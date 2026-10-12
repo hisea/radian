@@ -6,7 +6,7 @@ use agent_core::{
 };
 
 use crate::workspace::{WorkspaceError, WorkspaceRoot};
-use crate::{fail, list, patch, read, write};
+use crate::{fail, git, list, patch, read, write};
 
 /// Resource bounds, all overridable with [`CodingTools::with_limits`]. Defaults are chosen
 /// so a single tool call cannot blow up the model context or the session file.
@@ -91,7 +91,14 @@ pub struct CodingSession {
 }
 
 fn specs() -> Vec<ToolSpec> {
-    vec![read::spec(), write::spec(), patch::spec(), list::spec()]
+    vec![
+        read::spec(),
+        write::spec(),
+        patch::spec(),
+        list::spec(),
+        git::status_spec(),
+        git::diff_spec(),
+    ]
 }
 
 impl ToolSession for CodingSession {
@@ -109,6 +116,8 @@ impl ToolSession for CodingSession {
             "write" => write::run(&self.root, &self.limits, &call.arguments).await,
             "patch" => patch::run(&self.root, &self.limits, &call.arguments).await,
             "list" => list::run(&self.root, &self.limits, &call.arguments).await,
+            "git_status" => git::status(&self.root, &self.limits, &call.arguments).await,
+            "git_diff" => git::diff(&self.root, &self.limits, &call.arguments).await,
             other => Err(fail(
                 "unknown_tool",
                 format!("`{other}` is not one of the built-in coding tools"),

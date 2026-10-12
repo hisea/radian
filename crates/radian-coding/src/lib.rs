@@ -33,6 +33,7 @@
 //!   and it is told not to take optional locks (`--no-optional-locks`); the tests assert
 //!   `.git` is unchanged. No sandbox is applied to it.
 
+mod git;
 mod list;
 mod patch;
 mod provider;
