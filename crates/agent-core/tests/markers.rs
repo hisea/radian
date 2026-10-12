@@ -6,7 +6,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agent_core::testing::RecordingJournal;
+use agent_core::testing::{RecordingJournal, SequenceLog, SlowJournal};
 use agent_core::*;
 use common::*;
 use serde_json::json;
@@ -552,4 +552,189 @@ async fn until_started(log: &ToolLog, id: &str) {
     while !log.started().iter().any(|s| s == id) {
         tokio::task::yield_now().await;
     }
+}
+
+// ---------- cancellation and drop semantics (AC-A2-7 / AC-A2-9) ----------
+
+/// AC-A2-7: tools cancelled gracefully or dropped after the grace both settle as
+/// `cancelled`, before their result messages.
+#[tokio::test(start_paused = true)]
+async fn cancelled_tools_settle_as_cancelled() {
+    let journal = Arc::new(RecordingJournal::new());
+    let tools = MemTools::new(vec![
+        (shared("clean"), Behavior::CleansUp(10)),
+        (shared("stubborn"), Behavior::Stubborn),
+    ]);
+    let log = tools.log.clone();
+    let model = ScriptedModel::new([calls(vec![
+        call("g1", "clean", json!({})),
+        call("s1", "stubborn", json!({})),
+    ])]);
+    let mut chat = session_with(model, tools, journal.clone()).await;
+    let mut run = chat.start_turn("go").unwrap();
+    let cancel = run.cancellation_handle();
+
+    let (outcome, ()) = tokio::join!(run.run(&NoopSink), async {
+        until_started(&log, "g1").await;
+        until_started(&log, "s1").await;
+        cancel.cancel();
+    });
+
+    assert_eq!(
+        outcome.unwrap().status,
+        RunStatus::Cancelled(CancelReason::Requested)
+    );
+    drop(run);
+    let records = journal.records();
+    for id in ["g1", "s1"] {
+        let settled_at = records.iter().position(|r| {
+            matches!(r,
+            JournalRecord::ToolExecutionSettled { call_id, result } if call_id == id
+                && result.error_code.as_deref() == Some("cancelled"))
+        });
+        let message_at = records.iter().position(|r| matches!(r,
+            JournalRecord::Message { message: Message::Tool { result }, .. } if result.call_id == id));
+        let (Some(settled_at), Some(message_at)) = (settled_at, message_at) else {
+            panic!("no cancelled settle/message pair for {id}: {records:?}");
+        };
+        assert!(settled_at < message_at, "{id}: {records:?}");
+    }
+    // The graceful one used its cleanup window.
+    let cleaned = log.cleaned_up.lock().unwrap().clone();
+    assert_eq!(cleaned, ["g1"]);
+}
+
+/// AC-A2-7 + D3: a cancellation that lands while the `Settled` append is in flight waits
+/// for it; the marker and the result message both land before the turn converges.
+#[tokio::test(start_paused = true)]
+async fn cancellation_waits_for_the_inflight_settled_append() {
+    let log = SequenceLog::default();
+    let journal = Arc::new(SlowJournal::with_log(
+        Duration::from_millis(100),
+        log.clone(),
+    ));
+    let tools = MemTools::new(vec![(spec("a"), Behavior::Echo)]);
+    let model = ScriptedModel::new([calls(vec![call("c1", "a", json!({}))])]);
+    let mut chat = session_with(model, tools, journal.clone()).await;
+    let mut run = chat.start_turn("go").unwrap();
+    let cancel = run.cancellation_handle();
+
+    let (outcome, cancelled_at) = tokio::join!(run.run(&NoopSink), async {
+        while !log
+            .entries()
+            .iter()
+            .any(|e| e == "journal-start:settled:c1")
+        {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let at = tokio::time::Instant::now();
+        cancel.cancel();
+        at
+    });
+
+    assert_eq!(
+        outcome.unwrap().status,
+        RunStatus::Cancelled(CancelReason::Requested)
+    );
+    drop(run);
+    assert_eq!(journal.calls(), 5, "{:?}", journal.records());
+    // The settled marker landed with the cancelled result right behind it.
+    let records = journal.records();
+    let settled_at = records
+        .iter()
+        .position(
+            |r| matches!(r, JournalRecord::ToolExecutionSettled { call_id, .. } if call_id == "c1"),
+        )
+        .unwrap();
+    let message_at = records
+        .iter()
+        .position(|r| matches!(r, JournalRecord::Message { message: Message::Tool { result }, .. } if result.call_id == "c1"))
+        .unwrap();
+    assert!(settled_at < message_at);
+    // Convergence waited out the in-flight settled append, then the result message
+    // append: two slow appends after the cancel, plus little else.
+    assert!(
+        cancelled_at.elapsed() <= Duration::from_millis(250),
+        "{:?}",
+        cancelled_at.elapsed()
+    );
+}
+
+/// AC-A2-9: dropping a step mid-tool leaves the call started but unsettled; the Drop path
+/// does not touch the journal, and recovery classifies the call as outcome-unknown.
+#[tokio::test(start_paused = true)]
+async fn dropping_mid_tool_leaves_no_settled() {
+    let journal = Arc::new(RecordingJournal::new());
+    let tools = MemTools::new(vec![(spec("a"), Behavior::Hang)]);
+    let model = ScriptedModel::new([calls(vec![call("h1", "a", json!({}))])]);
+    let mut chat = session_with(model, tools, journal.clone()).await;
+    let mut run = chat.start_turn("go").unwrap();
+
+    let timed_out = tokio::time::timeout(Duration::from_millis(50), run.step(&NoopSink)).await;
+    assert!(timed_out.is_err());
+    let calls_at_drop = journal.calls();
+    drop(run);
+
+    assert!(chat.is_poisoned());
+    // Exactly the three appends of the live path (user, assistant, started); the Drop
+    // repair writes to memory only (E6/D7).
+    assert_eq!(calls_at_drop, 3, "{:?}", journal.records());
+    assert_eq!(journal.calls(), 3, "the Drop path journaled something");
+    let records = journal.records();
+    assert!(records.iter().any(|r| matches!(r,
+        JournalRecord::ToolExecutionStarted { call_id, .. } if call_id == "h1")));
+    assert!(!records.iter().any(|r| matches!(r,
+        JournalRecord::ToolExecutionSettled { call_id, .. } if call_id == "h1")));
+
+    // Recovery reads the markers: started without settled means the outcome is unknown.
+    let history = recover(&records).unwrap();
+    assert_eq!(
+        code(result_for(&history, "h1")),
+        Some("outcome_unknown_after_crash")
+    );
+    Arc::new(Agent::new(ScriptedModel::new(Vec::new()), NoTools))
+        .open_session_with_history(history)
+        .await
+        .unwrap();
+}
+
+// ---------- parallel batches under a slow journal (AC-A2-8) ----------
+
+/// AC-A2-8: with a slow journal, the started markers come in dispatch order, the result
+/// messages in call order, and the batch still completes.
+#[tokio::test(start_paused = true)]
+async fn started_markers_follow_dispatch_and_results_follow_call_order() {
+    let journal = Arc::new(SlowJournal::new(Duration::from_millis(20)));
+    let tools = MemTools::new(vec![(shared("a"), Behavior::Delay(5))]);
+    let model = ScriptedModel::new([
+        calls(vec![
+            call("s1", "a", json!({})),
+            call("s2", "a", json!({})),
+            call("s3", "a", json!({})),
+            call("s4", "a", json!({})),
+        ]),
+        text("done"),
+    ]);
+    let log = tools.log.clone();
+    let mut chat = session_with(model, tools, journal.clone()).await;
+
+    let outcome = chat
+        .run_turn("go", Default::default(), &NoopSink)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(log.max_concurrent(), 4);
+    // Started markers in dispatch order ...
+    let started_order: Vec<String> = journal
+        .records()
+        .iter()
+        .filter_map(|r| match r {
+            JournalRecord::ToolExecutionStarted { call_id, .. } => Some(call_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started_order, ["s1", "s2", "s3", "s4"]);
+    // ... results in call order, settled or not in completion order.
+    assert_eq!(result_ids(chat.transcript()), ["s1", "s2", "s3", "s4"]);
 }

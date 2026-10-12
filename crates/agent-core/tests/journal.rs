@@ -187,6 +187,15 @@ async fn journal_failure_sweep() {
             Err(SessionError::RecoveryRequired)
         ));
         chat.close().await.unwrap();
+
+        // Whatever succeeded is enough to reopen: recover classifies every open call from
+        // the markers (settled -> its result, started only -> outcome unknown, else ->
+        // not started) and the result validates as history.
+        let history = agent_core::recover(&journal.records()).unwrap();
+        Arc::new(Agent::new(ScriptedModel::new(Vec::new()), NoTools))
+            .open_session_with_history(history)
+            .await
+            .unwrap();
     }
 }
 
