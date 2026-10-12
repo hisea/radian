@@ -33,7 +33,7 @@ impl SandboxBackend for Seatbelt {
                 detail: format!("{SANDBOX_EXEC} does not exist"),
             });
         }
-        let dir = probe_dir()?;
+        let dir = crate::probe_dir()?;
         let ws = dir.join("ws");
         let outside = dir.join("outside");
         std::fs::create_dir_all(&ws)?;
@@ -190,14 +190,6 @@ fn sbpl_string(value: &str) -> String {
 
 fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
-}
-
-pub(crate) fn probe_dir() -> Result<std::path::PathBuf, SandboxError> {
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("radian-sandbox-probe-{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
 }
 
 #[cfg(test)]

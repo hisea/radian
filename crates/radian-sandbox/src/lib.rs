@@ -17,6 +17,8 @@
 //! deny actually takes effect. The binary existing is not enough: SBPL operation names are a
 //! private interface that has silently drifted between macOS releases.
 
+#[cfg(target_os = "linux")]
+mod bwrap;
 mod error;
 mod policy;
 #[cfg(target_os = "macos")]
@@ -86,6 +88,10 @@ pub fn platform_backend() -> Result<&'static dyn SandboxBackend, SandboxError> {
     #[cfg(target_os = "macos")]
     {
         return Ok(&seatbelt::SEATBELT);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return Ok(&bwrap::BWRAP);
     }
     #[allow(unreachable_code)]
     Err(SandboxError::UnsupportedPlatform(std::env::consts::OS))
@@ -208,6 +214,7 @@ pub fn probe() -> Result<ProbeReport, SandboxError> {
 
 /// Applies the policy's environment whitelist to a command: clears everything, then sets the
 /// named variables that exist in the parent. Shared by the backends.
+#[allow(dead_code)] // used by the macOS backend; the Linux backend sets --setenv
 pub(crate) fn apply_env(command: &mut Command, policy: &SandboxPolicy) {
     command.env_clear();
     for name in &policy.allow_env {
@@ -223,4 +230,13 @@ pub(crate) fn workspace_tmp(policy: &SandboxPolicy) -> std::path::PathBuf {
     let tmp = policy.workspace.join(".radian").join("tmp");
     let _ = std::fs::create_dir_all(&tmp);
     tmp
+}
+
+/// A fresh scratch directory for a backend probe. Shared by both backends.
+pub(crate) fn probe_dir() -> Result<std::path::PathBuf, SandboxError> {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("radian-sandbox-probe-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
 }

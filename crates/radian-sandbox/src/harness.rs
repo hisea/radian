@@ -718,12 +718,13 @@ fn orphan_report() -> String {
             let text = String::from_utf8_lossy(&output.stdout);
             let hits: Vec<&str> = text
                 .lines()
+                // The driver's own argv contains its name and the launching shell; only
+                // children that could outlive the run matter.
                 .filter(|l| {
                     l.contains("mcp_echo.py")
-                        || l.contains("radian-sandbox-escape")
                         || l.contains("sandbox-exec -p")
+                        || l.contains(" bwrap ")
                 })
-                .filter(|l| !l.contains("grep"))
                 .collect();
             if hits.is_empty() {
                 "(no orphan processes)".into()
