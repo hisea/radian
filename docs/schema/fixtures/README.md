@@ -1,0 +1,18 @@
+# Session JSONL v1 fixtures
+
+每个文件一个场景；"读取方期望"与 `../check-fixtures.sh` 内置的期望**一一对应**（脚本以本表为准运行）。读取方 = 支持 `schema_version = 1` 的 v1 实现（ADR 0006 §7）。
+
+| 文件 | 场景 | 读取方期望结果 | 对应 AC |
+|---|---|---|---|
+| `v1-minimal.jsonl` | 只含 Phase 1–5 字段；走完一个完整 turn，含一次工具调用（`ToolExecutionStarted` → `ToolExecutionSettled` → 结果消息）。9 个事件。 | **接受**，0 跳过；`MessageAppended.index` 为 0..3 连续；无未配对 tool call（repair 为空）。 | AC-S-1 / AC-S-4（后向样本） |
+| `v1-forward.jsonl` | `SessionCreated` 带 AC-S-2 **全部**预留可选字段（`agent_id`、`profile_ref`、`workspace_binding`、`parent`），外加一个未来的**非 critical** 事件 `HeartbeatRecorded`。6 个事件。 | **接受**；跳过并记录 `(seq=3, HeartbeatRecorded)`；预留字段按未知可选字段忽略（AC-S-3a）；其余 5 个事件完整重建。 | AC-S-2 / AC-S-4（前向样本） |
+| `unknown-optional-field.jsonl` | 已知事件 `MessageAppended` 的 `data` 里多一个读取方不认识的字段 `display_hint_v2`。4 个事件。 | **接受**，0 跳过；未知字段忽略。 | AC-S-3(a) |
+| `unknown-event-noncritical.jsonl` | 未知事件类型 `SpinProgressRecorded`，`critical:false`。5 个事件。 | **接受**；跳过并记录 `(seq=1, SpinProgressRecorded)`；其余 4 个事件重建。 | AC-S-3(b) |
+| `unknown-event-critical.jsonl` | 未知事件类型 `LedgerCommitted`，`critical:true`。2 个事件。 | **拒绝打开**；错误必须点名：文件、行号（第 2 行 / seq=1）、事件名、读取方支持的 schema 版本。 | AC-S-3(b) |
+| `schema-version-newer.jsonl` | 每行 `schema_version: 2`（高于 v1）。2 个事件。 | **只读打开或拒绝打开**（宿主二选一），**绝不能以 v1 语义追加写入**；追加模式必须直接报错。 | AC-S-3(c) |
+| `truncated-tail.jsonl` | 5 个合法行 + 一个截断的尾部（无 LF 的半行）。 | **接受（丢弃尾部）**：torn tail 字节不解析、不计 `seq`、不进 replay；重放得到前 5 个事件（seq 0..4）；安全追加前必须先截断到第 5 行的 LF 之后。 | ADR 0006 §3.2 |
+| `crash-after-started.jsonl` | assistant 声明两个调用：`call-1` 完整（Started+Settled+结果消息），`call-2` 只有 `ToolExecutionStarted`、无 Settled、无结果消息；无 `TurnFinished`。8 个事件。 | **接受**（文件本身合法）；按 ADR 0002 恢复规则，`call-2` 补 `error_code = "outcome_unknown_after_crash"` 的合成结果，`call-1` 原样；Phase 1 的恢复测试直接使用。 | ADR 0002 崩溃语义 / ADR 0006 §15-2 |
+
+通用约束（所有 fixture 共同满足，脚本逐项校验）：每行是合法 JSON 对象；信封七字段（`schema_version`/`session_id`/`seq`/`ts`/`event`/`critical`/`data`）齐全且类型正确；`seq` 从 0 严格 +1；同一文件内 `schema_version`、`session_id` 恒定；`ts` 为 RFC 3339 UTC（`Z` 结尾）；除 `truncated-tail.jsonl` 外所有文件以 LF 结尾，且**只有**该文件允许存在无 LF 的尾部。
+
+fixture 内不含真实密钥与真实路径（一律 `/work/example` 等占位）。

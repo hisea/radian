@@ -1,0 +1,4 @@
+{"schema_version":1,"session_id":"11111111-1111-4111-8111-111111111111","seq":0,"ts":"2026-10-12T12:10:00.000000Z","event":"SessionCreated","critical":true,"data":{"workspace":"/work/example","config_snapshot":{"model":{"provider":"example","model":"m-1"}}}}
+{"schema_version":1,"session_id":"11111111-1111-4111-8111-111111111111","seq":1,"ts":"2026-10-12T12:10:01.000000Z","event":"TurnStarted","critical":true,"data":{"turn_id":"t-1"}}
+{"schema_version":1,"session_id":"11111111-1111-4111-8111-111111111111","seq":2,"ts":"2026-10-12T12:10:02.000000Z","event":"MessageAppended","critical":true,"data":{"index":0,"message":{"user":{"content":[{"text":{"text":"hi"}}]}},"display_hint_v2":{"color":"cyan"}}}
+{"schema_version":1,"session_id":"11111111-1111-4111-8111-111111111111","seq":3,"ts":"2026-10-12T12:10:03.000000Z","event":"TurnFinished","critical":true,"data":{"turn_id":"t-1","outcome":"completed"}}

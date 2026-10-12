@@ -1,0 +1,2 @@
+{"schema_version":2,"session_id":"44444444-4444-4444-8444-444444444444","seq":0,"ts":"2026-10-12T14:00:00.000000Z","event":"SessionCreated","critical":true,"data":{"workspace":"/work/example","config_snapshot":{"model":{"provider":"example","model":"m-2"}}}}
+{"schema_version":2,"session_id":"44444444-4444-4444-8444-444444444444","seq":1,"ts":"2026-10-12T14:00:01.000000Z","event":"TurnStarted","critical":true,"data":{"turn_id":"t-1","turn_kind":"background"}}
