@@ -21,4 +21,5 @@ tokio = { workspace = true, features = ["time"] }
 # Turns on the `testing` feature for this crate's own integration tests.
 agent-provider-openai-compatible = { path = ".", features = ["testing"] }
 agent-core = { path = "../agent-core" }
+agent-provider-contract = { path = "../agent-provider-contract" }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "test-util"] }
