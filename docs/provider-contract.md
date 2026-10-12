@@ -43,3 +43,10 @@ OpenAI 专有（只属于 http.rs，契约不管）：请求体/header 的形状
 ## 变异保证
 
 10 条契约每条都有一个针对性变异（在一次性检出里破坏 adapter 对应行为），全部被对应契约测试抓住，见 `crates/agent-provider-contract/MUTATIONS-CONTRACT.md`。抓不住错误的契约没有价值——这条保证是套件本身的一部分。
+
+## 2026-10-12 更新：出口已实现，Anthropic adapter 已接入
+
+- **出口已实现**：`ContractHarness::unsupported_reasons() -> &'static [Reason]`（默认 `&[]`）。`check_finish_reasons` 只跳过**显式声明**的项；未声明的必须满足。`reasons_to_check` 暴露了筛选结果，契约 crate 自带四个测试钉住「声明了就跳过、没声明就必须满足、默认支持全部」。
+- **Anthropic adapter 已接入**：`crates/agent-provider-anthropic`，12 个契约测试委托给同一套检查。官方 `stop_reason` 共 7 个值（`end_turn`/`max_tokens`/`stop_sequence`/`tool_use`/`pause_turn`/`refusal`/`model_context_window_exceeded`），因此 `pause_turn` 正常实现；Anthropic **没有** `content_filter`（它用 `refusal`，由契约的另一条子检查覆盖），harness 显式声明 `Reason::ContentFiltered` 不支持。
+- **发现第二处未解耦**：`check_usage_shapes` 脚本一个含 `total: Some(15)` 的 `ModelUsage` 并断言逐字段相等，而 Anthropic 的官方 usage 对象**没有** total 字段（见 `docs/providers/anthropic-wire-notes.md` §3/§8）。adapter 按 ADR 0007 J2 诚实地返回 `total: None`，于是 `contract_7a_usage_shapes` 仅因该字段失败。任务约束只允许为 `Reason` 加出口，故未顺带为 usage 加出口；是否补一个对称的 usage 字段声明出口待 决定。
+- 变异记录：`crates/agent-provider-anthropic/MUTATIONS-ANTHROPIC.md`（11 条可运行契约子检查全部抓住，另有出口的两个反向变异）。
