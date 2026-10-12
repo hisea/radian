@@ -1,0 +1,35 @@
+backend: macos-seatbelt
+probe: a write outside was denied and a write inside succeeded
+
+group            case                         expect  sandbox  control  verdict
+escape_write     outside_absolute               fail   denied       ok  PASS
+escape_write     outside_dotdot                 fail   denied       ok  PASS
+escape_write     outside_via_symlink            fail   denied       ok  PASS
+escape_write     outside_tmp                    fail   denied       ok  PASS
+symlink          symlinked_parent_dir           fail   denied       ok  PASS
+symlink          write_through_workspace_symlink     fail   denied       ok  PASS
+network_off      connect_local_port             fail   denied       ok  PASS
+environment      unlisted_var_hidden            fail   denied       ok  PASS
+environment      whitelisted_path_visible         ok       ok       ok  PASS
+inheritance      nested_sh_confined             fail   denied       ok  PASS
+inheritance      nested_sh_inside_ok              ok       ok       ok  PASS
+normal_use       write_read_inside                ok       ok       ok  PASS
+normal_use       read_outside_allowed             ok       ok       ok  PASS
+git_readonly     write_hook                     fail   denied       ok  PASS
+git_readonly     write_config                   fail   denied       ok  PASS
+git_readonly     write_info                     fail   denied       ok  PASS
+git_readonly     git_config_hookspath           fail   denied       ok  PASS
+git_readonly     git_add                        fail   denied       ok  PASS
+git_readonly     worktree_pointer               fail   denied       ok  PASS
+git_readonly     shared_gitdir                  fail   denied       ok  PASS
+git_readonly     shared_git_via_symlink         fail   denied       ok  PASS
+git_readonly     git_status_ok                    ok       ok       ok  PASS
+git_readonly     git_log_ok                       ok       ok       ok  PASS
+sensitive_read   fake_ssh_key_unreadable        fail   denied       ok  PASS
+sensitive_read   normal_file_still_readable       ok       ok       ok  PASS
+mcp_stdio        initialize_list_echo             ok       ok       ok  PASS
+
+26 cases, 0 failed
+
+orphan check:
+(no orphan processes)
