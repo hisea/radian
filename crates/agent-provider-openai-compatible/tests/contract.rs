@@ -192,7 +192,9 @@ fn arguments_string(arguments: &Value) -> String {
 }
 
 /// A neutral `ModelUsage` back to OpenAI's usage JSON (`prompt_tokens`,
-/// `completion_tokens`, `total_tokens`, `prompt_tokens_details`).
+/// `completion_tokens`, `total_tokens`, and the `*_details` sub-objects). The neutral
+/// `details` blob is keyed by those sub-object names, so each key maps to its wire key and
+/// both prompt and completion details survive the round trip.
 fn usage_json(usage: &ModelUsage) -> Value {
     let mut body = Map::new();
     if let Some(v) = usage.input {
@@ -207,20 +209,37 @@ fn usage_json(usage: &ModelUsage) -> Value {
     if let Some(v) = usage.cache_write {
         body.insert("cache_creation_input_tokens".into(), json!(v));
     }
-    let mut details = Map::new();
+    let mut prompt_details = Map::new();
     if let Some(v) = usage.cache_read {
-        details.insert("cached_tokens".into(), json!(v));
+        prompt_details.insert("cached_tokens".into(), json!(v));
     }
+    let mut completion_details = Map::new();
     if let Some(raw) = &usage.details {
         let parsed: Value = serde_json::from_str(raw.get()).expect("details is valid JSON");
-        if let Value::Object(extra) = parsed {
-            for (k, v) in extra {
-                details.insert(k, v);
+        if let Value::Object(subs) = parsed {
+            for (key, value) in subs {
+                let Value::Object(fields) = value else {
+                    continue;
+                };
+                match key.as_str() {
+                    "prompt_tokens_details" => prompt_details.extend(fields),
+                    "completion_tokens_details" => completion_details.extend(fields),
+                    _ => {}
+                }
             }
         }
     }
-    if !details.is_empty() {
-        body.insert("prompt_tokens_details".into(), Value::Object(details));
+    if !prompt_details.is_empty() {
+        body.insert(
+            "prompt_tokens_details".into(),
+            Value::Object(prompt_details),
+        );
+    }
+    if !completion_details.is_empty() {
+        body.insert(
+            "completion_tokens_details".into(),
+            Value::Object(completion_details),
+        );
     }
     Value::Object(body)
 }

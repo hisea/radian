@@ -57,6 +57,9 @@ impl UsageAccum {
         if let Some(value) = number("cache_creation_input_tokens") {
             self.cache_write = Some(value);
         }
+        // Anthropic has exactly one usage sub-object (`output_tokens_details`), so unlike the
+        // OpenAI-compatible adapter (which keys several `*_details` sub-objects by their wire
+        // names) this one keeps the sub-object verbatim. The wire notes record both sides.
         if let Some(details) = usage.get("output_tokens_details").filter(|d| d.is_object()) {
             self.details = Some(details.clone());
         }

@@ -193,6 +193,19 @@ async fn a_turn_sends_the_expected_request_and_returns_the_text() {
 }
 
 #[tokio::test]
+async fn the_user_agent_names_radian() {
+    // Same outward contract as the OpenAI-compatible adapter: identify as radian, not as a
+    // generic SDK.
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let _ = complete_once(&server, |_| {}).await;
+    let agent = server.requests()[0]
+        .header("user-agent")
+        .unwrap_or_default()
+        .to_owned();
+    assert!(agent.starts_with("radian/"), "{agent}");
+}
+
+#[tokio::test]
 async fn a_base_url_with_a_trailing_slash_or_a_path_works() {
     let server = MockServer::start(vec![text_reply("ok"), text_reply("ok")]).await;
     for base in [

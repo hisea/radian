@@ -543,7 +543,16 @@ pub async fn check_usage_shapes<M: Model, H: ContractHarness<M>>(h: &H) {
         total: Some(15),
         cache_read: Some(3),
         cache_write: None,
-        details: Some(OpaqueJson::parse(r#"{"cached_tokens":3}"#).unwrap()),
+        // `OpaqueJson` equality is byte-exact and the adapter path normalizes object key
+        // order (ADR 0007 J3), so this blob is written in the normalized (sorted) order the
+        // adapter is allowed to produce. The harness maps the sub-objects to the wire by
+        // name, so the order here does not change what is sent.
+        details: Some(
+            OpaqueJson::parse(
+                r#"{"completion_tokens_details":{"reasoning_tokens":30},"prompt_tokens_details":{"cached_tokens":3}}"#,
+            )
+            .unwrap(),
+        ),
     };
     let model = h.script(&[Wire::UsageTrailing(usage.clone())]).await;
     let resp = complete(&model, request(), &NoopSink).await.unwrap();
