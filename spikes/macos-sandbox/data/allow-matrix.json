@@ -1,0 +1,51 @@
+{
+  "(none)": {
+    "cargo --version": true,
+    "cat": true,
+    "git status": true,
+    "ls": true,
+    "mcp initialize": true
+  },
+  "file-read*": {
+    "cargo --version": false,
+    "cat": false,
+    "git status": false,
+    "ls": false,
+    "mcp initialize": false
+  },
+  "file-test-existence": {
+    "cargo --version": true,
+    "cat": true,
+    "git status": true,
+    "ls": true,
+    "mcp initialize": true
+  },
+  "mach-lookup": {
+    "cargo --version": true,
+    "cat": true,
+    "git status": true,
+    "ls": true,
+    "mcp initialize": true
+  },
+  "process-exec*": {
+    "cargo --version": false,
+    "cat": false,
+    "git status": false,
+    "ls": false,
+    "mcp initialize": false
+  },
+  "process-fork": {
+    "cargo --version": true,
+    "cat": true,
+    "git status": true,
+    "ls": true,
+    "mcp initialize": true
+  },
+  "sysctl-read": {
+    "cargo --version": false,
+    "cat": true,
+    "git status": true,
+    "ls": true,
+    "mcp initialize": false
+  }
+}
