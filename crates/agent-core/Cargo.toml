@@ -16,3 +16,9 @@ tokio-util.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
+
+[features]
+# Test doubles for journalling, for this crate's own tests and for downstream crates.
+testing = []
+# Self-verify at session end that the journal replay matches the transcript (AC-A1-2).
+journal-selfcheck = ["testing"]

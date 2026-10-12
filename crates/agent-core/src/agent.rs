@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::event::EventSink;
+use crate::event::{AgentEvent, EventSink};
 use crate::hooks::Hooks;
+use crate::journal::{JournalError, JournalRecord, TranscriptJournal};
 use crate::message::Message;
 use crate::model::Model;
 use crate::outcome::{ResumeState, RunError, RunOutcome, SessionError};
@@ -75,12 +76,31 @@ impl<M: Model, P: ToolProvider, H: Hooks> Agent<M, P, H> {
         self.open_session_with_history(Vec::new()).await
     }
 
+    /// Like [`Agent::open_session_with_history`], but every later transcript change of the
+    /// session is first appended to `journal` and only applied to memory once that succeeds.
+    /// The `history` itself is not re-journaled (D8): it is assumed to already be durable.
+    pub async fn open_session_with_journal(
+        self: &Arc<Self>,
+        history: Vec<Message>,
+        journal: Arc<dyn TranscriptJournal>,
+    ) -> Result<AgentSession<M, P, H>, SessionError> {
+        self.open_session_inner(history, Some(journal)).await
+    }
+
     /// Validates `history`, then opens the tool session (for MCP, this starts the servers).
     /// Nothing half-open is returned: if the tool declarations are invalid, the tool session
     /// is closed before the error is returned.
     pub async fn open_session_with_history(
         self: &Arc<Self>,
         history: Vec<Message>,
+    ) -> Result<AgentSession<M, P, H>, SessionError> {
+        self.open_session_inner(history, None).await
+    }
+
+    async fn open_session_inner(
+        self: &Arc<Self>,
+        history: Vec<Message>,
+        journal: Option<Arc<dyn TranscriptJournal>>,
     ) -> Result<AgentSession<M, P, H>, SessionError> {
         validate_history(&history)?;
         let mut tools = self.tools.open_session().await?;
@@ -97,7 +117,9 @@ impl<M: Model, P: ToolProvider, H: Hooks> Agent<M, P, H> {
             tools,
             registry,
             transcript: history,
+            journal,
             poisoned: false,
+            recovery_required: false,
             close_state: CloseState::Open,
             stranded_steering: Vec::new(),
         })
@@ -122,7 +144,16 @@ pub struct AgentSession<M: Model, P: ToolProvider, H: Hooks> {
     pub(crate) tools: P::Session,
     pub(crate) registry: ToolRegistry,
     pub(crate) transcript: Vec<Message>,
+    /// Mounted at open time; `None` keeps today's journal-free behavior.
+    pub(crate) journal: Option<Arc<dyn TranscriptJournal>>,
     pub(crate) poisoned: bool,
+    /// Set when a journal append failed: memory and journal may differ, so the session
+    /// refuses new turns until the host recovers it (D6).
+    #[expect(
+        dead_code,
+        reason = "read from start_turn once the failure semantics land"
+    )]
+    pub(crate) recovery_required: bool,
     pub(crate) close_state: CloseState,
     /// Steering from turns that ended without returning an outcome.
     pub(crate) stranded_steering: Vec<Message>,
@@ -131,6 +162,37 @@ pub struct AgentSession<M: Model, P: ToolProvider, H: Hooks> {
 impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
     pub fn transcript(&self) -> &[Message] {
         &self.transcript
+    }
+
+    /// The single entry every transcript modification goes through: journal first, then
+    /// memory, then the [`AgentEvent::TranscriptAppended`] event. A failed append changes
+    /// neither memory nor events (S1). Without a journal this is just a push plus the event.
+    ///
+    /// The append is awaited to completion and never raced against cancellation (D3), and
+    /// appends within a session are strictly serialized (D4) because callers await this
+    /// before making the next change.
+    #[expect(
+        dead_code,
+        reason = "wired into the write points in the following commits"
+    )]
+    pub(crate) async fn commit(
+        &mut self,
+        message: Message,
+        events: &dyn EventSink,
+    ) -> Result<(), JournalError> {
+        if let Some(journal) = &self.journal {
+            let index = self.transcript.len();
+            journal
+                .append(JournalRecord::Message {
+                    index,
+                    message: message.clone(),
+                })
+                .await?;
+        }
+        let index = self.transcript.len();
+        self.transcript.push(message.clone());
+        events.emit(AgentEvent::TranscriptAppended { index, message });
+        Ok(())
     }
 
     pub fn is_poisoned(&self) -> bool {

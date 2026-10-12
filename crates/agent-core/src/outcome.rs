@@ -1,4 +1,5 @@
 use crate::hooks::{HookError, HookPoint};
+use crate::journal::JournalError;
 use crate::message::Message;
 use crate::model::ModelError;
 use crate::tool::ToolError;
@@ -56,6 +57,8 @@ pub enum RunError {
     Model(#[from] ModelError),
     #[error("hook {point:?} failed: {error}")]
     Hook { point: HookPoint, error: HookError },
+    #[error("journal: {0}")]
+    Journal(#[from] JournalError),
     #[error("the turn has already finished")]
     Finished,
     #[error("the session is poisoned; resume from history_for_resume()")]
@@ -74,6 +77,10 @@ pub enum SessionError {
     Poisoned,
     #[error("the session is closed")]
     Closed,
+    #[error(
+        "the session needs recovery: a journal write failed;          resume from history_for_resume()"
+    )]
+    RecoveryRequired,
     #[error("tool session: {0}")]
     Tools(#[from] ToolError),
     #[error("tool {tool}: {message}")]

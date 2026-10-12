@@ -1,6 +1,7 @@
 use serde_json::Value;
 
 use crate::hooks::HookPoint;
+use crate::message::Message;
 use crate::model::StopReason;
 use crate::outcome::RunStatus;
 
@@ -28,6 +29,12 @@ pub enum AgentEvent {
         index: usize,
         call_id: String,
         name: String,
+    },
+    /// Emitted after a transcript modification was journaled and applied to memory; never
+    /// emitted for a modification whose journal append failed.
+    TranscriptAppended {
+        index: usize,
+        message: Message,
     },
     /// Emitted by tool sessions.
     ToolProgress {
