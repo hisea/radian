@@ -238,10 +238,36 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_is_not_sent_to_the_provider() {
+        // The same rule as `meta` (ADR 0005 G4): a history with full reasoning and the same
+        // history without it must produce a byte-identical request body.
+        let plain = request(vec![Message::user("what?"), Message::assistant("answer")]);
+        let with_reasoning = request(vec![
+            Message::user("what?"),
+            Message::Assistant {
+                content: vec![ContentPart::text("answer")],
+                reasoning: vec![ContentPart::text("private chain of thought")],
+                tool_calls: Vec::new(),
+                provider_payload: None,
+                interrupted: false,
+                meta: MessageMeta::default(),
+            },
+        ]);
+        let plain_body =
+            serde_json::to_vec(&build_body(&plain, &config(), false).unwrap()).unwrap();
+        let with_body =
+            serde_json::to_vec(&build_body(&with_reasoning, &config(), false).unwrap()).unwrap();
+        assert_eq!(with_body, plain_body);
+        let body = String::from_utf8(with_body).unwrap();
+        assert!(!body.contains("reasoning"), "{body}");
+    }
+
+    #[test]
     fn a_tool_conversation_maps_to_the_expected_messages() {
         let mut req = request(vec![
             Message::user("what is 2+3?"),
             Message::Assistant {
+                reasoning: Vec::new(),
                 content: Vec::new(),
                 tool_calls: vec![call("c1", "calc__add", json!({"a": 2, "b": 3}))],
                 provider_payload: None,
@@ -298,6 +324,7 @@ mod tests {
         let interrupted = request(vec![
             Message::user("what?"),
             Message::Assistant {
+                reasoning: Vec::new(),
                 content: vec![ContentPart::text("Let me think...")],
                 tool_calls: Vec::new(),
                 provider_payload: None,
@@ -343,6 +370,7 @@ mod tests {
     fn arguments_that_were_not_json_go_back_as_received() {
         let body = build_body(
             &request(vec![Message::Assistant {
+                reasoning: Vec::new(),
                 content: vec![ContentPart::text("calling")],
                 tool_calls: vec![call("c1", "t", Value::String("{\"a\": ".into()))],
                 provider_payload: None,

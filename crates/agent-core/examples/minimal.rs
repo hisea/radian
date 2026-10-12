@@ -22,6 +22,7 @@ impl Model for FauxModel {
         });
         Ok(match last_result {
             None => ModelResponse {
+                reasoning: Vec::new(),
                 content: vec![ContentPart::text("Let me add those.")],
                 tool_calls: vec![ToolCall {
                     id: "call-1".into(),
@@ -33,6 +34,7 @@ impl Model for FauxModel {
                 usage: None,
             },
             Some(sum) => ModelResponse {
+                reasoning: Vec::new(),
                 content: vec![ContentPart::text(format!("2 + 3 = {sum}"))],
                 tool_calls: vec![],
                 provider_payload: None,

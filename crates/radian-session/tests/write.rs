@@ -97,6 +97,7 @@ async fn opaque_json_round_trips_byte_for_byte_through_the_file() {
     let payload_raw = r#"{ "think":  {"sig":"abc"} ,"k":  1}"#;
     let details_raw = r#"{"reasoning_tokens": 3,  "audio": null}"#;
     let assistant = Message::Assistant {
+        reasoning: Vec::new(),
         content: vec![ContentPart::text("hi")],
         tool_calls: vec![ToolCall {
             id: "c1".into(),

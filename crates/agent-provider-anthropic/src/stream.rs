@@ -149,6 +149,11 @@ impl<'a> Assembler<'a> {
                         })
                     }
                     // thinking, server_tool_use, web_search_tool_result, ...: not implemented.
+                    // Extended thinking is deliberately **not** wired into the reasoning
+                    // channel: its thinking/signature blocks must be passed back verbatim in
+                    // tool turns, which belongs to `provider_payload`, not to the
+                    // provider-invisible `reasoning` field (ADR 0014 R10). Anthropic
+                    // reasoning parsing is unimplemented, not supported.
                     _ => Block::Ignored,
                 };
                 self.set_block(index, started);
@@ -260,6 +265,7 @@ impl<'a> Assembler<'a> {
             }
         }
         Ok(ModelResponse {
+            reasoning: Vec::new(),
             content,
             tool_calls,
             provider_payload: None,

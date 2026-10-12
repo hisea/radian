@@ -66,6 +66,7 @@ impl Gate {
 
 fn response_text(text: &str) -> ModelResponse {
     ModelResponse {
+        reasoning: Vec::new(),
         content: vec![ContentPart::text(text)],
         tool_calls: vec![],
         provider_payload: None,
@@ -76,6 +77,7 @@ fn response_text(text: &str) -> ModelResponse {
 
 fn response_tool_call(id: &str, name: &str) -> ModelResponse {
     ModelResponse {
+        reasoning: Vec::new(),
         content: vec![],
         tool_calls: vec![ToolCall {
             id: id.into(),

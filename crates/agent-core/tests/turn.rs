@@ -259,6 +259,7 @@ async fn pause_turn_continues_with_same_budget_and_keeps_opaque_blocks() {
     };
     let model = ScriptedModel::new([
         Reply::Respond(ModelResponse {
+            reasoning: Vec::new(),
             content: vec![server_block.clone()],
             tool_calls: vec![],
             provider_payload: None,
@@ -322,6 +323,7 @@ async fn history_with_unpaired_tool_call_is_rejected() {
     let dangling = vec![
         Message::user("hi"),
         Message::Assistant {
+            reasoning: Vec::new(),
             content: vec![],
             tool_calls: vec![call("c1", "echo", json!({}))],
             provider_payload: None,
@@ -362,6 +364,7 @@ async fn provider_payload_round_trips() {
     ];
     let model = ScriptedModel::new([
         Reply::Respond(ModelResponse {
+            reasoning: Vec::new(),
             content: content.clone(),
             tool_calls: vec![],
             provider_payload: Some(OpaqueJson::parse(raw).unwrap()),

@@ -512,3 +512,216 @@ async fn prefix_failure_sweep_recovers_every_position() {
             .unwrap();
     }
 }
+
+// ---------- R1: the reasoning prefix (AC-R1-2/3/4/5/9) ----------
+
+/// Records reasoning deltas in order, so a test can cancel at the right moment.
+#[derive(Clone, Default)]
+struct ReasoningSink {
+    deltas: Arc<Mutex<Vec<String>>>,
+}
+
+impl EventSink for ReasoningSink {
+    fn emit(&self, event: AgentEvent) {
+        if let AgentEvent::ModelReasoningDelta { text } = event {
+            self.deltas.lock().unwrap().push(text);
+        }
+    }
+}
+
+async fn until_reasoning(seen: &Mutex<Vec<String>>, count: usize) {
+    while seen.lock().unwrap().len() < count {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelling_during_reasoning_only_commits_the_reasoning_prefix() {
+    // AC-R1-2, the regression test for the dogfooded bug: the model emits only reasoning
+    // (`delta.content` stays empty), and cancellation must still commit what was produced.
+    let journal = Arc::new(RecordingJournal::new());
+    let deltas = vec!["Let me ".to_owned(), "think".to_owned()];
+    let model = ScriptedModel::new([Reply::ReasoningStreamHang(deltas.clone())]);
+    let mut chat = session_with(model, journal.clone()).await;
+    let sink = ReasoningSink::default();
+    let seen = sink.deltas.clone();
+    let mut run = chat.start_turn("go").unwrap();
+    let cancel = run.cancellation_handle();
+
+    let (outcome, ()) = tokio::join!(run.run(&sink), async {
+        until_reasoning(&seen, 2).await;
+        cancel.cancel();
+    });
+    assert_eq!(
+        outcome.unwrap().status,
+        RunStatus::Cancelled(CancelReason::Requested)
+    );
+    drop(run);
+
+    let expected = deltas.concat();
+    let Message::Assistant {
+        content,
+        reasoning,
+        tool_calls,
+        interrupted,
+        ..
+    } = chat.transcript().last().expect("a prefix message")
+    else {
+        panic!("no assistant at the end");
+    };
+    assert!(
+        content.is_empty(),
+        "no visible text was emitted: {content:?}"
+    );
+    assert_eq!(reasoning, &vec![ContentPart::text(expected)]);
+    assert!(tool_calls.is_empty());
+    assert!(interrupted);
+    // The journal holds exactly that message, field for field.
+    assert_eq!(journal.messages().last(), chat.transcript().last());
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelling_mid_stream_keeps_text_and_reasoning_separate() {
+    // AC-R1-3: both channels produce a prefix, and neither leaks into the other.
+    let journal = Arc::new(RecordingJournal::new());
+    let model = ScriptedModel::new([Reply::BothStreamHang {
+        text: vec!["visible ".into(), "answer".into()],
+        reasoning: vec!["hidden ".into(), "thinking".into()],
+    }]);
+    let mut chat = session_with(model, journal.clone()).await;
+    let mut run = chat.start_turn("go").unwrap();
+    let cancel = run.cancellation_handle();
+
+    let (outcome, ()) = tokio::join!(run.run(&NoopSink), async {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        cancel.cancel();
+    });
+    assert_eq!(
+        outcome.unwrap().status,
+        RunStatus::Cancelled(CancelReason::Requested)
+    );
+    drop(run);
+
+    let Message::Assistant {
+        content, reasoning, ..
+    } = chat.transcript().last().unwrap()
+    else {
+        panic!();
+    };
+    assert_eq!(content, &vec![ContentPart::text("visible answer")]);
+    assert_eq!(reasoning, &vec![ContentPart::text("hidden thinking")]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn neither_text_nor_reasoning_means_no_prefix() {
+    // AC-R1-4 / revised F4: only when *both* channels are empty is nothing committed.
+    let journal = Arc::new(RecordingJournal::new());
+    let model = ScriptedModel::new([Reply::BothStreamHang {
+        text: Vec::new(),
+        reasoning: Vec::new(),
+    }]);
+    let mut chat = session_with(model, journal.clone()).await;
+    let mut run = chat.start_turn("go").unwrap();
+    let cancel = run.cancellation_handle();
+
+    let (outcome, ()) = tokio::join!(run.run(&NoopSink), async {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        cancel.cancel();
+    });
+    assert_eq!(
+        outcome.unwrap().status,
+        RunStatus::Cancelled(CancelReason::Requested)
+    );
+    drop(run);
+    assert_eq!(chat.transcript().len(), 1);
+    assert_eq!(journal.messages().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn each_model_call_accumulates_reasoning_from_scratch() {
+    // AC-R1-5: the first call's reasoning must not leak into the second call's prefix.
+    let journal = Arc::new(RecordingJournal::new());
+    let tools = MemTools::new(vec![(spec("a"), Behavior::Echo)]);
+    let Reply::Respond(first) = calls(vec![call("c1", "a", json!({}))]) else {
+        unreachable!()
+    };
+    let model = ScriptedModel::new([
+        Reply::ReasoningStreamed(vec!["first ".into()], first),
+        Reply::ReasoningStreamHang(vec!["second".into()]),
+    ]);
+    let agent = Arc::new(Agent::new(model.clone(), tools));
+    let mut chat = agent
+        .open_session_with_journal(Vec::new(), journal)
+        .await
+        .unwrap();
+    let sink = ReasoningSink::default();
+    let seen = sink.deltas.clone();
+    let mut run = chat.start_turn("go").unwrap();
+    let cancel = run.cancellation_handle();
+
+    let (outcome, ()) = tokio::join!(run.run(&sink), async {
+        until_reasoning(&seen, 2).await;
+        cancel.cancel();
+    });
+    assert_eq!(
+        outcome.unwrap().status,
+        RunStatus::Cancelled(CancelReason::Requested)
+    );
+    drop(run);
+
+    // The completed first response kept its own reasoning...
+    let completed = chat.transcript().iter().find_map(|m| match m {
+        Message::Assistant {
+            reasoning,
+            interrupted: false,
+            ..
+        } if !reasoning.is_empty() => Some(reasoning.clone()),
+        _ => None,
+    });
+    assert_eq!(completed, Some(vec![ContentPart::text("first ")]));
+    // ...and the prefix holds only the second call's.
+    let Message::Assistant {
+        content,
+        reasoning,
+        interrupted,
+        ..
+    } = chat.transcript().last().unwrap()
+    else {
+        panic!();
+    };
+    assert!(interrupted);
+    assert!(content.is_empty(), "{content:?}");
+    assert_eq!(reasoning, &vec![ContentPart::text("second")]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn reasoning_deltas_write_no_journal_records_of_their_own() {
+    // AC-R1-9: the event is a live projection (ADR 0010); only the committed message's
+    // `reasoning` field is durable.
+    let journal = Arc::new(RecordingJournal::new());
+    let Reply::Respond(response) = text("done") else {
+        unreachable!()
+    };
+    let model = ScriptedModel::new([Reply::ReasoningStreamed(
+        vec!["a".into(), "b".into()],
+        response,
+    )]);
+    let mut chat = session_with(model, journal.clone()).await;
+    chat.run_turn("go", Default::default(), &NoopSink)
+        .await
+        .unwrap();
+
+    // user + assistant only: the two reasoning deltas added no records.
+    let messages = journal.messages();
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert!(
+        journal
+            .records()
+            .iter()
+            .all(|r| matches!(r, JournalRecord::Message { .. }))
+    );
+    let Message::Assistant { reasoning, .. } = &messages[1] else {
+        panic!();
+    };
+    assert_eq!(reasoning, &vec![ContentPart::text("ab")]);
+}

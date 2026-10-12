@@ -21,6 +21,7 @@ async fn journaled_session(
 
 fn assistant_call(id: &str) -> Message {
     Message::Assistant {
+        reasoning: Vec::new(),
         content: Vec::new(),
         tool_calls: vec![call(id, "missing", json!({}))],
         provider_payload: None,
@@ -159,6 +160,7 @@ async fn invalid_replacements_are_rejected_before_the_journal() {
     assert!(events.events().is_empty());
 
     let duplicate = vec![Message::Assistant {
+        reasoning: Vec::new(),
         content: Vec::new(),
         tool_calls: vec![
             call("same", "missing", json!({})),

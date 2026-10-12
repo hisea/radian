@@ -179,6 +179,7 @@ pub fn text(s: &str) -> ModelResponse {
         provider_payload: None,
         stop_reason: StopReason::EndTurn,
         usage: None,
+        reasoning: Vec::new(),
     }
 }
 
@@ -189,6 +190,7 @@ pub fn calls(calls: Vec<ToolCall>) -> ModelResponse {
         provider_payload: None,
         stop_reason: StopReason::ToolUse,
         usage: None,
+        reasoning: Vec::new(),
     }
 }
 

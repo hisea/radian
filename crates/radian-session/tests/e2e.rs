@@ -89,6 +89,7 @@ async fn repair_write_back_appends_normally_and_keeps_seq_continuous() {
             .append(JournalRecord::Message {
                 index: 1,
                 message: Message::Assistant {
+                    reasoning: Vec::new(),
                     content: vec![],
                     tool_calls: vec![call("c1", "echo", json!({}))],
                     provider_payload: None,

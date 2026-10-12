@@ -36,6 +36,10 @@ pub struct ModelRequest {
 #[derive(Debug, Clone)]
 pub struct ModelResponse {
     pub content: Vec<ContentPart>,
+    /// The provider's separate reasoning channel for this response, if any. Kept beside
+    /// `content` so reasoning never becomes visible history; adapters that have no such
+    /// channel leave it empty.
+    pub reasoning: Vec<ContentPart>,
     pub tool_calls: Vec<ToolCall>,
     pub provider_payload: Option<OpaqueJson>,
     pub stop_reason: StopReason,

@@ -213,6 +213,13 @@ pub enum Message {
     },
     Assistant {
         content: Vec<ContentPart>,
+        /// The provider's separate reasoning channel for this message, if any. **Provider
+        /// invisible** (the same rule as `meta`, ADR 0005 G4): adapters must not send it
+        /// back. Kept as `ContentPart`s so a future non-text reasoning block (a signature,
+        /// a structured reason) does not need a new shape; empty for providers that have no
+        /// reasoning channel.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        reasoning: Vec<ContentPart>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tool_calls: Vec<ToolCall>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -242,6 +249,7 @@ impl Message {
     pub fn assistant(text: impl Into<String>) -> Self {
         Self::Assistant {
             content: vec![ContentPart::text(text)],
+            reasoning: Vec::new(),
             tool_calls: Vec::new(),
             provider_payload: None,
             interrupted: false,
@@ -281,6 +289,7 @@ mod tests {
     fn interrupted_assistant(text: &str) -> Message {
         Message::Assistant {
             content: vec![ContentPart::text(text)],
+            reasoning: Vec::new(),
             tool_calls: Vec::new(),
             provider_payload: None,
             interrupted: true,
@@ -308,6 +317,50 @@ mod tests {
     #[test]
     fn interrupted_assistants_round_trip() {
         let message = interrupted_assistant("你😀好");
+        let round: Message =
+            serde_json::from_str(&serde_json::to_string(&message).unwrap()).unwrap();
+        assert_eq!(round, message);
+    }
+
+    #[test]
+    fn reasoning_is_absent_when_empty_and_present_when_set() {
+        let plain = Message::assistant("hello");
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("reasoning"), "{json}");
+
+        let with_reasoning = Message::Assistant {
+            content: vec![ContentPart::text("hello")],
+            reasoning: vec![ContentPart::text("because")],
+            tool_calls: Vec::new(),
+            provider_payload: None,
+            interrupted: false,
+            meta: MessageMeta::default(),
+        };
+        let json = serde_json::to_string(&with_reasoning).unwrap();
+        assert!(json.contains("\"reasoning\""), "{json}");
+    }
+
+    #[test]
+    fn old_json_without_reasoning_reads_as_empty() {
+        let json = r#"{"assistant":{"content":[{"text":{"text":"hello"}}]}}"#;
+        let message: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(message, Message::assistant("hello"));
+        let Message::Assistant { reasoning, .. } = &message else {
+            unreachable!()
+        };
+        assert!(reasoning.is_empty());
+    }
+
+    #[test]
+    fn reasoning_round_trips() {
+        let message = Message::Assistant {
+            content: vec![ContentPart::text("answer")],
+            reasoning: vec![ContentPart::text("思考 😀")],
+            tool_calls: Vec::new(),
+            provider_payload: None,
+            interrupted: true,
+            meta: MessageMeta::default(),
+        };
         let round: Message =
             serde_json::from_str(&serde_json::to_string(&message).unwrap()).unwrap();
         assert_eq!(round, message);

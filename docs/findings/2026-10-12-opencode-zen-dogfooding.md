@@ -83,7 +83,7 @@ delta: {"role":"assistant","content":"","reasoning_content":" user is asking"}
 | 3 `completion_tokens_details` 丢失 | **已修**：`details` 现在按 wire 名承载**每一个** `*_details` 子对象（`prompt_tokens_details`、`completion_tokens_details`），推理 token 不再丢；`cache_read`/`cache_write` 仍从 prompt details 取；`total` 仍绝不计算。 |
 | 4 user-agent 叫 `agent-runtime` | **已修**：改为 `radian/<version>`，并有断言它的测试。 |
 | `include_usage` 无法显式开启 | **已修**：CLI 加了开关，默认沿用 ADR 0007 J8 的策略（只对 `api.openai.com` 默认开）。 |
-| 2 `reasoning_content` 被丢弃 | **已决定方案，待实现**：owner 选了"新增事件与字段"（`AgentEvent::ModelReasoningDelta` + `Message::Assistant.reasoning`）。规格见 `scratchpad/phase0-acceptance-criteria.md` §6.5（R1）。 |
+| 2 `reasoning_content` 被丢弃 | **已修**（R1，ADR 0014）：新增 `AgentEvent::ModelReasoningDelta` 与 `Message::Assistant.reasoning`；OpenAI 兼容 adapter 读 `delta.reasoning_content`；只产生了推理就被取消时现在会提交前缀（ADR 0003 F4 已修订）。推理对 provider 不可见。**遗留**：导出默认带不带推理未决定（ADR 0014 评审补充第 2 条）。 |
 | 顺带 | `agent-cli` 那个对负载敏感的 30 秒退出超时已改。 |
 
 **仍未做的端到端验证**：上述修复之后还**没有**真的用 `agent-cli` 把这个端点跑通一轮（需要用户的 key）。命令形如：

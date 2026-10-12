@@ -19,6 +19,16 @@ pub enum Reply {
     Slow(u64, ModelResponse),
     /// Emits these text deltas, then waits until cancelled.
     StreamHang(Vec<String>),
+    /// Emits these reasoning deltas, then waits until cancelled.
+    ReasoningStreamHang(Vec<String>),
+    /// Emits these reasoning deltas, then responds with `reasoning` set to their
+    /// concatenation (what a real adapter does).
+    ReasoningStreamed(Vec<String>, ModelResponse),
+    /// Emits these text and reasoning deltas, then waits until cancelled.
+    BothStreamHang {
+        text: Vec<String>,
+        reasoning: Vec<String>,
+    },
     /// Emits these text deltas, then responds.
     Streamed(Vec<String>, ModelResponse),
     /// Emits these text deltas, then fails.
@@ -75,6 +85,35 @@ impl Model for ScriptedModel {
                 cx.cancellation.cancelled().await;
                 Err(ModelError::Transport("cancelled".into()))
             }
+            Some(Reply::ReasoningStreamHang(deltas)) => {
+                for text in deltas {
+                    cx.events.emit(AgentEvent::ModelReasoningDelta { text });
+                }
+                cx.cancellation.cancelled().await;
+                Err(ModelError::Transport("cancelled".into()))
+            }
+            Some(Reply::ReasoningStreamed(deltas, mut r)) => {
+                for text in deltas.iter() {
+                    cx.events
+                        .emit(AgentEvent::ModelReasoningDelta { text: text.clone() });
+                }
+                let joined = deltas.concat();
+                if !joined.is_empty() {
+                    r.reasoning = vec![ContentPart::text(joined)];
+                }
+                Ok(r)
+            }
+            Some(Reply::BothStreamHang { text, reasoning }) => {
+                for piece in text {
+                    cx.events.emit(AgentEvent::ModelTextDelta { text: piece });
+                }
+                for piece in reasoning {
+                    cx.events
+                        .emit(AgentEvent::ModelReasoningDelta { text: piece });
+                }
+                cx.cancellation.cancelled().await;
+                Err(ModelError::Transport("cancelled".into()))
+            }
             Some(Reply::Streamed(deltas, r)) => {
                 for text in deltas {
                     cx.events.emit(AgentEvent::ModelTextDelta { text });
@@ -94,6 +133,7 @@ impl Model for ScriptedModel {
 
 pub fn text(s: &str) -> Reply {
     Reply::Respond(ModelResponse {
+        reasoning: Vec::new(),
         content: vec![ContentPart::text(s)],
         tool_calls: vec![],
         provider_payload: None,
@@ -111,6 +151,7 @@ pub fn slow_text(ms: u64, s: &str) -> Reply {
 
 pub fn stop(reason: StopReason, s: &str) -> Reply {
     Reply::Respond(ModelResponse {
+        reasoning: Vec::new(),
         content: vec![ContentPart::text(s)],
         tool_calls: vec![],
         provider_payload: None,
@@ -133,6 +174,7 @@ pub fn calls(list: Vec<ToolCall>) -> Reply {
 
 pub fn calls_with(reason: StopReason, list: Vec<ToolCall>) -> Reply {
     Reply::Respond(ModelResponse {
+        reasoning: Vec::new(),
         content: vec![],
         tool_calls: list,
         provider_payload: None,

@@ -99,6 +99,7 @@ fn repair_fills_unpaired_calls_by_the_three_rules() {
     let history = vec![
         Message::user("go"),
         Message::Assistant {
+            reasoning: Vec::new(),
             content: vec![],
             tool_calls: vec![
                 call("ran", "a", json!({})),
@@ -154,6 +155,7 @@ fn repair_fills_from_settled_exactly_and_leaves_complete_history_alone() {
     let history = vec![
         Message::user("go"),
         Message::Assistant {
+            reasoning: Vec::new(),
             content: vec![],
             tool_calls: vec![call("c1", "a", json!({}))],
             provider_payload: None,
@@ -188,6 +190,7 @@ async fn recover_yields_history_that_validates() {
         JournalRecord::Message {
             index: 1,
             message: Message::Assistant {
+                reasoning: Vec::new(),
                 content: vec![],
                 tool_calls: vec![call("c1", "a", json!({})), call("c2", "a", json!({}))],
                 provider_payload: None,
