@@ -16,7 +16,10 @@ async fn concurrent_followups_are_all_kept_and_ordered_by_enqueue() {
     for i in 0..64u32 {
         let inbox = Arc::clone(&inbox);
         tasks.push(tokio::spawn(async move {
-            inbox.followup(format!("m{i}")).await.unwrap()
+            inbox
+                .followup(format!("m{i}"), InputSource::User)
+                .await
+                .unwrap()
         }));
     }
     let mut ids = Vec::new();
@@ -24,9 +27,9 @@ async fn concurrent_followups_are_all_kept_and_ordered_by_enqueue() {
         ids.push(task.await.unwrap());
     }
 
-    let snapshot = inbox.snapshot();
+    let snapshot = inbox.snapshot().await;
     assert_eq!(snapshot.len(), 64, "no message lost, none duplicated");
-    assert_eq!(inbox.len(), 64);
+    assert_eq!(inbox.len().await, 64);
     let mut seen: Vec<MessageId> = snapshot.iter().map(|e| e.id.clone()).collect();
     seen.sort_by(|a, b| a.0.cmp(&b.0));
     seen.dedup();
@@ -46,15 +49,15 @@ async fn concurrent_followups_are_all_kept_and_ordered_by_enqueue() {
 #[tokio::test]
 async fn a_full_inbox_refuses_and_returns_the_rejected_message() {
     let inbox = Inbox::new(2);
-    inbox.followup("a").await.unwrap();
-    inbox.steer("b").await.unwrap();
-    assert_eq!(inbox.len(), 2);
+    inbox.followup("a", InputSource::User).await.unwrap();
+    inbox.steer("b", InputSource::User).await.unwrap();
+    assert_eq!(inbox.len().await, 2);
 
     for (op, text) in [("followup", "c"), ("steer", "d"), ("inject", "e")] {
         let error = match op {
-            "followup" => inbox.followup(text).await.unwrap_err(),
-            "steer" => inbox.steer(text).await.unwrap_err(),
-            "inject" => inbox.inject(text).await.unwrap_err(),
+            "followup" => inbox.followup(text, InputSource::User).await.unwrap_err(),
+            "steer" => inbox.steer(text, InputSource::User).await.unwrap_err(),
+            "inject" => inbox.inject(text, InputSource::User).await.unwrap_err(),
             other => panic!("unknown op {other}"),
         };
         match &error {
@@ -73,7 +76,7 @@ async fn a_full_inbox_refuses_and_returns_the_rejected_message() {
     }
 
     // Nothing was evicted and nothing was added.
-    let snapshot = inbox.snapshot();
+    let snapshot = inbox.snapshot().await;
     assert_eq!(
         snapshot
             .iter()
@@ -81,17 +84,20 @@ async fn a_full_inbox_refuses_and_returns_the_rejected_message() {
             .collect::<Vec<_>>(),
         ["a", "b"]
     );
-    assert_eq!(inbox.len(), 2);
+    assert_eq!(inbox.len().await, 2);
 }
 
 #[tokio::test]
 async fn only_user_messages_are_accepted() {
     let inbox = Inbox::new(4);
     let assistant = Message::assistant("not a user message");
-    let error = inbox.followup(assistant.clone()).await.unwrap_err();
+    let error = inbox
+        .followup(assistant.clone(), InputSource::User)
+        .await
+        .unwrap_err();
     assert!(matches!(error, InboxError::NotUser { .. }));
     assert_eq!(error.into_message(), assistant);
-    assert!(inbox.is_empty());
+    assert!(inbox.is_empty().await);
 }
 
 // ---------- 3. cancel: no lane, no capacity, idempotent ----------
@@ -99,8 +105,8 @@ async fn only_user_messages_are_accepted() {
 #[tokio::test]
 async fn cancel_ignores_capacity_and_is_idempotent() {
     let inbox = Inbox::new(1);
-    inbox.followup("full").await.unwrap();
-    assert_eq!(inbox.len(), 1);
+    inbox.followup("full", InputSource::User).await.unwrap();
+    assert_eq!(inbox.len().await, 1);
 
     // Not subject to capacity: it succeeds with a full queue.
     inbox.cancel(CancelCause::Requested);
@@ -123,9 +129,12 @@ async fn cancel_ignores_capacity_and_is_idempotent() {
     assert_eq!(inbox.cancel_calls(), 3);
 
     // cancel did not occupy the queue.
-    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox.len().await, 1);
     assert!(matches!(
-        inbox.followup("another").await.unwrap_err(),
+        inbox
+            .followup("another", InputSource::User)
+            .await
+            .unwrap_err(),
         InboxError::Full { .. }
     ));
 
@@ -142,7 +151,7 @@ async fn inject_does_not_wake_an_idle_driver_but_followup_and_steer_do() {
     let inbox = Inbox::new(8);
 
     // `inject` must not resolve the wake signal.
-    inbox.inject("context").await.unwrap();
+    inbox.inject("context", InputSource::System).await.unwrap();
     assert!(
         tokio::time::timeout(Duration::from_millis(1), inbox.wake_signal())
             .await
@@ -151,7 +160,10 @@ async fn inject_does_not_wake_an_idle_driver_but_followup_and_steer_do() {
     );
 
     // `steer` does.
-    inbox.steer("change direction").await.unwrap();
+    inbox
+        .steer("change direction", InputSource::User)
+        .await
+        .unwrap();
     assert!(
         tokio::time::timeout(Duration::from_millis(1), inbox.wake_signal())
             .await
@@ -160,7 +172,10 @@ async fn inject_does_not_wake_an_idle_driver_but_followup_and_steer_do() {
     );
 
     // `followup` does.
-    inbox.followup("next task").await.unwrap();
+    inbox
+        .followup("next task", InputSource::User)
+        .await
+        .unwrap();
     assert!(
         tokio::time::timeout(Duration::from_millis(1), inbox.wake_signal())
             .await
@@ -183,11 +198,11 @@ async fn inject_does_not_wake_an_idle_driver_but_followup_and_steer_do() {
 #[tokio::test]
 async fn the_four_operations_map_to_the_documented_lanes() {
     let inbox = Inbox::new(8);
-    inbox.followup("f").await.unwrap();
-    inbox.steer("s").await.unwrap();
-    inbox.inject("i").await.unwrap();
+    inbox.followup("f", InputSource::User).await.unwrap();
+    inbox.steer("s", InputSource::User).await.unwrap();
+    inbox.inject("i", InputSource::User).await.unwrap();
 
-    let snapshot = inbox.snapshot();
+    let snapshot = inbox.snapshot().await;
     let by_text: Vec<(String, Lane)> = snapshot
         .iter()
         .map(|e| (e.message.text(), e.lane))
@@ -197,49 +212,57 @@ async fn the_four_operations_map_to_the_documented_lanes() {
     assert!(by_text.contains(&("i".to_owned(), Lane::NextStep)));
 
     // Claim order within a lane is FIFO.
-    let first = inbox.claim_next_step().unwrap();
+    let first = inbox.claim_next_step().await.unwrap();
     assert_eq!(first.message.text(), "s");
-    let second = inbox.claim_next_step().unwrap();
+    let second = inbox.claim_next_step().await.unwrap();
     assert_eq!(second.message.text(), "i");
-    assert!(inbox.claim_next_step().is_none());
-    assert_eq!(inbox.claim_next_turn().unwrap().message.text(), "f");
+    assert!(inbox.claim_next_step().await.is_none());
+    assert_eq!(inbox.claim_next_turn().await.unwrap().message.text(), "f");
 }
 
-/// ADR 0011 leaves "must `followup`/`inject` carry a `source`?" undecided; this crate follows
-/// the core (optional) and must neither require nor invent one.
+/// The source is required at the runtime boundary and is
+/// recorded on the message itself so the transcript and the durable event agree.
 #[tokio::test]
-async fn source_is_optional_and_preserved_when_present() {
+async fn source_is_required_and_recorded_on_the_message() {
     let inbox = Inbox::new(8);
 
-    // No source: accepted, and the inbox does not invent one.
-    inbox.followup("no source").await.unwrap();
-    let entry = inbox.snapshot().pop().unwrap();
+    inbox
+        .followup("no source", InputSource::Scheduler)
+        .await
+        .unwrap();
+    let entry = inbox.snapshot().await.pop().unwrap();
+    assert_eq!(entry.source, InputSource::Scheduler);
     match &entry.message {
-        Message::User { meta, .. } => assert_eq!(meta.source, None),
+        Message::User { meta, .. } => {
+            assert_eq!(meta.source, Some(InputSource::Scheduler));
+            assert!(meta.id.is_some(), "the inbox assigns an id");
+        }
         other => panic!("expected a user message, got {other:?}"),
     }
 
-    // A source is preserved verbatim, including the opaque origin.
+    // A caller-supplied opaque origin survives; the source is overwritten with the declared
+    // one (the API is the source of truth, not the pre-built message).
     let meta = MessageMeta {
         id: None,
-        source: Some(InputSource::Subagent),
+        source: Some(InputSource::User),
         origin: Some(OpaqueJson::parse(r#"{"parent":{"session_id":"s"}}"#).unwrap()),
     };
     let message = Message::User {
         content: vec![agent_core::ContentPart::text("from a subagent")],
         meta,
     };
-    inbox.inject(message).await.unwrap();
+    inbox.inject(message, InputSource::Subagent).await.unwrap();
     let entry = inbox
         .snapshot()
+        .await
         .into_iter()
         .find(|e| e.message.text() == "from a subagent")
         .unwrap();
+    assert_eq!(entry.source, InputSource::Subagent);
     match &entry.message {
         Message::User { meta, .. } => {
             assert_eq!(meta.source, Some(InputSource::Subagent));
             assert!(meta.origin.is_some());
-            assert!(meta.id.is_some(), "the inbox assigns an id");
         }
         other => panic!("expected a user message, got {other:?}"),
     }

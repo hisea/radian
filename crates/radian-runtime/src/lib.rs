@@ -1,13 +1,16 @@
 //! The runtime layer above `agent-core` and `radian-session`: the durable inbox and (in a
 //! later slice) the per-session driver.
 //!
-//! **Slice A status**: the four semantic input operations and their queue semantics are
-//! implemented here ([`Inbox`]). The durable half — writing `InboxEnqueued` /
-//! `InputClaimed` / `InputAdmitted` (and `TurnStarted` / `TurnFinished` / `ConfigChanged`)
-//! to the session JSONL — is **blocked**: `radian-session` exposes no API to append runtime
-//! events, and this slice must not change `radian-session`. See the crate `README.md` and
-//! the report for the exact proposed API.
+//! - [`Inbox`] holds the four semantic input operations and, when built with
+//!   [`Inbox::durable`], writes `InboxEnqueued` before an input becomes visible.
+//! - [`Driver`] owns one session: it applies configuration at turn boundaries, claims
+//!   inputs, drives the core turn loop, and writes `InputClaimed`/`InputAdmitted`/
+//!   `TurnStarted`/`TurnFinished`/`ConfigChanged` through `radian-session`.
 
+mod config;
+mod driver;
 mod inbox;
 
+pub use config::{ConfigQueue, ConfigSlot};
+pub use driver::{Driver, DriverError};
 pub use inbox::{CancelCause, Inbox, InboxEntry, InboxError, Lane};

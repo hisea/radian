@@ -19,17 +19,27 @@
 //! and return [`InboxError::Full`] **carrying the rejected message**, so the host can keep
 //! it and retry. Nothing is ever silently dropped. `cancel` is exempt.
 //!
-//! # Source is optional
+//! # Source is required at this boundary
 //!
-//! ADR 0011 leaves "must `followup`/`inject` carry a `source`?" undecided. This crate
-//! follows the core: the message's [`agent_core::MessageMeta`] may carry a `source`, and
-//! the inbox neither requires nor invents one. A `None` source is not `User` (ADR 0005 G2).
+//! ADR 0011 requires `followup`/`steer`/`inject` to take an
+//! explicit [`InputSource`]: the core keeps `source: Option` (ADR 0005 G2, `None` means "the
+//! host did not say"), and the runtime is where "you must say" is enforced. The inbox writes
+//! the source into the message's `meta.source` and into `InboxEnqueued.source`, so the
+//! permission layer can always find it.
+//!
+//! # Durability
+//!
+//! An inbox built with [`Inbox::durable`] writes `InboxEnqueued` through the session journal
+//! **before** the input is visible in memory: an accepted input is a durable promise (ADR
+//! 0011 L3). [`Inbox::new`] is the in-memory variant used by the queue tests.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use agent_core::{Message, MessageId};
+use agent_core::{InputSource, Message, MessageId};
+use radian_session::{InboxLane, RuntimeEvent, SessionJournal};
+use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::futures::Notified;
 
@@ -42,6 +52,15 @@ pub enum Lane {
     NextStep,
 }
 
+impl Lane {
+    pub(crate) fn wire(self) -> InboxLane {
+        match self {
+            Lane::NextTurn => InboxLane::NextTurn,
+            Lane::NextStep => InboxLane::NextStep,
+        }
+    }
+}
+
 /// Why an input was refused. Every variant carries the rejected message back (ADR 0011
 /// decision 1: never drop silently, hand the message to the caller).
 #[derive(Debug, thiserror::Error)]
@@ -52,6 +71,8 @@ pub enum InboxError {
     Closed { message: Message },
     #[error("only user messages can be enqueued in v1")]
     NotUser { message: Message },
+    #[error("the enqueue could not be made durable, so it was not accepted: {error}")]
+    Journal { message: Message, error: String },
 }
 
 impl InboxError {
@@ -60,7 +81,8 @@ impl InboxError {
         match self {
             InboxError::Full { message, .. }
             | InboxError::Closed { message }
-            | InboxError::NotUser { message } => message,
+            | InboxError::NotUser { message }
+            | InboxError::Journal { message, .. } => message,
         }
     }
 
@@ -69,7 +91,8 @@ impl InboxError {
         match self {
             InboxError::Full { message, .. }
             | InboxError::Closed { message }
-            | InboxError::NotUser { message } => message,
+            | InboxError::NotUser { message }
+            | InboxError::Journal { message, .. } => message,
         }
     }
 }
@@ -88,7 +111,9 @@ pub enum CancelCause {
 pub struct InboxEntry {
     pub id: MessageId,
     pub lane: Lane,
-    /// The message, with its `meta.id` set to `id`.
+    /// The source the caller declared at enqueue time (ADR 0011).
+    pub source: InputSource,
+    /// The message, with its `meta.id` and `meta.source` set.
     pub message: Message,
     /// Monotonic enqueue order within this inbox. Entries in a lane are FIFO by this value.
     pub seq: u64,
@@ -104,13 +129,20 @@ impl State {
     fn len(&self) -> usize {
         self.next_turn.len() + self.next_step.len()
     }
+
+    fn push(&mut self, entry: InboxEntry) {
+        match entry.lane {
+            Lane::NextTurn => self.next_turn.push_back(entry),
+            Lane::NextStep => self.next_step.push_back(entry),
+        }
+    }
 }
 
 /// The bounded, two-lane input queue. Share it with `Arc`: the host enqueues, the driver
 /// claims.
 pub struct Inbox {
     capacity: usize,
-    state: std::sync::Mutex<State>,
+    state: Mutex<State>,
     /// Woken by `followup`, `steer` and `cancel`; **not** by `inject`.
     wake: Notify,
     next_seq: AtomicU64,
@@ -123,6 +155,8 @@ pub struct Inbox {
     cancelled: AtomicBool,
     last_cause: std::sync::Mutex<Option<CancelCause>>,
     closed: AtomicBool,
+    /// When present, `InboxEnqueued` is written before the input becomes visible.
+    journal: Option<Arc<SessionJournal>>,
 }
 
 // Carrying the rejected message in the error is the decision 1 (ADR 0011 L4): the
@@ -131,16 +165,26 @@ pub struct Inbox {
 // `agent_core::SteerError::RunFinished(Message)`.
 #[allow(clippy::result_large_err)]
 impl Inbox {
-    /// Creates an inbox that accepts at most `capacity` queued inputs (both lanes
-    /// together). `capacity` must be at least 1.
+    /// An in-memory inbox (no durability). Used by the queue semantics tests and by hosts
+    /// that manage durability themselves.
     pub fn new(capacity: usize) -> Arc<Self> {
+        Self::build(capacity, None)
+    }
+
+    /// The durable inbox: every accepted input is written as `InboxEnqueued` before it is
+    /// visible in memory.
+    pub fn durable(capacity: usize, journal: Arc<SessionJournal>) -> Arc<Self> {
+        Self::build(capacity, Some(journal))
+    }
+
+    fn build(capacity: usize, journal: Option<Arc<SessionJournal>>) -> Arc<Self> {
         assert!(
             capacity >= 1,
             "an inbox with capacity 0 could never accept input"
         );
         Arc::new(Self {
             capacity,
-            state: std::sync::Mutex::new(State::default()),
+            state: Mutex::new(State::default()),
             wake: Notify::new(),
             next_seq: AtomicU64::new(0),
             next_id: AtomicU64::new(0),
@@ -149,30 +193,47 @@ impl Inbox {
             cancelled: AtomicBool::new(false),
             last_cause: std::sync::Mutex::new(None),
             closed: AtomicBool::new(false),
+            journal,
         })
     }
 
     /// `next_turn`: a new task for after the current turn. Wakes an idle driver.
-    pub async fn followup(&self, input: impl Into<Message>) -> Result<MessageId, InboxError> {
-        self.enqueue(Lane::NextTurn, input.into(), true)
+    pub async fn followup(
+        &self,
+        input: impl Into<Message>,
+        source: InputSource,
+    ) -> Result<MessageId, InboxError> {
+        self.enqueue(Lane::NextTurn, input.into(), source, true)
+            .await
     }
 
     /// `next_step`: change the current turn's direction at the next safe point. Wakes an
     /// idle driver.
-    pub async fn steer(&self, input: impl Into<Message>) -> Result<MessageId, InboxError> {
-        self.enqueue(Lane::NextStep, input.into(), true)
+    pub async fn steer(
+        &self,
+        input: impl Into<Message>,
+        source: InputSource,
+    ) -> Result<MessageId, InboxError> {
+        self.enqueue(Lane::NextStep, input.into(), source, true)
+            .await
     }
 
     /// `next_step`: context that waits for a natural step boundary. Does **not** wake an
     /// idle driver.
-    pub async fn inject(&self, input: impl Into<Message>) -> Result<MessageId, InboxError> {
-        self.enqueue(Lane::NextStep, input.into(), false)
+    pub async fn inject(
+        &self,
+        input: impl Into<Message>,
+        source: InputSource,
+    ) -> Result<MessageId, InboxError> {
+        self.enqueue(Lane::NextStep, input.into(), source, false)
+            .await
     }
 
-    fn enqueue(
+    async fn enqueue(
         &self,
         lane: Lane,
         mut message: Message,
+        source: InputSource,
         wake: bool,
     ) -> Result<MessageId, InboxError> {
         if self.closed.load(Ordering::SeqCst) {
@@ -181,7 +242,13 @@ impl Inbox {
         if !message.is_user() {
             return Err(InboxError::NotUser { message });
         }
-        let mut state = self.lock();
+        // The source is explicit at this boundary and is recorded on the message itself, so
+        // the transcript carries it too (ADR 0006 §5.5: `meta.source` comes from here).
+        set_message_meta_source(&mut message, source);
+
+        // The lock is held across the durable write so that capacity is exact and the
+        // in-memory order equals the `seq` order even under concurrent enqueues.
+        let mut state = self.state.lock().await;
         if state.len() >= self.capacity {
             return Err(InboxError::Full {
                 message,
@@ -197,17 +264,30 @@ impl Inbox {
                 id
             }
         };
+        if let Some(journal) = &self.journal {
+            // Journal first, then memory (ADR 0001 S1): an input that is not durable was
+            // never accepted.
+            journal
+                .append_runtime_event(RuntimeEvent::InboxEnqueued {
+                    message: message.clone(),
+                    message_id: id.clone(),
+                    lane: lane.wire(),
+                    source,
+                })
+                .await
+                .map_err(|error| InboxError::Journal {
+                    message: message.clone(),
+                    error: error.to_string(),
+                })?;
+        }
         let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
-        let entry = InboxEntry {
+        state.push(InboxEntry {
             id: id.clone(),
             lane,
+            source,
             message,
             seq,
-        };
-        match lane {
-            Lane::NextTurn => state.next_turn.push_back(entry),
-            Lane::NextStep => state.next_step.push_back(entry),
-        }
+        });
         drop(state);
         if wake {
             self.wake.notify_one();
@@ -250,18 +330,18 @@ impl Inbox {
         self.capacity
     }
 
-    pub fn len(&self) -> usize {
-        self.lock().len()
+    pub async fn len(&self) -> usize {
+        self.state.lock().await.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
+    pub async fn is_empty(&self) -> bool {
+        self.len().await == 0
     }
 
     /// A consistent copy of the queue: `next_turn` entries then `next_step` entries, each in
     /// FIFO order. For a UI that displays pending input.
-    pub fn snapshot(&self) -> Vec<InboxEntry> {
-        let state = self.lock();
+    pub async fn snapshot(&self) -> Vec<InboxEntry> {
+        let state = self.state.lock().await;
         state
             .next_turn
             .iter()
@@ -276,22 +356,35 @@ impl Inbox {
         self.wake.notified()
     }
 
+    /// Wakes the driver without changing any state (used by shutdown).
+    pub(crate) fn wake_now(&self) {
+        self.wake.notify_one();
+    }
+
     /// Removes the oldest `next_turn` entry, if any. Used by the driver at a turn boundary.
-    pub fn claim_next_turn(&self) -> Option<InboxEntry> {
-        self.lock().next_turn.pop_front()
+    pub async fn claim_next_turn(&self) -> Option<InboxEntry> {
+        self.state.lock().await.next_turn.pop_front()
     }
 
     /// Removes the oldest `next_step` entry, if any. Used by the driver at a safe point.
-    pub fn claim_next_step(&self) -> Option<InboxEntry> {
-        self.lock().next_step.pop_front()
+    pub async fn claim_next_step(&self) -> Option<InboxEntry> {
+        self.state.lock().await.next_step.pop_front()
     }
 
     /// Puts a claimed entry back at the front of its lane (recovery, ADR 0011 L3-2).
-    pub fn requeue_front(&self, entry: InboxEntry) {
-        let mut state = self.lock();
+    pub async fn requeue_front(&self, entry: InboxEntry) {
+        let mut state = self.state.lock().await;
         match entry.lane {
             Lane::NextTurn => state.next_turn.push_front(entry),
             Lane::NextStep => state.next_step.push_front(entry),
+        }
+    }
+
+    /// Puts recovered entries back, preserving their relative order. The input is in
+    /// reverse order (front-most last), so a single front-push per entry restores it.
+    pub async fn restore(&self, entries: Vec<InboxEntry>) {
+        for entry in entries {
+            self.requeue_front(entry).await;
         }
     }
 
@@ -301,13 +394,9 @@ impl Inbox {
         *self.lock_cause() = None;
     }
 
-    /// Rejects all future input. Not used yet; the driver owns session lifetime.
+    /// Rejects all future input.
     pub fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn lock_cause(&self) -> std::sync::MutexGuard<'_, Option<CancelCause>> {
@@ -331,6 +420,14 @@ fn set_message_meta_id(message: &mut Message, id: MessageId) {
     }
 }
 
+fn set_message_meta_source(message: &mut Message, source: InputSource) {
+    match message {
+        Message::User { meta, .. }
+        | Message::Assistant { meta, .. }
+        | Message::Tool { meta, .. } => meta.source = Some(source),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,13 +441,16 @@ mod tests {
         for i in 0..32u32 {
             let inbox = Arc::clone(&inbox);
             tasks.push(tokio::spawn(async move {
-                inbox.followup(format!("m{i}")).await.unwrap()
+                inbox
+                    .followup(format!("m{i}"), InputSource::User)
+                    .await
+                    .unwrap()
             }));
         }
         for task in tasks {
             task.await.unwrap();
         }
-        let state = inbox.lock();
+        let state = inbox.state.lock().await;
         let seqs: Vec<u64> = state.next_turn.iter().map(|e| e.seq).collect();
         assert_eq!(
             seqs,
@@ -362,10 +462,11 @@ mod tests {
     #[tokio::test]
     async fn an_assigned_id_is_written_into_the_message_meta() {
         let inbox = Inbox::new(4);
-        let id = inbox.followup("hi").await.unwrap();
-        let entry = inbox.snapshot().pop().unwrap();
+        let id = inbox.followup("hi", InputSource::User).await.unwrap();
+        let entry = inbox.snapshot().await.pop().unwrap();
         assert_eq!(entry.id, id);
         assert_eq!(message_meta_id(&entry.message), Some(&id));
+        assert_eq!(entry.message_meta_source(), Some(InputSource::User));
     }
 
     #[tokio::test]
@@ -373,7 +474,21 @@ mod tests {
         let inbox = Inbox::new(4);
         let mut message = Message::user("hi");
         set_message_meta_id(&mut message, MessageId("host-7".into()));
-        let id = inbox.followup(message).await.unwrap();
+        let id = inbox.followup(message, InputSource::User).await.unwrap();
         assert_eq!(id, MessageId("host-7".into()));
+    }
+
+    trait MetaSource {
+        fn message_meta_source(&self) -> Option<InputSource>;
+    }
+
+    impl MetaSource for InboxEntry {
+        fn message_meta_source(&self) -> Option<InputSource> {
+            match &self.message {
+                Message::User { meta, .. }
+                | Message::Assistant { meta, .. }
+                | Message::Tool { meta, .. } => meta.source,
+            }
+        }
     }
 }

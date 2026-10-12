@@ -7,6 +7,8 @@ description = "Runtime layer: the durable inbox and the per-session driver (ADR 
 
 [dependencies]
 agent-core = { path = "../agent-core" }
+radian-session = { path = "../radian-session" }
+serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true }
 
