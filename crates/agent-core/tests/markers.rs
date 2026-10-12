@@ -738,3 +738,162 @@ async fn started_markers_follow_dispatch_and_results_follow_call_order() {
     // ... results in call order, settled or not in completion order.
     assert_eq!(result_ids(chat.transcript()), ["s1", "s2", "s3", "s4"]);
 }
+
+// ---------- the crash traversal (AC-A2-5) ----------
+
+/// Denies every call to `d`.
+#[derive(Clone, Copy)]
+struct DenyD;
+
+impl Hooks for DenyD {
+    fn before_tool_call(
+        &self,
+        _cx: &HookContext,
+        call: &ToolCall,
+    ) -> impl Future<Output = Result<ToolDecision, HookError>> + Send {
+        let decision = if call.name == "d" {
+            ToolDecision::Deny {
+                reason: "not in this test".into(),
+            }
+        } else {
+            ToolDecision::Allow
+        };
+        async move { Ok(decision) }
+    }
+}
+
+/// The classification rule 3.2 predicts for one call, judging only by the records.
+fn expected_code(records: &[JournalRecord], id: &str) -> Option<&'static str> {
+    for record in records {
+        if let JournalRecord::Message {
+            message: Message::Tool { result },
+            ..
+        } = record
+            && result.call_id == id
+        {
+            return None; // already paired; repair leaves it alone
+        }
+    }
+    if records.iter().any(|r| {
+        matches!(r,
+        JournalRecord::ToolExecutionSettled { call_id, .. } if call_id == id)
+    }) {
+        None // filled from the settled result, not from a code
+    } else if records.iter().any(|r| {
+        matches!(r,
+        JournalRecord::ToolExecutionStarted { call_id, .. } if call_id == id)
+    }) {
+        Some("outcome_unknown_after_crash")
+    } else {
+        Some("not_started_after_crash")
+    }
+}
+
+/// AC-A2-5: recovering at every possible crash point of one scripted batch yields a valid,
+/// reopenable history, classifies every call per 3.2, and never executes a tool.
+#[tokio::test(start_paused = true)]
+async fn crash_traversal_recovers_every_prefix() {
+    // A parallel shared pair, an exclusive call, a denied call and an unknown tool.
+    let tools = MemTools::new(vec![
+        (shared("a"), Behavior::Delay(5)),
+        (spec("b"), Behavior::Echo),
+        (spec("d"), Behavior::Echo),
+    ]);
+    let log = tools.log.clone();
+    let model = ScriptedModel::new([
+        calls(vec![
+            call("s1", "a", json!({})),
+            call("s2", "a", json!({})),
+            call("e1", "b", json!({})),
+            call("d1", "d", json!({})),
+            call("u1", "missing", json!({})),
+        ]),
+        text("done"),
+    ]);
+    let journal = Arc::new(RecordingJournal::new());
+    let mut chat = session_with_hooks(model, tools, journal.clone(), DenyD).await;
+    chat.run_turn("go", Default::default(), &NoopSink)
+        .await
+        .unwrap();
+
+    let records = journal.records();
+    let all_ids = ["s1", "s2", "e1", "d1", "u1"];
+    let executed_before = log.started().len();
+    assert_eq!(
+        executed_before, 3,
+        "s1, s2 and e1 ran; d1 was denied, u1 unknown"
+    );
+
+    for k in 0..=records.len() {
+        let prefix = &records[..k];
+        let history = recover(prefix).unwrap();
+        let replayed = replay(prefix).unwrap();
+
+        // (1) Every call the prefix knows has exactly one result, in assistant order; a
+        // prefix without the assistant message knows none.
+        let known: Vec<String> = replayed
+            .iter()
+            .filter_map(|m| match m {
+                Message::Assistant { tool_calls, .. } => {
+                    Some(tool_calls.iter().map(|c| c.id.clone()).collect::<Vec<_>>())
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(result_ids(&history), known, "prefix {k}");
+
+        // (2) Each fill matches the classification the prefix predicts.
+        for id in all_ids {
+            if !known.iter().any(|i| i == id) {
+                continue;
+            }
+            let result = result_for(&history, id);
+            match expected_code(prefix, id) {
+                Some(expected) => assert_eq!(code(result), Some(expected), "prefix {k}, call {id}"),
+                // Either the original result message, or the settled one verbatim.
+                None => assert!(
+                    code(result).is_none()
+                        || matches!(code(result), Some(c) if c != "not_started_after_crash"
+                            && c != "outcome_unknown_after_crash"),
+                    "prefix {k}, call {id}: unexpected synthetic {result:?}"
+                ),
+            }
+        }
+
+        // (3) The recovered history validates ...
+        Arc::new(Agent::new(ScriptedModel::new(Vec::new()), NoTools))
+            .open_session_with_history(history)
+            .await
+            .unwrap();
+
+        // (4) ... and a reopened session runs another turn.
+        let fresh_tools = MemTools::new(vec![(spec("a"), Behavior::Echo)]);
+        let fresh_model = ScriptedModel::new([text("fine")]);
+        let mut reopened = Arc::new(Agent::new(fresh_model, fresh_tools.clone()))
+            .open_session_with_history(replay(prefix).unwrap().clone())
+            .await
+            // The replayed prefix alone may have unpaired calls; with the repair it
+            // always opens. Use the recovered history for the reopen instead.
+            .map_err(|_| ())
+            .ok();
+        if let Some(session) = reopened.as_mut() {
+            session
+                .run_turn("next", Default::default(), &NoopSink)
+                .await
+                .unwrap();
+        } else {
+            let mut session = Arc::new(Agent::new(ScriptedModel::new([text("fine")]), fresh_tools))
+                .open_session_with_history(recover(prefix).unwrap())
+                .await
+                .unwrap();
+            session
+                .run_turn("next", Default::default(), &NoopSink)
+                .await
+                .unwrap();
+        }
+
+        // (5) No tool executed anywhere in the traversal: the original counters stand.
+        assert_eq!(log.started().len(), executed_before, "prefix {k}");
+    }
+}
