@@ -20,6 +20,13 @@ bash docs/schema/check-fixtures.sh
 bash docs/schema/check-config-fixtures.sh
 ```
 
+Run tests with `--no-fail-fast`. Cargo stops at the first failing test binary by
+default, which makes a mutation look like it was caught by one test when it was
+caught by seven, and hides failures in the binaries that never ran.
+
+The workspace MSRV is checked, not assumed: `cargo +1.88 check --workspace
+--all-targets` passes (`rustup toolchain install 1.88 --profile minimal`).
+
 A change to a provider adapter must also keep the contract suite green:
 `cargo test -p agent-provider-openai-compatible --features testing --test contract`.
 See `docs/provider-contract.md`.

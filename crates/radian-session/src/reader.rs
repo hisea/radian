@@ -1,5 +1,9 @@
 //! The read side: streaming parse with the ADR 0006 §7 unknown-content policy, and
 //! transcript folding through `agent_core`'s own `replay`/`repair`/`recover`.
+//!
+//! [`scan_stream`] is the single parser. [`Session::open`] uses it to retain every event;
+//! the index cache (ADR 0006 §10) uses the same function to fold rows without retaining the
+//! session — so both agree on the LF-commit / torn-tail rule by construction.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
@@ -14,11 +18,11 @@ use crate::writer::SCHEMA_VERSION;
 
 /// Refuse lines larger than this instead of growing the buffer without bound (ADR 0006
 /// §3.1 suggests a configurable cap; this slice uses a fixed 64 MiB default).
-const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 
 /// The v1 events known to a schema-v1 reader (ADR 0006 §4). Anything else is unknown and
 /// handled by the `critical` policy.
-const KNOWN_EVENTS: [&str; 16] = [
+pub(crate) const KNOWN_EVENTS: [&str; 16] = [
     "SessionCreated",
     "InboxEnqueued",
     "InputClaimed",
@@ -64,13 +68,265 @@ pub enum EventData {
     Other(Value),
 }
 
-/// One accepted envelope line.
+/// One accepted envelope line, with the fields an index can derive from the file alone
+/// (ADR 0006 §10): the envelope plus the line's byte offset and length.
 #[derive(Debug, Clone)]
 pub struct SessionEvent {
     pub seq: u64,
+    pub ts: String,
     pub event: String,
     pub critical: bool,
+    /// Byte offset of the line's first byte in the file.
+    pub byte_offset: u64,
+    /// Length in bytes of the line, including its terminating LF (the commit marker).
+    pub line_len: u64,
     pub data: EventData,
+}
+
+/// What a full scan learned about the file. `committed_bytes` is the size of the committed
+/// prefix: everything after the last LF is a torn tail and is not counted (ADR 0006 §3.2).
+#[derive(Debug, Clone)]
+pub(crate) struct ScanSummary {
+    pub(crate) session_id: String,
+    pub(crate) schema_version: u64,
+    pub(crate) committed_bytes: u64,
+    pub(crate) event_count: u64,
+    pub(crate) skipped: Vec<(u64, String)>,
+}
+
+/// Streams a session file, applying the ADR 0006 §7 policy and the §3.2 torn-tail rule,
+/// and calls `on_event` for every accepted event in order. Never loads the whole file (or
+/// the whole session) into memory; the per-line buffer is bounded by
+/// [`MAX_LINE_BYTES`].
+pub(crate) fn scan_stream<E, F>(path: &Path, mut on_event: F) -> Result<ScanSummary, E>
+where
+    E: From<ReadError>,
+    F: FnMut(SessionEvent) -> Result<(), E>,
+{
+    let file = File::open(path).map_err(|source| {
+        E::from(ReadError::Open {
+            path: path.to_path_buf(),
+            source,
+        })
+    })?;
+    let mut reader = BufReader::new(file);
+    let mut line: Vec<u8> = Vec::new();
+    let mut lineno: u64 = 0;
+    let mut expect_seq: u64 = 0;
+    let mut index_next: u64 = 0;
+    let mut pending_len: Option<u64> = None;
+    let mut messages_since: u64 = 0;
+    let mut schema_version: Option<u64> = None;
+    let mut session_id = String::new();
+    let mut skipped = Vec::new();
+    let mut event_count: u64 = 0;
+    // Byte offset where the current line starts, and the end of the last committed line.
+    let mut line_offset: u64 = 0;
+    let mut committed_bytes: u64 = 0;
+
+    loop {
+        line.clear();
+        let n = {
+            // Bounded read: never grow `line` past the cap + 1.
+            let mut limited = reader.by_ref().take((MAX_LINE_BYTES + 1) as u64);
+            limited.read_until(b'\n', &mut line).map_err(|source| {
+                E::from(ReadError::Open {
+                    path: path.to_path_buf(),
+                    source,
+                })
+            })?
+        };
+        if n == 0 {
+            break;
+        }
+        if !line.ends_with(b"\n") {
+            if line.len() > MAX_LINE_BYTES {
+                return Err(E::from(ReadError::Corrupt {
+                    path: path.to_path_buf(),
+                    line: lineno + 1,
+                    column: MAX_LINE_BYTES,
+                    message: format!("line exceeds the {MAX_LINE_BYTES}-byte cap"),
+                }));
+            }
+            // No LF means no commit: the trailing bytes are a torn tail (ADR 0006 §3.2)
+            // and are dropped without being parsed or counted. `committed_bytes` keeps the
+            // end of the previous complete line.
+            break;
+        }
+        lineno += 1;
+        let raw = std::str::from_utf8(&line[..line.len() - 1]).map_err(|e| {
+            E::from(ReadError::Corrupt {
+                path: path.to_path_buf(),
+                line: lineno,
+                column: e.valid_up_to(),
+                message: "line is not valid UTF-8".into(),
+            })
+        })?;
+        let header: Header = serde_json::from_str(raw).map_err(|e| {
+            E::from(ReadError::Corrupt {
+                path: path.to_path_buf(),
+                line: lineno,
+                column: e.column(),
+                message: e.to_string(),
+            })
+        })?;
+
+        match schema_version {
+            None => {
+                if header.schema_version > SCHEMA_VERSION {
+                    return Err(E::from(ReadError::SchemaTooNew {
+                        path: path.to_path_buf(),
+                        found: header.schema_version,
+                        supported: SCHEMA_VERSION,
+                    }));
+                }
+                if header.schema_version != SCHEMA_VERSION {
+                    return Err(E::from(ReadError::UnsupportedSchema {
+                        path: path.to_path_buf(),
+                        found: header.schema_version,
+                    }));
+                }
+                schema_version = Some(header.schema_version);
+                session_id = header.session_id.clone();
+            }
+            Some(version) => {
+                if header.schema_version != version || header.session_id != session_id {
+                    return Err(E::from(ReadError::Envelope {
+                        path: path.to_path_buf(),
+                        line: lineno,
+                        message: "schema_version or session_id changed mid-file".into(),
+                    }));
+                }
+            }
+        }
+        if header.seq != expect_seq {
+            return Err(E::from(ReadError::BadSeq {
+                path: path.to_path_buf(),
+                line: lineno,
+                expected: expect_seq,
+                found: header.seq,
+            }));
+        }
+        expect_seq += 1;
+        if header.event == "SessionCreated" && header.seq != 0 {
+            return Err(E::from(ReadError::SessionCreatedNotFirst {
+                path: path.to_path_buf(),
+                line: lineno,
+            }));
+        }
+
+        let seq = header.seq;
+        let ts = header.ts;
+        let event = header.event;
+        let critical = header.critical;
+        // The accepted/committed line ends here, whatever it turns out to be.
+        committed_bytes = line_offset + n as u64;
+
+        if !KNOWN_EVENTS.contains(&event.as_str()) {
+            if critical {
+                return Err(E::from(ReadError::UnknownCritical {
+                    path: path.to_path_buf(),
+                    line: lineno,
+                    event,
+                }));
+            }
+            skipped.push((seq, event));
+            line_offset = committed_bytes;
+            continue;
+        }
+
+        let data = match event.as_str() {
+            "MessageAppended" => {
+                let d: MessageData = data_of(raw, lineno, path)?;
+                if d.index != index_next {
+                    return Err(E::from(ReadError::BadIndex {
+                        path: path.to_path_buf(),
+                        line: lineno,
+                        expected: index_next,
+                        found: d.index,
+                    }));
+                }
+                index_next += 1;
+                messages_since += 1;
+                EventData::MessageAppended {
+                    index: d.index,
+                    message: d.message,
+                }
+            }
+            "TranscriptReplaced" => {
+                let d: ReplacedData = data_of(raw, lineno, path)?;
+                if let Some(len) = pending_len
+                    && messages_since != len
+                {
+                    return Err(E::from(ReadError::BadReplacementLen {
+                        path: path.to_path_buf(),
+                        len,
+                        count: messages_since,
+                    }));
+                }
+                pending_len = Some(d.len);
+                messages_since = 0;
+                index_next = 0;
+                EventData::TranscriptReplaced {
+                    revision: d.revision,
+                    len: d.len,
+                }
+            }
+            "ToolExecutionStarted" => {
+                let d: StartedData = data_of(raw, lineno, path)?;
+                EventData::ToolExecutionStarted {
+                    call_id: d.call_id,
+                    name: d.name,
+                    arguments: d.arguments,
+                }
+            }
+            "ToolExecutionSettled" => {
+                let d: SettledData = data_of(raw, lineno, path)?;
+                EventData::ToolExecutionSettled {
+                    call_id: d.call_id,
+                    result: d.result,
+                }
+            }
+            "ModelUsageRecorded" => {
+                let d: UsageData = data_of(raw, lineno, path)?;
+                EventData::ModelUsageRecorded { usage: d.usage }
+            }
+            _ => {
+                let value = data_value(raw, lineno, path).map_err(E::from)?;
+                EventData::Other(value)
+            }
+        };
+
+        on_event(SessionEvent {
+            seq,
+            ts,
+            event,
+            critical,
+            byte_offset: line_offset,
+            line_len: n as u64,
+            data,
+        })?;
+        event_count += 1;
+        line_offset = committed_bytes;
+    }
+
+    if let Some(len) = pending_len
+        && messages_since != len
+    {
+        return Err(E::from(ReadError::BadReplacementLen {
+            path: path.to_path_buf(),
+            len,
+            count: messages_since,
+        }));
+    }
+
+    Ok(ScanSummary {
+        session_id,
+        schema_version: schema_version.unwrap_or(SCHEMA_VERSION),
+        committed_bytes,
+        event_count,
+        skipped,
+    })
 }
 
 /// A fully parsed session file. Unknown non-critical events are not part of `events`; they
@@ -80,6 +336,7 @@ pub struct Session {
     path: PathBuf,
     session_id: String,
     schema_version: u64,
+    committed_bytes: u64,
     events: Vec<SessionEvent>,
     skipped: Vec<(u64, String)>,
 }
@@ -90,205 +347,22 @@ impl Session {
     /// Lines are read one at a time with a bounded read, so a single oversized line is
     /// rejected rather than grown into memory. The parsed events are **retained**, so a
     /// `Session`'s memory grows with the length of the session: this is fine for Phase 1,
-    /// where a session is opened to fold it, and a fold-without-retention API belongs with
-    /// the index slice.
+    /// where a session is opened to fold it. Code that only needs a summary (the index
+    /// cache) uses [`scan_stream`] instead and does not retain.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ReadError> {
         let path = path.as_ref().to_path_buf();
-        let file = File::open(&path).map_err(|source| ReadError::Open {
-            path: path.clone(),
-            source,
-        })?;
-        let mut reader = BufReader::new(file);
-        let mut line: Vec<u8> = Vec::new();
-        let mut lineno: u64 = 0;
-        let mut expect_seq: u64 = 0;
-        let mut index_next: u64 = 0;
-        let mut pending_len: Option<u64> = None;
-        let mut messages_since: u64 = 0;
-        let mut schema_version: Option<u64> = None;
-        let mut session_id = String::new();
         let mut events = Vec::new();
-        let mut skipped = Vec::new();
-
-        loop {
-            line.clear();
-            let n = {
-                // Bounded read: never grow `line` past the cap + 1.
-                let mut limited = reader.by_ref().take((MAX_LINE_BYTES + 1) as u64);
-                limited
-                    .read_until(b'\n', &mut line)
-                    .map_err(|source| ReadError::Open {
-                        path: path.clone(),
-                        source,
-                    })?
-            };
-            if n == 0 {
-                break;
-            }
-            if !line.ends_with(b"\n") {
-                if line.len() > MAX_LINE_BYTES {
-                    return Err(ReadError::Corrupt {
-                        path,
-                        line: lineno + 1,
-                        column: MAX_LINE_BYTES,
-                        message: format!("line exceeds the {MAX_LINE_BYTES}-byte cap"),
-                    });
-                }
-                // No LF means no commit: the trailing bytes are a torn tail (ADR 0006
-                // §3.2) and are dropped without being parsed or counted.
-                break;
-            }
-            lineno += 1;
-            let raw =
-                std::str::from_utf8(&line[..line.len() - 1]).map_err(|e| ReadError::Corrupt {
-                    path: path.clone(),
-                    line: lineno,
-                    column: e.valid_up_to(),
-                    message: "line is not valid UTF-8".into(),
-                })?;
-            let header: Header = serde_json::from_str(raw).map_err(|e| ReadError::Corrupt {
-                path: path.clone(),
-                line: lineno,
-                column: e.column(),
-                message: e.to_string(),
-            })?;
-
-            match schema_version {
-                None => {
-                    if header.schema_version > SCHEMA_VERSION {
-                        return Err(ReadError::SchemaTooNew {
-                            path,
-                            found: header.schema_version,
-                            supported: SCHEMA_VERSION,
-                        });
-                    }
-                    if header.schema_version != SCHEMA_VERSION {
-                        return Err(ReadError::UnsupportedSchema {
-                            path,
-                            found: header.schema_version,
-                        });
-                    }
-                    schema_version = Some(header.schema_version);
-                    session_id = header.session_id.clone();
-                }
-                Some(version) => {
-                    if header.schema_version != version || header.session_id != session_id {
-                        return Err(ReadError::Envelope {
-                            path,
-                            line: lineno,
-                            message: "schema_version or session_id changed mid-file".into(),
-                        });
-                    }
-                }
-            }
-            if header.seq != expect_seq {
-                return Err(ReadError::BadSeq {
-                    path,
-                    line: lineno,
-                    expected: expect_seq,
-                    found: header.seq,
-                });
-            }
-            expect_seq += 1;
-            if header.event == "SessionCreated" && header.seq != 0 {
-                return Err(ReadError::SessionCreatedNotFirst { path, line: lineno });
-            }
-
-            if !KNOWN_EVENTS.contains(&header.event.as_str()) {
-                if header.critical {
-                    return Err(ReadError::UnknownCritical {
-                        path,
-                        line: lineno,
-                        event: header.event,
-                    });
-                }
-                skipped.push((header.seq, header.event));
-                continue;
-            }
-
-            let seq = header.seq;
-            let data = match header.event.as_str() {
-                "MessageAppended" => {
-                    let d: MessageData = data_of(raw, lineno, &path)?;
-                    if d.index != index_next {
-                        return Err(ReadError::BadIndex {
-                            path,
-                            line: lineno,
-                            expected: index_next,
-                            found: d.index,
-                        });
-                    }
-                    index_next += 1;
-                    messages_since += 1;
-                    EventData::MessageAppended {
-                        index: d.index,
-                        message: d.message,
-                    }
-                }
-                "TranscriptReplaced" => {
-                    let d: ReplacedData = data_of(raw, lineno, &path)?;
-                    if let Some(len) = pending_len
-                        && messages_since != len
-                    {
-                        return Err(ReadError::BadReplacementLen {
-                            path,
-                            len,
-                            count: messages_since,
-                        });
-                    }
-                    pending_len = Some(d.len);
-                    messages_since = 0;
-                    index_next = 0;
-                    EventData::TranscriptReplaced {
-                        revision: d.revision,
-                        len: d.len,
-                    }
-                }
-                "ToolExecutionStarted" => {
-                    let d: StartedData = data_of(raw, lineno, &path)?;
-                    EventData::ToolExecutionStarted {
-                        call_id: d.call_id,
-                        name: d.name,
-                        arguments: d.arguments,
-                    }
-                }
-                "ToolExecutionSettled" => {
-                    let d: SettledData = data_of(raw, lineno, &path)?;
-                    EventData::ToolExecutionSettled {
-                        call_id: d.call_id,
-                        result: d.result,
-                    }
-                }
-                "ModelUsageRecorded" => {
-                    let d: UsageData = data_of(raw, lineno, &path)?;
-                    EventData::ModelUsageRecorded { usage: d.usage }
-                }
-                _ => EventData::Other(data_value(raw, lineno, &path)?),
-            };
-            events.push(SessionEvent {
-                seq,
-                event: header.event,
-                critical: header.critical,
-                data,
-            });
-        }
-
-        if let Some(len) = pending_len
-            && messages_since != len
-        {
-            return Err(ReadError::BadReplacementLen {
-                path,
-                len,
-                count: messages_since,
-            });
-        }
-
+        let summary = scan_stream(&path, |event| -> Result<(), ReadError> {
+            events.push(event);
+            Ok(())
+        })?;
         Ok(Session {
             path,
-            session_id,
-            schema_version: schema_version.unwrap_or(SCHEMA_VERSION),
+            session_id: summary.session_id,
+            schema_version: summary.schema_version,
+            committed_bytes: summary.committed_bytes,
             events,
-            skipped,
+            skipped: summary.skipped,
         })
     }
 
@@ -302,6 +376,12 @@ impl Session {
 
     pub fn schema_version(&self) -> u64 {
         self.schema_version
+    }
+
+    /// The size of the committed prefix: every byte through the last LF. Bytes after it are
+    /// a torn tail (ADR 0006 §3.2) and are not part of the session.
+    pub fn committed_bytes(&self) -> u64 {
+        self.committed_bytes
     }
 
     pub fn events(&self) -> &[SessionEvent] {
@@ -364,7 +444,6 @@ struct Header {
     schema_version: u64,
     session_id: String,
     seq: u64,
-    #[allow(dead_code)]
     ts: String,
     event: String,
     critical: bool,
