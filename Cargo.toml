@@ -1,6 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["crates/agent-core", "crates/agent-extensions"]
+members = [
+    "crates/agent-core",
+    "crates/agent-extensions",
+    "crates/agent-provider-openai-compatible",
+]
 
 [workspace.package]
 edition = "2024"

@@ -1,0 +1,389 @@
+//! `ModelRequest` -> Chat Completions request body. Pure, so it is tested without a server.
+
+use agent_core::{ContentPart, Message, ModelError, ModelRequest, ToolCall, ToolResult};
+use serde_json::{Map, Value, json};
+
+use crate::config::OpenAiCompatibleConfig;
+
+/// Keys the adapter owns. Settings may not override them.
+const RESERVED: [&str; 4] = ["model", "messages", "tools", "stream"];
+
+pub(crate) fn build_body(
+    request: &ModelRequest,
+    config: &OpenAiCompatibleConfig,
+) -> Result<Value, ModelError> {
+    let mut body = Map::new();
+    for source in [&config.extra_body, &settings_object(&request.settings)?] {
+        for (key, value) in source {
+            if RESERVED.contains(&key.as_str()) {
+                return Err(ModelError::Protocol(format!(
+                    "the request setting `{key}` is set by the adapter and cannot be overridden"
+                )));
+            }
+            body.insert(key.clone(), value.clone());
+        }
+    }
+    body.insert("model".into(), json!(config.model));
+    body.insert("stream".into(), json!(true));
+
+    let mut messages = Vec::with_capacity(request.messages.len() + 1);
+    if let Some(system) = &request.system_prompt {
+        messages.push(json!({"role": "system", "content": system}));
+    }
+    messages.extend(request.messages.iter().map(message));
+    body.insert("messages".into(), Value::Array(messages));
+
+    if !request.tools.is_empty() {
+        let tools: Vec<Value> = request
+            .tools
+            .iter()
+            .map(|tool| {
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.input_schema,
+                    }
+                })
+            })
+            .collect();
+        body.insert("tools".into(), Value::Array(tools));
+    }
+    Ok(Value::Object(body))
+}
+
+fn settings_object(settings: &Value) -> Result<Map<String, Value>, ModelError> {
+    match settings {
+        Value::Null => Ok(Map::new()),
+        Value::Object(map) => Ok(map.clone()),
+        _ => Err(ModelError::Protocol(
+            "model settings must be a JSON object".into(),
+        )),
+    }
+}
+
+fn message(message: &Message) -> Value {
+    match message {
+        Message::User { content } => user(content),
+        Message::Assistant {
+            content,
+            tool_calls,
+            ..
+        } => assistant(content, tool_calls),
+        Message::Tool { result } => tool_result(result),
+    }
+}
+
+fn user(content: &[ContentPart]) -> Value {
+    let has_media = content
+        .iter()
+        .any(|p| matches!(p, ContentPart::Image { .. } | ContentPart::Audio { .. }));
+    if !has_media {
+        return json!({"role": "user", "content": plain_text(content)});
+    }
+    let parts: Vec<Value> = content
+        .iter()
+        .map(|part| match part {
+            ContentPart::Image {
+                mime_type, data, ..
+            } => json!({
+                "type": "image_url",
+                "image_url": {"url": format!("data:{mime_type};base64,{data}")}
+            }),
+            ContentPart::Audio {
+                mime_type, data, ..
+            } => json!({
+                "type": "input_audio",
+                "input_audio": {"data": data, "format": audio_format(mime_type)}
+            }),
+            other => json!({"type": "text", "text": text_of(other)}),
+        })
+        .collect();
+    json!({"role": "user", "content": parts})
+}
+
+fn assistant(content: &[ContentPart], tool_calls: &[ToolCall]) -> Value {
+    let text = plain_text(content);
+    let mut message = Map::new();
+    message.insert("role".into(), json!("assistant"));
+    // The API wants `content` null, not an empty string, when only tool calls were made.
+    let content = if text.is_empty() && !tool_calls.is_empty() {
+        Value::Null
+    } else {
+        Value::String(text)
+    };
+    message.insert("content".into(), content);
+    if !tool_calls.is_empty() {
+        let calls: Vec<Value> = tool_calls
+            .iter()
+            .map(|call| {
+                json!({
+                    "id": call.id,
+                    "type": "function",
+                    "function": {"name": call.name, "arguments": arguments_string(call)},
+                })
+            })
+            .collect();
+        message.insert("tool_calls".into(), Value::Array(calls));
+    }
+    Value::Object(message)
+}
+
+/// The API carries arguments as a JSON string. A string value is what `response` stores for
+/// arguments the model sent that were not valid JSON, so it goes back exactly as received.
+fn arguments_string(call: &ToolCall) -> String {
+    match &call.arguments {
+        Value::String(raw) => raw.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn tool_result(result: &ToolResult) -> Value {
+    let mut text = plain_text(&result.content);
+    if result.is_error {
+        text = format!("Error: {text}");
+    }
+    json!({"role": "tool", "tool_call_id": result.call_id, "content": text})
+}
+
+/// Text of every part, joined by blank lines. Parts the API cannot take as text become short
+/// placeholders, so the model knows something was there. This is lossy by design.
+fn plain_text(parts: &[ContentPart]) -> String {
+    parts.iter().map(text_of).collect::<Vec<_>>().join("\n\n")
+}
+
+fn text_of(part: &ContentPart) -> String {
+    match part {
+        ContentPart::Text { text, .. } => text.clone(),
+        ContentPart::Image { mime_type, .. } => format!("[{mime_type} image omitted]"),
+        ContentPart::Audio { mime_type, .. } => format!("[{mime_type} audio omitted]"),
+        ContentPart::ResourceLink { uri, name, .. } => match name {
+            Some(name) => format!("[resource {name}: {uri}]"),
+            None => format!("[resource: {uri}]"),
+        },
+        ContentPart::EmbeddedResource { resource, .. } => match resource["text"].as_str() {
+            Some(text) => text.to_owned(),
+            None => format!(
+                "[embedded resource: {}]",
+                resource["uri"].as_str().unwrap_or("unknown")
+            ),
+        },
+        ContentPart::Opaque { .. } => "[unsupported content omitted]".into(),
+    }
+}
+
+fn audio_format(mime_type: &str) -> &str {
+    match mime_type {
+        "audio/mpeg" | "audio/mp3" => "mp3",
+        "audio/wav" | "audio/x-wav" | "audio/wave" => "wav",
+        other => other.strip_prefix("audio/").unwrap_or(other),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_core::{ToolConcurrency, ToolSpec};
+
+    fn config() -> OpenAiCompatibleConfig {
+        OpenAiCompatibleConfig::new("http://localhost/v1", "test-model")
+    }
+
+    fn request(messages: Vec<Message>) -> ModelRequest {
+        ModelRequest {
+            system_prompt: None,
+            messages,
+            tools: Vec::new(),
+            settings: Value::Null,
+        }
+    }
+
+    fn call(id: &str, name: &str, arguments: Value) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments,
+        }
+    }
+
+    #[test]
+    fn a_tool_conversation_maps_to_the_expected_messages() {
+        let mut req = request(vec![
+            Message::user("what is 2+3?"),
+            Message::Assistant {
+                content: Vec::new(),
+                tool_calls: vec![call("c1", "calc__add", json!({"a": 2, "b": 3}))],
+                provider_payload: None,
+            },
+            Message::Tool {
+                result: ToolResult::success("c1", vec![ContentPart::text("5")]),
+            },
+            Message::assistant("It is 5."),
+        ]);
+        req.system_prompt = Some("Be brief.".into());
+        req.tools = vec![ToolSpec {
+            name: "calc__add".into(),
+            description: "Adds.".into(),
+            input_schema: json!({"type": "object"}),
+            concurrency: ToolConcurrency::Shared,
+        }];
+
+        let body = build_body(&req, &config()).unwrap();
+
+        assert_eq!(
+            body,
+            json!({
+                "model": "test-model",
+                "stream": true,
+                "messages": [
+                    {"role": "system", "content": "Be brief."},
+                    {"role": "user", "content": "what is 2+3?"},
+                    {"role": "assistant", "content": null, "tool_calls": [{
+                        "id": "c1", "type": "function",
+                        "function": {"name": "calc__add", "arguments": "{\"a\":2,\"b\":3}"}
+                    }]},
+                    {"role": "tool", "tool_call_id": "c1", "content": "5"},
+                    {"role": "assistant", "content": "It is 5."}
+                ],
+                "tools": [{"type": "function", "function": {
+                    "name": "calc__add", "description": "Adds.",
+                    "parameters": {"type": "object"}
+                }}]
+            })
+        );
+    }
+
+    #[test]
+    fn no_tools_means_no_tools_key() {
+        let body = build_body(&request(vec![Message::user("hi")]), &config()).unwrap();
+        assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn arguments_that_were_not_json_go_back_as_received() {
+        let body = build_body(
+            &request(vec![Message::Assistant {
+                content: vec![ContentPart::text("calling")],
+                tool_calls: vec![call("c1", "t", Value::String("{\"a\": ".into()))],
+                provider_payload: None,
+            }]),
+            &config(),
+        )
+        .unwrap();
+        let message = &body["messages"][0];
+        assert_eq!(message["content"], "calling");
+        assert_eq!(
+            message["tool_calls"][0]["function"]["arguments"],
+            "{\"a\": "
+        );
+    }
+
+    #[test]
+    fn a_tool_error_is_marked_for_the_model() {
+        let body = build_body(
+            &request(vec![Message::Tool {
+                result: ToolResult::error("c1", "boom", "it failed"),
+            }]),
+            &config(),
+        )
+        .unwrap();
+        assert_eq!(body["messages"][0]["content"], "Error: it failed");
+    }
+
+    #[test]
+    fn images_and_audio_are_sent_where_the_api_takes_them() {
+        let body = build_body(
+            &request(vec![Message::User {
+                content: vec![
+                    ContentPart::text("look"),
+                    ContentPart::Image {
+                        mime_type: "image/png".into(),
+                        data: "AAAA".into(),
+                        annotations: None,
+                        meta: None,
+                    },
+                    ContentPart::Audio {
+                        mime_type: "audio/mpeg".into(),
+                        data: "BBBB".into(),
+                        annotations: None,
+                        meta: None,
+                    },
+                ],
+            }]),
+            &config(),
+        )
+        .unwrap();
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!([
+                {"type": "text", "text": "look"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                {"type": "input_audio", "input_audio": {"data": "BBBB", "format": "mp3"}}
+            ])
+        );
+    }
+
+    #[test]
+    fn what_the_api_cannot_take_becomes_a_placeholder_in_text() {
+        let body = build_body(
+            &request(vec![Message::Tool {
+                result: ToolResult::success(
+                    "c1",
+                    vec![
+                        ContentPart::text("done"),
+                        ContentPart::Image {
+                            mime_type: "image/png".into(),
+                            data: "AAAA".into(),
+                            annotations: None,
+                            meta: None,
+                        },
+                        ContentPart::ResourceLink {
+                            uri: "file:///a".into(),
+                            name: Some("a".into()),
+                            mime_type: None,
+                            annotations: None,
+                            meta: None,
+                        },
+                        ContentPart::EmbeddedResource {
+                            resource: json!({"uri": "file:///b", "text": "inline"}),
+                            annotations: None,
+                            meta: None,
+                        },
+                    ],
+                ),
+            }]),
+            &config(),
+        )
+        .unwrap();
+        assert_eq!(
+            body["messages"][0]["content"],
+            "done\n\n[image/png image omitted]\n\n[resource a: file:///a]\n\ninline"
+        );
+    }
+
+    #[test]
+    fn settings_override_the_config_and_reserved_keys_are_refused() {
+        let mut cfg = config();
+        cfg.extra_body.insert("temperature".into(), json!(0.2));
+        cfg.extra_body.insert("max_tokens".into(), json!(100));
+        let mut req = request(vec![Message::user("hi")]);
+        req.settings = json!({"temperature": 0.9});
+
+        let body = build_body(&req, &cfg).unwrap();
+        assert_eq!(body["temperature"], 0.9);
+        assert_eq!(body["max_tokens"], 100);
+
+        for key in ["model", "messages", "tools", "stream"] {
+            let mut req = request(vec![Message::user("hi")]);
+            req.settings = json!({ key: 1 });
+            assert!(
+                matches!(build_body(&req, &cfg), Err(ModelError::Protocol(_))),
+                "{key} must be refused"
+            );
+        }
+        let mut req = request(vec![Message::user("hi")]);
+        req.settings = json!([1, 2]);
+        assert!(build_body(&req, &cfg).is_err());
+    }
+}

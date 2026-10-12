@@ -65,7 +65,7 @@ CLI / Desktop / Server / 自定义客户端
 
 1. `agent-core` 定义消息、停止原因、Model 与 ToolProvider/ToolSession 接口、JSON Schema 参数验证、运行事件、取消和 async loop。它不依赖 CLI、UI、HTTP Server、数据库或具体 Provider。
 2. `agent-extensions` 实现 MCP stdio client、Native 子进程生命周期，以及 MCP tools 到 Core ToolSession 的适配。依赖方向为 `agent-extensions → agent-core`。
-3. Model adapter 可由宿主实现。首个正式 Provider 出现后再决定是否单独拆 crate。
+3. Model adapter 可由宿主实现。首个正式 Provider（OpenAI 兼容 Chat Completions）是独立 crate `agent-provider-openai-compatible`，见 §6。
 4. 客户端通过依赖/嵌入 `agent-core` 或自行提供 RPC/HTTP 调用面；Core 不负责网络 listener。
 
 Core 的工具生命周期接口建议保持为两个小 trait，并用 associated type 静态分发，不使用 `Box<dyn ToolSession>`：`ToolProvider { type Session: ToolSession; async fn open_session(context) -> Result<Self::Session> }`；`ToolSession` 提供同步 `tool_specs()`、异步 `execute(call, cancellation)` 和 `close().await`。Agent 持有 provider/factory；AgentSession 持有具体 Session 类型；ActiveRun 借用 AgentSession。MCP 子进程的 supervisor 与 wait handle 由 ToolSession 所有，避免把每 Run 进程错误地挂在共享 provider 上，也避免 object-safety/`async_trait` 依赖。因为支持并行工具，`ToolSession::execute` 取 `&self` 并要求 `Sync`，同一会话内可有多个调用同时进行。
@@ -301,7 +301,7 @@ MCP **子进程崩溃、坏帧、协议错误，以及任何一次超时或取�
 
 ## 6. Rust Workspace 与 Crate 划分
 
-MVP 两个 crate：
+MVP 的 crate：
 
 ```text
 workspace/
@@ -309,11 +309,24 @@ workspace/
   crates/
     agent-core/          # async loop、类型、Model/ToolProvider/ToolSession、Hooks、steering、并行调度、事件、取消
     agent-extensions/    # rmcp client、AgentSession 级 Native 子进程监督、ToolSession adapter
+    agent-provider-openai-compatible/  # OpenAI 兼容 Chat Completions 的流式 Model adapter
+    agent-cli/           # 独立的命令行客户端（可选客户端，不是 Runtime 的必需部分）
 ```
 
 依赖方向 `agent-extensions → agent-core`。`agent-core` 的 JSON Schema preflight 使用 validator（候选 `jsonschema` 必须 `default-features = false`，禁用 HTTP/file resolver；MVP 拒绝外部 `$ref`，只验证内嵌或显式内存 registry 中的 schema），避免 Core 产生网络/文件 I/O。当前 `jsonschema` 文档说明默认会解析 HTTP 和文件引用，关闭全部默认 feature 可禁用解析器。([external references](https://docs.rs/jsonschema/latest/jsonschema/#external-references)) Core 是 async API，MVP 可明确选 Tokio；取消句柄和 `select!` 属于 async loop。`agent-extensions` 使用官方 `rmcp` child-process/stdio transport，并在 runtime-independent supervisor 中管理子进程生命周期；稳定 alias 使用小型 SHA-256 依赖（如 `sha2`）。Cargo.lock 锁定的版本必须通过 MCP lifecycle、MRTR 和 unsupported-request 测试。
 
-faux Model 与内存 Tool 可作为 `agent-core` 的 dev support 或 integration test fixtures，不单建 crate。Example 放在 `crates/agent-core/examples/minimal.rs`，命令为 `cargo run -p agent-core --example minimal`。首个 Provider adapter、CLI、Server 都在有实际需求后再加 crate/客户端。
+### OpenAI 兼容 Provider adapter
+
+`agent-provider-openai-compatible` 实现 `agent_core::Model`，POST `{base_url}/chat/completions`，`stream: true`，用 `reqwest`（rustls）。选这个 API 而不是 Anthropic Messages，是因为它覆盖面最广（OpenAI、GLM、OpenRouter、Ollama 等）；代价是设计稿里只对 Anthropic 有意义的几条（带签名的 thinking 块、`PauseTurn`、服务端工具块）在这个 adapter 上得不到真实验证。
+
+- **库不读环境。** 密钥由宿主以 `ApiKey` 传入，`Debug` 与错误信息里都不出现它；有密钥时拒绝向非本机地址发明文 `http`；不跟随重定向（否则密钥会随请求发往别处）。
+- **映射：** 文本与工具调用往返无损；图片、音频放到 API 接受的位置；资源链接、嵌入资源、不透明块、工具结果里的图片退化成简短文本占位（有损，已在文档与测试里写明）；工具错误加 `Error: ` 前缀，因为该 API 没有 `is_error`。工具参数不是合法 JSON 时作为字符串保存，由 Core 的参数检查返回给模型修正，原样发回。
+- **流式：** 字节级 SSE 解析（多字节字符、`\r\n` 跨块拆分都正确）。只在收到 `finish_reason`（或 `[DONE]`）后交付完整响应，流中断是错误，绝不返回半截答案。`finish_reason` 映射：`stop`→EndTurn，`tool_calls`/`function_call`→ToolUse，`length`→MaxTokens，`content_filter`→ContentFiltered，其余保留为 `Other`；`refusal` 字段映射为 Refusal。流式 reasoning 文本（`reasoning_content`）忽略。
+- **方言：** 缺 `index` 的 tool call 片段、缺 `id`、缺 `[DONE]`、只含 usage 的空 choices 块都能处理。部分服务器每个响应都复用 `call_0` 之类的 id，而 Core 要求 id 在整个 transcript 内唯一，所以 adapter 把与已有 id 重复的改名为 `{id}-2`。
+- **边界：** 响应文本与工具参数总量有上限（默认 32 MiB），一行 SSE 有上限（4 MiB），连接后服务器沉默超过空闲超时（默认 120 秒）即失败；没有总时长限制。不自动重试，429/5xx 以 `Transport` 结束，其他 4xx 以 `Protocol` 结束，由宿主决定是否重试。
+- **测试：** `testing` feature 提供进程内 mock 服务器（分块流、挂住、中途断开、固定状态码，并记录请求），单元测试与集成测试都在本地离线运行。
+
+faux Model 与内存 Tool 可作为 `agent-core` 的 dev support 或 integration test fixtures，不单建 crate。Example 放在 `crates/agent-core/examples/minimal.rs`，命令为 `cargo run -p agent-core --example minimal`。Server 在有实际需求后再加。
 
 ## 7. MVP Implementation Plan（依赖顺序）
 
@@ -328,7 +341,7 @@ faux Model 与内存 Tool 可作为 `agent-core` 的 dev support 或 integration
 | 6. 并行工具 | `Shared`/`Exclusive` 调度、`max_parallel_tools`、前缀式写入、并行取消与 poison | 不同完成时序下 transcript 完全一致；`Exclusive` 永不与其他调用重叠 |
 | 7. MCP stdio adapter | rmcp client、每 AgentSession 的 tools/list、可读且与工具集无关的稳定 alias、冲突即失败、tools/call、并发请求、progress、cancel、MRTR 拒绝 | 2025-11-25 与 2026-07-28 的交互行为有协议测试；不支持的请求快速返回 error |
 | 8. Process supervision | 每 AgentSession 子进程、deadline、环境 allowlist、Unix process group、Windows Job Object、同步 Drop kill 与 runtime-independent reap | timeout/cancel/crash/drop 后进程树无残留；同一 server 状态跨 turn 保持 |
-| 9. 首个真实 Provider 与 client sample | 单一 API adapter；可选 CLI example | Core API 不引入 UI/HTTP 类型 |
+| 9. 首个真实 Provider 与 client sample | 单一 API adapter（OpenAI 兼容 Chat Completions，流式）；独立 `agent-cli` crate | Core API 不引入 UI/HTTP 类型；adapter 用本地 mock server 离线测试，真实 API 冒烟测试需要宿主提供密钥 |
 | 10. 基准 | Core、并行加速、MCP round-trip、spawn/cancel 资源报告 | 以实测为依据决定是否优化或共享进程 |
 
 磁盘 Session Persistence、Compaction、工作流扩展和 multi-agent 不属于 MVP 验收范围。未来增加委派扩展前，先做单独 ADR 定义子 Agent 的模型 profile、工具 allowlist、预算、产物传递和取消传播。
