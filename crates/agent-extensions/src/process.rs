@@ -1,16 +1,21 @@
 //! Spawning and supervising one server process.
 //!
 //! The server runs in its own process group (Unix), so killing it also kills anything it
-//! started. A dedicated OS thread owns the `Child` and blocks in `wait()`, which reaps the
-//! process without needing a Tokio runtime. As soon as the leader exits, for any reason, that
-//! thread kills what is left of its process group, so a server that crashes cannot leave
-//! helpers behind. Killing is a synchronous signal, so it also works from `Drop` while a
-//! runtime is shutting down.
+//! started. A dedicated OS thread owns the `Child`, so reaping needs no Tokio runtime. As soon
+//! as the leader exits, for any reason, that thread kills what is left of its process group,
+//! so a server that crashes cannot leave helpers behind. Killing is a synchronous signal, so it
+//! also works from `Drop` while a runtime is shutting down.
+//!
+//! A process group id is the leader's pid, and it can be reused once the leader is reaped and
+//! the group is empty. So the group is only ever signalled while the leader is still
+//! unreaped: the reaper first waits for the exit *without* reaping (`waitid` with `WNOWAIT`),
+//! kills the group while the leader is a zombie (a zombie still holds its pid and group), and
+//! only then reaps. Every signal and the reap itself take the same lock, so no other path can
+//! signal the group between the reap and the end of the check.
 
 use std::io;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
@@ -22,9 +27,9 @@ use crate::config::McpServerConfig;
 pub(crate) struct ServerProcess {
     pid: u32,
     exited: watch::Receiver<bool>,
-    /// Set once the leader was reaped and its group cleaned up. After that the group id is
-    /// free to be reused, so nothing may signal it again.
-    cleaned: Arc<AtomicBool>,
+    /// `true` once the leader has been reaped. The group id may belong to someone else from
+    /// then on, so nothing may signal it. Held across every signal and across the reap.
+    reaped: Arc<Mutex<bool>>,
 }
 
 impl ServerProcess {
@@ -75,22 +80,26 @@ impl ServerProcess {
         };
 
         let (exited_tx, exited) = watch::channel(false);
-        let cleaned = Arc::new(AtomicBool::new(false));
-        let cleaned_by_reaper = Arc::clone(&cleaned);
+        let reaped = Arc::new(Mutex::new(false));
+        let reaped_by_reaper = Arc::clone(&reaped);
         let reaper = thread::Builder::new()
             .name(format!("mcp-reaper-{pid}"))
             .spawn(move || {
-                let _ = child.wait();
-                // The group id stays reserved while any member lives, and the leader was only
-                // just reaped, so this reaches the leftover members and nothing else.
-                kill_group(pid);
-                cleaned_by_reaper.store(true, Ordering::SeqCst);
+                wait_for_exit_without_reaping(pid);
+                {
+                    let mut reaped = lock(&reaped_by_reaper);
+                    // The leader is a zombie or already reaped by nobody else, so its pid and
+                    // group are still reserved and this reaches only the leftover members.
+                    kill_group(pid);
+                    let _ = child.wait();
+                    *reaped = true;
+                }
                 let _ = exited_tx.send(true);
             });
         let process = Self {
             pid,
             exited,
-            cleaned,
+            reaped,
         };
         if let Err(e) = reaper {
             // The child moved into the failed closure and was dropped unreaped; kill it at
@@ -106,9 +115,11 @@ impl ServerProcess {
     }
 
     /// Kills the whole process group. Synchronous and safe to call repeatedly. Does nothing
-    /// once the reaper has cleaned up, because the group id may belong to someone else by then.
+    /// once the leader has been reaped, because the group id may belong to someone else by
+    /// then. The lock makes "not reaped yet" hold until the signal is sent.
     pub(crate) fn kill_tree(&self) {
-        if !self.cleaned.load(Ordering::SeqCst) {
+        let reaped = lock(&self.reaped);
+        if !*reaped {
             kill_group(self.pid);
         }
     }
@@ -127,6 +138,37 @@ impl ServerProcess {
         self.wait_exit(limit).await
     }
 }
+
+fn lock(mutex: &Mutex<bool>) -> MutexGuard<'_, bool> {
+    // The flag is a plain bool, so a poisoned lock still holds a usable value.
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Blocks until process `pid` has exited, leaving it unreaped (a zombie) so that its pid and
+/// process group stay reserved.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn wait_for_exit_without_reaping(pid: u32) {
+    let id: libc::id_t = pid;
+    loop {
+        // SAFETY: `info` is zeroed plain data that waitid fills in; no other preconditions.
+        let status = unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            libc::waitid(libc::P_PID, id, &mut info, libc::WEXITED | libc::WNOWAIT)
+        };
+        if status == 0 {
+            return;
+        }
+        if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            // Not our child any more, or waitid is unsupported: fall back to reaping directly.
+            return;
+        }
+    }
+}
+
+/// Platforms without `waitid(WNOWAIT)` reap directly, so there is a short window between the
+/// reap and the group kill. It only matters if the leader was the group's last member.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn wait_for_exit_without_reaping(_pid: u32) {}
 
 /// Sends SIGKILL to process group `pid` (Unix), or terminates the tree rooted at `pid`
 /// (Windows).
