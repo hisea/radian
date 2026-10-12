@@ -72,8 +72,19 @@ struct Cli {
 
     /// Extra request headers, repeatable: `--header NAME=VALUE`. The value is never
     /// printed; `Authorization` is refused because the key comes only from `--api-key-env`.
+    /// A value may contain `{session_id}`, which expands to this process's session id.
     #[arg(long = "header", value_name = "NAME=VALUE")]
     header: Vec<String>,
+
+    /// A stable session identifier for this process: used verbatim, and available to
+    /// `--header` values as `{session_id}`. Generated once per process when omitted.
+    #[arg(long, value_name = "VALUE")]
+    session_id: Option<String>,
+
+    /// Ask the server to include usage in the stream. Omit to keep the default policy
+    /// (on for `api.openai.com` only, off elsewhere); `--include-usage=false` turns it off.
+    #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
+    include_usage: Option<bool>,
 
     /// Approve every tool call without asking.
     #[arg(long)]
@@ -156,8 +167,23 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     if let Some(key) = &key {
         config = config.with_api_key(ApiKey::new(key.clone()));
     }
-    let headers = parse_headers(&cli.header)?;
+    // Resolve the session id once per process: the same value goes into every request this
+    // process makes, and a different process gets a different one. When the CLI starts
+    // opening session files, this is the value to pass to `SessionJournal::create`
+    // (`radian-session` takes the id as a string), so the header and the file agree.
+    let session_id = cli.session_id.clone().unwrap_or_else(generate_session_id);
+    let uses_placeholder = cli
+        .header
+        .iter()
+        .any(|item| item.contains(SESSION_PLACEHOLDER));
+    let headers = parse_headers(&cli.header, &session_id)?;
     config.headers = headers.clone();
+    config.include_usage = cli.include_usage;
+    if uses_placeholder && cli.session_id.is_none() {
+        // Only when the generated id is actually observable: it is what makes the routing
+        // reusable across processes.
+        eprintln!("[session] {session_id} (pass --session-id to reuse it)");
+    }
     let model = OpenAiCompatible::new(config)
         .map_err(|e| SetupError(format!("--base-url {}: {e}", cli.base_url)))?;
     let servers = match &cli.mcp_config {
@@ -179,12 +205,26 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     })
 }
 
-/// Parses repeated `--header NAME=VALUE` arguments.
+/// The placeholder `--header` values may use for the process's session id.
+const SESSION_PLACEHOLDER: &str = "{session_id}";
+
+/// A per-process identifier, opaque to the server. Time plus pid is enough for "stable
+/// within one process, different across processes"; a UUID dependency would not earn its
+/// keep for that.
+fn generate_session_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{nanos:x}-{:x}", std::process::id())
+}
+
+/// Parses repeated `--header NAME=VALUE` arguments, expanding `{session_id}` in values.
 ///
 /// The value is never echoed, not even in the error for a malformed argument: a user who
 /// forgot the `=` may have pasted a credential as the whole argument. The name may be echoed
 /// (the brief only forbids values).
-fn parse_headers(raw: &[String]) -> Result<Vec<(String, String)>, SetupError> {
+fn parse_headers(raw: &[String], session_id: &str) -> Result<Vec<(String, String)>, SetupError> {
     let mut headers = Vec::with_capacity(raw.len());
     for (index, item) in raw.iter().enumerate() {
         let Some((name, value)) = item.split_once('=') else {
@@ -211,7 +251,8 @@ fn parse_headers(raw: &[String]) -> Result<Vec<(String, String)>, SetupError> {
                     .into(),
             ));
         }
-        headers.push((name.to_owned(), value.to_owned()));
+        let value = value.replace(SESSION_PLACEHOLDER, session_id);
+        headers.push((name.to_owned(), value));
     }
     Ok(headers)
 }

@@ -682,6 +682,170 @@ async fn a_header_value_never_leaks_into_errors() {
     assert!(!stderr.contains("team-secret-value"), "{stderr}");
 }
 
+// ---------- session id and usage ----------
+
+/// The `[session] <id>` note, when the CLI printed one.
+fn generated_session_id(stderr: &str) -> Option<String> {
+    stderr.lines().find_map(|line| {
+        Some(
+            line.strip_prefix("[session] ")?
+                .split(' ')
+                .next()?
+                .to_owned(),
+        )
+    })
+}
+
+#[tokio::test]
+async fn a_header_value_can_reference_the_generated_session_id() {
+    let server = MockServer::start(vec![text_reply("one"), text_reply("two")]).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--header",
+                "x-opencode-session={session_id}",
+            ],
+            &[],
+        ),
+        "first\nsecond\n",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    let id = generated_session_id(&stderr).unwrap_or_else(|| panic!("no session note: {stderr}"));
+    assert!(!id.is_empty());
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].header("x-opencode-session"), Some(id.as_str()));
+    // The same process uses the same id for every request.
+    assert_eq!(requests[1].header("x-opencode-session"), Some(id.as_str()));
+}
+
+#[tokio::test]
+async fn two_processes_get_different_generated_session_ids() {
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let server = MockServer::start(vec![text_reply("ok")]).await;
+        let (code, _, stderr) = feed_and_wait(
+            spawn_agent(
+                &[
+                    "--model",
+                    "m",
+                    "--base-url",
+                    &server.base_url,
+                    "--header",
+                    "x-session={session_id}",
+                    "-p",
+                    "hi",
+                ],
+                &[],
+            ),
+            "",
+        )
+        .await;
+        assert_eq!(code, 0, "{stderr}");
+        let id = generated_session_id(&stderr).expect("the CLI printed the generated id");
+        assert_eq!(server.requests()[0].header("x-session"), Some(id.as_str()));
+        ids.push(id);
+    }
+    assert_ne!(ids[0], ids[1], "different processes must differ");
+}
+
+#[tokio::test]
+async fn an_explicit_session_id_is_used_verbatim_and_not_announced() {
+    let server = MockServer::start(vec![text_reply("one"), text_reply("two")]).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--session-id",
+                "fixed-42",
+                "--header",
+                "x-session={session_id}",
+            ],
+            &[],
+        ),
+        "first\nsecond\n",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        generated_session_id(&stderr).is_none(),
+        "an explicit id needs no note: {stderr}"
+    );
+    let requests = server.requests();
+    assert_eq!(requests[0].header("x-session"), Some("fixed-42"));
+    assert_eq!(requests[1].header("x-session"), Some("fixed-42"));
+}
+
+#[tokio::test]
+async fn include_usage_flag_controls_stream_options() {
+    // Absent: the default policy. 127.0.0.1 is not api.openai.com, so usage is off.
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    feed_and_wait(
+        spawn_agent(
+            &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert!(server.requests()[0].json().get("stream_options").is_none());
+
+    // --include-usage: on.
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--include-usage",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(
+        server.requests()[0].json()["stream_options"],
+        json!({"include_usage": true})
+    );
+
+    // --include-usage=false: explicitly off.
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--include-usage=false",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert!(server.requests()[0].json().get("stream_options").is_none());
+}
+
 // ---------- tool approval ----------
 
 #[tokio::test]
