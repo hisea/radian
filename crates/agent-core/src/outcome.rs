@@ -77,9 +77,10 @@ pub enum SessionError {
     Poisoned,
     #[error("the session is closed")]
     Closed,
-    #[error(
-        "the session needs recovery: a journal write failed;          resume from history_for_resume()"
-    )]
+    /// A journal write failed, so memory and journal may disagree (ADR 0001, D6). Rebuild the
+    /// session from the journal. `history_for_resume()` is **not** enough: its history can end
+    /// in tool calls without results, which `open_session_with_history` rejects.
+    #[error("the session needs recovery: a journal write failed; rebuild it from the journal")]
     RecoveryRequired,
     #[error("tool session: {0}")]
     Tools(#[from] ToolError),
@@ -90,7 +91,9 @@ pub enum SessionError {
 /// What a host needs to continue a conversation in a new session.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResumeState {
-    /// The transcript, with every tool call paired with a result.
+    /// The transcript. After a poisoned turn every tool call is paired with a result. After a
+    /// journal failure (`SessionError::RecoveryRequired`) the tail may hold calls without
+    /// results, and the history must be repaired before it can open a session.
     pub history: Vec<Message>,
     /// Steering messages from turns that ended without returning an outcome.
     pub unapplied_steering: Vec<Message>,
