@@ -60,7 +60,8 @@ fn parse_args() -> Args {
         lines: 30,
         interval_ms: 50,
         duration_secs: 60,
-        stats: PathBuf::from("stats.json"),
+        // 默认也绝不落在仓库根：固定写到本 spike 的 data/ 下。
+        stats: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data/stats.json"),
     };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {

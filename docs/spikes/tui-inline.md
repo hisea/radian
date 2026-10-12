@@ -92,7 +92,7 @@ cargo test
 ps -axo pid,comm | grep 'tui-inline-app' # 本次检查无孤儿；grep 自身输出不计
 ```
 
-driver 的 `data/*.txt` 和 `data/*.json` 是上表证据。测试的临时 stats 文件放在 `/tmp`，不会污染仓库。
+driver 的 `data/*.txt` 和 `data/*.json` 是上表证据。测试的临时 stats 文件放在 `/tmp`，不会污染仓库；原型默认的 stats 路径也固定在本 spike 的 `data/`（`spikes/tui-inline/.gitignore` 屏蔽 `data/stats.json` 与 `data/*.tmp`），从仓库根或别处运行也不会在仓库生成未跟踪文件。
 
 ## 变异检查
 
