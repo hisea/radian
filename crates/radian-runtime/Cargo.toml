@@ -1,0 +1,16 @@
+[package]
+name = "radian-runtime"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Runtime layer: the durable inbox and the per-session driver (ADR 0011)"
+
+[dependencies]
+agent-core = { path = "../agent-core" }
+radian-session = { path = "../radian-session" }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "test-util"] }

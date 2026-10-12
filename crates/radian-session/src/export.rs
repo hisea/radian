@@ -191,6 +191,44 @@ fn event_data_value(
             json!({"call_id": call_id, "result": serde_json::to_value(result)?})
         }
         EventData::ModelUsageRecorded { usage } => json!({"usage": serde_json::to_value(usage)?}),
+        EventData::InboxEnqueued {
+            message,
+            message_id,
+            lane,
+            source,
+        } => json!({
+            "message": serde_json::to_value(message)?,
+            "message_id": message_id,
+            "lane": lane,
+            "source": source,
+        }),
+        EventData::InputClaimed {
+            message_ids,
+            turn_id,
+        } => json!({"message_ids": message_ids, "turn_id": turn_id}),
+        EventData::InputAdmitted {
+            message_id,
+            transcript_index,
+        } => json!({"message_id": message_id, "transcript_index": transcript_index}),
+        EventData::TurnStarted { turn_id } => json!({"turn_id": turn_id}),
+        EventData::TurnFinished {
+            turn_id,
+            outcome,
+            reason,
+            stop_reason,
+        } => {
+            let mut value = json!({"turn_id": turn_id, "outcome": outcome});
+            if let Some(reason) = reason {
+                value["reason"] = serde_json::to_value(reason)?;
+            }
+            if let Some(stop_reason) = stop_reason {
+                value["stop_reason"] = json!(stop_reason);
+            }
+            value
+        }
+        EventData::ConfigChanged { revision, change } => {
+            json!({"revision": revision, "change": change})
+        }
         EventData::Other(value) => value.clone(),
     };
     Ok(value)

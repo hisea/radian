@@ -3,7 +3,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent_core::{JournalError, JournalRecord, Message, ModelUsage, ToolResult, TranscriptJournal};
@@ -11,8 +10,10 @@ use fs2::FileExt;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use serde_json::value::RawValue;
 
 use crate::ReadError;
+use crate::runtime::{RuntimeEvent, runtime_data};
 
 /// The schema version this crate writes and accepts.
 pub(crate) const SCHEMA_VERSION: u64 = 1;
@@ -82,13 +83,19 @@ const EVT_USAGE: (&str, bool) = ("ModelUsageRecorded", false);
 pub struct SessionJournal {
     path: PathBuf,
     session_id: String,
-    /// The next envelope `seq`. Counting starts at 1 because [`SessionJournal::create`]
-    /// already wrote `SessionCreated` at seq 0.
-    next_seq: AtomicU64,
-    /// The open file, holding the `flock` for the journal's lifetime. Writes are also
-    /// serialized through this mutex, so even a misused concurrent `append` cannot
-    /// interleave two lines.
-    inner: Arc<Mutex<File>>,
+    /// The open file (holding the `flock` for the journal's lifetime) **and** the next
+    /// envelope `seq`, behind one mutex. The counter lives inside the lock on purpose: a
+    /// line's `seq` is chosen, rendered, written and fsynced while the lock is held, and the
+    /// counter only advances once the write succeeded. So `seq` order is file order even when
+    /// the runtime's events and the core's journal records are appended concurrently.
+    inner: Arc<Mutex<Writer>>,
+}
+
+/// What the writer mutex guards. Counting starts at 1 because [`SessionJournal::create`]
+/// already wrote `SessionCreated` at seq 0.
+struct Writer {
+    file: File,
+    next_seq: u64,
 }
 
 impl SessionJournal {
@@ -114,10 +121,9 @@ impl SessionJournal {
         let journal = SessionJournal {
             path: path.clone(),
             session_id: session_id.to_owned(),
-            next_seq: AtomicU64::new(1),
-            inner: Arc::new(Mutex::new(file)),
+            inner: Arc::new(Mutex::new(Writer { file, next_seq: 0 })),
         };
-        journal.write_line_numbered(EVT_SESSION_CREATED, 0, &CreatedData(&created))?;
+        journal.write_line(EVT_SESSION_CREATED, &CreatedData(&created))?;
         Ok(journal)
     }
 
@@ -165,8 +171,10 @@ impl SessionJournal {
         Ok(SessionJournal {
             path,
             session_id: session_id.to_owned(),
-            next_seq: AtomicU64::new(last_seq + 1),
-            inner: Arc::new(Mutex::new(file)),
+            inner: Arc::new(Mutex::new(Writer {
+                file,
+                next_seq: last_seq + 1,
+            })),
         })
     }
 
@@ -180,7 +188,18 @@ impl SessionJournal {
 
     /// The `seq` the next append will use.
     pub fn next_seq(&self) -> u64 {
-        self.next_seq.load(Ordering::SeqCst)
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .next_seq
+    }
+
+    /// Appends a runtime event (ADR 0006 §5.5–§5.7) through the same lock, `seq` counter and
+    /// fsync as every other line. `critical` comes from the event type (ADR 0006 §4), never
+    /// from the caller, and transcript events cannot be written this way — they go through
+    /// [`TranscriptJournal::append`], which keeps `MessageAppended.index` contiguous.
+    pub async fn append_runtime_event(&self, event: RuntimeEvent) -> Result<(), WriteError> {
+        self.write_line((event.name(), event.critical()), &runtime_data(&event))
     }
 
     fn open_locked(path: &Path) -> Result<File, WriteError> {
@@ -207,64 +226,78 @@ impl SessionJournal {
         }
     }
 
-    fn render_line<D: Serialize>(
-        &self,
-        (event, critical): (&str, bool),
-        seq: u64,
-        data: &D,
-    ) -> Result<Vec<u8>, WriteError> {
-        let line = Line {
-            schema_version: SCHEMA_VERSION,
-            session_id: &self.session_id,
-            seq,
-            ts: now_utc(),
-            event,
-            critical,
-            data,
-        };
-        let mut bytes = serde_json::to_vec(&line).map_err(|e| WriteError::Io {
-            path: self.path.clone(),
-            source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
-        })?;
-        bytes.push(b'\n');
-        Ok(bytes)
+    /// Writes one line, choosing its `seq` under the writer lock (see [`SessionJournal`]).
+    fn write_line<D: Serialize>(&self, event: (&str, bool), data: &D) -> Result<(), WriteError> {
+        let data = raw_data(data).map_err(|e| invalid_data(&self.path, e))?;
+        let mut writer = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        write_locked(&mut writer, &self.session_id, event, &data).map_err(|e| io_err(&self.path, e))
     }
+}
 
-    fn write_line_numbered<D: Serialize>(
-        &self,
-        event: (&str, bool),
-        seq: u64,
-        data: &D,
-    ) -> Result<(), WriteError> {
-        let line = self.render_line(event, seq, data)?;
-        let mut file = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        file.write_all(&line)
-            .and_then(|()| file.flush())
-            .and_then(|()| file.sync_all())
-            .map_err(|e| io_err(&self.path, e))
+/// The event body serialized once, outside the lock. `RawValue` keeps it verbatim, so
+/// `OpaqueJson` payloads inside `Message`/`ModelUsage` still reach the file byte-for-byte;
+/// a detour through `serde_json::Value` would re-serialize (and reorder) them.
+fn raw_data<D: Serialize>(data: &D) -> serde_json::Result<Box<RawValue>> {
+    RawValue::from_string(serde_json::to_string(data)?)
+}
+
+/// Picks the next `seq`, renders the envelope, writes it, flushes and fsyncs — all while the
+/// caller holds the writer lock — and advances the counter only after the line is durable.
+/// A failed write therefore never burns a `seq` number.
+fn write_locked(
+    writer: &mut Writer,
+    session_id: &str,
+    (event, critical): (&str, bool),
+    data: &RawValue,
+) -> std::io::Result<()> {
+    let seq = writer.next_seq;
+    let line = Line {
+        schema_version: SCHEMA_VERSION,
+        session_id,
+        seq,
+        ts: now_utc(),
+        event,
+        critical,
+        data,
+    };
+    let mut bytes = serde_json::to_vec(&line)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    bytes.push(b'\n');
+    writer.file.write_all(&bytes)?;
+    writer.file.flush()?;
+    writer.file.sync_all()?;
+    writer.next_seq = seq + 1;
+    Ok(())
+}
+
+fn invalid_data(path: &Path, e: serde_json::Error) -> WriteError {
+    WriteError::Io {
+        path: path.to_path_buf(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
     }
 }
 
 impl TranscriptJournal for SessionJournal {
     fn append(&self, record: JournalRecord) -> BoxFuture<'static, Result<(), JournalError>> {
-        let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
+        // Render the body now (it borrows `record`); the `seq` is chosen later, under the
+        // lock, so it matches file order even when runtime events are appended concurrently.
         let rendered = render_record(&record)
             .ok_or_else(|| "this record has no disk event".to_string())
             .and_then(|(event, data)| {
-                self.render_line(event, seq, &data)
+                raw_data(&data)
+                    .map(|data| (event, data))
                     .map_err(|e| e.to_string())
             });
         let path = self.path.clone();
+        let session_id = self.session_id.clone();
         let inner = Arc::clone(&self.inner);
         Box::pin(async move {
-            let line = rendered.map_err(JournalError)?;
+            let (event, data) = rendered.map_err(JournalError)?;
             let res = tokio::task::spawn_blocking(move || {
-                let mut file = inner.lock().unwrap_or_else(|e| e.into_inner());
-                file.write_all(&line)?;
-                file.flush()?;
-                // D3: the core awaits this future and never cancels it; the fsync is what
-                // makes the append durable before the next transcript change may start.
-                file.sync_all()
+                let mut writer = inner.lock().unwrap_or_else(|e| e.into_inner());
+                // D3: the core awaits this future and never cancels it; the fsync inside is
+                // what makes the append durable before the next transcript change may start.
+                write_locked(&mut writer, &session_id, event, &data)
             })
             .await
             .map_err(|join| {
@@ -279,14 +312,14 @@ impl TranscriptJournal for SessionJournal {
 /// this struct's declaration order. `data` stays a typed, borrowed view, so `OpaqueJson`
 /// payloads inside `Message`/`ModelUsage` pass through byte-for-byte.
 #[derive(Serialize)]
-struct Line<'a, D: Serialize> {
+struct Line<'a> {
     schema_version: u64,
     session_id: &'a str,
     seq: u64,
     ts: String,
     event: &'a str,
     critical: bool,
-    data: &'a D,
+    data: &'a RawValue,
 }
 
 #[derive(Serialize)]

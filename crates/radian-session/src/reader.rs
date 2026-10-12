@@ -9,11 +9,12 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
-use agent_core::{JournalRecord, Message, ModelUsage, ToolResult, recover};
+use agent_core::{InputSource, JournalRecord, Message, MessageId, ModelUsage, ToolResult, recover};
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::error::ReadError;
+use crate::runtime::{InboxLane, TurnOutcome, TurnReason};
 use crate::writer::SCHEMA_VERSION;
 
 /// Refuse lines larger than this instead of growing the buffer without bound (ADR 0006
@@ -65,6 +66,38 @@ pub enum EventData {
     ModelUsageRecorded {
         usage: ModelUsage,
     },
+    // Runtime events (ADR 0006 §5.5–§5.7). They are typed so a round trip is exact, and
+    // they are deliberately **not** mapped to `JournalRecord`: they are not transcript
+    // records, and `replay`/`repair` must keep ignoring them (ADR 0006 §12).
+    InboxEnqueued {
+        message: Message,
+        message_id: MessageId,
+        lane: InboxLane,
+        source: InputSource,
+    },
+    InputClaimed {
+        message_ids: Vec<MessageId>,
+        turn_id: String,
+    },
+    InputAdmitted {
+        message_id: MessageId,
+        transcript_index: u64,
+    },
+    TurnStarted {
+        turn_id: String,
+    },
+    TurnFinished {
+        turn_id: String,
+        outcome: TurnOutcome,
+        reason: Option<TurnReason>,
+        stop_reason: Option<String>,
+    },
+    ConfigChanged {
+        revision: u64,
+        change: Value,
+    },
+    /// A known event this crate does not interpret (`SessionCreated`) or an unknown
+    /// non-critical event.
     Other(Value),
 }
 
@@ -291,6 +324,49 @@ where
                 let d: UsageData = data_of(raw, lineno, path)?;
                 EventData::ModelUsageRecorded { usage: d.usage }
             }
+            "InboxEnqueued" => {
+                let d: InboxEnqueuedData = data_of(raw, lineno, path)?;
+                EventData::InboxEnqueued {
+                    message: d.message,
+                    message_id: d.message_id,
+                    lane: d.lane,
+                    source: d.source,
+                }
+            }
+            "InputClaimed" => {
+                let d: InputClaimedData = data_of(raw, lineno, path)?;
+                EventData::InputClaimed {
+                    message_ids: d.message_ids,
+                    turn_id: d.turn_id,
+                }
+            }
+            "InputAdmitted" => {
+                let d: InputAdmittedData = data_of(raw, lineno, path)?;
+                EventData::InputAdmitted {
+                    message_id: d.message_id,
+                    transcript_index: d.transcript_index,
+                }
+            }
+            "TurnStarted" => {
+                let d: TurnStartedData = data_of(raw, lineno, path)?;
+                EventData::TurnStarted { turn_id: d.turn_id }
+            }
+            "TurnFinished" => {
+                let d: TurnFinishedData = data_of(raw, lineno, path)?;
+                EventData::TurnFinished {
+                    turn_id: d.turn_id,
+                    outcome: d.outcome,
+                    reason: d.reason,
+                    stop_reason: d.stop_reason,
+                }
+            }
+            "ConfigChanged" => {
+                let d: ConfigChangedData = data_of(raw, lineno, path)?;
+                EventData::ConfigChanged {
+                    revision: d.revision,
+                    change: d.change,
+                }
+            }
             _ => {
                 let value = data_value(raw, lineno, path).map_err(E::from)?;
                 EventData::Other(value)
@@ -427,7 +503,15 @@ impl Session {
                 EventData::ModelUsageRecorded { usage } => Some(JournalRecord::ModelUsage {
                     usage: usage.clone(),
                 }),
-                EventData::Other(_) => None,
+                // Runtime events are not transcript records: `replay`/`repair`/`recover`
+                // must never see them (ADR 0006 §12).
+                EventData::InboxEnqueued { .. }
+                | EventData::InputClaimed { .. }
+                | EventData::InputAdmitted { .. }
+                | EventData::TurnStarted { .. }
+                | EventData::TurnFinished { .. }
+                | EventData::ConfigChanged { .. }
+                | EventData::Other(_) => None,
             })
             .collect()
     }
@@ -494,6 +578,47 @@ struct SettledData {
 #[derive(Deserialize)]
 struct UsageData {
     usage: ModelUsage,
+}
+
+#[derive(Deserialize)]
+struct InboxEnqueuedData {
+    message: Message,
+    message_id: MessageId,
+    lane: InboxLane,
+    source: InputSource,
+}
+
+#[derive(Deserialize)]
+struct InputClaimedData {
+    message_ids: Vec<MessageId>,
+    turn_id: String,
+}
+
+#[derive(Deserialize)]
+struct InputAdmittedData {
+    message_id: MessageId,
+    transcript_index: u64,
+}
+
+#[derive(Deserialize)]
+struct TurnStartedData {
+    turn_id: String,
+}
+
+#[derive(Deserialize)]
+struct TurnFinishedData {
+    turn_id: String,
+    outcome: TurnOutcome,
+    #[serde(default)]
+    reason: Option<TurnReason>,
+    #[serde(default)]
+    stop_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ConfigChangedData {
+    revision: u64,
+    change: Value,
 }
 
 /// Deserializes just the `data` field from the already-read line. Deserializing from the
