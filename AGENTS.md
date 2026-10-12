@@ -4,12 +4,14 @@ This repository holds a minimal headless Rust agent runtime: `agent-core` (the t
 
 ## Verify
 
-Run these before you say a change is done. All three must pass. The minimum Rust version is 1.88.
+Run these before you say a change is done. All of them must pass. The `journal-selfcheck` runs replay every session's journal against its transcript, so they check every transcript write. The minimum Rust version is 1.88.
 
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --locked
+cargo test -p agent-core --locked --features journal-selfcheck
+cargo clippy -p agent-core --all-targets --features journal-selfcheck -- -D warnings
 ```
 
 ## Rules for delegating to pi
