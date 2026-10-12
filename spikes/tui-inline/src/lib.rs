@@ -290,12 +290,13 @@ fn assert_no_forbidden(bytes: &[u8]) -> Result<(), String> {
 }
 
 fn assert_paste_paired(bytes: &[u8]) -> Result<(), String> {
-    let on = find_sub(bytes, b"\x1b[?2004h");
-    let off = find_sub(bytes, b"\x1b[?2004l");
-    match (on, off) {
-        (Some(a), Some(b)) if a < b => Ok(()),
-        (None, None) => Err("没有 bracketed paste 开关（应成对出现）".into()),
-        _ => Err("bracketed paste 开关不成对".into()),
+    let on = count_occurrences(bytes, b"\x1b[?2004h");
+    let off = count_occurrences(bytes, b"\x1b[?2004l");
+    let on_pos = find_sub(bytes, b"\x1b[?2004h");
+    let off_pos = find_sub(bytes, b"\x1b[?2004l");
+    match (on, off, on_pos, off_pos) {
+        (1, 1, Some(a), Some(b)) if a < b => Ok(()),
+        _ => Err(format!("bracketed paste 开关不精确成对：on={on} off={off}")),
     }
 }
 

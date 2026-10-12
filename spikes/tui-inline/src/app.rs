@@ -203,7 +203,11 @@ fn main() {
     }
 
     let done_all = pushed >= args.lines;
-    restore_tty();
+    // panic 路径只让 panic hook 恢复一次；normal/Ctrl-C 在这里恢复。
+    // 这样 ?2004h/?2004l 精确成对，而不是重复发送 DisableBracketedPaste。
+    if !panic_requested {
+        restore_tty();
+    }
     let mut sorted = insert_ms.clone();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let p = |q: f64| -> f64 {
