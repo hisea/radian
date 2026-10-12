@@ -807,5 +807,7 @@ async fn call_one<S: ToolSession, H: Hooks>(
             format!("Result processing failed: {e}"),
         );
     }
+    // The hook may edit the result, but not which call it answers.
+    result.call_id = call.id;
     (index, result)
 }

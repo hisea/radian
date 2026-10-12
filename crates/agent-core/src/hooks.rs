@@ -85,7 +85,7 @@ pub trait Hooks: Send + Sync {
     }
 
     /// Runs on each executed call's result before it is written. May run concurrently for
-    /// parallel calls.
+    /// parallel calls. Any change to `result.call_id` is discarded.
     fn after_tool_call(
         &self,
         _cx: &HookContext,

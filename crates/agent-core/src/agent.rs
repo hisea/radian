@@ -98,10 +98,18 @@ impl<M: Model, P: ToolProvider, H: Hooks> Agent<M, P, H> {
             registry,
             transcript: history,
             poisoned: false,
-            closed: false,
+            close_state: CloseState::Open,
             stranded_steering: Vec::new(),
         })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CloseState {
+    Open,
+    /// A close was attempted but has not succeeded. No new turns; `close()` retries.
+    Closing,
+    Closed,
 }
 
 /// One in-memory conversation. Holds the transcript and the open tool session, which lives
@@ -115,7 +123,7 @@ pub struct AgentSession<M: Model, P: ToolProvider, H: Hooks> {
     pub(crate) registry: ToolRegistry,
     pub(crate) transcript: Vec<Message>,
     pub(crate) poisoned: bool,
-    pub(crate) closed: bool,
+    pub(crate) close_state: CloseState,
     /// Steering from turns that ended without returning an outcome.
     pub(crate) stranded_steering: Vec<Message>,
 }
@@ -145,7 +153,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         if self.poisoned {
             return Err(SessionError::Poisoned);
         }
-        if self.closed {
+        if self.close_state != CloseState::Open {
             return Err(SessionError::Closed);
         }
         let input = input.into();
@@ -176,12 +184,23 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         }
     }
 
-    /// Closes the tool session. Safe to call more than once.
+    /// Closes the tool session.
+    ///
+    /// The first call stops new turns, even if it fails or its future is dropped. The session
+    /// counts as closed only once `ToolSession::close` succeeds; until then, calling `close()`
+    /// again retries it. After a successful close, further calls return `Ok(())`.
     pub async fn close(&mut self) -> Result<(), ToolError> {
-        if self.closed {
+        if self.close_state == CloseState::Closed {
             return Ok(());
         }
-        self.closed = true;
-        self.tools.close().await
+        self.close_state = CloseState::Closing;
+        self.tools.close().await?;
+        self.close_state = CloseState::Closed;
+        Ok(())
+    }
+
+    /// True once `close()` has succeeded.
+    pub fn is_closed(&self) -> bool {
+        self.close_state == CloseState::Closed
     }
 }

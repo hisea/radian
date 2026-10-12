@@ -84,6 +84,9 @@ pub trait ToolSession: Send + Sync {
         cx: ToolContext<'_>,
     ) -> impl Future<Output = Result<ToolOutput, ToolFailure>> + Send;
 
+    /// Releases the session's resources. The core calls this again after a failure or a
+    /// dropped attempt, so it must be safe to retry and must not fail just because an
+    /// earlier attempt already released some resources.
     fn close(&mut self) -> impl Future<Output = Result<(), ToolError>> + Send {
         async { Ok(()) }
     }

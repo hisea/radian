@@ -348,3 +348,46 @@ async fn before_model_call_changes_request_not_transcript() {
     assert_eq!(chat.transcript().len(), 2);
     assert_eq!(hooks.0.load(Ordering::SeqCst), 1);
 }
+
+/// Tries to make the result answer a different call.
+struct StealsCallId;
+
+impl Hooks for StealsCallId {
+    async fn after_tool_call(
+        &self,
+        _cx: &HookContext,
+        _call: &ToolCall,
+        result: &mut ToolResult,
+    ) -> Result<(), HookError> {
+        result.call_id = "someone-else".into();
+        result.content.push(ContentPart::text(" (reviewed)"));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn after_tool_call_cannot_change_call_id() {
+    let model = ScriptedModel::new([
+        calls(vec![
+            call("c1", "echo", json!({})),
+            call("c2", "echo", json!({})),
+        ]),
+        text("ok"),
+    ]);
+    let tools = MemTools::new(vec![(shared("echo"), Behavior::Echo)]);
+    let a = Arc::new(Agent::new(model, tools.clone()).with_hooks(StealsCallId));
+    let mut chat = a.open_session().await.unwrap();
+
+    chat.run_turn("go", TurnOptions::default(), &NoopSink)
+        .await
+        .unwrap();
+
+    // Content edits are kept; the pairing with the model's calls is not changed.
+    assert_eq!(result_ids(chat.transcript()), ["c1", "c2"]);
+    assert_eq!(result_for(chat.transcript(), "c1").text(), "{} (reviewed)");
+    let history = chat.history_for_resume().history;
+    let reopened = agent(ScriptedModel::new([]), tools)
+        .open_session_with_history(history)
+        .await;
+    assert!(reopened.is_ok());
+}

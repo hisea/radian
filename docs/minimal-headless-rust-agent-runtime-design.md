@@ -217,7 +217,7 @@ pub enum ToolDecision {
 | `before_model_call` | 每次模型请求前，预算检查之后 | 修改**本次**请求：追加上下文、调整参数。不改 transcript | Run → `Failed(Hook)` |
 | `after_model_response` | 完整响应到达、写入 transcript 之前 | 只读检查；返回错误即中止 | Run → `Failed(Hook)` |
 | `before_tool_call` | preflight 通过后、调度执行前 | Allow / Deny / Rewrite / Respond | 视为 Deny，结果写明 hook 出错 |
-| `after_tool_call` | 结果写入 transcript 之前 | 修改结果：脱敏、截断、补充说明 | 结果替换为 tool error，不让未处理的原结果流入模型 |
+| `after_tool_call` | 结果写入 transcript 之前 | 修改结果：脱敏、截断、补充说明；对 `call_id` 的修改会被丢弃 | 结果替换为 tool error，不让未处理的原结果流入模型 |
 | `on_turn_end` | 终态收敛时，`RunFinished` 之后 | 同步观察，例如审计落盘的触发 | 无（不可失败） |
 
 规则：
@@ -289,7 +289,7 @@ MCP **单个工具超时、子进程崩溃、坏帧或协议错误**都会杀掉
 - Unix 子进程放入独立 process group/session，终止时杀整个 group；Windows 使用 Job Object，并设置关闭时终止成员。单杀直接子进程不能满足无孤儿子进程验收。
 - 子进程默认不继承宿主完整环境变量。Host 用 `env_clear()`，仅设置必要的启动环境（例如可执行文件解析所需 `PATH` 和 Windows 系统变量）；其他变量逐项由 Extension 配置 allowlist，API key 等 secret 不因默认继承而泄露。
 - 启动失败、坏 MCP 帧或进程崩溃：当前调用转成 `extension_unavailable` / `extension_protocol_error` tool result，ToolSession 按上条规则失效；不重放失败调用。
-- `AgentSession::close().await` 幂等地正常关闭所有 ToolSession：关闭 stdin，等待进程退出；超过 shutdown deadline 或发生关闭错误则 terminate/kill，并 wait/reap 所有进程后返回首个关闭错误。MCP 生命周期不定义通用 `shutdown` 方法；Host 不发明自定义 `shutdown`/`exit` RPC。AgentSession Drop 同步 kill 每个进程组/Job Object；独立 supervisor 线程负责最终 wait/reap，不依赖 Tokio runtime。Drop 是兜底路径而非正常关闭：不给 server 优雅退出的机会，API 文档须写明正常退出前调用 `close().await`。
+- `AgentSession::close().await` 正常关闭所有 ToolSession。第一次调用起会话不再接受新轮次；只有底层关闭成功后会话才算已关闭，失败或 close future 被丢弃时可再次调用 `close()` 重试，因此 `ToolSession::close` 必须可重试；关闭成功后再调用直接返回 `Ok(())`。关闭过程：关闭 stdin，等待进程退出；超过 shutdown deadline 或发生关闭错误则 terminate/kill，并 wait/reap 所有进程后返回首个关闭错误。MCP 生命周期不定义通用 `shutdown` 方法；Host 不发明自定义 `shutdown`/`exit` RPC。AgentSession Drop 同步 kill 每个进程组/Job Object；独立 supervisor 线程负责最终 wait/reap，不依赖 Tokio runtime。Drop 是兜底路径而非正常关闭：不给 server 优雅退出的机会，API 文档须写明正常退出前调用 `close().await`。
 - 旧版 2025-11-25 MCP 可主动请求 sampling、roots、elicitation。MVP 明确不提供这些能力：rmcp 3.5.1 默认 `create_message` 返回 method-not-found、`list_roots` 返回空列表、`create_elicitation` 返回 decline；这不满足统一拒绝策略。Adapter 应不声明这些能力，并覆盖 handler，对三种旧式请求都快速返回 MCP method-not-found。对 2026 MRTR，使用 rmcp 的单轮 `call_tool_once` 检查结果；若返回 `InputRequired`，MVP 返回 `extension_unsupported_interaction` tool error，不自动满足/重试。禁止用会等待 UI 或宿主回调的默认处理造成挂起。实现时为上述行为加无 hang 测试。[`ClientHandler` defaults](https://docs.rs/rmcp/latest/rmcp/handler/client/trait.ClientHandler.html) · [MRTR behavior](https://github.com/modelcontextprotocol/rust-sdk)
 
 ## 6. Rust Workspace 与 Crate 划分

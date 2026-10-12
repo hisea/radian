@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -132,6 +132,12 @@ pub struct ToolLog {
     pub finished: Mutex<Vec<String>>,
     current: AtomicUsize,
     pub max_concurrent: AtomicUsize,
+    /// `close()` fails this many more times before succeeding.
+    pub close_failures_left: AtomicUsize,
+    /// Each `close()` attempt sleeps this long first.
+    pub close_delay_ms: AtomicU64,
+    pub close_calls: AtomicUsize,
+    pub released: AtomicBool,
 }
 
 impl ToolLog {
@@ -190,6 +196,26 @@ impl ToolProvider for MemTools {
 impl ToolSession for MemSession {
     fn tool_specs(&self) -> &[ToolSpec] {
         &self.specs
+    }
+
+    async fn close(&mut self) -> Result<(), ToolError> {
+        let log = &self.log;
+        log.close_calls.fetch_add(1, Ordering::SeqCst);
+        let delay = log.close_delay_ms.load(Ordering::SeqCst);
+        if delay > 0 {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
+        // close() takes &mut self, so attempts never overlap; load then store is enough.
+        let left = log.close_failures_left.load(Ordering::SeqCst);
+        let failing = left > 0;
+        if failing {
+            log.close_failures_left.store(left - 1, Ordering::SeqCst);
+        }
+        if failing {
+            return Err(ToolError("server did not exit".into()));
+        }
+        log.released.store(true, Ordering::SeqCst);
+        Ok(())
     }
 
     async fn execute(
