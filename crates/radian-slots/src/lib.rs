@@ -6,6 +6,8 @@
 
 mod config;
 mod model_slot;
+mod policy_slot;
 
 pub use config::{ConfigChange, ConfigChanged, ConfigLog};
 pub use model_slot::{DynModel, ModelSlot};
+pub use policy_slot::{AllowAll, DenyAll, DynPolicy, Policy, PolicySlot};

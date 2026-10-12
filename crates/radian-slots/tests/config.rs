@@ -1,5 +1,10 @@
 //! `ConfigChanged`: serializability, unknown-field tolerance, monotonic revisions.
 
+mod common;
+
+use std::sync::Arc;
+
+use common::ConstantModel;
 use radian_slots::*;
 
 #[test]
@@ -45,4 +50,22 @@ fn old_reader_ignores_unknown_optional_fields() {
     let parsed: ConfigChanged = serde_json::from_str(json).unwrap();
     assert_eq!(parsed.revision, 3);
     assert_eq!(parsed.change, ConfigChange::Policy { name: "p".into() });
+}
+
+#[tokio::test]
+async fn shared_log_keeps_one_monotonic_revision_sequence() {
+    let log = Arc::new(ConfigLog::new());
+    let mslot = ModelSlot::with_config_log(ConstantModel::new("a"), Arc::clone(&log));
+    let pslot = PolicySlot::with_config_log(AllowAll, Arc::clone(&log));
+
+    let r1 = mslot.swap("r1", ConstantModel::new("b"));
+    let r2 = pslot.swap("p1", DenyAll::new("no"));
+    let r3 = pslot.swap("p2", AllowAll);
+    assert_eq!([r1.revision, r2.revision, r3.revision], [1, 2, 3]);
+    let records = log.records();
+    assert_eq!(records, vec![r1, r2, r3]);
+    // Each record names only the changed route/policy: no keys or secrets.
+    for record in &records {
+        assert!(serde_json::to_string(record).unwrap().len() < 256);
+    }
 }
