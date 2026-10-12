@@ -165,11 +165,13 @@ async fn the_next_turn_carries_the_interrupted_prefix() {
     let journal = Arc::new(RecordingJournal::new());
     let model = ScriptedModel::new([Reply::StreamHang(vec!["partial".into()]), text("recovered")]);
     let mut chat = session_with(model.clone(), journal).await;
+    let sink = DeltaSink::default();
+    let seen = sink.deltas.clone();
     let mut run = chat.start_turn("go").unwrap();
     let cancel = run.cancellation_handle();
 
-    let (outcome, ()) = tokio::join!(run.run(&NoopSink), async {
-        tokio::time::sleep(Duration::from_millis(20)).await;
+    let (outcome, ()) = tokio::join!(run.run(&sink), async {
+        until_deltas(&seen, 1).await;
         cancel.cancel();
     });
     assert_eq!(
