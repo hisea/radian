@@ -421,24 +421,45 @@ impl<M: Model, P: ToolProvider, H: Hooks> Drop for ActiveRun<'_, M, P, H> {
     }
 }
 
-/// Forwards events to the host sink while accumulating the text this model call emitted
-/// through `ModelTextDelta` (F2). A fresh one per call, so one call's text can never leak
-/// into the next; only the core-observed stream is counted, not what any adapter buffered.
+/// One text part, or no parts at all when the accumulated string is empty. An interrupted
+/// prefix keeps `content` and `reasoning` structurally the same shape: absent when nothing
+/// was emitted on that channel.
+fn parts_of(text: String) -> Vec<ContentPart> {
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        vec![ContentPart::text(text)]
+    }
+}
+
+/// Forwards events to the host sink while accumulating, separately, the visible text and the
+/// reasoning this model call emitted through `ModelTextDelta`/`ModelReasoningDelta` (F2,
+/// R5). A fresh one per call, so one call's text or reasoning can never leak into the next;
+/// only the core-observed stream is counted, not what any adapter buffered.
 struct StreamTap<'a> {
     host: &'a dyn EventSink,
     text: Mutex<String>,
+    reasoning: Mutex<String>,
 }
 
 impl StreamTap<'_> {
-    fn take(&self) -> String {
-        std::mem::take(&mut self.text.lock().unwrap())
+    /// The visible text and the reasoning, each in emission order. They are never mixed.
+    fn take(&self) -> (String, String) {
+        (
+            std::mem::take(&mut self.text.lock().unwrap()),
+            std::mem::take(&mut self.reasoning.lock().unwrap()),
+        )
     }
 }
 
 impl EventSink for StreamTap<'_> {
     fn emit(&self, event: AgentEvent) {
-        if let AgentEvent::ModelTextDelta { text } = &event {
-            self.text.lock().unwrap().push_str(text);
+        match &event {
+            AgentEvent::ModelTextDelta { text } => self.text.lock().unwrap().push_str(text),
+            AgentEvent::ModelReasoningDelta { text } => {
+                self.reasoning.lock().unwrap().push_str(text);
+            }
+            _ => {}
         }
         self.host.emit(event);
     }
@@ -513,6 +534,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
         let tap = StreamTap {
             host: events,
             text: Mutex::new(String::new()),
+            reasoning: Mutex::new(String::new()),
         };
         let mcx = ModelContext {
             cancellation: interrupt.token.child_token(),
@@ -520,15 +542,16 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
         };
         let response = match race(&interrupt, agent.model.complete(request, mcx)).await {
             Raced::Interrupted(reason) => {
-                // The model future is gone; whatever it emitted is in the tap. A non-empty
-                // prefix becomes an interrupted assistant message through the journal before
-                // the turn converges (F3/F5). The append itself is never cancelled (D3) and
-                // runs no hooks: this is not a complete response.
-                let prefix = tap.take();
-                if !prefix.is_empty() {
+                // The model future is gone; whatever it emitted is in the tap. Any non-empty
+                // prefix — visible text **or** reasoning — becomes an interrupted assistant
+                // message through the journal before the turn converges (F3/F5, revised F4:
+                // "empty" means both are empty). The append itself is never cancelled (D3)
+                // and runs no hooks: this is not a complete response.
+                let (text, reasoning) = tap.take();
+                if !text.is_empty() || !reasoning.is_empty() {
                     let message = Message::Assistant {
-                        content: vec![ContentPart::text(prefix)],
-                        reasoning: Vec::new(),
+                        content: parts_of(text),
+                        reasoning: parts_of(reasoning),
                         tool_calls: Vec::new(),
                         provider_payload: None,
                         interrupted: true,
