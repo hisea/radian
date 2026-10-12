@@ -61,7 +61,7 @@ for i in $(seq 1 50); do printf 'PRE-%04d\n' "$i"; done
 
 每条退出路径都在同一 pty 内由 app 后的 shell 执行 `stty -a` 和 `echo MARKER-$$`。driver 检查：
 
-- `?2004h` 在 `?2004l` 前，且恢复后没有遗留 bracketed paste；
+- `?2004h` 与 `?2004l` 各恰好一次，且开在关之前；恢复后没有遗留 bracketed paste；
 - ratatui 每帧会写 `?25l` 隐藏光标，app 的 `restore_tty()` 明确写 `?25h`；测试确认最后一个 hide 后有 show；
 - `stty -a` 包含 `icanon` 且不含 `-icanon`，所以不是只依靠控制序列推测 raw mode 已恢复；
 - `MARKER-$$` 是一行开头，之前连续空行不超过 2（本次都是 0），模型光标列为 0。
@@ -72,11 +72,11 @@ for i in $(seq 1 50); do printf 'PRE-%04d\n' "$i"; done
 
 | 请求高度 / pty | 实际 viewport | 6 次 insert p50 / p95 / max | 证据 |
 |---|---:|---:|---|
-| 50 / 120×40 | 120×40 | 7.58 / 15.12 / 15.12 ms | `data/clamp-h50-term40.json` |
-| 10 / 120×6 | 120×6 | 2.39 / 8.72 / 8.72 ms | `data/clamp-h10-term6.json` |
-| 3 / 120×40 | 120×3 | 5.14 / 12.89 / 12.89 ms | `data/clamp-h3-term40.json` |
+| 50 / 120×40 | 120×40 | 5.70 / 13.59 / 13.59 ms | `data/clamp-h50-term40.json` |
+| 10 / 120×6 | 120×6 | 2.80 / 10.94 / 10.94 ms | `data/clamp-h10-term6.json` |
+| 3 / 120×40 | 120×3 | 8.72 / 15.10 / 15.10 ms | `data/clamp-h3-term40.json` |
 
-所以 `Viewport::Inline(height)` 在高度超过终端行数时钳制到终端高度；高度为 3 时保持 3。样本仅 6 次、受本机负载影响，只是可行性粗测，不构成性能承诺。
+所以 `Viewport::Inline(height)` 在高度超过终端行数时钳制到终端高度；高度为 3 时保持 3。样本仅 6 次、受本机负载影响，上表是**单次运行**的数字（`data/` 中每个 JSON 就是那一次），只是可行性粗测，不构成性能承诺。
 
 ## 复现
 
@@ -96,14 +96,15 @@ driver 的 `data/*.txt` 和 `data/*.json` 是上表证据。测试的临时 stat
 
 ## 变异检查
 
-在一次性 worktree `/tmp/radian-inline-mut`（基于提交 `9e3a684`）中，每项先修改 `src/app.rs`、执行 `cargo build --bins`，再只运行相应具名集成测试；四项都以 exit 101 失败，随后 `git restore`，最后删除 worktree。没有修改主分支 worktree。
+在一次性 worktree `/tmp/radian-inline-mut`（基于最终原型提交 `540c215`）中，每项先修改 `src/app.rs`、执行 `cargo build --bins`，再只运行相应具名集成测试；五项都以 exit 101 失败，随后 `git restore`，最后删除 worktree。没有修改主分支 worktree。
 
 | 变异 | 对应测试 | 被抓住的失败 |
 |---|---|---|
 | 在初始化额外写 `EnterAlternateScreen` | `streaming_coexists_with_scrollback` | 原始 pty 字节流含 `?1049h`，vt100 也报告 alternate screen |
 | status 宽度硬编码 120、忽略 `Frame::area().width` | `resize_keeps_inline_layout_correct` | 60 列阶段的 `size:60x` 标记永不出现 |
 | 初始化额外写 `EnableMouseCapture` | `native_selection_preconditions_hold` | 字节流含 `?1000h` |
-| `restore_tty()` 变为空实现 | `shell_prompt_position_correct_on_normal_exit` | paste 开关不成对、`stty` 仍为 `-icanon`、光标列不是 0 |
+| `restore_tty()` 变为空实现 | `shell_prompt_position_correct_on_normal_exit` | paste 的精确配对失败（on=1、off=0）、`stty` 仍为 `-icanon`、光标列不是 0 |
+| panic 前也调用一次 `restore_tty()`（hook 会再恢复） | `shell_prompt_position_correct_on_panic` | paste 的精确配对失败（on=1、off=2） |
 
 ## 未验证
 
