@@ -186,7 +186,10 @@ impl SessionJournal {
     fn open_locked(path: &Path) -> Result<File, WriteError> {
         let file = OpenOptions::new()
             .read(true)
-            .write(true)
+            // O_APPEND (implies write): every write lands at the current end, so after a
+            // torn-tail truncation the next append cannot leave a hole where the torn
+            // bytes were.
+            .append(true)
             .create(true)
             // We never truncate on open; the torn tail is handled explicitly by
             // `create`/`resume` after scanning, so an existing session is never lost.

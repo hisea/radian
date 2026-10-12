@@ -11,7 +11,16 @@ use agent_core::{
     ToolCall, ToolConcurrency, ToolContext, ToolError, ToolFailure, ToolOutput, ToolProvider,
     ToolSession, ToolSpec,
 };
+use radian_session::SessionCreatedData;
 use serde_json::{Value, json};
+
+/// The `SessionCreated` payload used across the session tests.
+pub fn created() -> SessionCreatedData {
+    SessionCreatedData::new(
+        "/work/example",
+        json!({"model": {"provider": "example", "model": "m-1"}}),
+    )
+}
 
 // ---------- temp dirs (kept outside the repo, cleaned up on drop) ----------
 
