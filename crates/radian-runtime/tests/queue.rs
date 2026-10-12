@@ -193,6 +193,23 @@ async fn inject_does_not_wake_an_idle_driver_but_followup_and_steer_do() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn closing_rejects_new_input_and_wakes_the_driver() {
+    let inbox = Inbox::new(4);
+    inbox.close();
+    assert!(inbox.is_closed());
+    match inbox.followup("late", InputSource::User).await {
+        Err(InboxError::Closed { message }) => assert_eq!(message.text(), "late"),
+        other => panic!("expected Closed, got {other:?}"),
+    }
+    // Closing wakes an idle driver so it can stop.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), inbox.wake_signal())
+            .await
+            .is_ok()
+    );
+}
+
 // ---------- lane mapping and source passthrough ----------
 
 #[tokio::test]

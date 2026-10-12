@@ -394,9 +394,16 @@ impl Inbox {
         *self.lock_cause() = None;
     }
 
-    /// Rejects all future input.
+    /// Rejects all future input and wakes the driver so it can notice and stop. Closing is
+    /// how a host shuts a driver down without holding `&mut Driver` (the driver owns itself
+    /// on its task).
     pub fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
+        self.wake.notify_one();
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
     }
 
     fn lock_cause(&self) -> std::sync::MutexGuard<'_, Option<CancelCause>> {

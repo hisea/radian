@@ -110,6 +110,8 @@ pub struct ScriptedModel {
     config: Mutex<Option<ConfigWatch>>,
     /// (call index, applied value, applied revision) for every call.
     pub seen: Mutex<Vec<(usize, Value, u64)>>,
+    /// Call indexes that hang forever (for the deadline test).
+    hang: Mutex<Vec<usize>>,
 }
 
 impl ScriptedModel {
@@ -119,6 +121,7 @@ impl ScriptedModel {
             requests: Mutex::new(Vec::new()),
             config: Mutex::new(None),
             seen: Mutex::new(Vec::new()),
+            hang: Mutex::new(Vec::new()),
         })
     }
 
@@ -131,6 +134,11 @@ impl ScriptedModel {
         at_call: usize,
     ) {
         *self.config.lock().unwrap() = Some((slot, queue, change, at_call));
+    }
+
+    /// The `index`-th call hangs forever.
+    pub fn hang_at(self: &Arc<Self>, index: usize) {
+        self.hang.lock().unwrap().push(index);
     }
 
     pub fn requests(&self) -> Vec<ModelRequest> {
@@ -163,6 +171,9 @@ impl Model for ScriptedModel {
                 .lock()
                 .unwrap()
                 .push((index, slot.value(), slot.revision()));
+        }
+        if self.hang.lock().unwrap().contains(&index) {
+            return std::future::pending::<Result<ModelResponse, ModelError>>().await;
         }
         self.script
             .lock()

@@ -66,6 +66,9 @@ pub struct Driver<M: Model, P: ToolProvider, H: Hooks> {
     slot: Arc<ConfigSlot>,
     queue: Arc<ConfigQueue>,
     options: TurnOptions,
+    /// A per-turn time limit: each turn's deadline is computed when the turn starts, so it
+    /// is fresh rather than an absolute instant fixed at startup.
+    turn_timeout: Option<std::time::Duration>,
     next_turn: u64,
     next_config_revision: u64,
     closed: bool,
@@ -98,6 +101,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             slot: ConfigSlot::new(serde_json::Value::Null),
             queue: ConfigQueue::new(),
             options,
+            turn_timeout: None,
             next_turn: recovery.next_turn,
             next_config_revision: recovery.next_config_revision,
             closed: false,
@@ -123,6 +127,12 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         self.journal.session_id()
     }
 
+    /// Sets a per-turn time limit. Each turn gets a deadline computed at its start, so this
+    /// applies to every turn rather than only the first.
+    pub fn set_turn_timeout(&mut self, timeout: Option<std::time::Duration>) {
+        self.turn_timeout = timeout;
+    }
+
     pub fn is_closed(&self) -> bool {
         self.closed
     }
@@ -135,20 +145,32 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
     }
 
     /// The driver loop: apply pending configuration at each turn boundary, claim the next
-    /// `next_turn` input, run one turn, repeat. Returns when [`Driver::shutdown`] is called.
+    /// `next_turn` input, run one turn, repeat. Returns when [`Driver::shutdown`] or
+    /// `Inbox::close` is called (or after an error).
+    ///
+    /// The session is closed on **both** paths, so a host that exits after an error still
+    /// releases the tool session (for MCP, the servers shut down gracefully instead of being
+    /// dropped). A forced exit that aborts the task drops the driver instead, which kills
+    /// the servers' process groups — that is the supported use of an abort.
     pub async fn run(&mut self) -> Result<(), DriverError> {
-        while !self.closed {
+        let result = self.run_loop().await;
+        let closed = self.session.close().await;
+        match (result, closed) {
+            (Err(error), _) => Err(error),
+            (Ok(()), Err(error)) => Err(DriverError::Session(SessionError::Tools(error))),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+
+    async fn run_loop(&mut self) -> Result<(), DriverError> {
+        while !self.closed && !self.inbox.is_closed() {
             let Some(entry) = self.inbox.claim_next_turn().await else {
-                // Idle. A `followup`/`steer`/`cancel` wakes us; `inject` does not.
+                // Idle. A `followup`/`steer`/`cancel`/`close` wakes us; `inject` does not.
                 self.inbox.wake_signal().await;
                 continue;
             };
             self.run_turn(entry).await?;
         }
-        self.session
-            .close()
-            .await
-            .map_err(|e| DriverError::Session(SessionError::Tools(e)))?;
         Ok(())
     }
 
@@ -169,7 +191,10 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         let journal = Arc::clone(&self.journal);
         let inbox = Arc::clone(&self.inbox);
         let live: Arc<dyn EventSink> = Arc::clone(&self.live);
-        let options = self.options.clone();
+        let mut options = self.options.clone();
+        if let Some(timeout) = self.turn_timeout {
+            options.deadline = Some(tokio::time::Instant::now() + timeout);
+        }
 
         journal
             .append_runtime_event(RuntimeEvent::InputClaimed {

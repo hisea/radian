@@ -237,6 +237,35 @@ async fn a_config_change_is_not_seen_by_the_turn_that_queued_it() {
         && data["change"]["route"] == "fast"));
 }
 
+// ---------- the per-turn timeout ----------
+
+#[tokio::test(start_paused = true)]
+async fn a_turn_timeout_ends_the_turn_as_deadline_exceeded() {
+    let model = ScriptedModel::new([]);
+    model.hang_at(0);
+    let tools = MemTools::new();
+    let (mut driver, env) = open_env("timeout", model, tools).await;
+    driver.set_turn_timeout(Some(std::time::Duration::from_secs(1)));
+    let handle = tokio::spawn(async move {
+        let _ = driver.run().await;
+    });
+
+    env.inbox.followup("go", InputSource::User).await.unwrap();
+    // Under paused time the deadline fires as soon as the runtime is idle (the model is
+    // hanging), so this resolves without a real wait.
+    env.recorder.wait_finished().await;
+    handle.abort();
+    let _ = handle.await;
+
+    let events = common::events(&env.path);
+    let finished = events
+        .iter()
+        .find(|(name, _, _)| name == "TurnFinished")
+        .expect("the turn finished durably");
+    assert_eq!(finished.2["outcome"], "cancelled");
+    assert_eq!(finished.2["reason"], "deadline_exceeded");
+}
+
 // ---------- 10. the public API never exposes `ActiveRun` ----------
 
 /// Structural guarantee, not a runtime assertion: `ActiveRun` appears in no public
