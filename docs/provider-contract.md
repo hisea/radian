@@ -69,3 +69,15 @@ OpenAI 专有（只属于 http.rs，契约不管）：请求体/header 的形状
 ## Anthropic adapter 已接入
 
 `crates/agent-provider-anthropic`（API key 认证，无 OAuth）的 12 个契约测试全部委托给同一套检查，现已全绿。线格式依据（官方 URL + 访问日期）、`stop_reason` 取值集合与 usage 字段全集见 `docs/providers/anthropic-wire-notes.md`。
+
+## 接第三家时预计会暴露的地方（2026-10-12 评估，非结论）
+
+第二个实现（Anthropic）暴露出两处泄漏。以下是在接第三家（Gemini/Cohere/Bedrock 等）前、按现有契约内容**预计**还会撞上的地方——写在这里是为了下次不用重新发现，不是为了预先放宽契约：
+
+1. **错误文本格式与错误分类是规定的**。`check_error_classification` 要求错误信息包含 `HTTP {status}` 并引用响应体，且 500/429/408 → `Transport`、其余 4xx → `Protocol`。若第三家的错误不是 HTTP（gRPC/仅 SSE error 事件）或错误体需要解析出别的码，adapter 会被迫拼出 `HTTP …` 文本。可能需第三个出口：声明“错误不以 HTTP 表达”或让检查只断言分类、不断言文本。
+2. **`Reason` 枚举本身就是 OpenAI 与 Anthropic 的混合**（`ContentFiltered` 来自 OpenAI，`PauseTurn` 来自 Anthropic）。Gemini 的 `SAFETY`/`RECITATION`/`MALFORMED_FUNCTION_CALL`、Cohere 的 `STOP_SEQUENCE`/`ERROR` 都会要求加变体。考虑改成「每家声明的 provider 原值 → 中性分类」映射，而不是继续扩枚举。
+3. **`Refusal` 假定拒绝文本在 content 里**（`check_finish_reasons` 断言 `joined_text == "I can't help."`）。Anthropic 的拒绝还带 `stop_details`（本 adapter 未解析）；若第三家的安全拒绝**无文本**或只有结构化原因，这条会硬失败。
+4. **usage 的 `Wire` 变体是 OpenAI 的块形状**（`UsageTrailing` = “无 choices 的尾块”）。Anthropic 没有这种块，靠 harness 映射到 `message_delta`；第三家（如 Gemini 的每块 `usageMetadata`）可能需要新变体或更抽象的“usage 在末尾/每块”描述。
+5. **`check_plain_text` 断言内容恰为单个文本 part**（`vec![ContentPart::text("hello")]`）。若第三家把推理/思考作为 `ContentPart` 暴露（而不是像本 adapter 那样忽略），或多文本块，这条会失败。
+6. **取消必须是 `Transport` 且消息含 `cancelled`**（`check_cancellation`）。自然返回 `Protocol` 或不同文本的 adapter 会被迫迎合。
+7. **usage 出口可被滥用成真空**：若某 adapter 把 `ModelUsage` 全部字段都声明为 unreported，`check_usage_shapes` 就只断言“全为 None”而变得空洞（`check_total_not_computed` 仍有效）。若要堵，可要求“至少一个字段必须被报告”，或把声明做成“字段 → provider 线上的名字”的正向映射（声明即承诺能从该名字读到值）。本次未做。
