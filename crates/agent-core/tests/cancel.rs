@@ -65,7 +65,8 @@ async fn cancel_mid_tool_batch_keeps_completed_results() {
     assert_eq!(code(result_for(t, "c2")), Some("cancelled"));
     assert_eq!(code(result_for(t, "c3")), Some("cancelled"));
     assert_eq!(log.started(), ["c1", "c2"]);
-    assert_eq!(log.finished(), ["c1"]);
+    // c2 saw the cancellation and returned on its own within the grace period.
+    assert_eq!(log.finished(), ["c1", "c2"]);
     assert_eq!(rec.finished().len(), 1);
 }
 
@@ -174,4 +175,58 @@ async fn poisoned_session_history_is_resumable() {
         .await
         .unwrap();
     assert_eq!(outcome.status, RunStatus::Completed);
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelled_tool_gets_grace_to_clean_up() {
+    let model = ScriptedModel::new([calls(vec![call("c1", "slowstop", json!({}))])]);
+    let tools = MemTools::new(vec![(spec("slowstop"), Behavior::CleansUp(1_000))]);
+    let log = tools.log.clone();
+    let mut chat = agent(model, tools).open_session().await.unwrap();
+    let mut run = chat.start_turn("go").unwrap();
+    let cancel = run.cancellation_handle();
+    let start = tokio::time::Instant::now();
+
+    let (outcome, ()) = tokio::join!(run.run(&NoopSink), async {
+        until_started(&log, "c1").await;
+        cancel.cancel();
+    });
+
+    assert_eq!(
+        outcome.unwrap().status,
+        RunStatus::Cancelled(CancelReason::Requested)
+    );
+    // The turn waited for the cleanup instead of abandoning it.
+    assert_eq!(*log.cleaned_up.lock().unwrap(), ["c1"]);
+    assert_eq!(start.elapsed(), Duration::from_secs(1));
+    drop(run);
+    assert_eq!(code(result_for(chat.transcript(), "c1")), Some("cancelled"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn tool_ignoring_cancellation_is_dropped_after_grace() {
+    let model = ScriptedModel::new([calls(vec![call("c1", "stubborn", json!({}))])]);
+    let tools = MemTools::new(vec![(spec("stubborn"), Behavior::Stubborn)]);
+    let log = tools.log.clone();
+    let mut chat = agent(model, tools).open_session().await.unwrap();
+    let options = TurnOptions {
+        tool_cancel_grace: Duration::from_millis(300),
+        ..Default::default()
+    };
+    let mut run = chat.start_turn_with("go", options).unwrap();
+    let cancel = run.cancellation_handle();
+    let start = tokio::time::Instant::now();
+
+    let (outcome, ()) = tokio::join!(run.run(&NoopSink), async {
+        until_started(&log, "c1").await;
+        cancel.cancel();
+    });
+
+    assert_eq!(
+        outcome.unwrap().status,
+        RunStatus::Cancelled(CancelReason::Requested)
+    );
+    assert_eq!(start.elapsed(), Duration::from_millis(300));
+    drop(run);
+    assert_eq!(code(result_for(chat.transcript(), "c1")), Some("cancelled"));
 }

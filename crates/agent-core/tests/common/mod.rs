@@ -124,10 +124,15 @@ pub enum Behavior {
     Delay(u64),
     /// Waits until cancelled.
     Hang,
+    /// Ignores cancellation and never finishes.
+    Stubborn,
+    /// On cancellation, spends this many milliseconds cleaning up, then records it.
+    CleansUp(u64),
 }
 
 #[derive(Default)]
 pub struct ToolLog {
+    pub cleaned_up: Mutex<Vec<String>>,
     pub started: Mutex<Vec<String>>,
     pub finished: Mutex<Vec<String>>,
     current: AtomicUsize,
@@ -242,6 +247,13 @@ impl ToolSession for MemSession {
             }
             Behavior::Hang => {
                 cx.cancellation.cancelled().await;
+                Err(ToolFailure::new("cancelled", "cancelled"))
+            }
+            Behavior::Stubborn => std::future::pending().await,
+            Behavior::CleansUp(ms) => {
+                cx.cancellation.cancelled().await;
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+                self.log.cleaned_up.lock().unwrap().push(call.id.clone());
                 Err(ToolFailure::new("cancelled", "cancelled"))
             }
         };

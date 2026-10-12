@@ -132,7 +132,10 @@ async fn cancel_during_parallel_batch_cancels_all_in_flight() {
     assert_eq!(code(result_for(t, "h1")), Some("cancelled"));
     assert_eq!(code(result_for(t, "h2")), Some("cancelled"));
     assert!(!result_for(t, "quick").is_error);
-    assert_eq!(log.finished(), ["quick"]);
+    // The hanging calls observed the cancellation and returned on their own.
+    let mut finished = log.finished();
+    finished.sort();
+    assert_eq!(finished, ["h1", "h2", "quick"]);
     assert_eq!(rec.finished().len(), 1);
 }
 

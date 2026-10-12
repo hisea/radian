@@ -29,6 +29,9 @@ pub use tool::{
     NoTools, ToolConcurrency, ToolContext, ToolError, ToolFailure, ToolOutput, ToolProvider,
     ToolSession, ToolSpec,
 };
-pub use turn::{ActiveRun, CancellationHandle, DEFAULT_MAX_PARALLEL_TOOLS, TurnOptions};
+pub use turn::{
+    ActiveRun, CancellationHandle, DEFAULT_MAX_PARALLEL_TOOLS, DEFAULT_TOOL_CANCEL_GRACE,
+    TurnOptions,
+};
 
 pub use tokio_util::sync::CancellationToken;

@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::time::Instant;
@@ -18,6 +19,9 @@ use crate::tool::{ToolConcurrency, ToolContext, ToolProvider, ToolSession};
 /// Default number of `Shared` tool calls that may run at once.
 pub const DEFAULT_MAX_PARALLEL_TOOLS: usize = 4;
 
+/// Default time a tool gets to wind down after cancellation before its future is dropped.
+pub const DEFAULT_TOOL_CANCEL_GRACE: Duration = Duration::from_secs(5);
+
 #[derive(Debug, Clone)]
 pub struct TurnOptions {
     /// When reached, the turn is cancelled through the normal path and ends as
@@ -28,6 +32,10 @@ pub struct TurnOptions {
     pub max_parallel_tools: usize,
     /// Overrides `AgentConfig::max_model_calls` for this turn.
     pub max_model_calls: Option<u32>,
+    /// After cancellation, how long a running tool may keep going to clean up (for MCP:
+    /// send the cancel notification, then stop and reap the server). After this, the tool's
+    /// future is dropped.
+    pub tool_cancel_grace: Duration,
 }
 
 impl Default for TurnOptions {
@@ -37,6 +45,7 @@ impl Default for TurnOptions {
             steer_mode: SteerMode::default(),
             max_parallel_tools: DEFAULT_MAX_PARALLEL_TOOLS,
             max_model_calls: None,
+            tool_cancel_grace: DEFAULT_TOOL_CANCEL_GRACE,
         }
     }
 }
@@ -718,6 +727,7 @@ impl<S: ToolSession, H: Hooks> BatchCx<'_, S, H> {
                     index,
                     call,
                     cancel.clone(),
+                    self.options.tool_cancel_grace,
                 ));
             }
             if running.is_empty() {
@@ -753,7 +763,11 @@ impl<S: ToolSession, H: Hooks> BatchCx<'_, S, H> {
     }
 }
 
-/// Executes one call and its `after_tool_call` hook. Cancellation drops the tool's future.
+/// Executes one call and its `after_tool_call` hook.
+///
+/// On cancellation the tool sees `cx.cancellation` fire and gets `grace` to finish its own
+/// cleanup; then its future is dropped. Either way the call's result is `cancelled`.
+#[allow(clippy::too_many_arguments)]
 async fn call_one<S: ToolSession, H: Hooks>(
     tools: &S,
     hooks: &H,
@@ -762,6 +776,7 @@ async fn call_one<S: ToolSession, H: Hooks>(
     index: usize,
     call: ToolCall,
     cancel: CancellationToken,
+    grace: Duration,
 ) -> (usize, ToolResult) {
     let cancelled = |call: &ToolCall| {
         ToolResult::error(
@@ -775,10 +790,16 @@ async fn call_one<S: ToolSession, H: Hooks>(
         events,
         index,
     };
+    let execution = tools.execute(&call, cx);
+    tokio::pin!(execution);
     let output = tokio::select! {
         biased;
-        () = cancel.cancelled() => return (index, cancelled(&call)),
-        output = tools.execute(&call, cx) => output,
+        () = cancel.cancelled() => {
+            // Whatever the tool returns now, the turn is over; the result is `cancelled`.
+            let _ = tokio::time::timeout(grace, &mut execution).await;
+            return (index, cancelled(&call));
+        }
+        output = &mut execution => output,
     };
     let mut result = match output {
         Ok(output) => ToolResult {
@@ -808,6 +829,6 @@ async fn call_one<S: ToolSession, H: Hooks>(
         );
     }
     // The hook may edit the result, but not which call it answers.
-    result.call_id = call.id;
+    result.call_id = call.id.clone();
     (index, result)
 }
