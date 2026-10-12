@@ -106,6 +106,7 @@ fn repair_fills_unpaired_calls_by_the_three_rules() {
                 call("never", "a", json!({})),
             ],
             provider_payload: None,
+            interrupted: false,
         },
         // The `ran` result message is already there.
         Message::Tool {
@@ -154,6 +155,7 @@ fn repair_fills_from_settled_exactly_and_leaves_complete_history_alone() {
             content: vec![],
             tool_calls: vec![call("c1", "a", json!({}))],
             provider_payload: None,
+            interrupted: false,
         },
     ];
     let records = [
@@ -185,6 +187,7 @@ async fn recover_yields_history_that_validates() {
                 content: vec![],
                 tool_calls: vec![call("c1", "a", json!({})), call("c2", "a", json!({}))],
                 provider_payload: None,
+                interrupted: false,
             },
         },
         started("c1", "a", json!({})),

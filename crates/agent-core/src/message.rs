@@ -175,6 +175,10 @@ pub enum Message {
         tool_calls: Vec<ToolCall>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_payload: Option<OpaqueJson>,
+        /// True only for the prefix Core commits when a model call is cancelled mid-stream
+        /// (A3): the text is what the core had emitted, never a full response.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        interrupted: bool,
     },
     Tool {
         result: ToolResult,
@@ -193,6 +197,7 @@ impl Message {
             content: vec![ContentPart::text(text)],
             tool_calls: Vec::new(),
             provider_payload: None,
+            interrupted: false,
         }
     }
 
@@ -218,5 +223,44 @@ impl From<&str> for Message {
 impl From<String> for Message {
     fn from(text: String) -> Self {
         Self::user(text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn interrupted_assistant(text: &str) -> Message {
+        Message::Assistant {
+            content: vec![ContentPart::text(text)],
+            tool_calls: Vec::new(),
+            provider_payload: None,
+            interrupted: true,
+        }
+    }
+
+    #[test]
+    fn interrupted_is_absent_when_false_and_present_when_true() {
+        let plain = Message::assistant("hello");
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("interrupted"), "{json}");
+        let json = serde_json::to_string(&interrupted_assistant("half")).unwrap();
+        assert!(json.contains("\"interrupted\":true"), "{json}");
+    }
+
+    #[test]
+    fn old_json_without_the_field_reads_as_false() {
+        // Externally tagged parts: {"text": {"text": ...}}.
+        let json = r#"{"assistant":{"content":[{"text":{"text":"hello"}}]}}"#;
+        let message: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(message, Message::assistant("hello"));
+    }
+
+    #[test]
+    fn interrupted_assistants_round_trip() {
+        let message = interrupted_assistant("你😀好");
+        let round: Message =
+            serde_json::from_str(&serde_json::to_string(&message).unwrap()).unwrap();
+        assert_eq!(round, message);
     }
 }

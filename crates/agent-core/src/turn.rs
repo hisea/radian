@@ -523,6 +523,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
             content,
             tool_calls: tool_calls.clone(),
             provider_payload,
+            interrupted: false,
         };
         // Journaled before any tool of this response is dispatched (S4).
         if let Err(e) = self.run.session.commit(assistant, events).await {

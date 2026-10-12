@@ -419,6 +419,7 @@ async fn history_is_not_rejournaled() {
             content: vec![ContentPart::text("earlier answer")],
             tool_calls: vec![],
             provider_payload: None,
+            interrupted: false,
         },
     ];
     let model = ScriptedModel::new([text("fresh")]);
