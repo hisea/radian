@@ -103,6 +103,20 @@ impl<M: Model, P: ToolProvider, H: Hooks> Agent<M, P, H> {
         journal: Option<Arc<dyn TranscriptJournal>>,
     ) -> Result<AgentSession<M, P, H>, SessionError> {
         validate_history(&history)?;
+        #[cfg(feature = "journal-selfcheck")]
+        let mut journal = journal;
+        #[cfg(feature = "journal-selfcheck")]
+        // Sessions without their own journal get a recording one, so session end can prove
+        // the journal would replay the transcript (AC-A1-2). Sessions with a host journal
+        // cannot be read back here; their tests assert on the journal directly.
+        let selfcheck = match &journal {
+            None => {
+                let recorder = Arc::new(crate::testing::RecordingJournal::new());
+                journal = Some(Arc::clone(&recorder) as Arc<dyn TranscriptJournal>);
+                Some(recorder)
+            }
+            Some(_) => None,
+        };
         let mut tools = self.tools.open_session().await?;
         let registry = match ToolRegistry::new(tools.tool_specs()) {
             Ok(registry) => registry,
@@ -118,6 +132,8 @@ impl<M: Model, P: ToolProvider, H: Hooks> Agent<M, P, H> {
             registry,
             transcript: history,
             journal,
+            #[cfg(feature = "journal-selfcheck")]
+            selfcheck,
             poisoned: false,
             recovery_required: false,
             close_state: CloseState::Open,
@@ -153,6 +169,9 @@ pub struct AgentSession<M: Model, P: ToolProvider, H: Hooks> {
     pub(crate) close_state: CloseState,
     /// Steering from turns that ended without returning an outcome.
     pub(crate) stranded_steering: Vec<Message>,
+    /// The recording journal this session was silently given, under `journal-selfcheck`.
+    #[cfg(feature = "journal-selfcheck")]
+    pub(crate) selfcheck: Option<Arc<crate::testing::RecordingJournal>>,
 }
 
 impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
@@ -242,12 +261,88 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         self.close_state = CloseState::Closing;
         self.tools.close().await?;
         self.close_state = CloseState::Closed;
+        #[cfg(feature = "journal-selfcheck")]
+        self.verify_journal_replays();
         Ok(())
     }
 
     /// True once `close()` has succeeded.
     pub fn is_closed(&self) -> bool {
         self.close_state == CloseState::Closed
+    }
+
+    /// Replays the session's recording journal and compares it with the live transcript
+    /// (AC-A1-2). After a drop (`poisoned`), memory may only lead the journal with
+    /// `interrupted` tool results (D7). Only compiled under `journal-selfcheck`.
+    #[cfg(feature = "journal-selfcheck")]
+    fn verify_journal_replays(&self) {
+        // A test that is already failing must not abort the process from a panic inside
+        // this Drop-time check.
+        if std::thread::panicking() {
+            return;
+        }
+        let Some(recorder) = &self.selfcheck else {
+            return;
+        };
+        let records = recorder.records();
+        let replay: Vec<&Message> = records
+            .iter()
+            .map(|r| match r {
+                JournalRecord::Message { message, .. } => message,
+            })
+            .collect();
+        let transcript = &self.transcript;
+        // The opening history is never journaled (D8), so the replay lines up with the
+        // transcript from the first record's index on.
+        let base = match records.first() {
+            Some(JournalRecord::Message { index, .. }) => *index,
+            // No records: nothing was written through this recorder, nothing to compare.
+            _ => return,
+        };
+        if self.poisoned {
+            assert!(
+                base + replay.len() <= transcript.len(),
+                "journal ({} records at {base}) is not a prefix of the transcript ({} messages)",
+                replay.len(),
+                transcript.len()
+            );
+            for (i, recorded) in replay.iter().enumerate() {
+                assert_eq!(
+                    recorded,
+                    &&transcript[base + i],
+                    "journal record {} diverges from the transcript",
+                    base + i
+                );
+            }
+            for message in &transcript[base + replay.len()..] {
+                assert!(
+                    matches!(message, Message::Tool { result }
+                        if result.error_code.as_deref() == Some("interrupted")),
+                    "after a drop, memory may only add `interrupted` results, found {message:?}"
+                );
+            }
+        } else {
+            assert_eq!(
+                base + replay.len(),
+                transcript.len(),
+                "journal replay does not match the transcript"
+            );
+            for (i, recorded) in replay.iter().enumerate() {
+                assert_eq!(
+                    recorded,
+                    &&transcript[base + i],
+                    "journal record {} diverges from the transcript",
+                    base + i
+                );
+            }
+        }
+    }
+}
+
+#[cfg(feature = "journal-selfcheck")]
+impl<M: Model, P: ToolProvider, H: Hooks> Drop for AgentSession<M, P, H> {
+    fn drop(&mut self) {
+        self.verify_journal_replays();
     }
 }
 
