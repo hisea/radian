@@ -39,6 +39,15 @@ impl Server {
         out.flush().unwrap();
     }
 
+    /// A `notifications/progress` for the request carrying `token`.
+    fn notify_progress(&self, token: Value, progress: u64, total: Option<u64>, message: &str) {
+        let mut params = json!({"progressToken": token, "progress": progress, "message": message});
+        if let Some(total) = total {
+            params["total"] = json!(total);
+        }
+        self.send(json!({"jsonrpc": "2.0", "method": "notifications/progress", "params": params}));
+    }
+
     fn log(&self, line: &str) {
         if let Some(file) = &self.log {
             let mut file = file.lock().unwrap();
@@ -76,7 +85,16 @@ impl Server {
             {"name": "Bad Name!", "description": "A name providers reject.", "inputSchema": object},
             {"name": "crash_later", "description": "Starts a child process, then exits shortly after replying.", "inputSchema": object},
             {"name": "pid", "description": "Returns this server's process id.", "inputSchema": object},
-            {"name": "freeze", "description": "Blocks the whole server, so it stops responding.", "inputSchema": object}
+            {"name": "freeze", "description": "Blocks the whole server, so it stops responding.", "inputSchema": object},
+            {"name": "progress",
+             "description": "Sends `count` progress notifications, then returns.",
+             "inputSchema": {"type": "object", "properties": {
+                "count": {"type": "integer"}, "intervalMs": {"type": "integer"},
+                "settleMs": {"type": "integer"},
+                "total": {"type": "integer"}, "label": {"type": "string"},
+                "alsoUnknownToken": {"type": "boolean"}}}},
+            {"name": "progress_late",
+             "description": "Returns, then sends one more progress notification afterwards.", "inputSchema": object}
         ])
     }
 
@@ -143,6 +161,35 @@ impl Server {
                 "structuredContent": {"answer": 42},
                 "isError": false
             }),
+            "progress" => {
+                let token = params["_meta"]["progressToken"].clone();
+                if args["alsoUnknownToken"].as_bool() == Some(true) {
+                    // A token no call ever registered.
+                    self.notify_progress(json!("no-such-token"), 99, None, "for nobody");
+                }
+                let count = args["count"].as_u64().unwrap_or(1);
+                let interval = Duration::from_millis(args["intervalMs"].as_u64().unwrap_or(20));
+                // Lets notifications beat the reply, so tests can isolate the registration
+                // race from rmcp's best-effort tail delivery.
+                let settle = Duration::from_millis(args["settleMs"].as_u64().unwrap_or(0));
+                let total = args["total"].as_u64();
+                let label = args["label"].as_str().unwrap_or("step").to_owned();
+                for step in 1..=count {
+                    thread::sleep(interval);
+                    self.notify_progress(token.clone(), step, total, &format!("{label} {step}"));
+                }
+                thread::sleep(settle);
+                text("progressed".into())
+            }
+            "progress_late" => {
+                let token = params["_meta"]["progressToken"].clone();
+                let server = Arc::clone(self);
+                thread::spawn(move || {
+                    thread::sleep(Duration::from_millis(100));
+                    server.notify_progress(token, 42, None, "too late");
+                });
+                text("answered first".into())
+            }
             other => {
                 self.error(&id, -32602, &format!("unknown tool {other}"));
                 return;

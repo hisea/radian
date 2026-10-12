@@ -3,12 +3,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_core::{
-    ContentPart, OpaqueJson, ToolCall, ToolConcurrency, ToolContext, ToolError, ToolFailure,
-    ToolOutput, ToolProvider, ToolSession, ToolSpec,
+    AgentEvent, ContentPart, OpaqueJson, ToolCall, ToolConcurrency, ToolContext, ToolError,
+    ToolFailure, ToolOutput, ToolProvider, ToolSession, ToolSpec,
 };
 use rmcp::model::{
-    CallToolRequest, CallToolRequestParams, ClientRequest, PingRequest, ProtocolVersion,
-    ServerResult,
+    CallToolRequest, CallToolRequestParams, ClientRequest, PingRequest, ProgressNotificationParam,
+    ProtocolVersion, ServerResult,
 };
 use rmcp::service::{
     ClientLifecycleMode, ClientServiceExt, PeerRequestOptions, RequestHandle, RoleClient,
@@ -17,7 +17,7 @@ use rmcp::service::{
 use serde_json::{Value, json};
 
 use crate::alias::tool_alias;
-use crate::client::Client;
+use crate::client::{Client, ProgressRouter};
 use crate::config::McpServerConfig;
 use crate::process::ServerProcess;
 
@@ -116,6 +116,18 @@ impl ToolSession for McpSession {
     }
 }
 
+impl McpSession {
+    /// Not part of the public API: lets the integration tests observe that no call leaves
+    /// its progress route behind. `#[cfg(test)]` cannot reach integration tests.
+    #[doc(hidden)]
+    pub fn progress_route_count(&self) -> usize {
+        self.servers
+            .iter()
+            .map(|s| s.progress_router.route_count())
+            .sum()
+    }
+}
+
 struct Server {
     config: McpServerConfig,
     service: Option<RunningService<RoleClient, Client>>,
@@ -123,6 +135,8 @@ struct Server {
     tools: Vec<Value>,
     /// Why the server can no longer be used in this session, if it cannot.
     unavailable: Mutex<Option<String>>,
+    /// Shared with the `Client` handler, which routes progress notifications here by token.
+    progress_router: Arc<ProgressRouter>,
     closed: bool,
 }
 
@@ -134,6 +148,7 @@ impl Server {
         };
         let (process, stdout, stdin) =
             ServerProcess::spawn(&config).map_err(|e| failed("failed to start", &e))?;
+        let progress_router = Arc::new(ProgressRouter::default());
         // rmcp's plain `serve()` would use only the legacy `initialize` handshake. `Auto` tries
         // `server/discover` (2026-07-28) and falls back to `initialize` (2025-11-25).
         let lifecycle = ClientLifecycleMode::Auto {
@@ -141,7 +156,7 @@ impl Server {
             legacy_version: Some(ProtocolVersion::V_2025_11_25),
         };
         let startup = async {
-            let service = Client
+            let service = Client::new(Arc::clone(&progress_router))
                 .serve_with_lifecycle((stdout, stdin), lifecycle)
                 .await
                 .map_err(|e| failed("handshake failed", &e))?;
@@ -171,6 +186,7 @@ impl Server {
                 process,
                 tools,
                 unavailable: Mutex::new(None),
+                progress_router,
                 closed: false,
             }),
             Err(e) => {
@@ -234,21 +250,55 @@ impl Server {
             }
         };
 
+        // The request is already on the wire when `send_cancellable_request` returns, so the
+        // server may have sent progress before this point; whatever the router buffered for
+        // this token is replayed into the channel by `register`, under the same lock
+        // `on_progress` delivers through, so nothing is missed.
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        self.progress_router
+            .register(handle.progress_token.clone(), progress_tx.clone());
         // If this future is dropped mid-call (the turn was poisoned), kill the server now.
         let mut guard = AbortGuard {
             server: self,
             armed: true,
+        };
+        // Removes the registration when the call ends, whenever that happens, and keeps the
+        // channel open until then — the select below relies on `recv()` never returning
+        // `None` while the call runs.
+        let _progress = ProgressGuard {
+            router: &self.progress_router,
+            token: handle.progress_token.clone(),
+            sender: progress_tx,
         };
         enum Waited<T> {
             Response(T),
             Cancelled,
             TimedOut,
         }
-        let waited = tokio::select! {
-            biased;
-            () = cx.cancellation.cancelled() => Waited::Cancelled,
-            () = tokio::time::sleep(self.config.call_timeout) => Waited::TimedOut,
-            response = &mut handle.rx => Waited::Response(response),
+        // rmcp routes each notification on its own spawned task and hands the response straight
+        // to the waiter, so a notification can be delivered out of order, or after the reply
+        // was taken. Order within a call is restored here; tail loss is accepted.
+        let mut monotone = ProgressMonotone::default();
+        let timeout = tokio::time::sleep(self.config.call_timeout);
+        tokio::pin!(timeout);
+        let waited = loop {
+            tokio::select! {
+                biased;
+                () = cx.cancellation.cancelled() => break Waited::Cancelled,
+                // Pinned outside the loop: recreating it per notification would reset the
+                // deadline whenever progress flows.
+                () = &mut timeout => break Waited::TimedOut,
+                // Polled before the response, which trims (but cannot eliminate) tail loss.
+                Some(notification) = progress_rx.recv() => {
+                    if monotone.admit(&notification) {
+                        cx.events.emit(AgentEvent::ToolProgress {
+                            index: cx.index,
+                            progress: progress_json(&notification),
+                        });
+                    }
+                }
+                response = &mut handle.rx => break Waited::Response(response),
+            }
         };
         let response = match waited {
             Waited::Response(response) => response,
@@ -359,6 +409,52 @@ impl Drop for AbortGuard<'_> {
             self.server.mark_unavailable("a call was interrupted");
             self.server.process.kill_tree();
         }
+    }
+}
+
+/// Unregisters a call's progress route when it settles or is dropped, so a late notification
+/// finds no route and a dropped call leaks no entry.
+struct ProgressGuard<'a> {
+    router: &'a Arc<ProgressRouter>,
+    token: rmcp::model::ProgressToken,
+    #[allow(dead_code)] // held only to keep the channel open while the call runs
+    sender: tokio::sync::mpsc::UnboundedSender<ProgressNotificationParam>,
+}
+
+impl Drop for ProgressGuard<'_> {
+    fn drop(&mut self) {
+        self.router.unregister(&self.token);
+    }
+}
+
+/// The model-visible form of a progress notification: always the current value, `total` and
+/// `message` only when the server sent them.
+fn progress_json(notification: &ProgressNotificationParam) -> Value {
+    let mut progress = json!({ "progress": notification.progress });
+    if let Some(total) = notification.total {
+        progress["total"] = json!(total);
+    }
+    if let Some(message) = &notification.message {
+        progress["message"] = json!(message);
+    }
+    progress
+}
+
+/// The spec requires a token's `progress` values to rise monotonically. rmcp routes every
+/// notification on its own spawned task, so they can arrive out of order; a value that does
+/// not beat what was already emitted is stale and dropped.
+#[derive(Debug, Default)]
+struct ProgressMonotone {
+    last: Option<f64>,
+}
+
+impl ProgressMonotone {
+    fn admit(&mut self, notification: &ProgressNotificationParam) -> bool {
+        if self.last.is_some_and(|last| notification.progress <= last) {
+            return false;
+        }
+        self.last = Some(notification.progress);
+        true
     }
 }
 
@@ -509,4 +605,52 @@ fn content_part(block: &Value) -> ContentPart {
     known.unwrap_or_else(|| ContentPart::Opaque {
         raw: OpaqueJson::parse(block.to_string()).expect("serde_json output is valid JSON"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmcp::model::NumberOrString;
+
+    fn token(n: i64) -> rmcp::model::ProgressToken {
+        rmcp::model::ProgressToken(NumberOrString::Number(n))
+    }
+
+    fn notification(progress: f64) -> ProgressNotificationParam {
+        ProgressNotificationParam::new(token(1), progress)
+    }
+
+    #[test]
+    fn out_of_order_progress_is_dropped_to_a_monotone_sequence() {
+        let mut monotone = ProgressMonotone::default();
+        let admitted: Vec<f64> = [1.0, 3.0, 2.0, 3.0, 4.0]
+            .iter()
+            .map(|&p| notification(p))
+            .filter(|n| monotone.admit(n))
+            .map(|n| n.progress)
+            .collect();
+        assert_eq!(admitted, [1.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn routed_progress_reaches_emission_in_registration_order() {
+        // What `call` does, minus the server: the router channel plus the monotone filter.
+        let router = crate::client::ProgressRouter::default();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        // Notifications that beat the registration, in order.
+        router.deliver(notification(1.0));
+        router.register(token(1), tx);
+        // ...and ones that find the live route.
+        router.deliver(notification(3.0));
+        router.deliver(notification(2.0));
+
+        let mut monotone = ProgressMonotone::default();
+        let mut emitted = Vec::new();
+        while let Ok(notification) = rx.try_recv() {
+            if monotone.admit(&notification) {
+                emitted.push(notification.progress);
+            }
+        }
+        assert_eq!(emitted, [1.0, 3.0]);
+    }
 }
