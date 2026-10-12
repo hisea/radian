@@ -17,6 +17,10 @@ pub enum Reply {
     Hang,
     /// Responds after this many milliseconds.
     Slow(u64, ModelResponse),
+    /// Emits these text deltas, then waits until cancelled.
+    StreamHang(Vec<String>),
+    /// Emits these text deltas, then responds.
+    Streamed(Vec<String>, ModelResponse),
 }
 
 /// Returns scripted replies in order and records every request.
@@ -60,6 +64,19 @@ impl Model for ScriptedModel {
             }
             Some(Reply::Slow(ms, r)) => {
                 tokio::time::sleep(Duration::from_millis(ms)).await;
+                Ok(r)
+            }
+            Some(Reply::StreamHang(deltas)) => {
+                for text in deltas {
+                    cx.events.emit(AgentEvent::ModelTextDelta { text });
+                }
+                cx.cancellation.cancelled().await;
+                Err(ModelError::Transport("cancelled".into()))
+            }
+            Some(Reply::Streamed(deltas, r)) => {
+                for text in deltas {
+                    cx.events.emit(AgentEvent::ModelTextDelta { text });
+                }
                 Ok(r)
             }
             None => Err(ModelError::Protocol("script exhausted".into())),
