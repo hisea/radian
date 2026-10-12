@@ -215,6 +215,7 @@ mod tests {
                 content: Vec::new(),
                 tool_calls: vec![call("c1", "calc__add", json!({"a": 2, "b": 3}))],
                 provider_payload: None,
+                interrupted: false,
             },
             Message::Tool {
                 result: ToolResult::success("c1", vec![ContentPart::text("5")]),
@@ -255,6 +256,31 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_assistants_are_sent_as_plain_assistants() {
+        // Same content, only the flag differs: the wire bodies must be byte-identical.
+        let plain = request(vec![
+            Message::user("what?"),
+            Message::assistant("Let me think..."),
+            Message::user("and then?"),
+        ]);
+        let interrupted = request(vec![
+            Message::user("what?"),
+            Message::Assistant {
+                content: vec![ContentPart::text("Let me think...")],
+                tool_calls: Vec::new(),
+                provider_payload: None,
+                interrupted: true,
+            },
+            Message::user("and then?"),
+        ]);
+        let plain_body = serde_json::to_string(&build_body(&plain, &config()).unwrap()).unwrap();
+        let interrupted_body =
+            serde_json::to_string(&build_body(&interrupted, &config()).unwrap()).unwrap();
+        assert_eq!(plain_body, interrupted_body);
+        assert!(!interrupted_body.contains("interrupted"));
+    }
+
+    #[test]
     fn no_tools_means_no_tools_key() {
         let body = build_body(&request(vec![Message::user("hi")]), &config()).unwrap();
         assert!(body.get("tools").is_none());
@@ -267,6 +293,7 @@ mod tests {
                 content: vec![ContentPart::text("calling")],
                 tool_calls: vec![call("c1", "t", Value::String("{\"a\": ".into()))],
                 provider_payload: None,
+                interrupted: false,
             }]),
             &config(),
         )

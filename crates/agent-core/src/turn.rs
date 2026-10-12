@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
@@ -11,7 +11,7 @@ use crate::agent::{Agent, AgentSession};
 use crate::event::{AgentEvent, EventSink};
 use crate::hooks::{HookContext, HookError, HookPoint, Hooks, ToolDecision};
 use crate::journal::{JournalError, JournalRecord, TranscriptJournal};
-use crate::message::{Message, ToolCall, ToolResult};
+use crate::message::{ContentPart, Message, ToolCall, ToolResult};
 use crate::model::{Model, ModelContext, ModelRequest, ModelResponse, StopReason};
 use crate::outcome::{CancelReason, IncompleteReason, RunError, RunOutcome, RunStatus, Step};
 use crate::preflight::ToolRegistry;
@@ -417,6 +417,29 @@ impl<M: Model, P: ToolProvider, H: Hooks> Drop for ActiveRun<'_, M, P, H> {
     }
 }
 
+/// Forwards events to the host sink while accumulating the text this model call emitted
+/// through `ModelTextDelta` (F2). A fresh one per call, so one call's text can never leak
+/// into the next; only the core-observed stream is counted, not what any adapter buffered.
+struct StreamTap<'a> {
+    host: &'a dyn EventSink,
+    text: Mutex<String>,
+}
+
+impl StreamTap<'_> {
+    fn take(&self) -> String {
+        std::mem::take(&mut self.text.lock().unwrap())
+    }
+}
+
+impl EventSink for StreamTap<'_> {
+    fn emit(&self, event: AgentEvent) {
+        if let AgentEvent::ModelTextDelta { text } = &event {
+            self.text.lock().unwrap().push_str(text);
+        }
+        self.host.emit(event);
+    }
+}
+
 /// Poisons the turn if the step future is dropped before it completes.
 struct StepGuard<'r, 's, M: Model, P: ToolProvider, H: Hooks> {
     run: &'r mut ActiveRun<'s, M, P, H>,
@@ -483,12 +506,32 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
         events.emit(AgentEvent::ModelRequestStarted {
             model_call: self.run.model_calls,
         });
+        let tap = StreamTap {
+            host: events,
+            text: Mutex::new(String::new()),
+        };
         let mcx = ModelContext {
             cancellation: interrupt.token.child_token(),
-            events,
+            events: &tap,
         };
         let response = match race(&interrupt, agent.model.complete(request, mcx)).await {
             Raced::Interrupted(reason) => {
+                // The model future is gone; whatever it emitted is in the tap. A non-empty
+                // prefix becomes an interrupted assistant message through the journal before
+                // the turn converges (F3/F5). The append itself is never cancelled (D3) and
+                // runs no hooks: this is not a complete response.
+                let prefix = tap.take();
+                if !prefix.is_empty() {
+                    let message = Message::Assistant {
+                        content: vec![ContentPart::text(prefix)],
+                        tool_calls: Vec::new(),
+                        provider_payload: None,
+                        interrupted: true,
+                    };
+                    if let Err(e) = self.run.session.commit(message, events).await {
+                        return Err(self.run.fail_journal(e, events));
+                    }
+                }
                 return Ok(self.run.finish(RunStatus::Cancelled(reason), events));
             }
             Raced::Done(Err(e)) => return Err(self.run.fail(RunError::Model(e), events)),
@@ -523,6 +566,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
             content,
             tool_calls: tool_calls.clone(),
             provider_payload,
+            interrupted: false,
         };
         // Journaled before any tool of this response is dispatched (S4).
         if let Err(e) = self.run.session.commit(assistant, events).await {

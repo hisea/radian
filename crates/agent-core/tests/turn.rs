@@ -324,6 +324,7 @@ async fn history_with_unpaired_tool_call_is_rejected() {
             content: vec![],
             tool_calls: vec![call("c1", "echo", json!({}))],
             provider_payload: None,
+            interrupted: false,
         },
         Message::user("next"),
     ];
