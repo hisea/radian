@@ -10,6 +10,7 @@ members = [
     "crates/agent-provider-contract",
     "crates/radian-session",
     "crates/radian-coding",
+    "crates/radian-sandbox",
 ]
 
 [workspace.package]
