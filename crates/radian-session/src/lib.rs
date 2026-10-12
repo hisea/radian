@@ -21,6 +21,7 @@ mod error;
 mod export;
 mod index;
 mod reader;
+mod runtime;
 mod writer;
 
 pub use error::ReadError;
@@ -33,4 +34,5 @@ pub use index::{
     read_line_at,
 };
 pub use reader::{EventData, Session, SessionEvent};
+pub use runtime::{InboxLane, RuntimeEvent, TurnOutcome, TurnReason};
 pub use writer::{SessionCreatedData, SessionJournal, WriteError};

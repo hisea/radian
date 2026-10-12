@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::ReadError;
+use crate::runtime::{RuntimeEvent, runtime_data};
 
 /// The schema version this crate writes and accepts.
 pub(crate) const SCHEMA_VERSION: u64 = 1;
@@ -181,6 +182,15 @@ impl SessionJournal {
     /// The `seq` the next append will use.
     pub fn next_seq(&self) -> u64 {
         self.next_seq.load(Ordering::SeqCst)
+    }
+
+    /// Appends a runtime event (ADR 0006 §5.5–§5.7) through the same lock, `seq` counter and
+    /// fsync as every other line. `critical` comes from the event type (ADR 0006 §4), never
+    /// from the caller, and transcript events cannot be written this way — they go through
+    /// [`TranscriptJournal::append`], which keeps `MessageAppended.index` contiguous.
+    pub async fn append_runtime_event(&self, event: RuntimeEvent) -> Result<(), WriteError> {
+        let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
+        self.write_line_numbered((event.name(), event.critical()), seq, &runtime_data(&event))
     }
 
     fn open_locked(path: &Path) -> Result<File, WriteError> {
