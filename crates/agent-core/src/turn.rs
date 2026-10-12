@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -281,17 +282,24 @@ impl<'s, M: Model, P: ToolProvider, H: Hooks> ActiveRun<'s, M, P, H> {
 
     /// Commits each steering message through the journal (S3): if the j-th fails, the first
     /// j-1 are journaled and in memory, the rest are not, and memory still equals the journal.
+    /// The failed message and those behind it go back to the queue, so the turn's outcome and
+    /// `history_for_resume` hand them to the host.
     async fn inject_steering(&mut self, events: &dyn EventSink) -> Result<(), RunError> {
-        let messages = self.steering.drain();
-        if !messages.is_empty() {
-            events.emit(AgentEvent::SteeringApplied {
-                count: messages.len(),
-            });
-            for message in messages {
-                if let Err(e) = self.session.commit(message, events).await {
-                    return Err(self.fail_journal(e, events));
+        let mut pending: VecDeque<Message> = self.steering.drain().into();
+        let mut applied = 0;
+        while let Some(message) = pending.pop_front() {
+            if let Err(e) = self.session.commit(message.clone(), events).await {
+                pending.push_front(message);
+                self.steering.requeue_front(pending.into());
+                if applied > 0 {
+                    events.emit(AgentEvent::SteeringApplied { count: applied });
                 }
+                return Err(self.fail_journal(e, events));
             }
+            applied += 1;
+        }
+        if applied > 0 {
+            events.emit(AgentEvent::SteeringApplied { count: applied });
         }
         Ok(())
     }
@@ -351,6 +359,10 @@ impl<'s, M: Model, P: ToolProvider, H: Hooks> ActiveRun<'s, M, P, H> {
     fn fail_journal(&mut self, error: JournalError, events: &dyn EventSink) -> RunError {
         self.session.recovery_required = true;
         self.finish(RunStatus::Failed, events);
+        let outcome = self.outcome.as_ref().expect("finish sets the outcome");
+        self.session
+            .stranded_steering
+            .extend(outcome.unapplied_steering.iter().cloned());
         RunError::Journal(error)
     }
 

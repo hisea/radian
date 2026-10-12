@@ -51,6 +51,15 @@ impl SteeringHandle {
         Ok(())
     }
 
+    /// Puts messages that were drained but could not be applied back in front of the queue,
+    /// so that `close` returns them to the host instead of losing them.
+    pub(crate) fn requeue_front(&self, messages: Vec<Message>) {
+        let mut queue = self.lock();
+        for message in messages.into_iter().rev() {
+            queue.messages.push_front(message);
+        }
+    }
+
     pub(crate) fn has_pending(&self) -> bool {
         !self.lock().messages.is_empty()
     }

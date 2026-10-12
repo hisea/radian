@@ -394,3 +394,38 @@ async fn history_is_not_rejournaled() {
         JournalRecord::Message { index: 3, .. }
     ));
 }
+
+// ---------- steering is never lost to a journal failure ----------
+
+/// Two steering messages are queued before the first step. Appends: 1 = input, 2 = first
+/// steering message, 3 = second. Whatever fails, every steering message is either in the
+/// journal or handed back to the host.
+#[tokio::test(start_paused = true)]
+async fn steering_that_fails_to_journal_is_handed_back_not_lost() {
+    for (fail_at, journaled) in [(2, 0), (3, 1)] {
+        let model = ScriptedModel::new([text("unused")]);
+        let journal = Arc::new(FailingJournal::fail_at(fail_at));
+        let mut chat = session_with(model, MemTools::new(vec![]), journal.clone()).await;
+        let mut run = chat.start_turn("go").unwrap();
+        run.steering_handle().steer("s1").unwrap();
+        run.steering_handle().steer("s2").unwrap();
+
+        let error = run.run(&NoopSink).await.unwrap_err();
+
+        assert!(matches!(error, RunError::Journal(_)), "{error:?}");
+        let expected: Vec<Message> = ["s1", "s2"][journaled..]
+            .iter()
+            .map(|t| Message::from(*t))
+            .collect();
+        let outcome = run.outcome().expect("the turn ended");
+        assert_eq!(outcome.unapplied_steering, expected, "fail_at {fail_at}");
+        drop(run);
+        // The same messages are available to a host that only has the session.
+        assert_eq!(
+            chat.history_for_resume().unapplied_steering,
+            expected,
+            "fail_at {fail_at}"
+        );
+        assert_eq!(chat.transcript().len(), 1 + journaled);
+    }
+}
