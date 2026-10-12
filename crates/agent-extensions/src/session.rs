@@ -3,12 +3,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_core::{
-    ContentPart, OpaqueJson, ToolCall, ToolConcurrency, ToolContext, ToolError, ToolFailure,
-    ToolOutput, ToolProvider, ToolSession, ToolSpec,
+    AgentEvent, ContentPart, OpaqueJson, ToolCall, ToolConcurrency, ToolContext, ToolError,
+    ToolFailure, ToolOutput, ToolProvider, ToolSession, ToolSpec,
 };
 use rmcp::model::{
-    CallToolRequest, CallToolRequestParams, ClientRequest, PingRequest, ProtocolVersion,
-    ServerResult,
+    CallToolRequest, CallToolRequestParams, ClientRequest, PingRequest, ProgressNotificationParam,
+    ProtocolVersion, ServerResult,
 };
 use rmcp::service::{
     ClientLifecycleMode, ClientServiceExt, PeerRequestOptions, RequestHandle, RoleClient,
@@ -17,7 +17,7 @@ use rmcp::service::{
 use serde_json::{Value, json};
 
 use crate::alias::tool_alias;
-use crate::client::Client;
+use crate::client::{Client, ProgressRoutes};
 use crate::config::McpServerConfig;
 use crate::process::ServerProcess;
 
@@ -123,6 +123,8 @@ struct Server {
     tools: Vec<Value>,
     /// Why the server can no longer be used in this session, if it cannot.
     unavailable: Mutex<Option<String>>,
+    /// Shared with the `Client` handler, which routes progress notifications here by token.
+    progress_routes: ProgressRoutes,
     closed: bool,
 }
 
@@ -134,6 +136,7 @@ impl Server {
         };
         let (process, stdout, stdin) =
             ServerProcess::spawn(&config).map_err(|e| failed("failed to start", &e))?;
+        let progress_routes = ProgressRoutes::default();
         // rmcp's plain `serve()` would use only the legacy `initialize` handshake. `Auto` tries
         // `server/discover` (2026-07-28) and falls back to `initialize` (2025-11-25).
         let lifecycle = ClientLifecycleMode::Auto {
@@ -141,7 +144,7 @@ impl Server {
             legacy_version: Some(ProtocolVersion::V_2025_11_25),
         };
         let startup = async {
-            let service = Client
+            let service = Client::new(Arc::clone(&progress_routes))
                 .serve_with_lifecycle((stdout, stdin), lifecycle)
                 .await
                 .map_err(|e| failed("handshake failed", &e))?;
@@ -171,6 +174,7 @@ impl Server {
                 process,
                 tools,
                 unavailable: Mutex::new(None),
+                progress_routes,
                 closed: false,
             }),
             Err(e) => {
@@ -234,21 +238,52 @@ impl Server {
             }
         };
 
+        // Route this call's progress notifications to the channel drained below. Registering
+        // after the request is queued is race-free: a server cannot notify progress for a
+        // request it has not read yet.
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        self.progress_routes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(handle.progress_token.clone(), progress_tx.clone());
         // If this future is dropped mid-call (the turn was poisoned), kill the server now.
         let mut guard = AbortGuard {
             server: self,
             armed: true,
+        };
+        // Removes the registration when the call ends, whenever that happens, and keeps the
+        // channel open until then.
+        let _progress = ProgressGuard {
+            routes: &self.progress_routes,
+            token: handle.progress_token.clone(),
+            sender: progress_tx,
         };
         enum Waited<T> {
             Response(T),
             Cancelled,
             TimedOut,
         }
-        let waited = tokio::select! {
-            biased;
-            () = cx.cancellation.cancelled() => Waited::Cancelled,
-            () = tokio::time::sleep(self.config.call_timeout) => Waited::TimedOut,
-            response = &mut handle.rx => Waited::Response(response),
+        let mut progress_open = true;
+        let timeout = tokio::time::sleep(self.config.call_timeout);
+        tokio::pin!(timeout);
+        let waited = loop {
+            tokio::select! {
+                biased;
+                () = cx.cancellation.cancelled() => break Waited::Cancelled,
+                // Pinned outside the loop: recreating it per notification would reset the
+                // deadline whenever progress flows.
+                () = &mut timeout => break Waited::TimedOut,
+                // Drained before the response is taken, so progress that raced with the reply
+                // is still emitted.
+                notification = progress_rx.recv(), if progress_open => match notification {
+                    Some(notification) => cx.events.emit(AgentEvent::ToolProgress {
+                        index: cx.index,
+                        progress: progress_json(&notification),
+                    }),
+                    None => progress_open = false,
+                },
+                response = &mut handle.rx => break Waited::Response(response),
+            }
         };
         let response = match waited {
             Waited::Response(response) => response,
@@ -360,6 +395,37 @@ impl Drop for AbortGuard<'_> {
             self.server.process.kill_tree();
         }
     }
+}
+
+/// Unregisters a call's progress route when it settles or is dropped, so a late notification
+/// finds no route and a dropped call leaks no entry.
+struct ProgressGuard<'a> {
+    routes: &'a ProgressRoutes,
+    token: rmcp::model::ProgressToken,
+    #[allow(dead_code)] // held only to keep the channel open while the call runs
+    sender: tokio::sync::mpsc::UnboundedSender<ProgressNotificationParam>,
+}
+
+impl Drop for ProgressGuard<'_> {
+    fn drop(&mut self) {
+        self.routes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.token);
+    }
+}
+
+/// The model-visible form of a progress notification: always the current value, `total` and
+/// `message` only when the server sent them.
+fn progress_json(notification: &ProgressNotificationParam) -> Value {
+    let mut progress = json!({ "progress": notification.progress });
+    if let Some(total) = notification.total {
+        progress["total"] = json!(total);
+    }
+    if let Some(message) = &notification.message {
+        progress["message"] = json!(message);
+    }
+    progress
 }
 
 async fn stop_all(servers: &mut [Server]) {
