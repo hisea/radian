@@ -202,22 +202,44 @@ impl<'a> Assembler<'a> {
 }
 
 /// Maps a provider usage object to the neutral [`ModelUsage`]. Aliases cover the shapes the
-/// adapter is built for (OpenAI's `prompt_tokens`/`completion_tokens`/`total_tokens` plus
-/// `prompt_tokens_details`; Anthropic-style `input_tokens`/`output_tokens` and
+/// adapter is built for (OpenAI's `prompt_tokens`/`completion_tokens`/`total_tokens` plus the
+/// `*_details` sub-objects; Anthropic-style `input_tokens`/`output_tokens` and
 /// `cache_*_input_tokens`). `total` is taken from the provider only and never computed.
+///
+/// `details` carries **every** `*_details` sub-object the provider sent, keyed by its wire
+/// name (`prompt_tokens_details`, `completion_tokens_details`), so reasoning tokens are not
+/// lost; a bare `details` key is treated as the prompt details. `cache_read`/`cache_write`
+/// still come from the prompt details' `cached_tokens`/`cache_write`.
 fn usage_from_json(usage: &Value) -> ModelUsage {
     let number = |keys: &[&str]| {
         keys.iter()
             .find_map(|key| usage.get(*key).and_then(Value::as_u64))
     };
-    // The details sub-object, kept verbatim (J3).
-    let details = usage
+    let prompt_details = usage
         .get("prompt_tokens_details")
         .or_else(|| usage.get("details"))
         .filter(|d| d.is_object())
         .cloned();
+    let completion_details = usage
+        .get("completion_tokens_details")
+        .filter(|d| d.is_object())
+        .cloned();
+    let details = {
+        let mut merged = serde_json::Map::new();
+        if let Some(sub) = &prompt_details {
+            merged.insert("prompt_tokens_details".into(), sub.clone());
+        }
+        if let Some(sub) = &completion_details {
+            merged.insert("completion_tokens_details".into(), sub.clone());
+        }
+        if merged.is_empty() {
+            None
+        } else {
+            Some(Value::Object(merged))
+        }
+    };
     let details_number = |key: &str| {
-        details
+        prompt_details
             .as_ref()
             .and_then(|d| d.get(key).and_then(Value::as_u64))
     };
@@ -569,11 +591,51 @@ mod tests {
         assert_eq!(usage.total, Some(15));
         assert_eq!(usage.cache_read, Some(3));
         assert_eq!(usage.cache_write, None);
-        // The details sub-object is kept as one blob; key order may be normalized by the
-        // stream parse, content and nesting must match exactly.
+        // Every `*_details` sub-object is kept, keyed by its wire name; key order may be
+        // normalized by the stream parse, content and nesting must match exactly.
         let details: Value =
             serde_json::from_str(usage.details.unwrap().get()).expect("details is JSON");
-        assert_eq!(details, json!({"cached_tokens": 3, "audio_tokens": 0}));
+        assert_eq!(
+            details,
+            json!({"prompt_tokens_details": {"cached_tokens": 3, "audio_tokens": 0}})
+        );
+    }
+
+    #[test]
+    fn the_dogfooded_usage_shape_keeps_completion_tokens_details() {
+        // The real shape from `docs/findings/2026-10-12-opencode-zen-dogfooding.md`
+        // (key already removed). 30 of the 40 completion tokens are reasoning tokens, and
+        // losing them under-reports the bill.
+        let response = assemble(
+            &[
+                json!({"choices": [], "usage": {
+                    "prompt_tokens": 31,
+                    "completion_tokens": 40,
+                    "total_tokens": 71,
+                    "prompt_tokens_details": {"cached_tokens": 0},
+                    "completion_tokens_details": {"reasoning_tokens": 30}
+                }})
+                .to_string(),
+                chunk(json!({}), Some("stop")),
+            ],
+            false,
+        )
+        .unwrap();
+        let usage = response.usage.unwrap();
+        assert_eq!(usage.input, Some(31));
+        assert_eq!(usage.output, Some(40));
+        assert_eq!(usage.total, Some(71));
+        // cache_read still comes from prompt_tokens_details.cached_tokens.
+        assert_eq!(usage.cache_read, Some(0));
+        let details: Value =
+            serde_json::from_str(usage.details.unwrap().get()).expect("details is JSON");
+        assert_eq!(
+            details,
+            json!({
+                "prompt_tokens_details": {"cached_tokens": 0},
+                "completion_tokens_details": {"reasoning_tokens": 30}
+            })
+        );
     }
 
     #[test]

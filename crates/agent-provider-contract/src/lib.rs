@@ -515,6 +515,30 @@ fn assert_unreported_usage_absent<M: Model, H: ContractHarness<M>>(
 /// last non-null one wins); and not at all. `ModelUsage` is the neutral unit: the harness
 /// maps it to its provider's field names. Fields the harness declares unreported must be
 /// `None` in the result — asserted, never skipped.
+/// Compares two `ModelUsage` values, but `details` **by JSON content, not by bytes**.
+///
+/// `OpaqueJson` equality is byte-exact, and an adapter that parses a provider chunk into
+/// `serde_json::Value` loses the original key order (`Value`'s map is a `BTreeMap`), which
+/// ADR 0007 J3 records as accepted. Comparing bytes here would force every expectation to be
+/// written in whatever order one adapter's parser happens to emit — encoding an
+/// implementation detail into a provider-neutral contract. The sub-objects' content and
+/// nesting are what the contract is about.
+fn assert_usage_eq(actual: Option<&ModelUsage>, expected: &ModelUsage, what: &str) {
+    let actual = actual.unwrap_or_else(|| panic!("{what}: no usage at all"));
+    let json = |usage: &ModelUsage| -> Option<Value> {
+        usage
+            .details
+            .as_ref()
+            .map(|d| serde_json::from_str(d.get()).expect("details is JSON"))
+    };
+    assert_eq!(json(actual), json(expected), "{what}: details content");
+    let strip = |usage: &ModelUsage| ModelUsage {
+        details: None,
+        ..usage.clone()
+    };
+    assert_eq!(strip(actual), strip(expected), "{what}");
+}
+
 pub async fn check_usage_shapes<M: Model, H: ContractHarness<M>>(h: &H) {
     // The hatch must not be usable to opt out of usage altogether: an adapter that declares
     // every field unreported would turn this check into a no-op and pass without parsing
@@ -543,16 +567,21 @@ pub async fn check_usage_shapes<M: Model, H: ContractHarness<M>>(h: &H) {
         total: Some(15),
         cache_read: Some(3),
         cache_write: None,
-        details: Some(OpaqueJson::parse(r#"{"cached_tokens":3}"#).unwrap()),
+        details: Some(
+            OpaqueJson::parse(
+                r#"{"prompt_tokens_details":{"cached_tokens":3},"completion_tokens_details":{"reasoning_tokens":30}}"#,
+            )
+            .unwrap(),
+        ),
     };
     let model = h.script(&[Wire::UsageTrailing(usage.clone())]).await;
     let resp = complete(&model, request(), &NoopSink).await.unwrap();
     assert_unreported_usage_absent(h, resp.usage.as_ref());
-    assert_eq!(
-        resp.usage,
-        Some(expected_usage(h, &usage)),
+    assert_usage_eq(
+        resp.usage.as_ref(),
+        &expected_usage(h, &usage),
         "the trailing usage block must be captured field-for-field, except that a provider \
-         which does not report a field must leave it None"
+         which does not report a field must leave it None",
     );
 
     // Every chunk carries usage; the last non-null one wins.
@@ -570,10 +599,10 @@ pub async fn check_usage_shapes<M: Model, H: ContractHarness<M>>(h: &H) {
         .await;
     let resp = complete(&model, request(), &NoopSink).await.unwrap();
     assert_unreported_usage_absent(h, resp.usage.as_ref());
-    assert_eq!(
-        resp.usage,
-        Some(expected_usage(h, &last)),
-        "the last non-null usage chunk must win"
+    assert_usage_eq(
+        resp.usage.as_ref(),
+        &expected_usage(h, &last),
+        "the last non-null usage chunk must win",
     );
 
     // No usage anywhere.

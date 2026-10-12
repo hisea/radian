@@ -95,7 +95,7 @@ impl OpenAiCompatible {
 
         let client = Client::builder()
             .connect_timeout(config.connect_timeout)
-            .user_agent(concat!("agent-runtime/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("radian/", env!("CARGO_PKG_VERSION")))
             // A redirect would resend the request, and the key with it, somewhere else.
             .redirect(redirect::Policy::none())
             .build()

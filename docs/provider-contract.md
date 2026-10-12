@@ -40,6 +40,12 @@ OpenAI 专有（只属于 http.rs，契约不管）：请求体/header 的形状
 - **判断：可以接受，风险有界。** 语义上是对的——兼容端点代理 Anthropic 模型时确实可能透传 `pause_turn`，而 Core 对 `PauseTurn` 的处理是 `Step::Continue`（`turn.rs:606`），正是「turn 被暂停、继续它」的本意；而且每个 step 开头都会检查 `max_model_calls`，所以不会无界循环。改动前它落到 `Other("pause_turn")`，Core 会把本轮判为 `Incomplete(UnknownStopReason)`——对一个真的发了 `pause_turn` 的端点，新行为更正确。
 - **但契约有一个设计缺口要在 Phase 3 之前补**：`check_finish_reasons` 要求每个 adapter 对**每个** `Reason` 都有线上形式，没有「我这家 provider 没有这个概念」的出口。这次是让 adapter 去迎合契约，下次可能逼着某个 adapter 伪造 provider 行为——那会产出错误的 adapter。**建议**：给 `ContractHarness` 加一个显式声明不支持的入口（例如 `fn unsupported() -> &'static [Reason] { &[] }`），`check_finish_reasons` 跳过被声明的项但**要求显式声明**，不允许静默跳过。接 Anthropic 时一并做。
 
+## 评审补充：契约比较 `details` 的方式（2026-10-12）
+
+实测暴露的 `completion_tokens_details` 缺口修好后，契约的 usage 期望值里出现了嵌套的 `details`。因为 `OpaqueJson` 的相等是**字节级**的，而适配器把 provider 的 chunk 解析成 `serde_json::Value` 时会丢掉原始键序（`Value` 的 map 是 `BTreeMap`，ADR 0007 的 J3 已把这一点记为可接受），原先的写法只能把期望值**按某个适配器的解析器恰好产出的顺序**写出来——那等于把一个实现细节编进了"与 adapter 无关"的契约里。
+
+评审时改成：契约用 `assert_usage_eq` 比较，**`details` 按 JSON 内容比，其余字段仍逐字段比**。`OpaqueJson` 的字节级相等仍在 `agent-core` 侧的往返测试里起作用（那里的字节确实应当保真）；契约关心的是子对象的内容与嵌套结构。两家 adapter 的契约套件在改动后仍各自全绿。
+
 ## 变异保证
 
 10 条契约每条都有一个针对性变异（在一次性检出里破坏 adapter 对应行为），全部被对应契约测试抓住，见 `crates/agent-provider-contract/MUTATIONS-CONTRACT.md`。抓不住错误的契约没有价值——这条保证是套件本身的一部分。

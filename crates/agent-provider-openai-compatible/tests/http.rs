@@ -571,7 +571,27 @@ async fn a_trailing_usage_chunk_is_captured_through_the_sse_stream() {
     assert_eq!(usage.cache_write, None);
     let details: Value =
         serde_json::from_str(usage.details.unwrap().get()).expect("details is JSON");
-    assert_eq!(details, json!({ "cached_tokens": 3 }));
+    assert_eq!(
+        details,
+        json!({ "prompt_tokens_details": { "cached_tokens": 3 } })
+    );
+}
+
+#[tokio::test]
+async fn the_user_agent_names_radian() {
+    // The endpoint's own documentation asks clients to identify themselves rather than
+    // impersonate a generic SDK, so this header is part of the outward contract.
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let mut session = chat(model(&server), NoTools).await;
+    session
+        .run_turn("hi", TurnOptions::default(), &NoopSink)
+        .await
+        .unwrap();
+    let agent = server.requests()[0]
+        .header("user-agent")
+        .unwrap_or_default()
+        .to_owned();
+    assert!(agent.starts_with("radian/"), "{agent}");
 }
 
 #[tokio::test]

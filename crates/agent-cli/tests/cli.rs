@@ -12,6 +12,18 @@ use tokio::time::timeout;
 
 const KEY: &str = "sk-cli-test-secret";
 
+/// How long a test waits for the CLI process to exit before calling it stuck. These bounds
+/// are hang watchdogs, not performance assertions: the actual synchronization is the state
+/// condition (process exit, a marker on stderr, a pid disappearing). The slowest legitimate
+/// run observed standalone was ~13 s, and one exceeded 30 s on a machine at load average 51,
+/// so 120 s leaves roughly ten times the observed worst case while still failing a genuinely
+/// stuck CLI.
+const EXIT_WATCHDOG: Duration = Duration::from_secs(120);
+
+/// The same idea for waits on a state that is not process exit (a stderr marker, a pid going
+/// away, a mock server recording a request).
+const STATE_WATCHDOG: Duration = Duration::from_secs(30);
+
 // ---------- helpers ----------
 
 /// The `agent` binary, built by the harness.
@@ -122,9 +134,9 @@ async fn feed_and_wait(mut child: Child, input: &str) -> (i32, String, String) {
         .unwrap()
         .write_all(input.as_bytes())
         .await;
-    let output = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output())
+    let output = tokio::time::timeout(EXIT_WATCHDOG, child.wait_with_output())
         .await
-        .expect("the CLI did not exit within 30s")
+        .expect("the CLI did not exit within the watchdog")
         .expect("wait");
     (
         output.status.code().unwrap_or(-1),
@@ -201,7 +213,7 @@ fn scratch(name: &str) -> PathBuf {
 /// Polls `predicate` until it holds, bounded; a sleep here is only the poll interval, never
 /// the synchronization itself.
 async fn wait_until(what: &str, predicate: impl Fn() -> bool) {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(STATE_WATCHDOG, async {
         while !predicate() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -239,7 +251,7 @@ impl Running {
 
     /// Reads more stderr until `marker` appears; keeps everything read so far.
     async fn wait_for_stderr(&mut self, marker: &str) {
-        timeout(Duration::from_secs(10), async {
+        timeout(STATE_WATCHDOG, async {
             while !self.stderr_seen.contains(marker) {
                 let mut buf = [0u8; 4096];
                 let n = self.stderr.read(&mut buf).await.expect("read stderr");
@@ -298,7 +310,7 @@ impl Running {
             mut stderr_seen,
             stdin: _,
         } = self;
-        let (output, ()) = timeout(Duration::from_secs(30), async {
+        let (output, ()) = timeout(EXIT_WATCHDOG, async {
             tokio::join!(child.wait_with_output(), async {
                 let mut rest = String::new();
                 let _ = stderr.read_to_string(&mut rest).await;
@@ -533,6 +545,319 @@ async fn a_local_base_url_needs_no_key_and_sends_no_authorization() {
     assert_eq!(server.requests()[0].header("authorization"), None);
 }
 
+// ---------- custom headers ----------
+
+#[tokio::test]
+async fn a_header_flag_is_sent_and_can_be_repeated() {
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--header",
+                "x-opencode-session=stable-123",
+                "--header",
+                "x-team=radian",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout, "ok\n");
+    let request = &server.requests()[0];
+    assert_eq!(request.header("x-opencode-session"), Some("stable-123"));
+    assert_eq!(request.header("x-team"), Some("radian"));
+}
+
+#[tokio::test]
+async fn a_header_without_an_equals_sign_is_a_usage_error_that_does_not_echo_it() {
+    // The malformed argument may itself be a credential: the error must not contain it.
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                "http://127.0.0.1:9",
+                "--header",
+                "Bearer sk-looks-like-a-secret",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 2);
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(stderr.contains("NAME=VALUE"), "{stderr}");
+    assert!(!stderr.contains("sk-looks-like-a-secret"), "{stderr}");
+}
+
+#[tokio::test]
+async fn an_invalid_header_name_is_refused() {
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                "http://127.0.0.1:9",
+                "--header",
+                "bad name=value",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 2);
+    assert!(stderr.contains("not a valid HTTP header name"), "{stderr}");
+}
+
+#[tokio::test]
+async fn an_authorization_header_is_refused_so_the_key_has_one_source() {
+    let server = MockServer::start(vec![text_reply("should not be reached")]).await;
+
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--header",
+                "Authorization=Bearer sk-from-a-header",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 2);
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(stderr.contains("--api-key-env"), "{stderr}");
+    assert!(!stderr.contains("sk-from-a-header"), "{stderr}");
+    assert!(
+        server.requests().is_empty(),
+        "no request may be sent when a header is refused"
+    );
+}
+
+#[tokio::test]
+async fn a_header_value_never_leaks_into_errors() {
+    // The server echoes the header value in an error body; neither stream may carry it.
+    let server = MockServer::start(vec![Reply::status(
+        500,
+        "{\"error\":{\"message\":\"bad team-secret-value\"}}",
+    )])
+    .await;
+
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--header",
+                "x-team-token=team-secret-value",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 1);
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(stderr.contains("HTTP 500"), "{stderr}");
+    assert!(!stderr.contains("team-secret-value"), "{stderr}");
+}
+
+// ---------- session id and usage ----------
+
+/// The `[session] <id>` note, when the CLI printed one.
+fn generated_session_id(stderr: &str) -> Option<String> {
+    stderr.lines().find_map(|line| {
+        Some(
+            line.strip_prefix("[session] ")?
+                .split(' ')
+                .next()?
+                .to_owned(),
+        )
+    })
+}
+
+#[tokio::test]
+async fn a_header_value_can_reference_the_generated_session_id() {
+    let server = MockServer::start(vec![text_reply("one"), text_reply("two")]).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--header",
+                "x-opencode-session={session_id}",
+            ],
+            &[],
+        ),
+        "first\nsecond\n",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    let id = generated_session_id(&stderr).unwrap_or_else(|| panic!("no session note: {stderr}"));
+    assert!(!id.is_empty());
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].header("x-opencode-session"), Some(id.as_str()));
+    // The same process uses the same id for every request.
+    assert_eq!(requests[1].header("x-opencode-session"), Some(id.as_str()));
+}
+
+#[tokio::test]
+async fn two_processes_get_different_generated_session_ids() {
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let server = MockServer::start(vec![text_reply("ok")]).await;
+        let (code, _, stderr) = feed_and_wait(
+            spawn_agent(
+                &[
+                    "--model",
+                    "m",
+                    "--base-url",
+                    &server.base_url,
+                    "--header",
+                    "x-session={session_id}",
+                    "-p",
+                    "hi",
+                ],
+                &[],
+            ),
+            "",
+        )
+        .await;
+        assert_eq!(code, 0, "{stderr}");
+        let id = generated_session_id(&stderr).expect("the CLI printed the generated id");
+        assert_eq!(server.requests()[0].header("x-session"), Some(id.as_str()));
+        ids.push(id);
+    }
+    assert_ne!(ids[0], ids[1], "different processes must differ");
+}
+
+#[tokio::test]
+async fn an_explicit_session_id_is_used_verbatim_and_not_announced() {
+    let server = MockServer::start(vec![text_reply("one"), text_reply("two")]).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--session-id",
+                "fixed-42",
+                "--header",
+                "x-session={session_id}",
+            ],
+            &[],
+        ),
+        "first\nsecond\n",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        generated_session_id(&stderr).is_none(),
+        "an explicit id needs no note: {stderr}"
+    );
+    let requests = server.requests();
+    assert_eq!(requests[0].header("x-session"), Some("fixed-42"));
+    assert_eq!(requests[1].header("x-session"), Some("fixed-42"));
+}
+
+#[tokio::test]
+async fn include_usage_flag_controls_stream_options() {
+    // Absent: the default policy. 127.0.0.1 is not api.openai.com, so usage is off.
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    feed_and_wait(
+        spawn_agent(
+            &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert!(server.requests()[0].json().get("stream_options").is_none());
+
+    // --include-usage: on.
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--include-usage",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(
+        server.requests()[0].json()["stream_options"],
+        json!({"include_usage": true})
+    );
+
+    // --include-usage=false: explicitly off.
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--include-usage=false",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert!(server.requests()[0].json().get("stream_options").is_none());
+}
+
 // ---------- tool approval ----------
 
 #[tokio::test]
@@ -644,7 +969,7 @@ async fn one_shot_without_a_terminal_denies_without_waiting() {
         ],
         &[],
     );
-    let (code, _, _) = running.finish_open(Duration::from_secs(10)).await;
+    let (code, _, _) = running.finish_open(EXIT_WATCHDOG).await;
 
     assert_eq!(code, 0);
     let denial = tool_result_content(&server, 1);
@@ -813,7 +1138,7 @@ async fn second_sigint_exits_130() {
         start.elapsed()
     );
     // Even the forced exit reaped the fixture.
-    assert!(gone_within(fixture_pid(&log), Duration::from_secs(3)).await);
+    assert!(gone_within(fixture_pid(&log), STATE_WATCHDOG).await);
 }
 
 // ---------- child process lifetime ----------
@@ -855,7 +1180,7 @@ async fn every_exit_reaps_the_mcp_children() {
 
         let pid = fixture_pid(&log);
         assert!(
-            gone_within(pid, Duration::from_secs(3)).await,
+            gone_within(pid, STATE_WATCHDOG).await,
             "{name}: fixture {pid} still running"
         );
     }
@@ -900,7 +1225,7 @@ async fn typing_exit_leaves_even_though_stdin_is_still_open() {
     let mut running = Running::spawn(&["--model", "m", "--base-url", &server.base_url], &[]);
 
     running.write("hi\n/exit\n").await;
-    let (code, stdout, _) = running.finish_open(Duration::from_secs(10)).await;
+    let (code, stdout, _) = running.finish_open(EXIT_WATCHDOG).await;
 
     assert_eq!(code, 0);
     assert_eq!(stdout, "hello\n");

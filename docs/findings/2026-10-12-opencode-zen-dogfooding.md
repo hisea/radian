@@ -73,3 +73,22 @@ delta: {"role":"assistant","content":"","reasoning_content":" user is asking"}
 - 未验证取消行为、idle timeout、错误体形态（4xx/5xx 的 JSON 结构）、并发限制。
 - 未验证 `--workspace` 内建工具与该模型的实际配合（它支持 `tools`，但没测多轮工具循环）。
 - 未测其他模型（`/models` 列了 `glm-5.3`、`grok-4.7`、`deepseek-v4-pro` 等）。
+
+## 修复状态（2026-10-12 当天）
+
+| 缺口 | 状态 |
+|---|---|
+| 1 `agent-cli` 不能发自定义 header | **已修**：`--header NAME=VALUE`（可重复）；`Authorization` 被**拒绝**并报错（key 的唯一来源仍是 `--api-key-env`）；值不进任何日志/错误/`Debug`。 |
+| 1b 没有会话 ID | **已修**：`--session-id`，且 `--header` 的值里可以写 `{session_id}` 占位符，由本进程生成的 ID 展开。设计是通用的，不是 opencode 专用。 |
+| 3 `completion_tokens_details` 丢失 | **已修**：`details` 现在按 wire 名承载**每一个** `*_details` 子对象（`prompt_tokens_details`、`completion_tokens_details`），推理 token 不再丢；`cache_read`/`cache_write` 仍从 prompt details 取；`total` 仍绝不计算。 |
+| 4 user-agent 叫 `agent-runtime` | **已修**：改为 `radian/<version>`，并有断言它的测试。 |
+| `include_usage` 无法显式开启 | **已修**：CLI 加了开关，默认沿用 ADR 0007 J8 的策略（只对 `api.openai.com` 默认开）。 |
+| 2 `reasoning_content` 被丢弃 | **已决定方案，待实现**：owner 选了"新增事件与字段"（`AgentEvent::ModelReasoningDelta` + `Message::Assistant.reasoning`）。规格见 `scratchpad/phase0-acceptance-criteria.md` §6.5（R1）。 |
+| 顺带 | `agent-cli` 那个对负载敏感的 30 秒退出超时已改。 |
+
+**仍未做的端到端验证**：上述修复之后还**没有**真的用 `agent-cli` 把这个端点跑通一轮（需要用户的 key）。命令形如：
+
+```sh
+cargo run -p agent-cli -- --base-url https://opencode.ai/zen/go/v1 --model deepseek-v4.1-flash \
+  --api-key-env MY_KEY --header 'x-opencode-session={session_id}' --workspace <某目录>
+```
