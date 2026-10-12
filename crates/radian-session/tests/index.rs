@@ -459,3 +459,102 @@ fn sessions_are_isolated_by_workspace() {
     assert_eq!(index.list(Some("/work/gamma")).unwrap().len(), 0);
     assert_eq!(index.list(None).unwrap().len(), 2);
 }
+
+// ---------- search (req 7) ----------
+
+/// A session with a user message, an assistant message and a tool result, each carrying a
+/// distinct searchable word.
+fn write_search_session(path: &Path) {
+    let sid = "sid-search";
+    let lines = [
+        serde_json::json!({"schema_version":1,"session_id":sid,"seq":0,
+            "ts":"2026-10-12T09:00:00.000000Z","event":"SessionCreated","critical":true,
+            "data":{"workspace":"/work/search","config_snapshot":{}}}),
+        serde_json::json!({"schema_version":1,"session_id":sid,"seq":1,
+            "ts":"2026-10-12T09:00:01.000000Z","event":"MessageAppended","critical":true,
+            "data":{"index":0,"message":{"user":{"content":[{"text":{"text":"the quick brown fox"}}]}}}}),
+        serde_json::json!({"schema_version":1,"session_id":sid,"seq":2,
+            "ts":"2026-10-12T09:00:02.000000Z","event":"MessageAppended","critical":true,
+            "data":{"index":1,"message":{"assistant":{"content":[{"text":{"text":"a plain answer"}}]}}}}),
+        serde_json::json!({"schema_version":1,"session_id":sid,"seq":3,
+            "ts":"2026-10-12T09:00:03.000000Z","event":"MessageAppended","critical":true,
+            "data":{"index":2,"message":{"tool":{"result":{"call_id":"c1","content":[
+                {"text":{"text":"toolonlysecretword"}}],"is_error":false}}}}}),
+    ];
+    let mut out = String::new();
+    for line in lines {
+        out.push_str(&line.to_string());
+        out.push('\n');
+    }
+    std::fs::write(path, out).unwrap();
+}
+
+#[test]
+fn a_search_hit_locates_back_to_the_original_line() {
+    let dir = TempDir::new("search");
+    let path = dir.file("s.jsonl");
+    write_search_session(&path);
+    let mut index = Index::open(dir.file("index.db")).unwrap();
+    index.rebuild(std::slice::from_ref(&path)).unwrap();
+
+    let hits = index.search("quick", None, 10).unwrap();
+    assert_eq!(hits.len(), 1);
+    let hit = &hits[0];
+    assert_eq!(hit.session_id, "sid-search");
+    assert_eq!(hit.seq, 1);
+    assert_eq!(hit.message_index, Some(0));
+    assert!(hit.snippet.contains("quick"), "{}", hit.snippet);
+
+    // The hit points at the exact bytes of the authoritative line.
+    let line = radian_session::read_line_at(&path, hit.byte_offset, hit.line_len).unwrap();
+    let value: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(value["seq"], 1);
+    assert_eq!(value["event"], "MessageAppended");
+    assert_eq!(value["data"]["index"], 0);
+    assert!(line.contains("quick"));
+}
+
+#[test]
+fn search_covers_user_and_assistant_text_but_not_tool_results() {
+    let dir = TempDir::new("search-scope");
+    let path = dir.file("s.jsonl");
+    write_search_session(&path);
+    let mut index = Index::open(dir.file("index.db")).unwrap();
+    index.rebuild(std::slice::from_ref(&path)).unwrap();
+
+    // Covered: user text and assistant text.
+    assert_eq!(index.search("fox", None, 10).unwrap().len(), 1);
+    assert_eq!(index.search("plain answer", None, 10).unwrap().len(), 1);
+    // Not covered: text inside a tool result (the documented gap).
+    assert_eq!(
+        index.search("toolonlysecretword", None, 10).unwrap().len(),
+        0
+    );
+}
+
+#[test]
+fn like_metacharacters_in_a_query_are_matched_literally() {
+    let dir = TempDir::new("search-escape");
+    let path = dir.file("s.jsonl");
+    write_search_session(&path);
+    let mut index = Index::open(dir.file("index.db")).unwrap();
+    index.rebuild(std::slice::from_ref(&path)).unwrap();
+
+    // `%` would match everything if unescaped.
+    assert_eq!(index.search("%", None, 10).unwrap().len(), 0);
+    assert_eq!(index.search("_", None, 10).unwrap().len(), 0);
+    assert_eq!(
+        index
+            .search("quick", Some("/work/other"), 10)
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(
+        index
+            .search("quick", Some("/work/search"), 10)
+            .unwrap()
+            .len(),
+        1
+    );
+}
