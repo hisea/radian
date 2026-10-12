@@ -1,0 +1,66 @@
+# radian agent instructions
+
+This repository holds a minimal headless Rust agent runtime: `agent-core` (the turn loop, tools, hooks, steering) and `agent-extensions` (MCP stdio tools). The design is in `docs/minimal-headless-rust-agent-runtime-design.md`. Read this file before you change code.
+
+## Verify
+
+Run these before you say a change is done. All three must pass. The minimum Rust version is 1.88.
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --locked
+```
+
+## Rules for delegating to pi
+
+Use this section when the owner asks you to hand work to pi in herdr. pi is a second coding agent in another pane. It is cheaper than you, and it does not know what you know.
+
+### Pick the task
+
+- Delegate a task when its result can be checked by commands and tests, and it does not depend on timing. Examples: benchmarks, adding tests with known expected results, mechanical refactors, syncing docs with code.
+- Do not hand off a task that depends on concurrency, ordering, cancellation, process lifetime, or the inner behavior of a dependency, unless you have already investigated it. Do these yourself, or put the verified facts in the brief first.
+- Do not hand off code that you cannot test on this machine, such as Windows process control.
+
+### Before you write the brief
+
+- Read the code the task touches. Read the source of every dependency whose behavior the task depends on. For example, read the service loop of `rmcp` before you ask for anything about its notifications.
+- Write only what you verified as fact. Mark each claim you did not verify as unverified. A wrong claim in a brief costs a whole round of work.
+- Check that what you ask for is possible. Do not ask for a deterministic proof of an order that the dependency does not guarantee.
+- Split a test that covers two causes into two tests, for example with a parameter. A test that mixes them fails for the wrong reason.
+
+### Set up
+
+- Check `test "$HERDR_ENV" = 1`. Find pi with `herdr agent list`. Read its pane with `herdr pane read <pane>` before you send anything. Make sure its input box is empty: a stale draft is added to the front of your message.
+- Give each task its own git worktree and branch: `git worktree add ../radian-pi -b pi/<task>`. pi works only there. pi commits on the branch and does not push or merge. You merge after the review, and only when the owner agrees. Remove the worktree after the merge.
+- Write the brief in a file outside the repository, in the scratchpad. Send one line with `herdr agent prompt <pane> "<one line that names the file>"`. Do not send long or multi-line text.
+
+### What the brief holds
+
+- The worktree path and the branch, and a ban on touching the main working tree.
+- The files to read first, the background, and the steps.
+- The limits: do not change the public API of `agent-core` without saying why, no new dependencies without a reason, minimum Rust 1.88, follow the style around it.
+- The acceptance commands from the Verify section, and how many times to repeat flaky-prone tests.
+- The test rule: each new test must fail when the feature is broken. pi runs the test against the broken code, and does a mutation check for each behavior it adds. The report names the test that caught each mutation.
+- The report: files changed, the design in a few lines, the command results, what pi is unsure about, and the commit id. pi must say when it is unsure, and must not guess.
+- The notice: when pi finishes or is blocked, it runs `herdr agent prompt <your pane> "<one line>"`. Use your own pane id from `$HERDR_PANE_ID`. The line has the status, the commit id, whether all the commands passed, and what you must decide.
+
+### While pi works
+
+- Do not poll. The notice wakes you.
+- Do not change pi's worktree while pi works.
+- If pi seems stuck, read its pane. Signs are a rising token count with no edits, and the same question asked again and again. Interrupt with `herdr agent send-keys <pane> esc`, then send one message with the correct facts and a clear decision. An interrupt loses only the current reasoning.
+- Keep a watch on the cost counter in the pane.
+
+### Review
+
+- Do not trust the report. Say that something is verified only after you ran it yourself.
+- Check out the commit in a separate worktree under the scratchpad. Run the Verify commands there. Run the tests that can be flaky five times.
+- Do a mutation check of pi's new tests in that worktree: break the code, see that a test fails, restore the code. A test that stays green is a hole. Tell pi about it.
+- Read the diff. Read each comment that claims a guarantee, such as "race-free", and check the claim. Look for a test that is named for one thing and checks another.
+- Send the problems back in a new brief on the same branch, as a new commit. Do not amend.
+
+### Shell hygiene
+
+- Test fixtures start child processes, and the children keep the stderr of the test run. An orphan keeps `cargo test 2>&1 | grep` blocked until the orphan ends. Write the output to a file. Find the orphan by the pid that the fixture logged, and kill only that pid.
+- Do not use `sleep` to wait. Do not leave a changed source file behind after a mutation check: restore it from a copy and compare.
