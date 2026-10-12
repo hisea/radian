@@ -4,6 +4,7 @@ members = [
     "crates/agent-core",
     "crates/agent-extensions",
     "crates/agent-provider-openai-compatible",
+    "crates/agent-cli",
 ]
 
 [workspace.package]
