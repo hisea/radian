@@ -1,0 +1,235 @@
+//! ADR 0006 §15-2/4/5/7: the reader must process every repository fixture exactly as
+//! `fixtures/README.md` declares, enforce `MessageAppended.index` continuity, and refuse
+//! a newer `schema_version` without ever writing.
+
+mod common;
+
+use agent_core::{InputSource, Message, recover};
+use common::{TempDir, fixture};
+use radian_session::{EventData, ReadError, Session, SessionJournal, WriteError};
+use serde_json::json;
+
+#[test]
+fn v1_minimal_is_accepted_with_a_contiguous_transcript() {
+    let session = Session::open(fixture("v1-minimal.jsonl")).unwrap();
+    assert_eq!(session.session_id(), "11111111-1111-4111-8111-111111111111");
+    assert_eq!(session.events().len(), 9);
+    assert!(session.skipped().is_empty());
+
+    // §15-7: the folded transcript equals the messages we expect from the file, without
+    // relying on a second copy of the file.
+    let history = session.history().unwrap();
+    assert_eq!(history.len(), 4);
+    assert_eq!(
+        history[0],
+        Message::user("Read /work/example/a.txt and fix the typo.")
+    );
+    assert!(matches!(&history[1], Message::Assistant { tool_calls, .. }
+        if tool_calls.len() == 1 && tool_calls[0].id == "call-1"));
+    assert!(matches!(&history[2], Message::Tool { result, .. } if result.call_id == "call-1"));
+    assert_eq!(history[3], Message::assistant("Fixed: wolrd -> world."));
+
+    // And the fold is exactly `recover` over the events mapped back to core records.
+    assert_eq!(history, recover(&session.journal_records()).unwrap());
+}
+
+#[test]
+fn v1_forward_skips_the_unknown_event_and_ignores_reserved_fields() {
+    let session = Session::open(fixture("v1-forward.jsonl")).unwrap();
+    assert_eq!(session.skipped(), &[(3, "HeartbeatRecorded".to_string())]);
+    assert_eq!(session.events().len(), 5);
+    assert_eq!(session.history().unwrap().len(), 2);
+
+    let EventData::Other(data) = &session.events()[0].data else {
+        panic!("SessionCreated is stored opaquely in this slice");
+    };
+    for reserved in ["agent_id", "profile_ref", "workspace_binding", "parent"] {
+        assert!(
+            data.get(reserved).is_some(),
+            "missing reserved field {reserved}"
+        );
+    }
+}
+
+#[test]
+fn unknown_optional_fields_are_ignored() {
+    let session = Session::open(fixture("unknown-optional-field.jsonl")).unwrap();
+    assert!(session.skipped().is_empty());
+    assert_eq!(session.events().len(), 4);
+    assert_eq!(session.history().unwrap(), [Message::user("hi")]);
+}
+
+#[test]
+fn an_unknown_noncritical_event_is_skipped_and_reported() {
+    let session = Session::open(fixture("unknown-event-noncritical.jsonl")).unwrap();
+    assert_eq!(
+        session.skipped(),
+        &[(1, "SpinProgressRecorded".to_string())]
+    );
+    assert_eq!(session.events().len(), 4);
+}
+
+#[test]
+fn an_unknown_critical_event_refuses_the_file_with_line_and_event() {
+    let err = Session::open(fixture("unknown-event-critical.jsonl")).unwrap_err();
+    let ReadError::UnknownCritical { line, event, .. } = &err else {
+        panic!("expected UnknownCritical, got {err:?}");
+    };
+    assert_eq!(*line, 2, "the 1-based line must be reported");
+    assert_eq!(event, "LedgerCommitted");
+    let text = err.to_string();
+    assert!(text.contains("line 2"), "{text}");
+    assert!(text.contains("LedgerCommitted"), "{text}");
+    assert!(text.contains("critical"), "{text}");
+}
+
+#[test]
+fn a_newer_schema_version_is_refused_and_never_written() {
+    let path = fixture("schema-version-newer.jsonl");
+    let before = std::fs::read(&path).unwrap();
+
+    let err = Session::open(&path).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ReadError::SchemaTooNew {
+                found: 2,
+                supported: 1,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+
+    // The write path must refuse as well, and touch nothing.
+    match SessionJournal::resume(&path, "11111111-1111-4111-8111-111111111111") {
+        Err(WriteError::Policy(e)) => assert!(matches!(e, ReadError::SchemaTooNew { .. }), "{e:?}"),
+        Err(other) => panic!("expected a policy refusal, got {other:?}"),
+        Ok(_) => panic!("resume must refuse a newer schema version"),
+    }
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "the file must be untouched"
+    );
+}
+
+#[test]
+fn a_torn_tail_is_dropped_at_read_time() {
+    let session = Session::open(fixture("truncated-tail.jsonl")).unwrap();
+    let seqs: Vec<u64> = session.events().iter().map(|e| e.seq).collect();
+    assert_eq!(seqs, [0, 1, 2, 3, 4]);
+}
+
+#[test]
+fn crash_after_started_repairs_the_unsettled_call() {
+    let session = Session::open(fixture("crash-after-started.jsonl")).unwrap();
+    assert_eq!(session.events().len(), 8);
+
+    let history = session.history().unwrap();
+    // call-1 keeps its real result; call-2, which only started, gets the ADR 0002 code.
+    let call_1 = history
+        .iter()
+        .find_map(|m| match m {
+            Message::Tool { result, .. } if result.call_id == "call-1" => Some(result),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(call_1.text(), "check a passed");
+    let call_2 = history
+        .iter()
+        .find_map(|m| match m {
+            Message::Tool { result, .. } if result.call_id == "call-2" => Some(result),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        call_2.error_code.as_deref(),
+        Some("outcome_unknown_after_crash")
+    );
+}
+
+#[test]
+fn replace_resets_the_index_and_repairs_the_new_revision_only() {
+    let session = Session::open(fixture("replace-resets-index.jsonl")).unwrap();
+    assert_eq!(session.events().len(), 10);
+    assert!(session.skipped().is_empty());
+
+    // The two messages before the replacement are gone from the transcript.
+    let history = session.history().unwrap();
+    assert_eq!(history[0].text(), "sync from scheduler");
+    match &history[0] {
+        Message::User { meta, .. } => {
+            assert_eq!(meta.id.as_ref().map(|m| m.0.as_str()), Some("sync-1"));
+            assert_eq!(meta.source, Some(InputSource::Scheduler));
+            assert!(meta.origin.is_some());
+        }
+        other => panic!("expected the replacement user message, got {other:?}"),
+    }
+    assert_eq!(
+        history[1],
+        Message::Assistant {
+            content: vec![],
+            tool_calls: vec![agent_core::ToolCall {
+                id: "call-9".into(),
+                name: "check_a".into(),
+                arguments: json!({}),
+            }],
+            provider_payload: None,
+            interrupted: false,
+            meta: Default::default(),
+        }
+    );
+    assert_eq!(history.len(), 3, "call-9 gets one repaired result");
+    // call-9 has a Started marker, so its outcome is unknown, not "not started".
+    assert!(matches!(&history[2], Message::Tool { result, .. }
+        if result.error_code.as_deref() == Some("outcome_unknown_after_crash")));
+}
+
+#[test]
+fn a_message_index_gap_is_corruption() {
+    let dir = TempDir::new("index-gap");
+    let path = dir.file("bad.jsonl");
+    let head = r#"{"schema_version":1,"session_id":"sid","seq":0,"ts":"2026-10-12T00:00:00.000000Z","event":"MessageAppended","critical":true,"data":{"index":0,"message":{"user":{"content":[{"text":{"text":"hi"}}]}}}}"#;
+    let gap = r#"{"schema_version":1,"session_id":"sid","seq":1,"ts":"2026-10-12T00:00:01.000000Z","event":"MessageAppended","critical":true,"data":{"index":2,"message":{"assistant":{"content":[]}}}}"#;
+    std::fs::write(&path, format!("{head}\n{gap}\n")).unwrap();
+
+    let err = Session::open(&path).unwrap_err();
+    let ReadError::BadIndex {
+        line,
+        expected,
+        found,
+        ..
+    } = &err
+    else {
+        panic!("expected BadIndex, got {err:?}");
+    };
+    assert_eq!((*line, *expected, *found), (2, 1, 2));
+}
+
+#[test]
+fn a_schema_version_change_mid_file_is_corruption() {
+    let dir = TempDir::new("version-mid");
+    let path = dir.file("bad.jsonl");
+    let a = r#"{"schema_version":1,"session_id":"sid","seq":0,"ts":"2026-10-12T00:00:00.000000Z","event":"MessageAppended","critical":true,"data":{"index":0,"message":{"user":{"content":[]}}}}"#;
+    let b = r#"{"schema_version":2,"session_id":"sid","seq":1,"ts":"2026-10-12T00:00:01.000000Z","event":"MessageAppended","critical":true,"data":{"index":1,"message":{"user":{"content":[]}}}}"#;
+    std::fs::write(&path, format!("{a}\n{b}\n")).unwrap();
+    let err = Session::open(&path).unwrap_err();
+    assert!(
+        matches!(err, ReadError::Envelope { line: 2, .. }),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn a_bad_json_line_names_its_line_number() {
+    let dir = TempDir::new("bad-json");
+    let path = dir.file("bad.jsonl");
+    let ok = r#"{"schema_version":1,"session_id":"sid","seq":0,"ts":"2026-10-12T00:00:00.000000Z","event":"MessageAppended","critical":true,"data":{"index":0,"message":{"user":{"content":[]}}}}"#;
+    std::fs::write(&path, format!("{ok}\n{{not json}}\n")).unwrap();
+    let err = Session::open(&path).unwrap_err();
+    let ReadError::Corrupt { line, .. } = err else {
+        panic!("expected Corrupt");
+    };
+    assert_eq!(line, 2);
+}

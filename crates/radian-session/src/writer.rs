@@ -132,14 +132,18 @@ impl SessionJournal {
         let Some(last_seq) = scan.last_seq else {
             return Err(WriteError::Empty { path });
         };
-        if scan.version != SCHEMA_VERSION {
-            return Err(ReadError::Envelope {
+        if scan.version > SCHEMA_VERSION {
+            return Err(ReadError::SchemaTooNew {
                 path: path.clone(),
-                line: 1,
-                message: format!(
-                    "declared schema_version {}, expected {SCHEMA_VERSION}",
-                    scan.version
-                ),
+                found: scan.version,
+                supported: SCHEMA_VERSION,
+            }
+            .into());
+        }
+        if scan.version != SCHEMA_VERSION {
+            return Err(ReadError::UnsupportedSchema {
+                path: path.clone(),
+                found: scan.version,
             }
             .into());
         }
