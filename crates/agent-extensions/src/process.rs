@@ -14,8 +14,8 @@
 //! signal the group between the reap and the end of the check.
 
 use std::io;
-use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -35,6 +35,42 @@ pub(crate) struct ServerProcess {
 impl ServerProcess {
     /// Must be called inside a Tokio runtime (the pipes register with its reactor).
     pub(crate) fn spawn(config: &McpServerConfig) -> io::Result<(Self, ChildStdout, ChildStdin)> {
+        Self::spawn_with(config, start_reaper_thread)
+    }
+
+    /// `start_reaper` runs the reaper body on a new thread. It is a parameter so that a test
+    /// can make thread creation fail.
+    ///
+    /// The reaper thread is created before the child. A thread the OS refuses to create then
+    /// costs nothing: no child exists yet. Once the child runs, it is handed to the reaper
+    /// through a channel, and every failure from there on is cleaned up by this thread, which
+    /// still owns the child until the hand-over succeeds.
+    fn spawn_with(
+        config: &McpServerConfig,
+        start_reaper: impl FnOnce(Box<dyn FnOnce() + Send>) -> io::Result<()>,
+    ) -> io::Result<(Self, ChildStdout, ChildStdin)> {
+        let (child_tx, child_rx) = mpsc::channel::<Child>();
+        let (exited_tx, exited) = watch::channel(false);
+        let reaped = Arc::new(Mutex::new(false));
+        let reaped_by_reaper = Arc::clone(&reaped);
+        start_reaper(Box::new(move || {
+            // The sender is dropped without sending when the child could not be started.
+            let Ok(mut child) = child_rx.recv() else {
+                return;
+            };
+            let pid = child.id();
+            wait_for_exit_without_reaping(pid);
+            {
+                let mut reaped = lock(&reaped_by_reaper);
+                // The leader is a zombie or already reaped by nobody else, so its pid and
+                // group are still reserved and this reaches only the leftover members.
+                kill_group(pid);
+                let _ = child.wait();
+                *reaped = true;
+            }
+            let _ = exited_tx.send(true);
+        }))?;
+
         let mut command = Command::new(&config.command);
         command
             .args(&config.args)
@@ -73,41 +109,26 @@ impl ServerProcess {
         let (stdout, stdin) = match pipes {
             Ok(pipes) => pipes,
             Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                stop_unreaped(child);
                 return Err(e);
             }
         };
-
-        let (exited_tx, exited) = watch::channel(false);
-        let reaped = Arc::new(Mutex::new(false));
-        let reaped_by_reaper = Arc::clone(&reaped);
-        let reaper = thread::Builder::new()
-            .name(format!("mcp-reaper-{pid}"))
-            .spawn(move || {
-                wait_for_exit_without_reaping(pid);
-                {
-                    let mut reaped = lock(&reaped_by_reaper);
-                    // The leader is a zombie or already reaped by nobody else, so its pid and
-                    // group are still reserved and this reaches only the leftover members.
-                    kill_group(pid);
-                    let _ = child.wait();
-                    *reaped = true;
-                }
-                let _ = exited_tx.send(true);
-            });
-        let process = Self {
-            pid,
-            exited,
-            reaped,
-        };
-        if let Err(e) = reaper {
-            // The child moved into the failed closure and was dropped unreaped; kill it at
-            // least, so it does not keep running.
-            process.kill_tree();
-            return Err(e);
+        if let Err(mpsc::SendError(child)) = child_tx.send(child) {
+            // The reaper thread is gone, so nothing else will ever reap this child.
+            stop_unreaped(child);
+            return Err(io::Error::other(format!(
+                "the reaper thread ended early (server process {pid} was stopped)"
+            )));
         }
-        Ok((process, stdout, stdin))
+        Ok((
+            Self {
+                pid,
+                exited,
+                reaped,
+            },
+            stdout,
+            stdin,
+        ))
     }
 
     pub(crate) fn pid(&self) -> u32 {
@@ -137,6 +158,19 @@ impl ServerProcess {
         self.kill_tree();
         self.wait_exit(limit).await
     }
+}
+
+fn start_reaper_thread(body: Box<dyn FnOnce() + Send>) -> io::Result<()> {
+    thread::Builder::new()
+        .name("mcp-reaper".into())
+        .spawn(body)
+        .map(|_| ())
+}
+
+/// Kills a child that no reaper owns and reaps it here.
+fn stop_unreaped(mut child: Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn lock(mutex: &Mutex<bool>) -> MutexGuard<'_, bool> {
@@ -199,5 +233,48 @@ impl Drop for ServerProcess {
     fn drop(&mut self) {
         // The reaper thread keeps running and reaps the process after the kill.
         self.kill_tree();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(command: &str) -> McpServerConfig {
+        McpServerConfig::new("test", command)
+    }
+
+    #[tokio::test]
+    async fn no_child_is_started_when_the_reaper_thread_cannot_be_created() {
+        // The command does not exist: had the child been spawned first, the error would be
+        // NotFound. Getting the thread error instead shows the thread came first.
+        let result = ServerProcess::spawn_with(&config("/nonexistent/never-run"), |_body| {
+            Err(io::Error::other("no threads left"))
+        });
+
+        let error = result.err().expect("spawn must fail");
+        assert_eq!(error.to_string(), "no threads left");
+    }
+
+    #[tokio::test]
+    async fn a_child_is_stopped_and_reaped_when_the_reaper_never_runs() {
+        // The thread "starts" but drops its body, so the hand-over of the child fails.
+        let result = ServerProcess::spawn_with(&config("/bin/sleep").arg("30"), |body| {
+            drop(body);
+            Ok(())
+        });
+
+        let error = result.err().expect("spawn must fail");
+        let message = error.to_string();
+        let pid: i32 = message
+            .split("server process ")
+            .nth(1)
+            .and_then(|rest| rest.split(' ').next())
+            .and_then(|pid| pid.parse().ok())
+            .unwrap_or_else(|| panic!("no pid in {message:?}"));
+        // kill(pid, 0) succeeds for a zombie, so failure means the child was reaped too.
+        // SAFETY: signal 0 only checks that the process exists.
+        let exists = unsafe { libc::kill(pid, 0) } == 0;
+        assert!(!exists, "server process {pid} was left behind");
     }
 }

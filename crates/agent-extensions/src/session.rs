@@ -17,7 +17,7 @@ use rmcp::service::{
 use serde_json::{Value, json};
 
 use crate::alias::tool_alias;
-use crate::client::{Client, ProgressRouter};
+use crate::client::{Client, ProgressQueue, ProgressRouter};
 use crate::config::McpServerConfig;
 use crate::process::ServerProcess;
 
@@ -252,23 +252,21 @@ impl Server {
 
         // The request is already on the wire when `send_cancellable_request` returns, so the
         // server may have sent progress before this point; whatever the router buffered for
-        // this token is replayed into the channel by `register`, under the same lock
-        // `on_progress` delivers through, so nothing is missed.
-        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        // this token is replayed into the queue by `register`, under the same lock
+        // `on_progress` delivers through, so nothing is missed. The queue is bounded, so a
+        // server that floods progress cannot grow host memory; see `PROGRESS_QUEUE_LIMIT`.
+        let progress = Arc::new(ProgressQueue::default());
         self.progress_router
-            .register(handle.progress_token.clone(), progress_tx.clone());
+            .register(handle.progress_token.clone(), Arc::clone(&progress));
         // If this future is dropped mid-call (the turn was poisoned), kill the server now.
         let mut guard = AbortGuard {
             server: self,
             armed: true,
         };
-        // Removes the registration when the call ends, whenever that happens, and keeps the
-        // channel open until then — the select below relies on `recv()` never returning
-        // `None` while the call runs.
+        // Removes the registration when the call ends, whenever that happens.
         let _progress = ProgressGuard {
             router: &self.progress_router,
             token: handle.progress_token.clone(),
-            sender: progress_tx,
         };
         enum Waited<T> {
             Response(T),
@@ -289,7 +287,7 @@ impl Server {
                 // deadline whenever progress flows.
                 () = &mut timeout => break Waited::TimedOut,
                 // Polled before the response, which trims (but cannot eliminate) tail loss.
-                Some(notification) = progress_rx.recv() => {
+                notification = progress.recv() => {
                     if monotone.admit(&notification) {
                         cx.events.emit(AgentEvent::ToolProgress {
                             index: cx.index,
@@ -417,8 +415,6 @@ impl Drop for AbortGuard<'_> {
 struct ProgressGuard<'a> {
     router: &'a Arc<ProgressRouter>,
     token: rmcp::model::ProgressToken,
-    #[allow(dead_code)] // held only to keep the channel open while the call runs
-    sender: tokio::sync::mpsc::UnboundedSender<ProgressNotificationParam>,
 }
 
 impl Drop for ProgressGuard<'_> {
@@ -634,19 +630,19 @@ mod tests {
 
     #[test]
     fn routed_progress_reaches_emission_in_registration_order() {
-        // What `call` does, minus the server: the router channel plus the monotone filter.
+        // What `call` does, minus the server: the router queue plus the monotone filter.
         let router = crate::client::ProgressRouter::default();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let queue = Arc::new(ProgressQueue::default());
         // Notifications that beat the registration, in order.
         router.deliver(notification(1.0));
-        router.register(token(1), tx);
+        router.register(token(1), Arc::clone(&queue));
         // ...and ones that find the live route.
         router.deliver(notification(3.0));
         router.deliver(notification(2.0));
 
         let mut monotone = ProgressMonotone::default();
         let mut emitted = Vec::new();
-        while let Ok(notification) = rx.try_recv() {
+        while let Some(notification) = queue.try_pop() {
             if monotone.admit(&notification) {
                 emitted.push(notification.progress);
             }

@@ -16,6 +16,51 @@ use rmcp::{ClientHandler, ErrorData};
 /// grow host memory; the oldest are dropped first.
 const ORPHAN_LIMIT: usize = 256;
 
+/// Most progress notifications one call keeps waiting for the call to take them. Progress is a
+/// display value that a newer one supersedes, so when a server sends faster than the call
+/// drains, the oldest are dropped rather than letting memory grow without bound.
+pub(crate) const PROGRESS_QUEUE_LIMIT: usize = 64;
+
+/// The notifications of one call, waiting to be emitted. Bounded; drops the oldest when full.
+///
+/// `push` is synchronous because rmcp delivers notifications from its service loop, which must
+/// never wait on a call. `recv` is cancel-safe: it keeps no state between polls.
+#[derive(Debug, Default)]
+pub(crate) struct ProgressQueue {
+    items: Mutex<VecDeque<ProgressNotificationParam>>,
+    ready: tokio::sync::Notify,
+}
+
+impl ProgressQueue {
+    pub(crate) fn push(&self, params: ProgressNotificationParam) {
+        {
+            let mut items = self.items.lock().unwrap_or_else(|e| e.into_inner());
+            items.push_back(params);
+            while items.len() > PROGRESS_QUEUE_LIMIT {
+                items.pop_front();
+            }
+        }
+        // Stores a permit when nobody waits yet, so a push is never missed by `recv`.
+        self.ready.notify_one();
+    }
+
+    pub(crate) async fn recv(&self) -> ProgressNotificationParam {
+        loop {
+            if let Some(params) = self.try_pop() {
+                return params;
+            }
+            self.ready.notified().await;
+        }
+    }
+
+    pub(crate) fn try_pop(&self) -> Option<ProgressNotificationParam> {
+        self.items
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop_front()
+    }
+}
+
 /// Routes progress notifications to the call that carries the matching token.
 ///
 /// rmcp mints the token only while sending the request, and the request is on the wire by the
@@ -30,7 +75,7 @@ pub(crate) struct ProgressRouter {
 
 #[derive(Debug, Default)]
 struct Inner {
-    routes: HashMap<ProgressToken, tokio::sync::mpsc::UnboundedSender<ProgressNotificationParam>>,
+    routes: HashMap<ProgressToken, Arc<ProgressQueue>>,
     orphans: VecDeque<ProgressNotificationParam>,
 }
 
@@ -40,10 +85,7 @@ impl ProgressRouter {
     pub(crate) fn deliver(&self, params: ProgressNotificationParam) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         match inner.routes.get(&params.progress_token) {
-            Some(sender) => {
-                // A failure means the call already settled and dropped its receiver.
-                let _ = sender.send(params);
-            }
+            Some(queue) => queue.push(params),
             None => {
                 inner.orphans.push_back(params);
                 while inner.orphans.len() > ORPHAN_LIMIT {
@@ -53,25 +95,21 @@ impl ProgressRouter {
         }
     }
 
-    /// Registers a call's channel. Notifications that already arrived for the token are
+    /// Registers a call's queue. Notifications that already arrived for the token are
     /// replayed into it here, under the lock, so nothing sent before registration is missed
     /// and nothing after is duplicated.
-    pub(crate) fn register(
-        &self,
-        token: ProgressToken,
-        sender: tokio::sync::mpsc::UnboundedSender<ProgressNotificationParam>,
-    ) {
+    pub(crate) fn register(&self, token: ProgressToken, queue: Arc<ProgressQueue>) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut i = 0;
         while i < inner.orphans.len() {
             if inner.orphans[i].progress_token == token {
                 let orphan = inner.orphans.remove(i).expect("index just checked");
-                let _ = sender.send(orphan);
+                queue.push(orphan);
             } else {
                 i += 1;
             }
         }
-        inner.routes.insert(token, sender);
+        inner.routes.insert(token, queue);
     }
 
     /// Removes a settled call's route; whatever arrives for its token afterwards stays in the
@@ -178,17 +216,21 @@ mod tests {
         serde_json::from_value(value).expect("valid notification")
     }
 
+    fn queue() -> Arc<ProgressQueue> {
+        Arc::new(ProgressQueue::default())
+    }
+
     #[test]
     fn live_routes_receive_their_notifications() {
         let router = ProgressRouter::default();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        router.register(token(1), tx);
+        let mine = queue();
+        router.register(token(1), Arc::clone(&mine));
 
         router.deliver(notification(1, 4.0, "mine"));
         router.deliver(notification(2, 5.0, "not mine"));
 
-        assert_eq!(rx.try_recv().unwrap().message.as_deref(), Some("mine"));
-        assert!(rx.try_recv().is_err());
+        assert_eq!(mine.try_pop().unwrap().message.as_deref(), Some("mine"));
+        assert!(mine.try_pop().is_none());
         assert_eq!(router.orphan_count(), 1);
     }
 
@@ -200,19 +242,13 @@ mod tests {
         router.deliver(notification(1, 2.0, "second"));
         router.deliver(notification(1, 3.0, "third"));
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        router.register(token(1), tx);
+        let mine = queue();
+        router.register(token(1), Arc::clone(&mine));
 
-        let messages: Vec<_> = [
-            rx.try_recv().unwrap(),
-            rx.try_recv().unwrap(),
-            rx.try_recv().unwrap(),
-        ]
-        .into_iter()
-        .map(|n| n.message.expect("set"))
-        .collect();
+        let messages: Vec<_> = std::iter::from_fn(|| mine.try_pop())
+            .map(|n| n.message.expect("set"))
+            .collect();
         assert_eq!(messages, ["first", "second", "third"]);
-        assert!(rx.try_recv().is_err());
         // The other call's notification is still buffered, waiting for its own route.
         assert_eq!(router.orphan_count(), 1);
     }
@@ -227,12 +263,13 @@ mod tests {
         assert_eq!(router.orphan_count(), ORPHAN_LIMIT);
 
         // The first notifications were evicted; the latest survive.
-        let (early, _) = tokio::sync::mpsc::unbounded_channel();
-        router.register(token(0), early);
-        let (late, mut late_rx) = tokio::sync::mpsc::unbounded_channel();
-        router.register(token(far_over as i64 - 1), late);
+        let early = queue();
+        router.register(token(0), Arc::clone(&early));
+        assert!(early.try_pop().is_none(), "the oldest orphan must be gone");
+        let late = queue();
+        router.register(token(far_over as i64 - 1), Arc::clone(&late));
         assert!(
-            late_rx.try_recv().is_ok(),
+            late.try_pop().is_some(),
             "the newest orphan must still be there"
         );
     }
@@ -240,14 +277,53 @@ mod tests {
     #[test]
     fn unregister_stops_delivery() {
         let router = ProgressRouter::default();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        router.register(token(1), tx);
+        let mine = queue();
+        router.register(token(1), Arc::clone(&mine));
         assert_eq!(router.route_count(), 1);
 
         router.unregister(&token(1));
         router.deliver(notification(1, 1.0, "late"));
 
-        assert!(rx.try_recv().is_err());
+        assert!(mine.try_pop().is_none());
         assert_eq!(router.route_count(), 0);
+    }
+
+    #[test]
+    fn a_flood_keeps_the_queue_bounded_and_keeps_the_newest() {
+        let router = ProgressRouter::default();
+        let mine = queue();
+        router.register(token(1), Arc::clone(&mine));
+
+        let flood = PROGRESS_QUEUE_LIMIT * 50;
+        for i in 1..=flood {
+            router.deliver(notification(1, i as f64, "flood"));
+        }
+
+        let kept: Vec<f64> = std::iter::from_fn(|| mine.try_pop())
+            .map(|n| n.progress)
+            .collect();
+        assert_eq!(kept.len(), PROGRESS_QUEUE_LIMIT);
+        assert_eq!(
+            kept.last().copied(),
+            Some(flood as f64),
+            "the newest survives"
+        );
+        assert!(kept.windows(2).all(|w| w[0] < w[1]), "order is kept");
+    }
+
+    #[tokio::test]
+    async fn recv_waits_for_a_push_and_a_push_is_never_missed() {
+        let mine = queue();
+        let waiting = {
+            let mine = Arc::clone(&mine);
+            tokio::spawn(async move { mine.recv().await.progress })
+        };
+        tokio::task::yield_now().await;
+        mine.push(notification(1, 7.0, "x"));
+        assert_eq!(waiting.await.unwrap(), 7.0);
+
+        // A push before anyone waits is still seen.
+        mine.push(notification(1, 8.0, "y"));
+        assert_eq!(mine.recv().await.progress, 8.0);
     }
 }

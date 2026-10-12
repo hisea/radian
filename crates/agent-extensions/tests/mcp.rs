@@ -610,6 +610,36 @@ async fn settled_progress_is_not_lost() {
     );
 }
 
+// A server may send progress far faster than a call drains it. Each call keeps a bounded queue
+// and drops the oldest when it is full (the bound itself is a `ProgressQueue` unit test), so the
+// newest value must still arrive. `settleMs` gives the last notifications time to be routed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_progress_flood_still_delivers_the_latest_value() {
+    let session = open(vec![fixture("fx")]).await;
+    let events = Recorder::default();
+
+    call_at(
+        &session,
+        "fx__progress",
+        json!({"count": 3000, "intervalMs": 0, "settleMs": 200}),
+        0,
+        &events,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    let seen: Vec<f64> = progress_events(&events)
+        .iter()
+        .map(|(_, progress)| progress["progress"].as_f64().unwrap())
+        .collect();
+    assert_eq!(seen.last().copied(), Some(3000.0));
+    assert!(
+        seen.windows(2).all(|w| w[0] < w[1]),
+        "emission stays monotone"
+    );
+}
+
 // A server that breaks the spec's monotone rule reaches the filter on the real call path in a
 // deterministic order, which rmcp's own reordering never does. Removing the filter from the
 // call must fail this test; the filter's unit tests alone cannot show that it is wired in.
