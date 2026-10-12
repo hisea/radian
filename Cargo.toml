@@ -12,6 +12,7 @@ members = [
     "crates/radian-coding",
     "crates/radian-runtime",
     "crates/radian-sandbox",
+    "crates/radian-tui",
 ]
 
 [workspace.package]
