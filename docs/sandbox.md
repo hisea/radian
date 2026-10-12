@@ -1,8 +1,14 @@
 # Sandbox backends（Phase 3）
 
 `crates/radian-sandbox` 把两个 spike 变成产品代码：macOS 的 `sandbox-exec` + SBPL，和 Linux 的
-`bubblewrap`。它只提供一件事——**受约束地启动一个子进程**；shell 工具、审批（`ApprovalPolicy`）
-与规则集（`ToolRuleSet`）不在本 crate，也**没有**接进 `agent-cli`。
+`bubblewrap`。它只提供一件事——**受约束地启动一个子进程**；审批（`ApprovalPolicy`）与规则集
+（`ToolRuleSet`）不在本 crate，也**没有**接进 `agent-cli`。
+
+**消费者（2026-10-12，Phase 3 shell 切片）：** `radian-coding` 的 `shell` 工具是第一个消费者
+（`CodingTools::with_sandbox`）；没有 `Sandbox` 时它根本不注册。两点值得记在这里：① `FullAccess`
+下后端是透明的（不探测、不包裹），但 shell 工具仍自己按 `allow_env` 清环境——**full-access 是
+"文件系统/网络不设限"，不是"把宿主环境交给模型控制的 shell"**；② 进程组清理（超时/取消/leader
+退出都杀整组）是 shell 工具自己的职责，不是沙箱的，见 `crates/radian-coding/src/shell.rs`。
 
 ## 硬规则：请求沙箱但后端不可用 = 明确失败
 

@@ -1,11 +1,11 @@
 //! Built-in coding tools for radian: `read`, `write`, `patch`, `list`, `git_status`,
-//! `git_diff`. **No shell, no command execution, read-only git.** See `README.md` next to
+//! `git_diff`, and (only when the host supplies a sandbox) `shell`. See `README.md` next to
 //! this crate for the tool/limit tables.
 //!
-//! Every tool operates under one workspace root given by the host. There is no sandbox
-//! behind these tools (see `docs/adr/0012-permission-sources.md` and
-//! `docs/spikes/macos-sandbox.md`: the sandbox, when one exists, can read the whole
-//! `$HOME` anyway), so the path boundary is enforced **here**, per call:
+//! Every tool operates under one workspace root given by the host. The file tools enforce the
+//! path boundary **here**, per call (see below); `shell` adds the OS sandbox as defence in
+//! depth and is never run without one — see `src/shell.rs` for what the sandbox does and does
+//! not enforce.
 //!
 //! - paths are workspace-relative; absolute paths and `..` escapes are refused;
 //! - the target is canonicalized and must stay under the canonical workspace root, which
@@ -33,6 +33,14 @@
 //! - **`git` is invoked as a child process.** It can read `~/.gitconfig` and the repository,
 //!   and it is told not to take optional locks (`--no-optional-locks`); the tests assert
 //!   `.git` is unchanged. No sandbox is applied to it.
+//! - **`shell`'s confinement is exactly the sandbox's.** Under `workspace-write` the
+//!   backend confines filesystem writes, sensitive reads and the network; the macOS backend
+//!   leaves `mach-lookup` open, so the IPC boundary is not tightened, and no text may present
+//!   the tool as full credential isolation (ADR 0012). `full-access` is **not** confined at
+//!   all: it is the caller's explicit choice, never a default, and the tool description says
+//!   so. The tool's own guarantees are narrower and always hold: a command runs in its own
+//!   process group which is killed on timeout, cancellation and leader exit, and the host's
+//!   environment is filtered to the sandbox whitelist in every mode.
 
 mod git;
 mod list;

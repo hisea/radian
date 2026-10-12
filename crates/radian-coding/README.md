@@ -1,7 +1,8 @@
 # radian-coding
 
-Built-in coding tools for radian, bound to one workspace root. **No shell, no arbitrary
-command execution, read-only git.** See the crate docs (`src/lib.rs`) for the security
+Built-in coding tools for radian, bound to one workspace root. The file tools enforce the
+workspace boundary themselves; `shell` exists **only when the host supplies a sandbox** and
+never runs without one. Git is read-only. See the crate docs (`src/lib.rs`) for the security
 contract; this file is the practical summary.
 
 ## Tools
@@ -14,6 +15,7 @@ contract; this file is the practical summary.
 | `list` | `Shared` | List a directory, sorted, with kind and size; symlinks shown but not followed; capped by `max_entries`. |
 | `git_status` | `Shared` | `git status --porcelain=v1 --branch --untracked-files=all`. |
 | `git_diff` | `Shared` | `git diff [--cached] [-- <path>]`; the path must stay inside the workspace. |
+| `shell` | `Exclusive` | `/bin/sh -c <command>` **through a sandbox**, with `cwd` (workspace-relative) and `timeout_secs`. Present only when the host built the tools with a `Sandbox`. |
 
 `write`/`patch` are `Exclusive` because they mutate files: running them alone keeps each
 edit's read-modify-write atomic with respect to the other tools and avoids two writers
@@ -29,6 +31,8 @@ racing on one file. The read-only tools are `Shared` so a batch of reads/diffs c
 | `max_list_entries` / `default_list_entries` | 5000 / 500 | Bound the listing result. |
 | `max_git_output_bytes` | 1 MiB | Bound git output, truncated on a character boundary with a marker. |
 | `git_timeout` | 10 s | A hung git must not hang the turn. |
+| `max_shell_output_bytes` | 256 KiB (stdout+stderr combined) | Four times the default `read` budget: enough for a build/test log tail, small enough not to dominate the context. Truncation is reported in the text and in `structured.stdout_truncated_bytes`/`stderr_truncated_bytes`. |
+| `default_shell_timeout` / `max_shell_timeout` | 60 s / 600 s | A model-supplied `timeout_secs` is clamped to the maximum, and the clamp is reported. |
 
 ## What is enforced, and what is not
 
@@ -54,13 +58,25 @@ Enforced (each with tests in `tests/escaping.rs` and `tests/mutation.rs`):
 - **`git` is a child process** and can read `~/.gitconfig` and the repository. It is told
   not to take optional locks; tests assert `.git` is unchanged, but no sandbox wraps it.
 - Windows: no `O_NOFOLLOW` and no link count; the extra checks are Unix-only.
+- **`shell`'s confinement is exactly the sandbox's** (tests in `tests/shell.rs`). Under
+  `workspace-write` writes are confined to the workspace, the fake sensitive path in the test
+  is unreadable and the network is off; **the macOS backend leaves `mach-lookup` open, so the
+  IPC boundary is not tightened and this is not full credential isolation** (ADR 0012).
+  `full-access` runs the command unconfined; it is only reachable because the caller named it
+  when building the sandbox, and the tool description says "NOT sandboxed".
+  Independently of the mode, the tool kills the whole process group on timeout,
+  cancellation and leader exit, and filters the environment to the sandbox whitelist, so a
+  model-controlled shell never inherits the host's API keys.
 
 ## Mounting
 
-- In `agent-cli`: `--workspace <dir>` exposes these six tools (no shell). Without the flag
-  nothing changes.
-- Directly: `CodingTools::new(root)` returns a `ToolProvider`; pass it to
+- In `agent-cli`: `--workspace <dir>` exposes the six file/git tools (no shell). Without the
+  flag nothing changes. The CLI does not mount `shell` yet; this slice is library-only.
+- Directly: `CodingTools::new(root)` returns a `ToolProvider` (no shell); pass it to
   `Agent::new(model, tools)`.
+- With a sandbox: build one with `radian_sandbox::Sandbox::new(mode, root)` (an enforced mode
+  probes the backend and fails if it cannot prove enforcement) and pass it to
+  `CodingTools::with_sandbox(root, sandbox)`. The shell tool then appears in `tool_specs()`.
 
 ## 评审补充（合并时由评审者追加，2026-10-12）
 

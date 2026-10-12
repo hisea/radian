@@ -44,3 +44,23 @@ would refresh and write `.git/index`).
 "workspace-relative only", so an absolute path that happens to point inside must be refused
 too. Without it, the absolute-path requirement had no test that distinguished it from the
 canonicalization check.
+
+## `shell` tool (Phase 3 sandbox slice)
+
+Base: `fd0388d` (re-run at the final tests commit) · one-shot worktree `/tmp/shell-mut` (created from HEAD, deleted after) ·
+each mutation run with `cargo test -p radian-coding --test shell <test> -- --exact
+--no-fail-fast`; files restored after each; `git status --short` empty at the end; no orphan
+processes left (`ps` check).
+
+| # | Requirement mutated | Mutation | Result |
+|---|---|---|---|
+| M1 | no sandbox ⇒ no shell, no naked run | the `None` execute arm runs `/bin/sh -c` directly instead of refusing | ✅ caught (`shell_is_absent_without_a_sandbox`) |
+| M2 | timeout/cancel kill the whole process group | `killpg(pid)` → `kill(pid)` (only the direct child) | ✅ caught (`a_timeout_kills_the_whole_process_group`; the background `sleep 600` survives) |
+| M3 | output cap | `take_from_budget` returns `want` and ignores the budget | ✅ caught (`output_over_the_cap_is_truncated_and_reported`) |
+| M4 | environment filtered in every mode | remove the `env_clear` + whitelist block for the transparent backend | ✅ caught (`the_host_environment_does_not_reach_the_shell`) |
+| M5 | `cwd` stays inside the workspace | `root.resolve_existing(dir)` → `root.root().join(dir)` (no canonicalize/containment) | ✅ caught (`cwd_escapes_are_refused`) |
+| M6 | `full-access` is never a default | `CodingTools::new` builds a transparent `FullAccess` sandbox internally | ✅ caught (`full_access_is_never_the_default`) |
+| M7 | a failing backend never downgrades | `Sandbox::from_backend` falls back to a transparent sandbox when `probe()` fails | ✅ caught (`an_unavailable_backend_never_yields_a_sandbox_or_a_shell`) |
+
+7/7 caught; no misses. M2 is the one that shows the "kill the direct child only" bug is a
+real hazard: with it the background `sleep 600` is still alive after the timeout.
