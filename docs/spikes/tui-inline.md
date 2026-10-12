@@ -94,6 +94,17 @@ ps -axo pid,comm | grep 'tui-inline-app' # 本次检查无孤儿；grep 自身�
 
 driver 的 `data/*.txt` 和 `data/*.json` 是上表证据。测试的临时 stats 文件放在 `/tmp`，不会污染仓库。
 
+## 变异检查
+
+在一次性 worktree `/tmp/radian-inline-mut`（基于提交 `9e3a684`）中，每项先修改 `src/app.rs`、执行 `cargo build --bins`，再只运行相应具名集成测试；四项都以 exit 101 失败，随后 `git restore`，最后删除 worktree。没有修改主分支 worktree。
+
+| 变异 | 对应测试 | 被抓住的失败 |
+|---|---|---|
+| 在初始化额外写 `EnterAlternateScreen` | `streaming_coexists_with_scrollback` | 原始 pty 字节流含 `?1049h`，vt100 也报告 alternate screen |
+| status 宽度硬编码 120、忽略 `Frame::area().width` | `resize_keeps_inline_layout_correct` | 60 列阶段的 `size:60x` 标记永不出现 |
+| 初始化额外写 `EnableMouseCapture` | `native_selection_preconditions_hold` | 字节流含 `?1000h` |
+| `restore_tty()` 变为空实现 | `shell_prompt_position_correct_on_normal_exit` | paste 开关不成对、`stty` 仍为 `-icanon`、光标列不是 0 |
+
 ## 未验证
 
 - Terminal.app、iTerm2、Alacritty 等真实终端模拟器下的 scrollback 保留/回流、`CSI 2J` 视觉影响、resize 残影、鼠标选择和系统剪贴板；尤其 resize 时旧的**可见**普通输出是否可接受，必须人工确认。
