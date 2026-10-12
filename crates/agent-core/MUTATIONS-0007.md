@@ -1,4 +1,4 @@
-# 变异记录：ADR 0005 / Usage（Phase 0 / A5）
+# 变异记录：ADR 0007 / Usage（Phase 0 / A5）
 
 日期：2026-10-12。全部变异在一次性检出 `/tmp/a5-mut`（`git worktree add`，HEAD = 本提交）里做，每项变异后跑对应测试、恢复源码，提交前 `git status --short` 为空（已核对）。失败遍历 `usage_append_failure_sweep` 与 provider http 套件连跑 10 遍通过，完整输出在 `/tmp/a5-runs/usage-{1..10}.log` 与 `/tmp/a5-runs/http-{1..10}.log`。
 
