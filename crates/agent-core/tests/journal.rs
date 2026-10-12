@@ -360,7 +360,7 @@ async fn dropping_a_step_never_touches_the_journal_again() {
     let n = replay.len();
     assert!(transcript.starts_with(&replay), "{transcript:?}");
     for message in &transcript[n..] {
-        assert!(matches!(message, Message::Tool { result }
+        assert!(matches!(message, Message::Tool { result, .. }
             if result.error_code.as_deref() == Some("interrupted")));
     }
 
@@ -420,6 +420,7 @@ async fn history_is_not_rejournaled() {
             tool_calls: vec![],
             provider_payload: None,
             interrupted: false,
+            meta: MessageMeta::default(),
         },
     ];
     let model = ScriptedModel::new([text("fresh")]);

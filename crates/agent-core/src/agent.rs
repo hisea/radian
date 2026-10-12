@@ -321,7 +321,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
             }
             for message in &transcript[base + replay.len()..] {
                 assert!(
-                    matches!(message, Message::Tool { result }
+                    matches!(message, Message::Tool { result, .. }
                         if result.error_code.as_deref() == Some("interrupted")),
                     "after a drop, memory may only add `interrupted` results, found {message:?}"
                 );

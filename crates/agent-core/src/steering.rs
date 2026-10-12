@@ -38,6 +38,9 @@ pub struct SteeringHandle {
 }
 
 impl SteeringHandle {
+    // Carrying the rejected message is intentional: callers can recover it. Host metadata may
+    // contain opaque JSON, so boxing merely to satisfy a size heuristic would change that API.
+    #[allow(clippy::result_large_err)]
     pub fn steer(&self, message: impl Into<Message>) -> Result<(), SteerError> {
         let message = message.into();
         if !message.is_user() {

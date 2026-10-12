@@ -65,13 +65,13 @@ fn settings_object(settings: &Value) -> Result<Map<String, Value>, ModelError> {
 
 fn message(message: &Message) -> Value {
     match message {
-        Message::User { content } => user(content),
+        Message::User { content, .. } => user(content),
         Message::Assistant {
             content,
             tool_calls,
             ..
         } => assistant(content, tool_calls),
-        Message::Tool { result } => tool_result(result),
+        Message::Tool { result, .. } => tool_result(result),
     }
 }
 
@@ -184,7 +184,7 @@ fn audio_format(mime_type: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{ToolConcurrency, ToolSpec};
+    use agent_core::{InputSource, MessageId, MessageMeta, OpaqueJson, ToolConcurrency, ToolSpec};
 
     fn config() -> OpenAiCompatibleConfig {
         OpenAiCompatibleConfig::new("http://localhost/v1", "test-model")
@@ -208,6 +208,30 @@ mod tests {
     }
 
     #[test]
+    fn host_message_meta_is_not_sent_to_the_provider() {
+        let plain = request(vec![Message::user("hello")]);
+        let with_meta = request(vec![Message::User {
+            content: vec![ContentPart::text("hello")],
+            meta: MessageMeta {
+                id: Some(MessageId("host-42".into())),
+                source: Some(InputSource::Subagent),
+                origin: Some(
+                    OpaqueJson::parse(
+                        r#"{"parent":{"session_id":"s","turn_id":"t","call_id":"c"}}"#,
+                    )
+                    .unwrap(),
+                ),
+            },
+        }]);
+
+        let plain = serde_json::to_vec(&build_body(&plain, &config()).unwrap()).unwrap();
+        let with_meta = serde_json::to_vec(&build_body(&with_meta, &config()).unwrap()).unwrap();
+        assert_eq!(with_meta, plain);
+        let body = String::from_utf8(with_meta).unwrap();
+        assert!(!body.contains("meta") && !body.contains("source") && !body.contains("origin"));
+    }
+
+    #[test]
     fn a_tool_conversation_maps_to_the_expected_messages() {
         let mut req = request(vec![
             Message::user("what is 2+3?"),
@@ -216,9 +240,11 @@ mod tests {
                 tool_calls: vec![call("c1", "calc__add", json!({"a": 2, "b": 3}))],
                 provider_payload: None,
                 interrupted: false,
+                meta: MessageMeta::default(),
             },
             Message::Tool {
                 result: ToolResult::success("c1", vec![ContentPart::text("5")]),
+                meta: MessageMeta::default(),
             },
             Message::assistant("It is 5."),
         ]);
@@ -270,6 +296,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 provider_payload: None,
                 interrupted: true,
+                meta: MessageMeta::default(),
             },
             Message::user("and then?"),
         ]);
@@ -294,6 +321,7 @@ mod tests {
                 tool_calls: vec![call("c1", "t", Value::String("{\"a\": ".into()))],
                 provider_payload: None,
                 interrupted: false,
+                meta: MessageMeta::default(),
             }]),
             &config(),
         )
@@ -311,6 +339,7 @@ mod tests {
         let body = build_body(
             &request(vec![Message::Tool {
                 result: ToolResult::error("c1", "boom", "it failed"),
+                meta: MessageMeta::default(),
             }]),
             &config(),
         )
@@ -337,6 +366,7 @@ mod tests {
                         meta: None,
                     },
                 ],
+                meta: MessageMeta::default(),
             }]),
             &config(),
         )
@@ -379,6 +409,7 @@ mod tests {
                         },
                     ],
                 ),
+                meta: MessageMeta::default(),
             }]),
             &config(),
         )

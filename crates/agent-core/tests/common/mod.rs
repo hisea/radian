@@ -358,7 +358,7 @@ pub fn result_ids(transcript: &[Message]) -> Vec<String> {
     transcript
         .iter()
         .filter_map(|m| match m {
-            Message::Tool { result } => Some(result.call_id.clone()),
+            Message::Tool { result, .. } => Some(result.call_id.clone()),
             _ => None,
         })
         .collect()
@@ -368,7 +368,7 @@ pub fn result_for<'a>(transcript: &'a [Message], id: &str) -> &'a ToolResult {
     transcript
         .iter()
         .find_map(|m| match m {
-            Message::Tool { result } if result.call_id == id => Some(result),
+            Message::Tool { result, .. } if result.call_id == id => Some(result),
             _ => None,
         })
         .unwrap_or_else(|| panic!("no result for {id}"))

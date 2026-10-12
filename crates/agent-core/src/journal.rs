@@ -8,7 +8,7 @@ use futures_util::future::BoxFuture;
 
 use serde_json::Value;
 
-use crate::message::{Message, ToolResult};
+use crate::message::{Message, MessageMeta, ToolResult};
 
 /// One durable record. A1 journals transcript messages; A2 adds tool execution markers so
 /// a crash between "dispatched" and "result written" can be classified on recovery.
@@ -107,7 +107,7 @@ pub fn repair(history: &[Message], records: &[JournalRecord]) -> Vec<Message> {
                     open.push(call.id.clone());
                 }
             }
-            Message::Tool { result } => {
+            Message::Tool { result, .. } => {
                 answered.insert(result.call_id.clone());
             }
             Message::User { .. } => {}
@@ -116,7 +116,10 @@ pub fn repair(history: &[Message], records: &[JournalRecord]) -> Vec<Message> {
     open.retain(|id| !answered.contains(id));
     open.into_iter()
         .map(|id| match settled.remove(&id) {
-            Some(result) => Message::Tool { result },
+            Some(result) => Message::Tool {
+                result,
+                meta: MessageMeta::default(),
+            },
             None => {
                 let code = if started.contains(&id) {
                     ("outcome_unknown_after_crash", "The tool may already have executed before the interruption; its outcome is unknown. Do not assume it did not run.")
@@ -125,6 +128,7 @@ pub fn repair(history: &[Message], records: &[JournalRecord]) -> Vec<Message> {
                 };
                 Message::Tool {
                     result: ToolResult::error(&id, code.0, code.1),
+                    meta: MessageMeta::default(),
                 }
             }
         })

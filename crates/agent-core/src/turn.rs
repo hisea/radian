@@ -11,7 +11,7 @@ use crate::agent::{Agent, AgentSession};
 use crate::event::{AgentEvent, EventSink};
 use crate::hooks::{HookContext, HookError, HookPoint, Hooks, ToolDecision};
 use crate::journal::{JournalError, JournalRecord, TranscriptJournal};
-use crate::message::{ContentPart, Message, ToolCall, ToolResult};
+use crate::message::{ContentPart, Message, MessageMeta, ToolCall, ToolResult};
 use crate::model::{Model, ModelContext, ModelRequest, ModelResponse, StopReason};
 use crate::outcome::{CancelReason, IncompleteReason, RunError, RunOutcome, RunStatus, Step};
 use crate::preflight::ToolRegistry;
@@ -143,7 +143,10 @@ impl Batch {
 
     fn commit_ready(&mut self, transcript: &mut Vec<Message>) {
         while let Some(result) = self.slots.get_mut(self.committed).and_then(Option::take) {
-            transcript.push(Message::Tool { result });
+            transcript.push(Message::Tool {
+                result,
+                meta: MessageMeta::default(),
+            });
             self.committed += 1;
         }
     }
@@ -322,6 +325,7 @@ impl<'s, M: Model, P: ToolProvider, H: Hooks> ActiveRun<'s, M, P, H> {
                 .commit(
                     Message::Tool {
                         result: ToolResult::error(&call.id, code, message),
+                        meta: MessageMeta::default(),
                     },
                     events,
                 )
@@ -527,6 +531,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
                         tool_calls: Vec::new(),
                         provider_payload: None,
                         interrupted: true,
+                        meta: MessageMeta::default(),
                     };
                     if let Err(e) = self.run.session.commit(message, events).await {
                         return Err(self.run.fail_journal(e, events));
@@ -567,6 +572,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
             tool_calls: tool_calls.clone(),
             provider_payload,
             interrupted: false,
+            meta: MessageMeta::default(),
         };
         // Journaled before any tool of this response is dispatched (S4).
         if let Err(e) = self.run.session.commit(assistant, events).await {
@@ -971,7 +977,10 @@ impl<P: ToolProvider, H: Hooks> BatchCx<'_, P, H> {
             crate::agent::commit_parts(
                 self.journal,
                 self.transcript,
-                Message::Tool { result },
+                Message::Tool {
+                    result,
+                    meta: MessageMeta::default(),
+                },
                 self.events,
             )
             .await?;

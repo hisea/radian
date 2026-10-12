@@ -194,7 +194,7 @@ async fn tool_call_round_trips_through_core_on_both_protocol_versions() {
             .transcript()
             .iter()
             .find_map(|m| match m {
-                Message::Tool { result } => Some(result.clone()),
+                Message::Tool { result, .. } => Some(result.clone()),
                 _ => None,
             })
             .unwrap();
@@ -388,7 +388,7 @@ async fn server_state_survives_turns_but_not_sessions() {
         .transcript()
         .iter()
         .filter_map(|m| match m {
-            Message::Tool { result } => Some(result.text()),
+            Message::Tool { result, .. } => Some(result.text()),
             _ => None,
         })
         .collect();

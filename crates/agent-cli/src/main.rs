@@ -296,6 +296,9 @@ impl LineHub {
     }
 }
 
+// `RunOutcome` deliberately owns its transcript; avoid changing this local control-flow enum's
+// simple shape merely because host metadata may include opaque JSON.
+#[allow(clippy::large_enum_variant)]
 enum TurnEnd {
     Done(Result<RunOutcome, RunError>),
     /// A second Ctrl-C arrived while the first cancellation was still settling.

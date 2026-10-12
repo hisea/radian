@@ -325,6 +325,7 @@ async fn history_with_unpaired_tool_call_is_rejected() {
             tool_calls: vec![call("c1", "echo", json!({}))],
             provider_payload: None,
             interrupted: false,
+            meta: MessageMeta::default(),
         },
         Message::user("next"),
     ];
@@ -334,6 +335,7 @@ async fn history_with_unpaired_tool_call_is_rejected() {
 
     let orphan = vec![Message::Tool {
         result: ToolResult::success("ghost", vec![]),
+        meta: MessageMeta::default(),
     }];
     let err = a.open_session_with_history(orphan).await.err().unwrap();
     assert!(matches!(err, SessionError::InvalidHistory(_)));
