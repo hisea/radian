@@ -1,0 +1,5 @@
+selection:
+PASS | 无 ?1049 / 无鼠标上报 / 无整屏清除 | -
+PASS | bracketed paste 开关成对 | -
+PASS | 结束后模型不在 bracketed paste 模式，内容可选中（在 scrollback） | bracketed_paste=false, scrollback 含 LINE-0014=true
+PASS | 退出码 | exit=0

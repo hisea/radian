@@ -1,0 +1,9 @@
+prompt-panic:
+PASS | 退出码 | exit=101（期望 101）
+PASS | 退出路径无 ?1049/鼠标/整屏清除 | -
+PASS | bracketed paste 成对 | -
+PASS | 光标显示已恢复（最后的 ?25l 之后有 ?25h） | restored=true
+PASS | stty 显示 cooked | -icanon 出现：false
+PASS | MARKER 完整且在新行行首 | row=Some(11) at_col0=true
+PASS | MARKER 上方无大片空行（≤2） | 空行 0
+PASS | 光标列 0 | cursor=(25,0)

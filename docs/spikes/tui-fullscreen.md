@@ -83,3 +83,9 @@ cargo test                  # 9 个测试覆盖同一路径（时长缩短）
 - 证实：ratatui 0.30 MSRV 恰为 1.88，与仓库 MSRV 对齐，无版本障碍。
 - 修正一条工程事实：**跨 bin 的驱动测试必须先重建全部 bin**（`cargo run --bin tui-driver` 不会重建 `tui-app`），否则测的是旧二进制。产品化时应让驱动从 `CARGO_BIN_EXE_*` 取路径（集成测试已这样做了）。
 - 待定（给决策）：inline 模式（不用备用屏）是另一张 spike（0b 表格里的"TUI inline"），本任务不含；全屏通过不等于 inline 通过。
+
+## 复核补充（owner 真实终端手测，2026-10-12）
+
+owner 在 Terminal.app（macOS 27.0.1）里按 `--mode stream|width|resize|paste` 各跑了一遍：流式刷新、CJK/emoji 对齐、resize 重排、bracketed paste 的字节统计**均正常**，基础功能通过。本文档"未验证"一节里的"真实终端模拟器"一项就此关闭（仅限 Terminal.app / macOS 27.0.1；其他模拟器仍未验证）。
+
+发现一处观感问题：**原型退出时没有补一个换行**，真实 shell 下 zsh 会显示它的"输出未以换行结尾"标记 `%`（提示符本身仍落在新行，所以不影响正确性）。pty 自动化看不到这个标记。Phase 4 实现时退出前补一个换行。

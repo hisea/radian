@@ -4,7 +4,7 @@ This repository holds a minimal headless Rust agent runtime: `agent-core` (the t
 
 ## Decisions are in `docs/adr/`
 
-Every decision that constrains the code lives in a numbered ADR there, newest number last. Read the ones that touch what you are changing **before** you change it, and do not contradict one: journal ordering and failure semantics (0001), tool execution markers and recovery (0002), the interrupted streaming prefix (0003), hot configuration slots (0004), host message metadata and transcript replacement (0005), the session JSONL format (0006), usage (0007). A change that needs a decision reversed is a change that needs a new ADR, not a quiet edit.
+Every decision that constrains the code lives in a numbered ADR there, newest number last. Read the ones that touch what you are changing **before** you change it, and do not contradict one: journal ordering and failure semantics (0001), tool execution markers and recovery (0002), the interrupted streaming prefix (0003), hot configuration slots (0004), host message metadata and transcript replacement (0005), the session JSONL format (0006), usage (0007), fullscreen-only TUI for the first release (0009). A change that needs a decision reversed is a change that needs a new ADR, not a quiet edit.
 
 ## Verify
 
