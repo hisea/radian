@@ -48,6 +48,11 @@ impl TempDir {
 impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.path);
+        // Also try to remove the shared parent: it succeeds only once the last test in
+        // this process has dropped its directory, which is exactly when it is empty.
+        if let Some(parent) = self.path.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
     }
 }
 

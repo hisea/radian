@@ -1,5 +1,6 @@
 //! Built-in coding tools for radian: `read`, `write`, `patch`, `list`, `git_status`,
-//! `git_diff`. **No shell, no command execution, read-only git.**
+//! `git_diff`. **No shell, no command execution, read-only git.** See `README.md` next to
+//! this crate for the tool/limit tables.
 //!
 //! Every tool operates under one workspace root given by the host. There is no sandbox
 //! behind these tools (see `docs/adr/0012-permission-sources.md` and

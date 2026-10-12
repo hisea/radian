@@ -277,3 +277,36 @@ async fn list_truncates_at_max_entries() {
     assert_eq!(info["truncated"], true);
     assert_eq!(text(&output).lines().count(), 3);
 }
+
+/// The rule is "workspace-relative paths only", so even an absolute path that happens to
+/// point inside is refused; it is the syntax, not the target, that decides.
+#[tokio::test]
+async fn an_absolute_path_inside_the_workspace_is_still_refused() {
+    let dir = TempDir::new("abs-inside");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("inside.txt"), "INSIDE").unwrap();
+    let tools = tools(&root);
+
+    let failure = call(
+        &tools,
+        "read",
+        json!({"path": root.join("inside.txt").to_string_lossy()}),
+    )
+    .await
+    .unwrap_err();
+    assert_outside(&failure, "absolute-inside");
+
+    let failure = call(
+        &tools,
+        "write",
+        json!({
+            "path": root.join("new.txt").to_string_lossy(),
+            "content": "x"
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_outside(&failure, "absolute-inside");
+    assert!(!root.join("new.txt").exists());
+}

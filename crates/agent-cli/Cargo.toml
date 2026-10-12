@@ -14,6 +14,7 @@ path = "src/main.rs"
 agent-core = { path = "../agent-core" }
 agent-extensions = { path = "../agent-extensions" }
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible" }
+radian-coding = { path = "../radian-coding" }
 clap = { version = "4", features = ["derive"] }
 serde.workspace = true
 serde_json.workspace = true
