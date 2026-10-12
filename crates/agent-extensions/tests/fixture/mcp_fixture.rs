@@ -93,6 +93,11 @@ impl Server {
                 "settleMs": {"type": "integer"},
                 "total": {"type": "integer"}, "label": {"type": "string"},
                 "alsoUnknownToken": {"type": "boolean"}}}},
+            {"name": "progress_values",
+             "description": "Sends the given progress values in order, then returns.",
+             "inputSchema": {"type": "object", "properties": {
+                "values": {"type": "array", "items": {"type": "integer"}},
+                "intervalMs": {"type": "integer"}}}},
             {"name": "progress_late",
              "description": "Returns, then sends one more progress notification afterwards.", "inputSchema": object}
         ])
@@ -179,6 +184,22 @@ impl Server {
                     self.notify_progress(token.clone(), step, total, &format!("{label} {step}"));
                 }
                 thread::sleep(settle);
+                text("progressed".into())
+            }
+            "progress_values" => {
+                let token = params["_meta"]["progressToken"].clone();
+                let interval = Duration::from_millis(args["intervalMs"].as_u64().unwrap_or(10));
+                for value in args["values"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_u64)
+                {
+                    thread::sleep(interval);
+                    self.notify_progress(token.clone(), value, None, "value");
+                }
+                // Let every notification be routed before the reply is taken.
+                thread::sleep(Duration::from_millis(50));
                 text("progressed".into())
             }
             "progress_late" => {

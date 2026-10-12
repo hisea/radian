@@ -575,17 +575,20 @@ async fn progress_maps_to_tool_progress() {
     );
 }
 
-// The request is already on the wire when `send_cancellable_request` returns, so a fast
-// server can notify progress before the call registers its route; a multi-thread runtime
-// makes that race possible. `settleMs` lets the notifications beat the reply, so this tests
-// the registration race, not rmcp's best-effort delivery of tail progress. The 10 ms spacing
-// keeps notifications from overlapping in flight: rmcp routes each on its own task, and a
-// burst can arrive out of order, which the monotone filter drops by design.
+// `settleMs` holds the reply back until every notification has been routed, so on a
+// multi-thread runtime none may be lost; this excludes rmcp's best-effort delivery of tail
+// progress. The 10 ms spacing keeps notifications from overlapping in flight: rmcp routes each
+// on its own task, and a burst can arrive out of order, which the monotone filter drops by
+// design.
+//
+// This does not reproduce the registration race (a notification that beats the call's route).
+// That window is a few microseconds: with the replay removed, 2880 calls under 16 CPU-hogging
+// threads lost nothing. The `ProgressRouter` unit tests cover the replay deterministically.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn immediate_progress_is_not_lost() {
+async fn settled_progress_is_not_lost() {
     let session = std::sync::Arc::new(open(vec![fixture("fx")]).await);
     let mut lost = 0;
-    let runs = 300;
+    let runs = 20;
     for _ in 0..runs {
         let events = Recorder::default();
         let out = call_at(
@@ -603,8 +606,34 @@ async fn immediate_progress_is_not_lost() {
     }
     assert_eq!(
         lost, 0,
-        "progress notifications were dropped: {lost} of {runs} calls"
+        "{lost} progress events were dropped over {runs} calls"
     );
+}
+
+// A server that breaks the spec's monotone rule reaches the filter on the real call path in a
+// deterministic order, which rmcp's own reordering never does. Removing the filter from the
+// call must fail this test; the filter's unit tests alone cannot show that it is wired in.
+#[tokio::test]
+async fn non_monotone_progress_is_dropped_on_the_call_path() {
+    let session = open(vec![fixture("fx")]).await;
+    let events = Recorder::default();
+
+    call_at(
+        &session,
+        "fx__progress_values",
+        json!({"values": [1, 3, 2, 3, 4]}),
+        0,
+        &events,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    let seen: Vec<f64> = progress_events(&events)
+        .iter()
+        .map(|(_, progress)| progress["progress"].as_f64().unwrap())
+        .collect();
+    assert_eq!(seen, [1.0, 3.0, 4.0]);
 }
 
 #[tokio::test]
