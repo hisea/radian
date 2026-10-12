@@ -1,0 +1,7 @@
+# schema_version 低于 v1：没有 v0→v1 迁移路径就拒绝，绝不静默改写用户文件（ADR 0008 §5.3）。
+schema_version = 0
+
+[model]
+provider = "openai-compatible"
+base_url = "https://example.com/v1"
+model = "m-0"
