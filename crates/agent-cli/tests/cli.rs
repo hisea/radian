@@ -12,6 +12,18 @@ use tokio::time::timeout;
 
 const KEY: &str = "sk-cli-test-secret";
 
+/// How long a test waits for the CLI process to exit before calling it stuck. These bounds
+/// are hang watchdogs, not performance assertions: the actual synchronization is the state
+/// condition (process exit, a marker on stderr, a pid disappearing). The slowest legitimate
+/// run observed standalone was ~13 s, and one exceeded 30 s on a machine at load average 51,
+/// so 120 s leaves roughly ten times the observed worst case while still failing a genuinely
+/// stuck CLI.
+const EXIT_WATCHDOG: Duration = Duration::from_secs(120);
+
+/// The same idea for waits on a state that is not process exit (a stderr marker, a pid going
+/// away, a mock server recording a request).
+const STATE_WATCHDOG: Duration = Duration::from_secs(30);
+
 // ---------- helpers ----------
 
 /// The `agent` binary, built by the harness.
@@ -122,9 +134,9 @@ async fn feed_and_wait(mut child: Child, input: &str) -> (i32, String, String) {
         .unwrap()
         .write_all(input.as_bytes())
         .await;
-    let output = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output())
+    let output = tokio::time::timeout(EXIT_WATCHDOG, child.wait_with_output())
         .await
-        .expect("the CLI did not exit within 30s")
+        .expect("the CLI did not exit within the watchdog")
         .expect("wait");
     (
         output.status.code().unwrap_or(-1),
@@ -201,7 +213,7 @@ fn scratch(name: &str) -> PathBuf {
 /// Polls `predicate` until it holds, bounded; a sleep here is only the poll interval, never
 /// the synchronization itself.
 async fn wait_until(what: &str, predicate: impl Fn() -> bool) {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(STATE_WATCHDOG, async {
         while !predicate() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -239,7 +251,7 @@ impl Running {
 
     /// Reads more stderr until `marker` appears; keeps everything read so far.
     async fn wait_for_stderr(&mut self, marker: &str) {
-        timeout(Duration::from_secs(10), async {
+        timeout(STATE_WATCHDOG, async {
             while !self.stderr_seen.contains(marker) {
                 let mut buf = [0u8; 4096];
                 let n = self.stderr.read(&mut buf).await.expect("read stderr");
@@ -298,7 +310,7 @@ impl Running {
             mut stderr_seen,
             stdin: _,
         } = self;
-        let (output, ()) = timeout(Duration::from_secs(30), async {
+        let (output, ()) = timeout(EXIT_WATCHDOG, async {
             tokio::join!(child.wait_with_output(), async {
                 let mut rest = String::new();
                 let _ = stderr.read_to_string(&mut rest).await;
@@ -957,7 +969,7 @@ async fn one_shot_without_a_terminal_denies_without_waiting() {
         ],
         &[],
     );
-    let (code, _, _) = running.finish_open(Duration::from_secs(10)).await;
+    let (code, _, _) = running.finish_open(EXIT_WATCHDOG).await;
 
     assert_eq!(code, 0);
     let denial = tool_result_content(&server, 1);
@@ -1126,7 +1138,7 @@ async fn second_sigint_exits_130() {
         start.elapsed()
     );
     // Even the forced exit reaped the fixture.
-    assert!(gone_within(fixture_pid(&log), Duration::from_secs(3)).await);
+    assert!(gone_within(fixture_pid(&log), STATE_WATCHDOG).await);
 }
 
 // ---------- child process lifetime ----------
@@ -1168,7 +1180,7 @@ async fn every_exit_reaps_the_mcp_children() {
 
         let pid = fixture_pid(&log);
         assert!(
-            gone_within(pid, Duration::from_secs(3)).await,
+            gone_within(pid, STATE_WATCHDOG).await,
             "{name}: fixture {pid} still running"
         );
     }
@@ -1213,7 +1225,7 @@ async fn typing_exit_leaves_even_though_stdin_is_still_open() {
     let mut running = Running::spawn(&["--model", "m", "--base-url", &server.base_url], &[]);
 
     running.write("hi\n/exit\n").await;
-    let (code, stdout, _) = running.finish_open(Duration::from_secs(10)).await;
+    let (code, stdout, _) = running.finish_open(EXIT_WATCHDOG).await;
 
     assert_eq!(code, 0);
     assert_eq!(stdout, "hello\n");
