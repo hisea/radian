@@ -47,6 +47,10 @@ struct Cli {
 
     #[arg(long)]
     system: Option<String>,
+
+    /// Test hook: enter the terminal, then panic, so the restore hook can be exercised.
+    #[arg(long, hide = true)]
+    panic_after_enter: bool,
 }
 
 /// Forwards core events to the UI thread. `emit` must be short and non-blocking (ADR 0010),
@@ -132,6 +136,9 @@ fn run(cli: Cli) -> Result<(), String> {
         radian_tui::terminal::TtyGuard::enter().map_err(|e| format!("terminal: {e}"))?;
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))
         .map_err(|e| format!("terminal: {e}"))?;
+    if cli.panic_after_enter {
+        panic!("radian-tui: panic path test");
+    }
     let mut app = App::new(cli.model.clone(), session_id.clone());
     app.entries.push(radian_tui::Entry::new(
         radian_tui::EntryKind::Notice,

@@ -56,5 +56,9 @@ pub fn install_panic_hook() {
         let mut guard = TtyGuard { active: true };
         guard.restore();
         default(info);
+        // Do not unwind: dropping the tokio runtime and the session while a spawned driver
+        // task is parked can block, and the terminal is already restored. Exit with the
+        // conventional panic code instead.
+        std::process::exit(101);
     }));
 }
