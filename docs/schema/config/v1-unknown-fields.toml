@@ -1,0 +1,14 @@
+# v1 加上未知字段：读取方解释时忽略，但写回必须保真（ADR 0008 §5.3/§5.4）。
+schema_version = 1
+
+future_top_level = { feature = true }
+
+[model]
+provider = "openai-compatible"
+base_url = "https://example.com/v1"
+model = "m-1"
+api_key = { from = "env", name = "EXAMPLE_TOKEN" }
+future_option = "alpha"
+
+[tui.theme.hairline]
+frames = false

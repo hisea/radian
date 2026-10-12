@@ -1,0 +1,20 @@
+# radian 最小合法配置（ADR 0008 §7）。
+schema_version = 1
+
+[model]
+provider = "openai-compatible"
+base_url = "https://api.openai.com/v1"
+model = "m-1"
+include_usage = true
+api_key = { from = "env", name = "OPENAI_API_KEY" }
+
+[[mcp.servers]]
+id = "files"
+command = "/work/example/mcp-files"
+args = ["--root", "/work/example"]
+
+[permissions]
+profile = "ask"
+
+[tui]
+theme = "dark"

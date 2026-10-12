@@ -16,6 +16,12 @@ KNOWN_EVENTS = {
     "TranscriptReplaced", "TurnFinished", "ConfigChanged", "ContextCompacted",
     "Rewound", "PermissionResolved", "ModelUsageRecorded", "SessionForked",
 }
+# ADR 0005/0006 §5.5：InputSource 的 snake_case 全集。
+SOURCES = {
+    "user", "slash_command", "permission_decision", "scheduler",
+    "mcp", "subagent", "system",
+}
+META_FIELDS = {"id", "source", "origin"}
 RFC3339_UTC = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$"
 )
@@ -50,6 +56,17 @@ EXPECT = {
         skips=[],
         repair={"call-2": "outcome_unknown_after_crash"},
     ),
+    "replace-resets-index.jsonl": dict(
+        outcome="accept",
+        events=10,
+        skips=[],
+        # (1 起的行号, revision, len) —— len 必须等于其后的 MessageAppended 条数。
+        replacement=(5, 1, 2),
+        meta_present=True,
+        interrupted_present=True,
+        usage_present=True,
+        repair={"call-9": "outcome_unknown_after_crash"},
+    ),
 }
 
 
@@ -82,10 +99,16 @@ def check_envelope(ev, lineno, version, session_id):
 
 
 def simulate_repair(events):
-    """ADR 0002 的 repair：返回 {call_id: error_code}（需要补合成结果的调用）。"""
+    """ADR 0002 的 repair：返回 {call_id: error_code}（需要补合成结果的调用）。
+
+    `TranscriptReplaced` 清空旧 revision 的声明/应答/标记状态（ADR 0005）：旧标记不得
+    修复新历史。
+    """
     declared, answered, started, settled = [], set(), set(), set()
     for ev in events:
-        if ev["event"] == "MessageAppended":
+        if ev["event"] == "TranscriptReplaced":
+            declared, answered, started, settled = [], set(), set(), set()
+        elif ev["event"] == "MessageAppended":
             msg = ev["data"]["message"]
             if "assistant" in msg:
                 declared += [c["id"] for c in msg["assistant"].get("tool_calls", [])]
@@ -124,6 +147,9 @@ def check_fixture(name, exp):
     version, session_id = None, None
     expect_seq = 0
     events, skips, index_next = [], [], 0
+    replacements = []
+    pending_len = []
+    messages_since_replacement = 0
     for i, line in enumerate(lines, start=1):
         try:
             ev = json.loads(line)
@@ -158,7 +184,46 @@ def check_fixture(name, exp):
                     f"{name}: line {i}: MessageAppended.index {idx} != transcript 长度 {index_next}"
                 )
             index_next += 1
+            messages_since_replacement += 1
+            msg = ev["data"].get("message")
+            if not isinstance(msg, dict) or len(msg) != 1:
+                raise Corruption(f"{name}: line {i}: message 必须是单变体对象")
+            body = next(iter(msg.values()))
+            meta = body.get("meta")
+            if meta is not None:
+                if not isinstance(meta, dict):
+                    raise Corruption(f"{name}: line {i}: meta 不是对象")
+                unknown = set(meta) - META_FIELDS
+                if unknown:
+                    raise Corruption(f"{name}: line {i}: meta 未知字段 {sorted(unknown)}")
+                if meta.get("id") == "" or ("id" in meta and not isinstance(meta["id"], str)):
+                    raise Corruption(f"{name}: line {i}: meta.id 必须是非空字符串")
+                if "source" in meta and meta["source"] not in SOURCES:
+                    raise Corruption(
+                        f"{name}: line {i}: meta.source {meta['source']!r} 不在 InputSource 集合"
+                    )
+        if ev["event"] == "TranscriptReplaced":
+            data = ev["data"]
+            for field in ("revision", "len"):
+                if not isinstance(data.get(field), int) or isinstance(data.get(field), bool):
+                    raise Corruption(f"{name}: line {i}: TranscriptReplaced.{field} 不是整数")
+            if pending_len:
+                if messages_since_replacement != pending_len[0]:
+                    raise Corruption(
+                        f"{name}: line {i}: 上一个 TranscriptReplaced.len {pending_len[0]} "
+                        f"!= 其后的 MessageAppended 数 {messages_since_replacement}"
+                    )
+            pending_len = [data["len"]]
+            messages_since_replacement = 0
+            index_next = 0
+            replacements.append((i, data["revision"], data["len"]))
         events.append(ev)
+
+    if pending_len and messages_since_replacement != pending_len[0]:
+        raise Corruption(
+            f"{name}: TranscriptReplaced.len {pending_len[0]} "
+            f"!= 其后的 MessageAppended 数 {messages_since_replacement}"
+        )
 
     outcome = exp["outcome"]
     if outcome == "policy_reject":
@@ -184,6 +249,23 @@ def check_fixture(name, exp):
     repair = simulate_repair(events)
     if repair != exp.get("repair", {}):
         raise Corruption(f"{name}: repair {repair} != 期望 {exp.get('repair', {})}")
+    if "replacement" in exp and replacements != [exp["replacement"]]:
+        raise Corruption(f"{name}: replacements {replacements} != 期望 {[exp['replacement']]}")
+    if exp.get("meta_present") and not any(
+        e["event"] == "MessageAppended" and "meta" in next(iter(e["data"]["message"].values()))
+        for e in events
+    ):
+        raise Corruption(f"{name}: 期望至少一条消息带 meta")
+    if exp.get("interrupted_present") and not any(
+        e["event"] == "MessageAppended"
+        and e["data"]["message"].get("assistant", {}).get("interrupted") is True
+        for e in events
+    ):
+        raise Corruption(f"{name}: 期望至少一条 interrupted assistant")
+    if exp.get("usage_present") and not any(
+        e["event"] == "ModelUsageRecorded" and "usage" in e["data"] for e in events
+    ):
+        raise Corruption(f"{name}: 期望带 usage 的 ModelUsageRecorded")
     if outcome == "accept_drop_tail":
         return f"PASS {name}: 接受，丢弃 torn tail {len(tail)} 字节，replay {len(events)} 个事件"
     if outcome == "accept_with_skips":
