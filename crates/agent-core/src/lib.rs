@@ -25,7 +25,9 @@ pub use journal::{
 pub use message::{
     ContentPart, InputSource, Message, MessageId, MessageMeta, OpaqueJson, ToolCall, ToolResult,
 };
-pub use model::{Model, ModelContext, ModelError, ModelRequest, ModelResponse, StopReason};
+pub use model::{
+    Model, ModelContext, ModelError, ModelRequest, ModelResponse, ModelUsage, StopReason,
+};
 pub use outcome::{
     CancelReason, IncompleteReason, ResumeState, RunError, RunOutcome, RunStatus, SessionError,
     Step,

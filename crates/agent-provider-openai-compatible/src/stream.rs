@@ -6,7 +6,8 @@
 use std::collections::HashSet;
 
 use agent_core::{
-    AgentEvent, ContentPart, EventSink, ModelError, ModelResponse, StopReason, ToolCall,
+    AgentEvent, ContentPart, EventSink, ModelError, ModelResponse, ModelUsage, OpaqueJson,
+    StopReason, ToolCall,
 };
 use serde_json::Value;
 
@@ -27,6 +28,8 @@ pub(crate) struct Assembler<'a> {
     calls: Vec<PartialCall>,
     finish_reason: Option<String>,
     done: bool,
+    /// The last non-null `usage` object seen; may come from a trail chunk with no choices.
+    usage: Option<Value>,
 }
 
 pub(crate) enum Progress {
@@ -46,6 +49,7 @@ impl<'a> Assembler<'a> {
             calls: Vec::new(),
             finish_reason: None,
             done: false,
+            usage: None,
         }
     }
 
@@ -63,7 +67,12 @@ impl<'a> Assembler<'a> {
                 message.unwrap_or("(no message)")
             )));
         }
-        // Chunks with no choice carry only usage data.
+        // Usage travels on the chunk, and a trailing chunk may carry only usage (no choices).
+        // Capture it before the choice check; `null` means the server did not report usage.
+        if let Some(usage) = chunk.get("usage").filter(|u| !u.is_null()) {
+            self.usage = Some(usage.clone());
+        }
+        // Chunks with no choice carry only usage data; they are recorded above and skipped.
         let Some(choice) = chunk["choices"].get(0) else {
             return Ok(Progress::Continue);
         };
@@ -176,6 +185,7 @@ impl<'a> Assembler<'a> {
         } else {
             self.text
         };
+        let usage = self.usage.as_ref().map(usage_from_json);
         Ok(ModelResponse {
             content: if text.is_empty() {
                 Vec::new()
@@ -185,7 +195,43 @@ impl<'a> Assembler<'a> {
             tool_calls,
             provider_payload: None,
             stop_reason,
+            usage,
         })
+    }
+}
+
+/// Maps a provider usage object to the neutral [`ModelUsage`]. Aliases cover the shapes the
+/// adapter is built for (OpenAI's `prompt_tokens`/`completion_tokens`/`total_tokens` plus
+/// `prompt_tokens_details`; Anthropic-style `input_tokens`/`output_tokens` and
+/// `cache_*_input_tokens`). `total` is taken from the provider only and never computed.
+fn usage_from_json(usage: &Value) -> ModelUsage {
+    let number = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|key| usage.get(*key).and_then(Value::as_u64))
+    };
+    // The details sub-object, kept verbatim (J3).
+    let details = usage
+        .get("prompt_tokens_details")
+        .or_else(|| usage.get("details"))
+        .filter(|d| d.is_object())
+        .cloned();
+    let details_number = |key: &str| {
+        details
+            .as_ref()
+            .and_then(|d| d.get(key).and_then(Value::as_u64))
+    };
+    ModelUsage {
+        input: number(&["prompt_tokens", "input_tokens"]),
+        output: number(&["completion_tokens", "output_tokens"]),
+        total: number(&["total_tokens"]),
+        cache_read: number(&["cache_read_input_tokens"])
+            .or_else(|| details_number("cached_tokens")),
+        cache_write: number(&["cache_creation_input_tokens"])
+            .or_else(|| details_number("cache_write")),
+        details: details.map(|d| {
+            // The object already parsed as JSON, so a re-serialization cannot fail.
+            OpaqueJson::parse(d.to_string()).expect("a usage sub-object is valid JSON")
+        }),
     }
 }
 
@@ -463,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn usage_only_chunks_are_ignored() {
+    fn usage_only_chunks_carry_the_usage() {
         let response = assemble(
             &[
                 chunk(json!({"content": "ok"}), Some("stop")),
@@ -473,6 +519,80 @@ mod tests {
         )
         .unwrap();
         assert_eq!(response.content, vec![ContentPart::text("ok")]);
+        let usage = response
+            .usage
+            .expect("the trailing usage chunk is captured");
+        assert_eq!(usage.total, Some(3));
+        assert_eq!(usage.input, None);
+    }
+
+    #[test]
+    fn usage_in_every_chunk_takes_the_last_non_empty_one() {
+        let response = assemble(
+            &[
+                json!({"choices": [], "usage": {"prompt_tokens": 1}}).to_string(),
+                chunk(json!({"content": "ok"}), None),
+                json!({"choices": [], "usage": {"prompt_tokens": 9, "completion_tokens": 2}})
+                    .to_string(),
+                json!({"choices": [], "usage": null}).to_string(),
+                chunk(json!({}), Some("stop")),
+            ],
+            true,
+        )
+        .unwrap();
+        let usage = response.usage.expect("usage was reported");
+        // The last non-null usage object wins; the null one is ignored.
+        assert_eq!(usage.input, Some(9));
+        assert_eq!(usage.output, Some(2));
+    }
+
+    #[test]
+    fn usage_maps_openai_and_anthropic_field_names() {
+        let response = assemble(
+            &[
+                json!({"choices": [], "usage": {
+                    "prompt_tokens": 11,
+                    "completion_tokens": 4,
+                    "total_tokens": 15,
+                    "prompt_tokens_details": {"cached_tokens": 3, "audio_tokens": 0}
+                }})
+                .to_string(),
+                chunk(json!({}), Some("stop")),
+            ],
+            false,
+        )
+        .unwrap();
+        let usage = response.usage.unwrap();
+        assert_eq!(usage.input, Some(11));
+        assert_eq!(usage.output, Some(4));
+        assert_eq!(usage.total, Some(15));
+        assert_eq!(usage.cache_read, Some(3));
+        assert_eq!(usage.cache_write, None);
+        // The details sub-object is kept as one blob; key order may be normalized by the
+        // stream parse, content and nesting must match exactly.
+        let details: Value =
+            serde_json::from_str(usage.details.unwrap().get()).expect("details is JSON");
+        assert_eq!(details, json!({"cached_tokens": 3, "audio_tokens": 0}));
+    }
+
+    #[test]
+    fn total_is_never_invented_from_input_plus_output() {
+        let response = assemble(
+            &[
+                json!({"choices": [], "usage": {"prompt_tokens": 7, "completion_tokens": 2}})
+                    .to_string(),
+                chunk(json!({}), Some("stop")),
+            ],
+            false,
+        )
+        .unwrap();
+        let usage = response.usage.unwrap();
+        assert_eq!(usage.input, Some(7));
+        assert_eq!(usage.output, Some(2));
+        assert_eq!(
+            usage.total, None,
+            "total must stay None when the provider omits it"
+        );
     }
 
     #[test]

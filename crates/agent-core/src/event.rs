@@ -2,7 +2,7 @@ use serde_json::Value;
 
 use crate::hooks::HookPoint;
 use crate::message::Message;
-use crate::model::StopReason;
+use crate::model::{ModelUsage, StopReason};
 use crate::outcome::RunStatus;
 
 /// Observations of a turn. Events never change control flow; use `Hooks` for that.
@@ -23,6 +23,8 @@ pub enum AgentEvent {
     ModelResponseReceived {
         stop_reason: StopReason,
         tool_calls: usize,
+        /// The provider's usage for this response; `None` when it reported none.
+        usage: Option<ModelUsage>,
     },
     /// Emitted in the order calls actually start; `index` is the call's position in its batch.
     ToolStarted {

@@ -7,7 +7,9 @@ use agent_core::{
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Url, redirect};
 
-use crate::config::{ConfigError, OpenAiCompatibleConfig, is_local_host, redact_url};
+use crate::config::{
+    ConfigError, OpenAiCompatibleConfig, is_local_host, openai_host_is_default, redact_url,
+};
 use crate::request::build_body;
 use crate::sse::SseParser;
 use crate::stream::{Assembler, Progress};
@@ -25,6 +27,8 @@ pub struct OpenAiCompatible {
     endpoint: Url,
     headers: HeaderMap,
     config: OpenAiCompatibleConfig,
+    /// Whether the last request asked for streamed usage (resolved from `include_usage`).
+    include_usage: bool,
     /// The API key and custom header values, masked in every error message.
     secrets: Vec<String>,
 }
@@ -62,6 +66,10 @@ impl OpenAiCompatible {
         if config.api_key.is_some() && base.scheme() == "http" && !is_local_host(&host) {
             return Err(ConfigError::InsecureKey { host });
         }
+        // J8: explicit override wins; the default is on only for OpenAI's own endpoint.
+        let include_usage = config
+            .include_usage
+            .unwrap_or_else(|| openai_host_is_default(&host));
         // `join` would drop the last path segment of a base without a trailing slash.
         let path = format!("{}/chat/completions", base.path().trim_end_matches('/'));
         base.set_path(&path);
@@ -104,8 +112,14 @@ impl OpenAiCompatible {
             endpoint: base,
             headers,
             config,
+            include_usage,
             secrets,
         })
+    }
+
+    /// Whether this adapter asks for streamed usage, after the host-based default policy.
+    pub fn include_usage(&self) -> bool {
+        self.include_usage
     }
 
     async fn run(
@@ -126,7 +140,14 @@ impl OpenAiCompatible {
         let status = response.status();
         if !status.is_success() {
             let snippet = read_error_body(&mut response, self.config.idle_timeout).await;
-            let message = format!("HTTP {status}: {snippet}");
+            let mut message = format!("HTTP {status}: {snippet}");
+            // J10: a 400 from a server that rejects the usage option deserves a way out.
+            if status.as_u16() == 400 && self.include_usage {
+                message.push_str(
+                    "; the server rejected stream_options; set include_usage to Some(false) to \
+                     turn the option off",
+                );
+            }
             // Throttling and server trouble are the provider's; the rest is the request's.
             return Err(
                 if status.is_server_error() || matches!(status.as_u16(), 408 | 429) {
@@ -169,7 +190,7 @@ impl Model for OpenAiCompatible {
         request: ModelRequest,
         cx: ModelContext<'_>,
     ) -> Result<ModelResponse, ModelError> {
-        let body = build_body(&request, &self.config)?.to_string();
+        let body = build_body(&request, &self.config, self.include_usage)?.to_string();
         let taken = tool_call_ids(&request.messages);
         // The core already drops this future on cancellation; this also covers a host that
         // calls `complete` directly.

@@ -143,6 +143,7 @@ fn calls_tool(name: &str, args: Value) -> ModelResponse {
         }],
         provider_payload: None,
         stop_reason: StopReason::ToolUse,
+        usage: None,
     }
 }
 
@@ -152,6 +153,7 @@ fn answers(text: &str) -> ModelResponse {
         tool_calls: vec![],
         provider_payload: None,
         stop_reason: StopReason::EndTurn,
+        usage: None,
     }
 }
 
@@ -422,6 +424,7 @@ async fn replacing_a_transcript_keeps_the_mcp_process_and_its_state() {
             ],
             provider_payload: None,
             stop_reason: StopReason::ToolUse,
+            usage: None,
         },
         answers("before"),
         ModelResponse {
@@ -440,6 +443,7 @@ async fn replacing_a_transcript_keeps_the_mcp_process_and_its_state() {
             ],
             provider_payload: None,
             stop_reason: StopReason::ToolUse,
+            usage: None,
         },
         answers("after"),
     ])));

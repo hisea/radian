@@ -70,6 +70,7 @@ fn response_text(text: &str) -> ModelResponse {
         tool_calls: vec![],
         provider_payload: None,
         stop_reason: StopReason::EndTurn,
+        usage: None,
     }
 }
 
@@ -83,6 +84,7 @@ fn response_tool_call(id: &str, name: &str) -> ModelResponse {
         }],
         provider_payload: None,
         stop_reason: StopReason::ToolUse,
+        usage: None,
     }
 }
 

@@ -39,6 +39,32 @@ pub struct ModelResponse {
     pub tool_calls: Vec<ToolCall>,
     pub provider_payload: Option<OpaqueJson>,
     pub stop_reason: StopReason,
+    /// Usage the provider reported for this call, if any. The core never fills missing
+    /// fields: `None` means "not reported", never zero.
+    pub usage: Option<ModelUsage>,
+}
+
+/// Provider-reported token usage of one model call, self-contained and provider-neutral
+/// (AC-S-6). Every field is optional and serialized only when present.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModelUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<u64>,
+    /// The provider's own total. **Never computed** from `input + output`: the definition of
+    /// total differs between providers (caching counted or not), so an invented number is
+    /// worse than no number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<u64>,
+    /// The provider's own usage sub-object (e.g. OpenAI's `prompt_tokens_details`), kept
+    /// exactly as received: the core does not interpret, reorder or reformat it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<OpaqueJson>,
 }
 
 #[derive(Debug, thiserror::Error)]

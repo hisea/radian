@@ -30,12 +30,14 @@ impl Model for FauxModel {
                 }],
                 provider_payload: None,
                 stop_reason: StopReason::ToolUse,
+                usage: None,
             },
             Some(sum) => ModelResponse {
                 content: vec![ContentPart::text(format!("2 + 3 = {sum}"))],
                 tool_calls: vec![],
                 provider_payload: None,
                 stop_reason: StopReason::EndTurn,
+                usage: None,
             },
         })
     }
