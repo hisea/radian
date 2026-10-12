@@ -25,6 +25,9 @@ pub(crate) struct Assembler<'a> {
     used: usize,
     text: String,
     refusal: String,
+    /// The provider's separate reasoning channel (`delta.reasoning_content`); never mixed
+    /// into `text` (R4/R9).
+    reasoning: String,
     calls: Vec<PartialCall>,
     finish_reason: Option<String>,
     done: bool,
@@ -46,6 +49,7 @@ impl<'a> Assembler<'a> {
             used: 0,
             text: String::new(),
             refusal: String::new(),
+            reasoning: String::new(),
             calls: Vec::new(),
             finish_reason: None,
             done: false,
@@ -88,6 +92,19 @@ impl<'a> Assembler<'a> {
             self.refusal.push_str(text);
             self.events
                 .emit(AgentEvent::ModelTextDelta { text: text.into() });
+        }
+        // A reasoning model streams its chain of thought here while `content` stays ""
+        // (the dogfooded shape). It is a separate channel: emit a reasoning delta, never a
+        // text delta, and keep it out of the visible content.
+        if let Some(reasoning) = delta["reasoning_content"]
+            .as_str()
+            .filter(|t| !t.is_empty())
+        {
+            self.account(reasoning.len())?;
+            self.reasoning.push_str(reasoning);
+            self.events.emit(AgentEvent::ModelReasoningDelta {
+                text: reasoning.into(),
+            });
         }
         if let Some(calls) = delta["tool_calls"].as_array() {
             for call in calls {
@@ -188,7 +205,11 @@ impl<'a> Assembler<'a> {
         };
         let usage = self.usage.as_ref().map(usage_from_json);
         Ok(ModelResponse {
-            reasoning: Vec::new(),
+            reasoning: if self.reasoning.is_empty() {
+                Vec::new()
+            } else {
+                vec![ContentPart::text(self.reasoning)]
+            },
             content: if text.is_empty() {
                 Vec::new()
             } else {

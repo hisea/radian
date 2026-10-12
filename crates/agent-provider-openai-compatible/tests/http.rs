@@ -243,21 +243,58 @@ async fn a_tool_call_round_trips_through_the_core() {
 }
 
 #[tokio::test]
-async fn reasoning_text_the_server_streams_is_ignored() {
+async fn reasoning_content_streams_as_reasoning_not_text() {
+    // AC-R1-8: the dogfooded shape (`docs/findings/2026-10-12-opencode-zen-dogfooding.md`
+    // gap 2) - a `delta` carries `content: ""` and `reasoning_content` at the same time.
     let server = MockServer::start(vec![Reply::sse(&[
-        chunk(json!({"reasoning_content": "let me think"}), None),
-        chunk(json!({"content": "answer"}), None),
+        chunk(
+            json!({"role": "assistant", "content": "", "reasoning_content": "The"}),
+            None,
+        ),
+        chunk(
+            json!({"content": "", "reasoning_content": " user is asking"}),
+            None,
+        ),
+        chunk(json!({"content": "Hello!"}), None),
         chunk(json!({}), Some("stop")),
     ])])
     .await;
-    let mut session = chat(model(&server), NoTools).await;
+    let model = model(&server);
+    let events = Recorder::default();
+    let request = ModelRequest {
+        system_prompt: None,
+        messages: vec![Message::user("hi")],
+        tools: Vec::new(),
+        settings: Value::Null,
+    };
+    let cx = ModelContext {
+        cancellation: CancellationToken::new(),
+        events: &events,
+    };
+    let response = model.complete(request, cx).await.unwrap();
 
-    let outcome = session
-        .run_turn("hi", TurnOptions::default(), &NoopSink)
-        .await
-        .unwrap();
+    assert_eq!(response.content, vec![ContentPart::text("Hello!")]);
+    assert_eq!(
+        response.reasoning,
+        vec![ContentPart::text("The user is asking")]
+    );
 
-    assert_eq!(outcome.final_message.unwrap().text(), "answer");
+    let (reasoning, text): (Vec<String>, Vec<String>) = {
+        let events = events.0.lock().unwrap();
+        let mut reasoning = Vec::new();
+        let mut text = Vec::new();
+        for event in events.iter() {
+            match event {
+                AgentEvent::ModelReasoningDelta { text: piece } => reasoning.push(piece.clone()),
+                AgentEvent::ModelTextDelta { text: piece } => text.push(piece.clone()),
+                _ => {}
+            }
+        }
+        (reasoning, text)
+    };
+    assert_eq!(reasoning, ["The", " user is asking"]);
+    // The empty `content` on the reasoning chunks must not become text deltas.
+    assert_eq!(text, ["Hello!"]);
 }
 
 #[tokio::test]
