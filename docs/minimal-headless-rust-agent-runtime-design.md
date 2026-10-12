@@ -247,7 +247,7 @@ pub enum ToolDecision {
 - Model 网络/协议失败：`RunError::Model`，Run 进入 `Failed`，发唯一终态事件，不自动 retry。
 - Tool 执行失败、未知 tool、参数/schema 错误：生成模型可读的 tool error result；Run 继续（若预算允许）。`before_tool_call` hook 的 Deny 与 ToolSession wrapper 的拒绝同样转为 tool error result。
 - Hook 错误：按 §4 Hooks 表格 fail closed；model 相关 hook 出错时 Run 进入 `Failed(Hook)`。
-- `CancellationHandle::cancel()` 可从其他任务同步触发取消。Model 与 ToolSession 接口接收同一取消信号；`step()` 竞速当前 async 调用，取消后丢弃/中止本地 future，并要求实现方停止其后台工作。对有子进程的扩展，只有完成子进程树终止和 wait/reap 后 `step()` 才返回；对远端 API，取消不保证撤销服务端已经接受的请求或副作用。
+- `CancellationHandle::cancel()` 可从其他任务同步触发取消。Model 与 ToolSession 接口接收同一取消信号；模型调用在取消时直接丢弃其 future。工具调用则先让工具看到取消信号，并继续等它自行收尾，最多 `TurnOptions::tool_cancel_grace`（默认 5 秒），超时才丢弃其 future；不论工具返回什么，该调用结果都是 `cancelled`。这样有子进程的扩展可以在 `step()` 返回前发出取消通知、终止并 wait/reap 子进程树；对远端 API，取消不保证撤销服务端已经接受的请求或副作用。
 - `step()` 或 `run()` future 在首次 poll 后若被调用方直接 drop（例如 `timeout()` / `select!` 丢弃 losing future），属于**不安全中断**：同步 Drop guard 将 `ActiveRun` 标记为 `Poisoned`、发出唯一 `RunFinished(Poisoned)`，并将所属 AgentSession 标记不可继续；若工具子进程可能处于调用中，ToolSession 请求 future 的 Drop guard 同步终止该 session 的进程组。后续 `step()`/新 turn 都返回稳定的 `Poisoned` 错误。Poison 时 Drop guard 同步为所有尚无结果的 tool call 追加 `interrupted` 错误结果（与取消路径一致），保证 transcript 不含未配对调用；宿主可通过 `AgentSession::history_for_resume()` 取出该 transcript，再用 `open_session_with_history` 打开新会话继续对话。被中断的调用可能已产生副作用，`interrupted` 结果须如实说明“执行状态未知”。future 在首次 poll 前被 drop 没有执行、无需 poison。调用方要取消正在运行的操作，必须通过 `CancellationHandle::cancel()` 发信号并继续 await `step()`/`run()` 收敛；不要用会 drop future 的 timeout 包住它。
 - `step()` 若正在执行一批工具（串行或并行），取消后保留已写入的结果，向所有进行中的调用发出取消，为进行中/未启动调用补齐取消结果，然后以 `Cancelled` 终态结束；未注入的 steering 消息随 `unapplied_steering` 返回。
 - `RunFinished` 由 `ActiveRun` 的终态收敛路径发出，只能发生一次；`Completed`、`Incomplete`、`Refused`、`BudgetExceeded`、`Cancelled`、`Failed` 和 `Poisoned` 均覆盖。终态后不能继续调用 `step()`。
@@ -261,7 +261,13 @@ pub enum ToolDecision {
 
 **ADR 建议：不设计自定义 JSON-RPC 协议；扩展进程作为 MCP stdio Server，Host 使用官方 Rust SDK `rmcp`。** MCP stdio 已定义 JSON-RPC framing、工具发现/调用、错误、progress、取消和子进程传输；另造一套协议会损失现成服务器互通性。[MCP stdio transport](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/specification/2026-07-28/basic/transports/index.mdx) · [官方 `rmcp` SDK](https://github.com/modelcontextprotocol/rust-sdk)
 
-源码/规范核对结果：截至本文日期，MCP 最新正式规范是 **2026-07-28**。它移除了旧 `initialize` / `notifications/initialized` 会话握手，增加 `server/discover`；请求携带 protocol version/client capabilities。stdio 仍是子进程 stdin/stdout 上的换行 JSON-RPC。官方 `rmcp` 当前文档版本 **3.5.1** 声明支持 `2025-11-25` 和 `2026-07-28`；实际实施前仍需在 Cargo.lock 锁定并针对该版本跑协议测试。[MCP releases](https://github.com/modelcontextprotocol/modelcontextprotocol/releases) · [2026-07-28 changelog](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/specification/2026-07-28/changelog.mdx) · [`rmcp` compatibility/transports](https://github.com/modelcontextprotocol/rust-sdk)
+源码/规范核对结果：截至本文日期，MCP 最新正式规范是 **2026-07-28**。它移除了旧 `initialize` / `notifications/initialized` 会话握手，增加 `server/discover`；请求携带 protocol version/client capabilities。stdio 仍是子进程 stdin/stdout 上的换行 JSON-RPC。官方 `rmcp` 当前文档版本 **3.5.1** 声明支持 `2025-11-25` 和 `2026-07-28`；已核实（`agent-extensions` 以 `=3.5.1` 锁定）：
+
+- rmcp 的 `serve()` 默认只走旧的 `initialize` 握手；必须显式使用 `ClientLifecycleMode::Auto`，才会先发 `server/discover`，收到非现代错误码时回退到 `initialize`。对 `server/discover` 完全不回复的旧 server 要等 10 秒才回退。
+- 丢弃 `call_tool_once` 的 future 不会发送 `notifications/cancelled`；要通知 server，需用 `send_cancellable_request` 并在取消时调用 `RequestHandle::cancel`。
+- rmcp 的 `TokioChildProcess` 在 drop 时用 `tokio::spawn` 杀进程，且不建进程组；因此 Host 自行 spawn 子进程（独立进程组、同步 `killpg`、专用线程 wait/reap），只把 stdin/stdout 交给 rmcp 的 async-rw 传输。
+- rmcp 默认对 sampling 返回 method-not-found、roots 返回空列表、elicitation 返回 decline；sampling 与 roots 自 2026-07-28 起被 SEP-2577 标为弃用，但 2025-11-25 server 仍可能发来，所以 Host 覆盖为一律 method-not-found。
+- 集成测试使用一个手写的 fixture server（不依赖 rmcp），分别以 2026-07-28 和 2025-11-25 生命周期运行，并断言收到的方法序列：前者为 `server/discover` → `tools/list`，后者为 `server/discover`（被拒）→ `initialize` → `notifications/initialized` → `tools/list`。[MCP releases](https://github.com/modelcontextprotocol/modelcontextprotocol/releases) · [2026-07-28 changelog](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/specification/2026-07-28/changelog.mdx) · [`rmcp` compatibility/transports](https://github.com/modelcontextprotocol/rust-sdk)
 
 MVP 使用标准 `tools/list` 与 `tools/call`。工具执行错误放在 MCP CallToolResult 的 `isError: true` 中；JSON-RPC error 留给协议/分发层错误。Host 把 MCP 的原始工具名映射为符合所选 Model Provider 命名约束的唯一 model-facing name；模型名与 MCP 真名通过本地注册表映射，**不把 `extension_id/tool_name` 直接发给 Provider**。
 
@@ -279,14 +285,14 @@ MVP 使用标准 `tools/list` 与 `tools/call`。工具执行错误放在 MCP Ca
 
 因此别名不依赖列表顺序、进程实例或工具集合的增减；历史中既有 tool call/result 名称可跨新 AgentSession 稳定解析。回调时用注册表映射回原始 server/tool 名。`tools/call` 的进度经 progress token 映射为 Core `ToolProgress` 事件。
 
-MCP **单个工具超时、子进程崩溃、坏帧或协议错误**都会杀掉该 AgentSession 中对应 Extension 的整棵进程树，并把这个 ToolSession 标为 `Unavailable`；当前调用得到超时/不可用 tool error，当前轮可以继续。并行时，杀进程会连带终止同一 server 上其他进行中的调用，它们得到 `extension_unavailable` 结果，并写明是因同一扩展中另一调用超时或崩溃而终止。该对话后续调用同一 Extension 都立即返回 unavailable tool error，不在会话中自动重启，也不重放可能已产生副作用的调用。Host 新建 AgentSession 时才启动新进程并重读工具定义；其他 Extension sessions 不受影响。显式整轮取消仍以 `Cancelled` 结束。
+MCP **子进程崩溃、坏帧、协议错误，以及超时或取消后不再响应**，都会杀掉该 AgentSession 中对应 Extension 的整棵进程树，并把这个 ToolSession 标为 `Unavailable`；当前调用得到超时/不可用 tool error，当前轮可以继续。并行时，杀进程会连带终止同一 server 上其他进行中的调用，它们得到 `extension_unavailable` 结果，并写明是因同一扩展中另一调用超时或崩溃而终止。该对话后续调用同一 Extension 都立即返回 unavailable tool error，不在会话中自动重启，也不重放可能已产生副作用的调用。Host 新建 AgentSession 时才启动新进程并重读工具定义；其他 Extension sessions 不受影响。显式整轮取消仍以 `Cancelled` 结束。
 
 不可用 Extension 的工具**继续保留在本会话的工具声明中**，以保持工具列表稳定、不让 Provider 的 prompt cache 失效；对它的调用立即返回 `extension_unavailable` 错误，内容明确写“该扩展在本会话中已不可用，不要再调用这些工具”，让模型改用其他路径。重复调用照常计入模型调用预算。
 
 ### Timeout、进程树和环境
 
-- 每个工具请求有可配置的有限 deadline。MCP cancellation 发出后进入短 grace period；服务器若仍未停止，Host 终止所属 AgentSession 的该 Extension 子进程树并等待回收，再让 `step()` 返回 `extension_timeout` tool error。该扩展在当前 AgentSession 内永久不可用；整次 Run 用户取消则成为 `Cancelled`。
-- Unix 子进程放入独立 process group/session，终止时杀整个 group；Windows 使用 Job Object，并设置关闭时终止成员。单杀直接子进程不能满足无孤儿子进程验收。
+- 每个工具请求有可配置的有限 deadline（`call_timeout`）。超时或整轮取消时，Host 发送 `notifications/cancelled`。规范要求 server 对被取消的请求不再回复，所以无法从回复判断它是否已停止；Host 改为在 `cancel_grace` 内发一次 `ping`：server 能响应就继续使用（保留跨轮状态，被取消的工作是否仍在后台进行无法确知）；不响应则视为卡死，终止其子进程树、等待回收，并在本会话内标为不可用。当前调用分别得到 `extension_timeout` 或 `cancelled` 结果；整轮取消仍以 `Cancelled` 结束。
+- Unix 子进程放入独立 process group/session，终止时杀整个 group；Windows 计划使用 Job Object 并设置关闭时终止成员；当前实现暂以 `taskkill /T /F` 按 pid 终止进程树，尚未在 Windows 上测试。单杀直接子进程不能满足无孤儿子进程验收。
 - 子进程默认不继承宿主完整环境变量。Host 用 `env_clear()`，仅设置必要的启动环境（例如可执行文件解析所需 `PATH` 和 Windows 系统变量）；其他变量逐项由 Extension 配置 allowlist，API key 等 secret 不因默认继承而泄露。
 - 启动失败、坏 MCP 帧或进程崩溃：当前调用转成 `extension_unavailable` / `extension_protocol_error` tool result，ToolSession 按上条规则失效；不重放失败调用。
 - `AgentSession::close().await` 正常关闭所有 ToolSession。第一次调用起会话不再接受新轮次；只有底层关闭成功后会话才算已关闭，失败或 close future 被丢弃时可再次调用 `close()` 重试，因此 `ToolSession::close` 必须可重试；关闭成功后再调用直接返回 `Ok(())`。关闭过程：关闭 stdin，等待进程退出；超过 shutdown deadline 或发生关闭错误则 terminate/kill，并 wait/reap 所有进程后返回首个关闭错误。MCP 生命周期不定义通用 `shutdown` 方法；Host 不发明自定义 `shutdown`/`exit` RPC。AgentSession Drop 同步 kill 每个进程组/Job Object；独立 supervisor 线程负责最终 wait/reap，不依赖 Tokio runtime。Drop 是兜底路径而非正常关闭：不给 server 优雅退出的机会，API 文档须写明正常退出前调用 `close().await`。

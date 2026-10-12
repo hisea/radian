@@ -1,10 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["crates/agent-core"]
+members = ["crates/agent-core", "crates/agent-extensions"]
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [workspace.dependencies]
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
