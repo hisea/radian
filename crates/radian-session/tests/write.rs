@@ -217,3 +217,41 @@ async fn a_tool_result_settles_with_its_full_shape() {
         other => panic!("expected ToolExecutionSettled, got {other:?}"),
     }
 }
+
+/// Not a correctness test: measures the wall time of one `append` including its fsync, so
+/// the D3 "the core waits for this" cost is a measured number rather than a guess.
+/// Run with `cargo test -p radian-session --test write -- --ignored --nocapture`.
+#[tokio::test]
+#[ignore = "measurement, not an assertion; run with --ignored --nocapture"]
+async fn bench_append_latency() {
+    let dir = TempDir::new("latency");
+    let path = dir.file("s.jsonl");
+    let journal = SessionJournal::create(&path, "sid-latency", created()).unwrap();
+    // Warm up the file and the page cache.
+    for i in 0..5 {
+        journal
+            .append(JournalRecord::Message {
+                index: i,
+                message: Message::assistant(format!("warm {i}")),
+            })
+            .await
+            .unwrap();
+    }
+    let n = 50;
+    let start = std::time::Instant::now();
+    for i in 0..n {
+        journal
+            .append(JournalRecord::Message {
+                index: 5 + i,
+                message: Message::assistant(format!("line {i}")),
+            })
+            .await
+            .unwrap();
+    }
+    let per_append = start.elapsed() / n as u32;
+    println!("append + flush + fsync: {per_append:?} per record ({n} records)");
+    assert!(
+        per_append < std::time::Duration::from_secs(1),
+        "sanity bound"
+    );
+}
