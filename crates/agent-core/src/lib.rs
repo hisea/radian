@@ -7,6 +7,7 @@
 mod agent;
 mod event;
 mod hooks;
+mod journal;
 mod message;
 mod model;
 mod outcome;
@@ -18,6 +19,7 @@ mod turn;
 pub use agent::{Agent, AgentConfig, AgentSession, DEFAULT_MAX_MODEL_CALLS};
 pub use event::{AgentEvent, EventSink, NoopSink};
 pub use hooks::{HookContext, HookError, HookPoint, Hooks, ToolDecision};
+pub use journal::{JournalError, JournalRecord, TranscriptJournal};
 pub use message::{ContentPart, Message, OpaqueJson, ToolCall, ToolResult};
 pub use model::{Model, ModelContext, ModelError, ModelRequest, ModelResponse, StopReason};
 pub use outcome::{
@@ -33,5 +35,8 @@ pub use turn::{
     ActiveRun, CancellationHandle, DEFAULT_MAX_PARALLEL_TOOLS, DEFAULT_TOOL_CANCEL_GRACE,
     TurnOptions,
 };
+
+#[cfg(feature = "testing")]
+pub mod testing;
 
 pub use tokio_util::sync::CancellationToken;
