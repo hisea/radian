@@ -1,0 +1,17 @@
+MUTATION|M1|bwrap: drop the .git read-only bind
+CASE|10e|git-add-index-lock|expected=fail|actual=success|MISMATCH|
+CASE|10a|git-hooks-write|expected=fail|actual=success|MISMATCH|
+CASE|10b|git-config-write|expected=fail|actual=success|MISMATCH|
+CASE|10f|worktree-pointer|expected=fail|actual=fail|OK|/bin/sh: line 1: /tmp/radian-linux-sandbox/ws/wt/.git: Read-only file system
+CASE|10g|worktree-gitdir|expected=fail|actual=success|MISMATCH|
+CASE|10h|worktree-symlink|expected=fail|actual=success|MISMATCH|
+MUTATION|M2|bwrap: keep the network namespace shared
+CASE|5|connect-local-listener|expected=fail|actual=success|MISMATCH|b'pong'
+MUTATION|M3|bwrap: do not clear the environment
+CASE|6a|env-secret-hidden|expected=<unset>|actual=leaked-secret-value|MISMATCH|leaked-secret-value
+MUTATION|M4|bwrap: do not make the escape target visible at all
+CASE|1|abs-write-outside|expected=fail|actual=fail|OK|/bin/sh: line 1: /tmp/radian-linux-sandbox/outside/abs.txt: No such file or directory
+MUTATION|M5|landlock: drop the workspace writable rule
+CASE|9|workspace-write-read|expected=success|actual=fail|MISMATCH|/bin/sh: line 1: in.txt: Permission denied
+MUTATION|M6|landlock: drop the network denial
+CASE|5|connect-local-listener|expected=fail|actual=success|MISMATCH|b'pong'

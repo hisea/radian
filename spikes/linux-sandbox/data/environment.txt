@@ -1,0 +1,7 @@
+== environment
+Linux 7.2.6-1-aarch64-ARCH aarch64
+lsm: capability,yama,landlock
+bubblewrap 0.12.0
+gcc (GCC) 16.1.1 20260430
+Python 3.14.7
+git version 2.55.0

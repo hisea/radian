@@ -1,0 +1,29 @@
+CASE|1|abs-write-outside|expected=fail|actual=fail|OK|/bin/sh: line 1: /tmp/radian-linux-sandbox/outside/abs.txt: Read-only file system
+CASE|2|dotdot-write-outside|expected=fail|actual=fail|OK|/bin/sh: line 1: ../outside/dotdot.txt: Read-only file system
+CASE|3|symlink-file-outside|expected=fail|actual=fail|OK|/bin/sh: line 1: leak.txt: Read-only file system
+CASE|4|symlink-parent-outside|expected=fail|actual=fail|OK|/bin/sh: line 1: link_dir/new.txt: Read-only file system
+CASE|7|nested-sh-outside|expected=fail|actual=fail|OK|sh: line 1: /tmp/radian-linux-sandbox/outside/nested.txt: Read-only file system
+CASE|9|workspace-write-read|expected=success|actual=success|OK|hi
+CASE|5|connect-local-listener|expected=fail|actual=fail|OK|Traceback (most recent call last):
+  File "<string>", line 3, in <module>
+    s = socket.create_connection(('127.0.0.1', 47311), timeout=3)
+  File "/usr/lib/pyt
+CASE|6a|env-secret-hidden|expected=<unset>|actual=<unset>|OK|<unset>
+CASE|6b|env-whitelist-visible|expected=passed-through|actual=passed-through|OK|passed-through
+CASE|8a|mcp-handshake|expected=success|actual=success|OK|MCP_OK echo=hello-mcp inside_written=True outside_write_succeeded=False
+CASE|8b|mcp-outside-write|expected=fail|actual=fail|OK|MCP_OK echo=hello-mcp inside_written=True outside_write_succeeded=False
+CASE|10i|git-status-read|expected=success|actual=success|OK|?? in.txt
+?? leak.txt
+?? link_dir
+?? mcp_inside.txt
+?? wt/
+CASE|10j|git-log-read|expected=success|actual=success|OK|b0a4131 init
+CASE|10e|git-add-index-lock|expected=fail|actual=fail|OK|fatal: Unable to create '/tmp/radian-linux-sandbox/ws/.git/index.lock': Read-only file system
+CASE|10d|git-hookspath|expected=fail|actual=fail|OK|error: could not lock config file .git/config: Read-only file system
+CASE|10a|git-hooks-write|expected=fail|actual=fail|OK|/bin/sh: line 1: .git/hooks/evil: Read-only file system
+CASE|10b|git-config-write|expected=fail|actual=fail|OK|/bin/sh: line 1: .git/config: Read-only file system
+CASE|10c|git-info-write|expected=fail|actual=fail|OK|/bin/sh: line 1: .git/info/evil: Read-only file system
+CASE|10f|worktree-pointer|expected=fail|actual=fail|OK|/bin/sh: line 1: /tmp/radian-linux-sandbox/ws/wt/.git: Read-only file system
+CASE|10g|worktree-gitdir|expected=fail|actual=fail|OK|/bin/sh: line 1: /tmp/radian-linux-sandbox/ws/.git/worktrees/wt/gitdir: Read-only file system
+CASE|10h|worktree-symlink|expected=fail|actual=fail|OK|/bin/sh: line 1: /tmp/radian-linux-sandbox/ws/wt/gitlink/config: Read-only file system
+SUMMARY|combo-sandbox|ok=21|mismatch=0
