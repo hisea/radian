@@ -62,9 +62,25 @@ Anthropic 的 `ContentBlockParam` 文档列出的输入块类型里**没有**音
 
 来源：api/messages `Message` / `Usage` 域类型。访问 2026-10-12。
 
-`Message`：`id`、`type:"message"`、`role:"assistant"`、`content: array of ContentBlock`、`model`、`stop_reason`、`stop_sequence`、`usage`。`Usage` 字段：`input_tokens`、`output_tokens`、`cache_creation_input_tokens`、`cache_read_input_tokens`、`cache_creation`、`output_tokens_details`、`server_tool_use`、`service_tier`、`inference_geo`。
+`Message`：`id`、`type:"message"`、`role:"assistant"`、`content: array of ContentBlock`、`model`、`stop_reason`、`stop_sequence`、`usage`。
 
-**`Usage` 里没有 `total_tokens`**（对整份 api/messages 全文 grep `total_tokens` 无命中；`Message Delta Usage` 同样没有）。因此本 adapter 的 `ModelUsage.total` 在 Anthropic 下**恒为 `None`**（ADR 0007 J2：绝不计算）。
+### 3.1 Anthropic 官方 usage 的完整字段集合（`unreported_usage_fields` 的依据）
+
+来源：`https://platform.claude.com/docs/en/api/messages.md` 的 `Usage` 域类型（行 ~33732）与 `Message Delta Usage` 域类型（行 ~22678）。访问 2026-10-12。
+
+| 字段 | 类型 | 在 `Usage` | 在 `MessageDeltaUsage` | 本 adapter 映射到 `ModelUsage` |
+|---|---|---|---|---|
+| `input_tokens` | number（Delta 里为 `number or null`，累计） | 有 | 有 | `input` |
+| `output_tokens` | number（Delta 里为 `number`，累计） | 有 | 有 | `output` |
+| `cache_read_input_tokens` | `number or null` | 有 | 有 | `cache_read` |
+| `cache_creation_input_tokens` | `number or null` | 有 | 有 | `cache_write` |
+| `cache_creation` | `CacheCreation or null`（`ephemeral_1h_input_tokens`、`ephemeral_5m_input_tokens`） | 有 | 无 | 不映射（见下） |
+| `output_tokens_details` | `OutputTokensDetails or null`（`thinking_tokens`） | 有 | 有 | `details`（原样保留） |
+| `server_tool_use` | `ServerToolUsage or null`（`web_fetch_requests`、`web_search_requests`） | 有 | 有 | 不映射 |
+| `service_tier` | `"standard" or "priority" or "batch" or null` | 有 | 无 | 不映射 |
+| `inference_geo` | `string or null` | 有 | 无 | 不映射 |
+
+**没有 `total_tokens`**（对整份 api/messages 全文 grep `total_tokens` 无命中；`Usage` 与 `Message Delta Usage` 均无）。因此 `agent-provider-anthropic` 的 `ContractHarness::unreported_usage_fields()` 声明 `UsageField::Total`，`ModelUsage.total` 恒为 `None`（ADR 0007 J2：绝不计算）。不映射的 `cache_creation`/`server_tool_use`/`service_tier`/`inference_geo` 是本 adapter 的**已知有损**：它们不是 `ModelUsage` 的中性字段（`cache_creation` 的 TTL 明细只是 `cache_write` 的和的分解，`cache_write` 已承载总和）。
 
 ## 4. 流式事件（SSE）
 
@@ -146,8 +162,9 @@ Anthropic 的 `ContentBlockParam` 文档列出的输入块类型里**没有**音
 - `https://platform.claude.com/docs/en/build-with-claude/tool-use`（工具往返示例）
 - `https://platform.claude.com/docs/en/build-with-claude/thinking`（思考流式与签名，仅用于说明本 adapter 未实现它）
 
-## 8. 与 provider 契约套件的关系：一处未解耦
+## 8. 与 provider 契约套件的关系：两处出口
 
-`agent-provider-contract` 的 `check_usage_shapes` 脚本一个含 `total: Some(15)` 的 `ModelUsage`，并断言 adapter 返回的 usage **逐字段相等**。Anthropic 的官方 usage 对象**没有** total 字段（§3），所以 `agent-provider-anthropic` 诚实地返回 `total: None`，该条契约因此**必然失败**（`contract_7a_usage_shapes`，仅差 `total`；`input`/`output`/`cache_read`/`details` 都正确往返）。
+`agent-provider-contract` 的契约按「语义（`Wire`）」描述，但两处把 OpenAI 的形状当成了所有 provider 的形状。两处都用**显式声明 + 断言缺席/跳过**解决，**没有**静默跳过，也**没有**为了让契约通过而伪造 provider 行为：
 
-这是「契约与 adapter 解耦」声称的一处反例：契约假设 provider 能承载 `ModelUsage` 的每个字段，Anthropic 不能。按任务约束，本次**只**给 `Reason` 加了显式声明出口（`unsupported_reasons`），没有顺带给 usage 加同类出口；修法建议与待决事项写在汇报里。`check_finish_reasons` 一侧已用出口解决：Anthropic 没有 `content_filter`（用 `refusal`，由契约的另一条子检查覆盖），harness 显式声明 `Reason::ContentFiltered` 不支持。
+1. **finish reason**：`check_finish_reasons` 原先要求每个 adapter 对每个 `Reason` 都有线上形式。Anthropic 的官方 `stop_reason` 集合（§4.4）里**没有** `content_filter`（它用 `refusal`，由契约的另一条子检查覆盖），所以 Anthropic harness 用 `unsupported_reasons()` 显式声明 `Reason::ContentFiltered`，该条被**跳过**（它在本 provider 下无意义）。
+2. **usage 字段**：`check_usage_shapes` 原先脚本一个含 `total: Some(15)` 的 `ModelUsage` 并要求逐字段相等。Anthropic 官方 usage **没有** total 字段（§3.1），所以 Anthropic harness 用 `unreported_usage_fields()` 显式声明 `UsageField::Total`；契约据此把 `total` **断言为 `None`**（而不是跳过）：provider 没报的数字，adapter 永不得编（ADR 0007 J2）。这处出口让检查**更严**。

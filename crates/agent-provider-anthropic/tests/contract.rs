@@ -17,7 +17,7 @@ use agent_provider_anthropic::testing::{
     message_stop, text_delta, text_start, tool_start,
 };
 use agent_provider_anthropic::{Anthropic, AnthropicConfig, ApiKey};
-use agent_provider_contract::{FnCall, Reason, Wire};
+use agent_provider_contract::{FnCall, Reason, UsageField, Wire};
 use serde_json::{Map, Value, json};
 
 const SECRET: &str = "sk-ant-contract-secret-token";
@@ -53,6 +53,12 @@ impl agent_provider_contract::ContractHarness<Anthropic> for AnthropicHarness {
         // Anthropic's stop_reason set is exactly the seven values in the wire notes §4.4;
         // there is no content-filter value, so the suite must not require one.
         &[Reason::ContentFiltered]
+    }
+
+    fn unreported_usage_fields(&self) -> &'static [UsageField] {
+        // Anthropic's usage object has no total field (wire notes §3), so the adapter must
+        // leave `total` None; the contract asserts that absence rather than skipping it.
+        &[UsageField::Total]
     }
 }
 
@@ -202,8 +208,8 @@ fn arguments_string(arguments: &Value) -> String {
 }
 
 /// A neutral `ModelUsage` back to Anthropic's usage JSON. Anthropic has no `total` field
-/// (wire notes §3), so a scripted `total` cannot round-trip — the one place the contract's
-/// usage-shape check does not fit a provider without a total.
+/// (wire notes §3), so the harness drops it; the adapter declares `total` unreported and the
+/// contract asserts it stays `None` (rather than skipping the field).
 fn usage_json(usage: &ModelUsage) -> Value {
     let mut body = Map::new();
     if let Some(value) = usage.input {

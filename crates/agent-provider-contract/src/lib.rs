@@ -86,6 +86,55 @@ pub enum Wire {
     Hangs,
 }
 
+/// One field of [`ModelUsage`]. Used to declare which fields a provider does not report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageField {
+    Input,
+    Output,
+    Total,
+    CacheRead,
+    CacheWrite,
+    Details,
+}
+
+impl UsageField {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::Output => "output",
+            Self::Total => "total",
+            Self::CacheRead => "cache_read",
+            Self::CacheWrite => "cache_write",
+            Self::Details => "details",
+        }
+    }
+
+    /// Whether `usage` carries a value for this field.
+    pub fn is_reported(self, usage: &ModelUsage) -> bool {
+        match self {
+            Self::Input => usage.input.is_some(),
+            Self::Output => usage.output.is_some(),
+            Self::Total => usage.total.is_some(),
+            Self::CacheRead => usage.cache_read.is_some(),
+            Self::CacheWrite => usage.cache_write.is_some(),
+            Self::Details => usage.details.is_some(),
+        }
+    }
+
+    /// Clears this field. A harness uses it to model "the provider does not report this";
+    /// [`expected_usage`] uses it to build what the adapter is required to return.
+    pub fn clear(self, usage: &mut ModelUsage) {
+        match self {
+            Self::Input => usage.input = None,
+            Self::Output => usage.output = None,
+            Self::Total => usage.total = None,
+            Self::CacheRead => usage.cache_read = None,
+            Self::CacheWrite => usage.cache_write = None,
+            Self::Details => usage.details = None,
+        }
+    }
+}
+
 /// An adapter plugged into a mock server that can serve [`Wire`]s.
 ///
 /// Implement once per provider. The harness owns: the mock, the credential it configures
@@ -106,6 +155,15 @@ pub trait ContractHarness<M: Model>: Sync {
     /// provider's documentation as the reason, so the suite never pressures an adapter into
     /// inventing a value its provider does not send. The default is "supports every reason".
     fn unsupported_reasons(&self) -> &'static [Reason] {
+        &[]
+    }
+
+    /// The [`ModelUsage`] fields this provider does **not** report. A declared field is not
+    /// skipped: the contract requires it to be `None` in every response (see
+    /// [`expected_usage`]). This hatch makes the check **stricter**, not looser — a provider
+    /// that does not report a number must never have one invented for it (ADR 0007 J2). The
+    /// default is "reports every field".
+    fn unreported_usage_fields(&self) -> &'static [UsageField] {
         &[]
     }
 }
@@ -422,9 +480,41 @@ pub async fn check_finish_reasons<M: Model, H: ContractHarness<M>>(h: &H) {
     );
 }
 
+/// The usage the adapter must return for `scripted`: the scripted values, except that every
+/// field the harness declares unreported must be `None`. This is deliberately **not** a skip:
+/// a declared field is still asserted, just asserted absent, so an adapter that invents a
+/// value for a field its provider never reports fails the check (ADR 0007 J2).
+pub fn expected_usage<M: Model, H: ContractHarness<M>>(h: &H, scripted: &ModelUsage) -> ModelUsage {
+    let mut expected = scripted.clone();
+    for field in h.unreported_usage_fields() {
+        field.clear(&mut expected);
+    }
+    expected
+}
+
+/// Asserts that every field the harness declared unreported is `None` in `usage`, with a
+/// message that names the field. A field the provider does not report must never carry a
+/// value the adapter made up.
+fn assert_unreported_usage_absent<M: Model, H: ContractHarness<M>>(
+    h: &H,
+    usage: Option<&ModelUsage>,
+) {
+    for field in h.unreported_usage_fields() {
+        let reported = usage.is_some_and(|usage| field.is_reported(usage));
+        assert!(
+            !reported,
+            "the adapter reported `{}` although the harness declares the provider does not \
+             report it; a provider that does not report a number must never have one invented \
+             for it (ADR 0007 J2)",
+            field.name()
+        );
+    }
+}
+
 /// 7a. Usage arrives: in a trailing chunk with no choices, and riding on every chunk (the
 /// last non-null one wins); and not at all. `ModelUsage` is the neutral unit: the harness
-/// maps it to its provider's field names.
+/// maps it to its provider's field names. Fields the harness declares unreported must be
+/// `None` in the result — asserted, never skipped.
 pub async fn check_usage_shapes<M: Model, H: ContractHarness<M>>(h: &H) {
     // Trailing block.
     let usage = ModelUsage {
@@ -437,10 +527,12 @@ pub async fn check_usage_shapes<M: Model, H: ContractHarness<M>>(h: &H) {
     };
     let model = h.script(&[Wire::UsageTrailing(usage.clone())]).await;
     let resp = complete(&model, request(), &NoopSink).await.unwrap();
+    assert_unreported_usage_absent(h, resp.usage.as_ref());
     assert_eq!(
         resp.usage,
-        Some(usage),
-        "the trailing usage block must be captured field-for-field"
+        Some(expected_usage(h, &usage)),
+        "the trailing usage block must be captured field-for-field, except that a provider \
+         which does not report a field must leave it None"
     );
 
     // Every chunk carries usage; the last non-null one wins.
@@ -457,9 +549,10 @@ pub async fn check_usage_shapes<M: Model, H: ContractHarness<M>>(h: &H) {
         .script(&[Wire::UsageEveryChunk(vec![first, last.clone()])])
         .await;
     let resp = complete(&model, request(), &NoopSink).await.unwrap();
+    assert_unreported_usage_absent(h, resp.usage.as_ref());
     assert_eq!(
         resp.usage,
-        Some(last),
+        Some(expected_usage(h, &last)),
         "the last non-null usage chunk must win"
     );
 
@@ -583,12 +676,12 @@ pub async fn check_secret_not_leaked<M: Model, H: ContractHarness<M>>(h: &H) {
 mod tests {
     use super::*;
 
-    /// A fake provider whose only flaw is that it maps `ContentFiltered` to `EndTurn`: it
-    /// cannot satisfy `check_finish_reasons` for that reason. Everything else is correct, so
-    /// the only variable is the declaration.
+    /// A fake provider. Its only flaws are the ones the tests inject: a wrong
+    /// `ContentFiltered` mapping, and the `drop_usage` fields it fails to report.
     struct FakeModel {
         stop_reason: StopReason,
         text: String,
+        usage: Option<ModelUsage>,
     }
 
     impl Model for FakeModel {
@@ -606,13 +699,27 @@ mod tests {
                 tool_calls: Vec::new(),
                 provider_payload: None,
                 stop_reason: self.stop_reason.clone(),
-                usage: None,
+                usage: self.usage.clone(),
             })
         }
     }
 
     struct FakeHarness {
         unsupported: &'static [Reason],
+        /// What the harness tells the contract the provider does not report.
+        unreported_usage: &'static [UsageField],
+        /// What the fake adapter actually leaves out when it builds a response.
+        drop_usage: &'static [UsageField],
+    }
+
+    impl FakeHarness {
+        fn new() -> Self {
+            Self {
+                unsupported: &[],
+                unreported_usage: &[],
+                drop_usage: &[],
+            }
+        }
     }
 
     impl ContractHarness<FakeModel> for FakeHarness {
@@ -621,40 +728,49 @@ mod tests {
         }
 
         async fn script(&self, wires: &[Wire]) -> FakeModel {
-            match wires.first() {
+            let mut usage = match wires.first() {
+                Some(Wire::UsageTrailing(usage)) => Some(usage.clone()),
+                Some(Wire::UsageEveryChunk(usages)) => usages.last().cloned(),
+                _ => None,
+            };
+            if let Some(usage) = usage.as_mut() {
+                for field in self.drop_usage {
+                    field.clear(usage);
+                }
+            }
+            let (stop_reason, text) = match wires.first() {
                 // Deliberately wrong: `ContentFiltered` surfaces as `EndTurn`.
-                Some(Wire::Finish(Reason::ContentFiltered)) => FakeModel {
-                    stop_reason: StopReason::EndTurn,
-                    text: "x".into(),
-                },
-                Some(Wire::Finish(Reason::Unknown)) => FakeModel {
-                    stop_reason: StopReason::Other("unknown".into()),
-                    text: "x".into(),
-                },
-                Some(Wire::Refusal(text)) => FakeModel {
-                    stop_reason: StopReason::Refusal,
-                    text: text.clone(),
-                },
-                Some(Wire::Finish(reason)) => FakeModel {
-                    stop_reason: expected_stop_reason(*reason),
-                    text: "x".into(),
-                },
-                _ => FakeModel {
-                    stop_reason: StopReason::EndTurn,
-                    text: "x".into(),
-                },
+                Some(Wire::Finish(Reason::ContentFiltered)) => (StopReason::EndTurn, "x".into()),
+                Some(Wire::Finish(Reason::Unknown)) => {
+                    (StopReason::Other("unknown".into()), "x".into())
+                }
+                Some(Wire::Refusal(text)) => (StopReason::Refusal, text.clone()),
+                Some(Wire::Finish(reason)) => (expected_stop_reason(*reason), "x".into()),
+                _ => (StopReason::EndTurn, "x".into()),
+            };
+            FakeModel {
+                stop_reason,
+                text,
+                usage,
             }
         }
 
         fn unsupported_reasons(&self) -> &'static [Reason] {
             self.unsupported
         }
+
+        fn unreported_usage_fields(&self) -> &'static [UsageField] {
+            self.unreported_usage
+        }
     }
 
+    // ---------- the reason hatch ----------
+
     #[test]
-    fn the_default_declaration_supports_every_reason() {
-        let harness = FakeHarness { unsupported: &[] };
+    fn the_default_declarations_support_everything() {
+        let harness = FakeHarness::new();
         assert_eq!(harness.unsupported_reasons(), &[]);
+        assert_eq!(harness.unreported_usage_fields(), &[]);
         assert_eq!(reasons_to_check(&harness), ALL_REASONS.to_vec());
     }
 
@@ -662,6 +778,7 @@ mod tests {
     fn only_declared_reasons_are_dropped_from_the_check() {
         let harness = FakeHarness {
             unsupported: &[Reason::ContentFiltered],
+            ..FakeHarness::new()
         };
         let checked = reasons_to_check(&harness);
         assert!(!checked.contains(&Reason::ContentFiltered));
@@ -684,6 +801,7 @@ mod tests {
         // check pass. Refusal and Unknown are always checked and the fake satisfies them.
         let harness = FakeHarness {
             unsupported: &[Reason::ContentFiltered],
+            ..FakeHarness::new()
         };
         check_finish_reasons(&harness).await;
     }
@@ -691,7 +809,70 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "ContentFiltered")]
     async fn an_undeclared_reason_must_be_satisfied() {
-        let harness = FakeHarness { unsupported: &[] };
+        let harness = FakeHarness::new();
         check_finish_reasons(&harness).await;
+    }
+
+    // ---------- the usage hatch ----------
+
+    #[test]
+    fn expected_usage_clears_only_declared_fields() {
+        let scripted = ModelUsage {
+            input: Some(1),
+            output: Some(2),
+            total: Some(3),
+            cache_read: Some(4),
+            cache_write: Some(5),
+            details: Some(OpaqueJson::parse(r#"{"x":1}"#).unwrap()),
+        };
+        let harness = FakeHarness {
+            unreported_usage: &[UsageField::Total, UsageField::Details],
+            ..FakeHarness::new()
+        };
+        let expected = expected_usage(&harness, &scripted);
+        assert_eq!(expected.input, Some(1));
+        assert_eq!(expected.output, Some(2));
+        assert_eq!(expected.total, None, "a declared field is cleared");
+        assert_eq!(expected.cache_read, Some(4));
+        assert_eq!(expected.cache_write, Some(5));
+        assert_eq!(expected.details, None, "a declared field is cleared");
+    }
+
+    #[tokio::test]
+    async fn a_declared_unreported_field_must_be_absent() {
+        // The honest fake adapter drops `total`, and the harness declares it unreported:
+        // the check passes because the contract requires exactly that.
+        let harness = FakeHarness {
+            unreported_usage: &[UsageField::Total],
+            drop_usage: &[UsageField::Total],
+            ..FakeHarness::new()
+        };
+        check_usage_shapes(&harness).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "reported `total`")]
+    async fn a_declared_field_that_is_filled_fails() {
+        // The harness declares `total` unreported but the adapter invents one anyway: the
+        // hatch is an assertion of absence, not a skip, so this must fail.
+        let harness = FakeHarness {
+            unreported_usage: &[UsageField::Total],
+            drop_usage: &[],
+            ..FakeHarness::new()
+        };
+        check_usage_shapes(&harness).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "trailing usage block")]
+    async fn an_undeclared_field_must_be_reported() {
+        // The adapter silently drops `total` without declaring it: the contract expects the
+        // scripted value and must notice the loss.
+        let harness = FakeHarness {
+            unreported_usage: &[],
+            drop_usage: &[UsageField::Total],
+            ..FakeHarness::new()
+        };
+        check_usage_shapes(&harness).await;
     }
 }
