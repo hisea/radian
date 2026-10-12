@@ -39,10 +39,11 @@ mod list;
 mod patch;
 mod provider;
 mod read;
+mod shell;
 mod workspace;
 mod write;
 
-pub use provider::{CodingSession, CodingTools, Limits};
+pub use provider::{CodingSession, CodingTools, CodingToolsError, Limits};
 pub use workspace::WorkspaceError;
 
 use agent_core::ToolFailure;
