@@ -42,6 +42,7 @@ impl Inner {
         let nth = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         let key = match &record {
             JournalRecord::Message { index, .. } => format!("{index}"),
+            JournalRecord::TranscriptReplaced { revision, .. } => format!("replaced:{revision}"),
             JournalRecord::ToolExecutionStarted { call_id, .. } => format!("started:{call_id}"),
             JournalRecord::ToolExecutionSettled { call_id, .. } => format!("settled:{call_id}"),
         };

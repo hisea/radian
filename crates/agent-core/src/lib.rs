@@ -16,7 +16,7 @@ mod steering;
 mod tool;
 mod turn;
 
-pub use agent::{Agent, AgentConfig, AgentSession, DEFAULT_MAX_MODEL_CALLS};
+pub use agent::{Agent, AgentConfig, AgentSession, DEFAULT_MAX_MODEL_CALLS, ReplaceError};
 pub use event::{AgentEvent, EventSink, NoopSink};
 pub use hooks::{HookContext, HookError, HookPoint, Hooks, ToolDecision};
 pub use journal::{
