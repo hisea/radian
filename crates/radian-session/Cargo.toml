@@ -10,6 +10,9 @@ agent-core = { path = "../agent-core" }
 chrono = "0.4"
 fs2 = "0.4"
 futures-util.workspace = true
+# The session index cache (ADR 0006 §10). `bundled` compiles SQLite from source, so the
+# crate needs no system libsqlite3; the index is always rebuildable from the JSONL.
+rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
