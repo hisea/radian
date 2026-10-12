@@ -23,7 +23,9 @@ pub use journal::{
     JournalError, JournalRecord, ReplayError, TranscriptJournal, recover, repair, replay,
 };
 pub use message::{ContentPart, Message, OpaqueJson, ToolCall, ToolResult};
-pub use model::{Model, ModelContext, ModelError, ModelRequest, ModelResponse, StopReason};
+pub use model::{
+    Model, ModelContext, ModelError, ModelRequest, ModelResponse, ModelUsage, StopReason,
+};
 pub use outcome::{
     CancelReason, IncompleteReason, ResumeState, RunError, RunOutcome, RunStatus, SessionError,
     Step,

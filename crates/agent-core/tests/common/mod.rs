@@ -98,6 +98,7 @@ pub fn text(s: &str) -> Reply {
         tool_calls: vec![],
         provider_payload: None,
         stop_reason: StopReason::EndTurn,
+        usage: None,
     })
 }
 
@@ -114,6 +115,7 @@ pub fn stop(reason: StopReason, s: &str) -> Reply {
         tool_calls: vec![],
         provider_payload: None,
         stop_reason: reason,
+        usage: None,
     })
 }
 
@@ -135,6 +137,7 @@ pub fn calls_with(reason: StopReason, list: Vec<ToolCall>) -> Reply {
         tool_calls: list,
         provider_payload: None,
         stop_reason: reason,
+        usage: None,
     })
 }
 

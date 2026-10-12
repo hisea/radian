@@ -561,6 +561,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
             tool_calls,
             provider_payload,
             stop_reason,
+            usage: _,
         } = response;
         let assistant = Message::Assistant {
             content,

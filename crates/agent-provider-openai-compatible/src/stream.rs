@@ -185,6 +185,7 @@ impl<'a> Assembler<'a> {
             tool_calls,
             provider_payload: None,
             stop_reason,
+            usage: None,
         })
     }
 }

@@ -143,6 +143,7 @@ fn calls_tool(name: &str, args: Value) -> ModelResponse {
         }],
         provider_payload: None,
         stop_reason: StopReason::ToolUse,
+        usage: None,
     }
 }
 
@@ -152,6 +153,7 @@ fn answers(text: &str) -> ModelResponse {
         tool_calls: vec![],
         provider_payload: None,
         stop_reason: StopReason::EndTurn,
+        usage: None,
     }
 }
 

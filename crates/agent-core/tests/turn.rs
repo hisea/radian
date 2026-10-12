@@ -263,6 +263,7 @@ async fn pause_turn_continues_with_same_budget_and_keeps_opaque_blocks() {
             tool_calls: vec![],
             provider_payload: None,
             stop_reason: StopReason::PauseTurn,
+            usage: None,
         }),
         text("finished"),
     ]);
@@ -363,6 +364,7 @@ async fn provider_payload_round_trips() {
             tool_calls: vec![],
             provider_payload: Some(OpaqueJson::parse(raw).unwrap()),
             stop_reason: StopReason::EndTurn,
+            usage: None,
         }),
         text("next"),
     ]);
