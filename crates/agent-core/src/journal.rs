@@ -9,6 +9,7 @@ use futures_util::future::BoxFuture;
 use serde_json::Value;
 
 use crate::message::{Message, ToolResult};
+use crate::model::ModelUsage;
 
 /// One durable record. A1 journals transcript messages; A2 adds tool execution markers so
 /// a crash between "dispatched" and "result written" can be classified on recovery.
@@ -29,6 +30,10 @@ pub enum JournalRecord {
     /// A dispatched call settled: `result` is the final one (after `after_tool_call`),
     /// exactly what the transcript's result message will carry.
     ToolExecutionSettled { call_id: String, result: ToolResult },
+    /// Usage the provider reported for the assistant message that precedes this record (J5).
+    /// Written only when the response carried usage; failure to append fails the turn like any
+    /// other write (J6).
+    ModelUsage { usage: ModelUsage },
 }
 
 /// Why a journal write was refused.
@@ -95,6 +100,7 @@ pub fn repair(history: &[Message], records: &[JournalRecord]) -> Vec<Message> {
                 started.insert(call_id.clone());
             }
             JournalRecord::Message { .. } => {}
+            JournalRecord::ModelUsage { .. } => {}
         }
     }
     // Calls with no result message yet, in the order the assistants declared them.

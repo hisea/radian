@@ -540,6 +540,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
         events.emit(AgentEvent::ModelResponseReceived {
             stop_reason: response.stop_reason.clone(),
             tool_calls: response.tool_calls.len(),
+            usage: response.usage.clone(),
         });
         match race(
             &interrupt,
@@ -561,7 +562,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
             tool_calls,
             provider_payload,
             stop_reason,
-            usage: _,
+            usage,
         } = response;
         let assistant = Message::Assistant {
             content,
@@ -571,6 +572,14 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
         };
         // Journaled before any tool of this response is dispatched (S4).
         if let Err(e) = self.run.session.commit(assistant, events).await {
+            return Err(self.run.fail_journal(e, events));
+        }
+        // The provider's usage follows its message (J5) and is journaled the same strict way:
+        // a failure is a journal failure, not a tolerated gap (D6/J6).
+        if let Some(usage) = usage
+            && let Some(journal) = self.run.session.journal.as_ref()
+            && let Err(e) = journal.append(JournalRecord::ModelUsage { usage }).await
+        {
             return Err(self.run.fail_journal(e, events));
         }
 

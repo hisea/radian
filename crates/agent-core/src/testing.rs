@@ -44,6 +44,7 @@ impl Inner {
             JournalRecord::Message { index, .. } => format!("{index}"),
             JournalRecord::ToolExecutionStarted { call_id, .. } => format!("started:{call_id}"),
             JournalRecord::ToolExecutionSettled { call_id, .. } => format!("settled:{call_id}"),
+            JournalRecord::ModelUsage { .. } => "usage".into(),
         };
         if let Some(delay) = self.delay {
             if let Some(log) = &self.log {
