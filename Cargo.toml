@@ -1,0 +1,16 @@
+[workspace]
+resolver = "3"
+members = ["crates/agent-core"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+
+[workspace.dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+jsonschema = { version = "0.58", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tokio-util = "0.7"

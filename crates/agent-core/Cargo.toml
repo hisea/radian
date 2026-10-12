@@ -1,0 +1,18 @@
+[package]
+name = "agent-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Minimal headless agent runtime: turn loop, tools, hooks, steering"
+
+[dependencies]
+futures-util.workspace = true
+jsonschema.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
