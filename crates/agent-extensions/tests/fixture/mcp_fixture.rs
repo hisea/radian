@@ -90,6 +90,7 @@ impl Server {
              "description": "Sends `count` progress notifications, then returns.",
              "inputSchema": {"type": "object", "properties": {
                 "count": {"type": "integer"}, "intervalMs": {"type": "integer"},
+                "settleMs": {"type": "integer"},
                 "total": {"type": "integer"}, "label": {"type": "string"},
                 "alsoUnknownToken": {"type": "boolean"}}}},
             {"name": "progress_late",
@@ -168,12 +169,16 @@ impl Server {
                 }
                 let count = args["count"].as_u64().unwrap_or(1);
                 let interval = Duration::from_millis(args["intervalMs"].as_u64().unwrap_or(20));
+                // Lets notifications beat the reply, so tests can isolate the registration
+                // race from rmcp's best-effort tail delivery.
+                let settle = Duration::from_millis(args["settleMs"].as_u64().unwrap_or(0));
                 let total = args["total"].as_u64();
                 let label = args["label"].as_str().unwrap_or("step").to_owned();
                 for step in 1..=count {
                     thread::sleep(interval);
                     self.notify_progress(token.clone(), step, total, &format!("{label} {step}"));
                 }
+                thread::sleep(settle);
                 text("progressed".into())
             }
             "progress_late" => {

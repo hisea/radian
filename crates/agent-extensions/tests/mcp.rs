@@ -575,6 +575,38 @@ async fn progress_maps_to_tool_progress() {
     );
 }
 
+// The request is already on the wire when `send_cancellable_request` returns, so a fast
+// server can notify progress before the call registers its route; a multi-thread runtime
+// makes that race possible. `settleMs` lets the notifications beat the reply, so this tests
+// the registration race, not rmcp's best-effort delivery of tail progress. The 10 ms spacing
+// keeps notifications from overlapping in flight: rmcp routes each on its own task, and a
+// burst can arrive out of order, which the monotone filter drops by design.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn immediate_progress_is_not_lost() {
+    let session = std::sync::Arc::new(open(vec![fixture("fx")]).await);
+    let mut lost = 0;
+    let runs = 300;
+    for _ in 0..runs {
+        let events = Recorder::default();
+        let out = call_at(
+            &session,
+            "fx__progress",
+            json!({"count": 5, "intervalMs": 10, "settleMs": 50}),
+            0,
+            &events,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(text(&out), "progressed");
+        lost += 5 - progress_events(&events).len().min(5);
+    }
+    assert_eq!(
+        lost, 0,
+        "progress notifications were dropped: {lost} of {runs} calls"
+    );
+}
+
 #[tokio::test]
 async fn concurrent_progress_calls_stay_separate() {
     let mut config = fixture("fx");
@@ -668,7 +700,60 @@ async fn late_and_unknown_progress_tokens_are_ignored() {
 }
 
 #[tokio::test]
+async fn progress_does_not_reset_the_call_deadline() {
+    let mut config = fixture("fx");
+    config.call_timeout = Duration::from_millis(300);
+    let session = open(vec![config]).await;
+    let events = Recorder::default();
+    let start = Instant::now();
+
+    // Twenty notifications at 100 ms apiece would run 2 s if each one reset the deadline.
+    let failure = call_at(
+        &session,
+        "fx__progress",
+        json!({"count": 20, "intervalMs": 100, "label": "x"}),
+        0,
+        &events,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(failure.code, "extension_timeout");
+    assert!(!progress_events(&events).is_empty());
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "deadline was pushed back by progress: {:?}",
+        start.elapsed()
+    );
+}
+
+#[tokio::test]
 async fn settled_calls_leave_no_progress_registration_behind() {
+    // Success: one route while in flight, none after.
+    let session = std::sync::Arc::new(open(vec![fixture("fx")]).await);
+    let events = Recorder::default();
+    let inflight = {
+        let session = std::sync::Arc::clone(&session);
+        let events = events.clone();
+        tokio::spawn(async move {
+            call_at(
+                &session,
+                "fx__progress",
+                json!({"count": 3, "intervalMs": 60, "label": "ok"}),
+                0,
+                &events,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(session.progress_route_count(), 1);
+    inflight.await.unwrap();
+    assert_eq!(session.progress_route_count(), 0);
+
     // Cancelled mid-progress.
     let session = open(vec![fixture("fx")]).await;
     let events = Recorder::default();
@@ -690,6 +775,7 @@ async fn settled_calls_leave_no_progress_registration_behind() {
     );
     assert_eq!(result.unwrap_err().code, "cancelled");
     assert!(!progress_events(&events).is_empty());
+    assert_eq!(session.progress_route_count(), 0);
 
     // Timed out mid-progress.
     let mut config = fixture("fx");
@@ -708,8 +794,9 @@ async fn settled_calls_leave_no_progress_registration_behind() {
     .unwrap_err();
     assert_eq!(failure.code, "extension_timeout");
     assert!(!progress_events(&events).is_empty());
+    assert_eq!(session.progress_route_count(), 0);
 
-    // Dropped mid-progress.
+    // Dropped mid-progress: the drop itself must unregister, synchronously.
     let session = open(vec![fixture("fx")]).await;
     let dropped = tokio::time::timeout(
         Duration::from_millis(120),
@@ -724,6 +811,7 @@ async fn settled_calls_leave_no_progress_registration_behind() {
     )
     .await;
     assert!(dropped.is_err());
+    assert_eq!(session.progress_route_count(), 0);
 
     // None of it shows up later: a fresh call maps progress exactly as before.
     let session = open(vec![fixture("fx")]).await;
