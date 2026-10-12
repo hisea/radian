@@ -6,11 +6,12 @@ use serde_json::{Map, Value, json};
 use crate::config::OpenAiCompatibleConfig;
 
 /// Keys the adapter owns. Settings may not override them.
-const RESERVED: [&str; 4] = ["model", "messages", "tools", "stream"];
+const RESERVED: [&str; 5] = ["model", "messages", "tools", "stream", "stream_options"];
 
 pub(crate) fn build_body(
     request: &ModelRequest,
     config: &OpenAiCompatibleConfig,
+    include_usage: bool,
 ) -> Result<Value, ModelError> {
     let mut body = Map::new();
     for source in [&config.extra_body, &settings_object(&request.settings)?] {
@@ -25,6 +26,10 @@ pub(crate) fn build_body(
     }
     body.insert("model".into(), json!(config.model));
     body.insert("stream".into(), json!(true));
+    // Only ask for streamed usage when we handle it; some compatible servers reject the key.
+    if include_usage {
+        body.insert("stream_options".into(), json!({ "include_usage": true }));
+    }
 
     let mut messages = Vec::with_capacity(request.messages.len() + 1);
     if let Some(system) = &request.system_prompt {
@@ -230,7 +235,7 @@ mod tests {
             concurrency: ToolConcurrency::Shared,
         }];
 
-        let body = build_body(&req, &config()).unwrap();
+        let body = build_body(&req, &config(), false).unwrap();
 
         assert_eq!(
             body,
@@ -273,17 +278,37 @@ mod tests {
             },
             Message::user("and then?"),
         ]);
-        let plain_body = serde_json::to_string(&build_body(&plain, &config()).unwrap()).unwrap();
+        let plain_body =
+            serde_json::to_string(&build_body(&plain, &config(), false).unwrap()).unwrap();
         let interrupted_body =
-            serde_json::to_string(&build_body(&interrupted, &config()).unwrap()).unwrap();
+            serde_json::to_string(&build_body(&interrupted, &config(), false).unwrap()).unwrap();
         assert_eq!(plain_body, interrupted_body);
         assert!(!interrupted_body.contains("interrupted"));
     }
 
     #[test]
     fn no_tools_means_no_tools_key() {
-        let body = build_body(&request(vec![Message::user("hi")]), &config()).unwrap();
+        let body = build_body(&request(vec![Message::user("hi")]), &config(), false).unwrap();
         assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn stream_options_carries_include_usage_only_when_enabled() {
+        let req = request(vec![Message::user("hi")]);
+        let on = build_body(&req, &config(), true).unwrap();
+        assert_eq!(on["stream_options"], json!({ "include_usage": true }));
+        let off = build_body(&req, &config(), false).unwrap();
+        assert!(off.get("stream_options").is_none());
+    }
+
+    #[test]
+    fn stream_options_is_reserved_like_stream() {
+        let mut req = request(vec![Message::user("hi")]);
+        req.settings = json!({ "stream_options": { "include_usage": true } });
+        assert!(matches!(
+            build_body(&req, &config(), true),
+            Err(ModelError::Protocol(_))
+        ));
     }
 
     #[test]
@@ -296,6 +321,7 @@ mod tests {
                 interrupted: false,
             }]),
             &config(),
+            false,
         )
         .unwrap();
         let message = &body["messages"][0];
@@ -313,6 +339,7 @@ mod tests {
                 result: ToolResult::error("c1", "boom", "it failed"),
             }]),
             &config(),
+            false,
         )
         .unwrap();
         assert_eq!(body["messages"][0]["content"], "Error: it failed");
@@ -339,6 +366,7 @@ mod tests {
                 ],
             }]),
             &config(),
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -381,6 +409,7 @@ mod tests {
                 ),
             }]),
             &config(),
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -397,7 +426,7 @@ mod tests {
         let mut req = request(vec![Message::user("hi")]);
         req.settings = json!({"temperature": 0.9});
 
-        let body = build_body(&req, &cfg).unwrap();
+        let body = build_body(&req, &cfg, false).unwrap();
         assert_eq!(body["temperature"], 0.9);
         assert_eq!(body["max_tokens"], 100);
 
@@ -405,12 +434,12 @@ mod tests {
             let mut req = request(vec![Message::user("hi")]);
             req.settings = json!({ key: 1 });
             assert!(
-                matches!(build_body(&req, &cfg), Err(ModelError::Protocol(_))),
+                matches!(build_body(&req, &cfg, false), Err(ModelError::Protocol(_))),
                 "{key} must be refused"
             );
         }
         let mut req = request(vec![Message::user("hi")]);
         req.settings = json!([1, 2]);
-        assert!(build_body(&req, &cfg).is_err());
+        assert!(build_body(&req, &cfg, false).is_err());
     }
 }

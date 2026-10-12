@@ -517,6 +517,216 @@ async fn a_connection_error_is_a_transport_error_without_the_url() {
     assert!(!message.contains("127.0.0.1:1"), "{message}");
 }
 
+// ---------- usage ----------
+
+/// Calls the adapter directly so the response's usage is visible; `complete` reads the
+/// streamed SSE bytes from the mock server.
+async fn complete_once(
+    server: &MockServer,
+    tweak: impl FnOnce(&mut OpenAiCompatibleConfig),
+) -> ModelResponse {
+    let model = model_with(server, tweak);
+    let request = ModelRequest {
+        system_prompt: None,
+        messages: vec![Message::user("hi")],
+        tools: Vec::new(),
+        settings: Value::Null,
+    };
+    let cx = ModelContext {
+        cancellation: CancellationToken::new(),
+        events: &NoopSink,
+    };
+    model.complete(request, cx).await.unwrap()
+}
+
+#[tokio::test]
+async fn a_trailing_usage_chunk_is_captured_through_the_sse_stream() {
+    // Shape 1: everything arrives, then one final chunk with no choices carries the usage.
+    let server = MockServer::start(vec![Reply::sse(&[
+        chunk(
+            json!({ "role": "assistant", "content": "ok" }),
+            Some("stop"),
+        ),
+        json!({
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 11,
+                "completion_tokens": 4,
+                "total_tokens": 15,
+                "prompt_tokens_details": { "cached_tokens": 3 }
+            }
+        }),
+    ])])
+    .await;
+
+    let response = complete_once(&server, |_| {}).await;
+    assert_eq!(response.content, vec![ContentPart::text("ok")]);
+    let usage = response
+        .usage
+        .expect("the trailing usage chunk is captured");
+    assert_eq!(usage.input, Some(11));
+    assert_eq!(usage.output, Some(4));
+    assert_eq!(usage.total, Some(15));
+    assert_eq!(usage.cache_read, Some(3));
+    assert_eq!(usage.cache_write, None);
+    let details: Value =
+        serde_json::from_str(usage.details.unwrap().get()).expect("details is JSON");
+    assert_eq!(details, json!({ "cached_tokens": 3 }));
+}
+
+#[tokio::test]
+async fn usage_in_every_chunk_takes_the_last_non_empty_one() {
+    // Shape 2: usage rides along on several chunks; the last non-null one wins.
+    let server = MockServer::start(vec![Reply::sse(&[
+        chunk(json!({ "role": "assistant", "content": "ok" }), None),
+        json!({"choices": [], "usage": { "prompt_tokens": 1, "completion_tokens": 1 }}),
+        json!({"choices": [], "usage": { "prompt_tokens": 9, "completion_tokens": 2 }}),
+        json!({"choices": [], "usage": null}),
+        chunk(json!({}), Some("stop")),
+    ])])
+    .await;
+
+    let response = complete_once(&server, |_| {}).await;
+    let usage = response.usage.expect("usage was reported");
+    assert_eq!(usage.input, Some(9));
+    assert_eq!(usage.output, Some(2));
+}
+
+#[tokio::test]
+async fn a_response_without_usage_reports_none() {
+    // Shape 3: no usage anywhere.
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let response = complete_once(&server, |_| {}).await;
+    assert_eq!(response.usage, None);
+}
+
+#[tokio::test]
+async fn total_is_not_invented_when_the_provider_omits_it() {
+    let server = MockServer::start(vec![Reply::sse(&[
+        chunk(
+            json!({ "role": "assistant", "content": "ok" }),
+            Some("stop"),
+        ),
+        json!({"choices": [], "usage": { "prompt_tokens": 7, "completion_tokens": 2 }}),
+    ])])
+    .await;
+
+    let response = complete_once(&server, |_| {}).await;
+    let usage = response.usage.unwrap();
+    assert_eq!(usage.input, Some(7));
+    assert_eq!(usage.output, Some(2));
+    assert_eq!(
+        usage.total, None,
+        "total must stay None, never input+output"
+    );
+}
+
+// ---------- include_usage on the wire ----------
+
+#[test]
+fn include_usage_defaults_to_the_openai_host_only() {
+    for url in ["https://api.openai.com/v1", "https://api.openai.com:443/v1"] {
+        let model = OpenAiCompatible::new(OpenAiCompatibleConfig::new(url, "m")).unwrap();
+        assert!(model.include_usage(), "{url}");
+    }
+    for url in [
+        "http://127.0.0.1:8080/v1",
+        "https://evil-openai.com.attacker.net/v1",
+        "https://localhost/v1",
+        "https://openai.com/v1",
+        "https://api.openai.com.cn/v1",
+    ] {
+        let model = OpenAiCompatible::new(OpenAiCompatibleConfig::new(url, "m")).unwrap();
+        assert!(!model.include_usage(), "{url}");
+    }
+    // Explicit overrides beat the default in either direction.
+    let on = OpenAiCompatible::new(
+        OpenAiCompatibleConfig::new("http://127.0.0.1/v1", "m").with_include_usage(true),
+    )
+    .unwrap();
+    assert!(on.include_usage());
+    let off = OpenAiCompatible::new(
+        OpenAiCompatibleConfig::new("https://api.openai.com/v1", "m").with_include_usage(false),
+    )
+    .unwrap();
+    assert!(!off.include_usage());
+}
+
+#[tokio::test]
+async fn the_request_body_carries_stream_options_only_when_enabled() {
+    let check = |server: &MockServer, json: Value| {
+        let body = server.requests()[0].json();
+        assert_eq!(body["stream_options"], json, "body: {body}");
+    };
+
+    // Explicit Some(true) on the local mock.
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let mut session = chat(
+        model_with(&server, |c| c.include_usage = Some(true)),
+        NoTools,
+    )
+    .await;
+    session
+        .run_turn("hi", TurnOptions::default(), &NoopSink)
+        .await
+        .unwrap();
+    check(&server, json!({ "include_usage": true }));
+
+    // Default on a local host: no stream_options key at all.
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let mut session = chat(model(&server), NoTools).await;
+    session
+        .run_turn("hi", TurnOptions::default(), &NoopSink)
+        .await
+        .unwrap();
+    assert!(server.requests()[0].json().get("stream_options").is_none());
+
+    // Explicit Some(false) overrides the default and keeps the key away.
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let mut session = chat(
+        model_with(&server, |c| c.include_usage = Some(false)),
+        NoTools,
+    )
+    .await;
+    session
+        .run_turn("hi", TurnOptions::default(), &NoopSink)
+        .await
+        .unwrap();
+    assert!(server.requests()[0].json().get("stream_options").is_none());
+}
+
+// ---------- the 400 hint (AC-A5-5) ----------
+
+#[tokio::test]
+async fn a_400_for_stream_options_tells_you_to_turn_it_off() {
+    let server = MockServer::start(vec![Reply::status(
+        400,
+        "{\"error\":{\"message\":\"unknown parameter: stream_options\"}}",
+    )])
+    .await;
+
+    let message = run_error(model_with(&server, |c| c.include_usage = Some(true))).await;
+
+    assert!(
+        message.contains("unknown parameter: stream_options"),
+        "{message}"
+    );
+    assert!(
+        message.contains("include_usage to Some(false)"),
+        "the way out is named: {message}"
+    );
+    assert!(!message.contains("sk-secret-key"), "{message}");
+}
+
+#[tokio::test]
+async fn a_400_without_stream_options_gets_no_hint() {
+    let server = MockServer::start(vec![Reply::status(400, "bad request")]).await;
+    // Default policy on a local mock: stream_options was never sent.
+    let message = run_error(model(&server)).await;
+    assert!(message.contains("bad request"), "{message}");
+    assert!(!message.contains("include_usage"), "{message}");
+}
+
 // ---------- configuration ----------
 
 #[test]

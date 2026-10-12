@@ -45,6 +45,10 @@ pub struct OpenAiCompatibleConfig {
     /// Cap on the text and tool-call arguments of one response. A server that never stops
     /// cannot grow host memory past it.
     pub max_response_bytes: usize,
+    /// Whether the request asks the server to include usage in the stream.
+    /// `None` = the default policy (on for `api.openai.com`, off everywhere else),
+    /// `Some(b)` = explicit override.
+    pub include_usage: Option<bool>,
 }
 
 /// Header values are hidden: custom headers often carry credentials such as `X-API-Key`.
@@ -60,6 +64,7 @@ impl fmt::Debug for OpenAiCompatibleConfig {
             .field("connect_timeout", &self.connect_timeout)
             .field("idle_timeout", &self.idle_timeout)
             .field("max_response_bytes", &self.max_response_bytes)
+            .field("include_usage", &self.include_usage)
             .finish()
     }
 }
@@ -75,11 +80,17 @@ impl OpenAiCompatibleConfig {
             connect_timeout: Duration::from_secs(30),
             idle_timeout: Duration::from_secs(120),
             max_response_bytes: 32 * 1024 * 1024,
+            include_usage: None,
         }
     }
 
     pub fn with_api_key(mut self, key: ApiKey) -> Self {
         self.api_key = Some(key);
+        self
+    }
+
+    pub fn with_include_usage(mut self, enabled: bool) -> Self {
+        self.include_usage = Some(enabled);
         self
     }
 }
@@ -102,6 +113,12 @@ pub enum ConfigError {
 pub(crate) fn is_local_host(host: &str) -> bool {
     let host = host.trim_start_matches('[').trim_end_matches(']');
     host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
+}
+
+/// The default for `include_usage`: only OpenAI's own endpoint reports usage compatibly.
+/// Compared by exact host, never by substring: `evil-openai.com.attacker.net` must not match.
+pub(crate) fn openai_host_is_default(host: &str) -> bool {
+    host.eq_ignore_ascii_case("api.openai.com")
 }
 
 /// The URL without credentials: userinfo is dropped, query values and the fragment are
