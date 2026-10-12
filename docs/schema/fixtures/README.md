@@ -12,6 +12,7 @@
 | `schema-version-newer.jsonl` | 每行 `schema_version: 2`（高于 v1）。2 个事件。 | **只读打开或拒绝打开**（宿主二选一），**绝不能以 v1 语义追加写入**；追加模式必须直接报错。 | AC-S-3(c) |
 | `truncated-tail.jsonl` | 5 个合法行 + 一个截断的尾部（无 LF 的半行）。 | **接受（丢弃尾部）**：torn tail 字节不解析、不计 `seq`、不进 replay；重放得到前 5 个事件（seq 0..4）；安全追加前必须先截断到第 5 行的 LF 之后。 | ADR 0006 §3.2 |
 | `crash-after-started.jsonl` | assistant 声明两个调用：`call-1` 完整（Started+Settled+结果消息），`call-2` 只有 `ToolExecutionStarted`、无 Settled、无结果消息；无 `TurnFinished`。8 个事件。 | **接受**（文件本身合法）；按 ADR 0002 恢复规则，`call-2` 补 `error_code = "outcome_unknown_after_crash"` 的合成结果，`call-1` 原样；Phase 1 的恢复测试直接使用。 | ADR 0002 崩溃语义 / ADR 0006 §15-2 |
+| `replace-resets-index.jsonl` | 旧 revision 两条消息（user 带 `meta`，assistant 带 `interrupted:true`）→ `TranscriptReplaced{revision:1,len:2}` → 新 revision 从 index 0 重计；一条 `ModelUsageRecorded`；新 revision 的 `call-9` 有 `Started` 无 `Settled`。10 个事件。 | **接受**，0 跳过；遇 `TranscriptReplaced` 清空已重建消息并把期望 index 归零，`len` 等于其后的 `MessageAppended` 条数；`meta`/`interrupted`/`usage` 形状按 v1（§5.2/§5.10/§5.11）；按 ADR 0002/0005 清空旧 revision 标记后，`call-9` 补 `outcome_unknown_after_crash`。 | ADR 0005 G8 / ADR 0006 §5.11 |
 
 通用约束（所有 fixture 共同满足，脚本逐项校验）：每行是合法 JSON 对象；信封七字段（`schema_version`/`session_id`/`seq`/`ts`/`event`/`critical`/`data`）齐全且类型正确；`seq` 从 0 严格 +1；同一文件内 `schema_version`、`session_id` 恒定；`ts` 为 RFC 3339 UTC（`Z` 结尾）；除 `truncated-tail.jsonl` 外所有文件以 LF 结尾，且**只有**该文件允许存在无 LF 的尾部。
 
