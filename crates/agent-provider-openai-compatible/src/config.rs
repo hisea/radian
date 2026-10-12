@@ -52,7 +52,7 @@ impl fmt::Debug for OpenAiCompatibleConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let header_names: Vec<&str> = self.headers.iter().map(|(name, _)| name.as_str()).collect();
         f.debug_struct("OpenAiCompatibleConfig")
-            .field("base_url", &self.base_url)
+            .field("base_url", &redact_url(&self.base_url))
             .field("model", &self.model)
             .field("api_key", &self.api_key)
             .field("headers", &header_names)
@@ -102,4 +102,22 @@ pub enum ConfigError {
 pub(crate) fn is_local_host(host: &str) -> bool {
     let host = host.trim_start_matches('[').trim_end_matches(']');
     host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
+}
+
+/// The URL without credentials: userinfo is dropped, query values and the fragment are
+/// masked. A URL that does not parse is not echoed at all.
+pub(crate) fn redact_url(raw: &str) -> String {
+    let Ok(mut url) = reqwest::Url::parse(raw) else {
+        return "<unparseable url>".into();
+    };
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_fragment(None);
+    if url.query().is_some() {
+        let keys: Vec<String> = url.query_pairs().map(|(key, _)| key.into_owned()).collect();
+        url.query_pairs_mut()
+            .clear()
+            .extend_pairs(keys.iter().map(|key| (key.as_str(), "<redacted>")));
+    }
+    url.to_string()
 }

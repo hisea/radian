@@ -7,7 +7,7 @@ use agent_core::{
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Url, redirect};
 
-use crate::config::{ConfigError, OpenAiCompatibleConfig, is_local_host};
+use crate::config::{ConfigError, OpenAiCompatibleConfig, is_local_host, redact_url};
 use crate::request::build_body;
 use crate::sse::SseParser;
 use crate::stream::{Assembler, Progress};
@@ -33,7 +33,7 @@ impl std::fmt::Debug for OpenAiCompatible {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // `secrets` is left out on purpose; `headers` marks its values sensitive.
         f.debug_struct("OpenAiCompatible")
-            .field("endpoint", &self.endpoint)
+            .field("endpoint", &redact_url(self.endpoint.as_str()))
             .field("headers", &self.headers)
             .field("config", &self.config)
             .finish_non_exhaustive()
@@ -43,19 +43,19 @@ impl std::fmt::Debug for OpenAiCompatible {
 impl OpenAiCompatible {
     pub fn new(config: OpenAiCompatibleConfig) -> Result<Self, ConfigError> {
         let mut base = Url::parse(&config.base_url).map_err(|e| ConfigError::BaseUrl {
-            url: config.base_url.clone(),
+            url: redact_url(&config.base_url),
             reason: e.to_string(),
         })?;
         if !matches!(base.scheme(), "http" | "https") {
             return Err(ConfigError::BaseUrl {
-                url: config.base_url.clone(),
+                url: redact_url(&config.base_url),
                 reason: "the scheme must be http or https".into(),
             });
         }
         let host = base.host_str().unwrap_or_default().to_owned();
         if host.is_empty() {
             return Err(ConfigError::BaseUrl {
-                url: config.base_url.clone(),
+                url: redact_url(&config.base_url),
                 reason: "there is no host".into(),
             });
         }

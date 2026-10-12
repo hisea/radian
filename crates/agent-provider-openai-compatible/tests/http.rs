@@ -649,3 +649,26 @@ fn debug_output_hides_the_key_and_header_values() {
     assert!(!text.contains("sk-secret-key"), "{text}");
     assert!(!text.contains("hdr-secret-value"), "{text}");
 }
+
+#[test]
+fn urls_never_leak_credentials_through_debug_or_config_errors() {
+    let url = "https://user:pass-secret@example.com/v1?token=url-secret#frag-secret";
+    let config = OpenAiCompatibleConfig::new(url, "m");
+    let model = OpenAiCompatible::new(config.clone()).unwrap();
+    for text in [format!("{config:?}"), format!("{model:?}")] {
+        for secret in ["pass-secret", "url-secret", "frag-secret", "user:"] {
+            assert!(!text.contains(secret), "{secret} in {text}");
+        }
+        assert!(text.contains("example.com"), "{text}");
+    }
+
+    let bad = "ftp://user:pass-secret@example.com/v1?token=url-secret";
+    let error = OpenAiCompatible::new(OpenAiCompatibleConfig::new(bad, "m")).unwrap_err();
+    let text = error.to_string();
+    assert!(
+        !text.contains("pass-secret") && !text.contains("url-secret"),
+        "{text}"
+    );
+    let error = OpenAiCompatible::new(OpenAiCompatibleConfig::new("pass-secret", "m")).unwrap_err();
+    assert!(!error.to_string().contains("pass-secret"), "{error}");
+}
