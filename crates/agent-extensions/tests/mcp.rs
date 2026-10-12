@@ -203,11 +203,15 @@ async fn tool_call_round_trips_through_core_on_both_protocol_versions() {
         assert_eq!(result.text(), r#"{"hello":"mcp"}"#);
         chat.close().await.unwrap();
 
-        let methods: Vec<String> = logged(&log)
+        // After the methods, `close()` shut the server down gracefully: its stdin closed and
+        // it finished on its own, rather than being killed.
+        let mut expected: Vec<&str> = expected_methods.clone();
+        expected.extend(["stdin-closed", "shutdown-complete"]);
+        let lines: Vec<String> = logged(&log)
             .into_iter()
             .filter(|l| !l.starts_with("pid:"))
             .collect();
-        assert_eq!(methods, expected_methods);
+        assert_eq!(lines, expected);
     }
 }
 

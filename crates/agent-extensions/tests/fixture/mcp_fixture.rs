@@ -7,6 +7,9 @@
 //!
 //! If `FIXTURE_LOG` is set, every received method (and cancelled request id) is appended to
 //! that file, one per line.
+//!
+//! After stdin closes it logs `stdin-closed`, then `shutdown-complete`. `FIXTURE_IGNORE_EOF=1`
+//! makes it never exit by itself; `FIXTURE_SLOW_SHUTDOWN_MS=<n>` delays `shutdown-complete`.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
@@ -309,4 +312,20 @@ fn main() {
             server.handle(message);
         }
     }
+    // EOF on stdin is how a host asks an MCP server to shut down. Tests can tell a host that
+    // closed the server from one that killed it by what gets logged here.
+    server.log("stdin-closed");
+    if std::env::var_os("FIXTURE_IGNORE_EOF").is_some() {
+        // A server that does not shut down on its own: only being killed removes it.
+        loop {
+            thread::sleep(Duration::from_secs(60));
+        }
+    }
+    if let Some(ms) = std::env::var("FIXTURE_SLOW_SHUTDOWN_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        thread::sleep(Duration::from_millis(ms));
+    }
+    server.log("shutdown-complete");
 }

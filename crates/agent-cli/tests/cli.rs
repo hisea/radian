@@ -38,15 +38,38 @@ fn write_file(dir: &Path, name: &str, text: &str) -> PathBuf {
 
 /// Writes an MCP config pointing at the fixture, logging to `log`.
 fn mcp_config(dir: &Path, log: &Path) -> PathBuf {
-    let config = json!({
-        "servers": [{
-            "id": "fx",
-            "command": fixture_bin(),
-            "env": {"FIXTURE_LOG": log},
-            "call_timeout_secs": 30,
-        }]
+    mcp_config_with(dir, log, &[], None)
+}
+
+/// Like [`mcp_config`], with extra environment for the fixture and a shutdown timeout.
+fn mcp_config_with(
+    dir: &Path,
+    log: &Path,
+    env: &[(&str, &str)],
+    shutdown_timeout_secs: Option<u64>,
+) -> PathBuf {
+    let mut server_env = json!({"FIXTURE_LOG": log});
+    for (key, value) in env {
+        server_env[*key] = json!(value);
+    }
+    let mut server = json!({
+        "id": "fx",
+        "command": fixture_bin(),
+        "env": server_env,
+        "call_timeout_secs": 30,
     });
-    write_file(dir, "mcp.json", &config.to_string())
+    if let Some(secs) = shutdown_timeout_secs {
+        server["shutdown_timeout_secs"] = json!(secs);
+    }
+    write_file(dir, "mcp.json", &json!({"servers": [server]}).to_string())
+}
+
+fn log_lines(log: &Path) -> Vec<String> {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
 }
 
 fn text_reply(text: &str) -> Reply {
@@ -237,6 +260,33 @@ impl Running {
                 self.stderr_seen
             )
         });
+    }
+
+    /// Waits for the process to exit **without closing its stdin**, so the test shows the
+    /// CLI did not need more input to finish. Bounded by `limit`.
+    async fn finish_open(self, limit: Duration) -> (i32, String, String) {
+        let Self {
+            child,
+            mut stderr,
+            mut stderr_seen,
+            stdin,
+        } = self;
+        let (output, ()) = timeout(limit, async {
+            tokio::join!(child.wait_with_output(), async {
+                let mut rest = String::new();
+                let _ = stderr.read_to_string(&mut rest).await;
+                stderr_seen.push_str(&rest);
+            })
+        })
+        .await
+        .expect("the CLI did not exit while stdin stayed open");
+        let output = output.expect("wait");
+        drop(stdin);
+        (
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr_seen,
+        )
     }
 
     /// Closes stdin, drains both pipes, and waits with a bound.
@@ -576,31 +626,28 @@ async fn one_shot_without_a_terminal_denies_without_waiting() {
     let dir = scratch("deny");
     let config = mcp_config(&dir, &dir.join("fixture.log"));
     let server = MockServer::start(echo_then("fine")).await;
-    let start = Instant::now();
 
-    // stdin is a pipe nobody will write to; without --yes the call must be denied at once,
-    // not waited on.
-    let (code, _, _) = feed_and_wait(
-        spawn_agent(
-            &[
-                "--model",
-                "m",
-                "--base-url",
-                &server.base_url,
-                "-p",
-                "go",
-                "--mcp-config",
-                config.to_str().unwrap(),
-            ],
-            &[],
-        ),
-        "",
-    )
-    .await;
+    // stdin is a pipe that stays open and that nobody writes to: the CLI must deny at once
+    // because it has no terminal, not because it ran into end of input. Closing stdin here
+    // would let an approval that does try to read look the same.
+    let running = Running::spawn(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "-p",
+            "go",
+            "--mcp-config",
+            config.to_str().unwrap(),
+        ],
+        &[],
+    );
+    let (code, _, _) = running.finish_open(Duration::from_secs(10)).await;
 
     assert_eq!(code, 0);
-    assert!(start.elapsed() < Duration::from_secs(10));
     let denial = tool_result_content(&server, 1);
+    assert!(denial.contains("no terminal"), "{denial}");
     assert!(denial.contains("--yes"), "{denial}");
 }
 
@@ -779,7 +826,9 @@ async fn every_exit_reaps_the_mcp_children() {
         ("sigint", "", true),
     ] {
         let log = dir.join(format!("{name}.log"));
-        let config = mcp_config(&dir, &log);
+        // This fixture does not leave when its stdin closes. A server that did would vanish
+        // when the CLI process dies, whatever the CLI did, and the test could not tell.
+        let config = mcp_config_with(&dir, &log, &[("FIXTURE_IGNORE_EOF", "1")], Some(1));
         let server = MockServer::start(vec![text_reply("ok")]).await;
         let args = [
             "--model".to_owned(),
@@ -809,6 +858,51 @@ async fn every_exit_reaps_the_mcp_children() {
             "{name}: fixture {pid} still running"
         );
     }
+}
+
+#[tokio::test]
+async fn a_normal_exit_lets_each_server_shut_down_before_the_cli_leaves() {
+    let dir = scratch("graceful");
+    for (name, input) in [("exit", "hi\n/exit\n"), ("eof", "hi\n")] {
+        let log = dir.join(format!("{name}.log"));
+        // The server takes 300 ms to finish after its stdin closes. If the CLI killed it, or
+        // just left, the marker would be missing (or arrive after the CLI is gone).
+        let config = mcp_config_with(&dir, &log, &[("FIXTURE_SLOW_SHUTDOWN_MS", "300")], None);
+        let server = MockServer::start(vec![text_reply("ok")]).await;
+        let args = [
+            "--model".to_owned(),
+            "m".to_owned(),
+            "--base-url".to_owned(),
+            server.base_url.clone(),
+            "--mcp-config".to_owned(),
+            config.display().to_string(),
+        ];
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+
+        let (code, _, _) = feed_and_wait(spawn_agent(&arg_refs, &[]), input).await;
+
+        assert_eq!(code, 0, "{name}");
+        let lines = log_lines(&log);
+        assert!(
+            lines.contains(&"shutdown-complete".to_owned()),
+            "{name}: {lines:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn typing_exit_leaves_even_though_stdin_is_still_open() {
+    // A terminal never reaches end of input. The CLI must not wait for one more line after
+    // `/exit`: the stdin reader's blocking read cannot be interrupted, so exiting has to
+    // abandon it instead of waiting for it.
+    let server = MockServer::start(vec![text_reply("hello")]).await;
+    let mut running = Running::spawn(&["--model", "m", "--base-url", &server.base_url], &[]);
+
+    running.write("hi\n/exit\n").await;
+    let (code, stdout, _) = running.finish_open(Duration::from_secs(10)).await;
+
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "hello\n");
 }
 
 // ---------- approval must not eat input ----------

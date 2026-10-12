@@ -29,6 +29,9 @@ struct ServerEntry {
     shared_tools: Vec<String>,
     #[serde(default)]
     call_timeout_secs: Option<u64>,
+    /// How long `close()` waits for the server to exit once its stdin is closed.
+    #[serde(default)]
+    shutdown_timeout_secs: Option<u64>,
 }
 
 /// Parses and validates the file. Duplicate ids fail here, before any process starts: the
@@ -58,6 +61,9 @@ pub(crate) fn load_mcp_config(path: &str) -> Result<Vec<McpServerConfig>, String
         config.shared_tools = entry.shared_tools;
         if let Some(secs) = entry.call_timeout_secs {
             config.call_timeout = Duration::from_secs(secs);
+        }
+        if let Some(secs) = entry.shutdown_timeout_secs {
+            config.shutdown_timeout = Duration::from_secs(secs);
         }
         servers.push(config);
     }

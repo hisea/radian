@@ -80,13 +80,15 @@ struct SetupError(String);
 
 fn main() {
     let cli = Cli::parse();
-    let code = tokio::runtime::Builder::new_multi_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .expect("tokio runtime")
-        .block_on(run(cli));
-    // The session is closed on every path inside `run`; exiting here skips only the
-    // runtime, whose remaining tasks (the stdin reader) cannot outlive the process.
+        .expect("tokio runtime");
+    let code = runtime.block_on(run(cli));
+    // The session is closed on every path inside `run`. Dropping a runtime waits for its
+    // blocking threads, and the stdin reader's blocking read cannot be interrupted: with stdin
+    // still open it would hold the process here until the user typed another line.
+    runtime.shutdown_background();
     std::process::exit(code);
 }
 
@@ -243,9 +245,15 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         )
         .await
     };
-    // Every exit path closes the session first, so MCP child processes are reaped before
-    // the process goes away.
-    // let _ = session.close().await;
+    // Every exit path closes the session first, so each MCP server sees its stdin close,
+    // gets the chance to shut down on its own, and is reaped before the process goes away.
+    // A forced exit (a second Ctrl-C) skips the wait: dropping the session still kills the
+    // servers' process groups at once.
+    if code != 130
+        && let Err(e) = session.close().await
+    {
+        eprintln!("agent: could not close the tools cleanly: {e}");
+    }
     ui.end_of_turn();
     Ok(code)
 }
@@ -426,7 +434,7 @@ struct Approval {
 impl Hooks for Approval {
     fn before_tool_call(
         &self,
-        cx: &HookContext,
+        _cx: &HookContext,
         call: &ToolCall,
     ) -> impl Future<Output = Result<ToolDecision, HookError>> + Send {
         let lines = self.lines.clone();
@@ -447,24 +455,10 @@ impl Hooks for Approval {
                 call.name, call.arguments
             );
             let _ = std::io::stderr().flush();
-            // Cancel is checked first on purpose. A line is only taken off the hub when
-            // `recv()` is polled to ready, so once cancellation is visible here, a line the
-            // user is about to type stays queued for the next prompt instead of being
-            // swallowed by an approval whose answer nobody will read.
-            // Cancel is checked first on purpose. A line is only taken off the hub when
-            // `recv()` is polled to ready, so once cancellation is visible here, a line the
-            // user is about to type stays queued for the next prompt instead of being
-            // swallowed by an approval whose answer nobody will read.
-            let answer = tokio::select! {
-                biased;
-                () = cx.cancellation.cancelled() => {
-                    return Ok(ToolDecision::Deny {
-                        reason: "the turn was cancelled before approval".into(),
-                    });
-                }
-                line = lines.next() => line,
-            };
-            match answer.as_deref() {
+            // No cancellation check is needed here: the core drops this future as soon as the
+            // turn is cancelled, and a line leaves the hub only when `next()` completes, so a
+            // cancelled approval cannot swallow the user's next line.
+            match lines.next().await.as_deref() {
                 Some("y") | Some("Y") => Ok(ToolDecision::Allow),
                 Some(other) => Ok(ToolDecision::Deny {
                     reason: format!(
