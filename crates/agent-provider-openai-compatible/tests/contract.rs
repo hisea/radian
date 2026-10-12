@@ -260,3 +260,33 @@ async fn contract_4_split_arguments() {
 async fn contract_5_call_ids_unique() {
     contract::check_call_ids_unique(&harness()).await
 }
+
+#[tokio::test]
+async fn contract_6_finish_reasons() {
+    contract::check_finish_reasons(&harness()).await
+}
+
+#[tokio::test]
+async fn contract_7a_usage_shapes() {
+    contract::check_usage_shapes(&harness()).await
+}
+
+#[tokio::test]
+async fn contract_7b_total_not_computed() {
+    contract::check_total_not_computed(&harness()).await
+}
+
+#[tokio::test]
+async fn contract_8_error_classification() {
+    contract::check_error_classification(&harness()).await
+}
+
+#[tokio::test]
+async fn contract_9_cancellation() {
+    contract::check_cancellation(&harness()).await
+}
+
+#[tokio::test]
+async fn contract_10_secret_not_leaked() {
+    contract::check_secret_not_leaked(&harness()).await
+}

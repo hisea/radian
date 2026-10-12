@@ -14,6 +14,7 @@
 //! the wrong thing, not that the adapter is fine.
 
 use std::sync::Mutex;
+use std::time::Duration;
 
 use agent_core::*;
 use serde_json::Value;
@@ -349,4 +350,192 @@ pub async fn check_call_ids_unique<M: Model, H: ContractHarness<M>>(h: &H) {
     let id2 = &r2.tool_calls[0].id;
     assert!(!id2.is_empty());
     assert_ne!(id2, &id1, "made-up ids must not collide either");
+}
+
+// ---------- 6-10: finish reasons, usage, errors, cancellation, secrets ----------
+
+/// Every `StopReason` variant has a fixture; an unknown reason falls into `Other` with
+/// the provider's own text, not a silent fallback.
+pub async fn check_finish_reasons<M: Model, H: ContractHarness<M>>(h: &H) {
+    for (reason, expected) in [
+        (Reason::EndTurn, StopReason::EndTurn),
+        (Reason::ToolUse, StopReason::ToolUse),
+        (Reason::MaxTokens, StopReason::MaxTokens),
+        (Reason::ContentFiltered, StopReason::ContentFiltered),
+        (Reason::PauseTurn, StopReason::PauseTurn),
+    ] {
+        let model = h.script(&[Wire::Finish(reason)]).await;
+        let resp = complete(&model, request(), &NoopSink).await.unwrap();
+        assert_eq!(resp.stop_reason, expected, "{reason:?}");
+    }
+
+    let model = h.script(&[Wire::Refusal("I can't help.".into())]).await;
+    let resp = complete(&model, request(), &NoopSink).await.unwrap();
+    assert_eq!(resp.stop_reason, StopReason::Refusal);
+    assert_eq!(joined_text(&resp), "I can't help.");
+
+    let model = h.script(&[Wire::Finish(Reason::Unknown)]).await;
+    let resp = complete(&model, request(), &NoopSink).await.unwrap();
+    assert!(
+        matches!(&resp.stop_reason, StopReason::Other(raw) if !raw.is_empty()),
+        "an unknown reason must surface in StopReason::Other: {:?}",
+        resp.stop_reason
+    );
+}
+
+/// 7a. Usage arrives: in a trailing chunk with no choices, and riding on every chunk (the
+/// last non-null one wins); and not at all. `ModelUsage` is the neutral unit: the harness
+/// maps it to its provider's field names.
+pub async fn check_usage_shapes<M: Model, H: ContractHarness<M>>(h: &H) {
+    // Trailing block.
+    let usage = ModelUsage {
+        input: Some(11),
+        output: Some(4),
+        total: Some(15),
+        cache_read: Some(3),
+        cache_write: None,
+        details: Some(OpaqueJson::parse(r#"{"cached_tokens":3}"#).unwrap()),
+    };
+    let model = h.script(&[Wire::UsageTrailing(usage.clone())]).await;
+    let resp = complete(&model, request(), &NoopSink).await.unwrap();
+    assert_eq!(
+        resp.usage,
+        Some(usage),
+        "the trailing usage block must be captured field-for-field"
+    );
+
+    // Every chunk carries usage; the last non-null one wins.
+    let first = ModelUsage {
+        input: Some(1),
+        ..Default::default()
+    };
+    let last = ModelUsage {
+        input: Some(9),
+        output: Some(2),
+        ..Default::default()
+    };
+    let model = h
+        .script(&[Wire::UsageEveryChunk(vec![first, last.clone()])])
+        .await;
+    let resp = complete(&model, request(), &NoopSink).await.unwrap();
+    assert_eq!(
+        resp.usage,
+        Some(last),
+        "the last non-null usage chunk must win"
+    );
+
+    // No usage anywhere.
+    let model = h.script(&[Wire::NoUsage]).await;
+    let resp = complete(&model, request(), &NoopSink).await.unwrap();
+    assert_eq!(resp.usage, None);
+}
+
+/// 7b. `total` is never computed by the adapter: input and output alone stay `total: None`.
+pub async fn check_total_not_computed<M: Model, H: ContractHarness<M>>(h: &H) {
+    let usage = ModelUsage {
+        input: Some(7),
+        output: Some(2),
+        ..Default::default()
+    };
+    let model = h.script(&[Wire::UsageTrailing(usage.clone())]).await;
+    let resp = complete(&model, request(), &NoopSink).await.unwrap();
+    let usage = resp.usage.expect("usage was reported");
+    assert_eq!(usage.input, Some(7));
+    assert_eq!(usage.output, Some(2));
+    assert_eq!(
+        usage.total, None,
+        "total must stay None, never input + output"
+    );
+}
+
+/// Server errors are `Transport`, request errors are `Protocol`, and a stream cut before
+/// completion is an error, never a partial `ModelResponse`.
+pub async fn check_error_classification<M: Model, H: ContractHarness<M>>(h: &H) {
+    let model = h
+        .script(&[Wire::Status {
+            code: 500,
+            body: "oops".into(),
+        }])
+        .await;
+    let error = complete(&model, request(), &NoopSink).await.unwrap_err();
+    assert!(
+        matches!(&error, ModelError::Transport(m) if m.contains("HTTP 500") && m.contains("oops")),
+        "a 500 is a transport error quoting the body: {error}"
+    );
+
+    let model = h
+        .script(&[Wire::Status {
+            code: 400,
+            body: "bad request".into(),
+        }])
+        .await;
+    let error = complete(&model, request(), &NoopSink).await.unwrap_err();
+    assert!(
+        matches!(&error, ModelError::Protocol(m) if m.contains("HTTP 400") && m.contains("bad request")),
+        "a 400 is a protocol error quoting the body: {error}"
+    );
+
+    let model = h.script(&[Wire::CutMidStream("half an ans".into())]).await;
+    let error = complete(&model, request(), &NoopSink).await.unwrap_err();
+    assert!(
+        matches!(error, ModelError::Transport(_) | ModelError::Protocol(_)),
+        "a cut stream is an error, never a partial response"
+    );
+}
+
+/// Once `ModelContext.cancellation` fires, `complete` must return `Err` soon, never an
+/// incomplete `ModelResponse`.
+pub async fn check_cancellation<M: Model, H: ContractHarness<M>>(h: &H) {
+    // Token already cancelled before the call: even a server that would answer instantly
+    // must not turn into a response.
+    let model = h.script(&[Wire::Text("hi".into())]).await;
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    let cx = ModelContext {
+        cancellation: cancelled,
+        events: &NoopSink,
+    };
+    let result = model.complete(request(), cx).await;
+    assert!(result.is_err(), "a cancelled request must return an error");
+
+    // Cancellation while the request is in flight against a server that never answers.
+    // The watchdog bounds the suite; synchronization is the cancellation token itself.
+    let model = h.script(&[Wire::Hangs]).await;
+    let token = CancellationToken::new();
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
+        let cx = ModelContext {
+            cancellation: token.clone(),
+            events: &NoopSink,
+        };
+        tokio::join!(
+            async {
+                tokio::task::yield_now().await;
+                token.cancel();
+            },
+            model.complete(request(), cx),
+        )
+        .1
+    })
+    .await
+    .expect("the cancelled call returns without the watchdog");
+    assert!(
+        matches!(&result, Err(ModelError::Transport(m)) if m.contains("cancelled")),
+        "an in-flight cancellation surfaces as a transport error: {result:?}"
+    );
+}
+
+/// A server that echoes the credential in an error body must end up masked in the
+/// returned `ModelError`. The harness picks its own secret.
+pub async fn check_secret_not_leaked<M: Model, H: ContractHarness<M>>(h: &H) {
+    let secret = h.secret();
+    assert!(!secret.is_empty());
+    let model = h.script(&[Wire::ErrorEchoesSecret]).await;
+    let error = complete(&model, request(), &NoopSink).await.unwrap_err();
+    let message = error.to_string();
+    assert!(
+        !message.contains(secret),
+        "the credential must be masked in errors: {message}"
+    );
+    // The error is still an error with a real body, not an empty placeholder.
+    assert!(!message.is_empty());
 }

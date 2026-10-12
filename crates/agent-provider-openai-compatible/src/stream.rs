@@ -178,6 +178,7 @@ impl<'a> Assembler<'a> {
             "tool_calls" | "function_call" => StopReason::ToolUse,
             "length" => StopReason::MaxTokens,
             "content_filter" => StopReason::ContentFiltered,
+            "pause_turn" => StopReason::PauseTurn,
             other => StopReason::Other(other.to_owned()),
         };
         let text = if self.text.is_empty() {
