@@ -107,10 +107,12 @@ fn repair_fills_unpaired_calls_by_the_three_rules() {
             ],
             provider_payload: None,
             interrupted: false,
+            meta: MessageMeta::default(),
         },
         // The `ran` result message is already there.
         Message::Tool {
             result: ToolResult::success("ran", vec![ContentPart::text("done")]),
+            meta: MessageMeta::default(),
         },
     ];
     let assistant = history[1].clone();
@@ -143,7 +145,7 @@ fn repair_fills_unpaired_calls_by_the_three_rules() {
     recovered.extend(repair(&recovered, &records));
     assert!(matches!(
         &recovered[3],
-        Message::Tool { result } if result.call_id == "half"
+        Message::Tool { result, .. } if result.call_id == "half"
     ));
 }
 
@@ -156,6 +158,7 @@ fn repair_fills_from_settled_exactly_and_leaves_complete_history_alone() {
             tool_calls: vec![call("c1", "a", json!({}))],
             provider_payload: None,
             interrupted: false,
+            meta: MessageMeta::default(),
         },
     ];
     let records = [
@@ -169,6 +172,7 @@ fn repair_fills_from_settled_exactly_and_leaves_complete_history_alone() {
         fill,
         vec![Message::Tool {
             result: ToolResult::success("c1", vec![ContentPart::text("the settled text")]),
+            meta: MessageMeta::default(),
         }]
     );
 
@@ -188,6 +192,7 @@ async fn recover_yields_history_that_validates() {
                 tool_calls: vec![call("c1", "a", json!({})), call("c2", "a", json!({}))],
                 provider_payload: None,
                 interrupted: false,
+                meta: MessageMeta::default(),
             },
         },
         started("c1", "a", json!({})),
@@ -375,7 +380,7 @@ async fn settled_precedes_and_matches_the_result_message() {
         });
         let message_at = records.iter().position(|r| {
             matches!(r,
-            JournalRecord::Message { message: Message::Tool { result }, .. }
+            JournalRecord::Message { message: Message::Tool { result, .. }, .. }
                 if result.call_id == id)
         });
         let (Some(settled_at), Some(message_at)) = (settled_at, message_at) else {
@@ -392,7 +397,7 @@ async fn settled_precedes_and_matches_the_result_message() {
                     result: settled, ..
                 },
                 JournalRecord::Message {
-                    message: Message::Tool { result },
+                    message: Message::Tool { result, .. },
                     ..
                 },
             ) => assert_eq!(settled, result),
@@ -515,8 +520,8 @@ async fn skipped_and_cancelled_before_start_carry_no_markers() {
     assert_eq!(outcome.unwrap().status, RunStatus::Completed);
     assert!(matches!(
         journal.records().iter().find(|r| matches!(r,
-            JournalRecord::Message { message: Message::Tool { result }, .. } if result.call_id == "s2")),
-        Some(JournalRecord::Message { message: Message::Tool { result }, .. }
+            JournalRecord::Message { message: Message::Tool { result, .. }, .. } if result.call_id == "s2")),
+        Some(JournalRecord::Message { message: Message::Tool { result, .. }, .. }
             ) if result.error_code.as_deref() == Some("skipped_by_steering")));
     assert!(!journal.records().iter().any(|r| matches!(r,
         JournalRecord::ToolExecutionStarted { call_id, .. } if call_id == "s2")));
@@ -596,7 +601,7 @@ async fn cancelled_tools_settle_as_cancelled() {
                 && result.error_code.as_deref() == Some("cancelled"))
         });
         let message_at = records.iter().position(|r| matches!(r,
-            JournalRecord::Message { message: Message::Tool { result }, .. } if result.call_id == id));
+            JournalRecord::Message { message: Message::Tool { result, .. }, .. } if result.call_id == id));
         let (Some(settled_at), Some(message_at)) = (settled_at, message_at) else {
             panic!("no cancelled settle/message pair for {id}: {records:?}");
         };
@@ -651,7 +656,7 @@ async fn cancellation_waits_for_the_inflight_settled_append() {
         .unwrap();
     let message_at = records
         .iter()
-        .position(|r| matches!(r, JournalRecord::Message { message: Message::Tool { result }, .. } if result.call_id == "c1"))
+        .position(|r| matches!(r, JournalRecord::Message { message: Message::Tool { result, .. }, .. } if result.call_id == "c1"))
         .unwrap();
     assert!(settled_at < message_at);
     // Convergence waited out the in-flight settled append, then the result message
@@ -769,7 +774,7 @@ impl Hooks for DenyD {
 fn expected_code(records: &[JournalRecord], id: &str) -> Option<&'static str> {
     for record in records {
         if let JournalRecord::Message {
-            message: Message::Tool { result },
+            message: Message::Tool { result, .. },
             ..
         } = record
             && result.call_id == id

@@ -36,6 +36,13 @@ pub enum AgentEvent {
         index: usize,
         message: Message,
     },
+    /// Emitted after a complete transcript replacement has been journaled and applied. The
+    /// replacement's individual messages are journaled but do not each emit
+    /// `TranscriptAppended`, to avoid flooding the host.
+    TranscriptReplaced {
+        revision: u64,
+        len: usize,
+    },
     /// Emitted by tool sessions.
     ToolProgress {
         index: usize,

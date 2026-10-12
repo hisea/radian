@@ -8,7 +8,7 @@ use futures_util::future::BoxFuture;
 
 use serde_json::Value;
 
-use crate::message::{Message, ToolResult};
+use crate::message::{Message, MessageMeta, ToolResult};
 
 /// One durable record. A1 journals transcript messages; A2 adds tool execution markers so
 /// a crash between "dispatched" and "result written" can be classified on recovery.
@@ -18,6 +18,9 @@ pub enum JournalRecord {
     /// A message appended to the transcript at `index`, which equals the transcript length
     /// at the time of the append.
     Message { index: usize, message: Message },
+    /// Replaces the whole transcript. The following `Message` records rebuild the replacement
+    /// from index zero; the record deliberately does not duplicate the history itself.
+    TranscriptReplaced { revision: u64, len: usize },
     /// A tool call was handed to the tool session: the tool's own execution may begin.
     /// `arguments` are the final ones (after any `Rewrite`), so they are exactly what the
     /// tool saw.
@@ -57,18 +60,25 @@ pub enum ReplayError {
 
 /// Rebuilds the transcript messages from the `Message` records, in order. Indexes must run
 /// contiguously from 0; the first gap or repeat is reported. Marker records are ignored.
+/// `TranscriptReplaced` starts a new history, so it clears the rebuilt messages and resets the
+/// expected index to zero.
 pub fn replay(records: &[JournalRecord]) -> Result<Vec<Message>, ReplayError> {
     let mut messages = Vec::new();
     for record in records {
-        if let JournalRecord::Message { index, message } = record {
-            let expected = messages.len();
-            if *index != expected {
-                return Err(ReplayError::NotContiguous {
-                    expected,
-                    found: *index,
-                });
+        match record {
+            JournalRecord::TranscriptReplaced { .. } => messages.clear(),
+            JournalRecord::Message { index, message } => {
+                let expected = messages.len();
+                if *index != expected {
+                    return Err(ReplayError::NotContiguous {
+                        expected,
+                        found: *index,
+                    });
+                }
+                messages.push(message.clone());
             }
-            messages.push(message.clone());
+            JournalRecord::ToolExecutionStarted { .. }
+            | JournalRecord::ToolExecutionSettled { .. } => {}
         }
     }
     Ok(messages)
@@ -94,6 +104,11 @@ pub fn repair(history: &[Message], records: &[JournalRecord]) -> Vec<Message> {
             JournalRecord::ToolExecutionStarted { call_id, .. } => {
                 started.insert(call_id.clone());
             }
+            // Markers describe the old revision and must not repair its replacement.
+            JournalRecord::TranscriptReplaced { .. } => {
+                settled.clear();
+                started.clear();
+            }
             JournalRecord::Message { .. } => {}
         }
     }
@@ -107,7 +122,7 @@ pub fn repair(history: &[Message], records: &[JournalRecord]) -> Vec<Message> {
                     open.push(call.id.clone());
                 }
             }
-            Message::Tool { result } => {
+            Message::Tool { result, .. } => {
                 answered.insert(result.call_id.clone());
             }
             Message::User { .. } => {}
@@ -116,7 +131,10 @@ pub fn repair(history: &[Message], records: &[JournalRecord]) -> Vec<Message> {
     open.retain(|id| !answered.contains(id));
     open.into_iter()
         .map(|id| match settled.remove(&id) {
-            Some(result) => Message::Tool { result },
+            Some(result) => Message::Tool {
+                result,
+                meta: MessageMeta::default(),
+            },
             None => {
                 let code = if started.contains(&id) {
                     ("outcome_unknown_after_crash", "The tool may already have executed before the interruption; its outcome is unknown. Do not assume it did not run.")
@@ -125,6 +143,7 @@ pub fn repair(history: &[Message], records: &[JournalRecord]) -> Vec<Message> {
                 };
                 Message::Tool {
                     result: ToolResult::error(&id, code.0, code.1),
+                    meta: MessageMeta::default(),
                 }
             }
         })

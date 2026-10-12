@@ -207,7 +207,7 @@ fn tool_call_ids(messages: &[Message]) -> HashSet<String> {
             Message::Assistant { tool_calls, .. } => {
                 tool_calls.iter().map(|c| c.id.clone()).collect::<Vec<_>>()
             }
-            Message::Tool { result } => vec![result.call_id.clone()],
+            Message::Tool { result, .. } => vec![result.call_id.clone()],
             Message::User { .. } => Vec::new(),
         })
         .collect()

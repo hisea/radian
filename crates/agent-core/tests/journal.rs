@@ -37,6 +37,38 @@ impl EventSink for NotingSink {
     }
 }
 
+#[tokio::test]
+async fn steer_with_preserves_host_metadata_through_transcript_journal_and_event() {
+    let model = ScriptedModel::new([text("ok")]);
+    let journal = Arc::new(RecordingJournal::new());
+    let mut chat = session_with(model, MemTools::new(Vec::new()), journal.clone()).await;
+    let mut run = chat.start_turn("go").unwrap();
+    let meta = MessageMeta {
+        id: Some(MessageId("inbox-42".into())),
+        source: Some(InputSource::Subagent),
+        origin: Some(
+            OpaqueJson::parse(r#"{"parent":{"session_id":"s","turn_id":"t","call_id":"c"}}"#)
+                .unwrap(),
+        ),
+    };
+    run.steering_handle()
+        .steer_with("continue", meta.clone())
+        .unwrap();
+    let events = Recorder::default();
+    run.run(&events).await.unwrap();
+    drop(run);
+
+    let expected = Message::User {
+        content: vec![ContentPart::text("continue")],
+        meta,
+    };
+    assert_eq!(chat.transcript()[1], expected);
+    assert!(journal.records().iter().any(|record| matches!(record,
+        JournalRecord::Message { index: 1, message } if message == &expected)));
+    assert!(events.events().iter().any(|event| matches!(event,
+        AgentEvent::TranscriptAppended { index: 1, message } if message == &expected)));
+}
+
 // ---------- the sweep (AC-A1-3) ----------
 
 /// The scripted conversation of the sweep: turn 1 covers a user input, steering, a parallel
@@ -360,7 +392,7 @@ async fn dropping_a_step_never_touches_the_journal_again() {
     let n = replay.len();
     assert!(transcript.starts_with(&replay), "{transcript:?}");
     for message in &transcript[n..] {
-        assert!(matches!(message, Message::Tool { result }
+        assert!(matches!(message, Message::Tool { result, .. }
             if result.error_code.as_deref() == Some("interrupted")));
     }
 
@@ -420,6 +452,7 @@ async fn history_is_not_rejournaled() {
             tool_calls: vec![],
             provider_payload: None,
             interrupted: false,
+            meta: MessageMeta::default(),
         },
     ];
     let model = ScriptedModel::new([text("fresh")]);

@@ -101,7 +101,7 @@ fn tool_result_text(transcript: &[Message], id: &str) -> String {
     transcript
         .iter()
         .find_map(|m| match m {
-            Message::Tool { result } if result.call_id == id => Some(result.text()),
+            Message::Tool { result, .. } if result.call_id == id => Some(result.text()),
             _ => None,
         })
         .unwrap_or_else(|| panic!("no result for {id}"))
@@ -281,7 +281,7 @@ async fn a_server_that_reuses_tool_call_ids_does_not_break_the_conversation() {
         .transcript()
         .iter()
         .filter_map(|m| match m {
-            Message::Tool { result } => Some(result.call_id.clone()),
+            Message::Tool { result, .. } => Some(result.call_id.clone()),
             _ => None,
         })
         .collect();

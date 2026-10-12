@@ -15,6 +15,17 @@ use crate::turn::{ActiveRun, TurnOptions};
 /// Default cap on model requests per turn.
 pub const DEFAULT_MAX_MODEL_CALLS: u32 = 32;
 
+/// Why a host-requested transcript replacement was rejected.
+#[derive(Debug, thiserror::Error)]
+pub enum ReplaceError {
+    #[error("the session is unusable: it is poisoned, closed, or needs recovery")]
+    Unusable,
+    #[error("invalid history: {0}")]
+    InvalidHistory(String),
+    #[error("journal: {0}")]
+    Journal(#[from] JournalError),
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
     pub system_prompt: Option<String>,
@@ -179,6 +190,55 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         &self.transcript
     }
 
+    /// Replaces the transcript with host-supplied history and records the host's `revision`.
+    ///
+    /// The caller-supplied revision is opaque to Core: Core does not require it to increase;
+    /// the host owns that version space. `&mut self` makes an in-flight turn impossible, so no
+    /// redundant runtime "running" check is needed. The replacement is journaled as one
+    /// `TranscriptReplaced` marker followed by messages indexed from zero, then atomically
+    /// swapped into memory. A failed append leaves memory unchanged and requires recovery.
+    ///
+    /// Replacement messages intentionally do not emit `TranscriptAppended` one by one; a large
+    /// replacement would otherwise flood the host. One `TranscriptReplaced` event follows the
+    /// successful in-memory swap instead.
+    pub async fn replace_transcript(
+        &mut self,
+        history: Vec<Message>,
+        revision: u64,
+        events: &dyn EventSink,
+    ) -> Result<(), ReplaceError> {
+        if self.recovery_required || self.poisoned || self.close_state != CloseState::Open {
+            return Err(ReplaceError::Unusable);
+        }
+        validate_history(&history).map_err(|error| match error {
+            SessionError::InvalidHistory(message) => ReplaceError::InvalidHistory(message),
+            _ => unreachable!("validate_history only returns invalid-history errors"),
+        })?;
+
+        let len = history.len();
+        if let Some(journal) = &self.journal {
+            if let Err(error) = journal
+                .append(JournalRecord::TranscriptReplaced { revision, len })
+                .await
+            {
+                self.recovery_required = true;
+                return Err(ReplaceError::Journal(error));
+            }
+            for (index, message) in history.iter().cloned().enumerate() {
+                if let Err(error) = journal
+                    .append(JournalRecord::Message { index, message })
+                    .await
+                {
+                    self.recovery_required = true;
+                    return Err(ReplaceError::Journal(error));
+                }
+            }
+        }
+        self.transcript = history;
+        events.emit(AgentEvent::TranscriptReplaced { revision, len });
+        Ok(())
+    }
+
     /// The single entry every transcript modification goes through: journal first, then
     /// memory, then the [`AgentEvent::TranscriptAppended`] event. A failed append changes
     /// neither memory nor events (S1). Without a journal this is just a push plus the event.
@@ -284,8 +344,39 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         let Some(recorder) = &self.selfcheck else {
             return;
         };
-        let records: Vec<JournalRecord> = recorder
-            .records()
+        let all_records = recorder.records();
+        if let Some(replacement) = all_records
+            .iter()
+            .rposition(|record| matches!(record, JournalRecord::TranscriptReplaced { .. }))
+        {
+            let replay = crate::journal::replay(&all_records[replacement..])
+                .expect("selfcheck journal replacement must replay");
+            let transcript = &self.transcript;
+            assert!(
+                replay.len() <= transcript.len(),
+                "replacement journal has {} messages but transcript has {}",
+                replay.len(),
+                transcript.len()
+            );
+            assert_eq!(&transcript[..replay.len()], replay.as_slice());
+            if self.poisoned {
+                for message in &transcript[replay.len()..] {
+                    assert!(
+                        matches!(message, Message::Tool { result, .. }
+                            if result.error_code.as_deref() == Some("interrupted")),
+                        "after a drop, memory may only add `interrupted` results, found {message:?}"
+                    );
+                }
+            } else {
+                assert_eq!(
+                    replay.len(),
+                    transcript.len(),
+                    "journal replay does not match the transcript"
+                );
+            }
+            return;
+        }
+        let records: Vec<JournalRecord> = all_records
             .into_iter()
             .filter(|r| matches!(r, JournalRecord::Message { .. }))
             .collect();
@@ -321,7 +412,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
             }
             for message in &transcript[base + replay.len()..] {
                 assert!(
-                    matches!(message, Message::Tool { result }
+                    matches!(message, Message::Tool { result, .. }
                         if result.error_code.as_deref() == Some("interrupted")),
                     "after a drop, memory may only add `interrupted` results, found {message:?}"
                 );

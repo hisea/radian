@@ -45,6 +45,9 @@ pub struct RunOutcome {
 }
 
 /// Result of one `step()`.
+// `RunOutcome` carries a transcript. Boxing it would make the public `Step::Finished`
+// shape less ergonomic solely because host metadata can contain an opaque JSON value.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Step {
     Continue,

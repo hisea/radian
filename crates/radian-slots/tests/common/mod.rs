@@ -273,7 +273,7 @@ impl ToolSession for EchoSession {
 /// The text written by the tool result for `call_id`, if any.
 pub fn tool_result_text(transcript: &[Message], call_id: &str) -> Option<String> {
     transcript.iter().find_map(|m| match m {
-        Message::Tool { result } if result.call_id == call_id => Some(result.text()),
+        Message::Tool { result, .. } if result.call_id == call_id => Some(result.text()),
         _ => None,
     })
 }

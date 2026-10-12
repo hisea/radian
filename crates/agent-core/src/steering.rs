@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::message::Message;
+use crate::message::{Message, MessageMeta};
 
 /// What happens to not-yet-started tool calls when a steering message arrives mid-batch.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -38,17 +38,33 @@ pub struct SteeringHandle {
 }
 
 impl SteeringHandle {
+    // Carrying the rejected message is intentional: callers can recover it. Host metadata may
+    // contain opaque JSON, so boxing merely to satisfy a size heuristic would change that API.
+    #[allow(clippy::result_large_err)]
     pub fn steer(&self, message: impl Into<Message>) -> Result<(), SteerError> {
-        let message = message.into();
-        if !message.is_user() {
+        self.enqueue(message.into())
+    }
+
+    /// Sends a user message with metadata supplied by the host.
+    ///
+    /// This deliberately has a separate method rather than changing [`Self::steer`]: a caller
+    /// which already constructed a message with metadata keeps that metadata when using
+    /// `steer`, while this method explicitly replaces the user message's metadata.
+    #[allow(clippy::result_large_err)]
+    pub fn steer_with(
+        &self,
+        message: impl Into<Message>,
+        meta: MessageMeta,
+    ) -> Result<(), SteerError> {
+        let mut message = message.into();
+        let Message::User {
+            meta: message_meta, ..
+        } = &mut message
+        else {
             return Err(SteerError::NotUserMessage(message));
-        }
-        let mut queue = self.lock();
-        if queue.closed {
-            return Err(SteerError::RunFinished(message));
-        }
-        queue.messages.push_back(message);
-        Ok(())
+        };
+        *message_meta = meta;
+        self.enqueue(message)
     }
 
     /// Puts messages that were drained but could not be applied back in front of the queue,
@@ -73,6 +89,19 @@ impl SteeringHandle {
         let mut queue = self.lock();
         queue.closed = true;
         queue.messages.drain(..).collect()
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn enqueue(&self, message: Message) -> Result<(), SteerError> {
+        if !message.is_user() {
+            return Err(SteerError::NotUserMessage(message));
+        }
+        let mut queue = self.lock();
+        if queue.closed {
+            return Err(SteerError::RunFinished(message));
+        }
+        queue.messages.push_back(message);
+        Ok(())
     }
 
     fn lock(&self) -> MutexGuard<'_, Queue> {

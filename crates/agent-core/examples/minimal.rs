@@ -17,7 +17,7 @@ impl Model for FauxModel {
         _cx: ModelContext<'_>,
     ) -> Result<ModelResponse, ModelError> {
         let last_result = request.messages.iter().rev().find_map(|m| match m {
-            Message::Tool { result } => Some(result.text()),
+            Message::Tool { result, .. } => Some(result.text()),
             _ => None,
         });
         Ok(match last_result {

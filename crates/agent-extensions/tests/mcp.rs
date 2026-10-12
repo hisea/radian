@@ -194,7 +194,7 @@ async fn tool_call_round_trips_through_core_on_both_protocol_versions() {
             .transcript()
             .iter()
             .find_map(|m| match m {
-                Message::Tool { result } => Some(result.clone()),
+                Message::Tool { result, .. } => Some(result.clone()),
                 _ => None,
             })
             .unwrap();
@@ -388,7 +388,7 @@ async fn server_state_survives_turns_but_not_sessions() {
         .transcript()
         .iter()
         .filter_map(|m| match m {
-            Message::Tool { result } => Some(result.text()),
+            Message::Tool { result, .. } => Some(result.text()),
             _ => None,
         })
         .collect();
@@ -400,6 +400,107 @@ async fn server_state_survives_turns_but_not_sessions() {
         text(&call(&fresh, "fx__counter", json!({})).await.unwrap()),
         "1"
     );
+}
+
+#[tokio::test]
+async fn replacing_a_transcript_keeps_the_mcp_process_and_its_state() {
+    let provider = McpToolProvider::new(vec![fixture("fx")]);
+    let model = Scripted(Mutex::new(VecDeque::from([
+        ModelResponse {
+            content: vec![],
+            tool_calls: vec![
+                ToolCall {
+                    id: "pid-before".into(),
+                    name: "fx__pid".into(),
+                    arguments: json!({}),
+                },
+                ToolCall {
+                    id: "counter-before".into(),
+                    name: "fx__counter".into(),
+                    arguments: json!({}),
+                },
+            ],
+            provider_payload: None,
+            stop_reason: StopReason::ToolUse,
+        },
+        answers("before"),
+        ModelResponse {
+            content: vec![],
+            tool_calls: vec![
+                ToolCall {
+                    id: "pid-after".into(),
+                    name: "fx__pid".into(),
+                    arguments: json!({}),
+                },
+                ToolCall {
+                    id: "counter-after".into(),
+                    name: "fx__counter".into(),
+                    arguments: json!({}),
+                },
+            ],
+            provider_payload: None,
+            stop_reason: StopReason::ToolUse,
+        },
+        answers("after"),
+    ])));
+    let agent = Arc::new(Agent::new(model, provider));
+    let mut chat = agent.open_session().await.unwrap();
+
+    chat.run_turn("before", TurnOptions::default(), &NoopSink)
+        .await
+        .unwrap();
+    let before_pid = chat
+        .transcript()
+        .iter()
+        .find_map(|message| match message {
+            Message::Tool { result, .. } if result.call_id == "pid-before" => Some(result.text()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        chat.transcript()
+            .iter()
+            .find_map(|message| match message {
+                Message::Tool { result, .. } if result.call_id == "counter-before" => {
+                    Some(result.text())
+                }
+                _ => None,
+            })
+            .as_deref(),
+        Some("1")
+    );
+
+    chat.replace_transcript(vec![Message::user("replacement")], 23, &NoopSink)
+        .await
+        .unwrap();
+    chat.run_turn("after", TurnOptions::default(), &NoopSink)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        chat.transcript()
+            .iter()
+            .find_map(|message| match message {
+                Message::Tool { result, .. } if result.call_id == "pid-after" =>
+                    Some(result.text()),
+                _ => None,
+            })
+            .as_deref(),
+        Some(before_pid.as_str())
+    );
+    assert_eq!(
+        chat.transcript()
+            .iter()
+            .find_map(|message| match message {
+                Message::Tool { result, .. } if result.call_id == "counter-after" => {
+                    Some(result.text())
+                }
+                _ => None,
+            })
+            .as_deref(),
+        Some("2")
+    );
+    chat.close().await.unwrap();
 }
 
 #[tokio::test]

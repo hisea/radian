@@ -101,7 +101,7 @@ pub(crate) fn validate_history(history: &[Message]) -> Result<(), SessionError> 
                     open.push(&call.id);
                 }
             }
-            Message::Tool { result } => {
+            Message::Tool { result, .. } => {
                 let Some(pos) = open.iter().position(|id| *id == result.call_id) else {
                     return invalid(format!(
                         "message {i}: result for unknown or already answered call {}",

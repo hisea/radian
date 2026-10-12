@@ -68,7 +68,7 @@ async fn policy_slot_denies_then_allows_after_a_swap() {
     assert!(tools.executed().is_empty());
     assert!(session.transcript().iter().any(|m| matches!(
         m,
-        Message::Tool { result } if result.error_code.as_deref() == Some("denied")
+        Message::Tool { result, .. } if result.error_code.as_deref() == Some("denied")
     )));
 
     let record = slot.swap("allow", AllowAll);

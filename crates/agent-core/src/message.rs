@@ -163,11 +163,53 @@ fn joined_text(parts: &[ContentPart]) -> String {
         .collect()
 }
 
+/// A host-owned opaque identifier for a message. The core carries it, never interprets it
+/// and never generates one.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MessageId(pub String);
+
+/// Who produced a message, as the host sees it. The core makes no permission decision on
+/// this basis, and deliberately provides no default: `None` means "the host did not say",
+/// which is not the same as [`InputSource::User`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum InputSource {
+    User,
+    SlashCommand,
+    PermissionDecision,
+    Scheduler,
+    Mcp,
+    Subagent,
+    System,
+}
+
+/// Host-owned metadata attached to any message. Invisible to model adapters; carried by
+/// the transcript, the journal and the events unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MessageMeta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<MessageId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<InputSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<OpaqueJson>,
+}
+
+impl MessageMeta {
+    /// True when no field is set; such a meta is not serialized at all.
+    pub fn is_empty(&self) -> bool {
+        self.id.is_none() && self.source.is_none() && self.origin.is_none()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Message {
     User {
         content: Vec<ContentPart>,
+        #[serde(default, skip_serializing_if = "MessageMeta::is_empty")]
+        meta: MessageMeta,
     },
     Assistant {
         content: Vec<ContentPart>,
@@ -179,9 +221,13 @@ pub enum Message {
         /// (A3): the text is what the core had emitted, never a full response.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         interrupted: bool,
+        #[serde(default, skip_serializing_if = "MessageMeta::is_empty")]
+        meta: MessageMeta,
     },
     Tool {
         result: ToolResult,
+        #[serde(default, skip_serializing_if = "MessageMeta::is_empty")]
+        meta: MessageMeta,
     },
 }
 
@@ -189,6 +235,7 @@ impl Message {
     pub fn user(text: impl Into<String>) -> Self {
         Self::User {
             content: vec![ContentPart::text(text)],
+            meta: MessageMeta::default(),
         }
     }
 
@@ -198,6 +245,7 @@ impl Message {
             tool_calls: Vec::new(),
             provider_payload: None,
             interrupted: false,
+            meta: MessageMeta::default(),
         }
     }
 
@@ -208,8 +256,8 @@ impl Message {
     /// Concatenated text parts, for display and tests.
     pub fn text(&self) -> String {
         match self {
-            Self::User { content } | Self::Assistant { content, .. } => joined_text(content),
-            Self::Tool { result } => result.text(),
+            Self::User { content, .. } | Self::Assistant { content, .. } => joined_text(content),
+            Self::Tool { result, .. } => result.text(),
         }
     }
 }
@@ -236,6 +284,7 @@ mod tests {
             tool_calls: Vec::new(),
             provider_payload: None,
             interrupted: true,
+            meta: MessageMeta::default(),
         }
     }
 
@@ -262,5 +311,55 @@ mod tests {
         let round: Message =
             serde_json::from_str(&serde_json::to_string(&message).unwrap()).unwrap();
         assert_eq!(round, message);
+    }
+
+    #[test]
+    fn input_sources_round_trip_as_snake_case_and_reject_unknown_values() {
+        let cases = [
+            (InputSource::User, "user"),
+            (InputSource::SlashCommand, "slash_command"),
+            (InputSource::PermissionDecision, "permission_decision"),
+            (InputSource::Scheduler, "scheduler"),
+            (InputSource::Mcp, "mcp"),
+            (InputSource::Subagent, "subagent"),
+            (InputSource::System, "system"),
+        ];
+        for (source, wire) in cases {
+            assert_eq!(
+                serde_json::to_string(&source).unwrap(),
+                format!("\"{wire}\"")
+            );
+            assert_eq!(
+                serde_json::from_str::<InputSource>(&format!("\"{wire}\"")).unwrap(),
+                source
+            );
+        }
+        assert!(serde_json::from_str::<InputSource>("\"future_source\"").is_err());
+    }
+
+    #[test]
+    fn message_meta_omits_empty_fields_and_reads_older_messages() {
+        let empty = Message::user("hello");
+        let encoded = serde_json::to_value(&empty).unwrap();
+        assert!(encoded["user"].get("meta").is_none(), "{encoded}");
+
+        let old: Message =
+            serde_json::from_str(r#"{"user":{"content":[{"text":{"text":"hello"}}]}}"#).unwrap();
+        assert_eq!(old, empty);
+
+        let partial = Message::User {
+            content: vec![ContentPart::text("hello")],
+            meta: MessageMeta {
+                id: None,
+                source: Some(InputSource::Subagent),
+                origin: None,
+            },
+        };
+        let encoded = serde_json::to_value(&partial).unwrap();
+        assert_eq!(
+            encoded["user"]["meta"],
+            serde_json::json!({"source": "subagent"})
+        );
+        assert_eq!(serde_json::from_value::<Message>(encoded).unwrap(), partial);
     }
 }
