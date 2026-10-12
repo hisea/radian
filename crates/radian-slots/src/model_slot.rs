@@ -70,7 +70,13 @@ impl ModelSlot {
     /// Replaces the adapter and records one [`ConfigChanged`]. Takes `&self`, so the swap is
     /// available through a shared `Arc` and needs no `&mut`.
     pub fn swap<M: Model + 'static>(&self, route: impl Into<String>, model: M) -> ConfigChanged {
-        *self.current.write().unwrap() = Arc::new(model);
+        self.swap_dyn(route, Arc::new(model))
+    }
+
+    /// Erased form of [`ModelSlot::swap`], for hosts that already hold the adapter as an
+    /// `Arc<dyn DynModel>` (e.g. the driver's pending-change queue).
+    pub fn swap_dyn(&self, route: impl Into<String>, model: Arc<dyn DynModel>) -> ConfigChanged {
+        *self.current.write().unwrap() = model;
         self.log.record(ConfigChange::ModelRoute {
             route: route.into(),
         })

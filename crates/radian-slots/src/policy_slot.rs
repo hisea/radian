@@ -108,7 +108,13 @@ impl PolicySlot {
     /// Replaces the policy and records one [`ConfigChanged`]. Takes `&self`; a decision
     /// already in flight holds its own clone and is unaffected.
     pub fn swap<P: Policy + 'static>(&self, name: impl Into<String>, policy: P) -> ConfigChanged {
-        *self.current.write().unwrap() = Arc::new(policy);
+        self.swap_dyn(name, Arc::new(policy))
+    }
+
+    /// Erased form of [`PolicySlot::swap`], for hosts that already hold the policy as an
+    /// `Arc<dyn DynPolicy>` (e.g. the driver's pending-change queue).
+    pub fn swap_dyn(&self, name: impl Into<String>, policy: Arc<dyn DynPolicy>) -> ConfigChanged {
+        *self.current.write().unwrap() = policy;
         self.log.record(ConfigChange::Policy { name: name.into() })
     }
 }
