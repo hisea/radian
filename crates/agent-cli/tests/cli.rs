@@ -533,6 +533,155 @@ async fn a_local_base_url_needs_no_key_and_sends_no_authorization() {
     assert_eq!(server.requests()[0].header("authorization"), None);
 }
 
+// ---------- custom headers ----------
+
+#[tokio::test]
+async fn a_header_flag_is_sent_and_can_be_repeated() {
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--header",
+                "x-opencode-session=stable-123",
+                "--header",
+                "x-team=radian",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout, "ok\n");
+    let request = &server.requests()[0];
+    assert_eq!(request.header("x-opencode-session"), Some("stable-123"));
+    assert_eq!(request.header("x-team"), Some("radian"));
+}
+
+#[tokio::test]
+async fn a_header_without_an_equals_sign_is_a_usage_error_that_does_not_echo_it() {
+    // The malformed argument may itself be a credential: the error must not contain it.
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                "http://127.0.0.1:9",
+                "--header",
+                "Bearer sk-looks-like-a-secret",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 2);
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(stderr.contains("NAME=VALUE"), "{stderr}");
+    assert!(!stderr.contains("sk-looks-like-a-secret"), "{stderr}");
+}
+
+#[tokio::test]
+async fn an_invalid_header_name_is_refused() {
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                "http://127.0.0.1:9",
+                "--header",
+                "bad name=value",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 2);
+    assert!(stderr.contains("not a valid HTTP header name"), "{stderr}");
+}
+
+#[tokio::test]
+async fn an_authorization_header_is_refused_so_the_key_has_one_source() {
+    let server = MockServer::start(vec![text_reply("should not be reached")]).await;
+
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--header",
+                "Authorization=Bearer sk-from-a-header",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 2);
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(stderr.contains("--api-key-env"), "{stderr}");
+    assert!(!stderr.contains("sk-from-a-header"), "{stderr}");
+    assert!(
+        server.requests().is_empty(),
+        "no request may be sent when a header is refused"
+    );
+}
+
+#[tokio::test]
+async fn a_header_value_never_leaks_into_errors() {
+    // The server echoes the header value in an error body; neither stream may carry it.
+    let server = MockServer::start(vec![Reply::status(
+        500,
+        "{\"error\":{\"message\":\"bad team-secret-value\"}}",
+    )])
+    .await;
+
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--header",
+                "x-team-token=team-secret-value",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 1);
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(stderr.contains("HTTP 500"), "{stderr}");
+    assert!(!stderr.contains("team-secret-value"), "{stderr}");
+}
+
 // ---------- tool approval ----------
 
 #[tokio::test]

@@ -70,6 +70,11 @@ struct Cli {
     #[arg(short, long)]
     prompt: Option<String>,
 
+    /// Extra request headers, repeatable: `--header NAME=VALUE`. The value is never
+    /// printed; `Authorization` is refused because the key comes only from `--api-key-env`.
+    #[arg(long = "header", value_name = "NAME=VALUE")]
+    header: Vec<String>,
+
     /// Approve every tool call without asking.
     #[arg(long)]
     yes: bool,
@@ -108,11 +113,11 @@ async fn run(cli: Cli) -> i32 {
             return USAGE_ERROR;
         }
     };
-    let redact_key = setup.key.clone();
+    let redact_secrets = setup.secrets.clone();
     match chat(setup, cli).await {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("agent: {}", redact(&e.0, redact_key.as_deref()));
+            eprintln!("agent: {}", redact(&e.0, &redact_secrets));
             USAGE_ERROR
         }
     }
@@ -124,8 +129,8 @@ struct Setup {
     system_prompt: Option<String>,
     max_model_calls: Option<u32>,
     turn_timeout_secs: Option<u64>,
-    /// Kept only to redact the key from error output, never printed.
-    key: Option<String>,
+    /// The key and every custom header value: redacted from all error output, never printed.
+    secrets: Vec<String>,
 }
 
 async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
@@ -151,20 +156,75 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     if let Some(key) = &key {
         config = config.with_api_key(ApiKey::new(key.clone()));
     }
+    let headers = parse_headers(&cli.header)?;
+    config.headers = headers.clone();
     let model = OpenAiCompatible::new(config)
         .map_err(|e| SetupError(format!("--base-url {}: {e}", cli.base_url)))?;
     let servers = match &cli.mcp_config {
         Some(path) => load_mcp_config(path).map_err(SetupError)?,
         None => Vec::new(),
     };
+    // The key and every header value are secrets: no error this program prints may contain
+    // any of them. The adapter masks them too; this covers the CLI's own messages.
+    let mut secrets: Vec<String> = key.into_iter().collect();
+    secrets.extend(headers.into_iter().map(|(_, value)| value));
+    secrets.retain(|secret| !secret.is_empty());
     Ok(Setup {
         model,
         servers,
         system_prompt,
         max_model_calls: cli.max_model_calls,
         turn_timeout_secs: cli.turn_timeout_secs,
-        key,
+        secrets,
     })
+}
+
+/// Parses repeated `--header NAME=VALUE` arguments.
+///
+/// The value is never echoed, not even in the error for a malformed argument: a user who
+/// forgot the `=` may have pasted a credential as the whole argument. The name may be echoed
+/// (the brief only forbids values).
+fn parse_headers(raw: &[String]) -> Result<Vec<(String, String)>, SetupError> {
+    let mut headers = Vec::with_capacity(raw.len());
+    for (index, item) in raw.iter().enumerate() {
+        let Some((name, value)) = item.split_once('=') else {
+            return Err(SetupError(format!(
+                "--header (number {}) must be NAME=VALUE",
+                index + 1
+            )));
+        };
+        if name.is_empty() {
+            return Err(SetupError(format!(
+                "--header (number {}) has an empty name",
+                index + 1
+            )));
+        }
+        if !is_header_name(name) {
+            return Err(SetupError(format!(
+                "--header {name}: not a valid HTTP header name"
+            )));
+        }
+        if name.eq_ignore_ascii_case("authorization") {
+            return Err(SetupError(
+                "--header authorization=... is refused: the API key comes only from \
+                 --api-key-env, so a header must not replace it"
+                    .into(),
+            ));
+        }
+        headers.push((name.to_owned(), value.to_owned()));
+    }
+    Ok(headers)
+}
+
+/// RFC 7230 token characters, which is what a header name may contain.
+fn is_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|b| {
+            matches!(b,
+                b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' | b'^'
+                    | b'_' | b'`' | b'|' | b'~'
+                    | b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z')
+        })
 }
 
 /// Like the provider's own rule: localhost, 127.0.0.1 and ::1 may go without a key.
@@ -185,13 +245,16 @@ fn is_local_base_url(base_url: &str) -> bool {
     host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
 }
 
-/// A server may echo the key back in an error body; nothing this program prints may
-/// contain it, so every error goes through here.
-fn redact(text: &str, key: Option<&str>) -> String {
-    match key {
-        Some(key) if !key.is_empty() => text.replace(key, "<redacted>"),
-        _ => text.to_owned(),
+/// A server may echo the key or a header value back in an error body; nothing this program
+/// prints may contain them, so every error goes through here.
+fn redact(text: &str, secrets: &[String]) -> String {
+    let mut out = text.to_owned();
+    for secret in secrets {
+        if !secret.is_empty() {
+            out = out.replace(secret.as_str(), "<redacted>");
+        }
     }
+    out
 }
 
 async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
@@ -227,7 +290,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         Err(e) => return Err(SetupError(format!("cannot start tools: {e}"))),
     };
     let ui = Ui::default();
-    let key = setup.key.as_deref();
+    let secrets = setup.secrets.clone();
     let turn_options = |deadline: Option<Instant>| TurnOptions {
         max_model_calls: setup.max_model_calls,
         deadline,
@@ -247,7 +310,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
                 }
             },
             TurnEnd::Done(Err(e)) => {
-                eprintln!("agent: {}", redact(&e.to_string(), key));
+                eprintln!("agent: {}", redact(&e.to_string(), &secrets));
                 1
             }
         }
@@ -258,7 +321,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             &ui,
             &turn_options,
             setup.turn_timeout_secs,
-            key,
+            &secrets,
         )
         .await
     };
@@ -358,7 +421,7 @@ async fn interactive_loop(
     ui: &Ui,
     turn_options: &impl Fn(Option<Instant>) -> TurnOptions,
     timeout_secs: Option<u64>,
-    key: Option<&str>,
+    secrets: &[String],
 ) -> i32 {
     loop {
         eprint!("> ");
@@ -389,7 +452,7 @@ async fn interactive_loop(
                 }
                 status => eprintln!("agent: the turn ended as {status:?}"),
             },
-            TurnEnd::Done(Err(e)) => eprintln!("agent: {}", redact(&e.to_string(), key)),
+            TurnEnd::Done(Err(e)) => eprintln!("agent: {}", redact(&e.to_string(), secrets)),
         }
         ui.end_of_turn();
     }
