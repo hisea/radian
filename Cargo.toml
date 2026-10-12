@@ -5,6 +5,7 @@ members = [
     "crates/agent-extensions",
     "crates/agent-provider-openai-compatible",
     "crates/agent-cli",
+    "crates/radian-slots",
 ]
 
 [workspace.package]
