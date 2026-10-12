@@ -77,6 +77,56 @@ impl WorkspaceRoot {
         Ok(real)
     }
 
+    /// Resolves the directory a new or existing file lives in, for `write`/`patch`: the
+    /// parent is canonicalized and checked, then the final name is appended. A file that
+    /// does not exist yet has no canonical path, which is exactly why the parent is used.
+    pub(crate) fn resolve_parent_for_write(&self, user: &str) -> Result<PathBuf, ToolFailure> {
+        let joined = self.joined(user)?;
+        let Some(name) = joined.file_name() else {
+            return Err(fail(CODE_OUTSIDE, format!("`{user}` does not name a file")));
+        };
+        let parent = joined.parent().unwrap_or(self.root.as_path());
+        let parent_real = std::fs::canonicalize(parent).map_err(|e| io_failure(user, e))?;
+        self.ensure_inside(user, &parent_real)?;
+        Ok(parent_real.join(name))
+    }
+
+    /// Refuses a `write`/`patch` target that is a symlink (never followed) or is
+    /// hard-linked (nlink > 1; see the crate docs on why writes refuse that).
+    pub(crate) fn guard_mutation_target(
+        &self,
+        user: &str,
+        target: &Path,
+    ) -> Result<(), ToolFailure> {
+        let Ok(metadata) = std::fs::symlink_metadata(target) else {
+            return Ok(()); // does not exist yet: a fresh file
+        };
+        if metadata.file_type().is_symlink() {
+            match std::fs::canonicalize(target) {
+                Ok(real) if !real.starts_with(&self.root) => {
+                    return Err(self.outside(user, "a symlink pointing outside the workspace"));
+                }
+                // Includes a dangling link: it is still a link, and we do not follow it.
+                _ => {
+                    return Err(fail(
+                        "path_is_symlink",
+                        format!("`{user}` is a symlink; this tool never writes through a link"),
+                    ));
+                }
+            }
+        }
+        if hard_link_count(&metadata) > 1 {
+            return Err(fail(
+                "hard_link_refused",
+                format!(
+                    "`{user}` has more than one hard link, so writing it could change a file \
+                     outside the workspace; the tool refuses"
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     fn ensure_inside(&self, user: &str, real: &Path) -> Result<(), ToolFailure> {
         if real.starts_with(&self.root) {
             Ok(())
@@ -94,6 +144,18 @@ impl WorkspaceRoot {
             ),
         )
     }
+}
+
+#[cfg(unix)]
+fn hard_link_count(metadata: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    metadata.nlink()
+}
+
+#[cfg(not(unix))]
+fn hard_link_count(_metadata: &std::fs::Metadata) -> u64 {
+    // No portable link count; the hard-link refusal is Unix-only and documented as such.
+    1
 }
 
 /// Maps an io error to a stable tool failure code, naming the user's path (never the

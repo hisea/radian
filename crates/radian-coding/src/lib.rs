@@ -34,9 +34,11 @@
 //!   `.git` is unchanged. No sandbox is applied to it.
 
 mod list;
+mod patch;
 mod provider;
 mod read;
 mod workspace;
+mod write;
 
 pub use provider::{CodingSession, CodingTools, Limits};
 pub use workspace::WorkspaceError;
