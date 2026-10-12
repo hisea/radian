@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::{Agent, AgentSession};
 use crate::event::{AgentEvent, EventSink};
 use crate::hooks::{HookContext, HookError, HookPoint, Hooks, ToolDecision};
-use crate::journal::{JournalError, TranscriptJournal};
+use crate::journal::{JournalError, JournalRecord, TranscriptJournal};
 use crate::message::{Message, ToolCall, ToolResult};
 use crate::model::{Model, ModelContext, ModelRequest, ModelResponse, StopReason};
 use crate::outcome::{CancelReason, IncompleteReason, RunError, RunOutcome, RunStatus, Step};
@@ -826,6 +826,19 @@ impl<P: ToolProvider, H: Hooks> BatchCx<'_, P, H> {
                     call_id: call.id.clone(),
                     name: call.name.clone(),
                 });
+                // E3: the marker is durable before the tool's own execution may begin. On
+                // failure the call is not dispatched (E4) and the batch stops.
+                if let Some(journal) = self.journal {
+                    let record = JournalRecord::ToolExecutionStarted {
+                        call_id: call.id.clone(),
+                        name: call.name.clone(),
+                        arguments: call.arguments.clone(),
+                    };
+                    if let Err(e) = journal.append(record).await {
+                        journal_failed = Some(e);
+                        continue;
+                    }
+                }
                 running.push(call_one(
                     tools,
                     hooks,
@@ -850,7 +863,7 @@ impl<P: ToolProvider, H: Hooks> BatchCx<'_, P, H> {
                 // the append is short, and this backpressure is the price of serializing
                 // journal writes with tool completions (AC-A1-6).
                 Some((index, result)) = running.next() => {
-                    if let Err(e) = self.resolve(index, result).await {
+                    if let Err(e) = self.settle(index, result).await {
                         journal_failed = Some(e);
                     }
                 }
@@ -862,6 +875,21 @@ impl<P: ToolProvider, H: Hooks> BatchCx<'_, P, H> {
             Some(e) => Err(e),
             None => Ok(interrupted),
         }
+    }
+
+    /// Settles one executed call: the marker is appended first (E3), and only then does the
+    /// result join the ready-prefix commit. Cancelled and hook-error results settle too
+    /// (E5); they went through the same execution.
+    async fn settle(&mut self, index: usize, result: ToolResult) -> Result<(), JournalError> {
+        if let Some(journal) = self.journal {
+            journal
+                .append(JournalRecord::ToolExecutionSettled {
+                    call_id: result.call_id.clone(),
+                    result: result.clone(),
+                })
+                .await?;
+        }
+        self.resolve(index, result).await
     }
 
     /// Records one result and commits every result that has become ready, in call order,

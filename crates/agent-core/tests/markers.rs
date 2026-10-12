@@ -2,7 +2,9 @@
 
 mod common;
 
+use std::future::Future;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use agent_core::testing::RecordingJournal;
 use agent_core::*;
@@ -202,4 +204,352 @@ async fn recover_yields_history_that_validates() {
         code(result_for(&history, "c2")),
         Some("not_started_after_crash")
     );
+}
+
+// ---------- Core wiring: Started / Settled (AC-A2-2/3/4) ----------
+
+/// A tool that checks, on the first line of `execute`, that its own `Started` marker (with
+/// the exact final arguments) is already durable in the journal.
+#[derive(Clone)]
+struct ProbeTools {
+    journal: Arc<RecordingJournal>,
+    checks: Arc<Mutex<Vec<(String, bool)>>>,
+    specs: Arc<Vec<ToolSpec>>,
+}
+
+struct ProbeSession {
+    journal: Arc<RecordingJournal>,
+    checks: Arc<Mutex<Vec<(String, bool)>>>,
+    specs: Vec<ToolSpec>,
+}
+
+impl ToolProvider for ProbeTools {
+    type Session = ProbeSession;
+
+    async fn open_session(&self) -> Result<ProbeSession, ToolError> {
+        Ok(ProbeSession {
+            journal: Arc::clone(&self.journal),
+            checks: Arc::clone(&self.checks),
+            specs: self.specs.iter().cloned().collect(),
+        })
+    }
+}
+
+impl ToolSession for ProbeSession {
+    fn tool_specs(&self) -> &[ToolSpec] {
+        &self.specs
+    }
+
+    async fn execute(
+        &self,
+        call: &ToolCall,
+        _cx: ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolFailure> {
+        let seen = self.journal.records().iter().any(|r| match r {
+            JournalRecord::ToolExecutionStarted {
+                call_id,
+                name,
+                arguments,
+            } => call_id == &call.id && name == &call.name && arguments == &call.arguments,
+            _ => false,
+        });
+        self.checks.lock().unwrap().push((call.id.clone(), seen));
+        Ok(ToolOutput::text(call.arguments.to_string()))
+    }
+}
+
+/// Rewrites the arguments of calls to `rw`.
+#[derive(Clone, Copy)]
+struct Rewrite;
+
+impl Hooks for Rewrite {
+    fn before_tool_call(
+        &self,
+        _cx: &HookContext,
+        call: &ToolCall,
+    ) -> impl Future<Output = Result<ToolDecision, HookError>> + Send {
+        let decision = if call.name == "rw" {
+            ToolDecision::Rewrite {
+                arguments: json!({"rewritten": true}),
+            }
+        } else {
+            ToolDecision::Allow
+        };
+        async move { Ok(decision) }
+    }
+}
+
+async fn session_with_hooks(
+    model: Arc<ScriptedModel>,
+    tools: impl ToolProvider,
+    journal: Arc<dyn TranscriptJournal>,
+    hooks: impl Hooks,
+) -> AgentSession<Arc<ScriptedModel>, impl ToolProvider, impl Hooks> {
+    Arc::new(Agent::new(model, tools).with_hooks(hooks))
+        .open_session_with_journal(Vec::new(), journal)
+        .await
+        .unwrap()
+}
+
+/// AC-A2-2: serial, parallel-shared, exclusive and rewritten calls all see their own
+/// `Started` (with the rewritten arguments) before their body starts.
+#[tokio::test(start_paused = true)]
+async fn execution_starts_only_after_started_is_durable() {
+    let journal = Arc::new(RecordingJournal::new());
+    let probe = ProbeTools {
+        journal: Arc::clone(&journal),
+        checks: Arc::default(),
+        specs: Arc::new(vec![shared("a"), spec("b"), spec("rw")]),
+    };
+    let checks = probe.checks.clone();
+    let model = ScriptedModel::new([
+        calls(vec![
+            call("s1", "a", json!({"n": 1})),
+            call("s2", "a", json!({"n": 2})),
+            call("x1", "b", json!({})),
+            call("r1", "rw", json!({"n": 3})),
+        ]),
+        text("done"),
+    ]);
+    let mut chat = session_with_hooks(model, probe, journal.clone(), Rewrite).await;
+
+    let outcome = chat
+        .run_turn("go", Default::default(), &NoopSink)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.status, RunStatus::Completed);
+    // Every executed call saw its own Started, with the final (rewritten) arguments.
+    assert_eq!(checks.lock().unwrap().len(), 4);
+    for (id, seen) in checks.lock().unwrap().iter() {
+        assert!(seen, "call {id} executed before its Started was durable");
+    }
+    let r1 = journal.records().iter().find_map(|r| match r {
+        JournalRecord::ToolExecutionStarted {
+            call_id, arguments, ..
+        } if call_id == "r1" => Some(arguments.clone()),
+        _ => None,
+    });
+    assert_eq!(r1, Some(json!({"rewritten": true})));
+}
+
+/// Appends a review note to every result.
+#[derive(Clone, Copy)]
+struct Review;
+
+impl Hooks for Review {
+    fn after_tool_call(
+        &self,
+        _cx: &HookContext,
+        _call: &ToolCall,
+        result: &mut ToolResult,
+    ) -> impl Future<Output = Result<(), HookError>> + Send {
+        result.content.push(ContentPart::text("reviewed"));
+        async { Ok(()) }
+    }
+}
+
+/// AC-A2-3: `Settled` precedes the result message and carries the final, post-hook result.
+#[tokio::test(start_paused = true)]
+async fn settled_precedes_and_matches_the_result_message() {
+    let journal = Arc::new(RecordingJournal::new());
+    let tools = MemTools::new(vec![(shared("a"), Behavior::Echo)]);
+    let model = ScriptedModel::new([
+        calls(vec![call("c1", "a", json!({})), call("c2", "a", json!({}))]),
+        text("done"),
+    ]);
+    let mut chat = session_with_hooks(model, tools, journal.clone(), Review).await;
+
+    chat.run_turn("go", Default::default(), &NoopSink)
+        .await
+        .unwrap();
+
+    let records = journal.records();
+    for id in ["c1", "c2"] {
+        let settled_at = records.iter().position(|r| {
+            matches!(r,
+            JournalRecord::ToolExecutionSettled { call_id, .. } if call_id == id)
+        });
+        let message_at = records.iter().position(|r| {
+            matches!(r,
+            JournalRecord::Message { message: Message::Tool { result }, .. }
+                if result.call_id == id)
+        });
+        let (Some(settled_at), Some(message_at)) = (settled_at, message_at) else {
+            panic!("no settled/message pair for {id}: {records:?}");
+        };
+        assert!(
+            settled_at < message_at,
+            "{id}: settled at {settled_at}, message at {message_at}"
+        );
+        // The settled result is exactly the one committed, hook modifications included.
+        match (&records[settled_at], &records[message_at]) {
+            (
+                JournalRecord::ToolExecutionSettled {
+                    result: settled, ..
+                },
+                JournalRecord::Message {
+                    message: Message::Tool { result },
+                    ..
+                },
+            ) => assert_eq!(settled, result),
+            other => panic!("unexpected records for {id}: {other:?}"),
+        }
+        assert!(settled_result_content_has(&records[settled_at], "reviewed"));
+    }
+}
+
+fn settled_result_content_has(record: &JournalRecord, text: &str) -> bool {
+    match record {
+        JournalRecord::ToolExecutionSettled { result, .. } => result
+            .content
+            .iter()
+            .any(|p| matches!(p, ContentPart::Text { text: t, .. } if t.contains(text))),
+        _ => false,
+    }
+}
+
+/// Denies `d`, answers `r` itself, and fails the policy for `h`.
+#[derive(Clone, Copy)]
+struct Policy;
+
+impl Hooks for Policy {
+    fn before_tool_call(
+        &self,
+        _cx: &HookContext,
+        call: &ToolCall,
+    ) -> impl Future<Output = Result<ToolDecision, HookError>> + Send {
+        let decision = match call.name.as_str() {
+            "d" => ToolDecision::Deny {
+                reason: "not allowed".into(),
+            },
+            "r" => ToolDecision::Respond(ToolResult::success(
+                &call.id,
+                vec![ContentPart::text("answered locally")],
+            )),
+            "h" => return std::future::ready(Err(HookError::new("policy broke"))),
+            _ => ToolDecision::Allow,
+        };
+        std::future::ready(Ok(decision))
+    }
+}
+
+/// AC-A2-4: calls that never reach a tool session leave no markers behind.
+#[tokio::test(start_paused = true)]
+async fn unexecuted_calls_carry_no_markers() {
+    let journal = Arc::new(RecordingJournal::new());
+    let tools = MemTools::new(vec![
+        (spec("d"), Behavior::Echo),
+        (typed("t"), Behavior::Echo),
+    ]);
+    let log = tools.log.clone();
+    let model = ScriptedModel::new([
+        calls(vec![
+            call("u1", "missing", json!({})),            // unknown_tool
+            call("t1", "t", json!({"x": "not an int"})), // invalid_arguments
+            call("d1", "d", json!({})),                  // denied
+            call("r1", "r", json!({})),                  // responded by the hook
+            call("h1", "h", json!({})),                  // hook_error
+        ]),
+        text("done"),
+    ]);
+    let mut chat = session_with_hooks(model, tools, journal.clone(), Policy).await;
+
+    chat.run_turn("go", Default::default(), &NoopSink)
+        .await
+        .unwrap();
+
+    // Nothing executed, so no markers at all.
+    assert_eq!(log.started(), Vec::<String>::new());
+    assert!(!journal.records().iter().any(|r| matches!(
+        r,
+        JournalRecord::ToolExecutionStarted { .. } | JournalRecord::ToolExecutionSettled { .. }
+    )));
+    // Each call has exactly one result message.
+    for id in ["u1", "t1", "d1", "r1", "h1"] {
+        assert_eq!(
+            result_ids(chat.transcript())
+                .iter()
+                .filter(|i| *i == id)
+                .count(),
+            1
+        );
+    }
+}
+
+/// AC-A2-4, second half: `skipped_by_steering` and cancelled-before-start calls leave no
+/// markers either.
+#[tokio::test(start_paused = true)]
+async fn skipped_and_cancelled_before_start_carry_no_markers() {
+    // Steering skips the exclusive call that has not launched yet.
+    let journal = Arc::new(RecordingJournal::new());
+    let tools = MemTools::new(vec![
+        (shared("a"), Behavior::Delay(20)),
+        (spec("b"), Behavior::Echo),
+    ]);
+    let model = ScriptedModel::new([
+        calls(vec![call("s1", "a", json!({})), call("s2", "b", json!({}))]),
+        // The injected steering keeps the turn going, so one more reply is needed.
+        text("ok"),
+    ]);
+    let log = tools.log.clone();
+    let mut chat = session_with(model.clone(), tools, journal.clone()).await;
+    let mut run = chat
+        .start_turn_with(
+            "go",
+            TurnOptions {
+                steer_mode: SteerMode::SkipRemaining,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let steer = run.steering_handle();
+    let (outcome, ()) = tokio::join!(run.run(&NoopSink), async {
+        // Once s1 is running, a new message makes the not-yet-launched s2 skip.
+        until_started(&log, "s1").await;
+        steer.steer("stop").unwrap();
+    });
+    assert_eq!(outcome.unwrap().status, RunStatus::Completed);
+    assert!(matches!(
+        journal.records().iter().find(|r| matches!(r,
+            JournalRecord::Message { message: Message::Tool { result }, .. } if result.call_id == "s2")),
+        Some(JournalRecord::Message { message: Message::Tool { result }, .. }
+            ) if result.error_code.as_deref() == Some("skipped_by_steering")));
+    assert!(!journal.records().iter().any(|r| matches!(r,
+        JournalRecord::ToolExecutionStarted { call_id, .. } if call_id == "s2")));
+
+    // A cancel before the exclusive call starts.
+    let journal = Arc::new(RecordingJournal::new());
+    let tools = MemTools::new(vec![
+        (shared("a"), Behavior::Hang),
+        (spec("b"), Behavior::Echo),
+    ]);
+    let model = ScriptedModel::new([calls(vec![
+        call("h1", "a", json!({})),
+        call("x1", "b", json!({})),
+    ])]);
+    let log = tools.log.clone();
+    let mut chat = session_with(model, tools, journal.clone()).await;
+    let mut run = chat.start_turn("go").unwrap();
+    let cancel = run.cancellation_handle();
+    let (outcome, ()) = tokio::join!(run.run(&NoopSink), async {
+        until_started(&log, "h1").await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        cancel.cancel();
+    });
+    assert_eq!(
+        outcome.unwrap().status,
+        RunStatus::Cancelled(CancelReason::Requested)
+    );
+    drop(run);
+    assert!(!log.started().contains(&"x1".to_owned()));
+    assert!(!journal.records().iter().any(|r| matches!(r,
+        JournalRecord::ToolExecutionStarted { call_id, .. } if call_id == "x1")));
+    assert_eq!(code(result_for(chat.transcript(), "x1")), Some("cancelled"));
+}
+
+async fn until_started(log: &ToolLog, id: &str) {
+    while !log.started().iter().any(|s| s == id) {
+        tokio::task::yield_now().await;
+    }
 }
