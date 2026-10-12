@@ -194,6 +194,9 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         input: impl Into<Message>,
         options: TurnOptions,
     ) -> Result<ActiveRun<'_, M, P, H>, SessionError> {
+        if self.recovery_required {
+            return Err(SessionError::RecoveryRequired);
+        }
         if self.poisoned {
             return Err(SessionError::Poisoned);
         }
