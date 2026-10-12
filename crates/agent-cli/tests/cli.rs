@@ -298,15 +298,16 @@ impl Running {
             mut stderr_seen,
             stdin: _,
         } = self;
-        let (output, ()) = tokio::join!(child.wait_with_output(), async {
-            let mut rest = String::new();
-            let _ = stderr.read_to_string(&mut rest).await;
-            stderr_seen.push_str(&rest);
-        },);
-        let output = timeout(Duration::from_secs(30), async { output })
-            .await
-            .expect("the CLI did not exit in time")
-            .expect("wait");
+        let (output, ()) = timeout(Duration::from_secs(30), async {
+            tokio::join!(child.wait_with_output(), async {
+                let mut rest = String::new();
+                let _ = stderr.read_to_string(&mut rest).await;
+                stderr_seen.push_str(&rest);
+            })
+        })
+        .await
+        .expect("the CLI did not exit in time");
+        let output = output.expect("wait");
         (
             output.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&output.stdout).into_owned(),
