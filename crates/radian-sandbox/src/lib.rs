@@ -19,6 +19,11 @@
 
 mod error;
 mod policy;
+#[cfg(target_os = "macos")]
+mod seatbelt;
+
+#[cfg(feature = "testing")]
+pub mod harness;
 
 use std::ffi::{OsStr, OsString};
 use std::process::Command;
@@ -76,9 +81,13 @@ impl SandboxBackend for NoSandbox {
     }
 }
 
-/// The backend for the current OS. Platform backends are added by their own slices; until
-/// then a requested enforcement mode has no backend and fails.
+/// The backend for the current OS, if one is compiled in.
 pub fn platform_backend() -> Result<&'static dyn SandboxBackend, SandboxError> {
+    #[cfg(target_os = "macos")]
+    {
+        return Ok(&seatbelt::SEATBELT);
+    }
+    #[allow(unreachable_code)]
     Err(SandboxError::UnsupportedPlatform(std::env::consts::OS))
 }
 
@@ -115,7 +124,13 @@ impl Sandbox {
                 },
             });
         }
-        Self::from_backend(platform_backend()?, policy.mode, policy.workspace.clone())
+        let backend = platform_backend()?;
+        let probe = backend.probe()?;
+        Ok(Self {
+            backend,
+            policy,
+            probe,
+        })
     }
 
     /// Builds a sandbox over an explicit backend (used by tests to inject an unavailable or
@@ -189,4 +204,23 @@ impl std::fmt::Debug for Sandbox {
 /// Probes the platform backend without building a sandbox.
 pub fn probe() -> Result<ProbeReport, SandboxError> {
     platform_backend()?.probe()
+}
+
+/// Applies the policy's environment whitelist to a command: clears everything, then sets the
+/// named variables that exist in the parent. Shared by the backends.
+pub(crate) fn apply_env(command: &mut Command, policy: &SandboxPolicy) {
+    command.env_clear();
+    for name in &policy.allow_env {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+}
+
+/// The per-session temp directory, always inside the workspace so it is writable under
+/// `workspace-write`. Created on demand.
+pub(crate) fn workspace_tmp(policy: &SandboxPolicy) -> std::path::PathBuf {
+    let tmp = policy.workspace.join(".radian").join("tmp");
+    let _ = std::fs::create_dir_all(&tmp);
+    tmp
 }

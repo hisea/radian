@@ -168,12 +168,22 @@ pub(crate) fn canonical_dir(path: &Path) -> Result<PathBuf, SandboxError> {
 /// Canonicalizes `path`, or its nearest existing ancestor when the path itself is absent, so
 /// a deny rule for `~/.ssh` still binds before the directory has been created.
 pub(crate) fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
-    let mut candidate = path.to_path_buf();
+    // Resolve symlinks in the part that exists and keep the missing tail: a deny rule for a
+    // not-yet-created `~/.netrc` must name `~/.netrc`, never stop at `$HOME` (which would
+    // deny the whole home directory).
+    let mut existing = path.to_path_buf();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
     loop {
-        if let Ok(p) = std::fs::canonicalize(&candidate) {
-            return Some(p);
+        if let Ok(canonical) = std::fs::canonicalize(&existing) {
+            let mut resolved = canonical;
+            for part in tail.iter().rev() {
+                resolved.push(part);
+            }
+            return Some(resolved);
         }
-        if !candidate.pop() {
+        let name = existing.file_name()?.to_os_string();
+        tail.push(name);
+        if !existing.pop() {
             return None;
         }
     }

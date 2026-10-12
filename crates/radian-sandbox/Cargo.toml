@@ -8,3 +8,17 @@ description = "OS sandbox backends (macOS sandbox-exec, Linux bubblewrap) that r
 [dependencies]
 serde_json.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+# The escape-matrix harness and the cross-platform driver build under `testing`.
+radian-sandbox = { path = ".", features = ["testing"] }
+
+[features]
+# The escape-matrix harness used by the tests and by the `sandbox-escape` driver that runs
+# on the Linux VM. Not part of the product surface.
+testing = []
+
+[[bin]]
+name = "sandbox-escape"
+path = "src/bin/sandbox-escape.rs"
+required-features = ["testing"]
