@@ -8,6 +8,7 @@ members = [
     "crates/radian-slots",
     "crates/agent-provider-contract",
     "crates/radian-session",
+    "crates/radian-coding",
 ]
 
 [workspace.package]

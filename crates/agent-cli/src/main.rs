@@ -6,6 +6,7 @@
 //! variable only, and is redacted from everything this program prints.
 
 mod mcp;
+mod tools;
 
 use std::future::Future;
 use std::io::{IsTerminal, Write};
@@ -23,9 +24,11 @@ use agent_core::{
 use agent_extensions::{McpServerConfig, McpToolProvider};
 use agent_provider_openai_compatible::{ApiKey, OpenAiCompatible, OpenAiCompatibleConfig};
 use clap::Parser;
+use radian_coding::CodingTools;
 use tokio::sync::{Mutex, mpsc};
 
 use crate::mcp::load_mcp_config;
+use crate::tools::CliTools;
 
 /// Exit code for usage and configuration errors, matching clap's own usage failures.
 const USAGE_ERROR: i32 = 2;
@@ -57,6 +60,11 @@ struct Cli {
     /// MCP server config file (JSON).
     #[arg(long)]
     mcp_config: Option<String>,
+
+    /// Expose the built-in file and read-only git tools rooted at this directory
+    /// (read/write/patch/list, git_status/git_diff). No shell is provided.
+    #[arg(long)]
+    workspace: Option<String>,
 
     /// One-shot mode: run this prompt, then exit.
     #[arg(short, long)]
@@ -200,10 +208,19 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         system_prompt: setup.system_prompt,
         ..AgentConfig::default()
     };
+    let coding = match &cli.workspace {
+        Some(path) => Some(
+            CodingTools::new(path).map_err(|e| SetupError(format!("--workspace {path}: {e}")))?,
+        ),
+        None => None,
+    };
     let agent = Arc::new(
-        Agent::new(setup.model, McpToolProvider::new(setup.servers))
-            .with_config(agent_config)
-            .with_hooks(approval),
+        Agent::new(
+            setup.model,
+            CliTools::new(coding, McpToolProvider::new(setup.servers)),
+        )
+        .with_config(agent_config)
+        .with_hooks(approval),
     );
     let mut session = match agent.open_session().await {
         Ok(session) => session,
@@ -309,7 +326,7 @@ enum TurnEnd {
 /// is kept alive (dropping it would poison the session); a second Ctrl-C during the
 /// wind-down drops it on purpose — the exit that follows is the one supported use of that.
 async fn run_turn(
-    session: &mut AgentSession<OpenAiCompatible, McpToolProvider, Approval>,
+    session: &mut AgentSession<OpenAiCompatible, CliTools, Approval>,
     input: String,
     options: TurnOptions,
     ui: &Ui,
@@ -336,7 +353,7 @@ async fn run_turn(
 }
 
 async fn interactive_loop(
-    session: &mut AgentSession<OpenAiCompatible, McpToolProvider, Approval>,
+    session: &mut AgentSession<OpenAiCompatible, CliTools, Approval>,
     lines: &LineHub,
     ui: &Ui,
     turn_options: &impl Fn(Option<Instant>) -> TurnOptions,

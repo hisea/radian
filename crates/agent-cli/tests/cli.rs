@@ -943,3 +943,126 @@ async fn cancelling_at_the_approval_prompt_does_not_swallow_the_next_line() {
     assert_eq!(server.requests().len(), 2, "{stderr}");
     assert_eq!(last_user_text(&messages_of(&server, 1)), "next", "{stderr}");
 }
+
+// ---------- built-in coding tools ----------
+
+/// One-shot: the model asks for the built-in `write`, then answers.
+#[tokio::test]
+async fn built_in_write_tool_creates_a_file_in_the_workspace() {
+    let dir = scratch("builtin-write");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        tool_reply(
+            "call_1",
+            "write",
+            r#"{"path":"out.txt","content":"hello\n"}"#,
+        ),
+        text_reply("done"),
+    ])
+    .await;
+
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--yes",
+                "-p",
+                "write a file",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("done"), "{stdout}");
+    assert_eq!(
+        std::fs::read_to_string(ws.join("out.txt")).unwrap(),
+        "hello\n"
+    );
+    // The tool result went back to the model.
+    assert!(
+        tool_result_content(&server, 1).contains("wrote 6 bytes"),
+        "{}",
+        tool_result_content(&server, 1)
+    );
+}
+
+#[tokio::test]
+async fn built_in_read_outside_the_workspace_is_refused_and_the_turn_continues() {
+    let dir = scratch("builtin-escape");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "read", r#"{"path":"/etc/passwd"}"#),
+        text_reply("done"),
+    ])
+    .await;
+
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--yes",
+                "-p",
+                "read a file",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("done"), "the turn continues: {stdout}");
+    let result = tool_result_content(&server, 1);
+    assert!(
+        result.contains("absolute path") && result.contains("/etc/passwd"),
+        "the model sees the refusal: {result}"
+    );
+}
+
+#[tokio::test]
+async fn without_workspace_the_built_in_tools_do_not_exist() {
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "write", r#"{"path":"x","content":"y"}"#),
+        text_reply("done"),
+    ])
+    .await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--yes",
+                "-p",
+                "write a file",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    let result = tool_result_content(&server, 1);
+    assert!(
+        result.contains("no tool named"),
+        "without --workspace there is no `write`: {result}"
+    );
+}
