@@ -1,0 +1,17 @@
+[package]
+name = "radian-coding"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Built-in coding tools (read/write/patch/list + read-only git) with workspace path confinement"
+
+[dependencies]
+agent-core = { path = "../agent-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["process"] }
+
+[target.'cfg(unix)'.dependencies]
+# `O_NOFOLLOW` for the write path: refuse to follow a symlink at the destination.
+libc = "0.2"
