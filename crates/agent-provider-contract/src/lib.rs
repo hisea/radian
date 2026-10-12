@@ -98,6 +98,16 @@ pub trait ContractHarness<M: Model>: Sync {
     /// The returned adapter must stay valid (the mock stays alive) for as long as it is
     /// used.
     fn script(&self, wires: &[Wire]) -> impl std::future::Future<Output = M> + Send;
+
+    /// The finish reasons this provider has **no wire form for**. A reason listed here is
+    /// skipped by [`check_finish_reasons`]; a reason that is *not* listed must be satisfied.
+    ///
+    /// There is deliberately no silent skip: an adapter must declare the gap here, with the
+    /// provider's documentation as the reason, so the suite never pressures an adapter into
+    /// inventing a value its provider does not send. The default is "supports every reason".
+    fn unsupported_reasons(&self) -> &'static [Reason] {
+        &[]
+    }
 }
 
 /// A default request the checks send. One user turn, no tools.
@@ -354,19 +364,48 @@ pub async fn check_call_ids_unique<M: Model, H: ContractHarness<M>>(h: &H) {
 
 // ---------- 6-10: finish reasons, usage, errors, cancellation, secrets ----------
 
+/// Every `Reason` the suite can script, in check order.
+const ALL_REASONS: [Reason; 5] = [
+    Reason::EndTurn,
+    Reason::ToolUse,
+    Reason::MaxTokens,
+    Reason::ContentFiltered,
+    Reason::PauseTurn,
+];
+
+/// The neutral stop reason a `Reason` must surface as.
+fn expected_stop_reason(reason: Reason) -> StopReason {
+    match reason {
+        Reason::EndTurn => StopReason::EndTurn,
+        Reason::ToolUse => StopReason::ToolUse,
+        Reason::MaxTokens => StopReason::MaxTokens,
+        Reason::ContentFiltered => StopReason::ContentFiltered,
+        Reason::PauseTurn => StopReason::PauseTurn,
+        // `Unknown` is checked separately and must land in `Other`.
+        Reason::Unknown => StopReason::Other(String::new()),
+    }
+}
+
+/// The reasons a check must exercise for this harness: every reason except those the harness
+/// explicitly declares unsupported. Exposed so the escape hatch itself is testable.
+pub fn reasons_to_check<M: Model, H: ContractHarness<M>>(h: &H) -> Vec<Reason> {
+    let unsupported = h.unsupported_reasons();
+    ALL_REASONS
+        .iter()
+        .copied()
+        .filter(|reason| !unsupported.contains(reason))
+        .collect()
+}
+
 /// Every `StopReason` variant has a fixture; an unknown reason falls into `Other` with
-/// the provider's own text, not a silent fallback.
+/// the provider's own text, not a silent fallback. Reasons the harness explicitly declares
+/// unsupported (see [`ContractHarness::unsupported_reasons`]) are skipped, and only an
+/// explicit declaration skips them.
 pub async fn check_finish_reasons<M: Model, H: ContractHarness<M>>(h: &H) {
-    for (reason, expected) in [
-        (Reason::EndTurn, StopReason::EndTurn),
-        (Reason::ToolUse, StopReason::ToolUse),
-        (Reason::MaxTokens, StopReason::MaxTokens),
-        (Reason::ContentFiltered, StopReason::ContentFiltered),
-        (Reason::PauseTurn, StopReason::PauseTurn),
-    ] {
+    for reason in reasons_to_check(h) {
         let model = h.script(&[Wire::Finish(reason)]).await;
         let resp = complete(&model, request(), &NoopSink).await.unwrap();
-        assert_eq!(resp.stop_reason, expected, "{reason:?}");
+        assert_eq!(resp.stop_reason, expected_stop_reason(reason), "{reason:?}");
     }
 
     let model = h.script(&[Wire::Refusal("I can't help.".into())]).await;
@@ -538,4 +577,121 @@ pub async fn check_secret_not_leaked<M: Model, H: ContractHarness<M>>(h: &H) {
     );
     // The error is still an error with a real body, not an empty placeholder.
     assert!(!message.is_empty());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fake provider whose only flaw is that it maps `ContentFiltered` to `EndTurn`: it
+    /// cannot satisfy `check_finish_reasons` for that reason. Everything else is correct, so
+    /// the only variable is the declaration.
+    struct FakeModel {
+        stop_reason: StopReason,
+        text: String,
+    }
+
+    impl Model for FakeModel {
+        async fn complete(
+            &self,
+            _request: ModelRequest,
+            _cx: ModelContext<'_>,
+        ) -> Result<ModelResponse, ModelError> {
+            Ok(ModelResponse {
+                content: if self.text.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![ContentPart::text(self.text.clone())]
+                },
+                tool_calls: Vec::new(),
+                provider_payload: None,
+                stop_reason: self.stop_reason.clone(),
+                usage: None,
+            })
+        }
+    }
+
+    struct FakeHarness {
+        unsupported: &'static [Reason],
+    }
+
+    impl ContractHarness<FakeModel> for FakeHarness {
+        fn secret(&self) -> &str {
+            "fake-secret"
+        }
+
+        async fn script(&self, wires: &[Wire]) -> FakeModel {
+            match wires.first() {
+                // Deliberately wrong: `ContentFiltered` surfaces as `EndTurn`.
+                Some(Wire::Finish(Reason::ContentFiltered)) => FakeModel {
+                    stop_reason: StopReason::EndTurn,
+                    text: "x".into(),
+                },
+                Some(Wire::Finish(Reason::Unknown)) => FakeModel {
+                    stop_reason: StopReason::Other("unknown".into()),
+                    text: "x".into(),
+                },
+                Some(Wire::Refusal(text)) => FakeModel {
+                    stop_reason: StopReason::Refusal,
+                    text: text.clone(),
+                },
+                Some(Wire::Finish(reason)) => FakeModel {
+                    stop_reason: expected_stop_reason(*reason),
+                    text: "x".into(),
+                },
+                _ => FakeModel {
+                    stop_reason: StopReason::EndTurn,
+                    text: "x".into(),
+                },
+            }
+        }
+
+        fn unsupported_reasons(&self) -> &'static [Reason] {
+            self.unsupported
+        }
+    }
+
+    #[test]
+    fn the_default_declaration_supports_every_reason() {
+        let harness = FakeHarness { unsupported: &[] };
+        assert_eq!(harness.unsupported_reasons(), &[]);
+        assert_eq!(reasons_to_check(&harness), ALL_REASONS.to_vec());
+    }
+
+    #[test]
+    fn only_declared_reasons_are_dropped_from_the_check() {
+        let harness = FakeHarness {
+            unsupported: &[Reason::ContentFiltered],
+        };
+        let checked = reasons_to_check(&harness);
+        assert!(!checked.contains(&Reason::ContentFiltered));
+        for reason in [
+            Reason::EndTurn,
+            Reason::ToolUse,
+            Reason::MaxTokens,
+            Reason::PauseTurn,
+        ] {
+            assert!(
+                checked.contains(&reason),
+                "{reason:?} must still be checked"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_declared_reason_is_skipped() {
+        // The fake maps ContentFiltered wrongly; declaring it unsupported is what lets the
+        // check pass. Refusal and Unknown are always checked and the fake satisfies them.
+        let harness = FakeHarness {
+            unsupported: &[Reason::ContentFiltered],
+        };
+        check_finish_reasons(&harness).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "ContentFiltered")]
+    async fn an_undeclared_reason_must_be_satisfied() {
+        let harness = FakeHarness { unsupported: &[] };
+        check_finish_reasons(&harness).await;
+    }
 }

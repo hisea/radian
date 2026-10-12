@@ -1,0 +1,475 @@
+//! `ModelRequest` -> Anthropic Messages request body. Pure, so it is tested without a server.
+
+use agent_core::{ContentPart, Message, ModelError, ModelRequest, ToolCall, ToolResult};
+use serde_json::{Map, Value, json};
+
+use crate::config::AnthropicConfig;
+
+/// Keys the adapter owns. Settings may not override them. `max_tokens` is here because
+/// Anthropic requires it and the adapter always sends it (see the wire notes §2).
+const RESERVED: [&str; 7] = [
+    "model",
+    "messages",
+    "max_tokens",
+    "stream",
+    "system",
+    "tools",
+    "tool_choice",
+];
+
+pub(crate) fn build_body(
+    request: &ModelRequest,
+    config: &AnthropicConfig,
+) -> Result<Value, ModelError> {
+    let mut body = Map::new();
+    for source in [&config.extra_body, &settings_object(&request.settings)?] {
+        for (key, value) in source {
+            if RESERVED.contains(&key.as_str()) {
+                return Err(ModelError::Protocol(format!(
+                    "the request setting `{key}` is set by the adapter and cannot be overridden"
+                )));
+            }
+            body.insert(key.clone(), value.clone());
+        }
+    }
+    body.insert("model".into(), json!(config.model));
+    body.insert("max_tokens".into(), json!(config.max_tokens));
+    body.insert("stream".into(), json!(true));
+    if let Some(system) = &request.system_prompt {
+        body.insert("system".into(), json!(system));
+    }
+    body.insert("messages".into(), Value::Array(messages(&request.messages)));
+    if !request.tools.is_empty() {
+        let tools: Vec<Value> = request
+            .tools
+            .iter()
+            .map(|tool| {
+                json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.input_schema,
+                })
+            })
+            .collect();
+        body.insert("tools".into(), Value::Array(tools));
+    }
+    Ok(Value::Object(body))
+}
+
+fn settings_object(settings: &Value) -> Result<Map<String, Value>, ModelError> {
+    match settings {
+        Value::Null => Ok(Map::new()),
+        Value::Object(map) => Ok(map.clone()),
+        _ => Err(ModelError::Protocol(
+            "model settings must be a JSON object".into(),
+        )),
+    }
+}
+
+/// Anthropic has no `tool` role: tool results are `tool_result` blocks inside a `user`
+/// message. Consecutive results are merged into one user message, matching the official
+/// round-trip example (wire notes §2.1).
+fn messages(messages: &[Message]) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < messages.len() {
+        match &messages[index] {
+            Message::User { content, .. } => {
+                out.push(user_message(content));
+                index += 1;
+            }
+            Message::Assistant {
+                content,
+                tool_calls,
+                ..
+            } => {
+                out.push(assistant_message(content, tool_calls));
+                index += 1;
+            }
+            Message::Tool { .. } => {
+                let mut blocks = Vec::new();
+                while let Some(Message::Tool { result, .. }) = messages.get(index) {
+                    blocks.push(tool_result_block(result));
+                    index += 1;
+                }
+                out.push(json!({"role": "user", "content": blocks}));
+            }
+        }
+    }
+    out
+}
+
+fn user_message(content: &[ContentPart]) -> Value {
+    let blocks = blocks(content);
+    // An empty content is not a documented shape; a plain empty string is the least
+    // surprising fallback (and cannot happen for messages the core builds in practice).
+    let content = if blocks.is_empty() {
+        json!("")
+    } else {
+        Value::Array(blocks)
+    };
+    json!({"role": "user", "content": content})
+}
+
+fn assistant_message(content: &[ContentPart], tool_calls: &[ToolCall]) -> Value {
+    let mut blocks = blocks(content);
+    blocks.extend(tool_calls.iter().map(tool_use_block));
+    json!({"role": "assistant", "content": blocks})
+}
+
+/// Text and image blocks; every other `ContentPart` becomes a short text placeholder, so the
+/// model knows something was there. Empty text blocks are dropped (`text` has minLength 1).
+fn blocks(parts: &[ContentPart]) -> Vec<Value> {
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Text { text, .. } if text.is_empty() => None,
+            other => Some(block(other)),
+        })
+        .collect()
+}
+
+fn block(part: &ContentPart) -> Value {
+    match part {
+        ContentPart::Text { text, .. } => json!({"type": "text", "text": text}),
+        ContentPart::Image {
+            mime_type, data, ..
+        } => json!({
+            "type": "image",
+            "source": {"type": "base64", "media_type": mime_type, "data": data}
+        }),
+        other => json!({"type": "text", "text": text_of(other)}),
+    }
+}
+
+fn tool_use_block(call: &ToolCall) -> Value {
+    json!({
+        "type": "tool_use",
+        "id": call.id,
+        "name": call.name,
+        "input": input_object(&call.arguments),
+    })
+}
+
+/// Anthropic's `tool_use.input` is always an object. A string that parses to an object is
+/// used; anything else becomes `{}` (the adapter does not invent structure for arguments the
+/// model produced badly). This is lossy and recorded in the wire notes.
+fn input_object(arguments: &Value) -> Value {
+    match arguments {
+        Value::Object(_) => arguments.clone(),
+        Value::String(raw) => serde_json::from_str::<Value>(raw)
+            .ok()
+            .filter(Value::is_object)
+            .unwrap_or_else(|| json!({})),
+        _ => json!({}),
+    }
+}
+
+fn tool_result_block(result: &ToolResult) -> Value {
+    let text = plain_text(&result.content);
+    let mut block = Map::new();
+    block.insert("type".into(), json!("tool_result"));
+    block.insert("tool_use_id".into(), json!(result.call_id));
+    if !text.is_empty() {
+        block.insert("content".into(), json!(text));
+    }
+    if result.is_error {
+        block.insert("is_error".into(), json!(true));
+    }
+    Value::Object(block)
+}
+
+/// Text of every part, joined by blank lines. Parts the API cannot take as text become short
+/// placeholders. This is lossy by design.
+fn plain_text(parts: &[ContentPart]) -> String {
+    parts.iter().map(text_of).collect::<Vec<_>>().join("\n\n")
+}
+
+fn text_of(part: &ContentPart) -> String {
+    match part {
+        ContentPart::Text { text, .. } => text.clone(),
+        ContentPart::Image { mime_type, .. } => format!("[{mime_type} image omitted]"),
+        ContentPart::Audio { mime_type, .. } => format!("[{mime_type} audio omitted]"),
+        ContentPart::ResourceLink { uri, name, .. } => match name {
+            Some(name) => format!("[resource {name}: {uri}]"),
+            None => format!("[resource: {uri}]"),
+        },
+        ContentPart::EmbeddedResource { resource, .. } => match resource["text"].as_str() {
+            Some(text) => text.to_owned(),
+            None => format!(
+                "[embedded resource: {}]",
+                resource["uri"].as_str().unwrap_or("unknown")
+            ),
+        },
+        ContentPart::Opaque { .. } => "[unsupported content omitted]".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_core::{InputSource, MessageId, MessageMeta, OpaqueJson, ToolConcurrency, ToolSpec};
+
+    fn config() -> AnthropicConfig {
+        AnthropicConfig::new("http://localhost", "claude-test")
+    }
+
+    fn request(messages: Vec<Message>) -> ModelRequest {
+        ModelRequest {
+            system_prompt: None,
+            messages,
+            tools: Vec::new(),
+            settings: Value::Null,
+        }
+    }
+
+    fn call(id: &str, name: &str, arguments: Value) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments,
+        }
+    }
+
+    #[test]
+    fn the_required_fields_and_stream_flag_are_always_sent() {
+        let body = build_body(&request(vec![Message::user("hi")]), &config()).unwrap();
+        assert_eq!(body["model"], "claude-test");
+        assert_eq!(body["max_tokens"], 4096);
+        assert_eq!(body["stream"], true);
+        assert_eq!(
+            body["messages"],
+            json!([{"role": "user", "content": [{"type":"text","text":"hi"}]}])
+        );
+        assert!(body.get("system").is_none());
+        assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn host_message_meta_is_not_sent_to_the_provider() {
+        let plain = request(vec![Message::user("hello")]);
+        let with_meta = request(vec![Message::User {
+            content: vec![ContentPart::text("hello")],
+            meta: MessageMeta {
+                id: Some(MessageId("host-42".into())),
+                source: Some(InputSource::Subagent),
+                origin: Some(
+                    OpaqueJson::parse(
+                        r#"{"parent":{"session_id":"s","turn_id":"t","call_id":"c"}}"#,
+                    )
+                    .unwrap(),
+                ),
+            },
+        }]);
+        let plain = serde_json::to_vec(&build_body(&plain, &config()).unwrap()).unwrap();
+        let with_meta = serde_json::to_vec(&build_body(&with_meta, &config()).unwrap()).unwrap();
+        assert_eq!(with_meta, plain);
+        let body = String::from_utf8(with_meta).unwrap();
+        assert!(!body.contains("meta") && !body.contains("source") && !body.contains("origin"));
+    }
+
+    #[test]
+    fn a_tool_conversation_maps_to_anthropic_blocks() {
+        let mut req = request(vec![
+            Message::user("what is 2+3?"),
+            Message::Assistant {
+                content: Vec::new(),
+                tool_calls: vec![call("toolu_1", "calc__add", json!({"a": 2, "b": 3}))],
+                provider_payload: None,
+                interrupted: false,
+                meta: MessageMeta::default(),
+            },
+            Message::Tool {
+                result: ToolResult::success("toolu_1", vec![ContentPart::text("5")]),
+                meta: MessageMeta::default(),
+            },
+            Message::Tool {
+                result: ToolResult::error("toolu_2", "boom", "it failed"),
+                meta: MessageMeta::default(),
+            },
+            Message::assistant("It is 5."),
+        ]);
+        req.system_prompt = Some("Be brief.".into());
+        req.tools = vec![ToolSpec {
+            name: "calc__add".into(),
+            description: "Adds.".into(),
+            input_schema: json!({"type": "object"}),
+            concurrency: ToolConcurrency::Shared,
+        }];
+
+        let body = build_body(&req, &config()).unwrap();
+        assert_eq!(
+            body,
+            json!({
+                "model": "claude-test",
+                "max_tokens": 4096,
+                "stream": true,
+                "system": "Be brief.",
+                "messages": [
+                    {"role": "user", "content": [{"type": "text", "text": "what is 2+3?"}]},
+                    {"role": "assistant", "content": [{
+                        "type": "tool_use", "id": "toolu_1", "name": "calc__add",
+                        "input": {"a": 2, "b": 3}
+                    }]},
+                    // Both tool results are merged into one user message, in order.
+                    {"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_1", "content": "5"},
+                        {"type": "tool_result", "tool_use_id": "toolu_2", "content": "it failed", "is_error": true}
+                    ]},
+                    {"role": "assistant", "content": [{"type": "text", "text": "It is 5."}]}
+                ],
+                "tools": [{"name": "calc__add", "description": "Adds.", "input_schema": {"type": "object"}}]
+            })
+        );
+    }
+
+    #[test]
+    fn interrupted_assistants_are_sent_as_plain_assistants() {
+        let plain = request(vec![
+            Message::user("what?"),
+            Message::assistant("Let me think..."),
+            Message::user("and then?"),
+        ]);
+        let interrupted = request(vec![
+            Message::user("what?"),
+            Message::Assistant {
+                content: vec![ContentPart::text("Let me think...")],
+                tool_calls: Vec::new(),
+                provider_payload: None,
+                interrupted: true,
+                meta: MessageMeta::default(),
+            },
+            Message::user("and then?"),
+        ]);
+        let plain_body = serde_json::to_string(&build_body(&plain, &config()).unwrap()).unwrap();
+        let interrupted_body =
+            serde_json::to_string(&build_body(&interrupted, &config()).unwrap()).unwrap();
+        assert_eq!(plain_body, interrupted_body);
+        assert!(!interrupted_body.contains("interrupted"));
+    }
+
+    #[test]
+    fn images_are_sent_as_base64_blocks() {
+        let body = build_body(
+            &request(vec![Message::User {
+                content: vec![
+                    ContentPart::text("look"),
+                    ContentPart::Image {
+                        mime_type: "image/png".into(),
+                        data: "AAAA".into(),
+                        annotations: None,
+                        meta: None,
+                    },
+                ],
+                meta: MessageMeta::default(),
+            }]),
+            &config(),
+        )
+        .unwrap();
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!([
+                {"type": "text", "text": "look"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+            ])
+        );
+    }
+
+    #[test]
+    fn what_the_api_cannot_take_becomes_a_placeholder_in_text() {
+        let body = build_body(
+            &request(vec![Message::Tool {
+                result: ToolResult::success(
+                    "toolu_1",
+                    vec![
+                        ContentPart::text("done"),
+                        ContentPart::Audio {
+                            mime_type: "audio/mpeg".into(),
+                            data: "BBBB".into(),
+                            annotations: None,
+                            meta: None,
+                        },
+                        ContentPart::ResourceLink {
+                            uri: "file:///a".into(),
+                            name: Some("a".into()),
+                            mime_type: None,
+                            annotations: None,
+                            meta: None,
+                        },
+                        ContentPart::EmbeddedResource {
+                            resource: json!({"uri": "file:///b", "text": "inline"}),
+                            annotations: None,
+                            meta: None,
+                        },
+                    ],
+                ),
+                meta: MessageMeta::default(),
+            }]),
+            &config(),
+        )
+        .unwrap();
+        assert_eq!(
+            body["messages"][0]["content"][0]["content"],
+            "done\n\n[audio/mpeg audio omitted]\n\n[resource a: file:///a]\n\ninline"
+        );
+    }
+
+    #[test]
+    fn arguments_that_are_not_an_object_become_an_empty_input() {
+        let body = build_body(
+            &request(vec![Message::Assistant {
+                content: Vec::new(),
+                tool_calls: vec![
+                    call("a", "t", Value::String("{\"x\": 1}".into())),
+                    call("b", "u", Value::String("not json".into())),
+                ],
+                provider_payload: None,
+                interrupted: false,
+                meta: MessageMeta::default(),
+            }]),
+            &config(),
+        )
+        .unwrap();
+        assert_eq!(body["messages"][0]["content"][0]["input"], json!({"x": 1}));
+        assert_eq!(body["messages"][0]["content"][1]["input"], json!({}));
+    }
+
+    #[test]
+    fn settings_override_the_config_and_reserved_keys_are_refused() {
+        let mut cfg = config();
+        cfg.extra_body.insert("temperature".into(), json!(0.2));
+        cfg.extra_body.insert("top_p".into(), json!(0.5));
+        let mut req = request(vec![Message::user("hi")]);
+        req.settings = json!({"temperature": 0.9});
+
+        let body = build_body(&req, &cfg).unwrap();
+        assert_eq!(body["temperature"], 0.9);
+        assert_eq!(body["top_p"], 0.5);
+
+        for key in [
+            "model",
+            "messages",
+            "max_tokens",
+            "stream",
+            "system",
+            "tools",
+        ] {
+            let mut req = request(vec![Message::user("hi")]);
+            req.settings = json!({ key: 1 });
+            assert!(
+                matches!(build_body(&req, &cfg), Err(ModelError::Protocol(_))),
+                "{key} must be refused"
+            );
+        }
+        let mut req = request(vec![Message::user("hi")]);
+        req.settings = json!([1, 2]);
+        assert!(build_body(&req, &cfg).is_err());
+    }
+
+    #[test]
+    fn max_tokens_comes_from_the_config() {
+        let cfg = config().with_max_tokens(123);
+        let body = build_body(&request(vec![Message::user("hi")]), &cfg).unwrap();
+        assert_eq!(body["max_tokens"], 123);
+    }
+}
