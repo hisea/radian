@@ -448,6 +448,7 @@ async fn history_is_not_rejournaled() {
     let history = vec![
         Message::user("earlier"),
         Message::Assistant {
+            reasoning: Vec::new(),
             content: vec![ContentPart::text("earlier answer")],
             tool_calls: vec![],
             provider_payload: None,

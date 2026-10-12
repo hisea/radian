@@ -188,6 +188,7 @@ impl<'a> Assembler<'a> {
         };
         let usage = self.usage.as_ref().map(usage_from_json);
         Ok(ModelResponse {
+            reasoning: Vec::new(),
             content: if text.is_empty() {
                 Vec::new()
             } else {

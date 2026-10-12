@@ -105,6 +105,7 @@ impl Model for ScriptedModel {
 
 pub fn text(s: &str) -> ModelResponse {
     ModelResponse {
+        reasoning: Vec::new(),
         content: vec![ContentPart::text(s)],
         tool_calls: vec![],
         provider_payload: None,
@@ -115,6 +116,7 @@ pub fn text(s: &str) -> ModelResponse {
 
 pub fn calls(calls: Vec<ToolCall>) -> ModelResponse {
     ModelResponse {
+        reasoning: Vec::new(),
         content: vec![],
         tool_calls: calls,
         provider_payload: None,

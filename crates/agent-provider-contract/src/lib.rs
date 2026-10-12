@@ -350,6 +350,7 @@ pub async fn check_call_ids_unique<M: Model, H: ContractHarness<M>>(h: &H) {
     let history = vec![
         Message::user("hi"),
         Message::Assistant {
+            reasoning: Vec::new(),
             content: Vec::new(),
             tool_calls: vec![first_call(&first).clone()],
             provider_payload: None,
@@ -397,6 +398,7 @@ pub async fn check_call_ids_unique<M: Model, H: ContractHarness<M>>(h: &H) {
     let history = vec![
         Message::user("hi"),
         Message::Assistant {
+            reasoning: Vec::new(),
             content: Vec::new(),
             tool_calls: vec![first_call(&r1).clone()],
             provider_payload: None,
@@ -740,6 +742,7 @@ mod tests {
             _cx: ModelContext<'_>,
         ) -> Result<ModelResponse, ModelError> {
             Ok(ModelResponse {
+                reasoning: Vec::new(),
                 content: if self.text.is_empty() {
                     Vec::new()
                 } else {

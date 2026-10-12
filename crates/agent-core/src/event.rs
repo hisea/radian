@@ -20,6 +20,15 @@ pub enum AgentEvent {
     ModelTextDelta {
         text: String,
     },
+    /// Emitted by model adapters while streaming, for a provider's separate reasoning
+    /// channel (e.g. OpenAI-compatible `delta.reasoning_content`). It rides the same event
+    /// outlet as [`AgentEvent::ModelTextDelta`] but is a distinct kind, so a host can render
+    /// it apart from the visible answer. Like the text delta it is a live projection (ADR
+    /// 0010): dropping or merging it is allowed, and only the committed message's
+    /// `reasoning` field is durable.
+    ModelReasoningDelta {
+        text: String,
+    },
     ModelResponseReceived {
         stop_reason: StopReason,
         tool_calls: usize,

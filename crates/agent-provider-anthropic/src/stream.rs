@@ -260,6 +260,7 @@ impl<'a> Assembler<'a> {
             }
         }
         Ok(ModelResponse {
+            reasoning: Vec::new(),
             content,
             tool_calls,
             provider_payload: None,

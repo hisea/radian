@@ -528,6 +528,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
                 if !prefix.is_empty() {
                     let message = Message::Assistant {
                         content: vec![ContentPart::text(prefix)],
+                        reasoning: Vec::new(),
                         tool_calls: Vec::new(),
                         provider_payload: None,
                         interrupted: true,
@@ -564,6 +565,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
 
         let ModelResponse {
             content,
+            reasoning,
             tool_calls,
             provider_payload,
             stop_reason,
@@ -571,6 +573,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
         } = response;
         let assistant = Message::Assistant {
             content,
+            reasoning,
             tool_calls: tool_calls.clone(),
             provider_payload,
             interrupted: false,

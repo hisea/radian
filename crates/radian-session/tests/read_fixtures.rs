@@ -169,6 +169,7 @@ fn replace_resets_the_index_and_repairs_the_new_revision_only() {
     assert_eq!(
         history[1],
         Message::Assistant {
+            reasoning: Vec::new(),
             content: vec![],
             tool_calls: vec![agent_core::ToolCall {
                 id: "call-9".into(),

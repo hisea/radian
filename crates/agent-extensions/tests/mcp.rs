@@ -135,6 +135,7 @@ impl Model for Scripted {
 
 fn calls_tool(name: &str, args: Value) -> ModelResponse {
     ModelResponse {
+        reasoning: Vec::new(),
         content: vec![],
         tool_calls: vec![ToolCall {
             id: "c1".into(),
@@ -149,6 +150,7 @@ fn calls_tool(name: &str, args: Value) -> ModelResponse {
 
 fn answers(text: &str) -> ModelResponse {
     ModelResponse {
+        reasoning: Vec::new(),
         content: vec![ContentPart::text(text)],
         tool_calls: vec![],
         provider_payload: None,
@@ -409,6 +411,7 @@ async fn replacing_a_transcript_keeps_the_mcp_process_and_its_state() {
     let provider = McpToolProvider::new(vec![fixture("fx")]);
     let model = Scripted(Mutex::new(VecDeque::from([
         ModelResponse {
+            reasoning: Vec::new(),
             content: vec![],
             tool_calls: vec![
                 ToolCall {
@@ -428,6 +431,7 @@ async fn replacing_a_transcript_keeps_the_mcp_process_and_its_state() {
         },
         answers("before"),
         ModelResponse {
+            reasoning: Vec::new(),
             content: vec![],
             tool_calls: vec![
                 ToolCall {

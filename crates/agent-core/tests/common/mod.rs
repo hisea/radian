@@ -94,6 +94,7 @@ impl Model for ScriptedModel {
 
 pub fn text(s: &str) -> Reply {
     Reply::Respond(ModelResponse {
+        reasoning: Vec::new(),
         content: vec![ContentPart::text(s)],
         tool_calls: vec![],
         provider_payload: None,
@@ -111,6 +112,7 @@ pub fn slow_text(ms: u64, s: &str) -> Reply {
 
 pub fn stop(reason: StopReason, s: &str) -> Reply {
     Reply::Respond(ModelResponse {
+        reasoning: Vec::new(),
         content: vec![ContentPart::text(s)],
         tool_calls: vec![],
         provider_payload: None,
@@ -133,6 +135,7 @@ pub fn calls(list: Vec<ToolCall>) -> Reply {
 
 pub fn calls_with(reason: StopReason, list: Vec<ToolCall>) -> Reply {
     Reply::Respond(ModelResponse {
+        reasoning: Vec::new(),
         content: vec![],
         tool_calls: list,
         provider_payload: None,
