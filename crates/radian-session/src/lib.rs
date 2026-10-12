@@ -14,14 +14,20 @@
 //!   `agent_core`'s own `replay`/`repair`/`recover` — never a reimplementation.
 //! - [`Index`] is the **disposable** SQLite cache over the files (ADR 0006 §10): every
 //!   column is re-derivable from the JSONL, a torn tail is never indexed, and the JSONL is
-//!   never written.
+//!   never written. [`export_json`]/[`export_markdown`] render a session with non-optional
+//!   secret redaction and an opt-in for raw provider payloads (ADR 0013 T4).
 
 mod error;
+mod export;
 mod index;
 mod reader;
 mod writer;
 
 pub use error::ReadError;
+pub use export::{
+    ExportError, ExportOptions, export_json, export_json_to, export_markdown, export_markdown_to,
+    redact_text, redact_value,
+};
 pub use index::{
     Audit, Index, IndexError, IndexedEvent, RebuildWarning, Reconcile, SearchHit, SessionSummary,
     read_line_at,

@@ -192,7 +192,9 @@ fn a_deleted_index_rebuilds_to_the_same_rows() {
 #[test]
 fn a_stale_index_is_detected_and_rebuilt_from_the_jsonl() {
     let dir = TempDir::new("stale");
-    let path = fixture("v1-minimal.jsonl");
+    // Work on a temp copy: a buggy reconcile must not be able to touch the repo fixture.
+    let path = dir.file("s.jsonl");
+    std::fs::copy(fixture("v1-minimal.jsonl"), &path).unwrap();
     let before = std::fs::read(&path).unwrap();
     let mut index = Index::open(dir.file("index.db")).unwrap();
     index.rebuild(std::slice::from_ref(&path)).unwrap();
@@ -557,4 +559,33 @@ fn like_metacharacters_in_a_query_are_matched_literally() {
             .len(),
         1
     );
+}
+
+// ---------- large file (req 10) ----------
+
+/// `list` and `search` must answer from the index alone. The proof: index a 20k-line
+/// session, then move the authoritative file away and query anyway. If either call read the
+/// session file it would fail or need it present; since the file is gone, they provably do
+/// not touch it (and cannot scale their memory with its size).
+#[test]
+fn list_and_search_answer_from_the_index_with_the_file_moved_away() {
+    let dir = TempDir::new("big");
+    let path = dir.file("big.jsonl");
+    write_synthetic(&path, "sid-big", "/w/big", 20_000);
+    let mut index = Index::open(dir.file("index.db")).unwrap();
+    index.rebuild(std::slice::from_ref(&path)).unwrap();
+    assert_eq!(index.list(None).unwrap()[0].event_count, 20_001);
+
+    let moved = dir.file("big.jsonl.gone");
+    std::fs::rename(&path, &moved).unwrap();
+
+    let list = index.list(Some("/w/big")).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].event_count, 20_001);
+    let hits = index.search("message number 19999", None, 5).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].seq, 20_000);
+    assert!(hits[0].message_index == Some(19_999));
+
+    std::fs::rename(&moved, &path).unwrap();
 }
