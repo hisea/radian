@@ -285,14 +285,14 @@ MVP 使用标准 `tools/list` 与 `tools/call`。工具执行错误放在 MCP Ca
 
 因此别名不依赖列表顺序、进程实例或工具集合的增减；历史中既有 tool call/result 名称可跨新 AgentSession 稳定解析。回调时用注册表映射回原始 server/tool 名。`tools/call` 的进度经 progress token 映射为 Core `ToolProgress` 事件。
 
-MCP **子进程崩溃、坏帧、协议错误，以及超时或取消后不再响应**，都会杀掉该 AgentSession 中对应 Extension 的整棵进程树，并把这个 ToolSession 标为 `Unavailable`；当前调用得到超时/不可用 tool error，当前轮可以继续。并行时，杀进程会连带终止同一 server 上其他进行中的调用，它们得到 `extension_unavailable` 结果，并写明是因同一扩展中另一调用超时或崩溃而终止。该对话后续调用同一 Extension 都立即返回 unavailable tool error，不在会话中自动重启，也不重放可能已产生副作用的调用。Host 新建 AgentSession 时才启动新进程并重读工具定义；其他 Extension sessions 不受影响。显式整轮取消仍以 `Cancelled` 结束。
+MCP **子进程崩溃、坏帧、协议错误，以及任何一次超时或取消**，都会杀掉该 AgentSession 中对应 Extension 的整棵进程树，并把这个 ToolSession 标为 `Unavailable`；当前调用得到超时/不可用 tool error，当前轮可以继续。并行时，杀进程会连带终止同一 server 上其他进行中的调用，它们得到 `extension_unavailable` 结果，并写明是因同一扩展中另一调用超时或崩溃而终止。该对话后续调用同一 Extension 都立即返回 unavailable tool error，不在会话中自动重启，也不重放可能已产生副作用的调用。Host 新建 AgentSession 时才启动新进程并重读工具定义；其他 Extension sessions 不受影响。显式整轮取消仍以 `Cancelled` 结束。
 
 不可用 Extension 的工具**继续保留在本会话的工具声明中**，以保持工具列表稳定、不让 Provider 的 prompt cache 失效；对它的调用立即返回 `extension_unavailable` 错误，内容明确写“该扩展在本会话中已不可用，不要再调用这些工具”，让模型改用其他路径。重复调用照常计入模型调用预算。
 
 ### Timeout、进程树和环境
 
-- 每个工具请求有可配置的有限 deadline（`call_timeout`）。超时或整轮取消时，Host 发送 `notifications/cancelled`。规范要求 server 对被取消的请求不再回复，所以无法从回复判断它是否已停止；Host 改为在 `cancel_grace` 内发一次 `ping`：server 能响应就继续使用（保留跨轮状态，被取消的工作是否仍在后台进行无法确知）；不响应则视为卡死，终止其子进程树、等待回收，并在本会话内标为不可用。当前调用分别得到 `extension_timeout` 或 `cancelled` 结果；整轮取消仍以 `Cancelled` 结束。
-- Unix 子进程放入独立 process group/session，终止时杀整个 group；Windows 计划使用 Job Object 并设置关闭时终止成员；当前实现暂以 `taskkill /T /F` 按 pid 终止进程树，尚未在 Windows 上测试。单杀直接子进程不能满足无孤儿子进程验收。
+- 每个工具请求有可配置的有限 deadline（`call_timeout`）。超时或整轮取消时，Host 发送 `notifications/cancelled`。规范要求 server 对被取消的请求不再回复，所以无法从回复判断它是否已停止；Host 在 `cancel_grace` 内先把通知写出，并用一次 `ping` 确认 server 已读到它，**然后无论 server 是否还能响应，一律终止其子进程树、等待回收，并在本会话内标为不可用**。能响应 `ping` 不代表被取消的工具已经停止：它可能仍在后台运行，若继续复用该 server，被放弃的工作会与下一次调用交错，这对浏览器、数据库、REPL 这类有状态 server 不安全。代价是取消或超时会丢失该 server 的跨轮状态。当前调用分别得到 `extension_timeout` 或 `cancelled` 结果，消息里说明 server 已被停止；整轮取消仍以 `Cancelled` 结束。
+- Unix 子进程放入独立 process group/session，终止时杀整个 group；专用 reaper 线程在 leader 退出后（包括 server 自己崩溃）立刻杀掉该 group 的剩余成员，之后不再向该 pgid 发信号；Windows 计划使用 Job Object 并设置关闭时终止成员；当前实现暂以 `taskkill /T /F` 按 pid 终止进程树，尚未在 Windows 上测试；它沿父子关系遍历，到达不了已退出 leader 的子进程，所以 server 自己崩溃后的清理在 Windows 上要等 Job Object 方案才完整。单杀直接子进程不能满足无孤儿子进程验收。
 - 子进程默认不继承宿主完整环境变量。Host 用 `env_clear()`，仅设置必要的启动环境（例如可执行文件解析所需 `PATH` 和 Windows 系统变量）；其他变量逐项由 Extension 配置 allowlist，API key 等 secret 不因默认继承而泄露。
 - 启动失败、坏 MCP 帧或进程崩溃：当前调用转成 `extension_unavailable` / `extension_protocol_error` tool result，ToolSession 按上条规则失效；不重放失败调用。
 - `AgentSession::close().await` 正常关闭所有 ToolSession。第一次调用起会话不再接受新轮次；只有底层关闭成功后会话才算已关闭，失败或 close future 被丢弃时可再次调用 `close()` 重试，因此 `ToolSession::close` 必须可重试；关闭成功后再调用直接返回 `Ok(())`。关闭过程：关闭 stdin，等待进程退出；超过 shutdown deadline 或发生关闭错误则 terminate/kill，并 wait/reap 所有进程后返回首个关闭错误。MCP 生命周期不定义通用 `shutdown` 方法；Host 不发明自定义 `shutdown`/`exit` RPC。AgentSession Drop 同步 kill 每个进程组/Job Object；独立 supervisor 线程负责最终 wait/reap，不依赖 Tokio runtime。Drop 是兜底路径而非正常关闭：不给 server 优雅退出的机会，API 文档须写明正常退出前调用 `close().await`。

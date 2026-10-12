@@ -292,6 +292,16 @@ async fn tool_errors_and_rich_content() {
     let rich = call(&session, "fx__rich", json!({})).await.unwrap();
     assert_eq!(rich.content.len(), 3);
     assert!(
+        matches!(&rich.content[0], ContentPart::Text { meta: Some(m), .. } if m == &json!({"trace": "t-1"}))
+    );
+    assert!(
+        matches!(&rich.content[1], ContentPart::Image { meta: Some(m), .. } if m == &json!({"origin": "fixture"}))
+    );
+    assert!(matches!(
+        &rich.content[2],
+        ContentPart::ResourceLink { meta: None, .. }
+    ));
+    assert!(
         matches!(&rich.content[1], ContentPart::Image { mime_type, data, .. } if mime_type == "image/png" && data == "AAAA")
     );
     assert!(
@@ -395,9 +405,10 @@ async fn shared_calls_overlap_on_one_server() {
 }
 
 #[tokio::test]
-async fn cancelled_call_notifies_server_and_keeps_a_responsive_one() {
+async fn cancelled_call_notifies_then_stops_the_server() {
     let log = log_file("cancel");
     let session = open(vec![fixture("fx").env("FIXTURE_LOG", &log)]).await;
+    let pid = pid_of(&session, "fx").await;
     let token = CancellationToken::new();
     let trigger = token.clone();
     let start = Instant::now();
@@ -410,11 +421,21 @@ async fn cancelled_call_notifies_server_and_keeps_a_responsive_one() {
         }
     );
 
-    assert_eq!(result.unwrap_err().code, "cancelled");
+    let failure = result.unwrap_err();
+    assert_eq!(failure.code, "cancelled");
+    assert!(failure.message.contains("stopped"));
     assert!(start.elapsed() < Duration::from_secs(2));
+    // The server read the cancellation before it was stopped.
     assert!(logged(&log).iter().any(|l| l.starts_with("cancelled:")));
-    // The server still answers, so it stays in use.
-    assert!(call(&session, "fx__echo", json!({})).await.is_ok());
+    // It was still answering pings, yet it is not reused: its abandoned work may still run.
+    assert!(gone_within(pid, Duration::from_secs(3)).await);
+    assert_eq!(
+        call(&session, "fx__echo", json!({}))
+            .await
+            .unwrap_err()
+            .code,
+        "extension_unavailable"
+    );
 }
 
 #[tokio::test]
@@ -435,17 +456,27 @@ async fn timeout_on_a_frozen_server_kills_it_and_marks_it_unavailable() {
 }
 
 #[tokio::test]
-async fn timeout_on_a_responsive_server_keeps_it() {
+async fn timeout_stops_even_a_server_that_still_responds() {
     let mut config = fixture("fx");
     config.call_timeout = Duration::from_millis(200);
     let session = open(vec![config]).await;
+    let pid = pid_of(&session, "fx").await;
 
     let failure = call(&session, "fx__sleep", json!({"ms": 5000}))
         .await
         .unwrap_err();
 
+    // `sleep` keeps running in the background while the server answers pings; a later call
+    // must not be able to run alongside it.
     assert_eq!(failure.code, "extension_timeout");
-    assert!(call(&session, "fx__echo", json!({})).await.is_ok());
+    assert!(gone_within(pid, Duration::from_secs(3)).await);
+    assert_eq!(
+        call(&session, "fx__echo", json!({}))
+            .await
+            .unwrap_err()
+            .code,
+        "extension_unavailable"
+    );
 }
 
 #[tokio::test]
@@ -534,4 +565,28 @@ async fn failed_startup_reaps_servers_already_started() {
     let pids = logged_pids(&log);
     assert_eq!(pids.len(), 1);
     assert!(gone_within(pids[0], Duration::from_secs(3)).await);
+}
+
+#[tokio::test]
+async fn server_crash_kills_its_children_at_once() {
+    let log = log_file("crash");
+    let session = open(vec![fixture("fx").env("FIXTURE_LOG", &log)]).await;
+    let server = pid_of(&session, "fx").await;
+
+    call(&session, "fx__crash_later", json!({})).await.unwrap();
+
+    // No further call and no close(): the supervisor alone must clean up.
+    let grandchild: u32 = logged(&log)
+        .iter()
+        .find_map(|l| l.strip_prefix("grandchild:")?.parse().ok())
+        .expect("fixture logged its child");
+    assert!(
+        gone_within(server, Duration::from_secs(3)).await,
+        "server still running"
+    );
+    assert!(
+        gone_within(grandchild, Duration::from_secs(3)).await,
+        "child left behind"
+    );
+    drop(session);
 }

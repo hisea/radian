@@ -45,6 +45,9 @@ pub enum ContentPart {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         annotations: Option<Value>,
+        /// Protocol-level `_meta`, kept as received.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<Value>,
     },
     Image {
         mime_type: String,
@@ -52,6 +55,9 @@ pub enum ContentPart {
         data: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         annotations: Option<Value>,
+        /// Protocol-level `_meta`, kept as received.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<Value>,
     },
     Audio {
         mime_type: String,
@@ -59,6 +65,9 @@ pub enum ContentPart {
         data: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         annotations: Option<Value>,
+        /// Protocol-level `_meta`, kept as received.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<Value>,
     },
     ResourceLink {
         uri: String,
@@ -68,11 +77,17 @@ pub enum ContentPart {
         mime_type: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         annotations: Option<Value>,
+        /// Protocol-level `_meta`, kept as received.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<Value>,
     },
     EmbeddedResource {
         resource: Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         annotations: Option<Value>,
+        /// Protocol-level `_meta`, kept as received.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<Value>,
     },
     /// A block the core does not understand, such as a provider's server-side tool block.
     Opaque { raw: OpaqueJson },
@@ -83,6 +98,7 @@ impl ContentPart {
         Self::Text {
             text: text.into(),
             annotations: None,
+            meta: None,
         }
     }
 }

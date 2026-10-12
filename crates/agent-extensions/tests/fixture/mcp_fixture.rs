@@ -74,6 +74,7 @@ impl Server {
             {"name": "read_only", "description": "Marked read-only.", "inputSchema": object,
              "annotations": {"readOnlyHint": true}},
             {"name": "Bad Name!", "description": "A name providers reject.", "inputSchema": object},
+            {"name": "crash_later", "description": "Starts a child process, then exits shortly after replying.", "inputSchema": object},
             {"name": "pid", "description": "Returns this server's process id.", "inputSchema": object},
             {"name": "freeze", "description": "Blocks the whole server, so it stops responding.", "inputSchema": object}
         ])
@@ -93,6 +94,20 @@ impl Server {
                 text("slept".into())
             }
             "pid" => text(std::process::id().to_string()),
+            "crash_later" => {
+                // Left running on purpose: the host must clean it up when this server dies.
+                #[allow(clippy::zombie_processes)]
+                let child = std::process::Command::new("sleep")
+                    .arg("600")
+                    .spawn()
+                    .unwrap();
+                self.log(&format!("grandchild:{}", child.id()));
+                thread::spawn(|| {
+                    thread::sleep(Duration::from_millis(150));
+                    std::process::exit(1);
+                });
+                text("crashing soon".into())
+            }
             "counter" => text((self.counter.fetch_add(1, Ordering::SeqCst) + 1).to_string()),
             "env" => {
                 let var = args["name"].as_str().unwrap_or_default();
@@ -121,8 +136,8 @@ impl Server {
             }
             "rich" => json!({
                 "content": [
-                    {"type": "text", "text": "hello"},
-                    {"type": "image", "mimeType": "image/png", "data": "AAAA"},
+                    {"type": "text", "text": "hello", "_meta": {"trace": "t-1"}},
+                    {"type": "image", "mimeType": "image/png", "data": "AAAA", "_meta": {"origin": "fixture"}},
                     {"type": "resource_link", "uri": "file:///tmp/a.txt", "name": "a.txt"}
                 ],
                 "structuredContent": {"answer": 42},

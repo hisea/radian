@@ -346,12 +346,14 @@ async fn provider_payload_round_trips() {
             mime_type: "image/png".into(),
             data: "AAAA".into(),
             annotations: Some(json!({"audience": ["user"]})),
+            meta: Some(json!({"trace": "abc"})),
         },
         ContentPart::ResourceLink {
             uri: "file:///a".into(),
             name: Some("a".into()),
             mime_type: None,
             annotations: None,
+            meta: Some(json!({"k": 1})),
         },
     ];
     let model = ScriptedModel::new([

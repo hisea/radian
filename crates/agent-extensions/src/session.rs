@@ -11,8 +11,8 @@ use rmcp::model::{
     ServerResult,
 };
 use rmcp::service::{
-    ClientLifecycleMode, ClientServiceExt, PeerRequestOptions, RoleClient, RunningService,
-    ServiceError,
+    ClientLifecycleMode, ClientServiceExt, PeerRequestOptions, RequestHandle, RoleClient,
+    RunningService, ServiceError,
 };
 use serde_json::{Value, json};
 
@@ -254,25 +254,25 @@ impl Server {
             Waited::Response(response) => response,
             Waited::Cancelled | Waited::TimedOut => {
                 let timed_out = matches!(waited, Waited::TimedOut);
-                let reason = if timed_out {
-                    "request timeout"
+                let what = if timed_out {
+                    "timed out"
                 } else {
-                    "cancelled by the host"
+                    "was cancelled"
                 };
-                // Best effort: the notification asks the server to stop.
-                let _ = handle.cancel(Some(reason.to_owned())).await;
-                self.settle_after_cancel(service).await;
+                self.cancel_and_stop(service, handle, what).await;
                 guard.armed = false;
+                const STOPPED: &str = "The server was stopped and its tools are unavailable \
+                                       for the rest of the conversation.";
                 return Err(if timed_out {
                     ToolFailure::new(
                         "extension_timeout",
                         format!(
-                            "The tool did not finish within {:?}.",
+                            "The tool did not finish within {:?}. {STOPPED}",
                             self.config.call_timeout
                         ),
                     )
                 } else {
-                    ToolFailure::new("cancelled", "The call was cancelled.")
+                    ToolFailure::new("cancelled", format!("The call was cancelled. {STOPPED}"))
                 });
             }
         };
@@ -289,24 +289,29 @@ impl Server {
         }
     }
 
-    /// After a cancel notification there is no reply to wait for, so check whether the server
-    /// still responds. A server that answers a ping within `cancel_grace` is kept; one that
-    /// does not is treated as hung and killed.
-    async fn settle_after_cancel(&self, service: &RunningService<RoleClient, Client>) {
-        let ping = service
-            .peer()
-            .send_request(ClientRequest::PingRequest(PingRequest::default()));
-        let responsive = matches!(
-            tokio::time::timeout(self.config.cancel_grace, ping).await,
-            Ok(Ok(_))
-        );
-        if !responsive {
-            self.fail(format!(
-                "it did not respond within {:?} after a cancellation",
-                self.config.cancel_grace
-            ))
+    /// Cancels a call that timed out or was cancelled, then stops the whole server.
+    ///
+    /// A cancelled request gets no reply, and a server that still answers `ping` may well be
+    /// running the tool in the background. Reusing it could interleave the abandoned work with
+    /// the next call, which is unsafe for stateful servers (browsers, databases, REPLs). So the
+    /// server is always stopped; only a short grace period is spent first so that the
+    /// notification is written and read: the `ping` reply shows the server got past it.
+    async fn cancel_and_stop(
+        &self,
+        service: &RunningService<RoleClient, Client>,
+        handle: RequestHandle<RoleClient>,
+        what: &str,
+    ) {
+        let _ = tokio::time::timeout(self.config.cancel_grace, async {
+            let _ = handle.cancel(Some(format!("the call {what}"))).await;
+            let _ = service
+                .peer()
+                .send_request(ClientRequest::PingRequest(PingRequest::default()))
+                .await;
+        })
+        .await;
+        self.fail(format!("a call {what}, so the server was stopped"))
             .await;
-        }
     }
 
     /// Marks the server unavailable, kills its process tree and waits for it to be reaped.
@@ -455,8 +460,13 @@ fn map_result(result: ServerResult) -> Result<ToolOutput, ToolFailure> {
 fn content_part(block: &Value) -> ContentPart {
     let text = |key: &str| block[key].as_str().map(str::to_owned);
     let annotations = block.get("annotations").cloned();
+    let meta = block.get("_meta").cloned();
     let known = match block["type"].as_str() {
-        Some("text") => text("text").map(|text| ContentPart::Text { text, annotations }),
+        Some("text") => text("text").map(|text| ContentPart::Text {
+            text,
+            annotations,
+            meta,
+        }),
         Some("image") => {
             text("mimeType")
                 .zip(text("data"))
@@ -464,6 +474,7 @@ fn content_part(block: &Value) -> ContentPart {
                     mime_type,
                     data,
                     annotations,
+                    meta,
                 })
         }
         Some("audio") => {
@@ -473,6 +484,7 @@ fn content_part(block: &Value) -> ContentPart {
                     mime_type,
                     data,
                     annotations,
+                    meta,
                 })
         }
         Some("resource_link") => text("uri").map(|uri| ContentPart::ResourceLink {
@@ -480,6 +492,7 @@ fn content_part(block: &Value) -> ContentPart {
             name: text("name"),
             mime_type: text("mimeType"),
             annotations,
+            meta,
         }),
         Some("resource") => {
             block
@@ -488,6 +501,7 @@ fn content_part(block: &Value) -> ContentPart {
                 .map(|resource| ContentPart::EmbeddedResource {
                     resource,
                     annotations,
+                    meta,
                 })
         }
         _ => None,

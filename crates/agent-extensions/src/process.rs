@@ -2,11 +2,15 @@
 //!
 //! The server runs in its own process group (Unix), so killing it also kills anything it
 //! started. A dedicated OS thread owns the `Child` and blocks in `wait()`, which reaps the
-//! process without needing a Tokio runtime; killing is a synchronous signal, so it also works
-//! from `Drop` while a runtime is shutting down.
+//! process without needing a Tokio runtime. As soon as the leader exits, for any reason, that
+//! thread kills what is left of its process group, so a server that crashes cannot leave
+//! helpers behind. Killing is a synchronous signal, so it also works from `Drop` while a
+//! runtime is shutting down.
 
 use std::io;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -18,6 +22,9 @@ use crate::config::McpServerConfig;
 pub(crate) struct ServerProcess {
     pid: u32,
     exited: watch::Receiver<bool>,
+    /// Set once the leader was reaped and its group cleaned up. After that the group id is
+    /// free to be reused, so nothing may signal it again.
+    cleaned: Arc<AtomicBool>,
 }
 
 impl ServerProcess {
@@ -68,13 +75,23 @@ impl ServerProcess {
         };
 
         let (exited_tx, exited) = watch::channel(false);
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let cleaned_by_reaper = Arc::clone(&cleaned);
         let reaper = thread::Builder::new()
             .name(format!("mcp-reaper-{pid}"))
             .spawn(move || {
                 let _ = child.wait();
+                // The group id stays reserved while any member lives, and the leader was only
+                // just reaped, so this reaches the leftover members and nothing else.
+                kill_group(pid);
+                cleaned_by_reaper.store(true, Ordering::SeqCst);
                 let _ = exited_tx.send(true);
             });
-        let process = Self { pid, exited };
+        let process = Self {
+            pid,
+            exited,
+            cleaned,
+        };
         if let Err(e) = reaper {
             // The child moved into the failed closure and was dropped unreaped; kill it at
             // least, so it does not keep running.
@@ -88,29 +105,11 @@ impl ServerProcess {
         self.pid
     }
 
-    /// Sends SIGKILL to the whole process group. Synchronous and safe to call repeatedly.
-    ///
-    /// The group is signalled even after the leader exits, to reach children it left behind.
-    /// A group id stays reserved while any member is alive, so this cannot hit an unrelated
-    /// group unless the group is already empty and its id was reused.
+    /// Kills the whole process group. Synchronous and safe to call repeatedly. Does nothing
+    /// once the reaper has cleaned up, because the group id may belong to someone else by then.
     pub(crate) fn kill_tree(&self) {
-        #[cfg(unix)]
-        {
-            if let Ok(pgid) = libc::pid_t::try_from(self.pid) {
-                // SAFETY: killpg takes plain integers and has no memory-safety preconditions.
-                unsafe {
-                    libc::killpg(pgid, libc::SIGKILL);
-                }
-            }
-        }
-        #[cfg(windows)]
-        {
-            // Interim: terminate the tree by pid. Job Object supervision is planned.
-            let _ = Command::new("taskkill")
-                .args(["/PID", &self.pid.to_string(), "/T", "/F"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+        if !self.cleaned.load(Ordering::SeqCst) {
+            kill_group(self.pid);
         }
     }
 
@@ -126,6 +125,31 @@ impl ServerProcess {
     pub(crate) async fn kill_and_reap(&self, limit: Duration) -> bool {
         self.kill_tree();
         self.wait_exit(limit).await
+    }
+}
+
+/// Sends SIGKILL to process group `pid` (Unix), or terminates the tree rooted at `pid`
+/// (Windows).
+fn kill_group(pid: u32) {
+    #[cfg(unix)]
+    {
+        if let Ok(pgid) = libc::pid_t::try_from(pid) {
+            // SAFETY: killpg takes plain integers and has no memory-safety preconditions.
+            unsafe {
+                libc::killpg(pgid, libc::SIGKILL);
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        // Interim, and weaker than the Unix path: `taskkill /T` follows parent links, so it
+        // cannot reach the children of a leader that has already exited. A Job Object is
+        // planned.
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 }
 
