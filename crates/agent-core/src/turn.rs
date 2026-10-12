@@ -833,11 +833,6 @@ impl<P: ToolProvider, H: Hooks> BatchCx<'_, P, H> {
                     journal_failed = self.resolve(index, result).await.err();
                     continue;
                 }
-                events.emit(AgentEvent::ToolStarted {
-                    index,
-                    call_id: call.id.clone(),
-                    name: call.name.clone(),
-                });
                 // E3: the marker is durable before the tool's own execution may begin. On
                 // failure the call is not dispatched (E4) and the batch stops.
                 if let Some(journal) = self.journal {
@@ -851,6 +846,12 @@ impl<P: ToolProvider, H: Hooks> BatchCx<'_, P, H> {
                         continue;
                     }
                 }
+                // Observers learn of the start only once it is durable.
+                events.emit(AgentEvent::ToolStarted {
+                    index,
+                    call_id: call.id.clone(),
+                    name: call.name.clone(),
+                });
                 running.push(call_one(
                     tools,
                     hooks,
@@ -862,7 +863,16 @@ impl<P: ToolProvider, H: Hooks> BatchCx<'_, P, H> {
                     self.options.tool_cancel_grace,
                 ));
             }
-            if running.is_empty() || journal_failed.is_some() {
+            if running.is_empty() {
+                break;
+            }
+            if journal_failed.is_some() {
+                // The journal is broken, so nothing more is written; but the calls already
+                // running must still hear the cancellation and get their grace period
+                // instead of being dropped mid-flight. Their results are discarded: with no
+                // `Settled`, recovery treats them as `outcome_unknown_after_crash`.
+                cancel.cancel();
+                while running.next().await.is_some() {}
                 break;
             }
             tokio::select! {
@@ -956,6 +966,11 @@ async fn call_one<S: ToolSession, H: Hooks>(
             "The turn was cancelled while this call was running.",
         )
     };
+    // A call whose turn was cancelled before it was first polled never starts: its body
+    // would only run to be cancelled at once.
+    if cancel.is_cancelled() {
+        return (index, cancelled(&call));
+    }
     let cx = ToolContext {
         cancellation: cancel.clone(),
         events,

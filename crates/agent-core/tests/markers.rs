@@ -6,7 +6,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agent_core::testing::{RecordingJournal, SequenceLog, SlowJournal};
+use agent_core::testing::{FailingJournal, RecordingJournal, SequenceLog, SlowJournal};
 use agent_core::*;
 use common::*;
 use serde_json::json;
@@ -896,4 +896,67 @@ async fn crash_traversal_recovers_every_prefix() {
         // (5) No tool executed anywhere in the traversal: the original counters stand.
         assert_eq!(log.started().len(), executed_before, "prefix {k}");
     }
+}
+
+/// A failed `Started` append ends the batch, but a call that is already running must still
+/// hear the cancellation and get its grace period, not be dropped mid-flight.
+#[tokio::test(start_paused = true)]
+async fn a_failed_started_append_cancels_calls_already_running() {
+    let tools = MemTools::new(vec![
+        // Delayed, so both first calls are polled (really running) before c1 settles.
+        (shared("quick"), Behavior::Delay(5)),
+        (shared("clean"), Behavior::CleansUp(10)),
+    ]);
+    let log = tools.log.clone();
+    let model = ScriptedModel::new([calls(vec![
+        call("c1", "quick", json!({})),
+        call("c2", "clean", json!({})),
+        call("c3", "quick", json!({})),
+    ])]);
+    // Appends: 1 input, 2 assistant, 3-4 Started c1/c2, 5 Settled c1, 6 result c1,
+    // 7 Started c3 (fails) while c2 is still running.
+    let journal = Arc::new(FailingJournal::fail_at(7));
+    let mut chat = session_with(model, tools, journal.clone()).await;
+    let options = TurnOptions {
+        max_parallel_tools: 2,
+        ..Default::default()
+    };
+
+    let error = chat.run_turn("go", options, &NoopSink).await.unwrap_err();
+
+    assert!(matches!(error, RunError::Journal(_)), "{error:?}");
+    assert_eq!(log.started(), ["c1", "c2"]);
+    assert_eq!(*log.cleaned_up.lock().unwrap(), ["c2"]);
+    // No further appends were attempted after the failure, and c2 has no `Settled`.
+    assert_eq!(journal.calls(), 7);
+    assert!(!journal.records().iter().any(|r| matches!(r,
+        JournalRecord::ToolExecutionSettled { call_id, .. } if call_id == "c2")));
+}
+
+/// `ToolStarted` is an observation of the durable marker: a failed `Started` append means
+/// no event for that call.
+#[tokio::test(start_paused = true)]
+async fn tool_started_events_follow_the_durable_marker() {
+    #[derive(Clone, Default)]
+    struct Seen(Arc<std::sync::Mutex<Vec<String>>>);
+    impl EventSink for Seen {
+        fn emit(&self, event: AgentEvent) {
+            if let AgentEvent::ToolStarted { call_id, .. } = event {
+                self.0.lock().unwrap().push(call_id);
+            }
+        }
+    }
+    let model = ScriptedModel::new([calls(vec![call("c1", "a", json!({}))])]);
+    let tools = MemTools::new(vec![(shared("a"), Behavior::Echo)]);
+    let journal = Arc::new(FailingJournal::fail_at(3)); // 1 input, 2 assistant, 3 Started
+    let mut chat = session_with(model, tools, journal).await;
+    let seen = Seen::default();
+
+    let error = chat
+        .run_turn("go", Default::default(), &seen)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, RunError::Journal(_)), "{error:?}");
+    assert!(seen.0.lock().unwrap().is_empty());
 }
