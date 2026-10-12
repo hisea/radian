@@ -40,12 +40,14 @@ struct Inner {
 impl Inner {
     async fn append(&self, record: JournalRecord) -> Result<(), JournalError> {
         let nth = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
-        let index = match &record {
-            JournalRecord::Message { index, .. } => *index,
+        let key = match &record {
+            JournalRecord::Message { index, .. } => format!("{index}"),
+            JournalRecord::ToolExecutionStarted { call_id, .. } => format!("started:{call_id}"),
+            JournalRecord::ToolExecutionSettled { call_id, .. } => format!("settled:{call_id}"),
         };
         if let Some(delay) = self.delay {
             if let Some(log) = &self.log {
-                log.note(format!("journal-start:{index}"));
+                log.note(format!("journal-start:{key}"));
             }
             tokio::time::sleep(delay).await;
         }
@@ -54,7 +56,7 @@ impl Inner {
         }
         self.records.lock().unwrap().push(record);
         if let Some(log) = &self.log {
-            log.note(format!("journal:{index}"));
+            log.note(format!("journal:{key}"));
         }
         Ok(())
     }
@@ -108,12 +110,13 @@ impl RecordingJournal {
         self.inner().records.lock().unwrap().clone()
     }
 
-    /// The recorded messages in order, without their indexes.
+    /// The recorded messages in order, without their indexes or marker records.
     pub fn messages(&self) -> Vec<Message> {
         self.records()
             .into_iter()
-            .map(|r| match r {
-                JournalRecord::Message { message, .. } => message,
+            .filter_map(|r| match r {
+                JournalRecord::Message { message, .. } => Some(message),
+                _ => None,
             })
             .collect()
     }

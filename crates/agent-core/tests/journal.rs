@@ -59,8 +59,9 @@ fn sweep_tools() -> MemTools {
     MemTools::new(vec![(shared("a"), Behavior::Delay(5))])
 }
 
-/// Runs the whole scripted conversation once without failures, returning the exact journal.
-async fn baseline() -> Vec<Message> {
+/// Runs the whole scripted conversation once without failures, returning the exact journal
+/// (messages and markers).
+async fn baseline() -> Vec<JournalRecord> {
     let (t1, t2) = sweep_script();
     let mut script = t1;
     script.extend(t2);
@@ -78,18 +79,39 @@ async fn baseline() -> Vec<Message> {
     chat.run_turn("again", Default::default(), &NoopSink)
         .await
         .unwrap();
-    journal.messages()
+    journal.records()
+}
+
+/// How many tools the original run had dispatched once `records` is all that succeeded:
+/// every started marker, plus the call whose settle is the record that just failed.
+fn started_tools_after(records: &[JournalRecord]) -> usize {
+    records
+        .iter()
+        .filter(|r| matches!(r, JournalRecord::ToolExecutionStarted { .. }))
+        .count()
 }
 
 /// Every append position fails once; each failure leaves memory equal to the journaled
 /// prefix, stops all later dispatch, and requires recovery before another turn.
 #[tokio::test(start_paused = true)]
 async fn journal_failure_sweep() {
-    let baseline = baseline().await;
-    let total = baseline.len();
+    let records = baseline().await;
+    let total = records.len();
+    let messages: Vec<Message> = records
+        .iter()
+        .filter_map(|r| match r {
+            JournalRecord::Message { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .collect();
     assert_eq!(
-        total, 11,
-        "the scripted conversation must append 11 records"
+        messages.len(),
+        11,
+        "the scripted conversation must append 11 messages"
+    );
+    assert_eq!(
+        total, 15,
+        "plus four execution markers for the two-call batch"
     );
 
     for nth in 1..=total {
@@ -123,19 +145,36 @@ async fn journal_failure_sweep() {
             "append {nth}: {error:?}"
         );
 
-        // Memory is exactly the journaled prefix of the baseline.
-        let expected = &baseline[..nth - 1];
+        // Memory is exactly the journaled message prefix of the baseline.
+        let succeeded = &records[..nth - 1];
+        let expected: Vec<Message> = succeeded
+            .iter()
+            .filter_map(|r| match r {
+                JournalRecord::Message { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .collect();
         assert_eq!(
             chat.transcript(),
             expected,
-            "append {nth}: transcript must equal the first {} records",
+            "append {nth}: transcript must equal the messages of the first {} records",
             nth - 1
         );
         assert_eq!(journal.records().len(), nth - 1);
 
-        // Nothing is dispatched at or after the failed append: both batch tools start right
-        // after the third append (the assistant message of the batch), nothing else runs.
-        let expected_started = if nth <= 3 { 0 } else { 2 };
+        // Nothing new executes at or after the failed append. When the failure is a
+        // started-marker append, the launch loop stops before polling the just-pushed
+        // futures, so only calls that already settled have executed; otherwise every
+        // dispatched call of this script has run.
+        let expected_started =
+            if matches!(records[nth - 1], JournalRecord::ToolExecutionStarted { .. }) {
+                succeeded
+                    .iter()
+                    .filter(|r| matches!(r, JournalRecord::ToolExecutionSettled { .. }))
+                    .count()
+            } else {
+                started_tools_after(succeeded)
+            };
         assert_eq!(
             log.started().len(),
             expected_started,
@@ -148,6 +187,15 @@ async fn journal_failure_sweep() {
             Err(SessionError::RecoveryRequired)
         ));
         chat.close().await.unwrap();
+
+        // Whatever succeeded is enough to reopen: recover classifies every open call from
+        // the markers (settled -> its result, started only -> outcome unknown, else ->
+        // not started) and the result validates as history.
+        let history = agent_core::recover(&journal.records()).unwrap();
+        Arc::new(Agent::new(ScriptedModel::new(Vec::new()), NoTools))
+            .open_session_with_history(history)
+            .await
+            .unwrap();
     }
 }
 
@@ -184,7 +232,8 @@ async fn a_result_append_failure_runs_the_tool_once_and_starts_no_more() {
     ])]);
     let tools = MemTools::new(vec![(spec("a"), Behavior::Echo)]);
     let log = tools.log.clone();
-    let journal = Arc::new(FailingJournal::fail_at(3)); // 1: user, 2: assistant, 3: c1 result
+    // 1: user, 2: assistant, 3: started, 4: settled, 5: c1's result message.
+    let journal = Arc::new(FailingJournal::fail_at(5));
     let mut chat = session_with(model, tools, journal).await;
 
     let error = chat
@@ -234,9 +283,10 @@ async fn cancellation_waits_for_the_inflight_append() {
         RunStatus::Cancelled(CancelReason::Requested)
     );
     drop(run);
-    // The in-flight append completed and reached memory before the turn converged.
-    assert_eq!(journal.calls(), 3);
-    assert_eq!(journal.records().len(), 3);
+    // The in-flight append completed and reached memory before the turn converged:
+    // user, assistant, started, settled and the result message.
+    assert_eq!(journal.calls(), 5);
+    assert_eq!(journal.records().len(), 5);
     assert_eq!(result_ids(chat.transcript()), ["c1"]);
     // Convergence waited for the in-flight append (up to its 100 ms) plus little else.
     assert!(
@@ -274,7 +324,8 @@ async fn a_parallel_batch_completes_over_a_slow_journal() {
     assert_eq!(log.max_concurrent(), 4);
     // Results still land in call order.
     assert_eq!(result_ids(chat.transcript()), ["s1", "s2", "s3", "s4"]);
-    assert_eq!(journal.records().len(), 7); // user, assistant, 4 results, final
+    // user, assistant, 4x (started, settled), 4 results, final
+    assert_eq!(journal.records().len(), 15);
 }
 
 // ---------- D7 (AC-A1-7) ----------
@@ -300,9 +351,9 @@ async fn dropping_a_step_never_touches_the_journal_again() {
     let replay: Vec<Message> = journal
         .records()
         .iter()
-        .map(|r| match r {
-            JournalRecord::Message { message, .. } => message.clone(),
-            _ => unreachable!("A1 journals messages only"),
+        .filter_map(|r| match r {
+            JournalRecord::Message { message, .. } => Some(message.clone()),
+            _ => None,
         })
         .collect();
     let transcript = chat.transcript();
@@ -352,6 +403,8 @@ async fn events_mirror_the_journal_in_order() {
         .entries()
         .into_iter()
         .filter(|e| e.starts_with("journal:") || e.starts_with("event:"))
+        // Marker records (A2) interleave too; this test is about message order.
+        .filter(|e| !e.contains("started:") && !e.contains("settled:"))
         .collect();
     assert_eq!(entries, expected);
 }

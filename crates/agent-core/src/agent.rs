@@ -284,11 +284,16 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         let Some(recorder) = &self.selfcheck else {
             return;
         };
-        let records = recorder.records();
+        let records: Vec<JournalRecord> = recorder
+            .records()
+            .into_iter()
+            .filter(|r| matches!(r, JournalRecord::Message { .. }))
+            .collect();
         let replay: Vec<&Message> = records
             .iter()
-            .map(|r| match r {
-                JournalRecord::Message { message, .. } => message,
+            .filter_map(|r| match r {
+                JournalRecord::Message { message, .. } => Some(message),
+                _ => None,
             })
             .collect();
         let transcript = &self.transcript;
