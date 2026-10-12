@@ -1,0 +1,5 @@
+bare /bin/true        : median=0.54ms p95=1.11ms n=20
+bwrap launcher + true : median=14.50ms p95=22.89ms n=20
+landlock wrapper+true : median=11.64ms p95=16.53ms n=20
+bwrap overhead (median diff)    : 13.97ms
+landlock overhead (median diff) : 11.10ms

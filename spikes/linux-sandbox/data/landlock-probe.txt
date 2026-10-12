@@ -1,0 +1,21 @@
+landlock_abi: 10
+fs EXECUTE              accepted
+fs WRITE_FILE           accepted
+fs READ_FILE            accepted
+fs READ_DIR             accepted
+fs REMOVE_DIR           accepted
+fs REMOVE_FILE          accepted
+fs MAKE_CHAR            accepted
+fs MAKE_DIR             accepted
+fs MAKE_REG             accepted
+fs MAKE_SOCK            accepted
+fs MAKE_FIFO            accepted
+fs MAKE_BLOCK           accepted
+fs MAKE_SYM             accepted
+fs REFER                accepted
+fs TRUNCATE             accepted
+fs IOCTL_DEV            accepted
+net BIND_TCP            accepted
+net CONNECT_TCP         accepted
+scoped ABSTRACT_UNIX_SOCKET accepted
+scoped SIGNAL           accepted

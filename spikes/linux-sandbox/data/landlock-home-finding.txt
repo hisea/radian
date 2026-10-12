@@ -1,0 +1,7 @@
+# Landlock read confinement breaks git when HOME is inherited (not an allowed path)
+$ HOME=<home> bin/llsandbox ... -- git -C $WS status
+warning: unable to access '<home>/.config/git/config': Permission denied
+warning: unable to access '<home>/.config/git/config': Permission denied
+warning: unable to access '<home>/.config/git/config': Permission denied
+fatal: unknown error occurred while reading the configuration files
+rc=128

@@ -1,0 +1,65 @@
+== environment
+Linux 7.2.6-1-aarch64-ARCH aarch64
+lsm: capability,yama,landlock
+bubblewrap 0.12.0
+gcc (GCC) 16.1.1 20260430
+Python 3.14.7
+git version 2.55.0
+== build
+built bin/llsandbox bin/ll_probe
+landlock_abi: 10
+fs EXECUTE              accepted
+fs WRITE_FILE           accepted
+fs READ_FILE            accepted
+fs READ_DIR             accepted
+fs REMOVE_DIR           accepted
+fs REMOVE_FILE          accepted
+fs MAKE_CHAR            accepted
+fs MAKE_DIR             accepted
+fs MAKE_REG             accepted
+fs MAKE_SOCK            accepted
+fs MAKE_FIFO            accepted
+fs MAKE_BLOCK           accepted
+fs MAKE_SYM             accepted
+fs REFER                accepted
+fs TRUNCATE             accepted
+fs IOCTL_DEV            accepted
+net BIND_TCP            accepted
+net CONNECT_TCP         accepted
+scoped ABSTRACT_UNIX_SOCKET accepted
+scoped SIGNAL           accepted
+== bwrap
+SUMMARY|bwrap-sandbox|ok=21|mismatch=0
+SUMMARY|bwrap-control|ok=21|mismatch=0
+== landlock
+SUMMARY|landlock-sandbox|ok=21|mismatch=0
+SUMMARY|landlock-control|ok=21|mismatch=0
+== combo (bwrap outside + landlock inside)
+SUMMARY|combo-sandbox|ok=21|mismatch=0
+SUMMARY|combo-control|ok=21|mismatch=0
+== mutations
+MUTATION|M1|bwrap: drop the .git read-only bind
+CASE|10e|git-add-index-lock|expected=fail|actual=success|MISMATCH|
+CASE|10a|git-hooks-write|expected=fail|actual=success|MISMATCH|
+CASE|10b|git-config-write|expected=fail|actual=success|MISMATCH|
+CASE|10f|worktree-pointer|expected=fail|actual=fail|OK|/bin/sh: line 1: /tmp/radian-linux-sandbox/ws/wt/.git: Read-only file system
+CASE|10g|worktree-gitdir|expected=fail|actual=success|MISMATCH|
+CASE|10h|worktree-symlink|expected=fail|actual=success|MISMATCH|
+MUTATION|M2|bwrap: keep the network namespace shared
+CASE|5|connect-local-listener|expected=fail|actual=success|MISMATCH|b'pong'
+MUTATION|M3|bwrap: do not clear the environment
+CASE|6a|env-secret-hidden|expected=<unset>|actual=leaked-secret-value|MISMATCH|leaked-secret-value
+MUTATION|M4|bwrap: do not make the escape target visible at all
+CASE|1|abs-write-outside|expected=fail|actual=fail|OK|/bin/sh: line 1: /tmp/radian-linux-sandbox/outside/abs.txt: No such file or directory
+MUTATION|M5|landlock: drop the workspace writable rule
+CASE|9|workspace-write-read|expected=success|actual=fail|MISMATCH|/bin/sh: line 1: in.txt: Permission denied
+MUTATION|M6|landlock: drop the network denial
+CASE|5|connect-local-listener|expected=fail|actual=success|MISMATCH|b'pong'
+== bench
+bare /bin/true        : median=0.54ms p95=1.11ms n=20
+bwrap launcher + true : median=14.50ms p95=22.89ms n=20
+landlock wrapper+true : median=11.64ms p95=16.53ms n=20
+bwrap overhead (median diff)    : 13.97ms
+landlock overhead (median diff) : 11.10ms
+== orphan check
+(empty above means no orphans)
