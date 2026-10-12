@@ -1,0 +1,6 @@
+resize:
+PASS | 三个宽度阶段标记按序出现 | 120→60→120 标记：true/true/true，回位位置 Some(840)
+PASS | 流式行完整（60 行） | LINE- 出现 60 次
+PASS | 无 ?1049/鼠标捕获（resize 允许 2J，另行记录） | -
+PASS | 观测：resize 字节流含 ratatui 全屏清除（非门槛） | CSI 2J 出现 1 次；旧行回流/保留需真实终端人工确认
+PASS | 退出码 | exit=0

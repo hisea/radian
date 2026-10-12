@@ -1,0 +1,6 @@
+scrollback:
+PASS | 退出码 | exit=0
+PASS | PRE 历史行仍在字节流（50 行） | PRE- 出现 50 次
+PASS | 流式行进入字节流（30 行） | LINE- 出现 30 次
+PASS | 无备用屏/无鼠标捕获/无整屏清除 | -
+PASS | vt100 模型：scrollback 顶部含最早 PRE，可见区含收尾状态，未进备用屏 | pre_0001_to_0040=true done=true alt_screen=false
