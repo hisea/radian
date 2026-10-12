@@ -1451,6 +1451,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "radian-runtime"
+version = "0.1.0"
+dependencies = [
+ "agent-core",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "radian-session"
 version = "0.1.0"
 dependencies = [
