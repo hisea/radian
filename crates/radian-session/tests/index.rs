@@ -317,3 +317,145 @@ async fn a_torn_tail_is_not_indexed_and_is_picked_up_after_truncate_and_append()
         3
     );
 }
+
+// ---------- concurrency (req 5) and workspace isolation (req 6) ----------
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Barrier};
+
+/// Writes a synthetic session file: `SessionCreated` plus `count` user messages.
+fn write_synthetic(path: &Path, sid: &str, workspace: &str, count: usize) {
+    let mut out = String::new();
+    out.push_str(
+        &serde_json::json!({
+            "schema_version": 1, "session_id": sid, "seq": 0,
+            "ts": "2026-10-12T10:00:00.000000Z", "event": "SessionCreated",
+            "critical": true,
+            "data": {"workspace": workspace, "config_snapshot": {}}
+        })
+        .to_string(),
+    );
+    out.push('\n');
+    for i in 0..count {
+        out.push_str(
+            &serde_json::json!({
+                "schema_version": 1, "session_id": sid, "seq": i + 1,
+                "ts": format!("2026-10-12T10:00:{:02}.000000Z", i % 60),
+                "event": "MessageAppended", "critical": true,
+                "data": {"index": i, "message": {"user": {"content": [
+                    {"text": {"text": format!("message number {i}")}}
+                ]}}}
+            })
+            .to_string(),
+        );
+        out.push('\n');
+    }
+    std::fs::write(path, out).unwrap();
+}
+
+/// WAL and a busy timeout are what let readers and a writer share the index; assert both
+/// are actually configured (this is what the concurrency mutations break).
+#[test]
+fn the_index_uses_wal_and_a_busy_timeout() {
+    let dir = TempDir::new("pragma");
+    let index = Index::open(dir.file("index.db")).unwrap();
+    assert_eq!(index.journal_mode().unwrap().to_ascii_lowercase(), "wal");
+    assert!(
+        index.busy_timeout().unwrap() >= 1000,
+        "busy timeout must be set, got {}",
+        index.busy_timeout().unwrap()
+    );
+}
+
+#[test]
+fn two_readers_share_one_index_without_busy_failures() {
+    let dir = TempDir::new("readers");
+    let db = dir.file("index.db");
+    let path = dir.file("s.jsonl");
+    write_synthetic(&path, "sid-readers", "/w/a", 20);
+    {
+        let mut index = Index::open(&db).unwrap();
+        index.rebuild(std::slice::from_ref(&path)).unwrap();
+    }
+    let barrier = Arc::new(Barrier::new(2));
+    std::thread::scope(|scope| {
+        for _ in 0..2 {
+            let db = db.clone();
+            let barrier = Arc::clone(&barrier);
+            scope.spawn(move || {
+                let index = Index::open(&db).unwrap();
+                barrier.wait();
+                assert_eq!(index.list(None).unwrap().len(), 1);
+            });
+        }
+    });
+}
+
+/// One writer rebuilding while one reader lists and searches: neither may fail with a busy
+/// error. No sleeps; the reader loops until the writer signals completion.
+#[test]
+fn a_writer_and_a_reader_share_one_index_without_busy_failures() {
+    let dir = TempDir::new("writer-reader");
+    let db = dir.file("index.db");
+    let path = dir.file("s.jsonl");
+    write_synthetic(&path, "sid-wr", "/w/a", 4000);
+    {
+        let mut index = Index::open(&db).unwrap();
+        index.rebuild(std::slice::from_ref(&path)).unwrap();
+    }
+    let done = Arc::new(AtomicBool::new(false));
+    let barrier = Arc::new(Barrier::new(2));
+    std::thread::scope(|scope| {
+        let writer = {
+            let db = db.clone();
+            let path = path.clone();
+            let barrier = Arc::clone(&barrier);
+            scope.spawn(move || {
+                let mut index = Index::open(&db).unwrap();
+                barrier.wait();
+                index.rebuild(std::slice::from_ref(&path)).unwrap();
+            })
+        };
+        {
+            let db = db.clone();
+            let barrier = Arc::clone(&barrier);
+            let done = Arc::clone(&done);
+            scope.spawn(move || {
+                let index = Index::open(&db).unwrap();
+                barrier.wait();
+                while !done.load(Ordering::SeqCst) {
+                    assert_eq!(index.list(None).unwrap().len(), 1);
+                    let _ = index.search("message", None, 10).unwrap();
+                }
+                // One last read after the write committed.
+                assert_eq!(index.list(None).unwrap().len(), 1);
+            });
+        }
+        writer.join().unwrap();
+        done.store(true, Ordering::SeqCst);
+    });
+}
+
+#[test]
+fn sessions_are_isolated_by_workspace() {
+    let dir = TempDir::new("workspace");
+    let a = dir.file("a.jsonl");
+    let b = dir.file("b.jsonl");
+    write_synthetic(&a, "sid-a", "/work/alpha", 2);
+    write_synthetic(&b, "sid-b", "/work/beta", 3);
+    let mut index = Index::open(dir.file("index.db")).unwrap();
+    index.rebuild(&[a, b]).unwrap();
+
+    let alpha = index.list(Some("/work/alpha")).unwrap();
+    assert_eq!(alpha.len(), 1);
+    assert_eq!(alpha[0].session_id, "sid-a");
+    assert_eq!(alpha[0].workspace.as_deref(), Some("/work/alpha"));
+    assert_eq!(alpha[0].event_count, 3);
+
+    let beta = index.list(Some("/work/beta")).unwrap();
+    assert_eq!(beta.len(), 1);
+    assert_eq!(beta[0].session_id, "sid-b");
+
+    assert_eq!(index.list(Some("/work/gamma")).unwrap().len(), 0);
+    assert_eq!(index.list(None).unwrap().len(), 2);
+}
