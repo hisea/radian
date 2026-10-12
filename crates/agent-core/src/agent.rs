@@ -172,19 +172,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         message: Message,
         events: &dyn EventSink,
     ) -> Result<(), JournalError> {
-        if let Some(journal) = &self.journal {
-            let index = self.transcript.len();
-            journal
-                .append(JournalRecord::Message {
-                    index,
-                    message: message.clone(),
-                })
-                .await?;
-        }
-        let index = self.transcript.len();
-        self.transcript.push(message.clone());
-        events.emit(AgentEvent::TranscriptAppended { index, message });
-        Ok(())
+        commit_parts(self.journal.as_ref(), &mut self.transcript, message, events).await
     }
 
     pub fn is_poisoned(&self) -> bool {
@@ -258,4 +246,27 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
     pub fn is_closed(&self) -> bool {
         self.close_state == CloseState::Closed
     }
+}
+
+/// The one implementation of "journal, then memory, then event" (S1). `AgentSession::commit`
+/// and the batch context share it; nothing else may touch a mounted session's transcript.
+/// The pieces arrive separately because running tool futures hold `tools` across commits.
+pub(crate) async fn commit_parts(
+    journal: Option<&Arc<dyn TranscriptJournal>>,
+    transcript: &mut Vec<Message>,
+    message: Message,
+    events: &dyn EventSink,
+) -> Result<(), JournalError> {
+    let index = transcript.len();
+    if let Some(journal) = journal {
+        journal
+            .append(JournalRecord::Message {
+                index,
+                message: message.clone(),
+            })
+            .await?;
+    }
+    transcript.push(message.clone());
+    events.emit(AgentEvent::TranscriptAppended { index, message });
+    Ok(())
 }

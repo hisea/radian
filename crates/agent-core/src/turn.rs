@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::{Agent, AgentSession};
 use crate::event::{AgentEvent, EventSink};
 use crate::hooks::{HookContext, HookError, HookPoint, Hooks, ToolDecision};
-use crate::journal::JournalError;
+use crate::journal::{JournalError, TranscriptJournal};
 use crate::message::{Message, ToolCall, ToolResult};
 use crate::model::{Model, ModelContext, ModelRequest, ModelResponse, StopReason};
 use crate::outcome::{CancelReason, IncompleteReason, RunError, RunOutcome, RunStatus, Step};
@@ -147,6 +147,15 @@ impl Batch {
         }
     }
 
+    /// The next result in call order that is ready to leave the batch, if any. The caller
+    /// commits it through the journal; `commit_ready` above stays for the Drop path, which
+    /// must not touch the journal (D7).
+    fn next_ready(&mut self) -> Option<ToolResult> {
+        let result = self.slots.get_mut(self.committed).and_then(Option::take)?;
+        self.committed += 1;
+        Some(result)
+    }
+
     fn unresolved(&self) -> Vec<usize> {
         (self.committed..self.calls.len())
             .filter(|&i| self.slots[i].is_none())
@@ -270,34 +279,47 @@ impl<'s, M: Model, P: ToolProvider, H: Hooks> ActiveRun<'s, M, P, H> {
         }
     }
 
-    fn inject_steering(&mut self, events: &dyn EventSink) {
+    /// Commits each steering message through the journal (S3): if the j-th fails, the first
+    /// j-1 are journaled and in memory, the rest are not, and memory still equals the journal.
+    async fn inject_steering(&mut self, events: &dyn EventSink) -> Result<(), RunError> {
         let messages = self.steering.drain();
         if !messages.is_empty() {
             events.emit(AgentEvent::SteeringApplied {
                 count: messages.len(),
             });
-            self.session.transcript.extend(messages);
+            for message in messages {
+                if let Err(e) = self.session.commit(message, events).await {
+                    return Err(self.fail_journal(e, events));
+                }
+            }
         }
+        Ok(())
     }
 
-    /// Answers calls that will not run, all with the same error.
-    fn resolve_unexecuted(
+    /// Answers calls that will not run, all with the same error, through the journal.
+    async fn resolve_unexecuted(
         &mut self,
         calls: &[ToolCall],
         code: &str,
         message: &str,
         events: &dyn EventSink,
-    ) {
+    ) -> Result<(), JournalError> {
         for (index, call) in calls.iter().enumerate() {
             events.emit(AgentEvent::ToolFinished {
                 index,
                 call_id: call.id.clone(),
                 is_error: true,
             });
-            self.session.transcript.push(Message::Tool {
-                result: ToolResult::error(&call.id, code, message),
-            });
+            self.session
+                .commit(
+                    Message::Tool {
+                        result: ToolResult::error(&call.id, code, message),
+                    },
+                    events,
+                )
+                .await?;
         }
+        Ok(())
     }
 
     fn finish(&mut self, status: RunStatus, events: &dyn EventSink) -> Step {
@@ -418,7 +440,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
         if let Some(reason) = interrupt.check() {
             return Ok(self.run.finish(RunStatus::Cancelled(reason), events));
         }
-        self.run.inject_steering(events);
+        self.run.inject_steering(events).await?;
         if self.run.model_calls >= self.run.max_model_calls {
             return Ok(self.run.finish(RunStatus::BudgetExceeded, events));
         }
@@ -496,7 +518,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
         }
 
         if !tool_calls.is_empty() {
-            return Ok(self.dispatch_tools(&agent, tool_calls, stop_reason).await);
+            return self.dispatch_tools(&agent, tool_calls, stop_reason).await;
         }
         let status = match stop_reason {
             StopReason::EndTurn => {
@@ -526,51 +548,71 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
         agent: &Agent<M, P, H>,
         calls: Vec<ToolCall>,
         stop_reason: StopReason,
-    ) -> Step {
+    ) -> Result<Step, RunError> {
         let events = self.events;
         let run = &mut *self.run;
         match stop_reason {
             StopReason::MaxTokens => {
-                run.resolve_unexecuted(
-                    &calls,
-                    "truncated",
-                    "The response was cut off at the token limit, so this call was not run. \
-                     Send it again if it is still needed.",
-                    events,
-                );
-                return Step::Continue;
+                if let Err(e) = run
+                    .resolve_unexecuted(
+                        &calls,
+                        "truncated",
+                        "The response was cut off at the token limit, so this call was not run. \
+                         Send it again if it is still needed.",
+                        events,
+                    )
+                    .await
+                {
+                    return Err(run.fail_journal(e, events));
+                }
+                return Ok(Step::Continue);
             }
             StopReason::ContentFiltered => {
-                run.resolve_unexecuted(
-                    &calls,
-                    "content_filtered",
-                    "The response was filtered, so this call was not run.",
-                    events,
-                );
-                return run.finish(
+                if let Err(e) = run
+                    .resolve_unexecuted(
+                        &calls,
+                        "content_filtered",
+                        "The response was filtered, so this call was not run.",
+                        events,
+                    )
+                    .await
+                {
+                    return Err(run.fail_journal(e, events));
+                }
+                return Ok(run.finish(
                     RunStatus::Incomplete(IncompleteReason::ContentFiltered),
                     events,
-                );
+                ));
             }
             _ => {}
         }
         if run.model_calls >= run.max_model_calls {
-            run.resolve_unexecuted(
-                &calls,
-                "budget_exhausted",
-                "The model call budget is used up, so this call was not run.",
-                events,
-            );
-            return run.finish(RunStatus::BudgetExceeded, events);
+            if let Err(e) = run
+                .resolve_unexecuted(
+                    &calls,
+                    "budget_exhausted",
+                    "The model call budget is used up, so this call was not run.",
+                    events,
+                )
+                .await
+            {
+                return Err(run.fail_journal(e, events));
+            }
+            return Ok(run.finish(RunStatus::BudgetExceeded, events));
         }
 
         let hcx = run.hook_context();
         run.batch = Some(Batch::new(calls.clone()));
-        let cx = BatchCx {
-            tools: &run.session.tools,
-            registry: &run.session.registry,
+        // Disjoint field borrows: the running tool futures hold `tools` for their lifetime,
+        // so the journal, transcript and registry travel separately and meet again inside
+        // `commit_parts`.
+        let session = &mut *run.session;
+        let cx = BatchCx::<P, H> {
+            tools: &session.tools,
+            registry: &session.registry,
+            journal: session.journal.as_ref(),
+            transcript: &mut session.transcript,
             hooks: &agent.hooks,
-            transcript: &mut run.session.transcript,
             batch: run.batch.as_mut().expect("batch was just set"),
             steering: &run.steering,
             options: &run.options,
@@ -578,22 +620,26 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
             events,
             hcx,
         };
-        let interrupted = cx.run(calls).await;
-        debug_assert!(run.batch.as_ref().is_some_and(Batch::is_complete));
+        let interrupted = match cx.run(calls).await {
+            Ok(interrupted) => interrupted,
+            Err(e) => return Err(run.fail_journal(e, events)),
+        };
+        debug_assert!(run.batch.as_ref().is_none_or(Batch::is_complete));
         run.batch = None;
-        match interrupted {
+        Ok(match interrupted {
             Some(reason) => run.finish(RunStatus::Cancelled(reason), events),
             None => Step::Continue,
-        }
+        })
     }
 }
 
 /// Disjoint borrows of the turn and session needed to run one batch.
-struct BatchCx<'a, S, H> {
-    tools: &'a S,
+struct BatchCx<'a, P: ToolProvider, H: Hooks> {
+    tools: &'a P::Session,
     registry: &'a ToolRegistry,
-    hooks: &'a H,
+    journal: Option<&'a Arc<dyn TranscriptJournal>>,
     transcript: &'a mut Vec<Message>,
+    hooks: &'a H,
     batch: &'a mut Batch,
     steering: &'a SteeringHandle,
     options: &'a TurnOptions,
@@ -602,34 +648,46 @@ struct BatchCx<'a, S, H> {
     hcx: HookContext,
 }
 
-impl<S: ToolSession, H: Hooks> BatchCx<'_, S, H> {
+/// Why a batch stopped before its plan played out.
+enum BatchStop {
+    Interrupted(CancelReason),
+    Journal(JournalError),
+}
+
+impl<P: ToolProvider, H: Hooks> BatchCx<'_, P, H> {
     /// Validates, runs hooks, then schedules. Returns the reason if the turn was interrupted;
-    /// either way every call ends with a result in the transcript.
-    async fn run(mut self, calls: Vec<ToolCall>) -> Option<CancelReason> {
+    /// either way every call ends with a result in the transcript. A journal failure ends
+    /// the batch at once (D6): later appends are not attempted and memory keeps the prefix.
+    async fn run(mut self, calls: Vec<ToolCall>) -> Result<Option<CancelReason>, JournalError> {
         let plan = match self.plan(calls).await {
             Ok(plan) => plan,
-            Err(reason) => {
-                self.resolve_rest("cancelled", "The turn was cancelled before this call ran.");
-                return Some(reason);
+            Err(BatchStop::Interrupted(reason)) => {
+                self.resolve_rest("cancelled", "The turn was cancelled before this call ran.")
+                    .await?;
+                return Ok(Some(reason));
             }
+            Err(BatchStop::Journal(e)) => return Err(e),
         };
-        let interrupted = self.schedule(plan).await;
+        let interrupted = self.schedule(plan).await?;
         if interrupted.is_some() {
-            self.resolve_rest("cancelled", "The turn was cancelled before this call ran.");
+            self.resolve_rest("cancelled", "The turn was cancelled before this call ran.")
+                .await?;
         }
-        interrupted
+        Ok(interrupted)
     }
 
     /// Preflight and `before_tool_call`, one call at a time in order.
     async fn plan(
         &mut self,
         calls: Vec<ToolCall>,
-    ) -> Result<Vec<Option<(ToolCall, ToolConcurrency)>>, CancelReason> {
+    ) -> Result<Vec<Option<(ToolCall, ToolConcurrency)>>, BatchStop> {
         let mut plan = Vec::with_capacity(calls.len());
         for (i, call) in calls.into_iter().enumerate() {
             plan.push(None);
             if let Err(result) = self.registry.check(&call) {
-                self.resolve(i, result);
+                if let Err(e) = self.resolve(i, result).await {
+                    return Err(BatchStop::Journal(e));
+                }
                 continue;
             }
             let decision = match race(
@@ -638,7 +696,7 @@ impl<S: ToolSession, H: Hooks> BatchCx<'_, S, H> {
             )
             .await
             {
-                Raced::Interrupted(reason) => return Err(reason),
+                Raced::Interrupted(reason) => return Err(BatchStop::Interrupted(reason)),
                 Raced::Done(decision) => decision,
             };
             match decision {
@@ -650,29 +708,45 @@ impl<S: ToolSession, H: Hooks> BatchCx<'_, S, H> {
                     let call = ToolCall { arguments, ..call };
                     match self.registry.check(&call) {
                         Ok(concurrency) => plan[i] = Some((call, concurrency)),
-                        Err(result) => self.resolve(i, result),
+                        Err(result) => {
+                            if let Err(e) = self.resolve(i, result).await {
+                                return Err(BatchStop::Journal(e));
+                            }
+                        }
                     }
                 }
                 Ok(ToolDecision::Deny { reason }) => {
-                    self.resolve(i, ToolResult::error(&call.id, "denied", reason));
+                    if let Err(e) = self
+                        .resolve(i, ToolResult::error(&call.id, "denied", reason))
+                        .await
+                    {
+                        return Err(BatchStop::Journal(e));
+                    }
                 }
                 Ok(ToolDecision::Respond(mut result)) => {
                     result.call_id = call.id;
-                    self.resolve(i, result);
+                    if let Err(e) = self.resolve(i, result).await {
+                        return Err(BatchStop::Journal(e));
+                    }
                 }
                 Err(e) => {
                     self.events.emit(AgentEvent::HookFailed {
                         hook: HookPoint::BeforeToolCall,
                         message: e.to_string(),
                     });
-                    self.resolve(
-                        i,
-                        ToolResult::error(
-                            &call.id,
-                            "hook_error",
-                            format!("A policy check failed: {e}"),
-                        ),
-                    );
+                    if let Err(e) = self
+                        .resolve(
+                            i,
+                            ToolResult::error(
+                                &call.id,
+                                "hook_error",
+                                format!("A policy check failed: {e}"),
+                            ),
+                        )
+                        .await
+                    {
+                        return Err(BatchStop::Journal(e));
+                    }
                 }
             }
         }
@@ -684,7 +758,7 @@ impl<S: ToolSession, H: Hooks> BatchCx<'_, S, H> {
     async fn schedule(
         &mut self,
         mut plan: Vec<Option<(ToolCall, ToolConcurrency)>>,
-    ) -> Option<CancelReason> {
+    ) -> Result<Option<CancelReason>, JournalError> {
         let n = plan.len();
         let mut i = 0;
         while i < n {
@@ -693,7 +767,7 @@ impl<S: ToolSession, H: Hooks> BatchCx<'_, S, H> {
                 continue;
             };
             if let Some(reason) = self.interrupt.check() {
-                return Some(reason);
+                return Ok(Some(reason));
             }
             let end = match concurrency {
                 ToolConcurrency::Exclusive => i + 1,
@@ -712,15 +786,18 @@ impl<S: ToolSession, H: Hooks> BatchCx<'_, S, H> {
             let group: Vec<(usize, ToolCall)> = (i..end)
                 .filter_map(|k| plan[k].take().map(|(call, _)| (k, call)))
                 .collect();
-            if let Some(reason) = self.run_group(group).await {
-                return Some(reason);
+            if let Some(reason) = self.run_group(group).await? {
+                return Ok(Some(reason));
             }
             i = end;
         }
-        None
+        Ok(None)
     }
 
-    async fn run_group(&mut self, group: Vec<(usize, ToolCall)>) -> Option<CancelReason> {
+    async fn run_group(
+        &mut self,
+        group: Vec<(usize, ToolCall)>,
+    ) -> Result<Option<CancelReason>, JournalError> {
         let limit = self.options.max_parallel_tools.max(1);
         let skip_on_steer = self.options.steer_mode == SteerMode::SkipRemaining;
         let (tools, hooks, events, interrupt) =
@@ -729,8 +806,9 @@ impl<S: ToolSession, H: Hooks> BatchCx<'_, S, H> {
         let mut queue = group.into_iter();
         let mut running = FuturesUnordered::new();
         let mut interrupted = None;
+        let mut journal_failed = None;
         loop {
-            while interrupted.is_none() && running.len() < limit {
+            while interrupted.is_none() && journal_failed.is_none() && running.len() < limit {
                 let Some((index, call)) = queue.next() else {
                     break;
                 };
@@ -740,7 +818,7 @@ impl<S: ToolSession, H: Hooks> BatchCx<'_, S, H> {
                         "skipped_by_steering",
                         "The user sent a new message, so this call was not run.",
                     );
-                    self.resolve(index, result);
+                    journal_failed = self.resolve(index, result).await.err();
                     continue;
                 }
                 events.emit(AgentEvent::ToolStarted {
@@ -759,7 +837,7 @@ impl<S: ToolSession, H: Hooks> BatchCx<'_, S, H> {
                     self.options.tool_cancel_grace,
                 ));
             }
-            if running.is_empty() {
+            if running.is_empty() || journal_failed.is_some() {
                 break;
             }
             tokio::select! {
@@ -768,27 +846,51 @@ impl<S: ToolSession, H: Hooks> BatchCx<'_, S, H> {
                     interrupted = Some(reason);
                     cancel.cancel();
                 }
-                Some((index, result)) = running.next() => self.resolve(index, result),
+                // Awaiting a journal append inside this branch pauses the other branches:
+                // the append is short, and this backpressure is the price of serializing
+                // journal writes with tool completions (AC-A1-6).
+                Some((index, result)) = running.next() => {
+                    if let Err(e) = self.resolve(index, result).await {
+                        journal_failed = Some(e);
+                    }
+                }
             }
         }
-        interrupted
+        match journal_failed {
+            // A failed append ends the turn; the not-yet-started calls behind it never run
+            // and the batch's remaining slots stay unresolved in memory (D6, S3).
+            Some(e) => Err(e),
+            None => Ok(interrupted),
+        }
     }
 
-    fn resolve(&mut self, index: usize, result: ToolResult) {
+    /// Records one result and commits every result that has become ready, in call order,
+    /// through the journal.
+    async fn resolve(&mut self, index: usize, result: ToolResult) -> Result<(), JournalError> {
         self.events.emit(AgentEvent::ToolFinished {
             index,
             call_id: result.call_id.clone(),
             is_error: result.is_error,
         });
         self.batch.set(index, result);
-        self.batch.commit_ready(self.transcript);
+        while let Some(result) = self.batch.next_ready() {
+            crate::agent::commit_parts(
+                self.journal,
+                self.transcript,
+                Message::Tool { result },
+                self.events,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
-    fn resolve_rest(&mut self, code: &str, message: &str) {
+    async fn resolve_rest(&mut self, code: &str, message: &str) -> Result<(), JournalError> {
         for i in self.batch.unresolved() {
             let result = ToolResult::error(&self.batch.calls[i].id, code, message);
-            self.resolve(i, result);
+            self.resolve(i, result).await?;
         }
+        Ok(())
     }
 }
 
