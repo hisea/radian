@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agent_core::testing::RecordingJournal;
+use agent_core::testing::{FailingJournal, RecordingJournal, SequenceLog, SlowJournal};
 use agent_core::*;
 use common::*;
 use serde_json::json;
@@ -274,4 +274,239 @@ async fn each_model_call_accumulates_from_scratch() {
     };
     assert!(interrupted);
     assert_eq!(content, &vec![ContentPart::text("B")]);
+}
+
+// ---------- paths that must not commit (AC-A3-6) ----------
+
+#[tokio::test(start_paused = true)]
+async fn a_model_error_after_deltas_commits_no_prefix() {
+    let journal = Arc::new(RecordingJournal::new());
+    let model = ScriptedModel::new([Reply::StreamFail(vec!["doomed".into()], "boom".into())]);
+    let mut chat = session_with(model, journal.clone()).await;
+
+    let error = chat
+        .run_turn("go", Default::default(), &NoopSink)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, RunError::Model(_)), "{error:?}");
+    assert_eq!(chat.transcript().len(), 1);
+    assert_eq!(journal.messages().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn dropping_the_step_mid_stream_commits_nothing_and_stops_journaling() {
+    let journal = Arc::new(RecordingJournal::new());
+    let model = ScriptedModel::new([Reply::StreamHang(vec!["in flight".into()])]);
+    let mut chat = session_with(model, journal.clone()).await;
+    let mut run = chat.start_turn("go").unwrap();
+
+    let timed_out = tokio::time::timeout(Duration::from_millis(50), run.step(&NoopSink)).await;
+    assert!(timed_out.is_err());
+    let calls_at_drop = journal.calls();
+    drop(run);
+
+    assert!(chat.is_poisoned());
+    assert_eq!(calls_at_drop, 1, "only the user input was journaled");
+    assert_eq!(journal.calls(), 1, "the Drop path journaled something");
+    // No prefix anywhere: memory holds only the input.
+    assert!(chat.transcript().iter().skip(1).all(|m| !matches!(
+        m,
+        Message::Assistant {
+            interrupted: true,
+            ..
+        }
+    )));
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelling_during_tools_commits_no_prefix() {
+    let journal = Arc::new(RecordingJournal::new());
+    let tools = MemTools::new(vec![(spec("a"), Behavior::Delay(60))]);
+    let model = ScriptedModel::new([calls(vec![call("c1", "a", json!({}))])]);
+    let agent = Arc::new(Agent::new(model, tools.clone()));
+    let log = tools.log.clone();
+    let mut chat = agent
+        .open_session_with_journal(Vec::new(), journal.clone())
+        .await
+        .unwrap();
+    let mut run = chat.start_turn("go").unwrap();
+    let cancel = run.cancellation_handle();
+
+    let (outcome, ()) = tokio::join!(run.run(&NoopSink), async {
+        until_started(&log, "c1").await;
+        cancel.cancel();
+    });
+    assert_eq!(
+        outcome.unwrap().status,
+        RunStatus::Cancelled(CancelReason::Requested)
+    );
+    drop(run);
+    assert!(!chat.transcript().iter().any(|m| matches!(
+        m,
+        Message::Assistant {
+            interrupted: true,
+            ..
+        }
+    )));
+    assert!(!journal.messages().iter().any(|m| matches!(
+        m,
+        Message::Assistant {
+            interrupted: true,
+            ..
+        }
+    )));
+}
+
+async fn until_started(log: &ToolLog, id: &str) {
+    while !log.started().iter().any(|s| s == id) {
+        tokio::task::yield_now().await;
+    }
+}
+
+// ---------- journal interaction (AC-A3-8) ----------
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_prefix_append_fails_the_turn() {
+    let journal = Arc::new(FailingJournal::fail_at(2)); // 1: user, 2: the prefix
+    let model = ScriptedModel::new([Reply::StreamHang(vec!["half".into()])]);
+    let mut chat = session_with(model, journal.clone()).await;
+    let mut run = chat.start_turn("go").unwrap();
+    let cancel = run.cancellation_handle();
+
+    let (error, ()) = tokio::join!(run.run(&NoopSink), async {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        cancel.cancel();
+    });
+    drop(run);
+
+    assert!(matches!(error.unwrap_err(), RunError::Journal(_)));
+    assert_eq!(
+        chat.transcript().len(),
+        1,
+        "the prefix must not reach memory"
+    );
+    assert!(matches!(
+        chat.start_turn("no"),
+        Err(SessionError::RecoveryRequired)
+    ));
+    // What did land is enough to reopen.
+    let history = agent_core::recover(&journal.records()).unwrap();
+    Arc::new(Agent::new(ScriptedModel::new(Vec::new()), NoTools))
+        .open_session_with_history(history)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_prefix_append_is_not_cancelled_by_the_cancellation() {
+    let log = SequenceLog::default();
+    let journal = Arc::new(SlowJournal::with_log(
+        Duration::from_millis(100),
+        log.clone(),
+    ));
+    let model = ScriptedModel::new([Reply::StreamHang(vec!["half".into()])]);
+    let mut chat = session_with(model, journal.clone()).await;
+    let sink = DeltaSink::default();
+    let seen = sink.deltas.clone();
+    let mut run = chat.start_turn("go").unwrap();
+    let cancel = run.cancellation_handle();
+
+    // Cancel once the text is out: the prefix append then begins as part of convergence,
+    // finds the cancellation already set, and must still run to completion (D3).
+    let (outcome, cancelled_at) = tokio::join!(run.run(&sink), async {
+        until_deltas(&seen, 1).await;
+        let at = tokio::time::Instant::now();
+        cancel.cancel();
+        at
+    });
+
+    assert_eq!(
+        outcome.unwrap().status,
+        RunStatus::Cancelled(CancelReason::Requested)
+    );
+    drop(run);
+    // The append the cancellation found in flight completed: the message is durable and in
+    // memory, and convergence waited the append out (D3) - at least its full delay.
+    assert_eq!(journal.calls(), 2);
+    let Message::Assistant { interrupted, .. } = chat.transcript().last().unwrap() else {
+        panic!();
+    };
+    assert!(interrupted);
+    assert!(cancelled_at.elapsed() >= Duration::from_millis(100));
+    assert!(cancelled_at.elapsed() <= Duration::from_millis(160));
+}
+
+#[tokio::test(start_paused = true)]
+async fn prefix_failure_sweep_recovers_every_position() {
+    // Turn 1 completes; turn 2 streams and gets cancelled. Four appends in total.
+    let baseline = || {
+        ScriptedModel::new([
+            text("first"),
+            Reply::StreamHang(vec!["second ".into(), "half".into()]),
+        ])
+    };
+    let journal = Arc::new(RecordingJournal::new());
+    let mut chat = session_with(baseline(), journal.clone()).await;
+    chat.run_turn("go", Default::default(), &NoopSink)
+        .await
+        .unwrap();
+    let sink = DeltaSink::default();
+    let seen = sink.deltas.clone();
+    let mut run = chat.start_turn("again").unwrap();
+    let cancel = run.cancellation_handle();
+    let (second, ()) = tokio::join!(run.run(&sink), async {
+        until_deltas(&seen, 1).await;
+        cancel.cancel();
+    });
+    assert_eq!(
+        second.unwrap().status,
+        RunStatus::Cancelled(CancelReason::Requested)
+    );
+    drop(run);
+    // user, assistant("first"), user, prefix.
+    assert_eq!(journal.calls(), 4, "{:?}", journal.records());
+    drop(chat);
+
+    for nth in 1..=4 {
+        let journal = Arc::new(FailingJournal::fail_at(nth));
+        let mut chat = session_with(baseline(), journal.clone()).await;
+        let turn1 = chat.run_turn("go", Default::default(), &NoopSink).await;
+        let error = match turn1 {
+            Err(e) => e,
+            Ok(_) => {
+                let mut run = chat.start_turn("again").unwrap();
+                let cancel = run.cancellation_handle();
+                let (result, ()) = tokio::join!(run.run(&NoopSink), async {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    cancel.cancel();
+                });
+                drop(run);
+                result.unwrap_err()
+            }
+        };
+        assert!(
+            matches!(error, RunError::Journal(_)),
+            "append {nth}: {error:?}"
+        );
+        assert!(matches!(
+            chat.start_turn("no"),
+            Err(SessionError::RecoveryRequired)
+        ));
+        // Memory equals the journaled messages, and the journal reopens.
+        let history = agent_core::recover(&journal.records()).unwrap();
+        let expected: Vec<Message> = journal
+            .records()
+            .iter()
+            .filter_map(|r| match r {
+                JournalRecord::Message { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(chat.transcript(), expected, "append {nth}");
+        Arc::new(Agent::new(ScriptedModel::new(Vec::new()), NoTools))
+            .open_session_with_history(history)
+            .await
+            .unwrap();
+    }
 }

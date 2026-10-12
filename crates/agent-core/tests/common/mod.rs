@@ -21,6 +21,8 @@ pub enum Reply {
     StreamHang(Vec<String>),
     /// Emits these text deltas, then responds.
     Streamed(Vec<String>, ModelResponse),
+    /// Emits these text deltas, then fails.
+    StreamFail(Vec<String>, String),
 }
 
 /// Returns scripted replies in order and records every request.
@@ -78,6 +80,12 @@ impl Model for ScriptedModel {
                     cx.events.emit(AgentEvent::ModelTextDelta { text });
                 }
                 Ok(r)
+            }
+            Some(Reply::StreamFail(deltas, message)) => {
+                for text in deltas {
+                    cx.events.emit(AgentEvent::ModelTextDelta { text });
+                }
+                Err(ModelError::Transport(message))
             }
             None => Err(ModelError::Protocol("script exhausted".into())),
         }
