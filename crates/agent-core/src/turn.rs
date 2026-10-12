@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::{Agent, AgentSession};
 use crate::event::{AgentEvent, EventSink};
 use crate::hooks::{HookContext, HookError, HookPoint, Hooks, ToolDecision};
+use crate::journal::JournalError;
 use crate::message::{Message, ToolCall, ToolResult};
 use crate::model::{Model, ModelContext, ModelRequest, ModelResponse, StopReason};
 use crate::outcome::{CancelReason, IncompleteReason, RunError, RunOutcome, RunStatus, Step};
@@ -165,6 +166,9 @@ pub struct ActiveRun<'s, M: Model, P: ToolProvider, H: Hooks> {
     interrupt: Interrupt,
     steering: SteeringHandle,
     turn_start: usize,
+    /// The turn's user input, committed to the journal and transcript at the first `step()`
+    /// (D9): `start_turn` stays synchronous, so the input cannot be journaled there.
+    pending_input: Option<Message>,
     model_calls: u32,
     max_model_calls: u32,
     started: bool,
@@ -173,13 +177,18 @@ pub struct ActiveRun<'s, M: Model, P: ToolProvider, H: Hooks> {
 }
 
 impl<'s, M: Model, P: ToolProvider, H: Hooks> ActiveRun<'s, M, P, H> {
-    pub(crate) fn new(session: &'s mut AgentSession<M, P, H>, options: TurnOptions) -> Self {
+    pub(crate) fn new(
+        session: &'s mut AgentSession<M, P, H>,
+        options: TurnOptions,
+        input: Message,
+    ) -> Self {
         let agent = Arc::clone(&session.agent);
         let max_model_calls = options
             .max_model_calls
             .unwrap_or(agent.config.max_model_calls);
-        // The user input was just pushed; it belongs to this turn.
-        let turn_start = session.transcript.len() - 1;
+        // The input is still pending; once committed it lands at this index and everything
+        // from here on belongs to this turn.
+        let turn_start = session.transcript.len();
         Self {
             interrupt: Interrupt {
                 token: CancellationToken::new(),
@@ -190,6 +199,7 @@ impl<'s, M: Model, P: ToolProvider, H: Hooks> ActiveRun<'s, M, P, H> {
             options,
             steering: SteeringHandle::default(),
             turn_start,
+            pending_input: Some(input),
             model_calls: 0,
             max_model_calls,
             started: false,
@@ -314,6 +324,14 @@ impl<'s, M: Model, P: ToolProvider, H: Hooks> ActiveRun<'s, M, P, H> {
         error
     }
 
+    /// Ends the turn after a failed journal append: the session refuses further turns until
+    /// the host recovers it (D6). Memory and events were left untouched by `commit`.
+    fn fail_journal(&mut self, error: JournalError, events: &dyn EventSink) -> RunError {
+        self.session.recovery_required = true;
+        self.finish(RunStatus::Failed, events);
+        RunError::Journal(error)
+    }
+
     fn fail_hook(
         &mut self,
         point: HookPoint,
@@ -386,6 +404,13 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
         let agent = Arc::clone(&self.run.agent);
         let interrupt = self.run.interrupt.clone();
 
+        // The input lands in journal and memory before anything can end the turn, matching
+        // the old behavior where `start_turn` had already pushed it (D9).
+        if let Some(input) = self.run.pending_input.take()
+            && let Err(e) = self.run.session.commit(input, events).await
+        {
+            return Err(self.run.fail_journal(e, events));
+        }
         if !self.run.started {
             self.run.started = true;
             events.emit(AgentEvent::TurnStarted);
@@ -460,11 +485,15 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
             provider_payload,
             stop_reason,
         } = response;
-        self.run.session.transcript.push(Message::Assistant {
+        let assistant = Message::Assistant {
             content,
             tool_calls: tool_calls.clone(),
             provider_payload,
-        });
+        };
+        // Journaled before any tool of this response is dispatched (S4).
+        if let Err(e) = self.run.session.commit(assistant, events).await {
+            return Err(self.run.fail_journal(e, events));
+        }
 
         if !tool_calls.is_empty() {
             return Ok(self.dispatch_tools(&agent, tool_calls, stop_reason).await);

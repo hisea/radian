@@ -149,10 +149,6 @@ pub struct AgentSession<M: Model, P: ToolProvider, H: Hooks> {
     pub(crate) poisoned: bool,
     /// Set when a journal append failed: memory and journal may differ, so the session
     /// refuses new turns until the host recovers it (D6).
-    #[expect(
-        dead_code,
-        reason = "read from start_turn once the failure semantics land"
-    )]
     pub(crate) recovery_required: bool,
     pub(crate) close_state: CloseState,
     /// Steering from turns that ended without returning an outcome.
@@ -171,10 +167,6 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
     /// The append is awaited to completion and never raced against cancellation (D3), and
     /// appends within a session are strictly serialized (D4) because callers await this
     /// before making the next change.
-    #[expect(
-        dead_code,
-        reason = "wired into the write points in the following commits"
-    )]
     pub(crate) async fn commit(
         &mut self,
         message: Message,
@@ -206,7 +198,9 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         self.start_turn_with(input, TurnOptions::default())
     }
 
-    /// Appends `input` and returns the turn. Does no I/O.
+    /// Starts a turn with `input`. Does no I/O: with a journal mounted, the input is
+    /// committed (journaled, then applied to memory) at the start of the turn's first
+    /// `step()`, so `transcript()` does not show it until then (D9).
     pub fn start_turn_with(
         &mut self,
         input: impl Into<Message>,
@@ -222,8 +216,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         if !input.is_user() {
             return Err(SessionError::NotUserMessage);
         }
-        self.transcript.push(input);
-        Ok(ActiveRun::new(self, options))
+        Ok(ActiveRun::new(self, options, input))
     }
 
     /// Starts a turn and runs it to the end. Owns nothing borrowed, so it suits `tokio::spawn`.
