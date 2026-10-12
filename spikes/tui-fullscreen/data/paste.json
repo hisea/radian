@@ -1,0 +1,1 @@
+{"backend":"pty","duration_secs":60,"frame_max_ms":0.8556250000000001,"frame_ms":[0.8556250000000001,0.54,0.5151249999999999],"frame_p50_ms":0.54,"frame_p95_ms":0.8556250000000001,"frames":3,"mode":"paste","paste_bytes":5000,"paste_events":1,"paste_sum":538382,"terminal_size":[120,40],"tokens":0,"tokens_per_sec":200,"tokens_sent":0}

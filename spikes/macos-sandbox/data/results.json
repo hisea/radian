@@ -1,0 +1,221 @@
+{
+  "cases": [
+    {
+      "detail": "退出码 0",
+      "expected": "succeed",
+      "group": "normal_use",
+      "name": "ls 工作区",
+      "passed": true
+    },
+    {
+      "detail": "退出码 0",
+      "expected": "succeed",
+      "group": "normal_use",
+      "name": "写工作区内文件",
+      "passed": true
+    },
+    {
+      "detail": "cat 输出 \"spike\\n\"",
+      "expected": "succeed",
+      "group": "normal_use",
+      "name": "读工作区内文件",
+      "passed": true
+    },
+    {
+      "detail": "退出码 0",
+      "expected": "succeed",
+      "group": "normal_use",
+      "name": "git 只读 status（--no-optional-locks）",
+      "passed": true
+    },
+    {
+      "detail": "退出码 0",
+      "expected": "succeed",
+      "group": "normal_use",
+      "name": "git log",
+      "passed": true
+    },
+    {
+      "detail": "退出码 0",
+      "expected": "succeed",
+      "group": "normal_use",
+      "name": "cargo --version",
+      "passed": true
+    },
+    {
+      "detail": "/bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/outside/x.txt: Operation not p",
+      "expected": "denied",
+      "group": "escape_writes",
+      "name": "绝对路径写工作区外",
+      "passed": true
+    },
+    {
+      "detail": "/bin/sh: ../escape.txt: Operation not permitted",
+      "expected": "denied",
+      "group": "escape_writes",
+      "name": "用 .. 绕出工作区",
+      "passed": true
+    },
+    {
+      "detail": "/bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/ws/link-out/s.txt: Operation n",
+      "expected": "denied",
+      "group": "escape_writes",
+      "name": "经符号链接写工作区外",
+      "passed": true
+    },
+    {
+      "detail": "/bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/outside/deep.txt: Operation no",
+      "expected": "denied",
+      "group": "escape_writes",
+      "name": "嵌套 sh 仍不能写工作区外",
+      "passed": true
+    },
+    {
+      "detail": "退出码 0",
+      "expected": "succeed",
+      "group": "escape_writes",
+      "name": "嵌套 sh 写工作区内",
+      "passed": true
+    },
+    {
+      "detail": "/bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/ws/proj/.git/hooks/hook: Opera",
+      "expected": "denied",
+      "group": "git_dir_readonly",
+      "name": "写 .git/hooks",
+      "passed": true
+    },
+    {
+      "detail": "/bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/ws/proj/.git/config: Operation",
+      "expected": "denied",
+      "group": "git_dir_readonly",
+      "name": "写 .git/config",
+      "passed": true
+    },
+    {
+      "detail": "/bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/ws/proj/.git/info/x: Operation",
+      "expected": "denied",
+      "group": "git_dir_readonly",
+      "name": "写 .git/info",
+      "passed": true
+    },
+    {
+      "detail": "error: could not lock config file .git/config: Operation not permitted",
+      "expected": "denied",
+      "group": "git_dir_readonly",
+      "name": "git config core.hooksPath",
+      "passed": true
+    },
+    {
+      "detail": "fatal: Unable to create '/private<tmpdir>/radian-spike-sb-61190-0/ws/proj/.git/i",
+      "expected": "denied",
+      "group": "git_dir_readonly",
+      "name": "git add（写 .git/index.lock）",
+      "passed": true
+    },
+    {
+      "detail": "退出码 0",
+      "expected": "succeed",
+      "group": "worktree_escapes",
+      "name": "worktree 内写文件",
+      "passed": true
+    },
+    {
+      "detail": "/bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/wt/.git: Operation not permitt",
+      "expected": "denied",
+      "group": "worktree_escapes",
+      "name": "改 worktree 的 .git 指针文件",
+      "passed": true
+    },
+    {
+      "detail": "/bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/mainrepo/.git/hooks/evil: Oper",
+      "expected": "denied",
+      "group": "worktree_escapes",
+      "name": "写共享 .git/hooks",
+      "passed": true
+    },
+    {
+      "detail": "/bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/mainrepo/.git/worktrees/wt/git",
+      "expected": "denied",
+      "group": "worktree_escapes",
+      "name": "写共享 .git/worktrees/<wt>/gitdir",
+      "passed": true
+    },
+    {
+      "detail": "/bin/sh: /private<tmpdir>/radian-spike-sb-61190-0/wt/g/evil3: Operation not perm",
+      "expected": "denied",
+      "group": "worktree_escapes",
+      "name": "经 worktree 内符号链接写共享 .git",
+      "passed": true
+    },
+    {
+      "detail": "退出码 0",
+      "expected": "succeed",
+      "group": "worktree_escapes",
+      "name": "worktree 内 git 只读 status",
+      "passed": true
+    },
+    {
+      "detail": "Operation not permitted (os error 1)",
+      "expected": "denied",
+      "group": "network_off",
+      "name": "connect 自己的监听端口 A",
+      "passed": true
+    },
+    {
+      "detail": "Operation not permitted (os error 1)",
+      "expected": "denied",
+      "group": "network_off",
+      "name": "connect 本机另一端口 B",
+      "passed": true
+    },
+    {
+      "detail": "退出码 0",
+      "expected": "succeed",
+      "group": "network_off",
+      "name": "对照：net-on profile 可连接",
+      "passed": true
+    },
+    {
+      "detail": "子进程读到 \"topsecret\"",
+      "expected": "succeed",
+      "group": "environment",
+      "name": "sandbox-exec 不过滤环境变量（继承即可见）",
+      "passed": true
+    },
+    {
+      "detail": "子进程读到 \"<unset>\"",
+      "expected": "succeed",
+      "group": "environment",
+      "name": "spawner 白名单后未授权变量不可见",
+      "passed": true
+    },
+    {
+      "detail": "子进程读到 \"yes\"",
+      "expected": "succeed",
+      "group": "environment",
+      "name": "白名单内变量可见",
+      "passed": true
+    },
+    {
+      "detail": "serverInfo.name = Some(String(\"mcp-fixture\"))",
+      "expected": "succeed",
+      "group": "mcp_stdio",
+      "name": "initialize 往返",
+      "passed": true
+    },
+    {
+      "detail": "{\"id\":2,\"jsonrpc\":\"2.0\",\"result\":{\"content\":[{\"text\":\"{\\\"hello\\\":\\\"sandbox\\\"}\",\"type\":\"text\"}],\"isError\":false}}",
+      "expected": "succeed",
+      "group": "mcp_stdio",
+      "name": "tools/call echo",
+      "passed": true
+    },
+    {
+      "detail": "env 工具返回 Some(String(\"<unset>\"))",
+      "expected": "succeed",
+      "group": "mcp_stdio",
+      "name": "MCP 子进程的 env 白名单（宿主密钥不可见）",
+      "passed": true
+    }
+  ]
+}

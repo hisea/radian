@@ -1,0 +1,1 @@
+5000 字节多行 bracketed paste；app 收到 bytes=5000 sum=538382；发送→状态行显示 13ms；paste 期间最大帧 0.8556250000000001ms
