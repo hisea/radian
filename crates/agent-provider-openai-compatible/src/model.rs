@@ -19,12 +19,25 @@ const ERROR_BODY_BYTES: usize = 2048;
 ///
 /// There is no retry: a failed request ends the turn with a `ModelError`, and the host decides
 /// whether to try again.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpenAiCompatible {
     client: Client,
     endpoint: Url,
     headers: HeaderMap,
     config: OpenAiCompatibleConfig,
+    /// The API key and custom header values, masked in every error message.
+    secrets: Vec<String>,
+}
+
+impl std::fmt::Debug for OpenAiCompatible {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `secrets` is left out on purpose; `headers` marks its values sensitive.
+        f.debug_struct("OpenAiCompatible")
+            .field("endpoint", &self.endpoint)
+            .field("headers", &self.headers)
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
 }
 
 impl OpenAiCompatible {
@@ -67,6 +80,8 @@ impl OpenAiCompatible {
                 .map_err(|_| ConfigError::Header(name.clone()))?;
             let header_value =
                 HeaderValue::from_str(value).map_err(|_| ConfigError::Header(name.clone()))?;
+            let mut header_value = header_value;
+            header_value.set_sensitive(true);
             headers.insert(header_name, header_value);
         }
 
@@ -77,11 +92,19 @@ impl OpenAiCompatible {
             .redirect(redirect::Policy::none())
             .build()
             .map_err(|e| ConfigError::Client(e.without_url().to_string()))?;
+        let secrets = config
+            .api_key
+            .iter()
+            .map(|key| key.expose().to_owned())
+            .chain(config.headers.iter().map(|(_, value)| value.clone()))
+            .filter(|secret| !secret.is_empty())
+            .collect();
         Ok(Self {
             client,
             endpoint: base,
             headers,
             config,
+            secrets,
         })
     }
 
@@ -155,7 +178,24 @@ impl Model for OpenAiCompatible {
             () = cx.cancellation.cancelled() => {
                 Err(ModelError::Transport("the request was cancelled".into()))
             }
-            result = self.run(body, taken, cx.events) => result,
+            result = self.run(body, taken, cx.events) => result.map_err(|e| self.mask(e)),
+        }
+    }
+}
+
+impl OpenAiCompatible {
+    /// A server may echo the credentials it was sent in an error body or stream error; the
+    /// host will log what we return, so mask them here.
+    fn mask(&self, error: ModelError) -> ModelError {
+        let scrub = |mut text: String| {
+            for secret in &self.secrets {
+                text = text.replace(secret.as_str(), "<redacted>");
+            }
+            text
+        };
+        match error {
+            ModelError::Transport(text) => ModelError::Transport(scrub(text)),
+            ModelError::Protocol(text) => ModelError::Protocol(scrub(text)),
         }
     }
 }

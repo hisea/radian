@@ -3,7 +3,8 @@ use std::time::Duration;
 
 use serde_json::{Map, Value};
 
-/// An API key that never shows up in `Debug` output or error messages.
+/// An API key that never shows up in `Debug` output. The adapter also masks it in the error
+/// messages it produces, including text a server echoes back.
 #[derive(Clone)]
 pub struct ApiKey(String);
 
@@ -26,7 +27,7 @@ impl fmt::Debug for ApiKey {
 /// How to reach an OpenAI-compatible `/chat/completions` endpoint.
 ///
 /// The library never reads the environment; the host decides where the key comes from.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpenAiCompatibleConfig {
     /// Everything before `/chat/completions`, e.g. `https://api.openai.com/v1`.
     pub base_url: String,
@@ -44,6 +45,23 @@ pub struct OpenAiCompatibleConfig {
     /// Cap on the text and tool-call arguments of one response. A server that never stops
     /// cannot grow host memory past it.
     pub max_response_bytes: usize,
+}
+
+/// Header values are hidden: custom headers often carry credentials such as `X-API-Key`.
+impl fmt::Debug for OpenAiCompatibleConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let header_names: Vec<&str> = self.headers.iter().map(|(name, _)| name.as_str()).collect();
+        f.debug_struct("OpenAiCompatibleConfig")
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key)
+            .field("headers", &header_names)
+            .field("extra_body", &self.extra_body)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("idle_timeout", &self.idle_timeout)
+            .field("max_response_bytes", &self.max_response_bytes)
+            .finish()
+    }
 }
 
 impl OpenAiCompatibleConfig {

@@ -570,4 +570,82 @@ fn the_key_is_hidden_from_debug_output() {
     let model = OpenAiCompatible::new(config.clone()).unwrap();
     assert!(!format!("{config:?}").contains("sk-secret-key"));
     assert!(!format!("{model:?}").contains("sk-secret-key"));
+
+    let mut config = config;
+    config
+        .headers
+        .push(("X-Api-Key".into(), "hdr-secret-value".into()));
+    let model = OpenAiCompatible::new(config).unwrap();
+    assert!(!format!("{model:?}").contains("hdr-secret-value"));
+}
+
+// ---------- secrets in errors ----------
+
+async fn run_error(model: OpenAiCompatible) -> String {
+    let mut session = chat(model, NoTools).await;
+    let error = session
+        .run_turn("hi", TurnOptions::default(), &NoopSink)
+        .await
+        .unwrap_err();
+    let RunError::Model(model_error) = error else {
+        panic!("expected a model error")
+    };
+    model_error.to_string()
+}
+
+#[tokio::test]
+async fn an_http_error_body_that_echoes_the_key_is_masked() {
+    let server = MockServer::start(vec![Reply::status(
+        401,
+        "{\"error\":{\"message\":\"Incorrect API key provided: sk-secret-key\"}}",
+    )])
+    .await;
+
+    let message = run_error(model(&server)).await;
+
+    assert!(message.contains("Incorrect API key provided"), "{message}");
+    assert!(!message.contains("sk-secret-key"), "{message}");
+}
+
+#[tokio::test]
+async fn a_stream_error_that_echoes_the_key_is_masked() {
+    let server = MockServer::start(vec![Reply::sse(&[serde_json::json!({
+        "error": {"message": "rejected key sk-secret-key"}
+    })])])
+    .await;
+
+    let message = run_error(model(&server)).await;
+
+    assert!(message.contains("rejected key"), "{message}");
+    assert!(!message.contains("sk-secret-key"), "{message}");
+}
+
+#[tokio::test]
+async fn a_custom_header_value_echoed_by_the_server_is_masked() {
+    let server = MockServer::start(vec![Reply::status(403, "denied for hdr-secret-value")]).await;
+
+    let message = run_error(model_with(&server, |config| {
+        config
+            .headers
+            .push(("X-Api-Key".into(), "hdr-secret-value".into()));
+    }))
+    .await;
+
+    assert!(message.contains("denied for"), "{message}");
+    assert!(!message.contains("hdr-secret-value"), "{message}");
+}
+
+#[test]
+fn debug_output_hides_the_key_and_header_values() {
+    let mut config = OpenAiCompatibleConfig::new("https://example.com/v1", "m")
+        .with_api_key(ApiKey::new("sk-secret-key"));
+    config
+        .headers
+        .push(("X-Api-Key".into(), "hdr-secret-value".into()));
+
+    let text = format!("{config:?}");
+
+    assert!(text.contains("X-Api-Key"), "names stay visible: {text}");
+    assert!(!text.contains("sk-secret-key"), "{text}");
+    assert!(!text.contains("hdr-secret-value"), "{text}");
 }
