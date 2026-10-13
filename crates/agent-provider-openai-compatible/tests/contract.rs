@@ -330,3 +330,41 @@ async fn contract_10_secret_not_leaked() {
 async fn contract_11_context_overflow() {
     contract::check_context_overflow(&harness()).await
 }
+
+/// ADR 0018: a user message may carry an attached file as its **own** part. The
+/// OpenAI-compatible adapter joins the parts with a blank line, exactly as before, and there
+/// is no `<file>` wrapper any more.
+#[tokio::test]
+async fn contract_12_attachment_parts_are_joined_by_blank_lines() {
+    let server = MockServer::start(vec![Reply::sse(&[
+        chunk(json!({"role": "assistant", "content": "ok"}), None),
+        chunk(json!({}), Some("stop")),
+    ])])
+    .await;
+    let base = server.base_url.clone();
+    let model = OpenAiCompatible::new(
+        OpenAiCompatibleConfig::new(base, "contract-model").with_api_key(ApiKey::new(SECRET)),
+    )
+    .expect("a local mock config is valid");
+    let request = ModelRequest {
+        system_prompt: None,
+        messages: vec![Message::User {
+            content: vec![
+                ContentPart::text("look at @notes.txt"),
+                ContentPart::attachment("alpha\nbeta", "notes.txt"),
+            ],
+            meta: MessageMeta::default(),
+        }],
+        tools: Vec::new(),
+        settings: Value::Null,
+    };
+    model
+        .complete(request, agent_provider_contract::context(&NoopSink))
+        .await
+        .unwrap();
+    let body = server.requests()[0].json();
+    let content = body["messages"][0]["content"]
+        .as_str()
+        .expect("the user content is one string on this wire");
+    assert_eq!(content, "look at @notes.txt\n\nalpha\nbeta");
+}
