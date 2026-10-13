@@ -8,7 +8,7 @@ use agent_core::{
 use radian_sandbox::{Sandbox, SandboxMode};
 
 use crate::workspace::{WorkspaceError, WorkspaceRoot};
-use crate::{fail, git, list, patch, read, shell, write};
+use crate::{ask, fail, git, list, patch, read, shell, write};
 
 /// Resource bounds, all overridable with [`CodingTools::with_limits`]. Defaults are chosen
 /// so a single tool call cannot blow up the model context or the session file.
@@ -86,6 +86,9 @@ pub struct CodingTools {
     root: Arc<WorkspaceRoot>,
     limits: Limits,
     sandbox: Option<Arc<Sandbox>>,
+    /// The human, when there is one (ADR 0024 Q1). `None` means `ask_user` is not advertised
+    /// at all: a model never asks a question nobody can answer.
+    prompter: Option<Arc<dyn ask::Prompter>>,
 }
 
 impl CodingTools {
@@ -98,6 +101,7 @@ impl CodingTools {
             root: Arc::new(WorkspaceRoot::new(root)?),
             limits: Limits::default(),
             sandbox: None,
+            prompter: None,
         })
     }
 
@@ -121,7 +125,15 @@ impl CodingTools {
             root: Arc::new(root),
             limits: Limits::default(),
             sandbox: Some(Arc::new(sandbox)),
+            prompter: None,
         })
+    }
+
+    /// Adds `ask_user` (ADR 0024 Q1). A host with an interactive user calls this; every other
+    /// host does not, and the model's tool list has no `ask_user`.
+    pub fn with_prompter(mut self, prompter: Arc<dyn ask::Prompter>) -> Self {
+        self.prompter = Some(prompter);
+        self
     }
 
     pub fn with_limits(mut self, limits: Limits) -> Self {
@@ -137,6 +149,11 @@ impl CodingTools {
     pub fn sandbox_mode(&self) -> Option<SandboxMode> {
         self.sandbox.as_deref().map(Sandbox::mode)
     }
+
+    /// Whether `ask_user` is advertised (a prompter was injected).
+    pub fn has_prompter(&self) -> bool {
+        self.prompter.is_some()
+    }
 }
 
 impl ToolProvider for CodingTools {
@@ -147,21 +164,26 @@ impl ToolProvider for CodingTools {
             root: Arc::clone(&self.root),
             limits: self.limits,
             sandbox: self.sandbox.clone(),
-            specs: specs(self.sandbox.as_deref().map(Sandbox::mode)),
+            prompter: self.prompter.clone(),
+            specs: specs(
+                self.sandbox.as_deref().map(Sandbox::mode),
+                self.prompter.is_some(),
+            ),
         })
     }
 }
 
-/// One session's view of the built-in tools. Holds only the root, the limits, the sandbox
-/// and the specs; there is no per-session state to close.
+/// One session's view of the built-in tools. Holds only the root, the limits, the sandbox,
+/// the prompter and the specs; there is no per-session state to close.
 pub struct CodingSession {
     root: Arc<WorkspaceRoot>,
     limits: Limits,
     sandbox: Option<Arc<Sandbox>>,
+    prompter: Option<Arc<dyn ask::Prompter>>,
     specs: Vec<ToolSpec>,
 }
 
-fn specs(shell_mode: Option<SandboxMode>) -> Vec<ToolSpec> {
+fn specs(shell_mode: Option<SandboxMode>, has_prompter: bool) -> Vec<ToolSpec> {
     let mut specs = vec![
         read::spec(),
         write::spec(),
@@ -172,6 +194,9 @@ fn specs(shell_mode: Option<SandboxMode>) -> Vec<ToolSpec> {
     ];
     if let Some(mode) = shell_mode {
         specs.push(shell::spec(mode));
+    }
+    if has_prompter {
+        specs.push(ask::spec());
     }
     specs
 }
@@ -202,6 +227,15 @@ impl ToolSession for CodingSession {
                 None => Err(fail(
                     "unknown_tool",
                     "`shell` needs a sandbox and this session has none",
+                )),
+            },
+            "ask_user" => match &self.prompter {
+                Some(prompter) => ask::run(prompter, &call.arguments, &cx).await,
+                // Unreachable through the advertised specs; a hand-built call gets a refusal,
+                // never a hang.
+                None => Err(fail(
+                    "unknown_tool",
+                    "`ask_user` needs an interactive user and this session has none",
                 )),
             },
             other => Err(fail(

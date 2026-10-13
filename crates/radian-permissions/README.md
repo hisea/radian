@@ -30,6 +30,11 @@ in all three tiers, `memory_save` and `memory_revise` are `ask` in all three (`-
 the ask, a `deny` still wins). There is deliberately no agent tool for archive/forget/purge/
 confirm; an agent can only add or revise, and the store refuses a `source: User` record.
 
+`ask_user` (ADR 0024 Q6) is `allow` in **all three** tiers: it writes nothing and runs
+nothing, so it never prompts. It still goes through the ordinary hook path, and its answer is
+data — it grants no permission for the tool calls the model makes afterwards.
+(`ask_user_is_allowed_in_every_tier` in `src/profile.rs`.)
+
 ## Shell matching (the part most likely to hide a hole)
 
 This is a deliberate conservative approximation, **not a shell parser**.
@@ -123,6 +128,7 @@ transcript record, so it never appears in `journal_records`/`replay`.
 | 9 | `PermissionResolved` round trip, not replayed | `radian-session/tests/permission_event.rs` |
 | 10 | preset behaviour (safe denies writes, full allows) | `tests/rule.rs` |
 | 11 | resolved-path matching (`..`, symlinks) | `tests/rule.rs` |
+| 12 | `ask_user` is fixed `allow` in all three tiers (ADR 0024 Q6) | `src/profile.rs` |
 
 ## Not verified / limits
 
