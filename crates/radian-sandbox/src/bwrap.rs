@@ -152,7 +152,7 @@ impl SandboxBackend for Bwrap {
         // `/tmp` must not be masked, since the workspace may live under it). PATH comes from
         // the parent when present.
         let tmp = workspace_tmp(policy);
-        let home = policy.workspace.join(".radian").join("home");
+        let home = policy.workspace.join(".radian-sandbox").join("home");
         let _ = std::fs::create_dir_all(&home);
         set_env(&mut command, "PATH", "/usr/bin:/bin");
         command.arg("--setenv").arg("HOME").arg(&home);

@@ -30,10 +30,10 @@ session file is created, and no network is touched. The version is the package's
 
 Every run is a durable session: one JSONL file per conversation.
 
-- **Where**: `--session-dir <dir>`, else `$RADIAN_SESSION_DIR`, else the user's *data*
-  directory — `$XDG_DATA_HOME/radian/sessions` (default `~/.local/share/radian/sessions`)
-  on Linux, `~/Library/Application Support/radian/sessions` on macOS. Sessions are records,
-  not a cache, so they do not live under a cache directory (ADR 0013 decision 4).
+- **Where**: `--session-dir <dir>`, else `$RADIAN_SESSION_DIR`, else `~/.radian/sessions`
+  (`$RADIAN_HOME/sessions` when `RADIAN_HOME` is set; ADR 0020). Sessions are records, not a
+  cache. The same `~/.radian/` root holds `config/`, `cache/` and `memory/`; the sandbox
+  denies read on `sessions/` and `memory/`.
 - **New session**: `--session-id <id>` names it (the same value expands `{session_id}` in
   `--header`); otherwise an id is generated and printed to stderr.
 - **`--resume <id>`**: reopen a session and continue; the previous history is sent to the
@@ -99,7 +99,8 @@ The window comes from one of three places, in order:
    `--catalog-provider`, or derived from the `--base-url` hostname (`opencode.ai` →
    `opencode`, `api.anthropic.com` → `anthropic`, `api.openai.com` → `openai`,
    `api.deepseek.com` → `deepseek`, ...). The catalog is a read-only GET with **no key, no
-   header and no user data**, cached owner-only under `<cache>/radian/catalog/models.json`
+   header and no user data**, cached owner-only under `~/.radian/cache/catalog/models.json`
+   (`$RADIAN_HOME/cache/catalog/models.json`)
    and refreshed at most once every 24 h (3 s timeout; a failed fetch falls back to the
    cache). `--offline-catalog` never goes out; `--catalog-provider` overrides the hostname
    mapping.

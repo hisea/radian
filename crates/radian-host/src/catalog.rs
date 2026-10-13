@@ -297,10 +297,10 @@ impl WindowQuery {
     }
 }
 
-/// The catalog cache file: `<cache root>/catalog/models.json` (ADR 0013 decision 4's root).
+/// The catalog cache file: `~/.radian/cache/catalog/models.json` (ADR 0020's layout).
 pub fn cache_path() -> PathBuf {
-    match crate::diagnostics::cache_dir() {
-        Some(dir) => dir.join("catalog").join("models.json"),
+    match crate::home::catalog_cache() {
+        Some(path) => path,
         // No HOME: a path the write will fail on, so the window stays unknown.
         None => PathBuf::from("radian-catalog-models.json"),
     }

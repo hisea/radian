@@ -128,6 +128,8 @@ struct Rig {
     repo: PathBuf,
     main: PathBuf,
     wt: PathBuf,
+    /// A sessions directory moved elsewhere (`--session-dir`), which must also be denied.
+    custom_sessions: PathBuf,
     worktree_name: String,
     cases: Vec<Case>,
 }
@@ -147,16 +149,40 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
     std::fs::create_dir_all(home.join(".ssh"))?;
     std::fs::write(home.join(".ssh/id_ed25519"), "FAKE-KEY-NOT-A-REAL-SECRET\n")?;
     std::fs::write(home.join("readable.txt"), "plain\n")?;
+    // ADR 0020: a fake `~/.radian/` with the four subdirectories, so the matrix can assert
+    // sessions/memory are unreadable and config/cache are readable. The test only ever reads
+    // these through the sandbox (redirected to /dev/null) or not at all.
+    let radian_home = home.join(".radian");
+    for (dir, file) in [
+        ("sessions", "s.jsonl"),
+        ("memory", "m.txt"),
+        ("config", "c.toml"),
+        ("cache", "cache.txt"),
+    ] {
+        std::fs::create_dir_all(radian_home.join(dir))?;
+        std::fs::write(radian_home.join(dir).join(file), "radian-data\n")?;
+    }
+    // A sessions directory moved elsewhere (`--session-dir`): it must be denied too.
+    std::fs::create_dir_all(root.join("custom-sessions"))?;
+    let custom_sessions = std::fs::canonicalize(root.join("custom-sessions"))?;
+    std::fs::write(custom_sessions.join("x.jsonl"), "{}\n")?;
     // A symlink from inside the workspace to a sibling outside it.
     symlink(&outside, &ws.join("leak"))?;
     // A symlink from inside the worktree to the shared git directory.
     symlink(&main.join(".git"), &wt.join("leakgit"))?;
 
-    let policy = SandboxPolicy::workspace_write(&ws)?.deny_read(home.join(".ssh"));
+    let radian_deny = |policy: SandboxPolicy| {
+        policy
+            .deny_read(home.join(".ssh"))
+            .deny_read(radian_home.join("sessions"))
+            .deny_read(radian_home.join("memory"))
+            .deny_read(&custom_sessions)
+    };
+    let policy = radian_deny(SandboxPolicy::workspace_write(&ws)?);
     let sandbox = Sandbox::from_policy(policy.clone())?;
     // ADR 0016: the network cases are asserted against `safe` (off) and `workspace` (on),
     // so the rig needs both enforced sandboxes as well as the transparent control.
-    let safe = Sandbox::from_policy(SandboxPolicy::safe(&ws)?.deny_read(home.join(".ssh")))?;
+    let safe = Sandbox::from_policy(radian_deny(SandboxPolicy::safe(&ws)?))?;
     let control = Sandbox::new(SandboxMode::FullAccess, &ws)?;
     let worktree_name = wt
         .file_name()
@@ -171,6 +197,7 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
         repo,
         main,
         wt,
+        custom_sessions,
         worktree_name,
         cases: Vec::new(),
     };
@@ -184,6 +211,7 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
     rig.normal_use(&sandbox, &control);
     rig.git_metadata(&sandbox, &control);
     rig.sensitive_read(&sandbox, &control);
+    rig.radian_home(&sandbox, &control);
     rig.mcp_stdio(&sandbox, &control);
     rig.signals(&sandbox, &control);
 
@@ -639,6 +667,57 @@ impl Rig {
             "normal_file_still_readable",
             Expect::MustSucceed,
             &format!("cat {} > /dev/null", q(&self.home.join("readable.txt"))),
+        );
+    }
+
+    /// ADR 0020: `~/.radian/sessions` and `~/.radian/memory` are not readable; `config` and
+    /// `cache` are. A sessions directory moved by `--session-dir` is denied as well. Each case
+    /// carries the transparent control (which can read everything).
+    fn radian_home(&mut self, sandbox: &Sandbox, control: &Sandbox) {
+        let g = "radian_home";
+        let radian = self.home.join(".radian");
+        self.sh_case(
+            sandbox,
+            control,
+            g,
+            "sessions_unreadable",
+            Expect::MustFail,
+            &format!("cat {} > /dev/null", q(&radian.join("sessions/s.jsonl"))),
+        );
+        self.sh_case(
+            sandbox,
+            control,
+            g,
+            "memory_unreadable",
+            Expect::MustFail,
+            &format!("cat {} > /dev/null", q(&radian.join("memory/m.txt"))),
+        );
+        self.sh_case(
+            sandbox,
+            control,
+            g,
+            "config_readable",
+            Expect::MustSucceed,
+            &format!("cat {} > /dev/null", q(&radian.join("config/c.toml"))),
+        );
+        self.sh_case(
+            sandbox,
+            control,
+            g,
+            "cache_readable",
+            Expect::MustSucceed,
+            &format!("cat {} > /dev/null", q(&radian.join("cache/cache.txt"))),
+        );
+        self.sh_case(
+            sandbox,
+            control,
+            g,
+            "moved_sessions_unreadable",
+            Expect::MustFail,
+            &format!(
+                "cat {} > /dev/null",
+                q(&self.custom_sessions.join("x.jsonl"))
+            ),
         );
     }
 

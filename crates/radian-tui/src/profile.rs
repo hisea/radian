@@ -14,7 +14,7 @@ use std::path::Path;
 use radian_permissions::{
     Action, ApprovalPolicy, Preset, Profile, ResourceMatcher, Rule, ToolMatcher,
 };
-use radian_sandbox::{Sandbox, SandboxMode};
+use radian_sandbox::{Sandbox, SandboxMode, SandboxPolicy};
 
 /// The `--profile` value: a product concept (ADR 0012 P1), not a backend flag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,7 +104,11 @@ pub fn build_profile(
 /// `safe` mounts no `shell` and its rules deny every execution path, so there is nothing to
 /// sandbox and `None` is returned. `workspace-write` and `full-access` build a sandbox for the
 /// workspace; for the enforced tier a probe failure is an **error**, never a fallback.
-pub fn build_sandbox(tier: Tier, workspace: &Path) -> Result<Option<Sandbox>, String> {
+pub fn build_sandbox(
+    tier: Tier,
+    workspace: &Path,
+    deny_read: &[std::path::PathBuf],
+) -> Result<Option<Sandbox>, String> {
     if tier == Tier::Safe {
         return Ok(None);
     }
@@ -112,7 +116,14 @@ pub fn build_sandbox(tier: Tier, workspace: &Path) -> Result<Option<Sandbox>, St
     if probe_failure_injected() {
         return Err(unavailable(tier, mode));
     }
-    match Sandbox::new(mode, workspace) {
+    let mut policy = SandboxPolicy::new(mode, workspace)
+        .map_err(|error| format!("{}: {error}", unavailable(tier, mode)))?;
+    // ADR 0020 decision 3: the actual sessions directory and the memory directory are not
+    // readable in the enforced tiers. `full` never reaches here.
+    for path in deny_read {
+        policy = policy.deny_read(path);
+    }
+    match Sandbox::from_policy(policy) {
         Ok(sandbox) => Ok(Some(sandbox)),
         Err(error) => Err(format!("{}: {error}", unavailable(tier, mode))),
     }

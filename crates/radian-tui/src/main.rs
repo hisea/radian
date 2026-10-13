@@ -70,9 +70,8 @@ struct Cli {
     #[arg(long = "header", value_name = "NAME=VALUE")]
     header: Vec<String>,
 
-    /// Where session files live. Defaults to `RADIAN_SESSION_DIR`, then the platform's data
-    /// directory (`~/.local/share/radian/sessions`, or `Library/Application Support` on
-    /// macOS). The same convention as `agent-cli`.
+    /// Where session files live. Defaults to `RADIAN_SESSION_DIR`, then `~/.radian/sessions`
+    /// (`$RADIAN_HOME/sessions` when that is set, ADR 0020). The same rule as `agent-cli`.
     #[arg(long, value_name = "DIR")]
     session_dir: Option<PathBuf>,
 
@@ -247,6 +246,13 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
     // startup. A failure is one line, never a fault.
     radian_host::clean_startup();
     let dir = session_dir(&cli)?;
+    // ADR 0020 decision 5: never move a user's data; print a copy-pasteable command instead.
+    if cli.session_dir.is_none()
+        && std::env::var("RADIAN_SESSION_DIR").map_or(true, |dir| dir.is_empty())
+        && let Some(hint) = radian_host::legacy_sessions_hint()
+    {
+        eprintln!("{hint}");
+    }
     // The session id is resolved before the headers: a `{session_id}` in a header expands to
     // this process's id, and `--resume` uses the id being resumed. The parser is the same one
     // `agent-cli` uses, so `{session_id}`, name validation and the `authorization` refusal
@@ -300,7 +306,15 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
     // here, never a fallback to an unsandboxed run (ADR 0012 decision 2). Still before
     // the session file exists, so a refusal leaves nothing behind (dogfooding D2).
     let tier = radian_tui::profile::parse_tier(&cli.profile)?;
-    let sandbox = radian_tui::profile::build_sandbox(tier, &workspace_path)?;
+    // ADR 0020 decision 3: the sandbox denies read on the **actual** sessions directory and
+    // the memory directory. Create them owner-only first so Linux's bwrap (which can only mask
+    // paths that exist) can hide them.
+    let _ = radian_host::ensure_private_dir(&dir);
+    let mut sandbox_deny_read = vec![dir.clone()];
+    if let Some(memory) = radian_host::memory_dir() {
+        sandbox_deny_read.push(memory);
+    }
+    let sandbox = radian_tui::profile::build_sandbox(tier, &workspace_path, &sandbox_deny_read)?;
     // The description is taken before the sandbox moves into the tools.
     let (startup, meaning) = radian_tui::profile::describe(tier, sandbox.as_ref());
     // The MCP config file is read and validated here: before any server process starts and
@@ -717,24 +731,10 @@ fn session_dir(cli: &Cli) -> Result<PathBuf, String> {
     {
         return Ok(PathBuf::from(dir));
     }
-    let home = std::env::var("HOME")
-        .map_err(|_| "no HOME to place sessions under; pass --session-dir".to_string())?;
-    if let Ok(xdg) = std::env::var("XDG_DATA_HOME")
-        && !xdg.is_empty()
-    {
-        return Ok(PathBuf::from(xdg).join("radian").join("sessions"));
-    }
-    if cfg!(target_os = "macos") {
-        Ok(PathBuf::from(home)
-            .join("Library/Application Support")
-            .join("radian")
-            .join("sessions"))
-    } else {
-        Ok(PathBuf::from(home)
-            .join(".local/share")
-            .join("radian")
-            .join("sessions"))
-    }
+    // ADR 0020: the default is `~/.radian/sessions` (or `$RADIAN_HOME/sessions`).
+    radian_host::sessions_dir().ok_or_else(|| {
+        "no RADIAN_HOME or HOME to place sessions under; pass --session-dir".to_string()
+    })
 }
 
 /// The workspace a session belongs to: `--workspace` when given, else the current directory,

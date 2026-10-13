@@ -190,3 +190,13 @@ M10 的变异只在报错字符串上；测试还断言已有 `.jsonl` 字节不
 | # | 变异 | 结果 | 抓住它的测试 |
 |---|---|---|---|
 | M10 | 删掉 `ProfileArg` 的 `alias = "workspace-write"` / `alias = "full-access"` | ✅ failed | `tier_names_and_aliases_are_accepted_but_help_lists_only_new_names`（旧名不再被接受） |
+
+## ADR 0020 沙箱禁读接线（2026-10-13）
+
+一次性 worktree `/tmp/home-mut`（从 `62cdcf3` 创建，用完删除），`--no-fail-fast`；变异后从副本还原，
+`git status --short` 为空。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M1 | 宿主不把实际会话目录加进 `deny_read` | ✅ 抓住 (rc=101) | `workspace_shell_cannot_read_the_sessions_directory` 与 `workspace_shell_cannot_read_a_moved_sessions_directory`（两条都失败） |
+| M5 | `session_dir` 仍用旧的数据目录（`~/.local/share/radian/sessions`） | ✅ 抓住 (rc=101) | `radian_home_places_sessions_under_the_radian_root` |

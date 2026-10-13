@@ -56,9 +56,9 @@ Both hosts read the API key **only** from an environment variable — never from
 — and never print it. The default variable is `$OPENAI_API_KEY` for `openai-compatible` and
 `$ANTHROPIC_API_KEY` for `anthropic`; `--api-key-env` names a different one. A session is one
 `<session-dir>/<session-id>.jsonl` file; the session directory defaults to
-`--session-dir`, else `$RADIAN_SESSION_DIR`, else the platform data directory
-(`~/Library/Application Support/radian/sessions` on macOS, `$XDG_DATA_HOME/radian/sessions` or
-`~/.local/share/radian/sessions` elsewhere).
+`--session-dir`, else `$RADIAN_SESSION_DIR`, else `~/.radian/sessions` (`$RADIAN_HOME/sessions`
+when `RADIAN_HOME` is set, ADR 0020). The same `~/.radian/` root also holds `config/`,
+`cache/` and `memory/`; the sandbox denies read on `sessions/` and `memory/`.
 
 ### `agent` (line prompt)
 
