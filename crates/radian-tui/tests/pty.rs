@@ -306,6 +306,21 @@ impl Pty {
             .ok()
     }
 
+    /// Waits until `needle` is **gone** from the screen (a modal that was cleared).
+    fn wait_until_gone(&mut self, needle: &str, secs: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        loop {
+            self.pump();
+            if !self.parser.screen().contents().contains(needle) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     fn screen(&mut self) -> String {
         self.pump();
         self.parser.screen().contents()
@@ -4197,4 +4212,169 @@ fn pty_a_flooding_producer_still_draws_and_answers_keys() {
         pty.screen()
     );
     pty.quit();
+}
+
+// ---------- ADR 0024: the structured question (ask_user) ----------
+
+/// The `ask_user` arguments the ask tests use: one single, one multi, one text; all required.
+fn ask_questions() -> serde_json::Value {
+    json!({"questions": [
+        {"id": "loader", "prompt": "How should it load?", "kind": "single",
+         "options": [{"id": "builtin", "label": "Built-in"}, {"id": "process", "label": "Plugins"}],
+         "required": true},
+        {"id": "tiers", "prompt": "Which tiers ship?", "kind": "multi",
+         "options": [{"id": "safe", "label": "Safe"}, {"id": "workspace", "label": "Workspace"}],
+         "required": true},
+        {"id": "name", "prompt": "What is it called?", "kind": "text", "required": true}
+    ]})
+}
+
+/// `ask_user` with those questions, then the text reply.
+fn ask_reply(done: &str) -> Vec<Reply> {
+    vec![
+        tool_reply("call_ask", "ask_user", &ask_questions().to_string()),
+        text_reply(done),
+    ]
+}
+
+/// ADR 0024 Q5/Q7 end to end: the TUI registers `ask_user`, shows the form, and the turn
+/// continues after three answers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_ask_user_answers_three_questions_and_the_turn_continues() {
+    let _serial = pty_guard();
+    // The workspace is a **sibling** of the session directory: the sandbox denies read on the
+    // sessions directory, so a workspace inside it could not be both hidden and usable (the
+    // linux3 finding).
+    let dir = TempDir::new("ask");
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(ask_reply("ASK-DONE")).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "ask",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        40,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // ADR 0024 Q5: this host has an interactive user, so the startup line says so.
+    assert!(
+        pty.wait_for_screen("ask_user: on", 10),
+        "the startup line must say ask_user is on: {}",
+        pty.screen()
+    );
+    pty.send(b"go\r");
+    assert!(
+        pty.wait_for_screen("How should it load?", 20),
+        "no question form: {}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("question 1/3", 20),
+        "the title must name the position: {}",
+        pty.screen()
+    );
+    // Question 1 (single): select the highlighted option.
+    pty.send(b" ");
+    pty.send(b"\t");
+    // Question 2 (multi): select the highlighted option.
+    pty.send(b" ");
+    pty.send(b"\t");
+    // Question 3 (text): type.
+    pty.send(b"radian");
+    // Enter -> the overview, Enter -> submit.
+    pty.send(b"\r");
+    assert!(
+        pty.wait_for_screen("overview", 20),
+        "the overview must be shown: {}",
+        pty.screen()
+    );
+    pty.send(b"\r");
+    assert!(
+        pty.wait_for_screen("ASK-DONE", 30),
+        "the turn must continue after the answers: {}",
+        pty.screen()
+    );
+}
+
+/// ADR 0024 Q4: Ctrl-C while a question is up cancels the turn, the form goes with the waiter
+/// (ADR 0023 U7), and **no** answer is sent: the model is never asked again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_ctrl_c_during_a_question_cancels_without_an_answer() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("ask-cancel");
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        Reply::sse(&[
+            chunk(json!({"role": "assistant", "content": "WORKING"}), None),
+            chunk(
+                json!({"tool_calls": [{"index": 0, "id": "call_ask", "type": "function",
+                    "function": {"name": "ask_user", "arguments": ask_questions().to_string()}}]}),
+                None,
+            ),
+            chunk(json!({}), Some("tool_calls")),
+        ]),
+        text_reply("ASK-DONE"),
+    ])
+    .await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "ask-cancel",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        40,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"go\r");
+    assert!(
+        pty.wait_for_screen("How should it load?", 20),
+        "no question form: {}",
+        pty.screen()
+    );
+    // The streamed text before the question is drawn normally, not lost.
+    assert!(
+        pty.screen().contains("WORKING"),
+        "the streamed text must still be on screen: {}",
+        pty.screen()
+    );
+    pty.send(&[0x03]);
+    // The form's own title, not the prompt: the transcript shows the tool call's arguments,
+    // which contain the prompt text.
+    assert!(
+        pty.wait_until_gone("question 1/3", 20),
+        "the form must go with the cancelled wait: {}",
+        pty.screen()
+    );
+    // One request only: the tool never returned an answer, so the model was never asked again.
+    assert_eq!(
+        server.requests().len(),
+        1,
+        "a cancelled question must not produce an answer"
+    );
+    assert!(!pty.screen().contains("ASK-DONE"));
 }
