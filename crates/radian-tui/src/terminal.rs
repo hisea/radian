@@ -98,8 +98,9 @@ fn redact(text: &str, secrets: &[String]) -> String {
 }
 
 /// Records the panic summary (for the exit line) and appends a timestamped line to the panic
-/// log, if one was set. Never panics itself: a panic hook that panicked would abort.
-fn record_panic(info: &std::panic::PanicHookInfo<'_>) {
+/// log, if one was set, and returns the redacted report for stderr. Never panics itself: a
+/// panic hook that panicked would abort.
+fn record_panic(info: &std::panic::PanicHookInfo<'_>) -> String {
     let thread = std::thread::current()
         .name()
         .unwrap_or("<unnamed>")
@@ -137,6 +138,7 @@ fn record_panic(info: &std::panic::PanicHookInfo<'_>) {
             let _ = file.flush();
         }
     }
+    format!("thread '{thread}' {redacted}")
 }
 
 /// Installs a panic hook that restores the terminal **only when the panicking thread is the
@@ -150,14 +152,18 @@ fn record_panic(info: &std::panic::PanicHookInfo<'_>) {
 ///
 /// The hook never exits: `main` catches the unwind, shuts the runtime down with a bound
 /// (dropping in-flight tool futures and their `kill_on_drop` children) and exits 101.
+///
+/// It replaces Rust's default hook rather than chaining to it: the default prints the raw
+/// panic text to stderr, and that text is not redacted (a panic message can carry a header
+/// value or the key). What reaches stderr is the same redacted text the panic log gets. The
+/// cost is the default hook's backtrace note; `RUST_BACKTRACE` is not honoured here.
 pub fn install_panic_hook() {
-    let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        record_panic(info);
+        let report = record_panic(info);
         if std::thread::current().name() == Some("main") {
             let mut guard = TtyGuard { active: true };
             guard.restore();
         }
-        default(info);
+        let _ = writeln!(io::stderr(), "{report}");
     }));
 }

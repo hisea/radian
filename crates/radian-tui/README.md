@@ -136,6 +136,20 @@ Gap found while preparing the test: the TUI's `--header` took a literal value an
 `authorization` is refused, names are validated, and a malformed argument never echoes its
 value.
 
+## SIGTERM and SIGHUP leave like a quit (2026-10-13, dogfooding D7)
+
+A SIGTERM used to kill the app mid-frame: alternate screen and raw mode stayed on and nothing
+said why. `signals::listen` now records SIGTERM/SIGHUP; the UI loop sees it on its next tick
+and takes the ordinary quit path, so the terminal is restored and `main` prints
+`received SIGTERM; session <id> saved; resume with --resume <id>` and exits with 128 + the
+signal (143, 129). Tested by `pty_sigterm_and_sighup_restore_the_terminal_and_say_why`; not
+starting the listener makes it fail.
+
+The panic hook no longer chains to Rust's default hook, which printed the raw panic text to
+stderr: stderr now gets the same redacted report as the panic log
+(`pty_a_panic_writes_a_redacted_panic_log` asserts neither the header value nor the key reaches
+the terminal). The cost: `RUST_BACKTRACE` is not honoured.
+
 ## The panic path unwinds, with a bounded runtime shutdown (2026-10-12)
 
 Slice A's panic hook restored the terminal and then called `process::exit(101)`, which skips

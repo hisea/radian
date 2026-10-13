@@ -164,6 +164,11 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    // SIGTERM/SIGHUP take the ordinary exit path from here on (dogfooding D7).
+    if let Err(e) = radian_tui::signals::listen(runtime.handle()) {
+        eprintln!("radian-tui: cannot listen for SIGTERM/SIGHUP: {e}");
+        return ExitCode::from(1);
+    }
     // A panic must not unwind through a runtime *drop*: that drop can wait on a parked task
     // and hang. Catch it here, shut the runtime down with a bound (which drops the in-flight
     // tool futures, and with them the `kill_on_drop` child processes they own), then exit
@@ -178,7 +183,12 @@ fn main() -> ExitCode {
             if let Some(reason) = reason {
                 eprintln!("radian-tui: {reason}");
             }
-            ExitCode::SUCCESS
+            // A signal-driven exit is still an orderly one, but the caller asked us to stop:
+            // report it the way a shell does, 128 + the signal number.
+            match radian_tui::signals::received() {
+                Some(signal) => ExitCode::from((128 + signal) as u8),
+                None => ExitCode::SUCCESS,
+            }
         }
         Ok(Err(message)) => {
             eprintln!("radian-tui: {message}");
@@ -457,9 +467,11 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
     }
     // A failure in the UI loop is the app's failure too; the terminal is already restored.
     outcome?;
-    Ok(Some(format!(
-        "session {session_id} saved; resume with `--resume {session_id}`"
-    )))
+    let saved = format!("session {session_id} saved; resume with `--resume {session_id}`");
+    Ok(Some(match radian_tui::signals::received() {
+        Some(signal) => format!("received {}; {saved}", radian_tui::signals::name(signal)),
+        None => saved,
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -475,6 +487,13 @@ fn ui_loop(
     relax_budget: &radian_runtime::BudgetRelax,
 ) -> Result<(), String> {
     while !app.quit {
+        // SIGTERM/SIGHUP: leave exactly like a quit, so the terminal is restored and the
+        // reason is printed on the normal screen (dogfooding D7). No last frame: after a
+        // SIGHUP the terminal may already be gone.
+        if radian_tui::signals::received().is_some() {
+            app.quit = true;
+            break;
+        }
         // The driver task is the session. If it ends — normally or by panicking — the UI has
         // nothing left to talk to, so leave in order instead of drawing over a dead session
         // and sending input into a closed inbox. The exit code and the message are decided

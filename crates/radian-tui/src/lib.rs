@@ -7,6 +7,7 @@
 pub mod app;
 pub mod profile;
 pub mod render;
+pub mod signals;
 pub mod terminal;
 
 pub use app::{App, ApprovalPrompt, Entry, EntryKind, Send, TurnState};

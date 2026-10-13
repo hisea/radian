@@ -24,7 +24,7 @@ clap = { version = "4", features = ["derive"] }
 ratatui = "0.30.2"
 serde_json.workspace = true
 unicode-width = "0.2.2"
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "process"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "process", "signal"] }
 
 [target.'cfg(unix)'.dev-dependencies]
 # The panic-path test checks that a child process group is really gone.

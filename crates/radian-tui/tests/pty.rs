@@ -1877,4 +1877,81 @@ fn pty_a_panic_writes_a_redacted_panic_log() {
         log.contains("<redacted>"),
         "redaction marker missing: {log}"
     );
+    // Nothing on the terminal either: the hook replaces Rust's default one, which would print
+    // the raw panic text to stderr.
+    assert!(
+        !raw.contains(secret) && !raw.contains(key),
+        "the terminal output must not carry the header value or the key: {raw}"
+    );
+    assert!(
+        raw.contains("<redacted>"),
+        "the redacted report reaches stderr: {raw}"
+    );
+}
+
+/// The pid of the app the pty's `sh -c` wrapper started.
+fn app_pid(pty: &Pty) -> String {
+    let shell = pty.child.process_id().expect("the wrapper shell has a pid");
+    let out = std::process::Command::new("pgrep")
+        .arg("-P")
+        .arg(shell.to_string())
+        .output()
+        .expect("pgrep");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .expect("the app runs under the wrapper shell")
+        .trim()
+        .to_string()
+}
+
+/// Dogfooding D7: SIGTERM and SIGHUP leave like a quit. The terminal is restored, one reason
+/// line names the signal and how to resume, and the exit code is 128 + the signal.
+#[test]
+fn pty_sigterm_and_sighup_restore_the_terminal_and_say_why() {
+    for (signal, name, code) in [("TERM", "SIGTERM", 143), ("HUP", "SIGHUP", 129)] {
+        let _serial = pty_guard();
+        let dir = TempDir::new("signal");
+        let id = format!("signal-{}", name.to_lowercase());
+        let mut pty = Pty::spawn(
+            &[
+                "--model",
+                "mock",
+                "--base-url",
+                "http://127.0.0.1:1/v1",
+                "--session-dir",
+                dir.path().to_str().unwrap(),
+                "--session-id",
+                &id,
+            ],
+            20,
+            100,
+        );
+        assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+        let pid = app_pid(&pty);
+        let status = std::process::Command::new("kill")
+            .arg(format!("-{signal}"))
+            .arg(&pid)
+            .status()
+            .unwrap();
+        assert!(status.success(), "kill -{signal} {pid}");
+        assert!(
+            pty.wait_for_exit(15).is_some(),
+            "{name}: the app did not exit"
+        );
+        assert_eq!(pty.app_exit_code(), Some(code), "{name}: 128 + signal");
+        let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+        let (_, after) = raw
+            .rsplit_once("\u{1b}[?1049l")
+            .unwrap_or_else(|| panic!("{name}: the alternate screen was not left: {raw}"));
+        assert!(
+            after.contains(&format!("received {name}"))
+                && after.contains(&format!("--resume {id}")),
+            "{name}: the reason line is on the normal screen: {after}"
+        );
+        assert!(
+            raw.contains("icanon") && !raw.contains("-icanon"),
+            "{name}: cooked mode restored"
+        );
+    }
 }
