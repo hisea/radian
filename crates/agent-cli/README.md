@@ -72,6 +72,62 @@ These are their own mode: `--export`/`--search`/`--list` conflict with `--prompt
 `--resume` and each other (clap rejects a combination with exit 2), and `--model` is only
 required for a conversation (`-p` or interactive).
 
+## Memory (`agent memory …`)
+
+`agent memory` is the user side of ADR 0021 (M1): durable memory shared across sessions,
+stored under `~/.radian/memory/` (`$RADIAN_HOME/memory`). It is its own mode: **no `--model`,
+no key, no session file, no network**. Put `--workspace <dir>` before `memory` to name the
+workspace; the default is the current directory.
+
+Memory is scoped to a **project** (a git repository, shared by all its worktrees through the
+git common dir, or the canonical workspace path outside a repository) and to **Global**. Reads
+default to Project then Global, with a Project record overriding a Global one with the same
+key. Writes default to Project; `--global` writes a Global record.
+
+| Command | What it does |
+|---|---|
+| `list [--global\|--project] [--all]` | Active records (`--all` adds archived), Project first; `--json` for machine output |
+| `search <词…> [--global\|--project]` | keyword search (every word must match); `--json` |
+| `show <id> [--global\|--project]` | one record; `--json` |
+| `add [--global] [--kind preference\|decision\|fact\|lesson] [--key KEY] <内容\|->` | a new record; `-` reads stdin; the default kind is `fact` |
+| `edit <id> --revision N <内容\|->` | change the content |
+| `archive <id> --revision N` / `restore <id> --revision N` | lifecycle |
+| `confirm <id> --revision N` | confirm an Agent/Import record (its `source` is kept) |
+| `forget <id>` | logical delete (never resurrected by a rebuild); needs confirmation |
+| `purge [--global\|--project]` | physically rewrite the log, removing forgotten content; needs confirmation |
+| `export [--global\|--project]` / `import [--global\|--project] <文件\|->` | the editable Markdown view |
+| `project` / `project new` | show the identity key and project state, or register it; `--json` |
+| `relink <ProjectId>` | attach this workspace to an existing project |
+| `split <from> <to> <id…>` / `merge <into> <from>` | move records between projects; need confirmation |
+
+- **No silent project identity** (ADR 0021 D2): a workspace whose identity key is not in the
+  registry is *unlinked*. `project new` registers it; `project` shows candidates (projects
+  whose identity key has the same repository name) and `relink` attaches it. Until then,
+  Project reads and writes fail with a message naming the candidates and `--global`; Global
+  still works.
+- **Confirmations** (`forget`, `purge`, `split`, `merge`): a terminal asks `y/N`; `--yes`
+  skips it; **without a terminal and without `--yes` the command refuses, exits 2 and does
+  nothing**.
+- Every user command writes `source: user`; the store applies the revision and same-key rules
+  (`KeyConflict`, `RevisionConflict`).
+- **Exit codes**: 0 on success; 1 for a conflict, a missing record or an unlinked workspace;
+  2 for a usage error or a refused confirmation (plus clap's own usage failures).
+
+### The agent's own memory tools and injection (ADR 0021 D5/D6)
+
+During a conversation the model also gets four tools: `memory_search` and `memory_get` (read,
+**allowed** by the rules) and `memory_save` and `memory_revise` (write, always **asked**;
+`--yes` answers the ask and the decision is still audited). Agent writes are `source: agent`
+and `unverified`; a user record is never modified, and a user key still wins. An unlinked
+workspace gets a tool error naming `project new`/`relink`, never a silent new project.
+
+Each request also injects the current memory into the **system prompt** (never the
+transcript): Active records in the D6 order, up to 2000 tokens (Global 500 / Project 1500 soft
+shares, whole records only), with the user/confirmed and agent-unverified segments labelled
+apart. The injected ids/revisions/scopes are recorded as a `MemoryInjected` runtime event when
+the set changes; the content is never written. A memory read failure is a `[memory]` warning,
+never a failed turn. Startup prints `[memory]` with the project state and the budget.
+
 ## Input
 
 While a turn is in flight, a line typed at the prompt is a **steer** (it changes the current

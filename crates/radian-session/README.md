@@ -26,7 +26,10 @@ same lock, `seq` counter and fsync; `next_seq()`, `session_id()`, `path()`.
 
 `RuntimeEvent` is the typed runtime write path: `InboxEnqueued`, `InputClaimed`,
 `InputAdmitted`, `TurnStarted`, `TurnFinished`, `ConfigChanged`, `ContextBudgetReached`,
-`PermissionResolved`, plus `RuntimeEvent::name()`, `critical()` and `permission_resolved()`.
+`PermissionResolved`, `MemoryInjected`, plus `RuntimeEvent::name()`, `critical()` and
+`permission_resolved()`. `PermissionResolved` and `MemoryInjected` are `critical: false`
+(audit); `MemoryInjected` carries only `{ id, revision, scope }` per record, never content
+(ADR 0021 D6).
 Transcript events are deliberately **absent** from it: they must go through
 `TranscriptJournal::append` so `MessageAppended.index` stays contiguous with what `replay`
 expects.
@@ -111,6 +114,8 @@ set on purpose would be a surprise; telling them is not.
 | Concurrent runtime and core appends keep `seq` in file order | `concurrent_runtime_and_core_appends_keep_seq_in_file_order` | `tests/runtime_events.rs` |
 | The runtime-event write path respects the single-writer lock and truncates a torn tail like every other line | `the_new_method_respects_the_single_writer_lock`, `the_new_method_truncates_a_torn_tail_like_every_other_line` | `tests/runtime_events.rs` |
 | `PermissionResolved` round-trips and is not replayed | `permission_resolved_round_trips_and_is_not_replayed` | `tests/permission_event.rs` |
+| `MemoryInjected` round-trips without content, is `critical: false`, is never a transcript record, and the exports show it | `memory_injected_round_trips_without_content_and_is_not_critical` | `tests/runtime_events.rs` |
+| `MemoryInjected` round-trips without content, is `critical: false`, is never a transcript record, and the exports show it | `memory_injected_round_trips_without_content_and_is_not_critical` | `tests/runtime_events.rs` |
 | A normal append after a complete replacement is not counted as part of it; replacements and the appends between them fold to the last revision | `a_normal_append_after_a_complete_replacement_is_not_counted_as_part_of_it`, `replacements_and_the_appends_between_them_fold_to_the_last_revision` | `tests/replace.rs` |
 | Resume continues after a short replacement, and after that replacement is replaced again | `resume_continues_after_a_short_replacement`, `resume_continues_after_a_short_replacement_is_replaced_again` | `tests/replace.rs` |
 | A crash mid-replacement is recovered as the written prefix; a short replacement before a new marker reads back; an interior empty line refuses resume; an orphan tool marker is refused | `a_crash_mid_replacement_is_recovered_as_the_written_prefix`, `a_short_replacement_followed_by_another_replacement_reads_back`, `resume_refuses_an_interior_empty_line`, `a_marker_whose_call_id_never_appeared_is_refused` | `tests/findings.rs` |

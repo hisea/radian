@@ -49,6 +49,9 @@ fn with_budget<P: ToolProvider>(
 ) -> Arc<Agent<Arc<ScriptedModel>, P, ()>> {
     Arc::new(Agent::new(model, tools).with_config(AgentConfig {
         context_budget: Some(budget),
+        // These tests pin the ADR 0018 budget *projection*, not compaction; compaction has
+        // its own tests. With it off, an over-`B` request is sent unchanged.
+        auto_compact: false,
         ..Default::default()
     }))
 }
@@ -310,6 +313,7 @@ async fn a_restored_baseline_matches_an_uninterrupted_projection() {
     let agent = Arc::new(
         Agent::new(ScriptedModel::new([text("second")]), NoTools).with_config(AgentConfig {
             context_budget: Some(budget),
+            auto_compact: false,
             ..Default::default()
         }),
     );
@@ -346,6 +350,7 @@ async fn a_prefix_outside_the_transcript_leaves_the_estimate_alone() {
     let agent = Arc::new(
         Agent::new(ScriptedModel::new([text("ok")]), NoTools).with_config(AgentConfig {
             context_budget: Some(ContextBudget::new(1000)),
+            auto_compact: false,
             ..Default::default()
         }),
     );

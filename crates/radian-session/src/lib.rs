@@ -20,11 +20,15 @@
 mod error;
 mod export;
 mod fs;
+mod gate;
 mod index;
 mod reader;
 mod runtime;
 mod writer;
 
+/// Re-exported so a reader of [`UncommittedReplacement::end`] need not depend on `agent-core`
+/// directly for the enum.
+pub use agent_core::ReplacementEnd;
 pub use error::ReadError;
 pub use export::{
     ExportError, ExportOptions, export_json, export_json_to, export_markdown, export_markdown_to,
@@ -38,8 +42,14 @@ pub use index::{
     Audit, Index, IndexError, IndexedEvent, RebuildWarning, Reconcile, SearchHit, SessionSummary,
     read_line_at,
 };
-pub use reader::{EventData, RecoveredReplacement, Session, SessionEvent};
+pub use reader::{EventData, Session, SessionEvent, UncommittedReplacement};
 pub use runtime::{
-    InboxLane, PermissionApprover, PermissionDecision, RuntimeEvent, TurnOutcome, TurnReason,
+    InboxLane, MemoryInjectedRecord, PermissionApprover, PermissionDecision, RuntimeEvent,
+    TurnOutcome, TurnReason,
 };
 pub use writer::{SessionCreatedData, SessionJournal, WriteError, now_utc};
+
+/// Fault-injection seams, compiled only with the `testing` feature. Off by default so a
+/// production build cannot arm them (ADR 0019 §7's failed-abort-write path).
+#[cfg(feature = "testing")]
+pub use writer::{fail_next_aborted_write, fail_next_write};

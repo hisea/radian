@@ -8,13 +8,17 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{Agent, AgentSession};
-use crate::budget::{self, BudgetStatus};
+use crate::budget::{self, BudgetReport, BudgetStatus, ContextBudget, RequestSize};
+use crate::compaction;
+use crate::event::NoopSink;
 use crate::event::{AgentEvent, EventSink};
 use crate::hooks::{HookContext, HookError, HookPoint, Hooks, ToolDecision};
 use crate::journal::{JournalError, JournalRecord, TranscriptJournal};
 use crate::message::{ContentPart, Message, MessageMeta, ToolCall, ToolResult};
 use crate::model::{Model, ModelContext, ModelRequest, ModelResponse, StopReason};
-use crate::outcome::{CancelReason, IncompleteReason, RunError, RunOutcome, RunStatus, Step};
+use crate::outcome::{
+    CancelReason, CompactionError, IncompleteReason, RunError, RunOutcome, RunStatus, Step,
+};
 use crate::preflight::ToolRegistry;
 use crate::steering::{SteerMode, SteeringHandle};
 use crate::tool::{ToolConcurrency, ToolContext, ToolProvider, ToolSession};
@@ -106,6 +110,28 @@ enum Raced<T> {
     Interrupted(CancelReason),
 }
 
+/// What `maybe_compact` decided for the pending request (ADR 0018).
+enum CompactionDecision {
+    /// The request stays as it was; it is sent (possibly still over `B`).
+    NotNeeded,
+    /// The transcript was replaced and the request rebuilt.
+    Applied {
+        size: RequestSize,
+        report: BudgetReport,
+    },
+    /// The turn was cancelled while summarizing; no compaction was committed.
+    Cancelled(CancelReason),
+}
+
+/// The borrows `maybe_compact` needs, bundled so the method keeps a small signature.
+struct CompactCx<'a, M: Model, P: ToolProvider, H: Hooks> {
+    agent: &'a Arc<Agent<M, P, H>>,
+    interrupt: &'a Interrupt,
+    hcx: &'a HookContext,
+    budget: &'a ContextBudget,
+    events: &'a dyn EventSink,
+}
+
 async fn race<T>(interrupt: &Interrupt, work: impl Future<Output = T>) -> Raced<T> {
     tokio::select! {
         biased;
@@ -188,6 +214,10 @@ pub struct ActiveRun<'s, M: Model, P: ToolProvider, H: Hooks> {
     started: bool,
     batch: Option<Batch>,
     outcome: Option<RunOutcome>,
+    /// Set once an automatic compaction in this turn came out below the 75% target (ADR
+    /// 0018). The rest of the turn must not compact again; an over-budget request then fails
+    /// as `InsufficientCompaction` instead.
+    below_target_compaction: bool,
 }
 
 impl<'s, M: Model, P: ToolProvider, H: Hooks> ActiveRun<'s, M, P, H> {
@@ -219,6 +249,7 @@ impl<'s, M: Model, P: ToolProvider, H: Hooks> ActiveRun<'s, M, P, H> {
             started: false,
             batch: None,
             outcome: None,
+            below_target_compaction: false,
         }
     }
 
@@ -422,6 +453,17 @@ impl<M: Model, P: ToolProvider, H: Hooks> Drop for ActiveRun<'_, M, P, H> {
     }
 }
 
+/// The visible text of a message's or response's content parts, concatenated.
+fn text_of(parts: &[ContentPart]) -> String {
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// One text part, or no parts at all when the accumulated string is empty. An interrupted
 /// prefix keeps `content` and `reasoning` structurally the same shape: absent when nothing
 /// was emitted on that channel.
@@ -533,21 +575,60 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
         // this is the request that would be sent. A provider-reported `input` from an earlier
         // request in this session is the baseline; without one the projection is a local
         // estimate. No configured budget means nothing is claimed.
-        let request_size = if agent.config.context_budget.is_some() {
+        let mut request_size = if agent.config.context_budget.is_some() {
             Some(budget::request_size(&request))
         } else {
             None
         };
         if let Some((config, size)) = agent.config.context_budget.zip(request_size) {
             let report = budget::project(&config, self.run.session.budget_baseline, size);
-            // ADR 0018: over the input budget `B` the request is still sent. Automatic
-            // compaction triggers here (compact-core slice); this slice only records the
-            // status for the host's status bar.
-            self.run.session.budget_status = if budget::over_budget(&report) {
+            let over = budget::over_budget(&report);
+            let tokens_before = report.projected_tokens;
+            self.run.session.budget_status = if over {
                 BudgetStatus::Over(report)
             } else {
                 BudgetStatus::Ok(report)
             };
+            // ADR 0018: over the input budget `B` the request is normally compacted before it
+            // is sent. `--no-auto-compact` sends it anyway; a previous below-target compaction
+            // in this turn fails instead of compacting again.
+            if over && agent.config.auto_compact {
+                if self.run.below_target_compaction {
+                    events.emit(AgentEvent::CompactionFailed {
+                        reason: "a previous compaction this turn was below target".into(),
+                    });
+                    return Err(self
+                        .run
+                        .fail(RunError::Compaction(CompactionError::BelowTarget), events));
+                }
+                match self
+                    .maybe_compact(
+                        CompactCx {
+                            agent: &agent,
+                            interrupt: &interrupt,
+                            hcx: &hcx,
+                            budget: &config,
+                            events,
+                        },
+                        &mut request,
+                        tokens_before,
+                    )
+                    .await
+                {
+                    Ok(CompactionDecision::Cancelled(reason)) => {
+                        return Ok(self.run.finish(RunStatus::Cancelled(reason), events));
+                    }
+                    Ok(CompactionDecision::NotNeeded) => {}
+                    Ok(CompactionDecision::Applied { size, report, .. }) => {
+                        request_size = Some(size);
+                        self.run.session.budget_status = BudgetStatus::Ok(report);
+                    }
+                    Err(RunError::Journal(e)) => {
+                        return Err(self.run.fail_journal(e, events));
+                    }
+                    Err(other) => return Err(self.run.fail(other, events)),
+                }
+            }
         } else {
             self.run.session.budget_status = BudgetStatus::Disabled;
         }
@@ -671,6 +752,245 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
             }
         };
         Ok(self.run.finish(status, events))
+    }
+
+    /// Automatic compaction for the pending request (ADR 0018 §B). Called only when the
+    /// projection is over `B`, `auto_compact` is on, and this turn has not yet committed a
+    /// below-target compaction. It plans, summarizes, checks the gain, and commits through
+    /// `replace_transcript`, the only writer of the replacement segment.
+    async fn maybe_compact(
+        &mut self,
+        cx: CompactCx<'_, M, P, H>,
+        request: &mut ModelRequest,
+        tokens_before: u64,
+    ) -> Result<CompactionDecision, RunError> {
+        let CompactCx {
+            agent,
+            interrupt,
+            hcx,
+            budget,
+            events,
+        } = cx;
+        let revision = self.run.session.transcript_revision + 1;
+        let source_revision = self.run.session.transcript_revision;
+        let source_len = self.run.session.transcript.len();
+        let input_budget = budget.input_budget_tokens;
+
+        let plan = match compaction::plan(
+            &self.run.session.transcript,
+            input_budget,
+            &compaction::message_tokens,
+        ) {
+            Ok(plan) => plan,
+            Err(compaction::PlanError::NothingToCompact) => {
+                events.emit(AgentEvent::CompactionSkipped {
+                    reason: "the history already fits the keep target".into(),
+                });
+                return Ok(CompactionDecision::NotNeeded);
+            }
+            Err(compaction::PlanError::InvalidHistory(error)) => {
+                events.emit(AgentEvent::CompactionFailed {
+                    reason: error.to_string(),
+                });
+                return Err(RunError::Compaction(CompactionError::InvalidSummary(
+                    error.to_string(),
+                )));
+            }
+        };
+
+        events.emit(AgentEvent::CompactionStarted {
+            revision,
+            tokens_before,
+            keep_target: compaction::keep_target(input_budget),
+        });
+
+        // The rolling summary: a compaction summary is always the first message of a
+        // compacted history, so it is read out and excluded from the new summary input.
+        let transcript = self.run.session.transcript.clone();
+        let previous_summary = transcript
+            .first()
+            .and_then(compaction::compaction_summary_text);
+        let to_summarize: Vec<Message> = if previous_summary.is_some() {
+            transcript[1..plan.first_kept].to_vec()
+        } else {
+            transcript[..plan.first_kept].to_vec()
+        };
+        let summary_max =
+            compaction::DEFAULT_SUMMARY_MAX_TOKENS.min(compaction::keep_target(input_budget));
+
+        let mut summary = None;
+        for attempt in 0..2 {
+            let summary_request =
+                compaction::summary_request(previous_summary.as_deref(), &to_summarize, None);
+            let noop = NoopSink;
+            let mcx = ModelContext {
+                cancellation: interrupt.token.child_token(),
+                events: &noop,
+            };
+            let response = match race(interrupt, agent.model.complete(summary_request, mcx)).await {
+                Raced::Interrupted(reason) => return Ok(CompactionDecision::Cancelled(reason)),
+                Raced::Done(Err(error)) => {
+                    events.emit(AgentEvent::CompactionFailed {
+                        reason: error.to_string(),
+                    });
+                    return Err(RunError::Compaction(CompactionError::Summary(error)));
+                }
+                Raced::Done(Ok(response)) => response,
+            };
+            // ADR 0018 §计费: the real call is recorded immediately, commit or not, and it is
+            // deliberately not a `ModelUsage` (it must not move the budget baseline).
+            if let (Some(journal), Some(usage)) =
+                (self.run.session.journal.as_ref(), response.usage.clone())
+            {
+                journal
+                    .append(JournalRecord::CompactionUsage {
+                        revision,
+                        model: compaction::COMPACTION_MODEL_CURRENT.to_owned(),
+                        usage,
+                    })
+                    .await
+                    .map_err(RunError::Journal)?;
+            }
+            let text = text_of(&response.content);
+            match compaction::check_summary(&text, summary_max) {
+                Ok(checked) => {
+                    summary = Some(checked);
+                    break;
+                }
+                Err(_) if attempt == 0 => continue,
+                Err(error) => {
+                    events.emit(AgentEvent::CompactionFailed {
+                        reason: error.to_string(),
+                    });
+                    return Err(RunError::Compaction(CompactionError::InvalidSummary(
+                        error.to_string(),
+                    )));
+                }
+            }
+        }
+        let summary = summary.expect("the loop sets it or returns");
+
+        let new_history =
+            match compaction::compacted_history(&summary, &transcript[plan.first_kept..]) {
+                Ok(history) => history,
+                Err(error) => {
+                    events.emit(AgentEvent::CompactionFailed {
+                        reason: error.to_string(),
+                    });
+                    return Err(RunError::Compaction(CompactionError::InvalidSummary(
+                        error.to_string(),
+                    )));
+                }
+            };
+
+        // Rebuild the request for the compacted view and re-run the hook (ADR 0018), so the
+        // projection `T_after` describes exactly what would be sent.
+        request.system_prompt = agent.config.system_prompt.clone();
+        request.messages = new_history.clone();
+        request.tools = self.run.session.registry.specs().to_vec();
+        request.settings = agent.config.model_settings.clone();
+        match race(interrupt, agent.hooks.before_model_call(hcx, request)).await {
+            Raced::Interrupted(reason) => return Ok(CompactionDecision::Cancelled(reason)),
+            Raced::Done(Err(error)) => {
+                events.emit(AgentEvent::CompactionFailed {
+                    reason: error.to_string(),
+                });
+                return Err(RunError::Hook {
+                    point: HookPoint::BeforeModelCall,
+                    error,
+                });
+            }
+            Raced::Done(Ok(())) => {}
+        }
+        let size_after = budget::request_size(request);
+        // The compacted view was never reported by the provider, so `T_after` is always an
+        // estimate: the baseline describes the transcript that was just replaced.
+        let report_after = budget::project(budget, None, size_after);
+        let tokens_after = report_after.projected_tokens;
+        if tokens_after >= tokens_before || tokens_after > input_budget {
+            events.emit(AgentEvent::CompactionFailed {
+                reason: format!(
+                    "not enough gain: {tokens_before} -> {tokens_after} tokens, budget {input_budget}"
+                ),
+            });
+            return Err(RunError::Compaction(CompactionError::Insufficient {
+                before: tokens_before,
+                after: tokens_after,
+                budget: input_budget,
+            }));
+        }
+        // ADR 0018 §revision 与并发: the candidate only commits if the source view is still
+        // what it was planned from. This cannot happen with one writer, but is checked and
+        // tested as the ADR requires.
+        #[cfg(feature = "testing")]
+        if self.run.session.tamper_source_on_compaction {
+            self.run.session.tamper_source_on_compaction = false;
+            self.run.session.transcript_revision += 1;
+        }
+        if self.run.session.transcript_revision != source_revision
+            || self.run.session.transcript.len() != source_len
+        {
+            events.emit(AgentEvent::CompactionFailed {
+                reason: "the source view changed while the summary was made".into(),
+            });
+            return Err(RunError::Compaction(CompactionError::SourceChanged));
+        }
+        // `T_after <= B` but over the 75% target: commit and stop auto-compacting this turn.
+        let below_target = tokens_after.saturating_mul(4) > input_budget.saturating_mul(3);
+
+        if let Some(journal) = self.run.session.journal.as_ref() {
+            journal
+                .append(JournalRecord::ContextCompacted {
+                    revision,
+                    source_revision,
+                    source_len,
+                    summary: summary.clone(),
+                    first_kept: plan.first_kept,
+                    tokens_before,
+                    tokens_after,
+                    below_target,
+                    model: compaction::COMPACTION_MODEL_CURRENT.to_owned(),
+                })
+                .await
+                .map_err(RunError::Journal)?;
+        }
+
+        let first_kept = plan.first_kept;
+        if let Err(error) = self
+            .run
+            .session
+            .replace_transcript(new_history, revision, events)
+            .await
+        {
+            let run_error = match error {
+                crate::agent::ReplaceError::Journal(error) => RunError::Journal(error),
+                other => RunError::Compaction(CompactionError::InvalidSummary(other.to_string())),
+            };
+            events.emit(AgentEvent::CompactionFailed {
+                reason: run_error.to_string(),
+            });
+            return Err(run_error);
+        }
+
+        // ADR 0018 §B: `turn_start` tracks the first retained message of this turn in the new
+        // history (index 0 is the summary). If the turn's beginning was summarized, the first
+        // retained message is the one right after the summary.
+        self.run.turn_start = if self.run.turn_start < first_kept {
+            1
+        } else {
+            self.run.turn_start - first_kept + 1
+        };
+        self.run.below_target_compaction |= below_target;
+        events.emit(AgentEvent::CompactionFinished {
+            revision,
+            tokens_before,
+            tokens_after,
+            below_target,
+        });
+        Ok(CompactionDecision::Applied {
+            size: size_after,
+            report: report_after,
+        })
     }
 
     async fn dispatch_tools(

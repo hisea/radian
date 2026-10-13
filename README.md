@@ -2,10 +2,10 @@
 
 `radian` is a minimal, headless, embeddable Rust agent runtime, plus the coding agent built on
 top of it. The core (`agent-core`) runs a turn loop over an injected model, tools and hooks; the
-`radian-*` crates add durable sessions, a permission layer, an OS sandbox, built-in coding tools
-and the host plumbing, and two hosts ship as binaries: the line-prompt CLI `agent` and the
-full-screen TUI `radian-tui`. Everything the runtime does is journalled to a per-session JSONL
-file, so a session can be resumed by either host.
+`radian-*` crates add durable sessions, a permission layer, an OS sandbox, built-in coding
+tools, durable memory and the host plumbing, and two hosts ship as binaries: the line-prompt CLI
+`agent` and the full-screen TUI `radian-tui`. Everything the runtime does is journalled to a
+per-session JSONL file, so a session can be resumed by either host.
 
 The design of record is `docs/minimal-headless-rust-agent-runtime-design.md`. Decisions that
 constrain the code are ADRs under `docs/adr/` (see the index at the end of this file). Read
@@ -25,13 +25,26 @@ constrain the code are ADRs under `docs/adr/` (see the index at the end of this 
 | `radian-permissions` | The permission layer: `ApprovalPolicy` + `ToolRuleSet` as one `Hooks` implementation; decides allow / ask / deny. It does not enforce anything. | `crates/radian-permissions/README.md`, ADR 0012 |
 | `radian-sandbox` | OS sandbox backends (macOS `sandbox-exec`, Linux `bubblewrap`) that build a command under a policy and **refuse to run** without a proven backend. | `docs/sandbox.md`, ADR 0012, ADR 0016 |
 | `radian-coding` | Built-in coding tools — `read`, `write`, `patch`, `list`, `git_status`, `git_diff`, and `shell` only when the host supplies a sandbox — with workspace path confinement. | `crates/radian-coding/README.md` |
-| `radian-host` | Host plumbing shared by both binaries so they cannot drift: `--header` parsing, session ids, the `--mcp-config` file, model construction, the startup description, and the "built-in tools + MCP" provider. | `crates/radian-host/README.md` |
-| `agent-cli` | The `agent` binary: a line-prompt chat client with optional built-in tools, MCP servers and session-management commands. | `crates/agent-cli/README.md` |
-| `radian-tui` | The `radian-tui` binary: a full-screen TUI (ADR 0009: full screen only, no inline mode) over `radian-runtime`. | `crates/radian-tui/README.md`, ADR 0009 |
+| `radian-memory` | The memory storage layer (ADR 0021 M1): Global/Project scope logs with replay, the source rules (an agent cannot touch a user record), Forget/Purge, the `projects.jsonl` registry and the Markdown import/export view. Host-free: the caller passes `~/.radian/memory/`. | `crates/radian-memory/README.md`, ADR 0021 |
+| `radian-host` | Host plumbing shared by both binaries so they cannot drift: `--header` parsing, session ids, the `--mcp-config` file, model construction, the startup description, the "built-in tools + MCP" provider, the `~/.radian/` layout and diagnostics, the model catalog, and the memory layer (`MemoryService`, project identity, the agent memory tools, injection, and the shared `agent memory` / `/memory` commands). | `crates/radian-host/README.md` |
+| `agent-cli` | The `agent` binary: a line-prompt chat client with optional built-in tools, MCP servers, session-management commands and the `agent memory` commands. | `crates/agent-cli/README.md` |
+| `radian-tui` | The `radian-tui` binary: a full-screen TUI (ADR 0009: full screen only, no inline mode) over `radian-runtime`, with a slash-command layer (`/help`, `/memory …`) and its own transcript scrolling. | `crates/radian-tui/README.md`, ADR 0009 |
 
 Two more binaries exist but are not part of the product surface: `agent-extensions`'s
 `mcp-fixture` (a hand-written MCP server for its tests) and `radian-sandbox`'s `sandbox-escape`
 (requires `--features testing`).
+
+## Status (2026-10-13)
+
+- **The `~/.radian/` layout (ADR 0020)** is implemented: `config/` and `cache/` are readable
+  by the sandbox; `sessions/` and `memory/` are denied. `RADIAN_HOME` overrides the
+  root. (`--session-dir` / `RADIAN_SESSION_DIR` still override only the sessions directory.)
+- **Memory M1 (ADR 0021)** is implemented: the `agent memory` CLI commands, the TUI `/memory`
+  slash command (same commands), the agent's `memory_search` / `memory_get` / `memory_save` /
+  `memory_revise` tools (writes always ask), and deterministic injection with the
+  `MemoryInjected` audit event.
+- **Automatic compaction (ADR 0018) is in progress.** The model catalog and the context-budget
+  projection are in place; the turn-internal summarizer is being wired in.
 
 ## Build
 
@@ -110,7 +123,7 @@ export OPENAI_API_KEY=sk-...
 ./target/debug/radian-tui \
   --provider openai-compatible \
   --model gpt-5 \
-  --profile workspace-write \
+  --profile workspace \
   --approval on-ask \
   --workspace "$PWD" \
   --session-dir /tmp/radian-sessions \
@@ -123,7 +136,7 @@ Resume a session written by either host:
 ./target/debug/radian-tui \
   --provider openai-compatible \
   --model gpt-5 \
-  --profile workspace-write \
+  --profile workspace \
   --workspace "$PWD" \
   --session-dir /tmp/radian-sessions \
   --resume demo
@@ -137,15 +150,16 @@ Keys, the approval box, the status bar and the context-budget wording are in
 ## Permission tiers
 
 `--profile` picks all three layers of ADR 0012 at once: the sandbox (the enforcement boundary),
-the rule set (allow / ask / deny) and what the host mounts. The names the binaries accept today
-are `safe`, `workspace-write` and `full-access`; `workspace-write` is the default and
-`full-access` is never reached by forgetting a flag.
+the rule set (allow / ask / deny) and what the host mounts. The names the binaries accept are
+`safe`, `workspace` and `full` (ADR 0016); the old `workspace-write` and `full-access` remain
+accepted as aliases but are not listed in `--help`. `workspace` is the default and `full` is
+never reached by forgetting a flag.
 
 | Tier | Sandbox | Shell | MCP | Built-in files |
 |---|---|---|---|---|
 | `safe` | none needed — nothing executes | not offered | denied | `read`/`list`/`git_status`/`git_diff` allowed; `write`/`patch` denied |
-| `workspace-write` | enforced: macOS seatbelt or Linux bubblewrap, probed at startup | offered, **inside** the sandbox | asks | `write`/`patch` allowed only when the resolved path stays under the workspace |
-| `full-access` | none — chosen explicitly | offered, **not** sandboxed | allowed | `write`/`patch` as `workspace-write` |
+| `workspace` | enforced: macOS seatbelt or Linux bubblewrap, probed at startup | offered, **inside** the sandbox | asks | `write`/`patch` allowed only when the resolved path stays under the workspace |
+| `full` | none — chosen explicitly | offered, **not** sandboxed | allowed | `write`/`patch` as `workspace` |
 
 - **A failed probe refuses to run.** If the backend is missing or its probe fails, the host
   exits with an error instead of falling back to an unsandboxed run. There is no degrade path
@@ -153,12 +167,13 @@ are `safe`, `workspace-write` and `full-access`; `workspace-write` is the defaul
   cause a refusal.
 - **Without `--workspace`** no write or execute tool exists at all: the built-in tools are only
   mounted with a workspace, and `shell` additionally needs a sandbox.
-- **Under `workspace-write`**, writes are confined to the workspace, repository metadata
-  (`.git`) is read-only, sensitive directories (`~/.ssh`, `~/.aws`, `~/.gnupg`, browser
-  profiles, …) are not readable by default, and the network is off. This is **not** a claim of
-  credential isolation: the macOS backend leaves `mach-lookup` open, so the IPC boundary is not
-  tightened. MCP server processes are started outside the sandbox in this build, and the
-  startup notice says so.
+- **Under `workspace`**, writes are confined to the workspace, repository metadata (`.git`) is
+  read-only, sensitive directories (`~/.ssh`, `~/.aws`, `~/.gnupg`, browser profiles, …) are
+  not readable by default, and the network is **on** (outbound and local-loopback
+  connect/bind/listen) with the pty devices available, so a project's own tests can run
+  (ADR 0016). This is **not** a claim of credential isolation: the macOS backend leaves
+  `mach-lookup` open, so the IPC boundary is not tightened. MCP server processes are started
+  outside the sandbox in this build, and the startup notice says so.
 - **`--yes` is not "allow everything".** It swaps the approver for one that answers "allow
   once" without showing the question; `deny` rules still deny, `allow` rules still allow, the
   sandbox is unchanged, and every decision is still audited. `radian-tui` also has
@@ -170,15 +185,8 @@ are `safe`, `workspace-write` and `full-access`; `workspace-write` is the defaul
   PREFIX` allows one *simple* command prefix without asking; a compound command always asks.
   Write these at the subcommand level, never at a bare program name.
 
-> **Not yet in the code:** ADR 0016 decides to rename the tiers to `safe` / `workspace` /
-> `full` (old names kept as aliases) and to open the network and pty devices in the middle
-> tier. The binaries in this tree still accept only `safe` / `workspace-write` / `full-access`
-> — `--profile workspace` is rejected by both — and the middle tier still runs with the
-> network off. Use the names in the table above until the implementation slice lands.
-
 Common exit codes: `agent` uses 0 (turn completed), 1 (turn failed), 2 (usage/setup error,
-including a failed sandbox probe), 3 (the context-budget guard stopped a `-p` turn), 130
-(forced exit after a second Ctrl-C). `radian-tui` uses 0 (clean quit), 1 (startup refusal or a
+including a failed sandbox probe) and 130 (forced exit after a second Ctrl-C). `radian-tui` uses 0 (clean quit), 1 (startup refusal or a
 driver error), 101 (the app panicked), and 128 + the signal number on SIGTERM/SIGHUP.
 
 ## Docs
@@ -186,7 +194,7 @@ driver error), 101 (the app panicked), and 128 + the signal number on SIGTERM/SI
 | What | Where |
 |---|---|
 | Design of record | `docs/minimal-headless-rust-agent-runtime-design.md` |
-| Decisions (read before changing code) | `docs/adr/` — 0001 transcript journal · 0002 tool execution markers and recovery · 0003 interrupted streaming prefix · 0004 hot config slots · 0005 host message identity and transcript replacement · 0006 session JSONL v1 · 0007 usage · 0008 config schema and migration · 0009 fullscreen-only first release · 0010 durable vs live events · 0011 durable inbox semantics · 0012 permission sources · 0013 no telemetry by default · 0014 reasoning content · 0015 context budget guard · 0016 tier names, network and devices |
+| Decisions (read before changing code) | `docs/adr/` — 0001 transcript journal · 0002 tool execution markers and recovery · 0003 interrupted streaming prefix · 0004 hot config slots · 0005 host message identity and transcript replacement · 0006 session JSONL v1 · 0007 usage · 0008 config schema and migration · 0009 fullscreen-only first release · 0010 durable vs live events · 0011 durable inbox semantics · 0012 permission sources · 0013 no telemetry by default · 0014 reasoning content · 0015 context budget guard · 0016 tier names, network and devices · 0017 model and hook errors end the turn · 0018 model catalog and auto compaction · 0019 transcript replacement commit · 0020 the `~/.radian/` layout · 0021 memory |
 | Sandbox backends: what they really enforce | `docs/sandbox.md` (spikes: `docs/spikes/macos-sandbox.md`, `docs/spikes/linux-sandbox.md`) |
 | Provider contract and its escape hatches | `docs/provider-contract.md`, wire notes in `docs/providers/anthropic-wire-notes.md` |
 | Session format fixtures and their checkers | `docs/schema/` (`check-fixtures.sh`, `check-config-fixtures.sh`, `fixtures/`, `config/`) |

@@ -79,6 +79,9 @@ struct Recovery {
     /// for restoring the context-budget baseline (ADR 0015 C1). `None` means no report in the
     /// current transcript revision, so the projection stays a pure estimate.
     budget_baseline: Option<(usize, u64)>,
+    /// The revision of the last committed replacement (ADR 0018), 0 when the file has none,
+    /// so the next automatic compaction uses a strictly larger revision.
+    transcript_revision: u64,
 }
 
 /// The per-session driver.
@@ -96,6 +99,10 @@ pub struct Driver<M: Model, P: ToolProvider, H: Hooks> {
     /// A host listener for the runtime events this driver writes (ADR 0017). `None` keeps the
     /// behavior a host that never installed one had before.
     runtime_events: Option<Arc<dyn RuntimeEvents>>,
+    /// Test seam: fires when the turn loop enters the wake branch, so the deadlock test can
+    /// prove the branch does not block on the journal without relying on timing.
+    #[cfg(feature = "testing")]
+    testing_wake_branch: Arc<tokio::sync::Notify>,
     next_turn: u64,
     next_config_revision: u64,
     closed: bool,
@@ -126,6 +133,9 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         if let Some((prefix_len, input)) = recovery.budget_baseline {
             session.restore_budget_baseline(prefix_len, input);
         }
+        // ADR 0018 §B: the next compaction's revision must be strictly larger than the last
+        // committed one, so it is restored from the file too.
+        session.restore_transcript_revision(recovery.transcript_revision);
         Ok(Self {
             inbox,
             session,
@@ -136,6 +146,8 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             options,
             turn_timeout: None,
             runtime_events: None,
+            #[cfg(feature = "testing")]
+            testing_wake_branch: Arc::new(tokio::sync::Notify::new()),
             next_turn: recovery.next_turn,
             next_config_revision: recovery.next_config_revision,
             closed: false,
@@ -172,6 +184,12 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
     /// applies to every turn rather than only the first.
     pub fn set_turn_timeout(&mut self, timeout: Option<std::time::Duration>) {
         self.turn_timeout = timeout;
+    }
+
+    /// Test seam: the wake-branch signal (fired when the turn loop enters the wake branch).
+    #[cfg(feature = "testing")]
+    pub fn testing_wake_branch(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.testing_wake_branch)
     }
 
     /// Installs the host listener for the runtime events this driver writes (ADR 0017). The
@@ -279,6 +297,8 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         .await?;
 
         let cancel_generation = inbox.cancel_generation();
+        #[cfg(feature = "testing")]
+        let wake_branch = Arc::clone(&self.testing_wake_branch);
         // ADR 0017: a model or hook error ends **this turn**, not the session. Every other
         // `RunError` (journal, poisoned, session) is still fatal and propagates here.
         let outcome = loop {
@@ -287,10 +307,20 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
                 tokio::select! {
                     result = &mut step => break result,
                     _ = inbox.wake_signal() => {
+                        #[cfg(feature = "testing")]
+                        wake_branch.notify_waiters();
+                        // Only cancellation is handled here. `step` is not polled while this
+                        // branch body runs, so it can be parked in the middle of a core
+                        // replacement segment (`TranscriptReplaced` written, commit not yet).
+                        // Any journal write here (`drain_steering` -> `InputClaimed`) would
+                        // wait on the writer's segment gate, which only closes when `step` is
+                        // polled again: a deadlock. Steering is instead drained after
+                        // `Ok(Step::Continue)`, which is where the core reads it anyway
+                        // (`inject_steering` runs at the start of a step); a steer left in the
+                        // inbox at the end of a turn is used by the next turn (ADR 0011).
                         if inbox.cancel_generation() != cancel_generation {
                             cancellation.cancel();
                         }
-                        drain_steering(&inbox, &journal, &steering, &turn_id, &mut claimed, &mut claimed_entries).await?;
                     }
                 }
             };
@@ -536,7 +566,10 @@ fn message_meta_id(message: &Message) -> Option<MessageId> {
 /// step is committed. The tool-call hooks fail closed instead (they resolve the call with a
 /// `hook_error` result and continue), so they never reach here.
 fn is_fatal(error: &RunError) -> bool {
-    !matches!(error, RunError::Model(_) | RunError::Hook { .. })
+    !matches!(
+        error,
+        RunError::Model(_) | RunError::Hook { .. } | RunError::Compaction(_)
+    )
 }
 
 /// Maps the core's `RunStatus` to the ADR 0006 §5.6 wire shape.
@@ -693,6 +726,7 @@ async fn recover(journal: &SessionJournal) -> Result<Recovery, DriverError> {
         next_turn,
         next_config_revision,
         budget_baseline: reported_baseline(&parsed),
+        transcript_revision: parsed.last_committed_revision(),
     })
 }
 
@@ -754,7 +788,9 @@ fn turn_number(turn_id: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{HookError, HookPoint, ModelError, SessionError};
+    use agent_core::{
+        CompactionError, HookError, HookPoint, Message, ModelError, ModelUsage, SessionError,
+    };
 
     /// ADR 0017: the classification the driver uses. A model or hook error is non-fatal;
     /// journal, poisoned and session errors must keep ending the session.
@@ -770,7 +806,95 @@ mod tests {
         assert!(is_fatal(&RunError::Journal(JournalError(
             "write failed".into()
         ))));
+        // ADR 0018: a compaction failure fails this turn like a model error, not the session.
+        assert!(!is_fatal(&RunError::Compaction(
+            CompactionError::Insufficient {
+                before: 10,
+                after: 10,
+                budget: 5,
+            }
+        )));
         assert!(is_fatal(&RunError::Poisoned));
         assert!(is_fatal(&RunError::Session(SessionError::Poisoned)));
+    }
+
+    /// ADR 0018: the budget baseline comes only from `ModelUsageRecorded` after the last
+    /// committed replacement; a pre-replacement report and a `CompactionUsageRecorded` are
+    /// both ignored.
+    #[tokio::test]
+    async fn the_baseline_ignores_usage_before_a_replacement() {
+        use agent_core::{JournalRecord, TranscriptJournal};
+        use radian_session::{SessionCreatedData, SessionJournal};
+
+        let dir = std::env::temp_dir().join(format!("radian-baseline-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+        let journal = SessionJournal::create(
+            &path,
+            "s",
+            SessionCreatedData::new("/w", serde_json::json!({})),
+        )
+        .unwrap();
+        let usage = |input: u64| ModelUsage {
+            input: Some(input),
+            ..Default::default()
+        };
+        journal
+            .append(JournalRecord::Message {
+                index: 0,
+                message: Message::user("old"),
+            })
+            .await
+            .unwrap();
+        journal
+            .append(JournalRecord::Message {
+                index: 1,
+                message: Message::assistant("a"),
+            })
+            .await
+            .unwrap();
+        journal
+            .append(JournalRecord::ModelUsage { usage: usage(500) })
+            .await
+            .unwrap();
+        journal
+            .append(JournalRecord::TranscriptReplaced {
+                revision: 1,
+                len: 1,
+            })
+            .await
+            .unwrap();
+        journal
+            .append(JournalRecord::Message {
+                index: 0,
+                message: Message::user("summary"),
+            })
+            .await
+            .unwrap();
+        journal
+            .append(JournalRecord::TranscriptReplacementCommitted {
+                revision: 1,
+                len: 1,
+            })
+            .await
+            .unwrap();
+        journal
+            .append(JournalRecord::CompactionUsage {
+                revision: 2,
+                model: "current".into(),
+                usage: usage(999),
+            })
+            .await
+            .unwrap();
+        drop(journal);
+
+        let session = Session::open(&path).unwrap();
+        assert_eq!(
+            reported_baseline(&session),
+            None,
+            "the pre-replacement usage and the compaction usage are not baselines"
+        );
+        assert_eq!(session.last_committed_revision(), 1);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

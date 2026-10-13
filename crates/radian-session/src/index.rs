@@ -455,6 +455,32 @@ impl Index {
 }
 
 /// Replaces one file's index rows from a fresh scan. The caller owns the transaction.
+/// The `seq` of every `MessageAppended` that is part of the committed history (ADR 0019).
+/// Derived from the event names alone, so the streaming index does not retain messages.
+fn committed_message_seqs(rows: &[IndexedEvent]) -> std::collections::HashSet<u64> {
+    let mut committed = std::collections::HashSet::new();
+    let mut pending: Option<Vec<u64>> = None;
+    for row in rows {
+        match row.event.as_str() {
+            "MessageAppended" => match &mut pending {
+                Some(pending) => pending.push(row.seq),
+                None => {
+                    committed.insert(row.seq);
+                }
+            },
+            "TranscriptReplaced" => pending = Some(Vec::new()),
+            "TranscriptReplacementCommitted" => {
+                if let Some(pending) = pending.take() {
+                    committed.extend(pending);
+                }
+            }
+            "TranscriptReplacementAborted" => pending = None,
+            _ => {}
+        }
+    }
+    committed
+}
+
 fn index_file(tx: &Connection, path: &Path) -> Result<(), IndexError> {
     let path_str = path.to_string_lossy().to_string();
     // Drop any previous rows for this path before re-deriving them.
@@ -506,12 +532,18 @@ fn index_file(tx: &Connection, path: &Path) -> Result<(), IndexError> {
         });
     }
 
+    // ADR 0019: a message inside an uncommitted replacement segment is not in the current
+    // history, so it is not indexed (and therefore not searchable).
+    let committed = committed_message_seqs(&rows);
     let mut insert = tx.prepare(
         "INSERT INTO events \
          (session_id, seq, ts, event, critical, byte_offset, line_len, message_index, text) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
     )?;
-    for row in &rows {
+    for row in rows
+        .iter()
+        .filter(|row| row.event != "MessageAppended" || committed.contains(&row.seq))
+    {
         insert.execute(params![
             summary.session_id,
             row.seq as i64,

@@ -58,10 +58,46 @@ pub enum Step {
     Finished(RunOutcome),
 }
 
+/// Why automatic compaction could not proceed (ADR 0018). Any of these fails the turn
+/// without sending the oversized request; none of them is fatal to the session (ADR 0017).
+#[derive(Debug, thiserror::Error)]
+pub enum CompactionError {
+    /// The compacted request is not strictly smaller, or still over the input budget. The
+    /// compaction is not committed.
+    #[error(
+        "compaction would not shrink the request enough: {before} -> {after} tokens against a \
+         budget of {budget}"
+    )]
+    Insufficient {
+        before: u64,
+        after: u64,
+        budget: u64,
+    },
+    /// Even a summary plus the smallest keepable unit does not fit the input budget.
+    #[error("nothing fits the input budget even after compaction")]
+    NothingFits,
+    /// The summarizer returned text that is empty or over the summary length ceiling, twice.
+    #[error("the summary was invalid: {0}")]
+    InvalidSummary(String),
+    /// A previous compaction this turn was below the 75% target, so the turn must not
+    /// compact again (ADR 0018).
+    #[error("the previous compaction this turn was below target, so it will not compact again")]
+    BelowTarget,
+    /// The transcript changed between planning and commit, so the candidate view is stale
+    /// (ADR 0018 §revision 与并发). Nothing is committed.
+    #[error("the transcript changed while the summary was being made")]
+    SourceChanged,
+    /// The summarization model call itself failed.
+    #[error("the summarizer failed: {0}")]
+    Summary(#[from] ModelError),
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
     #[error(transparent)]
     Model(#[from] ModelError),
+    #[error(transparent)]
+    Compaction(#[from] CompactionError),
     #[error("hook {point:?} failed: {error}")]
     Hook { point: HookPoint, error: HookError },
     #[error("journal: {0}")]

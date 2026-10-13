@@ -38,6 +38,9 @@ async fn open_env(
     let agent = Arc::new(
         Agent::new(Arc::clone(&model), tools).with_config(AgentConfig {
             context_budget: budget,
+            // This file tests the ADR 0018 projection end to end, not compaction; with
+            // compaction off an over-`B` request is sent unchanged.
+            auto_compact: false,
             ..Default::default()
         }),
     );

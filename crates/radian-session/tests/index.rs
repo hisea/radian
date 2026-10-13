@@ -41,6 +41,9 @@ fn legal_fixtures() -> Vec<&'static str> {
         "truncated-tail.jsonl",
         "crash-after-started.jsonl",
         "replace-resets-index.jsonl",
+        // An uncommitted segment is not indexed, so the "rows == accepted events" invariant
+        // does not hold for those fixtures; `replace.rs` covers them directly.
+        "replace-committed.jsonl",
     ]
 }
 

@@ -11,7 +11,7 @@ mod profile;
 mod tools;
 
 use std::collections::HashMap;
-use std::io::{IsTerminal, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -28,6 +28,8 @@ use agent_core::{
 use agent_extensions::{McpServerConfig, McpToolProvider};
 use clap::Parser;
 use radian_coding::CodingTools;
+use radian_host::memory::commands::{self, CommandError, MemoryCommand};
+use radian_host::memory::{InjectionConfig, MemoryHooks, MemoryService, MemoryTools, ProjectState};
 use radian_host::{
     DEFAULT_MAX_TOKENS, HostModel, ModelArgs, Provider, SESSION_PLACEHOLDER, Thinking, build_model,
     check_provider_flags, generate_session_id, load_mcp_config, parse_headers, resolve_workspace,
@@ -55,7 +57,11 @@ const INBOX_CAPACITY: usize = 64;
 #[command(
     name = "agent",
     version,
-    about = "Chat with a model, with optional MCP tools"
+    about = "Chat with a model, with optional MCP tools",
+    // A subcommand (`agent memory …`) is a mode of its own, like `--list`: it must not need
+    // `--model`. `required_unless_present_any` cannot name a subcommand, so this attribute
+    // lifts the requirement whenever one is used.
+    subcommand_negates_reqs = true
 )]
 struct Cli {
     /// Model name sent to the API. Required to run a conversation (`-p` or interactive); the
@@ -164,6 +170,12 @@ struct Cli {
     )]
     search: Option<String>,
 
+    /// Manage durable memory (ADR 0021): `agent memory --help`. Needs no `--model`, reads no
+    /// key, creates no session file and never touches the network. Memory is shared across
+    /// sessions and resolved per project (a git repository, shared by its worktrees).
+    #[command(subcommand)]
+    memory: Option<Command>,
+
     /// Export format: `markdown` (the readable transcript) or `json` (the event document).
     #[arg(long, value_name = "FORMAT", value_enum, default_value_t = ExportFormat::Markdown, requires = "export")]
     format: ExportFormat,
@@ -219,6 +231,11 @@ struct Cli {
     /// `--base-url` hostname; e.g. `opencode.ai` → `opencode`).
     #[arg(long, value_name = "PROVIDER")]
     catalog_provider: Option<String>,
+
+    /// Turn automatic compaction off. Over the input budget `B` the request is then sent
+    /// unchanged (ADR 0018).
+    #[arg(long)]
+    no_auto_compact: bool,
 }
 
 /// Why startup failed. The message must not contain the key.
@@ -240,6 +257,133 @@ enum ExportFormat {
     Json,
 }
 
+/// The top-level subcommands. `agent` also has flag-only modes (`--list`, `--export`,
+/// `--search`); those stay flags for compatibility. The subcommand name comes from the
+/// variant, not the field that stores it.
+#[derive(clap::Subcommand, Debug)]
+enum Command {
+    /// Manage durable memory (ADR 0021 D7).
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommand,
+    },
+}
+
+fn run_memory(cli: &Cli, command: MemoryCommand) -> i32 {
+    match memory_command(cli, command) {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("agent: {}", error.message);
+            error.code
+        }
+    }
+}
+
+/// Runs one `agent memory` subcommand. Deliberately before `setup`: no model, no key, no
+/// session file, no network. The grammar and the execution live in
+/// `radian_host::memory::commands`, shared byte-for-byte with the TUI's `/memory`.
+fn memory_command(cli: &Cli, command: MemoryCommand) -> Result<(), CommandError> {
+    let workspace = resolve_workspace(cli.workspace.as_deref().map(std::path::Path::new))
+        .map_err(CommandError::usage)?;
+    let root = radian_host::memory_dir()
+        .ok_or_else(|| CommandError::usage("no RADIAN_HOME or HOME to place memory under"))?;
+    let service = MemoryService::open(&workspace, root);
+
+    let command = resolve_input(command)?;
+    let json = command.json();
+    let confirmed = command.yes();
+    let first = commands::execute(&service, command.clone(), confirmed, json)?;
+    let output = match (&first.needs_confirmation, confirmed) {
+        (Some(prompt), false) => {
+            confirm_or_refuse(prompt)?;
+            commands::execute(&service, command, true, json)?
+        }
+        _ => first,
+    };
+    if let Some(note) = &output.note {
+        eprintln!("{note}");
+    }
+    print!("{}", output.text);
+    Ok(())
+}
+
+/// Resolves the arguments that name external input: `add`/`edit` read `-` from stdin, and
+/// `import` reads `-` or a file. The shared executor only ever sees literal text.
+fn resolve_input(command: MemoryCommand) -> Result<MemoryCommand, CommandError> {
+    Ok(match command {
+        MemoryCommand::Add {
+            global,
+            kind,
+            key,
+            content,
+        } if content == "-" => MemoryCommand::Add {
+            global,
+            kind,
+            key,
+            content: read_stdin()?,
+        },
+        MemoryCommand::Edit {
+            global,
+            revision,
+            id,
+            content,
+        } if content == "-" => MemoryCommand::Edit {
+            global,
+            revision,
+            id,
+            content: read_stdin()?,
+        },
+        MemoryCommand::Import {
+            global,
+            project,
+            source,
+        } => MemoryCommand::Import {
+            global,
+            project,
+            source: read_import(&source)?,
+        },
+        other => other,
+    })
+}
+
+fn read_stdin() -> Result<String, CommandError> {
+    let mut text = String::new();
+    std::io::stdin()
+        .read_to_string(&mut text)
+        .map_err(|e| CommandError::failure(format!("cannot read stdin: {e}")))?;
+    Ok(text)
+}
+
+fn read_import(source: &str) -> Result<String, CommandError> {
+    if source == "-" {
+        read_stdin()
+    } else {
+        std::fs::read_to_string(source)
+            .map_err(|e| CommandError::failure(format!("cannot read {source}: {e}")))
+    }
+}
+
+/// The confirmation for `forget`/`purge`/`split`/`merge` (ADR 0021 D7). A terminal asks;
+/// without a terminal and without `--yes` the command refuses (exit 2) and does nothing.
+fn confirm_or_refuse(message: &str) -> Result<(), CommandError> {
+    if !std::io::stdin().is_terminal() {
+        return Err(CommandError::usage(format!(
+            "{message}: refusing without a terminal; pass --yes to confirm"
+        )));
+    }
+    eprint!("{message} [y/N] ");
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(|e| CommandError::failure(format!("cannot read the answer: {e}")))?;
+    if answer.trim().eq_ignore_ascii_case("y") || answer.trim().eq_ignore_ascii_case("yes") {
+        Ok(())
+    } else {
+        Err(CommandError::failure("cancelled"))
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -254,7 +398,24 @@ fn main() {
     std::process::exit(code);
 }
 
-async fn run(cli: Cli) -> i32 {
+async fn run(mut cli: Cli) -> i32 {
+    // `agent memory` is its own mode: no model, no key, no session file, no network. It is
+    // handled before `setup`, like the session-management commands below.
+    if cli.memory.is_some() {
+        if cli.list
+            || cli.export.is_some()
+            || cli.search.is_some()
+            || cli.prompt.is_some()
+            || cli.resume.is_some()
+        {
+            eprintln!("agent: `memory` cannot be combined with a session command");
+            return USAGE_ERROR;
+        }
+        match cli.memory.take() {
+            Some(Command::Memory { command }) => return run_memory(&cli, command),
+            None => unreachable!("checked just above"),
+        }
+    }
     if cli.list {
         return match list_sessions(&cli) {
             Ok(()) => 0,
@@ -322,6 +483,8 @@ struct Setup {
     context_budget: Option<ContextBudget>,
     /// The window and where it came from (ADR 0018), for the startup line.
     window: radian_host::Window,
+    /// Whether the core compacts a request over `B` before sending it (ADR 0018).
+    auto_compact: bool,
     /// The session id this process uses: the file name, and the `{session_id}` header value.
     session_id: String,
     /// The validated, canonical workspace (dogfooding D1). Resolved in `setup`, before any
@@ -462,6 +625,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         turn_timeout_secs: cli.turn_timeout_secs,
         context_budget,
         window,
+        auto_compact: !cli.no_auto_compact,
         session_id,
         workspace,
         secrets,
@@ -786,6 +950,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     let agent_config = AgentConfig {
         system_prompt: setup.system_prompt,
         context_budget: setup.context_budget,
+        auto_compact: setup.auto_compact,
         ..AgentConfig::default()
     };
 
@@ -801,25 +966,60 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     // paths that exist) can hide them.
     let sessions_for_deny = session_dir(&cli)?;
     let _ = radian_host::ensure_private_dir(&sessions_for_deny);
+    // ADR 0021: the memory root is under `~/.radian/` (ADR 0020), sandbox-denied, and the
+    // service is the same one `agent memory` uses. `None` only when neither `RADIAN_HOME` nor
+    // `HOME` is set; then memory is simply off for this run.
+    let memory_root = radian_host::memory_dir();
+    let injection_config = InjectionConfig::default();
     let mut sandbox_deny_read = vec![sessions_for_deny];
-    if let Some(memory) = radian_host::memory_dir() {
-        sandbox_deny_read.push(memory);
+    if let Some(memory) = &memory_root {
+        sandbox_deny_read.push(memory.clone());
     }
     let sandbox = profile::build_sandbox(profile_arg, &workspace_path, &sandbox_deny_read)?;
     let (profile_line, sandbox_facts) = profile::describe(profile_arg, sandbox.as_ref());
     eprintln!("[profile] {profile_line}");
     eprintln!("[sandbox] {sandbox_facts}");
     // The numbers, the effective input budget B, and where they came from (ADR 0018).
+    let compaction = if setup.auto_compact {
+        "automatic compaction on"
+    } else {
+        "automatic compaction off"
+    };
     match &setup.context_budget {
         Some(budget) => eprintln!(
             "[budget] {}; a provider-reported input is trusted as reported and only the growth \
              after it is estimated ({} ASCII bytes per token, at least 1 token per non-ASCII \
-             character)",
+             character); {compaction}",
             setup.window.describe(),
             budget.bytes_per_token
         ),
-        None => eprintln!("[budget] {} (ADR 0018)", setup.window.describe()),
+        None => eprintln!(
+            "[budget] {} (ADR 0018); {compaction}",
+            setup.window.describe()
+        ),
     }
+    // ADR 0021 D2/D6: the project state and the injection budget, before the session exists.
+    let memory_service = memory_root
+        .as_ref()
+        .map(|root| MemoryService::open(&workspace_path, root));
+    match &memory_service {
+        Some(service) => match service.state() {
+            Ok(ProjectState::Known(project)) => eprintln!(
+                "[memory] project {project}; injection on, up to {} tokens",
+                injection_config.max_tokens
+            ),
+            Ok(ProjectState::Unlinked { .. }) => eprintln!(
+                "[memory] no project linked; global memory only (run `agent memory project new` \
+                 or `agent memory relink <ProjectId>`); injection on, up to {} tokens",
+                injection_config.max_tokens
+            ),
+            Err(error) => eprintln!("[memory] unavailable: {error}"),
+        },
+        None => eprintln!("[memory] disabled (no RADIAN_HOME or HOME)"),
+    }
+    let memory_tools = memory_service
+        .as_ref()
+        .map(|service| MemoryTools::new(service.clone()));
 
     // The built-in tools exist only with `--workspace`. `shell` is present only when a
     // sandbox exists, which is exactly `workspace`/`full` with a workspace.
@@ -869,13 +1069,21 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         Some(approver),
         audit,
     ));
+    // ADR 0021 D6: injection runs in the same hook chain, after the permission layer. A
+    // memory failure is a warning line, never a failed turn.
+    let memory_hooks = Arc::new(MemoryHooks::new(
+        memory_service.clone(),
+        Arc::clone(&journal),
+        injection_config,
+        Arc::new(|message: &str| eprintln!("[memory] {message}")),
+    ));
     let agent = Arc::new(
         Agent::new(
             setup.model,
-            CliTools::new(coding, McpToolProvider::new(setup.servers)),
+            CliTools::new(coding, memory_tools, McpToolProvider::new(setup.servers)),
         )
         .with_config(agent_config)
-        .with_hooks(Arc::clone(&hooks)),
+        .with_hooks((Arc::clone(&hooks), Arc::clone(&memory_hooks))),
     );
 
     let inbox = Inbox::durable(INBOX_CAPACITY, Arc::clone(&journal));
@@ -1413,6 +1621,35 @@ impl EventSink for Ui {
                 } else {
                     eprintln!("[tool {index}] finished");
                 }
+            }
+            AgentEvent::CompactionStarted {
+                tokens_before,
+                keep_target,
+                ..
+            } => {
+                eprintln!(
+                    "[compaction] {tokens_before} tokens over the input budget; summarizing \
+                     (keep target {keep_target})"
+                );
+            }
+            AgentEvent::CompactionFinished {
+                tokens_before,
+                tokens_after,
+                below_target,
+                ..
+            } => {
+                let note = if below_target {
+                    " (below target; no further compaction this turn)"
+                } else {
+                    ""
+                };
+                eprintln!("[compaction] {tokens_before} tokens → {tokens_after} tokens{note}");
+            }
+            AgentEvent::CompactionFailed { reason } => {
+                eprintln!("[compaction] failed: {reason}");
+            }
+            AgentEvent::CompactionSkipped { reason } => {
+                eprintln!("[compaction] skipped: {reason}");
             }
             AgentEvent::RunFinished { status } => {
                 if self.reasoning_open.swap(false, Ordering::Relaxed) {

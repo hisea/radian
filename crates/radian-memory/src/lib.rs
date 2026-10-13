@@ -34,7 +34,7 @@ pub use model::{
     Verification, now_utc,
 };
 pub use registry::ProjectRegistry;
-pub use search::{SearchQuery, search};
+pub use search::{SearchQuery, ranked, search};
 pub use store::{
     ImportConflict, ImportRejection, ImportReport, MemoryStore, MoveConflict, MoveReport,
 };

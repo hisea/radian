@@ -125,3 +125,53 @@ tests in `crates/agent-cli/tests/cli.rs`.
 behaviours (the SQLite sibling modes and the two redaction fixes). The `-wal`/`-shm` modes are
 inherited from the database file, so M4 fails on `index.db` first and the siblings never get a
 chance to differ.
+
+## ADR 0019：reader / writer 与唯一状态机
+
+Base: `8858046` · one-shot worktree `/tmp/0019-mut`（detached，跑完删除）· 每个变异 `--no-fail-fast`
+跑完即 `git checkout -- .`，结束时 `git status --short` 为空。Core 侧三项（提交、待定段前缀、
+段内第二个 marker）记在 `crates/agent-core/MUTATIONS-0019.md`。
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| M4 | writer `resume` 不写 `TranscriptReplacementAborted`（`let _ = abort_revision`） | `replace::resume_aborts_a_pending_segment_and_the_next_append_is_normal` | ✅ failed |
+| M5 | writer `resume` 只要有未提交段就写 abort（`.last()` 取代 `.find(EndOfFile)`） | `replace::resume_does_not_repeat_the_abort` | ✅ failed |
+| M7 | reader 绕过状态机（`fold_push` 丢弃 `fold.push` 的错误） | `findings::a_second_replacement_inside_a_pending_segment_is_refused`、`replace::a_message_beyond_the_declared_len_is_corruption`、`a_commit_without_a_replacement_is_corruption`、`a_mismatched_commit_is_corruption`、`a_mismatched_abort_is_corruption` | ✅ failed |
+
+3/3 caught。M7 一次改 reader，五个 corruption 用例同时失败，证明 reader 的结构检查确实走
+Core 的状态机而不是第二套规则。只读打开不写盘这一条没有做人工变异：`a_crash_mid_replacement_recovers_the_old_history`
+在 `Session::open` 前后比较文件字节，且 `resume_*` 用例在 resume 前比较字节；这里只记录未变异。
+
+## ADR 0021 M1 第三片：`MemoryInjected`（2026-10-13）
+
+Base `2d01d9b` · 一次性 worktree `/tmp/memsvcb-mut` · `git checkout --` 还原。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M13 | `MemoryInjected` 的 `critical` 改为 `true` | ✅ 抓住 | `runtime_events::memory_injected_round_trips_without_content_and_is_not_critical` |
+
+## ADR 0019 收尾：resume 先校验后截尾
+
+Base: `3035930` · one-shot worktree `/tmp/0019b-mut`（detached，跑完删除）· 每个变异 `--no-fail-fast`
+跑完即 `git checkout -- .`，结束时 `git status --short` 为空。
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| N1 | `resume` 恢复旧顺序（先 `set_len` 截 torn tail，后 `Session::open` 校验） | `replace::resume_refuses_a_corrupt_file_without_touching_it`（`replace-resume-corrupt-pending-event` 这一例：字节不再相同） | ✅ failed |
+| N2 | `resume` 忽略写 abort 的错误（`let _ = journal.write_line(Aborted)`）并返回 `Ok` | `replace::resume_reports_a_failed_abort_write_and_appends_nothing` | ✅ failed |
+
+2/2 caught。N2 的测试用 `testing` feature 的故障接缝（`fail_next_aborted_write()`，在
+`write_locked` 真正 `write_all` 之前返回 `io::Error`），所以文件字节完全不变——测试断言的是
+"不变"而不是"只多一段 torn tail"。跑 N2 用 `cargo test -p radian-session --features testing
+--test replace`；默认 `cargo test --workspace` 不含该用例（接缝只在 `testing` feature 下编译）。
+
+## compact-core：写者闸门（ADR 0018 §A）
+
+Base: `b20cc3b` · 一次性检出 `/tmp/ccore-mutA`（detached，跑完删除）· `--no-fail-fast`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| G1 | `append_runtime_event` 不等待段关闭（去掉闸门） | `gate::a_runtime_event_waits_for_the_replacement_segment_to_close`、`gate::a_failed_segment_write_fails_the_waiter_and_the_file_still_resumes` | ✅ failed |
+
+1/1 抓住。两个测试都用 `testing` 接缝 `wait_for_gate_waiter()` 同步（外加 5 秒 watchdog 超时，
+超时只是安全网）；去掉闸门后等待者不再注册，超时触发，测试失败而不是挂起。

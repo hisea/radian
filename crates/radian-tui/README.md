@@ -47,6 +47,29 @@ the provider and the model only.
 
 Shift-Enter needs a terminal with the enhanced keyboard protocol; Ctrl-J works everywhere.
 
+## Slash commands (`/`)
+
+A submitted line whose first non-space character is `/` is a **command**: it never reaches the
+model, the transcript or the session journal. `//text` is the escape — one `/` is dropped and
+the rest is sent as an ordinary message.
+
+| Command | What it does |
+|---|---|
+| `/help` | list the commands |
+| `/memory <command> …` | the same durable-memory commands as `agent memory` (ADR 0021 D7): `list`, `search`, `show`, `add`, `edit`, `archive`, `restore`, `forget`, `purge`, `confirm`, `export`, `import`, `project` / `project new`, `relink`, `split`, `merge` |
+
+- Arguments are split with shell quoting, so `/memory add "two words"` is one argument.
+  Unbalanced quotes are an error notice.
+- The output is shown as transcript notices (scrollable); `--json` is shown verbatim.
+- `forget`, `purge`, `split` and `merge` ask first: a notice shows the prompt, `y` runs it and
+  `n`/`Esc` cancels. While the prompt is up, keys do not type into the input box.
+- A **read** command runs while a turn is running and does not interrupt it; a **write** takes
+  effect at the next model request (ADR 0021 D6).
+- An unknown command is an error notice, never a message to the model. `/compact` is not in
+  this slice.
+- The grammar and the execution are `radian_host::memory::commands`, shared byte-for-byte with
+  the CLI; the TUI only adds the framework and the notices.
+
 ## What the screen shows
 
 - **Streaming text** (`ModelTextDelta`) appears as it arrives.
@@ -118,6 +141,9 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
 - **the MCP approval box**: with `--mcp-config`, an MCP tool call prompts like any other. Is
   the tool name (`server__tool`) and the argument preview clear at your width, and is it
   obvious the server runs outside the sandbox (the startup notice says so)?
+- **`/help` and a `/memory` write**: type `/help` (a notice, no model request), then
+  `/memory forget <id>` — is the `[y/N]` prompt obvious and does `n` feel like a cancel? pty
+  automation asserts the notices and the keys, not the readability.
 - **the status bar at your usual width**: is the tier / usage / mcp / context order readable,
   and does the truncation (`…`) drop what you would have dropped? The pty and `TestBackend`
   tests assert the text and the 60-column rule, not the feel.
@@ -348,6 +374,12 @@ could be built. This is the same wiring `agent-cli` uses:
 - Two startup notices state what was chosen and what it means. The meaning line follows ADR
   0012 decision 4 and does **not** claim credential isolation: the macOS backend leaves
   `mach-lookup` open, so the IPC boundary is not tightened.
+- A `[memory]` startup notice names the project state (the linked project id, or "no project
+  linked" with the `agent memory project new`/`relink` hint) and the injection budget
+  (ADR 0021 D2/D6). The agent's four memory tools are mounted and the current memory is
+  injected into the system prompt each turn; `memory_search`/`memory_get` are allowed and
+  `memory_save`/`memory_revise` ask. Tested by
+  `pty_the_memory_notice_names_the_project_state_and_the_budget`.
 
 Every call goes through `radian-permissions` (ADR 0012) as a `Hooks` implementation:
 

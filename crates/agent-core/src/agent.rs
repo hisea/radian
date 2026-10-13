@@ -37,6 +37,10 @@ pub struct AgentConfig {
     /// Context window and threshold for the budget guard (ADR 0015). `None` disables the
     /// guard outright: the core does not guess a window, so no number is ever claimed.
     pub context_budget: Option<ContextBudget>,
+    /// Whether a request projected over `B` is compacted before it is sent (ADR 0018).
+    /// Defaults to `true`; a host turns it off with `--no-auto-compact`. With no
+    /// `context_budget` there is no `B`, so nothing triggers either way.
+    pub auto_compact: bool,
 }
 
 impl Default for AgentConfig {
@@ -46,6 +50,7 @@ impl Default for AgentConfig {
             max_model_calls: DEFAULT_MAX_MODEL_CALLS,
             model_settings: Value::Null,
             context_budget: None,
+            auto_compact: true,
         }
     }
 }
@@ -152,6 +157,9 @@ impl<M: Model, P: ToolProvider, H: Hooks> Agent<M, P, H> {
             selfcheck,
             budget_baseline: None,
             budget_status: BudgetStatus::Disabled,
+            transcript_revision: 0,
+            #[cfg(feature = "testing")]
+            tamper_source_on_compaction: false,
             poisoned: false,
             recovery_required: false,
             close_state: CloseState::Open,
@@ -196,6 +204,15 @@ pub struct AgentSession<M: Model, P: ToolProvider, H: Hooks> {
     pub(crate) budget_baseline: Option<(u64, RequestSize)>,
     /// The guard's last computation, host-visible through [`AgentSession::context_budget_status`].
     pub(crate) budget_status: BudgetStatus,
+    /// The revision of the last committed transcript replacement (ADR 0018 §B). A new
+    /// session starts at 0; `replace_transcript` sets it to the revision it committed, and a
+    /// resume restores it so the next automatic compaction uses a strictly larger revision.
+    pub(crate) transcript_revision: u64,
+    /// Test seam (ADR 0018 §revision 与并发): when set, the next automatic compaction bumps
+    /// the transcript revision right before its source-view check, so the check's abandon
+    /// path is exercised. Never set in production.
+    #[cfg(feature = "testing")]
+    pub(crate) tamper_source_on_compaction: bool,
 }
 
 impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
@@ -280,10 +297,51 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
                     return Err(ReplaceError::Journal(error));
                 }
             }
+            // ADR 0019 §1: the commit record is the point of no return. It lands before the
+            // memory swap, so a crash before it recovers the old history and a crash after
+            // it recovers the new one.
+            if let Err(error) = journal
+                .append(JournalRecord::TranscriptReplacementCommitted { revision, len })
+                .await
+            {
+                self.recovery_required = true;
+                return Err(ReplaceError::Journal(error));
+            }
         }
         self.transcript = history;
+        self.transcript_revision = revision;
+        // ADR 0018 §B2: the reported baseline described the context that was just replaced, so
+        // it no longer describes this transcript. A fresh projection is an estimate until the
+        // provider reports again.
+        self.budget_baseline = None;
         events.emit(AgentEvent::TranscriptReplaced { revision, len });
         Ok(())
+    }
+
+    /// The revision of the last committed transcript replacement, or 0 (ADR 0018). A host
+    /// restores it from the session file on resume.
+    pub fn transcript_revision(&self) -> u64 {
+        self.transcript_revision
+    }
+
+    /// Restores [`AgentSession::transcript_revision`] from a resume (ADR 0018). The host reads
+    /// the last committed replacement's revision from the session file.
+    pub fn restore_transcript_revision(&mut self, revision: u64) {
+        self.transcript_revision = revision;
+    }
+
+    /// Test seam: make the next automatic compaction observe a changed source view, so the
+    /// ADR 0018 source-view check can be tested without a second writer.
+    #[cfg(feature = "testing")]
+    pub fn testing_tamper_source_on_compaction(&mut self) {
+        self.tamper_source_on_compaction = true;
+    }
+
+    /// Test seam: the provider-reported baseline input, if any. A committed compaction must
+    /// clear it (ADR 0018 §B2), which is otherwise only observable through the next request.
+    #[cfg(feature = "testing")]
+    pub fn testing_budget_baseline_input(&self) -> Option<u64> {
+        self.budget_baseline.map(|(input, _)| input)
     }
 
     /// The single entry every transcript modification goes through: journal first, then

@@ -29,7 +29,8 @@ pub use compaction::{
 pub use event::{AgentEvent, EventSink, NoopSink};
 pub use hooks::{HookContext, HookError, HookPoint, Hooks, ToolDecision};
 pub use journal::{
-    JournalError, JournalRecord, ReplayError, TranscriptJournal, recover, repair, replay,
+    JournalError, JournalRecord, ReplacementEnd, ReplayError, TranscriptFold, TranscriptJournal,
+    UncommittedReplacement, recover, repair, replay,
 };
 pub use message::{
     ContentPart, InputSource, Message, MessageId, MessageMeta, OpaqueJson, ToolCall, ToolResult,
@@ -39,8 +40,8 @@ pub use model::{
     ModelUsage, StopReason,
 };
 pub use outcome::{
-    CancelReason, IncompleteReason, ResumeState, RunError, RunOutcome, RunStatus, SessionError,
-    Step,
+    CancelReason, CompactionError, IncompleteReason, ResumeState, RunError, RunOutcome, RunStatus,
+    SessionError, Step,
 };
 pub mod budget;
 pub mod compaction;

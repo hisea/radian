@@ -76,11 +76,44 @@ impl ExportOptions {
     }
 }
 
+/// The `seq` of every `MessageAppended` that is part of the committed history (ADR 0019).
+/// Messages inside an uncommitted replacement segment are not in the current history, so the
+/// export treats them as absent.
+fn committed_message_seqs(session: &Session) -> std::collections::HashSet<u64> {
+    let mut committed = std::collections::HashSet::new();
+    let mut pending: Option<Vec<u64>> = None;
+    for event in session.events() {
+        match &event.data {
+            EventData::MessageAppended { .. } => match &mut pending {
+                Some(pending) => pending.push(event.seq),
+                None => {
+                    committed.insert(event.seq);
+                }
+            },
+            EventData::TranscriptReplaced { .. } => pending = Some(Vec::new()),
+            EventData::TranscriptReplacementCommitted { .. } => {
+                if let Some(pending) = pending.take() {
+                    committed.extend(pending);
+                }
+            }
+            EventData::TranscriptReplacementAborted { .. } => pending = None,
+            _ => {}
+        }
+    }
+    committed
+}
+
 /// The JSON export: session metadata plus every accepted event, payload-stripped and
 /// redacted.
 pub fn export_json(session: &Session, opts: &ExportOptions) -> Result<String, ExportError> {
+    let committed = committed_message_seqs(session);
     let mut events = Vec::with_capacity(session.events().len());
     for event in session.events() {
+        if let EventData::MessageAppended { .. } = &event.data
+            && !committed.contains(&event.seq)
+        {
+            continue;
+        }
         let mut data = event_data_value(event, opts)?;
         redact_value(&mut data, opts.secrets());
         events.push(json!({
@@ -127,18 +160,52 @@ pub fn export_markdown(session: &Session, opts: &ExportOptions) -> Result<String
         session.skipped().len()
     ));
 
+    let committed = committed_message_seqs(session);
+    // ADR 0018: only a committed compaction is shown; a candidate with no commit is invisible.
+    let committed_revisions: std::collections::HashSet<u64> = session
+        .events()
+        .iter()
+        .filter_map(|event| match &event.data {
+            EventData::TranscriptReplacementCommitted { revision, .. } => Some(*revision),
+            _ => None,
+        })
+        .collect();
     for event in session.events() {
-        let EventData::MessageAppended { message, .. } = &event.data else {
-            continue;
-        };
-        let role = match message {
-            Message::User { .. } => "user",
-            Message::Assistant { .. } => "assistant",
-            Message::Tool { .. } => "tool",
-        };
-        out.push_str(&format!("## {role} (seq {})\n\n", event.seq));
-        out.push_str(&render_message(message, opts));
-        out.push('\n');
+        match &event.data {
+            EventData::ContextCompacted {
+                revision,
+                tokens_before,
+                tokens_after,
+                ..
+            } if committed_revisions.contains(revision) => {
+                out.push_str(&format!(
+                    "_context compacted ({tokens_before} → {tokens_after} tokens)_\n\n"
+                ));
+            }
+            EventData::MessageAppended { message, .. } => {
+                if !committed.contains(&event.seq) {
+                    continue;
+                }
+                let role = match message {
+                    Message::User { .. } => "user",
+                    Message::Assistant { .. } => "assistant",
+                    Message::Tool { .. } => "tool",
+                };
+                out.push_str(&format!("## {role} (seq {})\n\n", event.seq));
+                out.push_str(&render_message(message, opts));
+                out.push('\n');
+            }
+            // ADR 0021 D6: the injected set is audit, not transcript. The Markdown export
+            // shows only its size; the ids/revisions/scopes are in the JSON export.
+            EventData::MemoryInjected { records } => {
+                out.push_str(&format!(
+                    "- memory injected: {} record(s) (seq {})\n",
+                    records.len(),
+                    event.seq
+                ));
+            }
+            _ => {}
+        }
     }
 
     // Redaction is a whole-document pass as well, so a secret in a field this renderer did
@@ -201,6 +268,12 @@ fn event_data_value(
         EventData::TranscriptReplaced { revision, len } => {
             json!({"revision": revision, "len": len})
         }
+        EventData::TranscriptReplacementCommitted { revision, len } => {
+            json!({"revision": revision, "len": len})
+        }
+        EventData::TranscriptReplacementAborted { revision } => {
+            json!({"revision": revision})
+        }
         EventData::ToolExecutionStarted {
             call_id,
             name,
@@ -210,6 +283,36 @@ fn event_data_value(
             json!({"call_id": call_id, "result": serde_json::to_value(result)?})
         }
         EventData::ModelUsageRecorded { usage } => json!({"usage": serde_json::to_value(usage)?}),
+        EventData::CompactionUsageRecorded {
+            revision,
+            model,
+            usage,
+        } => json!({
+            "revision": revision,
+            "model": model,
+            "usage": serde_json::to_value(usage)?,
+        }),
+        EventData::ContextCompacted {
+            revision,
+            source_revision,
+            source_len,
+            summary,
+            first_kept,
+            tokens_before,
+            tokens_after,
+            below_target,
+            model,
+        } => json!({
+            "revision": revision,
+            "source_revision": source_revision,
+            "source_len": source_len,
+            "summary": summary,
+            "first_kept": first_kept,
+            "tokens_before": tokens_before,
+            "tokens_after": tokens_after,
+            "below_target": below_target,
+            "model": model,
+        }),
         EventData::InboxEnqueued {
             message,
             message_id,
@@ -281,6 +384,7 @@ fn event_data_value(
             "approver": approver,
             "reason": reason,
         }),
+        EventData::MemoryInjected { records } => json!({"records": records}),
         EventData::Other(value) => value.clone(),
     };
     Ok(value)

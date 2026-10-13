@@ -13,10 +13,16 @@ thiserror.workspace = true
 tokio = { workspace = true }
 
 [features]
+# Fault-injection seams for integration tests (always on for this crate's own tests via the
+# dev-dependency below). Off by default.
+testing = ["radian-session/testing"]
 # Forward the core's journal self-check, so this crate's failure-path tests (ADR 0017) also
 # run with replay verified against the transcript.
 journal-selfcheck = ["agent-core/journal-selfcheck"]
 
 [dev-dependencies]
+# The crate's own tests always build with the fault seams, so a plain `cargo test` (the
+# AGENTS.md Verify list) runs them too; production builds stay unarmed.
+radian-runtime = { path = ".", features = ["testing"] }
 agent-provider-anthropic = { path = "../agent-provider-anthropic", features = ["testing"] }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "test-util"] }

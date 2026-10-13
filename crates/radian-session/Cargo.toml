@@ -18,7 +18,16 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true }
 
+[features]
+# Fault-injection seams for integration tests
+# (always on for this crate's own tests via the dev-dependency below). Off by default so a production
+# build cannot arm them.
+testing = []
+
 [dev-dependencies]
+# The crate's own tests always build with the fault seams, so a plain `cargo test` (the
+# AGENTS.md Verify list) runs the fault-injection cases too; production builds stay unarmed.
+radian-session = { path = ".", features = ["testing"] }
 # `rt-multi-thread` lets the seq-ordering regression test run appends on real parallel
 # threads; with the current-thread runtime the race it guards against cannot happen.
 tokio = { workspace = true, features = ["rt-multi-thread"] }

@@ -13,6 +13,7 @@ use serde_json::Value;
 use serde_json::value::RawValue;
 
 use crate::ReadError;
+use crate::gate::SegmentGate;
 use crate::runtime::{RuntimeEvent, runtime_data};
 
 /// The schema version this crate writes and accepts.
@@ -66,6 +67,10 @@ pub enum WriteError {
     },
     #[error(transparent)]
     Policy(#[from] ReadError),
+    #[error(
+        "{path}: a transcript replacement write failed; the session needs recovery, so no          further events can be written"
+    )]
+    SegmentPoisoned { path: PathBuf },
 }
 
 /// Event names and their `critical` flags, exactly as ADR 0006 §4 pins them for the
@@ -73,9 +78,13 @@ pub enum WriteError {
 const EVT_SESSION_CREATED: (&str, bool) = ("SessionCreated", true);
 const EVT_MESSAGE_APPENDED: (&str, bool) = ("MessageAppended", true);
 const EVT_TRANSCRIPT_REPLACED: (&str, bool) = ("TranscriptReplaced", true);
+const EVT_TRANSCRIPT_REPLACEMENT_COMMITTED: (&str, bool) = ("TranscriptReplacementCommitted", true);
+const EVT_TRANSCRIPT_REPLACEMENT_ABORTED: (&str, bool) = ("TranscriptReplacementAborted", true);
 const EVT_TOOL_STARTED: (&str, bool) = ("ToolExecutionStarted", true);
 const EVT_TOOL_SETTLED: (&str, bool) = ("ToolExecutionSettled", true);
 const EVT_USAGE: (&str, bool) = ("ModelUsageRecorded", false);
+const EVT_COMPACTION_USAGE: (&str, bool) = ("CompactionUsageRecorded", false);
+const EVT_CONTEXT_COMPACTED: (&str, bool) = ("ContextCompacted", false);
 
 /// One JSONL session file plus its single-writer lock and running `seq` counter. It
 /// implements [`TranscriptJournal`], so it plugs directly into
@@ -89,6 +98,12 @@ pub struct SessionJournal {
     /// counter only advances once the write succeeded. So `seq` order is file order even when
     /// the runtime's events and the core's journal records are appended concurrently.
     inner: Arc<Mutex<Writer>>,
+    /// Holds host appends back while a core replacement segment is open (ADR 0018 §A).
+    gate: Arc<SegmentGate>,
+    /// Test seam: pause one in-segment core append so a driver test can observe a segment
+    /// mid-flight and prove no other writer deadlocks on it.
+    #[cfg(feature = "testing")]
+    segment_pause: Arc<SegmentPause>,
 }
 
 /// What the writer mutex guards. Counting starts at 1 because [`SessionJournal::create`]
@@ -122,6 +137,9 @@ impl SessionJournal {
             path: path.clone(),
             session_id: session_id.to_owned(),
             inner: Arc::new(Mutex::new(Writer { file, next_seq: 0 })),
+            gate: Arc::new(SegmentGate::new()),
+            #[cfg(feature = "testing")]
+            segment_pause: Arc::new(SegmentPause::default()),
         };
         journal.write_line(EVT_SESSION_CREATED, &CreatedData(&created))?;
         Ok(journal)
@@ -164,18 +182,40 @@ impl SessionJournal {
             }
             .into());
         }
+        // ADR 0019 §6/§7: validate before touching the file. `Session::open` ignores a torn
+        // tail and folds the committed prefix, so a corrupt file is refused with its bytes
+        // exactly as they were — the torn tail is not truncated first. An already-aborted
+        // segment is closed, so a second `resume` does not repeat the abort.
+        let parsed = crate::reader::Session::open(&path)?;
+        let abort_revision = parsed
+            .uncommitted_replacements()
+            .iter()
+            .rev()
+            .find(|segment| segment.end == agent_core::ReplacementEnd::EndOfFile)
+            .map(|segment| segment.revision);
+        // Only now that the file is known sound is the torn tail (ADR 0006 §3.2) removed.
         if scan.torn {
             file.set_len(scan.offset_after_last_lf)
                 .map_err(|e| io_err(&path, e))?;
         }
-        Ok(SessionJournal {
+        let journal = SessionJournal {
             path,
             session_id: session_id.to_owned(),
             inner: Arc::new(Mutex::new(Writer {
                 file,
                 next_seq: last_seq + 1,
             })),
-        })
+            gate: Arc::new(SegmentGate::new()),
+            #[cfg(feature = "testing")]
+            segment_pause: Arc::new(SegmentPause::default()),
+        };
+        if let Some(revision) = abort_revision {
+            journal.write_line(
+                EVT_TRANSCRIPT_REPLACEMENT_ABORTED,
+                &AbortedData { revision },
+            )?;
+        }
+        Ok(journal)
     }
 
     pub fn session_id(&self) -> &str {
@@ -199,7 +239,59 @@ impl SessionJournal {
     /// from the caller, and transcript events cannot be written this way — they go through
     /// [`TranscriptJournal::append`], which keeps `MessageAppended.index` contiguous.
     pub async fn append_runtime_event(&self, event: RuntimeEvent) -> Result<(), WriteError> {
-        self.write_line((event.name(), event.critical()), &runtime_data(&event))
+        let name = event.name();
+        let critical = event.critical();
+        let data = raw_data(&runtime_data(&event)).map_err(|e| invalid_data(&self.path, e))?;
+        // ADR 0018 §A: a runtime event must not land inside a core replacement segment.
+        // Wait for the segment to close, then re-check under the writer lock so a segment
+        // that opened between the wait and the lock cannot be entered.
+        loop {
+            self.gate
+                .wait_closed()
+                .await
+                .map_err(|()| WriteError::SegmentPoisoned {
+                    path: self.path.clone(),
+                })?;
+            let mut writer = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if self.gate.is_open() {
+                drop(writer);
+                continue;
+            }
+            let result = write_locked(&mut writer, &self.session_id, (name, critical), &data);
+            drop(writer);
+            return result.map_err(|e| io_err(&self.path, e));
+        }
+    }
+
+    /// Test seam: whether a core replacement segment is currently open.
+    #[cfg(feature = "testing")]
+    pub fn segment_open(&self) -> bool {
+        self.gate.is_open()
+    }
+
+    /// Test seam: completes once a host append is waiting on an open segment.
+    #[cfg(feature = "testing")]
+    pub async fn wait_for_gate_waiter(&self) {
+        self.gate.wait_for_waiter().await;
+    }
+
+    /// Test seam: pause the next in-segment core append (the replacement commit) on a
+    /// `Notify` until [`SessionJournal::release_segment_append`].
+    #[cfg(feature = "testing")]
+    pub fn pause_next_segment_append(&self) {
+        self.segment_pause.arm();
+    }
+
+    /// Test seam: completes once the paused in-segment append has reached its checkpoint.
+    #[cfg(feature = "testing")]
+    pub async fn wait_segment_paused(&self) {
+        self.segment_pause.wait_paused().await;
+    }
+
+    /// Test seam: release the paused in-segment append.
+    #[cfg(feature = "testing")]
+    pub fn release_segment_append(&self) {
+        self.segment_pause.release();
     }
 
     fn open_locked(path: &Path) -> Result<File, WriteError> {
@@ -259,6 +351,11 @@ fn write_locked(
     (event, critical): (&str, bool),
     data: &RawValue,
 ) -> std::io::Result<()> {
+    // A test-only seam: fail before any byte is written, so the file stays untouched.
+    #[cfg(feature = "testing")]
+    if take_write_failure(event) {
+        return Err(std::io::Error::other("injected: the write failed"));
+    }
     let seq = writer.next_seq;
     let line = Line {
         schema_version: SCHEMA_VERSION,
@@ -277,6 +374,97 @@ fn write_locked(
     writer.file.sync_all()?;
     writer.next_seq = seq + 1;
     Ok(())
+}
+
+/// Test seam (ADR 0018 §A): pause one in-segment core append on a `Notify`. The driver
+/// deadlock test observes a replacement segment mid-flight this way. Race-free against an
+/// early `release`: the `paused`/`released` flags are checked with the `Notified` future
+/// already enabled.
+#[cfg(feature = "testing")]
+#[derive(Default)]
+pub(crate) struct SegmentPause {
+    armed: std::sync::atomic::AtomicBool,
+    paused: std::sync::atomic::AtomicBool,
+    released: std::sync::atomic::AtomicBool,
+    reached: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[cfg(feature = "testing")]
+impl SegmentPause {
+    pub(crate) fn arm(&self) {
+        self.released
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) async fn checkpoint(&self) {
+        if !self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        self.paused.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.reached.notify_waiters();
+        loop {
+            let notified = self.release.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self
+                .released
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                break;
+            }
+            notified.await;
+        }
+        self.paused
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) async fn wait_paused(&self) {
+        loop {
+            let notified = self.reached.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.paused.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    pub(crate) fn release(&self) {
+        self.released
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.release.notify_waiters();
+    }
+}
+
+/// Test-only fault seam: arm a one-shot failure for the next write of `event`, so an
+/// integration test can see the error path without touching the file. Compiled only with the
+/// `testing` feature.
+#[cfg(feature = "testing")]
+pub fn fail_next_write(event: &'static str) {
+    *FAIL_NEXT_WRITE.lock().unwrap_or_else(|e| e.into_inner()) = Some(event);
+}
+
+/// Test-only fault seam (ADR 0019 §7): the next `TranscriptReplacementAborted` write fails.
+#[cfg(feature = "testing")]
+pub fn fail_next_aborted_write() {
+    fail_next_write(EVT_TRANSCRIPT_REPLACEMENT_ABORTED.0);
+}
+
+#[cfg(feature = "testing")]
+static FAIL_NEXT_WRITE: std::sync::Mutex<Option<&'static str>> = std::sync::Mutex::new(None);
+
+#[cfg(feature = "testing")]
+fn take_write_failure(event: &str) -> bool {
+    let mut slot = FAIL_NEXT_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    if slot.as_deref() == Some(event) {
+        *slot = None;
+        true
+    } else {
+        false
+    }
 }
 
 fn invalid_data(path: &Path, e: serde_json::Error) -> WriteError {
@@ -300,13 +488,31 @@ impl TranscriptJournal for SessionJournal {
         let path = self.path.clone();
         let session_id = self.session_id.clone();
         let inner = Arc::clone(&self.inner);
+        let gate = Arc::clone(&self.gate);
+        let effect = gate_effect(&record);
+        #[cfg(feature = "testing")]
+        let pause = matches!(record, JournalRecord::TranscriptReplacementCommitted { .. })
+            .then(|| Arc::clone(&self.segment_pause));
         Box::pin(async move {
+            #[cfg(feature = "testing")]
+            if let Some(pause) = pause {
+                pause.checkpoint().await;
+            }
             let (event, data) = rendered.map_err(JournalError)?;
             let res = tokio::task::spawn_blocking(move || {
                 let mut writer = inner.lock().unwrap_or_else(|e| e.into_inner());
                 // D3: the core awaits this future and never cancels it; the fsync inside is
                 // what makes the append durable before the next transcript change may start.
-                write_locked(&mut writer, &session_id, event, &data)
+                let result = write_locked(&mut writer, &session_id, event, &data);
+                // ADR 0018 §A: observe the segment boundaries under the same lock that chose
+                // the line's place, so a host append cannot slip inside a failed segment.
+                match (&result, effect) {
+                    (Ok(()), GateEffect::Begin(revision)) => gate.begin(revision),
+                    (Ok(()), GateEffect::Close(revision)) => gate.close(revision),
+                    (Err(_), _) if gate.is_open() => gate.poison(),
+                    _ => {}
+                }
+                result
             })
             .await
             .map_err(|join| {
@@ -341,6 +547,11 @@ struct MessageData<'a> {
 }
 
 #[derive(Serialize)]
+struct AbortedData {
+    revision: u64,
+}
+
+#[derive(Serialize)]
 struct ReplacedData {
     revision: u64,
     len: usize,
@@ -364,6 +575,43 @@ struct UsageData<'a> {
     usage: &'a ModelUsage,
 }
 
+#[derive(Serialize)]
+struct CompactionUsageData<'a> {
+    revision: u64,
+    model: &'a str,
+    usage: &'a ModelUsage,
+}
+
+#[derive(Serialize)]
+struct ContextCompactedData<'a> {
+    revision: u64,
+    source_revision: u64,
+    source_len: usize,
+    summary: &'a str,
+    first_kept: usize,
+    tokens_before: u64,
+    tokens_after: u64,
+    below_target: bool,
+    model: &'a str,
+}
+
+/// How one core record changes the replacement-segment gate (ADR 0018 §A).
+#[derive(Debug, Clone, Copy)]
+enum GateEffect {
+    None,
+    Begin(u64),
+    Close(u64),
+}
+
+fn gate_effect(record: &JournalRecord) -> GateEffect {
+    match record {
+        JournalRecord::TranscriptReplaced { revision, .. } => GateEffect::Begin(*revision),
+        JournalRecord::TranscriptReplacementCommitted { revision, .. }
+        | JournalRecord::TranscriptReplacementAborted { revision } => GateEffect::Close(*revision),
+        _ => GateEffect::None,
+    }
+}
+
 /// Maps a core record to its disk event name/`critical` and its `data` shape (ADR 0006
 /// §12). Every current variant is handled; `JournalRecord` is `#[non_exhaustive]`, so a
 /// future variant falls into the `None` arm and the append fails loudly instead of being
@@ -384,6 +632,19 @@ fn render_record(record: &JournalRecord) -> Option<((&'static str, bool), Render
                 len: *len,
             }),
         ),
+        JournalRecord::TranscriptReplacementCommitted { revision, len } => (
+            EVT_TRANSCRIPT_REPLACEMENT_COMMITTED,
+            Render::Replaced(ReplacedData {
+                revision: *revision,
+                len: *len,
+            }),
+        ),
+        JournalRecord::TranscriptReplacementAborted { revision } => (
+            EVT_TRANSCRIPT_REPLACEMENT_ABORTED,
+            Render::Aborted(AbortedData {
+                revision: *revision,
+            }),
+        ),
         JournalRecord::ToolExecutionStarted {
             call_id,
             name,
@@ -401,6 +662,42 @@ fn render_record(record: &JournalRecord) -> Option<((&'static str, bool), Render
             Render::Settled(SettledData { call_id, result }),
         ),
         JournalRecord::ModelUsage { usage } => (EVT_USAGE, Render::Usage(UsageData { usage })),
+        JournalRecord::CompactionUsage {
+            revision,
+            model,
+            usage,
+        } => (
+            EVT_COMPACTION_USAGE,
+            Render::CompactionUsage(CompactionUsageData {
+                revision: *revision,
+                model,
+                usage,
+            }),
+        ),
+        JournalRecord::ContextCompacted {
+            revision,
+            source_revision,
+            source_len,
+            summary,
+            first_kept,
+            tokens_before,
+            tokens_after,
+            below_target,
+            model,
+        } => (
+            EVT_CONTEXT_COMPACTED,
+            Render::ContextCompacted(ContextCompactedData {
+                revision: *revision,
+                source_revision: *source_revision,
+                source_len: *source_len,
+                summary,
+                first_kept: *first_kept,
+                tokens_before: *tokens_before,
+                tokens_after: *tokens_after,
+                below_target: *below_target,
+                model,
+            }),
+        ),
         _ => return None,
     };
     Some((event, data))
@@ -409,9 +706,12 @@ fn render_record(record: &JournalRecord) -> Option<((&'static str, bool), Render
 enum Render<'a> {
     Message(MessageData<'a>),
     Replaced(ReplacedData),
+    Aborted(AbortedData),
     Started(StartedData<'a>),
     Settled(SettledData<'a>),
     Usage(UsageData<'a>),
+    CompactionUsage(CompactionUsageData<'a>),
+    ContextCompacted(ContextCompactedData<'a>),
 }
 
 impl Serialize for Render<'_> {
@@ -419,9 +719,12 @@ impl Serialize for Render<'_> {
         match self {
             Render::Message(d) => d.serialize(serializer),
             Render::Replaced(d) => d.serialize(serializer),
+            Render::Aborted(d) => d.serialize(serializer),
             Render::Started(d) => d.serialize(serializer),
             Render::Settled(d) => d.serialize(serializer),
             Render::Usage(d) => d.serialize(serializer),
+            Render::CompactionUsage(d) => d.serialize(serializer),
+            Render::ContextCompacted(d) => d.serialize(serializer),
         }
     }
 }
