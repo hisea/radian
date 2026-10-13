@@ -6,7 +6,7 @@
 //! decided without I/O: how much recent history to keep, which messages form one atomic
 //! unit, what to ask the summarizer for, whether the answer is usable, and what the
 //! compacted history looks like. The turn loop, the journal writes, the model call and the
-//! retry are the `compact-core` slice; nothing here is `async` and nothing here touches a
+//! retry live in `turn.rs::maybe_compact`; nothing here is `async` and nothing here touches a
 //! file.
 //!
 //! The rules come straight from ADR 0018:
