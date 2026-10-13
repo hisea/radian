@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::error::ReadError;
-use crate::runtime::{InboxLane, TurnOutcome, TurnReason};
+use crate::runtime::{InboxLane, PermissionApprover, PermissionDecision, TurnOutcome, TurnReason};
 use crate::writer::SCHEMA_VERSION;
 
 /// Refuse lines larger than this instead of growing the buffer without bound (ADR 0006
@@ -95,6 +95,15 @@ pub enum EventData {
     ConfigChanged {
         revision: u64,
         change: Value,
+    },
+    /// One permission decision (ADR 0006 §5.9). Typed for an exact round trip; audit only,
+    /// never a transcript record.
+    PermissionResolved {
+        request_id: String,
+        call_id: String,
+        decision: PermissionDecision,
+        approver: PermissionApprover,
+        reason: Option<String>,
     },
     /// A known event this crate does not interpret (`SessionCreated`) or an unknown
     /// non-critical event.
@@ -324,6 +333,16 @@ where
                 let d: UsageData = data_of(raw, lineno, path)?;
                 EventData::ModelUsageRecorded { usage: d.usage }
             }
+            "PermissionResolved" => {
+                let d: PermissionResolvedData = data_of(raw, lineno, path)?;
+                EventData::PermissionResolved {
+                    request_id: d.request_id,
+                    call_id: d.call_id,
+                    decision: d.decision,
+                    approver: d.approver,
+                    reason: d.reason,
+                }
+            }
             "InboxEnqueued" => {
                 let d: InboxEnqueuedData = data_of(raw, lineno, path)?;
                 EventData::InboxEnqueued {
@@ -511,6 +530,7 @@ impl Session {
                 | EventData::TurnStarted { .. }
                 | EventData::TurnFinished { .. }
                 | EventData::ConfigChanged { .. }
+                | EventData::PermissionResolved { .. }
                 | EventData::Other(_) => None,
             })
             .collect()
@@ -619,6 +639,16 @@ struct TurnFinishedData {
 struct ConfigChangedData {
     revision: u64,
     change: Value,
+}
+
+#[derive(Deserialize)]
+struct PermissionResolvedData {
+    request_id: String,
+    call_id: String,
+    decision: PermissionDecision,
+    approver: PermissionApprover,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 /// Deserializes just the `data` field from the already-read line. Deserializing from the
