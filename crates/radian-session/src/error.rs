@@ -62,6 +62,16 @@ pub enum ReadError {
         found: u64,
     },
     #[error(
+        "{path}: line {line}: {event} for call_id {call_id:?} does not appear in an earlier \
+         assistant message of the current transcript revision (ADR 0006 §7)"
+    )]
+    OrphanToolMarker {
+        path: PathBuf,
+        line: u64,
+        event: String,
+        call_id: String,
+    },
+    #[error(
         "{path}: line {line}: the previous TranscriptReplaced.len {len} is not satisfied \
          (only {count} message records follow it) and a new replacement begins"
     )]

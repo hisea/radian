@@ -408,13 +408,12 @@ async fn concurrent_runtime_and_core_appends_keep_seq_in_file_order() {
                             .await
                             .unwrap();
                     } else {
-                        // Tool markers carry no transcript index, so concurrent core-side
-                        // appends are legal here and exercise the TranscriptJournal path.
+                        // Usage records carry no transcript index, so concurrent core-side
+                        // appends are legal here and exercise the TranscriptJournal path
+                        // without needing a declaring assistant message.
                         journal
-                            .append(JournalRecord::ToolExecutionStarted {
-                                call_id: format!("c{w}-{i}"),
-                                name: "t".into(),
-                                arguments: serde_json::json!({}),
+                            .append(JournalRecord::ModelUsage {
+                                usage: agent_core::ModelUsage::default(),
                             })
                             .await
                             .unwrap();

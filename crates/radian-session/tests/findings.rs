@@ -1,16 +1,11 @@
 //! Phase 7 findings: places where the code and ADR 0006 disagreed, and their regressions.
 //!
-//! The fuzz and crash tests found these. One is still reproduced as an `#[ignore]`d test that
-//! asserts what the ADR requires and currently **fails**; it is the reproduction, not a
-//! regression guard. Run it with `--ignored`:
+//! The fuzz and crash tests found these; all four are now fixed and their tests are normal
+//! regressions here (the replacement-segment tests live in `replace.rs`).
 //!
-//! ```sh
-//! cargo test -p radian-session --test findings -- --ignored
-//! ```
-//!
-//! The crash-mid-replacement (ADR 0005) and empty-line (ADR 0006 §3.2-3) findings are fixed
-//! and their tests are normal regressions here; the replacement-segment tests live in
-//! `replace.rs`.
+//! - a marker whose `call_id` no earlier assistant message declares is refused (§7);
+//! - `resume` refuses an unparseable line, empty ones included (§3.2-3);
+//! - a crash mid-replacement recovers the written prefix (ADR 0005).
 
 mod common;
 
@@ -29,13 +24,12 @@ fn envelope(seq: u64, event: &str, critical: bool, data: serde_json::Value) -> S
     )
 }
 
-/// Finding 1 (ADR 0006 §7 pseudocode): the event-level validation list says a
+/// ADR 0006 §7 pseudocode: the event-level validation list says a
 /// `ToolExecutionStarted`/`ToolExecutionSettled` `call_id` "必须已出现在更早的 assistant
-/// 消息" (must have appeared in an earlier assistant message). The reader does not check it:
-/// a marker for a call no message ever declared is accepted, not reported as corruption.
+/// 消息" (must have appeared in an earlier assistant message). A marker for a call no message
+/// ever declared is now refused, naming the call_id and the line.
 #[test]
-#[ignore = "finding: ADR 0006 §7 requires rejecting a marker whose call_id never appeared; the reader accepts it"]
-fn a_marker_whose_call_id_never_appeared_should_be_refused() {
+fn a_marker_whose_call_id_never_appeared_is_refused() {
     let dir = TempDir::new("finding-stray-marker");
     let path = dir.file("s.jsonl");
     let body = format!(
@@ -55,10 +49,18 @@ fn a_marker_whose_call_id_never_appeared_should_be_refused() {
     );
     std::fs::write(&path, body).unwrap();
 
-    let result = Session::open(&path);
+    let error = Session::open(&path).unwrap_err();
     assert!(
-        result.is_err(),
-        "the reader accepted a marker whose call_id no assistant message declares: {result:?}"
+        matches!(
+            error,
+            ReadError::OrphanToolMarker {
+                line: 2,
+                ref event,
+                ref call_id,
+                ..
+            } if event == "ToolExecutionStarted" && call_id == "ghost"
+        ),
+        "expected the orphan marker to be named: {error:?}"
     );
 }
 

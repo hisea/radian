@@ -197,6 +197,10 @@ where
     let mut session_id = String::new();
     let mut skipped = Vec::new();
     let mut event_count: u64 = 0;
+    // Every `call_id` an assistant message of the **current** transcript revision declared.
+    // A `TranscriptReplaced` starts a new revision, so the old revision's ids stop counting
+    // (ADR 0005; ADR 0006 §7 requires a marker's call_id to be declared earlier).
+    let mut declared_calls: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Byte offset where the current line starts, and the end of the last committed line.
     let mut line_offset: u64 = 0;
     let mut committed_bytes: u64 = 0;
@@ -324,6 +328,11 @@ where
                     }));
                 }
                 index_next += 1;
+                if let Message::Assistant { tool_calls, .. } = &d.message {
+                    for call in tool_calls {
+                        declared_calls.insert(call.id.clone());
+                    }
+                }
                 // The replacement segment is exactly the `len` messages that follow its
                 // marker. Once they have all arrived the segment is closed and later
                 // `MessageAppended` records are normal transcript growth, not more of the
@@ -359,6 +368,8 @@ where
                 pending_revision = d.revision;
                 messages_since = 0;
                 index_next = 0;
+                // A new revision: the old revision's declared calls no longer count.
+                declared_calls.clear();
                 EventData::TranscriptReplaced {
                     revision: d.revision,
                     len: d.len,
@@ -366,6 +377,14 @@ where
             }
             "ToolExecutionStarted" => {
                 let d: StartedData = data_of(raw, lineno, path)?;
+                if !declared_calls.contains(&d.call_id) {
+                    return Err(E::from(ReadError::OrphanToolMarker {
+                        path: path.to_path_buf(),
+                        line: lineno,
+                        event: "ToolExecutionStarted".into(),
+                        call_id: d.call_id,
+                    }));
+                }
                 EventData::ToolExecutionStarted {
                     call_id: d.call_id,
                     name: d.name,
@@ -374,6 +393,14 @@ where
             }
             "ToolExecutionSettled" => {
                 let d: SettledData = data_of(raw, lineno, path)?;
+                if !declared_calls.contains(&d.call_id) {
+                    return Err(E::from(ReadError::OrphanToolMarker {
+                        path: path.to_path_buf(),
+                        line: lineno,
+                        event: "ToolExecutionSettled".into(),
+                        call_id: d.call_id,
+                    }));
+                }
                 EventData::ToolExecutionSettled {
                     call_id: d.call_id,
                     result: d.result,
