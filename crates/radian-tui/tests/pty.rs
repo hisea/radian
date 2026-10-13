@@ -61,6 +61,9 @@ struct Pty {
     parser: Parser,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     processed: usize,
+    /// A per-pty `HOME`: the diagnostics directory (ADR 0013) and any default session
+    /// directory resolve under it, so no test ever writes to the runner's real `HOME`.
+    _home: TempDir,
 }
 
 impl Pty {
@@ -90,12 +93,17 @@ impl Pty {
         }
         // Keep the environment small and deterministic; the mock server needs no key.
         cmd.env_clear();
-        for name in ["PATH", "HOME", "TMPDIR", "LANG", "TERM"] {
+        // A fresh HOME per pty keeps the tests hermetic: the diagnostics directory (ADR 0013)
+        // lands under it, not in the runner's real `~/.cache` (or `~/Library/Caches`).
+        let home = TempDir::new("pty-home");
+        for name in ["PATH", "TMPDIR", "LANG", "TERM"] {
             if let Ok(value) = std::env::var(name) {
                 cmd.env(name, value);
             }
         }
         cmd.env("TERM", "xterm-256color");
+        cmd.env("HOME", home.path());
+        cmd.env("XDG_CACHE_HOME", home.path());
         for (name, value) in envs {
             cmd.env(name, value);
         }
@@ -119,6 +127,7 @@ impl Pty {
             parser: Parser::new(rows, cols, 5000),
             child,
             processed: 0,
+            _home: home,
         }
     }
 
