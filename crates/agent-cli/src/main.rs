@@ -6,10 +6,11 @@
 //! environment variable only, and is redacted from everything this program prints — and
 //! from everything it writes to disk.
 
+mod approval;
 mod mcp;
+mod profile;
 mod tools;
 
-use std::future::Future;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,18 +22,17 @@ use tokio::io::AsyncBufReadExt;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
-use agent_core::{
-    Agent, AgentConfig, AgentEvent, EventSink, HookContext, HookError, Hooks, InputSource,
-    RunStatus, ToolCall, ToolDecision, TurnOptions,
-};
+use agent_core::{Agent, AgentConfig, AgentEvent, EventSink, InputSource, RunStatus, TurnOptions};
 use agent_extensions::{McpServerConfig, McpToolProvider};
 use agent_provider_openai_compatible::{ApiKey, OpenAiCompatible, OpenAiCompatibleConfig};
 use clap::Parser;
 use radian_coding::CodingTools;
+use radian_permissions::{Approver, PermissionHooks};
 use radian_runtime::{CancelCause, Driver, DriverError, Inbox, InboxError};
 use radian_session::{Index, SessionCreatedData, SessionJournal};
 use tokio::sync::{Mutex, mpsc};
 
+use crate::approval::{AutoApprover, JournalAudit, TERMINAL_SOURCE, TerminalApprover};
 use crate::mcp::load_mcp_config;
 use crate::tools::CliTools;
 
@@ -72,9 +72,22 @@ struct Cli {
     mcp_config: Option<String>,
 
     /// Expose the built-in file and read-only git tools rooted at this directory
-    /// (read/write/patch/list, git_status/git_diff). No shell is provided.
+    /// (read/write/patch/list, git_status/git_diff). Under `workspace-write` this also
+    /// exposes `shell`, which runs only inside the sandbox.
     #[arg(long)]
     workspace: Option<String>,
+
+    /// Permission profile: `safe` (read-only, no shell, no MCP), `workspace-write` (the
+    /// default: writes confined to the workspace, `shell` sandboxed), or `full-access`
+    /// (explicitly unsandboxed; never a default).
+    #[arg(long, value_name = "PROFILE")]
+    profile: Option<profile::ProfileArg>,
+
+    /// Allow a simple shell command prefix without asking (repeatable), e.g.
+    /// `--allow-shell-command "git status"`. Only a simple command matches; a composite
+    /// (`git status; rm -x`) still asks. There is no allow rule for shell by default.
+    #[arg(long = "allow-shell-command", value_name = "PREFIX")]
+    allow_shell_command: Vec<String>,
 
     /// One-shot mode: run this prompt, then exit.
     #[arg(short, long, conflicts_with = "list")]
@@ -123,7 +136,7 @@ struct Cli {
 }
 
 /// Why startup failed. The message must not contain the key.
-struct SetupError(String);
+pub(crate) struct SetupError(pub(crate) String);
 
 fn main() {
     let cli = Cli::parse();
@@ -318,13 +331,20 @@ fn session_dir(cli: &Cli) -> Result<PathBuf, SetupError> {
 /// directory. `--list` filters by the same value, so a session is only listed in the
 /// workspace it was created in.
 fn session_workspace(cli: &Cli) -> Result<String, SetupError> {
+    Ok(permission_workspace(cli)?.to_string_lossy().into_owned())
+}
+
+/// The workspace the permission profile and the sandbox are built for: `--workspace` when
+/// given, else the current directory. Canonical, because SBPL `subpath` and bwrap binds match
+/// resolved paths.
+fn permission_workspace(cli: &Cli) -> Result<PathBuf, SetupError> {
     let path = match &cli.workspace {
         Some(path) => PathBuf::from(path),
         None => std::env::current_dir()
             .map_err(|e| SetupError(format!("cannot read the current directory: {e}")))?,
     };
-    let path = std::fs::canonicalize(&path).unwrap_or(path);
-    Ok(path.to_string_lossy().into_owned())
+    std::fs::canonicalize(&path)
+        .map_err(|e| SetupError(format!("workspace {}: {e}", path.display())))
 }
 
 /// `--list`: the sessions of this workspace, newest activity first.
@@ -481,38 +501,77 @@ fn open_journal(
 async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     let interactive = cli.prompt.is_none();
     let lines = LineHub::spawn();
+    // One-shot mode with no terminal on stdin has nobody to ask; interactive mode reads its
+    // answers from the same line hub as the prompt loop.
     let can_ask = interactive || std::io::stdin().is_terminal();
-    let approval = Approval {
-        yes: cli.yes,
-        // One-shot mode with no terminal on stdin has nobody to ask; interactive mode
-        // reads its answers from the same line hub as the prompt loop.
-        can_ask,
-        lines: lines.clone(),
-    };
     let workspace = session_workspace(&cli)?;
     let journal = open_journal(&cli, &setup.session_id, &workspace)?;
     let agent_config = AgentConfig {
         system_prompt: setup.system_prompt,
         ..AgentConfig::default()
     };
+
+    // The profile and the sandbox: what may run, and what the OS enforces. `full-access` is
+    // only reachable because the user named it; a failed probe is an error, never a fallback.
+    let profile_arg = cli.profile.unwrap_or_else(profile::default_profile);
+    let workspace_path = permission_workspace(&cli)?;
+    let permission_profile =
+        profile::build_profile(profile_arg, &workspace_path, &cli.allow_shell_command)?;
+    let sandbox = profile::build_sandbox(profile_arg, &workspace_path)?;
+    let (profile_line, sandbox_facts) = profile::describe(profile_arg, sandbox.as_ref());
+    eprintln!("[profile] {profile_line}");
+    eprintln!("[sandbox] {sandbox_facts}");
+
+    // The built-in tools exist only with `--workspace`. `shell` is present only when a
+    // sandbox exists, which is exactly `workspace-write`/`full-access` with a workspace.
     let coding = match &cli.workspace {
-        Some(path) => Some(
-            CodingTools::new(path).map_err(|e| SetupError(format!("--workspace {path}: {e}")))?,
-        ),
+        Some(path) => {
+            let tools = match sandbox {
+                Some(sandbox) => CodingTools::with_sandbox(path, sandbox)
+                    .map_err(|e| SetupError(format!("--workspace {path}: {e}")))?,
+                None => CodingTools::new(path)
+                    .map_err(|e| SetupError(format!("--workspace {path}: {e}")))?,
+            };
+            Some(tools)
+        }
         None => None,
     };
+    // The permission layer replaces the CLI's own approval hook: rules, "allow for this
+    // session" grants, and the audit record. `--yes` swaps the approver for one that answers
+    // "allow once" without asking; rules and the sandbox are untouched by it.
+    let approver: Arc<dyn Approver> = if cli.yes {
+        Arc::new(AutoApprover)
+    } else {
+        Arc::new(TerminalApprover {
+            lines: lines.clone(),
+            can_ask,
+        })
+    };
+    let (audit_tx, mut audit_rx) = mpsc::unbounded_channel();
+    let audit_journal = Arc::clone(&journal);
+    let audit_task = tokio::spawn(async move {
+        while let Some(event) = audit_rx.recv().await {
+            let _ = audit_journal.append_runtime_event(event).await;
+        }
+    });
+    let audit = JournalAudit::new(audit_tx.clone());
+    let hooks = Arc::new(PermissionHooks::new(
+        permission_profile,
+        Some(approver),
+        audit,
+    ));
     let agent = Arc::new(
         Agent::new(
             setup.model,
             CliTools::new(coding, McpToolProvider::new(setup.servers)),
         )
         .with_config(agent_config)
-        .with_hooks(approval),
+        .with_hooks(Arc::clone(&hooks)),
     );
 
     let inbox = Inbox::durable(INBOX_CAPACITY, Arc::clone(&journal));
     let ui = Arc::new(Ui::default());
-    let mut signals = spawn_signals();
+    let signals = spawn_signals();
     // The approval prompt and the prompt loop share stdin. While approval may read, the
     // loop must not compete for a line; with `--yes` (or nobody to ask) it may.
     ui.set_approval_may_read(can_ask && !cli.yes);
@@ -534,65 +593,115 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     driver.set_turn_timeout(setup.turn_timeout_secs.map(Duration::from_secs));
     let driver_ended = Arc::new(Notify::new());
     let ended = Arc::clone(&driver_ended);
-    let mut task = tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let result = driver.run().await;
         ended.notify_one();
         result
     });
 
-    let secrets = setup.secrets.clone();
+    let mut run = Run {
+        inbox,
+        hooks: Arc::clone(&hooks),
+        ui: Arc::clone(&ui),
+        driver_ended,
+        signals,
+        task,
+        secrets: setup.secrets.clone(),
+    };
     let code = if let Some(prompt) = cli.prompt {
-        one_shot(
-            &inbox,
-            &ui,
-            prompt,
-            &driver_ended,
-            &mut signals,
-            &mut task,
-            &secrets,
-        )
-        .await
+        one_shot(&mut run, prompt).await
     } else {
-        interactive_loop(
-            &inbox,
-            &ui,
-            &lines,
-            &driver_ended,
-            &mut signals,
-            &mut task,
-            &secrets,
-        )
-        .await
+        interactive_loop(&mut run, &lines).await
     };
     ui.end_of_turn();
+    // Flush the audit: dropping every holder of the hooks (the agent, the loop context and
+    // this function) and the last sender closes the channel, and the task writes what is
+    // left before it ends. Nothing may exit before this.
+    drop(run);
+    drop(agent);
+    drop(hooks);
+    drop(audit_tx);
+    let _ = audit_task.await;
     Ok(code)
 }
 
-/// `-p`: send one input, wait for its turn, then shut the driver down.
-async fn one_shot(
+/// The single place a turn's source is decided.
+///
+/// Both the permission layer's current-turn source and the inbox enqueue use the same value,
+/// so they cannot disagree. `reset` is true for the input that starts a turn: it resets the
+/// effective source, and then every accepted input reports itself. The effective source only
+/// ever **lowers** (ADR 0012 decision 5), so a mid-turn non-human input takes the turn's
+/// rights down and a later human input cannot raise them back. All CLI inputs are terminal
+/// input today, so this never lowers yet — but the path is wired, and this is the only place
+/// to change.
+fn set_turn_source(hooks: &PermissionHooks, source: InputSource, reset: bool) {
+    if reset {
+        hooks.set_turn_source(Some(source));
+    }
+    hooks.observe_input_source(source);
+}
+
+/// The running pieces the two input loops need, bundled so their signatures stay small.
+struct Run {
+    inbox: Arc<Inbox>,
+    hooks: Arc<PermissionHooks>,
+    ui: Arc<Ui>,
+    driver_ended: Arc<Notify>,
+    signals: mpsc::UnboundedReceiver<()>,
+    task: JoinHandle<Result<(), DriverError>>,
+    secrets: Vec<String>,
+}
+
+/// Enqueues one terminal input and sets the turn source to match. This is the only call site
+/// of [`set_turn_source`].
+// Carrying the rejected message is the runtime's contract (ADR 0011 decision 1); the
+// error is large because the message is, exactly as in `agent_core::SteerError`.
+#[allow(clippy::result_large_err)]
+async fn enqueue_input(
     inbox: &Arc<Inbox>,
-    ui: &Arc<Ui>,
-    prompt: String,
-    driver_ended: &Arc<Notify>,
-    signals: &mut mpsc::UnboundedReceiver<()>,
-    task: &mut JoinHandle<Result<(), DriverError>>,
-    secrets: &[String],
-) -> i32 {
-    if let Err(error) = inbox.followup(prompt, InputSource::User).await {
-        eprintln!("agent: {}", redact(&error.to_string(), secrets));
-        let _ = shutdown(inbox, ui, task).await;
+    hooks: &PermissionHooks,
+    text: String,
+    source: InputSource,
+    turn_in_flight: bool,
+) -> Result<agent_core::MessageId, InboxError> {
+    // The input that starts a turn resets the effective source; a mid-turn one only lowers.
+    set_turn_source(hooks, source, !turn_in_flight);
+    if turn_in_flight {
+        inbox.steer(text, source).await
+    } else {
+        inbox.followup(text, source).await
+    }
+}
+
+/// `-p`: send one input, wait for its turn, then shut the driver down.
+async fn one_shot(run: &mut Run, prompt: String) -> i32 {
+    if let Err(error) = enqueue_input(&run.inbox, &run.hooks, prompt, TERMINAL_SOURCE, false).await
+    {
+        eprintln!("agent: {}", redact(&error.to_string(), &run.secrets));
+        let _ = shutdown(&run.inbox, &run.ui, &mut run.task).await;
         return 1;
     }
     let mut cancelling = false;
-    match wait_for_turn(ui, inbox, driver_ended, signals, &mut cancelling).await {
-        TurnEnd::Forced => return force_exit(task).await,
-        TurnEnd::DriverEnded => return report_task(task, secrets).await,
+    match wait_for_turn(
+        &run.ui,
+        &run.inbox,
+        &run.driver_ended,
+        &mut run.signals,
+        &mut cancelling,
+    )
+    .await
+    {
+        TurnEnd::Forced => return force_exit(&mut run.task).await,
+        TurnEnd::DriverEnded => return report_task(&mut run.task, &run.secrets).await,
         TurnEnd::Done => {}
     }
-    if let Some(code) = report_error(&shutdown(inbox, ui, task).await, secrets) {
+    if let Some(code) = report_error(
+        &shutdown(&run.inbox, &run.ui, &mut run.task).await,
+        &run.secrets,
+    ) {
         return code;
     }
-    match ui.last_status() {
+    match run.ui.last_status() {
         Some(RunStatus::Completed) => 0,
         Some(status) => {
             eprintln!("agent: the turn ended as {status:?}");
@@ -603,27 +712,28 @@ async fn one_shot(
 }
 
 /// Interactive: read lines and route them into the inbox.
-async fn interactive_loop(
-    inbox: &Arc<Inbox>,
-    ui: &Arc<Ui>,
-    lines: &LineHub,
-    driver_ended: &Arc<Notify>,
-    signals: &mut mpsc::UnboundedReceiver<()>,
-    task: &mut JoinHandle<Result<(), DriverError>>,
-    secrets: &[String],
-) -> i32 {
+async fn interactive_loop(run: &mut Run, lines: &LineHub) -> i32 {
     // True once the first Ctrl-C of a wind-down has been seen: the second one forces exit.
     let mut cancelling = false;
     loop {
-        if !ui.busy() {
+        if !run.ui.busy() {
             cancelling = false;
             eprint!("> ");
             let _ = std::io::stderr().flush();
         }
-        match next_event(lines, ui, inbox, driver_ended, signals, &mut cancelling).await {
+        match next_event(
+            lines,
+            &run.ui,
+            &run.inbox,
+            &run.driver_ended,
+            &mut run.signals,
+            &mut cancelling,
+        )
+        .await
+        {
             Next::Leave => break,
-            Next::Forced => return force_exit(task).await,
-            Next::DriverEnded => return report_task(task, secrets).await,
+            Next::Forced => return force_exit(&mut run.task).await,
+            Next::DriverEnded => return report_task(&mut run.task, &run.secrets).await,
             Next::Again => continue,
             Next::Line(line) => {
                 let line = line.trim();
@@ -636,33 +746,39 @@ async fn interactive_loop(
                 // A turn in flight gets the line as a steer (it changes this turn's
                 // direction); an idle driver gets a followup (a new turn). Both are
                 // `source = User`.
-                let result = if ui.busy() {
-                    inbox.steer(line.to_owned(), InputSource::User).await
-                } else {
-                    inbox.followup(line.to_owned(), InputSource::User).await
-                };
+                let result = enqueue_input(
+                    &run.inbox,
+                    &run.hooks,
+                    line.to_owned(),
+                    TERMINAL_SOURCE,
+                    run.ui.busy(),
+                )
+                .await;
                 if let Err(error) = result {
                     match &error {
                         InboxError::Full { .. } => eprintln!(
                             "agent: the inbox is full; that input was not queued (try again)"
                         ),
-                        other => eprintln!("agent: {}", redact(&other.to_string(), secrets)),
+                        other => eprintln!("agent: {}", redact(&other.to_string(), &run.secrets)),
                     }
                     continue;
                 }
-                if ui.approval_may_read() {
+                if run.ui.approval_may_read() {
                     // Do not read again until the turn has started: an approval answer the
                     // user types now must reach the approval prompt, not become the next
                     // input.
                     tokio::select! {
-                        _ = ui.started.notified() => {}
-                        _ = ui.finished.notified() => {}
+                        _ = run.ui.started.notified() => {}
+                        _ = run.ui.finished.notified() => {}
                     }
                 }
             }
         }
     }
-    if let Some(code) = report_error(&shutdown(inbox, ui, task).await, secrets) {
+    if let Some(code) = report_error(
+        &shutdown(&run.inbox, &run.ui, &mut run.task).await,
+        &run.secrets,
+    ) {
         return code;
     }
     0
@@ -981,57 +1097,6 @@ impl EventSink for Ui {
                 self.finished.notify_one();
             }
             _ => {}
-        }
-    }
-}
-
-/// Asks the user about each tool call on stderr, reading the answer from the shared line
-/// hub. With `--yes`, or with nobody to ask, every call is allowed or denied without
-/// waiting, so the turn can never hang on approval.
-struct Approval {
-    yes: bool,
-    can_ask: bool,
-    lines: LineHub,
-}
-
-impl Hooks for Approval {
-    fn before_tool_call(
-        &self,
-        _cx: &HookContext,
-        call: &ToolCall,
-    ) -> impl Future<Output = Result<ToolDecision, HookError>> + Send {
-        let lines = self.lines.clone();
-        let (yes, can_ask) = (self.yes, self.can_ask);
-        async move {
-            if yes {
-                return Ok(ToolDecision::Allow);
-            }
-            if !can_ask {
-                return Ok(ToolDecision::Deny {
-                    reason: "not approved: this run has no terminal to ask in; \
-                             pass --yes to allow tool calls"
-                        .into(),
-                });
-            }
-            eprint!(
-                "[approve] tool {} args {}\nrun it? [y/N] ",
-                call.name, call.arguments
-            );
-            let _ = std::io::stderr().flush();
-            // No cancellation check is needed here: the core drops this future as soon as the
-            // turn is cancelled, and a line leaves the hub only when `next()` completes, so a
-            // cancelled approval cannot swallow the user's next line.
-            match lines.next().await.as_deref() {
-                Some("y") | Some("Y") => Ok(ToolDecision::Allow),
-                Some(other) => Ok(ToolDecision::Deny {
-                    reason: format!(
-                        "the user denied this call (answer: {other:?}; only `y` approves)"
-                    ),
-                }),
-                None => Ok(ToolDecision::Deny {
-                    reason: "no input left to approve with; pass --yes".into(),
-                }),
-            }
         }
     }
 }

@@ -11,11 +11,14 @@ name = "agent"
 path = "src/main.rs"
 
 [dependencies]
+futures-util.workspace = true
 agent-core = { path = "../agent-core" }
 agent-extensions = { path = "../agent-extensions" }
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible" }
 radian-coding = { path = "../radian-coding" }
+radian-permissions = { path = "../radian-permissions" }
 radian-runtime = { path = "../radian-runtime" }
+radian-sandbox = { path = "../radian-sandbox" }
 radian-session = { path = "../radian-session" }
 clap = { version = "4", features = ["derive"] }
 serde.workspace = true

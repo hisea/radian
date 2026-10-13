@@ -1878,3 +1878,153 @@ async fn a_killed_session_resumes_without_replaying_the_tool() {
         "the requeued steer was never admitted: {events}"
     );
 }
+
+// ---------- profiles, the sandbox, and the permission layer (Phase 3 / cli-tools) ----------
+
+/// The tool names the adapter advertised in request `n`.
+fn advertised_tools(server: &MockServer, n: usize) -> Vec<String> {
+    server.requests()[n].json()["tools"]
+        .as_array()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 1: `full-access` is never the default, and without `--workspace` no write/execute tool
+/// exists at all.
+#[tokio::test]
+async fn full_access_is_not_the_default_and_no_write_tools_without_a_workspace() {
+    let server = MockServer::start(vec![
+        tool_reply("c1", "write", r#"{"path":"x.txt","content":"y"}"#),
+        tool_reply("c2", "shell", r#"{"command":"echo hi"}"#),
+        text_reply("done"),
+    ])
+    .await;
+
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--yes",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("done"), "{stdout}");
+    // The default is named on startup, and it is not full-access.
+    assert!(stderr.contains("[profile] workspace-write"), "{stderr}");
+    assert!(!stderr.contains("full-access (chosen"), "{stderr}");
+    // Neither tool is advertised, so the model cannot even ask for one.
+    let names = advertised_tools(&server, 0);
+    for absent in ["write", "patch", "shell"] {
+        assert!(
+            !names.contains(&absent.to_owned()),
+            "`{absent}` must not exist without --workspace: {names:?}"
+        );
+    }
+    assert!(tool_result_content(&server, 1).contains("no tool named"));
+    assert!(tool_result_content(&server, 2).contains("no tool named"));
+}
+
+/// 2: a failed sandbox probe refuses to run; it never falls back to an unsandboxed run.
+///
+/// `RADIAN_SANDBOX_PROBE_FAIL=1` is a test seam that makes the CLI behave exactly as if the
+/// backend probe had failed. It can only cause a refusal, so it cannot weaken the guarantee;
+/// it exists because a real probe failure cannot be produced on a machine that has the
+/// backend.
+#[tokio::test]
+async fn a_failed_sandbox_probe_refuses_instead_of_degrading() {
+    let dir = scratch("probe-fail");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("done")]).await;
+
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--yes",
+                "-p",
+                "hi",
+            ],
+            &[("RADIAN_SANDBOX_PROBE_FAIL", "1")],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("sandbox backend is unavailable") || stderr.contains("cannot be enforced"),
+        "{stderr}"
+    );
+    assert_eq!(server.requests().len(), 0, "the model must never run");
+    assert!(stdout.is_empty(), "{stdout}");
+    // Nothing was written into the workspace either.
+    assert_eq!(std::fs::read_dir(&ws).unwrap().count(), 0);
+}
+
+/// 10: the startup text states the real limits and never claims credential isolation
+/// (ADR 0012 decision 4).
+#[tokio::test]
+async fn the_startup_text_does_not_claim_credential_isolation() {
+    let dir = scratch("wording");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("done")]).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("[profile] workspace-write"), "{stderr}");
+    assert!(stderr.contains("[sandbox]"), "{stderr}");
+    for phrase in [
+        "credentials are isolated",
+        "credential isolation",
+        "credentials are safe",
+        "fully isolated",
+        "凭据已隔离",
+        "IPC is contained",
+    ] {
+        assert!(
+            !stderr.contains(phrase),
+            "the startup text must not claim {phrase:?}: {stderr}"
+        );
+    }
+    // The honest limit is stated instead.
+    assert!(stderr.contains("not tightened"), "{stderr}");
+}
