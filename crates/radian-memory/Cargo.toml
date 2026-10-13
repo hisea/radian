@@ -13,3 +13,7 @@ fs2 = "0.4"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+# The split lock-holding test checks the target log is locked.
+fs2 = "0.4"

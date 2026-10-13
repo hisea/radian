@@ -1,15 +1,53 @@
 //! The memory store: Global and Project scope logs, CRUD with revision checks and the
-//! source rules, Forget/Purge, and the cross-scope view (ADR 0021 D1/D3/D4).
+//! source rules, Forget/Purge, split/merge, and the cross-scope view (ADR 0021 D1/D3/D4).
+//!
+//! Every operation is synchronous and holds the scope writer lock for its own short lifetime
+//! (open → replay → mutate → fsync → drop); it never spans user interaction. Concurrent
+//! writers therefore serialize, which is what ADR 0021 D4 asks of a store shared by many
+//! sessions.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::error::{MemoryError, PurgeStep};
 use crate::event::MemoryEvent;
-use crate::log::Log;
+use crate::log::{Log, LoggedEvent};
 use crate::model::{
     Confirmer, Kind, MemoryId, MemoryRecord, ProjectId, Provenance, Scope, Source, now_utc,
 };
+
+/// Where a split/merge calls its test seam.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MovePhase {
+    /// After the conflict check and before the target `Created`: the window a second writer
+    /// must not be able to enter.
+    BeforeTargetAppend,
+    /// After the target `Created` and before the source `Forgotten`: a crash here leaves the
+    /// half-finished on-disk state.
+    AfterTargetAppend,
+}
+
+// Test seam: a callback run at a [`MovePhase`]; returning `true` aborts with
+// [`MemoryError::SimulatedCrash`]. Thread-local, so a test never affects another one;
+// production never sets it.
+/// The move-hook callback type.
+type MoveHook = Box<dyn FnMut(MovePhase) -> bool>;
+
+thread_local! {
+    static MOVE_HOOK: std::cell::RefCell<Option<MoveHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Installs the move-hook callback (this thread). Used only by tests.
+#[doc(hidden)]
+pub fn set_move_hook(hook: Box<dyn FnMut(MovePhase) -> bool>) {
+    MOVE_HOOK.with(|slot| *slot.borrow_mut() = Some(hook));
+}
+
+fn run_move_hook(phase: MovePhase) -> bool {
+    MOVE_HOOK.with(|slot| slot.borrow_mut().as_mut().is_some_and(|hook| hook(phase)))
+}
 
 /// The in-memory replay of one scope's log.
 struct ScopeLog {
@@ -22,6 +60,19 @@ struct ScopeLog {
 impl ScopeLog {
     fn open(path: &Path) -> Result<Self, MemoryError> {
         let (log, events) = Log::open(path, MemoryEvent::NAMES)?;
+        Self::from_events(path, log, events)
+    }
+
+    /// Opens an existing log for a read-only operation. `None` when it does not exist, so a
+    /// read never creates a directory or an empty file.
+    fn open_read(path: &Path) -> Result<Option<Self>, MemoryError> {
+        match Log::open_existing(path, MemoryEvent::NAMES)? {
+            Some((log, events)) => Ok(Some(Self::from_events(path, log, events)?)),
+            None => Ok(None),
+        }
+    }
+
+    fn from_events(path: &Path, log: Log, events: Vec<LoggedEvent>) -> Result<Self, MemoryError> {
         let mut records = BTreeMap::new();
         let mut forgotten = BTreeSet::new();
         for accepted in &events {
@@ -98,27 +149,35 @@ impl MemoryStore {
         }
     }
 
+    /// Opens (creating if needed) the scope's log for a write.
     fn open_scope(&self, scope: &Scope) -> Result<ScopeLog, MemoryError> {
-        if scope.is_global() {
-            ScopeLog::open(&self.log_path(scope))
-        } else {
-            // A project log creates its directory so a first write may target a new project.
-            let path = self.log_path(scope);
-            if let Some(parent) = path.parent() {
-                crate::fs::ensure_private_dir(parent).map_err(|e| MemoryError::io(parent, e))?;
-            }
-            ScopeLog::open(&path)
+        let path = self.log_path(scope);
+        if let Some(parent) = path.parent() {
+            crate::fs::ensure_private_dir(parent).map_err(|e| MemoryError::io(parent, e))?;
         }
+        ScopeLog::open(&path)
     }
 
-    /// The current state of one scope, in id order.
+    /// Opens an existing scope's log for a read. `None` when it does not exist.
+    fn read_scope(&self, scope: &Scope) -> Result<Option<ScopeLog>, MemoryError> {
+        ScopeLog::open_read(&self.log_path(scope))
+    }
+
+    /// The current state of one scope, in id order. A scope that was never written reads as
+    /// empty and is not created.
     pub fn records(&self, scope: &Scope) -> Result<Vec<MemoryRecord>, MemoryError> {
-        let log = self.open_scope(scope)?;
-        Ok(log.records.into_values().collect())
+        Ok(self
+            .read_scope(scope)?
+            .map(|log| log.records.into_values().collect())
+            .unwrap_or_default())
     }
 
-    /// The combined view of several scopes: a Project Active record overrides a Global one
-    /// with the same key (ADR 0021 D1).
+    /// The combined view of several scopes. Two deterministic rules apply:
+    ///
+    /// - a Project Active record overrides a Global one with the same key (ADR 0021 D1);
+    /// - the same id can appear in two scopes only after a half-finished move (a crash between
+    ///   the target `Created` and the source `Forgotten`); the first scope in the caller's
+    ///   order is kept. The host passes Project before Global, so the target wins.
     pub fn view(&self, scopes: &[Scope]) -> Result<Vec<MemoryRecord>, MemoryError> {
         let mut all = Vec::new();
         for scope in scopes {
@@ -137,6 +196,8 @@ impl MemoryStore {
                     .as_ref()
                     .is_some_and(|key| project_keys.contains(key)))
         });
+        let mut seen = HashSet::new();
+        all.retain(|record| seen.insert(record.id.clone()));
         Ok(all)
     }
 
@@ -222,6 +283,7 @@ impl MemoryStore {
             .records
             .get(id)
             .ok_or_else(|| MemoryError::NotFound { id: id.clone() })?;
+        guard_known(record)?;
         guard_source(record, actor)?;
         check_revision(record, expected_revision)?;
         let revision = record.revision + 1;
@@ -267,6 +329,7 @@ impl MemoryStore {
             .records
             .get(id)
             .ok_or_else(|| MemoryError::NotFound { id: id.clone() })?;
+        guard_known(record)?;
         guard_source(record, actor)?;
         check_revision(record, expected_revision)?;
         let revision = record.revision + 1;
@@ -300,6 +363,7 @@ impl MemoryStore {
             .records
             .get(id)
             .ok_or_else(|| MemoryError::NotFound { id: id.clone() })?;
+        guard_known(record)?;
         check_revision(record, expected_revision)?;
         let revision = record.revision + 1;
         log.append(&MemoryEvent::Confirmed {
@@ -323,6 +387,7 @@ impl MemoryStore {
         log.append(&MemoryEvent::Forgotten {
             id: id.clone(),
             at: now_utc(),
+            moved_to: None,
         })?;
         Ok(())
     }
@@ -362,7 +427,9 @@ impl MemoryStore {
 
     /// Imports a Markdown export. A block whose `id` and `revision` match an existing record
     /// becomes a revision; a block with a new id becomes a record with `source: Import`; a
-    /// block whose revision does not match is reported and not written (ADR 0021 D3).
+    /// block whose revision does not match is reported as a conflict; a block that changes an
+    /// existing record's `key` or `kind` is reported as a rejection. Conflicts and rejections
+    /// write nothing (ADR 0021 D3).
     pub fn import(&self, scope: &Scope, text: &str) -> Result<ImportReport, MemoryError> {
         let parsed = crate::markdown::parse(text)?;
         let mut report = ImportReport::default();
@@ -373,6 +440,33 @@ impl MemoryStore {
                 .find(|record| record.id == item.id);
             match existing {
                 Some(record) => {
+                    if let Some(field) = record.unknown_field() {
+                        report.rejections.push(ImportRejection {
+                            id: item.id,
+                            field: field.to_owned(),
+                            stored: format!("<unknown {field}>"),
+                            imported: record.kind.as_str().to_owned(),
+                        });
+                        continue;
+                    }
+                    if record.key != item.key {
+                        report.rejections.push(ImportRejection {
+                            id: item.id,
+                            field: "key".into(),
+                            stored: record.key.clone().unwrap_or_default(),
+                            imported: item.key.clone().unwrap_or_default(),
+                        });
+                        continue;
+                    }
+                    if record.kind != item.kind {
+                        report.rejections.push(ImportRejection {
+                            id: item.id,
+                            field: "kind".into(),
+                            stored: record.kind.as_str().to_owned(),
+                            imported: item.kind.as_str().to_owned(),
+                        });
+                        continue;
+                    }
                     if record.revision != item.revision {
                         report.conflicts.push(ImportConflict {
                             id: item.id,
@@ -401,8 +495,15 @@ impl MemoryStore {
         Ok(report)
     }
 
-    /// Moves the listed records from one project to another. A record whose key is already
-    /// Active in the target is left where it is and reported (ADR 0021 D2).
+    /// Moves the listed records from one project to another under **both** locks, taken in
+    /// log-path order so two opposite splits cannot deadlock.
+    ///
+    /// The check and the two appends happen inside those locks: the target's key conflict is
+    /// read and the target record written without a window, and the source record's revision
+    /// cannot change between the read and the `Forgotten`. A record whose key is already
+    /// Active in the target is left where it is and reported. A re-run after a crash between
+    /// the two appends sees the target's copy and only completes the source's `Forgotten`
+    /// (ADR 0021 D2).
     pub fn split(
         &self,
         from: &ProjectId,
@@ -418,48 +519,65 @@ impl MemoryStore {
         }
         let from_scope = Scope::Project(from.clone());
         let to_scope = Scope::Project(to.clone());
+        let (mut source, mut target) = self.open_pair(&from_scope, &to_scope)?;
         let mut report = MoveReport::default();
         for id in ids {
-            let record = {
-                let source = self.open_scope(&from_scope)?;
-                source.records.get(id).cloned()
-            };
-            let Some(record) = record else {
-                report.missing.push(id.clone());
+            let Some(record) = source.records.get(id).cloned() else {
+                if target.records.contains_key(id) {
+                    // The source `Forgotten` already landed in an earlier run.
+                    report.moved.push(id.clone());
+                } else {
+                    report.missing.push(id.clone());
+                }
                 continue;
             };
-            let conflict = {
-                let target = self.open_scope(&to_scope)?;
-                record
-                    .key
-                    .as_deref()
-                    .and_then(|key| target.active_by_key(key))
-                    .map(|existing| MoveConflict {
+            if let Some(existing) = target.records.get(id) {
+                if existing.revision == record.revision && existing.content == record.content {
+                    // A previous run wrote the target copy but crashed before the source
+                    // `Forgotten`; complete the move.
+                    source.append(&MemoryEvent::Forgotten {
                         id: id.clone(),
-                        key: record.key.clone().unwrap_or_default(),
-                        held_by: existing.id.clone(),
-                        held_revision: existing.revision,
-                    })
-            };
-            if let Some(conflict) = conflict {
-                report.conflicts.push(conflict);
+                        at: now_utc(),
+                        moved_to: Some(to.clone()),
+                    })?;
+                    report.moved.push(id.clone());
+                    continue;
+                }
+                report.conflicts.push(MoveConflict {
+                    id: id.clone(),
+                    key: record.key.clone().unwrap_or_default(),
+                    held_by: existing.id.clone(),
+                    held_revision: existing.revision,
+                });
+                continue;
+            }
+            if let Some(key) = record.key.as_deref()
+                && let Some(existing) = target.active_by_key(key)
+            {
+                report.conflicts.push(MoveConflict {
+                    id: id.clone(),
+                    key: key.to_owned(),
+                    held_by: existing.id.clone(),
+                    held_revision: existing.revision,
+                });
                 continue;
             }
             let moved = MemoryRecord {
                 scope: to_scope.clone(),
                 ..record
             };
-            {
-                let mut target = self.open_scope(&to_scope)?;
-                target.append(&MemoryEvent::Created(moved))?;
+            if run_move_hook(MovePhase::BeforeTargetAppend) {
+                return Err(MemoryError::SimulatedCrash);
             }
-            {
-                let mut source = self.open_scope(&from_scope)?;
-                source.append(&MemoryEvent::Forgotten {
-                    id: id.clone(),
-                    at: now_utc(),
-                })?;
+            target.append(&MemoryEvent::Created(moved))?;
+            if run_move_hook(MovePhase::AfterTargetAppend) {
+                return Err(MemoryError::SimulatedCrash);
             }
+            source.append(&MemoryEvent::Forgotten {
+                id: id.clone(),
+                at: now_utc(),
+                moved_to: Some(to.clone()),
+            })?;
             report.moved.push(id.clone());
         }
         Ok(report)
@@ -474,17 +592,48 @@ impl MemoryStore {
             .collect();
         self.split(from, &ids, into)
     }
+
+    /// Opens two scopes for a move, locking them in log-path order. The returned tuple is
+    /// always `(a, b)`; only the acquisition order follows the paths.
+    fn open_pair(&self, a: &Scope, b: &Scope) -> Result<(ScopeLog, ScopeLog), MemoryError> {
+        let a_path = self.log_path(a);
+        let b_path = self.log_path(b);
+        for path in [&a_path, &b_path] {
+            if let Some(parent) = path.parent() {
+                crate::fs::ensure_private_dir(parent).map_err(|e| MemoryError::io(parent, e))?;
+            }
+        }
+        if a_path <= b_path {
+            Ok((ScopeLog::open(&a_path)?, ScopeLog::open(&b_path)?))
+        } else {
+            let second = ScopeLog::open(&b_path)?;
+            let first = ScopeLog::open(&a_path)?;
+            Ok((first, second))
+        }
+    }
 }
 
 fn guard_source(record: &MemoryRecord, actor: Source) -> Result<(), MemoryError> {
-    if actor == Source::Agent && record.source == Source::User {
+    if actor == Source::Agent && matches!(record.source, Source::User) {
         return Err(MemoryError::SourceProtected {
             id: record.id.clone(),
             actor,
-            existing: record.source,
+            existing: record.source.clone(),
         });
     }
     Ok(())
+}
+
+/// A record with an unknown enum value is listed/exported/forgotten/purged but cannot be
+/// changed by this version (ADR 0021 D4).
+fn guard_known(record: &MemoryRecord) -> Result<(), MemoryError> {
+    match record.unknown_field() {
+        Some(field) => Err(MemoryError::UnknownRecordField {
+            id: record.id.clone(),
+            field,
+        }),
+        None => Ok(()),
+    }
 }
 
 fn check_revision(record: &MemoryRecord, expected: u64) -> Result<(), MemoryError> {
@@ -521,6 +670,9 @@ pub struct ImportReport {
     pub created: Vec<MemoryId>,
     pub revised: Vec<MemoryId>,
     pub conflicts: Vec<ImportConflict>,
+    /// Blocks refused because they changed a field an import may not change (or because the
+    /// stored record carries an unknown value); nothing was written for them.
+    pub rejections: Vec<ImportRejection>,
 }
 
 /// One imported block whose revision did not match the stored record.
@@ -529,4 +681,14 @@ pub struct ImportConflict {
     pub id: MemoryId,
     pub expected: u64,
     pub found: u64,
+}
+
+/// One imported block refused because `field` differs from the stored record (`key`/`kind`),
+/// or because the stored record has an unknown value this version may not change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportRejection {
+    pub id: MemoryId,
+    pub field: String,
+    pub stored: String,
+    pub imported: String,
 }

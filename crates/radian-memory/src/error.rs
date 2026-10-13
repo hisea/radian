@@ -15,6 +15,8 @@ pub enum MemoryError {
     },
     #[error("{path}: already locked by another writer; a memory log allows exactly one writer")]
     Locked { path: PathBuf },
+    #[error("{path}: the file was replaced repeatedly while opening; giving up")]
+    Raced { path: PathBuf },
     #[error("{path}: line {line}: JSON parse failure (column {column}): {message}")]
     Corrupt {
         path: PathBuf,
@@ -49,6 +51,11 @@ pub enum MemoryError {
     NotFound { id: MemoryId },
     #[error("no project {0}")]
     UnknownProject(crate::model::ProjectId),
+    #[error("record {id} has an unknown {field} value; it cannot be changed by this version")]
+    UnknownRecordField { id: MemoryId, field: &'static str },
+    #[doc(hidden)]
+    #[error("simulated crash (test seam)")]
+    SimulatedCrash,
     #[error("key {key:?} is already held by {id} at revision {revision}")]
     KeyConflict {
         key: String,

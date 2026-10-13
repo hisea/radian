@@ -134,3 +134,40 @@ fn an_imported_new_id_creates_an_import_record() {
     assert_eq!(again.revised.len(), 1, "{again:?}");
     assert_eq!(store.records(&global()).unwrap().len(), 1);
 }
+
+/// The reviewer's decision: changing `key` or `kind` for an existing id is a rejection, not a
+/// silent drop of the user's edit; the content is not written either.
+#[test]
+fn an_import_that_changes_key_or_kind_is_rejected_not_silently_applied() {
+    let dir = TempDir::new("markdown-key-change");
+    let store = MemoryStore::open(dir.path());
+    store
+        .create(
+            &global(),
+            Source::User,
+            Kind::Fact,
+            Some("original".into()),
+            "body",
+            Provenance::default(),
+        )
+        .unwrap();
+    let text = store.export(&global()).unwrap();
+
+    let changed = text.replace("key: original", "key: renamed");
+    let report = store.import(&global(), &changed).unwrap();
+    assert_eq!(report.rejections.len(), 1, "{report:?}");
+    assert_eq!(report.rejections[0].field, "key");
+    assert_eq!(report.rejections[0].stored, "original");
+    assert_eq!(report.rejections[0].imported, "renamed");
+    assert!(report.revised.is_empty(), "{report:?}");
+    let records = store.records(&global()).unwrap();
+    assert_eq!(records[0].key.as_deref(), Some("original"));
+    assert_eq!(records[0].revision, 1, "a rejection must write nothing");
+
+    let changed = text.replace("kind: fact", "kind: lesson");
+    let report = store.import(&global(), &changed).unwrap();
+    assert_eq!(report.rejections.len(), 1, "{report:?}");
+    assert_eq!(report.rejections[0].field, "kind");
+    assert!(report.revised.is_empty(), "{report:?}");
+    assert_eq!(store.records(&global()).unwrap()[0].kind, Kind::Fact);
+}

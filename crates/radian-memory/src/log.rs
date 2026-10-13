@@ -30,6 +30,30 @@ pub(crate) struct LoggedEvent {
     pub data: Value,
 }
 
+/// How many times a racing replacement is tolerated before `open_locked` gives up. A replace
+/// (Purge) and an open never loop forever together in practice.
+const MAX_OPEN_RETRIES: usize = 64;
+
+// Test seam: a callback run after `open()` and before the writer lock is taken, so a test
+// can replace the file at `path` in exactly that window. Thread-local, so a test never
+// affects another one; production never sets it.
+thread_local! {
+    static OPEN_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Installs the open-hook callback (one shot, on this thread). Used only by tests.
+#[doc(hidden)]
+pub fn set_open_hook(hook: Box<dyn FnOnce()>) {
+    OPEN_HOOK.with(|slot| *slot.borrow_mut() = Some(hook));
+}
+
+fn run_open_hook() {
+    if let Some(hook) = OPEN_HOOK.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
+}
+
 /// One JSONL log file plus its writer lock and running `seq`.
 pub(crate) struct Log {
     path: PathBuf,
@@ -65,6 +89,18 @@ impl Log {
             },
             events,
         ))
+    }
+
+    /// Opens an **existing** log without creating anything. `None` when the file is absent,
+    /// so a read-only operation never leaves an empty scope behind.
+    pub(crate) fn open_existing(
+        path: &Path,
+        known: &[&str],
+    ) -> Result<Option<(Self, Vec<LoggedEvent>)>, MemoryError> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        Log::open(path, known).map(Some)
     }
 
     /// Appends one event, choosing its `seq` under the lock and fsyncing before returning.
@@ -152,21 +188,53 @@ impl Log {
     }
 }
 
+/// Opens the log and takes the single-writer lock, **revalidating the inode** afterwards.
+///
+/// A writer that reached `open()` before a Purge renamed a new file over the path is holding
+/// the *old*, now-unlinked inode; once it acquires the lock there it would replay the old
+/// content and fsync a write into a file with no path. So after locking, the file's
+/// `(dev, ino)` is compared with the path's current `(dev, ino)`; on any mismatch (or a
+/// vanished path) the descriptor is dropped and the open+lock is retried.
+///
+/// Non-Unix platforms skip the comparison (the memory store targets Unix), so the race is not
+/// closed there.
 fn open_locked(path: &Path) -> Result<File, MemoryError> {
-    let mut options = OpenOptions::new();
-    options.read(true).append(true).create(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(PRIVATE_FILE_MODE);
+    for _ in 0..MAX_OPEN_RETRIES {
+        let mut options = OpenOptions::new();
+        options.read(true).append(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(PRIVATE_FILE_MODE);
+        }
+        let file = options.open(path).map_err(|e| MemoryError::io(path, e))?;
+        run_open_hook();
+        // Blocking: two writers serialize on the lock (ADR 0021 D4), so a concurrent create
+        // surfaces as KeyConflict/RevisionConflict rather than as a lock error.
+        file.lock_exclusive().map_err(|_| MemoryError::Locked {
+            path: path.to_path_buf(),
+        })?;
+        if same_file(&file, path) {
+            return Ok(file);
+        }
     }
-    let file = options.open(path).map_err(|e| MemoryError::io(path, e))?;
-    // Blocking: two writers serialize on the lock (ADR 0021 D4), so a concurrent create
-    // surfaces as KeyConflict/RevisionConflict rather than as a lock error.
-    file.lock_exclusive().map_err(|_| MemoryError::Locked {
+    Err(MemoryError::Raced {
         path: path.to_path_buf(),
-    })?;
-    Ok(file)
+    })
+}
+
+#[cfg(unix)]
+fn same_file(file: &File, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let (Ok(open), Ok(current)) = (file.metadata(), std::fs::metadata(path)) else {
+        return false;
+    };
+    open.dev() == current.dev() && open.ino() == current.ino()
+}
+
+#[cfg(not(unix))]
+fn same_file(_file: &File, _path: &Path) -> bool {
+    true
 }
 
 /// Streams the log, applying the §3.2/§7 rules. Returns the accepted events and the committed

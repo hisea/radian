@@ -24,11 +24,11 @@ pub fn export(records: &[MemoryRecord]) -> String {
         out.push_str("---\n");
         out.push_str(&format!("id: {}\n", record.id));
         out.push_str(&format!("revision: {}\n", record.revision));
-        out.push_str(&format!("kind: {}\n", kind_str(record.kind)));
+        out.push_str(&format!("kind: {}\n", record.kind.as_str()));
         if let Some(key) = &record.key {
             out.push_str(&format!("key: {key}\n"));
         }
-        out.push_str(&format!("source: {}\n", source_str(record)));
+        out.push_str(&format!("source: {}\n", record.source.as_str()));
         out.push_str(&format!(
             "verification: {}\n",
             if record.verification.is_confirmed() {
@@ -37,7 +37,7 @@ pub fn export(records: &[MemoryRecord]) -> String {
                 "unverified"
             }
         ));
-        out.push_str(&format!("status: {}\n", status_str(record)));
+        out.push_str(&format!("status: {}\n", record.status.as_str()));
         out.push_str("---\n");
         out.push_str(&record.content);
         if !record.content.ends_with('\n') {
@@ -97,13 +97,10 @@ pub fn parse(text: &str) -> Result<Vec<ParsedRecord>, MemoryError> {
             .ok_or_else(|| md(block, 1, "missing `revision`"))?
             .parse()
             .map_err(|_| md(block, 1, "`revision` is not a number"))?;
-        let kind = match field("kind").as_deref() {
-            Some("preference") | None => Kind::Preference,
-            Some("decision") => Kind::Decision,
-            Some("fact") => Kind::Fact,
-            Some("lesson") => Kind::Lesson,
-            Some(other) => return Err(md(block, 1, &format!("unknown kind {other:?}"))),
-        };
+        // A kind this version does not know is kept verbatim, not refused.
+        let kind = field("kind")
+            .map(|raw| Kind::from_name(&raw))
+            .unwrap_or(Kind::Preference);
         let key = field("key").filter(|key| !key.is_empty());
         records.push(ParsedRecord {
             id: MemoryId(id),
@@ -121,29 +118,5 @@ fn md(line: usize, column: usize, message: &str) -> MemoryError {
         line,
         column,
         message: message.to_owned(),
-    }
-}
-
-fn kind_str(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Preference => "preference",
-        Kind::Decision => "decision",
-        Kind::Fact => "fact",
-        Kind::Lesson => "lesson",
-    }
-}
-
-fn source_str(record: &MemoryRecord) -> &'static str {
-    match record.source {
-        crate::model::Source::User => "user",
-        crate::model::Source::Agent => "agent",
-        crate::model::Source::Import => "import",
-    }
-}
-
-fn status_str(record: &MemoryRecord) -> &'static str {
-    match record.status {
-        crate::model::Status::Active => "active",
-        crate::model::Status::Archived => "archived",
     }
 }

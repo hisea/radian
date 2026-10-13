@@ -27,6 +27,9 @@ pub fn search(records: &[MemoryRecord], query: &SearchQuery) -> Vec<MemoryRecord
         .unwrap_or_default();
     let mut selected: Vec<(u32, MemoryRecord)> = records
         .iter()
+        // A record with an unknown enum value is listed/exported but not searched (ADR 0021
+        // D4): this version cannot interpret it.
+        .filter(|record| record.unknown_field().is_none())
         .filter(|record| query.include_archived || record.is_active())
         .filter(|record| match &query.key {
             Some(key) => record.key.as_deref() == Some(key.as_str()),

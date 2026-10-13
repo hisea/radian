@@ -157,3 +157,85 @@ fn a_bad_seq_is_refused() {
         "{error}"
     );
 }
+
+/// ADR 0021 D4 (last bullet): a record whose known field holds a value this version does not
+/// know is forward compatible — the scope still opens, the record is listed/exported and its
+/// raw value survives a Purge, but it is not searched and cannot be revised.
+#[test]
+fn an_unknown_kind_is_forward_compatible() {
+    use radian_memory::{Kind, SearchQuery, search};
+
+    let dir = TempDir::new("forward-unknown-kind");
+    let store = MemoryStore::open(dir.path());
+    record(&store, "known", "known body");
+
+    let line = json!({
+        "schema_version": 1,
+        "seq": 1,
+        "ts": "2026-10-13T00:00:00.000000Z",
+        "event": "MemoryCreated",
+        "critical": true,
+        "data": {"record": {
+            "id": "mem-future",
+            "scope": "global",
+            "kind": "future_kind",
+            "key": "future",
+            "content": "future body",
+            "source": "user",
+            "verification": "unverified",
+            "status": "active",
+            "created_at": "2026-10-13T00:00:00.000000Z",
+            "updated_at": "2026-10-13T00:00:00.000000Z",
+            "revision": 1
+        }}
+    });
+    append_raw(&log_path(&dir), format!("{line}\n").as_bytes());
+
+    // The scope opens and both records are listed.
+    let records = store.records(&global()).unwrap();
+    assert_eq!(records.len(), 2, "a future kind must not close the scope");
+    let future = records
+        .iter()
+        .find(|r| r.id.as_str() == "mem-future")
+        .unwrap();
+    assert_eq!(future.kind, Kind::Unknown("future_kind".into()));
+    assert_eq!(future.unknown_field(), Some("kind"));
+
+    // It is not searched...
+    let view = store.view(&[global()]).unwrap();
+    let query = SearchQuery {
+        text: Some("future".into()),
+        include_archived: true,
+        ..Default::default()
+    };
+    assert!(
+        search(&view, &query).is_empty(),
+        "an unknown kind is not searched"
+    );
+
+    // ...and cannot be changed by this version.
+    let error = store
+        .revise(&global(), Source::User, &future.id, 1, "changed")
+        .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            MemoryError::UnknownRecordField { field: "kind", .. }
+        ),
+        "{error}"
+    );
+
+    // Export keeps the raw value, and Purge writes it back verbatim.
+    assert!(
+        store
+            .export(&global())
+            .unwrap()
+            .contains("kind: future_kind")
+    );
+    store.purge(&global()).unwrap();
+    let raw = std::fs::read_to_string(log_path(&dir)).unwrap();
+    assert!(
+        raw.contains("future_kind"),
+        "Purge must keep the raw kind: {raw}"
+    );
+}

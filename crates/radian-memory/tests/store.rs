@@ -296,3 +296,20 @@ fn scopes_are_isolated() {
     assert_eq!(view.len(), 1, "{view:?}");
     assert_eq!(view[0].content, "project body");
 }
+
+/// A read-only operation on a scope that was never written must not create its directory or an
+/// empty log file.
+#[test]
+fn a_read_of_an_unwritten_scope_creates_nothing() {
+    let dir = TempDir::new("readonly-no-create");
+    let store = MemoryStore::open(dir.path());
+    let never = project("never-written");
+
+    assert!(store.records(&never).unwrap().is_empty());
+    assert!(store.view(&[global(), never.clone()]).unwrap().is_empty());
+    assert_eq!(store.export(&never).unwrap(), "");
+
+    assert!(!store.log_path(&never).exists());
+    assert!(!dir.path().join("projects").exists(), "no project dir");
+    assert!(!dir.path().join("global").exists(), "no global dir");
+}

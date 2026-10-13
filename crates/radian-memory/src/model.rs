@@ -1,9 +1,17 @@
 //! The memory data model (ADR 0021 D1/D4). A record is the replay result of the scope's
 //! event log; ids are stable across revisions, exports and Purge.
+//!
+//! The known-field enums (`Kind`, `Source`, `Status`, `Verification`) are **forward
+//! compatible**: a value this version does not know is kept as `Unknown(raw)` and written back
+//! verbatim (including by Purge's rewrite), so a newer writer's record does not make the whole
+//! scope unreadable. Such a record is listed/exported/forgettable but does not take part in
+//! search and cannot be revised/archived/restored/confirmed (ADR 0021 D4, last bullet).
 
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value;
 
 /// A stable record id: generated once, kept across revisions, export/import and Purge.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -78,32 +86,35 @@ impl Scope {
 }
 
 /// What kind of thing a memory is (ADR 0021 D4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Kind {
     Preference,
     Decision,
     Fact,
     Lesson,
+    /// A kind a newer writer defined: kept verbatim.
+    Unknown(String),
 }
 
 /// Where a record came from. The host decides this; the model never supplies it (ADR 0021
 /// invariant 3). It is written once and never changed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
     User,
     Agent,
     Import,
+    /// A source a newer writer defined: kept verbatim.
+    Unknown(String),
 }
 
 /// The lifecycle dimension (ADR 0021 D4): `Active` or `Archived`. A forgotten record is not
 /// in the state at all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
     Active,
     Archived,
+    /// A status a newer writer defined: kept verbatim.
+    Unknown(String),
 }
 
 /// Who confirmed a record. v1 only a user can (ADR 0021 D4).
@@ -115,16 +126,180 @@ pub enum Confirmer {
 
 /// The confirmation dimension, independent of `Status` (ADR 0021 D4). Confirming does **not**
 /// change `source`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verification {
     Unverified,
-    Confirmed { by: Confirmer, at: String },
+    Confirmed {
+        by: Confirmer,
+        at: String,
+    },
+    /// A verification shape a newer writer defined: kept verbatim.
+    Unknown(Value),
 }
 
 impl Verification {
     pub fn is_confirmed(&self) -> bool {
         matches!(self, Verification::Confirmed { .. })
+    }
+}
+
+impl Kind {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Kind::Preference => "preference",
+            Kind::Decision => "decision",
+            Kind::Fact => "fact",
+            Kind::Lesson => "lesson",
+            Kind::Unknown(raw) => raw,
+        }
+    }
+
+    /// Known name or an `Unknown` carrying it.
+    pub fn from_name(raw: &str) -> Self {
+        match raw {
+            "preference" => Kind::Preference,
+            "decision" => Kind::Decision,
+            "fact" => Kind::Fact,
+            "lesson" => Kind::Lesson,
+            _ => Kind::Unknown(raw.to_owned()),
+        }
+    }
+}
+
+impl Source {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Source::User => "user",
+            Source::Agent => "agent",
+            Source::Import => "import",
+            Source::Unknown(raw) => raw,
+        }
+    }
+}
+
+impl Status {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Status::Active => "active",
+            Status::Archived => "archived",
+            Status::Unknown(raw) => raw,
+        }
+    }
+}
+
+impl Serialize for Kind {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match self {
+            Kind::Preference => "preference",
+            Kind::Decision => "decision",
+            Kind::Fact => "fact",
+            Kind::Lesson => "lesson",
+            Kind::Unknown(raw) => raw,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for Kind {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Ok(match raw.as_str() {
+            "preference" => Kind::Preference,
+            "decision" => Kind::Decision,
+            "fact" => Kind::Fact,
+            "lesson" => Kind::Lesson,
+            _ => Kind::Unknown(raw),
+        })
+    }
+}
+
+impl Serialize for Source {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match self {
+            Source::User => "user",
+            Source::Agent => "agent",
+            Source::Import => "import",
+            Source::Unknown(raw) => raw,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for Source {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Ok(match raw.as_str() {
+            "user" => Source::User,
+            "agent" => Source::Agent,
+            "import" => Source::Import,
+            _ => Source::Unknown(raw),
+        })
+    }
+}
+
+impl Serialize for Status {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match self {
+            Status::Active => "active",
+            Status::Archived => "archived",
+            Status::Unknown(raw) => raw,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for Status {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Ok(match raw.as_str() {
+            "active" => Status::Active,
+            "archived" => Status::Archived,
+            _ => Status::Unknown(raw),
+        })
+    }
+}
+
+impl Serialize for Verification {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Verification::Unverified => serializer.serialize_str("unverified"),
+            Verification::Confirmed { by, at } => {
+                #[derive(Serialize)]
+                struct Confirmed<'a> {
+                    by: Confirmer,
+                    at: &'a str,
+                }
+                #[derive(Serialize)]
+                struct Wrapper<'a> {
+                    confirmed: Confirmed<'a>,
+                }
+                Wrapper {
+                    confirmed: Confirmed { by: *by, at },
+                }
+                .serialize(serializer)
+            }
+            Verification::Unknown(raw) => raw.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Verification {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        if value.as_str() == Some("unverified") {
+            return Ok(Verification::Unverified);
+        }
+        if let Some(confirmed) = value.get("confirmed") {
+            #[derive(Deserialize)]
+            struct Confirmed {
+                by: Confirmer,
+                at: String,
+            }
+            let confirmed: Confirmed =
+                serde_json::from_value(confirmed.clone()).map_err(D::Error::custom)?;
+            return Ok(Verification::Confirmed {
+                by: confirmed.by,
+                at: confirmed.at,
+            });
+        }
+        Ok(Verification::Unknown(value))
     }
 }
 
@@ -189,7 +364,7 @@ impl MemoryRecord {
                 by: Confirmer::User,
                 at: at.clone(),
             },
-            Source::Agent | Source::Import => Verification::Unverified,
+            Source::Agent | Source::Import | Source::Unknown(_) => Verification::Unverified,
         };
         Self {
             id,
@@ -210,6 +385,24 @@ impl MemoryRecord {
     /// The `updated_at`+`id` tiebreak used by the deterministic order (ADR 0021 D6).
     pub fn is_active(&self) -> bool {
         self.status == Status::Active
+    }
+
+    /// True when a field carries a value this version does not know. Such a record is listed,
+    /// exported, forgotten and purged, but is not searched and cannot be revised.
+    pub fn unknown_field(&self) -> Option<&'static str> {
+        if matches!(self.kind, Kind::Unknown(_)) {
+            return Some("kind");
+        }
+        if matches!(self.source, Source::Unknown(_)) {
+            return Some("source");
+        }
+        if matches!(self.status, Status::Unknown(_)) {
+            return Some("status");
+        }
+        if matches!(self.verification, Verification::Unknown(_)) {
+            return Some("verification");
+        }
+        None
     }
 }
 

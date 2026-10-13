@@ -6,9 +6,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::model::{Confirmer, MemoryId, MemoryRecord, Status, Verification};
+use crate::model::{Confirmer, MemoryId, MemoryRecord, ProjectId, Status, Verification};
 
 /// One durable memory event. The disk name is the exact string in [`MemoryEvent::NAMES`].
+// `Created` carries a whole record (which is large because `Kind`/`Verification` can hold an
+// unknown value); boxing it would only add indirection to a value that is written once.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemoryEvent {
     Created(MemoryRecord),
@@ -37,6 +40,9 @@ pub enum MemoryEvent {
     Forgotten {
         id: MemoryId,
         at: String,
+        /// Set by split/merge so an audit can tell "moved to this project" from a plain
+        /// "forgotten". A plain `forget` leaves it `None`.
+        moved_to: Option<ProjectId>,
     },
     Purged {
         removed: Vec<MemoryId>,
@@ -99,7 +105,10 @@ impl MemoryEvent {
                 by,
                 at,
             } => serde_json::json!({ "id": id, "revision": revision, "by": by, "at": at }),
-            MemoryEvent::Forgotten { id, at } => serde_json::json!({ "id": id, "at": at }),
+            MemoryEvent::Forgotten { id, at, moved_to } => match moved_to {
+                Some(project) => serde_json::json!({ "id": id, "at": at, "moved_to": project }),
+                None => serde_json::json!({ "id": id, "at": at }),
+            },
             MemoryEvent::Purged { removed, at } => {
                 serde_json::json!({ "removed": removed, "at": at })
             }
@@ -147,7 +156,11 @@ impl MemoryEvent {
             }
             "MemoryForgotten" => {
                 let d = from_value::<ForgottenData>(data)?;
-                MemoryEvent::Forgotten { id: d.id, at: d.at }
+                MemoryEvent::Forgotten {
+                    id: d.id,
+                    at: d.at,
+                    moved_to: d.moved_to,
+                }
             }
             "StorePurged" => {
                 let d = from_value::<PurgedData>(data)?;
@@ -278,6 +291,8 @@ struct ConfirmedData {
 struct ForgottenData {
     id: MemoryId,
     at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    moved_to: Option<ProjectId>,
 }
 
 #[derive(Deserialize, Serialize)]

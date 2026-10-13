@@ -26,6 +26,8 @@ mod store;
 
 pub use error::{MemoryError, PurgeStep};
 pub use event::MemoryEvent;
+#[doc(hidden)]
+pub use log::set_open_hook;
 pub use markdown::{ParsedRecord, export, parse};
 pub use model::{
     Confirmer, Kind, MemoryId, MemoryRecord, ProjectId, Provenance, Scope, Source, Status,
@@ -33,4 +35,8 @@ pub use model::{
 };
 pub use registry::ProjectRegistry;
 pub use search::{SearchQuery, search};
-pub use store::{ImportConflict, ImportReport, MemoryStore, MoveConflict, MoveReport};
+pub use store::{
+    ImportConflict, ImportRejection, ImportReport, MemoryStore, MoveConflict, MoveReport,
+};
+#[doc(hidden)]
+pub use store::{MovePhase, set_move_hook};
