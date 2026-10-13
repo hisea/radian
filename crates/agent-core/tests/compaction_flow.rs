@@ -607,6 +607,11 @@ async fn a_committed_compaction_clears_the_budget_baseline() {
         UsageSource::Estimated,
         "the baseline described the replaced transcript: {report:?}"
     );
+    assert_eq!(
+        session.testing_budget_baseline_input(),
+        None,
+        "the reported baseline was cleared with the replaced transcript"
+    );
 }
 
 // ---------- 12. changed source view ----------

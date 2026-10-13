@@ -337,6 +337,13 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         self.tamper_source_on_compaction = true;
     }
 
+    /// Test seam: the provider-reported baseline input, if any. A committed compaction must
+    /// clear it (ADR 0018 §B2), which is otherwise only observable through the next request.
+    #[cfg(feature = "testing")]
+    pub fn testing_budget_baseline_input(&self) -> Option<u64> {
+        self.budget_baseline.map(|(input, _)| input)
+    }
+
     /// The single entry every transcript modification goes through: journal first, then
     /// memory, then the [`AgentEvent::TranscriptAppended`] event. A failed append changes
     /// neither memory nor events (S1). Without a journal this is just a push plus the event.
