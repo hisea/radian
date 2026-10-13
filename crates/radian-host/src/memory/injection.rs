@@ -507,6 +507,52 @@ mod tests {
         assert_eq!(ids(&first), ["a", "b"], "id breaks the tie");
     }
 
+    /// ADR 0021 D6: the match score orders, it does not filter — a record the request does not
+    /// mention is still injected, after the ones that match.
+    #[test]
+    fn a_non_matching_record_is_still_injected_after_the_matching_ones() {
+        let view = vec![
+            record(
+                "n",
+                project("p1"),
+                Source::User,
+                Kind::Fact,
+                None,
+                "unrelated note",
+                "2026-01-01T00:00:00Z",
+            ),
+            record(
+                "m",
+                project("p1"),
+                Source::User,
+                Kind::Fact,
+                None,
+                "parser work",
+                "2026-01-02T00:00:00Z",
+            ),
+        ];
+        let injection = plan(&view, "parser", &InjectionConfig::default());
+        assert_eq!(ids(&injection), ["m", "n"]);
+    }
+
+    /// A selected record is injected in full; the budget selects whole records, it never
+    /// truncates one.
+    #[test]
+    fn a_selected_record_is_injected_whole_never_truncated() {
+        let content = "x".repeat(1000);
+        let view = vec![record(
+            "long",
+            project("p1"),
+            Source::User,
+            Kind::Fact,
+            None,
+            &content,
+            "2026-01-01T00:00:00Z",
+        )];
+        let text = plan(&view, "", &InjectionConfig::default()).text;
+        assert!(text.contains(&content), "the whole content is present");
+    }
+
     #[test]
     fn an_archived_record_is_never_injected() {
         let mut archived = record(
