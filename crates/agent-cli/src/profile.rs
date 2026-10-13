@@ -154,35 +154,11 @@ fn probe_failure_injected() -> bool {
 /// The macOS backend leaves `mach-lookup` open, so IPC is not contained, and "sensitive
 /// directories are not readable" is not the same as "your credentials are safe".
 pub(crate) fn describe(profile: ProfileArg, sandbox: Option<&Sandbox>) -> (String, String) {
-    match (profile, sandbox) {
-        (ProfileArg::Safe, _) => (
-            "safe (no sandbox needed: no command execution, no MCP tools)".into(),
-            "writes and command execution are denied; the read/list/git tools are confined to \
-             the workspace by the tools themselves"
-                .into(),
-        ),
-        (ProfileArg::WorkspaceWrite, Some(sandbox)) => (
-            format!(
-                "workspace-write · sandbox {} (probe: {})",
-                sandbox.backend_name(),
-                sandbox.probe().detail
-            ),
-            "commands and built-in tools: writes are confined to the workspace, repository \
-             metadata is read-only, sensitive directories are not readable by default, and the \
-             network is off. MCP servers are NOT sandboxed in this build and run with your full \
-             access. The IPC boundary is not tightened, so this is not a complete credential \
-             boundary"
-                .into(),
-        ),
-        (ProfileArg::FullAccess, _) => (
-            "full-access (chosen explicitly; never a default)".into(),
-            "no sandbox: commands can read and write anywhere you can, including the network"
-                .into(),
-        ),
-        // Unreachable: an enforced mode always has a sandbox or the build failed.
-        (ProfileArg::WorkspaceWrite, None) => (
-            "workspace-write (sandbox missing)".into(),
-            "the sandbox is missing; this must not happen".into(),
-        ),
-    }
+    // The shared text lives in `radian-host` (dogfooding D5); this host keeps only its
+    // wording: `agent` has MCP tools and names the confined subject accordingly.
+    radian_host::describe(
+        profile.preset().sandbox_mode(),
+        sandbox,
+        radian_host::CLI_WORDING,
+    )
 }
