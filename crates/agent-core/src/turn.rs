@@ -242,6 +242,56 @@ struct CompactionRun<'a> {
     events: &'a dyn EventSink,
 }
 
+/// Plans a compaction that reserves the space the verbatim user messages will take (ADR 0018
+/// revision 6).
+///
+/// The plan is computed, the retained list is computed for it, and the keep target is reduced
+/// by the list's size — twice at most, because the list is bounded by `U + U₁` and the second
+/// pass only ever makes the summarized prefix longer. Returns the final plan and the list that
+/// goes with it, so the caller cannot pair a plan with a list from another pass.
+fn plan_with_verbatim(
+    transcript: &[Message],
+    keep: u64,
+    summary_budget: Option<u64>,
+    previous: &[compaction::RetainedUserMessage],
+) -> Result<(compaction::Plan, Vec<compaction::RetainedUserMessage>), compaction::PlanError> {
+    let has_summary = transcript
+        .first()
+        .is_some_and(compaction::is_compaction_summary);
+    let summarize_from = |first_kept: usize| -> Vec<Message> {
+        if has_summary {
+            transcript[1..first_kept].to_vec()
+        } else {
+            transcript[..first_kept].to_vec()
+        }
+    };
+    let mut keep = keep;
+    let mut plan = compaction::plan_with_keep(transcript, keep, &compaction::message_tokens)?;
+    let mut user_messages = compaction::select_user_messages(
+        previous,
+        &summarize_from(plan.first_kept),
+        summary_budget,
+    );
+    for _ in 0..2 {
+        let used: u64 = user_messages
+            .iter()
+            .map(|message| compaction::message_tokens(&Message::user(&message.text)))
+            .sum();
+        let next = keep.saturating_sub(used);
+        if next == keep {
+            break;
+        }
+        keep = next;
+        plan = compaction::plan_with_keep(transcript, keep, &compaction::message_tokens)?;
+        user_messages = compaction::select_user_messages(
+            previous,
+            &summarize_from(plan.first_kept),
+            summary_budget,
+        );
+    }
+    Ok((plan, user_messages))
+}
+
 impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
     /// A manual `/compact` (ADR 0018 §兜底、手动与关闭). The driver runs it between turns and
     /// supplies the cancellation token; cancelling aborts it without committing. Unlike the
@@ -335,9 +385,21 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         let source_revision = self.transcript_revision;
         let source_len = self.transcript.len();
 
-        let plan =
-            match compaction::plan_with_keep(&self.transcript, keep, &compaction::message_tokens) {
-                Ok(plan) => plan,
+        // ADR 0018: the user's words are carried verbatim, and the plan reserves
+        // the space they will take. A compaction summary is always the first message of a
+        // compacted history, so the rolling summary and the rolling verbatim list are read out
+        // of it and excluded from the new summary input.
+        let transcript = self.transcript.clone();
+        let previous_summary = transcript
+            .first()
+            .and_then(compaction::compaction_summary_text);
+        let previous_user_messages: Vec<compaction::RetainedUserMessage> = transcript
+            .first()
+            .map(compaction::compaction_user_messages)
+            .unwrap_or_default();
+        let (plan, user_messages) =
+            match plan_with_verbatim(&transcript, keep, summary_budget, &previous_user_messages) {
+                Ok(planned) => planned,
                 Err(compaction::PlanError::NothingToCompact) => {
                     events.emit(AgentEvent::CompactionSkipped {
                         reason: "the history already fits the keep target".into(),
@@ -361,12 +423,6 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
             trigger,
         });
 
-        // The rolling summary: a compaction summary is always the first message of a
-        // compacted history, so it is read out and excluded from the new summary input.
-        let transcript = self.transcript.clone();
-        let previous_summary = transcript
-            .first()
-            .and_then(compaction::compaction_summary_text);
         let to_summarize: Vec<Message> = if previous_summary.is_some() {
             transcript[1..plan.first_kept].to_vec()
         } else {
@@ -459,18 +515,21 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         }
         let summary = summary.expect("the loop sets it or returns");
 
-        let new_history =
-            match compaction::compacted_history(&summary, &[], &transcript[plan.first_kept..]) {
-                Ok(history) => history,
-                Err(error) => {
-                    events.emit(AgentEvent::CompactionFailed {
-                        reason: error.to_string(),
-                    });
-                    return Err(CompactionFailure::Compaction(
-                        CompactionError::InvalidSummary(error.to_string()),
-                    ));
-                }
-            };
+        let new_history = match compaction::compacted_history(
+            &summary,
+            &user_messages,
+            &transcript[plan.first_kept..],
+        ) {
+            Ok(history) => history,
+            Err(error) => {
+                events.emit(AgentEvent::CompactionFailed {
+                    reason: error.to_string(),
+                });
+                return Err(CompactionFailure::Compaction(
+                    CompactionError::InvalidSummary(error.to_string()),
+                ));
+            }
+        };
 
         // Rebuild the request for the compacted view and, for the automatic paths, re-run the
         // hook (ADR 0018), so `T_after` describes exactly what would be sent.

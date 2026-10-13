@@ -617,3 +617,45 @@ async fn compact_now_scales_the_summary_ceiling_with_the_window() {
         .to_string();
     assert!(prompt.contains("8192 tokens"), "{prompt}");
 }
+
+/// ADR 0018: the verbatim user messages are part of `T_after`, so the fallback's
+/// half-gain threshold is higher than it was. This history is chosen to sit **inside** that
+/// band: without the verbatim `T_after` would be ~9000 (half of `T_before` would pass), and
+/// with it `T_after` is ~13000, so the fallback fails explicitly instead of sending a request
+/// that is still over the window.
+#[tokio::test]
+async fn the_verbatim_raises_the_fallback_threshold() {
+    let model = ScriptedModel::new([
+        overflow("prompt is too long"),
+        summary_reply("a short summary", 50),
+    ]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = overflow_agent(model.clone(), None, true);
+    let history = vec![
+        Message::user("x".repeat(48_000)),
+        Message::user("y".repeat(36_000)),
+    ];
+    let mut session = agent
+        .open_session_with_journal(history, journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let error = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            RunError::Compaction(CompactionError::Insufficient { .. })
+        ),
+        "{error:?}"
+    );
+    assert_eq!(session.transcript_revision(), 0, "nothing committed");
+    let kinds: Vec<String> = journal.records().iter().map(label).collect();
+    assert!(
+        !kinds.iter().any(|kind| kind.starts_with("compacted")),
+        "no candidate was written: {kinds:?}"
+    );
+}
