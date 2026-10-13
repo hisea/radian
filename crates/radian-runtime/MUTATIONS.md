@@ -135,3 +135,11 @@ Base: `4d43e03` · 一次性检出 `/tmp/ccore-mutC`（detached，跑完删除�
 1/1 抓住。测试用 `SessionJournal::pause_next_segment_append()`（段内 commit 前停在 `Notify`）+
 `Driver::testing_wake_branch()` 确定性地进入唤醒分支：修复前 driver 在该分支写 `InputClaimed`
 时永久等待闸门，5 秒 watchdog 触发而不是挂住；修复后 step 继续、段提交、steer 在提交之后被 claim。
+
+## compact-overflow：控制通道（ADR 0018 §手动）
+
+Base `dc307e6` · 一次性检出 `/tmp/covf-mut` · 独立 `CARGO_TARGET_DIR` · `git checkout --` 还原。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M6 | 手动 `/compact` 把说明 `commit` 进 transcript（runtime 侧看到 `MessageAppended`） | `compact_control::compact_between_turns_commits_and_enqueues_nothing` | ✅ failed |

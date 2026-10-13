@@ -160,3 +160,11 @@ Base `4bf767d` · 一次性 worktree `/tmp/memtui-mut`（从 HEAD 建，做完�
 | M5 | 未知命令发给模型（只拦 `/help`、`/memory`） | `tests/command.rs::help_and_unbalanced_quotes_are_notices_and_send_nothing` | ✅ |
 
 4/4 全抓。M4（`confirmed=false` 仍执行写操作）在 `radian-host/MUTATIONS.md`。
+
+## compact-overflow：`/compact` 拦截（ADR 0018 §手动）
+
+Base `dc307e6` · 一次性检出 `/tmp/covf-mut` · 独立 `CARGO_TARGET_DIR` · `git checkout --` 还原。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M10 | `dispatch` 去掉 `/compact` 分支（当成未知命令） | `command::tests::compact_is_a_control_request_with_optional_instructions` | ✅ failed |

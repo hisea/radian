@@ -56,6 +56,7 @@ the rest is sent as an ordinary message.
 | Command | What it does |
 |---|---|
 | `/help` | list the commands |
+| `/compact [note]` | summarize the history now and keep the recent part (ADR 0018) |
 | `/memory <command> …` | the same durable-memory commands as `agent memory` (ADR 0021 D7): `list`, `search`, `show`, `add`, `edit`, `archive`, `restore`, `forget`, `purge`, `confirm`, `export`, `import`, `project` / `project new`, `relink`, `split`, `merge` |
 
 - Arguments are split with shell quoting, so `/memory add "two words"` is one argument.
@@ -65,8 +66,10 @@ the rest is sent as an ordinary message.
   `n`/`Esc` cancels. While the prompt is up, keys do not type into the input box.
 - A **read** command runs while a turn is running and does not interrupt it; a **write** takes
   effect at the next model request (ADR 0021 D6).
-- An unknown command is an error notice, never a message to the model. `/compact` is not in
-  this slice.
+- `/compact [note]` asks the runtime to summarize the history now (ADR 0018); the driver runs
+  it between turns, so a running turn finishes first, and the result is a notice. Ctrl-C/Esc
+  cancels an in-flight compaction without committing.
+- An unknown command is an error notice, never a message to the model.
 - The grammar and the execution are `radian_host::memory::commands`, shared byte-for-byte with
   the CLI; the TUI only adds the framework and the notices.
 
