@@ -14,7 +14,8 @@ KNOWN_EVENTS = {
     "SessionCreated", "InboxEnqueued", "InputClaimed", "InputAdmitted",
     "TurnStarted", "MessageAppended", "ToolExecutionStarted", "ToolExecutionSettled",
     "TranscriptReplaced", "TurnFinished", "ConfigChanged", "ContextCompacted",
-    "Rewound", "PermissionResolved", "ModelUsageRecorded", "SessionForked",
+    "Rewound", "ContextBudgetReached", "PermissionResolved", "ModelUsageRecorded",
+    "SessionForked",
 }
 # ADR 0005/0006 §5.5：InputSource 的 snake_case 全集。
 SOURCES = {
@@ -56,6 +57,7 @@ EXPECT = {
         skips=[],
         repair={"call-2": "outcome_unknown_after_crash"},
     ),
+    "unknown-enum-values.jsonl": dict(outcome="accept", events=6, skips=[], repair={}),
     "replace-resets-index.jsonl": dict(
         outcome="accept",
         events=10,

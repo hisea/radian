@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use crate::budget::{BudgetStatus, ContextBudget, RequestSize};
 use crate::event::{AgentEvent, EventSink};
 use crate::hooks::Hooks;
 use crate::journal::{JournalError, JournalRecord, TranscriptJournal};
@@ -33,6 +34,9 @@ pub struct AgentConfig {
     pub max_model_calls: u32,
     /// Passed through to the model adapter unchanged.
     pub model_settings: Value,
+    /// Context window and threshold for the budget guard (ADR 0015). `None` disables the
+    /// guard outright: the core does not guess a window, so no number is ever claimed.
+    pub context_budget: Option<ContextBudget>,
 }
 
 impl Default for AgentConfig {
@@ -41,6 +45,7 @@ impl Default for AgentConfig {
             system_prompt: None,
             max_model_calls: DEFAULT_MAX_MODEL_CALLS,
             model_settings: Value::Null,
+            context_budget: None,
         }
     }
 }
@@ -145,6 +150,8 @@ impl<M: Model, P: ToolProvider, H: Hooks> Agent<M, P, H> {
             journal,
             #[cfg(feature = "journal-selfcheck")]
             selfcheck,
+            budget_baseline: None,
+            budget_status: BudgetStatus::Disabled,
             poisoned: false,
             recovery_required: false,
             close_state: CloseState::Open,
@@ -183,11 +190,25 @@ pub struct AgentSession<M: Model, P: ToolProvider, H: Hooks> {
     /// The recording journal this session was silently given, under `journal-selfcheck`.
     #[cfg(feature = "journal-selfcheck")]
     pub(crate) selfcheck: Option<Arc<crate::testing::RecordingJournal>>,
+    /// The last provider-reported `input` and the request size that produced it, per
+    /// session (ADR 0015 C1). It survives across turns, so a baseline projection has a
+    /// real fact rather than restarting from an estimate each turn.
+    pub(crate) budget_baseline: Option<(u64, RequestSize)>,
+    /// The guard's last computation, host-visible through [`AgentSession::context_budget_status`].
+    pub(crate) budget_status: BudgetStatus,
 }
 
 impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
     pub fn transcript(&self) -> &[Message] {
         &self.transcript
+    }
+
+    /// The context-budget guard's last computation for this session (ADR 0015 C1).
+    /// `Disabled` means no number is claimed: no window is configured, or no request has
+    /// been checked yet. `Ok`/`Blocked` carry a report whose `source` says whether the
+    /// baseline was provider-reported or a local estimate.
+    pub fn context_budget_status(&self) -> &BudgetStatus {
+        &self.budget_status
     }
 
     /// Replaces the transcript with host-supplied history and records the host's `revision`.

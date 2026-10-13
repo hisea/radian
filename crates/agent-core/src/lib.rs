@@ -17,6 +17,10 @@ mod tool;
 mod turn;
 
 pub use agent::{Agent, AgentConfig, AgentSession, DEFAULT_MAX_MODEL_CALLS, ReplaceError};
+pub use budget::{
+    BudgetReport, BudgetStatus, ContextBudget, DEFAULT_BYTES_PER_TOKEN, DEFAULT_THRESHOLD_PERCENT,
+    RequestSize, UsageSource, estimate_tokens,
+};
 pub use event::{AgentEvent, EventSink, NoopSink};
 pub use hooks::{HookContext, HookError, HookPoint, Hooks, ToolDecision};
 pub use journal::{
@@ -32,6 +36,7 @@ pub use outcome::{
     CancelReason, IncompleteReason, ResumeState, RunError, RunOutcome, RunStatus, SessionError,
     Step,
 };
+pub mod budget;
 pub use steering::{SteerError, SteerMode, SteeringHandle};
 pub use tool::{
     NoTools, ToolConcurrency, ToolContext, ToolError, ToolFailure, ToolOutput, ToolProvider,

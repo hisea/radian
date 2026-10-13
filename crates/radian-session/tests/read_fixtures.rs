@@ -6,7 +6,10 @@ mod common;
 
 use agent_core::{InputSource, Message, recover};
 use common::{TempDir, fixture};
-use radian_session::{EventData, ReadError, Session, SessionJournal, WriteError};
+use radian_session::{
+    EventData, InboxLane, PermissionApprover, PermissionDecision, ReadError, Session,
+    SessionJournal, TurnOutcome, TurnReason, WriteError,
+};
 use serde_json::json;
 
 #[test]
@@ -81,6 +84,57 @@ fn an_unknown_critical_event_refuses_the_file_with_line_and_event() {
     assert!(text.contains("line 2"), "{text}");
     assert!(text.contains("LedgerCommitted"), "{text}");
     assert!(text.contains("critical"), "{text}");
+}
+
+/// ADR 0006 §7(d): a known field carrying an unknown enum value is mapped to `Unknown`, not
+/// a parse error. A v1 reader must still open a file written by a newer v1-compatible writer.
+#[test]
+fn unknown_enum_values_are_mapped_to_unknown_not_refused() {
+    let session = Session::open(fixture("unknown-enum-values.jsonl")).unwrap();
+    assert!(session.skipped().is_empty(), "no line may be skipped");
+    assert_eq!(session.events().len(), 6);
+
+    // InboxEnqueued.lane: a future lane maps to Unknown.
+    let lane = session.events().iter().find_map(|event| match &event.data {
+        EventData::InboxEnqueued { lane, .. } => Some(*lane),
+        _ => None,
+    });
+    assert_eq!(lane, Some(InboxLane::Unknown));
+
+    // TurnFinished.outcome / reason: future values map to Unknown.
+    let outcomes: Vec<(TurnOutcome, Option<TurnReason>)> = session
+        .events()
+        .iter()
+        .filter_map(|event| match &event.data {
+            EventData::TurnFinished {
+                outcome, reason, ..
+            } => Some((*outcome, reason.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        outcomes,
+        vec![
+            (TurnOutcome::Unknown, None),
+            (TurnOutcome::Cancelled, Some(TurnReason::Unknown)),
+        ]
+    );
+
+    // PermissionResolved.decision / approver: future values map to Unknown.
+    let permission = session.events().iter().find_map(|event| match &event.data {
+        EventData::PermissionResolved {
+            decision, approver, ..
+        } => Some((*decision, *approver)),
+        _ => None,
+    });
+    assert_eq!(
+        permission,
+        Some((PermissionDecision::Unknown, PermissionApprover::Unknown))
+    );
+
+    // None of these events is a transcript record, so replay/recover is unaffected.
+    assert!(session.history().unwrap().is_empty());
+    assert!(session.journal_records().is_empty());
 }
 
 #[test]

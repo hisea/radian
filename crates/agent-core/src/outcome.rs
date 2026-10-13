@@ -1,3 +1,4 @@
+use crate::budget::BudgetReport;
 use crate::hooks::{HookError, HookPoint};
 use crate::journal::JournalError;
 use crate::message::Message;
@@ -20,12 +21,21 @@ pub enum CancelReason {
 }
 
 /// How a turn ended.
+///
+/// `#[non_exhaustive]`: new terminal reasons are expected (the plan adds more), and a
+/// downstream exhaustive match must not break when one lands. Match with a wildcard arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RunStatus {
     Completed,
     Incomplete(IncompleteReason),
     Refused,
     BudgetExceeded,
+    /// The next request would have reached the context budget, so it was not sent (ADR
+    /// 0015). The report says how big it would have been and whether the baseline was
+    /// provider-reported or estimated. Distinct from `BudgetExceeded` (the model-call count
+    /// cap) because a host chooses differently for a full window than for too many calls.
+    ContextBudget(BudgetReport),
     Cancelled(CancelReason),
     /// A model error or a model hook error; `step()` returned the `RunError`.
     Failed,

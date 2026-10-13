@@ -127,6 +127,13 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         self.journal.session_id()
     }
 
+    /// The context budget's last computation for this session (ADR 0015 C1), for a status
+    /// bar: `Disabled` means no number is claimed (no window configured yet), otherwise the
+    /// report's `source` says provider-reported vs. estimated.
+    pub fn context_budget_status(&self) -> &agent_core::BudgetStatus {
+        self.session.context_budget_status()
+    }
+
     /// Sets a per-turn time limit. Each turn gets a deadline computed at its start, so this
     /// applies to every turn rather than only the first.
     pub fn set_turn_timeout(&mut self, timeout: Option<std::time::Duration>) {
@@ -242,6 +249,22 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         };
         drop(run);
         admit_seen(&journal, &claimed, &mut admitted, &tap).await?;
+
+        // The budget stop's numbers, written beside the outcome so a reader can see why the
+        // turn ended and whether the projection was reported or estimated (ADR 0015 C6).
+        if let RunStatus::ContextBudget(report) = &outcome.status {
+            journal
+                .append_runtime_event(RuntimeEvent::ContextBudgetReached {
+                    turn_id: turn_id.clone(),
+                    source: report.source,
+                    projected_tokens: report.projected_tokens,
+                    window_tokens: report.window_tokens,
+                    threshold_percent: report.threshold_percent,
+                    baseline_input_tokens: report.baseline_input_tokens,
+                    estimated_growth_tokens: report.estimated_growth_tokens,
+                })
+                .await?;
+        }
 
         let (outcome, reason, stop_reason) = wire_outcome(&outcome);
         journal
@@ -400,6 +423,9 @@ fn wire_outcome(outcome: &RunOutcome) -> (TurnOutcome, Option<TurnReason>, Optio
         RunStatus::Completed => (TurnOutcome::Completed, None, None),
         RunStatus::Refused => (TurnOutcome::Refused, None, None),
         RunStatus::BudgetExceeded => (TurnOutcome::BudgetExceeded, None, None),
+        // The numbers (source, projection, window) ride on a sibling ContextBudgetReached
+        // event in `run_turn`; the outcome alone is the distinguishable reason.
+        RunStatus::ContextBudget(_) => (TurnOutcome::ContextBudget, None, None),
         RunStatus::Failed => (TurnOutcome::Failed, None, None),
         RunStatus::Poisoned => (TurnOutcome::Poisoned, None, None),
         RunStatus::Incomplete(reason) => match reason {
@@ -430,6 +456,10 @@ fn wire_outcome(outcome: &RunOutcome) -> (TurnOutcome, Option<TurnReason>, Optio
                 None,
             ),
         },
+        // `RunStatus` is `#[non_exhaustive]`: a future terminal reason maps to `Unknown`
+        // rather than breaking this build. The same commit that adds a Core variant must
+        // give it a real mapping here (ADR 0006 §7(d)).
+        _ => (TurnOutcome::Unknown, None, None),
     }
 }
 
@@ -437,6 +467,10 @@ fn lane_of(lane: InboxLane) -> Lane {
     match lane {
         InboxLane::NextTurn => Lane::NextTurn,
         InboxLane::NextStep => Lane::NextStep,
+        // A lane this version does not know (a newer writer). Requeue as a next-turn input:
+        // dropping it would lose the user's task, and `NextTurn` is the safest lane for a
+        // v1 reader that cannot know the future semantics (ADR 0006 §7(c)/(d)).
+        InboxLane::Unknown => Lane::NextTurn,
     }
 }
 

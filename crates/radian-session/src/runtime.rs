@@ -8,7 +8,7 @@
 //! `critical` is a property of the event type (ADR 0006 §4), never a caller argument: the
 //! same event must not be writable with two different skip policies.
 
-use agent_core::{InputSource, Message, MessageId};
+use agent_core::{InputSource, Message, MessageId, UsageSource};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -18,6 +18,9 @@ use serde_json::Value;
 pub enum InboxLane {
     NextTurn,
     NextStep,
+    /// A value this version does not know (ADR 0006 §7(d)).
+    #[serde(other)]
+    Unknown,
 }
 
 /// How a turn ended (ADR 0006 §5.6). This is the Core `RunStatus` set, snake_case.
@@ -28,10 +31,17 @@ pub enum TurnOutcome {
     Completed,
     Refused,
     BudgetExceeded,
+    /// The next request would have exceeded the context budget, so it was not sent (ADR
+    /// 0015). The numbers ride on a sibling `ContextBudgetReached` event.
+    ContextBudget,
     Failed,
     Poisoned,
     Incomplete,
     Cancelled,
+    /// An outcome value this reader does not know (a future writer's value). A v1 reader
+    /// maps it here instead of refusing the file (ADR 0006 §7(d)).
+    #[serde(other)]
+    Unknown,
 }
 
 /// The `reason` sub-field of `TurnFinished` (ADR 0006 §5.6). Required when `outcome` is
@@ -46,6 +56,9 @@ pub enum TurnReason {
     UnknownStopReason,
     Requested,
     DeadlineExceeded,
+    /// A value this version does not know (ADR 0006 §7(d)).
+    #[serde(other)]
+    Unknown,
 }
 
 /// How a permission decision came out (ADR 0006 §5.9).
@@ -56,6 +69,9 @@ pub enum PermissionDecision {
     Allow,
     Deny,
     Rewrite,
+    /// A value this version does not know (ADR 0006 §7(d)).
+    #[serde(other)]
+    Unknown,
 }
 
 /// Who made a permission decision (ADR 0006 §5.9).
@@ -65,6 +81,9 @@ pub enum PermissionDecision {
 pub enum PermissionApprover {
     User,
     Policy,
+    /// A value this version does not know (ADR 0006 §7(d)).
+    #[serde(other)]
+    Unknown,
 }
 
 /// One durable fact the runtime owns. `#[non_exhaustive]`: `ContextCompacted`, `Rewound`,
@@ -106,6 +125,20 @@ pub enum RuntimeEvent {
     /// registry and the slots own its meaning. The optional `profile_ref` sibling of §5.7 is
     /// not exposed yet (no producer in this phase).
     ConfigChanged { revision: u64, change: Value },
+    /// The next model request was not sent because it would have reached the context budget
+    /// (ADR 0015 C6). Audit only: `critical = false`. `source` says whether the projection is
+    /// a fact, a fact plus an estimate, or purely local; `baseline_input_tokens` and
+    /// `estimated_growth_tokens` split the projection so a reader is never shown a mixed
+    /// number as a precise report.
+    ContextBudgetReached {
+        turn_id: String,
+        source: UsageSource,
+        projected_tokens: u64,
+        window_tokens: u64,
+        threshold_percent: u8,
+        baseline_input_tokens: Option<u64>,
+        estimated_growth_tokens: Option<u64>,
+    },
     /// One permission decision (ADR 0006 §5.9). Audit only: `critical = false`, it does not
     /// take part in state reconstruction and is **not** replayed on resume.
     PermissionResolved {
@@ -127,6 +160,7 @@ impl RuntimeEvent {
             RuntimeEvent::TurnStarted { .. } => "TurnStarted",
             RuntimeEvent::TurnFinished { .. } => "TurnFinished",
             RuntimeEvent::ConfigChanged { .. } => "ConfigChanged",
+            RuntimeEvent::ContextBudgetReached { .. } => "ContextBudgetReached",
             RuntimeEvent::PermissionResolved { .. } => "PermissionResolved",
         }
     }
@@ -141,7 +175,9 @@ impl RuntimeEvent {
             | RuntimeEvent::TurnStarted { .. }
             | RuntimeEvent::TurnFinished { .. }
             | RuntimeEvent::ConfigChanged { .. } => true,
-            RuntimeEvent::PermissionResolved { .. } => false,
+            RuntimeEvent::ContextBudgetReached { .. } | RuntimeEvent::PermissionResolved { .. } => {
+                false
+            }
         }
     }
 
@@ -207,6 +243,19 @@ pub(crate) struct ConfigChangedData<'a> {
 }
 
 #[derive(Serialize)]
+pub(crate) struct ContextBudgetReachedData<'a> {
+    pub turn_id: &'a str,
+    pub source: UsageSource,
+    pub projected_tokens: u64,
+    pub window_tokens: u64,
+    pub threshold_percent: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_growth_tokens: Option<u64>,
+}
+
+#[derive(Serialize)]
 pub(crate) struct PermissionResolvedData<'a> {
     pub request_id: &'a str,
     pub call_id: &'a str,
@@ -225,6 +274,7 @@ pub(crate) enum RuntimeData<'a> {
     TurnStarted(TurnStartedData<'a>),
     TurnFinished(TurnFinishedData<'a>),
     ConfigChanged(ConfigChangedData<'a>),
+    ContextBudgetReached(ContextBudgetReachedData<'a>),
     PermissionResolved(PermissionResolvedData<'a>),
 }
 
@@ -237,6 +287,7 @@ impl Serialize for RuntimeData<'_> {
             RuntimeData::TurnStarted(d) => d.serialize(serializer),
             RuntimeData::TurnFinished(d) => d.serialize(serializer),
             RuntimeData::ConfigChanged(d) => d.serialize(serializer),
+            RuntimeData::ContextBudgetReached(d) => d.serialize(serializer),
             RuntimeData::PermissionResolved(d) => d.serialize(serializer),
         }
     }
@@ -289,6 +340,23 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
                 change,
             })
         }
+        RuntimeEvent::ContextBudgetReached {
+            turn_id,
+            source,
+            projected_tokens,
+            window_tokens,
+            threshold_percent,
+            baseline_input_tokens,
+            estimated_growth_tokens,
+        } => RuntimeData::ContextBudgetReached(ContextBudgetReachedData {
+            turn_id,
+            source: *source,
+            projected_tokens: *projected_tokens,
+            window_tokens: *window_tokens,
+            threshold_percent: *threshold_percent,
+            baseline_input_tokens: *baseline_input_tokens,
+            estimated_growth_tokens: *estimated_growth_tokens,
+        }),
         RuntimeEvent::PermissionResolved {
             request_id,
             call_id,
