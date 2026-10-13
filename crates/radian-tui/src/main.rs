@@ -845,6 +845,20 @@ fn terminal_gone(error: &std::io::Error) -> bool {
     false
 }
 
+/// Whether the tty is already hung up, as `poll(2)` sees it right now. A draw failure carries
+/// crossterm's own "failed to write the buffered data" (no errno), so the tty's own state is
+/// the reliable test.
+fn terminal_is_gone() -> bool {
+    #[cfg(unix)]
+    {
+        matches!(tty_readiness(Duration::ZERO), Tty::Gone)
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 /// Draws one frame. A draw that fails because the terminal is gone is the same event as
 /// [`Input::Gone`]: report it so the caller leaves cleanly instead of erroring out. `Ok(false)`
 /// means "the terminal is gone".
@@ -854,7 +868,7 @@ fn draw_frame(
 ) -> Result<bool, String> {
     match terminal.draw(|frame| radian_tui::render::draw(frame, app)) {
         Ok(_) => Ok(true),
-        Err(error) if terminal_gone(&error) => Ok(false),
+        Err(error) if terminal_gone(&error) || terminal_is_gone() => Ok(false),
         Err(error) => Err(error.to_string()),
     }
 }

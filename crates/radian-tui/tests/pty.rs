@@ -52,6 +52,17 @@ impl Drop for TempDir {
     }
 }
 
+/// Kills a directly-spawned child on drop, so a panicking test cannot leave the app behind
+/// (the `Pty` harness does the same for its process group).
+struct KillOnDrop(std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 const BIN: &str = env!("CARGO_BIN_EXE_radian-tui");
 
 /// The pty tests spawn real processes and mock servers; run them one at a time so the
@@ -3468,12 +3479,16 @@ async fn pty_fork_refuses_while_a_turn_runs() {
 // ---------- the terminal going away, and a panicking test's cleanup ----------
 
 /// The terminal going away (the pty master closes; an ssh session drops) must end the app
-/// cleanly, not leave it spinning. This drives the binary **directly** (no shell wrapper), so
-/// the test can close every master fd without killing anything, and waits on the process
-/// itself: a bounded watchdog is the判据, no CPU assertion.
+/// cleanly, not leave it spinning. This drives the binary **directly** through a plain
+/// `openpty` with **no controlling terminal**, so closing the master is a pure EOF (no
+/// SIGHUP): that is the read/EOF path on its own. The test waits on the process itself; a
+/// bounded watchdog is the判据, no CPU assertion.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn pty_a_closed_master_ends_the_app_cleanly() {
+    use std::os::fd::FromRawFd;
+
     let _serial = pty_guard();
     let dir = TempDir::new("master-gone");
     let ws = dir.path().join("ws");
@@ -3481,16 +3496,38 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
     // The sessions directory is a sibling of the workspace: the sandbox refuses a workspace
     // inside it (ADR 0020).
     let sessions = dir.path().join("sessions");
-    let portable_pty::PtyPair { slave, master } = portable_pty::native_pty_system()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 100,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .unwrap();
 
-    let mut cmd = CommandBuilder::new(BIN);
+    let mut master_fd: libc::c_int = -1;
+    let mut slave_fd: libc::c_int = -1;
+    let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+    size.ws_row = 24;
+    size.ws_col = 100;
+    // SAFETY: `openpty` writes the two fds and reads the null termios/name pointers.
+    let rc = unsafe {
+        libc::openpty(
+            &mut master_fd,
+            &mut slave_fd,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::addr_of_mut!(size),
+        )
+    };
+    assert_eq!(rc, 0, "openpty failed");
+    // `openpty` does not set close-on-exec, and `Command` only sets up stdin/stdout/stderr:
+    // without this the child inherits the master and the pty never sees EOF when the parent
+    // closes its copy (the app would block instead of leaving).
+    // SAFETY: `master_fd` is a valid fd; F_SETFD is async-signal-safe.
+    unsafe { libc::fcntl(master_fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    // SAFETY: the fds are fresh from `openpty`; `OwnedFd` closes them.
+    let (master, slave) = unsafe {
+        (
+            std::os::fd::OwnedFd::from_raw_fd(master_fd),
+            std::os::fd::OwnedFd::from_raw_fd(slave_fd),
+        )
+    };
+
+    let home = TempDir::new("master-gone-home");
+    let mut cmd = std::process::Command::new(BIN);
     cmd.args([
         "--model",
         "mock",
@@ -3504,7 +3541,6 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
         "--workspace",
         ws.to_str().unwrap(),
     ]);
-    let home = TempDir::new("master-gone-home");
     cmd.env_clear();
     for name in ["PATH", "TMPDIR", "LANG"] {
         if let Ok(value) = std::env::var(name) {
@@ -3514,15 +3550,24 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
     cmd.env("TERM", "xterm-256color");
     cmd.env("HOME", home.path().as_os_str());
     cmd.env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json");
-    let mut child = slave.spawn_command(cmd).unwrap();
-    let mut reader = master.try_clone_reader().unwrap();
+    let err_path = dir.path().join("stderr.txt");
+    let err_file = std::fs::File::create(&err_path).unwrap();
+    cmd.stdin(std::process::Stdio::from(slave.try_clone().unwrap()));
+    cmd.stdout(std::process::Stdio::from(slave.try_clone().unwrap()));
+    cmd.stderr(std::process::Stdio::from(err_file));
+    // A guard kills the child on every path, including a panic in an assertion below.
+    let mut child = KillOnDrop(cmd.spawn().unwrap());
+    // Close the parent's copies of the slave: the app has its own. (`cmd` owns the clones it
+    // was given, so it goes too.)
+    drop(cmd);
+    let mut master = std::fs::File::from(master);
 
     // Wait for the first frame (the input box), bounded.
     let mut bytes = Vec::new();
     let mut buf = [0u8; 4096];
     let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline && !String::from_utf8_lossy(&bytes).contains("message") {
-        match reader.read(&mut buf) {
+        match master.read(&mut buf) {
             Ok(0) | Err(_) => break,
             Ok(n) => bytes.extend_from_slice(&buf[..n]),
         }
@@ -3533,31 +3578,26 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
         String::from_utf8_lossy(&bytes)
     );
 
-    // Close the terminal: every master fd. No signal is sent.
-    drop(reader);
+    // Close the terminal: the master fd. No signal is sent (no controlling terminal).
     drop(master);
 
     let deadline = Instant::now() + Duration::from_secs(5);
     let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
+        if let Some(status) = child.0.try_wait().unwrap() {
             break status;
         }
         assert!(
             Instant::now() < deadline,
-            "the app did not exit within 5 s of its terminal closing"
+            "the app did not exit within 5 s of its terminal closing; stderr: {}",
+            std::fs::read_to_string(&err_path).unwrap_or_default()
         );
         std::thread::sleep(Duration::from_millis(20));
     };
-    // The ordinary clean exit: 0 when the terminal just vanished (EOF/EIO), or 128+SIGHUP
-    // when the pty master's close delivered a hang-up (this harness gives the pty a
-    // controlling terminal, so the app gets one).
-    let code = status.exit_code();
     assert!(
-        code == 0 || code == 128 + libc::SIGHUP as u32,
-        "the terminal-gone exit is the ordinary clean one: {status:?}"
+        status.success(),
+        "the terminal-gone exit is the ordinary clean one (exit 0, no signal): {status:?}; stderr: {}",
+        std::fs::read_to_string(&err_path).unwrap_or_default()
     );
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 /// A pty test that panics must not leave the app behind: `Drop` runs during the unwind and
