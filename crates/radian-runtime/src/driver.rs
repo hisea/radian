@@ -15,7 +15,7 @@
 //! Extensions (MCP servers) are re-opened when the session is reopened; their in-process
 //! state does **not** survive a process restart (plan Phase 2, last point).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use agent_core::{
@@ -209,7 +209,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             .await?;
 
         let mut claimed: Vec<MessageId> = vec![entry.id.clone()];
-        let admitted: HashSet<MessageId> = HashSet::new();
+        let mut admitted: HashSet<MessageId> = HashSet::new();
         let tap = Tap::new(&*live);
 
         let mut run = self.session.start_turn_with(entry.message, options)?;
@@ -232,7 +232,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
                     }
                 }
             };
-            admit_seen(&journal, &claimed, &admitted, &tap).await?;
+            admit_seen(&journal, &claimed, &mut admitted, &tap).await?;
             match result? {
                 Step::Continue => {
                     drain_steering(&inbox, &journal, &steering, &turn_id, &mut claimed).await?;
@@ -241,7 +241,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             }
         };
         drop(run);
-        admit_seen(&journal, &claimed, &admitted, &tap).await?;
+        admit_seen(&journal, &claimed, &mut admitted, &tap).await?;
 
         let (outcome, reason, stop_reason) = wire_outcome(&outcome);
         journal
@@ -329,7 +329,7 @@ async fn drain_steering(
 async fn admit_seen(
     journal: &SessionJournal,
     claimed: &[MessageId],
-    admitted: &HashSet<MessageId>,
+    admitted: &mut HashSet<MessageId>,
     tap: &Tap<'_>,
 ) -> Result<(), DriverError> {
     for id in claimed {
@@ -343,6 +343,8 @@ async fn admit_seen(
                     transcript_index: index,
                 })
                 .await?;
+            // Record it, or the next call would write the same admission again.
+            admitted.insert(id.clone());
         }
     }
     Ok(())
@@ -462,8 +464,21 @@ async fn recover(journal: &SessionJournal) -> Result<Recovery, DriverError> {
             .await?;
     }
 
+    // The transcript is the authority on whether an input was admitted: the input is
+    // committed at the **start** of a step, while `InputAdmitted` is written after the step
+    // returns. A crash in between leaves the message in the transcript without the record —
+    // requeueing it would replay it (ADR 0011 L3-1: "already in the transcript, do not
+    // replay"). Its `meta.id` is the identity link (ADR 0006 §5.5).
+    let mut in_transcript: HashMap<MessageId, usize> = HashMap::new();
+    for (index, message) in replayed.iter().enumerate() {
+        if let Some(id) = message_meta_id(message) {
+            in_transcript.entry(id).or_insert(index);
+        }
+    }
+
     let mut enqueued: Vec<(MessageId, InboxLane, Message, u64)> = Vec::new();
     let mut admitted: HashSet<MessageId> = HashSet::new();
+    let mut recorded_admitted: HashSet<MessageId> = HashSet::new();
     let mut next_turn = 1u64;
     // ADR 0006 §5.7: the session-local config revision starts at 1.
     let mut next_config_revision = 1u64;
@@ -476,6 +491,7 @@ async fn recover(journal: &SessionJournal) -> Result<Recovery, DriverError> {
                 ..
             } => enqueued.push((message_id.clone(), *lane, message.clone(), event.seq)),
             EventData::InputAdmitted { message_id, .. } => {
+                recorded_admitted.insert(message_id.clone());
                 admitted.insert(message_id.clone());
             }
             EventData::TurnStarted { turn_id } | EventData::TurnFinished { turn_id, .. } => {
@@ -485,6 +501,23 @@ async fn recover(journal: &SessionJournal) -> Result<Recovery, DriverError> {
                 next_config_revision = next_config_revision.max(revision + 1);
             }
             _ => {}
+        }
+    }
+
+    // Catch the admission record up for anything the transcript already holds, so the
+    // journal and the transcript agree before the session is reopened.
+    for (id, _, _, _) in &enqueued {
+        if recorded_admitted.contains(id) {
+            continue;
+        }
+        if let Some(index) = in_transcript.get(id) {
+            journal
+                .append_runtime_event(RuntimeEvent::InputAdmitted {
+                    message_id: id.clone(),
+                    transcript_index: *index,
+                })
+                .await?;
+            admitted.insert(id.clone());
         }
     }
 

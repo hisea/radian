@@ -142,6 +142,44 @@ async fn a_claimed_input_without_admission_returns_to_the_front_of_its_lane() {
     assert!(history.is_empty(), "{history:?}");
 }
 
+/// A crash between "the input was committed at the start of the step" and "the
+/// `InputAdmitted` record was written" must not replay the input: the transcript already
+/// holds it, and `meta.id` links the two.
+#[tokio::test]
+async fn an_input_in_the_transcript_without_an_admission_record_is_not_replayed() {
+    let dir = TempDir::new("recover-unrecorded");
+    let path = reference_run(&dir, vec![text("done")]).await;
+
+    // Keep everything before the InputAdmitted line: the message is committed, the record
+    // is not.
+    let admitted_line = lines(&path)
+        .iter()
+        .position(|l| l.contains("\"InputAdmitted\""))
+        .expect("the run wrote InputAdmitted");
+    truncate_to(&path, admitted_line);
+
+    let tools = MemTools::new();
+    let (_driver, inbox, _recorder, _model) = reopen(&path, tools, vec![]).await;
+    assert!(
+        inbox.is_empty().await,
+        "an input already in the transcript must not be requeued: {:?}",
+        inbox.snapshot().await.iter().map(|e| e.message.text()).collect::<Vec<_>>()
+    );
+    // Recovery wrote the missing admission record, so the journal now agrees.
+    let session = Session::open(&path).unwrap();
+    assert!(
+        session
+            .events()
+            .iter()
+            .any(|e| matches!(&e.data, EventData::InputAdmitted { .. })),
+        "the admission record was not caught up"
+    );
+    assert_eq!(
+        session.history().unwrap().iter().map(Message::text).collect::<Vec<_>>(),
+        ["go", "done"]
+    );
+}
+
 #[tokio::test]
 async fn an_unpaired_tool_call_is_repaired_and_the_tool_is_not_replayed() {
     let dir = TempDir::new("recover-tool");

@@ -176,6 +176,32 @@ async fn durable_event_order_and_index_correspondence() {
     }
 }
 
+/// Each admitted input is recorded exactly once, however many steps the turn takes.
+#[tokio::test]
+async fn each_input_is_admitted_once() {
+    let model = ScriptedModel::new([
+        calls(vec![call("c1", "echo", json!({}))]),
+        text("done"),
+    ]);
+    let tools = MemTools::new();
+    let (mut driver, env) = open_env("admit-once", model, tools).await;
+    let handle = tokio::spawn(async move { driver.run().await });
+
+    let followup = env.inbox.followup("go", InputSource::User).await.unwrap();
+    let steer = env.inbox.steer("also", InputSource::User).await.unwrap();
+    env.recorder.wait_finished().await;
+    handle.abort();
+    let _ = handle.await;
+
+    for id in [&followup.0, &steer.0] {
+        let count = common::events(&env.path)
+            .iter()
+            .filter(|(name, _, data)| name == "InputAdmitted" && data["message_id"] == json!(id))
+            .count();
+        assert_eq!(count, 1, "{id} was admitted {count} times");
+    }
+}
+
 // ---------- 9. configuration applies at the turn boundary ----------
 
 #[tokio::test]
