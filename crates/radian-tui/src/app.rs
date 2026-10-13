@@ -641,13 +641,14 @@ impl App {
         &self.layers
     }
 
-    /// Pushes an overlay. ADR 0023 U4: an overlay is never above a modal, so when a modal is
-    /// up the overlay is inserted just below the highest one. With no modal it goes on top.
+    /// Pushes an overlay. ADR 0023 U4: an overlay is never above **any** modal, so when modals
+    /// are up the overlay is inserted just below the lowest one (below the highest one would
+    /// put it above every modal under that). With no modal it goes on top.
     pub fn push_overlay(&mut self, overlay: Overlay) {
         match self
             .layers
             .iter()
-            .rposition(|layer| layer.tier() == Tier::Modal)
+            .position(|layer| layer.tier() == Tier::Modal)
         {
             Some(index) => self.layers.insert(index, Layer::Overlay(overlay)),
             None => self.layers.push(Layer::Overlay(overlay)),

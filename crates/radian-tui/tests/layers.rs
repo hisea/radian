@@ -4,7 +4,7 @@
 use agent_core::{AgentEvent, CancelReason, RunStatus};
 use radian_permissions::{ApprovalOutcome, ApprovalRequest};
 use radian_tui::TurnState;
-use radian_tui::app::{App, Effect, Input, Layer, Overlay, Tier};
+use radian_tui::app::{App, Effect, Input, Layer, Modal, Overlay, Tier};
 use radian_tui::find::FindState;
 use radian_tui::keys::Keymap;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -210,4 +210,28 @@ fn app_has_no_four_option_fields() {
         source.contains("layers: Vec<Layer>"),
         "the stack is the new home"
     );
+}
+
+/// ADR 0023 U4 with **two** modals up (an approval that arrives while a `/memory` confirmation
+/// or, later, a question is open): an overlay goes below both, never between them.
+#[test]
+fn an_overlay_never_lands_between_two_modals() {
+    let mut app = App::new("m", "s");
+    app.push_modal(Modal::Approval(request()));
+    let mut second = request();
+    second.request_id = "perm-2".into();
+    app.push_modal(Modal::Approval(second));
+    app.push_overlay(Overlay::Find(FindState::open(0)));
+    assert_tiers(&app);
+    let overlay = app
+        .layers()
+        .iter()
+        .position(|layer| matches!(layer, Layer::Overlay(_)))
+        .expect("the overlay");
+    let lowest_modal = app
+        .layers()
+        .iter()
+        .position(|layer| matches!(layer, Layer::Modal(_)))
+        .expect("a modal");
+    assert!(overlay < lowest_modal, "the overlay is below every modal");
 }
