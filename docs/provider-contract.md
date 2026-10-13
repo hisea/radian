@@ -87,3 +87,44 @@ OpenAI 专有（只属于 http.rs，契约不管）：请求体/header 的形状
 5. **`check_plain_text` 断言内容恰为单个文本 part**（`vec![ContentPart::text("hello")]`）。若第三家把推理/思考作为 `ContentPart` 暴露（而不是像本 adapter 那样忽略），或多文本块，这条会失败。
 6. **取消必须是 `Transport` 且消息含 `cancelled`**（`check_cancellation`）。自然返回 `Protocol` 或不同文本的 adapter 会被迫迎合。
 7. ~~**usage 出口可被滥用成真空**~~ **已堵（2026-10-12，评审者合并时加）**：`check_usage_shapes` 现在先断言「不是所有字段都被声明为 unreported」，否则直接失败并说明"provider 真的完全不报 usage 是需要决定的事，不是 harness 能声明出来的"。Anthropic 侧有 `declaring_every_usage_field_unreported_is_refused`（`#[should_panic]`）钉住它；两家 adapter 的契约测试均仍全绿。更强的做法（把声明改成"字段 → provider 线上名字"的正向映射，声明即承诺能读到值）仍可考虑，**未做**。
+## 网络异常现状矩阵（Phase 7 / resilience，2026-10-16）
+
+**只记录现状，不改策略。** 由 `crates/agent-provider-openai-compatible/tests/resilience.rs`、
+`crates/agent-provider-anthropic/tests/resilience.rs`（各 13 条）与
+`crates/radian-runtime/tests/provider_failure.rs` 钉住。所有测试走 adapter 的公开
+`Model::complete`（runtime 那层再走 `Driver`）；mock HTTP server 是两家的 `testing` 模块。
+超时类测试只断言"会失败"和错误类型，不断言耗时。
+
+| # | 场景 | OpenAI-compatible | Anthropic | 备注 |
+|---|---|---|---|---|
+| 1 | 400 / 401 / 403 / 404 | `Protocol("HTTP {code}: {body}")` | 同 | 错误体最多引用 **2048 字节**（超出截断），空体 → `(empty body)` |
+| 1 | 408 / 429 / 5xx | `Transport(...)` | 同 | 归类：5xx、408、429 属 provider；其余 4xx 属请求 |
+| 1 | key / header 值 | 不出现在错误里（`<redacted>`） | 同 | HTTP body 与 SSE error 两条路径都 mask |
+| 1 | 400 且 `include_usage` | 附一句 `set include_usage to Some(false)` | 无此提示 | 本地 mock 下 `include_usage` 默认 false，故矩阵里两家一致 |
+| 2 | 首个 delta 前断开 | `Transport`（reqwest 传输错误） | 同 | 无部分结果 |
+| 2 | 若干 delta 后连接重置 | `Transport`；partial 只进 live 事件，`complete` 返回 `Err` | 同 | **部分文本不会被当作完整回答** |
+| 2 | 若干 delta 后提前 EOF（正常收尾、无完成标记） | `Transport("...before the response was complete")` | 同 | OpenAI 缺 `finish_reason`/`[DONE]`，Anthropic 缺 `message_stop` |
+| 2 | 与 ADR 0003 中断前缀 | 一致：partial 只是 live delta；core 仅在**取消**时把它落成 `interrupted` assistant 前缀，错误时不落 | 同 | 见下方"落盘" |
+| 3 | idle timeout（中途静默） | `Transport("the server sent nothing for …")` | 同 | 只断言会失败；测试用小 `idle_timeout`（50 ms），不断言耗时 |
+| 4 | 请求途中取消 | 立即返回 `Transport("the request was cancelled")`，不挂起 | 同 | mock 侧连接随 future drop 关闭（未单独断言） |
+| 5 | 非 JSON `data:` 行 | `Protocol("unreadable stream chunk")` | `Protocol("unreadable stream event")` | 都是错误，不跳过 |
+| 5 | 未知事件 / 未知字段 | 忽略（未知字段照常解析） | 忽略（未知 `type` 忽略） | 与版本策略一致 |
+| 5 | 缺字段 | 容忍（缺 `choices` 的块被跳过） | 容忍（缺 `content_block` 视为 ignored） | 不报错 |
+| 5 | provider 的 error 事件 | `Transport("the provider reported an error: …")` | 同 | 文本同样 mask |
+| 6 | 失败一轮的会话文件 | 有 `InputClaimed`/`TurnStarted`/`MessageAppended(user)`/`InputAdmitted`，**没有 `TurnFinished`**，没有 assistant 消息 | 同 | 见下方 |
+
+### 落盘（item 6）
+
+模型错误（HTTP 5xx、或中途断开）让驱动以 `RunError::Model` 结束：`run_turn` 在
+`match result?` 处提前返回，**跳过了 `TurnFinished`**，驱动随之停止、宿主报错。会话文件因此有
+用户消息与 `TurnStarted`，却没有终态记录；resume 时 `Session::history()` = 仅那条 user 消息
+（一致，不重放）。
+
+**标为有问题的格子：失败的一轮没有 `TurnFinished`。** 读者无法从会话文件区分"这一轮失败了"
+与"进程在写终态前崩了"；`TurnFinished { outcome: "failed" }` 本可以表达它。稳定复现是
+`crates/radian-runtime/tests/provider_failure.rs` 里 `#[ignore]` 的
+`a_failed_turn_should_still_write_a_turn_finished`（当前会失败）。要不要让驱动把 `RunError`
+也落成一条终态事件，是 owner 的决定，本切片不改。
+
+其余格子（错误体 2048 字节上限、不解析结构化错误码、取消不单独断言 mock 侧连接关闭）是
+**记录**，不视为问题。要不要重试、要不要把错误码结构化解出来，同样是 owner 的决定。
