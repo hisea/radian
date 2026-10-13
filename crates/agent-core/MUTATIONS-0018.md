@@ -40,3 +40,27 @@ Base: `0f5d5e2` · 一次性检出 `/tmp/ccore-mutB`（detached，跑完删除�
 测试直接断言基线被清空，M2 才被抓住。M7 用“整个不写 usage”作近似（把写入移到提交之后的
 改动无法用单次替换表达），`a_replacement_abort_*` 断言中止路径仍有 `CompactionUsage`，因此仍
 指向“usage 必须在中止前写”。
+
+## compact-overflow：超长兜底与手动 `/compact`（ADR 0018 §兜底、手动与关闭）
+
+Base `dc307e6` · 一次性检出 `/tmp/covf-mut`（从 HEAD 建，跑完删除）· **独立
+`CARGO_TARGET_DIR`** · 每个变异跑 `cargo test -p agent-core --test compaction_overflow`、
+`cargo test -p radian-runtime --test compact_control`、`cargo test -p radian-tui --lib`、
+`cargo test -p agent-cli --test cli an_interactive_compact`（都 `--no-fail-fast`），然后
+`git checkout -- .`；`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M1 | 兜底不设“只重试一次”上限（去掉 `overflow_retried` 的失败分支） | `compaction_overflow::a_retry_that_still_overflows_fails_after_one_retry` | ✅ failed |
+| M2 | 非超长错误也触发兜底（去掉 `ContextOverflow` 的模式约束） | `compaction_overflow::a_non_overflow_model_error_does_not_compact` | ✅ failed |
+| M3 | 兜底目标用 0.75 而不是 0.5（`4·T_after ≤ 3·reference`） | `compaction_overflow::{a_fallback_that_cannot_reach_half_commits_nothing, a_known_window_uses_min_of_projection_and_budget}` | ✅ failed |
+| M4 | 窗口已知时不取 `min(T_before, B)`（`reference = T_before`） | `compaction_overflow::a_known_window_uses_min_of_projection_and_budget` | ✅ failed |
+| M5 | 兜底重发计入 `model_calls` | `compaction_overflow::an_overflow_with_no_window_compacts_to_half_and_retries_once` | ✅ failed |
+| M6 | 手动 `/compact` 把说明写进 transcript（`commit`） | `compact_control::compact_between_turns_commits_and_enqueues_nothing` | ✅ failed |
+| M8 | 手动 `/compact` 也要求 `T_after ≤ B`（`Gain::Any` → `Gain::Budget`） | `compaction_overflow::compact_now_only_requires_a_smaller_request` | ✅ failed |
+
+6/6 抓住。**“手动压缩在唤醒分支执行”无法用编译得过的变异表达**：`run_turn` 期间 `ActiveRun`
+持有 `&mut self.session`，`Driver::run_control` 同样需要 `&mut self`，借用检查器从结构上排除了
+“turn 运行中执行控制请求”。该不变量由顺序测试 `compact_control::compact_waits_for_a_running_turn`
+（`TurnFinished` 的 `seq` 必须小于 `ContextCompacted`）与既有的唤醒分支死锁测试
+（`compaction_gate`）共同钉住。

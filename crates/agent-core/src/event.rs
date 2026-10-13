@@ -6,6 +6,16 @@ use crate::message::Message;
 use crate::model::{ModelUsage, StopReason};
 use crate::outcome::RunStatus;
 
+/// Why a compaction was requested (ADR 0018). A host uses it to phrase its `[compaction]`
+/// line: `budget` is the proactive pre-request compaction, `overflow` is the provider-overflow
+/// fallback, and `manual` is a user `/compact`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionTrigger {
+    Budget,
+    Overflow,
+    Manual,
+}
+
 /// Observations of a turn. Events never change control flow; use `Hooks` for that.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -59,12 +69,14 @@ pub enum AgentEvent {
         revision: u64,
         len: usize,
     },
-    /// Automatic compaction is about to summarize (ADR 0018). `tokens_before` is the
-    /// projection that crossed the input budget; `keep_target` is the planned kept suffix.
+    /// Compaction is about to summarize (ADR 0018). `tokens_before` is the projection that
+    /// triggered it; `keep_target` is the planned kept suffix; `trigger` says whether the
+    /// budget, a provider overflow, or a user `/compact` asked for it.
     CompactionStarted {
         revision: u64,
         tokens_before: u64,
         keep_target: u64,
+        trigger: CompactionTrigger,
     },
     /// The compaction committed and the request is being rebuilt. `below_target` says the
     /// compacted view fit the budget but missed the 75% target, so the rest of this turn will

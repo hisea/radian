@@ -19,16 +19,17 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use agent_core::{
-    Agent, AgentEvent, AgentSession, CancelReason, EventSink, Hooks, IncompleteReason,
-    JournalError, JournalRecord, Message, MessageId, Model, RunError, RunOutcome, RunStatus,
-    SessionError, SteeringHandle, Step, ToolProvider, TranscriptJournal, TurnOptions,
+    Agent, AgentEvent, AgentSession, CancelReason, CancellationToken, CompactionFailure, EventSink,
+    Hooks, IncompleteReason, JournalError, JournalRecord, Message, MessageId, Model, RunError,
+    RunOutcome, RunStatus, SessionError, SteeringHandle, Step, ToolProvider, TranscriptJournal,
+    TurnOptions,
 };
 use radian_session::{
     EventData, InboxLane, ReadError, RuntimeEvent, Session, SessionJournal, TurnOutcome, TurnReason,
 };
 
 use crate::config::{ConfigQueue, ConfigSlot};
-use crate::inbox::{Inbox, InboxEntry, Lane};
+use crate::inbox::{ControlRequest, Inbox, InboxEntry, Lane};
 
 /// Why the driver could not continue.
 #[derive(Debug, thiserror::Error)]
@@ -230,6 +231,12 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
 
     async fn run_loop(&mut self) -> Result<(), DriverError> {
         while !self.closed && !self.inbox.is_closed() {
+            // A manual `/compact` runs **between turns** (ADR 0018). A request that arrived
+            // during a turn has waited for it to end; the wake branch never runs one.
+            if let Some(request) = self.inbox.claim_control().await {
+                self.run_control(request).await?;
+                continue;
+            }
             let Some(entry) = self.inbox.claim_next_turn().await else {
                 // Idle. A `followup`/`steer`/`cancel`/`close` wakes us; `inject` does not.
                 self.inbox.wake_signal().await;
@@ -387,6 +394,48 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
                 stop_reason,
             })
             .await?;
+        Ok(())
+    }
+
+    /// Runs one queued control request (ADR 0018: `/compact`). `step` is not running, so no
+    /// replacement segment is open and the writer's gate is free; the only journal writes are
+    /// the compaction's own. `cancel` (Ctrl-C/Esc) cancels the in-flight summarizer and
+    /// commits nothing.
+    async fn run_control(&mut self, request: ControlRequest) -> Result<(), DriverError> {
+        let inbox = Arc::clone(&self.inbox);
+        // A new cancellation episode: the next `cancel` counts as a first cancel again.
+        inbox.begin_turn();
+        let generation = inbox.cancel_generation();
+        let token = CancellationToken::new();
+        let live = Arc::clone(&self.live);
+        let session = &mut self.session;
+        let compact = session.compact_now(request.instructions, &token, &*live);
+        tokio::pin!(compact);
+        let result = loop {
+            tokio::select! {
+                biased;
+                _ = inbox.wake_signal() => {
+                    if inbox.cancel_generation() != generation {
+                        token.cancel();
+                    }
+                }
+                result = &mut compact => break result,
+            }
+        };
+        match result {
+            Ok(outcome) => {
+                let _ = request.reply.send(Ok(outcome));
+            }
+            Err(failure) => {
+                // The caller gets a readable reason; a journal failure is fatal here as it is
+                // for a turn (the file and memory may differ).
+                let message = failure.to_string();
+                let _ = request.reply.send(Err(message));
+                if let CompactionFailure::Journal(error) = failure {
+                    return Err(DriverError::CoreJournal(error));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -811,7 +860,7 @@ mod tests {
             CompactionError::Insufficient {
                 before: 10,
                 after: 10,
-                budget: 5,
+                target: 5,
             }
         )));
         assert!(is_fatal(&RunError::Poisoned));

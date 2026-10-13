@@ -174,12 +174,23 @@ pub fn plan(
     input_budget: u64,
     sizer: &dyn Fn(&Message) -> u64,
 ) -> Result<Plan, PlanError> {
+    plan_with_keep(history, keep_target(input_budget), sizer)
+}
+
+/// [`plan`] with an explicit keep target `K` (ADR 0018's overflow fallback uses `K = 20000`
+/// regardless of any budget). The splitting rules are identical, so the two callers cannot
+/// diverge.
+pub fn plan_with_keep(
+    history: &[Message],
+    keep: u64,
+    sizer: &dyn Fn(&Message) -> u64,
+) -> Result<Plan, PlanError> {
     let units = units(history)?;
     let Some((last, rest)) = units.split_last() else {
         // An empty history has no unit to keep and nothing to summarize.
         return Err(PlanError::NothingToCompact);
     };
-    let target = keep_target(input_budget);
+    let target = keep;
     let size_of = |range: &Range<usize>| -> u64 { history[range.clone()].iter().map(sizer).sum() };
 
     // Walk the units backwards from the last one, which is kept unconditionally.

@@ -177,6 +177,13 @@ reservation), never a silently clamped number.
   anyway (ADR 0018 replaced ADR 0015's stop). The provider's over-length error remains the only
   thing that refuses an oversized request.
 - A provider-reported input is trusted as reported, and only the growth after it is estimated.
+- **Compaction (ADR 0018)** keeps a request inside the window. When the projection crosses
+  `B`, the history is summarized (the recent part is kept) before the request is sent;
+  `--no-auto-compact` turns that proactive path off. If the provider still reports an
+  over-length error, an **overflow fallback** compacts to half of `min(T_before, B)` and
+  retries the request once (even under `--no-auto-compact`). Interactive mode also accepts
+  `/compact [note]` — a whole line, not a message, and not available in `-p` — which
+  summarizes on demand between turns; Ctrl-C cancels it without committing.
 
 ## Exit codes
 

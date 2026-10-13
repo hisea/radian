@@ -671,6 +671,9 @@ fn ui_loop(
     hooks: &Arc<PermissionHooks>,
     driver_task: &tokio::task::JoinHandle<Result<(), radian_runtime::DriverError>>,
 ) -> Result<(), String> {
+    // Manual `/compact` runs on the runtime (the driver executes it between turns); its
+    // result arrives over these channels and becomes a notice.
+    let mut pending_compacts: Vec<std::sync::mpsc::Receiver<Result<_, String>>> = Vec::new();
     while !app.quit {
         // SIGTERM/SIGHUP: leave exactly like a quit, so the terminal is restored and the
         // reason is printed on the normal screen (dogfooding D7). No last frame: after a
@@ -736,6 +739,38 @@ fn ui_loop(
         while let Ok(prompt) = approvals.try_recv() {
             app.request_approval(prompt);
         }
+        // `/compact`: hand it to the runtime and show the outcome when it finishes. The
+        // driver runs it between turns, so a running turn finishes first.
+        if let Some(instructions) = app.pending_compact.take() {
+            let inbox = Arc::clone(inbox);
+            let (tx, rx) = std::sync::mpsc::channel();
+            runtime.spawn(async move {
+                let _ = tx.send(inbox.compact(instructions).await);
+            });
+            pending_compacts.push(rx);
+        }
+        pending_compacts.retain(|rx| match rx.try_recv() {
+            Ok(Ok(agent_core::CompactionOutcome::Compacted {
+                tokens_before,
+                tokens_after,
+                ..
+            })) => {
+                app.push_notice(format!(
+                    "compaction: {tokens_before} → {tokens_after} tokens"
+                ));
+                false
+            }
+            Ok(Ok(agent_core::CompactionOutcome::NothingToCompact)) => {
+                app.push_notice("compaction: nothing to compact");
+                false
+            }
+            Ok(Err(message)) => {
+                app.push_notice(format!("compaction failed: {message}"));
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
+        });
         terminal
             .draw(|frame| radian_tui::render::draw(frame, app))
             .map_err(|e| e.to_string())?;
