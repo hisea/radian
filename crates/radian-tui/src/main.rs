@@ -420,6 +420,11 @@ fn run(
     // if it already exists and is group/world-readable. Done **before** the alternate screen
     // is entered: a raw `eprintln!` inside it writes cells the renderer's diff then skips.
     let _ = radian_host::ensure_private_dir(&dir);
+    // The privacy warning about a world-readable session directory is a startup diagnostic:
+    // printed here, on the normal screen. (Inside the alternate screen it would corrupt the
+    // display, and `/sessions` used to print it from there; `warn_if_wide` is once per path,
+    // so this is the only place it appears.)
+    radian_session::warn_if_wide(&dir);
     // ADR 0008: the `[config]` line and its warnings are startup diagnostics and belong on
     // the normal screen, **before** the alternate screen is entered. Printed inside it, a
     // stray `eprintln!` writes cells the renderer's diff then skips (both buffers see a

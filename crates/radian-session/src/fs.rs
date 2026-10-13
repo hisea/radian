@@ -125,9 +125,26 @@ pub fn wide_permissions_warning(_path: &Path) -> Option<String> {
 
 /// Prints [`wide_permissions_warning`] to stderr if there is one. Never changes permissions.
 pub fn warn_if_wide(path: &Path) {
-    if let Some(warning) = wide_permissions_warning(path) {
-        eprintln!("{warning}");
+    let Some(warning) = wide_permissions_warning(path) else {
+        return;
+    };
+    // Warn about a given path **once per process**. A host that warns at startup (on the
+    // normal screen) must not repeat the same line from a lazy call later: inside a
+    // full-screen UI that write lands in the alternate screen, where the renderer's diff
+    // skips the cells it thinks are unchanged and the text stays there for good
+    // (dogfooding: `/sessions` printed this while the picker was open).
+    static WARNED: std::sync::Mutex<Option<std::collections::HashSet<std::path::PathBuf>>> =
+        std::sync::Mutex::new(None);
+    {
+        let mut warned = WARNED.lock().unwrap_or_else(|poison| poison.into_inner());
+        if !warned
+            .get_or_insert_with(std::collections::HashSet::new)
+            .insert(path.to_path_buf())
+        {
+            return;
+        }
     }
+    eprintln!("{warning}");
 }
 
 #[cfg(test)]
