@@ -407,23 +407,58 @@ impl Hooks for FailBeforeTool {
     }
 }
 
-/// Investigation only (ADR 0017 item 5): the model already produced an assistant message with
-/// `tool_calls`, then `before_tool_call` fails. `fail_hook` ends the turn as `Failed` without
-/// repairing the transcript, so the assistant tool call stays with **no** result. The next
-/// turn would send that unpaired call, which both providers reject as an invalid request.
-///
-/// The desired behavior is asserted here (every declared call has a result); it fails today,
-/// hence `#[ignore]`. Run with `--ignored` to reproduce. Hook errors stay fatal until this is
-/// decided; this test exists so the decision has a repro.
+/// A `before_model_call` hook that always fails, so the turn ends as `RunError::Hook`.
+struct FailBeforeModel;
+
+impl Hooks for FailBeforeModel {
+    async fn before_model_call(
+        &self,
+        _cx: &HookContext,
+        _request: &mut ModelRequest,
+    ) -> Result<(), HookError> {
+        Err(HookError::new("the policy check failed"))
+    }
+}
+
+/// A `before_tool_call` hook error does **not** fail the turn: the core fails closed,
+/// resolving the call with a `hook_error` result, so every declared call still has a result
+/// and the next request is valid (ADR 0017). This replaced an older `#[ignore]`d test whose
+/// premise — a fatal `before_tool_call` error leaving an unpaired call — was wrong: this hook
+/// point has always failed closed, it does not fail the turn.
 #[tokio::test]
-#[ignore = "known gap: a failed before_tool_call hook leaves an unpaired tool call (ADR 0017 item 5)"]
-async fn a_before_tool_hook_error_does_not_leave_unpaired_tool_calls() {
+async fn a_before_tool_hook_error_resolves_the_call_and_keeps_the_turn_valid() {
     let model = ScriptedModel::new([
         calls(vec![call("c1", "echo", json!({}))]),
-        text("never reached"),
+        text("after the hook error"),
     ]);
     let tools = MemTools::new(vec![(spec("echo"), Behavior::Echo)]);
+    let log = tools.log.clone();
     let a = Arc::new(Agent::new(model, tools).with_hooks(FailBeforeTool));
+    let mut chat = a.open_session().await.unwrap();
+
+    let outcome = chat
+        .run_turn("go", TurnOptions::default(), &NoopSink)
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    // The tool never ran: the hook error became the call's result.
+    assert!(log.started().is_empty());
+    let transcript = chat.transcript();
+    assert_eq!(
+        code(result_for(transcript, "c1")),
+        Some("hook_error"),
+        "{transcript:?}"
+    );
+    assert_eq!(declared_calls(transcript), answered_calls(transcript));
+}
+
+/// `before_model_call` is one of the two hook points that **fail** a turn (ADR 0017). It runs
+/// before the model request, so the transcript holds only the turn input: no assistant message
+/// and no unpaired tool call, and the session is still usable for the next turn.
+#[tokio::test]
+async fn a_before_model_hook_error_ends_the_turn_with_a_valid_transcript() {
+    let model = ScriptedModel::new([text("never requested")]);
+    let a = Arc::new(Agent::new(model, NoTools).with_hooks(FailBeforeModel));
     let mut chat = a.open_session().await.unwrap();
 
     let error = chat
@@ -434,7 +469,7 @@ async fn a_before_tool_hook_error_does_not_leave_unpaired_tool_calls() {
         matches!(
             error,
             RunError::Hook {
-                point: HookPoint::BeforeToolCall,
+                point: HookPoint::BeforeModelCall,
                 ..
             }
         ),
@@ -442,7 +477,14 @@ async fn a_before_tool_hook_error_does_not_leave_unpaired_tool_calls() {
     );
 
     let transcript = chat.transcript();
-    let declared: Vec<String> = transcript
+    assert_eq!(transcript.len(), 1, "{transcript:?}");
+    assert_eq!(transcript[0].text(), "go");
+    assert!(declared_calls(transcript).is_empty());
+    assert!(answered_calls(transcript).is_empty());
+}
+
+fn declared_calls(transcript: &[Message]) -> Vec<String> {
+    transcript
         .iter()
         .flat_map(|message| match message {
             Message::Assistant { tool_calls, .. } => {
@@ -450,16 +492,15 @@ async fn a_before_tool_hook_error_does_not_leave_unpaired_tool_calls() {
             }
             _ => Vec::new(),
         })
-        .collect();
-    let answered: Vec<String> = transcript
+        .collect()
+}
+
+fn answered_calls(transcript: &[Message]) -> Vec<String> {
+    transcript
         .iter()
         .filter_map(|message| match message {
             Message::Tool { result, .. } => Some(result.call_id.clone()),
             _ => None,
         })
-        .collect();
-    assert_eq!(
-        declared, answered,
-        "every tool call must have a result before the next request: {transcript:?}"
-    );
+        .collect()
 }

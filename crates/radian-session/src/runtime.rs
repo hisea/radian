@@ -121,7 +121,7 @@ pub enum RuntimeEvent {
         /// [`TurnReason::UnknownStopReason`].
         stop_reason: Option<String>,
     },
-    /// A turn ended because the model request failed (ADR 0017). Audit only:
+    /// A turn ended because a model or hook error failed it (ADR 0017). Audit only:
     /// `critical = false`. `message` is the adapter's error text, already masked; it is the
     /// only place the host learns *why* a `TurnFinished { outcome: failed }` happened without
     /// reading the live event stream. A reader that skips it still sees the terminal record.

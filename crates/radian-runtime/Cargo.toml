@@ -12,6 +12,11 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true }
 
+[features]
+# Forward the core's journal self-check, so this crate's failure-path tests (ADR 0017) also
+# run with replay verified against the transcript.
+journal-selfcheck = ["agent-core/journal-selfcheck"]
+
 [dev-dependencies]
 agent-provider-anthropic = { path = "../agent-provider-anthropic", features = ["testing"] }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "test-util"] }

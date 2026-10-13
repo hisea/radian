@@ -315,8 +315,8 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         .await?;
 
         let cancel_generation = inbox.cancel_generation();
-        // ADR 0017: a model error ends **this turn**, not the session. Every other `RunError`
-        // (journal, poisoned, hook, session) is still fatal and propagates here.
+        // ADR 0017: a model or hook error ends **this turn**, not the session. Every other
+        // `RunError` (journal, poisoned, session) is still fatal and propagates here.
         let outcome = loop {
             let mut step = Box::pin(run.step(&tap));
             let result = loop {
@@ -358,9 +358,10 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
 
         let outcome = match outcome {
             Ok(outcome) => outcome,
-            Err(RunError::Model(error)) => {
-                // The adapter already masked its own key and header values; the host redacts
-                // the text against its own secret list before showing it.
+            Err(error) => {
+                // A model or hook error. The adapter already masked its own key and header
+                // values; the host redacts the text against its own secret list before
+                // showing it.
                 let message = error.to_string();
                 let failed = RuntimeEvent::TurnFailed {
                     turn_id: turn_id.clone(),
@@ -381,7 +382,6 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
                 // The driver keeps running: the next input opens a fresh turn.
                 return Ok(());
             }
-            Err(_) => unreachable!("only model errors break the loop as Err"),
         };
 
         // The budget stop's numbers, written beside the outcome so a reader can see why the
@@ -578,12 +578,17 @@ fn message_meta_id(message: &Message) -> Option<MessageId> {
     }
 }
 
-/// ADR 0017: only a model error ends the turn instead of the session. Journal, poisoned,
-/// hook and session errors are fatal — the session state may be damaged or unusable, so the
-/// driver must stop rather than keep writing to it. This is the single place the policy
-/// lives; `run_turn` calls it.
+/// ADR 0017: a model error **or a hook error** ends the turn instead of the session.
+/// Journal, poisoned and session errors stay fatal — the session state may be damaged or
+/// unusable, so the driver must stop rather than keep writing to it. This is the single place
+/// the policy lives; `run_turn` calls it.
+///
+/// A hook error leaves a valid transcript: `before_model_call` and `after_model_response` are
+/// the only hook points that fail a turn, and both run before the assistant message of the
+/// step is committed. The tool-call hooks fail closed instead (they resolve the call with a
+/// `hook_error` result and continue), so they never reach here.
 fn is_fatal(error: &RunError) -> bool {
-    !matches!(error, RunError::Model(_))
+    !matches!(error, RunError::Model(_) | RunError::Hook { .. })
 }
 
 /// Maps the core's `RunStatus` to the ADR 0006 §5.6 wire shape.
@@ -806,21 +811,21 @@ mod tests {
     use super::*;
     use agent_core::{HookError, HookPoint, ModelError, SessionError};
 
-    /// ADR 0017: the classification the driver uses. A model error is the only non-fatal one;
-    /// journal, poisoned, hook and session errors must keep ending the session.
+    /// ADR 0017: the classification the driver uses. A model or hook error is non-fatal;
+    /// journal, poisoned and session errors must keep ending the session.
     #[test]
-    fn only_model_errors_are_non_fatal() {
+    fn only_model_and_hook_errors_are_non_fatal() {
         assert!(!is_fatal(&RunError::Model(ModelError::Transport(
             "http 500".into()
         ))));
+        assert!(!is_fatal(&RunError::Hook {
+            point: HookPoint::BeforeModelCall,
+            error: HookError("hook refused".into()),
+        }));
         assert!(is_fatal(&RunError::Journal(JournalError(
             "write failed".into()
         ))));
         assert!(is_fatal(&RunError::Poisoned));
-        assert!(is_fatal(&RunError::Hook {
-            point: HookPoint::BeforeToolCall,
-            error: HookError("hook refused".into()),
-        }));
         assert!(is_fatal(&RunError::Session(SessionError::Poisoned)));
     }
 }
