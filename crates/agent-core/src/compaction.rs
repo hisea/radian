@@ -533,3 +533,174 @@ pub fn compaction_summary_text(message: &Message) -> Option<String> {
     let rest = text.strip_prefix(SUMMARY_MESSAGE_PREFIX)?;
     Some(rest.trim().to_owned())
 }
+
+// ---------- ADR 0018: the user's words, kept verbatim ----------
+
+/// The lower bound of the verbatim budget `U` (ADR 0018): it guarantees the newest
+/// short user message fits even in a small window.
+pub const MIN_USER_MESSAGE_BUDGET: u64 = 512;
+
+/// The upper bound of `U`, and the value used when there is no window at all.
+pub const MAX_USER_MESSAGE_BUDGET: u64 = 8_192;
+
+/// The cap on the **first** user message `U₁` (ADR 0018): the task itself, usually a
+/// plan, may be longer than one ordinary message. It is `min(2000, U)`, so it shrinks with a
+/// small window instead of pushing the compacted request to 83% of `B` on every compaction.
+pub const FIRST_USER_MESSAGE_MAX: u64 = 2_000;
+
+/// The two-layer verbatim budget for an input budget `B`: `(U, U₁)`.
+///
+/// `U = max(512, min(8192, ⌊B/16⌋))` governs the user messages after the first; `U₁ =
+/// min(2000, U)` governs the first. No window (`None`) takes `U = 8192`, `U₁ = 2000`, the same
+/// way the summary ceiling falls back to a fixed value.
+pub fn user_message_budget(input_budget: Option<u64>) -> (u64, u64) {
+    let u = match input_budget {
+        Some(budget) => (budget / 16).clamp(MIN_USER_MESSAGE_BUDGET, MAX_USER_MESSAGE_BUDGET),
+        None => MAX_USER_MESSAGE_BUDGET,
+    };
+    (u, u.min(FIRST_USER_MESSAGE_MAX))
+}
+
+/// One user message Core carries verbatim across a compaction: its text, with every attached
+/// file replaced by a `[file: P, N lines]` placeholder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetainedUserMessage {
+    pub text: String,
+}
+
+/// Whether `message` is a user message Core keeps verbatim (ADR 0018): a
+/// [`Message::User`] whose `source` is [`InputSource::User`] **or missing**. A missing source
+/// counts as `User` at this summary layer only (the same rule the TUI uses to decide "did a
+/// human say this"); it is not an equality of semantics, and ADR 0005's "`None` never equals
+/// `User`" stands. Everything else — `System` (so the summary message itself), `SlashCommand`,
+/// `Scheduler`, `Mcp`, `Subagent`, `PermissionDecision` — is not retained.
+fn retained_text(message: &Message) -> Option<String> {
+    let Message::User { content, meta } = message else {
+        return None;
+    };
+    match meta.source {
+        None | Some(InputSource::User) => {}
+        Some(_) => return None,
+    }
+    let mut out = String::new();
+    for part in content {
+        if let ContentPart::Text { text, .. } = part {
+            let rendered = match part.attachment_path() {
+                Some(path) => format!("[file: {path}, {} lines]", text.lines().count()),
+                None => text.clone(),
+            };
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&rendered);
+        }
+    }
+    Some(out)
+}
+
+/// The tokens `text` costs by the same conservative ruler [`message_tokens`] uses.
+fn text_tokens(text: &str) -> u64 {
+    message_tokens(&Message::user(text))
+}
+
+/// Truncates `text` to at most `budget` tokens, keeping the first ~3/4 and the last ~1/4 with
+/// an omission marker between them. `None` when it already fits.
+///
+/// The cut shrinks geometrically from the proportional one, so a very long message converges
+/// in a few dozen measurements; the shape is what the ADR asks for ("about 3/4 and about
+/// 1/4"), and the result always fits.
+fn truncate_text(text: &str, budget: u64) -> Option<String> {
+    let total = text_tokens(text);
+    if total <= budget {
+        return None;
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let build = |keep: usize| -> String {
+        let head = keep * 3 / 4;
+        let tail = keep - head;
+        let head_text: String = chars[..head].iter().collect();
+        let tail_text: String = chars[chars.len() - tail..].iter().collect();
+        let body = format!("{head_text}{tail_text}");
+        let omitted = total.saturating_sub(text_tokens(&body));
+        format!("{head_text}[… {omitted} tokens omitted …]{tail_text}")
+    };
+    let mut keep = chars.len();
+    loop {
+        let candidate = build(keep);
+        if text_tokens(&candidate) <= budget {
+            return Some(candidate);
+        }
+        if keep == 0 {
+            return Some(format!("[… {total} tokens omitted …]"));
+        }
+        keep = (keep * 9) / 10;
+    }
+}
+
+/// The user messages Core carries verbatim through this compaction (ADR 0018).
+///
+/// `previous` is the list the earlier compaction wrote; `newly_summarized` are the messages
+/// this compaction is about to summarize. The result is `previous + the new user messages`,
+/// re-budgeted: the **first** message is always kept (cut to `U₁` when it is over), then the
+/// rest fill `U` from the newest backwards, with `[N earlier user messages omitted]` naming
+/// the ones that did not fit. The output is in chronological order.
+///
+/// `newly_summarized` is scanned for user messages only ([`retained_text`]); an attached file
+/// becomes a `[file: P, N lines]` placeholder, never its body.
+pub fn select_user_messages(
+    previous: &[RetainedUserMessage],
+    newly_summarized: &[Message],
+    input_budget: Option<u64>,
+) -> Vec<RetainedUserMessage> {
+    let mut texts: Vec<String> = previous.iter().map(|kept| kept.text.clone()).collect();
+    for message in newly_summarized {
+        if let Some(text) = retained_text(message) {
+            texts.push(text);
+        }
+    }
+    if texts.is_empty() {
+        return Vec::new();
+    }
+    let (u, u1) = user_message_budget(input_budget);
+
+    // The first message is the task itself: always kept, cut to `U₁`.
+    let first = truncate_text(&texts[0], u1).unwrap_or_else(|| texts[0].clone());
+    let mut kept: Vec<String> = Vec::new();
+    let mut used = 0u64;
+    let mut omitted = 0usize;
+    // From the newest backwards: the newest is always placed, truncated into `U` when it alone
+    // is larger.
+    for (index, text) in texts[1..].iter().enumerate().rev() {
+        let tokens = text_tokens(text);
+        let entry = if tokens > u {
+            // Only the newest can reach here first; an older one that alone exceeds `U` is
+            // omitted like any other that does not fit.
+            if index + 1 == texts.len() - 1 {
+                truncate_text(text, u).unwrap_or_else(|| text.clone())
+            } else {
+                omitted += 1;
+                continue;
+            }
+        } else {
+            text.clone()
+        };
+        let entry_tokens = text_tokens(&entry);
+        if used + entry_tokens > u {
+            omitted += 1;
+            continue;
+        }
+        used += entry_tokens;
+        kept.push(entry);
+    }
+    kept.reverse();
+
+    let mut out = Vec::with_capacity(kept.len() + 2);
+    out.push(RetainedUserMessage { text: first });
+    if omitted > 0 {
+        out.push(RetainedUserMessage {
+            text: format!("[{omitted} earlier user messages omitted]"),
+        });
+    }
+    out.extend(kept.into_iter().map(|text| RetainedUserMessage { text }));
+    out
+}

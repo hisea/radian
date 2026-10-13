@@ -527,3 +527,203 @@ fn the_scaled_ceiling_reaches_the_prompt_and_the_check() {
     );
     assert_eq!(check_summary(&text, max).unwrap().len(), text.len());
 }
+
+// ---------- ADR 0018: the user's words, kept verbatim ----------
+
+/// A user message with `source = source` and one text part.
+fn user_sourced(text: &str, source: Option<InputSource>) -> Message {
+    Message::User {
+        content: vec![ContentPart::text(text)],
+        meta: MessageMeta {
+            source,
+            ..MessageMeta::default()
+        },
+    }
+}
+
+fn texts(kept: &[agent_core::RetainedUserMessage]) -> Vec<String> {
+    kept.iter().map(|message| message.text.clone()).collect()
+}
+
+/// The budget is the ADR's two-layer rule, including both bounds and the no-window fallback.
+#[test]
+fn the_verbatim_budget_is_the_two_layer_rule() {
+    use agent_core::user_message_budget;
+    // A small window: the 512 floor.
+    assert_eq!(user_message_budget(Some(4_000)), (512, 512));
+    // A medium window: B/16, and U₁ shrinks with U.
+    assert_eq!(user_message_budget(Some(16_000)), (1_000, 1_000));
+    assert_eq!(user_message_budget(Some(64_000)), (4_000, 2_000));
+    // A large window: the 8192 ceiling, U₁ capped at 2000.
+    assert_eq!(user_message_budget(Some(400_000)), (8_192, 2_000));
+    // No window: the fixed pair.
+    assert_eq!(user_message_budget(None), (8_192, 2_000));
+}
+
+/// Only `User` (and a missing source, at this layer) is retained; every other source is not.
+#[test]
+fn only_user_messages_are_retained() {
+    use agent_core::select_user_messages;
+    let messages = vec![
+        user_sourced("from the user", Some(InputSource::User)),
+        user_sourced("no source at all", None),
+        user_sourced("a slash command", Some(InputSource::SlashCommand)),
+        user_sourced("from the scheduler", Some(InputSource::Scheduler)),
+        user_sourced("from mcp", Some(InputSource::Mcp)),
+        user_sourced("from a subagent", Some(InputSource::Subagent)),
+        user_sourced("system", Some(InputSource::System)),
+        user_sourced(
+            "a permission decision",
+            Some(InputSource::PermissionDecision),
+        ),
+        Message::assistant("an assistant turn"),
+    ];
+    let kept = select_user_messages(&[], &messages, None);
+    assert_eq!(
+        texts(&kept),
+        ["from the user", "no source at all"],
+        "only the human's words are kept"
+    );
+}
+
+/// The summary message itself is a `System`-sourced user message, so a second compaction never
+/// re-retains it.
+#[test]
+fn the_summary_message_is_not_retained() {
+    use agent_core::{compacted_history, select_user_messages};
+    let history = compacted_history("a summary", &[]).unwrap();
+    let kept = select_user_messages(&[], &history, None);
+    assert!(kept.is_empty(), "{kept:?}");
+}
+
+/// An attached file is a placeholder, never its body.
+#[test]
+fn an_attachment_becomes_a_placeholder() {
+    use agent_core::select_user_messages;
+    let body = "secret\nfile\ncontents";
+    let message = Message::User {
+        content: vec![
+            ContentPart::text("look at @notes.txt"),
+            ContentPart::attachment(body, "notes.txt"),
+        ],
+        meta: MessageMeta {
+            source: Some(InputSource::User),
+            ..MessageMeta::default()
+        },
+    };
+    let kept = select_user_messages(&[], &[message], None);
+    assert_eq!(kept.len(), 1);
+    assert_eq!(
+        kept[0].text,
+        "look at @notes.txt\n[file: notes.txt, 3 lines]"
+    );
+    assert!(!kept[0].text.contains("secret"), "{:?}", kept[0].text);
+}
+
+/// The first message is always kept, and over `U₁` it is cut with the middle marked.
+#[test]
+fn the_first_message_is_kept_and_cut_to_u1() {
+    use agent_core::{select_user_messages, user_message_budget};
+    let first = format!("HEAD{}TAIL", "x".repeat(40_000));
+    let messages = vec![user_sourced(&first, Some(InputSource::User))];
+    let (_, u1) = user_message_budget(Some(400_000));
+    let kept = select_user_messages(&[], &messages, Some(400_000));
+    assert_eq!(kept.len(), 1);
+    assert!(kept[0].text.starts_with("HEAD"), "{:?}", kept[0].text);
+    assert!(kept[0].text.ends_with("TAIL"), "{:?}", kept[0].text);
+    assert!(
+        kept[0].text.contains("tokens omitted"),
+        "{:?}",
+        kept[0].text
+    );
+    assert!(
+        message_tokens(&Message::user(&kept[0].text)) <= u1,
+        "the cut must fit U₁"
+    );
+}
+
+/// After the first, the messages fill `U` from the newest backwards, and the ones that did not
+/// fit are counted. The output is chronological.
+#[test]
+fn the_rest_fill_u_from_the_newest_with_the_omitted_count() {
+    use agent_core::select_user_messages;
+    // A window that fits the first and about three of the ten messages.
+    let budget = Some(4_000);
+    let mut messages = vec![user_sourced("the task", Some(InputSource::User))];
+    for index in 0..10 {
+        messages.push(user_sourced(
+            &format!("message {index} {}", "y".repeat(600)),
+            Some(InputSource::User),
+        ));
+    }
+    let kept = select_user_messages(&[], &messages, budget);
+    let shown = texts(&kept);
+    assert_eq!(shown[0], "the task", "the first stays first");
+    assert!(
+        shown
+            .iter()
+            .any(|text| text.contains("earlier user messages omitted")),
+        "{shown:?}"
+    );
+    // Chronological: the messages that survive are in their original order.
+    let survivors: Vec<&String> = shown
+        .iter()
+        .filter(|text| text.starts_with("message "))
+        .collect();
+    let mut sorted = survivors.clone();
+    sorted.sort();
+    assert_eq!(survivors, sorted, "{shown:?}");
+    // The newest is always there.
+    assert!(
+        shown.iter().any(|text| text.starts_with("message 9")),
+        "the newest must always be kept: {shown:?}"
+    );
+    // The messages after the first together cost at most U.
+    let (u, _) = agent_core::user_message_budget(budget);
+    let used: u64 = shown[1..]
+        .iter()
+        .filter(|text| text.starts_with("message "))
+        .map(|text| message_tokens(&Message::user(text)))
+        .sum();
+    assert!(used <= u, "{used} > {u}: {shown:?}");
+}
+
+/// The newest message alone over `U` is truncated into it, not dropped.
+#[test]
+fn the_newest_message_is_cut_into_u() {
+    use agent_core::{select_user_messages, user_message_budget};
+    let budget = Some(4_000);
+    let (u, _) = user_message_budget(budget);
+    let newest = format!("NEWEST{}END", "z".repeat(40_000));
+    let messages = vec![
+        user_sourced("the task", Some(InputSource::User)),
+        user_sourced(&newest, Some(InputSource::User)),
+    ];
+    let kept = select_user_messages(&[], &messages, budget);
+    let shown = texts(&kept);
+    assert_eq!(shown.len(), 2, "{shown:?}");
+    assert!(shown[1].starts_with("NEWEST"), "{shown:?}");
+    assert!(shown[1].ends_with("END"), "{shown:?}");
+    assert!(shown[1].contains("tokens omitted"), "{shown:?}");
+    assert!(message_tokens(&Message::user(&shown[1])) <= u);
+}
+
+/// The first message is the first of the **combined** list: a rolling compaction keeps it.
+#[test]
+fn a_rolling_compaction_keeps_the_previous_list_and_its_first() {
+    use agent_core::{RetainedUserMessage, select_user_messages};
+    let previous = vec![
+        RetainedUserMessage {
+            text: "the original task".into(),
+        },
+        RetainedUserMessage {
+            text: "an earlier message".into(),
+        },
+    ];
+    let newly = vec![user_sourced("a new message", Some(InputSource::User))];
+    let kept = select_user_messages(&previous, &newly, None);
+    assert_eq!(
+        texts(&kept),
+        ["the original task", "an earlier message", "a new message"]
+    );
+}
