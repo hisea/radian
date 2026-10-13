@@ -110,3 +110,45 @@ Notes:
 
 「先建会话再检查」的 CLI 实例。工作区错误在 `setup` 里已经验证，所以用探测失败（sandbox 在
 `chat`）更能直接观察「检查失败仍留下文件」。
+
+## --export / --search（2026-10-13）
+
+一次性检出 `/tmp/clisess-mut`（`git worktree add --detach HEAD`，HEAD = `4d973d4`），每个变异用
+`git checkout --` 恢复、`git status --short` 为空；`cargo test -p agent-cli --no-fail-fast
+<精确测试名>`。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M10 | 导出不把本进程的 key/`--header` 值传给 `with_secret` | ✅ failed | `export_redacts_the_key_and_header_values`（`the header leaked: ...`） |
+| M11 | 默认打开推理（`include_reasoning(true)` 写死） | ✅ failed | `export_omits_reasoning_and_provider_payload_by_default`（默认导出含 `SECRET-REASONING`） |
+| M12 | `--export` 不按工作区过滤 | ✅ failed | `export_refuses_another_workspaces_session`（退出 0 而不是 2） |
+| M13 | `--out` 已存在时直接覆盖（去掉 `--force` 检查） | ✅ failed | `export_out_refuses_to_overwrite_without_force`（第二次退出 0） |
+
+4/4 抓住，无漏网、无等价变异。M10 的 key 断言由 `sk-` 模式兜底，所以真正抓变异的是 header 值那一条
+（header 值没有内置模式，只有 `with_secret` 会把它换掉）。
+
+## 第二轮：--model 必填性与 search 的索引位置（2026-10-13）
+
+一次性检出 `/tmp/clisess2-mut`（base `d4034ba`），每个变异用 `git checkout --` 恢复，
+`git status --short` 为空；`cargo test -p agent-cli --no-fail-fast <精确测试名>`。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M14 | 交互模式不带 `--model` 也能启动（去掉 clap 的 `required_unless_present_any` 并让 `model_name` 默认成 `"m"`） | ✅ failed | `a_conversation_still_requires_a_model`（不再有 clap 的 `Usage:` 行；实际是后面的 “no API key” 退出 2） |
+| M15 | `--search` 的缓存写成 `.jsonl` 名（`index.db` → `search.jsonl`），即看起来像新建了一个会话文件 | ✅ failed | `session_commands_do_not_touch_the_session_directory`（`created or modified a .jsonl file`，`index.db` 也不再出现） |
+
+M14 的断言特意包含 clap 的 `Usage:` 行：只断言 `--model` 字样的话，后面的 setup 错误也含它，变异就抓不住
+了（第一次写测试时正是这个洞）。M15 覆盖 brief 要求的「search 写进了一个新的 .jsonl」。
+
+## 第三轮：--export 的 session id 校验（2026-10-13）
+
+一次性检出 `/tmp/clisess3-mut`（base `421221b`），变异后
+`cargo test -p agent-cli --no-fail-fast export_refuses_a_path_like_session_id`，用 `git checkout --`
+恢复、`git status --short` 为空。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M16 | `--export` 不调用 `validate_session_id`（直接拿 id 拼文件名） | ✅ failed | `export_refuses_a_path_like_session_id`（`../x` 读到上级伪造文件，退出 0） |
+
+测试里的伪造文件 `dir/x.jsonl` 的 `SessionCreated.workspace` 故意写成当前工作区，所以只靠
+工作区比对是挡不住的；M16 证明去掉 id 校验后它会被导出，而校验在场时被拒。
