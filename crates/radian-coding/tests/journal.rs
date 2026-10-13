@@ -13,9 +13,7 @@ use agent_core::{
 };
 use common::TempDir;
 use futures_util::future::BoxFuture;
-use radian_coding::{
-    CodingTools, PromptError, Prompter, QuestionAnswer, QuestionReply, QuestionRequest,
-};
+use radian_coding::{PromptError, Prompter, QuestionAnswer, QuestionReply, QuestionRequest};
 use serde_json::json;
 
 /// Asks one question on the first model call, then answers the user.
@@ -88,9 +86,7 @@ async fn the_question_and_the_answer_are_journaled_as_the_call_arguments_and_res
     let dir = TempDir::new("ask-journal");
     let ws = dir.file("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    let tools = CodingTools::new(&ws)
-        .unwrap()
-        .with_prompter(Arc::new(FixedPrompter));
+    let tools = radian_coding::AskTools::new(Arc::new(FixedPrompter));
     let journal = Arc::new(RecordingJournal::new());
     let agent = Arc::new(Agent::new(AskingModel::default(), tools));
     let mut chat = agent

@@ -391,15 +391,27 @@ impl LocalSession {
         &self.config_snapshot
     }
 
-    /// Asks the driver to stop gracefully (idempotent).
+    /// Closes the session: its pending requests are completed with their abort outcome
+    /// (ADR 0023 U7 — an approval is denied fail-closed, a question gets
+    /// [`radian_coding::PromptError::Gone`]), so nothing is left waiting when the session goes.
+    fn close_pending(&self) {
+        let aborted = self.queue.abort_session_all(self.id.as_str());
+        let _ = aborted;
+    }
+
+    /// Asks the driver to stop gracefully (idempotent) and aborts this session's pending
+    /// requests.
     pub fn stop(&self) {
+        self.close_pending();
         if let Some(stop) = self.driver.stop.lock().unwrap().take() {
             let _ = stop.send(());
         }
     }
 
     /// Aborts the driver task: the session is dropped, which kills the tool processes at once.
+    /// The pending requests are aborted too, so a waiter is not left until the process exits.
     pub fn abort(&self) {
+        self.close_pending();
         self.driver.abort.abort();
     }
 
@@ -555,14 +567,15 @@ pub async fn open_session(
 
     // The startup description, before the sandbox moves into the tools.
     let (profile_line, sandbox_facts) = describe(tier.sandbox_mode(), sandbox.as_ref(), wording);
-    let mut coding = build_coding_tools(coding_root.as_deref(), sandbox)?;
-    if ask_user {
-        // ADR 0024 Q1/Q5: `ask_user` is advertised only when a human is there to answer, and
-        // its questions go on the same queue as the approvals.
+    let coding = build_coding_tools(coding_root.as_deref(), sandbox)?;
+    // ADR 0024 Q5: `ask_user` is mounted whenever a human is there to answer, **whether or not**
+    // there are coding tools. It is its own provider, so a host without `--workspace` still
+    // advertises it. `None` is what the model sees as "no such tool".
+    let ask = ask_user.then(|| {
         let prompter: Arc<dyn radian_coding::Prompter> =
             Arc::new(QueuedPrompter::new(Arc::clone(&queue), origin.clone()));
-        coding = coding.map(|tools| tools.with_prompter(prompter));
-    }
+        radian_coding::AskTools::new(prompter)
+    });
     let injection_config = InjectionConfig::default();
     let memory = memory_root
         .as_ref()
@@ -612,8 +625,13 @@ pub async fn open_session(
         injection_config,
         memory_warning,
     ));
+    let mut tools = HostTools::new(coding, memory_tools, mcp.clone());
+    let ask_registered = ask.is_some();
+    if let Some(ask) = ask {
+        tools = tools.with_ask(ask);
+    }
     let agent = Arc::new(
-        Agent::new(model, HostTools::new(coding, memory_tools, mcp.clone()))
+        Agent::new(model, tools)
             .with_config(agent_config)
             .with_hooks((Arc::clone(&hooks), Arc::clone(&memory_hooks))),
     );
@@ -684,7 +702,9 @@ pub async fn open_session(
         memory_enabled: memory.is_some(),
         mcp_configured,
         mcp_open,
-        ask_user,
+        // The **actual** registration, not the host's request: the startup line must not claim
+        // a tool the model cannot see.
+        ask_user: ask_registered,
     };
     Ok(LocalSession {
         id: session_id,

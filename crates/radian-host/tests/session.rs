@@ -283,3 +283,56 @@ async fn a_late_answer_is_silently_ignored() {
     let _ = session.join().await;
     drop(scratch);
 }
+
+/// ADR 0023 U7 / ADR 0024 Q4: closing a session completes its pending requests — an approval
+/// is denied fail-closed and a question gets `PromptError::Gone` — so nothing is left waiting.
+#[tokio::test]
+async fn stopping_a_session_aborts_its_pending_requests() {
+    use std::time::Duration;
+
+    let (scratch, session) = open_with("stop", SessionCapability::ALL.to_vec()).await;
+    let origin = session.id().as_str().to_string();
+    let (_approval_id, approval) = session.queue().push(
+        origin.clone(),
+        radian_host::PendingRequest::Approval(radian_permissions::ApprovalRequest::new(
+            "perm-1",
+            "call-1",
+            "write",
+            "/ws/out.txt",
+            "/ws/out.txt",
+            json!({}),
+            None,
+        )),
+    );
+    let (_question_id, question) = session.queue().push(
+        origin,
+        radian_host::PendingRequest::Question(radian_coding::QuestionRequest::new(Vec::new())),
+    );
+    assert_eq!(session.queue().len(), 2);
+
+    session.stop();
+
+    let approval = tokio::time::timeout(Duration::from_secs(2), approval.wait())
+        .await
+        .expect("the approval must not hang")
+        .expect("the queue must complete it");
+    assert_eq!(
+        approval,
+        radian_host::PendingResponse::Approval(ApprovalOutcome::Deny {
+            reason: Some("session closed".into())
+        }),
+        "an approval is denied fail-closed when the session closes"
+    );
+    let question = tokio::time::timeout(Duration::from_secs(2), question.wait())
+        .await
+        .expect("the question must not hang")
+        .expect("the queue must complete it");
+    assert_eq!(
+        question,
+        radian_host::PendingResponse::Question(Err(radian_coding::PromptError::Gone)),
+        "a question is aborted when the session closes"
+    );
+    assert!(session.queue().is_empty());
+    let _ = session.join().await;
+    drop(scratch);
+}

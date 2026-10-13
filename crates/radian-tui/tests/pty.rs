@@ -4488,3 +4488,51 @@ async fn pty_approval_never_still_registers_ask_user() {
         pty.screen()
     );
 }
+
+/// ADR 0024 Q5: `radian-tui` registers `ask_user` even with **no** `--workspace` (so no coding
+/// tools). The startup line must reflect the actual registration, not the host's intent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_ask_user_is_registered_without_a_workspace() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("ask-no-ws");
+    let server = MockServer::start(vec![text_reply("NO-WS-DONE")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "ask-no-ws",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("ask_user: on", 10),
+        "the startup line must say ask_user is on: {}",
+        pty.screen()
+    );
+    pty.send(b"go\r");
+    assert!(
+        pty.wait_for_screen("NO-WS-DONE", 20),
+        "the turn must run: {}",
+        pty.screen()
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1, "{}", pty.screen());
+    let body = &requests[0].body;
+    assert!(
+        body.contains("ask_user"),
+        "the request's tool list must offer ask_user without --workspace: {body}"
+    );
+    assert!(
+        !body.contains("\"name\":\"read\""),
+        "no coding tools exist without --workspace: {body}"
+    );
+}

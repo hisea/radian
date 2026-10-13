@@ -16,7 +16,7 @@ contract; this file is the practical summary.
 | `git_status` | `Shared` | `git status --porcelain=v1 --branch --untracked-files=all`. |
 | `git_diff` | `Shared` | `git diff [--cached] [-- <path>]`; the path must stay inside the workspace. |
 | `shell` | `Exclusive` | `/bin/sh -c <command>` **through a sandbox**, with `cwd` (workspace-relative), `timeout_secs` and `max_output_bytes`. Present only when the host built the tools with a `Sandbox`. |
-| `ask_user` | `Exclusive` | Ask the user one or more structured questions (single/multi/text) and wait for the answers. Present only when the host injected a `Prompter` with `CodingTools::with_prompter`; a host with no interactive user does not advertise it at all (ADR 0024 Q5). The wait races the turn's cancellation and never fabricates an answer. |
+| `ask_user` | `Exclusive` | Ask the user one or more structured questions (single/multi/text) and wait for the answers. Its **own** provider (`AskTools`, not part of `CodingTools`): a host mounts it only when a human is there to answer, and it exists whether or not the host has a workspace (ADR 0024 Q5). The wait races the turn's cancellation and never fabricates an answer. |
 
 `write`/`patch` are `Exclusive` because they mutate files: running them alone keeps each
 edit's read-modify-write atomic with respect to the other tools and avoids two writers
@@ -83,11 +83,12 @@ Enforced (each with tests in `tests/escaping.rs` and `tests/mutation.rs`):
 - With a sandbox: build one with `radian_sandbox::Sandbox::new(mode, root)` (an enforced mode
   probes the backend and fails if it cannot prove enforcement) and pass it to
   `CodingTools::with_sandbox(root, sandbox)`. The shell tool then appears in `tool_specs()`.
-- With a human: `CodingTools::with_prompter(root, Arc<dyn Prompter>)` adds `ask_user`. The
-  `Prompter` is implemented by the host (the TUI modal in ADR 0024 Q7); `radian-host`'s
-  `QueuedPrompter` puts the question on the shared pending queue. The answer is a tool result,
-  never user input: the question is the call's `arguments` and the answer its final result in
-  the session journal (ADR 0002 E1).
+- With a human: `AskTools::new(Arc<dyn Prompter>)` is the `ask_user` provider. It is separate
+  from `CodingTools` because a host with no `--workspace` has no coding tools but still has a
+  human to ask (ADR 0024 Q5). The `Prompter` is implemented by the host (the TUI modal in
+  ADR 0024 Q7); `radian-host`'s `QueuedPrompter` puts the question on the shared pending queue.
+  The answer is a tool result, never user input: the question is the call's `arguments` and the
+  answer its final result in the session journal (ADR 0002 E1).
 
 ## 评审补充（合并时由评审者追加，2026-10-12）
 
