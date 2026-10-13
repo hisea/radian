@@ -30,3 +30,42 @@ Base: `3451dc1` · one-shot worktree `/tmp/cli-mut` (deleted after) · each muta
   the input.** Recovery now treats the transcript (via `meta.id`) as authoritative and writes
   the missing record; pinned by
   `radian-runtime::recovery::an_input_in_the_transcript_without_an_admission_record_is_not_replayed`.
+
+## Follow-up: the flaky `second_sigint_exits_130` (2026-10-12)
+
+Review measured `second_sigint_exits_130` failing 2/15 on this branch (exit 0 instead of
+130) and 0/15 on `main`. Root cause, found by instrumenting the CLI's stderr with timestamps:
+
+- **`tokio::signal::ctrl_c()` does not buffer.** Every call creates a fresh `watch`
+  receiver (`signal(SignalKind::interrupt())?.recv()`), so a SIGINT that arrives while no
+  `ctrl_c()` future is registered is lost. The old CLI spawned one task that awaited the
+  first and then the second `ctrl_c()` back to back; this slice's loop awaited a *fresh*
+  `ctrl_c()` in `tokio::select!` on every iteration, so the second Ctrl-C could fall into
+  the gap and never reach `on_signal` (the failing run's log showed the turn then finishing
+  normally and the CLI leaving 0).
+- **The grace period is still fully waited.** The same instrumented run showed
+  `run finished Cancelled(Requested)` ~2031 ms after the first signal — the full 2 s MCP
+  `cancel_grace` (cancel + ping never answered by `fx__freeze`). So this was a CLI signal
+  plumbing regression, not a runtime behaviour change.
+
+Fixes (commit `8cd481d`):
+
+1. One long-lived listener task loops on `ctrl_c()` and forwards into a channel, so no
+   signal can fall between two calls.
+2. `next_event`/`wait_for_turn` select with `biased` and the signal branch first, so a
+   pending Ctrl-C beats a ready EOF or a turn that just ended.
+3. The second Ctrl-C of an open wind-down always forces, even if the turn ended in the
+   meantime.
+
+The test no longer sleeps: it waits for the CLI's `Ctrl-C again to quit` marker (the state
+gate proving the first signal was handled while the turn is winding down), sends the second
+signal, keeps stdin open while waiting (closing it would race an EOF against the signal),
+and asserts the forced exit happened in under 1 s (i.e. it did not wait out the 2 s grace).
+
+| # | Mutation | Result |
+|---|---|---|
+| M-S1 | remove the "second Ctrl-C of an open wind-down forces" check | ✅ caught: `second_sigint_exits_130` fails with `the CLI did not exit while stdin stayed open` (the forced exit never happens) |
+| M-S2 | revert to a fresh `tokio::signal::ctrl_c()` per loop iteration | ❌ not caught in 12 runs (0/12): with the state-gate test the second signal is sent while the loop is already awaiting, so the lost-signal window is too narrow to hit reliably. The single listener removes the whole class anyway; the original 2/15 reproduction is the evidence that the window was real. |
+
+`second_sigint_exits_130` was then run **30 times** with `--no-fail-fast`; all 30 passed
+(0 failures). Outputs: `/tmp/a66-30runs/run-{1..30}.txt`.
