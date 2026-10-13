@@ -1,5 +1,6 @@
 use serde_json::Value;
 
+use crate::budget::BudgetReport;
 use crate::hooks::HookPoint;
 use crate::message::Message;
 use crate::model::{ModelUsage, StopReason};
@@ -15,6 +16,10 @@ pub enum AgentEvent {
     },
     ModelRequestStarted {
         model_call: u32,
+        /// The context-budget projection for this request (ADR 0018). Over `B` the request is
+        /// still sent; a host's status bar shows `projected_tokens / input_budget_tokens`.
+        /// `None` when no budget is configured.
+        budget: Option<BudgetReport>,
     },
     /// Emitted by model adapters while streaming.
     ModelTextDelta {

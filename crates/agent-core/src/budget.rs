@@ -1,60 +1,51 @@
-//! Context budget guard (ADR 0015): stop before an oversized model request; never compress.
+//! Context budget **projection** (ADR 0015, kept by ADR 0018): how big is the request, and is
+//! it over the effective input budget `B`?
 //!
 //! `ModelUsage::input` is the only trustworthy "how big was this request", and only the
 //! provider can give it (ADR 0007: not reported is `None`, never 0). A local estimate is
 //! available earlier but is an estimate. This module keeps the answers distinct:
 //! **reported**, **reported + estimated** (a reported baseline plus estimated growth),
-//! **estimated**, and **unavailable** (no window configured → disabled). It never invents a
+//! **estimated**, and **unavailable** (no budget configured → disabled). It never invents a
 //! number to fill a gap, and the estimator deliberately errs high (ADR 0015 C2).
+//!
+//! Crossing `B` does **not** stop the request any more (ADR 0018): the status becomes
+//! [`BudgetStatus::Over`] and the request is still sent. Automatic compaction, the next
+//! slice, will act on that status.
 
 use serde::{Deserialize, Serialize};
 
 use crate::model::ModelRequest;
 
-/// The host-supplied context window and policy. There is deliberately **no** model→window
-/// table: it would age and would mostly be remembered numbers. Without a `ContextBudget`
-/// the guard is disabled (`BudgetStatus::Disabled`), not given a guessed default.
+/// The host-supplied **effective input budget `B`** (ADR 0018) and estimate ratio. The host
+/// computes `B = min(I, C - R)` from the model catalog and the request's output setting; Core
+/// knows none of `C`, `I` or `R`. There is deliberately **no** model→budget table: it would
+/// age and would mostly be remembered numbers. Without a `ContextBudget` there is no budget
+/// (`BudgetStatus::Disabled`), never a guessed one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContextBudget {
-    pub window_tokens: u64,
-    /// Block when the projection reaches this percent of the window.
-    pub threshold_percent: u8,
+    /// The effective input budget `B`: the request may use this many tokens before compaction
+    /// is due (ADR 0018). Crossing it does **not** stop the request.
+    pub input_budget_tokens: u64,
     /// ASCII bytes per token for the local estimate.
     pub bytes_per_token: u32,
 }
 
-/// Block at 80% by default: leave ~20% of the window for the response and for provider-side
-/// accounting differences (ADR 0015 C3).
-pub const DEFAULT_THRESHOLD_PERCENT: u8 = 80;
 /// A rough ASCII bytes-per-token for English and code. It is a warning ruler, not an audited
 /// number, and the report says exactly how much of it is estimated.
 pub const DEFAULT_BYTES_PER_TOKEN: u32 = 4;
 
 impl ContextBudget {
-    /// A window with the default threshold (80%) and estimate ratio (4 ASCII bytes/token).
-    pub fn new(window_tokens: u64) -> Self {
+    /// An input budget with the default estimate ratio (4 ASCII bytes/token).
+    pub fn new(input_budget_tokens: u64) -> Self {
         Self {
-            window_tokens,
-            threshold_percent: DEFAULT_THRESHOLD_PERCENT,
+            input_budget_tokens,
             bytes_per_token: DEFAULT_BYTES_PER_TOKEN,
         }
-    }
-
-    pub fn with_threshold_percent(mut self, percent: u8) -> Self {
-        self.threshold_percent = percent.min(100);
-        self
     }
 
     pub fn with_bytes_per_token(mut self, bytes: u32) -> Self {
         self.bytes_per_token = bytes.max(1);
         self
-    }
-
-    /// The block line in tokens: `window * threshold_percent / 100`.
-    pub fn threshold_tokens(&self) -> u64 {
-        self.window_tokens
-            .saturating_mul(u64::from(self.threshold_percent))
-            / 100
     }
 }
 
@@ -143,8 +134,8 @@ pub struct BudgetReport {
     pub source: UsageSource,
     /// The projection at the moment of the check (`baseline + growth`, or pure estimate).
     pub projected_tokens: u64,
-    pub window_tokens: u64,
-    pub threshold_percent: u8,
+    /// The input budget `B` the projection is compared against (ADR 0018).
+    pub input_budget_tokens: u64,
     /// The real byte count of the request the projection was computed from.
     pub request_bytes: u64,
     /// The provider-reported `input` baseline, when there was one.
@@ -155,25 +146,33 @@ pub struct BudgetReport {
     pub estimated_growth_tokens: Option<u64>,
 }
 
-/// The guard's state for a session (ADR 0015 C1).
+/// The projection's state for a session (ADR 0015 C1, ADR 0018).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BudgetStatus {
-    /// No window configured: the guard is off and no number is claimed.
+    /// No input budget configured: no number is claimed.
     Disabled,
-    /// A projection is available and below the threshold.
+    /// The projection is at or below the input budget `B`.
     Ok(BudgetReport),
-    /// The next request was not sent.
-    Blocked(BudgetReport),
+    /// The projection is over `B`. The request is **still sent** (ADR 0018); automatic
+    /// compaction triggers on this state in the next slice.
+    Over(BudgetReport),
 }
 
 impl BudgetStatus {
-    /// The report, if any (both `Ok` and `Blocked` carry one).
+    /// The report, if any (both `Ok` and `Over` carry one).
     pub fn report(&self) -> Option<&BudgetReport> {
         match self {
             BudgetStatus::Disabled => None,
-            BudgetStatus::Ok(report) | BudgetStatus::Blocked(report) => Some(report),
+            BudgetStatus::Ok(report) | BudgetStatus::Over(report) => Some(report),
         }
     }
+}
+
+/// Whether the projection is **over** the input budget `B` (ADR 0018). `T == B` is still
+/// within the budget: compaction is due only strictly above `B`. Pure, so the boundary is
+/// testable on its own.
+pub fn over_budget(report: &BudgetReport) -> bool {
+    report.projected_tokens > report.input_budget_tokens
 }
 
 /// Computes the projection for one request (ADR 0015 C2). Pure, so the rule is testable on
@@ -209,15 +208,9 @@ pub fn project(
     BudgetReport {
         source,
         projected_tokens,
-        window_tokens: budget.window_tokens,
-        threshold_percent: budget.threshold_percent,
+        input_budget_tokens: budget.input_budget_tokens,
         request_bytes: size.total_bytes(),
         baseline_input_tokens,
         estimated_growth_tokens,
     }
-}
-
-/// Convenience: does this report reach the block line?
-pub fn exceeds(budget: &ContextBudget, report: &BudgetReport) -> bool {
-    report.projected_tokens >= budget.threshold_tokens()
 }

@@ -18,8 +18,8 @@ mod turn;
 
 pub use agent::{Agent, AgentConfig, AgentSession, DEFAULT_MAX_MODEL_CALLS, ReplaceError};
 pub use budget::{
-    BudgetReport, BudgetStatus, ContextBudget, DEFAULT_BYTES_PER_TOKEN, DEFAULT_THRESHOLD_PERCENT,
-    RequestSize, UsageSource, estimate_tokens,
+    BudgetReport, BudgetStatus, ContextBudget, DEFAULT_BYTES_PER_TOKEN, RequestSize, UsageSource,
+    estimate_tokens, over_budget,
 };
 pub use event::{AgentEvent, EventSink, NoopSink};
 pub use hooks::{HookContext, HookError, HookPoint, Hooks, ToolDecision};

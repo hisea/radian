@@ -1,8 +1,9 @@
-//! Context budget guard (ADR 0015): the three usage states, the block, and the Continue path.
+//! Context budget projection (ADR 0015, kept by ADR 0018): the usage states and the fact that
+//! crossing the input budget `B` does **not** stop the request.
 
 mod common;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use agent_core::*;
 use common::*;
@@ -52,23 +53,45 @@ fn with_budget<P: ToolProvider>(
     }))
 }
 
-fn block_report(status: &RunStatus) -> &BudgetReport {
-    let RunStatus::ContextBudget(report) = status else {
-        panic!("expected a ContextBudget stop, got {status:?}");
+fn over_report(status: &BudgetStatus) -> &BudgetReport {
+    let BudgetStatus::Over(report) = status else {
+        panic!("expected an over-budget status, got {status:?}");
     };
     report
 }
 
-/// 1. A provider-reported `input` near the window blocks the *next* request, and the model
-///    never sees that request.
+fn declared_calls(transcript: &[Message]) -> Vec<String> {
+    transcript
+        .iter()
+        .flat_map(|message| match message {
+            Message::Assistant { tool_calls, .. } => {
+                tool_calls.iter().map(|c| c.id.clone()).collect::<Vec<_>>()
+            }
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+fn answered_calls(transcript: &[Message]) -> Vec<String> {
+    transcript
+        .iter()
+        .filter_map(|message| match message {
+            Message::Tool { result, .. } => Some(result.call_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 1. A provider-reported `input` over the input budget `B`: the request is **still sent**,
+///    the turn completes, and the status is `Over` with an honest source.
 #[tokio::test]
-async fn reported_usage_blocks_the_next_request_before_it_is_sent() {
+async fn reported_usage_over_the_budget_still_sends_the_request() {
     let model = ScriptedModel::new([
         calls_with_usage(vec![call("c1", "echo", json!({"a": 1}))], 900),
-        text_with_usage("never sent", 950),
+        text_with_usage("second reply", 950),
     ]);
     let tools = MemTools::new(vec![(spec("echo"), Behavior::Echo)]);
-    let mut chat = with_budget(model.clone(), tools, ContextBudget::new(1000))
+    let mut chat = with_budget(model.clone(), tools, ContextBudget::new(800))
         .open_session()
         .await
         .unwrap();
@@ -78,7 +101,11 @@ async fn reported_usage_blocks_the_next_request_before_it_is_sent() {
         .await
         .unwrap();
 
-    let report = block_report(&outcome.status);
+    assert_eq!(outcome.status, RunStatus::Completed);
+    // Both requests reached the model: crossing `B` does not stop the turn.
+    assert_eq!(model.requests().len(), 2);
+
+    let report = over_report(chat.context_budget_status());
     // A reported baseline plus estimated growth is not a precise report, and is labelled so.
     assert_eq!(report.source, UsageSource::ReportedPlusEstimate);
     assert_eq!(report.baseline_input_tokens, Some(900));
@@ -87,9 +114,7 @@ async fn reported_usage_blocks_the_next_request_before_it_is_sent() {
         report.projected_tokens,
         900 + report.estimated_growth_tokens.unwrap()
     );
-    assert_eq!(report.window_tokens, 1000);
-    // The second request was never sent: only the first call reached the model.
-    assert_eq!(model.requests().len(), 1);
+    assert_eq!(report.input_budget_tokens, 800);
 }
 
 fn request_with(text: &str) -> ModelRequest {
@@ -126,30 +151,33 @@ fn ascii_code_estimates_at_least_bytes_over_four() {
     assert!(estimate >= bound, "{estimate} < {bound}");
 }
 
-/// 2. With no provider usage, the projection is a local estimate and the report says so.
+/// 2. With no provider usage, the projection is a local estimate and the report says so; the
+///    over-budget request still goes out.
 #[tokio::test]
-async fn without_reported_usage_the_estimate_is_labelled() {
-    let model = ScriptedModel::new([text("never sent")]);
+async fn without_reported_usage_the_estimate_is_labelled_and_the_request_still_goes() {
+    let model = ScriptedModel::new([text("reply")]);
     let mut chat = with_budget(model.clone(), NoTools, ContextBudget::new(100))
         .open_session()
         .await
         .unwrap();
 
-    // 2000 chars across a 4-byte/token estimate is ~500 tokens, past the 80-token line.
+    // 2000 chars across a 4-byte/token estimate is ~500 tokens, past the 100-token budget.
     let outcome = chat
         .run_turn("x".repeat(2000), TurnOptions::default(), &NoopSink)
         .await
         .unwrap();
 
-    let report = block_report(&outcome.status);
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(model.requests().len(), 1);
+    let report = over_report(chat.context_budget_status());
     assert_eq!(report.source, UsageSource::Estimated);
     assert_eq!(report.baseline_input_tokens, None);
-    assert_eq!(model.requests().len(), 0);
+    assert_eq!(report.input_budget_tokens, 100);
 }
 
-/// 3. No configured window disables the guard, and the host can see that it is off.
+/// 3. No configured budget means no number is claimed, and the host can see that.
 #[tokio::test]
-async fn no_window_configured_disables_the_guard() {
+async fn no_budget_configured_is_disabled() {
     let model = ScriptedModel::new([text("ok")]);
     let mut chat = agent(model.clone(), NoTools).open_session().await.unwrap();
 
@@ -163,14 +191,56 @@ async fn no_window_configured_disables_the_guard() {
     assert_eq!(chat.context_budget_status(), &BudgetStatus::Disabled);
 }
 
-/// 4. The Continue path: one relaxed request goes out, and the guard applies again after it
-///    — both for the same turn's next request and for a later turn.
+/// 3b. A projection at or below `B` is `Ok`, and the boundary is strict: `T == B` is still
+///     within budget, `T == B + 1` is over (ADR 0018; compaction is due only strictly above).
+#[test]
+fn the_boundary_is_strictly_above_the_budget() {
+    let mut report = BudgetReport {
+        source: UsageSource::Estimated,
+        projected_tokens: 800,
+        input_budget_tokens: 800,
+        request_bytes: 0,
+        baseline_input_tokens: None,
+        estimated_growth_tokens: None,
+    };
+    assert!(!over_budget(&report), "T == B is within the budget");
+    report.projected_tokens = 801;
+    assert!(over_budget(&report), "T == B + 1 is over");
+}
+
+/// 3c. Under the budget the session status is `Ok`, not `Over`.
 #[tokio::test]
-async fn relaxing_once_sends_that_request_and_restores_the_guard() {
+async fn under_the_budget_is_ok() {
+    let model = ScriptedModel::new([text("ok")]);
+    let mut chat = with_budget(model.clone(), NoTools, ContextBudget::new(100_000))
+        .open_session()
+        .await
+        .unwrap();
+
+    let outcome = chat
+        .run_turn("go", TurnOptions::default(), &NoopSink)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(model.requests().len(), 1);
+    let report = match chat.context_budget_status() {
+        BudgetStatus::Ok(report) => report,
+        other => panic!("expected Ok, got {other:?}"),
+    };
+    assert!(
+        report.projected_tokens <= report.input_budget_tokens,
+        "{report:?}"
+    );
+}
+
+/// 4. A turn whose projection is over `B` completes normally: no stop, no relax, and the
+///    final status is `Over`.
+#[tokio::test]
+async fn a_turn_over_the_budget_completes_normally() {
     let model = ScriptedModel::new([
         calls(vec![call("c1", "echo", big_args())]),
-        calls(vec![call("c2", "echo", big_args())]),
-        text("never sent"),
+        text("done"),
     ]);
     let tools = MemTools::new(vec![(spec("echo"), Behavior::Echo)]);
     let mut chat = with_budget(model.clone(), tools, ContextBudget::new(1000))
@@ -178,94 +248,42 @@ async fn relaxing_once_sends_that_request_and_restores_the_guard() {
         .await
         .unwrap();
 
-    // Turn 1: the 64 KiB tool result pushes the second request over the line.
-    let first = chat
-        .run_turn("go", TurnOptions::default(), &NoopSink)
-        .await
-        .unwrap();
-    block_report(&first.status);
-    assert_eq!(model.requests().len(), 1);
-
-    // Turn 2: the host chose Continue. The over-budget request goes out once, then the same
-    // turn's next request is protected again.
-    let second = chat
-        .run_turn(
-            "continue",
-            TurnOptions {
-                context_budget_relax: true,
-                ..Default::default()
-            },
-            &NoopSink,
-        )
-        .await
-        .unwrap();
-    block_report(&second.status);
-    assert_eq!(model.requests().len(), 2);
-
-    // Turn 3: the exemption was for one request last turn, not for the session.
-    let third = chat
-        .run_turn("more", TurnOptions::default(), &NoopSink)
-        .await
-        .unwrap();
-    block_report(&third.status);
-    assert_eq!(model.requests().len(), 2);
-}
-
-/// A hook that snapshots `request.messages` at every `before_model_call`.
-#[derive(Default)]
-struct TranscriptSnaps(Mutex<Vec<Vec<u8>>>);
-
-impl Hooks for TranscriptSnaps {
-    async fn before_model_call(
-        &self,
-        _cx: &HookContext,
-        request: &mut ModelRequest,
-    ) -> Result<(), HookError> {
-        self.0
-            .lock()
-            .unwrap()
-            .push(serde_json::to_vec(&request.messages).unwrap());
-        Ok(())
-    }
-}
-
-/// 5. Blocking changes nothing in the transcript: the bytes at the blocked request equal the
-///    bytes after the turn ends (no implicit compression or rewriting).
-#[tokio::test]
-async fn blocking_does_not_change_the_transcript() {
-    let model = ScriptedModel::new([
-        calls(vec![call("c1", "echo", big_args())]),
-        text("never sent"),
-    ]);
-    let tools = MemTools::new(vec![(spec("echo"), Behavior::Echo)]);
-    let snaps = Arc::new(TranscriptSnaps::default());
-    let mut chat = Arc::new(
-        Agent::new(model.clone(), tools)
-            .with_config(AgentConfig {
-                context_budget: Some(ContextBudget::new(1000)),
-                ..Default::default()
-            })
-            .with_hooks(Arc::clone(&snaps)),
-    )
-    .open_session()
-    .await
-    .unwrap();
-
     let outcome = chat
         .run_turn("go", TurnOptions::default(), &NoopSink)
         .await
         .unwrap();
-    block_report(&outcome.status);
 
-    // The hook ran on both requests; the second is the one the guard blocked.
-    let snaps = snaps.0.lock().unwrap();
-    assert_eq!(snaps.len(), 2);
-    let blocked_view = snaps.last().unwrap();
-    let final_view = serde_json::to_vec(chat.transcript()).unwrap();
-    assert_eq!(blocked_view, &final_view);
-    // And the growth from the tool result is real, so the guard did not simply hide it.
-    assert!(snaps[1].len() > snaps[0].len());
-    assert_eq!(chat.transcript().len(), 3);
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(model.requests().len(), 2);
+    let report = over_report(chat.context_budget_status());
+    assert!(report.projected_tokens > 1000, "{report:?}");
+}
+
+/// 5. Over `B`, the transcript is the normal one: nothing is dropped or rewritten to get
+///    under the budget (there is no implicit compression).
+#[tokio::test]
+async fn over_the_budget_does_not_change_the_transcript() {
+    let model = ScriptedModel::new([
+        calls(vec![call("c1", "echo", big_args())]),
+        text("done"),
+    ]);
+    let tools = MemTools::new(vec![(spec("echo"), Behavior::Echo)]);
+    let mut chat = with_budget(model.clone(), tools, ContextBudget::new(1000))
+        .open_session()
+        .await
+        .unwrap();
+
+    chat.run_turn("go", TurnOptions::default(), &NoopSink)
+        .await
+        .unwrap();
+
+    let transcript = chat.transcript();
+    assert_eq!(transcript.len(), 4, "{transcript:?}");
+    assert!(matches!(&transcript[0], Message::User { .. }));
+    assert!(matches!(&transcript[1], Message::Assistant { .. }));
+    assert!(matches!(&transcript[2], Message::Tool { .. }));
+    assert_eq!(transcript[3].text(), "done");
+    assert_eq!(declared_calls(transcript), answered_calls(transcript));
 }
 
 /// 6. A session resumed from a reported usage restores that baseline, and its next projection
@@ -320,7 +338,7 @@ async fn a_restored_baseline_matches_an_uninterrupted_projection() {
         "resume must not change the projection"
     );
     let BudgetStatus::Ok(report) = &resumed_status else {
-        panic!("expected an under-threshold report, got {resumed_status:?}");
+        panic!("expected an under-budget report, got {resumed_status:?}");
     };
     assert_eq!(report.source, UsageSource::ReportedPlusEstimate);
     assert_eq!(report.baseline_input_tokens, Some(900));

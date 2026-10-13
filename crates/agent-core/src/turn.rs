@@ -39,10 +39,6 @@ pub struct TurnOptions {
     /// send the cancel notification, then stop and reap the server). After this, the tool's
     /// future is dropped.
     pub tool_cancel_grace: Duration,
-    /// The host saw a `ContextBudget` stop and chose Continue (ADR 0015 C5): the first
-    /// request of this turn that would exceed the threshold is let through, and the guard
-    /// applies again from the next request on. It is "once", not a whole-turn exemption.
-    pub context_budget_relax: bool,
 }
 
 impl Default for TurnOptions {
@@ -53,7 +49,6 @@ impl Default for TurnOptions {
             max_parallel_tools: DEFAULT_MAX_PARALLEL_TOOLS,
             max_model_calls: None,
             tool_cancel_grace: DEFAULT_TOOL_CANCEL_GRACE,
-            context_budget_relax: false,
         }
     }
 }
@@ -193,8 +188,6 @@ pub struct ActiveRun<'s, M: Model, P: ToolProvider, H: Hooks> {
     started: bool,
     batch: Option<Batch>,
     outcome: Option<RunOutcome>,
-    /// The per-turn half of `TurnOptions::context_budget_relax`; cleared once consumed.
-    context_budget_relax: bool,
 }
 
 impl<'s, M: Model, P: ToolProvider, H: Hooks> ActiveRun<'s, M, P, H> {
@@ -210,7 +203,6 @@ impl<'s, M: Model, P: ToolProvider, H: Hooks> ActiveRun<'s, M, P, H> {
         // The input is still pending; once committed it lands at this index and everything
         // from here on belongs to this turn.
         let turn_start = session.transcript.len();
-        let context_budget_relax = options.context_budget_relax;
         Self {
             interrupt: Interrupt {
                 token: CancellationToken::new(),
@@ -227,7 +219,6 @@ impl<'s, M: Model, P: ToolProvider, H: Hooks> ActiveRun<'s, M, P, H> {
             started: false,
             batch: None,
             outcome: None,
-            context_budget_relax,
         }
     }
 
@@ -538,10 +529,10 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
             Raced::Done(Ok(())) => {}
         }
 
-        // Context budget (ADR 0015): the hook has run, so this is the request that would
-        // be sent. A provider-reported `input` from an earlier request in this session is
-        // the baseline; without one the projection is a local estimate. No configured
-        // window means the guard is off and claims nothing.
+        // Context budget (ADR 0015 projection, ADR 0018 semantics): the hook has run, so
+        // this is the request that would be sent. A provider-reported `input` from an earlier
+        // request in this session is the baseline; without one the projection is a local
+        // estimate. No configured budget means nothing is claimed.
         let request_size = if agent.config.context_budget.is_some() {
             Some(budget::request_size(&request))
         } else {
@@ -549,22 +540,21 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
         };
         if let Some((config, size)) = agent.config.context_budget.zip(request_size) {
             let report = budget::project(&config, self.run.session.budget_baseline, size);
-            if budget::exceeds(&config, &report) {
-                if self.run.context_budget_relax {
-                    // The host chose Continue once: this request goes, then protect again.
-                    self.run.context_budget_relax = false;
-                } else {
-                    self.run.session.budget_status = BudgetStatus::Blocked(report.clone());
-                    return Ok(self.run.finish(RunStatus::ContextBudget(report), events));
-                }
-            }
-            self.run.session.budget_status = BudgetStatus::Ok(report);
+            // ADR 0018: over the input budget `B` the request is still sent. Automatic
+            // compaction triggers here (compact-core slice); this slice only records the
+            // status for the host's status bar.
+            self.run.session.budget_status = if budget::over_budget(&report) {
+                BudgetStatus::Over(report)
+            } else {
+                BudgetStatus::Ok(report)
+            };
         } else {
             self.run.session.budget_status = BudgetStatus::Disabled;
         }
 
         events.emit(AgentEvent::ModelRequestStarted {
             model_call: self.run.model_calls,
+            budget: self.run.session.context_budget_status().report().cloned(),
         });
         let tap = StreamTap {
             host: events,

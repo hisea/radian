@@ -1,4 +1,3 @@
-use crate::budget::BudgetReport;
 use crate::hooks::{HookError, HookPoint};
 use crate::journal::JournalError;
 use crate::message::Message;
@@ -31,11 +30,6 @@ pub enum RunStatus {
     Incomplete(IncompleteReason),
     Refused,
     BudgetExceeded,
-    /// The next request would have reached the context budget, so it was not sent (ADR
-    /// 0015). The report says how big it would have been and whether the baseline was
-    /// provider-reported or estimated. Distinct from `BudgetExceeded` (the model-call count
-    /// cap) because a host chooses differently for a full window than for too many calls.
-    ContextBudget(BudgetReport),
     Cancelled(CancelReason),
     /// A model error or a model hook error; `step()` returned the `RunError`.
     Failed,
