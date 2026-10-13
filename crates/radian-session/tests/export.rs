@@ -13,6 +13,7 @@ const FAKE_KEY: &str = "sk-test-secret-1234567890";
 const CUSTOM_HEADER: &str = "hdr-secret-value";
 const PAYLOAD_MARKER: &str = "payload-marker-xyz";
 const VISIBLE_MARKER: &str = "visible-marker-abc";
+const REASONING_MARKER: &str = "reasoning-marker-def";
 
 /// A session whose assistant message carries a provider payload and a fake key in its
 /// visible text, and whose `SessionCreated` config snapshot carries a custom header.
@@ -32,7 +33,8 @@ fn write_export_session(path: &std::path::Path) {
         "ts":"2026-10-12T08:00:02.000000Z","event":"MessageAppended","critical":true,
         "data":{"index":1,"message":{"assistant":{
             "content":[{"text":{"text":format!("answer with {VISIBLE_MARKER} and key {FAKE_KEY}")}}],
-            "provider_payload":{"marker":PAYLOAD_MARKER,"api_key":FAKE_KEY}
+            "provider_payload":{"marker":PAYLOAD_MARKER,"api_key":FAKE_KEY},
+            "reasoning":[{"text":{"text":format!("thinking {REASONING_MARKER} about {FAKE_KEY}")}}]
         }}}}),
     ];
     let mut out = String::new();
@@ -162,4 +164,38 @@ fn export_never_modifies_the_session_file() {
     )
     .unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+/// ADR 0014, decision 2026-10-12: reasoning is opt-in per export, like the raw payload,
+/// and **both formats agree**. Before this, JSON carried reasoning while Markdown silently
+/// dropped it -- neither by decision.
+#[test]
+fn reasoning_is_omitted_by_default_in_both_formats_and_included_when_opted_in() {
+    let dir = TempDir::new("export-reasoning");
+    let (_, session) = demo(&dir);
+
+    let default = ExportOptions::new();
+    let json_default = export_json(&session, &default).unwrap();
+    let md_default = export_markdown(&session, &default).unwrap();
+    assert!(!json_default.contains(REASONING_MARKER), "{json_default}");
+    assert!(!md_default.contains(REASONING_MARKER), "{md_default}");
+    // The answer itself is still there: only the reasoning was dropped.
+    assert!(json_default.contains(VISIBLE_MARKER));
+    assert!(md_default.contains(VISIBLE_MARKER));
+
+    let opted = ExportOptions::new().include_reasoning(true);
+    let json_opted = export_json(&session, &opted).unwrap();
+    let md_opted = export_markdown(&session, &opted).unwrap();
+    assert!(json_opted.contains(REASONING_MARKER), "{json_opted}");
+    assert!(md_opted.contains(REASONING_MARKER), "{md_opted}");
+    // Kept apart from the answer and labelled, never folded into it.
+    let reasoning_at = md_opted.find(REASONING_MARKER).unwrap();
+    assert!(md_opted[..reasoning_at].contains("reasoning"), "{md_opted}");
+
+    // Opting in to reasoning does not opt in to the payload, and turns nothing else off.
+    assert!(!json_opted.contains(PAYLOAD_MARKER), "{json_opted}");
+    // Redaction still applies inside the reasoning that was included.
+    for out in [&json_opted, &md_opted] {
+        assert!(!out.contains(FAKE_KEY), "{out}");
+    }
 }

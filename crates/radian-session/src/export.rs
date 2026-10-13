@@ -1,7 +1,10 @@
 //! JSON and Markdown export of a session (ADR 0013 T4 / decision 3).
 //!
-//! The only switch is [`ExportOptions::include_provider_payload`]: raw provider payloads
-//! are dropped unless the user opts in for this export. **Redaction has no switch.** Known
+//! Two opt-in switches, both per export and both off by default:
+//! [`ExportOptions::include_provider_payload`] (raw provider payloads, ADR 0013 decision 3)
+//! and [`ExportOptions::include_reasoning`] (a reasoning model's thinking, ADR 0014: it is
+//! model-internal, can be long, and can echo whatever the user pasted). **Redaction has no
+//! switch.** Known
 //! secrets (API keys, custom sensitive header values) plus `sk-`/`Bearer`/`Authorization`
 //! patterns are always stripped, whether or not the payload is included.
 //!
@@ -25,11 +28,13 @@ pub enum ExportError {
 
 /// Options for one export.
 ///
-/// `include_provider_payload` defaults to `false` (ADR 0013 decision 3). `secrets` is a
-/// list of always-redacted strings; there is deliberately no "disable redaction" flag.
+/// `include_provider_payload` (ADR 0013 decision 3) and `include_reasoning` (ADR 0014) both
+/// default to `false`. `secrets` is a list of always-redacted strings; there is deliberately
+/// no "disable redaction" flag, and opting in to either kind of content never turns it off.
 #[derive(Debug, Clone, Default)]
 pub struct ExportOptions {
     include_provider_payload: bool,
+    include_reasoning: bool,
     secrets: Vec<String>,
 }
 
@@ -42,6 +47,17 @@ impl ExportOptions {
     pub fn include_provider_payload(mut self, yes: bool) -> Self {
         self.include_provider_payload = yes;
         self
+    }
+
+    /// Include assistant reasoning in this export. Opt-in, per export. JSON and Markdown
+    /// honour it the same way: without it, neither format carries reasoning.
+    pub fn include_reasoning(mut self, yes: bool) -> Self {
+        self.include_reasoning = yes;
+        self
+    }
+
+    pub fn includes_reasoning(&self) -> bool {
+        self.include_reasoning
     }
 
     /// Always redact this known secret (an API key, an `Authorization` value, a custom
@@ -65,7 +81,7 @@ impl ExportOptions {
 pub fn export_json(session: &Session, opts: &ExportOptions) -> Result<String, ExportError> {
     let mut events = Vec::with_capacity(session.events().len());
     for event in session.events() {
-        let mut data = event_data_value(event, opts.includes_provider_payload())?;
+        let mut data = event_data_value(event, opts)?;
         redact_value(&mut data, opts.secrets());
         events.push(json!({
             "seq": event.seq,
@@ -166,16 +182,19 @@ fn workspace_of(session: &Session) -> Option<String> {
 
 fn event_data_value(
     event: &crate::reader::SessionEvent,
-    include_payload: bool,
+    opts: &ExportOptions,
 ) -> Result<Value, ExportError> {
     let value = match &event.data {
         EventData::MessageAppended { message, .. } => {
             let mut value = serde_json::to_value(message)?;
-            if !include_payload
-                && let Some(assistant) = value.get_mut("assistant").and_then(Value::as_object_mut)
-            {
-                // Dropping the raw provider payload is the whole point of the opt-in flag.
-                assistant.remove("provider_payload");
+            if let Some(assistant) = value.get_mut("assistant").and_then(Value::as_object_mut) {
+                // Dropping these is the whole point of the opt-in flags.
+                if !opts.includes_provider_payload() {
+                    assistant.remove("provider_payload");
+                }
+                if !opts.includes_reasoning() {
+                    assistant.remove("reasoning");
+                }
             }
             value
         }
@@ -256,9 +275,17 @@ fn render_message(message: &Message, opts: &ExportOptions) -> String {
             content,
             tool_calls,
             provider_payload,
+            reasoning,
             ..
         } => {
-            let mut out = redact_text(&plain_text(content), opts.secrets());
+            let mut out = String::new();
+            if opts.includes_reasoning() && !reasoning.is_empty() {
+                // Shown apart from the answer and marked, never folded into it (ADR 0014).
+                out.push_str("<details><summary>reasoning</summary>\n\n");
+                out.push_str(&redact_text(&plain_text(reasoning), opts.secrets()));
+                out.push_str("\n\n</details>\n\n");
+            }
+            out.push_str(&redact_text(&plain_text(content), opts.secrets()));
             if !tool_calls.is_empty() {
                 out.push_str("\n\nTool calls:\n");
                 for call in tool_calls {
