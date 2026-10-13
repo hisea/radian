@@ -100,6 +100,10 @@ pub struct SessionJournal {
     inner: Arc<Mutex<Writer>>,
     /// Holds host appends back while a core replacement segment is open (ADR 0018 §A).
     gate: Arc<SegmentGate>,
+    /// Test seam: pause one in-segment core append so a driver test can observe a segment
+    /// mid-flight and prove no other writer deadlocks on it.
+    #[cfg(feature = "testing")]
+    segment_pause: Arc<SegmentPause>,
 }
 
 /// What the writer mutex guards. Counting starts at 1 because [`SessionJournal::create`]
@@ -134,6 +138,8 @@ impl SessionJournal {
             session_id: session_id.to_owned(),
             inner: Arc::new(Mutex::new(Writer { file, next_seq: 0 })),
             gate: Arc::new(SegmentGate::new()),
+            #[cfg(feature = "testing")]
+            segment_pause: Arc::new(SegmentPause::default()),
         };
         journal.write_line(EVT_SESSION_CREATED, &CreatedData(&created))?;
         Ok(journal)
@@ -200,6 +206,8 @@ impl SessionJournal {
                 next_seq: last_seq + 1,
             })),
             gate: Arc::new(SegmentGate::new()),
+            #[cfg(feature = "testing")]
+            segment_pause: Arc::new(SegmentPause::default()),
         };
         if let Some(revision) = abort_revision {
             journal.write_line(
@@ -265,6 +273,25 @@ impl SessionJournal {
     #[cfg(feature = "testing")]
     pub async fn wait_for_gate_waiter(&self) {
         self.gate.wait_for_waiter().await;
+    }
+
+    /// Test seam: pause the next in-segment core append (the replacement commit) on a
+    /// `Notify` until [`SessionJournal::release_segment_append`].
+    #[cfg(feature = "testing")]
+    pub fn pause_next_segment_append(&self) {
+        self.segment_pause.arm();
+    }
+
+    /// Test seam: completes once the paused in-segment append has reached its checkpoint.
+    #[cfg(feature = "testing")]
+    pub async fn wait_segment_paused(&self) {
+        self.segment_pause.wait_paused().await;
+    }
+
+    /// Test seam: release the paused in-segment append.
+    #[cfg(feature = "testing")]
+    pub fn release_segment_append(&self) {
+        self.segment_pause.release();
     }
 
     fn open_locked(path: &Path) -> Result<File, WriteError> {
@@ -349,6 +376,69 @@ fn write_locked(
     Ok(())
 }
 
+/// Test seam (ADR 0018 §A): pause one in-segment core append on a `Notify`. The driver
+/// deadlock test observes a replacement segment mid-flight this way. Race-free against an
+/// early `release`: the `paused`/`released` flags are checked with the `Notified` future
+/// already enabled.
+#[cfg(feature = "testing")]
+#[derive(Default)]
+pub(crate) struct SegmentPause {
+    armed: std::sync::atomic::AtomicBool,
+    paused: std::sync::atomic::AtomicBool,
+    released: std::sync::atomic::AtomicBool,
+    reached: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[cfg(feature = "testing")]
+impl SegmentPause {
+    pub(crate) fn arm(&self) {
+        self.released
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) async fn checkpoint(&self) {
+        if !self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        self.paused.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.reached.notify_waiters();
+        loop {
+            let notified = self.release.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self
+                .released
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                break;
+            }
+            notified.await;
+        }
+        self.paused
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) async fn wait_paused(&self) {
+        loop {
+            let notified = self.reached.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.paused.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    pub(crate) fn release(&self) {
+        self.released
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.release.notify_waiters();
+    }
+}
+
 /// Test-only fault seam: arm a one-shot failure for the next write of `event`, so an
 /// integration test can see the error path without touching the file. Compiled only with the
 /// `testing` feature.
@@ -400,7 +490,14 @@ impl TranscriptJournal for SessionJournal {
         let inner = Arc::clone(&self.inner);
         let gate = Arc::clone(&self.gate);
         let effect = gate_effect(&record);
+        #[cfg(feature = "testing")]
+        let pause = matches!(record, JournalRecord::TranscriptReplacementCommitted { .. })
+            .then(|| Arc::clone(&self.segment_pause));
         Box::pin(async move {
+            #[cfg(feature = "testing")]
+            if let Some(pause) = pause {
+                pause.checkpoint().await;
+            }
             let (event, data) = rendered.map_err(JournalError)?;
             let res = tokio::task::spawn_blocking(move || {
                 let mut writer = inner.lock().unwrap_or_else(|e| e.into_inner());

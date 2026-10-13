@@ -2188,6 +2188,7 @@ version = "0.1.0"
 dependencies = [
  "agent-core",
  "agent-provider-anthropic",
+ "radian-runtime",
  "radian-session",
  "serde_json",
  "thiserror 2.0.21",

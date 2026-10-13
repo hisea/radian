@@ -99,6 +99,10 @@ pub struct Driver<M: Model, P: ToolProvider, H: Hooks> {
     /// A host listener for the runtime events this driver writes (ADR 0017). `None` keeps the
     /// behavior a host that never installed one had before.
     runtime_events: Option<Arc<dyn RuntimeEvents>>,
+    /// Test seam: fires when the turn loop enters the wake branch, so the deadlock test can
+    /// prove the branch does not block on the journal without relying on timing.
+    #[cfg(feature = "testing")]
+    testing_wake_branch: Arc<tokio::sync::Notify>,
     next_turn: u64,
     next_config_revision: u64,
     closed: bool,
@@ -142,6 +146,8 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             options,
             turn_timeout: None,
             runtime_events: None,
+            #[cfg(feature = "testing")]
+            testing_wake_branch: Arc::new(tokio::sync::Notify::new()),
             next_turn: recovery.next_turn,
             next_config_revision: recovery.next_config_revision,
             closed: false,
@@ -183,6 +189,12 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
     /// Installs the host listener for the runtime events this driver writes (ADR 0017). The
     /// driver calls it for `TurnFailed` so a host can show the error without reading the
     /// journal. Set it before `run()`; the last one wins.
+    /// Test seam: the wake-branch signal (fired when the turn loop enters the wake branch).
+    #[cfg(feature = "testing")]
+    pub fn testing_wake_branch(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.testing_wake_branch)
+    }
+
     pub fn set_runtime_events(&mut self, sink: Arc<dyn RuntimeEvents>) {
         self.runtime_events = Some(sink);
     }
@@ -285,6 +297,8 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         .await?;
 
         let cancel_generation = inbox.cancel_generation();
+        #[cfg(feature = "testing")]
+        let wake_branch = Arc::clone(&self.testing_wake_branch);
         // ADR 0017: a model or hook error ends **this turn**, not the session. Every other
         // `RunError` (journal, poisoned, session) is still fatal and propagates here.
         let outcome = loop {
@@ -293,10 +307,20 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
                 tokio::select! {
                     result = &mut step => break result,
                     _ = inbox.wake_signal() => {
+                        #[cfg(feature = "testing")]
+                        wake_branch.notify_waiters();
+                        // Only cancellation is handled here. `step` is not polled while this
+                        // branch body runs, so it can be parked in the middle of a core
+                        // replacement segment (`TranscriptReplaced` written, commit not yet).
+                        // Any journal write here (`drain_steering` -> `InputClaimed`) would
+                        // wait on the writer's segment gate, which only closes when `step` is
+                        // polled again: a deadlock. Steering is instead drained after
+                        // `Ok(Step::Continue)`, which is where the core reads it anyway
+                        // (`inject_steering` runs at the start of a step); a steer left in the
+                        // inbox at the end of a turn is used by the next turn (ADR 0011).
                         if inbox.cancel_generation() != cancel_generation {
                             cancellation.cancel();
                         }
-                        drain_steering(&inbox, &journal, &steering, &turn_id, &mut claimed, &mut claimed_entries).await?;
                     }
                 }
             };

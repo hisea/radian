@@ -453,9 +453,6 @@ impl<M: Model, P: ToolProvider, H: Hooks> Drop for ActiveRun<'_, M, P, H> {
     }
 }
 
-/// One text part, or no parts at all when the accumulated string is empty. An interrupted
-/// prefix keeps `content` and `reasoning` structurally the same shape: absent when nothing
-/// was emitted on that channel.
 /// The visible text of a message's or response's content parts, concatenated.
 fn text_of(parts: &[ContentPart]) -> String {
     parts
@@ -467,6 +464,9 @@ fn text_of(parts: &[ContentPart]) -> String {
         .collect()
 }
 
+/// One text part, or no parts at all when the accumulated string is empty. An interrupted
+/// prefix keeps `content` and `reasoning` structurally the same shape: absent when nothing
+/// was emitted on that channel.
 fn parts_of(text: String) -> Vec<ContentPart> {
     if text.is_empty() {
         Vec::new()
