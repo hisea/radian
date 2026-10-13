@@ -25,6 +25,7 @@ use crate::command::{self, PendingCommand};
 use crate::composer::Composer;
 use crate::find::FindState;
 use crate::keys::{Action, Keymap};
+use crate::render::InputStyle;
 use crate::mention::{Completion, ExpandError, Expansion};
 use crate::picker::{Outcome as PickerOutcome, Picker};
 use crate::projection::{SessionProjection, StreamSnapshot};
@@ -529,6 +530,8 @@ pub struct App {
     pub theme: Theme,
     /// The key bindings (config `tui.keybindings`), defaulting to the pre-config key table.
     pub keymap: Keymap,
+    /// How the input area is drawn (config `tui.input_style`), defaulting to `lines`.
+    pub input_style: InputStyle,
     pub total_lines: usize,
     pub view_height: u16,
     pub max_scroll: usize,
@@ -567,6 +570,7 @@ impl App {
             pending_expand: None,
             theme: Theme::default(),
             keymap: Keymap::default(),
+            input_style: InputStyle::default(),
             total_lines: 0,
             view_height: 0,
             max_scroll: 0,
@@ -631,6 +635,14 @@ impl App {
     ) -> Result<Vec<String>, String> {
         let name = config.tui.theme.as_deref().and_then(ThemeName::parse);
         self.theme = Theme::resolve(name, no_color);
+        // An unknown `tui.input_style` is a skipped key (the reader warns once); the TUI falls
+        // back to the default.
+        self.input_style = config
+            .tui
+            .input_style
+            .as_deref()
+            .and_then(InputStyle::parse)
+            .unwrap_or_default();
         let keymap = Keymap::from_config(&config.tui.keybindings).map_err(|e| e.to_string())?;
         let mut warnings = keymap.warnings.clone();
         self.keymap = keymap;

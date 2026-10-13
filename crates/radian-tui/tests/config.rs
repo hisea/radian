@@ -158,6 +158,36 @@ find_close = [\"ctrl-x\"]
     assert!(app.find_state().is_none(), "Ctrl-X closed the box");
 }
 
+/// `tui.input_style`: a known value is applied, an unknown one falls back to the default and
+/// is reported as a skipped key (the `tui.*` rule).
+#[test]
+fn the_input_style_is_applied_and_an_unknown_value_falls_back_to_lines() {
+    let mut app = App::new("m", "s");
+    let warnings = app
+        .apply_config(
+            &config("schema_version = 1\n[tui]\ninput_style = \"future\"\n"),
+            false,
+        )
+        .unwrap();
+    assert_eq!(
+        app.input_style,
+        radian_tui::render::InputStyle::Lines,
+        "an unknown style falls back to the default"
+    );
+    assert!(
+        warnings.iter().any(|warning| warning.contains("tui.input_style")),
+        "{warnings:?}"
+    );
+
+    let mut app = App::new("m", "s");
+    app.apply_config(
+        &config("schema_version = 1\n[tui]\ninput_style = \"box\"\n"),
+        false,
+    )
+    .unwrap();
+    assert_eq!(app.input_style, radian_tui::render::InputStyle::Box);
+}
+
 /// The `dark` theme is the pre-config palette; this is the screenshot assertion for a couple
 /// of key elements.
 #[test]

@@ -200,11 +200,42 @@ pub fn visible_lines(
     (total, out)
 }
 
-/// The tallest the input box grows before it scrolls internally instead.
+/// The tallest the input area grows before it scrolls internally instead.
 const MAX_INPUT_ROWS: usize = 10;
 
+/// How the input area is drawn (config `tui.input_style`, owner UI review 2026-10-13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InputStyle {
+    /// A rule above and below, `> ` on the first line, continuation lines indented two cells.
+    /// The default.
+    #[default]
+    Lines,
+    /// The bordered box with a ` message ` title (the pre-review shape).
+    Box,
+}
+
+impl InputStyle {
+    /// The config spelling. `None` for anything else, so the caller falls back to the default.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "lines" => Some(Self::Lines),
+            "box" => Some(Self::Box),
+            _ => None,
+        }
+    }
+}
+
+/// The input prompt, in the style of pi: the first line starts with `> ` and the continuation
+/// lines indent by the same two cells, so the text stays aligned. Two cells of the width go to
+/// it, which is why `input_height` measures the text at `width - 2`.
+const INPUT_PROMPT: &str = "> ";
+
+/// The placeholder shown while the input is empty.
+const INPUT_HINT: &str = "(type a message, Enter to send, Ctrl-J for a new line)";
+
+/// The input area's height: one rule above, the text rows, one rule below.
 fn input_height(app: &App, width: usize) -> u16 {
-    let inner = width.saturating_sub(2).max(1);
+    let inner = width.saturating_sub(INPUT_PROMPT.len()).max(1);
     let rows = crate::composer::rows(&app.input.text(), inner).len();
     (rows.clamp(1, MAX_INPUT_ROWS) as u16) + 2
 }
@@ -524,38 +555,80 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 .wrap(Wrap { trim: false });
             frame.render_widget(paragraph, chunks[2]);
         }
-        // The `/memory` confirmation and the ordinary state draw the input box, exactly as
+        // The `/memory` confirmation and the ordinary state draw the input area, exactly as
         // before (a confirmation only makes it non-editable).
         _ => {
-            let inner_width = chunks[2].width.saturating_sub(2).max(1) as usize;
+            // pi-style: a rule above and below instead of a box, and
+            // `> ` on the first line. `input_height` already reserves the two rule rows, so the
+            // layout of everything else is unchanged.
+            let inner_width = chunks[2]
+                .width
+                .saturating_sub(INPUT_PROMPT.len() as u16)
+                .max(1) as usize;
             let visible = chunks[2].height.saturating_sub(2).max(1) as usize;
             let text = app.input.text();
             let rows = crate::composer::rows(&text, inner_width);
             let (cursor_row, cursor_col) = app.input.cursor_cell(inner_width);
-            // Keep the cursor in view when the text is taller than the box.
+            // Keep the cursor in view when the text is taller than the area.
             let offset = cursor_row.saturating_sub(visible.saturating_sub(1));
             let offset = offset.min(rows.len().saturating_sub(1));
             let empty = app.input.is_empty();
-            let shown = if empty {
-                "(type a message, Enter to send, Ctrl-J for a new line)".to_string()
-            } else {
-                rows[offset..].join("\n")
-            };
             let style = if empty {
                 app.theme.hint
             } else {
                 Style::default()
             };
-            let input = Paragraph::new(Span::styled(shown, style))
-                .block(Block::default().borders(Borders::ALL).title(" message "))
-                .wrap(Wrap { trim: false });
-            frame.render_widget(input, chunks[2]);
+            // Both styles reserve the same two rows (rules / borders), so the rest of the
+            // layout does not depend on the choice.
+            match app.input_style {
+                InputStyle::Lines => {
+                    let body: Vec<Line> = if empty {
+                        vec![Line::from(vec![
+                            Span::styled(INPUT_PROMPT, app.theme.hint),
+                            Span::styled(INPUT_HINT, style),
+                        ])]
+                    } else {
+                        rows[offset..]
+                            .iter()
+                            .enumerate()
+                            .map(|(index, row)| {
+                                let lead = if index == 0 { INPUT_PROMPT } else { "  " };
+                                Line::from(vec![
+                                    Span::styled(lead, app.theme.hint),
+                                    Span::styled(row.clone(), style),
+                                ])
+                            })
+                            .collect()
+                    };
+                    let block = Block::default()
+                        .borders(Borders::TOP | Borders::BOTTOM)
+                        .border_style(app.theme.hint);
+                    frame.render_widget(Paragraph::new(body).block(block), chunks[2]);
+                }
+                InputStyle::Box => {
+                    let shown = if empty {
+                        INPUT_HINT.to_string()
+                    } else {
+                        rows[offset..].join("\n")
+                    };
+                    let input = Paragraph::new(Span::styled(shown, style))
+                        .block(Block::default().borders(Borders::ALL).title(" message "))
+                        .wrap(Wrap { trim: false });
+                    frame.render_widget(input, chunks[2]);
+                }
+            }
             if app.input_editable() {
-                // The inner area starts one cell in from the border; a full row clamps the
-                // cursor to its last cell rather than onto the border.
+                // The text starts after the prompt (`> `, two cells) or after the box border
+                // (one cell); a full row clamps the cursor to its last cell rather than onto the
+                // rule or the border.
+                let lead = match app.input_style {
+                    InputStyle::Lines => INPUT_PROMPT.len() as u16,
+                    InputStyle::Box => 1,
+                };
                 let col = cursor_col.min(inner_width.saturating_sub(1)) as u16;
-                let x = chunks[2].x + 1 + col;
-                let y = chunks[2].y + 1 + (cursor_row - offset) as u16;
+                let row = (cursor_row - offset).min(visible.saturating_sub(1)) as u16;
+                let x = chunks[2].x + lead + col;
+                let y = chunks[2].y + 1 + row;
                 frame.set_cursor_position((x, y));
             }
         }
