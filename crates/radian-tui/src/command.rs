@@ -14,6 +14,7 @@ use radian_host::memory::commands::{self, CommandOutput, MemoryCommand};
 /// The `/help` text. Kept short; the full grammar is `radian_host::memory::commands`.
 pub const HELP: &str = "\
 /help                 list the commands
+/compact [note]       summarize the history now and keep the recent part (ADR 0018)
 /memory <command>     durable memory: list, search, show, add, edit, archive, restore,
                       forget, purge, confirm, export, import, project, relink, split, merge
 //…                   send a message that starts with `/`";
@@ -32,6 +33,9 @@ pub enum Outcome {
     Notices(Vec<String>),
     /// The command writes and must be confirmed before it runs.
     Confirm(PendingCommand),
+    /// A manual `/compact` (ADR 0018): the host runs it on the runtime, between turns, and
+    /// shows the outcome as a notice. `Some(instructions)` is the optional note.
+    Compact(Option<String>),
     /// Not a command after all (an empty token list); the caller sends the line.
     Message,
 }
@@ -46,9 +50,17 @@ pub fn dispatch(line: &str, memory: Option<&MemoryService>) -> Outcome {
     match tokens.first().map(String::as_str) {
         Some("/help") => Outcome::Notices(vec![HELP.to_owned()]),
         Some("/memory") => memory_command(&tokens[1..], memory),
+        Some("/compact") => Outcome::Compact(compact_instructions(&tokens[1..])),
         Some(other) => Outcome::Notices(vec![format!("unknown command {other}; /help lists them")]),
         None => Outcome::Message,
     }
+}
+
+/// The optional `/compact` note: the arguments joined with spaces, or `None` when empty.
+fn compact_instructions(args: &[String]) -> Option<String> {
+    let joined = args.join(" ");
+    let joined = joined.trim();
+    (!joined.is_empty()).then(|| joined.to_owned())
 }
 
 fn memory_command(args: &[String], memory: Option<&MemoryService>) -> Outcome {
@@ -150,6 +162,15 @@ mod tests {
             1
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compact_is_a_control_request_with_optional_instructions() {
+        assert!(matches!(dispatch("/compact", None), Outcome::Compact(None)));
+        match dispatch("/compact focus on the parser", None) {
+            Outcome::Compact(Some(note)) => assert_eq!(note, "focus on the parser"),
+            other => panic!("expected a compact request, got {other:?}"),
+        }
     }
 
     #[test]

@@ -189,6 +189,9 @@ pub struct App {
     pub pending_approval: Option<ApprovalPrompt>,
     /// Set while a `/memory` write waits for the user's `y`; keys answer it instead of typing.
     pub pending_command: Option<PendingCommand>,
+    /// Set by `/compact`; the event loop runs it on the runtime and shows the outcome. `Some`
+    /// is a request, the inner value the optional instructions.
+    pub pending_compact: Option<Option<String>>,
     /// The host's memory service, or `None` when this process has no memory root. `/memory`
     /// runs against the same service the agent's own tools use.
     pub memory: Option<MemoryService>,
@@ -225,6 +228,7 @@ impl App {
             note: None,
             pending_approval: None,
             pending_command: None,
+            pending_compact: None,
             memory: None,
             context_window: None,
             budget_report: None,
@@ -464,6 +468,11 @@ impl App {
                 ));
                 self.pending_command = Some(pending);
             }
+            // `/compact` is asynchronous: the event loop runs it on the runtime and pushes the
+            // result as a notice when it finishes.
+            command::Outcome::Compact(instructions) => {
+                self.pending_compact = Some(instructions);
+            }
             // `dispatch` only returns `Message` for an empty token list, already rejected.
             command::Outcome::Message => {}
         }
@@ -486,7 +495,8 @@ impl App {
         }
     }
 
-    fn push_notice(&mut self, text: impl Into<String>) {
+    /// Pushes a notice entry. Public so the event loop can show a `/compact` result.
+    pub fn push_notice(&mut self, text: impl Into<String>) {
         self.entries.push(Entry::new(EntryKind::Notice, text));
     }
 

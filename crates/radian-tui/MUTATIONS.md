@@ -171,3 +171,11 @@ Base: `cd89c9d` · 一次性检出 `/tmp/sbxnest-mut`（detached，跑完删除�
 
 2/2 抓住。改后的断言要求命令输出（`sum=42` / `ALLOWED-OUTPUT-42`，都不出现在命令文本里），
 所以“命令没跑”不再能通过。
+
+## compact-overflow：`/compact` 拦截（ADR 0018 §手动）
+
+Base `dc307e6` · 一次性检出 `/tmp/covf-mut` · 独立 `CARGO_TARGET_DIR` · `git checkout --` 还原。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M10 | `dispatch` 去掉 `/compact` 分支（当成未知命令） | `command::tests::compact_is_a_control_request_with_optional_instructions` | ✅ failed |

@@ -217,3 +217,11 @@ M3 只改一行条件；两个测试都断言「未确认时既不执行也不�
 | # | 变异 | 结果 | 抓住它的测试 |
 |---|---|---|---|
 | M8 | `note_unlinked` 永不输出（`if global || project` 改 `if true`） | ✅ 抓住 (rc=101) | `memory_unlinked_workspace_refuses_project_writes_and_lists_global`（默认作用域的 `list` 必须报未关联 + 候选） |
+
+## compact-overflow：交互模式识别 `/compact`（ADR 0018 §手动）
+
+Base `dc307e6` · 一次性检出 `/tmp/covf-mut` · 独立 `CARGO_TARGET_DIR` · `git checkout --` 还原。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M9 | `compact_request` 去掉“后跟空白或行尾”的检查（`/compactfoo` 当命令） | `cli::an_interactive_compact_is_a_command_and_compactfoo_is_a_message` | ✅ failed |

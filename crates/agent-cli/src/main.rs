@@ -1255,6 +1255,45 @@ async fn one_shot(run: &mut Run, prompt: String) -> i32 {
 }
 
 /// Interactive: read lines and route them into the inbox.
+/// Recognizes a `/compact [instructions]` line (ADR 0018). Only a whole line whose first word
+/// is exactly `/compact` counts: `/compactfoo` and `see /compact` are ordinary messages.
+fn compact_request(line: &str) -> Option<Option<String>> {
+    let rest = line.strip_prefix("/compact")?;
+    if rest.is_empty() {
+        return Some(None);
+    }
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let instructions = rest.trim();
+    Some((!instructions.is_empty()).then(|| instructions.to_owned()))
+}
+
+/// Runs a manual `/compact` between turns (ADR 0018) and prints the result. Ctrl-C cancels the
+/// in-flight summarizer; nothing is committed then.
+async fn run_compact(run: &mut Run, instructions: Option<String>) {
+    let mut compact = Box::pin(run.inbox.compact(instructions));
+    let result = loop {
+        tokio::select! {
+            result = &mut compact => break result,
+            Some(()) = run.signals.recv() => {
+                run.inbox.cancel(CancelCause::Requested);
+            }
+        }
+    };
+    match result {
+        Ok(agent_core::CompactionOutcome::Compacted {
+            tokens_before,
+            tokens_after,
+            ..
+        }) => eprintln!("[compaction] {tokens_before} tokens → {tokens_after} tokens"),
+        Ok(agent_core::CompactionOutcome::NothingToCompact) => {
+            eprintln!("[compaction] nothing to compact")
+        }
+        Err(message) => eprintln!("[compaction] failed: {message}"),
+    }
+}
+
 async fn interactive_loop(run: &mut Run, lines: &LineHub) -> i32 {
     // True once the first Ctrl-C of a wind-down has been seen: the second one forces exit.
     let mut cancelling = false;
@@ -1285,6 +1324,13 @@ async fn interactive_loop(run: &mut Run, lines: &LineHub) -> i32 {
                 }
                 if line == "/exit" || line == "/quit" {
                     break;
+                }
+                // `/compact [instructions]` is a control request, not a message (ADR 0018).
+                // Only a whole line whose first word is exactly `/compact` counts; `-p` mode
+                // has no such command.
+                if let Some(instructions) = compact_request(line) {
+                    run_compact(run, instructions).await;
+                    continue;
                 }
                 // A turn in flight gets the line as a steer (it changes this turn's
                 // direction); an idle driver gets a followup (a new turn). Both are

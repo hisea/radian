@@ -43,8 +43,10 @@ Two more binaries exist but are not part of the product surface: `agent-extensio
   slash command (same commands), the agent's `memory_search` / `memory_get` / `memory_save` /
   `memory_revise` tools (writes always ask), and deterministic injection with the
   `MemoryInjected` audit event.
-- **Automatic compaction (ADR 0018) is in progress.** The model catalog and the context-budget
-  projection are in place; the turn-internal summarizer is being wired in.
+- **Automatic compaction (ADR 0018)** is implemented: the proactive budget path, the
+  provider-overflow fallback (compact to half and retry once), and a manual `/compact` in both
+  hosts. `--no-auto-compact` turns off the proactive path only; the overflow fallback still
+  runs. The model catalog and the context-budget projection are its inputs.
 
 ## Build
 

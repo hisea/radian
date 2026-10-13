@@ -4262,7 +4262,7 @@ async fn a_context_overflow_error_adds_a_hint() {
     assert_eq!(code, 1, "{stderr}");
     assert!(stderr.contains("model context overflow"), "{stderr}");
     assert!(
-        stderr.contains("automatic compaction could not keep the request"),
+        stderr.contains("compaction could not keep the request"),
         "the hint must be shown: {stderr}"
     );
     assert!(stdout.is_empty(), "stdout must stay model-only: {stdout}");
@@ -5186,4 +5186,24 @@ async fn memory_save_without_yes_is_denied() {
         value.as_array().unwrap().is_empty(),
         "a denied save wrote nothing: {value}"
     );
+}
+
+// ---------- interactive `/compact` (ADR 0018) ----------
+
+/// In interactive mode `/compact` is a control command (nothing is sent), while a line that
+/// merely starts with `/compact` (no separator) is an ordinary message.
+#[tokio::test]
+async fn an_interactive_compact_is_a_command_and_compactfoo_is_a_message() {
+    let server = MockServer::start(vec![text_reply("REPLY-TO-COMPACTFOO")]).await;
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(&["--model", "m", "--base-url", &server.base_url], &[]),
+        "/compact\n/compactfoo\n/compact note\n/exit\n",
+    )
+    .await;
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "REPLY-TO-COMPACTFOO\n");
+    // Both `/compact` and `/compact note` report a result; neither reaches the model.
+    assert_eq!(stderr.matches("nothing to compact").count(), 2, "{stderr}");
+    assert_eq!(server.requests().len(), 1, "only `/compactfoo` was a turn");
+    assert_eq!(last_user_text(&messages_of(&server, 0)), "/compactfoo");
 }

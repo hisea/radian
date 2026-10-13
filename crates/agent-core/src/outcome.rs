@@ -62,16 +62,18 @@ pub enum Step {
 /// without sending the oversized request; none of them is fatal to the session (ADR 0017).
 #[derive(Debug, thiserror::Error)]
 pub enum CompactionError {
-    /// The compacted request is not strictly smaller, or still over the input budget. The
-    /// compaction is not committed.
+    /// The compacted request is not small enough (or not smaller at all). The compaction is
+    /// not committed. `target` is the ceiling it had to reach: the input budget `B` for the
+    /// proactive path, `reference/2` for the overflow fallback, or `before` for a manual
+    /// `/compact` (which only has to shrink it).
     #[error(
         "compaction would not shrink the request enough: {before} -> {after} tokens against a \
-         budget of {budget}"
+         target of {target}"
     )]
     Insufficient {
         before: u64,
         after: u64,
-        budget: u64,
+        target: u64,
     },
     /// Even a summary plus the smallest keepable unit does not fit the input budget.
     #[error("nothing fits the input budget even after compaction")]
@@ -90,6 +92,38 @@ pub enum CompactionError {
     /// The summarization model call itself failed.
     #[error("the summarizer failed: {0}")]
     Summary(#[from] ModelError),
+    /// The compaction was cancelled (Ctrl-C/Esc, or the turn deadline). Nothing was
+    /// committed; a manual `/compact` reports this instead of a hard failure.
+    #[error("the compaction was cancelled")]
+    Cancelled,
+}
+
+/// Why a compaction run failed (ADR 0018). The automatic paths fold this into `RunError`; a
+/// manual `/compact` reports it to its caller. `Journal` is fatal to the session (the file and
+/// memory may differ); the others leave the session usable.
+#[derive(Debug, thiserror::Error)]
+pub enum CompactionFailure {
+    #[error("journal: {0}")]
+    Journal(#[from] JournalError),
+    #[error("hook {point:?} failed: {error}")]
+    Hook { point: HookPoint, error: HookError },
+    #[error(transparent)]
+    Compaction(#[from] CompactionError),
+}
+
+/// What a committed compaction (or a no-op) produced (ADR 0018). Returned by a manual
+/// `/compact`; the automatic paths use the same result internally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompactionOutcome {
+    /// The transcript was replaced. `tokens_before`/`tokens_after` are the projections the
+    /// gain rule used.
+    Compacted {
+        revision: u64,
+        tokens_before: u64,
+        tokens_after: u64,
+    },
+    /// The history already fits the keep target, so there was nothing worth summarizing.
+    NothingToCompact,
 }
 
 #[derive(Debug, thiserror::Error)]
