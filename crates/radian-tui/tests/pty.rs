@@ -1219,3 +1219,57 @@ async fn pty_yes_runs_an_ask_without_a_prompt_and_still_audits_it() {
         "the decision must still be audited: {session}"
     );
 }
+
+/// `--max-model-calls` reaches the turn: with a limit of 1, the reply after the tool call is
+/// never requested.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_max_model_calls_limits_the_turn() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("max-calls");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "list", &json!({"path": "."}).to_string()),
+        text_reply("SECOND-CALL"),
+    ])
+    .await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "max-calls",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--max-model-calls",
+            "1",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"go\r");
+    let path = dir.path().join("max-calls.jsonl");
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !std::fs::read_to_string(&path)
+        .map(|text| text.contains("TurnFinished"))
+        .unwrap_or(false)
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the turn did not finish:\n{}",
+            pty.screen()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(server.requests().len(), 1, "the limit of 1 was not applied");
+    assert!(!pty.screen().contains("SECOND-CALL"), "{}", pty.screen());
+
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}

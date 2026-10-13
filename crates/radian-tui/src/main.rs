@@ -90,6 +90,13 @@ struct Cli {
     #[arg(long)]
     yes: bool,
 
+    /// The per-turn model call limit. The core's default (`DEFAULT_MAX_MODEL_CALLS`, 32) is a
+    /// fuse for unattended runs; an interactive coding session reads many files per turn and
+    /// a human can cancel, so the TUI defaults much higher. It is still a fuse: a loop of
+    /// small calls is not stopped by the context-budget guard.
+    #[arg(long, value_name = "N", default_value_t = TUI_DEFAULT_MAX_MODEL_CALLS)]
+    max_model_calls: u32,
+
     /// Allow a shell command prefix without asking, repeatable (e.g. `--allow-shell-command
     /// "git status"`). Only a *simple* command matches: any shell metacharacter keeps the
     /// call at `ask`. Write these at the subcommand level, never at a bare program name.
@@ -118,6 +125,10 @@ struct Cli {
     #[arg(long, hide = true)]
     panic_in_driver: bool,
 }
+
+/// The TUI's per-turn model call limit when `--max-model-calls` is not given (decision
+/// 2026-10-12, dogfooding finding D6).
+const TUI_DEFAULT_MAX_MODEL_CALLS: u32 = 1000;
 
 /// Forwards core events to the UI thread. `emit` must be short and non-blocking (ADR 0010),
 /// so it only does a channel send.
@@ -245,7 +256,10 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
             Arc::clone(&journal),
             Arc::clone(&inbox),
             live,
-            TurnOptions::default(),
+            TurnOptions {
+                max_model_calls: Some(cli.max_model_calls),
+                ..TurnOptions::default()
+            },
         ))
         .map_err(|e| format!("driver: {e}"))?;
 
@@ -739,4 +753,19 @@ fn build_model(cli: &Cli) -> Result<OpenAiCompatible, String> {
         config.headers.push((name.to_string(), value.to_string()));
     }
     OpenAiCompatible::new(config).map_err(|e| format!("--base-url {}: {e}", cli.base_url))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_default_model_call_limit_is_the_tui_one_not_the_cores() {
+        let cli = Cli::try_parse_from(["radian-tui", "--model", "m"]).unwrap();
+        assert_eq!(cli.max_model_calls, TUI_DEFAULT_MAX_MODEL_CALLS);
+        assert_eq!(TUI_DEFAULT_MAX_MODEL_CALLS, 1000);
+        let cli =
+            Cli::try_parse_from(["radian-tui", "--model", "m", "--max-model-calls", "5"]).unwrap();
+        assert_eq!(cli.max_model_calls, 5);
+    }
 }
