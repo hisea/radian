@@ -13,6 +13,7 @@ dependencies = [
  "futures-util",
  "libc",
  "radian-coding",
+ "radian-host",
  "radian-permissions",
  "radian-runtime",
  "radian-sandbox",
@@ -2133,6 +2134,17 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+]
+
+[[package]]
+name = "radian-host"
+version = "0.1.0"
+dependencies = [
+ "agent-core",
+ "agent-extensions",
+ "radian-coding",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

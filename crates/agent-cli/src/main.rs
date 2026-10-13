@@ -7,7 +7,6 @@
 //! from everything it writes to disk.
 
 mod approval;
-mod mcp;
 mod profile;
 mod tools;
 
@@ -30,13 +29,15 @@ use agent_extensions::{McpServerConfig, McpToolProvider};
 use agent_provider_openai_compatible::{ApiKey, OpenAiCompatible, OpenAiCompatibleConfig};
 use clap::Parser;
 use radian_coding::CodingTools;
+use radian_host::{
+    SESSION_PLACEHOLDER, generate_session_id, load_mcp_config, parse_headers, validate_session_id,
+};
 use radian_permissions::{Approver, PermissionHooks};
 use radian_runtime::{BudgetRelax, CancelCause, Driver, DriverError, Inbox, InboxError};
 use radian_session::{Index, SessionCreatedData, SessionJournal};
 use tokio::sync::{Mutex, mpsc};
 
 use crate::approval::{AutoApprover, JournalAudit, TERMINAL_SOURCE, TerminalApprover};
-use crate::mcp::load_mcp_config;
 use crate::tools::CliTools;
 
 /// Exit code for usage and configuration errors, matching clap's own usage failures.
@@ -249,12 +250,12 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         (Some(id), _) | (None, Some(id)) => id.clone(),
         (None, None) => generate_session_id(),
     };
-    validate_session_id(&session_id)?;
+    validate_session_id(&session_id).map_err(SetupError)?;
     let uses_placeholder = cli
         .header
         .iter()
         .any(|item| item.contains(SESSION_PLACEHOLDER));
-    let headers = parse_headers(&cli.header, &session_id)?;
+    let headers = parse_headers(&cli.header, &session_id).map_err(SetupError)?;
     config.headers = headers.clone();
     config.include_usage = cli.include_usage;
     if uses_placeholder && cli.session_id.is_none() && cli.resume.is_none() {
@@ -301,39 +302,6 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         session_id,
         secrets,
     })
-}
-
-/// The placeholder `--header` values may use for the process's session id.
-const SESSION_PLACEHOLDER: &str = "{session_id}";
-
-/// A per-process identifier, opaque to the server. Time plus pid is enough for "stable
-/// within one process, different across processes"; a UUID dependency would not earn its
-/// keep for that.
-fn generate_session_id() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{nanos:x}-{:x}", std::process::id())
-}
-
-/// A session id becomes a file name, so it must not be able to escape the session
-/// directory or name another file.
-fn validate_session_id(id: &str) -> Result<(), SetupError> {
-    let ok = !id.is_empty()
-        && id.len() <= 128
-        && id != "."
-        && id != ".."
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
-    if ok {
-        Ok(())
-    } else {
-        Err(SetupError(format!(
-            "session id {id:?} must be 1-128 characters of [A-Za-z0-9._-]"
-        )))
-    }
 }
 
 /// Where session files live: `--session-dir`, then `RADIAN_SESSION_DIR`, then the user's
@@ -431,55 +399,6 @@ fn list_sessions(cli: &Cli) -> Result<(), SetupError> {
         );
     }
     Ok(())
-}
-
-/// Parses repeated `--header NAME=VALUE` arguments, expanding `{session_id}` in values.
-///
-/// The value is never echoed, not even in the error for a malformed argument: a user who
-/// forgot the `=` may have pasted a credential as the whole argument. The name may be echoed
-/// (the brief only forbids values).
-fn parse_headers(raw: &[String], session_id: &str) -> Result<Vec<(String, String)>, SetupError> {
-    let mut headers = Vec::with_capacity(raw.len());
-    for (index, item) in raw.iter().enumerate() {
-        let Some((name, value)) = item.split_once('=') else {
-            return Err(SetupError(format!(
-                "--header (number {}) must be NAME=VALUE",
-                index + 1
-            )));
-        };
-        if name.is_empty() {
-            return Err(SetupError(format!(
-                "--header (number {}) has an empty name",
-                index + 1
-            )));
-        }
-        if !is_header_name(name) {
-            return Err(SetupError(format!(
-                "--header {name}: not a valid HTTP header name"
-            )));
-        }
-        if name.eq_ignore_ascii_case("authorization") {
-            return Err(SetupError(
-                "--header authorization=... is refused: the API key comes only from \
-                 --api-key-env, so a header must not replace it"
-                    .into(),
-            ));
-        }
-        let value = value.replace(SESSION_PLACEHOLDER, session_id);
-        headers.push((name.to_owned(), value));
-    }
-    Ok(headers)
-}
-
-/// RFC 7230 token characters, which is what a header name may contain.
-fn is_header_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.bytes().all(|b| {
-            matches!(b,
-                b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' | b'^'
-                    | b'_' | b'`' | b'|' | b'~'
-                    | b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z')
-        })
 }
 
 /// Like the provider's own rule: localhost, 127.0.0.1 and ::1 may go without a key.
