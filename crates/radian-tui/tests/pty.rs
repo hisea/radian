@@ -3,7 +3,7 @@
 //! in the test runner's own terminal.**
 
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -218,6 +218,30 @@ fn text_reply(text: &str) -> Reply {
         chunk(json!({"role": "assistant", "content": text}), None),
         chunk(json!({}), Some("stop")),
     ])
+}
+
+/// The MCP fixture, built next to the TUI binary. `cargo test -p radian-tui` alone does not
+/// necessarily build it, so the failure says what to run.
+fn fixture_bin() -> PathBuf {
+    let path = Path::new(BIN).parent().unwrap().join("mcp-fixture");
+    assert!(
+        path.exists(),
+        "mcp-fixture is not built; run: cargo build -p agent-extensions --bin mcp-fixture"
+    );
+    path
+}
+
+/// An `--mcp-config` pointing at the fixture, logging every received method to `log`.
+fn mcp_config(dir: &Path, log: &Path) -> PathBuf {
+    let server = json!({
+        "id": "fx",
+        "command": fixture_bin(),
+        "env": {"FIXTURE_LOG": log},
+        "call_timeout_secs": 30,
+    });
+    let path = dir.join("mcp.json");
+    std::fs::write(&path, json!({"servers": [server]}).to_string()).unwrap();
+    path
 }
 
 /// One turn: send `hello`, wait for the mock reply, then quit with Ctrl-C.
@@ -1153,4 +1177,307 @@ async fn pty_reasoning_is_not_sent_back_to_the_provider() {
     assert!(second.contains("first answer"), "{second}");
 
     pty.quit();
+}
+
+/// The TUI's `--header` is the same parser `agent-cli` uses: `{session_id}` expands to this
+/// process's session id, so a routing header can name the conversation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_header_value_expands_the_session_id() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("header-new");
+    let server = MockServer::start(vec![text_reply("HEADER-OK")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "abc",
+            "--header",
+            "x-s={session_id}",
+        ],
+        24,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"hi\r");
+    assert!(
+        pty.wait_for_screen("HEADER-OK", 15),
+        "reply not rendered:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+    assert_eq!(
+        server.requests()[0].header("x-s"),
+        Some("abc"),
+        "the placeholder must expand to the session id"
+    );
+}
+
+/// A resumed session expands `{session_id}` to the id being resumed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_resumed_session_header_uses_the_resumed_id() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("header-resume");
+    let server = MockServer::start(vec![text_reply("FIRST"), text_reply("SECOND")]).await;
+
+    let mut first = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "abc",
+        ],
+        24,
+        100,
+    );
+    assert!(first.wait_for_screen("message", 10), "{}", first.screen());
+    first.send(b"one\r");
+    assert!(first.wait_for_screen("FIRST", 15), "{}", first.screen());
+    first.quit();
+    assert_eq!(first.app_exit_code(), Some(0));
+
+    let mut second = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--resume",
+            "abc",
+            "--header",
+            "x-s={session_id}",
+        ],
+        24,
+        100,
+    );
+    assert!(second.wait_for_screen("message", 10), "{}", second.screen());
+    second.send(b"two\r");
+    assert!(second.wait_for_screen("SECOND", 15), "{}", second.screen());
+    second.quit();
+    assert_eq!(second.app_exit_code(), Some(0));
+    assert_eq!(
+        server.requests()[1].header("x-s"),
+        Some("abc"),
+        "the resumed id must be the one expanded"
+    );
+}
+
+/// `authorization` is refused (the key has one source), and the refusal never echoes the
+/// value. The app refuses before entering the alternate screen, so it exits with an error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_an_authorization_header_is_refused_without_echoing_its_value() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("header-auth");
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "auth",
+            "--header",
+            "Authorization=Bearer sk-from-a-header",
+        ],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_exit(10).is_some(),
+        "the app did not refuse:\n{}",
+        pty.screen()
+    );
+    let raw = String::from_utf8_lossy(&pty.raw()).into_owned();
+    assert!(raw.contains("authorization"), "{raw}");
+    assert!(
+        !raw.contains("sk-from-a-header"),
+        "the header value leaked into the error: {raw}"
+    );
+    assert!(server.requests().is_empty(), "no request may be sent");
+    assert_eq!(pty.app_exit_code(), Some(1));
+}
+
+/// A `--header` with no `=` is a usage error whose message does not echo the argument: the
+/// whole argument may be a pasted credential.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_malformed_header_error_does_not_echo_its_value() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("header-bad");
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "bad",
+            "--header",
+            "sk-secret-value",
+        ],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_exit(10).is_some(),
+        "the app did not refuse:\n{}",
+        pty.screen()
+    );
+    let raw = String::from_utf8_lossy(&pty.raw()).into_owned();
+    assert!(raw.contains("must be NAME=VALUE"), "{raw}");
+    assert!(
+        !raw.contains("sk-secret-value"),
+        "the argument leaked into the error: {raw}"
+    );
+}
+
+/// MCP servers are mounted from the same config file the CLI reads; a model call to one of
+/// their tools goes through the approval prompt, returns its result, and the status bar shows
+/// the servers and tools that connected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_mcp_tools_run_through_approval_and_the_status_bar_shows_them() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("mcp");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let log = dir.path().join("mcp.log");
+    let config = mcp_config(dir.path(), &log);
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "fx__echo", r#"{"hello": "mcp"}"#),
+        text_reply("MCP-DONE"),
+    ])
+    .await;
+
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "mcp",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--mcp-config",
+            config.to_str().unwrap(),
+            "--approval",
+            "always",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // The session is open, so the status bar reports what connected. The fixture exposes 16
+    // tools.
+    assert!(
+        pty.wait_for_screen("mcp 1/16", 20),
+        "the status bar does not show the MCP counts:\n{}",
+        pty.screen()
+    );
+
+    pty.send(b"call the echo tool\r");
+    assert!(
+        pty.wait_for_screen("approve tool call?", 20),
+        "no approval for the MCP tool:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.screen().contains("fx__echo"),
+        "the prompt must name the tool:\n{}",
+        pty.screen()
+    );
+    let before = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !before.contains("tools/call"),
+        "the server ran the tool before approval was given: {before}"
+    );
+
+    pty.send(b"y");
+    assert!(
+        pty.wait_for_screen("MCP-DONE", 20),
+        "the approved MCP call did not complete:\n{}",
+        pty.screen()
+    );
+    let logged = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        logged.contains("tools/call"),
+        "the fixture never received the call: {logged}"
+    );
+
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0012 option B keeps MCP servers running outside the sandbox under `workspace-write`,
+/// so the startup notice is the only thing that tells the user. A test holds it in place.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_the_workspace_write_notice_names_the_mcp_sandbox_gap() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("notice");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "notice",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // The notice wraps across lines; collapse whitespace before matching the sentence.
+    let notice = pty
+        .screen()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        notice.contains("MCP servers are NOT sandboxed"),
+        "the startup notice must name the MCP sandbox gap: {notice}"
+    );
+    assert!(
+        notice.contains("not a complete credential boundary"),
+        "the notice must not claim credential isolation: {notice}"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
 }

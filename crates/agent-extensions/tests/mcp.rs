@@ -246,6 +246,27 @@ async fn aliases_are_readable_valid_and_stable() {
 }
 
 #[tokio::test]
+async fn the_provider_reports_what_the_opened_session_connected() {
+    let provider = McpToolProvider::new(vec![fixture("fx")]);
+    assert_eq!(
+        provider.configured(),
+        1,
+        "configured is known before opening"
+    );
+    assert!(provider.status().is_none(), "nothing has opened yet");
+
+    let mut session = provider.open_session().await.unwrap();
+    let status = provider.status().expect("the session is open");
+    assert_eq!(status.servers, 1);
+    assert_eq!(
+        status.tools,
+        session.tool_specs().len(),
+        "the status must report the tools that actually connected"
+    );
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn alias_collision_fails_open_and_reaps_servers() {
     let log = log_file("collision");
     let configs = vec![

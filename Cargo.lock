@@ -2212,12 +2212,14 @@ name = "radian-tui"
 version = "0.1.0"
 dependencies = [
  "agent-core",
+ "agent-extensions",
  "agent-provider-openai-compatible",
  "clap",
  "futures-util",
  "libc",
  "portable-pty",
  "radian-coding",
+ "radian-host",
  "radian-permissions",
  "radian-runtime",
  "radian-sandbox",

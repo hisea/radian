@@ -13,4 +13,4 @@ mod session;
 
 pub use alias::{MAX_ALIAS_LEN, tool_alias};
 pub use config::McpServerConfig;
-pub use session::{McpSession, McpToolProvider};
+pub use session::{McpSession, McpStatus, McpToolProvider};

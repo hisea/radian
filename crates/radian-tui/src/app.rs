@@ -1,7 +1,9 @@
 //! The UI state: transcript entries, the input buffer, scroll-follow logic, and key
 //! handling. It contains no terminal I/O, so the whole thing is driven by tests in memory.
 
-use agent_core::{AgentEvent, BudgetReport, ContentPart, Message, RunStatus, UsageSource};
+use agent_core::{
+    AgentEvent, BudgetReport, ContentPart, Message, ModelUsage, RunStatus, UsageSource,
+};
 use radian_permissions::{ApprovalOutcome, ApprovalRequest};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -97,6 +99,31 @@ pub fn budget_status_text(window: Option<u64>, report: Option<&BudgetReport>) ->
     }
 }
 
+/// The status bar's usage segment: the provider-reported input/output totals for this
+/// session. Only reported numbers appear; a field the provider never reported is `-`, and a
+/// session with no reports at all says `none` rather than inventing a zero.
+pub fn usage_text(input: Option<u64>, output: Option<u64>) -> String {
+    match (input, output) {
+        (None, None) => "usage none".to_string(),
+        (input, output) => format!(
+            "usage {}/{}",
+            input.map_or_else(|| "-".to_string(), |n| n.to_string()),
+            output.map_or_else(|| "-".to_string(), |n| n.to_string())
+        ),
+    }
+}
+
+/// The status bar's MCP segment: `off` with no servers configured, `servers/…` once servers
+/// are configured but the session has not opened, and the servers/tools the opened session
+/// actually reported. `…` is the honest "not known yet"; it is never a guessed count.
+pub fn mcp_text(configured: usize, open: Option<(usize, usize)>) -> String {
+    match (configured, open) {
+        (0, _) => "mcp off".to_string(),
+        (configured, None) => format!("mcp {configured}/…"),
+        (_, Some((servers, tools))) => format!("mcp {servers}/{tools}"),
+    }
+}
+
 /// What the event loop must do with the inbox after a key press.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Send {
@@ -130,6 +157,16 @@ pub struct App {
     pub context_window: Option<u64>,
     /// The most recent budget report, for the status bar.
     pub budget_report: Option<BudgetReport>,
+    /// The permission tier's display name (ADR 0012), set by the host at startup.
+    pub tier: Option<String>,
+    /// Provider-reported usage totals for this session. `None` means the provider never
+    /// reported that field; it is never filled with an estimate or a zero.
+    pub usage_input: Option<u64>,
+    pub usage_output: Option<u64>,
+    /// How many MCP servers are configured, and the servers/tools the opened session
+    /// reported (`None` until it opens). Plain numbers, so the app needs no MCP dependency.
+    pub mcp_configured: usize,
+    pub mcp_open: Option<(usize, usize)>,
     /// A budget stop waiting for the user's choice. The keys work only while the input box is
     /// empty, so ordinary typing is never swallowed.
     pub budget_stop: Option<BudgetReport>,
@@ -153,6 +190,11 @@ impl App {
             pending_approval: None,
             context_window: None,
             budget_report: None,
+            tier: None,
+            usage_input: None,
+            usage_output: None,
+            mcp_configured: 0,
+            mcp_open: None,
             budget_stop: None,
             total_lines: 0,
             view_height: 0,
@@ -163,6 +205,18 @@ impl App {
     /// Records the configured context window (the guard is off when this is `None`).
     pub fn set_context_window(&mut self, window: Option<u64>) {
         self.context_window = window;
+    }
+
+    /// Records the permission tier's display name, for the status bar.
+    pub fn set_tier(&mut self, tier: impl Into<String>) {
+        self.tier = Some(tier.into());
+    }
+
+    /// Records the MCP state: how many servers are configured, and what the opened session
+    /// reported (if it has opened).
+    pub fn set_mcp(&mut self, configured: usize, open: Option<(usize, usize)>) {
+        self.mcp_configured = configured;
+        self.mcp_open = open;
     }
 
     /// Records the transcript viewport. Called by the renderer with the measured transcript
@@ -353,6 +407,12 @@ impl App {
             AgentEvent::ModelReasoningDelta { text } => {
                 self.append_live(EntryKind::Reasoning, text)
             }
+            // Usage is the provider's own report; each present field is added to the session
+            // total, and a field that was never reported stays `None` (never a zero). A
+            // response without usage is not an event here at all.
+            AgentEvent::ModelResponseReceived {
+                usage: Some(usage), ..
+            } => self.add_usage(usage),
             AgentEvent::ToolStarted { name, .. } => {
                 self.note = Some(format!("tool {name} running"));
             }
@@ -386,6 +446,17 @@ impl App {
         }
     }
 
+    /// Adds one provider-reported usage to the session totals. A field the provider did not
+    /// report is left alone; it is never treated as zero.
+    fn add_usage(&mut self, usage: &ModelUsage) {
+        if let Some(input) = usage.input {
+            self.usage_input = Some(self.usage_input.unwrap_or(0).saturating_add(input));
+        }
+        if let Some(output) = usage.output {
+            self.usage_output = Some(self.usage_output.unwrap_or(0).saturating_add(output));
+        }
+    }
+
     fn append_live(&mut self, kind: EntryKind, text: &str) {
         match self.entries.last_mut() {
             Some(last) if last.live && last.kind == kind => last.text.push_str(text),
@@ -396,7 +467,6 @@ impl App {
             }
         }
     }
-
     /// Appends a committed message as transcript entries. Used for live commits and for the
     /// history of a resumed session.
     pub fn push_message(&mut self, message: &Message) {
