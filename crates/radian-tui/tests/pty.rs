@@ -319,6 +319,8 @@ async fn pty_end_to_end_conversation_and_clean_exit() {
 fn pty_panic_path_restores_the_terminal() {
     let _serial = pty_guard();
     let dir = TempDir::new("panic");
+    // A directory that does not exist yet, so the app creates it owner-only.
+    let sessions = dir.path().join("sessions");
     let mut pty = Pty::spawn(
         &[
             "--model",
@@ -326,7 +328,7 @@ fn pty_panic_path_restores_the_terminal() {
             "--base-url",
             "http://127.0.0.1:1/v1",
             "--session-dir",
-            dir.path().to_str().unwrap(),
+            sessions.to_str().unwrap(),
             "--panic-after-enter",
         ],
         20,
@@ -346,6 +348,20 @@ fn pty_panic_path_restores_the_terminal() {
     assert!(raw_text.contains("panicked"), "panic message printed");
     assert!(raw_text.contains("icanon"), "cooked mode restored");
     assert!(!raw_text.contains("-icanon"), "raw mode not restored");
+
+    // The diagnostics directory and the panic log are owner-only (ADR 0013).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&sessions), 0o700, "the session directory must be 0700");
+        let log = std::fs::read_dir(&sessions)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .find(|path| path.to_string_lossy().ends_with(".panic.log"))
+            .expect("a panic log was written");
+        assert_eq!(mode(&log), 0o600, "the panic log must be 0600");
+    }
 }
 
 /// Waits until `predicate` holds, bounded. The sleep is a poll interval, not the

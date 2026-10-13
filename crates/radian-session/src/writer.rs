@@ -203,7 +203,8 @@ impl SessionJournal {
     }
 
     fn open_locked(path: &Path) -> Result<File, WriteError> {
-        let file = OpenOptions::new()
+        let mut options = OpenOptions::new();
+        options
             .read(true)
             // O_APPEND (implies write): every write lands at the current end, so after a
             // torn-tail truncation the next append cannot leave a hole where the torn
@@ -212,12 +213,20 @@ impl SessionJournal {
             .create(true)
             // We never truncate on open; the torn tail is handled explicitly by
             // `create`/`resume` after scanning, so an existing session is never lost.
-            .truncate(false)
-            .open(path)
-            .map_err(|e| WriteError::Open {
-                path: path.to_path_buf(),
-                source: e,
-            })?;
+            .truncate(false);
+        // A new session file is owner-only (ADR 0013): the JSONL can carry a model-echoed
+        // secret in a `provider_payload` (ADR 0006 §11). The mode applies only when the file
+        // is created; an existing file keeps the mode the user gave it (we only warn).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(crate::fs::PRIVATE_FILE_MODE);
+        }
+        let file = options.open(path).map_err(|e| WriteError::Open {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
+        crate::fs::warn_if_wide(path);
         match file.try_lock_exclusive() {
             Ok(()) => Ok(file),
             Err(_) => Err(WriteError::Locked {

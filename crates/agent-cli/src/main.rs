@@ -359,9 +359,12 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     check_provider_flags(provider, thinking, cli.max_tokens).map_err(SetupError)?;
     let key = std::env::var(&api_key_env).ok().filter(|k| !k.is_empty());
     if key.is_none() && !is_local_base_url(&base_url) {
+        // The endpoint can carry userinfo or a query token; redact it like any other error
+        // that names it (ADR 0013 T4).
         return Err(SetupError(format!(
             "no API key: set ${api_key_env} (or point --api-key-env at the right variable); \
-             refusing to continue because {base_url} is not a local address"
+             refusing to continue because {} is not a local address",
+            radian_host::redact_base_url(&base_url)
         )));
     }
     // Resolve the session id once per process. `--resume` names an existing session, so it
@@ -497,6 +500,7 @@ fn open_workspace_index(cli: &Cli) -> Result<Option<(PathBuf, Index, String)>, S
     if !dir.exists() {
         return Ok(None);
     }
+    radian_session::warn_if_wide(&dir);
     let mut index = Index::open(dir.join("index.db")).map_err(|e| {
         SetupError(format!(
             "cannot open the session index in {}: {e}",
@@ -670,7 +674,10 @@ fn search_sessions(cli: &Cli, query: &str) -> Result<(), SetupError> {
             .get(&hit.session_id)
             .cloned()
             .unwrap_or_else(|| "-".into());
-        println!("{}\t{}\t{}", hit.session_id, time, one_line(&hit.snippet));
+        // The snippet is session content and can carry a model-echoed key or header value;
+        // redact the known secrets exactly like `--export` (ADR 0013 decision 3).
+        let snippet = redact(&one_line(&hit.snippet), &export_secrets(cli));
+        println!("{}\t{}\t{}", hit.session_id, time, snippet);
     }
     Ok(())
 }
@@ -731,7 +738,7 @@ fn open_journal(
             .map_err(|e| SetupError(format!("cannot resume session {session_id:?}: {e}")))?;
         return Ok(Arc::new(journal));
     }
-    std::fs::create_dir_all(&dir)
+    radian_session::ensure_private_dir(&dir)
         .map_err(|e| SetupError(format!("cannot create {}: {e}", dir.display())))?;
     // The snapshot is a model route reference only: never the key, a header value or a
     // base URL that could carry credentials (ADR 0008 §4, ADR 0013).

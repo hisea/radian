@@ -20,7 +20,7 @@ pub use headers::{SESSION_PLACEHOLDER, parse_headers};
 pub use mcp::load_mcp_config;
 pub use model::{
     DEFAULT_MAX_TOKENS, HostModel, MIN_THINKING_BUDGET, ModelArgs, Provider, Thinking, build_model,
-    check_provider_flags,
+    check_provider_flags, redact_base_url,
 };
 pub use session_id::{generate_session_id, validate_session_id};
 pub use tools::{HostSession, HostTools, merge_tool_specs};

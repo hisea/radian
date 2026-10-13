@@ -15,5 +15,5 @@ mod stream;
 #[cfg(feature = "testing")]
 pub mod testing;
 
-pub use config::{ApiKey, ConfigError, OpenAiCompatibleConfig};
+pub use config::{ApiKey, ConfigError, OpenAiCompatibleConfig, redact_url};
 pub use model::OpenAiCompatible;

@@ -19,6 +19,7 @@
 
 mod error;
 mod export;
+mod fs;
 mod index;
 mod reader;
 mod runtime;
@@ -28,6 +29,10 @@ pub use error::ReadError;
 pub use export::{
     ExportError, ExportOptions, export_json, export_json_to, export_markdown, export_markdown_to,
     redact_text, redact_value,
+};
+pub use fs::{
+    PRIVATE_DIR_MODE, PRIVATE_FILE_MODE, ensure_private_dir, ensure_private_file,
+    open_private_append, warn_if_wide, wide_permissions_warning,
 };
 pub use index::{
     Audit, Index, IndexError, IndexedEvent, RebuildWarning, Reconcile, SearchHit, SessionSummary,

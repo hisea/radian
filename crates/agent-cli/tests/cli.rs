@@ -4148,3 +4148,182 @@ async fn one_shot_model_error_still_exits_one_and_shows_the_error() {
     assert!(stderr.contains("HTTP 500"), "{stderr}");
     assert!(stdout.is_empty(), "stdout must stay model-only: {stdout}");
 }
+
+/// A new session directory and file are owner-only (ADR 0013): a session is potentially
+/// sensitive data (ADR 0006 §11).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_new_session_directory_and_file_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    let dir = scratch("private-session");
+    let sessions = dir.join("sessions"); // does not exist yet
+    let server = MockServer::start(vec![text_reply("done")]).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent_in(
+            &sessions,
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--session-id",
+                "priv",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(mode(&sessions), 0o700, "the session directory must be 0700");
+    assert_eq!(
+        mode(&sessions.join("priv.jsonl")),
+        0o600,
+        "the session file must be 0600"
+    );
+}
+
+/// A session directory that already exists with wider permissions is reported on stderr and
+/// left exactly as it was: the fix never silently changes a user's directory.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_wide_session_directory_is_warned_about_and_not_changed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = scratch("wide-session-dir");
+    let sessions = dir.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let server = MockServer::start(vec![text_reply("done")]).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent_in(
+            &sessions,
+            &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("[privacy]"),
+        "no warning on stderr: {stderr}"
+    );
+    assert!(stderr.contains("chmod 700"), "{stderr}");
+    assert_eq!(
+        std::fs::metadata(&sessions).unwrap().permissions().mode() & 0o777,
+        0o755,
+        "an existing directory's permissions must not be changed"
+    );
+}
+
+/// The configured endpoint can carry credentials in its userinfo or a query token. Any error
+/// that names it must redact them (ADR 0013 T4), and the host must not prepend the raw value.
+#[tokio::test]
+async fn a_base_url_with_credentials_is_redacted_in_errors() {
+    // No key + a remote endpoint: the "no API key" error names the endpoint.
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                "https://user:url-secret@example.com/v1?token=query-secret",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(!stderr.contains("url-secret"), "userinfo leaked: {stderr}");
+    assert!(
+        !stderr.contains("query-secret"),
+        "query token leaked: {stderr}"
+    );
+    assert!(stderr.contains("example.com"), "{stderr}");
+
+    // An unparseable URL with a secret: the provider error names the redacted form, and the
+    // host must not prepend the raw one.
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &["--model", "m", "--base-url", "url-secret", "-p", "hi"],
+            &[("OPENAI_API_KEY", "sk-x")],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        !stderr.contains("url-secret"),
+        "the raw URL leaked: {stderr}"
+    );
+}
+
+/// A search snippet is session content and can carry a model-echoed key; `--search` redacts
+/// the known secrets exactly like `--export` (ADR 0013 decision 3).
+#[tokio::test]
+async fn search_redacts_the_key_from_a_snippet() {
+    let dir = scratch("search-redact");
+    let sessions = dir.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("echoed sk-search-secret in the answer")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--session-id",
+                "s1",
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "-p",
+                "find me",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--search",
+                "echoed",
+            ],
+            &[("OPENAI_API_KEY", "sk-search-secret")],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        !stdout.contains("sk-search-secret"),
+        "the key leaked into a search hit: {stdout}"
+    );
+    assert!(stdout.contains("<redacted>"), "{stdout}");
+}

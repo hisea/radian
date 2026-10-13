@@ -103,3 +103,25 @@ then `git checkout -- .`; `git status --short` empty at the end.
 2/2 caught; `agent-core --features journal-selfcheck` failed on neither, as before. The M6
 catch is exactly the two new tests, so the decision "accept a short segment before a new
 marker" is pinned.
+
+## Phase 7 privacy: owner-only modes and diagnostic redaction
+
+Base: `90a91a6` · one-shot worktree `/tmp/privacy-mut` (created from HEAD, deleted after) · a
+private `CARGO_TARGET_DIR` · each mutation run with `--no-fail-fast`, then `git checkout -- .`;
+`git status --short` empty at the end. The permission tests live in
+`crates/radian-session/tests/privacy.rs` and `crates/agent-cli/tests/cli.rs`; the redaction
+tests in `crates/agent-cli/tests/cli.rs`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| M1 | the `.jsonl` is created with the default mode (`.mode(0600)` removed) | `privacy::a_new_session_file_is_owner_only`, `cli::a_new_session_directory_and_file_are_owner_only` | ✅ failed |
+| M2 | the session directory is created with the default mode (`DirBuilder::mode` removed) | `privacy::a_new_session_directory_is_owner_only`, `cli::a_new_session_directory_and_file_are_owner_only` | ✅ failed |
+| M3 | `wide_permissions_warning` always returns `None` | `privacy::an_existing_wide_{session_directory,session_file,index}_is_reported_and_not_changed`, `cli::a_wide_session_directory_is_warned_about_and_not_changed` | ✅ failed |
+| M4 | the index database is created with the default mode (`ensure_private_file` removed) | `privacy::the_index_database_and_its_wal_are_owner_only` | ✅ failed |
+| M5 | `redact_base_url` returns the raw URL | `cli::a_base_url_with_credentials_is_redacted_in_errors` | ✅ failed |
+| M6 | the `--search` snippet skips `redact` | `cli::search_redacts_the_key_from_a_snippet` | ✅ failed |
+
+6/6 caught. M1–M3 are the mutations the brief asked for; M4–M6 cover the other two new
+behaviours (the SQLite sibling modes and the two redaction fixes). The `-wal`/`-shm` modes are
+inherited from the database file, so M4 fails on `index.db` first and the siblings never get a
+chance to differ.

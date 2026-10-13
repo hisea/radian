@@ -722,7 +722,8 @@ fn open_journal(
             .map(Arc::new)
             .map_err(|e| format!("cannot resume session {session_id:?}: {e}"));
     }
-    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    radian_session::ensure_private_dir(dir)
+        .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     // The snapshot is a model route reference only: never the key, a header value or a base
     // URL that could carry credentials (ADR 0008 §4, ADR 0013).
     let created = SessionCreatedData::new(
@@ -749,6 +750,7 @@ fn list_sessions(cli: &Cli) -> Result<(), String> {
     if !dir.exists() {
         return Ok(()); // no sessions yet
     }
+    radian_session::warn_if_wide(&dir);
     let mut index = Index::open(dir.join("index.db"))
         .map_err(|e| format!("cannot open the session index in {}: {e}", dir.display()))?;
     index
