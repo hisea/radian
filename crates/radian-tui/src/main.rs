@@ -124,7 +124,7 @@ struct Cli {
     /// The per-turn model call limit. The core's default (`DEFAULT_MAX_MODEL_CALLS`, 32) is a
     /// fuse for unattended runs; an interactive coding session reads many files per turn and
     /// a human can cancel, so the TUI defaults much higher. It is still a fuse: a loop of
-    /// small calls is not stopped by the context-budget guard.
+    /// small calls is not stopped by the context budget (which only triggers compaction).
     #[arg(long, value_name = "N", default_value_t = TUI_DEFAULT_MAX_MODEL_CALLS)]
     max_model_calls: u32,
 

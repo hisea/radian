@@ -220,7 +220,8 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         &self.transcript
     }
 
-    /// The context-budget guard's last computation for this session (ADR 0015 C1).
+    /// The context-budget projection's last computation for this session (ADR 0015 C1, ADR
+    /// 0018).
     /// `Disabled` means no number is claimed: no window is configured, or no request has
     /// been checked yet. `Ok`/`Blocked` carry a report whose `source` says whether the
     /// baseline was provider-reported or a local estimate.
