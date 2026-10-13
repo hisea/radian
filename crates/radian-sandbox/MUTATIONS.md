@@ -31,3 +31,28 @@ Linux 变异把 `sandbox-escape` 交叉编译成 aarch64-musl、scp 到 VM（`ss
 
 结论：macOS 7 个、Linux 5 个变异全部被抓住。LM1 不是被某条矩阵用例抓住，而是被**后端自检**抓住——
 这正是自检存在的理由（规则静默失效时，构建阶段就拒绝）。没有等价变异或测试漏洞。
+
+## ADR 0016：workspace 开网与 pty（2026-10-13）
+
+一次性检出 `/tmp/tiers-mut`（base `9c060d2`），每个变异用 `git checkout --` 恢复，
+`git status --short` 为空。macOS 跑 `cargo test -p radian-sandbox --test escape_macos`；Linux
+变异交叉编译 `sandbox-escape` 到 VM 后运行（先确认 `uname -s` = Linux）。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| MM8 | `workspace` 关网（`network: false`） | ✅ escape_macos FAILED（`network_workspace` 的 3 例由 ok 变 denied） | `escape_macos`（network_workspace） |
+| MM9 | `file-ioctl` 不带过滤（`(allow file-ioctl (literal …) (regex …))` → `(allow file-ioctl)`） | ✅ `--lib` FAILED | `seatbelt::tests::the_pty_ioctl_allow_is_filtered_to_the_pty_devices`；**逃逸矩阵抓不住**（见下） |
+| LM6 | Linux 去掉 `--new-session`（bwrap 的 setsid） | ❌ **未抓住**：`tiocsti_outside_terminal` 仍 PASS | 无 |
+
+**MM9 的说明（matrix cannot distinguish）**：`(allow file-ioctl)` 不带过滤时，`openpty` 与
+`tiocsti_outside_terminal` 都照常 PASS（实测，macOS）。矩阵区分不了过滤与不过滤；用 seatbelt
+单测把规则的**形状**钉住（断言 profile 含带 `(literal …) (regex …)` 的 file-ioctl、不含裸的
+`(allow file-ioctl)`）。ADV 0016 要求过滤，单测是这条要求的执行点。
+
+**LM6 的说明**：去掉 bwrap 的 `--new-session` 后，Linux 的 `tiocsti_outside_terminal` 仍然只看到
+sandbox `denied`、control `ok`。原因：bwrap 的 `--dev /dev` 在沙箱内挂载自己的 devpts，测试传进去
+的**沙箱外** pts 路径在沙箱里指向另一个终端（或不存在），因此这条用例在 Linux 上并没有真的把
+“继承的控制终端”交给被沙箱化的命令；`--new-session` 不是这条用例能观测到的防线。macOS 同理：
+seatbelt 即使 `(allow file-ioctl)`（过滤或不过滤）也拒 `TIOCSTI`（实测，`/dev/tty` 可打开、ioctl
+返回 EPERM），所以 `tiocsti_outside_terminal` 通过但**不敏感于 setsid**。setsid 的变异由
+`radian-coding` 的进程组用例抓住（见该 crate 的 MUTATIONS）。
