@@ -494,3 +494,9 @@ Base `1e3fec4` · 在本任务工作树内施加后从副本还原（`--no-fail-
 
 2/2 抓住。W6 的测试同时断言退出码 143、原因行 `received SIGTERM`、`?1000l`/`?1006l` 与会话目录里没有新
 `.jsonl`。
+
+| W7 | 兜底写完不还原 fd 1 的 `O_NONBLOCK` | `pty_the_watchdog_restores_the_stdout_flags`（在子进程 stdout 的同一个打开文件描述上 `F_GETFL` 仍含 `O_NONBLOCK`） | ✅ failed |
+
+3/3 抓住。W7 的测试用 `spawn_direct_keeping_slave` 保留 pty slave 的一个 `dup`——`dup` 共享同一个打开
+文件描述，所以子进程在 fd 1 上设/还原的 `O_NONBLOCK` 标志在子进程退出后仍能在该描述上读到（新 `open`
+得到的是新描述，证明不了）。变异去掉还原那步后该断言失败，说明测试确实观测到标志。

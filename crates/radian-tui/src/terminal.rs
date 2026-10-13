@@ -59,6 +59,13 @@ pub fn restore_terminal() {
 /// `io::stdout()` could block forever and the forced exit would never happen. Write the same
 /// [`restore_to`] sequences straight to fd 1, after making it non-blocking: no lock to wait
 /// on, and a failed or partial write is ignored. This is best-effort, the process is leaving.
+///
+/// `O_NONBLOCK` is a **status flag of the open file description**, which this process shares
+/// with the shell and every later program on the same terminal (a `dup` shares it; only a fresh
+/// `open` does not). Leaving it set would make their stdout writes fail with `EAGAIN`
+/// ("Resource temporarily unavailable") and truncate output. So the original flags are saved,
+/// `O_NONBLOCK` is set, the restore is written, and the original flags are put back before the
+/// caller exits. If `F_GETFL` fails, non-blocking is never set.
 pub fn restore_terminal_nonblocking() {
     #[cfg(unix)]
     {
@@ -66,13 +73,18 @@ pub fn restore_terminal_nonblocking() {
         // the stuck main loop is holding.
         let fd = libc::STDOUT_FILENO;
         // SAFETY: `fd` is our own stdout and `fcntl` only reads/writes its flags.
-        unsafe {
-            let flags = libc::fcntl(fd, libc::F_GETFL);
-            if flags >= 0 {
-                libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-            }
+        let original = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if original >= 0 {
+            // SAFETY: same fd and flag-only mutation.
+            unsafe { libc::fcntl(fd, libc::F_SETFL, original | libc::O_NONBLOCK) };
         }
         restore_to(&mut RawFdWriter { fd });
+        if original >= 0 {
+            // Put the shared description back the way we found it. Best-effort too: a failure
+            // here must not stop the forced exit, but it must never be skipped.
+            // SAFETY: same fd and flag-only mutation.
+            unsafe { libc::fcntl(fd, libc::F_SETFL, original) };
+        }
     }
     #[cfg(not(unix))]
     {

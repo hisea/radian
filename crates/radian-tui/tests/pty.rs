@@ -68,6 +68,17 @@ impl Drop for KillOnDrop {
 /// inherits the master and the pty never sees EOF). `home` is a private HOME the caller keeps
 /// alive. Returns the child (killed on drop) and the master for reading/closing.
 fn spawn_direct(args: &[&str], home: &std::path::Path) -> (KillOnDrop, std::fs::File) {
+    let (child, master, _slave) = spawn_direct_keeping_slave(args, home);
+    (child, master)
+}
+
+/// Like [`spawn_direct`], and also keeps a `dup` of the pty **slave**: the child's stdout is
+/// that same open file description (a `dup` shares it; a fresh `open` would not), so a test can
+/// inspect the status flags the child set on its stdout after the child is gone.
+fn spawn_direct_keeping_slave(
+    args: &[&str],
+    home: &std::path::Path,
+) -> (KillOnDrop, std::fs::File, std::os::fd::OwnedFd) {
     use std::os::fd::FromRawFd;
     let mut master_fd: libc::c_int = -1;
     let mut slave_fd: libc::c_int = -1;
@@ -106,6 +117,7 @@ fn spawn_direct(args: &[&str], home: &std::path::Path) -> (KillOnDrop, std::fs::
     cmd.env("TERM", "xterm-256color");
     cmd.env("HOME", home.as_os_str());
     cmd.env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json");
+    let keep_slave = slave.try_clone().unwrap();
     cmd.stdin(std::process::Stdio::from(slave.try_clone().unwrap()));
     cmd.stdout(std::process::Stdio::from(slave.try_clone().unwrap()));
     cmd.stderr(std::process::Stdio::from(slave));
@@ -120,7 +132,7 @@ fn spawn_direct(args: &[&str], home: &std::path::Path) -> (KillOnDrop, std::fs::
         use std::os::fd::AsRawFd;
         libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK);
     }
-    (child, master)
+    (child, master, keep_slave)
 }
 
 const BIN: &str = env!("CARGO_BIN_EXE_radian-tui");
@@ -4796,5 +4808,77 @@ async fn pty_a_signal_during_pick_exits_128_plus_signal() {
         jsonl(&sessions),
         before,
         "a signal during picking must create no session file"
+    );
+}
+
+/// The watchdog's forced exit must put back the stdout `O_NONBLOCK` it set: that flag belongs to
+/// the **open file description**, shared with the shell and later programs on the same terminal
+/// (a `dup` shares it), so leaving it set would make their writes fail with EAGAIN. The test
+/// keeps a `dup` of the child's stdout (the pty slave) and checks `F_GETFL` on that same
+/// description after the watchdog exits.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_the_watchdog_restores_the_stdout_flags() {
+    use std::os::fd::AsRawFd;
+    let _serial = pty_guard();
+    let dir = TempDir::new("mouse-flags");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let home = TempDir::new("mouse-flags-home");
+    let (mut child, mut master, slave) = spawn_direct_keeping_slave(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "flags",
+            "--offline-catalog",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--slow-draw",
+            "10000",
+        ],
+        home.path(),
+    );
+    // Wait for the mouse-on sequence: the app has entered the terminal and is now sleeping in
+    // `draw_frame`, so the signal below reaches the watchdog.
+    let mut drained = Vec::new();
+    let mut buf = [0u8; 65536];
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !String::from_utf8_lossy(&drained).contains("\u{1b}[?1000h") {
+        if let Ok(n) = master.read(&mut buf) {
+            drained.extend_from_slice(&buf[..n]);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the app never enabled mouse reporting: {}",
+            String::from_utf8_lossy(&drained)
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // SAFETY: signal delivery to our own child process.
+    unsafe { libc::kill(child.0.id() as libc::pid_t, libc::SIGTERM) };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child.0.try_wait().unwrap().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "the watchdog did not force the exit"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // `slave` is a `dup` of the child's stdout: the same open file description, so the flags the
+    // watchdog set (and must have restored) are visible here.
+    let flags = unsafe { libc::fcntl(slave.as_raw_fd(), libc::F_GETFL) };
+    assert!(flags >= 0, "F_GETFL on the kept slave failed");
+    assert_eq!(
+        flags & libc::O_NONBLOCK,
+        0,
+        "the watchdog left O_NONBLOCK set on the shared terminal description"
     );
 }
