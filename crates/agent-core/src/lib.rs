@@ -23,11 +23,11 @@ pub use budget::{
 };
 pub use compaction::{
     DEFAULT_SUMMARY_MAX_TOKENS, MAX_KEEP_TARGET, MIN_KEEP_TARGET, Plan, PlanError,
-    SHORTEN_TARGET_PERCENT, SUMMARY_MESSAGE_PREFIX, SUMMARY_PLANS_ARE_NOT_FACTS,
-    SUMMARY_SHORTEN_KEEPS_FACTS, SUMMARY_SYSTEM_PROMPT, SummaryError, TOOL_RESULT_LIMIT_CHARS,
-    check_summary, compacted_history, keep_target, message_tokens, plan, plan_with_keep,
-    shorten_request, shorten_target, summary_max_tokens, summary_request, summary_system_prompt,
-    units,
+    SHORTEN_TARGET_PERCENT, SUMMARY_FACTS_DELETE_OLDEST, SUMMARY_FACTS_ORDER_RULE,
+    SUMMARY_MESSAGE_PREFIX, SUMMARY_PLANS_ARE_NOT_FACTS, SUMMARY_SYSTEM_PROMPT, SummaryError,
+    TOOL_RESULT_LIMIT_CHARS, check_summary, compacted_history, keep_target, message_tokens, plan,
+    plan_with_keep, shorten_request, shorten_target, summary_max_tokens, summary_request,
+    summary_system_prompt, units, verified_facts_max_tokens,
 };
 pub use event::{AgentEvent, CompactionTrigger, EventSink, NoopSink};
 pub use hooks::{HookContext, HookError, HookPoint, Hooks, ToolDecision};

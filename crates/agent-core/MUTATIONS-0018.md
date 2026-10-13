@@ -105,3 +105,18 @@ Base `3d7066b` · 在本任务工作树内逐条施加后从副本还原（`--no
 
 3/3 抓住。测试断言用的是 `SUMMARY_PLANS_ARE_NOT_FACTS` / `SUMMARY_SHORTEN_KEEPS_FACTS` 两个稳定子串
 常量，不绑定整段措辞；V2/V3 因此精确地落在「规则是否还在」上。
+
+## sumsect-2：Verified facts 的可执行删除优先级与三分之一上限
+
+Base `faeae09` · 在本任务工作树内逐条施加后从副本还原（`--no-fail-fast`）· `git status --short`
+结束后干净。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| W1 | `verified_facts_max_tokens` 的除数 `3` 改成 `2` | `compaction::the_summary_prompt_states_the_verified_facts_ceiling`、`the_shorten_request_carries_only_the_overlong_summary` | ✅ failed |
+| W2 | `shorten_request` 正文漏掉 `Verified facts` 三分之一上限 | `compaction::the_shorten_request_carries_only_the_overlong_summary`、`compaction_flow::an_overlong_summary_is_shortened_on_the_retry` | ✅ failed |
+| W3 | `shorten_request` 正文漏掉删除优先级与时间顺序 | `compaction::the_shorten_request_carries_only_the_overlong_summary`、`compaction_flow::an_overlong_summary_is_shortened_on_the_retry` | ✅ failed |
+| W4 | `SUMMARY_SYSTEM_PROMPT` 漏掉时间顺序规则 | `compaction::the_summary_request_serializes_text_and_truncates_tool_results` | ✅ failed |
+
+4/4 抓住。测试断言用 `SUMMARY_FACTS_ORDER_RULE` / `SUMMARY_FACTS_DELETE_OLDEST` 两个稳定子串常量，
+W3/W4 因此分别落在 shorten 正文与系统提示上。

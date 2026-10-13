@@ -828,9 +828,19 @@ async fn an_overlong_summary_is_shortened_on_the_retry() {
         "the over-long summary is not the input"
     );
     assert!(!body.contains("seven"), "{body}");
+    // The retry states the deletion priority, the chronological order and the one-third
+    // ceiling for Verified facts.
     assert!(
-        body.contains(agent_core::SUMMARY_SHORTEN_KEEPS_FACTS),
-        "the shorten prompt must protect Verified facts: {body}"
+        body.contains(agent_core::SUMMARY_FACTS_ORDER_RULE)
+            && body.contains(agent_core::SUMMARY_FACTS_DELETE_OLDEST),
+        "the shorten prompt must state the deletion rule: {body}"
+    );
+    assert!(
+        body.contains(&format!(
+            "{} tokens",
+            agent_core::verified_facts_max_tokens(agent_core::shorten_target(2_048))
+        )),
+        "the shorten prompt must name the Verified facts ceiling: {body}"
     );
     assert!(
         !body.contains("Conversation to summarize") && !body.contains("xxxx"),
