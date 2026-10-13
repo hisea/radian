@@ -19,6 +19,7 @@
 
 mod error;
 mod export;
+mod fork;
 mod fs;
 mod gate;
 mod index;
@@ -34,6 +35,10 @@ pub use export::{
     ExportError, ExportOptions, export_json, export_json_to, export_markdown, export_markdown_to,
     redact_text, redact_value,
 };
+pub use fork::{
+    ForkError, ForkOutcome, ForkPoint, ForkRequest, fork, fork_point_history, fork_with_journal,
+    last_fork_point, resolve_fork_point,
+};
 pub use fs::{
     PRIVATE_DIR_MODE, PRIVATE_FILE_MODE, ensure_private_dir, ensure_private_file,
     open_private_append, warn_if_wide, wide_permissions_warning,
@@ -47,7 +52,7 @@ pub use runtime::{
     InboxLane, MemoryInjectedRecord, PermissionApprover, PermissionDecision, RuntimeEvent,
     TurnOutcome, TurnReason,
 };
-pub use writer::{SessionCreatedData, SessionJournal, WriteError, now_utc};
+pub use writer::{ForkParent, SessionCreatedData, SessionJournal, WriteError, now_utc};
 
 /// Fault-injection seams, compiled only with the `testing` feature. Off by default so a
 /// production build cannot arm them (ADR 0019 §7's failed-abort-write path).

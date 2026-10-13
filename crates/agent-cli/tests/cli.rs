@@ -2626,8 +2626,10 @@ async fn without_a_window_the_budget_is_off_and_says_so() {
 #[tokio::test]
 async fn an_over_budget_request_is_still_sent_and_the_turn_completes() {
     let (_dir, ws) = budget_workspace("budget-over");
+    // C = 20000, so R = 5000 and B = 15000 (ADR 0018); the reported input (20000)
+    // is over it.
     let server = MockServer::start(vec![
-        used_tool_reply("c1", "write", r#"{"path":"f.txt","content":"x"}"#, 9000),
+        used_tool_reply("c1", "write", r#"{"path":"f.txt","content":"x"}"#, 20000),
         text_reply("done"),
     ])
     .await;
@@ -2654,7 +2656,7 @@ async fn an_over_budget_request_is_still_sent_and_the_turn_completes() {
     .await;
 
     assert_eq!(code, 0, "{stderr}");
-    assert!(stderr.contains("B 3616 from --context-window"), "{stderr}");
+    assert!(stderr.contains("B 15000 from --context-window"), "{stderr}");
     assert_eq!(
         server.requests().len(),
         2,
@@ -2663,29 +2665,34 @@ async fn an_over_budget_request_is_still_sent_and_the_turn_completes() {
 }
 
 /// 3: a context window that cannot hold the output reservation is a startup error, before the
-/// session file or any request (ADR 0018). `C <= R` is impossible, so it is refused, never
-/// silently clamped.
+/// session file or any request (ADR 0018). With revision 4's adaptive `R` it needs the
+/// request's own output to reach `C`: Anthropic sends `max_tokens = 16384` by default, so an
+/// 8192-token window cannot hold the reservation.
 #[tokio::test]
 async fn a_context_window_at_or_below_the_reservation_is_rejected() {
     let (_dir, ws) = budget_workspace("budget-too-small");
-    let server = MockServer::start(vec![]).await;
+    let server = anth::MockServer::start(vec![]).await;
 
     let (code, _, stderr) = feed_and_wait(
         spawn_agent(
             &[
                 "--model",
-                "m",
+                "claude-x",
+                "--provider",
+                "anthropic",
                 "--base-url",
                 &server.base_url,
+                "--api-key-env",
+                "ANTHROPIC_API_KEY",
                 "--workspace",
                 ws.to_str().unwrap(),
                 "--yes",
                 "--context-window",
-                "16384",
+                "8192",
                 "-p",
                 "go",
             ],
-            &[],
+            &[("ANTHROPIC_API_KEY", "sk-ant-test-key")],
         ),
         "",
     )
@@ -2706,8 +2713,9 @@ async fn a_context_window_at_or_below_the_reservation_is_rejected() {
 async fn an_over_budget_turn_records_a_normal_outcome() {
     let sessions = fresh_session_dir();
     let (_dir, ws) = budget_workspace("budget-durable");
+    // C = 20000 -> B = 15000; the reported input (20000) is over it.
     let server = MockServer::start(vec![
-        used_tool_reply("c1", "write", r#"{"path":"f.txt","content":"x"}"#, 9000),
+        used_tool_reply("c1", "write", r#"{"path":"f.txt","content":"x"}"#, 20000),
         text_reply("done"),
     ])
     .await;
@@ -4304,8 +4312,9 @@ async fn the_startup_line_names_an_explicit_window() {
     )
     .await;
     assert_eq!(code, 0, "{stderr}");
-    assert!(stderr.contains("B 3616 from --context-window"), "{stderr}");
-    assert!(stderr.contains("R 16384"), "{stderr}");
+    // C = 20000 -> R = 5000 (a quarter of the window), B = 15000.
+    assert!(stderr.contains("B 15000 from --context-window"), "{stderr}");
+    assert!(stderr.contains("R 5000"), "{stderr}");
 }
 
 /// `--no-auto-compact` is shown on the startup line; the default is on (ADR 0018).
@@ -5330,4 +5339,127 @@ async fn list_and_search_refuse_session_id() {
         assert_eq!(code, 2, "args {args:?}: {stderr}");
         assert!(stderr.contains("--session-id"), "args {args:?}: {stderr}");
     }
+}
+
+// ---------- session fork (ADR 0022) ----------
+
+/// Writes a parent with one finished turn: `PARENT-TEXT` as the first user message. Returns
+/// the `TurnFinished` seq (the fork boundary the CLI should default to).
+async fn write_turn_session(sessions: &Path, id: &str, workspace: &str) -> u64 {
+    use agent_core::{JournalRecord, Message, TranscriptJournal};
+    let path = sessions.join(format!("{id}.jsonl"));
+    let journal = radian_session::SessionJournal::create(
+        &path,
+        id,
+        radian_session::SessionCreatedData::new(workspace, json!({})),
+    )
+    .unwrap();
+    journal
+        .append_runtime_event(radian_session::RuntimeEvent::TurnStarted {
+            turn_id: "t-1".into(),
+        })
+        .await
+        .unwrap();
+    journal
+        .append(JournalRecord::Message {
+            index: 0,
+            message: Message::user("PARENT-TEXT"),
+        })
+        .await
+        .unwrap();
+    let seq = journal.next_seq();
+    journal
+        .append_runtime_event(radian_session::RuntimeEvent::TurnFinished {
+            turn_id: "t-1".into(),
+            outcome: radian_session::TurnOutcome::Completed,
+            reason: None,
+            stop_reason: None,
+        })
+        .await
+        .unwrap();
+    drop(journal);
+    seq
+}
+
+/// `agent --fork` creates a child with the parent's history, records the lineage in both
+/// files, and refuses a parent another process holds.
+#[tokio::test]
+async fn fork_creates_a_child_and_refuses_a_locked_parent() {
+    let dir = scratch("fork-cli");
+    let sessions = dir.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let workspace = canonical(&ws);
+    let boundary = write_turn_session(&sessions, "parent", &workspace).await;
+
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                // No --model: --fork is a session command.
+                "--fork",
+                "parent",
+                "--session-id",
+                "child",
+                "--session-dir",
+                sessions.to_str().unwrap(),
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stdout.contains(&format!("forked parent at seq {boundary} into child")),
+        "{stdout}"
+    );
+    assert!(stdout.contains("--resume child"), "{stdout}");
+
+    // The child's initial history is the parent's one turn.
+    let child = std::fs::read_to_string(sessions.join("child.jsonl")).unwrap();
+    assert!(
+        child.contains(&format!(
+            "\"parent\":{{\"session_id\":\"parent\",\"seq\":{boundary}}}"
+        )),
+        "{child}"
+    );
+    assert!(child.contains("PARENT-TEXT"), "{child}");
+
+    // The parent gained exactly one SessionForked with the same seq.
+    let parent = std::fs::read_to_string(sessions.join("parent.jsonl")).unwrap();
+    assert_eq!(parent.matches("\"event\":\"SessionForked\"").count(), 1);
+    assert!(
+        parent.contains(&format!(
+            "\"child_session_id\":\"child\",\"parent_seq\":{boundary}"
+        )),
+        "{parent}"
+    );
+
+    // A parent another process is writing must be refused with exit 1, not waited for.
+    let held =
+        radian_session::SessionJournal::resume(sessions.join("parent.jsonl"), "parent").unwrap();
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--fork",
+                "parent",
+                "--session-id",
+                "child-2",
+                "--session-dir",
+                sessions.to_str().unwrap(),
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("being written by another process"),
+        "{stderr}"
+    );
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(!sessions.join("child-2.jsonl").exists());
+    drop(held);
 }

@@ -65,15 +65,25 @@ pub struct ModelLimit {
     pub input: Option<u64>,
 }
 
-/// The output reservation `R` (ADR 0018): the safety reservation, raised to the
-/// request's own output setting when that is larger. The catalog's `limit.output` is a
-/// capability ceiling and does **not** participate in `R`.
-pub const OUTPUT_RESERVATION: u64 = 16_384;
+/// The **cap** on the output reservation `R` (ADR 0018): the reservation is a
+/// quarter of the window, never more than this. A fixed 16384 made any window at or below 16K
+/// have no budget at all.
+pub const OUTPUT_RESERVATION_CAP: u64 = 16_384;
 
-/// `R = max(16384, request_max_output)`. `None` means the provider does not send an output
-/// setting (OpenAI-compatible), so only the safety reservation applies.
-pub fn output_reservation(request_max_output: Option<u32>) -> u64 {
-    OUTPUT_RESERVATION.max(u64::from(request_max_output.unwrap_or(0)))
+/// `R = max(min(16384, ⌊C/4⌋), request_max_output)` (ADR 0018).
+///
+/// The reservation scales with the window — a quarter, capped at [`OUTPUT_RESERVATION_CAP`] —
+/// so a small-window model still has a budget. The request's **actual** output setting raises
+/// it further, because that output really does occupy the window; a provider that sends no
+/// such field does not raise it. `C` unknown: `R` does not take part in `B`, and the value is
+/// the request's own output (0 when there is none). The catalog's `limit.output` is a
+/// capability ceiling and does **not** participate.
+pub fn output_reservation(context: Option<u64>, request_max_output: Option<u32>) -> u64 {
+    let request = u64::from(request_max_output.unwrap_or(0));
+    match context.filter(|tokens| *tokens > 0) {
+        Some(context) => OUTPUT_RESERVATION_CAP.min(context / 4).max(request),
+        None => request,
+    }
 }
 
 /// ADR 0018's effective input budget `B = min(I, C − R)`.
@@ -87,16 +97,17 @@ pub fn input_budget(
     input: Option<u64>,
     request_max_output: Option<u32>,
 ) -> Result<Option<u64>, String> {
-    let reservation = output_reservation(request_max_output);
     let context = context.filter(|tokens| *tokens > 0);
     let input = input.filter(|tokens| *tokens > 0);
     match (context, input) {
         (Some(context), input) => {
+            let reservation = output_reservation(Some(context), request_max_output);
             if context <= reservation {
                 return Err(format!(
                     "the context window ({context} tokens) is not larger than the output \
-                     reservation ({reservation} tokens); raise --context-window or lower the \
-                     request's max output"
+                     reservation ({reservation} tokens: a quarter of the window, capped at \
+                     {OUTPUT_RESERVATION_CAP}, raised by the request's max output); raise \
+                     --context-window or lower the request's max output"
                 ));
             }
             let after_reservation = context - reservation;
@@ -250,7 +261,8 @@ impl Window {
             context: None,
             input: None,
             output: None,
-            reservation: OUTPUT_RESERVATION,
+            // `C` is unknown, so `R` does not enter `B`; `describe` shows it as `?`.
+            reservation: 0,
             source: WindowSource::Unknown,
             limit: None,
         }
@@ -264,7 +276,7 @@ impl Window {
             number(self.context),
             number(self.input),
             number(self.output),
-            self.reservation,
+            number(Some(self.reservation)),
             number(self.budget),
         );
         let origin = match &self.source {
@@ -419,7 +431,7 @@ fn build_window(
     source: WindowSource,
     limit: Option<ModelLimit>,
 ) -> Window {
-    let reservation = output_reservation(request_max_output);
+    let reservation = output_reservation(context, request_max_output);
     match input_budget(context, input, request_max_output) {
         Ok(budget) => Window {
             budget,
@@ -556,12 +568,32 @@ mod tests {
     }
 
     #[test]
+    fn the_output_reservation_scales_with_the_window_and_the_request() {
+        // ADR 0018: R = max(min(16384, C/4), request).
+        assert_eq!(output_reservation(Some(8_192), None), 2_048);
+        assert_eq!(output_reservation(Some(40_000), None), 10_000);
+        assert_eq!(output_reservation(Some(200_000), None), 16_384);
+        // The request's own output raises R above the quarter, up to the request's value.
+        assert_eq!(output_reservation(Some(8_192), Some(16_384)), 16_384);
+        assert_eq!(output_reservation(Some(1_000_000), Some(32_000)), 32_000);
+        // A request below the quarter does not lower it.
+        assert_eq!(output_reservation(Some(200_000), Some(1_000)), 16_384);
+        // C unknown: R does not take part in B; the value is the request's own output.
+        assert_eq!(output_reservation(None, None), 0);
+        assert_eq!(output_reservation(None, Some(32_000)), 32_000);
+        assert_eq!(output_reservation(Some(0), None), 0);
+    }
+
+    #[test]
     fn the_input_budget_is_min_of_input_and_context_minus_the_reservation() {
-        // The catalog's output ceiling (384000) does NOT raise R: R comes from the request.
+        // The catalog's output ceiling (384000) does NOT raise R: R comes from the window and
+        // the request.
         assert_eq!(
             input_budget(Some(1_000_000), Some(922_000), None),
             Ok(Some(922_000))
         );
+        // C = 8192, no request max output: R = 2048, B = 6144.
+        assert_eq!(input_budget(Some(8_192), None, None), Ok(Some(6_144)));
         // Anthropic with max_tokens = 32000: R = 32000, C - R = 968000.
         assert_eq!(
             input_budget(Some(1_000_000), Some(922_000), Some(32_000)),
@@ -576,21 +608,20 @@ mod tests {
             input_budget(Some(100_000), Some(50_000), Some(16_384)),
             Ok(Some(50_000))
         );
-        // `--context-window` changes C (here 50000), with R = 16384.
-        assert_eq!(input_budget(Some(50_000), None, None), Ok(Some(33_616)));
-        // C <= R is an error.
-        assert!(input_budget(Some(10_000), None, Some(16_384)).is_err());
+        // `--context-window` changes C (here 50000): R = 12500, B = 37500.
+        assert_eq!(input_budget(Some(50_000), None, None), Ok(Some(37_500)));
+        // C <= R only happens when the request's own output reaches C: an Anthropic request
+        // with max_tokens = 16384 against a 8192 window.
+        assert!(input_budget(Some(8_192), None, Some(16_384)).is_err());
+        // Without a request output, the quarter is always below C, so there is no error.
+        assert!(input_budget(Some(10_000), None, None).is_ok());
         // Both unknown: no budget.
         assert_eq!(input_budget(None, None, None), Ok(None));
-        // I alone is a budget.
+        // I alone is a budget, even with a request output.
         assert_eq!(
             input_budget(None, Some(70_000), Some(32_000)),
             Ok(Some(70_000))
         );
-        // R = max(16384, request).
-        assert_eq!(output_reservation(None), 16_384);
-        assert_eq!(output_reservation(Some(32_000)), 32_000);
-        assert_eq!(output_reservation(Some(1_000)), 16_384);
         // The catalog output ceiling only warns.
         assert!(output_ceiling_warning(Some(32_000), Some(4_000)).is_some());
         assert!(output_ceiling_warning(Some(4_000), Some(32_000)).is_none());
@@ -637,7 +668,16 @@ mod tests {
 
     #[test]
     fn a_small_catalog_window_warns_and_an_explicit_one_refuses() {
-        let explicit = build_window(Some(8_192), None, None, None, WindowSource::Explicit, None);
+        // C <= R needs the request's own output to reach C (revision 4): an Anthropic request
+        // with max_tokens = 16384 against an 8192 window.
+        let explicit = build_window(
+            Some(8_192),
+            None,
+            None,
+            Some(16_384),
+            WindowSource::Explicit,
+            None,
+        );
         assert_eq!(explicit.budget, None);
         assert!(
             matches!(explicit.startup_check(), WindowCheck::Refuse(ref m) if m.starts_with("--context-window: ")),
@@ -648,7 +688,7 @@ mod tests {
             Some(8_192),
             None,
             None,
-            None,
+            Some(16_384),
             WindowSource::Catalog {
                 provider: "p".into(),
                 model: "m".into(),
@@ -666,7 +706,7 @@ mod tests {
             Some(100_000),
             None,
             None,
-            None,
+            Some(16_384),
             WindowSource::Explicit,
             None,
         );
@@ -682,12 +722,12 @@ mod tests {
                 context: Some(1000),
                 input: None,
                 output: None,
-                reservation: 16_384,
+                reservation: 250,
                 source: WindowSource::Explicit,
                 limit: None
             }
             .describe(),
-            "C 1000, I ?, output ?, R 16384, B 1000 from --context-window"
+            "C 1000, I ?, output ?, R 250, B 1000 from --context-window"
         );
         let catalog = Window {
             budget: Some(922_000),
@@ -714,7 +754,7 @@ mod tests {
         );
         assert_eq!(
             Window::unknown().describe(),
-            "window unknown (C ?, I ?, output ?, R 16384, B ?); no budget, only the provider's \
+            "window unknown (C ?, I ?, output ?, R ?, B ?); no budget, only the provider's \
              over-length error remains"
         );
     }

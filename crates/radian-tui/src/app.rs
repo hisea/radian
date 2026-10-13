@@ -786,6 +786,9 @@ impl App {
             command::Outcome::Export(request) => {
                 self.pending_session = Some(command::SessionOutcome::Export(request));
             }
+            command::Outcome::Fork => {
+                self.pending_session = Some(command::SessionOutcome::Fork);
+            }
             // `dispatch` only returns `Message` for an empty token list, already rejected.
             command::Outcome::Message => {}
         }

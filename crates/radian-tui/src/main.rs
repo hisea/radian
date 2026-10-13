@@ -669,6 +669,11 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
         workspace: workspace_path.to_string_lossy().into_owned(),
         session_id: session_id.clone(),
         secrets: secrets_for_errors.as_ref().clone(),
+        journal: Arc::clone(&journal),
+        config_snapshot: serde_json::json!({
+            "provider": provider.as_str(),
+            "model": cli.model,
+        }),
     };
     let outcome = ui_loop(
         &mut terminal,
@@ -813,7 +818,7 @@ fn ui_loop(
         // `/sessions` and `/export` are host work (the index / a file), not transcript
         // changes; run them here where the session directory, workspace and secrets are known.
         if let Some(request) = app.pending_session.take() {
-            handle_session_request(app, host, request);
+            handle_session_request(app, host, runtime, request);
         }
         pending_compacts.retain(|rx| match rx.try_recv() {
             Ok(Ok(agent_core::CompactionOutcome::Compacted {
@@ -853,12 +858,18 @@ struct SessionHost {
     workspace: String,
     session_id: String,
     secrets: Vec<String>,
+    /// The parent's writer, so `/fork` records the lineage through the same single-writer lock
+    /// instead of opening a second one (ADR 0022 §1).
+    journal: Arc<SessionJournal>,
+    /// The child's `SessionCreated.config_snapshot` (a model-route reference).
+    config_snapshot: serde_json::Value,
 }
 
 /// Runs one `/sessions` or `/export` request and pushes the result as notices.
 fn handle_session_request(
     app: &mut App,
     host: &SessionHost,
+    runtime: &tokio::runtime::Runtime,
     request: radian_tui::command::SessionOutcome,
 ) {
     match request {
@@ -876,6 +887,33 @@ fn handle_session_request(
             match export_current(host, &request) {
                 Ok(path) => app.push_notice(format!("exported to {path}")),
                 Err(message) => app.push_notice(message),
+            }
+        }
+        radian_tui::command::SessionOutcome::Fork => {
+            // ADR 0022 §1: fork only when the session is idle.
+            if app.turn == radian_tui::TurnState::Running {
+                app.push_notice(
+                    "finish the current turn before forking (`/fork` needs an idle session)",
+                );
+                return;
+            }
+            let child_id = radian_host::generate_session_id();
+            let child_path = host.dir.join(format!("{child_id}.jsonl"));
+            let request = radian_session::ForkRequest {
+                parent_path: host.journal.path().to_path_buf(),
+                parent_id: host.session_id.clone(),
+                seq: None,
+                child_path,
+                child_id: child_id.clone(),
+                workspace: host.workspace.clone(),
+                config_snapshot: host.config_snapshot.clone(),
+            };
+            match runtime.block_on(radian_session::fork_with_journal(request, &host.journal)) {
+                Ok(outcome) => app.push_notice(format!(
+                    "forked at seq {} into {}; open it with `radian-tui --resume {}`                      (this window keeps the parent)",
+                    outcome.seq, outcome.child_id, outcome.child_id
+                )),
+                Err(error) => app.push_notice(format!("fork failed: {error}")),
             }
         }
     }

@@ -87,6 +87,7 @@ the rest is sent as an ordinary message.
 |---|---|
 | `/help` | list the commands |
 | `/compact [note]` | summarize the history now and keep the recent part (ADR 0018) |
+| `/fork` | fork this session at its last turn boundary (ADR 0022); idle only, and it does not switch to the child |
 | `/sessions [query]` | list this workspace's recent sessions (20), or search their message text; each line carries a copyable `--resume <id>` |
 | `/export [md\|json] [path] [--force]` | export **this** session (default `md`, default `<workspace>/radian-<id>.<ext>`) |
 | `/memory <command> …` | the same durable-memory commands as `agent memory` (ADR 0021 D7): `list`, `search`, `show`, `add`, `edit`, `archive`, `restore`, `forget`, `purge`, `confirm`, `export`, `import`, `project` / `project new`, `relink`, `split`, `merge` |
@@ -107,6 +108,10 @@ the rest is sent as an ordinary message.
   `radian-host` renderer as `agent --export` (redacted, read-only JSONL), writes atomically,
   and refuses to overwrite without `--force`; a relative path is resolved against the
   workspace, an absolute one may point anywhere the user named.
+- `/fork` (ADR 0022) creates a child session from this session's effective history at its
+  last turn boundary, through the writer this process already holds (no second lock). It is
+  refused while a turn is running, and it does **not** switch this window: the notice names
+  the child and how to open it (`radian-tui --resume <child>`).
 - An unknown command is an error notice, never a message to the model.
 - The grammar and the execution are `radian_host::memory::commands`, shared byte-for-byte with
   the CLI; the TUI only adds the framework and the notices.
@@ -512,11 +517,13 @@ refreshed at most once every 24 h (3 s timeout; a failure falls back to the cach
 `--offline-catalog` never goes out. With neither, `C` is **unknown**, there is no budget, and
 the startup notice says so.
 
-The effective input budget is **`B = min(I, C − R)`**, with **`R = max(16384, the request's max
-output)`** (ADR 0018). The startup notice names the source and every number
+The effective input budget is **`B = min(I, C − R)`**, with **`R = max(min(16384, ⌊C/4⌋), the
+request's max output)`** (ADR 0018: a quarter of the window, capped at 16384, raised
+by the output the request itself sends). The startup notice names the source and every number
 (`C 1000000, I 922000, output 384000, R 16384, B 922000 from models.dev (opencode/…, cached 3 h
-ago)`, `B 3616 from --context-window`, or a `no budget` line). `C ≤ R` is refused at startup:
-the window cannot hold the reservation.
+ago)`, `B 15000 from --context-window` for C = 20000, or a `no budget` line). `C ≤ R` is refused
+at startup: the window cannot hold the reservation (with the adaptive `R` it needs the request's
+own output to reach `C`).
 
 The status bar shows the projection `T` over `B` whenever a request is made, and highlights it
 when `T` is over `B`. Crossing `B` does **not** stop the turn (ADR 0018): the request is sent

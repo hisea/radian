@@ -23,7 +23,7 @@ mod tools;
 mod workspace;
 
 pub use catalog::{
-    CACHE_TTL, CATALOG_URL, Catalog, FETCH_TIMEOUT, ModelLimit, OUTPUT_RESERVATION, Window,
+    CACHE_TTL, CATALOG_URL, Catalog, FETCH_TIMEOUT, ModelLimit, OUTPUT_RESERVATION_CAP, Window,
     WindowCheck, WindowQuery, WindowSource, cache_path, host_of, input_budget,
     output_ceiling_warning, output_reservation, provider_for_host, resolve,
 };
