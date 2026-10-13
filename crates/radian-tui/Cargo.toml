@@ -16,6 +16,7 @@ futures-util.workspace = true
 radian-coding = { path = "../radian-coding" }
 radian-permissions = { path = "../radian-permissions" }
 radian-runtime = { path = "../radian-runtime" }
+radian-sandbox = { path = "../radian-sandbox" }
 radian-session = { path = "../radian-session" }
 clap = { version = "4", features = ["derive"] }
 ratatui = "0.30.2"

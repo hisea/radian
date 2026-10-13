@@ -19,9 +19,10 @@ use clap::Parser;
 use radian_coding::{CodingSession, CodingTools};
 use radian_permissions::{
     ApprovalError, ApprovalOutcome, ApprovalRequest, Approver, AuditSink, PermissionHooks,
-    PermissionResolved, Profile, runtime_event,
+    PermissionResolved, runtime_event,
 };
 use radian_runtime::{CancelCause, Driver, Inbox};
+use radian_sandbox::Sandbox;
 use radian_session::{Index, SessionCreatedData, SessionJournal};
 use radian_tui::app::{App, ApprovalPrompt, Send};
 use ratatui::Terminal;
@@ -82,6 +83,12 @@ struct Cli {
     /// `always` asks for every call a rule does not deny, `never` turns `ask` into a denial.
     #[arg(long, value_name = "POLICY", default_value = "on-ask")]
     approval: String,
+
+    /// Allow a shell command prefix without asking, repeatable (e.g. `--allow-shell-command
+    /// "git status"`). Only a *simple* command matches: any shell metacharacter keeps the
+    /// call at `ask`. Write these at the subcommand level, never at a bare program name.
+    #[arg(long = "allow-shell-command", value_name = "PREFIX")]
+    allow_shell_command: Vec<String>,
 
     #[arg(long)]
     system: Option<String>,
@@ -176,7 +183,14 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
     // Tools, permissions and approval. The permission layer decides allow/ask/deny; this
     // process is the host that answers `ask` through the UI, and writes every decision to the
     // session journal as a `PermissionResolved` (audit only, ADR 0006 §5.9).
-    let tools = build_tools(cli.workspace.as_deref())?;
+    let tier = radian_tui::profile::parse_tier(&cli.profile)?;
+    // The sandbox is built before the tools: for an enforced tier a probe failure is an error
+    // here, never a fallback to an unsandboxed run (ADR 0012 decision 2). `shell` only
+    // exists when a sandbox does.
+    let sandbox = radian_tui::profile::build_sandbox(tier, Path::new(&workspace))?;
+    // The description is taken before the sandbox moves into the tools.
+    let (startup, meaning) = radian_tui::profile::describe(tier, sandbox.as_ref());
+    let tools = build_tools(cli.workspace.as_deref(), sandbox)?;
     let (approval_tx, approval_rx) = std::sync::mpsc::channel::<ApprovalPrompt>();
     let approval = match cli.approval.as_str() {
         "on-ask" => radian_permissions::ApprovalPolicy::OnAsk,
@@ -188,18 +202,9 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
             ));
         }
     };
-    let profile = match cli.profile.as_str() {
-        "safe" => Profile::safe(&workspace),
-        "workspace-write" => Profile::workspace_write(&workspace),
-        "full-access" => Profile::full_access(&workspace),
-        other => {
-            return Err(format!(
-                "--profile {other:?} is not one of safe, workspace-write, full-access"
-            ));
-        }
-    }
-    .map_err(|e| format!("permission profile for {workspace}: {e}"))?
-    .with_approval(approval);
+    let profile =
+        radian_tui::profile::build_profile(tier, Path::new(&workspace), &cli.allow_shell_command)?
+            .with_approval(approval);
     let hooks = Arc::new(PermissionHooks::new(
         profile,
         Some(Arc::new(TuiApprover { tx: approval_tx })),
@@ -277,6 +282,15 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
     for message in &history {
         app.push_message(message);
     }
+    app.entries.push(radian_tui::Entry::new(
+        radian_tui::EntryKind::Notice,
+        format!("profile: {startup}"),
+    ));
+    // ADR 0012 decision 4: the meaning line must not claim credential isolation.
+    app.entries.push(radian_tui::Entry::new(
+        radian_tui::EntryKind::Notice,
+        meaning,
+    ));
     app.entries.push(radian_tui::Entry::new(
         radian_tui::EntryKind::Notice,
         match &cli.resume {
@@ -561,14 +575,22 @@ enum TuiSession {
     Coding(Box<CodingSession>),
 }
 
-fn build_tools(workspace: Option<&Path>) -> Result<TuiTools, String> {
-    match workspace {
-        Some(dir) => {
+fn build_tools(workspace: Option<&Path>, sandbox: Option<Sandbox>) -> Result<TuiTools, String> {
+    match (workspace, sandbox) {
+        // With a sandbox, `shell` exists and only ever runs under it (radian-coding refuses to
+        // advertise it otherwise). Without one (the `safe` tier), the file tools are still
+        // there, confined by their own workspace boundary.
+        (Some(dir), Some(sandbox)) => {
+            let tools = CodingTools::with_sandbox(dir, sandbox)
+                .map_err(|e| format!("--workspace {}: {e}", dir.display()))?;
+            Ok(TuiTools::Coding(Box::new(tools)))
+        }
+        (Some(dir), None) => {
             let tools =
                 CodingTools::new(dir).map_err(|e| format!("--workspace {}: {e}", dir.display()))?;
             Ok(TuiTools::Coding(Box::new(tools)))
         }
-        None => Ok(TuiTools::None(NoTools)),
+        (None, _) => Ok(TuiTools::None(NoTools)),
     }
 }
 

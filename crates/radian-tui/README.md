@@ -64,6 +64,9 @@ The transcript owns its scrolling:
 | 7 | panic path leaves no orphan child (child in its own process group) | `tests/pty.rs` |
 | 8 | `--resume` renders the stored history; `--list` prints the workspace sessions | `tests/pty.rs`, `tests/list.rs` |
 | 9 | approval: allow-once runs the tool, deny is fed back, always skips the next prompt, Ctrl-C cancels, the resolved path is shown, `PermissionResolved` is durable | `tests/pty.rs`, `tests/approval.rs` |
+| 10 | driver task panic: orderly exit, terminal restored, failure reported | `tests/pty.rs` |
+| 11 | a failed sandbox probe refuses instead of running unsandboxed | `tests/pty.rs` |
+| 12 | shell approval shows the whole command; a capped result keeps the truncation marker visible; a compound command always asks | `tests/pty.rs` |
 | — | Enter=followup idle / steer running; Ctrl-C cancel-then-quit | `tests/input.rs` |
 
 ## Must be hand-tested in a real terminal
@@ -81,6 +84,12 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   terminal width? does a long argument (a large patch, say) make the box unusable? do the
   `y`/`a`/`n` keys feel right, and is it obvious which one you are about to press? pty
   automation asserts the text and the keys, not the readability or the feel (ADR 0009).
+- **the shell approval box with a long command**: a real command line is often longer than a
+  file path. Does the `command:` line stay readable at your width, or does the wrapped preview
+  become a wall of text? The pty test only asserts that the whole command is present.
+- **the budget stop notice**: when the context guard stops a turn, is the reason and the
+  reported-vs-estimated wording readable at your width, and is it clear which key continues and
+  which abandons?
 - **mouse selection/copy**: this app does **not** enable mouse capture, so selection is the
   **terminal emulator's own** (drag to select, Cmd-C on macOS, or the emulator's copy key).
   The caveat ADR 0009 notes applies: a selection that spans the input box and the transcript
@@ -175,14 +184,32 @@ by one is resumable by the other:
 ## Flags
 
 `--model`, `--base-url`, `--api-key-env` (default `OPENAI_API_KEY`), `--header NAME=VALUE`,
-`--system`, `--session-dir`, `--session-id`, `--resume`, `--list`, `--workspace DIR`. The key
-is read only from the named environment variable and is never printed.
+`--system`, `--session-dir`, `--session-id`, `--resume`, `--list`, `--workspace DIR`,
+`--profile safe|workspace-write|full-access` (default `workspace-write`),
+`--approval on-ask|always|never` (default `on-ask`), `--allow-shell-command PREFIX`. The key is
+read only from the named environment variable and is never printed.
 
 ## Tools, permissions and the approval dialog
 
 `--workspace DIR` mounts the built-in file and read-only git tools (`read`, `write`, `patch`,
-`list`, `git_status`, `git_diff`) rooted at that directory. No `shell`: it needs the sandbox
-and permission-tier wiring, and follows in the next slice.
+`list`, `git_status`, `git_diff`) rooted at that directory, plus **`shell`** when a sandbox
+could be built. This is the same wiring `agent-cli` uses:
+
+- The sandbox is built **before** the tools: `workspace-write` and `full-access` call
+  `radian_sandbox::Sandbox::new`, and a missing backend or a failed probe is an **error**, never
+  a fallback to an unsandboxed run (ADR 0012 decision 2). The app then exits 1 without
+  entering the terminal. `RADIAN_SANDBOX_PROBE_FAIL=1` is a test seam that can only cause a
+  refusal.
+- `shell` exists only when a sandbox does (`radian-coding` does not advertise it otherwise), and
+  it never runs without one. `safe` builds no sandbox, so it has no shell; its rules deny
+  writes and execution.
+- `--allow-shell-command "git status"` (repeatable) adds a host `allow` rule. Only a **simple**
+  command matches: any shell metacharacter (`;`, `&`, `|`, `$`, quotes, …) keeps the call at
+  `ask`, so a compound command always prompts. Write these at the subcommand level, never at a
+  bare program name.
+- Two startup notices state what was chosen and what it means. The meaning line follows ADR
+  0012 decision 4 and does **not** claim credential isolation: the macOS backend leaves
+  `mach-lookup` open, so the IPC boundary is not tightened.
 
 Every call goes through `radian-permissions` (ADR 0012) as a `Hooks` implementation:
 
