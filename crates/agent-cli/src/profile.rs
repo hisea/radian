@@ -72,7 +72,19 @@ pub(crate) fn build_profile(
     if allow_shell_commands.is_empty() {
         return Ok(base);
     }
-    let mut rules = base.rules().to_vec();
+    // The preset's blanket "shell asks" rule would outrank every allow rule (`evaluate` keeps
+    // the highest-ranked action among matches), so an allowlist *replaces* it: a shell command
+    // that matches no allow rule then falls to the default `ask`. `deny` rules are never
+    // removed, so `--profile safe` still denies everything.
+    let mut rules: Vec<Rule> = base
+        .rules()
+        .iter()
+        .filter(|rule| {
+            !(matches!(&rule.tool, ToolMatcher::Name(name) if name == "shell")
+                && rule.action == Action::Ask)
+        })
+        .cloned()
+        .collect();
     for raw in allow_shell_commands {
         let prefix: Vec<String> = raw.split_whitespace().map(str::to_owned).collect();
         if prefix.is_empty() {

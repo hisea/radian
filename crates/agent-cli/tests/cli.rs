@@ -290,6 +290,32 @@ impl Running {
         });
     }
 
+    /// Like `wait_for_stderr`, but waits until the marker has been seen `count` times. Needed
+    /// where the same prompt legitimately appears more than once.
+    async fn wait_for_stderr_count(&mut self, marker: &str, count: usize) {
+        timeout(STATE_WATCHDOG, async {
+            while self.stderr_seen.matches(marker).count() < count {
+                let mut buf = [0u8; 4096];
+                let read = self.stderr.read(&mut buf).await.expect("read stderr");
+                if read == 0 {
+                    panic!(
+                        "stderr closed before {count} x {marker:?}; seen: {}",
+                        self.stderr_seen
+                    );
+                }
+                self.stderr_seen
+                    .push_str(&String::from_utf8_lossy(&buf[..read]));
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "timed out waiting for {count} x {marker:?}; seen: {}",
+                self.stderr_seen
+            )
+        });
+    }
+
     /// Waits for the process to exit **without closing its stdin**, so the test shows the
     /// CLI did not need more input to finish. Bounded by `limit`.
     async fn finish_open(self, limit: Duration) -> (i32, String, String) {
@@ -2027,4 +2053,434 @@ async fn the_startup_text_does_not_claim_credential_isolation() {
     }
     // The honest limit is stated instead.
     assert!(stderr.contains("not tightened"), "{stderr}");
+}
+
+/// Every tool result text in request `n` (a batch has more than one).
+fn tool_result_contents(server: &MockServer, n: usize) -> Vec<String> {
+    messages_of(server, n)
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == "tool")
+        .map(|m| m["content"].as_str().unwrap_or_default().to_owned())
+        .collect()
+}
+
+/// The tool result text for one call id in request `n`.
+fn tool_result_for(server: &MockServer, n: usize, call_id: &str) -> String {
+    messages_of(server, n)
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "tool" && m["tool_call_id"] == call_id)
+        .map(|m| m["content"].as_str().unwrap_or_default().to_owned())
+        .unwrap_or_else(|| {
+            panic!(
+                "no tool result for {call_id} in request {n}: {:?}",
+                messages_of(server, n)
+            )
+        })
+}
+
+fn shell_reply(id: &str, command: &str) -> Reply {
+    tool_reply(id, "shell", &json!({"command": command}).to_string())
+}
+
+/// 3: a shell command asks; "allow once" runs it; the *next* identical command asks again.
+#[tokio::test]
+async fn a_shell_command_asks_every_time_when_allowed_once() {
+    let dir = scratch("shell-ask");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        shell_reply("c1", "echo hi"),
+        shell_reply("c2", "echo hi"),
+        text_reply("done"),
+    ])
+    .await;
+
+    let mut child = Running::spawn(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[],
+    );
+    child.write("go\n").await;
+    child.wait_for_stderr_count("[y/N]", 1).await;
+    child.write("y\n").await;
+    child.wait_for_stderr_count("[y/N]", 2).await;
+    child.write("y\n").await;
+    child.write("/exit\n").await;
+    let (code, _, stderr) = child.finish().await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.matches("[y/N]").count(),
+        2,
+        "an allow-once must not cover the next call: {stderr}"
+    );
+    assert!(
+        stderr.contains("echo hi"),
+        "the prompt shows the command: {stderr}"
+    );
+    assert!(tool_result_content(&server, 1).contains("hi"));
+    assert!(tool_result_content(&server, 2).contains("hi"));
+}
+
+/// 4: "allow for this session" covers the next call in the same turn; a resumed session has
+/// no grant and asks again.
+#[tokio::test]
+async fn allow_for_session_covers_the_turn_and_not_a_resume() {
+    let sessions = fresh_session_dir();
+    let dir = scratch("shell-session");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let two_calls = Reply::sse(&[
+        chunk(
+            json!({"tool_calls": [
+                {"index": 0, "id": "c1", "type": "function",
+                 "function": {"name": "shell", "arguments": "{\"command\":\"echo hi\"}"}},
+                {"index": 1, "id": "c2", "type": "function",
+                 "function": {"name": "shell", "arguments": "{\"command\":\"echo hi\"}"}}
+            ]}),
+            None,
+        ),
+        chunk(json!({}), Some("tool_calls")),
+    ]);
+    let server = MockServer::start(vec![
+        two_calls,
+        text_reply("done"),
+        shell_reply("c3", "echo hi"),
+        text_reply("done again"),
+    ])
+    .await;
+
+    let mut child = Running::spawn(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--session-id",
+            "s-session",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+        ],
+        &[],
+    );
+    child.write("go\n").await;
+    child.wait_for_stderr_count("[y/N]", 1).await;
+    child.write("a\n").await; // always for this session
+    child.write("/exit\n").await;
+    let (code, _, stderr) = child.finish().await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.matches("[y/N]").count(),
+        1,
+        "the second call in the same turn must use the grant: {stderr}"
+    );
+    let results = tool_result_contents(&server, 1);
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert!(
+        results.iter().all(|text| text.contains("hi")),
+        "{results:?}"
+    );
+
+    // Resume: a new hooks instance, so the grant is gone and it asks again.
+    let mut resumed = Running::spawn(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--resume",
+            "s-session",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+        ],
+        &[],
+    );
+    resumed.write("go\n").await;
+    resumed.wait_for_stderr("[y/N]").await;
+    resumed.write("n\n").await;
+    resumed.write("/exit\n").await;
+    let (code, _, stderr) = resumed.finish().await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("[y/N]"), "resume must ask again: {stderr}");
+}
+
+/// 5: an allow rule is matched at the subcommand level, so a composite command always asks.
+#[tokio::test]
+async fn a_composite_shell_command_always_asks() {
+    let dir = scratch("composite");
+    let ws = dir.join("ws");
+    let outside = dir.join("outside");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let sentinel = outside.join("escaped.txt");
+    let composite = format!("git status; touch {}", sentinel.display());
+    let server = MockServer::start(vec![
+        shell_reply("c1", "git status"),
+        shell_reply("c2", &composite),
+        text_reply("done"),
+    ])
+    .await;
+
+    let mut child = Running::spawn(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--allow-shell-command",
+            "git status",
+        ],
+        &[],
+    );
+    child.write("go\n").await;
+    // The simple command is allowed by the rule; only the composite asks.
+    child.wait_for_stderr_count("[y/N]", 1).await;
+    child.write("n\n").await;
+    child.write("/exit\n").await;
+    let (code, _, stderr) = child.finish().await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.matches("[y/N]").count(),
+        1,
+        "only the composite may ask: {stderr}"
+    );
+    assert!(
+        !sentinel.exists(),
+        "a composite command must never be let through by an allow rule"
+    );
+    let simple = tool_result_for(&server, 1, "c1");
+    assert!(
+        simple.contains("$ git status") && !simple.contains("denied"),
+        "the allowed simple command ran: {simple}"
+    );
+    let composite = tool_result_for(&server, 2, "c2");
+    assert!(
+        composite.contains("denied"),
+        "the composite was denied: {composite}"
+    );
+}
+
+/// 6: `--yes` removes the question; it does not override a `deny` rule.
+#[tokio::test]
+async fn yes_does_not_bypass_a_deny_rule() {
+    let dir = scratch("deny");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        tool_reply("c1", "write", r#"{"path":"new.txt","content":"x"}"#),
+        text_reply("done"),
+    ])
+    .await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--profile",
+                "safe",
+                "--yes",
+                "-p",
+                "go",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    let result = tool_result_content(&server, 1);
+    assert!(
+        result.contains("denied") || result.contains("safe mode does not modify files"),
+        "{result}"
+    );
+    assert!(
+        !ws.join("new.txt").exists(),
+        "--yes must not write when a rule denies"
+    );
+}
+
+/// 7: Ctrl-C while waiting for a shell approval cancels the turn; the process does not hang.
+#[tokio::test]
+async fn cancelling_at_the_shell_approval_does_not_hang() {
+    let dir = scratch("shell-cancel");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![shell_reply("c1", "echo hi"), text_reply("done")]).await;
+
+    let mut child = Running::spawn(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[],
+    );
+    child.write("go\n").await;
+    child.wait_for_stderr("[y/N]").await;
+    sigint(&child.child);
+    // The approval wait is interrupted and the turn converges; nothing hangs.
+    child.wait_for_stderr("cancelled").await;
+    child.write("/exit\n").await;
+    let (code, _, stderr) = child.finish().await;
+
+    assert_eq!(code, 0, "{stderr}");
+    // The turn never reached a second model request: the approval was interrupted, not
+    // answered, and the command did not run.
+    assert_eq!(server.requests().len(), 1, "{stderr}");
+}
+
+/// 8: every decision writes exactly one `PermissionResolved`, with the right approver.
+#[tokio::test]
+async fn every_decision_is_audited_once_with_the_right_approver() {
+    let sessions = fresh_session_dir();
+    let dir = scratch("audit");
+    let ws = dir.join("ws");
+    let outside = dir.join("outside");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(ws.join("f.txt"), "content").unwrap();
+    let outside_file = outside.join("x.txt");
+
+    let three_calls = Reply::sse(&[
+        chunk(
+            json!({"tool_calls": [
+                {"index": 0, "id": "r1", "type": "function",
+                 "function": {"name": "read", "arguments": "{\"path\":\"f.txt\"}"}},
+                {"index": 1, "id": "s1", "type": "function",
+                 "function": {"name": "shell", "arguments": "{\"command\":\"echo hi\"}"}},
+                {"index": 2, "id": "w1", "type": "function",
+                 "function": {"name": "write",
+                              "arguments": format!("{{\"path\":{},\"content\":\"x\"}}", json!(outside_file.to_string_lossy()))}}
+            ]}),
+            None,
+        ),
+        chunk(json!({}), Some("tool_calls")),
+    ]);
+    let server = MockServer::start(vec![three_calls, text_reply("done")]).await;
+
+    let mut child = Running::spawn(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--session-id",
+            "s-audit",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+        ],
+        &[],
+    );
+    child.write("go\n").await;
+    // `read` is allowed by a rule (no prompt); `shell` asks; `write` outside the workspace
+    // has no rule and falls to ask.
+    child.wait_for_stderr_count("[y/N]", 1).await;
+    child.write("y\n").await;
+    child.wait_for_stderr_count("[y/N]", 2).await;
+    child.write("n\n").await;
+    child.write("/exit\n").await;
+    let (code, _, stderr) = child.finish().await;
+    assert_eq!(code, 0, "{stderr}");
+
+    let raw = std::fs::read_to_string(sessions.join("s-audit.jsonl")).unwrap();
+    let decisions: Vec<Value> = raw
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|value| value["event"] == "PermissionResolved")
+        .map(|value| value["data"].clone())
+        .collect();
+    assert_eq!(decisions.len(), 3, "{decisions:#?}");
+    let by_call = |id: &str| -> Value {
+        decisions
+            .iter()
+            .find(|d| d["call_id"] == id)
+            .unwrap_or_else(|| panic!("no decision for {id}: {decisions:#?}"))
+            .clone()
+    };
+    assert_eq!(by_call("r1")["decision"], "allow");
+    assert_eq!(by_call("r1")["approver"], "policy", "a rule decided it");
+    assert_eq!(by_call("s1")["decision"], "allow");
+    assert_eq!(by_call("s1")["approver"], "user", "the human answered");
+    assert_eq!(by_call("w1")["decision"], "deny");
+    assert_eq!(by_call("w1")["approver"], "user", "the human answered");
+    assert_eq!(
+        decisions.len(),
+        decisions
+            .iter()
+            .map(|d| d["call_id"].clone())
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        "one decision per call"
+    );
+}
+
+/// 9: under `workspace-write`, a shell command cannot write outside the workspace.
+#[tokio::test]
+async fn shell_cannot_write_outside_the_workspace() {
+    let dir = scratch("shell-escape");
+    let ws = dir.join("ws");
+    let outside = dir.join("outside");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let target = outside.join("escaped.txt");
+    let command = format!("echo x > {}", target.display());
+    let server = MockServer::start(vec![shell_reply("c1", &command), text_reply("done")]).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--yes",
+                "-p",
+                "go",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    let result = tool_result_content(&server, 1);
+    assert!(
+        result.contains("exit code: 1"),
+        "the sandboxed command must fail: {result}"
+    );
+    assert!(
+        !target.exists(),
+        "the sandbox let a write escape the workspace"
+    );
 }
