@@ -10,7 +10,8 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use agent_core::{
-    InputSource, JournalRecord, Message, MessageId, ModelUsage, ToolResult, UsageSource, recover,
+    InputSource, JournalRecord, Message, MessageId, ModelUsage, ReplacementEnd, ToolResult,
+    TranscriptFold, UsageSource, recover,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -25,7 +26,7 @@ pub(crate) const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 
 /// The v1 events known to a schema-v1 reader (ADR 0006 §4). Anything else is unknown and
 /// handled by the `critical` policy.
-pub(crate) const KNOWN_EVENTS: [&str; 18] = [
+pub(crate) const KNOWN_EVENTS: [&str; 20] = [
     "SessionCreated",
     "InboxEnqueued",
     "InputClaimed",
@@ -35,6 +36,8 @@ pub(crate) const KNOWN_EVENTS: [&str; 18] = [
     "ToolExecutionStarted",
     "ToolExecutionSettled",
     "TranscriptReplaced",
+    "TranscriptReplacementCommitted",
+    "TranscriptReplacementAborted",
     "TurnFinished",
     "TurnFailed",
     "ConfigChanged",
@@ -57,6 +60,13 @@ pub enum EventData {
     TranscriptReplaced {
         revision: u64,
         len: u64,
+    },
+    TranscriptReplacementCommitted {
+        revision: u64,
+        len: u64,
+    },
+    TranscriptReplacementAborted {
+        revision: u64,
     },
     ToolExecutionStarted {
         call_id: String,
@@ -146,28 +156,20 @@ pub struct SessionEvent {
     pub data: EventData,
 }
 
-/// A replacement segment that did not reach its declared `len`: the marker declared `declared`
-/// messages and only `written` landed. It was cut short either by end of file (a crash) or by
-/// the next `TranscriptReplaced` (the host recovered the written prefix and replaced again).
-/// ADR 0005 makes the written prefix the recoverable state, so the read succeeds and this
-/// records what happened; `len` never causes a refusal.
-///
-/// This is a **diagnostic**, not a `skipped` entry: `skipped` is the ADR 0006 §7b list of
-/// unknown non-critical events, and the index derives `skipped_count` from it. Overloading it
-/// would make a crash look like an unknown event and would force a fake event name.
-///
-/// A short segment that a later append happens to complete (`written` reaches `declared`
-/// because the host wrote a normal message) is indistinguishable from a complete replacement
-/// and is **not** reported: the file cannot tell a normal append from the replacement's own
-/// remaining messages, and `replay` does not care.
+/// A replacement segment that never committed (ADR 0019 §2). The segment is dropped and the
+/// history stays the one before it; this is a **diagnostic**, not an error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RecoveredReplacement {
-    /// The `revision` of the marker that was cut short.
+pub struct UncommittedReplacement {
+    /// The `revision` of the `TranscriptReplaced` marker that opened the segment.
     pub revision: u64,
     /// The marker's declared `len`.
-    pub declared: u64,
+    pub declared_len: u64,
     /// How many replacement messages actually landed.
     pub written: u64,
+    /// The line of the `TranscriptReplaced` marker (1-based).
+    pub line: u64,
+    /// How the segment ended: an explicit `TranscriptReplacementAborted` or end of file.
+    pub end: ReplacementEnd,
 }
 
 /// What a full scan learned about the file. `committed_bytes` is the size of the committed
@@ -179,7 +181,7 @@ pub(crate) struct ScanSummary {
     pub(crate) committed_bytes: u64,
     pub(crate) event_count: u64,
     pub(crate) skipped: Vec<(u64, String)>,
-    pub(crate) recovered_replacements: Vec<RecoveredReplacement>,
+    pub(crate) uncommitted: Vec<UncommittedReplacement>,
 }
 
 /// Streams a session file, applying the ADR 0006 §7 policy and the §3.2 torn-tail rule,
@@ -201,19 +203,15 @@ where
     let mut line: Vec<u8> = Vec::new();
     let mut lineno: u64 = 0;
     let mut expect_seq: u64 = 0;
-    let mut index_next: u64 = 0;
-    let mut pending_len: Option<u64> = None;
-    let mut pending_revision: u64 = 0;
-    let mut messages_since: u64 = 0;
-    let mut recovered_replacements: Vec<RecoveredReplacement> = Vec::new();
+    // ADR 0019: the one replacement state machine shared with `replay`/`repair`. The reader
+    // only adds its own structural checks (envelope, seq, critical, tool-marker call_ids).
+    let mut fold = TranscriptFold::new();
+    let mut marker_line: Option<u64> = None;
+    let mut uncommitted_lines: Vec<u64> = Vec::new();
     let mut schema_version: Option<u64> = None;
     let mut session_id = String::new();
     let mut skipped = Vec::new();
     let mut event_count: u64 = 0;
-    // Every `call_id` an assistant message of the **current** transcript revision declared.
-    // A `TranscriptReplaced` starts a new revision, so the old revision's ids stop counting
-    // (ADR 0005; ADR 0006 §7 requires a marker's call_id to be declared earlier).
-    let mut declared_calls: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Byte offset where the current line starts, and the end of the last committed line.
     let mut line_offset: u64 = 0;
     let mut committed_bytes: u64 = 0;
@@ -329,34 +327,42 @@ where
             continue;
         }
 
+        // ADR 0019 §2: inside a pending replacement only its own contiguous messages, its
+        // commit, or its abort may appear. Any other known event there is corruption.
+        let transcript_record = matches!(
+            event.as_str(),
+            "MessageAppended"
+                | "TranscriptReplaced"
+                | "TranscriptReplacementCommitted"
+                | "TranscriptReplacementAborted"
+                | "ToolExecutionStarted"
+                | "ToolExecutionSettled"
+                | "ModelUsageRecorded"
+        );
+        if fold.is_pending() && !transcript_record {
+            return Err(E::from(ReadError::Corrupt {
+                path: path.to_path_buf(),
+                line: lineno,
+                column: 0,
+                message: format!(
+                    "{event} appeared inside a transcript replacement; only its messages, \
+                     commit or abort may follow"
+                ),
+            }));
+        }
+
         let data = match event.as_str() {
             "MessageAppended" => {
                 let d: MessageData = data_of(raw, lineno, path)?;
-                if d.index != index_next {
-                    return Err(E::from(ReadError::BadIndex {
-                        path: path.to_path_buf(),
-                        line: lineno,
-                        expected: index_next,
-                        found: d.index,
-                    }));
-                }
-                index_next += 1;
-                if let Message::Assistant { tool_calls, .. } = &d.message {
-                    for call in tool_calls {
-                        declared_calls.insert(call.id.clone());
-                    }
-                }
-                // The replacement segment is exactly the `len` messages that follow its
-                // marker. Once they have all arrived the segment is closed and later
-                // `MessageAppended` records are normal transcript growth, not more of the
-                // replacement (ADR 0006 §5.11). Counting them forever made a session
-                // unreadable as soon as it was appended to after a replacement.
-                if let Some(len) = pending_len {
-                    messages_since += 1;
-                    if messages_since == len {
-                        pending_len = None;
-                    }
-                }
+                fold_push(
+                    &mut fold,
+                    JournalRecord::Message {
+                        index: d.index as usize,
+                        message: d.message.clone(),
+                    },
+                    path,
+                    lineno,
+                )?;
                 EventData::MessageAppended {
                     index: d.index,
                     message: d.message,
@@ -364,32 +370,56 @@ where
             }
             "TranscriptReplaced" => {
                 let d: ReplacedData = data_of(raw, lineno, path)?;
-                // A new marker while the previous segment is still short: the previous
-                // marker's `len` was not reached. That is the crash-recovery flow (the host
-                // recovered the written prefix and replaced again), so record the short
-                // segment and start the new one; `len` never refuses the file.
-                if let Some(declared) = pending_len {
-                    recovered_replacements.push(RecoveredReplacement {
-                        revision: pending_revision,
-                        declared,
-                        written: messages_since,
-                    });
-                }
-                // `len == 0` is a complete, empty replacement: nothing to wait for.
-                pending_len = (d.len != 0).then_some(d.len);
-                pending_revision = d.revision;
-                messages_since = 0;
-                index_next = 0;
-                // A new revision: the old revision's declared calls no longer count.
-                declared_calls.clear();
+                fold_push(
+                    &mut fold,
+                    JournalRecord::TranscriptReplaced {
+                        revision: d.revision,
+                        len: d.len as usize,
+                    },
+                    path,
+                    lineno,
+                )?;
+                marker_line = Some(lineno);
                 EventData::TranscriptReplaced {
                     revision: d.revision,
                     len: d.len,
                 }
             }
+            "TranscriptReplacementCommitted" => {
+                let d: ReplacedData = data_of(raw, lineno, path)?;
+                fold_push(
+                    &mut fold,
+                    JournalRecord::TranscriptReplacementCommitted {
+                        revision: d.revision,
+                        len: d.len as usize,
+                    },
+                    path,
+                    lineno,
+                )?;
+                marker_line = None;
+                EventData::TranscriptReplacementCommitted {
+                    revision: d.revision,
+                    len: d.len,
+                }
+            }
+            "TranscriptReplacementAborted" => {
+                let d: AbortedData = data_of(raw, lineno, path)?;
+                fold_push(
+                    &mut fold,
+                    JournalRecord::TranscriptReplacementAborted {
+                        revision: d.revision,
+                    },
+                    path,
+                    lineno,
+                )?;
+                uncommitted_lines.push(marker_line.take().unwrap_or(0));
+                EventData::TranscriptReplacementAborted {
+                    revision: d.revision,
+                }
+            }
             "ToolExecutionStarted" => {
                 let d: StartedData = data_of(raw, lineno, path)?;
-                if !declared_calls.contains(&d.call_id) {
+                if !fold.is_call_declared(&d.call_id) {
                     return Err(E::from(ReadError::OrphanToolMarker {
                         path: path.to_path_buf(),
                         line: lineno,
@@ -397,6 +427,16 @@ where
                         call_id: d.call_id,
                     }));
                 }
+                fold_push(
+                    &mut fold,
+                    JournalRecord::ToolExecutionStarted {
+                        call_id: d.call_id.clone(),
+                        name: d.name.clone(),
+                        arguments: d.arguments.clone(),
+                    },
+                    path,
+                    lineno,
+                )?;
                 EventData::ToolExecutionStarted {
                     call_id: d.call_id,
                     name: d.name,
@@ -405,7 +445,7 @@ where
             }
             "ToolExecutionSettled" => {
                 let d: SettledData = data_of(raw, lineno, path)?;
-                if !declared_calls.contains(&d.call_id) {
+                if !fold.is_call_declared(&d.call_id) {
                     return Err(E::from(ReadError::OrphanToolMarker {
                         path: path.to_path_buf(),
                         line: lineno,
@@ -413,6 +453,15 @@ where
                         call_id: d.call_id,
                     }));
                 }
+                fold_push(
+                    &mut fold,
+                    JournalRecord::ToolExecutionSettled {
+                        call_id: d.call_id.clone(),
+                        result: d.result.clone(),
+                    },
+                    path,
+                    lineno,
+                )?;
                 EventData::ToolExecutionSettled {
                     call_id: d.call_id,
                     result: d.result,
@@ -420,6 +469,14 @@ where
             }
             "ModelUsageRecorded" => {
                 let d: UsageData = data_of(raw, lineno, path)?;
+                fold_push(
+                    &mut fold,
+                    JournalRecord::ModelUsage {
+                        usage: d.usage.clone(),
+                    },
+                    path,
+                    lineno,
+                )?;
                 EventData::ModelUsageRecorded { usage: d.usage }
             }
             "PermissionResolved" => {
@@ -513,16 +570,24 @@ where
         line_offset = committed_bytes;
     }
 
-    if let Some(declared) = pending_len {
-        // The replacement segment is short and the file ends here. ADR 0005 line 92: the
-        // recoverable state is the new replacement's written prefix, so accept it and record
-        // the diagnostic.
-        recovered_replacements.push(RecoveredReplacement {
-            revision: pending_revision,
-            declared,
-            written: messages_since,
-        });
+    // A segment still open at end of file is uncommitted; record its marker line before the
+    // fold closes it.
+    if fold.is_pending() {
+        uncommitted_lines.push(marker_line.unwrap_or(0));
     }
+    let fold = fold.finish();
+    let uncommitted = fold
+        .uncommitted()
+        .iter()
+        .zip(uncommitted_lines.iter().copied())
+        .map(|(segment, line)| UncommittedReplacement {
+            revision: segment.revision,
+            declared_len: segment.declared_len as u64,
+            written: segment.written as u64,
+            line,
+            end: segment.end,
+        })
+        .collect();
 
     Ok(ScanSummary {
         session_id,
@@ -530,7 +595,7 @@ where
         committed_bytes,
         event_count,
         skipped,
-        recovered_replacements,
+        uncommitted,
     })
 }
 
@@ -544,7 +609,7 @@ pub struct Session {
     committed_bytes: u64,
     events: Vec<SessionEvent>,
     skipped: Vec<(u64, String)>,
-    recovered_replacements: Vec<RecoveredReplacement>,
+    uncommitted: Vec<UncommittedReplacement>,
 }
 
 impl Session {
@@ -569,7 +634,7 @@ impl Session {
             committed_bytes: summary.committed_bytes,
             events,
             skipped: summary.skipped,
-            recovered_replacements: summary.recovered_replacements,
+            uncommitted: summary.uncommitted,
         })
     }
 
@@ -600,11 +665,11 @@ impl Session {
         &self.skipped
     }
 
-    /// Every replacement segment that did not reach its declared `len`, in file order: cut
-    /// short by end of file or by the next `TranscriptReplaced` (ADR 0005). Empty when every
-    /// segment was complete.
-    pub fn recovered_replacements(&self) -> &[RecoveredReplacement] {
-        &self.recovered_replacements
+    /// Every replacement segment that never committed (ADR 0019 §2), in file order: cut
+    /// short by a `TranscriptReplacementAborted` or by end of file. The segment is dropped
+    /// and the history stays the one before it; empty when every segment committed.
+    pub fn uncommitted_replacements(&self) -> &[UncommittedReplacement] {
+        &self.uncommitted
     }
 
     /// Maps the parsed events back to core records. This is the only place that knows the
@@ -621,6 +686,17 @@ impl Session {
                     Some(JournalRecord::TranscriptReplaced {
                         revision: *revision,
                         len: *len as usize,
+                    })
+                }
+                EventData::TranscriptReplacementCommitted { revision, len } => {
+                    Some(JournalRecord::TranscriptReplacementCommitted {
+                        revision: *revision,
+                        len: *len as usize,
+                    })
+                }
+                EventData::TranscriptReplacementAborted { revision } => {
+                    Some(JournalRecord::TranscriptReplacementAborted {
+                        revision: *revision,
                     })
                 }
                 EventData::ToolExecutionStarted {
@@ -701,6 +777,11 @@ struct MessageData {
 struct ReplacedData {
     revision: u64,
     len: u64,
+}
+
+#[derive(Deserialize)]
+struct AbortedData {
+    revision: u64,
 }
 
 #[derive(Deserialize)]
@@ -789,6 +870,30 @@ struct PermissionResolvedData {
     approver: PermissionApprover,
     #[serde(default)]
     reason: Option<String>,
+}
+
+/// Feeds one record to the shared replacement state machine, mapping a rejection to the
+/// reader's positional errors (ADR 0019: the reader adds only the position).
+fn fold_push(
+    fold: &mut TranscriptFold,
+    record: JournalRecord,
+    path: &Path,
+    line: u64,
+) -> Result<(), ReadError> {
+    fold.push(&record).map_err(|error| match error {
+        agent_core::ReplayError::NotContiguous { expected, found } => ReadError::BadIndex {
+            path: path.to_path_buf(),
+            line,
+            expected: expected as u64,
+            found: found as u64,
+        },
+        other => ReadError::Corrupt {
+            path: path.to_path_buf(),
+            line,
+            column: 0,
+            message: other.to_string(),
+        },
+    })
 }
 
 /// Deserializes just the `data` field from the already-read line. Deserializing from the

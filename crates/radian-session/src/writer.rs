@@ -73,6 +73,8 @@ pub enum WriteError {
 const EVT_SESSION_CREATED: (&str, bool) = ("SessionCreated", true);
 const EVT_MESSAGE_APPENDED: (&str, bool) = ("MessageAppended", true);
 const EVT_TRANSCRIPT_REPLACED: (&str, bool) = ("TranscriptReplaced", true);
+const EVT_TRANSCRIPT_REPLACEMENT_COMMITTED: (&str, bool) = ("TranscriptReplacementCommitted", true);
+const EVT_TRANSCRIPT_REPLACEMENT_ABORTED: (&str, bool) = ("TranscriptReplacementAborted", true);
 const EVT_TOOL_STARTED: (&str, bool) = ("ToolExecutionStarted", true);
 const EVT_TOOL_SETTLED: (&str, bool) = ("ToolExecutionSettled", true);
 const EVT_USAGE: (&str, bool) = ("ModelUsageRecorded", false);
@@ -168,14 +170,32 @@ impl SessionJournal {
             file.set_len(scan.offset_after_last_lf)
                 .map_err(|e| io_err(&path, e))?;
         }
-        Ok(SessionJournal {
+        // ADR 0019 §6/§7: a file that ends inside a pending replacement is closed with an
+        // explicit abort before any append. The read side is the validator, so a corrupt
+        // file is refused here and nothing is written. An already-aborted segment is closed,
+        // so a second `resume` does not repeat the write.
+        let parsed = crate::reader::Session::open(&path)?;
+        let abort_revision = parsed
+            .uncommitted_replacements()
+            .iter()
+            .rev()
+            .find(|segment| segment.end == agent_core::ReplacementEnd::EndOfFile)
+            .map(|segment| segment.revision);
+        let journal = SessionJournal {
             path,
             session_id: session_id.to_owned(),
             inner: Arc::new(Mutex::new(Writer {
                 file,
                 next_seq: last_seq + 1,
             })),
-        })
+        };
+        if let Some(revision) = abort_revision {
+            journal.write_line(
+                EVT_TRANSCRIPT_REPLACEMENT_ABORTED,
+                &AbortedData { revision },
+            )?;
+        }
+        Ok(journal)
     }
 
     pub fn session_id(&self) -> &str {
@@ -341,6 +361,11 @@ struct MessageData<'a> {
 }
 
 #[derive(Serialize)]
+struct AbortedData {
+    revision: u64,
+}
+
+#[derive(Serialize)]
 struct ReplacedData {
     revision: u64,
     len: usize,
@@ -384,6 +409,19 @@ fn render_record(record: &JournalRecord) -> Option<((&'static str, bool), Render
                 len: *len,
             }),
         ),
+        JournalRecord::TranscriptReplacementCommitted { revision, len } => (
+            EVT_TRANSCRIPT_REPLACEMENT_COMMITTED,
+            Render::Replaced(ReplacedData {
+                revision: *revision,
+                len: *len,
+            }),
+        ),
+        JournalRecord::TranscriptReplacementAborted { revision } => (
+            EVT_TRANSCRIPT_REPLACEMENT_ABORTED,
+            Render::Aborted(AbortedData {
+                revision: *revision,
+            }),
+        ),
         JournalRecord::ToolExecutionStarted {
             call_id,
             name,
@@ -409,6 +447,7 @@ fn render_record(record: &JournalRecord) -> Option<((&'static str, bool), Render
 enum Render<'a> {
     Message(MessageData<'a>),
     Replaced(ReplacedData),
+    Aborted(AbortedData),
     Started(StartedData<'a>),
     Settled(SettledData<'a>),
     Usage(UsageData<'a>),
@@ -419,6 +458,7 @@ impl Serialize for Render<'_> {
         match self {
             Render::Message(d) => d.serialize(serializer),
             Render::Replaced(d) => d.serialize(serializer),
+            Render::Aborted(d) => d.serialize(serializer),
             Render::Started(d) => d.serialize(serializer),
             Render::Settled(d) => d.serialize(serializer),
             Render::Usage(d) => d.serialize(serializer),

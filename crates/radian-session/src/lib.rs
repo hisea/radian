@@ -25,6 +25,9 @@ mod reader;
 mod runtime;
 mod writer;
 
+/// Re-exported so a reader of [`UncommittedReplacement::end`] need not depend on `agent-core`
+/// directly for the enum.
+pub use agent_core::ReplacementEnd;
 pub use error::ReadError;
 pub use export::{
     ExportError, ExportOptions, export_json, export_json_to, export_markdown, export_markdown_to,
@@ -38,7 +41,7 @@ pub use index::{
     Audit, Index, IndexError, IndexedEvent, RebuildWarning, Reconcile, SearchHit, SessionSummary,
     read_line_at,
 };
-pub use reader::{EventData, RecoveredReplacement, Session, SessionEvent};
+pub use reader::{EventData, Session, SessionEvent, UncommittedReplacement};
 pub use runtime::{
     InboxLane, PermissionApprover, PermissionDecision, RuntimeEvent, TurnOutcome, TurnReason,
 };

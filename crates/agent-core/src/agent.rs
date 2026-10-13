@@ -280,6 +280,16 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
                     return Err(ReplaceError::Journal(error));
                 }
             }
+            // ADR 0019 §1: the commit record is the point of no return. It lands before the
+            // memory swap, so a crash before it recovers the old history and a crash after
+            // it recovers the new one.
+            if let Err(error) = journal
+                .append(JournalRecord::TranscriptReplacementCommitted { revision, len })
+                .await
+            {
+                self.recovery_required = true;
+                return Err(ReplaceError::Journal(error));
+            }
         }
         self.transcript = history;
         events.emit(AgentEvent::TranscriptReplaced { revision, len });

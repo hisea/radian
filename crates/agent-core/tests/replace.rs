@@ -59,6 +59,10 @@ async fn replacing_the_transcript_journals_from_zero_emits_one_event_and_continu
                 index: 1,
                 message: replacement[1].clone(),
             },
+            JournalRecord::TranscriptReplacementCommitted {
+                revision: 17,
+                len: 2,
+            },
         ]
     );
     assert_eq!(
@@ -118,6 +122,10 @@ async fn replay_and_recover_reset_at_replacement_and_repair_the_new_revision() {
         JournalRecord::Message {
             index: 1,
             message: replacement[1].clone(),
+        },
+        JournalRecord::TranscriptReplacementCommitted {
+            revision: 9,
+            len: replacement.len(),
         },
         JournalRecord::ToolExecutionStarted {
             call_id: "new-call".into(),
@@ -329,6 +337,10 @@ async fn markers_from_before_a_replacement_never_repair_a_reused_call_id() {
             index: 1,
             message: replacement[1].clone(),
         },
+        JournalRecord::TranscriptReplacementCommitted {
+            revision: 2,
+            len: replacement.len(),
+        },
     ];
 
     let recovered = recover(&records).unwrap();
@@ -343,4 +355,170 @@ async fn markers_from_before_a_replacement_never_repair_a_reused_call_id() {
         Some("not_started_after_crash")
     );
     assert_ne!(result.content, stale.content);
+}
+
+// ---------- ADR 0019 §2/§3: the pending segment and its commit/abort ----------
+
+#[test]
+fn a_pending_segment_at_end_of_file_recovers_the_old_history() {
+    let old = vec![Message::user("old")];
+    let records = vec![
+        JournalRecord::Message {
+            index: 0,
+            message: old[0].clone(),
+        },
+        JournalRecord::TranscriptReplaced {
+            revision: 1,
+            len: 2,
+        },
+        JournalRecord::Message {
+            index: 0,
+            message: Message::user("pending zero"),
+        },
+        JournalRecord::Message {
+            index: 1,
+            message: Message::user("pending one"),
+        },
+    ];
+    assert_eq!(replay(&records).unwrap(), old);
+}
+
+#[test]
+fn an_aborted_segment_recovers_the_old_history_and_the_next_append_is_normal() {
+    let old = vec![Message::user("old zero"), Message::user("old one")];
+    let records = vec![
+        JournalRecord::Message {
+            index: 0,
+            message: old[0].clone(),
+        },
+        JournalRecord::Message {
+            index: 1,
+            message: old[1].clone(),
+        },
+        JournalRecord::TranscriptReplaced {
+            revision: 7,
+            len: 4,
+        },
+        JournalRecord::Message {
+            index: 0,
+            message: Message::user("pending zero"),
+        },
+        JournalRecord::TranscriptReplacementAborted { revision: 7 },
+        // Index 2 continues the old history (length 2), not the dropped segment.
+        JournalRecord::Message {
+            index: 2,
+            message: Message::user("normal two"),
+        },
+    ];
+    let mut expected = old;
+    expected.push(Message::user("normal two"));
+    assert_eq!(replay(&records).unwrap(), expected);
+}
+
+#[test]
+fn a_committed_segment_recovers_the_new_history() {
+    let records = vec![
+        JournalRecord::Message {
+            index: 0,
+            message: Message::user("old"),
+        },
+        JournalRecord::TranscriptReplaced {
+            revision: 2,
+            len: 1,
+        },
+        JournalRecord::Message {
+            index: 0,
+            message: Message::user("new"),
+        },
+        JournalRecord::TranscriptReplacementCommitted {
+            revision: 2,
+            len: 1,
+        },
+    ];
+    assert_eq!(replay(&records).unwrap(), vec![Message::user("new")]);
+}
+
+#[test]
+fn a_commit_without_a_segment_is_a_replay_error() {
+    let records = vec![JournalRecord::TranscriptReplacementCommitted {
+        revision: 1,
+        len: 0,
+    }];
+    assert!(matches!(
+        replay(&records),
+        Err(ReplayError::Replacement { .. })
+    ));
+}
+
+#[test]
+fn a_second_marker_inside_a_pending_segment_is_a_replay_error() {
+    let records = vec![
+        JournalRecord::TranscriptReplaced {
+            revision: 1,
+            len: 1,
+        },
+        JournalRecord::TranscriptReplaced {
+            revision: 2,
+            len: 1,
+        },
+    ];
+    assert!(matches!(
+        replay(&records),
+        Err(ReplayError::Replacement { .. })
+    ));
+}
+
+#[test]
+fn a_mismatched_commit_is_a_replay_error() {
+    let records = vec![
+        JournalRecord::TranscriptReplaced {
+            revision: 1,
+            len: 1,
+        },
+        JournalRecord::Message {
+            index: 0,
+            message: Message::user("a"),
+        },
+        JournalRecord::TranscriptReplacementCommitted {
+            revision: 2,
+            len: 1,
+        },
+    ];
+    assert!(matches!(
+        replay(&records),
+        Err(ReplayError::Replacement { .. })
+    ));
+}
+
+/// ADR 0019 §3 row 5: a failed commit append leaves memory as the old history and requires
+/// recovery. The marker and the messages landed; nothing is patched after the failure.
+#[tokio::test]
+async fn a_failed_commit_append_keeps_memory_and_requires_recovery() {
+    // marker = 1, message 0 = 2, commit = 3.
+    let journal = Arc::new(FailingJournal::fail_at(3));
+    let original = vec![Message::user("original")];
+    let mut session =
+        journaled_session(ScriptedModel::new([]), original.clone(), journal.clone()).await;
+
+    assert!(matches!(
+        session
+            .replace_transcript(vec![Message::user("new")], 1, &NoopSink)
+            .await,
+        Err(ReplaceError::Journal(_))
+    ));
+    assert_eq!(session.transcript(), original);
+    assert!(matches!(
+        journal.records().as_slice(),
+        [
+            JournalRecord::TranscriptReplaced {
+                revision: 1,
+                len: 1
+            },
+            JournalRecord::Message { index: 0, .. }
+        ]
+    ));
+    assert!(matches!(
+        session.start_turn("later"),
+        Err(SessionError::RecoveryRequired)
+    ));
 }
