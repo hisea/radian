@@ -26,3 +26,26 @@
 结论：**12 条契约子检查（1/2/3a/3b/4/5/6/7a/7b/8/9/10）全部有「变异 → 测试失败」的证据**（7a 的 M8 证明：未声明就丢字段会被抓；若声明了却填值，由 M16 对应的契约测试证明会被抓）。两个出口各有正反两面：声明了就生效（M14/M15 破坏后失败）、没声明就必须满足（M13/M8 破坏后失败）、声明了却仍然填值必须被抓（M16 破坏后失败）。
 
 adapter 专有行为（`tests/http.rs` 的 32 个用例）与 lib 单测（35 个）另有自己的断言，本次没有为它们逐个做变异（任务单只要求契约条目与出口）。
+
+## 扩展思考（ADR 0014 R10 落实，2026-10-13）
+
+一次性检出 `/tmp/radian-mut`（`git worktree add --detach HEAD`，HEAD = `b9c43c2`），每个变异
+用 `git checkout --` 恢复、`git status --short` 为空；跑 `cargo test -p agent-provider-anthropic
+--lib <精确测试名>`。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M17 | `finish` 构造 thinking 块时丢掉 `signature`（只留 `thinking`） | 抓住 (rc=101) | `thinking_blocks_are_preserved_and_never_become_content` |
+| M18 | `assistant_message` 把保留块 `reverse()`（顺序颠倒） | 抓住 | `preserved_thinking_blocks_are_echoed_before_tool_use_in_order` |
+| M19 | `assistant_message` 把思考块放到 `tool_use` **之后** | 抓住 | `preserved_thinking_blocks_are_echoed_before_tool_use_in_order` |
+| M20 | 流解析只认 `thinking`，丢掉 `redacted_thinking` 块 | 抓住 | `redacted_thinking_blocks_round_trip_verbatim` |
+| M21 | 请求重建的过滤器只放行 `thinking`（丢掉 `redacted_thinking`） | 抓住 | `preserved_thinking_blocks_are_echoed_before_tool_use_in_order` |
+| M22 | `thinking_delta` 同时 `emit(ModelReasoningDelta)`（把思考写进推理通道/UI） | 抓住 | `thinking_blocks_are_preserved_and_never_become_content`（也由 http 的 `a_thinking_turn_echoes_the_blocks_back_on_the_next_request` 抓） |
+| M23 | 关闭 thinking 时也插入一个 `thinking` 对象（`config.thinking` 缺省时 `Adaptive`） | 抓住 | `thinking_off_leaves_the_request_body_unchanged` |
+
+M22 的 UI 侧断言（`http.rs`）与 lib 单测都覆盖；两条都是对新行为的具名测试。
+
+**JSONL 往返**：`provider_payload` 的字节保真由既有的
+`radian-session` 测试 `write.rs::provider_payload_is_written_byte_for_byte` 钉住（该测试在本切片
+之前就存在，本切片未改动它）；adapter 侧的「从 JSON 读回后仍回传」由
+`a_payload_read_back_from_json_still_echoes_thinking` 钉住。
