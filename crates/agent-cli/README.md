@@ -129,10 +129,12 @@ than known — ADR 0015 C1), the guard is off, and the startup says so.
 | Profile | Sandbox | Shell | MCP | Built-in files |
 |---|---|---|---|---|
 | `safe` | not needed (nothing executes) | not offered | denied | read/list/git allowed; write/patch denied |
-| `workspace-write` (default) | enforced (macOS seatbelt / Linux bubblewrap) | offered, sandboxed | asks | write/patch allowed under the workspace |
-| `full-access` | none (chosen explicitly) | offered, **not sandboxed** | allowed | write/patch allowed under the workspace |
+| `workspace` (default) | enforced (macOS seatbelt / Linux bubblewrap) | offered, sandboxed | asks | write/patch allowed under the workspace; network on |
+| `full` | none (chosen explicitly) | offered, **not sandboxed** | allowed | write/patch allowed under the workspace |
 
-- **`full-access` is never a default.** The default is `workspace-write`.
+- **`full` is never a default.** The default is `workspace`.
+- **The old names `workspace-write` and `full-access` are still accepted as aliases** (ADR
+  0016); they are not listed in `--help`.
 - **Without `--workspace` no write or execute tool exists at all**: the built-in tools are
   only mounted with a workspace, and `shell` additionally needs a sandbox.
 - **A failed probe refuses to run.** If the backend is missing or its probe fails, the CLI

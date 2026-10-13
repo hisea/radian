@@ -248,7 +248,7 @@ the session directory untouched and the same `--session-id` can be retried:
 2. `--header` parsing (values collected for panic-log redaction);
 3. workspace validation (`radian_host::resolve_workspace`: exists, is a directory, readable,
    canonical) — a bad path is a **workspace** error, never a sandbox message and never a
-   `full-access` suggestion;
+   `full` suggestion;
 4. model configuration (`--base-url`, key policy);
 5. tier parsing, permission rules, sandbox probe (a failed probe refuses, never downgrades,
    ADR 0012 decision 2);
@@ -301,7 +301,8 @@ by one is resumable by the other:
 `--model`, `--base-url`, `--api-key-env` (default `OPENAI_API_KEY`), `--header NAME=VALUE`,
 `--system`, `--session-dir`, `--session-id`, `--resume`, `--list`, `--version`,
 `--workspace DIR`, `--mcp-config FILE`,
-`--profile safe|workspace-write|full-access` (default `workspace-write`),
+`--profile safe|workspace|full` (default `workspace`; the old `workspace-write`/`full-access`
+are accepted aliases but not listed),
 `--approval on-ask|always|never` (default `on-ask`), `--allow-shell-command PREFIX`,
 `--context-window TOKENS`. The key is read only from the named environment variable and is
 never printed.
@@ -322,7 +323,7 @@ and a malformed argument is reported without echoing its value.
 `list`, `git_status`, `git_diff`) rooted at that directory, plus **`shell`** when a sandbox
 could be built. This is the same wiring `agent-cli` uses:
 
-- The sandbox is built **before** the tools: `workspace-write` and `full-access` call
+- The sandbox is built **before** the tools: `workspace` and `full` call
   `radian_sandbox::Sandbox::new`, and a missing backend or a failed probe is an **error**, never
   a fallback to an unsandboxed run (ADR 0012 decision 2). The app then exits 1 without
   entering the terminal. `RADIAN_SANDBOX_PROBE_FAIL=1` is a test seam that can only cause a
@@ -340,8 +341,9 @@ could be built. This is the same wiring `agent-cli` uses:
 
 Every call goes through `radian-permissions` (ADR 0012) as a `Hooks` implementation:
 
-- `--profile safe|workspace-write|full-access` picks the rule set (default `workspace-write`:
-  reads allowed, writes allowed only when the resolved path stays inside the workspace).
+- `--profile safe|workspace|full` picks the rule set (default `workspace`:
+  reads allowed, writes allowed only when the resolved path stays inside the workspace, and the
+  network is on).
 - `--approval on-ask|always|never` picks the `ApprovalPolicy` (default `on-ask`). `always`
   asks for every call a rule does not deny, which is how the dialog is exercised with the
   built-in tools; `never` turns `ask` into a denial.
@@ -353,7 +355,7 @@ Every call goes through `radian-permissions` (ADR 0012) as a `Hooks` implementat
 - `--yes` answers every `ask` with "allow once" and shows no dialog, the same as
   `agent --yes`. It removes the question only: `deny` rules still deny, the sandbox still
   applies, every decision is still audited, and the startup says it is on. With
-  `workspace-write` this means "the sandbox is the boundary"; with `full-access` there is no
+  `workspace` this means "the sandbox is the boundary"; with `full` there is no
   boundary left, so read the profile line before you use it. Tested by
   `pty_yes_runs_an_ask_without_a_prompt_and_still_audits_it` (a mutation that keeps the
   dialog approver under `--yes` makes it fail).
@@ -425,9 +427,9 @@ owns fork/rewind).
 - The servers' tools are mounted beside the built-in tools under `server__tool` aliases
   (`crates/radian-host`'s provider). A name collision fails the session rather than silently
   shadowing a built-in tool.
-- Under `workspace-write` an MCP call is an `ask`: it goes through the same approval dialog
-  as a built-in tool. `safe` denies MCP; `full-access` allows it.
-- **The servers themselves are not sandboxed** (ADR 0012 option B). The `workspace-write`
+- Under `workspace` an MCP call is an `ask`: it goes through the same approval dialog
+  as a built-in tool. `safe` denies MCP; `full` allows it.
+- **The servers themselves are not sandboxed** (ADR 0012 option B). The `workspace`
   startup notice says so, because the notice is the only safeguard.
 
 ## Status bar
@@ -438,7 +440,7 @@ The bottom line carries, most important first:
 |---|---|
 | model | the `--model` value |
 | turn | `idle` / `running` / `cancelled` |
-| tier | `safe` / `workspace-write` / `full-access` |
+| tier | `safe` / `workspace` / `full` |
 | usage | `usage <input>/<output>` from **provider-reported** totals; `-` for a field never reported, `none` for a session with no reports |
 | mcp | `mcp off`, `mcp N/…` (configured, not open) or `mcp servers/tools` (what connected) |
 | context | the ADR 0015 wording above |

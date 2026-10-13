@@ -59,11 +59,11 @@ Enforced (each with tests in `tests/escaping.rs` and `tests/mutation.rs`):
   not to take optional locks; tests assert `.git` is unchanged, but no sandbox wraps it.
 - Windows: no `O_NOFOLLOW` and no link count; the extra checks are Unix-only.
 - **`shell`'s confinement is exactly the sandbox's** (tests in `tests/shell.rs`). Under
-  `workspace-write` writes are confined to the workspace, the fake sensitive path in the test
-  is unreadable and the network is off; **the macOS backend leaves `mach-lookup` open, so the
-  IPC boundary is not tightened and this is not full credential isolation** (ADR 0012).
-  `full-access` runs the command unconfined; it is only reachable because the caller named it
-  when building the sandbox, and the tool description says "NOT sandboxed".
+  `workspace` writes are confined to the workspace, the fake sensitive path in the test
+  is unreadable and the network is on (ADR 0016); **the macOS backend leaves `mach-lookup`
+  open, so the IPC boundary is not tightened and this is not full credential isolation**
+  (ADR 0012). `full` runs the command unconfined; it is only reachable because the caller
+  named it when building the sandbox, and the tool description says "NOT sandboxed".
   Independently of the mode, the tool kills the whole process group on timeout,
   cancellation and leader exit, and filters the environment to the sandbox whitelist, so a
   model-controlled shell never inherits the host's API keys. Output is read as a stream:
@@ -74,7 +74,7 @@ Enforced (each with tests in `tests/escaping.rs` and `tests/mutation.rs`):
 ## Mounting
 
 - In `agent-cli`: `--workspace <dir>` exposes the six file/git tools, plus `shell` when the
-  profile built a sandbox (`workspace-write`/`full-access`). Without the flag nothing changes.
+  profile built a sandbox (`workspace`/`full`). Without the flag nothing changes.
 - Directly: `CodingTools::new(root)` returns a `ToolProvider` (no shell); pass it to
   `Agent::new(model, tools)`.
 - With a sandbox: build one with `radian_sandbox::Sandbox::new(mode, root)` (an enforced mode
