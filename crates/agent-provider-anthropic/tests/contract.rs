@@ -394,3 +394,48 @@ async fn contract_12_attachment_parts_are_separate_text_blocks() {
     );
     assert_eq!(blocks[1], json!({"type": "text", "text": "alpha\nbeta"}));
 }
+
+/// ADR 0018, the edge the brief asked about: a message with an **empty** text part
+/// and an attachment. Anthropic drops empty text blocks (`text` has `minLength: 1`), so the
+/// empty part is dropped and the attachment is what the message carries. The TUI never sends
+/// an empty text part (it refuses an empty input), but the adapter must not turn the pair into
+/// an empty `content` array when only the text is empty.
+#[tokio::test]
+async fn contract_12b_an_empty_text_part_is_dropped_and_the_attachment_remains() {
+    let server = MockServer::start(vec![Reply::sse(&[
+        message_start(None),
+        text_start(0),
+        text_delta(0, "ok"),
+        block_stop(0),
+        message_delta("end_turn", None),
+        message_stop(),
+    ])])
+    .await;
+    let base = server.base_url.clone();
+    let model = Anthropic::new(
+        AnthropicConfig::new(base, "contract-model").with_api_key(ApiKey::new(SECRET)),
+    )
+    .expect("a local mock config is valid");
+    let request = ModelRequest {
+        system_prompt: None,
+        messages: vec![Message::User {
+            content: vec![
+                ContentPart::text(""),
+                ContentPart::attachment("alpha\nbeta", "notes.txt"),
+            ],
+            meta: MessageMeta::default(),
+        }],
+        tools: Vec::new(),
+        settings: Value::Null,
+    };
+    model
+        .complete(request, agent_provider_contract::context(&NoopSink))
+        .await
+        .unwrap();
+    let body = server.requests()[0].json();
+    let blocks = body["messages"][0]["content"]
+        .as_array()
+        .expect("the user content is a block array on this wire");
+    assert_eq!(blocks.len(), 1, "the empty part is dropped: {blocks:?}");
+    assert_eq!(blocks[0], json!({"type": "text", "text": "alpha\nbeta"}));
+}
