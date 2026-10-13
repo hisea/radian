@@ -13,7 +13,8 @@ REQUIRED = ["schema_version", "session_id", "seq", "ts", "event", "critical", "d
 KNOWN_EVENTS = {
     "SessionCreated", "InboxEnqueued", "InputClaimed", "InputAdmitted",
     "TurnStarted", "MessageAppended", "ToolExecutionStarted", "ToolExecutionSettled",
-    "TranscriptReplaced", "TurnFinished", "ConfigChanged", "ContextCompacted",
+    "TranscriptReplaced", "TranscriptReplacementCommitted", "TranscriptReplacementAborted",
+    "TurnFinished", "ConfigChanged", "ContextCompacted",
     "Rewound", "ContextBudgetReached", "PermissionResolved", "ModelUsageRecorded",
     "SessionForked",
 }
@@ -58,9 +59,40 @@ EXPECT = {
         repair={"call-2": "outcome_unknown_after_crash"},
     ),
     "unknown-enum-values.jsonl": dict(outcome="accept", events=6, skips=[], repair={}),
+    "replace-committed.jsonl": dict(
+        outcome="accept",
+        events=6,
+        skips=[],
+        replacement=(2, 1, 2),
+        uncommitted=[],
+        repair={},
+    ),
+    "replace-uncommitted-eof.jsonl": dict(
+        outcome="accept",
+        events=4,
+        skips=[],
+        uncommitted=[(1, 2, 1, "end_of_file")],
+        repair={},
+    ),
+    "replace-aborted-then-append.jsonl": dict(
+        outcome="accept",
+        events=6,
+        skips=[],
+        replacement=(3, 5, 3),
+        uncommitted=[(5, 3, 1, "aborted")],
+        repair={},
+    ),
+    "replace-pending-other-event.jsonl": dict(
+        outcome="pending_event_reject",
+        events=3,
+    ),
+    "replace-commit-mismatch.jsonl": dict(
+        outcome="replacement_mismatch_reject",
+        events=4,
+    ),
     "replace-resets-index.jsonl": dict(
         outcome="accept",
-        events=10,
+        events=11,
         skips=[],
         # (1 起的行号, revision, len) —— len 必须等于其后的 MessageAppended 条数。
         replacement=(5, 1, 2),
@@ -100,31 +132,110 @@ def check_envelope(ev, lineno, version, session_id):
         raise Corruption(f"line {lineno}: session_id changed mid-file")
 
 
-def simulate_repair(events):
-    """ADR 0002 的 repair：返回 {call_id: error_code}（需要补合成结果的调用）。
+def new_fold():
+    return {
+        "history": [],
+        "pending": None,
+        "settled": set(),
+        "started": set(),
+        "declared": set(),
+        "uncommitted": [],
+    }
 
-    `TranscriptReplaced` 清空旧 revision 的声明/应答/标记状态（ADR 0005）：旧标记不得
-    修复新历史。
-    """
-    declared, answered, started, settled = [], set(), set(), set()
-    for ev in events:
-        if ev["event"] == "TranscriptReplaced":
-            declared, answered, started, settled = [], set(), set(), set()
-        elif ev["event"] == "MessageAppended":
-            msg = ev["data"]["message"]
+
+def fold_push(st, ev, lineno, name):
+    """ADR 0019 §2 的替换状态机（独立实现，不调用 Rust）。"""
+    e = ev["event"]
+    d = ev["data"]
+    if e == "MessageAppended":
+        msg = d["message"]
+        if st["pending"] is not None:
+            p = st["pending"]
+            if d.get("index") != len(p["messages"]):
+                raise Corruption(
+                    f"{name}: line {lineno}: replacement message index {d.get('index')} "
+                    f"!= {len(p['messages'])}"
+                )
+            if len(p["messages"]) >= p["declared_len"]:
+                raise Corruption(f"{name}: line {lineno}: message beyond the declared len")
+            p["messages"].append(msg)
+        else:
+            if d.get("index") != len(st["history"]):
+                raise Corruption(
+                    f"{name}: line {lineno}: MessageAppended.index {d.get('index')} "
+                    f"!= transcript 长度 {len(st['history'])}"
+                )
             if "assistant" in msg:
-                declared += [c["id"] for c in msg["assistant"].get("tool_calls", [])]
-            elif "tool" in msg:
-                answered.add(msg["tool"]["result"]["call_id"])
-        elif ev["event"] == "ToolExecutionStarted":
-            started.add(ev["data"]["call_id"])
-        elif ev["event"] == "ToolExecutionSettled":
-            settled.add(ev["data"]["call_id"])
+                for c in msg["assistant"].get("tool_calls") or []:
+                    st["declared"].add(c.get("id"))
+            st["history"].append(msg)
+    elif e == "TranscriptReplaced":
+        if st["pending"] is not None:
+            raise Corruption(
+                f"{name}: line {lineno}: 待定段内又出现 TranscriptReplaced（ADR 0019 §2）"
+            )
+        st["pending"] = {"revision": d["revision"], "declared_len": d["len"], "messages": []}
+    elif e == "TranscriptReplacementCommitted":
+        p = st["pending"]
+        if p is None:
+            raise Corruption(f"{name}: line {lineno}: 没有待定段时的 commit（ADR 0019 §2）")
+        if (
+            p["revision"] != d["revision"]
+            or p["declared_len"] != d["len"]
+            or len(p["messages"]) != d["len"]
+        ):
+            raise Corruption(f"{name}: line {lineno}: commit 与待定段不匹配")
+        st["history"] = p["messages"]
+        st["pending"] = None
+        st["settled"].clear()
+        st["started"].clear()
+        st["declared"] = set()
+        for msg in st["history"]:
+            if "assistant" in msg:
+                for c in msg["assistant"].get("tool_calls") or []:
+                    st["declared"].add(c.get("id"))
+    elif e == "TranscriptReplacementAborted":
+        p = st["pending"]
+        if p is None:
+            raise Corruption(f"{name}: line {lineno}: 没有待定段时的 abort（ADR 0019 §2）")
+        if p["revision"] != d["revision"]:
+            raise Corruption(f"{name}: line {lineno}: abort 的 revision 与待定段不匹配")
+        st["uncommitted"].append(
+            (p["revision"], p["declared_len"], len(p["messages"]), "aborted")
+        )
+        st["pending"] = None
+    elif e in ("ToolExecutionStarted", "ToolExecutionSettled"):
+        if st["pending"] is not None:
+            raise Corruption(f"{name}: line {lineno}: {e} 出现在待定段里（ADR 0019 §2）")
+        cid = d.get("call_id")
+        if cid not in st["declared"]:
+            raise Corruption(
+                f"{name}: line {lineno}: {e} 的 call_id {cid!r} "
+                "未出现在更早的 assistant 消息中（ADR 0006 §7）"
+            )
+        (st["started"] if e == "ToolExecutionStarted" else st["settled"]).add(cid)
+    else:
+        # ModelUsageRecorded 与所有 runtime/未知事件：待定段内一律损坏。
+        if st["pending"] is not None:
+            raise Corruption(f"{name}: line {lineno}: {e} 出现在待定段里（ADR 0019 §2）")
+
+
+def simulate_repair(events):
+    """ADR 0002 的 repair，基于 ADR 0019 的 fold：commit 才换 history、清旧标记。"""
+    st = new_fold()
+    for lineno, ev in enumerate(events, start=1):
+        fold_push(st, ev, lineno, "repair")
+    declared, answered = [], set()
+    for msg in st["history"]:
+        if "assistant" in msg:
+            declared += [c["id"] for c in msg["assistant"].get("tool_calls", [])]
+        elif "tool" in msg:
+            answered.add(msg["tool"]["result"]["call_id"])
     out = {}
     for call in declared:
         if call in answered:
             continue
-        out[call] = "outcome_unknown_after_crash" if call in started else "not_started_after_crash"
+        out[call] = "outcome_unknown_after_crash" if call in st["started"] else "not_started_after_crash"
     return out
 
 
@@ -148,12 +259,9 @@ def check_fixture(name, exp):
 
     version, session_id = None, None
     expect_seq = 0
-    events, skips, index_next = [], [], 0
+    events, skips = [], []
     replacements = []
-    pending_len = []
-    messages_since_replacement = 0
-    # 当前 transcript revision 里 assistant 消息声明过的 call_id（ADR 0006 §7）。
-    declared_calls = set()
+    fold = new_fold()
     for i, line in enumerate(lines, start=1):
         try:
             ev = json.loads(line)
@@ -182,25 +290,10 @@ def check_fixture(name, exp):
         if ev["event"] == "SessionCreated" and ev["seq"] != 0:
             raise Corruption(f"{name}: line {i}: SessionCreated 不在 seq 0")
         if ev["event"] == "MessageAppended":
-            idx = ev["data"].get("index")
-            if idx != index_next:
-                raise Corruption(
-                    f"{name}: line {i}: MessageAppended.index {idx} != transcript 长度 {index_next}"
-                )
-            index_next += 1
-            # 替换段只覆盖 marker 之后紧接着的 len 条消息；数满即结束，之后的
-            # MessageAppended 是正常追加（否则替换过再追加会让整个文件永远打不开）。
-            if pending_len:
-                messages_since_replacement += 1
-                if messages_since_replacement == pending_len[0]:
-                    pending_len = []
             msg = ev["data"].get("message")
             if not isinstance(msg, dict) or len(msg) != 1:
                 raise Corruption(f"{name}: line {i}: message 必须是单变体对象")
             body = next(iter(msg.values()))
-            if "assistant" in msg:
-                for call in msg["assistant"].get("tool_calls") or []:
-                    declared_calls.add(call.get("id"))
             meta = body.get("meta")
             if meta is not None:
                 if not isinstance(meta, dict):
@@ -214,26 +307,37 @@ def check_fixture(name, exp):
                     raise Corruption(
                         f"{name}: line {i}: meta.source {meta['source']!r} 不在 InputSource 集合"
                     )
-        if ev["event"] in ("ToolExecutionStarted", "ToolExecutionSettled"):
-            cid = ev["data"].get("call_id")
-            if cid not in declared_calls:
-                raise Corruption(
-                    f"{name}: line {i}: {ev['event']} 的 call_id {cid!r} "
-                    "未出现在更早的 assistant 消息中（ADR 0006 §7）"
-                )
-        if ev["event"] == "TranscriptReplaced":
+        if ev["event"] in ("TranscriptReplaced", "TranscriptReplacementCommitted"):
             data = ev["data"]
             for field in ("revision", "len"):
                 if not isinstance(data.get(field), int) or isinstance(data.get(field), bool):
-                    raise Corruption(f"{name}: line {i}: TranscriptReplaced.{field} 不是整数")
-            # 上一个替换段没写满又出现新 marker → 崩溃恢复后宿主重新替换，合法；
-            # 旧段按“已写入前缀”接受（ADR 0005）。
-            pending_len = [] if data["len"] == 0 else [data["len"]]
-            messages_since_replacement = 0
-            index_next = 0
-            declared_calls.clear()
-            replacements.append((i, data["revision"], data["len"]))
+                    raise Corruption(f"{name}: line {i}: {ev['event']}.{field} 不是整数")
+        if ev["event"] == "TranscriptReplacementAborted":
+            rev = ev["data"].get("revision")
+            if not isinstance(rev, int) or isinstance(rev, bool):
+                raise Corruption(f"{name}: line {i}: TranscriptReplacementAborted.revision 不是整数")
+        # ADR 0019 §2：唯一的替换状态机（本文件独立实现，不调用 Rust）。
+        try:
+            fold_push(fold, ev, i, name)
+        except Corruption:
+            if exp["outcome"] in ("pending_event_reject", "replacement_mismatch_reject"):
+                return f"PASS {name}: 拒绝打开（line {i}, {ev['event']}）"
+            raise
+        if ev["event"] == "TranscriptReplaced":
+            replacements.append((i, ev["data"]["revision"], ev["data"]["len"]))
         events.append(ev)
+
+    if exp["outcome"] in ("pending_event_reject", "replacement_mismatch_reject"):
+        raise Corruption(f"{name}: 期望拒绝打开，但文件被接受了")
+    if fold["pending"] is not None:
+        fold["uncommitted"].append(
+            (
+                fold["pending"]["revision"],
+                fold["pending"]["declared_len"],
+                len(fold["pending"]["messages"]),
+                "end_of_file",
+            )
+        )
 
     # 替换段不完整（文件到此为止，或被下一个 marker 取代）→ ADR 0005 把已写入前缀
     # 当作可恢复状态，读取方接受，len 不导致拒绝。
@@ -262,6 +366,12 @@ def check_fixture(name, exp):
     repair = simulate_repair(events)
     if repair != exp.get("repair", {}):
         raise Corruption(f"{name}: repair {repair} != 期望 {exp.get('repair', {})}")
+    if "uncommitted" in exp:
+        got_uncommitted = [tuple(x) for x in fold["uncommitted"]]
+        if got_uncommitted != [tuple(x) for x in exp["uncommitted"]]:
+            raise Corruption(
+                f"{name}: uncommitted {got_uncommitted} != 期望 {exp['uncommitted']}"
+            )
     if "replacement" in exp and replacements != [exp["replacement"]]:
         raise Corruption(f"{name}: replacements {replacements} != 期望 {[exp['replacement']]}")
     if exp.get("meta_present") and not any(
