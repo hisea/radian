@@ -19,9 +19,11 @@ use common::{Recorder, TempDir, created};
 use radian_runtime::{Driver, Inbox};
 use radian_session::{EventData, Session, SessionJournal};
 
+const SECRET: &str = "sk-ant-failure-test";
+
 fn model(server: &MockServer) -> Anthropic {
-    let config = AnthropicConfig::new(&server.base_url, "claude-test")
-        .with_api_key(ApiKey::new("sk-ant-failure-test"));
+    let config =
+        AnthropicConfig::new(&server.base_url, "claude-test").with_api_key(ApiKey::new(SECRET));
     Anthropic::new(config).expect("a local mock config is valid")
 }
 
@@ -237,4 +239,22 @@ async fn resume_after_a_failed_turn_keeps_the_history() {
     let history = Session::open(&path).unwrap().history().unwrap();
     let texts: Vec<String> = history.iter().map(|m| m.text()).collect();
     assert_eq!(texts, vec!["first", "second", "RESUMED-OK"]);
+}
+
+/// The `TurnFailed` message is durable, so the key must never reach the session file (the
+/// adapter masks it first; this pins the durable record, not just the live text).
+#[tokio::test]
+async fn the_turn_failed_message_never_contains_the_key() {
+    let server = MockServer::start(vec![Reply::status(500, &format!("bad key {SECRET}"))]).await;
+    let dir = TempDir::new("provider-secret");
+    let path = dir.file("s.jsonl");
+
+    let (statuses, _) = run_inputs(&path, &server, &["hi"]).await;
+    assert_eq!(statuses, vec![RunStatus::Failed]);
+    let file = std::fs::read_to_string(&path).unwrap();
+    assert!(file.contains("<redacted>"), "{file}");
+    assert!(
+        !file.contains(SECRET),
+        "the key leaked into the session file"
+    );
 }
