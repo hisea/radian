@@ -71,3 +71,14 @@ M-B3 正是本切片补的洞：原测试只跑两轮，`load` 变异照样绿�
 
 M3 改的是 `agent-provider-anthropic/src/model.rs` 的 `mask`（与上一轮 M25 同一处），本轮由新的
 **落盘记录**测试抓住：`TurnFailed.message` 会写进会话文件，因此它不能含 key。
+
+## 已 claim 未 admit 的 steer 要回队（ADR 0011，2026-10-13）
+
+一次性 worktree `/tmp/resil3-mut`（从 `c0640b7` 创建，用完删除，**不共享 target 目录**），
+`--no-fail-fast`；变异后从副本还原，`git status --short` 为空。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M5 | 去掉 `requeue_unadmitted` 调用（回到旧行为：claim 了但没应用就丢） | ✅ 抓住 (rc=101) | `steering_after_failure::a_steer_accepted_during_a_failing_turn_is_requeued_and_used_once` 与 `..._max_tokens_finish_...`（两条都失败） |
+
+M5 同时证明"必须先在旧代码上失败"：去掉 requeue 就是旧代码，两条测试都失败。
