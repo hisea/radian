@@ -14,6 +14,7 @@ pub mod mention;
 pub mod picker;
 pub mod profile;
 pub mod projection;
+pub mod question;
 pub mod render;
 pub mod signals;
 pub mod terminal;

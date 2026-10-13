@@ -28,6 +28,9 @@ use radian_session::{SessionCreatedData, SessionJournal};
 use crate::describe::{Wording, describe};
 use crate::memory::{InjectionConfig, MemoryHooks, MemoryService, MemoryTools, ProjectState};
 use crate::model::HostModel;
+use crate::pending::{
+    Answered, PendingQueue, PendingRequest, PendingResponse, QueuedApprover, QueuedPrompter,
+};
 use crate::projection::{ProjectionRead, SessionProjection};
 use crate::tools::HostTools;
 
@@ -161,6 +164,14 @@ pub trait SessionFacade: Send + Sync {
     fn projection(&self) -> ProjectionRead<'_>;
     fn command(&self, command: SessionCommand) -> Result<(), CommandRefused>;
 
+    /// The pending requests (ADR 0023 U7): the UI shows the head and counts the queue.
+    fn pending(&self) -> &SessionQueue;
+
+    /// Answer a pending request by its queue id (ADR 0023 U5's `AnswerRequest`). A late answer
+    /// is silently ignored (ADR 0024 Q4): the request is already gone, and re-completing it is
+    /// worse than dropping the answer.
+    fn answer(&self, request_id: u64, response: PendingResponse) -> Result<(), CommandRefused>;
+
     /// Ask the runtime to compact the context (the TUI's `/compact`). `command` cannot carry
     /// the outcome, and the UI must not hold the inbox, so the result comes back through
     /// `on_done`. Needs the same capability as sending.
@@ -239,10 +250,25 @@ pub struct SessionSetup {
     pub capabilities: Vec<SessionCapability>,
 }
 
+/// The one queue an in-process session uses (ADR 0023 U7): approvals and questions share it,
+/// so the UI shows one arrival order.
+pub type SessionQueue = PendingQueue<PendingRequest, PendingResponse>;
+
+/// How a host answers approvals.
+pub enum ApprovalRouting {
+    /// Through the session's pending queue: the UI reads the head and answers it (the TUI).
+    Queued,
+    /// Directly, by this approver (the CLI's line prompt: no queue, no modal).
+    Direct(Arc<dyn Approver>),
+}
+
 /// What the host injects. Everything here is host-specific; nothing is a session fact.
 pub struct HostBindings {
-    /// The human for `ask` decisions.
-    pub approver: Arc<dyn Approver>,
+    /// How approvals are answered (ADR 0023 U7).
+    pub approvals: ApprovalRouting,
+    /// `true` to advertise `ask_user` and route questions through the queue (a host with an
+    /// interactive user, ADR 0024 Q5); `false` for a host with nobody to ask.
+    pub ask_user: bool,
     /// Where permission decisions are written (audit). A factory: the audit sink needs the
     /// journal, and `open_session` creates it.
     pub audit: Arc<dyn Fn(Arc<SessionJournal>) -> Arc<dyn AuditSink> + Send + Sync>,
@@ -274,6 +300,20 @@ pub struct SessionFacts {
     pub mcp_configured: usize,
     /// The servers/tools that actually connected, once the session is open.
     pub mcp_open: Option<(usize, usize)>,
+    /// Whether `ask_user` is advertised (ADR 0024 Q5), for the host's startup line.
+    pub ask_user: bool,
+}
+
+impl SessionFacts {
+    /// The startup line for `ask_user` (ADR 0024 Q5): a host with no interactive user must say
+    /// so, so the model's missing tool is explained.
+    pub fn ask_user_line(&self) -> String {
+        if self.ask_user {
+            "ask_user: on".to_string()
+        } else {
+            "ask_user: off (no interactive user)".to_string()
+        }
+    }
 }
 
 /// The in-process facade: it owns the inbox, the driver handle, the projection and the
@@ -286,6 +326,8 @@ pub struct LocalSession {
     inbox: Arc<Inbox>,
     hooks: Arc<PermissionHooks>,
     projection: Arc<SessionProjection>,
+    /// The pending approvals and questions (ADR 0023 U7).
+    queue: Arc<SessionQueue>,
     memory: Option<MemoryService>,
     runtime: tokio::runtime::Handle,
     driver: DriverTask,
@@ -314,6 +356,12 @@ impl LocalSession {
 
     pub fn projection(&self) -> &Arc<SessionProjection> {
         &self.projection
+    }
+
+    /// The pending-request queue (ADR 0023 U7): the UI reads the head and the count, and
+    /// subscribes to changes.
+    pub fn queue(&self) -> &Arc<SessionQueue> {
+        &self.queue
     }
 
     /// The inbox, for a host whose loop is not the TUI's: the CLI's line loop enqueues with a
@@ -378,6 +426,26 @@ impl SessionFacade for LocalSession {
 
     fn projection(&self) -> ProjectionRead<'_> {
         self.projection.read()
+    }
+
+    fn pending(&self) -> &SessionQueue {
+        &self.queue
+    }
+
+    fn answer(&self, request_id: u64, response: PendingResponse) -> Result<(), CommandRefused> {
+        if !self
+            .capabilities
+            .contains(&SessionCapability::AnswerRequest)
+        {
+            return Err(CommandRefused {
+                command: "answer".into(),
+                capability: Some(SessionCapability::AnswerRequest.as_str().to_string()),
+                reason: "this session does not declare the `answer` capability".into(),
+            });
+        }
+        match self.queue.answer(request_id, response) {
+            Ok(()) | Err(Answered::Late) | Err(Answered::Unknown) => Ok(()),
+        }
     }
 
     /// Re-validates the capability, then runs the command. The check is here as well as in the
@@ -447,7 +515,8 @@ pub async fn open_session(
     bindings: HostBindings,
 ) -> Result<LocalSession, SessionError> {
     let HostBindings {
-        approver,
+        approvals,
+        ask_user,
         audit,
         events,
         projection,
@@ -479,9 +548,21 @@ pub async fn open_session(
         capabilities,
     } = setup;
 
+    // The pending queue (ADR 0023 U7): approvals and questions share it. It exists before the
+    // tools and the hooks, because both route through it.
+    let queue: Arc<SessionQueue> = Arc::new(PendingQueue::new());
+    let origin = session_id.as_str().to_string();
+
     // The startup description, before the sandbox moves into the tools.
     let (profile_line, sandbox_facts) = describe(tier.sandbox_mode(), sandbox.as_ref(), wording);
-    let coding = build_coding_tools(coding_root.as_deref(), sandbox)?;
+    let mut coding = build_coding_tools(coding_root.as_deref(), sandbox)?;
+    if ask_user {
+        // ADR 0024 Q1/Q5: `ask_user` is advertised only when a human is there to answer, and
+        // its questions go on the same queue as the approvals.
+        let prompter: Arc<dyn radian_coding::Prompter> =
+            Arc::new(QueuedPrompter::new(Arc::clone(&queue), origin.clone()));
+        coding = coding.map(|tools| tools.with_prompter(prompter));
+    }
     let injection_config = InjectionConfig::default();
     let memory = memory_root
         .as_ref()
@@ -511,6 +592,14 @@ pub async fn open_session(
         context_budget,
         auto_compact,
         ..AgentConfig::default()
+    };
+    // ADR 0023 U7: a UI host routes approvals through the pending queue; the CLI's line
+    // prompt answers them directly.
+    let approver: Arc<dyn Approver> = match approvals {
+        ApprovalRouting::Queued => {
+            Arc::new(QueuedApprover::new(Arc::clone(&queue), origin.clone()))
+        }
+        ApprovalRouting::Direct(approver) => approver,
     };
     let hooks = Arc::new(PermissionHooks::new(
         profile,
@@ -595,6 +684,7 @@ pub async fn open_session(
         memory_enabled: memory.is_some(),
         mcp_configured,
         mcp_open,
+        ask_user,
     };
     Ok(LocalSession {
         id: session_id,
@@ -604,6 +694,7 @@ pub async fn open_session(
         inbox,
         hooks,
         projection,
+        queue,
         memory,
         runtime,
         driver: DriverTask {

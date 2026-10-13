@@ -86,7 +86,7 @@ async fn observe_only(label: &str) -> (Scratch, Arc<radian_host::LocalSession>) 
             capabilities: vec![SessionCapability::Observe],
         },
         HostBindings {
-            approver: Arc::new(AllowAll),
+            approvals: radian_host::ApprovalRouting::Direct(Arc::new(AllowAll)),
             audit: Arc::new(|_journal| {
                 Arc::new(NoopAudit) as Arc<dyn radian_permissions::AuditSink>
             }),
@@ -94,6 +94,7 @@ async fn observe_only(label: &str) -> (Scratch, Arc<radian_host::LocalSession>) 
             projection: Arc::new(SessionProjection::new()),
             runtime_events: Arc::new(|_event: &radian_session::RuntimeEvent| {}),
             driver_stopped: Arc::new(|| {}),
+            ask_user: false,
             before_driver: None,
             memory_warning: Arc::new(|_message: &str| {}),
         },
@@ -177,7 +178,7 @@ async fn a_local_session_accepts_a_declared_command() {
             capabilities: SessionCapability::ALL.to_vec(),
         },
         HostBindings {
-            approver: Arc::new(AllowAll),
+            approvals: radian_host::ApprovalRouting::Direct(Arc::new(AllowAll)),
             audit: Arc::new(|_journal| {
                 Arc::new(NoopAudit) as Arc<dyn radian_permissions::AuditSink>
             }),
@@ -185,6 +186,7 @@ async fn a_local_session_accepts_a_declared_command() {
             projection: Arc::new(SessionProjection::new()),
             runtime_events: Arc::new(|_event: &radian_session::RuntimeEvent| {}),
             driver_stopped: Arc::new(|| {}),
+            ask_user: false,
             before_driver: None,
             memory_warning: Arc::new(|_message: &str| {}),
         },

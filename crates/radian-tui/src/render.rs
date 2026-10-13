@@ -429,7 +429,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // ADR 0023 U4: the middle of the frame is drawn by the top modal (the approval box
     // replaces the input box), then the find overlay, then the ordinary input box.
     let middle = match app.top_modal() {
-        Some(Modal::Approval(prompt)) => approval_height(prompt, area.width as usize),
+        Some(Modal::Approval(prompt)) => approval_height(&prompt.request, area.width as usize),
         _ => input_height(app, area.width as usize),
     };
     // The `@` completion list sits just above the input box (and never over an approval
@@ -483,7 +483,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 .borders(Borders::ALL)
                 .border_style(app.theme.approval_border)
                 .title(" approve tool call? ");
-            let text = Paragraph::new(approval_text(prompt))
+            let text = Paragraph::new(approval_text(&prompt.request))
                 .block(block)
                 .wrap(Wrap { trim: false });
             frame.render_widget(text, chunks[2]);
