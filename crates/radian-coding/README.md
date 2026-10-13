@@ -29,10 +29,12 @@ and `max_bytes` still bounds the result. A byte cut that would land mid-line dro
 incomplete line (the result's `next_offset` names it), so a caller can loop
 `offset = next_offset` and never see half a line; the one exception is a first line longer than
 the whole budget, whose UTF-8 prefix is returned with `line_truncated: true` and the next read
-continues at the following line. The text body ends with
-`[truncated: continue with offset=NNN]` for a provider that only reads text. This is the fix
-for dogfood10 D25 (a 73 KB guide read 20 times): read the section you need, do **not** raise
-`max_bytes` to reach it.
+continues at the following line. The body ends with a hint for a provider that only reads text
+(the adapters never send `structured` to the model): `[truncated: continue with offset=NNN]`,
+or `[line N truncated at max_bytes; continue with offset=N+1]` for that exception. Memory is
+bounded by about `max_bytes` plus one reader buffer, even for a file with a single enormous
+line. This is the fix for dogfood10 D25 (a 73 KB guide read 20 times): read the section you
+need, do **not** raise `max_bytes` to reach it.
 
 ## Limits (`Limits`, all overridable)
 

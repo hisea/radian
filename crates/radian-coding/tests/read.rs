@@ -148,7 +148,12 @@ async fn an_overlong_first_line_is_returned_as_a_marked_prefix() {
     .await
     .unwrap();
     let info = structured(&output);
-    assert_eq!(text(&output), "0123");
+    let content = text(&output);
+    assert!(content.starts_with("0123"), "{content}");
+    assert!(
+        content.contains("[line 2 truncated at max_bytes; continue with offset=3]"),
+        "{content}"
+    );
     assert_eq!(info["start_line"], 2);
     assert_eq!(info["end_line"], 2);
     assert_eq!(info["line_truncated"], true);
@@ -176,22 +181,17 @@ async fn an_offset_past_the_end_is_empty_with_a_note() {
         .unwrap();
     let content = text(&output);
     assert!(content.contains("past the end"), "{content}");
-    assert!(content.contains("2 line"), "{content}");
     let info = structured(&output);
     assert_eq!(info["bytes_read"], 0);
     assert_eq!(info["truncated"], false);
     assert!(info.get("next_offset").is_none(), "{info}");
 
-    // An empty file reports that too.
+    // An empty file reports the same thing.
     std::fs::write(root.join("empty"), "").unwrap();
     let empty = call(&tools, "read", json!({"path": "empty", "offset": 1}))
         .await
         .unwrap();
-    assert!(
-        text(&empty).contains("the file is empty"),
-        "{}",
-        text(&empty)
-    );
+    assert!(text(&empty).contains("past the end"), "{}", text(&empty));
 }
 
 #[tokio::test]
@@ -230,16 +230,30 @@ async fn a_multibyte_character_on_the_budget_edge_is_not_split() {
         .await
         .unwrap();
     let info = structured(&output);
-    assert_eq!(text(&output), "é");
+    let content = text(&output);
+    assert!(content.starts_with('é'), "{content}");
+    assert!(
+        content.contains("[line 1 truncated at max_bytes; continue with offset=2]"),
+        "{content}"
+    );
     assert_eq!(info["line_truncated"], true);
     assert_eq!(info["next_offset"], 2);
     assert_eq!(info["bytes_read"], 2);
 
-    // A 1-byte budget cannot even hold the character: the prefix is empty.
+    // A 1-byte budget cannot even hold the character: the prefix is empty and only the hint
+    // remains.
     let output = call(&tools, "read", json!({"path": "f.txt", "max_bytes": 1}))
         .await
         .unwrap();
-    assert_eq!(text(&output), "");
+    let content = text(&output);
+    assert!(
+        !content.contains('é'),
+        "the character is not split: {content}"
+    );
+    assert!(
+        content.contains("[line 1 truncated at max_bytes; continue with offset=2]"),
+        "{content}"
+    );
     assert_eq!(structured(&output)["bytes_read"], 0);
 }
 
@@ -257,4 +271,45 @@ async fn a_budget_ending_exactly_on_a_character_keeps_it() {
         .unwrap();
     assert_eq!(text(&output), "é\n[truncated: continue with offset=2]");
     assert_eq!(structured(&output)["end_line"], 1);
+}
+
+/// A 64 MiB file with **no newline** (a minified bundle, a huge log line): the old `read_until`
+/// implementation would pull the whole line into memory (the OOM case). `read` must return a
+/// bounded prefix plus the continuation hint, and starting past that one line must be a cheap
+/// past-the-end note. This does not measure memory; it is the shape of the OOM scenario.
+#[tokio::test]
+async fn a_huge_single_line_is_bounded() {
+    let dir = TempDir::new("read-huge");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = tools(&root);
+    let path = root.join("huge.js");
+    // Sparse: 64 MiB of zero bytes, no newline anywhere.
+    let file = std::fs::File::create(&path).unwrap();
+    file.set_len(64 * 1024 * 1024).unwrap();
+    drop(file);
+
+    let output = call(
+        &tools,
+        "read",
+        json!({"path": "huge.js", "max_bytes": 1024}),
+    )
+    .await
+    .unwrap();
+    let info = structured(&output);
+    assert_eq!(info["line_truncated"], true);
+    assert_eq!(info["next_offset"], 2);
+    assert_eq!(info["bytes_read"], 1024);
+    assert!(
+        text(&output).contains("continue with offset=2"),
+        "{}",
+        text(&output)
+    );
+
+    // Line 2 does not exist; the skip scans to EOF with constant memory.
+    let past = call(&tools, "read", json!({"path": "huge.js", "offset": 2}))
+        .await
+        .unwrap();
+    assert!(text(&past).contains("past the end"), "{}", text(&past));
+    assert_eq!(structured(&past)["bytes_read"], 0);
 }

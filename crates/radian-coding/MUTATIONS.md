@@ -135,3 +135,15 @@ Base `e1dccf0` · 在本任务工作树内逐条施加后从副本还原（`--no
 
 4/4 抓住。R1/R2 让 `next_offset` 循环读完整文件的拼接与原文件不一致，正是这条测试要防的
 "少一行/多一截"。
+
+### read-2：line_truncated 的正文提示，与读取阶段的内存上界
+
+Base `4538c14` · 在本任务工作树内逐条施加后从副本还原（`--no-fail-fast`）· `git status --short`
+结束后干净。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| R5 | `line_truncated` 时正文不加提示（只有非 line_truncated 才加） | `escaping::read_reports_truncation_and_the_total_size`、`read_trims_an_incomplete_character_at_the_budget_edge`、`read::an_overlong_first_line_is_returned_as_a_marked_prefix`、`a_multibyte_character_on_the_budget_edge_is_not_split`、`a_huge_single_line_is_bounded` | ✅ failed |
+| R6 | 读取阶段改回 `read_until` 整行读入内存 | `read::tests::the_read_phase_never_reads_more_than_the_budget_plus_a_buffer`（计数 reader 看到读了 64 MiB） | ✅ failed |
+
+2/2 抓住。R6 的计数 reader 用有限的 64 MiB `repeat`（不是无限，否则变异会挂而不是失败），断言读取阶段从源拉取的字节 ≤ `budget + BufReader 缓冲区`；跳过阶段只扫换行、常数内存，不受这条约束。
