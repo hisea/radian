@@ -62,3 +62,28 @@ index comparison plus the index suite — no existing test would have noticed a 
 `expect_seq` and `line_offset` too, or the next line fails `BadSeq` and the "silent" skip is
 not silent at all. The faithful mutation is the one in the table; it is caught by the fuzz's
 "an event that vanished must appear in `skipped`" rule.
+
+## Phase 7 fixes: read/write consistency
+
+Base: `1953b12` · one-shot worktree `/tmp/sessfix-mut` (created from HEAD, deleted after) · a
+private `CARGO_TARGET_DIR` · each mutation run with `--no-fail-fast` against
+`cargo test -p radian-session` and `cargo test -p agent-core --features journal-selfcheck`,
+then `git checkout -- .`; `git status --short` empty at the end.
+
+| # | Mutation (each fix reverted) | Caught by | Result |
+|---|---|---|---|
+| M1 | reader: count every later `MessageAppended` into the replacement segment again | `replace::a_normal_append_after_a_complete_replacement_is_not_counted_as_part_of_it`, `replace::replacements_and_the_appends_between_them_fold_to_the_last_revision`, `fuzz::the_fuzz_base_is_a_valid_v1_session` | ✅ failed |
+| M2 | reader: a short replacement at end of file is refused again | `findings::a_crash_mid_replacement_is_recovered_as_the_written_prefix`, `replace::resume_continues_after_a_short_replacement`, `fuzz::corruption_replay_is_total_and_never_writes_the_file` | ✅ failed |
+| M3 | writer: `scan_lines` skips an empty line again | `findings::resume_refuses_an_interior_empty_line` | ✅ failed |
+| M4 | reader: an orphan tool marker is accepted again | `findings::a_marker_whose_call_id_never_appeared_is_refused` | ✅ failed |
+| M5 | reader: the torn-tail check is disabled (`if false && ...`) | `fuzz::corruption_replay_is_total_and_never_writes_the_file`, `read_fixtures::a_torn_tail_is_dropped_at_read_time`, `index::a_deleted_index_rebuilds_to_the_same_rows`, `index::a_torn_tail_is_not_indexed_and_is_picked_up_after_truncate_and_append`, `findings::a_crash_mid_replacement_is_recovered_as_the_written_prefix` | ✅ failed |
+
+5/5 caught. **`agent-core --features journal-selfcheck` failed on none of them**: Core's
+`replay`/`repair` never consult `TranscriptReplaced.len` (they only check `index` contiguity
+and reset at a marker), and the selfcheck slices from the last replacement and replays, so
+finding 0 had no Core equivalent. The other three fixes are reader/writer-only, so Core is
+unaffected by construction.
+
+M5 is the mutation the brief asked for: with the tightened fuzz oracle (a torn tail must read
+back, not error) the fuzz now catches a reader that stops dropping the torn tail. Before the
+tightening it was only caught by the `read_fixtures`/`index` tests.
