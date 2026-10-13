@@ -5,14 +5,15 @@
 //!
 //! - a marker whose `call_id` no earlier assistant message declares is refused (§7);
 //! - `resume` refuses an unparseable line, empty ones included (§3.2-3);
-//! - a crash mid-replacement recovers the written prefix (ADR 0005).
+//! - a crash mid-replacement recovers the **old history** and a second marker inside a pending
+//!   segment is corruption (ADR 0019, which supersedes ADR 0005's written-prefix rule).
 
 mod common;
 
 use agent_core::Message;
 use common::TempDir;
 use radian_session::{
-    ReadError, RecoveredReplacement, Session, SessionCreatedData, SessionJournal,
+    ReadError, ReplacementEnd, Session, SessionCreatedData, SessionJournal, UncommittedReplacement,
 };
 use serde_json::json;
 
@@ -47,7 +48,7 @@ fn a_marker_whose_call_id_never_appeared_is_refused() {
             json!({"call_id": "ghost", "name": "echo", "arguments": {}})
         ),
     );
-    std::fs::write(&path, body).unwrap();
+    std::fs::write(&path, &body).unwrap();
 
     let error = Session::open(&path).unwrap_err();
     assert!(
@@ -104,12 +105,11 @@ fn resume_refuses_an_interior_empty_line() {
     );
 }
 
-/// A crash between `TranscriptReplaced` and its messages leaves a committed marker whose
-/// replacement is short. ADR 0005 line 92 makes the new replacement's written prefix the
-/// recoverable state, so the read succeeds with that prefix and reports the diagnostic. The
-/// torn tail (the half-written second message) is dropped first.
+/// A crash between `TranscriptReplaced` and its messages leaves a **pending** segment. ADR
+/// 0019: an uncommitted segment is dropped and the history stays the one before it (the file
+/// is the only place a crash can leave a pending segment). The torn tail is dropped first.
 #[test]
-fn a_crash_mid_replacement_is_recovered_as_the_written_prefix() {
+fn a_crash_mid_replacement_recovers_the_old_history() {
     let dir = TempDir::new("finding-mid-replacement");
     let path = dir.file("s.jsonl");
     let marker = envelope(
@@ -142,27 +142,35 @@ fn a_crash_mid_replacement_is_recovered_as_the_written_prefix() {
             json!({"workspace": "/w", "config_snapshot": {}})
         )
     );
-    std::fs::write(&path, body).unwrap();
+    std::fs::write(&path, &body).unwrap();
 
     let session = Session::open(&path).unwrap();
-    assert_eq!(session.history().unwrap(), vec![Message::user("a")]);
     assert_eq!(
-        session.recovered_replacements(),
-        &[RecoveredReplacement {
+        session.history().unwrap(),
+        Vec::<Message>::new(),
+        "an uncommitted replacement is dropped; the old history (empty here) stands"
+    );
+    assert_eq!(
+        session.uncommitted_replacements(),
+        &[UncommittedReplacement {
             revision: 1,
-            declared: 2,
+            declared_len: 2,
             written: 1,
+            line: 2,
+            end: ReplacementEnd::EndOfFile,
         }]
     );
     // The half-written message was dropped, not counted.
     assert_eq!(session.events().len(), 3);
+    // A read-only open never writes: the bytes are exactly what the test wrote.
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
 }
 
-/// A short segment followed by another `TranscriptReplaced` is the crash-recovery flow: the
-/// host recovered the written prefix and replaced again. The read must succeed, report the
-/// short segment, and fold to the last revision plus what follows it.
+/// A second `TranscriptReplaced` inside a pending segment is corruption (ADR 0019 §2): the
+/// boundary must be written to disk as a commit or an abort, not inferred from "an event
+/// appeared". The old rule accepted this as crash recovery.
 #[test]
-fn a_short_replacement_followed_by_another_replacement_reads_back() {
+fn a_second_replacement_inside_a_pending_segment_is_refused() {
     let dir = TempDir::new("finding-short-then-marker");
     let path = dir.file("s.jsonl");
     let body = [
@@ -190,33 +198,13 @@ fn a_short_replacement_followed_by_another_replacement_reads_back() {
             true,
             json!({"revision": 2, "len": 1}),
         ),
-        envelope(
-            4,
-            "MessageAppended",
-            true,
-            json!({"index": 0, "message": {"user": {"content": [{"text": {"text": "second"}}]}}}),
-        ),
-        envelope(
-            5,
-            "MessageAppended",
-            true,
-            json!({"index": 1, "message": {"assistant": {"content": [{"text": {"text": "grown"}}]}}}),
-        ),
     ]
     .join("\n");
     std::fs::write(&path, format!("{body}\n")).unwrap();
 
-    let session = Session::open(&path).unwrap();
-    assert_eq!(
-        session.history().unwrap(),
-        vec![Message::user("second"), Message::assistant("grown")]
-    );
-    assert_eq!(
-        session.recovered_replacements(),
-        &[RecoveredReplacement {
-            revision: 1,
-            declared: 2,
-            written: 1,
-        }]
+    let error = Session::open(&path).unwrap_err();
+    assert!(
+        matches!(&error, ReadError::Corrupt { line: 4, .. }),
+        "a second marker without a commit/abort is corruption at line 4: {error:?}"
     );
 }

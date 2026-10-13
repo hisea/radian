@@ -41,6 +41,9 @@ fn legal_fixtures() -> Vec<&'static str> {
         "truncated-tail.jsonl",
         "crash-after-started.jsonl",
         "replace-resets-index.jsonl",
+        "replace-committed.jsonl",
+        "replace-aborted-then-append.jsonl",
+        "replace-uncommitted-eof.jsonl",
     ]
 }
 

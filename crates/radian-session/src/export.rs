@@ -76,11 +76,44 @@ impl ExportOptions {
     }
 }
 
+/// The `seq` of every `MessageAppended` that is part of the committed history (ADR 0019).
+/// Messages inside an uncommitted replacement segment are not in the current history, so the
+/// export treats them as absent.
+fn committed_message_seqs(session: &Session) -> std::collections::HashSet<u64> {
+    let mut committed = std::collections::HashSet::new();
+    let mut pending: Option<Vec<u64>> = None;
+    for event in session.events() {
+        match &event.data {
+            EventData::MessageAppended { .. } => match &mut pending {
+                Some(pending) => pending.push(event.seq),
+                None => {
+                    committed.insert(event.seq);
+                }
+            },
+            EventData::TranscriptReplaced { .. } => pending = Some(Vec::new()),
+            EventData::TranscriptReplacementCommitted { .. } => {
+                if let Some(pending) = pending.take() {
+                    committed.extend(pending);
+                }
+            }
+            EventData::TranscriptReplacementAborted { .. } => pending = None,
+            _ => {}
+        }
+    }
+    committed
+}
+
 /// The JSON export: session metadata plus every accepted event, payload-stripped and
 /// redacted.
 pub fn export_json(session: &Session, opts: &ExportOptions) -> Result<String, ExportError> {
+    let committed = committed_message_seqs(session);
     let mut events = Vec::with_capacity(session.events().len());
     for event in session.events() {
+        if let EventData::MessageAppended { .. } = &event.data
+            && !committed.contains(&event.seq)
+        {
+            continue;
+        }
         let mut data = event_data_value(event, opts)?;
         redact_value(&mut data, opts.secrets());
         events.push(json!({
@@ -127,10 +160,14 @@ pub fn export_markdown(session: &Session, opts: &ExportOptions) -> Result<String
         session.skipped().len()
     ));
 
+    let committed = committed_message_seqs(session);
     for event in session.events() {
         let EventData::MessageAppended { message, .. } = &event.data else {
             continue;
         };
+        if !committed.contains(&event.seq) {
+            continue;
+        }
         let role = match message {
             Message::User { .. } => "user",
             Message::Assistant { .. } => "assistant",
@@ -200,6 +237,12 @@ fn event_data_value(
         }
         EventData::TranscriptReplaced { revision, len } => {
             json!({"revision": revision, "len": len})
+        }
+        EventData::TranscriptReplacementCommitted { revision, len } => {
+            json!({"revision": revision, "len": len})
+        }
+        EventData::TranscriptReplacementAborted { revision } => {
+            json!({"revision": revision})
         }
         EventData::ToolExecutionStarted {
             call_id,

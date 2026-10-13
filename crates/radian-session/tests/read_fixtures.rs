@@ -7,8 +7,8 @@ mod common;
 use agent_core::{InputSource, Message, recover};
 use common::{TempDir, fixture};
 use radian_session::{
-    EventData, InboxLane, PermissionApprover, PermissionDecision, ReadError, Session,
-    SessionJournal, TurnOutcome, TurnReason, WriteError,
+    EventData, InboxLane, PermissionApprover, PermissionDecision, ReadError, ReplacementEnd,
+    Session, SessionJournal, TurnOutcome, TurnReason, WriteError,
 };
 use serde_json::json;
 
@@ -206,7 +206,7 @@ fn crash_after_started_repairs_the_unsettled_call() {
 #[test]
 fn replace_resets_the_index_and_repairs_the_new_revision_only() {
     let session = Session::open(fixture("replace-resets-index.jsonl")).unwrap();
-    assert_eq!(session.events().len(), 10);
+    assert_eq!(session.events().len(), 11);
     assert!(session.skipped().is_empty());
 
     // The two messages before the replacement are gone from the transcript.
@@ -287,4 +287,55 @@ fn a_bad_json_line_names_its_line_number() {
         panic!("expected Corrupt");
     };
     assert_eq!(line, 2);
+}
+
+/// ADR 0019 fixtures: the reader accepts a committed replacement and a file that ends inside
+/// a pending segment (diagnosing it), and rejects the two corrupt shapes. This is the Rust
+/// half of the differential check with `docs/schema/check-fixtures.sh`.
+#[test]
+fn the_replacement_fixtures_agree_with_the_reference_checker() {
+    let committed = Session::open(fixture("replace-committed.jsonl")).unwrap();
+    assert_eq!(
+        committed.history().unwrap(),
+        vec![
+            Message::user("one"),
+            Message::assistant("two"),
+            Message::user("after"),
+        ]
+    );
+    assert!(committed.uncommitted_replacements().is_empty());
+
+    let pending = Session::open(fixture("replace-uncommitted-eof.jsonl")).unwrap();
+    assert_eq!(pending.history().unwrap(), vec![Message::user("old")]);
+    assert_eq!(
+        pending.uncommitted_replacements(),
+        &[radian_session::UncommittedReplacement {
+            revision: 1,
+            declared_len: 2,
+            written: 1,
+            line: 3,
+            end: ReplacementEnd::EndOfFile,
+        }]
+    );
+
+    let aborted = Session::open(fixture("replace-aborted-then-append.jsonl")).unwrap();
+    assert_eq!(
+        aborted.history().unwrap(),
+        vec![Message::user("old"), Message::user("after")]
+    );
+    assert_eq!(
+        aborted.uncommitted_replacements()[0].end,
+        ReplacementEnd::Aborted
+    );
+
+    let other = Session::open(fixture("replace-pending-other-event.jsonl")).unwrap_err();
+    assert!(
+        matches!(other, ReadError::Corrupt { line: 3, .. }),
+        "{other:?}"
+    );
+    let mismatch = Session::open(fixture("replace-commit-mismatch.jsonl")).unwrap_err();
+    assert!(
+        matches!(mismatch, ReadError::Corrupt { line: 4, .. }),
+        "{mismatch:?}"
+    );
 }
