@@ -568,6 +568,8 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
     app.set_context_window(window.budget);
     app.set_tier(tier.as_str());
     app.set_mcp(mcp_configured, mcp_open);
+    // `/memory` runs against the same service the agent's tools and injection use.
+    app.set_memory(memory_service.clone());
     for message in &history {
         app.push_message(message);
     }

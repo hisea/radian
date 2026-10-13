@@ -2397,3 +2397,102 @@ async fn pty_the_memory_notice_names_the_project_state_and_the_budget() {
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
 }
+
+/// ADR 0021 D7: `/memory` commands run in the TUI without a model request, and the record
+/// they create is injected into the next request's system prompt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_memory_commands_run_without_a_model_request() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("memory-commands");
+    let server = MockServer::start(vec![text_reply("REPLY-AFTER-MEMORY")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "memcmd",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+
+    pty.send(b"/memory project new\r");
+    assert!(pty.wait_for_screen("now owns", 10), "{}", pty.screen());
+    pty.send(b"/memory add \"hello world\"\r");
+    assert!(pty.wait_for_screen("added", 10), "{}", pty.screen());
+    pty.send(b"/memory list\r");
+    assert!(pty.wait_for_screen("hello world", 10), "{}", pty.screen());
+    assert!(
+        server.requests().is_empty(),
+        "a /memory command must not reach the model"
+    );
+
+    // A normal message still works, and the memory is in its system prompt.
+    pty.send(b"what do you remember?\r");
+    assert!(
+        pty.wait_for_screen("REPLY-AFTER-MEMORY", 20),
+        "{}",
+        pty.screen()
+    );
+    let body = server.requests()[0].json();
+    let system = body["messages"][0]["content"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(system.contains("hello world"), "system prompt: {system}");
+
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// A `/memory` read command runs while a turn is stuck on a hanging model call and does not
+/// interrupt it (ADR 0021 D6: memory takes effect at the next request, not mid-turn).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_memory_command_does_not_interrupt_a_running_turn() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("memory-running");
+    let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "memrun",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"/memory project new\r");
+    assert!(pty.wait_for_screen("now owns", 10), "{}", pty.screen());
+    pty.send(b"/memory add --global \"remembered\"\r");
+    assert!(pty.wait_for_screen("added", 10), "{}", pty.screen());
+
+    // Start a turn whose reply never completes; the status bar shows `running`.
+    pty.send(b"start a long turn\r");
+    assert!(pty.wait_for_screen("running", 10), "{}", pty.screen());
+    assert_eq!(server.requests().len(), 1);
+
+    pty.send(b"/memory list --global\r");
+    assert!(pty.wait_for_screen("remembered", 10), "{}", pty.screen());
+    assert!(
+        pty.screen().contains("running"),
+        "the turn is still running:\n{}",
+        pty.screen()
+    );
+    assert_eq!(server.requests().len(), 1, "the command sent no request");
+
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}

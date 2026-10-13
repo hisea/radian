@@ -6,11 +6,15 @@
 //! never reads `HOME` (the caller passes the memory root), never touches the network, and never
 //! starts a process.
 
+pub mod commands;
 mod identity;
 pub mod injection;
 mod service;
 pub mod tools;
 
+pub use commands::{
+    CommandError, CommandOutput, MemoryCommand, ProjectCommand, USAGE_ERROR, execute, parse_args,
+};
 pub use identity::{candidate_name, project_identity_key};
 pub use injection::{Injection, InjectionConfig, MemoryHooks, plan};
 pub use service::{MemoryService, MemoryServiceError, ProjectState, ScopeSelection, WriteScope};

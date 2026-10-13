@@ -8,6 +8,9 @@ publish = false
 
 [dependencies]
 agent-core = { path = "../agent-core" }
+# The shared `agent memory` / `/memory` command definitions (ADR 0021 D7): one clap grammar so
+# the two hosts cannot drift.
+clap = { version = "4", features = ["derive"] }
 agent-extensions = { path = "../agent-extensions" }
 agent-provider-anthropic = { path = "../agent-provider-anthropic" }
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible" }

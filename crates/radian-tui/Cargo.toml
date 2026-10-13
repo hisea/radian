@@ -21,6 +21,8 @@ radian-runtime = { path = "../radian-runtime" }
 radian-sandbox = { path = "../radian-sandbox" }
 radian-session = { path = "../radian-session" }
 clap = { version = "4", features = ["derive"] }
+# The slash-command arguments: quoted values like `/memory add "two words"`.
+shlex = "2"
 ratatui = "0.30.2"
 serde_json.workspace = true
 unicode-width = "0.2.2"
@@ -32,6 +34,7 @@ libc = "0.2"
 
 [dev-dependencies]
 agent-core = { path = "../agent-core" }
+radian-memory = { path = "../radian-memory" }
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible", features = ["testing"] }
 agent-provider-anthropic = { path = "../agent-provider-anthropic", features = ["testing"] }
 radian-session = { path = "../radian-session" }
