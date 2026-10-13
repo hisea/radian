@@ -1,6 +1,6 @@
 # radian agent instructions
 
-This repository holds a minimal headless Rust agent runtime: `agent-core` (the turn loop, tools, hooks, steering) and `agent-extensions` (MCP stdio tools). The design is in `docs/minimal-headless-rust-agent-runtime-design.md`. Read this file before you change code.
+This repository holds a minimal headless Rust agent runtime and the coding agent built on it. `agent-core` is the runtime (turn loop, tools, hooks, steering, the journal seam); `agent-extensions` adds MCP stdio tools; `radian-session`, `radian-runtime`, `radian-permissions`, `radian-sandbox`, `radian-coding` and `radian-host` are the layers around it (durable sessions, the inbox and driver, allow/ask/deny, the OS sandbox, the built-in tools, host plumbing); the two provider adapters are checked by the `agent-provider-contract` suite; and `agent-cli` and `radian-tui` are the `agent` and `radian-tui` binaries. The crate-by-crate table with each one's docs is `README.md`. The design is in `docs/minimal-headless-rust-agent-runtime-design.md`. Read this file before you change code.
 
 ## Decisions are in `docs/adr/`
 
