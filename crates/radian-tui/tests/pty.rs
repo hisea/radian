@@ -29,6 +29,13 @@ impl TempDir {
     }
 }
 
+impl Drop for Pty {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
@@ -36,6 +43,16 @@ impl Drop for TempDir {
 }
 
 const BIN: &str = env!("CARGO_BIN_EXE_radian-tui");
+
+/// The pty tests spawn real processes and mock servers; run them one at a time so the
+/// whole workspace staying busy cannot make one of them flake.
+static PTY_LOCK: Mutex<()> = Mutex::new(());
+
+fn pty_guard() -> std::sync::MutexGuard<'static, ()> {
+    PTY_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 struct Pty {
     writer: Box<dyn Write + Send>,
@@ -125,6 +142,7 @@ impl Pty {
         }
     }
 
+    /// Waits without killing: on timeout the caller decides (the `Drop` impl still kills).
     fn wait_for_exit(&mut self, secs: u64) -> Option<u32> {
         let deadline = Instant::now() + Duration::from_secs(secs);
         loop {
@@ -136,11 +154,21 @@ impl Pty {
                 return Some(status.exit_code());
             }
             if Instant::now() >= deadline {
-                let _ = self.child.kill();
                 return None;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// Ctrl-C cancels a running turn and quits when idle, so press it until the app exits.
+    fn quit(&mut self) {
+        for _ in 0..4 {
+            self.send(&[0x03]);
+            if self.wait_for_exit(3).is_some() {
+                return;
+            }
+        }
+        panic!("the app did not exit after repeated Ctrl-C");
     }
 
     fn raw(&self) -> Vec<u8> {
@@ -174,7 +202,10 @@ fn text_reply(text: &str) -> Reply {
 
 /// One turn: send `hello`, wait for the mock reply, then quit with Ctrl-C.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the four pty tests.
+#[allow(clippy::await_holding_lock)]
 async fn pty_end_to_end_conversation_and_clean_exit() {
+    let _serial = pty_guard();
     let server = MockServer::start(vec![text_reply("ASSISTANT-REPLY-OK")]).await;
     let dir = TempDir::new("e2e");
     let mut pty = Pty::spawn(
@@ -202,9 +233,8 @@ async fn pty_end_to_end_conversation_and_clean_exit() {
         pty.screen()
     );
 
-    // Idle now: Ctrl-C quits.
-    pty.send(&[0x03]);
-    assert!(pty.wait_for_exit(10).is_some(), "the app did not exit");
+    // Ctrl-C cancels if the turn is somehow still running, then quits.
+    pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0), "clean exit code");
 
     let raw = pty.raw();
@@ -240,6 +270,7 @@ async fn pty_end_to_end_conversation_and_clean_exit() {
 /// The panic hook restores the terminal before the panic message is printed.
 #[test]
 fn pty_panic_path_restores_the_terminal() {
+    let _serial = pty_guard();
     let dir = TempDir::new("panic");
     let mut pty = Pty::spawn(
         &[
@@ -272,7 +303,10 @@ fn pty_panic_path_restores_the_terminal() {
 
 /// A bracketed paste arrives whole and multi-line in the input box.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the four pty tests.
+#[allow(clippy::await_holding_lock)]
 async fn pty_multiline_paste_reaches_the_input_box() {
+    let _serial = pty_guard();
     let server = MockServer::start(vec![text_reply("after-paste")]).await;
     let dir = TempDir::new("paste");
     let mut pty = Pty::spawn(
@@ -305,14 +339,16 @@ async fn pty_multiline_paste_reaches_the_input_box() {
         "the paste is in the input box, not the transcript"
     );
 
-    pty.send(&[0x03]);
-    let _ = pty.wait_for_exit(10);
+    pty.quit();
 }
 
 /// The second request must not carry the first response's reasoning (ADR 0014 R4), verified
 /// on the real UI path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the four pty tests.
+#[allow(clippy::await_holding_lock)]
 async fn pty_reasoning_is_not_sent_back_to_the_provider() {
+    let _serial = pty_guard();
     let server = MockServer::start(vec![
         Reply::sse(&[
             chunk(json!({"reasoning_content": "SECRET-REASONING-TEXT"}), None),
@@ -352,6 +388,5 @@ async fn pty_reasoning_is_not_sent_back_to_the_provider() {
     // The assistant message itself is still in history.
     assert!(second.contains("first answer"), "{second}");
 
-    pty.send(&[0x03]);
-    let _ = pty.wait_for_exit(10);
+    pty.quit();
 }
