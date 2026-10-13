@@ -22,13 +22,16 @@ use tokio::io::AsyncBufReadExt;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
-use agent_core::{Agent, AgentConfig, AgentEvent, EventSink, InputSource, RunStatus, TurnOptions};
+use agent_core::{
+    Agent, AgentConfig, AgentEvent, BudgetReport, ContextBudget, EventSink, InputSource, RunStatus,
+    TurnOptions, UsageSource,
+};
 use agent_extensions::{McpServerConfig, McpToolProvider};
 use agent_provider_openai_compatible::{ApiKey, OpenAiCompatible, OpenAiCompatibleConfig};
 use clap::Parser;
 use radian_coding::CodingTools;
 use radian_permissions::{Approver, PermissionHooks};
-use radian_runtime::{CancelCause, Driver, DriverError, Inbox, InboxError};
+use radian_runtime::{BudgetRelax, CancelCause, Driver, DriverError, Inbox, InboxError};
 use radian_session::{Index, SessionCreatedData, SessionJournal};
 use tokio::sync::{Mutex, mpsc};
 
@@ -38,6 +41,17 @@ use crate::tools::CliTools;
 
 /// Exit code for usage and configuration errors, matching clap's own usage failures.
 const USAGE_ERROR: i32 = 2;
+
+/// The exit code for "the context-budget guard stopped the turn in one-shot mode". Distinct
+/// from 1 (the turn failed), 2 (usage/setup) and 130 (forced exit) so a script can tell a
+/// budget stop from an error. One-shot mode never continues automatically.
+const CONTEXT_BUDGET_EXIT: i32 = 3;
+
+/// What the CLI sends when the user chooses to continue after a context-budget stop. The user
+/// chose to continue, and a user message is the only way to open a new turn (Core's
+/// `start_turn` requires one); it records that choice truthfully. The transcript itself is
+/// never edited (ADR 0015 C7).
+const CONTINUE_MESSAGE: &str = "continue";
 
 /// How many inputs may wait in the inbox. Bounded on purpose (ADR 0011 L4): a full queue
 /// refuses and hands the message back instead of dropping it.
@@ -133,6 +147,16 @@ struct Cli {
     /// Per-turn time limit in seconds.
     #[arg(long)]
     turn_timeout_secs: Option<u64>,
+
+    /// The model's context window in tokens. Omit to leave the context-budget guard disabled:
+    /// no window is guessed, because a model-name-to-window table ages and is mostly
+    /// remembered numbers (ADR 0015 C1).
+    #[arg(long, value_name = "TOKENS")]
+    context_window: Option<u64>,
+
+    /// Block when the projected request size reaches this percent of the window (default 80).
+    #[arg(long, value_name = "PERCENT", default_value_t = agent_core::DEFAULT_THRESHOLD_PERCENT)]
+    context_threshold: u8,
 }
 
 /// Why startup failed. The message must not contain the key.
@@ -185,6 +209,9 @@ struct Setup {
     system_prompt: Option<String>,
     max_model_calls: Option<u32>,
     turn_timeout_secs: Option<u64>,
+    /// The context-budget guard, or `None` when no window was configured (the guard is then
+    /// disabled, not given a guessed default).
+    context_budget: Option<ContextBudget>,
     /// The session id this process uses: the file name, and the `{session_id}` header value.
     session_id: String,
     /// The key and every custom header value: redacted from all error output, never printed
@@ -246,12 +273,31 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     let mut secrets: Vec<String> = key.into_iter().collect();
     secrets.extend(headers.into_iter().map(|(_, value)| value));
     secrets.retain(|secret| !secret.is_empty());
+    // The context-budget guard exists only when the host names a window (ADR 0015 C1). The
+    // threshold is validated only when there is a window; a threshold alone changes nothing.
+    if !(1..=100).contains(&cli.context_threshold) {
+        return Err(SetupError(
+            "--context-threshold must be between 1 and 100".into(),
+        ));
+    }
+    let context_budget = match cli.context_window {
+        Some(0) => {
+            return Err(SetupError(
+                "--context-window must be at least 1 token".into(),
+            ));
+        }
+        Some(window) => {
+            Some(ContextBudget::new(window).with_threshold_percent(cli.context_threshold))
+        }
+        None => None,
+    };
     Ok(Setup {
         model,
         servers,
         system_prompt,
         max_model_calls: cli.max_model_calls,
         turn_timeout_secs: cli.turn_timeout_secs,
+        context_budget,
         session_id,
         secrets,
     })
@@ -508,6 +554,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     let journal = open_journal(&cli, &setup.session_id, &workspace)?;
     let agent_config = AgentConfig {
         system_prompt: setup.system_prompt,
+        context_budget: setup.context_budget,
         ..AgentConfig::default()
     };
 
@@ -521,6 +568,21 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     let (profile_line, sandbox_facts) = profile::describe(profile_arg, sandbox.as_ref());
     eprintln!("[profile] {profile_line}");
     eprintln!("[sandbox] {sandbox_facts}");
+    match &setup.context_budget {
+        Some(budget) => eprintln!(
+            "[budget] context guard on: window {} tokens, threshold {}% ({} tokens). A \
+             provider-reported input is trusted as reported; only the growth since that report \
+             is estimated ({} ASCII bytes per token, at least 1 token per non-ASCII character)",
+            budget.window_tokens,
+            budget.threshold_percent,
+            budget.threshold_tokens(),
+            budget.bytes_per_token
+        ),
+        None => eprintln!(
+            "[budget] context guard off: no --context-window was given, and no default window \
+             is guessed (ADR 0015)"
+        ),
+    }
 
     // The built-in tools exist only with `--workspace`. `shell` is present only when a
     // sandbox exists, which is exactly `workspace-write`/`full-access` with a workspace.
@@ -591,6 +653,8 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     .map_err(|e| SetupError(format!("cannot open the session: {e}")))?;
     // A per-turn timeout: the driver computes a fresh deadline at each turn's start.
     driver.set_turn_timeout(setup.turn_timeout_secs.map(Duration::from_secs));
+    // The handle the interactive loop uses to say "continue once" (ADR 0015 C5).
+    let driver_relax = driver.budget_relax();
     let driver_ended = Arc::new(Notify::new());
     let ended = Arc::clone(&driver_ended);
     let task = tokio::spawn(async move {
@@ -602,6 +666,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     let mut run = Run {
         inbox,
         hooks: Arc::clone(&hooks),
+        relax: driver_relax,
         ui: Arc::clone(&ui),
         driver_ended,
         signals,
@@ -645,6 +710,8 @@ fn set_turn_source(hooks: &PermissionHooks, source: InputSource, reset: bool) {
 struct Run {
     inbox: Arc<Inbox>,
     hooks: Arc<PermissionHooks>,
+    /// The one-shot relax the interactive "continue" uses (ADR 0015 C5).
+    relax: BudgetRelax,
     ui: Arc<Ui>,
     driver_ended: Arc<Notify>,
     signals: mpsc::UnboundedReceiver<()>,
@@ -703,11 +770,81 @@ async fn one_shot(run: &mut Run, prompt: String) -> i32 {
     }
     match run.ui.last_status() {
         Some(RunStatus::Completed) => 0,
+        Some(RunStatus::ContextBudget(report)) => {
+            for line in budget_stop_lines(&report) {
+                eprintln!("{line}");
+            }
+            eprintln!(
+                "[budget] one-shot mode does not continue automatically; nothing was sent \
+                 (exit {CONTEXT_BUDGET_EXIT})"
+            );
+            CONTEXT_BUDGET_EXIT
+        }
         Some(status) => {
             eprintln!("agent: the turn ended as {status:?}");
             1
         }
         None => 1,
+    }
+}
+
+/// The context-budget stop, worded so its source is never hidden (ADR 0015 C1): a reported
+/// number says "reported", a partly estimated number shows the reported baseline and the
+/// estimated growth separately, and a pure estimate is marked `~` and "estimated". An
+/// estimate is never displayed as a precise report.
+fn budget_stop_lines(report: &BudgetReport) -> Vec<String> {
+    let usage = match report.source {
+        UsageSource::Reported => format!("context {} (reported)", report.projected_tokens),
+        UsageSource::ReportedPlusEstimate => format!(
+            "context {} (reported {} + estimated {})",
+            report.projected_tokens,
+            report.baseline_input_tokens.unwrap_or_default(),
+            report.estimated_growth_tokens.unwrap_or_default()
+        ),
+        UsageSource::Estimated => format!("context ~{} (estimated)", report.projected_tokens),
+    };
+    let threshold = report
+        .window_tokens
+        .saturating_mul(u64::from(report.threshold_percent))
+        / 100;
+    vec![
+        format!("[budget] the model request was not sent: {usage}"),
+        format!(
+            "[budget] window {} tokens, threshold {}% ({} tokens), request {} bytes",
+            report.window_tokens, report.threshold_percent, threshold, report.request_bytes
+        ),
+    ]
+}
+
+/// What the user chose after a budget stop.
+enum BudgetChoice {
+    Continue,
+    Stop,
+}
+
+/// Asks whether to continue. `fork` is deliberately not offered as an option: this slice does
+/// not implement it, and an option that does nothing would lie (it is named only as
+/// "not implemented").
+async fn ask_budget_continue(
+    lines: &LineHub,
+    signals: &mut mpsc::UnboundedReceiver<()>,
+    report: &BudgetReport,
+) -> BudgetChoice {
+    for line in budget_stop_lines(report) {
+        eprintln!("{line}");
+    }
+    eprint!(
+        "[budget] [c] continue (the next request is let through once), [n] stop \
+         (fork: not implemented) "
+    );
+    let _ = std::io::stderr().flush();
+    tokio::select! {
+        line = lines.next() => match line.as_deref() {
+            Some("c") | Some("C") | Some("continue") => BudgetChoice::Continue,
+            _ => BudgetChoice::Stop,
+        },
+        // A Ctrl-C at this prompt gives up rather than hanging.
+        _ = signals.recv() => BudgetChoice::Stop,
     }
 }
 
@@ -734,7 +871,31 @@ async fn interactive_loop(run: &mut Run, lines: &LineHub) -> i32 {
             Next::Leave => break,
             Next::Forced => return force_exit(&mut run.task).await,
             Next::DriverEnded => return report_task(&mut run.task, &run.secrets).await,
-            Next::Again => continue,
+            Next::Again => {
+                if let Some(RunStatus::ContextBudget(report)) = run.ui.last_status()
+                    && matches!(
+                        ask_budget_continue(lines, &mut run.signals, &report).await,
+                        BudgetChoice::Continue
+                    )
+                {
+                    // The user chose to continue: the next turn's first request is let
+                    // through once, and the guard is back from the request after it
+                    // (ADR 0015 C5). It is never a permanent switch.
+                    run.relax.relax_once();
+                    if let Err(error) = enqueue_input(
+                        &run.inbox,
+                        &run.hooks,
+                        CONTINUE_MESSAGE.to_owned(),
+                        TERMINAL_SOURCE,
+                        false,
+                    )
+                    .await
+                    {
+                        eprintln!("agent: {}", redact(&error.to_string(), &run.secrets));
+                    }
+                }
+                continue;
+            }
             Next::Line(line) => {
                 let line = line.trim();
                 if line.is_empty() {
@@ -815,7 +976,10 @@ async fn next_event(
         biased;
         _ = signals.recv() => on_signal(ui, inbox, cancelling),
         _ = driver_ended.notified() => Next::DriverEnded,
-        _ = ui.finished.notified(), if ui.busy() => Next::Again,
+        // Not guarded by `busy`: `RunFinished` clears `busy` before it notifies, so a guard
+        // here would disable the branch exactly when the turn end arrives and the loop would
+        // never see it (a lost wakeup). A stale permit costs one extra loop turn, nothing more.
+        _ = ui.finished.notified() => Next::Again,
         line = lines.next(), if read_lines => match line {
             Some(line) => Next::Line(line),
             None => Next::Leave,

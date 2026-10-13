@@ -174,3 +174,61 @@ async fn a_large_tool_result_blocks_the_next_request_end_to_end() {
         }
     )));
 }
+
+/// Waits (without sleeping) until `n` turns have durably ended as `context_budget`.
+async fn wait_for_budget_turns(path: &Path, n: usize) {
+    for _ in 0..1_000_000 {
+        let count = std::fs::read_to_string(path)
+            .map(|text| text.matches("\"context_budget\"").count())
+            .unwrap_or(0);
+        if count >= n {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("fewer than {n} context_budget turns landed in {path:?}");
+}
+
+/// 8. The host's "continue" relaxes the next turn's first request; the request after it is
+///    blocked again, so the relax is once and never a permanent switch (ADR 0015 C5).
+#[tokio::test]
+async fn relaxing_once_sends_the_blocked_request_and_restores_the_guard() {
+    let big = json!({"blob": "x".repeat(64 * 1024)});
+    let model = ScriptedModel::new([
+        used(calls(vec![call("c1", "echo", big.clone())]), 900),
+        calls(vec![call("c2", "echo", big)]),
+        text("never sent"),
+    ]);
+    let tools = MemTools::new();
+    let (mut driver, env) = open_env(
+        "budget-relax",
+        Arc::clone(&model),
+        tools,
+        Some(ContextBudget::new(1000)),
+    )
+    .await;
+    // The handle is taken before the driver moves onto its task; it is a clone of the flag.
+    let relax = driver.budget_relax();
+    let handle = tokio::spawn(async move { driver.run().await });
+    env.inbox.followup("go", InputSource::User).await.unwrap();
+    wait_for_budget_turns(&env.path, 1).await;
+    assert_eq!(
+        model.requests().len(),
+        1,
+        "the over-budget request must not have been sent"
+    );
+
+    // The host saw the stop and chose continue: the next turn's first request is let through.
+    relax.relax_once();
+    env.inbox
+        .followup("continue", InputSource::User)
+        .await
+        .unwrap();
+    wait_for_budget_turns(&env.path, 2).await;
+    assert_eq!(
+        model.requests().len(),
+        2,
+        "the relaxed request was sent, and the one after it was blocked again"
+    );
+    handle.abort();
+}

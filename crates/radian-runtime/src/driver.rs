@@ -16,6 +16,7 @@
 //! state does **not** survive a process restart (plan Phase 2, last point).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent_core::{
@@ -57,6 +58,27 @@ struct Recovery {
     next_config_revision: u64,
 }
 
+/// The host's "continue past a context-budget stop" request (ADR 0015 C5).
+///
+/// It carries one flag. The next turn consumes it and starts with
+/// `TurnOptions::context_budget_relax = true`, so that turn's first over-threshold request is
+/// let through and the guard applies again from the next request on. It is a one-shot, never
+/// a permanent switch, and the driver clears it whether or not the turn used it.
+#[derive(Clone, Default)]
+pub struct BudgetRelax(Arc<AtomicBool>);
+
+impl BudgetRelax {
+    /// Requests the relax for the next turn.
+    pub fn relax_once(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    /// Consumes the request. The driver calls this once per turn.
+    fn take(&self) -> bool {
+        self.0.swap(false, Ordering::SeqCst)
+    }
+}
+
 /// The per-session driver.
 pub struct Driver<M: Model, P: ToolProvider, H: Hooks> {
     inbox: Arc<Inbox>,
@@ -69,6 +91,8 @@ pub struct Driver<M: Model, P: ToolProvider, H: Hooks> {
     /// A per-turn time limit: each turn's deadline is computed when the turn starts, so it
     /// is fresh rather than an absolute instant fixed at startup.
     turn_timeout: Option<std::time::Duration>,
+    /// The host's one-shot context-budget relax (ADR 0015 C5), consumed by the next turn.
+    budget_relax: BudgetRelax,
     next_turn: u64,
     next_config_revision: u64,
     closed: bool,
@@ -102,6 +126,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             queue: ConfigQueue::new(),
             options,
             turn_timeout: None,
+            budget_relax: BudgetRelax::default(),
             next_turn: recovery.next_turn,
             next_config_revision: recovery.next_config_revision,
             closed: false,
@@ -138,6 +163,13 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
     /// applies to every turn rather than only the first.
     pub fn set_turn_timeout(&mut self, timeout: Option<std::time::Duration>) {
         self.turn_timeout = timeout;
+    }
+
+    /// The handle the host uses to say "the user chose to continue" after a
+    /// [`agent_core::RunStatus::ContextBudget`] stop. The next turn consumes it exactly once
+    /// (ADR 0015 C5); the guard is back for the request after that.
+    pub fn budget_relax(&self) -> BudgetRelax {
+        self.budget_relax.clone()
     }
 
     pub fn is_closed(&self) -> bool {
@@ -202,6 +234,9 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         if let Some(timeout) = self.turn_timeout {
             options.deadline = Some(tokio::time::Instant::now() + timeout);
         }
+        // Consume the host's continue request: this turn's first over-threshold request is
+        // let through, and only that one (ADR 0015 C5).
+        options.context_budget_relax = self.budget_relax.take();
 
         journal
             .append_runtime_event(RuntimeEvent::InputClaimed {
