@@ -47,6 +47,8 @@ fn query(cache: &Path, server: &MockServer, model: &str) -> WindowQuery {
         catalog_provider: Some("opencode".into()),
         base_url: "https://opencode.ai/zen/go/v1".into(),
         model: model.into(),
+        // OpenAI-compatible sends no max_tokens, so R = the safety reservation (16384).
+        request_max_output: None,
         offline: false,
         cache_path: cache.join("catalog/models.json"),
         url: format!("{}/api.json", server.base_url),
@@ -80,17 +82,17 @@ async fn a_missing_cache_fetches_once_and_then_uses_the_cache() {
     let server = MockServer::start(vec![Reply::status(200, API_JSON)]).await;
 
     let window = resolve(&query(&cache, &server, "deepseek-v4.1-flash")).await;
-    assert_eq!(
-        window.tokens,
-        Some(922_000),
-        "min(I, C) = min(922000, 1000000)"
-    );
+    // B = min(I, C - R) = min(922000, 1000000 - 16384) = 922000.
+    assert_eq!(window.budget, Some(922_000));
+    assert_eq!(window.context, Some(1_000_000));
+    assert_eq!(window.input, Some(922_000));
+    assert_eq!(window.reservation, 16_384);
     assert!(matches!(window.source, WindowSource::Catalog { .. }));
     assert!(cache_file(&cache).exists(), "the cache must be written");
     assert_eq!(server.requests().len(), 1);
 
     let again = resolve(&query(&cache, &server, "deepseek-v4.1-flash")).await;
-    assert_eq!(again.tokens, Some(922_000));
+    assert_eq!(again.budget, Some(922_000));
     assert_eq!(
         server.requests().len(),
         1,
@@ -123,7 +125,8 @@ async fn a_stale_cache_survives_a_500() {
     age_file(&cache_file(&cache), Duration::from_secs(25 * 60 * 60));
 
     let window = resolve(&query(&cache, &server, "context-only")).await;
-    assert_eq!(window.tokens, Some(128_000), "the stale cache is used");
+    // context-only: B = C - R = 128000 - 16384.
+    assert_eq!(window.budget, Some(111_616), "the stale cache is used");
     assert_eq!(server.requests().len(), 1, "it did try to refresh");
     let _ = std::fs::remove_dir_all(&cache);
 }
@@ -139,7 +142,7 @@ async fn a_hanging_fetch_times_out_and_the_stale_cache_is_used() {
 
     let started = std::time::Instant::now();
     let window = resolve(&query(&cache, &server, "context-only")).await;
-    assert_eq!(window.tokens, Some(128_000));
+    assert_eq!(window.budget, Some(111_616));
     assert!(
         started.elapsed() < Duration::from_secs(10),
         "the 3 s timeout must bound the fetch"
@@ -153,9 +156,10 @@ async fn no_cache_and_a_failed_fetch_is_unknown() {
     let cache = scratch("no-cache");
     let server = MockServer::start(vec![Reply::status(500, "boom")]).await;
     let window = resolve(&query(&cache, &server, "deepseek-v4.1-flash")).await;
-    assert_eq!(window.tokens, None);
+    assert_eq!(window.budget, None);
     assert_eq!(window.source, WindowSource::Unknown);
-    assert_eq!(window.describe(), "unknown: context guard off");
+    assert!(window.error.is_none(), "unknown is not an error");
+    assert!(window.describe().contains("no budget"), "{}", window.describe());
     let _ = std::fs::remove_dir_all(&cache);
 }
 
@@ -171,7 +175,7 @@ async fn offline_never_fetches() {
     let mut q = query(&cache, &server, "deepseek-v4.1-flash");
     q.offline = true;
     let window = resolve(&q).await;
-    assert_eq!(window.tokens, Some(922_000));
+    assert_eq!(window.budget, Some(922_000));
     assert_eq!(server.requests().len(), 0, "offline must not go out");
 
     // Offline with no cache is unknown, still without a request.
@@ -191,12 +195,20 @@ async fn an_explicit_window_wins_and_does_not_fetch() {
     let cache = scratch("explicit");
     let server = MockServer::start(vec![Reply::status(200, API_JSON)]).await;
     let mut q = query(&cache, &server, "deepseek-v4.1-flash");
+    q.explicit = Some(100_000);
+    let window = resolve(&q).await;
+    // --context-window overrides C; B = C - R = 100000 - 16384.
+    assert_eq!(window.budget, Some(83_616));
+    assert_eq!(window.context, Some(100_000));
+    assert_eq!(window.source, WindowSource::Explicit);
+    assert!(window.describe().contains("from --context-window"), "{}", window.describe());
+    assert_eq!(server.requests().len(), 0);
+
+    // A window at or below the output reservation is an error, not a silent budget.
     q.explicit = Some(4096);
     let window = resolve(&q).await;
-    assert_eq!(window.tokens, Some(4096));
-    assert_eq!(window.source, WindowSource::Explicit);
-    assert_eq!(window.describe(), "window 4096 from --context-window");
-    assert_eq!(server.requests().len(), 0);
+    assert_eq!(window.budget, None);
+    assert!(window.error.is_some(), "C <= R must be an error");
     let _ = std::fs::remove_dir_all(&cache);
 }
 
@@ -210,14 +222,14 @@ async fn catalog_provider_overrides_the_hostname() {
     q.base_url = "https://some.mirror.example/v1".into();
     q.catalog_provider = Some("opencode".into());
     let window = resolve(&q).await;
-    assert_eq!(window.tokens, Some(922_000));
+    assert_eq!(window.budget, Some(922_000));
 
     // The mapping itself: api.openai.com resolves `openai` without a flag.
     let mut q = query(&cache, &server, "gpt-5.4");
     q.base_url = "https://api.openai.com/v1".into();
     q.catalog_provider = None;
     let window = resolve(&q).await;
-    assert_eq!(window.tokens, Some(900_000));
+    assert_eq!(window.budget, Some(900_000));
     let _ = std::fs::remove_dir_all(&cache);
 }
 
@@ -232,12 +244,13 @@ async fn zero_context_is_unknown_and_a_corrupt_cache_is_ignored() {
     .await;
 
     let window = resolve(&query(&cache, &server, "zero-context")).await;
-    assert_eq!(window.source, WindowSource::Unknown, "context 0 is unknown");
+    assert_eq!(window.budget, None, "context 0 is unknown");
+    assert!(window.describe().contains("window unknown"), "{}", window.describe());
 
     // Corrupt the cache; the next resolve must fetch again and succeed.
     std::fs::write(cache_file(&cache), "{ not json").unwrap();
     let window = resolve(&query(&cache, &server, "deepseek-v4.1-flash")).await;
-    assert_eq!(window.tokens, Some(922_000));
+    assert_eq!(window.budget, Some(922_000));
     assert_eq!(server.requests().len(), 2);
     let _ = std::fs::remove_dir_all(&cache);
 }
@@ -287,19 +300,15 @@ fn the_parsed_catalog_reports_the_real_shape() {
         catalog.limit("opencode", "context-only").unwrap().input,
         None
     );
+    // ADR 0018: B = min(I, C - R). `context-only` has no I, so B = 128000 - 16384.
     assert_eq!(
-        catalog
-            .limit("opencode", "context-only")
-            .unwrap()
-            .window_tokens(),
-        Some(128_000)
+        radian_host::input_budget(Some(128_000), None, None),
+        Ok(Some(111_616))
     );
     assert_eq!(
-        catalog
-            .limit("opencode", "zero-context")
-            .unwrap()
-            .window_tokens(),
-        None
+        radian_host::input_budget(Some(0), None, None),
+        Ok(None),
+        "a zero context is unknown"
     );
 }
 
@@ -311,13 +320,12 @@ async fn an_explicit_window_never_fetches() {
     let cache = scratch("explicit-offline");
     let server = MockServer::start(vec![Reply::status(200, API_JSON)]).await;
     let mut q = query(&cache, &server, "deepseek-v4.1-flash");
-    q.explicit = Some(5000);
+    q.explicit = Some(100_000);
 
     let window = resolve(&q).await;
-    assert_eq!(window.tokens, Some(5000));
+    assert_eq!(window.budget, Some(83_616));
     assert_eq!(window.source, WindowSource::Explicit);
     assert_eq!(server.requests().len(), 0, "no cache: no request at all");
-    assert_eq!(window.describe(), "window 5000 from --context-window");
 
     // With a cache present, the input/output come from it — still with no request.
     std::fs::create_dir_all(cache.join("catalog")).unwrap();
@@ -328,13 +336,9 @@ async fn an_explicit_window_never_fetches() {
         0,
         "a cache present: still no request"
     );
-    assert_eq!(window.limit.unwrap().input, Some(922_000));
-    assert!(
-        window
-            .describe()
-            .contains("(cached input 922000, output 384000)"),
-        "{}",
-        window.describe()
-    );
+    // The cached I is read; B = min(922000, 100000 - 16384) = 83616.
+    assert_eq!(window.input, Some(922_000));
+    assert_eq!(window.budget, Some(83_616));
+    assert_eq!(window.output, Some(384_000));
     let _ = std::fs::remove_dir_all(&cache);
 }

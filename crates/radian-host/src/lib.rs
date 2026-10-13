@@ -19,8 +19,9 @@ mod tools;
 mod workspace;
 
 pub use catalog::{
-    CACHE_TTL, CATALOG_URL, Catalog, FETCH_TIMEOUT, ModelLimit, Window, WindowQuery, WindowSource,
-    cache_path, host_of, provider_for_host, resolve,
+    CACHE_TTL, CATALOG_URL, Catalog, FETCH_TIMEOUT, ModelLimit, OUTPUT_RESERVATION, Window,
+    WindowQuery, WindowSource, cache_path, host_of, input_budget, output_ceiling_warning,
+    output_reservation, provider_for_host, resolve,
 };
 pub use describe::{CLI_WORDING, TUI_WORDING, Wording, describe};
 pub use diagnostics::{

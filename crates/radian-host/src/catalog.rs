@@ -65,24 +65,64 @@ pub struct ModelLimit {
     pub input: Option<u64>,
 }
 
-impl ModelLimit {
-    /// The window handed to the existing [`agent_core::ContextBudget`] in this slice:
-    /// `min(I, C)` when both are known, `C` when `I` is missing, `I` when `C` is missing, and
-    /// `None` when neither is positive.
-    ///
-    /// **Temporary:** the compaction slice will replace this with ADR 0018's effective input
-    /// budget `B = min(I, C − R)` (`R` the output reservation). The three numbers are stored
-    /// separately so that change needs no re-parsing.
-    pub fn window_tokens(&self) -> Option<u64> {
-        let context = self.context.filter(|tokens| *tokens > 0);
-        let input = self.input.filter(|tokens| *tokens > 0);
-        match (input, context) {
-            (Some(input), Some(context)) => Some(input.min(context)),
-            (Some(input), None) => Some(input),
-            (None, Some(context)) => Some(context),
-            (None, None) => None,
+/// The output reservation `R` (ADR 0018): the safety reservation, raised to the
+/// request's own output setting when that is larger. The catalog's `limit.output` is a
+/// capability ceiling and does **not** participate in `R`.
+pub const OUTPUT_RESERVATION: u64 = 16_384;
+
+/// `R = max(16384, request_max_output)`. `None` means the provider does not send an output
+/// setting (OpenAI-compatible), so only the safety reservation applies.
+pub fn output_reservation(request_max_output: Option<u32>) -> u64 {
+    OUTPUT_RESERVATION.max(u64::from(request_max_output.unwrap_or(0)))
+}
+
+/// ADR 0018's effective input budget `B = min(I, C − R)`.
+///
+/// `context` is `C` (`--context-window` when given, else the catalog), `input` is `I` (catalog
+/// only), and `request_max_output` is the output the request itself sets. A missing or zero
+/// value is unknown, never a fabricated number. `C ≤ R` is an error: the window cannot hold
+/// the reservation.
+pub fn input_budget(
+    context: Option<u64>,
+    input: Option<u64>,
+    request_max_output: Option<u32>,
+) -> Result<Option<u64>, String> {
+    let reservation = output_reservation(request_max_output);
+    let context = context.filter(|tokens| *tokens > 0);
+    let input = input.filter(|tokens| *tokens > 0);
+    match (context, input) {
+        (Some(context), input) => {
+            if context <= reservation {
+                return Err(format!(
+                    "the context window ({context} tokens) is not larger than the output \
+                     reservation ({reservation} tokens); raise --context-window or lower the \
+                     request's max output"
+                ));
+            }
+            let after_reservation = context - reservation;
+            Ok(Some(
+                input.map_or(after_reservation, |input| input.min(after_reservation)),
+            ))
         }
+        (None, Some(input)) => Ok(Some(input)),
+        (None, None) => Ok(None),
     }
+}
+
+/// A one-line warning when the request's output setting is above the catalog's output ceiling
+/// (ADR 0018: the ceiling is checked, not used in `R`).
+pub fn output_ceiling_warning(
+    request_max_output: Option<u32>,
+    output_ceiling: Option<u64>,
+) -> Option<String> {
+    let request = u64::from(request_max_output?);
+    let ceiling = output_ceiling.filter(|value| *value > 0)?;
+    (request > ceiling).then(|| {
+        format!(
+            "[budget] warning: the request's max output ({request}) is above the catalog's \
+             output ceiling for this model ({ceiling})"
+        )
+    })
 }
 
 /// The parsed catalog: provider id → model id → limits.
@@ -153,10 +193,22 @@ pub enum WindowSource {
     Unknown,
 }
 
-/// The resolved window for a run.
+/// The resolved window for a run: the numbers ADR 0018 distinguishes, plus the effective input
+/// budget `B` computed from them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Window {
-    pub tokens: Option<u64>,
+    /// The effective input budget `B`, or `None` when it cannot be computed (window unknown).
+    pub budget: Option<u64>,
+    /// `Some` when the window cannot hold the output reservation: the host must refuse.
+    pub error: Option<String>,
+    /// `C`: `--context-window` when given, else the catalog's `limit.context`.
+    pub context: Option<u64>,
+    /// `I`: the catalog's `limit.input` (never from `--context-window`).
+    pub input: Option<u64>,
+    /// The catalog's output ceiling (a capability; only used for a warning).
+    pub output: Option<u64>,
+    /// `R`: the output reservation used to compute `B`.
+    pub reservation: u64,
     pub source: WindowSource,
     pub limit: Option<ModelLimit>,
 }
@@ -164,43 +216,59 @@ pub struct Window {
 impl Window {
     fn unknown() -> Self {
         Self {
-            tokens: None,
+            budget: None,
+            error: None,
+            context: None,
+            input: None,
+            output: None,
+            reservation: OUTPUT_RESERVATION,
             source: WindowSource::Unknown,
             limit: None,
         }
     }
 
-    /// The one startup line (ADR 0018): the window and exactly where it came from. It never
-    /// contains a key, a header value or a URL.
+    /// The one startup line (ADR 0018): the numbers, the effective budget `B`, and exactly
+    /// where they came from. It never contains a key, a header value or a URL.
     pub fn describe(&self) -> String {
-        match (&self.source, self.tokens) {
-            (WindowSource::Explicit, Some(tokens)) => {
-                format!(
-                    "window {tokens} from --context-window{}",
-                    input_output_suffix(self.limit.as_ref())
-                )
-            }
-            (
-                WindowSource::Catalog {
-                    provider,
-                    model,
-                    age,
-                },
-                Some(tokens),
-            ) => {
-                format!(
-                    "window {tokens} from models.dev ({provider}/{model}{}, {})",
-                    limits_suffix(self.limit.as_ref()),
-                    match age {
-                        Some(age) if *age < Duration::from_secs(60) => "just fetched".to_string(),
-                        Some(age) => format!("cached {} ago", human_age(*age)),
-                        None => "age unknown".to_string(),
-                    }
-                )
-            }
-            _ => "unknown: context guard off".to_string(),
+        let numbers = format!(
+            "C {}, I {}, output {}, R {}, B {}",
+            number(self.context),
+            number(self.input),
+            number(self.output),
+            self.reservation,
+            number(self.budget),
+        );
+        let origin = match &self.source {
+            WindowSource::Explicit => "from --context-window".to_string(),
+            WindowSource::Catalog {
+                provider,
+                model,
+                age,
+            } => format!(
+                "from models.dev ({provider}/{model}, {})",
+                match age {
+                    Some(age) if *age < Duration::from_secs(60) => "just fetched".to_string(),
+                    Some(age) => format!("cached {} ago", human_age(*age)),
+                    None => "age unknown".to_string(),
+                }
+            ),
+            WindowSource::Unknown => "unknown".to_string(),
+        };
+        match (&self.error, self.budget) {
+            (Some(error), _) => format!("no input budget: {error}"),
+            (None, Some(_)) => format!("{numbers} {origin}"),
+            (None, None) => format!(
+                "window unknown ({numbers}); no budget, only the provider's over-length error \
+                 remains"
+            ),
         }
     }
+}
+
+fn number(value: Option<u64>) -> String {
+    value
+        .filter(|value| *value > 0)
+        .map_or_else(|| "?".to_string(), |value| value.to_string())
 }
 
 fn human_age(age: Duration) -> String {
@@ -214,49 +282,6 @@ fn human_age(age: Duration) -> String {
     }
 }
 
-/// `, context 1000000, input 922000, output 384000` for whichever of the three the catalog
-/// published (ADR 0018: they are shown separately, not merged).
-fn limits_suffix(limit: Option<&ModelLimit>) -> String {
-    let Some(limit) = limit else {
-        return String::new();
-    };
-    let mut parts = Vec::new();
-    for (name, value) in [
-        ("context", limit.context),
-        ("input", limit.input),
-        ("output", limit.output),
-    ] {
-        if let Some(value) = value.filter(|value| *value > 0) {
-            parts.push(format!("{name} {value}"));
-        }
-    }
-    if parts.is_empty() {
-        String::new()
-    } else {
-        format!(", {}", parts.join(", "))
-    }
-}
-
-/// ` (cached input 922000, output 384000)`: the part of a cached entry an explicit
-/// `--context-window` still reads (ADR 0018). The explicit number is `C`, so the
-/// catalog's `context` is not shown.
-fn input_output_suffix(limit: Option<&ModelLimit>) -> String {
-    let Some(limit) = limit else {
-        return String::new();
-    };
-    let mut parts = Vec::new();
-    for (name, value) in [("input", limit.input), ("output", limit.output)] {
-        if let Some(value) = value.filter(|value| *value > 0) {
-            parts.push(format!("{name} {value}"));
-        }
-    }
-    if parts.is_empty() {
-        String::new()
-    } else {
-        format!(" (cached {})", parts.join(", "))
-    }
-}
-
 /// Everything the resolver needs. `cache_path`/`url` are explicit so tests never touch the
 /// real cache or the network; [`WindowQuery::production`] fills them from the environment.
 pub struct WindowQuery {
@@ -264,6 +289,9 @@ pub struct WindowQuery {
     pub catalog_provider: Option<String>,
     pub base_url: String,
     pub model: String,
+    /// The output the request itself sets (`max_tokens`), for `R`; `None` for providers that
+    /// do not send one.
+    pub request_max_output: Option<u32>,
     pub offline: bool,
     pub cache_path: PathBuf,
     pub url: String,
@@ -277,6 +305,7 @@ impl WindowQuery {
         catalog_provider: Option<String>,
         base_url: impl Into<String>,
         model: impl Into<String>,
+        request_max_output: Option<u32>,
         offline: bool,
     ) -> Self {
         Self {
@@ -284,6 +313,7 @@ impl WindowQuery {
             catalog_provider,
             base_url: base_url.into(),
             model: model.into(),
+            request_max_output,
             offline,
             cache_path: cache_path(),
             url: std::env::var("RADIAN_CATALOG_URL").unwrap_or_else(|_| CATALOG_URL.to_string()),
@@ -310,17 +340,21 @@ pub fn cache_path() -> PathBuf {
 pub async fn resolve(query: &WindowQuery) -> Window {
     if let Some(explicit) = query.explicit {
         // ADR 0018: an explicit window never fetches. If a cache already exists,
-        // its `input`/`output` are read from it (for the input ceiling and the output
-        // capability checks); otherwise only the explicit number is used.
+        // its `input`/`output` are read from it; otherwise only the explicit number is used.
         let limit = query.provider().and_then(|provider| {
             read_cache(&query.cache_path)
                 .and_then(|(catalog, _)| catalog.limit(&provider, &query.model))
         });
-        return Window {
-            tokens: Some(explicit),
-            source: WindowSource::Explicit,
+        let input = limit.and_then(|limit| limit.input);
+        let output = limit.and_then(|limit| limit.output);
+        return build_window(
+            Some(explicit),
+            input,
+            output,
+            query.request_max_output,
+            WindowSource::Explicit,
             limit,
-        };
+        );
     }
     let Some(provider) = query.provider() else {
         return Window::unknown();
@@ -332,17 +366,52 @@ pub async fn resolve(query: &WindowQuery) -> Window {
     let Some(limit) = catalog.limit(&provider, &query.model) else {
         return Window::unknown();
     };
-    match limit.window_tokens() {
-        Some(tokens) => Window {
-            tokens: Some(tokens),
-            source: WindowSource::Catalog {
-                provider,
-                model: query.model.clone(),
-                age,
-            },
-            limit: Some(limit),
+    build_window(
+        limit.context,
+        limit.input,
+        limit.output,
+        query.request_max_output,
+        WindowSource::Catalog {
+            provider,
+            model: query.model.clone(),
+            age,
         },
-        None => Window::unknown(),
+        Some(limit),
+    )
+}
+
+/// Computes `B` and assembles a [`Window`], keeping a `C ≤ R` error instead of failing here
+/// (the host decides how to report it).
+fn build_window(
+    context: Option<u64>,
+    input: Option<u64>,
+    output: Option<u64>,
+    request_max_output: Option<u32>,
+    source: WindowSource,
+    limit: Option<ModelLimit>,
+) -> Window {
+    let reservation = output_reservation(request_max_output);
+    match input_budget(context, input, request_max_output) {
+        Ok(budget) => Window {
+            budget,
+            error: None,
+            context,
+            input,
+            output,
+            reservation,
+            source,
+            limit,
+        },
+        Err(error) => Window {
+            budget: None,
+            error: Some(error),
+            context,
+            input,
+            output,
+            reservation,
+            source,
+            limit,
+        },
     }
 }
 
@@ -458,35 +527,41 @@ mod tests {
     }
 
     #[test]
-    fn window_tokens_is_min_of_input_and_context_and_zero_is_unknown() {
-        let both = ModelLimit {
-            context: Some(1_000_000),
-            input: Some(922_000),
-            output: Some(128_000),
-        };
-        assert_eq!(both.window_tokens(), Some(922_000));
-        let no_input = ModelLimit {
-            context: Some(100_000),
-            input: None,
-            output: None,
-        };
-        assert_eq!(no_input.window_tokens(), Some(100_000));
-        let zero_input = ModelLimit {
-            context: Some(100_000),
-            input: Some(0),
-            output: None,
-        };
-        assert_eq!(zero_input.window_tokens(), Some(100_000));
-        let zero_context = ModelLimit {
-            context: Some(0),
-            input: None,
-            output: None,
-        };
-        assert_eq!(zero_context.window_tokens(), None);
-        // The three numbers are stored separately, not merged away.
-        assert_eq!(both.context, Some(1_000_000));
-        assert_eq!(both.input, Some(922_000));
-        assert_eq!(both.output, Some(128_000));
+    fn the_input_budget_is_min_of_input_and_context_minus_the_reservation() {
+        // The catalog's output ceiling (384000) does NOT raise R: R comes from the request.
+        assert_eq!(
+            input_budget(Some(1_000_000), Some(922_000), None),
+            Ok(Some(922_000))
+        );
+        // Anthropic with max_tokens = 32000: R = 32000, C - R = 968000.
+        assert_eq!(
+            input_budget(Some(1_000_000), Some(922_000), Some(32_000)),
+            Ok(Some(922_000))
+        );
+        assert_eq!(
+            input_budget(Some(1_000_000), None, Some(32_000)),
+            Ok(Some(968_000))
+        );
+        // I < C - R: the input ceiling wins.
+        assert_eq!(
+            input_budget(Some(100_000), Some(50_000), Some(16_384)),
+            Ok(Some(50_000))
+        );
+        // `--context-window` changes C (here 50000), with R = 16384.
+        assert_eq!(input_budget(Some(50_000), None, None), Ok(Some(33_616)));
+        // C <= R is an error.
+        assert!(input_budget(Some(10_000), None, Some(16_384)).is_err());
+        // Both unknown: no budget.
+        assert_eq!(input_budget(None, None, None), Ok(None));
+        // I alone is a budget.
+        assert_eq!(input_budget(None, Some(70_000), Some(32_000)), Ok(Some(70_000)));
+        // R = max(16384, request).
+        assert_eq!(output_reservation(None), 16_384);
+        assert_eq!(output_reservation(Some(32_000)), 32_000);
+        assert_eq!(output_reservation(Some(1_000)), 16_384);
+        // The catalog output ceiling only warns.
+        assert!(output_ceiling_warning(Some(32_000), Some(4_000)).is_some());
+        assert!(output_ceiling_warning(Some(4_000), Some(32_000)).is_none());
     }
 
     #[test]
@@ -532,15 +607,25 @@ mod tests {
     fn describe_names_the_source() {
         assert_eq!(
             Window {
-                tokens: Some(1000),
+                budget: Some(1000),
+                error: None,
+                context: Some(1000),
+                input: None,
+                output: None,
+                reservation: 16_384,
                 source: WindowSource::Explicit,
                 limit: None
             }
             .describe(),
-            "window 1000 from --context-window"
+            "C 1000, I ?, output ?, R 16384, B 1000 from --context-window"
         );
         let catalog = Window {
-            tokens: Some(922_000),
+            budget: Some(922_000),
+            error: None,
+            context: Some(1_000_000),
+            input: Some(922_000),
+            output: Some(384_000),
+            reservation: 16_384,
             source: WindowSource::Catalog {
                 provider: "opencode".into(),
                 model: "deepseek-v4.1-flash".into(),
@@ -554,9 +639,13 @@ mod tests {
         };
         assert_eq!(
             catalog.describe(),
-            "window 922000 from models.dev (opencode/deepseek-v4.1-flash, context 1000000, \
-             input 922000, output 384000, cached 3 h ago)"
+            "C 1000000, I 922000, output 384000, R 16384, B 922000 from models.dev \
+             (opencode/deepseek-v4.1-flash, cached 3 h ago)"
         );
-        assert_eq!(Window::unknown().describe(), "unknown: context guard off");
+        assert_eq!(
+            Window::unknown().describe(),
+            "window unknown (C ?, I ?, output ?, R 16384, B ?); no budget, only the provider's \
+             over-length error remains"
+        );
     }
 }
