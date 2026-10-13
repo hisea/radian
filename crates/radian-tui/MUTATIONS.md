@@ -255,3 +255,18 @@ Base: `fcd0c26` · 一次性检出 `/tmp/fork-mut`（detached，跑完删除）�
 | F5 | 去掉 `/fork` 的 `TurnState::Running` 检查（运行中也允许） | `pty::pty_fork_refuses_while_a_turn_runs` | ✅ failed |
 
 1/1 抓住。
+
+## orphan-spin：终端消失与 pty harness 的孤儿
+
+Base `84ca71d` · 一次性检出 `/tmp/orphan-mut`（detached，独立 target，跑完删除）· `--no-fail-fast` ·
+每个变异 `git checkout --` 还原、`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| O1 | `Pty::Drop` 只杀外层 shell（去掉 process-group kill） | `pty::a_panicking_pty_test_leaves_no_app_process` | ✅ failed（该变异运行本身也如预期留下孤儿，已清理） |
+| O2 | 屏蔽两条退出路径（`Input::Gone` 什么都不做，且 draw 失败不再按终端消失处理） | `pty::pty_a_closed_master_ends_the_app_cleanly` | ✅ failed（退出码 1，不是干净的 0） |
+| O3 | `tty_readiness` 把 `POLLHUP` 当成 `Readable`（进入 crossterm 的 EOF 死循环） | 同上 | ✅ failed（5s watchdog 内不退出） |
+
+3/3 全抓。O2/O3 走同一条端到端测试（关掉 pty master、断言有界时间内干净退出）；O1 走"panicking
+测试不留进程"这条。O3 起初没被抓住，因为最早的测试用了带控制终端的 pty：master 关闭会送 SIGHUP，
+信号标志让循环照常退出；换成无控制终端的 `openpty`（纯 EOF）后抓住。
