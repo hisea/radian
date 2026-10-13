@@ -2718,11 +2718,21 @@ async fn continue_relaxes_once_and_the_guard_comes_back() {
         "the relaxed request was sent, and the one after it was blocked"
     );
     child.write("n\n").await;
+    // A later turn is still guarded: the relax was for one request, not for the session.
+    child.write("hi\n").await;
+    child.wait_for_stderr_count("[c] continue", 3).await;
+    assert_eq!(
+        server.requests().len(),
+        2,
+        "a later turn must not be relaxed by an earlier continue"
+    );
+    child.write("n\n").await;
     child.write("/exit\n").await;
     let (code, _, stderr) = child.finish().await;
 
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(server.requests().len(), 2, "{stderr}");
+    assert_eq!(stderr.matches("[c] continue").count(), 3, "{stderr}");
 }
 
 /// 5: choosing stop ends the turn; the session keeps accepting turns.
