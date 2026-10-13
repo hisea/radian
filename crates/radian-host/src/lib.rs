@@ -64,8 +64,9 @@ pub use projection::{
     LastToolCall, ProjectionRead, SessionProjection, StreamKind, StreamSnapshot, TurnState,
 };
 pub use session::{
-    CommandRefused, DriverEnd, HostBindings, LocalSession, SessionCapability, SessionCommand,
-    SessionError, SessionFacade, SessionFacts, SessionId, SessionSetup, open_session,
+    ApprovalRouting, CommandRefused, DriverEnd, HostBindings, LocalSession, SessionCapability,
+    SessionCommand, SessionError, SessionFacade, SessionFacts, SessionId, SessionQueue,
+    SessionSetup, open_session,
 };
 pub use session_id::{generate_session_id, validate_session_id};
 pub use sessions::{

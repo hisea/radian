@@ -1191,7 +1191,8 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             capabilities: radian_host::SessionCapability::ALL.to_vec(),
         },
         radian_host::HostBindings {
-            approver,
+            approvals: radian_host::ApprovalRouting::Direct(approver),
+            ask_user: false,
             audit,
             events: Arc::clone(&ui) as Arc<dyn EventSink>,
             projection,
@@ -1249,6 +1250,8 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         ),
     }
     eprintln!("{}", session.facts().memory_notice);
+    // ADR 0024 Q5: this host has no interactive user, so `ask_user` is not registered.
+    eprintln!("{}", session.facts().ask_user_line());
 
     // The approval prompt and the prompt loop share stdin. While approval may read, the loop
     // must not compete for a line; with `--yes` (or nobody to ask) it may.

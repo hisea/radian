@@ -4,7 +4,6 @@
 //! Never run this in a shared terminal by hand without expecting it to take over: it enters
 //! the alternate screen and raw mode. The tests drive it through a pty.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
 use std::sync::Arc;
@@ -24,7 +23,7 @@ use radian_permissions::{
 };
 use radian_session::{Index, SessionJournal};
 use radian_tui::app::{App, Effect, Input as AppInput, MemoryResult, PickerData};
-use radian_tui::events::{ApprovalPrompt, InputEvent, ProjectionSink, UiEvent};
+use radian_tui::events::{InputEvent, ProjectionSink, UiEvent};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
@@ -499,12 +498,14 @@ fn run(
     let projection = Arc::new(radian_host::SessionProjection::new());
     let live: Arc<dyn EventSink> =
         Arc::new(ProjectionSink::new(tx.clone(), Arc::clone(&projection)));
-    // `--yes` swaps the approver for one that answers "allow once" without asking; rules,
-    // the sandbox and the audit record are untouched by it (same as `agent --yes`).
-    let approver: Arc<dyn Approver> = if cli.yes {
-        Arc::new(AutoApprover)
+    // ADR 0023 U7: approvals go through the session's pending queue, so the UI shows one
+    // arrival order and never supersedes a request. `--yes` answers "allow once" without
+    // asking, so it bypasses the queue; rules, the sandbox and the audit record are untouched
+    // by it (same as `agent --yes`).
+    let approvals = if cli.yes {
+        radian_host::ApprovalRouting::Direct(Arc::new(AutoApprover) as Arc<dyn Approver>)
     } else {
-        Arc::new(TuiApprover { tx: tx.clone() })
+        radian_host::ApprovalRouting::Queued
     };
     // The audit sink needs the journal, which `open_session` creates; the binding is a factory
     // for that reason.
@@ -577,7 +578,8 @@ fn run(
                 capabilities: radian_host::SessionCapability::ALL.to_vec(),
             },
             radian_host::HostBindings {
-                approver,
+                approvals,
+                ask_user: true,
                 audit,
                 events: live,
                 projection: Arc::clone(&projection),
@@ -588,6 +590,20 @@ fn run(
             },
         ))
         .map_err(|error| error.to_string())?;
+    // ADR 0023 U7: the queue's changes are a wake-up source. A push, an answer, an abort and
+    // a waiter that gave up all bump it, so the UI re-reads the head and the modal matches the
+    // queue even when nothing else happened.
+    {
+        let mut changes = session.queue().subscribe();
+        let pending_tx = tx.clone();
+        runtime.spawn(async move {
+            while changes.changed().await.is_ok() {
+                if pending_tx.send(UiEvent::Pending).is_err() {
+                    break;
+                }
+            }
+        });
+    }
     let memory_service = session.memory().cloned();
     // The history of a resumed session is rendered before the first frame, so the transcript
     // shows it from the start. `Driver::open` recovers the same history from the journal for
@@ -716,6 +732,11 @@ fn run(
     app.entries.push(radian_tui::Entry::new(
         radian_tui::EntryKind::Notice,
         session.facts().memory_notice.clone(),
+    ));
+    // ADR 0024 Q5: this host has an interactive user, so `ask_user` is registered.
+    app.entries.push(radian_tui::Entry::new(
+        radian_tui::EntryKind::Notice,
+        session.facts().ask_user_line(),
     ));
     if cli.yes {
         app.entries.push(radian_tui::Entry::new(
@@ -1052,8 +1073,9 @@ struct LoopContext<'a> {
     memory: &'a Option<MemoryService>,
     host: &'a SessionHost,
     tx: &'a Sender<UiEvent>,
-    /// The reply channels of the approval prompts on screen, by request id.
-    approval_replies: HashMap<String, tokio::sync::oneshot::Sender<ApprovalOutcome>>,
+    /// The pending queue (ADR 0023 U7): the loop reads the head and the count when it is told
+    /// something changed, and the facade answers it.
+    queue: &'a radian_host::SessionQueue,
     /// The signal that stopped the loop, if any: it decides the reason line (and, in `main`,
     /// the exit code).
     signal: Option<i32>,
@@ -1066,10 +1088,11 @@ impl LoopContext<'_> {
         let result = match event {
             UiEvent::Agent(event) => app.update(AppInput::Event(event)),
             UiEvent::Runtime(event) => app.update(AppInput::Runtime(event)),
-            UiEvent::Approval(prompt) => {
-                self.approval_replies
-                    .insert(prompt.request.request_id.clone(), prompt.reply);
-                app.update(AppInput::Approval(prompt.request))
+            UiEvent::Pending => {
+                // ADR 0023 U7: the UI shows the queue's head. Reading it here is what makes a
+                // waiter that gave up (a cancelled turn) disappear immediately.
+                let head = self.queue.head();
+                app.update(AppInput::Pending(head.map(Box::new), self.queue.len()))
             }
             UiEvent::Command(input) => app.update(input),
             UiEvent::Input(InputEvent::Key(key)) => app.on_key(key),
@@ -1121,20 +1144,20 @@ impl LoopContext<'_> {
             Effect::Steer(text) => self.command(radian_host::SessionCommand::Steer(text)),
             Effect::Cancel => self.command(radian_host::SessionCommand::Cancel),
             Effect::Quit => Ok(()),
-            Effect::AnswerApproval {
+            Effect::AnswerRequest {
                 request_id,
-                outcome,
+                response,
             } => {
-                if let Some(reply) = self.approval_replies.remove(&request_id) {
-                    let _ = reply.send(outcome);
+                // ADR 0023 U5: the answer goes through the facade, which re-validates the
+                // `AnswerRequest` capability. A late answer is silently ignored there.
+                match self.session.answer(request_id, response) {
+                    Ok(()) => Ok(()),
+                    Err(refused) if refused.capability.is_some() => {
+                        self.send(AppInput::CommandRefused(refused));
+                        Ok(())
+                    }
+                    Err(refused) => Err(refused.reason),
                 }
-                Ok(())
-            }
-            Effect::AbandonApproval { request_id } => {
-                // Dropping the channel is what makes the waiting call resolve as abandoned (a
-                // denial), exactly as dropping the prompt used to.
-                self.approval_replies.remove(&request_id);
-                Ok(())
             }
             // `@` expansion and completion read files, so they are effects; their results go
             // back through the channel as `Command` events.
@@ -1236,7 +1259,7 @@ fn ui_loop(
         memory,
         host,
         tx,
-        approval_replies: HashMap::new(),
+        queue: session.pending(),
         signal: None,
     };
     // The first frame: the startup notices and the resumed history are already in the app, and
@@ -1571,30 +1594,6 @@ fn list_sessions(cli: &Cli) -> Result<(), ListError> {
         ))?;
     }
     Ok(())
-}
-
-/// The host side of `ask`: forwards the request to the UI thread and waits for the answer.
-/// The permission layer races this future against the turn's cancellation, so a prompt that
-/// is never answered (Ctrl-C, quit) resolves as a denial instead of hanging.
-struct TuiApprover {
-    tx: Sender<UiEvent>,
-}
-
-impl Approver for TuiApprover {
-    fn decide(
-        &self,
-        request: ApprovalRequest,
-    ) -> futures_util::future::BoxFuture<'_, Result<ApprovalOutcome, ApprovalError>> {
-        Box::pin(async move {
-            let (reply, answer) = tokio::sync::oneshot::channel();
-            self.tx
-                .send(UiEvent::Approval(ApprovalPrompt { request, reply }))
-                .map_err(|_| ApprovalError("the UI is gone".into()))?;
-            answer
-                .await
-                .map_err(|_| ApprovalError("the approval was abandoned".into()))
-        })
-    }
 }
 
 /// The `--yes` approver: answers "allow once" without asking. Every decision still goes

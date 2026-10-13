@@ -1,8 +1,9 @@
-//! The approval dialog: what it shows, how keys answer it, and what a cancelled turn does
-//! with a prompt that is still up. Pure `App` state plus a `TestBackend` frame, so it runs
-//! everywhere without a terminal.
+//! The approval dialog: what it shows, how keys answer it, and how the pending queue drives
+//! it (ADR 0023 U7). Pure `App` state plus a `TestBackend` frame, so it runs everywhere
+//! without a terminal.
 
-use agent_core::RunStatus;
+use agent_core::{AgentEvent, CancelReason, RunStatus};
+use radian_host::{PendingRequest, PendingResponse, PendingView};
 use radian_permissions::{ApprovalOutcome, ApprovalRequest};
 use radian_tui::app::{App, Effect, Input};
 use radian_tui::render;
@@ -23,37 +24,34 @@ fn request() -> ApprovalRequest {
     )
 }
 
-/// Puts a prompt up and returns the reply channel (which the **event loop** owns) and the
-/// receiver its answer will arrive on.
-fn prompt(
-    app: &mut App,
-) -> (
-    tokio::sync::oneshot::Sender<ApprovalOutcome>,
-    tokio::sync::oneshot::Receiver<ApprovalOutcome>,
-) {
-    let (reply, answer) = tokio::sync::oneshot::channel();
-    app.update(Input::Approval(request()));
-    (reply, answer)
+/// The queue's view of that request: the id the UI shows and answers (ADR 0023 U7).
+fn view() -> PendingView<PendingRequest> {
+    PendingView {
+        request_id: 1,
+        origin: "session".into(),
+        request: PendingRequest::Approval(request()),
+    }
 }
 
-/// Answers the way the event loop does: the effect carries the outcome, and the loop sends it
-/// through the reply channel it owns. Returns the request id the effect named.
-fn answer(
-    app: &mut App,
-    key: KeyEvent,
-    reply: tokio::sync::oneshot::Sender<ApprovalOutcome>,
-) -> String {
+/// Puts the queue's head on screen the way the loop does.
+fn prompt(app: &mut App) {
+    app.update(Input::Pending(Some(Box::new(view())), 1));
+}
+
+/// Answers the way the event loop does: the effect names the queue's request id and the
+/// response, and the loop hands both to the facade. Returns what the effect named.
+fn answer(app: &mut App, key: KeyEvent) -> (u64, ApprovalOutcome) {
     let result = app.on_key(key);
     assert_eq!(result.effects.len(), 1, "{:?}", result.effects);
-    match &result.effects[0] {
-        Effect::AnswerApproval {
+    match result.effects[0].clone() {
+        Effect::AnswerRequest {
             request_id,
-            outcome,
-        } => {
-            let _ = reply.send(outcome.clone());
-            request_id.clone()
-        }
-        other => panic!("expected an approval answer, got {other:?}"),
+            response,
+        } => match response {
+            PendingResponse::Approval(outcome) => (request_id, outcome),
+            other => panic!("expected an approval response, got {other:?}"),
+        },
+        other => panic!("expected an answer request, got {other:?}"),
     }
 }
 
@@ -79,8 +77,8 @@ fn the_prompt_shows_the_resolved_path_not_the_raw_one() {
     assert_eq!(path_line, "path: /ws/out.txt");
 }
 
-#[tokio::test]
-async fn keys_answer_the_prompt() {
+#[test]
+fn keys_answer_the_prompt_with_the_queue_id() {
     for (code, expected) in [
         (KeyCode::Char('y'), ApprovalOutcome::AllowOnce),
         (KeyCode::Char('a'), ApprovalOutcome::AllowForSession),
@@ -88,9 +86,10 @@ async fn keys_answer_the_prompt() {
         (KeyCode::Esc, ApprovalOutcome::Deny { reason: None }),
     ] {
         let mut app = App::new("m", "s");
-        let (reply, answer_rx) = prompt(&mut app);
-        assert_eq!(answer(&mut app, key(code), reply), "perm-1", "{code:?}");
-        assert_eq!(answer_rx.await.unwrap(), expected, "{code:?}");
+        prompt(&mut app);
+        let (request_id, outcome) = answer(&mut app, key(code));
+        assert_eq!(request_id, 1, "{code:?}");
+        assert_eq!(outcome, expected, "{code:?}");
         assert!(
             app.pending_approval().is_none(),
             "the prompt is cleared after an answer"
@@ -98,10 +97,10 @@ async fn keys_answer_the_prompt() {
     }
 }
 
-#[tokio::test]
-async fn keys_do_not_type_while_a_prompt_is_up() {
+#[test]
+fn keys_do_not_type_while_a_prompt_is_up() {
     let mut app = App::new("m", "s");
-    let (_reply, _answer) = prompt(&mut app);
+    prompt(&mut app);
     app.on_key(key(KeyCode::Char('x')));
     app.on_key(key(KeyCode::Enter));
     assert!(
@@ -111,51 +110,71 @@ async fn keys_do_not_type_while_a_prompt_is_up() {
     );
 }
 
-#[tokio::test]
-async fn a_finished_turn_abandons_a_prompt_that_was_never_answered() {
+/// ADR 0023 U7: the queue drives the modal, not the turn. A finished turn produces no effect
+/// for the prompt; the head going away (the permission layer's waiter was cancelled) is what
+/// removes it, so "the waiter gave up" and "the turn ended" are the same event.
+#[test]
+fn the_queue_head_drives_the_prompt_not_the_turn() {
     let mut app = App::new("m", "s");
-    let (reply, answer_rx) = prompt(&mut app);
-    // Cancelling the turn makes the permission layer resolve the `ask` as a denial; the UI
-    // must not keep the stale prompt, and the loop must drop the reply channel.
-    let result = app.update(Input::Event(agent_core::AgentEvent::RunFinished {
-        status: RunStatus::Cancelled(agent_core::CancelReason::Requested),
+    prompt(&mut app);
+    let result = app.update(Input::Event(AgentEvent::RunFinished {
+        status: RunStatus::Cancelled(CancelReason::Requested),
     }));
-    assert!(app.pending_approval().is_none());
-    assert_eq!(
-        result.effects,
-        vec![Effect::AbandonApproval {
-            request_id: "perm-1".into()
-        }]
+    assert!(result.effects.is_empty(), "{:?}", result.effects);
+    assert!(
+        app.pending_approval().is_some(),
+        "the turn ending does not by itself clear the modal"
     );
-    // The loop runs the effect: it drops the channel it owns.
-    let mut reply = Some(reply);
-    for effect in result.effects {
-        if let Effect::AbandonApproval { .. } = effect {
-            reply.take();
-        }
-    }
-    assert!(answer_rx.await.is_err(), "the abandoned channel is dropped");
+
+    app.update(Input::Pending(None, 0));
+    assert!(app.pending_approval().is_none(), "the queue's head is gone");
+    assert_eq!(app.pending, 0);
 }
 
-#[tokio::test]
-async fn ctrl_c_while_a_prompt_is_up_cancels_instead_of_answering() {
+#[test]
+fn ctrl_c_while_a_prompt_is_up_cancels_instead_of_answering() {
     let mut app = App::new("m", "s");
-    // The receiver is dropped without awaiting: Ctrl-C must not answer the prompt, so the
-    // channel stays open until the turn actually ends and the prompt is cleared.
-    let (_reply, _answer) = prompt(&mut app);
+    prompt(&mut app);
     app.projection.set_turn(radian_tui::TurnState::Running);
     let result = app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
     assert_eq!(result.effects, vec![Effect::Cancel]);
     assert!(
         app.pending_approval().is_some(),
-        "Ctrl-C cancels the turn; the prompt is cleared when the turn ends"
+        "Ctrl-C cancels the turn; the queue clears the prompt when the waiter goes"
     );
+}
+
+/// Two approvals in a row: the second does not supersede the first (ADR 0023 U7 replaced that
+/// behavior). The queue hands the UI one head at a time.
+#[test]
+fn a_second_approval_does_not_supersede_the_first() {
+    let mut app = App::new("m", "s");
+    prompt(&mut app);
+    let second = PendingView {
+        request_id: 2,
+        origin: "session".into(),
+        request: PendingRequest::Approval(request()),
+    };
+    // The queue's head is still the first request (the second is behind it), so nothing moves.
+    app.update(Input::Pending(Some(Box::new(view())), 2));
+    assert_eq!(
+        app.pending_approval().map(|r| r.request_id.as_str()),
+        Some("perm-1")
+    );
+    assert_eq!(app.pending, 2, "the status bar counts the queue");
+
+    // When the first is answered, the second becomes the head. Moving to it must not answer
+    // (deny) the first: the queue already did, and a second answer would be a late one.
+    let result = app.update(Input::Pending(Some(Box::new(second)), 1));
+    assert!(result.effects.is_empty(), "{:?}", result.effects);
+    assert!(app.pending_approval().is_some());
+    assert_eq!(app.pending, 1);
 }
 
 #[test]
 fn the_approval_box_is_rendered_over_the_input() {
     let mut app = App::new("mock", "s");
-    app.update(Input::Approval(request()));
+    prompt(&mut app);
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     terminal
         .draw(|frame| render::draw(frame, &mut app))

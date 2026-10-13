@@ -97,21 +97,30 @@ fn the_approval_keys_cannot_be_taken_over_by_the_keymap() {
         false,
     )
     .unwrap();
-    app.update(Input::Approval(radian_permissions::ApprovalRequest::new(
-        "perm-1",
-        "call-1",
-        "write",
-        "/ws/out.txt",
-        "/ws/out.txt",
-        serde_json::json!({}),
-        None,
-    )));
+    app.update(Input::Pending(
+        Some(Box::new(radian_host::PendingView {
+            request_id: 1,
+            origin: "session".into(),
+            request: radian_host::PendingRequest::Approval(
+                radian_permissions::ApprovalRequest::new(
+                    "perm-1",
+                    "call-1",
+                    "write",
+                    "/ws/out.txt",
+                    "/ws/out.txt",
+                    serde_json::json!({}),
+                    None,
+                ),
+            ),
+        })),
+        1,
+    ));
     // The hardcoded prompt key wins over the keymap: it answers, it does not cancel.
     assert_eq!(
         app.on_key(key(KeyCode::Char('y'))).effects,
-        vec![Effect::AnswerApproval {
-            request_id: "perm-1".into(),
-            outcome: ApprovalOutcome::AllowOnce,
+        vec![Effect::AnswerRequest {
+            request_id: 1,
+            response: radian_host::PendingResponse::Approval(ApprovalOutcome::AllowOnce),
         }]
     );
     assert!(!app.quit, "the prompt key did not cancel/quit");
