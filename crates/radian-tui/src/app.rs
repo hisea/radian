@@ -1,6 +1,8 @@
 //! The UI state: transcript entries, the input buffer, scroll-follow logic, and key
 //! handling. It contains no terminal I/O, so the whole thing is driven by tests in memory.
 
+use std::path::PathBuf;
+
 use agent_core::{
     AgentEvent, BudgetReport, ContentPart, Message, ModelUsage, RunStatus, UsageSource,
 };
@@ -230,6 +232,12 @@ pub struct App {
     pub total_lines: usize,
     pub view_height: u16,
     pub max_scroll: usize,
+    /// The workspace root, so `Tab` can complete `@` file references. `None` until the host
+    /// sets it; without it `Tab` does nothing.
+    pub workspace: Option<PathBuf>,
+    /// The candidates from the last `Tab`, shown above the input box. `None` when no list is
+    /// up; any key other than `Tab` dismisses it.
+    pub completion: Option<Vec<String>>,
 }
 
 impl App {
@@ -264,6 +272,8 @@ impl App {
             total_lines: 0,
             view_height: 0,
             max_scroll: 0,
+            workspace: None,
+            completion: None,
         }
     }
 
@@ -423,10 +433,21 @@ impl App {
         }
         // Cancel/quit works even while a prompt is up: the permission layer races the
         // approval against cancellation, so the waiting call resolves as a denial.
-        if self.keymap.action_for(&key) == Some(Action::Cancel) {
+        let action = self.keymap.action_for(&key);
+        if action == Some(Action::Cancel) {
             return self.cancel_or_quit();
         }
-        if let Some(action) = self.keymap.action_for(&key) {
+        // The `@` completion list (Phase 4): the escape action closes it (and does not clear
+        // the input); any key other than the completion action dismisses it, because typing
+        // continues the word and the list would be stale.
+        if action == Some(Action::Escape) && self.completion.is_some() {
+            self.completion = None;
+            return None;
+        }
+        if action != Some(Action::Complete) {
+            self.completion = None;
+        }
+        if let Some(action) = action {
             return self.dispatch(action);
         }
         // Any other plain character is text, never a binding.
@@ -533,6 +554,12 @@ impl App {
             }
             Action::DeleteUnder => {
                 self.input.delete();
+                None
+            }
+            // Tab: complete the `@` file reference at the cursor (Phase 4). On any other
+            // word it does nothing, so the key stays free for a future binding.
+            Action::Complete => {
+                self.complete_mention();
                 None
             }
             Action::DeleteWord => {
@@ -844,5 +871,71 @@ impl App {
     /// the user typed.
     pub fn restore_input(&mut self, text: String) {
         self.input.set_text(&text);
+    }
+
+    /// Records the workspace root, so `Tab` can complete `@` file references against it.
+    pub fn set_workspace(&mut self, workspace: impl Into<PathBuf>) {
+        self.workspace = Some(workspace.into());
+    }
+
+    /// `Tab` on an `@` word (Phase 4):
+    ///
+    /// * one candidate: insert it; a directory keeps its trailing `/`, a file gets a trailing
+    ///   space so the next word can be typed;
+    /// * several: extend the word to their longest common prefix; a second `Tab` already at
+    ///   that prefix shows the candidate list (the renderer draws `self.completion`);
+    /// * none: leave the text alone;
+    /// * the cursor is not on an `@` word: do nothing.
+    ///
+    /// Only the text between `@` and the cursor is replaced; text after the cursor is kept.
+    fn complete_mention(&mut self) {
+        let Some(workspace) = self.workspace.clone() else {
+            self.completion = None;
+            return;
+        };
+        let Some(completion) =
+            crate::mention::complete(&self.input.text(), self.input.cursor(), &workspace)
+        else {
+            self.completion = None;
+            return;
+        };
+        if completion.candidates.is_empty() {
+            self.completion = None;
+            return;
+        }
+        if completion.candidates.len() == 1 {
+            let candidate = &completion.candidates[0];
+            let insert = if candidate.ends_with('/') {
+                candidate.clone()
+            } else {
+                format!("{candidate} ")
+            };
+            self.replace_range(completion.range, &insert);
+            self.completion = None;
+            return;
+        }
+        let chars: Vec<char> = self.input.text().chars().collect();
+        let typed: String = chars[completion.range.clone()].iter().collect();
+        if completion.common_prefix.chars().count() > typed.chars().count() {
+            self.replace_range(completion.range, &completion.common_prefix);
+            self.completion = None;
+            return;
+        }
+        self.completion = Some(completion.candidates);
+    }
+
+    /// Replaces the char range `range` with `replacement`, leaving the cursor right after the
+    /// replacement and the rest of the text unchanged.
+    fn replace_range(&mut self, range: std::ops::Range<usize>, replacement: &str) {
+        let chars: Vec<char> = self.input.text().chars().collect();
+        let mut text: Vec<char> = Vec::with_capacity(chars.len() + replacement.len());
+        text.extend_from_slice(&chars[..range.start]);
+        text.extend(replacement.chars());
+        let after = chars.len() - range.end;
+        text.extend_from_slice(&chars[range.end..]);
+        self.input.set_text(&text.into_iter().collect::<String>());
+        for _ in 0..after {
+            self.input.left();
+        }
     }
 }

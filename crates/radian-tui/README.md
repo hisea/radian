@@ -43,6 +43,7 @@ the composer.
 | Key | Action |
 |---|---|
 | Enter | send. Idle → `Inbox::followup`; while a turn runs → `Inbox::steer` |
+| Tab | complete the `@` file reference at the cursor: one candidate is inserted (a directory keeps its trailing `/`, a file gets a space); several complete to their longest common prefix, and a second Tab already at that prefix shows the candidate list above the input box; any other word does nothing (the key is reserved) |
 | Ctrl-J (or Shift-Enter / Alt-Enter) | insert a newline in the input |
 | Left / Right | move the cursor one character |
 | Ctrl-Left / Ctrl-Right (or Alt-Left / Alt-Right) | move by one word |
@@ -54,11 +55,18 @@ the composer.
 | PageUp / PageDown | scroll the transcript a page |
 | Shift-Up / Shift-Down | scroll the transcript one line |
 | Ctrl-Home / Ctrl-End | scroll the transcript to its top / bottom |
-| Esc | clear a non-empty input first (the line stays in the history, so `Up` finds it); with an empty input, cancel the running turn / quit |
+| Esc | close the `@` candidate list if it is up; otherwise clear a non-empty input first (the line stays in the history, so `Up` finds it); with an empty input, cancel the running turn / quit |
 | Ctrl-C | cancel the running turn; when idle, quit |
 | bracketed paste | inserts at the cursor, `\r\n` normalized to `\n`, and never sends |
 
 Shift-Enter needs a terminal with the enhanced keyboard protocol; Ctrl-J works everywhere.
+
+`@relative/path` in a message attaches the file's contents to the request (Phase 4): resolved
+inside the workspace like the `read` tool (no absolute path, no `..`, a symlink that leaves is
+refused), at most 100 KiB per file and 400 KiB in total, and a binary file makes the message
+unsendable with the input kept. The transcript folds each attachment to `[file: P, N lines]`.
+`Tab` completes the path; the candidate list is at most 10 rows plus `+N more`, clipped to the
+terminal width, and never covers an approval prompt.
 
 ### Theme and keybindings (config `tui.*`)
 
@@ -74,6 +82,7 @@ theme = "dark"                 # dark | light | mono
 send = ["ctrl-s"]              # replaces the default `enter`
 newline = ["ctrl-j", "alt-enter", "shift-enter"]
 history_prev = ["up"]
+complete = ["tab"]             # the `@` file-reference completion
 ```
 
 - `theme`: `dark` is the original palette, `light` re-picks it for a light background, `mono`
@@ -88,11 +97,14 @@ history_prev = ["up"]
   `line_start`, `line_end`, `history_prev`, `history_next`, `delete_before`, `delete_under`,
   `delete_word`, `delete_to_line_start`, `delete_to_line_end`, `scroll_page_up`,
   `scroll_page_down`, `scroll_line_up`, `scroll_line_down`, `scroll_top`, `scroll_bottom`,
-  `escape`, `cancel`. The defaults are exactly the table above, so an empty config changes
-  nothing.
+  `escape`, `cancel`, `complete`. The defaults are exactly the table above, so an empty config
+  changes nothing.
 - **The approval and command-confirmation prompts are not rebindable.** `y`/`a`/`n` and `Esc`
   are handled before the keymap, so a bad keybinding cannot approve a tool call the user meant
   to deny; `cancel` still works while a prompt is up.
+- While the `@` completion list is showing, `escape` only closes the list (it does not clear
+  the input), and any key other than `complete` dismisses it. Both follow the keymap, so a
+  rebound `escape`/`complete` moves that behavior too.
 - Note that rebinding `send` away from `enter` leaves `enter` a no-op unless `newline` is given
   it too (as in the example) — the keys are a total map, not layered.
 
@@ -229,6 +241,11 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
 - **the status bar at your usual width**: is the tier / usage / mcp / context order readable,
   and does the truncation (`…`) drop what you would have dropped? The pty and `TestBackend`
   tests assert the text and the 60-column rule, not the feel.
+- **the `@` completion list**: in a workspace with many files, type `@` and press Tab twice.
+  Does the first press extend to the common prefix and the second show the list above the input
+  box? Is the list readable at your width (10 rows plus `+N more`), does Esc close it without
+  clearing the line, and does typing dismiss it? pty automation asserts the text and the keys,
+  not the feel.
 
 Suggested 3-line manual pass (in a throwaway terminal, not your working one):
 

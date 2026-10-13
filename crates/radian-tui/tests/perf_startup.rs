@@ -109,6 +109,9 @@ impl Pty {
         }
         cmd.env("TERM", "xterm-256color");
         cmd.env("HOME", home.path());
+        // `env_clear` above already drops `RADIAN_HOME`/`RADIAN_CONFIG`; pin the root too so
+        // the config can only ever come from this temp directory.
+        cmd.env("RADIAN_HOME", home.path());
         // No real models.dev from a test (ADR 0018): a closed local port fails fast.
         cmd.env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json");
         let child = cmd.spawn().unwrap();

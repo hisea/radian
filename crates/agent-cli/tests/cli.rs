@@ -139,6 +139,10 @@ fn spawn_agent(args: &[&str], envs: &[(&str, &str)]) -> Child {
         // overrides both through `envs`.
         .env("HOME", fresh_session_dir())
         .env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json")
+        // No test may read the user's real config file: pin the whole `~/.radian` root and
+        // drop `RADIAN_CONFIG` (either could otherwise point at a real file).
+        .env("RADIAN_HOME", fresh_session_dir())
+        .env_remove("RADIAN_CONFIG")
         .envs(envs.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -2757,9 +2761,11 @@ fn spawn_agent_in(session_dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> C
         .args(args)
         .env_remove("OPENAI_API_KEY")
         .env("RADIAN_SESSION_DIR", session_dir)
-        // Isolate the catalog cache and the network, like `spawn_agent` above.
+        // Isolate the catalog cache, the `~/.radian` root and the network, like `spawn_agent`.
         .env("HOME", fresh_session_dir())
         .env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json")
+        .env("RADIAN_HOME", fresh_session_dir())
+        .env_remove("RADIAN_CONFIG")
         .envs(envs.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -3739,13 +3745,22 @@ async fn session_commands_do_not_need_a_model() {
 /// created). The decision moved from clap to `setup` so the config file can supply it.
 #[tokio::test]
 async fn a_conversation_still_requires_a_model() {
+    // The setup check runs **before** the API-key lookup, and its wording is unique: asserting
+    // only `--model` would also be satisfied by the later "no API key" error, so a mutation
+    // that dropped the model requirement would slip past. Assert the sentence itself.
     let (code, _, stderr) = feed_and_wait(spawn_agent(&["-p", "hi"], &[]), "").await;
     assert_eq!(code, 2, "{stderr}");
-    assert!(stderr.contains("--model"), "{stderr}");
+    assert!(
+        stderr.contains("no model: pass --model, or set model.model in the config file"),
+        "{stderr}"
+    );
 
     let (code, _, stderr) = feed_and_wait(spawn_agent(&[], &[]), "").await;
     assert_eq!(code, 2, "{stderr}");
-    assert!(stderr.contains("--model"), "{stderr}");
+    assert!(
+        stderr.contains("no model: pass --model, or set model.model in the config file"),
+        "{stderr}"
+    );
 }
 
 /// `--export` validates the id as a session id before using it as a file name: a path-like
@@ -4429,7 +4444,12 @@ fn spawn_agent_bare(args: &[&str], envs: &[(&str, &str)]) -> Child {
         .args(args)
         .env_remove("OPENAI_API_KEY")
         .env_remove("RADIAN_SESSION_DIR")
+        // The whole root is the test's to control, but it still must not be the real one:
+        // a fresh `HOME` makes the `$HOME/.radian` fallback hermetic, and `RADIAN_CONFIG`
+        // (which would win over both) is dropped.
+        .env("HOME", fresh_session_dir())
         .env_remove("RADIAN_HOME")
+        .env_remove("RADIAN_CONFIG")
         .envs(envs.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -5361,4 +5381,68 @@ async fn a_plaintext_secret_in_the_config_is_refused_without_echoing_it() {
         !stderr.contains("sk-live"),
         "the value must not be echoed: {stderr}"
     );
+}
+
+/// The config reader takes `schema_version = 0` from **the harness's temp `RADIAN_HOME`** and
+/// names that path: the reader and the harness agree on the root, so a test config lives in
+/// the temp directory and never in the user's real one.
+#[tokio::test]
+async fn a_failing_config_in_the_temp_radian_home_is_read_and_named() {
+    let dir = scratch("config-rh");
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config = config_dir.join("config.toml");
+    std::fs::write(&config, "schema_version = 0\n").unwrap();
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &["--model", "m", "-p", "hi"],
+            &[("RADIAN_HOME", dir.to_str().unwrap())],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("older than the supported"), "{stderr}");
+    assert!(
+        stderr.contains(&config.display().to_string()),
+        "the refusal names the temp config: {stderr}"
+    );
+    // The refusal happens before any API key is read.
+    assert!(!stderr.contains("no API key"), "{stderr}");
+}
+
+/// The harness must never read the user's real `~/.radian/config/config.toml`. `spawn_agent`
+/// pins the whole root (`RADIAN_HOME`) and drops `RADIAN_CONFIG`, so a `HOME` whose
+/// `.radian/config/config.toml` would refuse startup is **not** consulted: the run reports
+/// `[config] none` and reaches the model. Without the pin it would refuse with the version
+/// error instead — the test would fail.
+#[tokio::test]
+async fn the_harness_never_reads_a_config_outside_its_temp_root() {
+    let dir = scratch("config-fake-home");
+    let config_dir = dir.join(".radian").join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("config.toml"), "schema_version = 0\n").unwrap();
+
+    // A local mock keeps the run past the API-key check, so the `[config]` startup line is
+    // reached.
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
+            &[("HOME", dir.to_str().unwrap())],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        !stderr.contains("older than the supported"),
+        "a config outside the harness root must not be read: {stderr}"
+    );
+    assert!(
+        stderr.contains("[config] none"),
+        "the harness resolved no config file at all: {stderr}"
+    );
+    assert_eq!(server.requests().len(), 1, "the run reached the model");
 }

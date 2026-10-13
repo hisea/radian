@@ -227,6 +227,24 @@ Base: `9daed70` · 一次性检出 `/tmp/sessions-mut`（detached，跑完删除
 | M3 | `/export` 跳过已存在检查 | `pty::pty_sessions_and_export_commands`（断言 `ready exists`） | ✅ failed |
 | M5 | `/sessions` 落到 `Message`（发给模型） | `pty::pty_sessions_and_export_commands`（断言 `--resume cmd`） | ✅ failed |
 
+## tab：`@` 补全接到 Tab（Phase 4）
+
+Base `81ea117` · 一次性检出 `/tmp/radian-tab-mut`（detached，独立 target，跑完删除）·
+`--no-fail-fast` · 每个变异 `git checkout --` 还原、`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M19 | 唯一候选的替换区间错位（`range.start + 1`） | `mention_tab::a_unique_file_candidate_completes_and_adds_a_space` | ✅ failed |
+| M20 | 目录也加空格（不再保留尾 `/`） | `mention_tab::a_unique_directory_candidate_keeps_the_trailing_slash` | ✅ failed |
+| M21 | 第二次 Tab 不显示候选列表 | `mention_tab::several_candidates_complete_to_the_common_prefix_then_list` | ✅ failed |
+| M22 | 非 `@` 词也补全（`mention::complete` 不要求 `@`） | `mention_tab::tab_on_a_word_that_is_not_a_reference_does_nothing` | ✅ failed |
+| M23 | `Esc` 不关闭列表（落到清空输入的分支） | `mention_tab::esc_closes_the_list_without_clearing_the_input` | ✅ failed |
+| M24 | `truncate_columns` 不截断 | `render::completion_rows_truncates_to_the_width` | ✅ failed |
+
+6/6 全抓。M22、M24 起初有漏：`plain`/`mail a@b` 本来就不匹配文件，而 `Paragraph` 自己会裁剪，
+所以屏幕测试抓不住——补了“无 `@` 但匹配文件”的用例与 `completion_rows` 的直接单测（`81ea117`）
+后才抓住，记录在此。
+
 ## Phase 4：主题与按键（ADR 0008 `tui.*`）
 
 Base `8028d9e` · 一次性 worktree `/tmp/config-mut` · 独立 `CARGO_TARGET_DIR` · `git checkout --` 还原。

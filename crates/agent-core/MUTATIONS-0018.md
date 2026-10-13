@@ -64,3 +64,16 @@ Base `dc307e6` · 一次性检出 `/tmp/covf-mut`（从 HEAD 建，跑完删除�
 “turn 运行中执行控制请求”。该不变量由顺序测试 `compact_control::compact_waits_for_a_running_turn`
 （`TurnFinished` 的 `seq` 必须小于 `ContextCompacted`）与既有的唤醒分支死锁测试
 （`compaction_gate`）共同钉住。
+
+## sumlen：摘要上限与超长重试（dogfood7）
+
+Base: `4ff7528` · 一次性检出 `/tmp/sumlen-mut`（detached，跑完删除）· `--no-fail-fast`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| S1 | `summary_system_prompt` 不写上限（只返回基础提示） | `compaction::the_summary_request_states_the_length_ceiling` | ✅ failed |
+| S2 | 超长重试仍发原请求（不发缩短请求） | `compaction_flow::an_overlong_summary_is_shortened_on_the_retry` | ✅ failed |
+| S3 | 缩短目标用 100% 而非 80% | `compaction_flow::an_overlong_summary_is_shortened_on_the_retry` | ✅ failed |
+| S4 | 空摘要也走缩短请求 | `compaction_flow::an_empty_summary_resends_the_original_request` | ✅ failed |
+
+4/4 抓住。

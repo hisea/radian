@@ -370,8 +370,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(prompt) => approval_height(&prompt.request, area.width as usize),
         None => input_height(app, area.width as usize),
     };
+    // The `@` completion list sits just above the input box (and never over an approval
+    // prompt). A zero-height chunk keeps the rest of the layout identical when there is none.
+    let completion = completion_rows(app, area.width as usize);
     let chunks = Layout::vertical([
         Constraint::Min(1),
+        Constraint::Length(completion.len() as u16),
         Constraint::Length(middle),
         Constraint::Length(1),
     ])
@@ -387,6 +391,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let (_, visible) = visible_lines(&mut app.entries, width, app.scroll, height, &theme);
     frame.render_widget(Paragraph::new(visible), chunks[0]);
 
+    if !completion.is_empty() {
+        let style = theme.completion;
+        let lines: Vec<Line> = completion
+            .into_iter()
+            .map(|row| Line::from(Span::styled(row, style)))
+            .collect();
+        frame.render_widget(Paragraph::new(lines), chunks[1]);
+    }
+
     match &app.pending_approval {
         Some(prompt) => {
             let block = Block::default()
@@ -396,11 +409,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             let text = Paragraph::new(approval_text(&prompt.request))
                 .block(block)
                 .wrap(Wrap { trim: false });
-            frame.render_widget(text, chunks[1]);
+            frame.render_widget(text, chunks[2]);
         }
         None => {
-            let inner_width = chunks[1].width.saturating_sub(2).max(1) as usize;
-            let visible = chunks[1].height.saturating_sub(2).max(1) as usize;
+            let inner_width = chunks[2].width.saturating_sub(2).max(1) as usize;
+            let visible = chunks[2].height.saturating_sub(2).max(1) as usize;
             let text = app.input.text();
             let rows = crate::composer::rows(&text, inner_width);
             let (cursor_row, cursor_col) = app.input.cursor_cell(inner_width);
@@ -421,20 +434,63 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             let input = Paragraph::new(Span::styled(shown, style))
                 .block(Block::default().borders(Borders::ALL).title(" message "))
                 .wrap(Wrap { trim: false });
-            frame.render_widget(input, chunks[1]);
+            frame.render_widget(input, chunks[2]);
             if app.input_editable() {
                 // The inner area starts one cell in from the border; a full row clamps the
                 // cursor to its last cell rather than onto the border.
                 let col = cursor_col.min(inner_width.saturating_sub(1)) as u16;
-                let x = chunks[1].x + 1 + col;
-                let y = chunks[1].y + 1 + (cursor_row - offset) as u16;
+                let x = chunks[2].x + 1 + col;
+                let y = chunks[2].y + 1 + (cursor_row - offset) as u16;
                 frame.set_cursor_position((x, y));
             }
         }
     }
 
     frame.render_widget(
-        Paragraph::new(status_line(app, chunks[2].width as usize)),
-        chunks[2],
+        Paragraph::new(status_line(app, chunks[3].width as usize)),
+        chunks[3],
     );
+}
+
+/// The most candidate lines shown before a `+N more` line.
+pub const COMPLETION_MAX_LINES: usize = 10;
+
+/// The `@` completion list's lines: the candidates (at most [`COMPLETION_MAX_LINES`]), then a
+/// `+N more` line when there are more. Each row is cut to `width` display columns, so a narrow
+/// terminal clips instead of wrapping. Empty when no list is up, or while an approval prompt
+/// is shown: the list never covers the prompt.
+pub fn completion_rows(app: &App, width: usize) -> Vec<String> {
+    if app.pending_approval.is_some() {
+        return Vec::new();
+    }
+    let Some(candidates) = &app.completion else {
+        return Vec::new();
+    };
+    let mut rows: Vec<String> = candidates
+        .iter()
+        .take(COMPLETION_MAX_LINES)
+        .map(|candidate| truncate_columns(candidate, width))
+        .collect();
+    if candidates.len() > COMPLETION_MAX_LINES {
+        rows.push(truncate_columns(
+            &format!("+{} more", candidates.len() - COMPLETION_MAX_LINES),
+            width,
+        ));
+    }
+    rows
+}
+
+/// Cuts `text` to at most `width` display columns, never splitting a wide character.
+fn truncate_columns(text: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let cell = ch.width().unwrap_or(0);
+        if used + cell > width {
+            break;
+        }
+        out.push(ch);
+        used += cell;
+    }
+    out
 }

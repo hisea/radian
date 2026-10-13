@@ -3,7 +3,8 @@
 
 use agent_core::{
     ContentPart, InputSource, Message, MessageMeta, PlanError, SummaryError, ToolCall, ToolResult,
-    check_summary, compacted_history, keep_target, message_tokens, plan, summary_request, units,
+    check_summary, compacted_history, keep_target, message_tokens, plan, shorten_request,
+    shorten_target, summary_request, units,
 };
 use serde_json::{Value, json};
 
@@ -212,7 +213,7 @@ fn the_summary_request_serializes_text_and_truncates_tool_results() {
         tool_with_text("a", &long),
         assistant_with_reasoning("answer", "SECRET-REASONING"),
     ];
-    let request = summary_request(Some("PREVIOUS"), &history, Some("focus on the API"));
+    let request = summary_request(Some("PREVIOUS"), &history, Some("focus on the API"), 8_192);
 
     assert!(request.tools.is_empty(), "the summarizer gets no tools");
     assert_eq!(request.settings, Value::Null);
@@ -243,6 +244,43 @@ fn the_summary_request_serializes_text_and_truncates_tool_results() {
     assert!(!body.contains("SECRET-REASONING"), "{body}");
 }
 
+/// dogfood7: the model wrote a 10k-token summary because the prompt never stated the limit.
+/// The system prompt now carries the same ceiling `check_summary` enforces.
+#[test]
+fn the_summary_request_states_the_length_ceiling() {
+    let request = summary_request(None, &[Message::user("only")], None, 8_192);
+    let system = request.system_prompt.as_deref().unwrap();
+    assert!(system.contains("8192 tokens"), "{system}");
+    // 1 token ≈ 0.75 words, so 8192 tokens is about 6144 words; the prompt says it is
+    // approximate.
+    assert!(system.contains("6144 English words"), "{system}");
+    assert!(
+        system.contains("shorten it, do not only append"),
+        "{system}"
+    );
+    // A different ceiling produces a different prompt.
+    let smaller = summary_request(None, &[Message::user("only")], None, 2_048);
+    assert!(
+        smaller
+            .system_prompt
+            .as_deref()
+            .unwrap()
+            .contains("2048 tokens")
+    );
+}
+
+#[test]
+fn the_shorten_request_carries_only_the_overlong_summary() {
+    let request = shorten_request("OVERLONG SUMMARY BODY", shorten_target(8_192));
+    let system = request.system_prompt.as_deref().unwrap();
+    // 80% of 8192 is 6553.
+    assert!(system.contains("6553 tokens"), "{system}");
+    let body = request.messages[0].text();
+    assert!(body.contains("OVERLONG SUMMARY BODY"), "{body}");
+    assert!(body.contains("seven sections"), "{body}");
+    assert!(!body.contains("Conversation to summarize"), "{body}");
+}
+
 #[test]
 fn the_summary_request_truncates_tool_call_arguments_too() {
     // A write-a-file call carries the whole file in its arguments.
@@ -261,7 +299,7 @@ fn the_summary_request_truncates_tool_call_arguments_too() {
         },
         tool_with_text("w", "ok"),
     ];
-    let body = summary_request(None, &history, None).messages[0].text();
+    let body = summary_request(None, &history, None, 8_192).messages[0].text();
     assert!(body.contains("called write w with"), "{body}");
     assert!(body.contains("[truncated"), "{body}");
     assert!(body.matches('y').count() < 2_000, "{body}");
@@ -272,7 +310,7 @@ fn truncating_a_tool_result_never_splits_a_character() {
     // 2500 Han characters: a byte-based cut at 2000 would split one.
     let long = "中".repeat(2_500);
     let history = vec![assistant_calls(&["a"]), tool_with_text("a", &long)];
-    let request = summary_request(None, &history, None);
+    let request = summary_request(None, &history, None, 8_192);
     let body = request.messages[0].text();
     assert!(body.contains("truncated 500 characters"), "{body}");
     assert_eq!(body.matches('中').count(), 2_000, "{body}");
@@ -280,7 +318,7 @@ fn truncating_a_tool_result_never_splits_a_character() {
 
 #[test]
 fn a_summary_request_without_previous_or_instructions_is_just_the_conversation() {
-    let request = summary_request(None, &[Message::user("only")], None);
+    let request = summary_request(None, &[Message::user("only")], None, 8_192);
     let body = request.messages[0].text();
     assert!(body.contains("only"), "{body}");
     assert!(!body.contains("<previous-summary>"), "{body}");

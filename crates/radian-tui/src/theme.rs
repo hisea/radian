@@ -61,6 +61,8 @@ pub struct Theme {
     pub truncation: Style,
     pub approval_border: Style,
     pub hint: Style,
+    /// The `@` file-reference completion list (Phase 4).
+    pub completion: Style,
 }
 
 fn style(color: Option<Color>, modifiers: Modifier) -> Style {
@@ -103,6 +105,7 @@ impl Theme {
             truncation: style(Some(Color::DarkGray), Modifier::empty()),
             approval_border: style(Some(Color::Yellow), Modifier::empty()),
             hint: style(Some(Color::DarkGray), Modifier::empty()),
+            completion: style(Some(Color::DarkGray), Modifier::empty()),
         }
     }
 
@@ -131,6 +134,7 @@ impl Theme {
             truncation: style(Some(Color::DarkGray), Modifier::empty()),
             approval_border: style(Some(Color::Red), Modifier::empty()),
             hint: style(Some(Color::DarkGray), Modifier::empty()),
+            completion: style(Some(Color::DarkGray), Modifier::empty()),
         }
     }
 
@@ -158,6 +162,7 @@ impl Theme {
             truncation: style(None, Modifier::DIM),
             approval_border: style(None, Modifier::BOLD),
             hint: style(None, Modifier::DIM),
+            completion: style(None, Modifier::DIM),
         }
     }
 
@@ -188,7 +193,7 @@ impl Theme {
     }
 
     /// Every style this theme defines, for the "mono has no colors" test.
-    pub fn styles(&self) -> [Style; 20] {
+    pub fn styles(&self) -> [Style; 21] {
         [
             self.reasoning,
             self.interrupted,
@@ -210,6 +215,7 @@ impl Theme {
             self.truncation,
             self.approval_border,
             self.hint,
+            self.completion,
         ]
     }
 }

@@ -482,8 +482,8 @@ struct Setup {
     system_prompt: Option<String>,
     max_model_calls: Option<u32>,
     turn_timeout_secs: Option<u64>,
-    /// The context-budget guard, or `None` when no window is known (the guard is then
-    /// disabled, not given a guessed default).
+    /// The input budget `B` (ADR 0018), or `None` when no window is known (the budget is
+    /// then off, not given a guessed default).
     context_budget: Option<ContextBudget>,
     /// The window and where it came from (ADR 0018), for the startup line.
     window: radian_host::Window,

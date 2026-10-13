@@ -40,6 +40,8 @@ pub enum Action {
     ScrollBottom,
     Escape,
     Cancel,
+    /// Complete the `@` file reference at the cursor (Phase 4).
+    Complete,
 }
 
 impl Action {
@@ -69,6 +71,7 @@ impl Action {
             Action::ScrollBottom => "scroll_bottom",
             Action::Escape => "escape",
             Action::Cancel => "cancel",
+            Action::Complete => "complete",
         }
     }
 
@@ -105,6 +108,7 @@ const DEFAULT_BINDINGS: &[(&str, Action)] = &[
     ("scroll_bottom", Action::ScrollBottom),
     ("escape", Action::Escape),
     ("cancel", Action::Cancel),
+    ("complete", Action::Complete),
 ];
 
 /// The default key strings per action.
@@ -132,6 +136,7 @@ const DEFAULT_KEYS: &[(&str, &[&str])] = &[
     ("scroll_bottom", &["ctrl-end"]),
     ("escape", &["esc"]),
     ("cancel", &["ctrl-c"]),
+    ("complete", &["tab"]),
 ];
 
 /// One key and its modifiers.

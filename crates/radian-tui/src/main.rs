@@ -132,7 +132,7 @@ struct Cli {
     /// The per-turn model call limit. The core's default (`DEFAULT_MAX_MODEL_CALLS`, 32) is a
     /// fuse for unattended runs; an interactive coding session reads many files per turn and
     /// a human can cancel, so the TUI defaults much higher. It is still a fuse: a loop of
-    /// small calls is not stopped by the context-budget guard.
+    /// small calls is not stopped by the context budget (which only triggers compaction).
     #[arg(long, value_name = "N", default_value_t = TUI_DEFAULT_MAX_MODEL_CALLS)]
     max_model_calls: u32,
 
@@ -644,6 +644,8 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
         panic!("radian-tui: panic path test with a child in flight");
     }
     let mut app = App::new(model_name.clone(), session_id.clone());
+    // `Tab` (the `complete` action) completes `@` file references against the workspace.
+    app.set_workspace(workspace_path.clone());
     app.set_context_window(window.budget);
     let config_warnings = app
         .apply_config(&config, radian_tui::theme::Theme::no_color_env())
