@@ -861,9 +861,9 @@ async fn pty_an_over_budget_request_is_still_sent() {
             dir.path().to_str().unwrap(),
             "--session-id",
             "budget-over",
-            // B = C - R = 17000 - 16384 = 616. Small, so the input that crosses it is short:
-            // every typed byte is a key event the app renders, and 20 000 of them timed out
-            // under load.
+            // B = C - R = 17000 - 16384 = 616. The input is sent as one bracketed paste:
+            // a raw burst of 4 000 keys makes the app redraw once per key, which is O(n^2)
+            // and timed out on a slow Linux VM.
             "--context-window",
             "17000",
         ],
@@ -872,7 +872,7 @@ async fn pty_an_over_budget_request_is_still_sent() {
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
     // ~1000 estimated tokens, over B = 616.
-    pty.send(format!("{}\r", "x".repeat(4_000)).as_bytes());
+    pty.send(format!("\x1b[200~{}\x1b[201~\r", "x".repeat(4_000)).as_bytes());
     assert!(
         pty.wait_for_screen("OVER-BUDGET-REPLY", 20),
         "the over-budget request must still be sent:\n{}",
