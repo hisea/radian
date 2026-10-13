@@ -134,3 +134,64 @@
    接口）。
 5. **不做**：为了让请求通过而把对方的 `provider_payload` / `reasoning` 原样发出去（AGENTS.md：不得
    编造线上值；ADR 0014 R4：推理 provider 不可见）。
+
+---
+
+## 2. models.dev 目录里有哪些字段（ADR 0026 D0、ADR 0027 C2 的 `{display_name}`）
+
+**来源**：本机缓存 `~/.radian/cache/catalog/models.json`（权限 `0600`，mtime `2026-10-13 19:05`，
+5.6 MB）。这正是 `radian-host` 的 `cache_path()` 读的文件（`crates/radian-host/src/catalog.rs:471-478`
+的 `cache_path()` = `~/.radian/cache/catalog/models.json`），TTL 24h（`catalog.rs:20`），**本片没有为此
+发网络请求**（`models.dev/api.json` 只做了一次连通性探测，未下载）。
+
+**解析现状**：`Catalog::parse`（`catalog.rs:181-218`）**只**读
+`<provider>.models.<model>.limit.{context,output,input}`。provider 层的 `api`/`env`/`name`/`npm`、
+model 层的 `name` 都**没有**被解析。
+
+### 2.1 provider 层字段
+
+四个例子原样摘录（`python3` 从缓存 JSON 提取；只摘相关字段）：
+
+| provider id | `name` | `api` | `env` | `npm` |
+|---|---|---|---|---|
+| `opencode-go` | `"OpenCode Go"` | `"https://opencode.ai/inference/go/v1"` | `["OPENCODE_API_KEY"]` | `"@ai-sdk/openai-compatible"` |
+| `opencode` | `"OpenCode"` | `"https://opencode.ai/inference/v1"` | `["OPENCODE_API_KEY"]` | `"@ai-sdk/openai-compatible"` |
+| `anthropic` | `"Anthropic"` | **缺失** | `["ANTHROPIC_API_KEY"]` | `"@ai-sdk/anthropic"` |
+| `openai` | `"OpenAI"` | **缺失** | `["OPENAI_API_KEY"]` | `"@ai-sdk/openai"` |
+| `deepseek` | `"DeepSeek"` | `"https://api.deepseek.com"` | `["DEEPSEEK_API_KEY"]` | `"@ai-sdk/openai-compatible"` |
+
+- **`api`（base URL）存在，但不是每个 provider 都有**：`opencode-go`/`opencode`/`deepseek` 有；
+  `anthropic` 与 `openai` 在缓存里**没有 `api` 键**（它们靠 SDK 的默认端点）。所以「用目录的 `api`
+  当默认 base URL」对 Anthropic/OpenAI 拿不到值，必须回退到 adapter 的默认。
+- **`env` 是字符串数组**（key 的环境变量名），不是单个字符串。
+- **`npm`** 是 AI SDK 包名（`@ai-sdk/openai-compatible` / `@ai-sdk/anthropic` / `@ai-sdk/openai`），
+  是「用哪个线上协议」的一个现成线索（`anthropic` → Anthropic Messages，其余 → OpenAI 兼容）。
+- 还有 `doc`（文档 URL）等字段（本片只列相关的）。
+
+### 2.2 model 层字段
+
+**有 `name`（显示名）**。四个例子原样摘录：
+
+| provider / model id | `name` | `limit` |
+|---|---|---|
+| `anthropic` / `claude-opus-5-5` | `"Claude Opus 5.5"` | `{"context": 1000000, "output": 128000}` |
+| `openai` / `gpt-5.4` | `"GPT-5.4"` | `{"context": 1050000, "input": 922000, "output": 128000}` |
+| `deepseek` / `deepseek-v4-flash` | `"DeepSeek V4 Flash"` | `{"context": 1000000, "output": 393216}` |
+| `opencode-go` / `qwen3.7-max` | `"Qwen3.7 Max"` | `{"context": 1000000, "output": 65536}` |
+| `opencode-go` / `deepseek-v4.1-flash`（ADR 0026 D0 的例子） | `"DeepSeek V4.1 Flash"` | `{"context": 1000000, "output": 384000}` |
+
+一个 model 对象还有 `id`、`description`、`family`、`attachment`、`reasoning`、
+`reasoning_options`、`tool_call`、`structured_output`、`temperature`、`knowledge`、
+`release_date`、`last_updated`、`modalities`、`open_weights`、`limit`、`cost`、
+`canonical_model_id` 等（本片只列相关的）。`reasoning: true` / `tool_call: true` 是布尔能力位，
+可作为描述符模型列表的补充（**未核实**这些位是否对所有 provider 都可靠）。
+
+### 2.3 对 ADR 0026 D0 / ADR 0027 C2 的直接影响
+
+- ADR 0027 C2 的 `model` 条目 `{display_name}`：**目录有 model 的 `name`**，可直接用作 `display_name`
+  的回退来源（描述符拿不到时）。但 `Catalog::parse` 今天不读它，要加解析（只加字段，不改现有
+  `limit` 语义）。
+- ADR 0026 D0 的「描述符默认 base URL」：目录的 `api` 可作为 `opencode-go`/`opencode`/`deepseek`
+  的来源；`anthropic`/`openai` 没有 `api`，描述符要自带默认。
+- `env` 数组可作为「该 provider 的 key 环境变量名」的参考，但 ADR 0026 D2 已决定 key **只从
+  `auth.json`**，所以 `env` 只用于 `/login` 的提示，不作为运行时来源。
