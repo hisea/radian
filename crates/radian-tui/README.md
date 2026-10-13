@@ -348,6 +348,12 @@ could be built. This is the same wiring `agent-cli` uses:
 - Two startup notices state what was chosen and what it means. The meaning line follows ADR
   0012 decision 4 and does **not** claim credential isolation: the macOS backend leaves
   `mach-lookup` open, so the IPC boundary is not tightened.
+- A `[memory]` startup notice names the project state (the linked project id, or "no project
+  linked" with the `agent memory project new`/`relink` hint) and the injection budget
+  (ADR 0021 D2/D6). The agent's four memory tools are mounted and the current memory is
+  injected into the system prompt each turn; `memory_search`/`memory_get` are allowed and
+  `memory_save`/`memory_revise` ask. Tested by
+  `pty_the_memory_notice_names_the_project_state_and_the_budget`.
 
 Every call goes through `radian-permissions` (ADR 0012) as a `Hooks` implementation:
 

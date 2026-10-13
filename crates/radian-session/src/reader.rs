@@ -17,7 +17,10 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::error::ReadError;
-use crate::runtime::{InboxLane, PermissionApprover, PermissionDecision, TurnOutcome, TurnReason};
+use crate::runtime::{
+    InboxLane, MemoryInjectedRecord, PermissionApprover, PermissionDecision, TurnOutcome,
+    TurnReason,
+};
 use crate::writer::SCHEMA_VERSION;
 
 /// Refuse lines larger than this instead of growing the buffer without bound (ADR 0006
@@ -26,7 +29,7 @@ pub(crate) const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 
 /// The v1 events known to a schema-v1 reader (ADR 0006 §4). Anything else is unknown and
 /// handled by the `critical` policy.
-pub(crate) const KNOWN_EVENTS: [&str; 20] = [
+pub(crate) const KNOWN_EVENTS: [&str; 21] = [
     "SessionCreated",
     "InboxEnqueued",
     "InputClaimed",
@@ -45,6 +48,7 @@ pub(crate) const KNOWN_EVENTS: [&str; 20] = [
     "Rewound",
     "ContextBudgetReached",
     "PermissionResolved",
+    "MemoryInjected",
     "ModelUsageRecorded",
     "SessionForked",
 ];
@@ -135,6 +139,11 @@ pub enum EventData {
         decision: PermissionDecision,
         approver: PermissionApprover,
         reason: Option<String>,
+    },
+    /// The memory set injected before a model request (ADR 0021 D6). Typed for an exact round
+    /// trip; audit only, never a transcript record. Ids, revisions and scopes only.
+    MemoryInjected {
+        records: Vec<MemoryInjectedRecord>,
     },
     /// A known event this crate does not interpret (`SessionCreated`) or an unknown
     /// non-critical event.
@@ -489,6 +498,10 @@ where
                     reason: d.reason,
                 }
             }
+            "MemoryInjected" => {
+                let d: MemoryInjectedData = data_of(raw, lineno, path)?;
+                EventData::MemoryInjected { records: d.records }
+            }
             "InboxEnqueued" => {
                 let d: InboxEnqueuedData = data_of(raw, lineno, path)?;
                 EventData::InboxEnqueued {
@@ -728,6 +741,7 @@ impl Session {
                 | EventData::ConfigChanged { .. }
                 | EventData::ContextBudgetReached { .. }
                 | EventData::PermissionResolved { .. }
+                | EventData::MemoryInjected { .. }
                 | EventData::Other(_) => None,
             })
             .collect()
@@ -870,6 +884,11 @@ struct PermissionResolvedData {
     approver: PermissionApprover,
     #[serde(default)]
     reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MemoryInjectedData {
+    records: Vec<MemoryInjectedRecord>,
 }
 
 /// Feeds one record to the shared replacement state machine, mapping a rejection to the

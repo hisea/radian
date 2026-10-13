@@ -113,6 +113,21 @@ key. Writes default to Project; `--global` writes a Global record.
 - **Exit codes**: 0 on success; 1 for a conflict, a missing record or an unlinked workspace;
   2 for a usage error or a refused confirmation (plus clap's own usage failures).
 
+### The agent's own memory tools and injection (ADR 0021 D5/D6)
+
+During a conversation the model also gets four tools: `memory_search` and `memory_get` (read,
+**allowed** by the rules) and `memory_save` and `memory_revise` (write, always **asked**;
+`--yes` answers the ask and the decision is still audited). Agent writes are `source: agent`
+and `unverified`; a user record is never modified, and a user key still wins. An unlinked
+workspace gets a tool error naming `project new`/`relink`, never a silent new project.
+
+Each request also injects the current memory into the **system prompt** (never the
+transcript): Active records in the D6 order, up to 2000 tokens (Global 500 / Project 1500 soft
+shares, whole records only), with the user/confirmed and agent-unverified segments labelled
+apart. The injected ids/revisions/scopes are recorded as a `MemoryInjected` runtime event when
+the set changes; the content is never written. A memory read failure is a `[memory]` warning,
+never a failed turn. Startup prints `[memory]` with the project state and the budget.
+
 ## Input
 
 While a turn is in flight, a line typed at the prompt is a **steer** (it changes the current

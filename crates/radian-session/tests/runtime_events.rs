@@ -9,8 +9,8 @@ use agent_core::{
 };
 use common::{TempDir, created};
 use radian_session::{
-    EventData, InboxLane, Index, RuntimeEvent, Session, SessionJournal, TurnOutcome, TurnReason,
-    WriteError,
+    EventData, ExportOptions, InboxLane, Index, MemoryInjectedRecord, RuntimeEvent, Session,
+    SessionJournal, TurnOutcome, TurnReason, WriteError,
 };
 use serde_json::json;
 
@@ -179,6 +179,65 @@ async fn runtime_events_round_trip_through_typed_reader_variants() {
         }
         other => panic!("expected ConfigChanged, got {other:?}"),
     }
+}
+
+/// ADR 0021 D6: `MemoryInjected` carries only ids/revisions/scopes, is audit (`critical:
+/// false`), never enters the transcript fold, and the exports show it without content.
+#[tokio::test]
+async fn memory_injected_round_trips_without_content_and_is_not_critical() {
+    let dir = TempDir::new("memory-injected");
+    let path = dir.file("s.jsonl");
+    let journal = SessionJournal::create(&path, "sid", created()).unwrap();
+    let event = RuntimeEvent::MemoryInjected {
+        records: vec![
+            MemoryInjectedRecord {
+                id: "mem-1".into(),
+                revision: 3,
+                scope: json!("global"),
+            },
+            MemoryInjectedRecord {
+                id: "mem-2".into(),
+                revision: 1,
+                scope: json!({"project": "prj-1"}),
+            },
+        ],
+    };
+    assert_eq!(event.name(), "MemoryInjected");
+    assert!(
+        !event.critical(),
+        "the injected set is audit only (ADR 0021 D6)"
+    );
+    journal.append_runtime_event(event).await.unwrap();
+
+    let session = Session::open(&path).unwrap();
+    let injected = session
+        .events()
+        .iter()
+        .find(|e| e.event == "MemoryInjected")
+        .expect("the event round-trips");
+    assert!(!injected.critical);
+    match &injected.data {
+        EventData::MemoryInjected { records } => {
+            assert_eq!(records.len(), 2);
+            assert_eq!(records[0].id, "mem-1");
+            assert_eq!(records[0].revision, 3);
+            assert_eq!(records[0].scope, json!("global"));
+            assert_eq!(records[1].scope, json!({"project": "prj-1"}));
+        }
+        other => panic!("expected MemoryInjected, got {other:?}"),
+    }
+    // Audit only: never a transcript record.
+    assert!(session.journal_records().is_empty());
+    // Markdown shows the count; JSON carries the ids. Neither carries content (there is none).
+    let opts = ExportOptions::default();
+    let markdown = radian_session::export_markdown(&session, &opts).unwrap();
+    assert!(
+        markdown.contains("memory injected: 2 record(s)"),
+        "{markdown}"
+    );
+    let json = radian_session::export_json(&session, &opts).unwrap();
+    assert!(json.contains("mem-1"), "{json}");
+    assert!(json.contains("prj-1"), "{json}");
 }
 
 #[tokio::test]

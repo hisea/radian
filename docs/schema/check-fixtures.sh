@@ -15,8 +15,8 @@ KNOWN_EVENTS = {
     "TurnStarted", "MessageAppended", "ToolExecutionStarted", "ToolExecutionSettled",
     "TranscriptReplaced", "TranscriptReplacementCommitted", "TranscriptReplacementAborted",
     "TurnFinished", "ConfigChanged", "ContextCompacted",
-    "Rewound", "ContextBudgetReached", "PermissionResolved", "ModelUsageRecorded",
-    "SessionForked",
+    "Rewound", "ContextBudgetReached", "PermissionResolved", "MemoryInjected",
+    "ModelUsageRecorded", "SessionForked",
 }
 # ADR 0005/0006 §5.5：InputSource 的 snake_case 全集。
 SOURCES = {
@@ -59,6 +59,13 @@ EXPECT = {
         repair={"call-2": "outcome_unknown_after_crash"},
     ),
     "unknown-enum-values.jsonl": dict(outcome="accept", events=6, skips=[], repair={}),
+    "memory-injected.jsonl": dict(
+        outcome="accept",
+        events=6,
+        skips=[],
+        memory_injected=[(3, "mem-1", "global"), (1, "mem-2", "prj-1")],
+        repair={},
+    ),
     "replace-committed.jsonl": dict(
         outcome="accept",
         events=6,
@@ -316,6 +323,26 @@ def check_fixture(name, exp):
             rev = ev["data"].get("revision")
             if not isinstance(rev, int) or isinstance(rev, bool):
                 raise Corruption(f"{name}: line {i}: TranscriptReplacementAborted.revision 不是整数")
+        if ev["event"] == "MemoryInjected":
+            # ADR 0021 D6：只带 id/revision/scope，不带内容；critical 必须为 false。
+            if ev["critical"]:
+                raise Corruption(f"{name}: line {i}: MemoryInjected 必须是 critical:false")
+            records = ev["data"].get("records")
+            if not isinstance(records, list) or not records:
+                raise Corruption(f"{name}: line {i}: MemoryInjected.records 必须是非空数组")
+            for rec in records:
+                if set(rec) != {"id", "revision", "scope"}:
+                    raise Corruption(
+                        f"{name}: line {i}: MemoryInjected 记录字段必须是 id/revision/scope"
+                    )
+                if not isinstance(rec["id"], str) or not isinstance(rec["revision"], int):
+                    raise Corruption(f"{name}: line {i}: MemoryInjected 记录类型错误")
+                scope = rec["scope"]
+                if not (
+                    scope == "global"
+                    or (isinstance(scope, dict) and isinstance(scope.get("project"), str))
+                ):
+                    raise Corruption(f"{name}: line {i}: MemoryInjected.scope 形状错误")
         # ADR 0019 §2：唯一的替换状态机（本文件独立实现，不调用 Rust）。
         try:
             fold_push(fold, ev, i, name)
@@ -389,6 +416,20 @@ def check_fixture(name, exp):
         e["event"] == "ModelUsageRecorded" and "usage" in e["data"] for e in events
     ):
         raise Corruption(f"{name}: 期望带 usage 的 ModelUsageRecorded")
+    if "memory_injected" in exp:
+        got = []
+        for e in events:
+            if e["event"] != "MemoryInjected":
+                continue
+            for rec in e["data"]["records"]:
+                scope = rec["scope"]
+                if isinstance(scope, dict):
+                    scope = scope["project"]
+                got.append((rec["revision"], rec["id"], scope))
+        if got != [tuple(x) for x in exp["memory_injected"]]:
+            raise Corruption(
+                f"{name}: memory_injected {got} != 期望 {exp['memory_injected']}"
+            )
     if outcome == "accept_drop_tail":
         return f"PASS {name}: 接受，丢弃 torn tail {len(tail)} 字节，replay {len(events)} 个事件"
     if outcome == "accept_with_skips":

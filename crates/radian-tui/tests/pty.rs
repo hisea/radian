@@ -2349,3 +2349,51 @@ async fn pty_the_startup_notice_names_the_window_source() {
     );
     pty.quit();
 }
+
+/// ADR 0021 D2/D6: the TUI shows the memory project state and the injection budget at
+/// startup. The `HOME` is private to the pty, so this never reads the real `~/.radian`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_the_memory_notice_names_the_project_state_and_the_budget() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("memory-notice");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "mem-notice",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    let notice = pty
+        .screen()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        notice.contains("[memory]"),
+        "the memory startup notice is shown: {notice}"
+    );
+    assert!(
+        notice.contains("no project linked"),
+        "the notice names the unlinked state: {notice}"
+    );
+    assert!(
+        notice.contains("injection on, up to 2000 tokens"),
+        "the notice names the budget: {notice}"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}

@@ -162,20 +162,31 @@ pub fn export_markdown(session: &Session, opts: &ExportOptions) -> Result<String
 
     let committed = committed_message_seqs(session);
     for event in session.events() {
-        let EventData::MessageAppended { message, .. } = &event.data else {
-            continue;
-        };
-        if !committed.contains(&event.seq) {
-            continue;
+        match &event.data {
+            EventData::MessageAppended { message, .. } => {
+                if !committed.contains(&event.seq) {
+                    continue;
+                }
+                let role = match message {
+                    Message::User { .. } => "user",
+                    Message::Assistant { .. } => "assistant",
+                    Message::Tool { .. } => "tool",
+                };
+                out.push_str(&format!("## {role} (seq {})\n\n", event.seq));
+                out.push_str(&render_message(message, opts));
+                out.push('\n');
+            }
+            // ADR 0021 D6: the injected set is audit, not transcript. The Markdown export
+            // shows only its size; the ids/revisions/scopes are in the JSON export.
+            EventData::MemoryInjected { records } => {
+                out.push_str(&format!(
+                    "- memory injected: {} record(s) (seq {})\n",
+                    records.len(),
+                    event.seq
+                ));
+            }
+            _ => {}
         }
-        let role = match message {
-            Message::User { .. } => "user",
-            Message::Assistant { .. } => "assistant",
-            Message::Tool { .. } => "tool",
-        };
-        out.push_str(&format!("## {role} (seq {})\n\n", event.seq));
-        out.push_str(&render_message(message, opts));
-        out.push('\n');
     }
 
     // Redaction is a whole-document pass as well, so a secret in a field this renderer did
@@ -324,6 +335,7 @@ fn event_data_value(
             "approver": approver,
             "reason": reason,
         }),
+        EventData::MemoryInjected { records } => json!({"records": records}),
         EventData::Other(value) => value.clone(),
     };
     Ok(value)

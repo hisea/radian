@@ -73,6 +73,7 @@ impl Profile {
     pub fn safe(workspace: impl AsRef<Path>) -> Result<Self, ProfileError> {
         Self::build(Preset::Safe, workspace, |_ws| {
             let mut rules = read_only();
+            rules.extend(memory_rules());
             rules.extend([
                 Rule::new(
                     ToolMatcher::Name("write".into()),
@@ -102,6 +103,7 @@ impl Profile {
     pub fn workspace_write(workspace: impl AsRef<Path>) -> Result<Self, ProfileError> {
         Self::build(Preset::WorkspaceWrite, workspace, |ws| {
             let mut rules = read_only();
+            rules.extend(memory_rules());
             rules.extend(write_under(ws));
             rules.extend([
                 Rule::new(
@@ -118,6 +120,7 @@ impl Profile {
     pub fn full_access(workspace: impl AsRef<Path>) -> Result<Self, ProfileError> {
         Self::build(Preset::FullAccess, workspace, |ws| {
             let mut rules = read_only();
+            rules.extend(memory_rules());
             rules.extend(write_under(ws));
             rules.extend([
                 // Still ask: full-access is not "run anything silently".
@@ -187,6 +190,22 @@ fn canonical_workspace(path: &Path) -> Result<PathBuf, ProfileError> {
     Ok(canonical)
 }
 
+/// The memory tools (ADR 0021 D5/D7). Reading is allowed in every tier; writing always asks,
+/// in every tier. `--yes` answers the ask like any other, and a `deny` rule would still win.
+/// There is deliberately **no** archive/forget/purge/confirm tool (agent writes are limited to
+/// save/revise, D5).
+fn memory_rules() -> Vec<Rule> {
+    [
+        ("memory_search", Action::Allow),
+        ("memory_get", Action::Allow),
+        ("memory_save", Action::Ask),
+        ("memory_revise", Action::Ask),
+    ]
+    .into_iter()
+    .map(|(name, action)| Rule::new(ToolMatcher::Name(name.into()), ResourceMatcher::Any, action))
+    .collect()
+}
+
 /// The read-only built-ins, allowed regardless of path: `radian-coding` enforces the
 /// workspace boundary itself for these tools, so the permission layer does not need to.
 fn read_only() -> Vec<Rule> {
@@ -214,4 +233,51 @@ fn write_under(workspace: &Path) -> Vec<Rule> {
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_core::ToolCall;
+    use serde_json::json;
+
+    fn call(name: &str) -> ToolCall {
+        ToolCall {
+            id: "c1".into(),
+            name: name.into(),
+            arguments: json!({}),
+        }
+    }
+
+    fn action(profile: &Profile, name: &str) -> Action {
+        crate::rule::evaluate(profile.rules(), &profile.workspace, &call(name)).action
+    }
+
+    /// ADR 0021 D5/D7: `memory_search`/`memory_get` are allowed in all three tiers;
+    /// `memory_save`/`memory_revise` ask in all three; no destructive memory tool exists.
+    #[test]
+    fn the_memory_tools_read_allowed_and_write_asked_in_every_tier() {
+        let ws = std::env::temp_dir();
+        for profile in [
+            Profile::safe(&ws).unwrap(),
+            Profile::workspace_write(&ws).unwrap(),
+            Profile::full_access(&ws).unwrap(),
+        ] {
+            let tier = profile.preset.as_str();
+            assert_eq!(action(&profile, "memory_search"), Action::Allow, "{tier}");
+            assert_eq!(action(&profile, "memory_get"), Action::Allow, "{tier}");
+            assert_eq!(action(&profile, "memory_save"), Action::Ask, "{tier}");
+            assert_eq!(action(&profile, "memory_revise"), Action::Ask, "{tier}");
+            // No rule matches a destructive name, so the default `ask` stands — but there is
+            // no tool to ask about either.
+            for name in [
+                "memory_archive",
+                "memory_forget",
+                "memory_purge",
+                "memory_confirm",
+            ] {
+                assert_eq!(action(&profile, name), Action::Ask, "{tier}: {name}");
+            }
+        }
+    }
 }

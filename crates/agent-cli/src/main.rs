@@ -29,7 +29,8 @@ use agent_extensions::{McpServerConfig, McpToolProvider};
 use clap::Parser;
 use radian_coding::CodingTools;
 use radian_host::memory::{
-    MemoryService, MemoryServiceError, ProjectState, ScopeSelection, WriteScope,
+    InjectionConfig, MemoryHooks, MemoryService, MemoryServiceError, MemoryTools, ProjectState,
+    ScopeSelection, WriteScope,
 };
 use radian_host::{
     DEFAULT_MAX_TOKENS, HostModel, ModelArgs, Provider, SESSION_PLACEHOLDER, Thinking, build_model,
@@ -1442,9 +1443,14 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     // paths that exist) can hide them.
     let sessions_for_deny = session_dir(&cli)?;
     let _ = radian_host::ensure_private_dir(&sessions_for_deny);
+    // ADR 0021: the memory root is under `~/.radian/` (ADR 0020), sandbox-denied, and the
+    // service is the same one `agent memory` uses. `None` only when neither `RADIAN_HOME` nor
+    // `HOME` is set; then memory is simply off for this run.
+    let memory_root = radian_host::memory_dir();
+    let injection_config = InjectionConfig::default();
     let mut sandbox_deny_read = vec![sessions_for_deny];
-    if let Some(memory) = radian_host::memory_dir() {
-        sandbox_deny_read.push(memory);
+    if let Some(memory) = &memory_root {
+        sandbox_deny_read.push(memory.clone());
     }
     let sandbox = profile::build_sandbox(profile_arg, &workspace_path, &sandbox_deny_read)?;
     let (profile_line, sandbox_facts) = profile::describe(profile_arg, sandbox.as_ref());
@@ -1461,6 +1467,28 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         ),
         None => eprintln!("[budget] {} (ADR 0018)", setup.window.describe()),
     }
+    // ADR 0021 D2/D6: the project state and the injection budget, before the session exists.
+    let memory_service = memory_root
+        .as_ref()
+        .map(|root| MemoryService::open(&workspace_path, root));
+    match &memory_service {
+        Some(service) => match service.state() {
+            Ok(ProjectState::Known(project)) => eprintln!(
+                "[memory] project {project}; injection on, up to {} tokens",
+                injection_config.max_tokens
+            ),
+            Ok(ProjectState::Unlinked { .. }) => eprintln!(
+                "[memory] no project linked; global memory only (run `agent memory project new` \
+                 or `agent memory relink <ProjectId>`); injection on, up to {} tokens",
+                injection_config.max_tokens
+            ),
+            Err(error) => eprintln!("[memory] unavailable: {error}"),
+        },
+        None => eprintln!("[memory] disabled (no RADIAN_HOME or HOME)"),
+    }
+    let memory_tools = memory_service
+        .as_ref()
+        .map(|service| MemoryTools::new(service.clone()));
 
     // The built-in tools exist only with `--workspace`. `shell` is present only when a
     // sandbox exists, which is exactly `workspace`/`full` with a workspace.
@@ -1510,13 +1538,21 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         Some(approver),
         audit,
     ));
+    // ADR 0021 D6: injection runs in the same hook chain, after the permission layer. A
+    // memory failure is a warning line, never a failed turn.
+    let memory_hooks = Arc::new(MemoryHooks::new(
+        memory_service.clone(),
+        Arc::clone(&journal),
+        injection_config,
+        Arc::new(|message: &str| eprintln!("[memory] {message}")),
+    ));
     let agent = Arc::new(
         Agent::new(
             setup.model,
-            CliTools::new(coding, McpToolProvider::new(setup.servers)),
+            CliTools::new(coding, memory_tools, McpToolProvider::new(setup.servers)),
         )
         .with_config(agent_config)
-        .with_hooks(Arc::clone(&hooks)),
+        .with_hooks((Arc::clone(&hooks), Arc::clone(&memory_hooks))),
     );
 
     let inbox = Inbox::durable(INBOX_CAPACITY, Arc::clone(&journal));

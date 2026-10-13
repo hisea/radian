@@ -25,6 +25,11 @@ A rule is `(tool matcher, resource matcher) -> allow | ask | deny`.
 **Priority: `deny` > `ask` > `allow`; no rule matching means `ask`.** So an `ask` rule beats
 an `allow` rule when both match, and the default is conservative.
 
+The memory tools (ADR 0021 D5) follow this rule: `memory_search` and `memory_get` are `allow`
+in all three tiers, `memory_save` and `memory_revise` are `ask` in all three (`--yes` answers
+the ask, a `deny` still wins). There is deliberately no agent tool for archive/forget/purge/
+confirm; an agent can only add or revise, and the store refuses a `source: User` record.
+
 ## Shell matching (the part most likely to hide a hole)
 
 This is a deliberate conservative approximation, **not a shell parser**.
