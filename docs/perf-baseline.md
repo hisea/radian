@@ -195,5 +195,84 @@ release 构建。
 - `crates/radian-tui/tests/perf_render.rs`
 - `crates/radian-tui/tests/perf_startup.rs`
 - `crates/agent-cli/tests/perf_agent.rs`
+- `crates/radian-session/tests/perf_long_session.rs`（§6：open+history、RSS、索引重建）
+- `crates/radian-session/tests/common/long_session.rs`（§6 的合成会话生成器，三处共用）
+- `crates/agent-cli/tests/perf_long_resume.rs`（§6：resume 到第一个请求）
 
-全部 `#[ignore]`；默认 `cargo test` 不运行它们，也不新增依赖。
+全部 `#[ignore]`；默认 `cargo test` 不运行它们。生成器只新增一个测试模块，没有新依赖。
+
+## 6. 长会话 resume（Phase 5，只测量）
+
+**状态：测量进行中——本节的 TUI 一项尚未完成（暂停时未做）；已有数字如下，未据此改任何产品代码。**
+
+机器同上（M4 / macOS 27 / APFS，release）。**测量时 `uptime` 负载 73–150**（同时有多个
+pi 在编译），所以绝对值（尤其 p95）噪声大，只读量级与增长趋势。
+
+合成会话由 `crates/radian-session/tests/common/long_session.rs` 生成（三处 `#[path]` 共用）：
+1k / 10k / 50k / 100k 条消息，混合 user、assistant（~2.4 KiB 文本 + ~1.6 KiB reasoning）、
+工具调用 + 4 KiB 工具结果；另有一份含 **3 次已提交压缩**（ADR 0018/0019
+`ContextCompacted` → `TranscriptReplaced` → 消息 → `TranscriptReplacementCommitted`）的版本。
+压缩版 raw 文件只比 plain 多 600 条（3×201），但重建出的 live history 小很多。
+
+| 文件 | raw 消息 | live history | 字节 |
+|---|---|---|---|
+| 1k plain / compacted | 1 000 / 1 600 | 1 000 / 451 | 1.6 / 1.8 MB |
+| 10k plain / compacted | 10 000 / 10 600 | 10 000 / 2 701 | 16.3 / 16.5 MB |
+| 50k plain / compacted | 50 000 / 50 600 | 50 000 / 12 701 | 81.8 / 81.9 MB |
+| 100k plain / compacted | 100 000 / 100 600 | 100 000 / 25 201 | 163.7 / 163.8 MB |
+
+### `Session::open` + `history()`（5 次中位；峰值 RSS 来自每档独立的子进程）
+
+```sh
+cargo test --release -p radian-session --test perf_long_session -- --ignored --nocapture --test-threads=1 perf_long_session_open
+```
+
+| 规模 | plain 中位 | plain 峰值 RSS | compacted 中位 | compacted 峰值 RSS |
+|---|---|---|---|---|
+| 1k | 2.2 ms | 13.5 MB | 3.5 ms | 13.5 MB |
+| 10k | 57.0 ms | 81.1 MB | 34.2 ms | 66.1 MB |
+| 50k | 250.0 ms | 415.9 MB | 201.4 ms | 308.5 MB |
+| 100k | 488.7 ms | 818.8 MB | 338.8 ms | 683.0 MB |
+
+- 时间随**文件字节数**近似线性（~3 µs/消息，~1.2 µs/KiB 量级；10k 的 57 ms 有负载尖峰）。
+- **峰值 RSS 约 8 KB/消息**（100k plain 就到 **~819 MB**）；在这个混合里（每 5 条一个 4 KiB
+  工具结果 + 长文本/推理）内存比 §5 的简单 10k 会话（34.6 MB）大得多。压缩版的文件同样大，
+  但重建的 history 小，所以 RSS 低一些（100k compacted 683 MB vs 819 MB）——即**读文件的成本
+  按 raw 大小，history 的内存按 live 大小**。
+
+### 索引重建（`--list` 的后端）
+
+```sh
+cargo test --release -p radian-session --test perf_long_session -- --ignored --nocapture --test-threads=1 perf_long_index_rebuild
+```
+
+单文件：1k 5.5 ms · 10k 64.6 ms · 50k 823 ms · 100k **1877 ms**（5.5 → 18.8 µs/消息，
+这条曲线上翘，可能是 SQLite/WAL 与负载；未单独求证）。
+
+### `agent --resume <id> -p x`：启动到第一个请求
+
+```sh
+cargo test --release -p agent-cli --test perf_long_resume -- --ignored --nocapture --test-threads=1
+```
+
+mock 是一个裸 TCP listener：接受一次连接、读到请求头（`\r\n\r\n`）即记时（adapter 自带的进程内
+mock 拒绝 >16 MiB 的请求体，50k+ 的 resume 超限，所以用裸 socket 才能在每一档看到请求）。
+
+| 规模 | plain 中位 | compacted 中位 |
+|---|---|---|
+| 1k | 64.0 ms | 66.1 ms |
+| 10k | 197.7 ms | 143.7 ms |
+| 50k | 621.3 ms | 484.1 ms |
+| 100k | **1526.9 ms** | **872.3 ms** |
+
+100k plain 在 **1.5 s** 内都没能把第一个请求发出去；compacted 版（live history 25k）是 872 ms。
+两者都要先把整个 raw 文件读进来，所以这是"读文件 + 重建 history + 序列化整个 history"的成本。
+
+### 未完成 / 未测（暂停时）
+
+- **`radian-tui --resume` 到第一帧、以及首帧后 `Ctrl-Home` 滚动到顶的耗时**：未测（本片暂停
+  在这里）。计划复用 `perf_startup.rs` 的 `libc::openpty` harness，`--freeze-draw` 无关；第一帧的
+  判据是最后一条消息的标记，滚动判据是第一条消息的标记。
+- 真实 provider 的首 token（本测量只在第一个请求发出即停）；`--resume` 的磁盘冷缓存；
+  100k 条的 TUI 帧耗时与滚动；多会话并发。
+- 本节数字只在这台机器/负载下成立；没有统计显著性检验（每档 5 次中位）。
