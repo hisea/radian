@@ -304,3 +304,62 @@ x86_64 与其它发行版。
 - `radian-host` 全部通过。
 - 进度测试直接跑测试二进制：`settled_progress_arrives_in_order` **0/40 失败**，
   `progress_does_not_reset_the_call_deadline` **0/30 失败**（修正前分别是 15/40、1/30）。
+
+## Linux 复验（ADR 0018/0020/0021 M1 之后，2026-10-13）
+
+环境：Arch Linux aarch64（kernel 7.2.6）、8 核、`/tmp` 3.9G tmpfs、`bubblewrap 0.12.0`、
+Rust **1.88.0**（`/tmp/radian-rust`）。源码为分支 `pi/linux3`（base `bc194f2`）`git archive`
+同步到 `/tmp/radian-linux/src`（保留 `target/`）；本节的失败修法两条各提交在分支上。
+
+### 通过项
+
+- `cargo build -p agent-extensions --bin mcp-fixture`：ok。
+- `cargo test --workspace --locked --no-fail-fast`：**109 个 test result ok**，唯一失败是既有的
+  负载 flake `radian-session::a_torn_tail_is_truncated_before_appending`（单独跑 5/5 通过）。
+- `radian-memory`：全部通过（9 个测试二进制）；`tests/multiprocess.rs` 与 `tests/purge_race.rs`
+  各连跑 **20/20 通过**（`flock` 与 inode 复查在 Linux 上一致）。
+- `agent-core --test compaction` 16/16；`radian-host` 36 + 11；两家 provider 的 `overflow`
+  单元测试各 7/7；两家契约各 13/14 通过。
+- `radian-sandbox`：单元 8/8、`workspace_write_is_compatible…` 1/1、`linux_escape_matrix` 1/1
+  （含 ADR 0020 的 `radian_home` 组）；跑完 `pgrep -a bwrap`、`pgrep -af mcp-fixture` 无孤儿。
+- `radian-tui` 的 pty 测试：直接跑测试二进制 **37/37 ×3 通过**（21–30s/轮，见下两条修法）。
+  跑前 `~/.radian` 不存在、`~/.cache` 3527 条；跑后 `~/.radian` 仍不存在、`~/.cache` 的
+  `find -printf '%p %T@ %s'` **逐行 diff 为 0**，即测试没有写进 VM 真实的 `~/.radian`/`~/.cache`。
+- `agent-extensions` 的两个进度测试直接跑测试二进制各 **20/20 通过**。
+- `cargo test -p agent-core --locked --features journal-selfcheck`、其 clippy、
+  `cargo +1.88 check --workspace --all-targets`、两个 fixture 检查脚本：全部通过。
+
+### 失败与修法（两条，已在分支上提交）
+
+1. **`pty_an_over_budget_request_is_still_sent` 在 Linux 上超时**（单独跑、120s 仍不通过）。
+   复现：`cargo test -p radian-tui --test pty --no-fail-fast -- pty_an_over_budget_request_is_still_sent`。
+   根因：测试把 4 000 个 `x` 作为**裸字节**写进 pty；TUI 每个按键重绘一次、每次重绘都重新
+   wrap 整条输入，整体 O(n²)，慢 VM 上 120s 都跑不完 4 000 个键。修法：按真实终端的行为，
+   把输入作为**一次 bracketed paste**（`ESC[200~…ESC[201~`）发送——一次 `Event::Paste`、
+   一次重绘；行为断言（越过 `B` 仍发请求）不变，测试 <1s 通过。
+2. **`pty_shell_approval_shows_the_command_and_the_truncation_marker` 在 Linux 上确定性失败**。
+   屏幕显示 `bwrap: Can't chdir to /tmp/…/ws: No such file or directory`，shell `exit code: 1`。
+   根因：测试把工作区（`<tmp>/ws`）放在会话目录（`<tmp>`）里面，而 ADR 0020 把会话目录加进
+   沙箱的 `deny_read`；`bwrap` 先 `--bind` 工作区、**后**对会话目录 `--tmpfs` 遮蔽，于是工作区
+   被遮住，`--chdir` 失败。手工复现：
+   `bwrap … --bind W W --tmpfs P --chdir W …`（W 在 P 内）失败；把 `--tmpfs P` 放在 `--bind W W`
+   之前则成功。修法：给这个测试一个**与会话目录平级**的 sessions 目录（`<tmp>/sessions`）。
+   **未改产品**：工作区被放进被遮蔽目录这一行为（`bwrap.rs` 的顺序）原样保留，见"不确定"。
+   注意其它 shell 测试（`pty_yes_runs_an_ask…`、`pty_a_compound_shell_command_always_asks`）
+   同样把工作区放在会话目录里，但它们的断言恰好能在**命令文本**里匹配到（如 `YES-RAN`），
+   所以之前是"空过"；本次未改它们。
+
+### 未修的问题（报告给 owner）
+
+- **Rust 1.88 的 clippy 在 `radian-memory/tests/split.rs:61` 失败**：
+  `let _ = file.unlock();` 触发 rustc 的 `unstable_name_collisions`（std 正在加 `File::unlock`），
+  在 `-D warnings` 下是 error。复现：
+  `cargo clippy --workspace --all-targets -- -D warnings -A clippy::uninlined_format_args`
+  → `error: a method with this name may be added to the standard library in the future`。
+  在较新的 Rust（1.89+，`File::unlock` 已稳定）上不会触发，所以这是 **1.88 专属**。
+  全工作区在 `-A unstable_name_collisions` 下 clippy 通过（exit 0），即这是唯一一处。
+  `radian-memory` 由另一个 pi 负责，本任务不改。
+- **`bwrap` 的遮蔽顺序**：工作区若位于某个被 `deny_read` 的目录内，`--tmpfs` 会把工作区一起
+  遮住，沙箱内 shell 无法 `chdir`。macOS 的 seatbelt 用父进程 `current_dir` 起进程，绕开了
+  这一点；Linux 的 `bwrap --chdir` 做不到。要不要在 `bwrap.rs` 里对"工作区在被遮蔽目录内"
+  特判（跳过该条 deny，或直接拒绝并说明）是产品决定。
