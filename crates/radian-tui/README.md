@@ -118,25 +118,30 @@ the pid and the group are gone.
 Durable data was already safe (every append is fsynced, ADR 0001 D3; a torn tail is truncated
 on read, ADR 0006 §3.2) and stays so.
 
-## Review note: a panic in the driver task (2026-10-12)
+## A panic in the driver task leaves in order (2026-10-12)
 
-Slice B fixed the panic path that used to `process::exit(101)` from inside the hook: `main`
-now catches the unwind, shuts the runtime down with a bound (dropping in-flight tool futures
-and their `kill_on_drop` children) and then exits 101. Review confirmed the fix by reverting
-it: `pty_panic_path_does_not_orphan_a_child` failed and the reverted run **did** leave a real
-orphan (`sleep 600`, parent pid 1) behind.
+The driver runs as a **spawned** task. A panic inside it is caught by the runtime, not by
+`main`'s `catch_unwind`, so the process keeps running — and the old panic hook restored the
+terminal anyway, leaving the UI drawing in cooked mode over a normal screen and sending input
+to a closed inbox.
 
-One edge it does not cover. The driver runs as a **spawned** task and is only joined after
-the UI loop ends. A panic *inside that task* is caught by tokio, not by `main`'s
-`catch_unwind` — but the panic hook still runs and restores the terminal. The UI loop then
-keeps going in cooked mode, drawing over a normal screen and sending input to a dead inbox.
-Nothing is orphaned (the task's tool futures are dropped with it), so this is robustness, not
-safety. **Follow-up:** the UI loop should watch the driver task and leave as soon as it ends,
-and the hook should restore only when the process is actually going down.
+Two changes fix that:
 
-`ApprovalRequest` gained `resolved_resource` and `arguments` in this slice. Since it is a
-plain struct with public fields, adding a field breaks every literal construction outside the
-crate; mark it `#[non_exhaustive]` the next time `radian-permissions` is touched.
+- The panic hook restores the terminal **only when the panicking thread is `main`** — the
+  process-going-down case. A spawned task's panic is not fatal, so the UI keeps the terminal.
+  The hook still never exits; `main` catches the unwind, shuts the runtime down with a bound
+  (dropping in-flight tool futures and their `kill_on_drop` children) and exits 101. The main
+  thread's unwind drops `TtyGuard` regardless, so the hook's restore is only about making the
+  panic visible on the normal screen.
+- The UI loop watches the driver task (`JoinHandle::is_finished`) and leaves as soon as it
+  ends, whatever the reason: it draws a final notice, restores the terminal, and `run` joins
+  the task. A `JoinError` (the panic case) becomes exit 1 with a message; the panic hook
+  records the panic text, which is printed **after** the alternate screen is gone, so it is
+  readable instead of scrolling away inside the alternate screen.
+
+`pty_a_driver_panic_exits_orderly_and_restores_the_terminal` asserts the orderly exit (code 1,
+not 101), the restored terminal (`?1049l`, `?2004l`, `?25h`, `icanon`) and that the failure is
+reported on the normal screen. Durable data was already safe and stays so.
 
 ## Not verified
 

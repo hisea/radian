@@ -94,6 +94,11 @@ struct Cli {
     /// `<session-dir>/child.pid`, then panic. The pty test asserts the child is not orphaned.
     #[arg(long, hide = true, value_name = "SECS")]
     panic_with_child: Option<u64>,
+
+    /// Test hook: make the driver task panic instead of running, so the UI's watch on it can
+    /// be exercised.
+    #[arg(long, hide = true)]
+    panic_in_driver: bool,
 }
 
 /// Forwards core events to the UI thread. `emit` must be short and non-blocking (ADR 0010),
@@ -222,7 +227,11 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
     // The driver runs until the UI asks it to stop; dropping its `run()` future releases the
     // borrow so `shutdown()` can be called.
     let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let panic_in_driver = cli.panic_in_driver;
     let driver_task = runtime.spawn(async move {
+        if panic_in_driver {
+            panic!("radian-tui: driver task panic test");
+        }
         tokio::select! {
             result = driver.run() => result,
             _ = &mut stop_rx => {
@@ -291,14 +300,30 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
         runtime,
         &inbox,
         &hooks,
+        &driver_task,
     );
     guard.restore();
 
     let _ = stop_tx.send(());
-    let _ = runtime.block_on(driver_task);
+    // The driver task is the session: if it died, the failure is the app's failure. A panic
+    // inside it was caught by the runtime, so it shows up here as a `JoinError`, and the
+    // message the hook recorded is printed now that the alternate screen is gone.
+    let driver_result = runtime.block_on(driver_task);
+    match driver_result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return Err(format!("driver: {error}")),
+        Err(join_error) => {
+            let mut message = format!("the driver task ended unexpectedly: {join_error}");
+            if let Some(panic) = radian_tui::terminal::last_panic() {
+                message.push_str(&format!("\n  {panic}"));
+            }
+            return Err(message);
+        }
+    }
     outcome
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ui_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App,
@@ -307,8 +332,27 @@ fn ui_loop(
     runtime: &tokio::runtime::Runtime,
     inbox: &Arc<Inbox>,
     hooks: &Arc<PermissionHooks>,
+    driver_task: &tokio::task::JoinHandle<Result<(), radian_runtime::DriverError>>,
 ) -> Result<(), String> {
     while !app.quit {
+        // The driver task is the session. If it ends — normally or by panicking — the UI has
+        // nothing left to talk to, so leave in order instead of drawing over a dead session
+        // and sending input into a closed inbox. The exit code and the message are decided
+        // after the terminal is restored (see `run`).
+        if driver_task.is_finished() {
+            app.note = Some("the driver stopped; leaving".into());
+            app.entries.push(radian_tui::Entry::new(
+                radian_tui::EntryKind::Notice,
+                "the driver task ended; the session is closed",
+            ));
+            app.quit = true;
+            // One last frame, so the notice is what the user sees before the screen is
+            // restored.
+            terminal
+                .draw(|frame| radian_tui::render::draw(frame, app))
+                .map_err(|e| e.to_string())?;
+            break;
+        }
         // A short poll keeps rendering responsive without blocking on input; it is a UI
         // refresh interval, not a synchronization device.
         if event::poll(Duration::from_millis(50)).map_err(|e| e.to_string())? {

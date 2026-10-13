@@ -703,6 +703,55 @@ async fn pty_ctrl_c_while_waiting_for_approval_cancels_the_turn() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
+/// A panic inside the driver task is caught by the runtime, but the UI must notice that the
+/// session is gone: leave in order, restore the terminal, and report the failure where the
+/// user can see it (after the alternate screen is gone).
+#[test]
+fn pty_a_driver_panic_exits_orderly_and_restores_the_terminal() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("driver-panic");
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "driver-panic",
+            "--panic-in-driver",
+        ],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_exit(15).is_some(),
+        "the TUI did not exit after the driver task panicked"
+    );
+    // Not 101: the process did not panic, its driver did. The app exits 1 with a message.
+    assert_eq!(pty.app_exit_code(), Some(1), "an orderly failure exit");
+    let raw_text = String::from_utf8_lossy(&pty.raw()).to_string();
+    assert!(raw_text.contains("\u{1b}[?1049l"), "left alternate screen");
+    assert!(
+        raw_text.contains("\u{1b}[?2004l"),
+        "bracketed paste disabled"
+    );
+    assert!(raw_text.contains("\u{1b}[?25h"), "cursor restored");
+    assert!(raw_text.contains("icanon"), "cooked mode restored");
+    assert!(!raw_text.contains("-icanon"), "raw mode not restored");
+    // The panic is reported after the alternate screen is gone, so it is readable.
+    let after_restore = raw_text
+        .rsplit_once("\u{1b}[?1049l")
+        .map(|(_, rest)| rest.to_string())
+        .unwrap_or_default();
+    assert!(
+        after_restore.contains("driver task ended unexpectedly")
+            || after_restore.contains("driver task panic test"),
+        "the failure was not reported on the normal screen: {after_restore}"
+    );
+}
+
 /// A bracketed paste arrives whole and multi-line in the input box.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 // The test body blocks on the pty on purpose; the lock serializes the four pty tests.
