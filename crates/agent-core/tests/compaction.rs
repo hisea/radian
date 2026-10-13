@@ -743,7 +743,9 @@ fn the_verbatim_messages_are_written_and_read_back_from_origin() {
             text: "the first \"task\"\nwith a newline and a } brace".into(),
         },
         RetainedUserMessage {
-            text: "---\nUser messages kept verbatim (oldest first):".into(),
+            // A message whose own text contains the body's marker and heading: a reader that
+            // parsed the body would split it here, so this pins the origin as the source.
+            text: "--- user message 9 ---\nnot a real marker\n\n---\nUser messages kept verbatim (oldest first):".into(),
         },
     ];
     let history = compacted_history("the model summary", &kept, &[]).unwrap();

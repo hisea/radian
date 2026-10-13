@@ -1108,3 +1108,39 @@ async fn the_summary_request_does_not_carry_the_previous_verbatim_list() {
         "the previous model summary is still the rolling input: {text}"
     );
 }
+
+/// ADR 0018: the plan reserves the space the verbatim list takes. Without the
+/// reservation the kept suffix would include one more (large) unit and `T_after` would cross
+/// `B`, so the compaction would fail instead of committing.
+#[tokio::test]
+async fn the_plan_reserves_the_verbatim_space() {
+    let model = ScriptedModel::new([summary_reply("a short summary", 10), text("done")]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = compaction_agent(model.clone(), 8_000, true);
+    let history = vec![
+        // A big prefix: its verbatim copy is what the plan must reserve room for.
+        Message::user("x".repeat(48_000)),
+        // A unit that fits `K` but not `K - U₁`: with the reservation it is summarized.
+        Message::user("y".repeat(7_200)),
+        Message::user("last"),
+    ];
+    let mut session = agent
+        .open_session_with_journal(history, journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(session.transcript_revision(), 1, "the compaction committed");
+    let kept: Vec<usize> = session.transcript()[1..]
+        .iter()
+        .map(|message| message.text().chars().count())
+        .collect();
+    assert!(
+        kept.iter().all(|length| *length < 1_000),
+        "the 7200-byte unit must be summarized, not kept: {kept:?}"
+    );
+}
