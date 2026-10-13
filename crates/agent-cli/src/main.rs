@@ -10,11 +10,12 @@ mod approval;
 mod profile;
 mod tools;
 
+use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::io::AsyncBufReadExt;
@@ -35,7 +36,10 @@ use radian_host::{
 };
 use radian_permissions::{Approver, PermissionHooks};
 use radian_runtime::{BudgetRelax, CancelCause, Driver, DriverError, Inbox, InboxError};
-use radian_session::{Index, SessionCreatedData, SessionJournal};
+use radian_session::{
+    EventData, ExportOptions, Index, Session, SessionCreatedData, SessionJournal, export_json,
+    export_markdown,
+};
 use tokio::sync::{Mutex, mpsc};
 
 use crate::approval::{AutoApprover, JournalAudit, TERMINAL_SOURCE, TerminalApprover};
@@ -129,6 +133,44 @@ struct Cli {
     #[arg(long)]
     list: bool,
 
+    /// Export one session of this workspace and exit. Markdown by default; `--format json`
+    /// for the raw event document. Only the current workspace's sessions can be exported.
+    #[arg(
+        long,
+        value_name = "SESSION_ID",
+        conflicts_with_all = ["prompt", "resume", "list", "search"]
+    )]
+    export: Option<String>,
+
+    /// Search this workspace's sessions for message text and exit. Prints one
+    /// `session-id`/time/one-line-snippet row per hit; no match exits 0 with a note on stderr.
+    #[arg(
+        long,
+        value_name = "TEXT",
+        conflicts_with_all = ["prompt", "resume", "list", "export"]
+    )]
+    search: Option<String>,
+
+    /// Export format: `markdown` (the readable transcript) or `json` (the event document).
+    #[arg(long, value_name = "FORMAT", value_enum, default_value_t = ExportFormat::Markdown, requires = "export")]
+    format: ExportFormat,
+
+    /// Write the export here instead of stdout. Refuses to overwrite unless `--force`.
+    #[arg(long, value_name = "FILE", requires = "export")]
+    out: Option<PathBuf>,
+
+    /// Overwrite `--out` if it exists.
+    #[arg(long, requires = "out")]
+    force: bool,
+
+    /// Include the assistant reasoning in the export. Off by default (ADR 0014).
+    #[arg(long, requires = "export")]
+    include_reasoning: bool,
+
+    /// Include the raw provider payloads in the export. Off by default (ADR 0013).
+    #[arg(long, requires = "export")]
+    include_provider_payload: bool,
+
     /// Where session files live. Overrides `RADIAN_SESSION_DIR` and the user data directory.
     #[arg(long, value_name = "DIR")]
     session_dir: Option<String>,
@@ -164,6 +206,13 @@ struct Cli {
 /// Why startup failed. The message must not contain the key.
 pub(crate) struct SetupError(pub(crate) String);
 
+/// The `--format` value for `--export`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum ExportFormat {
+    Markdown,
+    Json,
+}
+
 fn main() {
     let cli = Cli::parse();
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -181,6 +230,26 @@ fn main() {
 async fn run(cli: Cli) -> i32 {
     if cli.list {
         return match list_sessions(&cli) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("agent: {}", e.0);
+                USAGE_ERROR
+            }
+        };
+    }
+    // The session-management commands never touch the model or the network: they run before
+    // `setup` (so no key is required) and never create a session file.
+    if let Some(session_id) = &cli.export {
+        return match export_session(&cli, session_id) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("agent: {}", e.0);
+                USAGE_ERROR
+            }
+        };
+    }
+    if let Some(query) = &cli.search {
+        return match search_sessions(&cli, query) {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("agent: {}", e.0);
@@ -402,6 +471,175 @@ fn list_sessions(cli: &Cli) -> Result<(), SetupError> {
         );
     }
     Ok(())
+}
+
+/// The maximum number of `--search` hits printed in one run.
+const SEARCH_LIMIT: usize = 200;
+
+/// `--export`: one session of the current workspace, Markdown or JSON. It reads the session
+/// file directly (no index), so a read-only command writes nothing into the session
+/// directory.
+fn export_session(cli: &Cli, session_id: &str) -> Result<(), SetupError> {
+    let dir = session_dir(cli)?;
+    let workspace = session_workspace(cli)?;
+    let path = dir.join(format!("{session_id}.jsonl"));
+    if !path.exists() {
+        return Err(SetupError(format!(
+            "no session {session_id:?} in {}",
+            dir.display()
+        )));
+    }
+    let session = Session::open(&path)
+        .map_err(|e| SetupError(format!("cannot read session {session_id:?}: {e}")))?;
+    // The same workspace filter as `--list`: a session belongs to the workspace it was
+    // created in, and another workspace's id is refused by name rather than exported.
+    if session_workspace_of(&session).as_deref() != Some(workspace.as_str()) {
+        return Err(SetupError(format!(
+            "session {session_id:?} is not in this workspace; --export only exports the \
+             current workspace"
+        )));
+    }
+    let mut opts = ExportOptions::new()
+        .include_reasoning(cli.include_reasoning)
+        .include_provider_payload(cli.include_provider_payload);
+    for secret in export_secrets(cli) {
+        opts = opts.with_secret(secret);
+    }
+    let rendered = match cli.format {
+        ExportFormat::Markdown => export_markdown(&session, &opts),
+        ExportFormat::Json => export_json(&session, &opts),
+    }
+    .map_err(|e| SetupError(format!("cannot export session {session_id:?}: {e}")))?;
+    match &cli.out {
+        Some(path) => {
+            if path.exists() && !cli.force {
+                return Err(SetupError(format!(
+                    "{} already exists; pass --force to overwrite it",
+                    path.display()
+                )));
+            }
+            std::fs::write(path, rendered)
+                .map_err(|e| SetupError(format!("cannot write {}: {e}", path.display())))?;
+        }
+        None => print!("{rendered}"),
+    }
+    Ok(())
+}
+
+/// The workspace recorded in a session's `SessionCreated` event. `None` for a file the reader
+/// accepted but that has no `SessionCreated` (impossible for one this CLI wrote).
+fn session_workspace_of(session: &Session) -> Option<String> {
+    session.events().iter().find_map(|event| match &event.data {
+        EventData::Other(data) => data
+            .get("workspace")
+            .and_then(|workspace| workspace.as_str())
+            .map(str::to_owned),
+        _ => None,
+    })
+}
+
+/// The values that must never appear in an export: this process's key (the one `setup` would
+/// read) and every `--header` value. Redaction itself is not optional (ADR 0013 decision 3).
+fn export_secrets(cli: &Cli) -> Vec<String> {
+    let mut secrets = Vec::new();
+    if let Ok(key) = std::env::var(&cli.api_key_env)
+        && !key.is_empty()
+    {
+        secrets.push(key);
+    }
+    for header in &cli.header {
+        if let Some((_, value)) = header.split_once('=')
+            && !value.is_empty()
+        {
+            secrets.push(value.to_owned());
+        }
+    }
+    secrets
+}
+
+/// `--search`: substring search over the current workspace's message text, using the same
+/// `Index::search` the index cache is built on.
+fn search_sessions(cli: &Cli, query: &str) -> Result<(), SetupError> {
+    let dir = session_dir(cli)?;
+    let workspace = session_workspace(cli)?;
+    if !dir.exists() {
+        eprintln!("no match");
+        return Ok(());
+    }
+    // A read-only command must not write into the session directory (the JSONL is the
+    // authority; the index is disposable, ADR 0006 §10), so the index is built in a private
+    // temp directory and removed on drop.
+    let scratch = TempIndex::new()?;
+    let mut index = Index::open(scratch.path())
+        .map_err(|e| SetupError(format!("cannot open a search index: {e}")))?;
+    index
+        .rebuild_dir(&dir)
+        .map_err(|e| SetupError(format!("cannot index {}: {e}", dir.display())))?;
+    let hits = index
+        .search(query, Some(&workspace), SEARCH_LIMIT)
+        .map_err(|e| SetupError(format!("cannot search: {e}")))?;
+    if hits.is_empty() {
+        eprintln!("no match");
+        return Ok(());
+    }
+    // The hit's own timestamp is not part of `SearchHit`; the session's last activity is the
+    // same value `--list` shows and is enough to tell hits apart.
+    let times: HashMap<String, String> = index
+        .list(Some(&workspace))
+        .map_err(|e| SetupError(format!("cannot list sessions: {e}")))?
+        .into_iter()
+        .map(|session| {
+            (
+                session.session_id,
+                session.last_ts.unwrap_or_else(|| "-".into()),
+            )
+        })
+        .collect();
+    for hit in hits {
+        let time = times
+            .get(&hit.session_id)
+            .cloned()
+            .unwrap_or_else(|| "-".into());
+        println!("{}\t{}\t{}", hit.session_id, time, one_line(&hit.snippet));
+    }
+    Ok(())
+}
+
+/// A hit snippet as one terminal line: every run of whitespace (including the newlines a
+/// multi-line message carries) becomes a single space.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A disposable SQLite index in the system temp directory, removed on drop. `--search` must
+/// not create anything in the session directory, and the index is re-derivable from the
+/// JSONL (ADR 0006 §10).
+struct TempIndex {
+    dir: PathBuf,
+}
+
+impl TempIndex {
+    fn new() -> Result<Self, SetupError> {
+        static SEARCH_INDEXES: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "radian-cli-search-{}-{}",
+            std::process::id(),
+            SEARCH_INDEXES.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| SetupError(format!("cannot create a search index dir: {e}")))?;
+        Ok(Self { dir })
+    }
+
+    fn path(&self) -> PathBuf {
+        self.dir.join("index.db")
+    }
+}
+
+impl Drop for TempIndex {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
 }
 
 /// Like the provider's own rule: localhost, 127.0.0.1 and ::1 may go without a key.

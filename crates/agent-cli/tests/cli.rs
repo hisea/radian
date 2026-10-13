@@ -3090,3 +3090,422 @@ async fn a_bad_mcp_config_leaves_no_session() {
     assert!(stderr.contains(bad.to_str().unwrap()), "{stderr}");
     assert_session_dir_empty(&session_dir);
 }
+
+// ---------- session export and search (--export / --search) ----------
+
+/// Writes a minimal, valid v1 session file by hand: one user message and one assistant
+/// message, optionally carrying reasoning and a raw provider payload. Used where a real run
+/// cannot produce the field (the OpenAI adapter never sets a provider payload).
+fn write_session(
+    dir: &Path,
+    id: &str,
+    workspace: &str,
+    assistant_text: &str,
+    reasoning: Option<&str>,
+    payload: Option<&str>,
+) -> PathBuf {
+    let ts = "2026-10-13T00:00:00.000000Z";
+    let mut assistant = json!({"content": [{"text": {"text": assistant_text}}]});
+    if let Some(reasoning) = reasoning {
+        assistant["reasoning"] = json!([{"text": {"text": reasoning}}]);
+    }
+    if let Some(payload) = payload {
+        assistant["provider_payload"] = serde_json::from_str(payload).unwrap();
+    }
+    let lines = [
+        json!({"schema_version":1,"session_id":id,"seq":0,"ts":ts,"event":"SessionCreated",
+               "critical":true,"data":{"workspace":workspace,"config_snapshot":{}}}),
+        json!({"schema_version":1,"session_id":id,"seq":1,"ts":ts,"event":"MessageAppended",
+               "critical":true,"data":{"index":0,
+               "message":{"user":{"content":[{"text":{"text":"hello from the user"}}]}}}}),
+        json!({"schema_version":1,"session_id":id,"seq":2,"ts":ts,"event":"MessageAppended",
+               "critical":true,"data":{"index":1,"message":{"assistant":assistant}}}),
+    ];
+    let mut text = String::new();
+    for line in lines {
+        text.push_str(&line.to_string());
+        text.push('\n');
+    }
+    let path = dir.join(format!("{id}.jsonl"));
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+fn canonical(path: &Path) -> String {
+    std::fs::canonicalize(path)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The sorted file names in a directory, for the "writes nothing" assertion.
+fn dir_names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Acceptance 1: `--export` renders the conversation as Markdown by default and as JSON with
+/// `--format json`.
+#[tokio::test]
+async fn export_renders_markdown_and_json() {
+    let dir = scratch("export-basic");
+    let sessions = dir.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("REPLY-TEXT-ONE")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--session-id",
+                "e1",
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "-p",
+                "USER-TEXT-ONE",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+
+    let base = [
+        "--model",
+        "m",
+        "--session-dir",
+        sessions.to_str().unwrap(),
+        "--workspace",
+        ws.to_str().unwrap(),
+        "--export",
+        "e1",
+    ];
+    let (code, stdout, stderr) = feed_and_wait(spawn_agent(&base, &[]), "").await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("# Session e1"), "{stdout}");
+    assert!(stdout.contains("USER-TEXT-ONE"), "{stdout}");
+    assert!(stdout.contains("REPLY-TEXT-ONE"), "{stdout}");
+
+    let mut json_args = base.to_vec();
+    json_args.extend_from_slice(&["--format", "json"]);
+    let (code, stdout, stderr) = feed_and_wait(spawn_agent(&json_args, &[]), "").await;
+    assert_eq!(code, 0, "{stderr}");
+    let parsed: Value = serde_json::from_str(&stdout).expect("the JSON export is valid JSON");
+    assert_eq!(parsed["session_id"], "e1");
+    assert!(stdout.contains("USER-TEXT-ONE"), "{stdout}");
+    assert!(stdout.contains("REPLY-TEXT-ONE"), "{stdout}");
+}
+
+/// Acceptance 2: reasoning and provider payload are omitted by default and included only
+/// with their switches.
+#[tokio::test]
+async fn export_omits_reasoning_and_provider_payload_by_default() {
+    let dir = scratch("export-optin");
+    let sessions = dir.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    write_session(
+        &sessions,
+        "optin",
+        &canonical(&ws),
+        "VISIBLE-ANSWER",
+        Some("SECRET-REASONING"),
+        Some(r#"{"marker":"PAYLOAD-MARKER"}"#),
+    );
+    let base = [
+        "--model",
+        "m",
+        "--session-dir",
+        sessions.to_str().unwrap(),
+        "--workspace",
+        ws.to_str().unwrap(),
+        "--export",
+        "optin",
+    ];
+
+    let (code, stdout, stderr) = feed_and_wait(spawn_agent(&base, &[]), "").await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("VISIBLE-ANSWER"), "{stdout}");
+    assert!(!stdout.contains("SECRET-REASONING"), "{stdout}");
+    assert!(!stdout.contains("PAYLOAD-MARKER"), "{stdout}");
+
+    let mut with_reasoning = base.to_vec();
+    with_reasoning.push("--include-reasoning");
+    let (code, stdout, stderr) = feed_and_wait(spawn_agent(&with_reasoning, &[]), "").await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("SECRET-REASONING"), "{stdout}");
+    assert!(!stdout.contains("PAYLOAD-MARKER"), "{stdout}");
+
+    let mut with_payload = base.to_vec();
+    with_payload.push("--include-provider-payload");
+    let (code, stdout, stderr) = feed_and_wait(spawn_agent(&with_payload, &[]), "").await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("PAYLOAD-MARKER"), "{stdout}");
+    assert!(!stdout.contains("SECRET-REASONING"), "{stdout}");
+}
+
+/// Acceptance 3: the process's key and every `--header` value are redacted from the export.
+#[tokio::test]
+async fn export_redacts_the_key_and_header_values() {
+    let dir = scratch("export-secrets");
+    let sessions = dir.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    write_session(
+        &sessions,
+        "sec",
+        &canonical(&ws),
+        "the key sk-cli-test-secret and the header hdr-value-xyz",
+        None,
+        None,
+    );
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--export",
+                "sec",
+                "--header",
+                "X-Test=hdr-value-xyz",
+            ],
+            &[("OPENAI_API_KEY", KEY)],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stdout.contains(KEY), "the key leaked: {stdout}");
+    assert!(
+        !stdout.contains("hdr-value-xyz"),
+        "the header leaked: {stdout}"
+    );
+    assert!(stdout.contains("<redacted>"), "{stdout}");
+}
+
+/// Acceptance 4: a session that belongs to another workspace is refused by name.
+#[tokio::test]
+async fn export_refuses_another_workspaces_session() {
+    let dir = scratch("export-other-ws");
+    let sessions = dir.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws_a = dir.join("ws-a");
+    let ws_b = dir.join("ws-b");
+    std::fs::create_dir_all(&ws_a).unwrap();
+    std::fs::create_dir_all(&ws_b).unwrap();
+    write_session(&sessions, "in-b", &canonical(&ws_b), "text", None, None);
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "--workspace",
+                ws_a.to_str().unwrap(),
+                "--export",
+                "in-b",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("not in this workspace"), "{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+}
+
+/// Acceptance 5: `--out` writes a file, refuses an existing one, and `--force` overwrites it.
+#[tokio::test]
+async fn export_out_refuses_to_overwrite_without_force() {
+    let dir = scratch("export-out");
+    let sessions = dir.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    write_session(&sessions, "out", &canonical(&ws), "OUT-TEXT", None, None);
+    let out = dir.join("export.md");
+    let base = [
+        "--model",
+        "m",
+        "--session-dir",
+        sessions.to_str().unwrap(),
+        "--workspace",
+        ws.to_str().unwrap(),
+        "--export",
+        "out",
+        "--out",
+        out.to_str().unwrap(),
+    ];
+
+    let (code, _, stderr) = feed_and_wait(spawn_agent(&base, &[]), "").await;
+    assert_eq!(code, 0, "{stderr}");
+    let first = std::fs::read_to_string(&out).unwrap();
+    assert!(first.contains("OUT-TEXT"), "{first}");
+
+    let (code, _, stderr) = feed_and_wait(spawn_agent(&base, &[]), "").await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("already exists"), "{stderr}");
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), first);
+
+    std::fs::write(&out, "OLD").unwrap();
+    let mut forced = base.to_vec();
+    forced.push("--force");
+    let (code, _, stderr) = feed_and_wait(spawn_agent(&forced, &[]), "").await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_ne!(std::fs::read_to_string(&out).unwrap(), "OLD");
+}
+
+/// Acceptance 6: `--search` prints one line per hit and reports "no match" on stderr with a
+/// zero exit when nothing matches.
+#[tokio::test]
+async fn search_finds_text_and_reports_no_match() {
+    let dir = scratch("search");
+    let sessions = dir.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("SEARCHABLE-MARKER here")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--session-id",
+                "s1",
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "-p",
+                "find me",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+
+    let base = [
+        "--model",
+        "m",
+        "--session-dir",
+        sessions.to_str().unwrap(),
+        "--workspace",
+        ws.to_str().unwrap(),
+    ];
+    let mut hit_args = base.to_vec();
+    hit_args.extend_from_slice(&["--search", "SEARCHABLE-MARKER"]);
+    let (code, stdout, stderr) = feed_and_wait(spawn_agent(&hit_args, &[]), "").await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    let row = stdout.lines().next().unwrap();
+    assert!(row.starts_with("s1\t"), "{row}");
+    assert_eq!(row.split('\t').count(), 3, "{row}");
+    assert!(row.contains("SEARCHABLE-MARKER"), "{row}");
+
+    let mut miss_args = base.to_vec();
+    miss_args.extend_from_slice(&["--search", "NO-SUCH-TEXT-XYZ"]);
+    let (code, stdout, stderr) = feed_and_wait(spawn_agent(&miss_args, &[]), "").await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(stderr.contains("no match"), "{stderr}");
+}
+
+/// Acceptance 7: the session commands write nothing into the session directory (not even an
+/// index cache; `--search` builds one in the system temp directory).
+#[tokio::test]
+async fn session_commands_do_not_touch_the_session_directory() {
+    let dir = scratch("session-readonly");
+    let sessions = dir.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("KEEP-MARKER")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--session-id",
+                "keep",
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "-p",
+                "keep me",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let before = dir_names(&sessions);
+    let before_bytes = std::fs::read(sessions.join("keep.jsonl")).unwrap();
+
+    let base = [
+        "--model",
+        "m",
+        "--session-dir",
+        sessions.to_str().unwrap(),
+        "--workspace",
+        ws.to_str().unwrap(),
+    ];
+    let mut export_args = base.to_vec();
+    export_args.extend_from_slice(&["--export", "keep"]);
+    let (code, _, stderr) = feed_and_wait(spawn_agent(&export_args, &[]), "").await;
+    assert_eq!(code, 0, "{stderr}");
+    let mut search_args = base.to_vec();
+    search_args.extend_from_slice(&["--search", "KEEP-MARKER"]);
+    let (code, _, stderr) = feed_and_wait(spawn_agent(&search_args, &[]), "").await;
+    assert_eq!(code, 0, "{stderr}");
+
+    assert_eq!(
+        dir_names(&sessions),
+        before,
+        "the session commands wrote a file"
+    );
+    assert_eq!(
+        std::fs::read(sessions.join("keep.jsonl")).unwrap(),
+        before_bytes,
+        "the session file was modified"
+    );
+}
+
+/// The session commands are their own mode: they cannot be combined with a prompt or a
+/// conversation, which is a clap usage error (exit 2).
+#[tokio::test]
+async fn session_commands_conflict_with_a_prompt() {
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(&["--model", "m", "--export", "x", "-p", "hi"], &[]),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2);
+    assert!(stderr.contains("cannot be used with"), "{stderr}");
+}

@@ -21,6 +21,33 @@ Every run is a durable session: one JSONL file per conversation.
 - One writer per file: a second process opening the same session is refused.
 - `-p` (one-shot) writes a session too.
 
+## Session management
+
+Three read-only commands work on the sessions of the **current workspace** (`--workspace`,
+else the current directory). None of them starts the model, and none writes into the session
+directory.
+
+- **`--list`**: id, created, last activity and message count, newest first.
+- **`--export <id>`**: the session as Markdown on stdout by default;
+  `--format json` gives the raw event document. `--out FILE` writes it to a file instead
+  (refused if the file exists, unless `--force`).
+  - **Redaction cannot be turned off** (ADR 0013 decision 3): this process's key (from
+    `--api-key-env`) and every `--header` value are redacted, on top of the always-on
+    `sk-`/`Bearer`/`Authorization` patterns. Opting in to extra content never weakens it.
+  - **Reasoning and raw provider payloads are omitted by default** (ADR 0014, ADR 0013);
+    `--include-reasoning` and `--include-provider-payload` add them to this export only.
+  - **Only the current workspace's sessions can be exported.** Another workspace's id is
+    refused with `session "<id>" is not in this workspace`, the same filter `--list` uses.
+  - The export reads the session JSONL directly; it does not create or update the index.
+- **`--search <text>`**: substring search over the visible message text, one tab-separated
+  row per hit: `session-id`, last activity, and the hit snippet on a single line. No match
+  prints nothing on stdout, says `no match` on stderr and exits 0. It builds a disposable
+  index in the system temp directory, so the session directory stays untouched (ADR 0006
+  §10: the JSONL is the authority, the index is disposable).
+
+All three exit without a model call, and `--export`/`--search` conflict with `--prompt`,
+`--resume` and `--list` (clap rejects a combination with exit 2).
+
 ## Input
 
 While a turn is in flight, a line typed at the prompt is a **steer** (it changes the current
