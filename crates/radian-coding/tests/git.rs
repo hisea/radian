@@ -18,6 +18,13 @@ fn repo(dir: &TempDir) -> std::path::PathBuf {
     git(&root, &["init", "-q"]);
     git(&root, &["config", "user.email", "test@example.com"]);
     git(&root, &["config", "user.name", "Test"]);
+    // `git commit` triggers git's background auto-maintenance, which can create
+    // `.git/objects/maintenance.lock` after this setup returns and race the `.git` snapshot
+    // in `git_status_and_diff_...`. That is git's own job, not the read-only tools', so pin
+    // the repo: no auto maintenance, no auto gc. (Observed on git 2.55 in the Linux VM; the
+    // macOS git 2.53 did not run it, which is why the test only flaked there.)
+    git(&root, &["config", "maintenance.auto", "false"]);
+    git(&root, &["config", "gc.auto", "0"]);
     std::fs::write(root.join("tracked.txt"), "one\n").unwrap();
     git(&root, &["add", "tracked.txt"]);
     git(&root, &["commit", "-q", "-m", "init"]);
