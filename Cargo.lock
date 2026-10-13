@@ -12,6 +12,8 @@ dependencies = [
  "clap",
  "libc",
  "radian-coding",
+ "radian-runtime",
+ "radian-session",
  "serde",
  "serde_json",
  "tokio",

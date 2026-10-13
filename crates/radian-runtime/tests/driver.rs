@@ -179,10 +179,7 @@ async fn durable_event_order_and_index_correspondence() {
 /// Each admitted input is recorded exactly once, however many steps the turn takes.
 #[tokio::test]
 async fn each_input_is_admitted_once() {
-    let model = ScriptedModel::new([
-        calls(vec![call("c1", "echo", json!({}))]),
-        text("done"),
-    ]);
+    let model = ScriptedModel::new([calls(vec![call("c1", "echo", json!({}))]), text("done")]);
     let tools = MemTools::new();
     let (mut driver, env) = open_env("admit-once", model, tools).await;
     let handle = tokio::spawn(async move { driver.run().await });

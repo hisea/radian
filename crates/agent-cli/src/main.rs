@@ -1,30 +1,36 @@
 //! The `agent` command: a chat client wiring the core turn loop to an OpenAI-compatible
-//! model and MCP stdio tools.
+//! model and MCP stdio tools, driven by `radian-runtime` so every session is durable.
 //!
-//! stdout carries only what the model said (streamed); status, prompts and errors go to
-//! stderr, so `agent -p "..."` can be piped. The API key is read from an environment
-//! variable only, and is redacted from everything this program prints.
+//! stdout carries only what the model said (streamed); status, prompts, reasoning and
+//! errors go to stderr, so `agent -p "..."` can be piped. The API key is read from an
+//! environment variable only, and is redacted from everything this program prints — and
+//! from everything it writes to disk.
 
 mod mcp;
 mod tools;
 
 use std::future::Future;
 use std::io::{IsTerminal, Write};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::io::AsyncBufReadExt;
-use tokio::time::Instant;
+use tokio::sync::Notify;
+use tokio::task::JoinHandle;
 
 use agent_core::{
-    Agent, AgentConfig, AgentEvent, AgentSession, EventSink, HookContext, HookError, Hooks,
-    RunError, RunOutcome, RunStatus, ToolCall, ToolDecision, TurnOptions,
+    Agent, AgentConfig, AgentEvent, EventSink, HookContext, HookError, Hooks, InputSource,
+    RunStatus, ToolCall, ToolDecision, TurnOptions,
 };
 use agent_extensions::{McpServerConfig, McpToolProvider};
 use agent_provider_openai_compatible::{ApiKey, OpenAiCompatible, OpenAiCompatibleConfig};
 use clap::Parser;
 use radian_coding::CodingTools;
+use radian_runtime::{CancelCause, Driver, DriverError, Inbox, InboxError};
+use radian_session::{Index, SessionCreatedData, SessionJournal};
 use tokio::sync::{Mutex, mpsc};
 
 use crate::mcp::load_mcp_config;
@@ -32,6 +38,10 @@ use crate::tools::CliTools;
 
 /// Exit code for usage and configuration errors, matching clap's own usage failures.
 const USAGE_ERROR: i32 = 2;
+
+/// How many inputs may wait in the inbox. Bounded on purpose (ADR 0011 L4): a full queue
+/// refuses and hands the message back instead of dropping it.
+const INBOX_CAPACITY: usize = 64;
 
 #[derive(Parser)]
 #[command(name = "agent", about = "Chat with a model, with optional MCP tools")]
@@ -67,7 +77,7 @@ struct Cli {
     workspace: Option<String>,
 
     /// One-shot mode: run this prompt, then exit.
-    #[arg(short, long)]
+    #[arg(short, long, conflicts_with = "list")]
     prompt: Option<String>,
 
     /// Extra request headers, repeatable: `--header NAME=VALUE`. The value is never
@@ -76,10 +86,23 @@ struct Cli {
     #[arg(long = "header", value_name = "NAME=VALUE")]
     header: Vec<String>,
 
-    /// A stable session identifier for this process: used verbatim, and available to
-    /// `--header` values as `{session_id}`. Generated once per process when omitted.
-    #[arg(long, value_name = "VALUE")]
+    /// A stable session identifier for this process: used verbatim as the session file's
+    /// name, and available to `--header` values as `{session_id}`. Generated once per
+    /// process when omitted.
+    #[arg(long, value_name = "VALUE", conflicts_with = "resume")]
     session_id: Option<String>,
+
+    /// Resume an existing session by id.
+    #[arg(long, value_name = "SESSION_ID", conflicts_with = "list")]
+    resume: Option<String>,
+
+    /// List this workspace's sessions and exit.
+    #[arg(long)]
+    list: bool,
+
+    /// Where session files live. Overrides `RADIAN_SESSION_DIR` and the user data directory.
+    #[arg(long, value_name = "DIR")]
+    session_dir: Option<String>,
 
     /// Ask the server to include usage in the stream. Omit to keep the default policy
     /// (on for `api.openai.com` only, off elsewhere); `--include-usage=false` turns it off.
@@ -117,6 +140,15 @@ fn main() {
 }
 
 async fn run(cli: Cli) -> i32 {
+    if cli.list {
+        return match list_sessions(&cli) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("agent: {}", e.0);
+                USAGE_ERROR
+            }
+        };
+    }
     let setup = match setup(&cli).await {
         Ok(setup) => setup,
         Err(e) => {
@@ -140,7 +172,10 @@ struct Setup {
     system_prompt: Option<String>,
     max_model_calls: Option<u32>,
     turn_timeout_secs: Option<u64>,
-    /// The key and every custom header value: redacted from all error output, never printed.
+    /// The session id this process uses: the file name, and the `{session_id}` header value.
+    session_id: String,
+    /// The key and every custom header value: redacted from all error output, never printed
+    /// and never written to the session file.
     secrets: Vec<String>,
 }
 
@@ -167,11 +202,14 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     if let Some(key) = &key {
         config = config.with_api_key(ApiKey::new(key.clone()));
     }
-    // Resolve the session id once per process: the same value goes into every request this
-    // process makes, and a different process gets a different one. When the CLI starts
-    // opening session files, this is the value to pass to `SessionJournal::create`
-    // (`radian-session` takes the id as a string), so the header and the file agree.
-    let session_id = cli.session_id.clone().unwrap_or_else(generate_session_id);
+    // Resolve the session id once per process. `--resume` names an existing session, so it
+    // wins; otherwise `--session-id`, otherwise a generated one. The same value is the
+    // session file's name and every `{session_id}` in a header.
+    let session_id = match (&cli.resume, &cli.session_id) {
+        (Some(id), _) | (None, Some(id)) => id.clone(),
+        (None, None) => generate_session_id(),
+    };
+    validate_session_id(&session_id)?;
     let uses_placeholder = cli
         .header
         .iter()
@@ -179,7 +217,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     let headers = parse_headers(&cli.header, &session_id)?;
     config.headers = headers.clone();
     config.include_usage = cli.include_usage;
-    if uses_placeholder && cli.session_id.is_none() {
+    if uses_placeholder && cli.session_id.is_none() && cli.resume.is_none() {
         // Only when the generated id is actually observable: it is what makes the routing
         // reusable across processes.
         eprintln!("[session] {session_id} (pass --session-id to reuse it)");
@@ -191,7 +229,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         None => Vec::new(),
     };
     // The key and every header value are secrets: no error this program prints may contain
-    // any of them. The adapter masks them too; this covers the CLI's own messages.
+    // any of them, and they are never written to the session file.
     let mut secrets: Vec<String> = key.into_iter().collect();
     secrets.extend(headers.into_iter().map(|(_, value)| value));
     secrets.retain(|secret| !secret.is_empty());
@@ -201,6 +239,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         system_prompt,
         max_model_calls: cli.max_model_calls,
         turn_timeout_secs: cli.turn_timeout_secs,
+        session_id,
         secrets,
     })
 }
@@ -217,6 +256,115 @@ fn generate_session_id() -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("{nanos:x}-{:x}", std::process::id())
+}
+
+/// A session id becomes a file name, so it must not be able to escape the session
+/// directory or name another file.
+fn validate_session_id(id: &str) -> Result<(), SetupError> {
+    let ok = !id.is_empty()
+        && id.len() <= 128
+        && id != "."
+        && id != ".."
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
+    if ok {
+        Ok(())
+    } else {
+        Err(SetupError(format!(
+            "session id {id:?} must be 1-128 characters of [A-Za-z0-9._-]"
+        )))
+    }
+}
+
+/// Where session files live: `--session-dir`, then `RADIAN_SESSION_DIR`, then the user's
+/// data directory.
+///
+/// Sessions are durable records, not a cache: ADR 0013 decision 4 says the journal is not
+/// subject to cache cleanup, so this is the platform's *data* directory —
+/// `$XDG_DATA_HOME/radian/sessions` (defaulting to `~/.local/share/radian/sessions`) on
+/// Linux, `~/Library/Application Support/radian/sessions` on macOS. Never a cache or temp
+/// path.
+fn session_dir(cli: &Cli) -> Result<PathBuf, SetupError> {
+    if let Some(dir) = &cli.session_dir {
+        return Ok(PathBuf::from(dir));
+    }
+    if let Ok(dir) = std::env::var("RADIAN_SESSION_DIR")
+        && !dir.is_empty()
+    {
+        return Ok(PathBuf::from(dir));
+    }
+    let home = std::env::var("HOME")
+        .map_err(|_| SetupError("no HOME to place sessions under; pass --session-dir".into()))?;
+    if let Ok(xdg) = std::env::var("XDG_DATA_HOME")
+        && !xdg.is_empty()
+    {
+        return Ok(PathBuf::from(xdg).join("radian").join("sessions"));
+    }
+    if cfg!(target_os = "macos") {
+        Ok(PathBuf::from(home)
+            .join("Library/Application Support")
+            .join("radian")
+            .join("sessions"))
+    } else {
+        Ok(PathBuf::from(home)
+            .join(".local/share")
+            .join("radian")
+            .join("sessions"))
+    }
+}
+
+/// The workspace a session belongs to: `--workspace` when given, else the current
+/// directory. `--list` filters by the same value, so a session is only listed in the
+/// workspace it was created in.
+fn session_workspace(cli: &Cli) -> Result<String, SetupError> {
+    let path = match &cli.workspace {
+        Some(path) => PathBuf::from(path),
+        None => std::env::current_dir()
+            .map_err(|e| SetupError(format!("cannot read the current directory: {e}")))?,
+    };
+    let path = std::fs::canonicalize(&path).unwrap_or(path);
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// `--list`: the sessions of this workspace, newest activity first.
+fn list_sessions(cli: &Cli) -> Result<(), SetupError> {
+    let dir = session_dir(cli)?;
+    let workspace = session_workspace(cli)?;
+    if !dir.exists() {
+        return Ok(()); // no sessions yet
+    }
+    let mut index = Index::open(dir.join("index.db")).map_err(|e| {
+        SetupError(format!(
+            "cannot open the session index in {}: {e}",
+            dir.display()
+        ))
+    })?;
+    index
+        .rebuild_dir(&dir)
+        .map_err(|e| SetupError(format!("cannot rebuild the session index: {e}")))?;
+    let sessions = index
+        .list(Some(&workspace))
+        .map_err(|e| SetupError(format!("cannot list sessions: {e}")))?;
+    for session in sessions {
+        let messages = index
+            .indexed_events(&session.session_id)
+            .map(|events| {
+                events
+                    .iter()
+                    .filter(|event| event.event == "MessageAppended")
+                    .count()
+            })
+            .unwrap_or(0);
+        println!(
+            "{}\t{}\t{}\t{}",
+            session.session_id,
+            session.created_ts.as_deref().unwrap_or("-"),
+            session.last_ts.as_deref().unwrap_or("-"),
+            messages
+        );
+    }
+    Ok(())
 }
 
 /// Parses repeated `--header NAME=VALUE` arguments, expanding `{session_id}` in values.
@@ -298,16 +446,51 @@ fn redact(text: &str, secrets: &[String]) -> String {
     out
 }
 
+/// Opens (or resumes) the session file. The caller has already resolved `session_id`.
+fn open_journal(
+    cli: &Cli,
+    session_id: &str,
+    workspace: &str,
+) -> Result<Arc<SessionJournal>, SetupError> {
+    let dir = session_dir(cli)?;
+    let path = dir.join(format!("{session_id}.jsonl"));
+    if cli.resume.is_some() {
+        if !path.exists() {
+            return Err(SetupError(format!(
+                "no session {session_id:?} in {}",
+                dir.display()
+            )));
+        }
+        let journal = SessionJournal::resume(&path, session_id)
+            .map_err(|e| SetupError(format!("cannot resume session {session_id:?}: {e}")))?;
+        return Ok(Arc::new(journal));
+    }
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| SetupError(format!("cannot create {}: {e}", dir.display())))?;
+    // The snapshot is a model route reference only: never the key, a header value or a
+    // base URL that could carry credentials (ADR 0008 §4, ADR 0013).
+    let created = SessionCreatedData::new(
+        workspace,
+        serde_json::json!({"provider": "openai-compatible", "model": cli.model}),
+    );
+    let journal = SessionJournal::create(&path, session_id, created)
+        .map_err(|e| SetupError(format!("cannot create session {session_id:?}: {e}")))?;
+    Ok(Arc::new(journal))
+}
+
 async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     let interactive = cli.prompt.is_none();
     let lines = LineHub::spawn();
+    let can_ask = interactive || std::io::stdin().is_terminal();
     let approval = Approval {
         yes: cli.yes,
         // One-shot mode with no terminal on stdin has nobody to ask; interactive mode
         // reads its answers from the same line hub as the prompt loop.
-        can_ask: interactive || std::io::stdin().is_terminal(),
+        can_ask,
         lines: lines.clone(),
     };
+    let workspace = session_workspace(&cli)?;
+    let journal = open_journal(&cli, &setup.session_id, &workspace)?;
     let agent_config = AgentConfig {
         system_prompt: setup.system_prompt,
         ..AgentConfig::default()
@@ -326,57 +509,277 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         .with_config(agent_config)
         .with_hooks(approval),
     );
-    let mut session = match agent.open_session().await {
-        Ok(session) => session,
-        Err(e) => return Err(SetupError(format!("cannot start tools: {e}"))),
-    };
-    let ui = Ui::default();
-    let secrets = setup.secrets.clone();
-    let turn_options = |deadline: Option<Instant>| TurnOptions {
+
+    let inbox = Inbox::durable(INBOX_CAPACITY, Arc::clone(&journal));
+    let ui = Arc::new(Ui::default());
+    // The approval prompt and the prompt loop share stdin. While approval may read, the
+    // loop must not compete for a line; with `--yes` (or nobody to ask) it may.
+    ui.set_approval_may_read(can_ask && !cli.yes);
+    let options = TurnOptions {
         max_model_calls: setup.max_model_calls,
-        deadline,
+        deadline: None,
         ..TurnOptions::default()
     };
-    let deadline = |secs: u64| Instant::now() + Duration::from_secs(secs);
+    let mut driver = Driver::open(
+        &agent,
+        journal,
+        Arc::clone(&inbox),
+        Arc::clone(&ui) as Arc<dyn EventSink>,
+        options,
+    )
+    .await
+    .map_err(|e| SetupError(format!("cannot open the session: {e}")))?;
+    // A per-turn timeout: the driver computes a fresh deadline at each turn's start.
+    driver.set_turn_timeout(setup.turn_timeout_secs.map(Duration::from_secs));
+    let driver_ended = Arc::new(Notify::new());
+    let ended = Arc::clone(&driver_ended);
+    let mut task = tokio::spawn(async move {
+        let result = driver.run().await;
+        ended.notify_one();
+        result
+    });
 
+    let secrets = setup.secrets.clone();
     let code = if let Some(prompt) = cli.prompt {
-        let options = turn_options(setup.turn_timeout_secs.map(deadline));
-        match run_turn(&mut session, prompt, options, &ui).await {
-            TurnEnd::Forced => 130,
-            TurnEnd::Done(Ok(outcome)) => match outcome.status {
-                RunStatus::Completed => 0,
-                status => {
-                    eprintln!("agent: the turn ended as {status:?}");
-                    1
-                }
-            },
-            TurnEnd::Done(Err(e)) => {
-                eprintln!("agent: {}", redact(&e.to_string(), &secrets));
-                1
-            }
-        }
+        one_shot(&inbox, &ui, prompt, &driver_ended, &mut task, &secrets).await
     } else {
-        interactive_loop(
-            &mut session,
-            &lines,
-            &ui,
-            &turn_options,
-            setup.turn_timeout_secs,
-            &secrets,
-        )
-        .await
+        interactive_loop(&inbox, &ui, &lines, &driver_ended, &mut task, &secrets).await
     };
-    // Every exit path closes the session first, so each MCP server sees its stdin close,
-    // gets the chance to shut down on its own, and is reaped before the process goes away.
-    // A forced exit (a second Ctrl-C) skips the wait: dropping the session still kills the
-    // servers' process groups at once.
-    if code != 130
-        && let Err(e) = session.close().await
-    {
-        eprintln!("agent: could not close the tools cleanly: {e}");
-    }
     ui.end_of_turn();
     Ok(code)
+}
+
+/// `-p`: send one input, wait for its turn, then shut the driver down.
+async fn one_shot(
+    inbox: &Arc<Inbox>,
+    ui: &Arc<Ui>,
+    prompt: String,
+    driver_ended: &Arc<Notify>,
+    task: &mut JoinHandle<Result<(), DriverError>>,
+    secrets: &[String],
+) -> i32 {
+    if let Err(error) = inbox.followup(prompt, InputSource::User).await {
+        eprintln!("agent: {}", redact(&error.to_string(), secrets));
+        let _ = shutdown(inbox, ui, task).await;
+        return 1;
+    }
+    let mut cancelling = false;
+    match wait_for_turn(ui, inbox, driver_ended, &mut cancelling).await {
+        TurnEnd::Forced => return force_exit(task).await,
+        TurnEnd::DriverEnded => return report_task(task, secrets).await,
+        TurnEnd::Done => {}
+    }
+    if let Some(code) = report_error(&shutdown(inbox, ui, task).await, secrets) {
+        return code;
+    }
+    match ui.last_status() {
+        Some(RunStatus::Completed) => 0,
+        Some(status) => {
+            eprintln!("agent: the turn ended as {status:?}");
+            1
+        }
+        None => 1,
+    }
+}
+
+/// Interactive: read lines and route them into the inbox.
+async fn interactive_loop(
+    inbox: &Arc<Inbox>,
+    ui: &Arc<Ui>,
+    lines: &LineHub,
+    driver_ended: &Arc<Notify>,
+    task: &mut JoinHandle<Result<(), DriverError>>,
+    secrets: &[String],
+) -> i32 {
+    // True once the first Ctrl-C of a wind-down has been seen: the second one forces exit.
+    let mut cancelling = false;
+    loop {
+        if !ui.busy() {
+            cancelling = false;
+            eprint!("> ");
+            let _ = std::io::stderr().flush();
+        }
+        match next_event(lines, ui, inbox, driver_ended, &mut cancelling).await {
+            Next::Leave => break,
+            Next::Forced => return force_exit(task).await,
+            Next::DriverEnded => return report_task(task, secrets).await,
+            Next::Again => continue,
+            Next::Line(line) => {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                if line == "/exit" || line == "/quit" {
+                    break;
+                }
+                // A turn in flight gets the line as a steer (it changes this turn's
+                // direction); an idle driver gets a followup (a new turn). Both are
+                // `source = User`.
+                let result = if ui.busy() {
+                    inbox.steer(line.to_owned(), InputSource::User).await
+                } else {
+                    inbox.followup(line.to_owned(), InputSource::User).await
+                };
+                if let Err(error) = result {
+                    match &error {
+                        InboxError::Full { .. } => eprintln!(
+                            "agent: the inbox is full; that input was not queued (try again)"
+                        ),
+                        other => eprintln!("agent: {}", redact(&other.to_string(), secrets)),
+                    }
+                    continue;
+                }
+                if ui.approval_may_read() {
+                    // Do not read again until the turn has started: an approval answer the
+                    // user types now must reach the approval prompt, not become the next
+                    // input.
+                    tokio::select! {
+                        _ = ui.started.notified() => {}
+                        _ = ui.finished.notified() => {}
+                    }
+                }
+            }
+        }
+    }
+    if let Some(code) = report_error(&shutdown(inbox, ui, task).await, secrets) {
+        return code;
+    }
+    0
+}
+
+/// What the interactive loop is waiting for.
+enum Next {
+    Line(String),
+    /// A turn ended, or a cancellation was requested: re-evaluate and keep going.
+    Again,
+    /// Leave (EOF, `/exit`, or Ctrl-C at the prompt).
+    Leave,
+    /// A second Ctrl-C during a wind-down.
+    Forced,
+    /// The driver stopped on its own (an error).
+    DriverEnded,
+}
+
+/// Waits for the next thing that can happen: a line, a turn ending, the driver ending, or a
+/// signal. While a turn is in flight and the approval prompt may read stdin, the loop does
+/// **not** read — the approval owns stdin then, exactly as before this slice.
+async fn next_event(
+    lines: &LineHub,
+    ui: &Ui,
+    inbox: &Inbox,
+    driver_ended: &Arc<Notify>,
+    cancelling: &mut bool,
+) -> Next {
+    let read_lines = !ui.busy() || !ui.approval_may_read();
+    tokio::select! {
+        line = lines.next(), if read_lines => match line {
+            Some(line) => Next::Line(line),
+            None => Next::Leave,
+        },
+        _ = ui.finished.notified(), if ui.busy() => Next::Again,
+        _ = driver_ended.notified() => Next::DriverEnded,
+        _ = tokio::signal::ctrl_c() => on_signal(ui, inbox, cancelling),
+    }
+}
+
+fn on_signal(ui: &Ui, inbox: &Inbox, cancelling: &mut bool) -> Next {
+    if !ui.busy() {
+        // At the prompt, Ctrl-C means leave, like EOF.
+        return Next::Leave;
+    }
+    if *cancelling {
+        return Next::Forced;
+    }
+    *cancelling = true;
+    inbox.cancel(CancelCause::Requested);
+    eprintln!("agent: cancelling (Ctrl-C again to quit)");
+    Next::Again
+}
+
+/// Stops the driver gracefully: it finishes the turns already queued, closes the session
+/// (so MCP servers shut down), and returns.
+async fn shutdown(
+    inbox: &Arc<Inbox>,
+    ui: &Arc<Ui>,
+    task: &mut JoinHandle<Result<(), DriverError>>,
+) -> Result<(), String> {
+    // Let queued inputs run: closing now would abandon them.
+    while ui.busy() || !inbox.is_empty().await {
+        ui.finished.notified().await;
+    }
+    inbox.close();
+    match task.await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(join) => Err(format!("the driver task ended unexpectedly: {join}")),
+    }
+}
+
+/// Aborts the driver: the session is dropped, which kills the tool processes at once. Used
+/// only for the forced second Ctrl-C.
+async fn force_exit(task: &mut JoinHandle<Result<(), DriverError>>) -> i32 {
+    task.abort();
+    let _ = task.await;
+    130
+}
+
+/// Awaits the driver task once and reports its error, if any.
+async fn report_task(task: &mut JoinHandle<Result<(), DriverError>>, secrets: &[String]) -> i32 {
+    match task.await {
+        Ok(Ok(())) => 0,
+        Ok(Err(error)) => {
+            eprintln!("agent: {}", redact(&error.to_string(), secrets));
+            1
+        }
+        Err(join) => {
+            eprintln!("agent: the driver task ended unexpectedly: {join}");
+            1
+        }
+    }
+}
+
+fn report_error(result: &Result<(), String>, secrets: &[String]) -> Option<i32> {
+    match result {
+        Ok(()) => None,
+        Err(error) => {
+            eprintln!("agent: {}", redact(error, secrets));
+            Some(1)
+        }
+    }
+}
+
+/// Waits for the turn in flight to end; the first Ctrl-C cancels it, the second forces exit.
+async fn wait_for_turn(
+    ui: &Ui,
+    inbox: &Inbox,
+    driver_ended: &Arc<Notify>,
+    cancelling: &mut bool,
+) -> TurnEnd {
+    loop {
+        tokio::select! {
+            _ = ui.finished.notified() => return TurnEnd::Done,
+            _ = driver_ended.notified() => return TurnEnd::DriverEnded,
+            _ = tokio::signal::ctrl_c() => {
+                if !ui.busy() {
+                    return TurnEnd::Done;
+                }
+                if *cancelling {
+                    return TurnEnd::Forced;
+                }
+                *cancelling = true;
+                inbox.cancel(CancelCause::Requested);
+                eprintln!("agent: cancelling (Ctrl-C again to quit)");
+            }
+        }
+    }
+}
+
+enum TurnEnd {
+    Done,
+    /// A second Ctrl-C arrived while the first cancellation was still settling.
+    Forced,
+    /// The driver stopped before the turn finished (an error).
+    DriverEnded,
 }
 
 /// Reads stdin on one dedicated task and hands each line to whoever needs it next: the
@@ -417,98 +820,48 @@ impl LineHub {
     }
 }
 
-// `RunOutcome` deliberately owns its transcript; avoid changing this local control-flow enum's
-// simple shape merely because host metadata may include opaque JSON.
-#[allow(clippy::large_enum_variant)]
-enum TurnEnd {
-    Done(Result<RunOutcome, RunError>),
-    /// A second Ctrl-C arrived while the first cancellation was still settling.
-    Forced,
-}
-
-/// Runs one turn. The first Ctrl-C cancels through `CancellationHandle` while the future
-/// is kept alive (dropping it would poison the session); a second Ctrl-C during the
-/// wind-down drops it on purpose — the exit that follows is the one supported use of that.
-async fn run_turn(
-    session: &mut AgentSession<OpenAiCompatible, CliTools, Approval>,
-    input: String,
-    options: TurnOptions,
-    ui: &Ui,
-) -> TurnEnd {
-    let mut run = match session.start_turn_with(input, options) {
-        Ok(run) => run,
-        Err(e) => return TurnEnd::Done(Err(RunError::Session(e))),
-    };
-    let cancel = run.cancellation_handle();
-    let (force_tx, mut force_rx) = mpsc::channel::<()>(1);
-    let interrupt = tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        cancel.cancel();
-        // A second Ctrl-C while the cancellation is still settling: stop waiting.
-        let _ = tokio::signal::ctrl_c().await;
-        let _ = force_tx.send(()).await;
-    });
-    let ended = tokio::select! {
-        outcome = run.run(ui) => TurnEnd::Done(outcome),
-        _ = force_rx.recv() => TurnEnd::Forced,
-    };
-    interrupt.abort();
-    ended
-}
-
-async fn interactive_loop(
-    session: &mut AgentSession<OpenAiCompatible, CliTools, Approval>,
-    lines: &LineHub,
-    ui: &Ui,
-    turn_options: &impl Fn(Option<Instant>) -> TurnOptions,
-    timeout_secs: Option<u64>,
-    secrets: &[String],
-) -> i32 {
-    loop {
-        eprint!("> ");
-        let _ = std::io::stderr().flush();
-        let line = tokio::select! {
-            line = lines.next() => match line {
-                Some(line) => line,
-                None => return 0, // EOF
-            },
-            // At the prompt, Ctrl-C means leave, like EOF.
-            _ = tokio::signal::ctrl_c() => return 0,
-        };
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line == "/exit" || line == "/quit" {
-            return 0;
-        }
-        // Fresh per turn: a deadline computed at startup would already be spent on turn two.
-        let deadline = timeout_secs.map(|secs| Instant::now() + Duration::from_secs(secs));
-        match run_turn(session, line.to_owned(), turn_options(deadline), ui).await {
-            TurnEnd::Forced => return 130,
-            TurnEnd::Done(Ok(outcome)) => match outcome.status {
-                RunStatus::Completed => {}
-                RunStatus::Cancelled(_) => {
-                    eprintln!("agent: cancelled; type another line or /exit")
-                }
-                status => eprintln!("agent: the turn ended as {status:?}"),
-            },
-            TurnEnd::Done(Err(e)) => eprintln!("agent: {}", redact(&e.to_string(), secrets)),
-        }
-        ui.end_of_turn();
-    }
-}
-
-/// Streams model text to stdout; everything else goes to stderr. stdout stays free of
-/// status output so one-shot mode can be piped.
+/// Streams model text to stdout; everything else — status, reasoning, tool lines — goes to
+/// stderr. stdout stays free of status output so one-shot mode can be piped.
+///
+/// Reasoning is rendered on stderr with a `[reasoning]` prefix, on its own line, so it is
+/// never confused with the visible answer (ADR 0014: reasoning is a separate channel).
 #[derive(Default)]
 struct Ui {
     streamed: AtomicBool,
+    reasoning_open: AtomicBool,
+    busy: AtomicBool,
+    /// Resolves when a turn starts.
+    started: Notify,
+    /// Resolves when a turn ends.
+    finished: Notify,
+    /// True while the approval prompt may read stdin (so the prompt loop must not).
+    approval_may_read: AtomicBool,
+    last_status: StdMutex<Option<RunStatus>>,
 }
 
 impl Ui {
+    /// True while a turn is in flight.
+    fn busy(&self) -> bool {
+        self.busy.load(Ordering::Relaxed)
+    }
+
+    fn set_approval_may_read(&self, yes: bool) {
+        self.approval_may_read.store(yes, Ordering::Relaxed);
+    }
+
+    fn approval_may_read(&self) -> bool {
+        self.approval_may_read.load(Ordering::Relaxed)
+    }
+
+    fn last_status(&self) -> Option<RunStatus> {
+        self.last_status.lock().unwrap().clone()
+    }
+
     /// Ends the streamed line, if anything was streamed this turn.
     fn end_of_turn(&self) {
+        if self.reasoning_open.swap(false, Ordering::Relaxed) {
+            eprintln!();
+        }
         if self.streamed.swap(false, Ordering::Relaxed) {
             let mut out = std::io::stdout().lock();
             let _ = out.write_all(b"\n");
@@ -520,7 +873,21 @@ impl Ui {
 impl EventSink for Ui {
     fn emit(&self, event: AgentEvent) {
         match event {
+            AgentEvent::TurnStarted => {
+                self.busy.store(true, Ordering::Relaxed);
+                self.started.notify_one();
+            }
+            AgentEvent::ModelReasoningDelta { text } => {
+                if !self.reasoning_open.swap(true, Ordering::Relaxed) {
+                    eprint!("[reasoning] ");
+                }
+                eprint!("{text}");
+                let _ = std::io::stderr().flush();
+            }
             AgentEvent::ModelTextDelta { text } => {
+                if self.reasoning_open.swap(false, Ordering::Relaxed) {
+                    eprintln!();
+                }
                 let mut out = std::io::stdout().lock();
                 let _ = out.write_all(text.as_bytes());
                 let _ = out.flush();
@@ -538,8 +905,25 @@ impl EventSink for Ui {
                     eprintln!("[tool {index}] finished");
                 }
             }
-            AgentEvent::RunFinished { status } if status != RunStatus::Completed => {
-                eprintln!("[turn] ended as {status:?}");
+            AgentEvent::RunFinished { status } => {
+                if self.reasoning_open.swap(false, Ordering::Relaxed) {
+                    eprintln!();
+                }
+                self.busy.store(false, Ordering::Relaxed);
+                // End this turn's streamed line (and close a reasoning line) so the next
+                // turn's output starts on its own line.
+                self.end_of_turn();
+                *self.last_status.lock().unwrap() = Some(status.clone());
+                match &status {
+                    RunStatus::Completed => {}
+                    RunStatus::Cancelled(_) => {
+                        // Carries both the lowercase hint and the debug status: the tests
+                        // wait for either.
+                        eprintln!("agent: cancelled ({status:?}); type another line or /exit")
+                    }
+                    other => eprintln!("[turn] ended as {other:?}"),
+                }
+                self.finished.notify_one();
             }
             _ => {}
         }

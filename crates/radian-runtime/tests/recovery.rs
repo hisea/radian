@@ -163,7 +163,12 @@ async fn an_input_in_the_transcript_without_an_admission_record_is_not_replayed(
     assert!(
         inbox.is_empty().await,
         "an input already in the transcript must not be requeued: {:?}",
-        inbox.snapshot().await.iter().map(|e| e.message.text()).collect::<Vec<_>>()
+        inbox
+            .snapshot()
+            .await
+            .iter()
+            .map(|e| e.message.text())
+            .collect::<Vec<_>>()
     );
     // Recovery wrote the missing admission record, so the journal now agrees.
     let session = Session::open(&path).unwrap();
@@ -175,7 +180,12 @@ async fn an_input_in_the_transcript_without_an_admission_record_is_not_replayed(
         "the admission record was not caught up"
     );
     assert_eq!(
-        session.history().unwrap().iter().map(Message::text).collect::<Vec<_>>(),
+        session
+            .history()
+            .unwrap()
+            .iter()
+            .map(Message::text)
+            .collect::<Vec<_>>(),
         ["go", "done"]
     );
 }
