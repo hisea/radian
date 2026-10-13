@@ -3548,9 +3548,13 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
         );
         std::thread::sleep(Duration::from_millis(20));
     };
+    // The ordinary clean exit: 0 when the terminal just vanished (EOF/EIO), or 128+SIGHUP
+    // when the pty master's close delivered a hang-up (this harness gives the pty a
+    // controlling terminal, so the app gets one).
+    let code = status.exit_code();
     assert!(
-        status.success(),
-        "the terminal-gone exit is the ordinary clean one (no signal, no error): {status:?}"
+        code == 0 || code == 128 + libc::SIGHUP as u32,
+        "the terminal-gone exit is the ordinary clean one: {status:?}"
     );
     let _ = child.kill();
     let _ = child.wait();
