@@ -192,6 +192,12 @@ struct Cli {
     #[arg(long, hide = true, value_name = "FILE")]
     freeze_draw: Option<PathBuf>,
 
+    /// Test hook (`--slow-draw <MILLIS>`): `draw_frame` sleeps this long per frame, so the main
+    /// loop can be made to miss the signal task's 3 s watchdog (the reader runs on its own
+    /// thread since ADR 0023 U2, so `--block-input` no longer parks the loop).
+    #[arg(long, hide = true, value_name = "MILLIS")]
+    slow_draw: Option<u64>,
+
     /// Test hook (`--flood-facts <COUNT>`): send this many facts as fast as possible, for the
     /// draw-fairness test. Real producers are bounded by the turn structure; this one is not.
     #[arg(long, hide = true, value_name = "COUNT")]
@@ -454,13 +460,24 @@ fn run(
             .as_mut()
             .expect("the terminal was entered for the picker");
         app.start_picking(picker);
-        ui_loop(terminal, &mut app, &rx, &tx, Phase::Picking)?;
+        let signal = ui_loop(terminal, &mut app, &rx, &tx, Phase::Picking)?;
+        if let Some(signal) = signal {
+            // A signal during the pre-session phase leaves exactly like the session phase —
+            // restore the terminal, exit 128 + signal, print the reason — but there is no
+            // session to name, so no `--resume` hint. No session file has been created.
+            radian_tui::signals::confirm_exit();
+            guard.restore();
+            return Ok(Some(format!(
+                "received {}",
+                radian_tui::signals::name(signal)
+            )));
+        }
         app.finish_picking();
         match app.take_picker_outcome() {
             Some(radian_tui::picker::Outcome::Resume(id)) => cli.resume = Some(id),
             Some(radian_tui::picker::Outcome::New) => {}
-            // `Quit`, Ctrl-C, a signal, or the terminal going away before any session:
-            // nothing was created, so leave through the ordinary clean-exit path.
+            // `Quit`, Ctrl-C, or the terminal going away before any session: nothing was
+            // created, so leave through the ordinary clean-exit path.
             _ => {
                 radian_tui::signals::confirm_exit();
                 guard.restore();
@@ -701,6 +718,9 @@ fn run(
     }
     if let Some(path) = &cli.freeze_draw {
         let _ = FREEZE_DRAW.set(path.clone());
+    }
+    if let Some(millis) = cli.slow_draw {
+        let _ = SLOW_DRAW.set(millis);
     }
     if let Some(count) = cli.flood_facts {
         // Test hook (`--flood-facts`): a producer that fills the channel as fast as it can, for
@@ -1005,6 +1025,10 @@ fn terminal_is_gone() -> bool {
 /// frame is not enough to keep a closed pty off the draw path; this is.
 static FREEZE_DRAW: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
+/// Test hook (`--slow-draw <MILLIS>`): make every `draw_frame` sleep, so the main loop is
+/// genuinely stuck and cannot reach `confirm_exit` before the signal watchdog fires.
+static SLOW_DRAW: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
 /// Draws one frame. A draw that fails because the terminal is gone is the same event as
 /// [`Input::Gone`]: report it so the caller leaves cleanly instead of erroring out. `Ok(false)`
 /// means "the terminal is gone".
@@ -1012,6 +1036,9 @@ fn draw_frame(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App,
 ) -> Result<bool, String> {
+    if let Some(millis) = SLOW_DRAW.get() {
+        std::thread::sleep(Duration::from_millis(*millis));
+    }
     if FREEZE_DRAW.get().is_some_and(|path| path.exists()) {
         return Ok(true);
     }
@@ -1297,7 +1324,7 @@ enum Phase<'a> {
 }
 
 /// Handles one event in the pre-session `--pick` phase. Returns whether the frame is dirty.
-fn handle_picking(event: UiEvent, app: &mut App) -> bool {
+fn handle_picking(event: UiEvent, app: &mut App, signal: &mut Option<i32>) -> bool {
     match event {
         UiEvent::Input(InputEvent::Key(key)) => app.on_key(key).dirty,
         UiEvent::Input(InputEvent::Paste(text)) => app.update(AppInput::Paste(text)).dirty,
@@ -1305,7 +1332,14 @@ fn handle_picking(event: UiEvent, app: &mut App) -> bool {
             app.update(AppInput::Resize { rows, cols }).dirty
         }
         UiEvent::Input(InputEvent::MouseScroll(direction)) => app.mouse_scroll(direction).dirty,
-        UiEvent::Signal(_) | UiEvent::TerminalGone => {
+        UiEvent::Signal(value) => {
+            // Remembered so the caller can exit like the session phase (128 + signal and the
+            // reason line); nothing has been created.
+            *signal = Some(value);
+            app.quit = true;
+            false
+        }
+        UiEvent::TerminalGone => {
             // Leave through the ordinary clean-exit path; nothing has been created.
             app.quit = true;
             false
@@ -1322,6 +1356,7 @@ fn ui_loop(
     tx: &Sender<UiEvent>,
     phase: Phase<'_>,
 ) -> Result<Option<i32>, String> {
+    let mut picking_signal: Option<i32> = None;
     let mut ctx = match phase {
         Phase::Picking => None,
         Phase::Session {
@@ -1362,7 +1397,7 @@ fn ui_loop(
         let mut facts = 1;
         dirty |= match ctx.as_mut() {
             Some(ctx) => ctx.handle(first, app, &mut effects),
-            None => handle_picking(first, app),
+            None => handle_picking(first, app, &mut picking_signal),
         };
         // At most `MAX_FACTS_PER_TURN` facts before a frame (draw fairness).
         while facts < MAX_FACTS_PER_TURN {
@@ -1370,7 +1405,7 @@ fn ui_loop(
                 Ok(event) => {
                     dirty |= match ctx.as_mut() {
                         Some(ctx) => ctx.handle(event, app, &mut effects),
-                        None => handle_picking(event, app),
+                        None => handle_picking(event, app, &mut picking_signal),
                     };
                     facts += 1;
                 }
@@ -1412,7 +1447,7 @@ fn ui_loop(
             radian_tui::terminal::set_cursor_visible(app.input_editable());
         }
     }
-    Ok(ctx.and_then(|ctx| ctx.signal))
+    Ok(ctx.and_then(|ctx| ctx.signal).or(picking_signal))
 }
 
 /// The host facts `/sessions` and `/export` need: where sessions live, which workspace this

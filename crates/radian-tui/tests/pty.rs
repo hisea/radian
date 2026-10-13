@@ -294,6 +294,21 @@ impl Pty {
         self.bytes.lock().unwrap().clone()
     }
 
+    /// Waits until `needle` appears in the raw output. Control sequences (mouse reporting)
+    /// never reach the `vt100` screen, so some assertions read the bytes directly.
+    fn wait_for_raw(&self, needle: &str, secs: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        loop {
+            if String::from_utf8_lossy(&self.raw()).contains(needle) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// The app's exit code, parsed from the shell wrapper's `EXITED:<n>` (the shell's own
     /// status is `stty`'s, not the app's).
     fn app_exit_code(&self) -> Option<i32> {
@@ -4641,5 +4656,145 @@ async fn pty_pick_resumes_the_selected_id_and_enters_once() {
         raw.matches("\u{1b}[?1049h").count(),
         1,
         "the alternate screen must be entered once:\n{raw}"
+    );
+}
+
+/// The signal watchdog's forced exit restores the terminal too: a still-alive terminal must
+/// stop receiving mouse reports after the app is gone. `--slow-draw` makes the main loop miss
+/// the 3 s watchdog (the reader runs on its own thread since ADR 0023 U2, so `--block-input`
+/// no longer parks the loop).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_the_signal_watchdog_releases_the_mouse() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("mouse-watchdog");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "mouse-watchdog",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--slow-draw",
+            "10000",
+        ],
+        20,
+        100,
+    );
+    // The app wrote its mouse-on sequences before the (slow) first frame, so the loop is now
+    // sleeping in `draw_frame` and cannot reach `confirm_exit`.
+    assert!(
+        pty.wait_for_raw(MOUSE_ON, 10),
+        "the app never enabled mouse reporting"
+    );
+    let pid = app_pid(&pty);
+    let status = std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(&pid)
+        .status()
+        .unwrap();
+    assert!(status.success(), "kill -TERM {pid}");
+    assert!(
+        pty.wait_for_exit(15).is_some(),
+        "the watchdog did not force the exit"
+    );
+    assert_eq!(pty.app_exit_code(), Some(143), "128 + SIGTERM");
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    assert!(
+        raw.contains(MOUSE_OFF) && raw.contains(MOUSE_SGR_OFF),
+        "the watchdog exit must release the mouse: {raw}"
+    );
+}
+
+/// A signal during the pre-session `--pick` phase leaves exactly like the session phase: exit
+/// `128 + signal`, the reason line, and the terminal (mouse included) restored. Nothing is
+/// created, because the session id is not even resolved yet.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_signal_during_pick_exits_128_plus_signal() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("pick-signal");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let workspace = std::fs::canonicalize(&ws)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    seed_session(&sessions, "alpha", &workspace, "ALPHA-HISTORY").await;
+    let jsonl = |dir: &Path| -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".jsonl"))
+            .collect();
+        names.sort();
+        names
+    };
+    let before = jsonl(&sessions);
+
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--pick",
+        ],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("filter:", 10),
+        "the picker did not open:\n{}",
+        pty.screen()
+    );
+    let pid = app_pid(&pty);
+    let status = std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(&pid)
+        .status()
+        .unwrap();
+    assert!(status.success(), "kill -TERM {pid}");
+    assert!(
+        pty.wait_for_exit(15).is_some(),
+        "the app did not exit after the signal"
+    );
+    assert_eq!(pty.app_exit_code(), Some(143), "128 + SIGTERM");
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    let (_, after) = raw
+        .rsplit_once("\u{1b}[?1049l")
+        .unwrap_or_else(|| panic!("the alternate screen was not left: {raw}"));
+    assert!(
+        after.contains("received SIGTERM"),
+        "the reason line is missing: {after}"
+    );
+    assert!(
+        raw.contains(MOUSE_OFF) && raw.contains(MOUSE_SGR_OFF),
+        "the mouse was not released: {raw}"
+    );
+    assert_eq!(
+        jsonl(&sessions),
+        before,
+        "a signal during picking must create no session file"
     );
 }

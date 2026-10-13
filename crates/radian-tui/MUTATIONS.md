@@ -477,3 +477,20 @@ Base `4cb83ee` · 在本任务工作树内逐条施加后从副本还原（`--no
 
 2/2 抓住。“整个过程只进一次 alternate screen”由 `pty_pick_resumes_the_selected_id_and_enters_once`
 统计 `?1049h == 1` 直接钉住。
+
+## mouse（提交 3）：信号兜底强退也恢复终端
+
+Base `1e3fec4` · 在本任务工作树内施加后从副本还原（`--no-fail-fast`）· `git status --short`
+结束后干净。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| W5 | 兜底分支 `exit` 前不做恢复（去掉 `restore_terminal_nonblocking()`） | `pty_the_signal_watchdog_releases_the_mouse`（输出里没有 `?1000l`/`?1006l`） | ✅ failed |
+
+1/1 抓住。该测试用新的 `--slow-draw` 接缝让主循环真的卡在 `draw_frame`（ADR 0023 U2 之后读取在输入
+线程，`--block-input` 不再卡住主循环），再发 SIGTERM，等 3 秒兜底退出。
+
+| W6 | 选择器阶段丢掉 `ui_loop` 返回的信号（`?;`），改走 Quit 分支 | `pty_a_signal_during_pick_exits_128_plus_signal`（退出码来自 `received()` 仍是 143，但**没有原因行**） | ✅ failed |
+
+2/2 抓住。W6 的测试同时断言退出码 143、原因行 `received SIGTERM`、`?1000l`/`?1006l` 与会话目录里没有新
+`.jsonl`。
