@@ -8,8 +8,8 @@ mod common;
 use agent_core::{JournalRecord, Message, ReplacementEnd, TranscriptJournal};
 use common::{TempDir, created};
 use radian_session::{
-    ExportOptions, Index, ReadError, Session, SessionJournal, UncommittedReplacement, export_json,
-    export_markdown,
+    ExportOptions, Index, ReadError, Session, SessionJournal, UncommittedReplacement, WriteError,
+    export_json, export_markdown,
 };
 
 const SID: &str = "replace-sid";
@@ -650,5 +650,150 @@ fn an_uncommitted_segment_is_absent_from_export_and_index() {
     assert!(
         !index.search("committed old", None, 10).unwrap().is_empty(),
         "the committed message stays searchable"
+    );
+}
+
+// ---------- resume validates before touching the file (ADR 0019 §7) ----------
+
+/// ADR 0019 §7: a corrupt file is refused by `resume` and left byte-for-byte untouched,
+/// including when it also ends in a torn tail: validation happens before the truncation.
+#[test]
+fn resume_refuses_a_corrupt_file_without_touching_it() {
+    let created = envelope(
+        0,
+        "SessionCreated",
+        serde_json::json!({"workspace": "/w", "config_snapshot": {}}),
+    );
+    let cases: [(&str, Vec<String>); 4] = [
+        (
+            "replace-resume-corrupt-pending-event",
+            vec![
+                created.clone(),
+                envelope(
+                    1,
+                    "TranscriptReplaced",
+                    serde_json::json!({"revision": 1, "len": 1}),
+                ),
+                envelope(2, "TurnStarted", serde_json::json!({"turn_id": "t-1"})),
+            ],
+        ),
+        (
+            "replace-resume-corrupt-commit-mismatch",
+            vec![
+                created.clone(),
+                envelope(
+                    1,
+                    "TranscriptReplaced",
+                    serde_json::json!({"revision": 1, "len": 1}),
+                ),
+                envelope(
+                    2,
+                    "MessageAppended",
+                    serde_json::json!({"index": 0, "message": user("a")}),
+                ),
+                envelope(
+                    3,
+                    "TranscriptReplacementCommitted",
+                    serde_json::json!({"revision": 2, "len": 1}),
+                ),
+            ],
+        ),
+        (
+            "replace-resume-corrupt-abort-mismatch",
+            vec![
+                created.clone(),
+                envelope(
+                    1,
+                    "TranscriptReplaced",
+                    serde_json::json!({"revision": 1, "len": 1}),
+                ),
+                envelope(
+                    2,
+                    "TranscriptReplacementAborted",
+                    serde_json::json!({"revision": 9}),
+                ),
+            ],
+        ),
+        (
+            "replace-resume-corrupt-orphan-commit",
+            vec![
+                created,
+                envelope(
+                    1,
+                    "TranscriptReplacementCommitted",
+                    serde_json::json!({"revision": 1, "len": 0}),
+                ),
+            ],
+        ),
+    ];
+    for (name, body) in cases {
+        let dir = TempDir::new(name);
+        let path = dir.file("s.jsonl");
+        write_lines(&path, &body);
+        // A torn tail must not be truncated before the corruption is reported.
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(br#"{"schema_version":1,"session_id":"replace-sid","seq":9"#);
+        std::fs::write(&path, &bytes).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        match SessionJournal::resume(&path, SID) {
+            Err(WriteError::Policy(_)) => {}
+            Err(other) => panic!("{name}: expected a policy error, got {other:?}"),
+            Ok(_) => panic!("{name}: a corrupt file must be refused"),
+        }
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "{name}: resume must not touch a corrupt file, not even its torn tail"
+        );
+    }
+}
+
+/// ADR 0019 §7: if writing the abort fails, `resume` returns the error and appends nothing
+/// else. With no torn tail the file is byte-for-byte unchanged. The failure is injected at
+/// the `Aborted` line via the `testing` feature, so the check is deterministic.
+#[cfg(feature = "testing")]
+#[tokio::test]
+async fn resume_reports_a_failed_abort_write_and_appends_nothing() {
+    let dir = TempDir::new("replace-resume-abort-fail");
+    let path = dir.file("s.jsonl");
+    let journal = SessionJournal::create(&path, SID, created()).unwrap();
+    journal
+        .append(JournalRecord::TranscriptReplaced {
+            revision: 4,
+            len: 2,
+        })
+        .await
+        .unwrap();
+    journal
+        .append(JournalRecord::Message {
+            index: 0,
+            message: Message::user("prefix"),
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let before = std::fs::read(&path).unwrap();
+    radian_session::fail_next_aborted_write();
+    match SessionJournal::resume(&path, SID) {
+        Err(WriteError::Io { .. }) => {}
+        Err(other) => panic!("expected the injected I/O failure, got {other:?}"),
+        Ok(_) => panic!("a failed abort write must fail the resume"),
+    }
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "a failed abort write must leave the file untouched"
+    );
+
+    // The seam is one-shot: the next resume (without arming it) writes the abort and succeeds.
+    SessionJournal::resume(&path, SID).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        text.matches("\"event\":\"TranscriptReplacementAborted\"")
+            .count(),
+        1,
+        "the un-armed resume writes exactly one abort"
     );
 }
