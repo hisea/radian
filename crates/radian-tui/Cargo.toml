@@ -12,16 +12,25 @@ path = "src/main.rs"
 [dependencies]
 agent-core = { path = "../agent-core" }
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible" }
+futures-util.workspace = true
+radian-coding = { path = "../radian-coding" }
+radian-permissions = { path = "../radian-permissions" }
 radian-runtime = { path = "../radian-runtime" }
 radian-session = { path = "../radian-session" }
 clap = { version = "4", features = ["derive"] }
 ratatui = "0.30.2"
 serde_json.workspace = true
 unicode-width = "0.2.2"
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "process"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+# The panic-path test checks that a child process group is really gone.
+libc = "0.2"
 
 [dev-dependencies]
+agent-core = { path = "../agent-core" }
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible", features = ["testing"] }
+radian-session = { path = "../radian-session" }
 portable-pty = "0.9.0"
 ratatui = "0.30.2"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }

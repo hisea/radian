@@ -61,6 +61,9 @@ The transcript owns its scrolling:
 | 4 | panic path restores the terminal | `tests/pty.rs` |
 | 5 | multi-line bracketed paste | `tests/pty.rs` |
 | 6 | reasoning not sent back to the provider (ADR 0014 R4) | `tests/pty.rs` |
+| 7 | panic path leaves no orphan child (child in its own process group) | `tests/pty.rs` |
+| 8 | `--resume` renders the stored history; `--list` prints the workspace sessions | `tests/pty.rs`, `tests/list.rs` |
+| 9 | approval: allow-once runs the tool, deny is fed back, always skips the next prompt, Ctrl-C cancels, the resolved path is shown, `PermissionResolved` is durable | `tests/pty.rs`, `tests/approval.rs` |
 | — | Enter=followup idle / steer running; Ctrl-C cancel-then-quit | `tests/input.rs` |
 
 ## Must be hand-tested in a real terminal
@@ -74,6 +77,10 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
 - resize: drag the window while a turn streams — no residue, status line keeps working?
 - CJK and emoji width: alignment of a pasted Chinese line and an emoji.
 - paste: a large multi-line paste into the box.
+- **the approval box**: is the resolved path and the argument preview readable at your
+  terminal width? does a long argument (a large patch, say) make the box unusable? do the
+  `y`/`a`/`n` keys feel right, and is it obvious which one you are about to press? pty
+  automation asserts the text and the keys, not the readability or the feel (ADR 0009).
 - **mouse selection/copy**: this app does **not** enable mouse capture, so selection is the
   **terminal emulator's own** (drag to select, Cmd-C on macOS, or the emulator's copy key).
   The caveat ADR 0009 notes applies: a selection that spans the input box and the transcript
@@ -89,24 +96,47 @@ cargo run -p radian-tui -- --model <model> --base-url <...> --session-dir /tmp/r
 #    is clean (no `%`) and `stty -a` still shows `icanon`.
 ```
 
-## Review note: the panic path exits without unwinding (2026-10-12)
+## The panic path unwinds, with a bounded runtime shutdown (2026-10-12)
 
-The panic hook restores the terminal and then calls `process::exit(101)` instead of letting
-the panic unwind, because unwinding drops the tokio runtime and that drop hangs on the
-blocking stdin reader (the same hang `agent-cli` avoids with `shutdown_background`).
+Slice A's panic hook restored the terminal and then called `process::exit(101)`, which skips
+every `Drop`. That was safe only while the TUI owned no child processes. Slice B wires the
+built-in file tools, whose `git_status`/`git_diff` spawn `git`, so the precondition no longer
+holds.
 
-Accepted **for now**, because of two facts checked in review:
+`main` now keeps the runtime outside `run`, catches the panic with `catch_unwind`, shuts the
+runtime down with `shutdown_timeout(2s)` — dropping the in-flight tool futures and, with them,
+the `kill_on_drop` children they own — and only then exits 101. The hook restores the terminal
+and returns; it no longer exits.
 
-- **Durable data is safe.** Every journal append is fsynced before it returns (ADR 0001 D3),
-  so an abrupt exit loses at most a torn tail, which the reader truncates (ADR 0006 §3.2).
-- **No child process can be orphaned today.** `radian-tui` does not depend on
-  `agent-extensions` or `radian-coding`, so it spawns no MCP servers and no shell.
+Why this rather than "kill the registered process groups inside the hook": the TUI does not
+know the pids (they are created inside `radian-coding`), and registering them would mean
+changing that crate's internals. Unwinding plus a bounded shutdown reuses the `kill_on_drop`
+contract the tools already rely on, and `pty_panic_path_does_not_orphan_a_child` exercises it:
+a child in its own process group is running when the panic fires, and the test asserts both
+the pid and the group are gone.
 
-**This stops being true the moment the TUI owns child processes.** Skipping unwinding skips
-every `Drop`, including the ones that kill MCP server process groups and (later) sandboxed
-shell children. Before the TUI gains MCP or the shell tool, the panic path must either kill
-the registered process groups itself before `exit`, or unwind with the runtime shut down via
-`shutdown_background`. Treat this as a precondition of that slice, not a follow-up.
+Durable data was already safe (every append is fsynced, ADR 0001 D3; a torn tail is truncated
+on read, ADR 0006 §3.2) and stays so.
+
+## Review note: a panic in the driver task (2026-10-12)
+
+Slice B fixed the panic path that used to `process::exit(101)` from inside the hook: `main`
+now catches the unwind, shuts the runtime down with a bound (dropping in-flight tool futures
+and their `kill_on_drop` children) and then exits 101. Review confirmed the fix by reverting
+it: `pty_panic_path_does_not_orphan_a_child` failed and the reverted run **did** leave a real
+orphan (`sleep 600`, parent pid 1) behind.
+
+One edge it does not cover. The driver runs as a **spawned** task and is only joined after
+the UI loop ends. A panic *inside that task* is caught by tokio, not by `main`'s
+`catch_unwind` — but the panic hook still runs and restores the terminal. The UI loop then
+keeps going in cooked mode, drawing over a normal screen and sending input to a dead inbox.
+Nothing is orphaned (the task's tool futures are dropped with it), so this is robustness, not
+safety. **Follow-up:** the UI loop should watch the driver task and leave as soon as it ends,
+and the hook should restore only when the process is actually going down.
+
+`ApprovalRequest` gained `resolved_resource` and `arguments` in this slice. Since it is a
+plain struct with public fields, adding a field breaks every literal construction outside the
+crate; mark it `#[non_exhaustive]` the next time `radian-permissions` is touched.
 
 ## Not verified
 
@@ -116,11 +146,74 @@ the registered process groups itself before `exit`, or unwind with the runtime s
 - `Shift-Enter` on terminals without the enhanced keyboard protocol.
 - Windows and Linux ptys; only macOS was exercised.
 - Large transcripts: this slice renders every entry each frame (no virtualization; Phase 5).
-- `--resume` and a session list are not implemented; a session is always new.
+
+## Sessions
+
+The session directory and id convention is **the same as `agent-cli`**, so a session written
+by one is resumable by the other:
+
+- `--session-dir DIR`, else `RADIAN_SESSION_DIR`, else the platform data directory
+  (`~/Library/Application Support/radian/sessions` on macOS,
+  `$XDG_DATA_HOME/radian/sessions` or `~/.local/share/radian/sessions` elsewhere). Never a
+  cache or temp path: a session is a durable record (ADR 0013 decision 4).
+- The session file is `<session-dir>/<session-id>.jsonl`; `--session-id VALUE` names it, and
+  a generated `time-pid` id is used when neither `--session-id` nor `--resume` is given.
+- `--resume ID` opens an existing session: its stored history is rendered into the transcript
+  before the first frame, and the session keeps appending to the same file. The model's
+  history comes from the journal (`radian-runtime` recovers it); the transcript view is the
+  same history.
+- `--list` prints this workspace's sessions (id, created, last activity, message count) and
+  exits without touching the terminal.
+
+`--resume` and `--session-id` are mutually exclusive, as are `--resume` and `--list`.
 
 ## Flags
 
 `--model`, `--base-url`, `--api-key-env` (default `OPENAI_API_KEY`), `--header NAME=VALUE`,
-`--session-dir`, `--system`. The key is read only from the named environment variable and is
-never printed. Tools are `NoTools` in this slice (a chat loop); wiring the coding tools is a
-later slice.
+`--system`, `--session-dir`, `--session-id`, `--resume`, `--list`, `--workspace DIR`. The key
+is read only from the named environment variable and is never printed.
+
+## Tools, permissions and the approval dialog
+
+`--workspace DIR` mounts the built-in file and read-only git tools (`read`, `write`, `patch`,
+`list`, `git_status`, `git_diff`) rooted at that directory. No `shell`: it needs the sandbox
+and permission-tier wiring, and follows in the next slice.
+
+Every call goes through `radian-permissions` (ADR 0012) as a `Hooks` implementation:
+
+- `--profile safe|workspace-write|full-access` picks the rule set (default `workspace-write`:
+  reads allowed, writes allowed only when the resolved path stays inside the workspace).
+- `--approval on-ask|always|never` picks the `ApprovalPolicy` (default `on-ask`). `always`
+  asks for every call a rule does not deny, which is how the dialog is exercised with the
+  built-in tools; `never` turns `ask` into a denial.
+- The turn source is set to `User` before each turn; the permission layer treats an unset
+  source as non-human and denies, so a forgotten setter fails closed.
+- Every decision is written to the session journal as a `PermissionResolved` (audit only,
+  `critical = false`, never replayed).
+
+When a call needs the human, the input box is replaced by an approval box:
+
+```
+┌ approve tool call? ──────────────────────────────────────────┐
+│ tool: write                                                  │
+│ path: /abs/workspace/out.txt        <- the RESOLVED path      │
+│ args: { "path": "out.txt", … }                               │
+│ [y] allow once   [a] always this session   [n] deny          │
+└──────────────────────────────────────────────────────────────┘
+```
+
+| Key | Answer |
+|---|---|
+| `y` | allow once |
+| `a` | allow for this session (the same tool + resolved resource stops asking; in memory only, gone after resume) |
+| `n` or Esc | deny (the model sees the denial) |
+| Ctrl-C | cancel the running turn; the waiting `ask` resolves as a denial and the prompt is cleared |
+
+The prompt shows the **resolved** resource, never the raw argument: `a/../b` must not read as
+if it stayed under `a/`. While the box is up, other keys do not type into the input.
+
+## Tool display
+
+A tool call shows as `-> name({…args…})`, its result as `<- <text>` (red on an error), and
+the status line carries a `tool <name> running` note while it runs. The call, the wait for
+approval, execution and the result are therefore distinguishable states.

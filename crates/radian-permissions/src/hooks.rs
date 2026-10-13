@@ -170,6 +170,10 @@ impl PermissionHooks {
             call_id: call_id.clone(),
             tool: call.name.clone(),
             resource: resource.display().to_string(),
+            // What the rules matched: for a path, the resolved one (the same key the session
+            // grant uses), so the prompt cannot be made to look harmless with `..`.
+            resolved_resource: resource_key(&resource, &self.profile.workspace),
+            arguments: call.arguments.clone(),
             reason: evaluated.reason.clone(),
         };
         let outcome = tokio::select! {

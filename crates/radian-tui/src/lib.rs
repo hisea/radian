@@ -8,4 +8,4 @@ pub mod app;
 pub mod render;
 pub mod terminal;
 
-pub use app::{App, Entry, EntryKind, Send, TurnState};
+pub use app::{App, ApprovalPrompt, Entry, EntryKind, Send, TurnState};
