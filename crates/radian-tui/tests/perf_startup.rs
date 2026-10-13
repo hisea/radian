@@ -59,6 +59,9 @@ struct Pty {
     first_byte: Arc<Mutex<Option<Instant>>>,
     start: Instant,
     child: Child,
+    /// A per-pty `HOME`: `~/.radian/` (ADR 0020) resolves under it, so a manual `--ignored`
+    /// run never writes to the real `HOME`.
+    _home: TempDir,
 }
 impl Drop for Pty {
     fn drop(&mut self) {
@@ -74,13 +77,15 @@ impl Pty {
         ws.ws_row = rows;
         ws.ws_col = cols;
         // SAFETY: openpty writes the two fds and takes null termios/name pointers.
+        // `winp` is `*mut winsize` on macOS but `*const winsize` on Linux/glibc, so pass a raw
+        // pointer rather than `&mut ws` (clippy's `unnecessary_mut_passed` fires on Linux).
         let rc = unsafe {
             libc::openpty(
                 &mut master,
                 &mut slave,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                &mut ws,
+                std::ptr::addr_of_mut!(ws),
             )
         };
         assert_eq!(rc, 0, "openpty failed");
@@ -95,12 +100,17 @@ impl Pty {
         cmd.stdout(Stdio::from(slave.try_clone().unwrap()));
         cmd.stderr(Stdio::from(slave));
         cmd.env_clear();
-        for name in ["PATH", "HOME", "TMPDIR", "LANG", "TERM"] {
+        // A fresh HOME per pty keeps the harness hermetic (ADR 0013 diagnostics).
+        let home = TempDir::new("perf-home");
+        for name in ["PATH", "TMPDIR", "LANG", "TERM"] {
             if let Ok(value) = std::env::var(name) {
                 cmd.env(name, value);
             }
         }
         cmd.env("TERM", "xterm-256color");
+        cmd.env("HOME", home.path());
+        // No real models.dev from a test (ADR 0018): a closed local port fails fast.
+        cmd.env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json");
         let child = cmd.spawn().unwrap();
 
         let mut master = File::from(master);
@@ -132,6 +142,7 @@ impl Pty {
             first_byte,
             start,
             child,
+            _home: home,
         }
     }
     fn send(&mut self, bytes: &[u8]) {
