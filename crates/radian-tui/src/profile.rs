@@ -14,7 +14,7 @@ use std::path::Path;
 use radian_permissions::{
     Action, ApprovalPolicy, Preset, Profile, ResourceMatcher, Rule, ToolMatcher,
 };
-use radian_sandbox::{Sandbox, SandboxMode, SandboxPolicy};
+use radian_sandbox::{Sandbox, SandboxError, SandboxMode, SandboxPolicy};
 
 /// The `--profile` value: a product concept (ADR 0012 P1), not a backend flag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,6 +125,9 @@ pub fn build_sandbox(
     }
     match Sandbox::from_policy(policy) {
         Ok(sandbox) => Ok(Some(sandbox)),
+        // The workspace being inside a denied directory is not a backend problem: say what it
+        // is and how to fix it, not "install/fix the backend" (dogfooding D1's lesson).
+        Err(error @ SandboxError::InvalidWorkspace { .. }) => Err(error.to_string()),
         Err(error) => Err(format!("{}: {error}", unavailable(tier, mode))),
     }
 }

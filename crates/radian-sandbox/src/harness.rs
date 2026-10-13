@@ -130,6 +130,9 @@ struct Rig {
     wt: PathBuf,
     /// A sessions directory moved elsewhere (`--session-dir`), which must also be denied.
     custom_sessions: PathBuf,
+    /// A session directory **inside** the workspace (the reverse of the usual layout): it is
+    /// allowed, but must be masked while the rest of the workspace stays usable (ADR 0020).
+    inside_sessions: PathBuf,
     worktree_name: String,
     cases: Vec<Case>,
 }
@@ -166,6 +169,10 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
     std::fs::create_dir_all(root.join("custom-sessions"))?;
     let custom_sessions = std::fs::canonicalize(root.join("custom-sessions"))?;
     std::fs::write(custom_sessions.join("x.jsonl"), "{}\n")?;
+    // The reverse layout: a session directory *inside* the workspace. Allowed, but masked.
+    let inside_sessions = ws.join("inside-sessions");
+    std::fs::create_dir_all(&inside_sessions)?;
+    std::fs::write(inside_sessions.join("s.jsonl"), "{}\n")?;
     // A symlink from inside the workspace to a sibling outside it.
     symlink(&outside, &ws.join("leak"))?;
     // A symlink from inside the worktree to the shared git directory.
@@ -180,6 +187,10 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
     };
     let policy = radian_deny(SandboxPolicy::workspace_write(&ws)?);
     let sandbox = Sandbox::from_policy(policy.clone())?;
+    // The reverse layout builds: the deny path is a child of the workspace, not a parent.
+    let inside_policy =
+        radian_deny(SandboxPolicy::workspace_write(&ws)?).deny_read(&inside_sessions);
+    let denied_inside = Sandbox::from_policy(inside_policy)?;
     // ADR 0016: the network cases are asserted against `safe` (off) and `workspace` (on),
     // so the rig needs both enforced sandboxes as well as the transparent control.
     let safe = Sandbox::from_policy(radian_deny(SandboxPolicy::safe(&ws)?))?;
@@ -198,6 +209,7 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
         main,
         wt,
         custom_sessions,
+        inside_sessions,
         worktree_name,
         cases: Vec::new(),
     };
@@ -212,6 +224,7 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
     rig.git_metadata(&sandbox, &control);
     rig.sensitive_read(&sandbox, &control);
     rig.radian_home(&sandbox, &control);
+    rig.deny_inside_workspace(&denied_inside, &control);
     rig.mcp_stdio(&sandbox, &control);
     rig.signals(&sandbox, &control);
 
@@ -717,6 +730,44 @@ impl Rig {
             &format!(
                 "cat {} > /dev/null",
                 q(&self.custom_sessions.join("x.jsonl"))
+            ),
+        );
+    }
+
+    /// ADR 0020, the reverse layout: a session directory nested in the workspace is allowed
+    /// to build, is unreadable inside the sandbox, and the rest of the workspace still works.
+    fn deny_inside_workspace(&mut self, sandbox: &Sandbox, control: &Sandbox) {
+        let g = "deny_inside_workspace";
+        self.sh_case(
+            sandbox,
+            control,
+            g,
+            "nested_sessions_unreadable",
+            Expect::MustFail,
+            &format!(
+                "cat {} > /dev/null",
+                q(&self.inside_sessions.join("s.jsonl"))
+            ),
+        );
+        self.sh_case(
+            sandbox,
+            control,
+            g,
+            "workspace_elsewhere_readable",
+            Expect::MustSucceed,
+            &format!("cat {} > /dev/null", q(&self.ws.join("proj/readme.md"))),
+        );
+        let allowed = self.ws.join("allowed.txt");
+        self.sh_case(
+            sandbox,
+            control,
+            g,
+            "workspace_elsewhere_writable",
+            Expect::MustSucceed,
+            &format!(
+                "printf x > {} && cat {} > /dev/null",
+                q(&allowed),
+                q(&allowed)
             ),
         );
     }

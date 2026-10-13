@@ -598,6 +598,7 @@ async fn pty_approval_allow_once_runs_the_tool() {
     let _serial = pty_guard();
     let dir = TempDir::new("approve");
     let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(ws.join("sub")).unwrap();
     let server = MockServer::start(vec![
         // A relative path: the prompt must show the resolved absolute one (the `..`
@@ -617,7 +618,7 @@ async fn pty_approval_allow_once_runs_the_tool() {
             "--base-url",
             &server.base_url,
             "--session-dir",
-            dir.path().to_str().unwrap(),
+            sessions.to_str().unwrap(),
             "--session-id",
             "approve",
             "--workspace",
@@ -664,7 +665,7 @@ async fn pty_approval_allow_once_runs_the_tool() {
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
     // Every decision is durable in the session file (ADR 0006 §5.9).
-    let session = std::fs::read_to_string(dir.path().join("approve.jsonl")).unwrap();
+    let session = std::fs::read_to_string(sessions.join("approve.jsonl")).unwrap();
     assert!(session.contains("PermissionResolved"), "{session}");
     assert!(session.contains("\"approver\":\"user\""), "{session}");
     assert!(session.contains("\"decision\":\"allow\""), "{session}");
@@ -678,6 +679,7 @@ async fn pty_approval_deny_is_fed_back_to_the_model() {
     let _serial = pty_guard();
     let dir = TempDir::new("approve-deny");
     let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&ws).unwrap();
     let server = MockServer::start(vec![
         tool_reply("call_1", "write", r#"{"path":"denied.txt","content":"no"}"#),
@@ -691,7 +693,7 @@ async fn pty_approval_deny_is_fed_back_to_the_model() {
             "--base-url",
             &server.base_url,
             "--session-dir",
-            dir.path().to_str().unwrap(),
+            sessions.to_str().unwrap(),
             "--session-id",
             "approve-deny",
             "--workspace",
@@ -724,7 +726,7 @@ async fn pty_approval_deny_is_fed_back_to_the_model() {
 
     pty.quit();
     // The decision is durable and attributed to the user.
-    let session = std::fs::read_to_string(dir.path().join("approve-deny.jsonl")).unwrap();
+    let session = std::fs::read_to_string(sessions.join("approve-deny.jsonl")).unwrap();
     assert!(session.contains("\"decision\":\"deny\""), "{session}");
     assert!(session.contains("\"approver\":\"user\""), "{session}");
 }
@@ -737,6 +739,7 @@ async fn pty_approval_always_skips_the_next_prompt() {
     let _serial = pty_guard();
     let dir = TempDir::new("approve-session");
     let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&ws).unwrap();
     let server = MockServer::start(vec![
         tool_reply("call_1", "write", r#"{"path":"same.txt","content":"one"}"#),
@@ -751,7 +754,7 @@ async fn pty_approval_always_skips_the_next_prompt() {
             "--base-url",
             &server.base_url,
             "--session-dir",
-            dir.path().to_str().unwrap(),
+            sessions.to_str().unwrap(),
             "--session-id",
             "approve-session",
             "--workspace",
@@ -791,6 +794,7 @@ async fn pty_ctrl_c_while_waiting_for_approval_cancels_the_turn() {
     let _serial = pty_guard();
     let dir = TempDir::new("approve-cancel");
     let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&ws).unwrap();
     let server = MockServer::start(vec![tool_reply(
         "call_1",
@@ -805,7 +809,7 @@ async fn pty_ctrl_c_while_waiting_for_approval_cancels_the_turn() {
             "--base-url",
             &server.base_url,
             "--session-dir",
-            dir.path().to_str().unwrap(),
+            sessions.to_str().unwrap(),
             "--session-id",
             "approve-cancel",
             "--workspace",
@@ -1053,14 +1057,15 @@ async fn pty_a_compound_shell_command_always_asks() {
     let _serial = pty_guard();
     let dir = TempDir::new("shell-compound");
     let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&ws).unwrap();
+    // The allowed command reads a file: the output must appear on screen, and it is not a
+    // substring of the command text, so the assertion can only pass if the shell really ran.
+    std::fs::write(ws.join("value.txt"), "ALLOWED-OUTPUT-42\n").unwrap();
+    let allowed = format!("cat {}/value.txt", ws.display());
     let compound = "echo ok; echo two";
     let server = MockServer::start(vec![
-        tool_reply(
-            "call_1",
-            "shell",
-            &json!({"command": "echo ok"}).to_string(),
-        ),
+        tool_reply("call_1", "shell", &json!({"command": allowed}).to_string()),
         text_reply("FIRST-DONE"),
         tool_reply("call_2", "shell", &json!({"command": compound}).to_string()),
         text_reply("SECOND-DONE"),
@@ -1073,20 +1078,26 @@ async fn pty_a_compound_shell_command_always_asks() {
             "--base-url",
             &server.base_url,
             "--session-dir",
-            dir.path().to_str().unwrap(),
+            sessions.to_str().unwrap(),
             "--session-id",
             "shell-compound",
             "--workspace",
             ws.to_str().unwrap(),
             "--allow-shell-command",
-            "echo ok",
+            &allowed,
         ],
         30,
         110,
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
-    // The simple command is allowed by the rule: it runs with no key pressed.
+    // The simple command is allowed by the rule: it runs with no key pressed, and its output
+    // proves it actually ran.
     pty.send(b"first\r");
+    assert!(
+        pty.wait_for_screen("ALLOWED-OUTPUT-42", 20),
+        "the allowed command did not run:\n{}",
+        pty.screen()
+    );
     assert!(
         pty.wait_for_screen("FIRST-DONE", 20),
         "the allowed command was blocked:\n{}",
@@ -1441,6 +1452,7 @@ async fn pty_mcp_tools_run_through_approval_and_the_status_bar_shows_them() {
     let _serial = pty_guard();
     let dir = TempDir::new("mcp");
     let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&ws).unwrap();
     let log = dir.path().join("mcp.log");
     let config = mcp_config(dir.path(), &log);
@@ -1457,7 +1469,7 @@ async fn pty_mcp_tools_run_through_approval_and_the_status_bar_shows_them() {
             "--base-url",
             &server.base_url,
             "--session-dir",
-            dir.path().to_str().unwrap(),
+            sessions.to_str().unwrap(),
             "--session-id",
             "mcp",
             "--workspace",
@@ -1521,6 +1533,7 @@ async fn pty_the_workspace_write_notice_names_the_mcp_sandbox_gap() {
     let _serial = pty_guard();
     let dir = TempDir::new("notice");
     let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&ws).unwrap();
     let server = MockServer::start(vec![text_reply("never")]).await;
     let mut pty = Pty::spawn(
@@ -1530,7 +1543,7 @@ async fn pty_the_workspace_write_notice_names_the_mcp_sandbox_gap() {
             "--base-url",
             &server.base_url,
             "--session-dir",
-            dir.path().to_str().unwrap(),
+            sessions.to_str().unwrap(),
             "--session-id",
             "notice",
             "--workspace",
@@ -1567,12 +1580,15 @@ async fn pty_yes_runs_an_ask_without_a_prompt_and_still_audits_it() {
     let _serial = pty_guard();
     let dir = TempDir::new("yes");
     let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&ws).unwrap();
     let server = MockServer::start(vec![
         tool_reply(
             "call_1",
             "shell",
-            &json!({"command": "echo YES-RAN; echo x | cat"}).to_string(),
+            // The output `sum=42` is not a substring of the command, so the assertion below
+            // can only pass if the shell really ran.
+            &json!({"command": "echo sum=$((6*7)); echo x | cat"}).to_string(),
         ),
         text_reply("YES-DONE"),
     ])
@@ -1584,7 +1600,7 @@ async fn pty_yes_runs_an_ask_without_a_prompt_and_still_audits_it() {
             "--base-url",
             &server.base_url,
             "--session-dir",
-            dir.path().to_str().unwrap(),
+            sessions.to_str().unwrap(),
             "--session-id",
             "yes",
             "--workspace",
@@ -1603,6 +1619,11 @@ async fn pty_yes_runs_an_ask_without_a_prompt_and_still_audits_it() {
     );
     pty.send(b"go\r");
     assert!(
+        pty.wait_for_screen("sum=42", 30),
+        "the command output is missing, so the shell did not run:\n{}",
+        pty.screen()
+    );
+    assert!(
         pty.wait_for_screen("YES-DONE", 30),
         "the command did not run without a prompt:\n{}",
         pty.screen()
@@ -1612,11 +1633,10 @@ async fn pty_yes_runs_an_ask_without_a_prompt_and_still_audits_it() {
         "--yes must not show a prompt:\n{}",
         pty.screen()
     );
-    assert!(pty.screen().contains("YES-RAN"), "{}", pty.screen());
 
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
-    let session = std::fs::read_to_string(dir.path().join("yes.jsonl")).unwrap();
+    let session = std::fs::read_to_string(sessions.join("yes.jsonl")).unwrap();
     assert!(
         session.contains("PermissionResolved") && session.contains("\"decision\":\"allow\""),
         "the decision must still be audited: {session}"
@@ -1631,6 +1651,7 @@ async fn pty_max_model_calls_limits_the_turn() {
     let _serial = pty_guard();
     let dir = TempDir::new("max-calls");
     let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&ws).unwrap();
     let server = MockServer::start(vec![
         tool_reply("call_1", "list", &json!({"path": "."}).to_string()),
@@ -1644,7 +1665,7 @@ async fn pty_max_model_calls_limits_the_turn() {
             "--base-url",
             &server.base_url,
             "--session-dir",
-            dir.path().to_str().unwrap(),
+            sessions.to_str().unwrap(),
             "--session-id",
             "max-calls",
             "--workspace",
@@ -1657,7 +1678,7 @@ async fn pty_max_model_calls_limits_the_turn() {
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
     pty.send(b"go\r");
-    let path = dir.path().join("max-calls.jsonl");
+    let path = sessions.join("max-calls.jsonl");
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     while !std::fs::read_to_string(&path)
         .map(|text| text.contains("TurnFinished"))
@@ -1736,6 +1757,55 @@ fn pty_a_missing_workspace_is_a_workspace_error_and_leaves_no_session() {
         "a refusal must not enter the alternate screen: {raw}"
     );
     assert_session_dir_empty(&session_dir);
+}
+
+/// ADR 0020: a `--session-dir` that is an ancestor of the workspace refuses at startup, says
+/// why, does not blame the backend, and creates no session file.
+#[test]
+fn pty_a_session_dir_above_the_workspace_is_refused_and_leaves_no_session() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("nested-session");
+    let session_dir = dir.path().join("sessions");
+    let ws = session_dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            session_dir.to_str().unwrap(),
+            "--session-id",
+            "nested-session",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        20,
+        100,
+    );
+    assert!(
+        pty.wait_for_exit(15).is_some(),
+        "the app did not exit on a nested workspace"
+    );
+    assert_eq!(pty.app_exit_code(), Some(1));
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    assert!(raw.contains("workspace is inside"), "{raw}");
+    assert!(
+        !raw.contains("sandbox backend"),
+        "a nested workspace must not blame the backend: {raw}"
+    );
+    assert!(!raw.contains("--profile"), "{raw}");
+    assert!(
+        !raw.contains("\u{1b}[?1049h"),
+        "a refusal must not enter the alternate screen: {raw}"
+    );
+    // The workspace lives inside the session dir, so the dir is not empty; the point is that
+    // no session file was created.
+    assert!(
+        !session_dir.join("nested-session.jsonl").exists(),
+        "a failed start left a session file behind"
+    );
 }
 
 /// Acceptance 2 and 4: a failed probe still refuses, leaves no session file, and the same
@@ -2362,6 +2432,7 @@ async fn pty_the_memory_notice_names_the_project_state_and_the_budget() {
     let _serial = pty_guard();
     let dir = TempDir::new("memory-notice");
     let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&ws).unwrap();
     let server = MockServer::start(vec![text_reply("never")]).await;
     let mut pty = Pty::spawn(
@@ -2371,7 +2442,7 @@ async fn pty_the_memory_notice_names_the_project_state_and_the_budget() {
             "--base-url",
             &server.base_url,
             "--session-dir",
-            dir.path().to_str().unwrap(),
+            sessions.to_str().unwrap(),
             "--session-id",
             "mem-notice",
             "--workspace",

@@ -226,6 +226,56 @@ fn denied_read_paths_are_kept_and_never_widened() {
     );
 }
 
+/// ADR 0020: a workspace inside a directory the sandbox denies reading is refused before any
+/// backend probes (Linux would `--tmpfs` the parent over the bound workspace; macOS's
+/// `deny file-read* (subpath P)` covers the workspace too).
+#[test]
+fn a_workspace_inside_a_denied_directory_is_refused() {
+    let dir = TempDir::new("nested");
+    let parent = dir.path().join("parent");
+    let ws = parent.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let ws = std::fs::canonicalize(&ws).unwrap();
+    let parent = std::fs::canonicalize(&parent).unwrap();
+    let policy = SandboxPolicy::workspace_write(&ws)
+        .unwrap()
+        .deny_read(&parent);
+    let error = Sandbox::from_policy(policy).unwrap_err();
+    match error {
+        SandboxError::InvalidWorkspace { path, detail } => {
+            assert_eq!(path, ws);
+            assert!(
+                detail.contains("workspace is inside") && detail.contains("session directory"),
+                "{detail}"
+            );
+        }
+        other => panic!("expected InvalidWorkspace, got {other}"),
+    }
+}
+
+/// The reverse direction is allowed: a deny path inside the workspace (e.g.
+/// `--session-dir ./sessions`) only masks that subtree; the sandbox is still built.
+#[test]
+fn a_denied_directory_inside_the_workspace_is_allowed() {
+    let dir = TempDir::new("inside");
+    let ws = dir.path().join("ws");
+    let sessions = ws.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = std::fs::canonicalize(&ws).unwrap();
+    let policy = SandboxPolicy::workspace_write(&ws)
+        .unwrap()
+        .deny_read(&sessions);
+    match Sandbox::from_policy(policy) {
+        Ok(_) => {}
+        // A host with no working backend is fine: what must not happen is the
+        // workspace-inside-deny rejection.
+        Err(SandboxError::InvalidWorkspace { .. }) => {
+            panic!("the reverse direction (deny inside the workspace) must be allowed")
+        }
+        Err(_) => {}
+    }
+}
+
 #[test]
 fn a_missing_workspace_is_an_invalid_workspace_error() {
     let dir = TempDir::new("missing");

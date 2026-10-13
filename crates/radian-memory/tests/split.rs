@@ -58,7 +58,9 @@ fn a_move_holds_the_target_lock_between_the_check_and_the_write() {
                     .unwrap();
                 let acquired = file.try_lock_exclusive().is_ok();
                 if acquired {
-                    let _ = file.unlock();
+                    // Explicit path: std's `File::unlock` is being stabilized and makes the
+                    // bare method ambiguous on 1.88 (`unstable_name_collisions`).
+                    let _ = fs2::FileExt::unlock(&file);
                 }
                 locked.store(!acquired, Ordering::SeqCst);
             }

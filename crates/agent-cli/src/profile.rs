@@ -16,7 +16,7 @@ use std::path::Path;
 use radian_permissions::{
     Action, ApprovalPolicy, Preset, Profile, ResourceMatcher, Rule, ToolMatcher,
 };
-use radian_sandbox::{Sandbox, SandboxMode, SandboxPolicy};
+use radian_sandbox::{Sandbox, SandboxError, SandboxMode, SandboxPolicy};
 
 use crate::SetupError;
 
@@ -142,6 +142,9 @@ pub(crate) fn build_sandbox(
     }
     match Sandbox::from_policy(policy) {
         Ok(sandbox) => Ok(Some(sandbox)),
+        // The workspace being inside a denied directory is not a backend problem: say what it
+        // is and how to fix it, not "install/fix the backend" (dogfooding D1's lesson).
+        Err(error @ SandboxError::InvalidWorkspace { .. }) => Err(SetupError(error.to_string())),
         Err(error) => Err(SetupError(format!(
             "{}: {error}",
             unavailable(profile, mode)

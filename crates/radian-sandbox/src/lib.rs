@@ -97,6 +97,23 @@ pub fn platform_backend() -> Result<&'static dyn SandboxBackend, SandboxError> {
     Err(SandboxError::UnsupportedPlatform(std::env::consts::OS))
 }
 
+/// ADR 0020: the workspace must not be inside a path the sandbox denies reading, or the
+/// sandbox would hide the workspace from the commands it is supposed to let run. Refuse the
+/// enforced modes before any backend probes.
+fn validate_workspace(policy: &SandboxPolicy) -> Result<(), SandboxError> {
+    if let Some(denied) = crate::policy::deny_read_covers_workspace(policy) {
+        return Err(SandboxError::InvalidWorkspace {
+            path: policy.workspace.clone(),
+            detail: format!(
+                "the workspace is inside {}, which the sandbox does not let commands read \
+                 (ADR 0020); move the session directory or the workspace",
+                denied.display()
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// A ready-to-use sandbox. Constructing it probes the backend; the probe must succeed or
 /// construction fails.
 pub struct Sandbox {
@@ -130,6 +147,7 @@ impl Sandbox {
                 },
             });
         }
+        validate_workspace(&policy)?;
         let backend = platform_backend()?;
         let probe = backend.probe()?;
         Ok(Self {
@@ -153,6 +171,7 @@ impl Sandbox {
             return Self::new(mode, workspace);
         }
         let policy = SandboxPolicy::new(mode, workspace)?;
+        validate_workspace(&policy)?;
         let probe = backend.probe()?;
         Ok(Self {
             backend,

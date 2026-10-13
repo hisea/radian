@@ -151,6 +151,34 @@ impl SandboxPolicy {
     }
 }
 
+/// The first `deny_read` path that is the workspace itself or an ancestor of it, if any
+/// (ADR 0020). The workspace must not live inside a path the sandbox masks: Linux binds the
+/// workspace writable and then mounts `--tmpfs` over the deny path (which hides the
+/// workspace), and macOS's `(deny file-read* (subpath P))` is more specific than the
+/// workspace allow. Both sides were canonicalized when the policy was built; comparison is by
+/// path components, so `/a/bc` is not inside `/a/b`.
+pub(crate) fn deny_read_covers_workspace(policy: &SandboxPolicy) -> Option<&Path> {
+    policy
+        .deny_read
+        .iter()
+        .find(|denied| is_ancestor_or_same(denied, &policy.workspace))
+        .map(PathBuf::as_path)
+}
+
+/// Whether `ancestor` is `descendant` or a strict ancestor of it, by path components.
+fn is_ancestor_or_same(ancestor: &Path, descendant: &Path) -> bool {
+    let mut ancestor = ancestor.components();
+    let mut descendant = descendant.components();
+    loop {
+        match (ancestor.next(), descendant.next()) {
+            // Every component of `ancestor` matched; it is the same path or a parent of it.
+            (None, _) => return true,
+            (Some(a), Some(d)) if a == d => continue,
+            _ => return false,
+        }
+    }
+}
+
 /// Canonicalizes a directory or fails with `InvalidWorkspace`.
 pub(crate) fn canonical_dir(path: &Path) -> Result<PathBuf, SandboxError> {
     let meta = std::fs::metadata(path).map_err(|e| SandboxError::InvalidWorkspace {

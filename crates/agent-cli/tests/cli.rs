@@ -2822,6 +2822,56 @@ async fn a_missing_workspace_is_a_workspace_error_and_leaves_no_session() {
     assert_session_dir_empty(&session_dir);
 }
 
+/// ADR 0020: a `--session-dir` that is an ancestor of the workspace refuses at startup with
+/// the same exit code as the other sandbox refusals, names the problem (not the backend), and
+/// leaves no session file.
+#[tokio::test]
+async fn a_session_dir_above_the_workspace_is_refused_and_leaves_no_session() {
+    let dir = scratch("nested-ws");
+    let session_dir = dir.join("sessions");
+    let ws = session_dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent_in(
+            &session_dir,
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                "http://127.0.0.1:9/v1",
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--session-dir",
+                session_dir.to_str().unwrap(),
+                "--session-id",
+                "nested-ws",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("workspace is inside"), "{stderr}");
+    assert!(
+        !stderr.contains("sandbox backend"),
+        "a nested workspace must not blame the backend: {stderr}"
+    );
+    assert!(
+        !stderr.contains("--profile"),
+        "a nested workspace must not suggest a profile: {stderr}"
+    );
+    assert!(stdout.is_empty(), "{stdout}");
+    // The workspace lives inside the session dir, so the dir is not empty; the point is that
+    // no session file was created.
+    assert!(
+        !session_dir.join("nested-ws.jsonl").exists(),
+        "a failed start left a session file behind"
+    );
+}
+
 /// Acceptance 2 and 4 (CLI): a failed sandbox probe refuses, leaves no session file, and the
 /// same `--session-id` with corrected parameters then creates the session (dogfooding D2).
 #[tokio::test]
