@@ -1,8 +1,8 @@
 //! Frame-time baseline for the transcript view (plan Phase 7).
 //!
-//! The TUI has **no virtualization**: `render::draw` re-wraps and re-styles every entry each
-//! frame (see `crates/radian-tui/README.md`). This measures where that stops fitting in a
-//! 60 fps budget (16.67 ms/frame) as the entry count grows.
+//! Since 2026-10-13 the transcript is virtualized (dogfooding D9): a frame wraps only the
+//! entries on screen and sums cached line counts for the rest. The first frame measures every
+//! entry once; this measures the frames after it, against a 60 fps budget (16.67 ms/frame).
 //!
 //! Measurement, not an assertion: `#[ignore]`d, so `cargo test` is unchanged. Run:
 //!

@@ -256,7 +256,7 @@ continue it: `... the session file <path> exists; after fixing the problem, cont
 - Frame timing under load (the spike measured p95 ≪ 16 ms; this skeleton was not benchmarked).
 - `Shift-Enter` on terminals without the enhanced keyboard protocol.
 - Windows and Linux ptys; only macOS was exercised.
-- Large transcripts: this slice renders every entry each frame (no virtualization; Phase 5).
+- Large transcripts: virtualized since 2026-10-13 (dogfooding D9; `tests/virtual.rs`, frame times in `docs/perf-baseline.md` §4). Not done: the first frame after resuming a large session still measures every entry once.
 
 ## Sessions
 

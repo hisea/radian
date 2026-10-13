@@ -36,6 +36,9 @@ pub struct Entry {
     /// The committed assistant message was an interrupted prefix (ADR 0003).
     pub interrupted: bool,
     pub is_error: bool,
+    /// How many lines this entry wrapped to, for the width and text it was last measured at.
+    /// The renderer keeps it so a frame only re-wraps entries that changed or are on screen.
+    pub(crate) wrap_cache: WrapCache,
 }
 
 impl Entry {
@@ -46,7 +49,40 @@ impl Entry {
             live: false,
             interrupted: false,
             is_error: false,
+            wrap_cache: WrapCache::default(),
         }
+    }
+}
+
+/// A measured line count, keyed by what it depends on: the width, the text length (entry text
+/// only ever grows while live, and a committed entry is a new `Entry`), and the interrupted
+/// marker. A cache, not state: two entries that differ only here are equal.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct WrapCache(Option<WrapKey>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WrapKey {
+    pub width: usize,
+    pub text_len: usize,
+    pub interrupted: bool,
+    pub lines: usize,
+}
+
+impl WrapCache {
+    pub(crate) fn get(&self, width: usize, text_len: usize, interrupted: bool) -> Option<usize> {
+        self.0
+            .filter(|k| k.width == width && k.text_len == text_len && k.interrupted == interrupted)
+            .map(|k| k.lines)
+    }
+
+    pub(crate) fn set(&mut self, key: WrapKey) {
+        self.0 = Some(key);
+    }
+}
+
+impl PartialEq for WrapCache {
+    fn eq(&self, _: &Self) -> bool {
+        true
     }
 }
 
@@ -144,7 +180,9 @@ pub struct App {
     pub session_id: String,
     pub entries: Vec<Entry>,
     pub input: String,
-    pub scroll: u16,
+    /// The first visible transcript line. `usize`: a long session passes 65,535 wrapped lines
+    /// (dogfooding D9), and a `u16` silently wrapped there.
+    pub scroll: usize,
     /// True while the view is pinned to the newest line. Scrolling up clears it; scrolling
     /// back to the bottom, or new content while it is set, pins it again.
     pub follow: bool,
@@ -170,9 +208,9 @@ pub struct App {
     /// A budget stop waiting for the user's choice. The keys work only while the input box is
     /// empty, so ordinary typing is never swallowed.
     pub budget_stop: Option<BudgetReport>,
-    pub total_lines: u16,
+    pub total_lines: usize,
     pub view_height: u16,
-    pub max_scroll: u16,
+    pub max_scroll: usize,
 }
 
 impl App {
@@ -221,10 +259,10 @@ impl App {
 
     /// Records the transcript viewport. Called by the renderer with the measured transcript
     /// size, so scroll math works on wrapped lines without the app knowing how to wrap.
-    pub fn set_viewport(&mut self, view_height: u16, total_lines: u16) {
+    pub fn set_viewport(&mut self, view_height: u16, total_lines: usize) {
         self.view_height = view_height;
         self.total_lines = total_lines;
-        self.max_scroll = total_lines.saturating_sub(view_height);
+        self.max_scroll = total_lines.saturating_sub(usize::from(view_height));
         if self.follow {
             self.scroll = self.max_scroll;
         } else {
@@ -236,16 +274,17 @@ impl App {
         self.follow
     }
 
-    fn set_scroll(&mut self, next: u16) {
+    fn set_scroll(&mut self, next: usize) {
         self.scroll = next.min(self.max_scroll);
         self.follow = self.scroll >= self.max_scroll;
     }
 
     pub fn scroll_by(&mut self, delta: i32) {
+        let step = delta.unsigned_abs() as usize;
         let next = if delta < 0 {
-            self.scroll.saturating_sub(delta.unsigned_abs() as u16)
+            self.scroll.saturating_sub(step)
         } else {
-            self.scroll.saturating_add(delta as u16)
+            self.scroll.saturating_add(step)
         };
         self.set_scroll(next);
     }

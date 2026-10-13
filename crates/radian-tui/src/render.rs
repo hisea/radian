@@ -10,7 +10,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use radian_permissions::ApprovalRequest;
 
-use crate::app::{App, Entry, EntryKind, TurnState, budget_status_text, mcp_text, usage_text};
+use crate::app::{
+    App, Entry, EntryKind, TurnState, WrapKey, budget_status_text, mcp_text, usage_text,
+};
 
 /// Reasoning is dim and italic; it must be visually distinct from assistant text (ADR 0014).
 pub fn reasoning_style() -> Style {
@@ -93,30 +95,93 @@ fn body_style(entry: &Entry) -> Style {
     }
 }
 
-/// Wraps the transcript into styled lines. One entry becomes one or more lines; an
-/// interrupted assistant entry gets an explicit marker on its last line.
-pub fn transcript_lines(entries: &[Entry], width: usize) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    for entry in entries {
-        let (prefix, prefix_style) = marker(entry.kind);
-        let body_width = width.saturating_sub(prefix.width()).max(1);
-        let wrapped = wrap(&entry.text, body_width);
-        let style = body_style(entry);
-        let last = wrapped.len().saturating_sub(1);
-        for (i, row) in wrapped.into_iter().enumerate() {
-            let lead = if i == 0 {
-                prefix.to_string()
-            } else {
-                " ".repeat(prefix.width())
-            };
-            let mut spans = vec![Span::styled(lead, prefix_style), Span::styled(row, style)];
-            if entry.interrupted && i == last {
-                spans.push(Span::styled(" [interrupted]", interrupted_style()));
-            }
-            lines.push(Line::from(spans));
+/// One entry's styled lines. An interrupted assistant entry gets an explicit marker on its
+/// last line.
+fn entry_lines(entry: &Entry, width: usize) -> Vec<Line<'static>> {
+    let (prefix, prefix_style) = marker(entry.kind);
+    let body_width = width.saturating_sub(prefix.width()).max(1);
+    let wrapped = wrap(&entry.text, body_width);
+    let style = body_style(entry);
+    let last = wrapped.len().saturating_sub(1);
+    let mut lines = Vec::with_capacity(wrapped.len());
+    for (i, row) in wrapped.into_iter().enumerate() {
+        let lead = if i == 0 {
+            prefix.to_string()
+        } else {
+            " ".repeat(prefix.width())
+        };
+        let mut spans = vec![Span::styled(lead, prefix_style), Span::styled(row, style)];
+        if entry.interrupted && i == last {
+            spans.push(Span::styled(" [interrupted]", interrupted_style()));
         }
+        lines.push(Line::from(spans));
     }
     lines
+}
+
+/// How many lines `entry` wraps to at `width`, from its cache when the entry has not changed
+/// since it was last measured.
+fn entry_line_count(entry: &mut Entry, width: usize) -> usize {
+    let text_len = entry.text.len();
+    if let Some(lines) = entry.wrap_cache.get(width, text_len, entry.interrupted) {
+        return lines;
+    }
+    let (prefix, _) = marker(entry.kind);
+    let body_width = width.saturating_sub(prefix.width()).max(1);
+    let lines = wrap(&entry.text, body_width).len();
+    entry.wrap_cache.set(WrapKey {
+        width,
+        text_len,
+        interrupted: entry.interrupted,
+        lines,
+    });
+    lines
+}
+
+/// Wraps the whole transcript into styled lines. The frame does not use this (it wraps only
+/// the visible entries, see [`visible_lines`]); it is the reference the virtualized path is
+/// tested against.
+pub fn transcript_lines(entries: &[Entry], width: usize) -> Vec<Line<'static>> {
+    entries
+        .iter()
+        .flat_map(|entry| entry_lines(entry, width))
+        .collect()
+}
+
+/// The transcript's total line count and the `height` lines starting at line `start`,
+/// wrapping only the entries that overlap that window (dogfooding D9). Every other entry
+/// contributes its cached line count, so a long session costs an integer sum per frame
+/// instead of re-wrapping every entry.
+pub fn visible_lines(
+    entries: &mut [Entry],
+    width: usize,
+    start: usize,
+    height: usize,
+) -> (usize, Vec<Line<'static>>) {
+    let counts: Vec<usize> = entries
+        .iter_mut()
+        .map(|entry| entry_line_count(entry, width))
+        .collect();
+    let total: usize = counts.iter().sum();
+    let mut out = Vec::with_capacity(height);
+    let mut line = 0usize;
+    for (entry, count) in entries.iter().zip(&counts) {
+        if out.len() >= height {
+            break;
+        }
+        let next = line + count;
+        if next > start {
+            let skip = start.saturating_sub(line);
+            out.extend(
+                entry_lines(entry, width)
+                    .into_iter()
+                    .skip(skip)
+                    .take(height - out.len()),
+            );
+        }
+        line = next;
+    }
+    (total, out)
 }
 
 fn input_height(app: &App, width: usize) -> u16 {
@@ -295,14 +360,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     ])
     .split(area);
 
-    let lines = transcript_lines(&app.entries, chunks[0].width as usize);
-    app.set_viewport(chunks[0].height, lines.len() as u16);
-    let start = app.scroll as usize;
-    let visible: Vec<Line<'static>> = lines
-        .into_iter()
-        .skip(start)
-        .take(chunks[0].height as usize)
-        .collect();
+    // Measure first (cached per entry), so the scroll position is clamped against the real
+    // total before the visible window is cut.
+    let width = chunks[0].width as usize;
+    let height = chunks[0].height as usize;
+    let (total, _) = visible_lines(&mut app.entries, width, 0, 0);
+    app.set_viewport(chunks[0].height, total);
+    let (_, visible) = visible_lines(&mut app.entries, width, app.scroll, height);
     frame.render_widget(Paragraph::new(visible), chunks[0]);
 
     match &app.pending_approval {
