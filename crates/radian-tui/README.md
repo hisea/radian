@@ -61,6 +61,9 @@ The transcript owns its scrolling:
 | 4 | panic path restores the terminal | `tests/pty.rs` |
 | 5 | multi-line bracketed paste | `tests/pty.rs` |
 | 6 | reasoning not sent back to the provider (ADR 0014 R4) | `tests/pty.rs` |
+| 7 | panic path leaves no orphan child (child in its own process group) | `tests/pty.rs` |
+| 8 | `--resume` renders the stored history; `--list` prints the workspace sessions | `tests/pty.rs`, `tests/list.rs` |
+| 9 | approval: allow-once runs the tool, deny is fed back, always skips the next prompt, Ctrl-C cancels, the resolved path is shown, `PermissionResolved` is durable | `tests/pty.rs`, `tests/approval.rs` |
 | — | Enter=followup idle / steer running; Ctrl-C cancel-then-quit | `tests/input.rs` |
 
 ## Must be hand-tested in a real terminal
@@ -74,6 +77,10 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
 - resize: drag the window while a turn streams — no residue, status line keeps working?
 - CJK and emoji width: alignment of a pasted Chinese line and an emoji.
 - paste: a large multi-line paste into the box.
+- **the approval box**: is the resolved path and the argument preview readable at your
+  terminal width? does a long argument (a large patch, say) make the box unusable? do the
+  `y`/`a`/`n` keys feel right, and is it obvious which one you are about to press? pty
+  automation asserts the text and the keys, not the readability or the feel (ADR 0009).
 - **mouse selection/copy**: this app does **not** enable mouse capture, so selection is the
   **terminal emulator's own** (drag to select, Cmd-C on macOS, or the emulator's copy key).
   The caveat ADR 0009 notes applies: a selection that spans the input box and the transcript
@@ -146,8 +153,47 @@ by one is resumable by the other:
 `--system`, `--session-dir`, `--session-id`, `--resume`, `--list`, `--workspace DIR`. The key
 is read only from the named environment variable and is never printed.
 
-## Tools
+## Tools, permissions and the approval dialog
 
 `--workspace DIR` mounts the built-in file and read-only git tools (`read`, `write`, `patch`,
-`list`, `git_status`, `git_diff`) rooted at that directory, behind the approval dialog. No
-`shell`: it needs the sandbox and permission-tier wiring, and follows in the next slice.
+`list`, `git_status`, `git_diff`) rooted at that directory. No `shell`: it needs the sandbox
+and permission-tier wiring, and follows in the next slice.
+
+Every call goes through `radian-permissions` (ADR 0012) as a `Hooks` implementation:
+
+- `--profile safe|workspace-write|full-access` picks the rule set (default `workspace-write`:
+  reads allowed, writes allowed only when the resolved path stays inside the workspace).
+- `--approval on-ask|always|never` picks the `ApprovalPolicy` (default `on-ask`). `always`
+  asks for every call a rule does not deny, which is how the dialog is exercised with the
+  built-in tools; `never` turns `ask` into a denial.
+- The turn source is set to `User` before each turn; the permission layer treats an unset
+  source as non-human and denies, so a forgotten setter fails closed.
+- Every decision is written to the session journal as a `PermissionResolved` (audit only,
+  `critical = false`, never replayed).
+
+When a call needs the human, the input box is replaced by an approval box:
+
+```
+┌ approve tool call? ──────────────────────────────────────────┐
+│ tool: write                                                  │
+│ path: /abs/workspace/out.txt        <- the RESOLVED path      │
+│ args: { "path": "out.txt", … }                               │
+│ [y] allow once   [a] always this session   [n] deny          │
+└──────────────────────────────────────────────────────────────┘
+```
+
+| Key | Answer |
+|---|---|
+| `y` | allow once |
+| `a` | allow for this session (the same tool + resolved resource stops asking; in memory only, gone after resume) |
+| `n` or Esc | deny (the model sees the denial) |
+| Ctrl-C | cancel the running turn; the waiting `ask` resolves as a denial and the prompt is cleared |
+
+The prompt shows the **resolved** resource, never the raw argument: `a/../b` must not read as
+if it stayed under `a/`. While the box is up, other keys do not type into the input.
+
+## Tool display
+
+A tool call shows as `-> name({…args…})`, its result as `<- <text>` (red on an error), and
+the status line carries a `tool <name> running` note while it runs. The call, the wait for
+approval, execution and the result are therefore distinguishable states.

@@ -8,6 +8,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use radian_permissions::ApprovalRequest;
+
 use crate::app::{App, Entry, EntryKind, TurnState};
 
 /// Reasoning is dim and italic; it must be visually distinct from assistant text (ADR 0014).
@@ -127,6 +129,53 @@ fn input_height(app: &App, width: usize) -> u16 {
     (rows as u16 + 2).clamp(3, 8)
 }
 
+/// The approval prompt's text. The **resolved** resource is what is shown: `a/../secret`
+/// must not read as if it stayed under `a/` (the permission layer resolves it before the
+/// prompt, and that resolved form is also the session-grant key).
+pub fn approval_text(request: &ApprovalRequest) -> String {
+    let label = if request.arguments.get("path").is_some() {
+        "path"
+    } else if request.arguments.get("command").is_some() {
+        "command"
+    } else {
+        "resource"
+    };
+    let mut text = String::new();
+    text.push_str(&format!("tool: {}\n", request.tool));
+    text.push_str(&format!("{label}: {}\n", request.resolved_resource));
+    let args = serde_json::to_string_pretty(&request.arguments)
+        .unwrap_or_else(|_| request.arguments.to_string());
+    let (shown, discarded) = truncate_for_display(&args, 400);
+    text.push_str(&format!("args: {shown}"));
+    if discarded > 0 {
+        text.push_str(&format!("\n      … {discarded} more bytes"));
+    }
+    if let Some(reason) = &request.reason {
+        text.push_str(&format!("\nwhy: {reason}"));
+    }
+    text.push_str("\n[y] allow once   [a] always this session   [n] deny");
+    text
+}
+
+/// Truncates a display string on a character boundary, returning the kept part and how many
+/// bytes were dropped.
+fn truncate_for_display(text: &str, cap: usize) -> (String, usize) {
+    if text.len() <= cap {
+        return (text.to_owned(), 0);
+    }
+    let mut end = cap;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (text[..end].to_owned(), text.len() - end)
+}
+
+/// The height the approval box needs, counting wrapped rows.
+fn approval_height(request: &ApprovalRequest, width: usize) -> u16 {
+    let rows = wrap(&approval_text(request), width.saturating_sub(2).max(1)).len();
+    (rows as u16 + 2).clamp(5, 14)
+}
+
 fn status_line(app: &App) -> Line<'static> {
     let turn_style = match app.turn {
         TurnState::Idle => Style::default().fg(Color::Green),
@@ -163,9 +212,13 @@ fn status_line(app: &App) -> Line<'static> {
 /// operate on wrapped lines.
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
+    let middle = match &app.pending_approval {
+        Some(prompt) => approval_height(&prompt.request, area.width as usize),
+        None => input_height(app, area.width as usize),
+    };
     let chunks = Layout::vertical([
         Constraint::Min(1),
-        Constraint::Length(input_height(app, area.width as usize)),
+        Constraint::Length(middle),
         Constraint::Length(1),
     ])
     .split(area);
@@ -180,20 +233,34 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         .collect();
     frame.render_widget(Paragraph::new(visible), chunks[0]);
 
-    let hint = if app.input.is_empty() {
-        "(type a message, Enter to send, Ctrl-J for a new line)".to_string()
-    } else {
-        app.input.clone()
-    };
-    let style = if app.input.is_empty() {
-        Style::default().fg(Color::DarkGray)
-    } else {
-        Style::default()
-    };
-    let input = Paragraph::new(Span::styled(hint, style))
-        .block(Block::default().borders(Borders::ALL).title(" message "))
-        .wrap(Wrap { trim: false });
-    frame.render_widget(input, chunks[1]);
+    match &app.pending_approval {
+        Some(prompt) => {
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow))
+                .title(" approve tool call? ");
+            let text = Paragraph::new(approval_text(&prompt.request))
+                .block(block)
+                .wrap(Wrap { trim: false });
+            frame.render_widget(text, chunks[1]);
+        }
+        None => {
+            let hint = if app.input.is_empty() {
+                "(type a message, Enter to send, Ctrl-J for a new line)".to_string()
+            } else {
+                app.input.clone()
+            };
+            let style = if app.input.is_empty() {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default()
+            };
+            let input = Paragraph::new(Span::styled(hint, style))
+                .block(Block::default().borders(Borders::ALL).title(" message "))
+                .wrap(Wrap { trim: false });
+            frame.render_widget(input, chunks[1]);
+        }
+    }
 
     frame.render_widget(Paragraph::new(status_line(app)), chunks[2]);
 }

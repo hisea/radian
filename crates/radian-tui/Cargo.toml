@@ -12,6 +12,9 @@ path = "src/main.rs"
 [dependencies]
 agent-core = { path = "../agent-core" }
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible" }
+futures-util.workspace = true
+radian-coding = { path = "../radian-coding" }
+radian-permissions = { path = "../radian-permissions" }
 radian-runtime = { path = "../radian-runtime" }
 radian-session = { path = "../radian-session" }
 clap = { version = "4", features = ["derive"] }

@@ -2,7 +2,15 @@
 //! handling. It contains no terminal I/O, so the whole thing is driven by tests in memory.
 
 use agent_core::{AgentEvent, ContentPart, Message, RunStatus};
+use radian_permissions::{ApprovalOutcome, ApprovalRequest};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+/// A tool call waiting for the human. `reply` is the channel the permission layer awaits; the
+/// answer is sent by the UI thread, so the waiting future never blocks it.
+pub struct ApprovalPrompt {
+    pub request: ApprovalRequest,
+    pub reply: tokio::sync::oneshot::Sender<ApprovalOutcome>,
+}
 
 /// What kind of transcript line an entry is. The renderer maps this to a style; the tests
 /// assert that reasoning and assistant text are distinguishable by style and position.
@@ -81,6 +89,8 @@ pub struct App {
     pub turn: TurnState,
     pub quit: bool,
     pub note: Option<String>,
+    /// Set while a tool call waits for the human; keys answer it instead of typing.
+    pub pending_approval: Option<ApprovalPrompt>,
     pub total_lines: u16,
     pub view_height: u16,
     pub max_scroll: u16,
@@ -98,6 +108,7 @@ impl App {
             turn: TurnState::Idle,
             quit: false,
             note: None,
+            pending_approval: None,
             total_lines: 0,
             view_height: 0,
             max_scroll: 0,
@@ -140,11 +151,56 @@ impl App {
         self.follow = true;
     }
 
+    /// Shows an approval prompt. If one was already up it is denied rather than dropped: the
+    /// permission layer awaits one call at a time, so this should not happen, and a silent
+    /// drop would leave that call waiting forever.
+    pub fn request_approval(&mut self, prompt: ApprovalPrompt) {
+        if let Some(previous) = self.pending_approval.replace(prompt) {
+            let _ = previous.reply.send(ApprovalOutcome::Deny {
+                reason: Some("superseded by another approval request".into()),
+            });
+        }
+    }
+
+    /// Answers the pending prompt and clears it. A no-op when nothing is pending.
+    pub fn answer_approval(&mut self, outcome: ApprovalOutcome) {
+        if let Some(prompt) = self.pending_approval.take() {
+            let _ = prompt.reply.send(outcome);
+        }
+    }
+
     /// Handles one key event and returns the inbox action it implies, if any.
     pub fn on_key(&mut self, key: KeyEvent) -> Option<Send> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        // Ctrl-C always means "cancel the turn / quit", even while a prompt is up: the
+        // permission layer races the approval against cancellation, so the waiting call then
+        // resolves as a denial and the prompt is cleared by `RunFinished`.
+        if ctrl && key.code == KeyCode::Char('c') {
+            return if self.turn == TurnState::Running {
+                Some(Send::Cancel)
+            } else {
+                self.quit = true;
+                Some(Send::Quit)
+            };
+        }
+        // While a prompt is up, keys answer it and never type into the input box.
+        if self.pending_approval.is_some() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.answer_approval(ApprovalOutcome::AllowOnce)
+                }
+                KeyCode::Char('a') | KeyCode::Char('A') => {
+                    self.answer_approval(ApprovalOutcome::AllowForSession)
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.answer_approval(ApprovalOutcome::Deny { reason: None })
+                }
+                _ => {}
+            }
+            return None;
+        }
         match key.code {
             KeyCode::Char('c') if ctrl => {
                 if self.turn == TurnState::Running {
@@ -240,6 +296,10 @@ impl App {
                     _ => TurnState::Idle,
                 };
                 self.note = None;
+                // The turn is over, so no approval can still be waiting: a cancelled turn
+                // already resolved the hook's `ask` as a denial. Dropping the prompt (and its
+                // reply channel) leaves nothing behind.
+                self.pending_approval = None;
             }
             _ => {}
         }

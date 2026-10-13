@@ -3,12 +3,20 @@
 use futures_util::future::BoxFuture;
 
 /// What the human is shown. `reason` is the rule's reason when an `ask` rule matched.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ApprovalRequest {
     pub request_id: String,
     pub call_id: String,
     pub tool: String,
+    /// The resource as the call wrote it: a raw `path`, a `command`, or the tool name.
     pub resource: String,
+    /// The resource the rules actually matched. For a path this is the **resolved** one
+    /// (relative to the profile workspace, with `.`/`..` removed and existing symlinks
+    /// resolved); for a command or a name it is the same as `resource`. A prompt must show
+    /// this one: otherwise `a/../secret` would read as if it stayed under `a/`.
+    pub resolved_resource: String,
+    /// The call's arguments, for the prompt to display. Opaque to this layer.
+    pub arguments: serde_json::Value,
     pub reason: Option<String>,
 }
 

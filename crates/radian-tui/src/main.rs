@@ -10,12 +10,20 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
-use agent_core::{Agent, AgentConfig, AgentEvent, EventSink, InputSource, NoTools, TurnOptions};
+use agent_core::{
+    Agent, AgentConfig, AgentEvent, EventSink, InputSource, NoTools, ToolCall, ToolContext,
+    ToolError, ToolFailure, ToolOutput, ToolProvider, ToolSession, ToolSpec, TurnOptions,
+};
 use agent_provider_openai_compatible::{ApiKey, OpenAiCompatible, OpenAiCompatibleConfig};
 use clap::Parser;
+use radian_coding::{CodingSession, CodingTools};
+use radian_permissions::{
+    ApprovalError, ApprovalOutcome, ApprovalRequest, Approver, AuditSink, PermissionHooks,
+    PermissionResolved, Profile, runtime_event,
+};
 use radian_runtime::{CancelCause, Driver, Inbox};
 use radian_session::{Index, SessionCreatedData, SessionJournal};
-use radian_tui::app::{App, Send};
+use radian_tui::app::{App, ApprovalPrompt, Send};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
@@ -64,6 +72,16 @@ struct Cli {
     /// (read/write/patch/list, git_status/git_diff). No shell is provided.
     #[arg(long, value_name = "DIR")]
     workspace: Option<PathBuf>,
+
+    /// The permission tier (ADR 0012): `safe` denies file modification, `workspace-write`
+    /// allows writes that resolve inside the workspace, `full-access` also allows MCP.
+    #[arg(long, value_name = "TIER", default_value = "workspace-write")]
+    profile: String,
+
+    /// How `ask` is resolved (ADR 0012's ApprovalPolicy): `on-ask` asks when a rule says so,
+    /// `always` asks for every call a rule does not deny, `never` turns `ask` into a denial.
+    #[arg(long, value_name = "POLICY", default_value = "on-ask")]
+    approval: String,
 
     #[arg(long)]
     system: Option<String>,
@@ -149,7 +167,47 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
         system_prompt: cli.system.clone(),
         ..AgentConfig::default()
     };
-    let agent = Arc::new(Agent::new(model, NoTools).with_config(agent_config));
+
+    // Tools, permissions and approval. The permission layer decides allow/ask/deny; this
+    // process is the host that answers `ask` through the UI, and writes every decision to the
+    // session journal as a `PermissionResolved` (audit only, ADR 0006 §5.9).
+    let tools = build_tools(cli.workspace.as_deref())?;
+    let (approval_tx, approval_rx) = std::sync::mpsc::channel::<ApprovalPrompt>();
+    let approval = match cli.approval.as_str() {
+        "on-ask" => radian_permissions::ApprovalPolicy::OnAsk,
+        "always" => radian_permissions::ApprovalPolicy::Always,
+        "never" => radian_permissions::ApprovalPolicy::Never,
+        other => {
+            return Err(format!(
+                "--approval {other:?} is not one of on-ask, always, never"
+            ));
+        }
+    };
+    let profile = match cli.profile.as_str() {
+        "safe" => Profile::safe(&workspace),
+        "workspace-write" => Profile::workspace_write(&workspace),
+        "full-access" => Profile::full_access(&workspace),
+        other => {
+            return Err(format!(
+                "--profile {other:?} is not one of safe, workspace-write, full-access"
+            ));
+        }
+    }
+    .map_err(|e| format!("permission profile for {workspace}: {e}"))?
+    .with_approval(approval);
+    let hooks = Arc::new(PermissionHooks::new(
+        profile,
+        Some(Arc::new(TuiApprover { tx: approval_tx })),
+        Arc::new(JournalAudit {
+            journal: Arc::clone(&journal),
+            runtime: runtime.handle().clone(),
+        }),
+    ));
+    let agent = Arc::new(
+        Agent::new(model, tools)
+            .with_config(agent_config)
+            .with_hooks(Arc::clone(&hooks)),
+    );
 
     let mut driver = runtime
         .block_on(Driver::open(
@@ -225,7 +283,15 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
         },
     ));
 
-    let outcome = ui_loop(&mut terminal, &mut app, &rx, runtime, &inbox);
+    let outcome = ui_loop(
+        &mut terminal,
+        &mut app,
+        &rx,
+        &approval_rx,
+        runtime,
+        &inbox,
+        &hooks,
+    );
     guard.restore();
 
     let _ = stop_tx.send(());
@@ -237,8 +303,10 @@ fn ui_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App,
     rx: &Receiver<AgentEvent>,
+    approvals: &Receiver<ApprovalPrompt>,
     runtime: &tokio::runtime::Runtime,
     inbox: &Arc<Inbox>,
+    hooks: &Arc<PermissionHooks>,
 ) -> Result<(), String> {
     while !app.quit {
         // A short poll keeps rendering responsive without blocking on input; it is a UI
@@ -247,7 +315,7 @@ fn ui_loop(
             match event::read().map_err(|e| e.to_string())? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     if let Some(send) = app.on_key(key) {
-                        dispatch(send, runtime, inbox)?;
+                        dispatch(send, runtime, inbox, hooks)?;
                     }
                 }
                 Event::Paste(text) => app.input.push_str(&text),
@@ -256,6 +324,11 @@ fn ui_loop(
         }
         while let Ok(event) = rx.try_recv() {
             app.apply_event(&event);
+        }
+        // A tool call waiting for the human: show it. The answer goes back over the prompt's
+        // own channel when a key is pressed, so this loop never blocks on the decision.
+        while let Ok(prompt) = approvals.try_recv() {
+            app.request_approval(prompt);
         }
         terminal
             .draw(|frame| radian_tui::render::draw(frame, app))
@@ -268,16 +341,25 @@ fn dispatch(
     send: Send,
     runtime: &tokio::runtime::Runtime,
     inbox: &Arc<Inbox>,
+    hooks: &Arc<PermissionHooks>,
 ) -> Result<(), String> {
     match send {
-        Send::Followup(text) => runtime
-            .block_on(inbox.followup(text, InputSource::User))
-            .map(|_| ())
-            .map_err(|e| e.to_string()),
-        Send::Steer(text) => runtime
-            .block_on(inbox.steer(text, InputSource::User))
-            .map(|_| ())
-            .map_err(|e| e.to_string()),
+        Send::Followup(text) => {
+            // `HookContext` has no source field, so the host declares each turn's source
+            // before it starts; an unset source is treated as non-human and denied.
+            hooks.set_turn_source(Some(InputSource::User));
+            runtime
+                .block_on(inbox.followup(text, InputSource::User))
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+        Send::Steer(text) => {
+            hooks.set_turn_source(Some(InputSource::User));
+            runtime
+                .block_on(inbox.steer(text, InputSource::User))
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
         Send::Cancel => {
             inbox.cancel(CancelCause::Requested);
             Ok(())
@@ -421,6 +503,102 @@ fn list_sessions(cli: &Cli) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// The tool provider the TUI mounts. An enum rather than two code paths so `Agent` keeps one
+/// type; `NoTools` is the no-`--workspace` case.
+enum TuiTools {
+    None(NoTools),
+    Coding(Box<CodingTools>),
+}
+
+enum TuiSession {
+    None(NoTools),
+    Coding(Box<CodingSession>),
+}
+
+fn build_tools(workspace: Option<&Path>) -> Result<TuiTools, String> {
+    match workspace {
+        Some(dir) => {
+            let tools =
+                CodingTools::new(dir).map_err(|e| format!("--workspace {}: {e}", dir.display()))?;
+            Ok(TuiTools::Coding(Box::new(tools)))
+        }
+        None => Ok(TuiTools::None(NoTools)),
+    }
+}
+
+impl ToolProvider for TuiTools {
+    type Session = TuiSession;
+
+    async fn open_session(&self) -> Result<TuiSession, ToolError> {
+        Ok(match self {
+            TuiTools::None(tools) => TuiSession::None(tools.open_session().await?),
+            TuiTools::Coding(tools) => TuiSession::Coding(Box::new(tools.open_session().await?)),
+        })
+    }
+}
+
+impl ToolSession for TuiSession {
+    fn tool_specs(&self) -> &[ToolSpec] {
+        match self {
+            TuiSession::None(session) => session.tool_specs(),
+            TuiSession::Coding(session) => session.tool_specs(),
+        }
+    }
+
+    async fn execute(
+        &self,
+        call: &ToolCall,
+        cx: ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolFailure> {
+        match self {
+            TuiSession::None(session) => session.execute(call, cx).await,
+            TuiSession::Coding(session) => session.execute(call, cx).await,
+        }
+    }
+}
+
+/// The host side of `ask`: forwards the request to the UI thread and waits for the answer.
+/// The permission layer races this future against the turn's cancellation, so a prompt that
+/// is never answered (Ctrl-C, quit) resolves as a denial instead of hanging.
+struct TuiApprover {
+    tx: Sender<ApprovalPrompt>,
+}
+
+impl Approver for TuiApprover {
+    fn decide(
+        &self,
+        request: ApprovalRequest,
+    ) -> futures_util::future::BoxFuture<'_, Result<ApprovalOutcome, ApprovalError>> {
+        Box::pin(async move {
+            let (reply, answer) = tokio::sync::oneshot::channel();
+            self.tx
+                .send(ApprovalPrompt { request, reply })
+                .map_err(|_| ApprovalError("the UI is gone".into()))?;
+            answer
+                .await
+                .map_err(|_| ApprovalError("the approval was abandoned".into()))
+        })
+    }
+}
+
+/// Writes every decision to the session journal as a `PermissionResolved` (ADR 0006 §5.9).
+/// The append is spawned: `AuditSink::record` is synchronous and runs inside the hook, so it
+/// must not block. The record is audit only (`critical = false`) and is never replayed.
+struct JournalAudit {
+    journal: Arc<SessionJournal>,
+    runtime: tokio::runtime::Handle,
+}
+
+impl AuditSink for JournalAudit {
+    fn record(&self, event: &PermissionResolved) {
+        let event = runtime_event(event);
+        let journal = Arc::clone(&self.journal);
+        self.runtime.spawn(async move {
+            let _ = journal.append_runtime_event(event).await;
+        });
+    }
 }
 
 fn build_model(cli: &Cli) -> Result<OpenAiCompatible, String> {

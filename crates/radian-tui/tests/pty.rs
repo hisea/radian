@@ -193,6 +193,18 @@ impl Pty {
     }
 }
 
+/// One tool call, then (for the next request) the given text.
+fn tool_reply(id: &str, name: &str, arguments: &str) -> Reply {
+    Reply::sse(&[
+        chunk(
+            json!({"tool_calls": [{"index": 0, "id": id, "type": "function",
+                "function": {"name": name, "arguments": arguments}}]}),
+            None,
+        ),
+        chunk(json!({}), Some("tool_calls")),
+    ])
+}
+
 fn text_reply(text: &str) -> Reply {
     Reply::sse(&[
         chunk(json!({"role": "assistant", "content": text}), None),
@@ -436,6 +448,257 @@ async fn pty_resume_renders_the_stored_history() {
         "the resumed session did not run a turn:\n{}",
         pty.screen()
     );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// The approval dialog end to end: the tool runs only after the human answers, the prompt
+/// shows the **resolved** path, and the decision is written to the session file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_approval_allow_once_runs_the_tool() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("approve");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(ws.join("sub")).unwrap();
+    let server = MockServer::start(vec![
+        // A relative path: the prompt must show the resolved absolute one (the `..`
+        // normalization itself is covered by the permission layer's own tests).
+        tool_reply(
+            "call_1",
+            "write",
+            r#"{"path":"out.txt","content":"approved"}"#,
+        ),
+        text_reply("WROTE-IT"),
+    ])
+    .await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "approve",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--approval",
+            "always",
+        ],
+        30,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"please write\r");
+
+    assert!(
+        pty.wait_for_screen("approve tool call?", 20),
+        "no approval prompt:\n{}",
+        pty.screen()
+    );
+    // The prompt shows the resolved path: the model asked for `out.txt`, the prompt names
+    // the absolute file the write will touch.
+    let prompt_screen = pty.screen();
+    assert!(prompt_screen.contains("tool: write"), "{prompt_screen}");
+    let resolved = std::fs::canonicalize(&ws).unwrap().join("out.txt");
+    assert!(
+        prompt_screen.contains(&resolved.display().to_string()),
+        "the resolved path is missing from the prompt:\n{prompt_screen}"
+    );
+    // Nothing ran yet.
+    assert!(!ws.join("out.txt").exists(), "the tool ran before approval");
+
+    pty.send(b"y");
+    assert!(
+        pty.wait_for_screen("WROTE-IT", 20),
+        "the approved call did not complete:\n{}",
+        pty.screen()
+    );
+    assert!(
+        ws.join("out.txt").exists(),
+        "the approved write did not land"
+    );
+
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+    // Every decision is durable in the session file (ADR 0006 §5.9).
+    let session = std::fs::read_to_string(dir.path().join("approve.jsonl")).unwrap();
+    assert!(session.contains("PermissionResolved"), "{session}");
+    assert!(session.contains("\"approver\":\"user\""), "{session}");
+    assert!(session.contains("\"decision\":\"allow\""), "{session}");
+}
+
+/// Denying feeds a denial result back to the model and never runs the tool.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_approval_deny_is_fed_back_to_the_model() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("approve-deny");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "write", r#"{"path":"denied.txt","content":"no"}"#),
+        text_reply("SAW-THE-DENIAL"),
+    ])
+    .await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "approve-deny",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--approval",
+            "always",
+        ],
+        30,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"go\r");
+    assert!(
+        pty.wait_for_screen("approve tool call?", 20),
+        "no prompt:\n{}",
+        pty.screen()
+    );
+    pty.send(b"n");
+    assert!(
+        pty.wait_for_screen("SAW-THE-DENIAL", 20),
+        "the turn did not continue after the denial:\n{}",
+        pty.screen()
+    );
+    let screen = pty.screen();
+    assert!(
+        screen.contains("denied"),
+        "the denial is not shown: {screen}"
+    );
+    assert!(!ws.join("denied.txt").exists(), "the denied tool ran");
+
+    pty.quit();
+    // The decision is durable and attributed to the user.
+    let session = std::fs::read_to_string(dir.path().join("approve-deny.jsonl")).unwrap();
+    assert!(session.contains("\"decision\":\"deny\""), "{session}");
+    assert!(session.contains("\"approver\":\"user\""), "{session}");
+}
+
+/// "Always this session" applies to the next matching call without a second prompt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_approval_always_skips_the_next_prompt() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("approve-session");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "write", r#"{"path":"same.txt","content":"one"}"#),
+        tool_reply("call_2", "write", r#"{"path":"same.txt","content":"two"}"#),
+        text_reply("DONE-TWICE"),
+    ])
+    .await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "approve-session",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--approval",
+            "always",
+        ],
+        30,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"go\r");
+    assert!(
+        pty.wait_for_screen("approve tool call?", 20),
+        "no first prompt:\n{}",
+        pty.screen()
+    );
+    pty.send(b"a");
+    // No further key press: if the second call asked again the turn would stall here.
+    assert!(
+        pty.wait_for_screen("DONE-TWICE", 20),
+        "the session grant did not cover the second call:\n{}",
+        pty.screen()
+    );
+    let written = std::fs::read_to_string(ws.join("same.txt")).unwrap();
+    assert_eq!(written, "two", "the second write did not run");
+
+    pty.quit();
+}
+
+/// Ctrl-C while the prompt is up cancels the turn: the prompt goes away, the tool never runs,
+/// and the app is still usable (a second Ctrl-C quits).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_ctrl_c_while_waiting_for_approval_cancels_the_turn() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("approve-cancel");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![tool_reply(
+        "call_1",
+        "write",
+        r#"{"path":"never.txt","content":"x"}"#,
+    )])
+    .await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "approve-cancel",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--approval",
+            "always",
+        ],
+        30,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"go\r");
+    assert!(
+        pty.wait_for_screen("approve tool call?", 20),
+        "no prompt:\n{}",
+        pty.screen()
+    );
+
+    pty.send(&[0x03]); // Ctrl-C: cancel the turn, not answer the prompt
+    assert!(
+        pty.wait_for_screen("cancelled", 20),
+        "the turn was not cancelled:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("approve tool call?"),
+        "the prompt outlived the cancelled turn:\n{}",
+        pty.screen()
+    );
+    assert!(!ws.join("never.txt").exists(), "the denied tool ran");
+
+    // The app is not hung: Ctrl-C again quits cleanly.
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
 }
