@@ -64,6 +64,10 @@ The transcript owns its scrolling:
 | 7 | panic path leaves no orphan child (child in its own process group) | `tests/pty.rs` |
 | 8 | `--resume` renders the stored history; `--list` prints the workspace sessions | `tests/pty.rs`, `tests/list.rs` |
 | 9 | approval: allow-once runs the tool, deny is fed back, always skips the next prompt, Ctrl-C cancels, the resolved path is shown, `PermissionResolved` is durable | `tests/pty.rs`, `tests/approval.rs` |
+| 10 | driver task panic: orderly exit, terminal restored, failure reported | `tests/pty.rs` |
+| 11 | a failed sandbox probe refuses instead of running unsandboxed | `tests/pty.rs` |
+| 12 | shell approval shows the whole command; a capped result keeps the truncation marker visible; a compound command always asks | `tests/pty.rs` |
+| 13 | budget stop sends nothing and shows the honest wording; continue relaxes one request; the guard resumes; no window says the guard is off | `tests/pty.rs`, `tests/budget.rs` |
 | — | Enter=followup idle / steer running; Ctrl-C cancel-then-quit | `tests/input.rs` |
 
 ## Must be hand-tested in a real terminal
@@ -81,6 +85,12 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   terminal width? does a long argument (a large patch, say) make the box unusable? do the
   `y`/`a`/`n` keys feel right, and is it obvious which one you are about to press? pty
   automation asserts the text and the keys, not the readability or the feel (ADR 0009).
+- **the shell approval box with a long command**: a real command line is often longer than a
+  file path. Does the `command:` line stay readable at your width, or does the wrapped preview
+  become a wall of text? The pty test only asserts that the whole command is present.
+- **the budget stop notice**: when the context guard stops a turn, is the reason and the
+  reported-vs-estimated wording readable at your width, and is it clear which key continues and
+  which abandons?
 - **mouse selection/copy**: this app does **not** enable mouse capture, so selection is the
   **terminal emulator's own** (drag to select, Cmd-C on macOS, or the emulator's copy key).
   The caveat ADR 0009 notes applies: a selection that spans the input box and the transcript
@@ -138,25 +148,30 @@ the pid and the group are gone.
 Durable data was already safe (every append is fsynced, ADR 0001 D3; a torn tail is truncated
 on read, ADR 0006 §3.2) and stays so.
 
-## Review note: a panic in the driver task (2026-10-12)
+## A panic in the driver task leaves in order (2026-10-12)
 
-Slice B fixed the panic path that used to `process::exit(101)` from inside the hook: `main`
-now catches the unwind, shuts the runtime down with a bound (dropping in-flight tool futures
-and their `kill_on_drop` children) and then exits 101. Review confirmed the fix by reverting
-it: `pty_panic_path_does_not_orphan_a_child` failed and the reverted run **did** leave a real
-orphan (`sleep 600`, parent pid 1) behind.
+The driver runs as a **spawned** task. A panic inside it is caught by the runtime, not by
+`main`'s `catch_unwind`, so the process keeps running — and the old panic hook restored the
+terminal anyway, leaving the UI drawing in cooked mode over a normal screen and sending input
+to a closed inbox.
 
-One edge it does not cover. The driver runs as a **spawned** task and is only joined after
-the UI loop ends. A panic *inside that task* is caught by tokio, not by `main`'s
-`catch_unwind` — but the panic hook still runs and restores the terminal. The UI loop then
-keeps going in cooked mode, drawing over a normal screen and sending input to a dead inbox.
-Nothing is orphaned (the task's tool futures are dropped with it), so this is robustness, not
-safety. **Follow-up:** the UI loop should watch the driver task and leave as soon as it ends,
-and the hook should restore only when the process is actually going down.
+Two changes fix that:
 
-`ApprovalRequest` gained `resolved_resource` and `arguments` in this slice. Since it is a
-plain struct with public fields, adding a field breaks every literal construction outside the
-crate; mark it `#[non_exhaustive]` the next time `radian-permissions` is touched.
+- The panic hook restores the terminal **only when the panicking thread is `main`** — the
+  process-going-down case. A spawned task's panic is not fatal, so the UI keeps the terminal.
+  The hook still never exits; `main` catches the unwind, shuts the runtime down with a bound
+  (dropping in-flight tool futures and their `kill_on_drop` children) and exits 101. The main
+  thread's unwind drops `TtyGuard` regardless, so the hook's restore is only about making the
+  panic visible on the normal screen.
+- The UI loop watches the driver task (`JoinHandle::is_finished`) and leaves as soon as it
+  ends, whatever the reason: it draws a final notice, restores the terminal, and `run` joins
+  the task. A `JoinError` (the panic case) becomes exit 1 with a message; the panic hook
+  records the panic text, which is printed **after** the alternate screen is gone, so it is
+  readable instead of scrolling away inside the alternate screen.
+
+`pty_a_driver_panic_exits_orderly_and_restores_the_terminal` asserts the orderly exit (code 1,
+not 101), the restored terminal (`?1049l`, `?2004l`, `?25h`, `icanon`) and that the failure is
+reported on the normal screen. Durable data was already safe and stays so.
 
 ## Not verified
 
@@ -191,14 +206,33 @@ by one is resumable by the other:
 ## Flags
 
 `--model`, `--base-url`, `--api-key-env` (default `OPENAI_API_KEY`), `--header NAME=VALUE`,
-`--system`, `--session-dir`, `--session-id`, `--resume`, `--list`, `--workspace DIR`. The key
-is read only from the named environment variable and is never printed.
+`--system`, `--session-dir`, `--session-id`, `--resume`, `--list`, `--workspace DIR`,
+`--profile safe|workspace-write|full-access` (default `workspace-write`),
+`--approval on-ask|always|never` (default `on-ask`), `--allow-shell-command PREFIX`,
+`--context-window TOKENS`. The key is read only from the named environment variable and is
+never printed.
 
 ## Tools, permissions and the approval dialog
 
 `--workspace DIR` mounts the built-in file and read-only git tools (`read`, `write`, `patch`,
-`list`, `git_status`, `git_diff`) rooted at that directory. No `shell`: it needs the sandbox
-and permission-tier wiring, and follows in the next slice.
+`list`, `git_status`, `git_diff`) rooted at that directory, plus **`shell`** when a sandbox
+could be built. This is the same wiring `agent-cli` uses:
+
+- The sandbox is built **before** the tools: `workspace-write` and `full-access` call
+  `radian_sandbox::Sandbox::new`, and a missing backend or a failed probe is an **error**, never
+  a fallback to an unsandboxed run (ADR 0012 decision 2). The app then exits 1 without
+  entering the terminal. `RADIAN_SANDBOX_PROBE_FAIL=1` is a test seam that can only cause a
+  refusal.
+- `shell` exists only when a sandbox does (`radian-coding` does not advertise it otherwise), and
+  it never runs without one. `safe` builds no sandbox, so it has no shell; its rules deny
+  writes and execution.
+- `--allow-shell-command "git status"` (repeatable) adds a host `allow` rule. Only a **simple**
+  command matches: any shell metacharacter (`;`, `&`, `|`, `$`, quotes, …) keeps the call at
+  `ask`, so a compound command always prompts. Write these at the subcommand level, never at a
+  bare program name.
+- Two startup notices state what was chosen and what it means. The meaning line follows ADR
+  0012 decision 4 and does **not** claim credential isolation: the macOS backend leaves
+  `mach-lookup` open, so the IPC boundary is not tightened.
 
 Every call goes through `radian-permissions` (ADR 0012) as a `Hooks` implementation:
 
@@ -232,6 +266,36 @@ When a call needs the human, the input box is replaced by an approval box:
 
 The prompt shows the **resolved** resource, never the raw argument: `a/../b` must not read as
 if it stayed under `a/`. While the box is up, other keys do not type into the input.
+
+## Context budget
+
+`--context-window TOKENS` configures the ADR 0015 guard. Omitted means **off**: the app does
+not guess a window and the status bar says `context guard off (no window configured)`.
+
+When a turn ends because the next request would cross the threshold, the transcript gets a
+notice and the status bar shows the numbers. The wording depends on where the number came
+from (ADR 0015 C1) — a report, a report plus an estimate, and a pure estimate are three
+different things:
+
+| Source | Wording |
+|---|---|
+| reported | `context 12,340 of 16,000 at 80% (reported)` |
+| reported + estimate | `context 12,340 of 16,000 at 80% (reported 12,000 + estimated 340)` |
+| estimate | `context ~12,340 of 16,000 at 80% (estimated)` |
+| no window | `context guard off (no window configured)` — no number at all |
+
+The mixed value is never shown as a plain report, and a projection that has no reported
+baseline is marked `~… (estimated)`.
+
+Keys, while the input box is empty (so typing is never swallowed):
+
+| Key | Action |
+|---|---|
+| `c` | continue once: the next turn's first request passes the guard, then the guard applies again |
+| Esc | dismiss the notice (the next message is a normal, guarded turn) |
+
+There is no fork option: an option that does nothing would be worse than its absence (Phase 5
+owns fork/rewind).
 
 ## Tool display
 

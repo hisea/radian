@@ -10,7 +10,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use radian_permissions::ApprovalRequest;
 
-use crate::app::{App, Entry, EntryKind, TurnState};
+use crate::app::{App, Entry, EntryKind, TurnState, budget_status_text};
 
 /// Reasoning is dim and italic; it must be visually distinct from assistant text (ADR 0014).
 pub fn reasoning_style() -> Style {
@@ -199,6 +199,13 @@ fn status_line(app: &App) -> Line<'static> {
             if app.follow { "follow" } else { "paused" }
         )),
     ];
+    spans.push(Span::styled(
+        format!(
+            " │ {} ",
+            budget_status_text(app.context_window, app.budget_report.as_ref())
+        ),
+        Style::default().fg(Color::Magenta),
+    ));
     if let Some(note) = &app.note {
         spans.push(Span::styled(
             note.clone(),

@@ -11,17 +11,19 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
 use agent_core::{
-    Agent, AgentConfig, AgentEvent, EventSink, InputSource, NoTools, ToolCall, ToolContext,
-    ToolError, ToolFailure, ToolOutput, ToolProvider, ToolSession, ToolSpec, TurnOptions,
+    Agent, AgentConfig, AgentEvent, ContextBudget, EventSink, InputSource, NoTools, ToolCall,
+    ToolContext, ToolError, ToolFailure, ToolOutput, ToolProvider, ToolSession, ToolSpec,
+    TurnOptions,
 };
 use agent_provider_openai_compatible::{ApiKey, OpenAiCompatible, OpenAiCompatibleConfig};
 use clap::Parser;
 use radian_coding::{CodingSession, CodingTools};
 use radian_permissions::{
     ApprovalError, ApprovalOutcome, ApprovalRequest, Approver, AuditSink, PermissionHooks,
-    PermissionResolved, Profile, runtime_event,
+    PermissionResolved, runtime_event,
 };
 use radian_runtime::{CancelCause, Driver, Inbox};
+use radian_sandbox::Sandbox;
 use radian_session::{Index, SessionCreatedData, SessionJournal};
 use radian_tui::app::{App, ApprovalPrompt, Send};
 use ratatui::Terminal;
@@ -83,6 +85,17 @@ struct Cli {
     #[arg(long, value_name = "POLICY", default_value = "on-ask")]
     approval: String,
 
+    /// Allow a shell command prefix without asking, repeatable (e.g. `--allow-shell-command
+    /// "git status"`). Only a *simple* command matches: any shell metacharacter keeps the
+    /// call at `ask`. Write these at the subcommand level, never at a bare program name.
+    #[arg(long = "allow-shell-command", value_name = "PREFIX")]
+    allow_shell_command: Vec<String>,
+
+    /// The model's context window in tokens (ADR 0015). Omitted means the context-budget
+    /// guard is **off**: the app does not guess a window, and the status bar says so.
+    #[arg(long, value_name = "TOKENS")]
+    context_window: Option<u64>,
+
     #[arg(long)]
     system: Option<String>,
 
@@ -94,6 +107,11 @@ struct Cli {
     /// `<session-dir>/child.pid`, then panic. The pty test asserts the child is not orphaned.
     #[arg(long, hide = true, value_name = "SECS")]
     panic_with_child: Option<u64>,
+
+    /// Test hook: make the driver task panic instead of running, so the UI's watch on it can
+    /// be exercised.
+    #[arg(long, hide = true)]
+    panic_in_driver: bool,
 }
 
 /// Forwards core events to the UI thread. `emit` must be short and non-blocking (ADR 0010),
@@ -165,13 +183,22 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
     let live: Arc<dyn EventSink> = Arc::new(ChannelSink(tx));
     let agent_config = AgentConfig {
         system_prompt: cli.system.clone(),
+        // No window configured means the guard is off, never a guessed default (ADR 0015).
+        context_budget: cli.context_window.map(ContextBudget::new),
         ..AgentConfig::default()
     };
 
     // Tools, permissions and approval. The permission layer decides allow/ask/deny; this
     // process is the host that answers `ask` through the UI, and writes every decision to the
     // session journal as a `PermissionResolved` (audit only, ADR 0006 §5.9).
-    let tools = build_tools(cli.workspace.as_deref())?;
+    let tier = radian_tui::profile::parse_tier(&cli.profile)?;
+    // The sandbox is built before the tools: for an enforced tier a probe failure is an error
+    // here, never a fallback to an unsandboxed run (ADR 0012 decision 2). `shell` only
+    // exists when a sandbox does.
+    let sandbox = radian_tui::profile::build_sandbox(tier, Path::new(&workspace))?;
+    // The description is taken before the sandbox moves into the tools.
+    let (startup, meaning) = radian_tui::profile::describe(tier, sandbox.as_ref());
+    let tools = build_tools(cli.workspace.as_deref(), sandbox)?;
     let (approval_tx, approval_rx) = std::sync::mpsc::channel::<ApprovalPrompt>();
     let approval = match cli.approval.as_str() {
         "on-ask" => radian_permissions::ApprovalPolicy::OnAsk,
@@ -183,18 +210,9 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
             ));
         }
     };
-    let profile = match cli.profile.as_str() {
-        "safe" => Profile::safe(&workspace),
-        "workspace-write" => Profile::workspace_write(&workspace),
-        "full-access" => Profile::full_access(&workspace),
-        other => {
-            return Err(format!(
-                "--profile {other:?} is not one of safe, workspace-write, full-access"
-            ));
-        }
-    }
-    .map_err(|e| format!("permission profile for {workspace}: {e}"))?
-    .with_approval(approval);
+    let profile =
+        radian_tui::profile::build_profile(tier, Path::new(&workspace), &cli.allow_shell_command)?
+            .with_approval(approval);
     let hooks = Arc::new(PermissionHooks::new(
         profile,
         Some(Arc::new(TuiApprover { tx: approval_tx })),
@@ -221,8 +239,15 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
 
     // The driver runs until the UI asks it to stop; dropping its `run()` future releases the
     // borrow so `shutdown()` can be called.
+    // The handle the UI uses for a context-budget "continue": it must be taken before the
+    // driver moves onto its task.
+    let relax_budget = driver.budget_relax();
     let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let panic_in_driver = cli.panic_in_driver;
     let driver_task = runtime.spawn(async move {
+        if panic_in_driver {
+            panic!("radian-tui: driver task panic test");
+        }
         tokio::select! {
             result = driver.run() => result,
             _ = &mut stop_rx => {
@@ -265,9 +290,19 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
         panic!("radian-tui: panic path test with a child in flight");
     }
     let mut app = App::new(cli.model.clone(), session_id.clone());
+    app.set_context_window(cli.context_window);
     for message in &history {
         app.push_message(message);
     }
+    app.entries.push(radian_tui::Entry::new(
+        radian_tui::EntryKind::Notice,
+        format!("profile: {startup}"),
+    ));
+    // ADR 0012 decision 4: the meaning line must not claim credential isolation.
+    app.entries.push(radian_tui::Entry::new(
+        radian_tui::EntryKind::Notice,
+        meaning,
+    ));
     app.entries.push(radian_tui::Entry::new(
         radian_tui::EntryKind::Notice,
         match &cli.resume {
@@ -291,14 +326,31 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
         runtime,
         &inbox,
         &hooks,
+        &driver_task,
+        &relax_budget,
     );
     guard.restore();
 
     let _ = stop_tx.send(());
-    let _ = runtime.block_on(driver_task);
+    // The driver task is the session: if it died, the failure is the app's failure. A panic
+    // inside it was caught by the runtime, so it shows up here as a `JoinError`, and the
+    // message the hook recorded is printed now that the alternate screen is gone.
+    let driver_result = runtime.block_on(driver_task);
+    match driver_result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return Err(format!("driver: {error}")),
+        Err(join_error) => {
+            let mut message = format!("the driver task ended unexpectedly: {join_error}");
+            if let Some(panic) = radian_tui::terminal::last_panic() {
+                message.push_str(&format!("\n  {panic}"));
+            }
+            return Err(message);
+        }
+    }
     outcome
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ui_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App,
@@ -307,15 +359,35 @@ fn ui_loop(
     runtime: &tokio::runtime::Runtime,
     inbox: &Arc<Inbox>,
     hooks: &Arc<PermissionHooks>,
+    driver_task: &tokio::task::JoinHandle<Result<(), radian_runtime::DriverError>>,
+    relax_budget: &radian_runtime::BudgetRelax,
 ) -> Result<(), String> {
     while !app.quit {
+        // The driver task is the session. If it ends — normally or by panicking — the UI has
+        // nothing left to talk to, so leave in order instead of drawing over a dead session
+        // and sending input into a closed inbox. The exit code and the message are decided
+        // after the terminal is restored (see `run`).
+        if driver_task.is_finished() {
+            app.note = Some("the driver stopped; leaving".into());
+            app.entries.push(radian_tui::Entry::new(
+                radian_tui::EntryKind::Notice,
+                "the driver task ended; the session is closed",
+            ));
+            app.quit = true;
+            // One last frame, so the notice is what the user sees before the screen is
+            // restored.
+            terminal
+                .draw(|frame| radian_tui::render::draw(frame, app))
+                .map_err(|e| e.to_string())?;
+            break;
+        }
         // A short poll keeps rendering responsive without blocking on input; it is a UI
         // refresh interval, not a synchronization device.
         if event::poll(Duration::from_millis(50)).map_err(|e| e.to_string())? {
             match event::read().map_err(|e| e.to_string())? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     if let Some(send) = app.on_key(key) {
-                        dispatch(send, runtime, inbox, hooks)?;
+                        dispatch(send, runtime, inbox, hooks, relax_budget)?;
                     }
                 }
                 Event::Paste(text) => app.input.push_str(&text),
@@ -342,8 +414,20 @@ fn dispatch(
     runtime: &tokio::runtime::Runtime,
     inbox: &Arc<Inbox>,
     hooks: &Arc<PermissionHooks>,
+    relax_budget: &radian_runtime::BudgetRelax,
 ) -> Result<(), String> {
     match send {
+        // ADR 0015 C5's "continue": the next turn's first model request passes the guard once,
+        // and the guard applies again after it. The turn is opened with a message of the
+        // host's own ("continue"), which is what the user chose.
+        Send::ContinueBudget => {
+            relax_budget.relax_once();
+            hooks.set_turn_source(Some(InputSource::User));
+            runtime
+                .block_on(inbox.followup("continue", InputSource::User))
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
         Send::Followup(text) => {
             // `HookContext` has no source field, so the host declares each turn's source
             // before it starts; an unset source is treated as non-human and denied.
@@ -517,14 +601,22 @@ enum TuiSession {
     Coding(Box<CodingSession>),
 }
 
-fn build_tools(workspace: Option<&Path>) -> Result<TuiTools, String> {
-    match workspace {
-        Some(dir) => {
+fn build_tools(workspace: Option<&Path>, sandbox: Option<Sandbox>) -> Result<TuiTools, String> {
+    match (workspace, sandbox) {
+        // With a sandbox, `shell` exists and only ever runs under it (radian-coding refuses to
+        // advertise it otherwise). Without one (the `safe` tier), the file tools are still
+        // there, confined by their own workspace boundary.
+        (Some(dir), Some(sandbox)) => {
+            let tools = CodingTools::with_sandbox(dir, sandbox)
+                .map_err(|e| format!("--workspace {}: {e}", dir.display()))?;
+            Ok(TuiTools::Coding(Box::new(tools)))
+        }
+        (Some(dir), None) => {
             let tools =
                 CodingTools::new(dir).map_err(|e| format!("--workspace {}: {e}", dir.display()))?;
             Ok(TuiTools::Coding(Box::new(tools)))
         }
-        None => Ok(TuiTools::None(NoTools)),
+        (None, _) => Ok(TuiTools::None(NoTools)),
     }
 }
 

@@ -1,7 +1,7 @@
 //! The UI state: transcript entries, the input buffer, scroll-follow logic, and key
 //! handling. It contains no terminal I/O, so the whole thing is driven by tests in memory.
 
-use agent_core::{AgentEvent, ContentPart, Message, RunStatus};
+use agent_core::{AgentEvent, BudgetReport, ContentPart, Message, RunStatus, UsageSource};
 use radian_permissions::{ApprovalOutcome, ApprovalRequest};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -65,6 +65,38 @@ impl TurnState {
     }
 }
 
+/// The wording for a budget report. ADR 0015 C1: a reported number, a reported baseline plus
+/// an estimated growth, and a pure estimate must be distinguishable, and a mixed value must
+/// **not** be presented as a report.
+pub fn budget_text(report: &BudgetReport) -> String {
+    let window = format!(
+        " of {} at {}%",
+        report.window_tokens, report.threshold_percent
+    );
+    match report.source {
+        UsageSource::Reported => format!("context {}{window} (reported)", report.projected_tokens),
+        UsageSource::ReportedPlusEstimate => format!(
+            "context {}{window} (reported {} + estimated {})",
+            report.projected_tokens,
+            report.baseline_input_tokens.unwrap_or(0),
+            report.estimated_growth_tokens.unwrap_or(0)
+        ),
+        UsageSource::Estimated => {
+            format!("context ~{}{window} (estimated)", report.projected_tokens)
+        }
+    }
+}
+
+/// The status bar's budget segment. A configured window with no report yet says the guard is
+/// on; no window says it is off, and never invents a number (ADR 0015 C1's `Disabled` row).
+pub fn budget_status_text(window: Option<u64>, report: Option<&BudgetReport>) -> String {
+    match (window, report) {
+        (None, _) => "context guard off (no window configured)".to_string(),
+        (Some(_), Some(report)) => budget_text(report),
+        (Some(window), None) => format!("context guard on ({window} tokens)"),
+    }
+}
+
 /// What the event loop must do with the inbox after a key press.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Send {
@@ -74,6 +106,9 @@ pub enum Send {
     Steer(String),
     /// Cancel the running turn.
     Cancel,
+    /// Continue once past a context-budget stop (ADR 0015 C5): the next turn's first request
+    /// is allowed through, then the guard applies again.
+    ContinueBudget,
     Quit,
 }
 
@@ -91,6 +126,13 @@ pub struct App {
     pub note: Option<String>,
     /// Set while a tool call waits for the human; keys answer it instead of typing.
     pub pending_approval: Option<ApprovalPrompt>,
+    /// The configured context window, if any; `None` means the guard is off.
+    pub context_window: Option<u64>,
+    /// The most recent budget report, for the status bar.
+    pub budget_report: Option<BudgetReport>,
+    /// A budget stop waiting for the user's choice. The keys work only while the input box is
+    /// empty, so ordinary typing is never swallowed.
+    pub budget_stop: Option<BudgetReport>,
     pub total_lines: u16,
     pub view_height: u16,
     pub max_scroll: u16,
@@ -109,10 +151,18 @@ impl App {
             quit: false,
             note: None,
             pending_approval: None,
+            context_window: None,
+            budget_report: None,
+            budget_stop: None,
             total_lines: 0,
             view_height: 0,
             max_scroll: 0,
         }
+    }
+
+    /// Records the configured context window (the guard is off when this is `None`).
+    pub fn set_context_window(&mut self, window: Option<u64>) {
+        self.context_window = window;
     }
 
     /// Records the transcript viewport. Called by the renderer with the measured transcript
@@ -184,6 +234,21 @@ impl App {
                 self.quit = true;
                 Some(Send::Quit)
             };
+        }
+        // A budget stop offers continue/dismiss, but only while the input box is empty: a
+        // typed message must never be swallowed by a prompt key.
+        if self.budget_stop.is_some() && self.input.is_empty() {
+            match key.code {
+                KeyCode::Char('c') | KeyCode::Char('C') => {
+                    self.budget_stop = None;
+                    return Some(Send::ContinueBudget);
+                }
+                KeyCode::Esc => {
+                    self.budget_stop = None;
+                    return None;
+                }
+                _ => {}
+            }
         }
         // While a prompt is up, keys answer it and never type into the input box.
         if self.pending_approval.is_some() {
@@ -281,6 +346,8 @@ impl App {
         match event {
             AgentEvent::TurnStarted | AgentEvent::ModelRequestStarted { .. } => {
                 self.turn = TurnState::Running;
+                // A new turn started, so a stop that was waiting for a choice is stale.
+                self.budget_stop = None;
             }
             AgentEvent::ModelTextDelta { text } => self.append_live(EntryKind::Assistant, text),
             AgentEvent::ModelReasoningDelta { text } => {
@@ -300,6 +367,20 @@ impl App {
                 // already resolved the hook's `ask` as a denial. Dropping the prompt (and its
                 // reply channel) leaves nothing behind.
                 self.pending_approval = None;
+                // A context-budget stop is a turn outcome the host must act on (ADR 0015 C5):
+                // show the reason and the numbers, and offer continue/dismiss.
+                if let RunStatus::ContextBudget(report) = status {
+                    self.budget_report = Some(report.clone());
+                    self.budget_stop = Some(report.clone());
+                    self.entries.push(Entry::new(
+                        EntryKind::Notice,
+                        format!(
+                            "stopped before the next request: {} — press c to continue once, \
+                             Esc to dismiss",
+                            budget_text(report)
+                        ),
+                    ));
+                }
             }
             _ => {}
         }

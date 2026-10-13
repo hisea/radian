@@ -2208,6 +2208,7 @@ dependencies = [
  "radian-coding",
  "radian-permissions",
  "radian-runtime",
+ "radian-sandbox",
  "radian-session",
  "ratatui",
  "serde_json",

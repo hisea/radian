@@ -66,6 +66,11 @@ impl Pty {
     /// Spawns the bin under `sh -c '"$@"; echo EXITED:$?; stty -a'` so the same pty reports
     /// the exit code and the tty state after the app exits.
     fn spawn(args: &[&str], rows: u16, cols: u16) -> Self {
+        Self::spawn_with_env(args, &[], rows, cols)
+    }
+
+    /// Like [`Pty::spawn`], with extra environment for the app (e.g. the sandbox probe seam).
+    fn spawn_with_env(args: &[&str], envs: &[(&str, &str)], rows: u16, cols: u16) -> Self {
         let pair = portable_pty::native_pty_system()
             .openpty(PtySize {
                 rows,
@@ -90,6 +95,9 @@ impl Pty {
             }
         }
         cmd.env("TERM", "xterm-256color");
+        for (name, value) in envs {
+            cmd.env(name, value);
+        }
         let child = pair.slave.spawn_command(cmd).unwrap();
         let writer = pair.master.take_writer().unwrap();
         let mut reader = pair.master.try_clone_reader().unwrap();
@@ -701,6 +709,360 @@ async fn pty_ctrl_c_while_waiting_for_approval_cancels_the_turn() {
     // The app is not hung: Ctrl-C again quits cleanly.
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// The context-budget stop: the request is not sent, the reason is shown honestly (estimated,
+/// since nothing was reported yet), and "continue" lets exactly one request through before the
+/// guard applies again (ADR 0015 C5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_budget_stop_sends_nothing_and_continue_relaxes_once() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("budget");
+    let server = MockServer::start(vec![text_reply("BUDGET-REPLY")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "budget",
+            "--context-window",
+            "1",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"hi\r");
+    assert!(
+        pty.wait_for_screen("stopped before the next request", 20),
+        "no budget stop:\n{}",
+        pty.screen()
+    );
+    assert!(
+        server.requests().is_empty(),
+        "the blocked request must not be sent"
+    );
+    let screen = pty.screen();
+    assert!(
+        screen.contains("(estimated)"),
+        "the stop must label the projection as estimated: {screen}"
+    );
+    assert!(
+        !screen.contains("(reported"),
+        "nothing was reported yet: {screen}"
+    );
+
+    // Continue once: that request goes out.
+    pty.send(b"c");
+    assert!(
+        pty.wait_for_screen("BUDGET-REPLY", 20),
+        "the relaxed request did not go out:\n{}",
+        pty.screen()
+    );
+    assert_eq!(server.requests().len(), 1);
+
+    // The guard applies again on the next turn: a second stop, and still one request.
+    pty.send(b"again\r");
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if pty
+            .screen()
+            .matches("stopped before the next request")
+            .count()
+            >= 2
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the guard did not resume:\n{}",
+            pty.screen()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        server.requests().len(),
+        1,
+        "a later request was sent although the guard is back"
+    );
+
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// Without `--context-window` the guard is off, and the status bar says so instead of showing
+/// a guessed number (ADR 0015 C1's `Disabled` row).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_without_a_window_the_status_bar_says_the_guard_is_off() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("budget-off");
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "budget-off",
+        ],
+        24,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("context guard off", 10),
+        "the status bar does not say the guard is off:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.screen().contains("no window configured"),
+        "{}",
+        pty.screen()
+    );
+    pty.quit();
+}
+
+/// A failed sandbox probe is a refusal, never an unsandboxed run (ADR 0012 decision 2). The
+/// seam is `RADIAN_SANDBOX_PROBE_FAIL=1`, which can only cause a refusal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_failed_sandbox_probe_refuses_instead_of_running_unsandboxed() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("probe-fail");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("SHOULD-NOT-RUN")]).await;
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "probe-fail",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[("RADIAN_SANDBOX_PROBE_FAIL", "1")],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_exit(15).is_some(),
+        "the app did not exit after the probe failed"
+    );
+    assert_eq!(pty.app_exit_code(), Some(1), "a refusal is a failure exit");
+    let raw_text = String::from_utf8_lossy(&pty.raw()).to_string();
+    assert!(
+        raw_text.contains("sandbox backend is unavailable")
+            || raw_text.contains("failed its probe"),
+        "the refusal is not explained: {raw_text}"
+    );
+    assert!(
+        !raw_text.contains("\u{1b}[?1049h"),
+        "the app entered the alternate screen although it refused to run"
+    );
+    assert!(
+        server.requests().is_empty(),
+        "no request may be sent when the sandbox cannot be enforced"
+    );
+}
+
+/// The shell approval shows the whole command, and a capped result keeps the truncation
+/// marker visible.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_shell_approval_shows_the_command_and_the_truncation_marker() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("shell");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    // ~200 KiB of output, well past the 64 KiB per-stream default: the marker must show.
+    let command = "i=0; while [ $i -lt 20000 ]; do echo filler-$i; i=$((i+1)); done";
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "shell", &json!({"command": command}).to_string()),
+        text_reply("SHELL-DONE"),
+    ])
+    .await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "shell",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"go\r");
+    assert!(
+        pty.wait_for_screen("approve tool call?", 20),
+        "a shell command must ask:\n{}",
+        pty.screen()
+    );
+    // The prompt shows the whole command, not a truncated preview.
+    let prompt_screen = pty.screen();
+    assert!(prompt_screen.contains("command:"), "{prompt_screen}");
+    assert!(
+        prompt_screen.contains("while [ $i -lt 20000 ]"),
+        "the full command is not shown:\n{prompt_screen}"
+    );
+
+    pty.send(b"y");
+    assert!(
+        pty.wait_for_screen("SHELL-DONE", 30),
+        "the approved shell command did not finish:\n{}",
+        pty.screen()
+    );
+    let screen = pty.screen();
+    assert!(
+        screen.contains("bytes discarded"),
+        "the truncation marker must be visible:\n{screen}"
+    );
+
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// A compound command is never matched by an allow rule, so it always asks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_compound_shell_command_always_asks() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("shell-compound");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let compound = "echo ok; echo two";
+    let server = MockServer::start(vec![
+        tool_reply(
+            "call_1",
+            "shell",
+            &json!({"command": "echo ok"}).to_string(),
+        ),
+        text_reply("FIRST-DONE"),
+        tool_reply("call_2", "shell", &json!({"command": compound}).to_string()),
+        text_reply("SECOND-DONE"),
+    ])
+    .await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "shell-compound",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--allow-shell-command",
+            "echo ok",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // The simple command is allowed by the rule: it runs with no key pressed.
+    pty.send(b"first\r");
+    assert!(
+        pty.wait_for_screen("FIRST-DONE", 20),
+        "the allowed command was blocked:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("approve tool call?"),
+        "an allowed simple command must not ask:\n{}",
+        pty.screen()
+    );
+
+    // The compound one is not a simple command, so the allow rule cannot match it.
+    pty.send(b"second\r");
+    assert!(
+        pty.wait_for_screen("approve tool call?", 20),
+        "a compound command must ask:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.screen().contains(compound),
+        "the prompt must show the whole compound command:\n{}",
+        pty.screen()
+    );
+    pty.send(b"n");
+    assert!(pty.wait_for_screen("SECOND-DONE", 20), "{}", pty.screen());
+
+    pty.quit();
+}
+
+/// A panic inside the driver task is caught by the runtime, but the UI must notice that the
+/// session is gone: leave in order, restore the terminal, and report the failure where the
+/// user can see it (after the alternate screen is gone).
+#[test]
+fn pty_a_driver_panic_exits_orderly_and_restores_the_terminal() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("driver-panic");
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "driver-panic",
+            "--panic-in-driver",
+        ],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_exit(15).is_some(),
+        "the TUI did not exit after the driver task panicked"
+    );
+    // Not 101: the process did not panic, its driver did. The app exits 1 with a message.
+    assert_eq!(pty.app_exit_code(), Some(1), "an orderly failure exit");
+    let raw_text = String::from_utf8_lossy(&pty.raw()).to_string();
+    assert!(raw_text.contains("\u{1b}[?1049l"), "left alternate screen");
+    assert!(
+        raw_text.contains("\u{1b}[?2004l"),
+        "bracketed paste disabled"
+    );
+    assert!(raw_text.contains("\u{1b}[?25h"), "cursor restored");
+    assert!(raw_text.contains("icanon"), "cooked mode restored");
+    assert!(!raw_text.contains("-icanon"), "raw mode not restored");
+    // The panic is reported after the alternate screen is gone, so it is readable.
+    let after_restore = raw_text
+        .rsplit_once("\u{1b}[?1049l")
+        .map(|(_, rest)| rest.to_string())
+        .unwrap_or_default();
+    assert!(
+        after_restore.contains("driver task ended unexpectedly")
+            || after_restore.contains("driver task panic test"),
+        "the failure was not reported on the normal screen: {after_restore}"
+    );
 }
 
 /// A bracketed paste arrives whole and multi-line in the input box.
