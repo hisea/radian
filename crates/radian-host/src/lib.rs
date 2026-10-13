@@ -18,6 +18,7 @@ mod mcp;
 pub mod memory;
 mod model;
 mod output;
+pub mod pending;
 mod session_id;
 pub mod sessions;
 mod tools;
@@ -52,6 +53,7 @@ pub use model::{
     check_provider_flags, redact_base_url,
 };
 pub use output::{StdoutError, write_line, write_stdout};
+pub use pending::{Abandoned, Answered, PendingAnswer, PendingQueue, PendingView, QueuedApprover};
 pub use session_id::{generate_session_id, validate_session_id};
 pub use sessions::{
     ExportSettings, Format, SEARCH_LIMIT, SUMMARY_MAX_CHARS, SearchRow, SessionRow,
