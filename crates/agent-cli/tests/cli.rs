@@ -1645,8 +1645,11 @@ async fn resume_carries_the_previous_history() {
 async fn list_shows_only_the_current_workspace() {
     let sessions = fresh_session_dir();
     let dir = sessions.to_str().unwrap();
-    let ws_a = sessions.join("ws-a");
-    let ws_b = sessions.join("ws-b");
+    // The workspaces must be siblings of the session directory: a workspace inside it is
+    // refused (ADR 0020), and this test is about `--list`, not the sandbox.
+    let name = sessions.file_name().unwrap().to_string_lossy().into_owned();
+    let ws_a = sessions.with_file_name(format!("{name}-ws-a"));
+    let ws_b = sessions.with_file_name(format!("{name}-ws-b"));
     std::fs::create_dir_all(&ws_a).unwrap();
     std::fs::create_dir_all(&ws_b).unwrap();
     let server = MockServer::start(vec![text_reply("a"), text_reply("b")]).await;
