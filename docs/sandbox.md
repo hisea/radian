@@ -36,13 +36,16 @@ macOS 版本漂移（spike 记录过 `process-fork*` 变 unbound）。探针在�
 - `SandboxPolicy`：canonical workspace、`network`、`read_only`（git 元数据自动发现：`.git` 目录、
   worktree 指针文件及其共享 common dir）、`deny_read`（默认 `~/.ssh`、`~/.aws`、`~/.gnupg`、
   `~/.netrc`、浏览器配置等）、`allow_env` 白名单。
+- **ADR 0020（2026-10-13）**：宿主在 enforced 档位把**实际的会话目录**（`--session-dir`
+  可能已改位）与 `~/.radian/memory` 加进 `deny_read`，并在建沙箱前把它们创建为 0700（Linux 的
+  bwrap 只能遮住**已存在**的路径）；`~/.radian/config` 与 `~/.radian/cache` 保持可读。
 - **macOS**：`(deny default)` + 选择性 allow；只写工作区；更深的 `deny` 覆盖 git 元数据与敏感读；
-  默认不加 `(allow network*)`；`/dev/null` 放行；`TMPDIR` 指向工作区内目录。
+  默认不加 `(allow network*)`；`/dev/null` 放行；`TMPDIR` 指向工作区内 `.radian-sandbox/tmp`。
 - **Linux**：`--unshare-all`（网络关闭）或部分隔离（开启）；宿主根 `--ro-bind / /` + 工作区
   `--bind`；git 元数据 `--ro-bind` 覆盖；敏感目录 `--tmpfs`（目录）或 `/dev/null`（文件）；
-  `--clearenv` + 白名单；`HOME`/`TMPDIR` 在工作区内。
+  `--clearenv` + 白名单；`HOME`/`TMPDIR` 在工作区内 `.radian-sandbox/{home,tmp}`。
 
-## 逃逸清单（两平台各 34 例，全部带"关掉沙箱后成功"的对照）
+## 逃逸清单（两平台各 39 例，全部带"关掉沙箱后成功"的对照）
 
 `radian-sandbox` 的 `harness`（`testing` feature）跑同一套矩阵：每条"应当失败"的用例都在
 `WorkspaceWrite` 下跑一次、在 `FullAccess` 对照下跑同一命令。`Case::passed()` 要求
@@ -58,6 +61,7 @@ macOS 版本漂移（spike 记录过 `process-fork*` 变 unbound）。探针在�
 | normal_use | 工作区内写回读；工作区外只读 | ✅ | ✅ |
 | git_readonly | 写 `.git/hooks`、`.git/config`、`.git/info`、`git config core.hooksPath`、`git add`、worktree 指针、共享 gitdir、经符号链接写共享 `.git` 全部被拒；`git status`/`git log` 可用 | 8 拒 + 2 可 | 8 拒 + 2 可 |
 | sensitive_read | 假 `~/.ssh/id_ed25519` 打开失败（只断言 exit，不读内容）；普通文件可读 | ✅ | ✅ |
+| radian_home | ADR 0020：`~/.radian/sessions/<file>` 与 `~/.radian/memory/<file>` 读失败；`config/<file>` 与 `cache/<file>` 可读；`--session-dir` 指向的目录也读失败 | 3 拒 + 2 可 | 3 拒 + 2 可 |
 | mcp_stdio | 最小 stdio MCP（initialize / tools/list / tools/call echo）可用 | ✅ | ✅ |
 | signals | 给自己的子进程、孙进程发信号可以；给沙箱外同用户进程发信号被拒 | 2 可 + 1 拒 | 2 可 + 1 拒 |
 

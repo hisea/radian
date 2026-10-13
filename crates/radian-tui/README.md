@@ -231,11 +231,11 @@ Whatever ended the app, the normal screen now says why, once, after the terminal
 Every line is a single `eprintln!` and therefore ends in `\n`; `TtyGuard::restore` also writes
 `\r\n` after leaving the alternate screen, so the shell never prints its "no newline" `%`.
 
-A panic is also appended to the **diagnostics directory** (ADR 0013 decision 4), named
-`<session-id>-<unix-millis>.panic.log` (a `radian_session::now_utc()` timestamp, the thread
-name, the panic text), with header values and the API key replaced by `<redacted>`. macOS uses
-`~/Library/Caches/radian/diagnostics`; Linux uses `$XDG_CACHE_HOME/radian/diagnostics` (or
-`~/.cache/radian/diagnostics` when it is unset or relative). The directory is `0700` and the
+A panic is also appended to the **diagnostics directory** (ADR 0013 decision 4; the path is
+ADR 0020), named `<session-id>-<unix-millis>.panic.log` (a `radian_session::now_utc()`
+timestamp, the thread name, the panic text), with header values and the API key replaced by
+`<redacted>`. It is `~/.radian/cache/diagnostics` (`$RADIAN_HOME/cache/diagnostics`). The
+directory is `0700` and the
 file `0600`; files older than 7 days are removed, and the total is capped at 50 MiB by dropping
 the oldest first — at startup and again before each write. The session directory is never
 touched by this cleanup.
@@ -291,10 +291,10 @@ continue it: `... the session file <path> exists; after fixing the problem, cont
 The session directory and id convention is **the same as `agent-cli`**, so a session written
 by one is resumable by the other:
 
-- `--session-dir DIR`, else `RADIAN_SESSION_DIR`, else the platform data directory
-  (`~/Library/Application Support/radian/sessions` on macOS,
-  `$XDG_DATA_HOME/radian/sessions` or `~/.local/share/radian/sessions` elsewhere). Never a
-  cache or temp path: a session is a durable record (ADR 0013 decision 4).
+- `--session-dir DIR`, else `RADIAN_SESSION_DIR`, else `~/.radian/sessions`
+  (`$RADIAN_HOME/sessions` when `RADIAN_HOME` is set; ADR 0020). Never a cache or temp path: a
+  session is a durable record (ADR 0013 decision 4); the sandbox denies read on it and on
+  `~/.radian/memory` (ADR 0020).
 - The session file is `<session-dir>/<session-id>.jsonl`; `--session-id VALUE` names it, and
   a generated `time-pid` id is used when neither `--session-id` nor `--resume` is given.
 - `--resume ID` opens an existing session: its stored history is rendered into the transcript
