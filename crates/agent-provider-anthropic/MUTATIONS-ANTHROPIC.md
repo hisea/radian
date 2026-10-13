@@ -49,3 +49,14 @@ M22 的 UI 侧断言（`http.rs`）与 lib 单测都覆盖；两条都是对新�
 `radian-session` 测试 `write.rs::provider_payload_is_written_byte_for_byte` 钉住（该测试在本切片
 之前就存在，本切片未改动它）；adapter 侧的「从 JSON 读回后仍回传」由
 `a_payload_read_back_from_json_still_echoes_thinking` 钉住。
+
+## anthost 追加（2026-10-16，端到端 resume）
+
+一次性 worktree `/tmp/anthost-mut`（从 `47ede1a` 创建，用完删除），`--no-fail-fast`。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M24 | `thinking_blocks` 的过滤器改成永不匹配（resume 后请求里没有思考块） | 抓住 (rc=101) | `radian-runtime` 的 `thinking_resume::a_thinking_block_survives_close_and_resume`（真会话文件 + 关闭/重开 + Anthropic mock） |
+
+M24 与 M17–M23 不同：那些是 adapter 单测/直接 `complete` 层面，M24 是**跨关闭与 resume**
+的端到端断言（thinking 块连同 signature 必须从 JSONL 读回后原样回传）。

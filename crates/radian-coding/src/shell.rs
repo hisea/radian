@@ -546,8 +546,7 @@ fn report(
     text.push_str(&format!("$ {command}\n"));
     if outcome.timed_out {
         text.push_str(&format!(
-            "[timed out after {:?}; the process group was killed]\n",
-            timeout
+            "[timed out after {timeout:?}; the process group was killed]\n"
         ));
     }
     if outcome.cancelled {
@@ -586,8 +585,7 @@ fn report(
     }
     if clamped {
         text.push_str(&format!(
-            "[timeout clamped to the configured maximum of {:?}]\n",
-            timeout
+            "[timeout clamped to the configured maximum of {timeout:?}]\n"
         ));
     }
     if output_clamped {

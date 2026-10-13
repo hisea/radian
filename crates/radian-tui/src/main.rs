@@ -14,10 +14,12 @@ use agent_core::{
     Agent, AgentConfig, AgentEvent, ContextBudget, EventSink, InputSource, TurnOptions,
 };
 use agent_extensions::McpToolProvider;
-use agent_provider_openai_compatible::{ApiKey, OpenAiCompatible, OpenAiCompatibleConfig};
 use clap::Parser;
 use radian_coding::CodingTools;
-use radian_host::{HostTools, load_mcp_config, parse_headers, validate_session_id};
+use radian_host::{
+    DEFAULT_MAX_TOKENS, HostTools, ModelArgs, Provider, Thinking, build_model, load_mcp_config,
+    parse_headers, validate_session_id,
+};
 use radian_permissions::{
     ApprovalError, ApprovalOutcome, ApprovalRequest, Approver, AuditSink, PermissionHooks,
     PermissionResolved, runtime_event,
@@ -39,13 +41,29 @@ struct Cli {
     #[arg(long)]
     model: String,
 
-    /// Everything before `/chat/completions`.
-    #[arg(long, default_value = "https://api.openai.com/v1")]
-    base_url: String,
+    /// Provider wire protocol: `openai-compatible` (the default, unchanged) or `anthropic`.
+    #[arg(long, value_name = "PROVIDER")]
+    provider: Option<String>,
 
-    /// Environment variable holding the API key. Never read from anywhere else, never printed.
-    #[arg(long, default_value = "OPENAI_API_KEY")]
-    api_key_env: String,
+    /// Everything before the provider's path (`/chat/completions` for openai-compatible,
+    /// `/v1/messages` for anthropic). Defaults to the provider's public endpoint.
+    #[arg(long, value_name = "URL")]
+    base_url: Option<String>,
+
+    /// Environment variable holding the API key. Never read from anywhere else, never
+    /// printed. Defaults to `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`.
+    #[arg(long, value_name = "VAR")]
+    api_key_env: Option<String>,
+
+    /// `max_tokens` for anthropic (the Messages API requires it). Ignored for
+    /// openai-compatible. Defaults to 16384.
+    #[arg(long, value_name = "N")]
+    max_tokens: Option<u32>,
+
+    /// Extended thinking for anthropic: `off` (default), `adaptive`, or `enabled:<budget>`.
+    /// Ignored for openai-compatible.
+    #[arg(long, value_name = "MODE")]
+    thinking: Option<String>,
 
     /// Extra request header, repeatable: `--header NAME=VALUE`.
     #[arg(long = "header", value_name = "NAME=VALUE")]
@@ -220,19 +238,42 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
         (None, None) => radian_host::generate_session_id(),
     };
     validate_session_id(&session_id)?;
+    // The provider names the defaults; an explicit flag always wins.
+    let provider = Provider::from_name(cli.provider.as_deref().unwrap_or("openai-compatible"))?;
+    let base_url = cli
+        .base_url
+        .clone()
+        .unwrap_or_else(|| provider.default_base_url().to_owned());
+    let api_key_env = cli
+        .api_key_env
+        .clone()
+        .unwrap_or_else(|| provider.default_api_key_env().to_owned());
+    let thinking = match cli.thinking.as_deref() {
+        Some(value) => value.parse::<Thinking>()?,
+        None => Thinking::Off,
+    };
     let headers = parse_headers(&cli.header, &session_id)?;
     // Header values and the key must not reach the panic log (dogfooding D4).
     let mut secrets: Vec<String> = headers.iter().map(|(_, value)| value.clone()).collect();
-    if let Ok(key) = std::env::var(&cli.api_key_env)
-        && !key.is_empty()
-    {
-        secrets.push(key);
+    let key = std::env::var(&api_key_env).ok().filter(|k| !k.is_empty());
+    if let Some(key) = &key {
+        secrets.push(key.clone());
     }
     // D1/D2: every check that can fail runs **before** the session file is created. The
     // workspace is validated first, so a typo is a workspace error and never reaches the
     // sandbox probe (dogfooding D1). `radian-host` owns the rule so both hosts share it.
     let workspace_path = radian_host::resolve_workspace(cli.workspace.as_deref())?;
-    let model = build_model(&cli, headers)?;
+    let model = build_model(ModelArgs {
+        provider,
+        base_url,
+        model: cli.model.clone(),
+        api_key: key,
+        headers,
+        // The TUI has no `--include-usage` flag; the adapter's default policy applies.
+        include_usage: None,
+        max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+        thinking,
+    })?;
     // The permission tier and the sandbox. For an enforced tier a probe failure is an error
     // here, never a fallback to an unsandboxed run (ADR 0012 decision 2). Still before
     // the session file exists, so a refusal leaves nothing behind (dogfooding D2).
@@ -265,7 +306,13 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
 
     // Every startup check that can fail is done. Only now is the session file created; a
     // failure above leaves the session directory untouched (dogfooding D2).
-    let journal = open_journal(&cli, &session_id, &dir, &workspace_path.to_string_lossy())?;
+    let journal = open_journal(
+        &cli,
+        &session_id,
+        &dir,
+        &workspace_path.to_string_lossy(),
+        provider,
+    )?;
     // D4: panics after this point get a sidecar log next to the session. Set before the
     // terminal is entered; the hook reads it whenever a panic happens.
     radian_tui::terminal::set_panic_log(dir.join(format!("{session_id}.panic.log")), secrets);
@@ -631,6 +678,7 @@ fn open_journal(
     session_id: &str,
     dir: &Path,
     workspace: &str,
+    provider: Provider,
 ) -> Result<Arc<SessionJournal>, String> {
     let path = dir.join(format!("{session_id}.jsonl"));
     if cli.resume.is_some() {
@@ -646,7 +694,7 @@ fn open_journal(
     // URL that could carry credentials (ADR 0008 §4, ADR 0013).
     let created = SessionCreatedData::new(
         workspace,
-        serde_json::json!({"provider": "openai-compatible", "model": cli.model}),
+        serde_json::json!({"provider": provider.as_str(), "model": cli.model}),
     );
     SessionJournal::create(&path, session_id, created)
         .map(Arc::new)
@@ -764,21 +812,6 @@ impl AuditSink for JournalAudit {
             let _ = journal.append_runtime_event(event).await;
         });
     }
-}
-
-fn build_model(cli: &Cli, headers: Vec<(String, String)>) -> Result<OpenAiCompatible, String> {
-    let key = std::env::var(&cli.api_key_env)
-        .ok()
-        .filter(|k| !k.is_empty());
-    let mut config = OpenAiCompatibleConfig::new(&cli.base_url, &cli.model);
-    if let Some(key) = key {
-        config = config.with_api_key(ApiKey::new(key));
-    }
-    // Parsed by `radian_host::parse_headers`: `{session_id}` already expanded, names
-    // validated, `authorization` refused. This function never touches the raw `--header`
-    // strings, so a malformed one cannot leak its value here.
-    config.headers = headers;
-    OpenAiCompatible::new(config).map_err(|e| format!("--base-url {}: {e}", cli.base_url))
 }
 
 #[cfg(test)]

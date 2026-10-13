@@ -27,12 +27,11 @@ use agent_core::{
     TurnOptions, UsageSource,
 };
 use agent_extensions::{McpServerConfig, McpToolProvider};
-use agent_provider_openai_compatible::{ApiKey, OpenAiCompatible, OpenAiCompatibleConfig};
 use clap::Parser;
 use radian_coding::CodingTools;
 use radian_host::{
-    SESSION_PLACEHOLDER, generate_session_id, load_mcp_config, parse_headers, resolve_workspace,
-    validate_session_id,
+    DEFAULT_MAX_TOKENS, HostModel, ModelArgs, Provider, SESSION_PLACEHOLDER, Thinking, build_model,
+    generate_session_id, load_mcp_config, parse_headers, resolve_workspace, validate_session_id,
 };
 use radian_permissions::{Approver, PermissionHooks};
 use radian_runtime::{BudgetRelax, CancelCause, Driver, DriverError, Inbox, InboxError};
@@ -75,14 +74,30 @@ struct Cli {
     )]
     model: Option<String>,
 
-    /// Everything before `/chat/completions`.
-    #[arg(long, default_value = "https://api.openai.com/v1")]
-    base_url: String,
+    /// Provider wire protocol: `openai-compatible` (the default, unchanged) or `anthropic`.
+    #[arg(long, value_name = "PROVIDER")]
+    provider: Option<String>,
+
+    /// Everything before the provider's path (`/chat/completions` for openai-compatible,
+    /// `/v1/messages` for anthropic). Defaults to the provider's public endpoint.
+    #[arg(long, value_name = "URL")]
+    base_url: Option<String>,
 
     /// Environment variable holding the API key. The key is never read from anywhere else
-    /// and never appears on the command line.
-    #[arg(long, default_value = "OPENAI_API_KEY")]
-    api_key_env: String,
+    /// and never appears on the command line. Defaults to `OPENAI_API_KEY`
+    /// (openai-compatible) or `ANTHROPIC_API_KEY` (anthropic).
+    #[arg(long, value_name = "VAR")]
+    api_key_env: Option<String>,
+
+    /// `max_tokens` for anthropic (the Messages API requires it). Ignored for
+    /// openai-compatible. Defaults to 16384.
+    #[arg(long, value_name = "N")]
+    max_tokens: Option<u32>,
+
+    /// Extended thinking for anthropic: `off` (default), `adaptive`, or `enabled:<budget>`.
+    /// Ignored for openai-compatible.
+    #[arg(long, value_name = "MODE")]
+    thinking: Option<String>,
 
     /// System prompt text.
     #[arg(long, conflicts_with = "system_file")]
@@ -289,7 +304,9 @@ async fn run(cli: Cli) -> i32 {
 }
 
 struct Setup {
-    model: OpenAiCompatible,
+    model: HostModel,
+    /// The provider actually chosen, for the session's config snapshot.
+    provider: Provider,
     servers: Vec<McpServerConfig>,
     system_prompt: Option<String>,
     max_model_calls: Option<u32>,
@@ -317,19 +334,27 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         ),
         _ => None,
     };
-    let key = std::env::var(&cli.api_key_env)
-        .ok()
-        .filter(|k| !k.is_empty());
-    if key.is_none() && !is_local_base_url(&cli.base_url) {
+    // The provider names the defaults; an explicit flag always wins.
+    let provider = Provider::from_name(cli.provider.as_deref().unwrap_or("openai-compatible"))
+        .map_err(SetupError)?;
+    let base_url = cli
+        .base_url
+        .clone()
+        .unwrap_or_else(|| provider.default_base_url().to_owned());
+    let api_key_env = cli
+        .api_key_env
+        .clone()
+        .unwrap_or_else(|| provider.default_api_key_env().to_owned());
+    let thinking = match cli.thinking.as_deref() {
+        Some(value) => value.parse::<Thinking>().map_err(SetupError)?,
+        None => Thinking::Off,
+    };
+    let key = std::env::var(&api_key_env).ok().filter(|k| !k.is_empty());
+    if key.is_none() && !is_local_base_url(&base_url) {
         return Err(SetupError(format!(
-            "no API key: set ${} (or point --api-key-env at the right variable); \
-             refusing to continue because {} is not a local address",
-            cli.api_key_env, cli.base_url
+            "no API key: set ${api_key_env} (or point --api-key-env at the right variable); \
+             refusing to continue because {base_url} is not a local address"
         )));
-    }
-    let mut config = OpenAiCompatibleConfig::new(&cli.base_url, model_name(cli)?);
-    if let Some(key) = &key {
-        config = config.with_api_key(ApiKey::new(key.clone()));
     }
     // Resolve the session id once per process. `--resume` names an existing session, so it
     // wins; otherwise `--session-id`, otherwise a generated one. The same value is the
@@ -349,15 +374,22 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         .iter()
         .any(|item| item.contains(SESSION_PLACEHOLDER));
     let headers = parse_headers(&cli.header, &session_id).map_err(SetupError)?;
-    config.headers = headers.clone();
-    config.include_usage = cli.include_usage;
     if uses_placeholder && cli.session_id.is_none() && cli.resume.is_none() {
         // Only when the generated id is actually observable: it is what makes the routing
         // reusable across processes.
         eprintln!("[session] {session_id} (pass --session-id to reuse it)");
     }
-    let model = OpenAiCompatible::new(config)
-        .map_err(|e| SetupError(format!("--base-url {}: {e}", cli.base_url)))?;
+    let model = build_model(ModelArgs {
+        provider,
+        base_url,
+        model: model_name(cli)?.to_owned(),
+        api_key: key.clone(),
+        headers: headers.clone(),
+        include_usage: cli.include_usage,
+        max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+        thinking,
+    })
+    .map_err(SetupError)?;
     let servers = match &cli.mcp_config {
         Some(path) => load_mcp_config(path).map_err(SetupError)?,
         None => Vec::new(),
@@ -387,6 +419,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     };
     Ok(Setup {
         model,
+        provider,
         servers,
         system_prompt,
         max_model_calls: cli.max_model_calls,
@@ -566,14 +599,25 @@ fn session_workspace_of(session: &Session) -> Option<String> {
     })
 }
 
-/// The values that must never appear in an export: this process's key (the one `setup` would
-/// read) and every `--header` value. Redaction itself is not optional (ADR 0013 decision 3).
+/// The values that must never appear in an export: the key `setup` would read and every
+/// `--header` value. Redaction itself is not optional (ADR 0013 decision 3). An export does
+/// not know which provider wrote the session, so without `--api-key-env` both providers'
+/// default key variables are redacted.
 fn export_secrets(cli: &Cli) -> Vec<String> {
     let mut secrets = Vec::new();
-    if let Ok(key) = std::env::var(&cli.api_key_env)
-        && !key.is_empty()
-    {
-        secrets.push(key);
+    let names: Vec<String> = match &cli.api_key_env {
+        Some(name) => vec![name.clone()],
+        None => [Provider::OpenAiCompatible, Provider::Anthropic]
+            .into_iter()
+            .map(|provider| provider.default_api_key_env().to_owned())
+            .collect(),
+    };
+    for name in names {
+        if let Ok(key) = std::env::var(&name)
+            && !key.is_empty()
+        {
+            secrets.push(key);
+        }
     }
     for header in &cli.header {
         if let Some((_, value)) = header.split_once('=')
@@ -664,6 +708,7 @@ fn open_journal(
     cli: &Cli,
     session_id: &str,
     workspace: &str,
+    provider: Provider,
 ) -> Result<Arc<SessionJournal>, SetupError> {
     let dir = session_dir(cli)?;
     let path = dir.join(format!("{session_id}.jsonl"));
@@ -684,7 +729,7 @@ fn open_journal(
     // base URL that could carry credentials (ADR 0008 §4, ADR 0013).
     let created = SessionCreatedData::new(
         workspace,
-        serde_json::json!({"provider": "openai-compatible", "model": model_name(cli)?}),
+        serde_json::json!({"provider": provider.as_str(), "model": model_name(cli)?}),
     );
     let journal = SessionJournal::create(&path, session_id, created)
         .map_err(|e| SetupError(format!("cannot create session {session_id:?}: {e}")))?;
@@ -748,7 +793,12 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
 
     // Every startup check that can fail is done. Only now is the session file created; a
     // failure above leaves the session directory untouched (dogfooding D2).
-    let journal = open_journal(&cli, &setup.session_id, &workspace_path.to_string_lossy())?;
+    let journal = open_journal(
+        &cli,
+        &setup.session_id,
+        &workspace_path.to_string_lossy(),
+        setup.provider,
+    )?;
     // The permission layer replaces the CLI's own approval hook: rules, "allow for this
     // session" grants, and the audit record. `--yes` swaps the approver for one that answers
     // "allow once" without asking; rules and the sandbox are untouched by it.

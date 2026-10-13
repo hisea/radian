@@ -9,6 +9,22 @@ scrolls itself, streaming text and reasoning, and clean terminal recovery.
 > screen. The tests never do: they drive the binary through `portable-pty` and read a `vt100`
 > screen model, or use `ratatui`'s `TestBackend`.
 
+## Providers
+
+`--provider` picks the wire protocol; the default is unchanged.
+
+- `openai-compatible` (default): `/chat/completions`; `--base-url` defaults to
+  `https://api.openai.com/v1`, the key comes from `$OPENAI_API_KEY` unless `--api-key-env`
+  names another variable.
+- `anthropic`: the Messages API (`/v1/messages`); `--base-url` defaults to
+  `https://api.anthropic.com`, the key comes from `$ANTHROPIC_API_KEY` unless `--api-key-env`
+  names another variable. `--max-tokens` (default 16384) is required by the Messages API, and
+  `--thinking off|adaptive|enabled:<budget>` enables extended thinking (default `off`).
+
+The key is read only from the environment variable and is redacted from the panic log along
+with every header value; it is never written to the session file. The config snapshot names
+the provider and the model only.
+
 ## Layout and keys
 
 ```

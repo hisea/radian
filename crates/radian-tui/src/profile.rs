@@ -140,35 +140,11 @@ fn probe_failure_injected() -> bool {
 /// ADR 0012 decision 4 and must **not** claim credential isolation: the macOS backend
 /// leaves `mach-lookup` open, so IPC is not contained.
 pub fn describe(tier: Tier, sandbox: Option<&Sandbox>) -> (String, String) {
-    match (tier, sandbox) {
-        (Tier::Safe, _) => (
-            "safe (no sandbox needed: no command execution)".into(),
-            "writes and command execution are denied; the read/list/git tools are confined to \
-             the workspace by the tools themselves"
-                .into(),
-        ),
-        (Tier::WorkspaceWrite, Some(sandbox)) => (
-            format!(
-                "workspace-write · sandbox {} (probe: {})",
-                sandbox.backend_name(),
-                sandbox.probe().detail
-            ),
-            "shell and the built-in tools: writes are confined to the workspace, repository \
-             metadata is read-only, sensitive directories are not readable by default, and the \
-             network is off. MCP servers are NOT sandboxed in this build and run with your full \
-             access. The IPC boundary is not tightened, so this is not a complete credential \
-             boundary"
-                .into(),
-        ),
-        (Tier::FullAccess, _) => (
-            "full-access (chosen explicitly; never a default)".into(),
-            "no sandbox: commands can read and write anywhere you can, including the network"
-                .into(),
-        ),
-        // Unreachable: an enforced tier always has a sandbox or the build failed.
-        (Tier::WorkspaceWrite, None) => (
-            "workspace-write (sandbox missing)".into(),
-            "the sandbox is missing; this must not happen".into(),
-        ),
-    }
+    // The shared text lives in `radian-host` (dogfooding D5); this host keeps only its
+    // wording: the full-screen host talks about its shell.
+    radian_host::describe(
+        tier.preset().sandbox_mode(),
+        sandbox,
+        radian_host::TUI_WORDING,
+    )
 }

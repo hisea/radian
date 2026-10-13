@@ -13,4 +13,5 @@ thiserror.workspace = true
 tokio = { workspace = true }
 
 [dev-dependencies]
+agent-provider-anthropic = { path = "../agent-provider-anthropic", features = ["testing"] }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "test-util"] }

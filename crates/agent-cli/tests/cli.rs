@@ -5,6 +5,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use agent_provider_anthropic::testing as anth;
 use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -3091,6 +3092,270 @@ async fn a_bad_mcp_config_leaves_no_session() {
     assert_session_dir_empty(&session_dir);
 }
 
+// ---------- provider selection: anthropic (Phase 7 / anthost) ----------
+
+/// One Anthropic text reply: the minimal end_turn event stream (wire notes §4).
+fn anth_text_reply(text: &str) -> anth::Reply {
+    anth::Reply::sse(&[
+        anth::message_start(Some(json!({"input_tokens": 3, "output_tokens": 1}))),
+        anth::text_start(0),
+        anth::text_delta(0, text),
+        anth::block_stop(0),
+        anth::message_delta("end_turn", Some(json!({"output_tokens": 2}))),
+        anth::message_stop(),
+    ])
+}
+
+/// `--provider anthropic` talks the Messages API: `/v1/messages`, `x-api-key` and
+/// `anthropic-version`, and the reply is shown.
+#[tokio::test]
+async fn anthropic_provider_sends_a_messages_request_and_shows_the_reply() {
+    let server = anth::MockServer::start(vec![anth_text_reply("ANTHROPIC-REPLY-OK")]).await;
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "claude-x",
+                "--provider",
+                "anthropic",
+                "--base-url",
+                &server.base_url,
+                "--api-key-env",
+                "ANTHROPIC_API_KEY",
+                "-p",
+                "hi",
+            ],
+            &[("ANTHROPIC_API_KEY", "sk-ant-test-key")],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("ANTHROPIC-REPLY-OK"), "{stdout}");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1, "one request expected");
+    assert_eq!(requests[0].path, "/v1/messages");
+    assert_eq!(requests[0].header("x-api-key"), Some("sk-ant-test-key"));
+    assert_eq!(requests[0].header("anthropic-version"), Some("2023-06-01"));
+    let body = requests[0].json();
+    assert_eq!(body["model"], "claude-x");
+    // `max_tokens` is required by the Messages API and the host fills it in.
+    assert_eq!(body["max_tokens"], 16384, "{body}");
+    // Default thinking is off: the request has no `thinking` key at all.
+    assert!(body.get("thinking").is_none(), "{body}");
+}
+
+/// Without `--api-key-env`, `--provider anthropic` reads `ANTHROPIC_API_KEY`; the key never
+/// appears in the output or the session file.
+#[tokio::test]
+async fn anthropic_reads_anthropic_api_key_env_by_default_and_never_leaks_it() {
+    let server = anth::MockServer::start(vec![anth_text_reply("ok")]).await;
+    let dir = fresh_session_dir();
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent_in(
+            &dir,
+            &[
+                "--model",
+                "claude",
+                "--provider",
+                "anthropic",
+                "--base-url",
+                &server.base_url,
+                "--session-id",
+                "anthro-env",
+                "-p",
+                "hi",
+            ],
+            &[("ANTHROPIC_API_KEY", "sk-ant-default-env-key")],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        server.requests()[0].header("x-api-key"),
+        Some("sk-ant-default-env-key")
+    );
+    for text in [&stdout, &stderr] {
+        assert!(
+            !text.contains("sk-ant-default-env-key"),
+            "the key leaked into the output: {text}"
+        );
+    }
+    let session = std::fs::read_to_string(dir.join("anthro-env.jsonl")).unwrap();
+    assert!(
+        !session.contains("sk-ant-default-env-key"),
+        "the key reached the session file"
+    );
+}
+
+/// `--thinking adaptive` puts `{"type":"adaptive"}` in the request body; `enabled:<budget>`
+/// puts the budget in. The default (no `--thinking`) sends no `thinking` key, asserted in the
+/// messages test above.
+#[tokio::test]
+async fn anthropic_thinking_modes_are_sent_in_the_body() {
+    for (mode, expected) in [
+        ("adaptive", json!({"type": "adaptive"})),
+        (
+            "enabled:8192",
+            json!({"type": "enabled", "budget_tokens": 8192}),
+        ),
+    ] {
+        let server = anth::MockServer::start(vec![anth_text_reply("ok")]).await;
+        let (code, _, stderr) = feed_and_wait(
+            spawn_agent(
+                &[
+                    "--model",
+                    "claude",
+                    "--provider",
+                    "anthropic",
+                    "--base-url",
+                    &server.base_url,
+                    "--thinking",
+                    mode,
+                    "-p",
+                    "hi",
+                ],
+                &[("ANTHROPIC_API_KEY", "sk-ant-thinking")],
+            ),
+            "",
+        )
+        .await;
+        assert_eq!(code, 0, "{mode}: {stderr}");
+        assert_eq!(server.requests()[0].json()["thinking"], expected, "{mode}");
+    }
+}
+
+/// The session config snapshot names the real provider; the default provider is unchanged.
+#[tokio::test]
+async fn the_session_snapshot_names_the_real_provider() {
+    // anthropic
+    let server = anth::MockServer::start(vec![anth_text_reply("ok")]).await;
+    let dir = fresh_session_dir();
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent_in(
+            &dir,
+            &[
+                "--model",
+                "claude",
+                "--provider",
+                "anthropic",
+                "--base-url",
+                &server.base_url,
+                "--session-id",
+                "snap-ant",
+                "-p",
+                "hi",
+            ],
+            &[("ANTHROPIC_API_KEY", "sk-ant-snap")],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let session = std::fs::read_to_string(dir.join("snap-ant.jsonl")).unwrap();
+    assert!(session.contains("\"provider\":\"anthropic\""), "{session}");
+
+    // openai-compatible (the default, no --provider flag)
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let dir = fresh_session_dir();
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent_in(
+            &dir,
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--session-id",
+                "snap-oai",
+                "-p",
+                "hi",
+            ],
+            &[("OPENAI_API_KEY", KEY)],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let session = std::fs::read_to_string(dir.join("snap-oai.jsonl")).unwrap();
+    assert!(
+        session.contains("\"provider\":\"openai-compatible\""),
+        "{session}"
+    );
+}
+
+/// The default provider still sends an OpenAI-compatible request: `/v1/chat/completions`
+/// (the adapter's path) and a bearer token.
+#[tokio::test]
+async fn the_default_provider_still_sends_an_openai_request() {
+    let server = MockServer::start(vec![text_reply("OPENAI-REPLY")]).await;
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
+            &[("OPENAI_API_KEY", KEY)],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("OPENAI-REPLY"), "{stdout}");
+    let request = &server.requests()[0];
+    assert_eq!(request.path, "/v1/chat/completions");
+    assert_eq!(
+        request.header("authorization"),
+        Some(format!("Bearer {KEY}").as_str())
+    );
+}
+
+/// `--thinking enabled:<budget>` is checked before the session file exists: the budget must be
+/// `>= 1024` and `< --max-tokens` (Anthropic's rule, wire notes §2.3). Both a budget equal to
+/// `max_tokens` (16384 default) and one below 1024 are usage errors and leave no session file.
+#[tokio::test]
+async fn anthropic_rejects_a_thinking_budget_out_of_range_before_creating_a_session() {
+    let server = anth::MockServer::start(vec![anth_text_reply("ok")]).await;
+    for (mode, budget) in [("enabled:16384", 16384u64), ("enabled:1000", 1000)] {
+        let dir = fresh_session_dir();
+        let (code, _, stderr) = feed_and_wait(
+            spawn_agent_in(
+                &dir,
+                &[
+                    "--model",
+                    "claude",
+                    "--provider",
+                    "anthropic",
+                    "--base-url",
+                    &server.base_url,
+                    "--thinking",
+                    mode,
+                    "-p",
+                    "hi",
+                ],
+                &[("ANTHROPIC_API_KEY", "sk-ant-budget")],
+            ),
+            "",
+        )
+        .await;
+        assert_eq!(code, 2, "{mode} must be a usage error: {stderr}");
+        assert!(stderr.contains("out of range"), "{mode}: {stderr}");
+        assert!(
+            stderr.contains(&format!("enabled:{budget}")),
+            "the message must name the budget: {stderr}"
+        );
+        // The rule and both numbers are in the message.
+        assert!(stderr.contains("1024"), "{mode}: {stderr}");
+        assert!(stderr.contains("16384"), "{mode}: {stderr}");
+        // No session file was created, and no request was sent.
+        assert_session_dir_empty(&dir);
+    }
+    assert!(
+        server.requests().is_empty(),
+        "an out-of-range budget must not reach the model"
+    );
+}
+
 // ---------- session export and search (--export / --search) ----------
 
 /// Writes a minimal, valid v1 session file by hand: one user message and one assistant
@@ -3630,4 +3895,46 @@ async fn export_refuses_a_path_like_session_id() {
             "{bad:?}: the error leaked file content: {stderr}"
         );
     }
+}
+
+/// An export does not know which provider wrote the session, so without `--api-key-env` both
+/// providers' default key variables are named secrets. The key here has no recognizable
+/// pattern (unlike `KEY`'s `sk-` prefix), so only a named secret can remove it.
+#[tokio::test]
+async fn export_redacts_the_anthropic_key_without_api_key_env() {
+    let opaque = "opaque-anthropic-credential-7f3a";
+    let dir = scratch("export-anthropic-secret");
+    let sessions = dir.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    write_session(
+        &sessions,
+        "anth",
+        &canonical(&ws),
+        &format!("the anthropic key {opaque} appears here"),
+        None,
+        None,
+    );
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--export",
+                "anth",
+            ],
+            &[("ANTHROPIC_API_KEY", opaque)],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        !stdout.contains(opaque),
+        "the anthropic key leaked: {stdout}"
+    );
+    assert!(stdout.contains("<redacted>"), "{stdout}");
 }
