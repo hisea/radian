@@ -365,30 +365,39 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         let summary_max = compaction::DEFAULT_SUMMARY_MAX_TOKENS.min(keep);
 
         let mut summary = None;
+        // The first call summarizes the conversation. The one controlled retry (ADR 0018)
+        // depends on why the first answer was invalid (dogfood7): an over-long answer gets a
+        // **shortening** request that carries only that answer (not the conversation again),
+        // while an empty answer just resends the original request.
+        let mut summary_request = compaction::summary_request(
+            previous_summary.as_deref(),
+            &to_summarize,
+            instructions.as_deref(),
+            summary_max,
+        );
         for attempt in 0..2 {
-            let summary_request = compaction::summary_request(
-                previous_summary.as_deref(),
-                &to_summarize,
-                instructions.as_deref(),
-            );
             let noop = NoopSink;
             let mcx = ModelContext {
                 cancellation: interrupt.token.child_token(),
                 events: &noop,
             };
-            let response =
-                match race(interrupt, self.agent.model.complete(summary_request, mcx)).await {
-                    Raced::Interrupted(reason) => return Ok(CompactionStep::Cancelled(reason)),
-                    Raced::Done(Err(error)) => {
-                        events.emit(AgentEvent::CompactionFailed {
-                            reason: error.to_string(),
-                        });
-                        return Err(CompactionFailure::Compaction(CompactionError::Summary(
-                            error,
-                        )));
-                    }
-                    Raced::Done(Ok(response)) => response,
-                };
+            let response = match race(
+                interrupt,
+                self.agent.model.complete(summary_request.clone(), mcx),
+            )
+            .await
+            {
+                Raced::Interrupted(reason) => return Ok(CompactionStep::Cancelled(reason)),
+                Raced::Done(Err(error)) => {
+                    events.emit(AgentEvent::CompactionFailed {
+                        reason: error.to_string(),
+                    });
+                    return Err(CompactionFailure::Compaction(CompactionError::Summary(
+                        error,
+                    )));
+                }
+                Raced::Done(Ok(response)) => response,
+            };
             // ADR 0018 §计费: the real call is recorded immediately, commit or not, and it is
             // deliberately not a `ModelUsage` (it must not move the budget baseline).
             if let (Some(journal), Some(usage)) = (self.journal.as_ref(), response.usage.clone())
@@ -409,7 +418,21 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
                     summary = Some(checked);
                     break;
                 }
-                Err(_) if attempt == 0 => continue,
+                Err(error) if attempt == 0 => {
+                    summary_request = match error {
+                        compaction::SummaryError::TooLong { .. } => compaction::shorten_request(
+                            text.trim(),
+                            compaction::shorten_target(summary_max),
+                        ),
+                        // Empty (and the only other variant) resends the original request.
+                        compaction::SummaryError::Empty => compaction::summary_request(
+                            previous_summary.as_deref(),
+                            &to_summarize,
+                            instructions.as_deref(),
+                            summary_max,
+                        ),
+                    };
+                }
                 Err(error) => {
                     events.emit(AgentEvent::CompactionFailed {
                         reason: error.to_string(),

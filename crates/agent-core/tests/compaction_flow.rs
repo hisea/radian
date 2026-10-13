@@ -8,8 +8,9 @@ use std::sync::Arc;
 
 use agent_core::testing::RecordingJournal;
 use agent_core::{
-    Agent, AgentConfig, AgentEvent, ContentPart, ContextBudget, JournalRecord, Message,
-    ModelResponse, ModelUsage, NoTools, RunStatus, StopReason, TurnOptions, compaction,
+    Agent, AgentConfig, AgentEvent, CompactionError, ContentPart, ContextBudget, JournalRecord,
+    Message, ModelResponse, ModelUsage, NoTools, RunError, RunStatus, StopReason, TurnOptions,
+    compaction,
 };
 use common::{Recorder, Reply, ScriptedModel, text};
 
@@ -95,10 +96,13 @@ async fn a_request_over_the_budget_is_compacted_and_committed() {
     // Two model calls: the summary first, then the compacted conversation request.
     let requests = model.requests();
     assert_eq!(requests.len(), 2, "one summary + one compacted request");
-    assert_eq!(
-        requests[0].system_prompt.as_deref(),
-        Some(compaction::SUMMARY_SYSTEM_PROMPT)
+    // The prompt is the base structure plus the length ceiling (dogfood7).
+    let summary_prompt = requests[0].system_prompt.as_deref().unwrap();
+    assert!(
+        summary_prompt.starts_with(compaction::SUMMARY_SYSTEM_PROMPT),
+        "{summary_prompt}"
     );
+    assert!(summary_prompt.contains("tokens"), "{summary_prompt}");
     assert!(
         requests[1].system_prompt.is_none(),
         "the second is the conversation"
@@ -770,5 +774,152 @@ fn a_compaction_record_inside_a_pending_segment_is_corruption() {
     assert!(
         matches!(error, agent_core::ReplayError::Replacement { .. }),
         "{error:?}"
+    );
+}
+
+// ---------- dogfood7: an over-long summary must not fail the turn ----------
+
+fn compaction_usage_count(journal: &RecordingJournal) -> usize {
+    journal
+        .records()
+        .iter()
+        .filter(|record| matches!(record, JournalRecord::CompactionUsage { .. }))
+        .count()
+}
+
+/// The first summary is over the limit: the one retry sends **only** the over-long summary
+/// and asks for a shorter one (no original conversation), and the second answer commits. Two
+/// real calls are billed.
+#[tokio::test]
+async fn an_overlong_summary_is_shortened_on_the_retry() {
+    let overlong = "L".repeat(9_000);
+    let model = ScriptedModel::new([
+        summary_reply(&overlong, 50),
+        summary_reply("the shorter summary", 10),
+        text("done"),
+    ]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = compaction_agent(model.clone(), 3_000, true);
+    let mut session = agent
+        .open_session_with_journal(big_history(), journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let outcome = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(session.transcript_revision(), 1, "the retry committed");
+
+    let requests = model.requests();
+    assert_eq!(requests.len(), 3, "summary, shorten, compacted request");
+    // The first summary request states the enforced limit (2048 = keep_target(3000)).
+    let first_prompt = requests[0].system_prompt.as_deref().unwrap();
+    assert!(first_prompt.contains("2048 tokens"), "{first_prompt}");
+    // The retry is the shortening request: 80% of 2048 is 1638, and the body is the over-long
+    // summary, not the conversation again.
+    let shorten_prompt = requests[1].system_prompt.as_deref().unwrap();
+    assert!(shorten_prompt.contains("1638 tokens"), "{shorten_prompt}");
+    let body = requests[1].messages[0].text();
+    assert!(
+        body.contains(&overlong),
+        "the over-long summary is not the input"
+    );
+    assert!(body.contains("seven sections"), "{body}");
+    assert!(
+        !body.contains("Conversation to summarize") && !body.contains("xxxx"),
+        "the retry must not resend the conversation: {body}"
+    );
+    // Both real calls are billed.
+    assert_eq!(compaction_usage_count(&journal), 2);
+    // And the committed history is the shorter summary.
+    assert!(
+        session.transcript()[0]
+            .text()
+            .contains("the shorter summary")
+    );
+}
+
+/// The first summary is empty: the retry resends the **original** request, not a shortening
+/// one.
+#[tokio::test]
+async fn an_empty_summary_resends_the_original_request() {
+    let model = ScriptedModel::new([
+        summary_reply("   ", 50),
+        summary_reply("the summary", 10),
+        text("done"),
+    ]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = compaction_agent(model.clone(), 3_000, true);
+    let mut session = agent
+        .open_session_with_journal(big_history(), journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let outcome = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    let requests = model.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests[1].messages[0].text(),
+        requests[0].messages[0].text(),
+        "an empty answer resends the original request"
+    );
+    assert!(
+        requests[1].messages[0]
+            .text()
+            .contains("Conversation to summarize")
+    );
+    assert!(
+        !requests[1].messages[0]
+            .text()
+            .contains("<summary-to-shorten>")
+    );
+    assert_eq!(compaction_usage_count(&journal), 2);
+}
+
+/// Both summaries are over the limit: the turn fails with the unchanged error text and
+/// nothing commits.
+#[tokio::test]
+async fn two_overlong_summaries_fail_the_turn() {
+    let overlong = "L".repeat(9_000);
+    let model = ScriptedModel::new([
+        summary_reply(&overlong, 50),
+        summary_reply(&overlong, 10),
+        text("never"),
+    ]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = compaction_agent(model.clone(), 3_000, true);
+    let mut session = agent
+        .open_session_with_journal(big_history(), journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let error = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap_err();
+    match error {
+        RunError::Compaction(CompactionError::InvalidSummary(message)) => {
+            assert!(message.contains("over the limit of 2048"), "{message}");
+        }
+        other => panic!("expected an invalid-summary failure, got {other:?}"),
+    }
+    assert_eq!(session.transcript_revision(), 0, "nothing committed");
+    assert_eq!(model.requests().len(), 2, "exactly two attempts");
+    assert_eq!(compaction_usage_count(&journal), 2);
+    assert!(
+        !journal
+            .records()
+            .iter()
+            .any(|record| matches!(record, JournalRecord::ContextCompacted { .. })),
+        "no candidate is written"
     );
 }

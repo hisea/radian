@@ -47,9 +47,10 @@ pub const DEFAULT_SUMMARY_MAX_TOKENS: u64 = 8_192;
 /// reach the summarizer.
 pub const TOOL_RESULT_LIMIT_CHARS: usize = 2_000;
 
-/// The fixed system prompt for a summary request (ADR 0018's structure). It asks for the
-/// seven sections by name and forbids inventing anything, because the summary becomes part
-/// of the next request's context.
+/// The fixed part of the summary system prompt (ADR 0018's structure). It asks for the seven
+/// sections by name and forbids inventing anything, because the summary becomes part of the
+/// next request's context. The length ceiling is added by [`summary_system_prompt`], which
+/// depends on the compaction.
 pub const SUMMARY_SYSTEM_PROMPT: &str = "\
 You are compressing a coding conversation so another agent can continue the work. \
 Produce one structured summary with exactly these sections, in this order:
@@ -65,6 +66,34 @@ Produce one structured summary with exactly these sections, in this order:
 Keep every section concise. Preserve exact file paths, function names, commands, and error \
 messages. Include only what the conversation contains; never invent or guess. Output only the \
 summary, with no preamble.";
+
+/// The share of the ceiling the shortening retry aims for, leaving margin so the result
+/// comfortably passes `check_summary`.
+pub const SHORTEN_TARGET_PERCENT: u64 = 80;
+
+/// The token ceiling the shortening retry asks for: 80% of the enforced limit.
+pub fn shorten_target(max_tokens: u64) -> u64 {
+    max_tokens.saturating_mul(SHORTEN_TARGET_PERCENT) / 100
+}
+
+/// The word count the prompt quotes for a token ceiling. ADR 0018's ruler is 1 token ≈ 0.75
+/// English words; the prompt says so, because the model cannot count tokens.
+fn approx_words(tokens: u64) -> u64 {
+    tokens.saturating_mul(3) / 4
+}
+
+/// The system prompt for a summary request: [`SUMMARY_SYSTEM_PROMPT`] plus the length ceiling
+/// `check_summary` enforces, stated in tokens and in approximate English words (dogfood7: the
+/// model wrote a 10k-token summary twice because nothing told it the limit).
+pub fn summary_system_prompt(max_tokens: u64) -> String {
+    format!(
+        "{SUMMARY_SYSTEM_PROMPT}\n\nThe entire summary must be shorter than {max_tokens} tokens \
+         (about {} English words; that is an approximation, 1 token ≈ 0.75 words). Drop details \
+         that are no longer important if you must. This applies when updating a previous summary \
+         too: shorten it, do not only append.",
+        approx_words(max_tokens)
+    )
+}
 
 /// The line the compacted history's summary message starts with, so a reader (and the model)
 /// can tell a summary from an ordinary user message.
@@ -256,6 +285,7 @@ pub fn summary_request(
     previous_summary: Option<&str>,
     to_summarize: &[Message],
     instructions: Option<&str>,
+    max_tokens: u64,
 ) -> ModelRequest {
     let mut body = String::new();
     if let Some(previous) = previous_summary.map(str::trim).filter(|p| !p.is_empty()) {
@@ -274,7 +304,29 @@ pub fn summary_request(
         body.push_str(instructions);
     }
     ModelRequest {
-        system_prompt: Some(SUMMARY_SYSTEM_PROMPT.to_owned()),
+        system_prompt: Some(summary_system_prompt(max_tokens)),
+        messages: vec![Message::user(body)],
+        tools: Vec::new(),
+        settings: Value::Null,
+    }
+}
+
+/// Builds the **shortening** retry request: when the first summary came back over the limit,
+/// the second call sends only that over-long summary and asks for a shorter one that keeps the
+/// seven sections. The original conversation is deliberately **not** resent, so the model is
+/// not tempted to write another 10k-token roll-up (dogfood7). `target_tokens` is
+/// [`shorten_target`], below the enforced limit to leave margin.
+pub fn shorten_request(overlong_summary: &str, target_tokens: u64) -> ModelRequest {
+    let body = format!(
+        "The summary below is over the length limit. Rewrite it shorter, keeping exactly the \
+         seven sections and what they say; drop details that are no longer important. The result \
+         must be shorter than {target_tokens} tokens (about {} English words; that is an \
+         approximation, 1 token ≈ 0.75 words). Do not add new content and do not only append: \
+         the whole summary must fit.\n\n<summary-to-shorten>\n{overlong_summary}\n</summary-to-shorten>",
+        approx_words(target_tokens)
+    );
+    ModelRequest {
+        system_prompt: Some(summary_system_prompt(target_tokens)),
         messages: vec![Message::user(body)],
         tools: Vec::new(),
         settings: Value::Null,
