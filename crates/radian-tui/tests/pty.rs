@@ -3975,3 +3975,155 @@ fn a_panicking_pty_test_leaves_no_app_process() {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+// ---------- ADR 0023 U2: the event-driven loop ----------
+
+/// The frame markers on the wire: `set_cursor_visible` writes one `?25h` per drawn frame (the
+/// same count the Step 0 baseline used).
+fn frame_count(pty: &Pty) -> usize {
+    pty.raw()
+        .windows(5)
+        .filter(|window| *window == b"[?25h")
+        .count()
+}
+
+/// ADR 0023 U2's zero-redraw rule: an idle screen is not redrawn at all. Before the
+/// event-driven loop the app drew ~19 frames/s while nothing happened (`docs/perf-baseline.md`
+/// §7); now the frame count over an idle window must not move.
+#[test]
+fn pty_an_idle_screen_is_not_redrawn() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("idle-redraw");
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "idle-redraw",
+            "--offline-catalog",
+        ],
+        20,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("type a message", 10),
+        "{}",
+        pty.screen()
+    );
+    let before = frame_count(&pty);
+    assert!(before >= 1, "the first frame is drawn");
+
+    let window = std::time::Instant::now();
+    while window.elapsed() < std::time::Duration::from_secs(2) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let after = frame_count(&pty);
+    pty.quit();
+    assert_eq!(
+        after, before,
+        "an idle screen must not be redrawn (ADR 0023 U2)"
+    );
+}
+
+/// ADR 0023 U2: a signal is an event, not a poll. The loop is blocked on its channel while the
+/// app is idle; SIGTERM must take the ordinary exit path at once — far inside the signal task's
+/// 3 s watchdog, which is what would fire if the loop still had to poll for the flag.
+#[test]
+fn pty_a_signal_while_idle_leaves_immediately() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("signal-immediate");
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "signal-immediate",
+            "--offline-catalog",
+        ],
+        20,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("type a message", 10),
+        "{}",
+        pty.screen()
+    );
+    let pid = app_pid(&pty);
+    let sent = std::time::Instant::now();
+    let status = std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(&pid)
+        .status()
+        .unwrap();
+    assert!(status.success(), "kill -TERM {pid}");
+    assert!(pty.wait_for_exit(5).is_some(), "the app did not exit");
+    let elapsed = sent.elapsed();
+    assert_eq!(pty.app_exit_code(), Some(143), "128 + SIGTERM");
+    assert!(
+        elapsed < std::time::Duration::from_millis(1500),
+        "the signal must be an event, not the 3 s watchdog: it took {elapsed:?}"
+    );
+}
+
+/// ADR 0023 U2's draw fairness: a producer that floods the channel must not starve the frame.
+/// `--flood-facts` sends 20 000 facts as fast as it can (real producers are bounded by the turn
+/// structure; this one is not, which is what makes the rule testable). The loop processes at
+/// most `MAX_FACTS_PER_TURN` per turn, so frames keep appearing while the queue drains, and a
+/// key is still handled.
+#[test]
+fn pty_a_flooding_producer_still_draws_and_answers_keys() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("flood-facts");
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "flood-facts",
+            "--offline-catalog",
+            "--flood-facts",
+            "20000",
+        ],
+        20,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("type a message", 10),
+        "{}",
+        pty.screen()
+    );
+    let before = frame_count(&pty);
+
+    // Sample while the flood drains: the frame count must keep moving (a loop that drained the
+    // whole queue in one turn would draw once and then nothing for the rest of the window).
+    let window = std::time::Instant::now();
+    while window.elapsed() < std::time::Duration::from_secs(2) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let drawn = frame_count(&pty) - before;
+    assert!(
+        drawn >= 100,
+        "the flood starved the draw: {drawn} frames in 2 s"
+    );
+
+    // A key is still handled while the queue drains.
+    pty.send(b"zzz");
+    assert!(
+        pty.wait_for_screen("zzz", 5),
+        "the key was not handled: {}",
+        pty.screen()
+    );
+    pty.quit();
+}

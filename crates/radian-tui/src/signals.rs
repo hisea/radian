@@ -2,9 +2,10 @@
 //!
 //! Without this, a SIGTERM killed the process mid-frame: the alternate screen and raw mode
 //! stayed on and nothing said why the app was gone (the shell printed `zsh: terminated`). The
-//! listener only records which signal arrived; the UI loop sees it on its next tick and takes
-//! the ordinary exit path, so the terminal is restored, the driver is stopped, and `main`
-//! prints one reason line and exits with `128 + signal`, the shell convention.
+//! listener records which signal arrived and hands it to the caller's `notify` (the TUI sends
+//! it as a `UiEvent`, ADR 0023 U2: nothing is polled); the loop then takes the ordinary exit
+//! path, so the terminal is restored, the driver is stopped, and `main` prints one reason line
+//! and exits with `128 + signal`, the shell convention.
 
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Duration;
@@ -17,10 +18,9 @@ const SIGHUP: i32 = 1;
 const SIGTERM: i32 = 15;
 
 /// How long the signal task waits for the main loop to confirm it is leaving. The loop is
-/// normally in its 50 ms input poll and sees the flag on the next tick; but crossterm's reader
-/// can spin forever on a tty that has gone away (see `read_input` in `main.rs`), and then the
-/// loop never reaches the flag. Three seconds is far longer than one tick and short enough that
-/// a hung app does not linger.
+/// normally blocked on its event channel and wakes immediately; but it can be stuck in a long
+/// frame or an effect, or the terminal can be gone. Three seconds is far longer than a wake-up
+/// and short enough that a stuck app does not linger.
 const EXIT_WATCHDOG: Duration = Duration::from_secs(3);
 
 /// The signal that asked the app to stop, or 0.
@@ -56,10 +56,14 @@ pub fn name(signal: i32) -> &'static str {
     }
 }
 
-/// Starts listening for SIGTERM and SIGHUP on `runtime`. Installing the handlers replaces the
-/// default "terminate now" action, so from here on these signals only set the flag.
+/// Starts listening for SIGTERM and SIGHUP on `runtime`, calling `notify(signal)` once. Installing
+/// the handlers replaces the default "terminate now" action, so from here on these signals only
+/// set the flag and call the notifier.
 #[cfg(unix)]
-pub fn listen(runtime: &tokio::runtime::Handle) -> std::io::Result<()> {
+pub fn listen(
+    runtime: &tokio::runtime::Handle,
+    notify: impl Fn(i32) + Send + 'static,
+) -> std::io::Result<()> {
     use tokio::signal::unix::{SignalKind, signal};
     let _enter = runtime.enter();
     let mut term = signal(SignalKind::terminate())?;
@@ -70,14 +74,20 @@ pub fn listen(runtime: &tokio::runtime::Handle) -> std::io::Result<()> {
             _ = hup.recv() => SIGHUP,
         };
         // The first signal wins; a second one changes nothing.
-        let _ = RECEIVED.compare_exchange(0, signal, Ordering::SeqCst, Ordering::SeqCst);
+        let first = RECEIVED
+            .compare_exchange(0, signal, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok();
+        if first {
+            // Hand it to the UI as an event (ADR 0023 U2). A second signal is not forwarded:
+            // the first one is already taking the app down.
+            notify(signal);
+        }
 
-        // The loop normally notices the flag within one 50 ms poll. If it does not — it is
-        // inside crossterm's reader, which loops forever when the tty returns EOF/EIO — the
-        // terminal is already gone, so restoring it is pointless. Exit with the shell
-        // convention. Every journal append is already fsynced, so an exit mid-turn recovers by
-        // the ADR 0019 / ADR 0002 rules (a torn tail is truncated; an interrupted run leaves
-        // memory and journal consistent).
+        // The loop normally wakes from its event channel immediately. If it does not — it is
+        // stuck in a long frame or effect — the terminal may already be gone, so restoring it
+        // is pointless. Exit with the shell convention. Every journal append is already
+        // fsynced, so an exit mid-turn recovers by the ADR 0019 / ADR 0002 rules (a torn tail
+        // is truncated; an interrupted run leaves memory and journal consistent).
         if tokio::time::timeout(EXIT_WATCHDOG, exit_notify().notified())
             .await
             .is_err()
@@ -89,6 +99,9 @@ pub fn listen(runtime: &tokio::runtime::Handle) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-pub fn listen(_runtime: &tokio::runtime::Handle) -> std::io::Result<()> {
+pub fn listen(
+    _runtime: &tokio::runtime::Handle,
+    _notify: impl Fn(i32) + Send + 'static,
+) -> std::io::Result<()> {
     Ok(())
 }

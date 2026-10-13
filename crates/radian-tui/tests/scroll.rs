@@ -3,10 +3,23 @@
 
 use agent_core::AgentEvent;
 use radian_tui::app::App;
+use radian_tui::projection::StreamKind;
 use radian_tui::render;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+/// One streaming chunk the way the loop does it: the projection accumulates the delta, then the
+/// snapshot becomes the live entries (ADR 0023 U2).
+fn stream(
+    app: &mut App,
+    projection: &radian_tui::projection::SessionProjection,
+    kind: radian_tui::projection::StreamKind,
+    text: &str,
+) {
+    projection.push_delta(kind, text);
+    app.update(radian_tui::app::Input::Stream(projection.snapshot()));
+}
 
 fn render(app: &mut App) {
     let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
@@ -32,9 +45,8 @@ fn new_content_follows_while_at_the_bottom() {
     assert!(app.max_scroll > 0, "the transcript must overflow the view");
 
     // New content arrives: still pinned to the bottom.
-    app.apply_event(&AgentEvent::ModelTextDelta {
-        text: "more".into(),
-    });
+    let projection = radian_tui::projection::SessionProjection::new();
+    stream(&mut app, &projection, StreamKind::Assistant, "more");
     render(&mut app);
     assert!(app.is_following());
     assert_eq!(app.scroll, app.max_scroll);
@@ -76,12 +88,13 @@ fn scrolling_back_to_the_bottom_resumes_following() {
     render(&mut app);
     assert!(!app.is_following());
 
+    let projection = radian_tui::projection::SessionProjection::new();
     app.on_key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL));
     render(&mut app);
     assert!(app.is_following());
     assert_eq!(app.scroll, app.max_scroll);
 
-    app.apply_event(&AgentEvent::ModelTextDelta { text: "x".into() });
+    stream(&mut app, &projection, StreamKind::Assistant, "x");
     render(&mut app);
     assert!(app.is_following());
     assert_eq!(app.scroll, app.max_scroll);

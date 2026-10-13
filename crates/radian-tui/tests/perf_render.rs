@@ -28,8 +28,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use agent_core::AgentEvent;
-use radian_tui::app::{App, Entry, EntryKind, TurnState};
+use radian_tui::app::{App, Entry, EntryKind, Input, TurnState};
+use radian_tui::projection::{SessionProjection, StreamKind};
 use radian_tui::render;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -289,6 +289,10 @@ fn perf_render_streaming() {
             app
         })
         .collect();
+    // Each app has its own projection now (ADR 0023 U2): the deltas accumulate there and the
+    // snapshot becomes the live entry, which is what the loop does.
+    let mut projections: Vec<SessionProjection> =
+        apps.iter().map(|_| SessionProjection::new()).collect();
     let mut terminal = test_terminal();
     let _ = draw_once(&mut terminal, &mut apps[0]);
 
@@ -296,12 +300,11 @@ fn perf_render_streaming() {
     let mut frames = Vec::with_capacity(ROUNDS);
     let mut keys = Vec::with_capacity(ROUNDS);
     for _ in 0..ROUNDS {
-        for app in apps.iter_mut() {
+        for (app, projection) in apps.iter_mut().zip(projections.iter_mut()) {
             for _ in 0..DELTAS_PER_ROUND {
-                app.apply_event(&AgentEvent::ModelTextDelta {
-                    text: DELTA.to_string(),
-                });
+                projection.push_delta(StreamKind::Assistant, DELTA);
             }
+            app.update(Input::Stream(projection.snapshot()));
         }
         frames.push(draw_once(&mut terminal, &mut apps[0]));
         let key = Instant::now();
@@ -603,9 +606,10 @@ fn guard() -> std::sync::MutexGuard<'static, ()> {
     PTY_LOCK.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// The idle redraw: the run loop polls input with a 50 ms timeout and draws a frame every
-/// time, so an idle screen still gets ~20 frames/s. Measured as the bytes and frame markers on
-/// the tty over a 5 s window (the window is observation time, not synchronization).
+/// The idle redraw (ADR 0023 U2). The loop blocks on its event channel, so an idle screen is
+/// not redrawn at all; the Step 0 baseline (§7) measured ~19 frames/s under the old polling
+/// loop. Measured as the bytes and frame markers on the tty over a 5 s window (the window is
+/// observation time, not synchronization).
 #[test]
 #[ignore = "measurement, not an assertion; run with --ignored --nocapture"]
 fn perf_idle_redraw() {
@@ -626,9 +630,9 @@ fn perf_idle_redraw() {
         100,
     );
     pty.wait_for("type a message", pty.start, 30);
-    // Past the startup burst: the first frame is the whole screen; frames after it only show
-    // the cursor/cursor-position diff.
-    pty.wait_for_frames(10, 30);
+    // The startup burst is over once the first frame is on the wire: the whole screen is drawn
+    // once, and nothing else happens until an event arrives.
+    pty.wait_for_frames(1, 30);
     let bytes_before = pty.snapshot().len();
     let frames_before = pty.count(FRAME_MARKER);
 

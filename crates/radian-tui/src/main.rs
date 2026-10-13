@@ -30,9 +30,10 @@ use radian_runtime::{CancelCause, Driver, Inbox};
 use radian_sandbox::Sandbox;
 use radian_session::{Index, SessionCreatedData, SessionJournal};
 use radian_tui::app::{App, Effect, Input as AppInput, MemoryResult};
+use radian_tui::projection::{SessionProjection, StreamKind};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::crossterm::event::{self, Event, KeyEventKind};
+use ratatui::crossterm::event::{self, Event, KeyEvent, KeyEventKind};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -196,19 +197,99 @@ struct Cli {
     /// only way out -- which is what `pty_a_closed_master_ends_the_app_cleanly` must exercise.
     #[arg(long, hide = true, value_name = "FILE")]
     freeze_draw: Option<PathBuf>,
+
+    /// Test hook (`--flood-facts <COUNT>`): send this many facts as fast as possible, for the
+    /// draw-fairness test. Real producers are bounded by the turn structure; this one is not.
+    #[arg(long, hide = true, value_name = "COUNT")]
+    flood_facts: Option<u64>,
 }
 
 /// The TUI's per-turn model call limit when `--max-model-calls` is not given (decision
 /// 2026-10-12, dogfooding finding D6).
 const TUI_DEFAULT_MAX_MODEL_CALLS: u32 = 1000;
 
-/// Forwards core events to the UI thread. `emit` must be short and non-blocking (ADR 0010),
-/// so it only does a channel send.
-struct ChannelSink(Sender<AgentEvent>);
+/// One event on the UI's single channel (ADR 0023 U2).
+///
+/// The channel carries three kinds of source with different promises: **facts and control**
+/// (never dropped — an unbounded `mpsc`, so a producer never blocks, ADR 0010 K3-1),
+/// **dirty notifications** (coalescible: at most one per session is in flight), **terminal
+/// input** (ordered, forwarded by the input thread), plus **process and host state** (signals,
+/// the driver's end). Nothing is polled any more: every source sends here.
+enum UiEvent {
+    /// A committed core event. Deltas never come this way: they accumulate in the projection
+    /// and wake the UI with [`UiEvent::Dirty`].
+    Agent(AgentEvent),
+    /// A runtime event (ADR 0017's turn failure).
+    Runtime(radian_session::RuntimeEvent),
+    /// A tool call waiting for the human.
+    Approval(ApprovalPrompt),
+    /// The result of an effect, as the input it becomes (ADR 0023 U3).
+    Command(AppInput),
+    /// The projection changed. At most one is in flight per session.
+    Dirty,
+    /// A terminal event.
+    Input(InputEvent),
+    /// The terminal went away (the pty master closed, the ssh session dropped).
+    TerminalGone,
+    /// A signal asked the app to stop.
+    Signal(i32),
+    /// The driver task ended.
+    DriverStopped,
+}
 
-impl EventSink for ChannelSink {
+/// A terminal event, forwarded by the input thread.
+enum InputEvent {
+    Key(KeyEvent),
+    Paste(String),
+    Resize { rows: u16, cols: u16 },
+}
+
+/// How many facts one loop turn processes before it draws. Bounded so a producer that keeps the
+/// channel busy cannot starve the frame (ADR 0023 U2's draw fairness): the fairness pty test
+/// floods 20 000 facts and still sees at least 100 frames. 64 keeps a turn's work near the
+/// pre-refactor 50 ms tick (~50 deltas) while staying far below a frame budget.
+const MAX_FACTS_PER_TURN: usize = 64;
+
+/// How many effect rounds one turn may take. An effect's result is another event, and a result
+/// can ask for one more effect (`@` expansion → send), so the chain is short; the bound turns a
+/// bug into an error instead of a hang.
+const MAX_EFFECT_ROUNDS: usize = 8;
+
+/// The input thread's poll interval: a wake-up granularity for the hang-up check, not a
+/// synchronization device.
+const INPUT_POLL: Duration = Duration::from_millis(50);
+
+/// Forwards core events to the UI thread (ADR 0023 U2). Deltas are **not** forwarded: they
+/// accumulate in the projection, and the UI is woken with one `Dirty` when it has not looked
+/// yet. `emit` stays short and non-blocking (ADR 0010 K3-1).
+struct ProjectionSink {
+    tx: Sender<UiEvent>,
+    projection: Arc<SessionProjection>,
+}
+
+impl ProjectionSink {
+    /// Appends a delta and wakes the UI when it has not been woken since it last looked.
+    fn stream(&self, kind: StreamKind, text: &str) {
+        if self.projection.push_delta(kind, text) {
+            let _ = self.tx.send(UiEvent::Dirty);
+        }
+    }
+}
+
+impl EventSink for ProjectionSink {
     fn emit(&self, event: AgentEvent) {
-        let _ = self.0.send(event);
+        match &event {
+            AgentEvent::ModelTextDelta { text } => {
+                return self.stream(StreamKind::Assistant, text);
+            }
+            AgentEvent::ModelReasoningDelta { text } => {
+                return self.stream(StreamKind::Reasoning, text);
+            }
+            // The committed message replaces the live view, so the stream buffer is done.
+            AgentEvent::TranscriptAppended { .. } => self.projection.clear_stream(),
+            _ => {}
+        }
+        let _ = self.tx.send(UiEvent::Agent(event));
     }
 }
 
@@ -225,8 +306,14 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    // The UI's one channel (ADR 0023 U2). It is created here so the signal listener can send
+    // into it as well: every source of UI input is an event on this channel.
+    let (tx, rx) = std::sync::mpsc::channel::<UiEvent>();
     // SIGTERM/SIGHUP take the ordinary exit path from here on (dogfooding D7).
-    if let Err(e) = radian_tui::signals::listen(runtime.handle()) {
+    let signal_tx = tx.clone();
+    if let Err(e) = radian_tui::signals::listen(runtime.handle(), move |signal| {
+        let _ = signal_tx.send(UiEvent::Signal(signal));
+    }) {
         eprintln!("radian-tui: cannot listen for SIGTERM/SIGHUP: {e}");
         return ExitCode::from(1);
     }
@@ -235,7 +322,8 @@ fn main() -> ExitCode {
     // tool futures, and with them the `kill_on_drop` child processes they own), then exit
     // 101. The panic hook restores the terminal and returns; it no longer exits, because
     // exiting here would skip exactly that cleanup.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(cli, &runtime)));
+    let result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(cli, &runtime, rx, tx)));
     runtime.shutdown_timeout(Duration::from_secs(2));
     match result {
         Ok(Ok(reason)) => {
@@ -279,7 +367,12 @@ fn print_exit_line(message: &str) {
     let _ = writeln!(std::io::stderr(), "radian-tui: {message}");
 }
 
-fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, String> {
+fn run(
+    mut cli: Cli,
+    runtime: &tokio::runtime::Runtime,
+    rx: Receiver<UiEvent>,
+    tx: Sender<UiEvent>,
+) -> Result<Option<String>, String> {
     if cli.list {
         return match list_sessions(&cli) {
             Ok(()) | Err(ListError::BrokenPipe) => Ok(None),
@@ -526,8 +619,13 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
     };
     let inbox = Inbox::durable(64, Arc::clone(&journal));
 
-    let (tx, rx) = std::sync::mpsc::channel();
-    let live: Arc<dyn EventSink> = Arc::new(ChannelSink(tx));
+    // The projection holds the streaming deltas; the sink forwards everything else as a fact
+    // (ADR 0023 U2). One session in this build, so one projection.
+    let projection = Arc::new(SessionProjection::new());
+    let live: Arc<dyn EventSink> = Arc::new(ProjectionSink {
+        tx: tx.clone(),
+        projection: Arc::clone(&projection),
+    });
     let agent_config = AgentConfig {
         system_prompt: cli.system.clone(),
         // No window known means the budget is off, never a guessed default (ADR 0015); the
@@ -540,13 +638,12 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
     // Tools, permissions and approval. The permission layer decides allow/ask/deny; this
     // process is the host that answers `ask` through the UI, and writes every decision to the
     // session journal as a `PermissionResolved` (audit only, ADR 0006 §5.9).
-    let (approval_tx, approval_rx) = std::sync::mpsc::channel::<ApprovalPrompt>();
     // `--yes` swaps the approver for one that answers "allow once" without asking; rules,
     // the sandbox and the audit record are untouched by it (same as `agent --yes`).
     let approver: Arc<dyn Approver> = if cli.yes {
         Arc::new(AutoApprover)
     } else {
-        Arc::new(TuiApprover { tx: approval_tx })
+        Arc::new(TuiApprover { tx: tx.clone() })
     };
     let hooks = Arc::new(PermissionHooks::new(
         profile,
@@ -596,7 +693,7 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
     // ADR 0017: the driver reports a failed turn over a runtime-event channel. The UI shows
     // the (host-redacted) message as a transcript notice and stays usable; the driver keeps
     // running. `AgentEvent` is unchanged, so this is a separate channel.
-    let (runtime_tx, runtime_rx) = std::sync::mpsc::channel::<radian_session::RuntimeEvent>();
+    let runtime_tx = tx.clone();
     let secrets_for_events = Arc::clone(&secrets_for_errors);
     driver.set_runtime_events(Arc::new(move |event: &radian_session::RuntimeEvent| {
         let redacted = match event {
@@ -608,7 +705,7 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
             }
             other => other.clone(),
         };
-        let _ = runtime_tx.send(redacted);
+        let _ = runtime_tx.send(UiEvent::Runtime(redacted));
     }));
 
     // The session is open now, so the MCP status is known: the servers and tools that actually
@@ -631,6 +728,15 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
             }
         }
     });
+    // The driver's end is an event, not something the loop polls (ADR 0023 U2). The watcher
+    // owns the handle and hands the result back through a oneshot for the exit code.
+    let (driver_done_tx, driver_done_rx) = tokio::sync::oneshot::channel();
+    let driver_events = tx.clone();
+    runtime.spawn(async move {
+        let result = driver_task.await;
+        let _ = driver_events.send(UiEvent::DriverStopped);
+        let _ = driver_done_tx.send(result);
+    });
 
     if let Some(path) = &cli.block_input {
         let _ = BLOCK_INPUT.set(path.clone());
@@ -638,6 +744,27 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
     if let Some(path) = &cli.freeze_draw {
         let _ = FREEZE_DRAW.set(path.clone());
     }
+    if let Some(count) = cli.flood_facts {
+        // Test hook (`--flood-facts`): a producer that fills the channel as fast as it can, for
+        // the draw-fairness test. Real producers are bounded by the turn structure; this one is
+        // not, which is exactly what makes the fairness rule testable.
+        let flood = tx.clone();
+        std::thread::spawn(move || {
+            for index in 0..count {
+                let event = AgentEvent::ToolStarted {
+                    index: 0,
+                    call_id: format!("flood-{index}"),
+                    name: "flood".into(),
+                };
+                if flood.send(UiEvent::Agent(event)).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+    // The terminal input thread (ADR 0023 U2). It is abandoned when the loop exits: the process
+    // is leaving, and the thread notices the closed channel within one poll.
+    spawn_input_thread(tx.clone());
     // ADR 0008: the `[config]` line and its warnings are startup diagnostics and belong on
     // the normal screen, **before** the alternate screen is entered. Printed inside it, a
     // stray `eprintln!` writes cells the renderer's diff then skips (both buffers see a
@@ -771,14 +898,13 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
         &mut app,
         &workspace_path,
         &rx,
-        &runtime_rx,
-        &approval_rx,
+        &tx,
         runtime,
         &inbox,
         &hooks,
-        &driver_task,
         &session_host,
         &memory_service,
+        &projection,
     );
     // Tell a pending signal task that the loop left on its own, so it does not force-exit.
     radian_tui::signals::confirm_exit();
@@ -792,13 +918,14 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
 
     let _ = stop_tx.send(());
     // The driver task is the session: if it died, the failure is the app's failure. A panic
-    // inside it was caught by the runtime, so it shows up here as a `JoinError`, and the
+    // inside it was caught by the runtime, so the watcher hands back a `JoinError`, and the
     // message the hook recorded is printed now that the alternate screen is gone.
-    let driver_result = runtime.block_on(driver_task);
-    match driver_result {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => return Err(format!("driver: {error}")),
-        Err(join_error) => {
+    // `Ok(Err(..))` is the driver's own error; `Err` from the inner result is the `JoinError` of
+    // a panicking driver; the outer `Err` would be the watcher task dying, which cannot happen.
+    match runtime.block_on(driver_done_rx) {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(error))) => return Err(format!("driver: {error}")),
+        Ok(Err(join_error)) => {
             let mut message = format!("the driver task ended unexpectedly: {join_error}");
             if let Some(panic) = radian_tui::terminal::last_panic() {
                 // One line: the normal screen gets one reason line (dogfooding D4).
@@ -807,11 +934,14 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
             }
             return Err(message);
         }
+        Err(_) => {
+            return Err("the driver task ended unexpectedly: its watcher stopped".to_string());
+        }
     }
     // A failure in the UI loop is the app's failure too; the terminal is already restored.
-    outcome?;
+    let signal = outcome?;
     let saved = format!("session {session_id} saved; resume with `--resume {session_id}`");
-    Ok(Some(match radian_tui::signals::received() {
+    Ok(Some(match signal {
         Some(signal) => format!("received {}; {saved}", radian_tui::signals::name(signal)),
         None => saved,
     }))
@@ -1003,228 +1133,317 @@ struct ApprovalPrompt {
     reply: tokio::sync::oneshot::Sender<ApprovalOutcome>,
 }
 
+/// The input thread (ADR 0023 U2). It owns `read_input`'s hang-up protection: `poll(2)` for
+/// `POLLHUP` first, then crossterm's buffered events, and it never blocks in `event::read` on a
+/// tty that returns EOF. The thread is **abandoned** when the loop exits: the process is
+/// leaving, and the next poll finds the channel closed and returns.
+fn spawn_input_thread(tx: Sender<UiEvent>) {
+    std::thread::spawn(move || {
+        loop {
+            match read_input(INPUT_POLL) {
+                Input::Gone => {
+                    let _ = tx.send(UiEvent::TerminalGone);
+                    return;
+                }
+                Input::Event(event) => {
+                    let event = match event {
+                        Event::Key(key) if key.kind == KeyEventKind::Release => continue,
+                        Event::Key(key) => InputEvent::Key(key),
+                        Event::Paste(text) => InputEvent::Paste(text),
+                        Event::Resize(rows, cols) => coalesce_resize(rows, cols),
+                        _ => continue,
+                    };
+                    if tx.send(UiEvent::Input(event)).is_err() {
+                        return;
+                    }
+                }
+                Input::Idle => {}
+            }
+        }
+    });
+}
+
+/// A burst of resizes (a window drag) collapses to the last one: every size in between would
+/// cost a full re-wrap for a frame nobody sees. A non-resize event stops the collapse and is
+/// handled on the next turn (it stays in crossterm's buffer).
+fn coalesce_resize(rows: u16, cols: u16) -> InputEvent {
+    let (mut rows, mut cols) = (rows, cols);
+    while let Input::Event(Event::Resize(next_rows, next_cols)) = read_input(Duration::ZERO) {
+        rows = next_rows;
+        cols = next_cols;
+    }
+    InputEvent::Resize { rows, cols }
+}
+
+/// The loop's side of the world (ADR 0023 U2/U3): everything handling an event or running an
+/// effect needs. The app stays pure; this is where the outside lives.
+struct LoopContext<'a> {
+    workspace: &'a Path,
+    runtime: &'a tokio::runtime::Runtime,
+    inbox: &'a Arc<Inbox>,
+    hooks: &'a Arc<PermissionHooks>,
+    memory: &'a Option<MemoryService>,
+    host: &'a SessionHost,
+    tx: &'a Sender<UiEvent>,
+    projection: &'a SessionProjection,
+    /// The reply channels of the approval prompts on screen, by request id.
+    approval_replies: HashMap<String, tokio::sync::oneshot::Sender<ApprovalOutcome>>,
+    /// The signal that stopped the loop, if any: it decides the reason line (and, in `main`,
+    /// the exit code).
+    signal: Option<i32>,
+}
+
+impl LoopContext<'_> {
+    /// Feeds one event to the app. Returns whether the frame is dirty; the effects it produced
+    /// are appended to `effects`.
+    fn handle(&mut self, event: UiEvent, app: &mut App, effects: &mut Vec<Effect>) -> bool {
+        let result = match event {
+            UiEvent::Agent(event) => app.update(AppInput::Event(event)),
+            UiEvent::Runtime(event) => app.update(AppInput::Runtime(event)),
+            UiEvent::Approval(prompt) => {
+                self.approval_replies
+                    .insert(prompt.request.request_id.clone(), prompt.reply);
+                app.update(AppInput::Approval(prompt.request))
+            }
+            UiEvent::Command(input) => app.update(input),
+            UiEvent::Input(InputEvent::Key(key)) => app.on_key(key),
+            UiEvent::Input(InputEvent::Paste(text)) => app.update(AppInput::Paste(text)),
+            UiEvent::Input(InputEvent::Resize { rows, cols }) => {
+                app.update(AppInput::Resize { rows, cols })
+            }
+            UiEvent::Dirty => {
+                // ADR 0023 U2: clear the flag **first**, then read the projection. An update
+                // that happens after this swap sets the flag again and sends another `Dirty`,
+                // so no wake-up is lost.
+                if !self.projection.take_dirty() {
+                    return false;
+                }
+                let snapshot = self.projection.snapshot();
+                app.update(AppInput::Stream(snapshot))
+            }
+            UiEvent::Signal(signal) => {
+                // Leave through the ordinary clean-exit path: the terminal is restored, the
+                // driver is stopped, and `main` prints the reason (a signal exits
+                // 128+signal). No last frame: after a SIGHUP the terminal may already be gone.
+                self.signal = Some(signal);
+                app.quit = true;
+                return false;
+            }
+            UiEvent::TerminalGone => {
+                // The terminal went away (the pty master closed, the ssh session dropped):
+                // leave through the ordinary clean-exit path. No signal was received, so the
+                // exit code is the ordinary 0.
+                app.quit = true;
+                return false;
+            }
+            UiEvent::DriverStopped => {
+                app.note = Some("the driver stopped; leaving".into());
+                app.entries.push(radian_tui::Entry::new(
+                    radian_tui::EntryKind::Notice,
+                    "the driver task ended; the session is closed",
+                ));
+                app.quit = true;
+                // One last frame, so the notice is what the user sees before the screen is
+                // restored.
+                return true;
+            }
+        };
+        effects.extend(result.effects);
+        result.dirty
+    }
+
+    /// Runs one effect. Its result is an event on the channel (ADR 0023 U2), so the caller
+    /// picks it up on the next round.
+    fn execute(&mut self, effect: Effect) -> Result<(), String> {
+        match effect {
+            Effect::SendFollowup(text) => {
+                // `HookContext` has no source field, so the host declares each turn's source
+                // before it starts; an unset source is treated as non-human and denied.
+                self.hooks.set_turn_source(Some(InputSource::User));
+                self.runtime
+                    .block_on(self.inbox.followup(text, InputSource::User))
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            }
+            Effect::Steer(text) => {
+                self.hooks.set_turn_source(Some(InputSource::User));
+                self.runtime
+                    .block_on(self.inbox.steer(text, InputSource::User))
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            }
+            Effect::Cancel => {
+                self.inbox.cancel(CancelCause::Requested);
+                Ok(())
+            }
+            Effect::Quit => Ok(()),
+            Effect::AnswerApproval {
+                request_id,
+                outcome,
+            } => {
+                if let Some(reply) = self.approval_replies.remove(&request_id) {
+                    let _ = reply.send(outcome);
+                }
+                Ok(())
+            }
+            Effect::AbandonApproval { request_id } => {
+                // Dropping the channel is what makes the waiting call resolve as abandoned (a
+                // denial), exactly as dropping the prompt used to.
+                self.approval_replies.remove(&request_id);
+                Ok(())
+            }
+            // `@` expansion and completion read files, so they are effects; their results go
+            // back through the channel as `Command` events.
+            Effect::ExpandMentions { text } => {
+                let result = radian_tui::mention::expand(&text, self.workspace);
+                self.send(AppInput::MentionsExpanded(result));
+                Ok(())
+            }
+            Effect::CompleteMention { text, cursor } => {
+                let result = radian_tui::mention::complete(&text, cursor, self.workspace);
+                self.send(AppInput::CompletionReady(result));
+                Ok(())
+            }
+            Effect::RunMemoryCommand { command, confirmed } => {
+                let result = match self.memory {
+                    Some(service) => {
+                        let json = command.json();
+                        match radian_host::memory::commands::execute(
+                            service,
+                            command.clone(),
+                            confirmed,
+                            json,
+                        ) {
+                            Ok(output) => match output.needs_confirmation {
+                                Some(prompt) => MemoryResult::NeedsConfirmation { command, prompt },
+                                None => MemoryResult::Output(radian_tui::command::output_notices(
+                                    &output,
+                                )),
+                            },
+                            Err(error) => MemoryResult::Failed(error.message),
+                        }
+                    }
+                    None => {
+                        MemoryResult::Failed("memory is disabled (no RADIAN_HOME or HOME)".into())
+                    }
+                };
+                self.send(AppInput::MemoryCommandDone(result));
+                Ok(())
+            }
+            Effect::Compact { instructions } => {
+                // The driver runs the request between turns, so this must not block the UI:
+                // spawn it and send the result as an event when it lands.
+                let inbox = Arc::clone(self.inbox);
+                let tx = self.tx.clone();
+                self.runtime.spawn(async move {
+                    let result = inbox.compact(instructions).await;
+                    let _ = tx.send(UiEvent::Command(AppInput::CompactDone(result)));
+                });
+                Ok(())
+            }
+            Effect::Session(request) => {
+                let notices = handle_session_request(self.host, self.runtime, request);
+                self.send(AppInput::SessionDone(notices));
+                Ok(())
+            }
+        }
+    }
+
+    /// Sends an effect's result back as an event, so it is handled like every other input.
+    fn send(&self, input: AppInput) {
+        let _ = self.tx.send(UiEvent::Command(input));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn ui_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App,
     workspace: &Path,
-    rx: &Receiver<AgentEvent>,
-    runtime_events: &Receiver<radian_session::RuntimeEvent>,
-    approvals: &Receiver<ApprovalPrompt>,
+    rx: &Receiver<UiEvent>,
+    tx: &Sender<UiEvent>,
     runtime: &tokio::runtime::Runtime,
     inbox: &Arc<Inbox>,
     hooks: &Arc<PermissionHooks>,
-    driver_task: &tokio::task::JoinHandle<Result<(), radian_runtime::DriverError>>,
     host: &SessionHost,
     memory: &Option<MemoryService>,
-) -> Result<(), String> {
-    // The reply channels of the approval prompts on screen, by request id.
-    let mut approval_replies: HashMap<String, tokio::sync::oneshot::Sender<ApprovalOutcome>> =
-        HashMap::new();
-    // Manual `/compact` runs on the runtime (the driver executes it between turns); its
-    // result arrives over its own channel and becomes a notice.
-    let mut pending_compacts: Vec<
-        std::sync::mpsc::Receiver<Result<agent_core::CompactionOutcome, String>>,
-    > = Vec::new();
+    projection: &SessionProjection,
+) -> Result<Option<i32>, String> {
+    let mut ctx = LoopContext {
+        workspace,
+        runtime,
+        inbox,
+        hooks,
+        memory,
+        host,
+        tx,
+        projection,
+        approval_replies: HashMap::new(),
+        signal: None,
+    };
+    // The first frame: the startup notices and the resumed history are already in the app, and
+    // zero-redraw means nothing else would draw one.
+    if !draw_frame(terminal, app)? {
+        return Ok(None);
+    }
+    radian_tui::terminal::set_cursor_visible(app.input_editable());
     while !app.quit {
-        // SIGTERM/SIGHUP: leave exactly like a quit, so the terminal is restored and the
-        // reason is printed on the normal screen (dogfooding D7). No last frame: after a
-        // SIGHUP the terminal may already be gone.
-        if radian_tui::signals::received().is_some() {
-            app.quit = true;
+        // Block until there is something to do. No display in this build changes with time (the
+        // status bar, the notes, the find box and the budget line are static text), so there is
+        // no `recv_timeout` here: an idle app is not redrawn at all (ADR 0023 U2). A clock-like
+        // display would take the timeout branch at this line.
+        let Ok(first) = rx.recv() else {
+            // Every sender is gone: nothing left to drive the UI.
             break;
-        }
-        // The driver task is the session. If it ends — normally or by panicking — the UI has
-        // nothing left to talk to, so leave in order instead of drawing over a dead session
-        // and sending input into a closed inbox. The exit code and the message are decided
-        // after the terminal is restored (see `run`).
-        if driver_task.is_finished() {
-            app.note = Some("the driver stopped; leaving".into());
-            app.entries.push(radian_tui::Entry::new(
-                radian_tui::EntryKind::Notice,
-                "the driver task ended; the session is closed",
-            ));
-            app.quit = true;
-            // One last frame, so the notice is what the user sees before the screen is
-            // restored. The last frame is best-effort: the terminal may already be gone.
-            let _ = draw_frame(terminal, app)?;
-            break;
-        }
-        // Every input goes through `App::update`, which returns the effects to run. A short
-        // poll keeps rendering responsive without blocking on input; it is a UI refresh
-        // interval, not a synchronization device. `read_input` also reports a terminal that
-        // has gone away, which crossterm's own poll cannot (see its docs).
+        };
+        let mut dirty = false;
         let mut effects: Vec<Effect> = Vec::new();
-        match read_input(Duration::from_millis(50)) {
-            Input::Gone => {
-                // The terminal went away (the pty master closed, the ssh session dropped):
-                // leave through the ordinary clean-exit path. The terminal restore is
-                // best-effort (it is already gone), the session is closed below, and no
-                // signal was received, so the exit code is the ordinary 0.
+        let mut facts = 1;
+        dirty |= ctx.handle(first, app, &mut effects);
+        // At most `MAX_FACTS_PER_TURN` facts before a frame (draw fairness).
+        while facts < MAX_FACTS_PER_TURN {
+            match rx.try_recv() {
+                Ok(event) => {
+                    dirty |= ctx.handle(event, app, &mut effects);
+                    facts += 1;
+                }
+                Err(_) => break,
+            }
+        }
+        // Run the effects. Their results are events, so they are handled by the same code; a
+        // result can ask for one more effect (`@` expansion → send), so this repeats until
+        // nothing is pending.
+        let mut rounds = 0;
+        while !effects.is_empty() {
+            rounds += 1;
+            if rounds > MAX_EFFECT_ROUNDS {
+                return Err("the effect worklist did not settle".into());
+            }
+            let batch = std::mem::take(&mut effects);
+            let produced = batch.len();
+            for effect in batch {
+                ctx.execute(effect)?;
+            }
+            // Each effect produces at most one result event; take that many (plus whatever else
+            // was already queued behind them).
+            for _ in 0..produced {
+                match rx.try_recv() {
+                    Ok(event) => dirty |= ctx.handle(event, app, &mut effects),
+                    Err(_) => break,
+                }
+            }
+        }
+        if dirty {
+            if !draw_frame(terminal, app)? {
+                // The terminal went away between the input poll and the frame: leave cleanly.
                 app.quit = true;
                 break;
             }
-            Input::Event(event) => match event {
-                Event::Key(key) if key.kind != KeyEventKind::Release => {
-                    effects.extend(app.on_key(key).effects);
-                }
-                Event::Paste(text) => effects.extend(app.update(AppInput::Paste(text)).effects),
-                Event::Resize(rows, cols) => {
-                    effects.extend(app.update(AppInput::Resize { rows, cols }).effects);
-                }
-                _ => {}
-            },
-            Input::Idle => {}
+            // The cursor is visible only while the input box is editable.
+            radian_tui::terminal::set_cursor_visible(app.input_editable());
         }
-        while let Ok(event) = rx.try_recv() {
-            effects.extend(app.update(AppInput::Event(event)).effects);
-        }
-        while let Ok(event) = runtime_events.try_recv() {
-            effects.extend(app.update(AppInput::Runtime(event)).effects);
-        }
-        // A tool call waiting for the human: show it. The answer goes back over the prompt's
-        // own channel when the app answers (an effect), so this loop never blocks on it.
-        while let Ok(prompt) = approvals.try_recv() {
-            approval_replies.insert(prompt.request.request_id.clone(), prompt.reply);
-            effects.extend(app.update(AppInput::Approval(prompt.request)).effects);
-        }
-        // Effects run here, and their results come back as inputs — which may produce more
-        // effects, so this is a worklist, in order.
-        let mut queue: std::collections::VecDeque<Effect> = effects.into();
-        while let Some(effect) = queue.pop_front() {
-            let results = execute_effect(
-                effect,
-                workspace,
-                runtime,
-                inbox,
-                hooks,
-                memory,
-                host,
-                &mut approval_replies,
-                &mut pending_compacts,
-            )?;
-            for input in results {
-                queue.extend(app.update(input).effects);
-            }
-        }
-        pending_compacts.retain(|rx| match rx.try_recv() {
-            Ok(result) => {
-                app.update(AppInput::CompactDone(result));
-                false
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => true,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
-        });
-        if !draw_frame(terminal, app)? {
-            // The terminal went away between the input poll and the frame: leave cleanly.
-            app.quit = true;
-            break;
-        }
-        // The cursor is visible only while the input box is editable.
-        radian_tui::terminal::set_cursor_visible(app.input_editable());
     }
-    Ok(())
-}
-
-/// Runs one effect (ADR 0023 U3). The inputs it returns are the effect's results; the caller
-/// feeds them back to `update`. Nothing here decides app state.
-#[allow(clippy::too_many_arguments)]
-fn execute_effect(
-    effect: Effect,
-    workspace: &Path,
-    runtime: &tokio::runtime::Runtime,
-    inbox: &Arc<Inbox>,
-    hooks: &Arc<PermissionHooks>,
-    memory: &Option<MemoryService>,
-    host: &SessionHost,
-    approval_replies: &mut HashMap<String, tokio::sync::oneshot::Sender<ApprovalOutcome>>,
-    pending_compacts: &mut Vec<
-        std::sync::mpsc::Receiver<Result<agent_core::CompactionOutcome, String>>,
-    >,
-) -> Result<Vec<AppInput>, String> {
-    match effect {
-        Effect::SendFollowup(text) => {
-            // `HookContext` has no source field, so the host declares each turn's source
-            // before it starts; an unset source is treated as non-human and denied.
-            hooks.set_turn_source(Some(InputSource::User));
-            runtime
-                .block_on(inbox.followup(text, InputSource::User))
-                .map(|_| Vec::new())
-                .map_err(|e| e.to_string())
-        }
-        Effect::Steer(text) => {
-            hooks.set_turn_source(Some(InputSource::User));
-            runtime
-                .block_on(inbox.steer(text, InputSource::User))
-                .map(|_| Vec::new())
-                .map_err(|e| e.to_string())
-        }
-        Effect::Cancel => {
-            inbox.cancel(CancelCause::Requested);
-            Ok(Vec::new())
-        }
-        Effect::Quit => Ok(Vec::new()),
-        Effect::AnswerApproval {
-            request_id,
-            outcome,
-        } => {
-            if let Some(reply) = approval_replies.remove(&request_id) {
-                let _ = reply.send(outcome);
-            }
-            Ok(Vec::new())
-        }
-        Effect::AbandonApproval { request_id } => {
-            // Dropping the channel is what makes the waiting call resolve as abandoned (a
-            // denial), exactly as dropping the prompt used to.
-            approval_replies.remove(&request_id);
-            Ok(Vec::new())
-        }
-        // `@` expansion and completion read files, so they are effects; their results come
-        // back as inputs.
-        Effect::ExpandMentions { text } => Ok(vec![AppInput::MentionsExpanded(
-            radian_tui::mention::expand(&text, workspace),
-        )]),
-        Effect::CompleteMention { text, cursor } => Ok(vec![AppInput::CompletionReady(
-            radian_tui::mention::complete(&text, cursor, workspace),
-        )]),
-        Effect::RunMemoryCommand { command, confirmed } => {
-            let result = match memory {
-                Some(service) => {
-                    let json = command.json();
-                    match radian_host::memory::commands::execute(
-                        service,
-                        command.clone(),
-                        confirmed,
-                        json,
-                    ) {
-                        Ok(output) => match output.needs_confirmation {
-                            Some(prompt) => MemoryResult::NeedsConfirmation { command, prompt },
-                            None => {
-                                MemoryResult::Output(radian_tui::command::output_notices(&output))
-                            }
-                        },
-                        Err(error) => MemoryResult::Failed(error.message),
-                    }
-                }
-                None => MemoryResult::Failed("memory is disabled (no RADIAN_HOME or HOME)".into()),
-            };
-            Ok(vec![AppInput::MemoryCommandDone(result)])
-        }
-        Effect::Compact { instructions } => {
-            // The driver runs the request between turns, so this must not block the UI: spawn
-            // it and drain the result on a later pass.
-            let inbox = Arc::clone(inbox);
-            let (tx, rx) = std::sync::mpsc::channel();
-            runtime.spawn(async move {
-                let _ = tx.send(inbox.compact(instructions).await);
-            });
-            pending_compacts.push(rx);
-            Ok(Vec::new())
-        }
-        Effect::Session(request) => Ok(vec![AppInput::SessionDone(handle_session_request(
-            host, runtime, request,
-        ))]),
-    }
+    Ok(ctx.signal)
 }
 
 /// The host facts `/sessions` and `/export` need: where sessions live, which workspace this
@@ -1596,7 +1815,7 @@ fn build_coding_tools(
 /// The permission layer races this future against the turn's cancellation, so a prompt that
 /// is never answered (Ctrl-C, quit) resolves as a denial instead of hanging.
 struct TuiApprover {
-    tx: Sender<ApprovalPrompt>,
+    tx: Sender<UiEvent>,
 }
 
 impl Approver for TuiApprover {
@@ -1607,7 +1826,7 @@ impl Approver for TuiApprover {
         Box::pin(async move {
             let (reply, answer) = tokio::sync::oneshot::channel();
             self.tx
-                .send(ApprovalPrompt { request, reply })
+                .send(UiEvent::Approval(ApprovalPrompt { request, reply }))
                 .map_err(|_| ApprovalError("the UI is gone".into()))?;
             answer
                 .await

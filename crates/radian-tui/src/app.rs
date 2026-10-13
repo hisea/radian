@@ -26,6 +26,7 @@ use crate::composer::Composer;
 use crate::find::FindState;
 use crate::keys::{Action, Keymap};
 use crate::mention::{Completion, ExpandError, Expansion};
+use crate::projection::StreamSnapshot;
 use crate::theme::{Theme, ThemeName};
 
 /// What kind of transcript line an entry is. The renderer maps this to a style; the tests
@@ -192,6 +193,9 @@ pub enum Input {
     ApprovalAnswer(ApprovalOutcome),
     /// The hardcoded answer to a `/memory` confirmation (`true` = confirmed).
     ConfirmCommand(bool),
+    /// The streaming text the projection has accumulated (ADR 0023 U2). Deltas never come
+    /// through the channel: the loop reads the projection when a `Dirty` notification says so.
+    Stream(StreamSnapshot),
     /// A live agent event.
     Event(AgentEvent),
     /// A runtime event (ADR 0017's turn failure).
@@ -701,6 +705,25 @@ impl App {
             Input::Resize { .. } => UpdateResult::dirty(),
             Input::ApprovalAnswer(outcome) => self.answer_approval(outcome),
             Input::ConfirmCommand(confirmed) => self.confirm_command(confirmed),
+            Input::Stream(stream) => {
+                // The snapshot is the whole live view of the current stream, so the entries are
+                // *set*, not appended: a coalesced notification can never leave a short entry.
+                if stream.order.is_empty() {
+                    // A cleared stream (a committed message replaced it): nothing to show.
+                    return UpdateResult::none();
+                }
+                for kind in &stream.order {
+                    match kind {
+                        crate::projection::StreamKind::Assistant => {
+                            self.set_live(EntryKind::Assistant, &stream.assistant);
+                        }
+                        crate::projection::StreamKind::Reasoning => {
+                            self.set_live(EntryKind::Reasoning, &stream.reasoning);
+                        }
+                    }
+                }
+                UpdateResult::dirty()
+            }
             Input::Event(event) => UpdateResult {
                 dirty: true,
                 effects: self.apply_event(&event),
@@ -1234,10 +1257,6 @@ impl App {
                 self.turn = TurnState::Running;
                 self.budget_report = budget.clone();
             }
-            AgentEvent::ModelTextDelta { text } => self.append_live(EntryKind::Assistant, text),
-            AgentEvent::ModelReasoningDelta { text } => {
-                self.append_live(EntryKind::Reasoning, text)
-            }
             // Usage is the provider's own report; each present field is added to the session
             // total, and a field that was never reported stays `None` (never a zero). A
             // response without usage is not an event here at all.
@@ -1307,16 +1326,24 @@ impl App {
         }
     }
 
-    fn append_live(&mut self, kind: EntryKind, text: &str) {
-        match self.entries.last_mut() {
-            Some(last) if last.live && last.kind == kind => last.text.push_str(text),
-            _ => {
+    /// Sets the live entry of `kind` to `text` (creating it when it does not exist yet). The
+    /// stream arrives as a snapshot, so this replaces rather than appends.
+    fn set_live(&mut self, kind: EntryKind, text: &str) {
+        match self
+            .entries
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.live && entry.kind == kind)
+        {
+            Some(entry) => entry.text = text.to_owned(),
+            None => {
                 let mut entry = Entry::new(kind, text);
                 entry.live = true;
                 self.entries.push(entry);
             }
         }
     }
+
     /// Appends a committed message as transcript entries. Used for live commits and for the
     /// history of a resumed session.
     pub fn push_message(&mut self, message: &Message) {

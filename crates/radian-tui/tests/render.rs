@@ -3,10 +3,23 @@
 
 use agent_core::{AgentEvent, ContentPart, Message, ToolCall, ToolResult};
 use radian_tui::app::{App, Entry, EntryKind};
+use radian_tui::projection::StreamKind;
 use radian_tui::render;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::style::Color;
+
+/// One streaming chunk the way the loop does it: the projection accumulates the delta, then the
+/// snapshot becomes the live entries (ADR 0023 U2).
+fn stream(
+    app: &mut App,
+    projection: &radian_tui::projection::SessionProjection,
+    kind: radian_tui::projection::StreamKind,
+    text: &str,
+) {
+    projection.push_delta(kind, text);
+    app.update(radian_tui::app::Input::Stream(projection.snapshot()));
+}
 
 fn render(app: &mut App, width: u16, height: u16) -> Terminal<TestBackend> {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -75,13 +88,20 @@ fn assistant_with(
 #[test]
 fn reasoning_and_assistant_text_are_visually_distinct() {
     let mut app = App::new("test-model", "s1");
-    // Live deltas arrive first...
-    app.apply_event(&AgentEvent::ModelReasoningDelta {
-        text: "THINKING-WORDS".into(),
-    });
-    app.apply_event(&AgentEvent::ModelTextDelta {
-        text: "VISIBLE-ANSWER".into(),
-    });
+    // Live deltas arrive first (through the projection, exactly as the loop feeds them)...
+    let projection = radian_tui::projection::SessionProjection::new();
+    stream(
+        &mut app,
+        &projection,
+        StreamKind::Reasoning,
+        "THINKING-WORDS",
+    );
+    stream(
+        &mut app,
+        &projection,
+        StreamKind::Assistant,
+        "VISIBLE-ANSWER",
+    );
     // ...then the committed message replaces the live view.
     app.apply_event(&AgentEvent::TranscriptAppended {
         index: 1,
@@ -166,8 +186,9 @@ fn the_status_line_shows_model_and_turn_state() {
 #[test]
 fn live_deltas_are_replaced_by_the_committed_message_not_duplicated() {
     let mut app = App::new("m", "s");
-    app.apply_event(&AgentEvent::ModelTextDelta { text: "hel".into() });
-    app.apply_event(&AgentEvent::ModelTextDelta { text: "lo".into() });
+    let projection = radian_tui::projection::SessionProjection::new();
+    stream(&mut app, &projection, StreamKind::Assistant, "hel");
+    stream(&mut app, &projection, StreamKind::Assistant, "lo");
     assert_eq!(app.entries.len(), 1);
     assert_eq!(app.entries[0].text, "hello");
     app.apply_event(&AgentEvent::TranscriptAppended {

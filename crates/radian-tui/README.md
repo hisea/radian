@@ -38,6 +38,33 @@ Because of this, most behavior tests are pure `update` tests (`tests/update.rs`,
 `tests/input.rs`, `tests/command.rs`, `tests/approval.rs`); the pty tests keep the terminal
 state, the real key protocol and the recovery paths.
 
+### The loop: one channel, three promises (ADR 0023 U2)
+
+`main.rs`'s loop blocks on **one** `std::sync::mpsc` channel of `UiEvent`:
+
+| Source | Event | Promise |
+|---|---|---|
+| facts and control | `Agent` (committed core events), `Runtime`, `Approval`, `Command` (effect results) | never dropped; unbounded, so a producer never blocks (ADR 0010 K3-1) |
+| dirty notification | `Dirty` | coalescible: at most one per session is in flight |
+| terminal input | `Input` (key/paste/resize), `TerminalGone` | ordered, forwarded by a dedicated input thread |
+| process and host | `Signal`, `DriverStopped` | one event each |
+
+- **Deltas never enter the channel.** `ModelTextDelta`/`ModelReasoningDelta` accumulate in
+  `projection::SessionProjection`; the producer sets a `dirty` flag (`Release`) and sends one
+  `Dirty` only when it was `false`. The UI clears the flag (`Acquire`) **before** reading the
+  snapshot, so an update after the read wakes it again — no lost wake-ups, and at most one
+  notification in flight. The snapshot then becomes the live entries through
+  `Input::Stream`.
+- **Nothing is polled.** Signals, the driver's end and command results are events; the input
+  thread owns `read_input`'s `poll(2)` hang-up protection (it never blocks in `event::read` on
+  a tty returning EOF) and coalesces a burst of resizes to the last one.
+- **The loop is bounded per turn**: at most `MAX_FACTS_PER_TURN` (64) facts, then a frame if
+  anything is dirty. That is the draw-fairness rule: a producer that keeps the channel busy
+  cannot starve the frame (`pty_a_flooding_producer_still_draws_and_answers_keys`).
+- **Idle is zero redraw**: the loop blocks in `recv`, and no display in this build changes with
+  time, so nothing is drawn until an event arrives (`pty_an_idle_screen_is_not_redrawn`; the
+  Step 0 baseline was ~19 frames/s, `docs/perf-baseline.md` §7b).
+
 ## Providers
 
 `--provider` picks the wire protocol; the default is unchanged.

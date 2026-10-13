@@ -391,3 +391,63 @@ cargo test --release -p radian-tui --test perf_render -- --ignored --nocapture -
 - 负载 195–252 下的数字；没有统计显著性检验，也没有跨机器对比。
 - 多**进程**（而非本测量的多 `App`）同时流式；鼠标、粘贴、搜索、审批等路径未测。
 - `--resume` 的冷磁盘缓存；100k 条。
+
+## 7b. ADR 0023 Step 1 PR ② 之后（事件驱动循环与脏通知）
+
+PR ② 把 `radian-tui` 的循环换成**一条 `UiEvent` 通道 + 阻塞 `recv`**：流式 delta 不再进通道
+（进 `SessionProjection` 的累积缓冲，用 `dirty` 标志唤醒），信号、driver 结束、命令结果都是事件，
+终端输入由专门的输入线程转发；每轮最多处理 `MAX_FACTS_PER_TURN = 64` 条事实，然后若脏才画一帧。
+
+**负载**：测量期间本机 load average **76–95**（同一台机器上还有别的 pi 在编译）；§7 的基线是
+195–252。两次数值因此不可逐项严格对比，但空闲重绘的结论不受负载影响（它是 0 与非 0 的区别）。
+
+命令（与 §7 相同）：
+
+```sh
+cargo test --release -p radian-tui --test perf_render -- --ignored --nocapture --test-threads=1
+```
+
+### 空闲重绘（pty，5 秒观测窗口）——本 PR 的验收门槛
+
+| | 5.0 s 内 | 折合 |
+|---|---|---|
+| **PR ② 之前（§7）** | 96 帧 | **19.1 帧/秒**，32 B/帧 |
+| **PR ② 之后** | **0 帧** | **0 帧/秒，0 B** |
+
+空闲零重绘成立：没有事件、没有随时间变化的显示（状态栏、通知、搜索框、预算行都是静态文本，
+所以循环用阻塞 `recv`，没有 `recv_timeout`）时不画。回归测试是
+`pty_an_idle_screen_is_not_redrawn`（同一计数法，2 秒窗口断言帧数不变）。
+
+### 其余档位（PR ② 之后重跑，供对照）
+
+| 档位 | §7 基线 | PR ② 之后 |
+|---|---|---|
+| `render::draw` 稳态 1k / 10k / 50k（TestBackend 120×40） | 0.10 / 0.13 / 0.27 ms（p50） | 0.10 / 0.13 / **0.49 ms**（p50；p95 1.12 ms） |
+| 宽度变化第一帧 50k | 66.9–78.1 ms（p50） | 59.9 ms（p50，p95 141.6 ms） |
+| 50k 滚动 PageUp×100 | 28.4–36.1 ms 总计 | 32.1 ms 总计（p50 0.29 ms/键） |
+| 流式（4 app，50 delta/轮，100 轮） | 单帧 p50 0.57–0.70 ms | 单帧 p50 **0.56 ms**（p95 1.11 ms）；按键 p50 0.000 ms |
+| 50k 条目 RSS | +36 MiB | +36 MiB |
+| `--resume` 1k / 10k / 50k 到第一帧 | 104–109 / 294–333 / 2208–4691 ms | 41 / 219 / 1983 ms（负载更低，未据此宣称改进） |
+
+流式一档现在走的是新路径（delta → `SessionProjection::push_delta` → `snapshot` →
+`App::update(Input::Stream)`），也就是循环实际做的事。
+
+### 绘制公平（本 PR 的验收门槛，pty 测试）
+
+`pty_a_flooding_producer_still_draws_and_answers_keys`：测试接缝 `--flood-facts 20000` 以最快速度
+灌 20 000 条事实（真实生产者受 turn 结构约束，只有这个接缝不受约束，规则才可测），循环每轮只吃
+64 条，所以 2 秒窗口里帧数仍在增长（断言 ≥100 帧），按键在有界时间内被处理。去掉每轮上限的变异
+会让整批一次排空（2 秒窗口只剩 1 帧），该测试抓住。
+
+### 唤醒顺序（确定性测试，不用 sleep）
+
+`crates/radian-tui/src/projection.rs` 的单元测试：生产者在 UI **清标志之前**再更新不产生多余的
+`Dirty`（`a_delta_wakes_the_ui_once_until_it_reads`）；在 UI **读取之后**更新必定再唤醒一次
+（`an_update_after_the_read_wakes_the_ui_again`）。顺序契约是 `Release`/`Acquire`，没有 `Relaxed`。
+
+### 局限（与 §7 相同，另加）
+
+- 真实终端上的绘制延迟与滚动体感仍未测（`TestBackend`/pty 测不出）。
+- 本节的绝对值取自 load 76–95 的一次运行；空闲帧数（0）与公平性（帧数仍增长）是结构性的结论。
+- `MAX_FACTS_PER_TURN = 64` 是按"一轮的活接近旧 50 ms tick（~50 个 delta）"选的，由公平性测试
+  验证；它不是从延迟数据反推的最优值。
