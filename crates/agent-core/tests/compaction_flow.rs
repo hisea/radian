@@ -87,8 +87,12 @@ async fn a_request_over_the_budget_is_compacted_and_committed() {
         .await
         .unwrap();
     assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(
+        outcome.model_calls, 1,
+        "the summary call must not count against the turn's model-call budget"
+    );
 
-    // Two calls: the summary first, then the compacted conversation request.
+    // Two model calls: the summary first, then the compacted conversation request.
     let requests = model.requests();
     assert_eq!(requests.len(), 2, "one summary + one compacted request");
     assert_eq!(
@@ -682,5 +686,84 @@ fn a_candidate_without_a_commit_recovers_the_old_history() {
         agent_core::recover(&records).unwrap(),
         vec![Message::user("new summary")],
         "with the commit the compacted history stands"
+    );
+}
+
+// ---------- 6b (cont.): below-target stops auto-compaction for the turn ----------
+
+/// After a below-target compaction, the next over-budget request in the same turn fails
+/// instead of compacting again (ADR 0018).
+#[tokio::test]
+async fn a_below_target_compaction_stops_auto_compaction_for_the_turn() {
+    use common::stop;
+
+    let model = ScriptedModel::new([
+        summary_reply(&"s".repeat(2_600), 10),
+        stop(StopReason::PauseTurn, &"a".repeat(2_000)),
+    ]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = compaction_agent(model.clone(), 3_000, true);
+    let history = vec![
+        Message::user("x".repeat(4_000)),
+        Message::user("y".repeat(12_000)),
+        Message::user("last"),
+    ];
+    let mut session = agent
+        .open_session_with_journal(history, journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let error = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            agent_core::RunError::Compaction(agent_core::CompactionError::BelowTarget)
+        ),
+        "{error:?}"
+    );
+}
+
+// ---------- 8. the candidate is illegal inside a pending segment ----------
+
+/// `ContextCompacted` and `CompactionUsage` outside a replacement are inert; inside one they
+/// are corruption, exactly like the other foreign records (ADR 0018/0019).
+#[test]
+fn a_compaction_record_inside_a_pending_segment_is_corruption() {
+    let candidate = JournalRecord::ContextCompacted {
+        revision: 1,
+        source_revision: 0,
+        source_len: 1,
+        summary: "s".into(),
+        first_kept: 1,
+        tokens_before: 10,
+        tokens_after: 5,
+        below_target: false,
+        model: "current".into(),
+    };
+    let open = JournalRecord::TranscriptReplaced {
+        revision: 1,
+        len: 1,
+    };
+    let error = agent_core::replay(&[open.clone(), candidate.clone()]).unwrap_err();
+    assert!(
+        matches!(error, agent_core::ReplayError::Replacement { .. }),
+        "{error:?}"
+    );
+    let usage = JournalRecord::CompactionUsage {
+        revision: 1,
+        model: "current".into(),
+        usage: ModelUsage {
+            input: Some(1),
+            ..Default::default()
+        },
+    };
+    let error = agent_core::replay(&[open, usage]).unwrap_err();
+    assert!(
+        matches!(error, agent_core::ReplayError::Replacement { .. }),
+        "{error:?}"
     );
 }
