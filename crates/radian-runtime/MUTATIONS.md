@@ -113,3 +113,13 @@ M5 同时证明"必须先在旧代码上失败"：去掉 requeue 就是旧代码
 
 历史值仍可读：`a_historical_budget_stop_still_reads_and_resumes` 手写一份旧格式会话
 （`TurnOutcome::ContextBudget` + `ContextBudgetReached`），`Session::open` 能读，`Driver` 能 resume。
+
+## compact-core：resume 基线与已提交替换（ADR 0018 §B）
+
+Base: `0f5d5e2` · 一次性检出 `/tmp/ccore-mutB`（detached，跑完删除）· `--no-fail-fast`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M9 | `reported_baseline` 不在 `TranscriptReplaced` 处重置（采用替换前的 usage 作基线） | `driver::tests::the_baseline_ignores_usage_before_a_replacement` | ✅ failed |
+
+1/1 抓住。

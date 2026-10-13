@@ -156,3 +156,14 @@ Base: `3035930` · one-shot worktree `/tmp/0019b-mut`（detached，跑完删除�
 `write_locked` 真正 `write_all` 之前返回 `io::Error`），所以文件字节完全不变——测试断言的是
 "不变"而不是"只多一段 torn tail"。跑 N2 用 `cargo test -p radian-session --features testing
 --test replace`；默认 `cargo test --workspace` 不含该用例（接缝只在 `testing` feature 下编译）。
+
+## compact-core：写者闸门（ADR 0018 §A）
+
+Base: `b20cc3b` · 一次性检出 `/tmp/ccore-mutA`（detached，跑完删除）· `--no-fail-fast`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| G1 | `append_runtime_event` 不等待段关闭（去掉闸门） | `gate::a_runtime_event_waits_for_the_replacement_segment_to_close`、`gate::a_failed_segment_write_fails_the_waiter_and_the_file_still_resumes` | ✅ failed |
+
+1/1 抓住。两个测试都用 `testing` 接缝 `wait_for_gate_waiter()` 同步（外加 5 秒 watchdog 超时，
+超时只是安全网）；去掉闸门后等待者不再注册，超时触发，测试失败而不是挂起。
