@@ -110,3 +110,19 @@ Notes:
 
 「先建会话再检查」的 CLI 实例。工作区错误在 `setup` 里已经验证，所以用探测失败（sandbox 在
 `chat`）更能直接观察「检查失败仍留下文件」。
+
+## --export / --search（2026-10-13）
+
+一次性检出 `/tmp/clisess-mut`（`git worktree add --detach HEAD`，HEAD = `4d973d4`），每个变异用
+`git checkout --` 恢复、`git status --short` 为空；`cargo test -p agent-cli --no-fail-fast
+<精确测试名>`。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M10 | 导出不把本进程的 key/`--header` 值传给 `with_secret` | ✅ failed | `export_redacts_the_key_and_header_values`（`the header leaked: ...`） |
+| M11 | 默认打开推理（`include_reasoning(true)` 写死） | ✅ failed | `export_omits_reasoning_and_provider_payload_by_default`（默认导出含 `SECRET-REASONING`） |
+| M12 | `--export` 不按工作区过滤 | ✅ failed | `export_refuses_another_workspaces_session`（退出 0 而不是 2） |
+| M13 | `--out` 已存在时直接覆盖（去掉 `--force` 检查） | ✅ failed | `export_out_refuses_to_overwrite_without_force`（第二次退出 0） |
+
+4/4 抓住，无漏网、无等价变异。M10 的 key 断言由 `sk-` 模式兜底，所以真正抓变异的是 header 值那一条
+（header 值没有内置模式，只有 `with_secret` 会把它换掉）。
