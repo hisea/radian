@@ -144,3 +144,19 @@ Base `f552250` · one-shot worktree `/tmp/small-mut` · `--no-fail-fast`；变�
 | M11 | `budget_text` 的分母写成投影 `T` 而不是 `B` | ✅ failed | `the_status_bar_shows_the_projection_over_the_input_budget`、`a_request_started_event_sets_the_status_bar_report` |
 
 「`c` 继续只放宽一次请求」的旧变异 M4 随 `BudgetRelax` 与继续提示一起删除（ADR 0018）。
+
+## ADR 0021 M1 第四片：slash 命令框架（2026-10-13）
+
+Base `4bf767d` · 一次性 worktree `/tmp/memtui-mut`（从 HEAD 建，做完删掉）· **独立
+`CARGO_TARGET_DIR`** · 每个变异跑 `cargo test -p radian-tui --lib`、`cargo test -p radian-tui
+--test command`、`cargo test -p radian-host memory`、`cargo test -p agent-cli --test cli memory_`
+（都 `--no-fail-fast`），然后 `git checkout -- .`；`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M1 | 去掉 `/` 拦截（`/` 开头的行发给模型） | `tests/command.rs::{help_and_unbalanced_quotes_are_notices_and_send_nothing, a_memory_read_runs_inline_and_is_never_sent, a_confirmed_forget_waits_for_y_and_n_keeps_the_record, a_pending_confirmation_keeps_keys_out_of_the_input_box}` | ✅ |
+| M2 | 去掉 `//` 转义（`//hi` 当命令） | `tests/command.rs::a_double_slash_sends_the_message_with_one_slash` | ✅ |
+| M3 | 确认被跳过（Confirm 直接执行） | `tests/command.rs::{a_confirmed_forget_waits_for_y_and_n_keeps_the_record, a_pending_confirmation_keeps_keys_out_of_the_input_box}` | ✅ |
+| M5 | 未知命令发给模型（只拦 `/help`、`/memory`） | `tests/command.rs::help_and_unbalanced_quotes_are_notices_and_send_nothing` | ✅ |
+
+4/4 全抓。M4（`confirmed=false` 仍执行写操作）在 `radian-host/MUTATIONS.md`。

@@ -4983,3 +4983,152 @@ async fn memory_split_and_merge_move_records_between_projects() {
     let (_, out, _) = env.run_in(&a, &["list"]).await;
     assert!(out.contains("moved record"), "{out}");
 }
+
+// ---------- memory injection and the agent memory tools (ADR 0021 D5/D6) ----------
+
+/// The injected block reaches the system prompt sent to the provider.
+#[tokio::test]
+async fn memory_injection_reaches_the_system_prompt() {
+    let env = MemoryEnv::new("mem-inject");
+    let (code, _, stderr) = env.run(&["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let (code, _, stderr) = env
+        .run(&["add", "--key", "style", "tabs over spaces"])
+        .await;
+    assert_eq!(code, 0, "{stderr}");
+
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                env.ws.to_str().unwrap(),
+                "--session-id",
+                "injected",
+                "-p",
+                "hi",
+            ],
+            &[
+                ("RADIAN_HOME", env.home.to_str().unwrap()),
+                ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
+            ],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let system = messages_of(&server, 0)[0]["content"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(system.contains("tabs over spaces"), "{system}");
+    assert!(
+        system.contains("not instructions"),
+        "the low-trust note is present: {system}"
+    );
+    // The injected set is recorded (id/revision/scope), but its content is not in the file.
+    let raw = std::fs::read_to_string(env.sessions.join("injected.jsonl")).unwrap();
+    assert!(raw.contains("MemoryInjected"), "{raw}");
+    assert!(
+        !raw.contains("tabs over spaces"),
+        "injected content leaked into the session: {raw}"
+    );
+}
+
+/// `--yes` allows `memory_save`, and the decision is written to the session audit.
+#[tokio::test]
+async fn memory_save_with_yes_is_allowed_and_audited() {
+    let env = MemoryEnv::new("mem-save-yes");
+    let (code, _, stderr) = env.run(&["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "memory_save", r#"{"content":"agent note"}"#),
+        text_reply("remembered"),
+    ])
+    .await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                env.ws.to_str().unwrap(),
+                "--session-id",
+                "audited",
+                "--yes",
+                "-p",
+                "remember this",
+            ],
+            &[
+                ("RADIAN_HOME", env.home.to_str().unwrap()),
+                ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
+            ],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+
+    // The record was saved as an agent record.
+    let (code, stdout, stderr) = env.run(&["list", "--json"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let value: Value = serde_json::from_str(stdout.trim()).expect("list --json");
+    let record = &value.as_array().unwrap()[0];
+    assert_eq!(record["content"], "agent note");
+    assert_eq!(record["source"], "agent");
+    assert_eq!(record["verification"], "unverified");
+
+    // The permission decision is in the session file.
+    let raw = std::fs::read_to_string(env.sessions.join("audited.jsonl")).unwrap();
+    assert!(raw.contains("PermissionResolved"), "{raw}");
+    assert!(raw.contains("\"call_id\":\"call_1\""), "{raw}");
+    assert!(raw.contains("\"decision\":\"allow\""), "{raw}");
+}
+
+/// Without `--yes` there is no terminal to ask in, so the save is denied and nothing is
+/// written.
+#[tokio::test]
+async fn memory_save_without_yes_is_denied() {
+    let env = MemoryEnv::new("mem-save-ask");
+    let (code, _, stderr) = env.run(&["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "memory_save", r#"{"content":"agent note"}"#),
+        text_reply("done"),
+    ])
+    .await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                env.ws.to_str().unwrap(),
+                "-p",
+                "remember this",
+            ],
+            &[("RADIAN_HOME", env.home.to_str().unwrap())],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+
+    let (code, stdout, stderr) = env.run(&["list", "--json"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let value: Value = serde_json::from_str(stdout.trim()).expect("list --json");
+    assert!(
+        value.as_array().unwrap().is_empty(),
+        "a denied save wrote nothing: {value}"
+    );
+}

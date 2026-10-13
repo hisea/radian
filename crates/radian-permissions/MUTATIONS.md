@@ -17,3 +17,12 @@
 
 结论：9 个变异全部被抓住，没有等价变异或测试漏洞。PM8 的失败是测试里的看门狗超时（2s）而不是挂死；
 PM9 在第一次跑时输出为空（变异脚本本身写坏导致编译失败），改成一个合法变异后复现了失败。
+
+## ADR 0021 M1 第三片：记忆工具的权限（2026-10-13）
+
+Base `2d01d9b` · 一次性 worktree `/tmp/memsvcb-mut` · 独立 `CARGO_TARGET_DIR` ·
+`cargo test -p radian-permissions`，变异后 `git checkout --` 还原。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M9 | `memory_revise` 规则 `Ask` → `Allow` | ✅ 抓住 | `profile::tests::the_memory_tools_read_allowed_and_write_asked_in_every_tier` |

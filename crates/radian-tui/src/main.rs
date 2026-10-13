@@ -16,6 +16,7 @@ use agent_core::{
 use agent_extensions::McpToolProvider;
 use clap::Parser;
 use radian_coding::CodingTools;
+use radian_host::memory::{InjectionConfig, MemoryHooks, MemoryService, MemoryTools, ProjectState};
 use radian_host::{
     DEFAULT_MAX_TOKENS, HostTools, ModelArgs, Provider, Thinking, build_model,
     check_provider_flags, load_mcp_config, parse_headers, validate_session_id,
@@ -315,9 +316,10 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
     // the memory directory. Create them owner-only first so Linux's bwrap (which can only mask
     // paths that exist) can hide them.
     let _ = radian_host::ensure_private_dir(&dir);
+    let memory_root = radian_host::memory_dir();
     let mut sandbox_deny_read = vec![dir.clone()];
-    if let Some(memory) = radian_host::memory_dir() {
-        sandbox_deny_read.push(memory);
+    if let Some(memory) = &memory_root {
+        sandbox_deny_read.push(memory.clone());
     }
     let sandbox = radian_tui::profile::build_sandbox(tier, &workspace_path, &sandbox_deny_read)?;
     // The description is taken before the sandbox moves into the tools.
@@ -331,6 +333,30 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
     let mcp = McpToolProvider::new(servers);
     let mcp_configured = mcp.configured();
     let coding = build_coding_tools(cli.workspace.as_deref(), sandbox)?;
+    // ADR 0021: the same service `agent memory` uses, plus the agent tools and the injection
+    // hook. `None` only when neither `RADIAN_HOME` nor `HOME` is set.
+    let injection_config = InjectionConfig::default();
+    let memory_service = memory_root
+        .as_ref()
+        .map(|root| MemoryService::open(&workspace_path, root));
+    let memory_tools = memory_service
+        .as_ref()
+        .map(|service| MemoryTools::new(service.clone()));
+    let memory_notice = match &memory_service {
+        Some(service) => match service.state() {
+            Ok(ProjectState::Known(project)) => format!(
+                "[memory] project {project}; injection on, up to {} tokens",
+                injection_config.max_tokens
+            ),
+            Ok(ProjectState::Unlinked { .. }) => format!(
+                "[memory] no project linked; global memory only (`agent memory project new` or \
+                 `relink`); injection on, up to {} tokens",
+                injection_config.max_tokens
+            ),
+            Err(error) => format!("[memory] unavailable: {error}"),
+        },
+        None => "[memory] disabled (no RADIAN_HOME or HOME)".to_owned(),
+    };
     let approval = match cli.approval.as_str() {
         "on-ask" => radian_permissions::ApprovalPolicy::OnAsk,
         "always" => radian_permissions::ApprovalPolicy::Always,
@@ -434,10 +460,18 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
             runtime: runtime.handle().clone(),
         }),
     ));
+    // ADR 0021 D6: injection is the second hook in the chain; a memory failure is a notice,
+    // never a failed turn.
+    let memory_hooks = Arc::new(MemoryHooks::new(
+        memory_service.clone(),
+        Arc::clone(&journal),
+        injection_config,
+        Arc::new(|message: &str| eprintln!("radian-tui: [memory] {message}")),
+    ));
     let agent = Arc::new(
-        Agent::new(model, HostTools::new(coding, mcp.clone()))
+        Agent::new(model, HostTools::new(coding, memory_tools, mcp.clone()))
             .with_config(agent_config)
-            .with_hooks(Arc::clone(&hooks)),
+            .with_hooks((Arc::clone(&hooks), Arc::clone(&memory_hooks))),
     );
 
     // MCP server **processes** start here, when the tool session opens. The session file
@@ -540,6 +574,8 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
     app.set_context_window(window.budget);
     app.set_tier(tier.as_str());
     app.set_mcp(mcp_configured, mcp_open);
+    // `/memory` runs against the same service the agent's tools and injection use.
+    app.set_memory(memory_service.clone());
     for message in &history {
         app.push_message(message);
     }
@@ -556,6 +592,11 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
     app.entries.push(radian_tui::Entry::new(
         radian_tui::EntryKind::Notice,
         format!("context: {}", window.describe()),
+    ));
+    // ADR 0021 D2/D6: the project state and the injection budget.
+    app.entries.push(radian_tui::Entry::new(
+        radian_tui::EntryKind::Notice,
+        memory_notice,
     ));
     if cli.yes {
         app.entries.push(radian_tui::Entry::new(

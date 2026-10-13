@@ -44,7 +44,8 @@ pub use index::{
 };
 pub use reader::{EventData, Session, SessionEvent, UncommittedReplacement};
 pub use runtime::{
-    InboxLane, PermissionApprover, PermissionDecision, RuntimeEvent, TurnOutcome, TurnReason,
+    InboxLane, MemoryInjectedRecord, PermissionApprover, PermissionDecision, RuntimeEvent,
+    TurnOutcome, TurnReason,
 };
 pub use writer::{SessionCreatedData, SessionJournal, WriteError, now_utc};
 

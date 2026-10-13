@@ -195,6 +195,15 @@ pub fn export_markdown(session: &Session, opts: &ExportOptions) -> Result<String
                 out.push_str(&render_message(message, opts));
                 out.push('\n');
             }
+            // ADR 0021 D6: the injected set is audit, not transcript. The Markdown export
+            // shows only its size; the ids/revisions/scopes are in the JSON export.
+            EventData::MemoryInjected { records } => {
+                out.push_str(&format!(
+                    "- memory injected: {} record(s) (seq {})\n",
+                    records.len(),
+                    event.seq
+                ));
+            }
             _ => {}
         }
     }
@@ -375,6 +384,7 @@ fn event_data_value(
             "approver": approver,
             "reason": reason,
         }),
+        EventData::MemoryInjected { records } => json!({"records": records}),
         EventData::Other(value) => value.clone(),
     };
     Ok(value)

@@ -4,8 +4,11 @@
 use agent_core::{
     AgentEvent, BudgetReport, ContentPart, Message, ModelUsage, RunStatus, UsageSource,
 };
+use radian_host::memory::MemoryService;
 use radian_permissions::{ApprovalOutcome, ApprovalRequest};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+use crate::command::{self, PendingCommand};
 
 /// A tool call waiting for the human. `reply` is the channel the permission layer awaits; the
 /// answer is sent by the UI thread, so the waiting future never blocks it.
@@ -184,6 +187,11 @@ pub struct App {
     pub note: Option<String>,
     /// Set while a tool call waits for the human; keys answer it instead of typing.
     pub pending_approval: Option<ApprovalPrompt>,
+    /// Set while a `/memory` write waits for the user's `y`; keys answer it instead of typing.
+    pub pending_command: Option<PendingCommand>,
+    /// The host's memory service, or `None` when this process has no memory root. `/memory`
+    /// runs against the same service the agent's own tools use.
+    pub memory: Option<MemoryService>,
     /// The effective input budget `B`, if any; `None` means no budget is configured.
     pub context_window: Option<u64>,
     /// The most recent budget report, for the status bar.
@@ -216,6 +224,8 @@ impl App {
             quit: false,
             note: None,
             pending_approval: None,
+            pending_command: None,
+            memory: None,
             context_window: None,
             budget_report: None,
             tier: None,
@@ -237,6 +247,11 @@ impl App {
     /// Records the permission tier's display name, for the status bar.
     pub fn set_tier(&mut self, tier: impl Into<String>) {
         self.tier = Some(tier.into());
+    }
+
+    /// The host's memory service, for `/memory`. Set once at startup.
+    pub fn set_memory(&mut self, memory: Option<MemoryService>) {
+        self.memory = memory;
     }
 
     /// Records the MCP state: how many servers are configured, and what the opened session
@@ -333,6 +348,17 @@ impl App {
             }
             return None;
         }
+        // A `/memory` write waiting for `y`: keys answer it and never type into the input box.
+        if let Some(pending) = self.pending_command.take() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => self.run_confirmed(pending),
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.push_notice("cancelled");
+                }
+                _ => self.pending_command = Some(pending),
+            }
+            return None;
+        }
         match key.code {
             KeyCode::Char('c') if ctrl => {
                 if self.turn == TurnState::Running {
@@ -355,6 +381,21 @@ impl App {
             KeyCode::Enter => {
                 let text = std::mem::take(&mut self.input);
                 if text.trim().is_empty() {
+                    return None;
+                }
+                let trimmed = text.trim();
+                // `//x` is the escape: send it as the ordinary message `/x`.
+                if let Some(escaped) = trimmed.strip_prefix("//") {
+                    let message = format!("/{escaped}");
+                    return if self.turn == TurnState::Running {
+                        Some(Send::Steer(message))
+                    } else {
+                        Some(Send::Followup(message))
+                    };
+                }
+                // A `/…` line is a command: it never reaches the model or the journal.
+                if trimmed.starts_with('/') {
+                    self.run_slash_command(trimmed);
                     return None;
                 }
                 if self.turn == TurnState::Running {
@@ -405,6 +446,48 @@ impl App {
             }
             _ => None,
         }
+    }
+
+    /// Runs one `/…` line: the notices become transcript entries, and a command that writes
+    /// arms `pending_command` instead of running. The line is not sent anywhere.
+    fn run_slash_command(&mut self, line: &str) {
+        match command::dispatch(line, self.memory.as_ref()) {
+            command::Outcome::Notices(notices) => {
+                for notice in notices {
+                    self.entries.push(Entry::new(EntryKind::Notice, notice));
+                }
+            }
+            command::Outcome::Confirm(pending) => {
+                self.entries.push(Entry::new(
+                    EntryKind::Notice,
+                    format!("{} [y/N]", pending.prompt),
+                ));
+                self.pending_command = Some(pending);
+            }
+            // `dispatch` only returns `Message` for an empty token list, already rejected.
+            command::Outcome::Message => {}
+        }
+    }
+
+    /// Runs a confirmed `/memory` command and shows its output.
+    fn run_confirmed(&mut self, pending: PendingCommand) {
+        let json = pending.command.json();
+        let Some(service) = self.memory.as_ref() else {
+            self.push_notice("memory is disabled (no RADIAN_HOME or HOME)");
+            return;
+        };
+        match radian_host::memory::commands::execute(service, pending.command, true, json) {
+            Ok(output) => {
+                for notice in command::output_notices(&output) {
+                    self.entries.push(Entry::new(EntryKind::Notice, notice));
+                }
+            }
+            Err(error) => self.push_notice(error.message),
+        }
+    }
+
+    fn push_notice(&mut self, text: impl Into<String>) {
+        self.entries.push(Entry::new(EntryKind::Notice, text));
     }
 
     /// Applies a live event. Deltas build `live` entries; the committed message

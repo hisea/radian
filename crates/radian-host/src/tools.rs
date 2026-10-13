@@ -1,8 +1,9 @@
-//! The combined tool provider: the built-in coding tools plus the MCP servers, behind one
-//! `ToolProvider` so `Agent` still has a single provider type.
+//! The combined tool provider: the built-in coding tools, the agent memory tools and the MCP
+//! servers, behind one `ToolProvider` so `Agent` still has a single provider type.
 //!
-//! Built-in names are checked first and may not collide with an MCP tool name; a collision
-//! fails `open_session` rather than silently shadowing one of them.
+//! Built-in names (coding and memory) are checked first and may not collide with each other or
+//! with an MCP tool name; a collision fails `open_session` rather than silently shadowing one
+//! of them.
 
 use std::collections::HashSet;
 
@@ -12,22 +13,35 @@ use agent_core::{
 use agent_extensions::{McpSession, McpToolProvider};
 use radian_coding::{CodingSession, CodingTools};
 
+use crate::memory::{MemorySession, MemoryTools};
+
 pub struct HostTools {
     coding: Option<CodingTools>,
+    memory: Option<MemoryTools>,
     mcp: McpToolProvider,
 }
 
 impl HostTools {
-    pub fn new(coding: Option<CodingTools>, mcp: McpToolProvider) -> Self {
-        Self { coding, mcp }
+    pub fn new(
+        coding: Option<CodingTools>,
+        memory: Option<MemoryTools>,
+        mcp: McpToolProvider,
+    ) -> Self {
+        Self {
+            coding,
+            memory,
+            mcp,
+        }
     }
 }
 
 pub struct HostSession {
     coding: Option<CodingSession>,
+    memory: Option<MemorySession>,
     mcp: McpSession,
     specs: Vec<ToolSpec>,
-    built_in: HashSet<String>,
+    coding_names: HashSet<String>,
+    memory_names: HashSet<String>,
 }
 
 impl ToolProvider for HostTools {
@@ -40,12 +54,23 @@ impl ToolProvider for HostTools {
             Some(coding) => Some(coding.open_session().await?),
             None => None,
         };
+        let memory = match &self.memory {
+            Some(memory) => Some(memory.open_session().await?),
+            None => None,
+        };
 
-        let mut built_in = HashSet::new();
+        let mut coding_names = HashSet::new();
+        let mut memory_names = HashSet::new();
         let mut built_in_specs: Vec<ToolSpec> = Vec::new();
         if let Some(coding) = &coding {
             for spec in coding.tool_specs() {
-                built_in.insert(spec.name.clone());
+                coding_names.insert(spec.name.clone());
+                built_in_specs.push(spec.clone());
+            }
+        }
+        if let Some(memory) = &memory {
+            for spec in memory.tool_specs() {
+                memory_names.insert(spec.name.clone());
                 built_in_specs.push(spec.clone());
             }
         }
@@ -53,9 +78,11 @@ impl ToolProvider for HostTools {
 
         Ok(HostSession {
             coding,
+            memory,
             mcp,
             specs,
-            built_in,
+            coding_names,
+            memory_names,
         })
     }
 }
@@ -70,7 +97,15 @@ impl ToolSession for HostSession {
         call: &ToolCall,
         cx: ToolContext<'_>,
     ) -> Result<ToolOutput, ToolFailure> {
-        if self.built_in.contains(&call.name) {
+        if self.memory_names.contains(&call.name) {
+            match &self.memory {
+                Some(memory) => memory.execute(call, cx).await,
+                None => Err(ToolFailure::new(
+                    "unknown_tool",
+                    format!("`{}` has no memory session", call.name),
+                )),
+            }
+        } else if self.coding_names.contains(&call.name) {
             match &self.coding {
                 Some(coding) => coding.execute(call, cx).await,
                 None => Err(ToolFailure::new(
@@ -88,7 +123,8 @@ impl ToolSession for HostSession {
     }
 }
 
-/// Merges the built-in specs with the MCP specs, refusing a name that both define.
+/// Merges the built-in specs (coding then memory) with the MCP specs, refusing a name that is
+/// defined twice — including two built-ins.
 ///
 /// Split out and public so the rule is testable on its own: with the current alias scheme
 /// (`server__tool`) a real MCP server cannot produce a built-in name, so a silent override
@@ -97,7 +133,16 @@ pub fn merge_tool_specs(
     built_in: Vec<ToolSpec>,
     mcp: Vec<ToolSpec>,
 ) -> Result<Vec<ToolSpec>, ToolError> {
-    let mut specs = built_in;
+    let mut specs: Vec<ToolSpec> = Vec::with_capacity(built_in.len() + mcp.len());
+    for spec in built_in {
+        if specs.iter().any(|existing| existing.name == spec.name) {
+            return Err(ToolError(format!(
+                "duplicate built-in tool name `{}`: two built-in providers define it",
+                spec.name
+            )));
+        }
+        specs.push(spec);
+    }
     for spec in mcp {
         if specs.iter().any(|existing| existing.name == spec.name) {
             return Err(ToolError(format!(
@@ -133,6 +178,12 @@ mod tests {
             "{}",
             error.0
         );
+    }
+
+    #[test]
+    fn two_built_in_providers_cannot_define_the_same_name() {
+        let error = merge_tool_specs(vec![spec("read"), spec("read")], vec![]).unwrap_err();
+        assert!(error.0.contains("two built-in providers"), "{}", error.0);
     }
 
     #[test]

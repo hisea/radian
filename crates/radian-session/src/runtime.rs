@@ -86,6 +86,18 @@ pub enum PermissionApprover {
     Unknown,
 }
 
+/// One record that was injected before a model request (ADR 0021 D6). It carries **only** the
+/// id, revision and scope — never the content (D6: the event cannot rebuild an old request).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemoryInjectedRecord {
+    pub id: String,
+    pub revision: u64,
+    /// The scope as the tagged value of ADR 0021 D1 (`"global"` or `{"project": "<id>"}`).
+    /// `radian-session` does not depend on the memory crate, so it stays a [`Value`] here;
+    /// a future scope shape round-trips without a new event version.
+    pub scope: Value,
+}
+
 /// One durable fact the runtime owns. `#[non_exhaustive]`: `ContextCompacted`, `Rewound`,
 /// `SessionForked` and `PermissionResolved` will be added when their producers exist.
 #[derive(Debug, Clone, PartialEq)]
@@ -153,6 +165,11 @@ pub enum RuntimeEvent {
         approver: PermissionApprover,
         reason: Option<String>,
     },
+    /// The memory set injected before a model request (ADR 0021 D6). Audit only:
+    /// `critical = false`. The records are an ordered list of `{ id, revision, scope }` and
+    /// carry no content; a reader uses them to see *which* records were injected, not to
+    /// rebuild the request.
+    MemoryInjected { records: Vec<MemoryInjectedRecord> },
 }
 
 impl RuntimeEvent {
@@ -168,6 +185,7 @@ impl RuntimeEvent {
             RuntimeEvent::ConfigChanged { .. } => "ConfigChanged",
             RuntimeEvent::ContextBudgetReached { .. } => "ContextBudgetReached",
             RuntimeEvent::PermissionResolved { .. } => "PermissionResolved",
+            RuntimeEvent::MemoryInjected { .. } => "MemoryInjected",
         }
     }
 
@@ -183,7 +201,8 @@ impl RuntimeEvent {
             | RuntimeEvent::ConfigChanged { .. } => true,
             RuntimeEvent::TurnFailed { .. }
             | RuntimeEvent::ContextBudgetReached { .. }
-            | RuntimeEvent::PermissionResolved { .. } => false,
+            | RuntimeEvent::PermissionResolved { .. }
+            | RuntimeEvent::MemoryInjected { .. } => false,
         }
     }
 
@@ -277,6 +296,11 @@ pub(crate) struct PermissionResolvedData<'a> {
     pub reason: Option<&'a str>,
 }
 
+#[derive(Serialize)]
+pub(crate) struct MemoryInjectedData<'a> {
+    pub records: &'a [MemoryInjectedRecord],
+}
+
 /// The `data` view of one runtime event. A manual enum (like the transcript writer's
 /// `Render`) keeps the field order of the ADR and avoids an externally tagged wrapper.
 pub(crate) enum RuntimeData<'a> {
@@ -289,6 +313,7 @@ pub(crate) enum RuntimeData<'a> {
     ConfigChanged(ConfigChangedData<'a>),
     ContextBudgetReached(ContextBudgetReachedData<'a>),
     PermissionResolved(PermissionResolvedData<'a>),
+    MemoryInjected(MemoryInjectedData<'a>),
 }
 
 impl Serialize for RuntimeData<'_> {
@@ -303,6 +328,7 @@ impl Serialize for RuntimeData<'_> {
             RuntimeData::ConfigChanged(d) => d.serialize(serializer),
             RuntimeData::ContextBudgetReached(d) => d.serialize(serializer),
             RuntimeData::PermissionResolved(d) => d.serialize(serializer),
+            RuntimeData::MemoryInjected(d) => d.serialize(serializer),
         }
     }
 }
@@ -387,5 +413,8 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
             approver: *approver,
             reason: reason.as_deref(),
         }),
+        RuntimeEvent::MemoryInjected { records } => {
+            RuntimeData::MemoryInjected(MemoryInjectedData { records })
+        }
     }
 }
