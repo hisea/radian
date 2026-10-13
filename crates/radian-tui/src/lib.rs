@@ -20,6 +20,7 @@ pub mod terminal;
 pub mod theme;
 
 pub use app::{
-    App, Effect, Entry, EntryKind, Input, MemoryResult, PickerData, TurnState, UpdateResult,
+    App, Effect, Entry, EntryKind, Input, MemoryResult, MouseScrollDirection, PickerData, Startup,
+    TurnState, UpdateResult,
 };
 pub use composer::Composer;

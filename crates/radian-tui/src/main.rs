@@ -314,32 +314,6 @@ fn run(
     {
         eprintln!("{hint}");
     }
-    // Phase 4: choose a session before the session id (and any header that expands it) is
-    // resolved, and before any session file exists. A `Resume` becomes the ordinary
-    // `--resume`; `Quit` exits with nothing created.
-    let mut pick_notice = false;
-    if cli.pick {
-        let workspace = radian_host::resolve_workspace(cli.workspace.as_deref())?
-            .to_string_lossy()
-            .into_owned();
-        match pick_session(&dir, &workspace)? {
-            // No sessions yet: go straight to a new one, with a notice (a list of nothing is
-            // not worth a full-screen flash).
-            None => pick_notice = true,
-            Some(radian_tui::picker::Outcome::Quit) => return Ok(None),
-            Some(radian_tui::picker::Outcome::New) => {}
-            Some(radian_tui::picker::Outcome::Resume(id)) => cli.resume = Some(id),
-        }
-    }
-    // The session id is resolved before the headers: a `{session_id}` in a header expands to
-    // this process's id, and `--resume` uses the id being resumed. The parser is the same one
-    // `agent-cli` uses, so `{session_id}`, name validation and the `authorization` refusal
-    // behave identically in both hosts.
-    let session_id = match (&cli.resume, &cli.session_id) {
-        (Some(id), _) | (None, Some(id)) => id.clone(),
-        (None, None) => radian_host::generate_session_id(),
-    };
-    validate_session_id(&session_id)?;
     // ADR 0008: the config file provides defaults; every CLI flag wins. A refused file fails
     // startup before any session file exists.
     let config =
@@ -397,6 +371,114 @@ fn run(
         .map(|(name, value)| format!("{name}={value}"))
         .collect();
     header_args.extend(cli.header.iter().cloned());
+    let workspace_path = radian_host::resolve_workspace(cli.workspace.as_deref())?;
+    let catalog_base_url = base_url.clone();
+    // The window comes from `--context-window` or the models.dev catalog (ADR 0018). A fetch
+    // failure is not a startup failure: the window is then unknown and the budget stays off.
+    // Still before the session file exists. `R` comes from the request's own output setting:
+    // Anthropic sends `max_tokens`, OpenAI-compatible sends none.
+    let request_max_output = match provider {
+        Provider::Anthropic => Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
+        Provider::OpenAiCompatible => None,
+    };
+    let window = runtime.block_on(radian_host::resolve(&radian_host::WindowQuery::production(
+        cli.context_window.or(config.model.context_window),
+        cli.catalog_provider.clone(),
+        &catalog_base_url,
+        model_name.clone(),
+        request_max_output,
+        cli.offline_catalog,
+    )));
+    // ADR 0018: `C ≤ R` refuses an explicit `--context-window` and only warns for a catalog
+    // window (the budget is then off).
+    match window.startup_check() {
+        radian_host::WindowCheck::Ok => {}
+        radian_host::WindowCheck::Refuse(message) => return Err(message),
+        radian_host::WindowCheck::Warn(message) => eprintln!("{message}"),
+    }
+    if let Some(warning) = radian_host::output_ceiling_warning(request_max_output, window.output) {
+        eprintln!("{warning}");
+    }
+
+    // `--pick`: load the picker's rows **before** the terminal is entered. `open_index` can
+    // warn about a wide session directory, and that warning must be on the normal screen.
+    // The picker owns its data; the phase itself runs after the terminal (ADR 0023 U4).
+    let startup_picker = if cli.pick {
+        let workspace = workspace_path.to_string_lossy().into_owned();
+        prepare_picker(&dir, &workspace)?
+    } else {
+        None
+    };
+    let pick_notice = cli.pick && startup_picker.is_none();
+
+    // ADR 0020 decision 3 / ADR 0013: create the session directory owner-only, or warn once
+    // if it already exists and is group/world-readable. Done **before** the alternate screen
+    // is entered: a raw `eprintln!` inside it writes cells the renderer's diff then skips.
+    let _ = radian_host::ensure_private_dir(&dir);
+    // ADR 0008: the `[config]` line and its warnings are startup diagnostics and belong on
+    // the normal screen, **before** the alternate screen is entered. Printed inside it, a
+    // stray `eprintln!` writes cells the renderer's diff then skips (both buffers see a
+    // space), so the raw text stays on screen and corrupts the first row.
+    // The session id is not known yet when `--pick` runs (the picker chooses it), so the app
+    // starts with an empty one and `run` sets the real id after the choice.
+    let mut app = App::new(model_name.clone(), String::new());
+    // `Tab` (the `complete` action) completes `@` file references against the workspace.
+    app.set_workspace(workspace_path.clone());
+    let config_warnings = app
+        .apply_config(&config, radian_tui::theme::Theme::no_color_env())
+        .map_err(|error| format!("config: {error}"))?;
+    match &config.source {
+        Some(path) => eprintln!("[config] {}", path.display()),
+        None => eprintln!("[config] none"),
+    }
+    for warning in &config_warnings {
+        eprintln!("[config] {warning}");
+    }
+
+    // The terminal is entered here **only** for `--pick`: the picker needs it before the
+    // session exists. A plain run enters it later, after every fallible startup check and the
+    // session itself, so a refusal leaves no alternate screen behind (dogfooding D2).
+    let mouse = config.tui.mouse.unwrap_or(true);
+    let mut startup_terminal = None;
+    if startup_picker.is_some() {
+        startup_terminal = Some(enter_terminal(mouse)?);
+        spawn_input_thread(tx.clone());
+    }
+    // ADR 0023 U4 / plan B: `--pick` is the session picker **overlay**, not a separate
+    // terminal loop. The process enters the terminal once; the loop runs a pre-session phase
+    // (the picker only) until the user chooses, then the ordinary session phase takes over in
+    // the same terminal. No session file, journal, driver or MCP connection exists until the
+    // choice is made (the session id and any `{session_id}` header are resolved after it).
+    if let Some(picker) = startup_picker {
+        let (guard, terminal) = startup_terminal
+            .as_mut()
+            .expect("the terminal was entered for the picker");
+        app.start_picking(picker);
+        ui_loop(terminal, &mut app, &rx, &tx, Phase::Picking)?;
+        app.finish_picking();
+        match app.take_picker_outcome() {
+            Some(radian_tui::picker::Outcome::Resume(id)) => cli.resume = Some(id),
+            Some(radian_tui::picker::Outcome::New) => {}
+            // `Quit`, Ctrl-C, a signal, or the terminal going away before any session:
+            // nothing was created, so leave through the ordinary clean-exit path.
+            _ => {
+                radian_tui::signals::confirm_exit();
+                guard.restore();
+                return Ok(None);
+            }
+        }
+    }
+
+    // The session id is resolved before the headers: a `{session_id}` in a header expands to
+    // this process's id, and `--resume` uses the id being resumed. The parser is the same one
+    // `agent-cli` uses, so `{session_id}`, name validation and the `authorization` refusal
+    // behave identically in both hosts.
+    let session_id = match (&cli.resume, &cli.session_id) {
+        (Some(id), _) | (None, Some(id)) => id.clone(),
+        (None, None) => radian_host::generate_session_id(),
+    };
+    validate_session_id(&session_id)?;
+    app.session_id = session_id.clone();
     let headers = parse_headers(&header_args, &session_id)?;
     // Header values and the key must not reach the panic log (dogfooding D4).
     let mut secrets: Vec<String> = headers.iter().map(|(_, value)| value.clone()).collect();
@@ -407,8 +489,6 @@ fn run(
     // D1/D2: every check that can fail runs **before** the session file is created. The
     // workspace is validated first, so a typo is a workspace error and never reaches the
     // sandbox probe (dogfooding D1). `radian-host` owns the rule so both hosts share it.
-    let workspace_path = radian_host::resolve_workspace(cli.workspace.as_deref())?;
-    let catalog_base_url = base_url.clone();
     let model = build_model(ModelArgs {
         provider,
         base_url,
@@ -425,9 +505,8 @@ fn run(
     // the session file exists, so a refusal leaves nothing behind (dogfooding D2).
     let tier = radian_tui::profile::parse_tier(&profile_name)?;
     // ADR 0020 decision 3: the sandbox denies read on the **actual** sessions directory and
-    // the memory directory. Create them owner-only first so Linux's bwrap (which can only mask
-    // paths that exist) can hide them.
-    let _ = radian_host::ensure_private_dir(&dir);
+    // the memory directory. The directory was created owner-only before the terminal was
+    // entered (`ensure_private_dir` above); Linux's bwrap can only mask paths that exist.
     let memory_root = radian_host::memory_dir();
     let mut sandbox_deny_read = vec![dir.clone()];
     if let Some(memory) = &memory_root {
@@ -456,33 +535,6 @@ fn run(
         radian_tui::profile::build_profile(tier, &workspace_path, &cli.allow_shell_command)?
             .with_approval(approval);
 
-    // The window comes from `--context-window` or the models.dev catalog (ADR 0018). A fetch
-    // failure is not a startup failure: the window is then unknown and the budget stays off.
-    // Still before the session file exists. `R` comes from the request's own output setting:
-    // Anthropic sends `max_tokens`, OpenAI-compatible sends none.
-    let request_max_output = match provider {
-        Provider::Anthropic => Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
-        Provider::OpenAiCompatible => None,
-    };
-    let window = runtime.block_on(radian_host::resolve(&radian_host::WindowQuery::production(
-        cli.context_window.or(config.model.context_window),
-        cli.catalog_provider.clone(),
-        &catalog_base_url,
-        model_name.clone(),
-        request_max_output,
-        cli.offline_catalog,
-    )));
-    // ADR 0018: `C ≤ R` refuses an explicit `--context-window` and only warns for a catalog
-    // window (the budget is then off).
-    match window.startup_check() {
-        radian_host::WindowCheck::Ok => {}
-        radian_host::WindowCheck::Refuse(message) => return Err(message),
-        radian_host::WindowCheck::Warn(message) => eprintln!("{message}"),
-    }
-    if let Some(warning) = radian_host::output_ceiling_warning(request_max_output, window.output) {
-        eprintln!("{warning}");
-    }
-
     // D4: panics after this point get a log in the diagnostics directory (ADR 0013 decision
     // 4), not next to the session: the session is the authoritative record and must not be
     // treated as a cache. Set before the terminal is entered; the hook reads it on a panic.
@@ -497,6 +549,9 @@ fn run(
 
     // The session facts the renderer reads, and the sink that writes them (ADR 0023 U2/U5).
     let projection = Arc::new(radian_host::SessionProjection::new());
+    // The renderer reads the session facts from the host's projection, not a private copy
+    // (ADR 0023 U5). Set here because the app is created before the session exists (`--pick`).
+    app.set_projection(Arc::clone(&projection));
     let live: Arc<dyn EventSink> =
         Arc::new(ProjectionSink::new(tx.clone(), Arc::clone(&projection)));
     // `--yes` swaps the approver for one that answers "allow once" without asking; rules,
@@ -588,6 +643,47 @@ fn run(
             },
         ))
         .map_err(|error| error.to_string())?;
+    // A plain run enters the terminal only now: every fallible check above, and the session
+    // itself, have already run. (`--pick` entered it before the picker and keeps it here.)
+    let (mut guard, mut terminal) = match startup_terminal {
+        Some(pair) => pair,
+        None => {
+            let pair = enter_terminal(mouse)?;
+            spawn_input_thread(tx.clone());
+            pair
+        }
+    };
+    if cli.panic_after_enter {
+        panic!("radian-tui: panic path test");
+    }
+    if let Some(message) = &cli.panic_message {
+        panic!("{message}");
+    }
+    if let Some(secs) = cli.panic_with_child {
+        // Test hook: a child in its own process group is running when the panic happens.
+        // The panic path must leave no orphan behind.
+        let (pid_tx, pid_rx) = tokio::sync::oneshot::channel();
+        runtime.spawn(async move {
+            let mut command = tokio::process::Command::new("sleep");
+            command
+                .arg(secs.to_string())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true);
+            #[cfg(unix)]
+            command.process_group(0);
+            let mut child = command.spawn().expect("spawn the test child");
+            let _ = pid_tx.send(child.id().unwrap_or(0));
+            let _ = child.wait().await;
+        });
+        let pid = runtime
+            .block_on(pid_rx)
+            .map_err(|_| "the test child did not start".to_string())?;
+        std::fs::write(dir.join("child.pid"), pid.to_string())
+            .map_err(|e| format!("child.pid: {e}"))?;
+        panic!("radian-tui: panic path test with a child in flight");
+    }
     let memory_service = session.memory().cloned();
     // The history of a resumed session is rendered before the first frame, so the transcript
     // shows it from the start. `Driver::open` recovers the same history from the journal for
@@ -623,65 +719,6 @@ fn run(
                 }
             }
         });
-    }
-    // The terminal input thread (ADR 0023 U2). It is abandoned when the loop exits: the process
-    // is leaving, and the thread notices the closed channel within one poll.
-    spawn_input_thread(tx.clone());
-    // ADR 0008: the `[config]` line and its warnings are startup diagnostics and belong on
-    // the normal screen, **before** the alternate screen is entered. Printed inside it, a
-    // stray `eprintln!` writes cells the renderer's diff then skips (both buffers see a
-    // space), so the raw text stays on screen and corrupts the first row.
-    let mut app = App::new(model_name.clone(), session_id.clone());
-    // The renderer reads the session facts from the projection the host owns, not a private
-    // copy (ADR 0023 U5).
-    app.set_projection(Arc::clone(&projection));
-    // `Tab` (the `complete` action) completes `@` file references against the workspace.
-    app.set_workspace(workspace_path.clone());
-    let config_warnings = app
-        .apply_config(&config, radian_tui::theme::Theme::no_color_env())
-        .map_err(|error| format!("config: {error}"))?;
-    match &config.source {
-        Some(path) => eprintln!("[config] {}", path.display()),
-        None => eprintln!("[config] none"),
-    }
-    for warning in &config_warnings {
-        eprintln!("[config] {warning}");
-    }
-
-    let mut guard = radian_tui::terminal::TtyGuard::enter(config.tui.mouse.unwrap_or(true))
-        .map_err(|e| format!("terminal: {e}"))?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))
-        .map_err(|e| format!("terminal: {e}"))?;
-    if cli.panic_after_enter {
-        panic!("radian-tui: panic path test");
-    }
-    if let Some(message) = &cli.panic_message {
-        panic!("{message}");
-    }
-    if let Some(secs) = cli.panic_with_child {
-        // Test hook: a child in its own process group is running when the panic happens.
-        // The panic path must leave no orphan behind.
-        let (pid_tx, pid_rx) = tokio::sync::oneshot::channel();
-        runtime.spawn(async move {
-            let mut command = tokio::process::Command::new("sleep");
-            command
-                .arg(secs.to_string())
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .kill_on_drop(true);
-            #[cfg(unix)]
-            command.process_group(0);
-            let mut child = command.spawn().expect("spawn the test child");
-            let _ = pid_tx.send(child.id().unwrap_or(0));
-            let _ = child.wait().await;
-        });
-        let pid = runtime
-            .block_on(pid_rx)
-            .map_err(|_| "the test child did not start".to_string())?;
-        std::fs::write(dir.join("child.pid"), pid.to_string())
-            .map_err(|e| format!("child.pid: {e}"))?;
-        panic!("radian-tui: panic path test with a child in flight");
     }
     // `/memory` runs against the same service the agent's tools and injection use.
     app.set_memory_enabled(session.facts().memory_enabled);
@@ -761,13 +798,15 @@ fn run(
     let outcome = ui_loop(
         &mut terminal,
         &mut app,
-        &workspace_path,
         &rx,
         &tx,
-        runtime,
-        &facade,
-        &session_host,
-        &memory_service,
+        Phase::Session {
+            workspace: &workspace_path,
+            runtime,
+            session: &facade,
+            host: &session_host,
+            memory: &memory_service,
+        },
     );
     // Tell a pending signal task that the loop left on its own, so it does not force-exit.
     radian_tui::signals::confirm_exit();
@@ -1221,26 +1260,86 @@ impl LoopContext<'_> {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Enters the terminal (raw mode + the alternate screen, and mouse reporting when `mouse`):
+/// the guard restores it on every exit path, and the `Terminal` owns the frame buffer. Split
+/// out because `--pick` enters it before the session and a plain run enters it after.
+fn enter_terminal(
+    mouse: bool,
+) -> Result<
+    (
+        radian_tui::terminal::TtyGuard,
+        Terminal<CrosstermBackend<std::io::Stdout>>,
+    ),
+    String,
+> {
+    let guard =
+        radian_tui::terminal::TtyGuard::enter(mouse).map_err(|e| format!("terminal: {e}"))?;
+    let terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))
+        .map_err(|e| format!("terminal: {e}"))?;
+    Ok((guard, terminal))
+}
+
+/// What one [`ui_loop`] run is: the pre-session `--pick` phase (only the picker overlay is
+/// live) or an ordinary session (ADR 0023 U4 / plan B). One loop implementation, one
+/// terminal and one input thread; the phase is the only difference.
+enum Phase<'a> {
+    /// No session yet. Agent/runtime/approval/dirty events have no producer, so only terminal
+    /// input and the two ways to leave are handled.
+    Picking,
+    /// A session is open; the loop runs effects through the facade.
+    Session {
+        workspace: &'a Path,
+        runtime: &'a tokio::runtime::Runtime,
+        session: &'a Arc<dyn radian_host::SessionFacade>,
+        host: &'a SessionHost,
+        memory: &'a Option<MemoryService>,
+    },
+}
+
+/// Handles one event in the pre-session `--pick` phase. Returns whether the frame is dirty.
+fn handle_picking(event: UiEvent, app: &mut App) -> bool {
+    match event {
+        UiEvent::Input(InputEvent::Key(key)) => app.on_key(key).dirty,
+        UiEvent::Input(InputEvent::Paste(text)) => app.update(AppInput::Paste(text)).dirty,
+        UiEvent::Input(InputEvent::Resize { rows, cols }) => {
+            app.update(AppInput::Resize { rows, cols }).dirty
+        }
+        UiEvent::Input(InputEvent::MouseScroll(direction)) => app.mouse_scroll(direction).dirty,
+        UiEvent::Signal(_) | UiEvent::TerminalGone => {
+            // Leave through the ordinary clean-exit path; nothing has been created.
+            app.quit = true;
+            false
+        }
+        // No session exists: these have no producer and are ignored if one somehow arrives.
+        _ => false,
+    }
+}
+
 fn ui_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App,
-    workspace: &Path,
     rx: &Receiver<UiEvent>,
     tx: &Sender<UiEvent>,
-    runtime: &tokio::runtime::Runtime,
-    session: &Arc<dyn radian_host::SessionFacade>,
-    host: &SessionHost,
-    memory: &Option<MemoryService>,
+    phase: Phase<'_>,
 ) -> Result<Option<i32>, String> {
-    let mut ctx = LoopContext {
-        workspace,
-        runtime,
-        session,
-        memory,
-        host,
-        tx,
-        approval_replies: HashMap::new(),
-        signal: None,
+    let mut ctx = match phase {
+        Phase::Picking => None,
+        Phase::Session {
+            workspace,
+            runtime,
+            session,
+            host,
+            memory,
+        } => Some(LoopContext {
+            workspace,
+            runtime,
+            session,
+            memory,
+            host,
+            tx,
+            approval_replies: HashMap::new(),
+            signal: None,
+        }),
     };
     // The first frame: the startup notices and the resumed history are already in the app, and
     // zero-redraw means nothing else would draw one.
@@ -1248,7 +1347,8 @@ fn ui_loop(
         return Ok(None);
     }
     radian_tui::terminal::set_cursor_visible(app.input_editable());
-    while !app.quit {
+    // The pre-session phase ends when the picker resolves; otherwise only `quit` leaves.
+    while !app.quit && !app.picking_resolved() {
         // Block until there is something to do. No display in this build changes with time (the
         // status bar, the notes, the find box and the budget line are static text), so there is
         // no `recv_timeout` here: an idle app is not redrawn at all (ADR 0023 U2). A clock-like
@@ -1260,37 +1360,45 @@ fn ui_loop(
         let mut dirty = false;
         let mut effects: Vec<Effect> = Vec::new();
         let mut facts = 1;
-        dirty |= ctx.handle(first, app, &mut effects);
+        dirty |= match ctx.as_mut() {
+            Some(ctx) => ctx.handle(first, app, &mut effects),
+            None => handle_picking(first, app),
+        };
         // At most `MAX_FACTS_PER_TURN` facts before a frame (draw fairness).
         while facts < MAX_FACTS_PER_TURN {
             match rx.try_recv() {
                 Ok(event) => {
-                    dirty |= ctx.handle(event, app, &mut effects);
+                    dirty |= match ctx.as_mut() {
+                        Some(ctx) => ctx.handle(event, app, &mut effects),
+                        None => handle_picking(event, app),
+                    };
                     facts += 1;
                 }
                 Err(_) => break,
             }
         }
-        // Run the effects. Their results are events, so they are handled by the same code; a
-        // result can ask for one more effect (`@` expansion → send), so this repeats until
-        // nothing is pending.
-        let mut rounds = 0;
-        while !effects.is_empty() {
-            rounds += 1;
-            if rounds > MAX_EFFECT_ROUNDS {
-                return Err("the effect worklist did not settle".into());
-            }
-            let batch = std::mem::take(&mut effects);
-            let produced = batch.len();
-            for effect in batch {
-                ctx.execute(effect)?;
-            }
-            // Each effect produces at most one result event; take that many (plus whatever else
-            // was already queued behind them).
-            for _ in 0..produced {
-                match rx.try_recv() {
-                    Ok(event) => dirty |= ctx.handle(event, app, &mut effects),
-                    Err(_) => break,
+        // Run the effects (session phase only: the picker produces none). Their results are
+        // events, so they are handled by the same code; a result can ask for one more effect
+        // (`@` expansion → send), so this repeats until nothing is pending.
+        if let Some(ctx) = ctx.as_mut() {
+            let mut rounds = 0;
+            while !effects.is_empty() {
+                rounds += 1;
+                if rounds > MAX_EFFECT_ROUNDS {
+                    return Err("the effect worklist did not settle".into());
+                }
+                let batch = std::mem::take(&mut effects);
+                let produced = batch.len();
+                for effect in batch {
+                    ctx.execute(effect)?;
+                }
+                // Each effect produces at most one result event; take that many (plus whatever
+                // else was already queued behind them).
+                for _ in 0..produced {
+                    match rx.try_recv() {
+                        Ok(event) => dirty |= ctx.handle(event, app, &mut effects),
+                        Err(_) => break,
+                    }
                 }
             }
         }
@@ -1304,7 +1412,7 @@ fn ui_loop(
             radian_tui::terminal::set_cursor_visible(app.input_editable());
         }
     }
-    Ok(ctx.signal)
+    Ok(ctx.and_then(|ctx| ctx.signal))
 }
 
 /// The host facts `/sessions` and `/export` need: where sessions live, which workspace this
@@ -1497,10 +1605,10 @@ fn session_workspace(cli: &Cli) -> Result<String, String> {
 /// The Phase 4 startup picker: opens the workspace index, lists the sessions, and (when there
 /// are any) runs the full-screen picker. `Ok(None)` means there are no sessions yet, so the
 /// caller starts a new one with a notice instead of flashing an empty list.
-fn pick_session(
+fn prepare_picker(
     dir: &Path,
     workspace: &str,
-) -> Result<Option<radian_tui::picker::Outcome>, String> {
+) -> Result<Option<radian_tui::picker::Picker>, String> {
     let index = radian_host::sessions::open_index(dir)?;
     let rows = match &index {
         Some(index) => radian_host::sessions::list(index, workspace)?,
@@ -1509,9 +1617,9 @@ fn pick_session(
     if rows.is_empty() {
         return Ok(None);
     }
-    radian_tui::picker::run(rows, index, workspace)
-        .map(Some)
-        .map_err(|e| format!("picker: {e}"))
+    Ok(Some(radian_tui::picker::Picker::new(
+        rows, index, workspace,
+    )))
 }
 
 /// Why the TUI's `--list` stopped. A closed stdout (`radian-tui --list | head`) is a normal

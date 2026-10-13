@@ -4563,3 +4563,83 @@ async fn pty_the_wheel_scrolls_an_open_overlay() {
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
 }
+
+// ---------- the `--pick` overlay (ADR 0023 U4, plan B) ----------
+
+/// `--pick` is the in-process picker overlay: the process enters the alternate screen **once**,
+/// the chosen session's id expands `{session_id}` in a header, and the same terminal then runs
+/// the session. This pins both the single terminal setup and the header ordering.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_pick_resumes_the_selected_id_and_enters_once() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("pick-overlay");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let workspace = std::fs::canonicalize(&ws)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    seed_session(&sessions, "alpha", &workspace, "ALPHA-HISTORY").await;
+    seed_session(&sessions, "beta", &workspace, "BETA-HISTORY").await;
+
+    let server = MockServer::start(vec![text_reply("PICKED")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--pick",
+            "--header",
+            "x-s={session_id}",
+        ],
+        24,
+        100,
+    );
+    // The picker overlay is up (still in the first, pre-session phase of the one loop).
+    assert!(pty.wait_for_screen("filter:", 10), "{}", pty.screen());
+    // Filter to beta and resume it.
+    pty.send(b"beta");
+    assert!(
+        pty.wait_until(5, |screen| !screen.contains("alpha")),
+        "the filter did not narrow the list:\n{}",
+        pty.screen()
+    );
+    pty.send(b"\r");
+    assert!(
+        pty.wait_for_screen("resumed session beta", 10),
+        "the picker did not resume the selection:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("BETA-HISTORY", 5),
+        "the resumed history is not on screen:\n{}",
+        pty.screen()
+    );
+    pty.send(b"go\r");
+    assert!(pty.wait_for_screen("PICKED", 15), "{}", pty.screen());
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(
+        requests[0].header("x-s"),
+        Some("beta"),
+        "the header must expand to the *selected* id, not a generated one"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+    // The alternate screen is entered exactly once for the whole process: the picker and the
+    // session share it.
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    assert_eq!(
+        raw.matches("\u{1b}[?1049h").count(),
+        1,
+        "the alternate screen must be entered once:\n{raw}"
+    );
+}

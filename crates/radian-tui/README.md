@@ -83,8 +83,12 @@ then the stack is walked top-down, the first layer that consumes the key winning
 unconsumed key falling toward the surface (`PageUp` still scrolls while the find box is open).
 The four former `Option` fields are gone (`tests/layers.rs`).
 
-The `--pick` startup screen and the `/sessions` overlay share one `picker::Picker`; the
-overlay opens **unfocused**, so the composer keeps the keys until the user navigates into it
+The `--pick` startup screen and the `/sessions` overlay share one `picker::Picker` and the
+**same** event loop, terminal and input thread: there is no separate picker loop. `--pick`
+runs a pre-session phase of that loop (only the picker overlay is live; no journal, driver or
+MCP connection exists), and the selected id resolves the session and `{session_id}` headers
+before the ordinary session phase takes over in the same terminal. The in-session overlay
+opens **unfocused**, so the composer keeps the keys until the user navigates into it
 (`Up`/`Down` focus it), and typing dismisses it. Selecting does not switch sessions in place
 (ADR 0022): it shows the `--resume <id>` line.
 
@@ -543,11 +547,12 @@ by one is resumable by the other:
 - `--list` prints this workspace's sessions (id, created, last activity, message count) and
   exits without touching the terminal. A closed stdout (`radian-tui --list | head -1`) stops
   quietly with exit 0, never a panic (dogfooding D21).
-- `--pick` shows a full-screen picker of this workspace's sessions **before** the main UI:
-  `Up`/`Down` select, type to filter by id/summary, `Tab` (or `Ctrl-S`) toggles full-text
-  search, `Enter` resumes the selection, `n` starts a new session, `Esc`/`Ctrl-C` quits. It
-  never creates a session file. `--pick` conflicts with `--resume` and `--session-id`. With no
-  sessions it goes straight to a new session and says so.
+- `--pick` opens the session **picker overlay** (the same one `/sessions` uses) in the one
+event loop, before any session exists: `Up`/`Down` select, type to filter by id/summary,
+  `Tab` (or `Ctrl-S`) toggles full-text search, `Enter` resumes the selection, `n` starts a new
+  session, `Esc`/`Ctrl-C` quits. It never creates a session file, and the whole process enters
+  the alternate screen **once** (the picker and the session share it). `--pick` conflicts with
+  `--resume` and `--session-id`. With no sessions it goes straight to a new session and says so.
 
 `--resume`, `--session-id` and `--list` are mutually exclusive pairwise.
 

@@ -464,3 +464,16 @@ Base `0063dae` · 在本任务工作树内逐条施加后从副本还原（`--no
 | M4 | `tui.mouse = false` 仍开上报（`enter` 忽略参数） | `pty_mouse_off_sends_no_reporting_sequence` | ✅ failed |
 
 4/4 抓住。
+
+## mouse（提交 2）：`--pick` 并入 `Overlay::Picker`
+
+Base `4cb83ee` · 在本任务工作树内逐条施加后从副本还原（`--no-fail-fast`）· `git status --short`
+结束后干净。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| P1 | `--pick` 选中后用生成的 id（忽略选中的 id），header 不再按选择展开 | `pty_pick_resumes_the_selected_id_and_enters_once`（header `x-s` 不是 `beta`）、`pty_pick_lists_filters_and_resumes_the_chosen_session`（没有 BETA-HISTORY） | ✅ failed |
+| P2 | `--pick` 选 Quit 后不早退，继续创建会话 | `pty_pick_starts_new_and_escape_leaves_no_session`（Esc 后会话目录多出文件） | ✅ failed |
+
+2/2 抓住。“整个过程只进一次 alternate screen”由 `pty_pick_resumes_the_selected_id_and_enters_once`
+统计 `?1049h == 1` 直接钉住。
