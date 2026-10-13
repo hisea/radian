@@ -12,15 +12,15 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::json;
 
 fn request() -> ApprovalRequest {
-    ApprovalRequest {
-        request_id: "perm-1".into(),
-        call_id: "call-1".into(),
-        tool: "write".into(),
-        resource: "sub/../out.txt".into(),
-        resolved_resource: "/ws/out.txt".into(),
-        arguments: json!({"path": "sub/../out.txt", "content": "hello"}),
-        reason: None,
-    }
+    ApprovalRequest::new(
+        "perm-1",
+        "call-1",
+        "write",
+        "sub/../out.txt",
+        "/ws/out.txt",
+        json!({"path": "sub/../out.txt", "content": "hello"}),
+        None,
+    )
 }
 
 /// Puts a prompt up and returns the channel its answer will arrive on.

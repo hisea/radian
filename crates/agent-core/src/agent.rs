@@ -7,7 +7,7 @@ use crate::event::{AgentEvent, EventSink};
 use crate::hooks::Hooks;
 use crate::journal::{JournalError, JournalRecord, TranscriptJournal};
 use crate::message::Message;
-use crate::model::Model;
+use crate::model::{Model, ModelRequest};
 use crate::outcome::{ResumeState, RunError, RunOutcome, SessionError};
 use crate::preflight::{ToolRegistry, validate_history};
 use crate::tool::{ToolError, ToolProvider, ToolSession};
@@ -209,6 +209,32 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
     /// baseline was provider-reported or a local estimate.
     pub fn context_budget_status(&self) -> &BudgetStatus {
         &self.budget_status
+    }
+
+    /// Restores the context-budget baseline from a usage report read back from the journal
+    /// (ADR 0015 C1, the resume path). Only the provider-reported `input` and the transcript
+    /// prefix that produced it are durable; the exact request is not stored, so Core
+    /// re-derives its size with the **current** system prompt, tools and settings over the
+    /// first `prefix_len` transcript messages. A later configuration change therefore biases
+    /// the recomputed baseline (recorded in ADR 0015).
+    ///
+    /// `prefix_len` is the transcript length at the moment that request was made, i.e. the
+    /// index of the assistant message that the `ModelUsageRecorded` event follows. Returns
+    /// `false` and leaves the baseline untouched when `prefix_len` exceeds the transcript
+    /// (a replaced or shorter history), which keeps the projection a pure estimate instead
+    /// of inventing a baseline.
+    pub fn restore_budget_baseline(&mut self, prefix_len: usize, input_tokens: u64) -> bool {
+        if prefix_len > self.transcript.len() {
+            return false;
+        }
+        let request = ModelRequest {
+            system_prompt: self.agent.config.system_prompt.clone(),
+            messages: self.transcript[..prefix_len].to_vec(),
+            tools: self.registry.specs().to_vec(),
+            settings: self.agent.config.model_settings.clone(),
+        };
+        self.budget_baseline = Some((input_tokens, crate::budget::request_size(&request)));
+        true
     }
 
     /// Replaces the transcript with host-supplied history and records the host's `revision`.

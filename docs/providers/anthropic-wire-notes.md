@@ -2,6 +2,8 @@
 
 **访问日期：2026-10-12（UTC 2026-10-12T21:35Z–21:40Z）。** 本文所有格式都来自 Anthropic **官方**开发者文档，逐条给出 URL。**没有**参考任何第三方 SDK 源码、社区整理或抓包。凡官方文档未确认的，写「未验证」，不实现。
 
+**扩展思考（extended thinking）补充访问：2026-10-13（UTC 2026-10-13T02:30Z–02:45Z）**，见 §2.3、§4.2、§6；那一批事实来自 `extended-thinking`、`thinking`、`thinking-tool-workflows` 与 `streaming` 页。
+
 官方文档提供 markdown 版本：把文档页 URL 加上 `.md` 即可（例如
 `https://platform.claude.com/docs/en/build-with-claude/streaming.md`）。下列访问用的是该形式；括号里是页面 frontmatter 声明的规范 URL。
 
@@ -35,7 +37,19 @@
 | `system` | `string` 或 array of `TextBlockParam`（**optional**） | 有 system prompt 时发送（用 string 形式） |
 | `tools` | array of `Tool`（optional） | 有工具时发送 |
 | `tool_choice` | `ToolChoice`（optional） | 不发送（Core 的 `ModelRequest` 没有该字段；可由 `extra_body`/`settings` 提供） |
-| 其它（`temperature`、`top_p`、`top_k`、`thinking` 等） | 各自 optional | 经 `extra_body`/`settings` 透传 |
+| `thinking` | `ThinkingConfig`（`{"type":"enabled","budget_tokens":N}` 或 `{"type":"adaptive"}`） | 有配置才发送；默认关闭（不发送该键）。见 §2.3 |
+| 其它（`temperature`、`top_p`、`top_k` 等） | 各自 optional | 经 `extra_body`/`settings` 透传 |
+
+### 2.3 `thinking` 参数（新增，访问 2026-10-13）
+
+来源：`https://platform.claude.com/docs/en/build-with-claude/extended-thinking.md`（规范 URL `.../extended-thinking`）与 `https://platform.claude.com/docs/en/build-with-claude/thinking.md`（规范 URL `.../thinking`）。访问 2026-10-13。
+
+- **两种开启方式**：(1) 手动 `thinking: {"type":"enabled","budget_tokens": N}`（本文写为 `ThinkingConfig::Enabled`）；(2) 自适应 `thinking: {"type":"adaptive"}`（`ThinkingConfig::Adaptive`）。手册明写：`type: "enabled"` 在 Claude 4.6 上 **deprecated**（请求仍成功），Claude 4.7 及以后 **拒绝** `type: "enabled"` 并返回 400；4.6+ 推荐 `adaptive`。两种模式都能开；本 adapter 两种都支持，由 host 选择。
+- **`budget_tokens` 约束**（仅 `Enabled`）：最小 **1024**（API 拒绝更小值）；必须 **小于 `max_tokens`**（思考 token 计入 `max_tokens`），唯一例外是 interleaved thinking（预算跨整轮，可超过 `max_tokens`）。本 adapter **不在本地校验**这两个约束（服务器是权威），配置错误会得到与 `extra_body` 相同的 400。
+- **`temperature` / 采样参数**：在老模型上、**开了 thinking 时**，`temperature` 与 `top_k` **不兼容**（`top_p` 只在 0.95–1 之间允许）；在新模型（Claude Opus 5.5/5、Sonnet 5.5/5、Haiku 5.5、Fable/Mythos 等）上，非默认采样参数在**每个请求**上都返回 400（不论是否 thinking）。本 adapter **不**替 host 增删这些参数：它照常透传 `settings`/`extra_body` 里的值；组合是否合法由服务器判定，错误原样冒泡（与 ADR 0015 对 provider 报错的立场一致）。
+- **`tool_choice`**：手动 `type:"enabled"` 只支持 `auto`（默认）与 `none`；`any` / 指定 `tool` 会报错（强制工具调用与手动思考不兼容）。`adaptive` 支持强制工具调用，但 Claude Opus 5.5 / Sonnet 5.5 / Fable 5.1 / Mythos 5.1 在每个请求上都拒绝强制工具调用。本 adapter 本就不发 `tool_choice`（wire notes §2 旧行），由 host 经 `extra_body` 提供，所以这里只是记录限制，不放宽。
+- **提示缓存**：改 thinking 配置（模式、`budget_tokens`）会使缓存断点失效。
+- **文档未说明**：本 adapter 不解析、不依赖 `display`（`summarized`/`omitted`/`updates`）——它是 `thinking` 对象里的另一个可选字段；只想开 thinking 时手册示例可以只给 `type`，所以本 adapter 只发 `type`（`Enabled` 时另发 `budget_tokens`），不发 `display`。若要 `display` 或 `block_binding` 等新字段，经 `extra_body` 传入。**未验证**：这些附加字段在 `thinking` 被 adapter 顶层插入后能否再经 `extra_body` 合并（两个来源都是 `thinking` 键，后者整体覆盖前者，文档未说明应否合并）。
 
 `max_tokens` 是否为必需：Body parameters 一节把它列为 `- max_tokens: number`（未标 `optional`），而同一节里 `system`/`tools`/`tool_choice` 都标了 `optional`；且**每一个**官方示例（streaming 页、api/messages Example、errors 页）都带 `max_tokens`。本 adapter 因此**总是**发送 `max_tokens`（配置默认 4096，可改）。**未验证**：官方未用「required」字样明写，此处依据的是「未标 optional + 所有示例都带」这一文档证据。
 
@@ -110,6 +124,18 @@ Anthropic 的 `ContentBlockParam` 文档列出的输入块类型里**没有**音
 - 工具参数（**分片 JSON 字符串**）：`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"location\": \"San Fra"}}`；官方说明最终 `tool_use.input` 是对象，delta 是 partial JSON 字符串。
 - 思考：`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"..."}}`
 - 思考签名：`{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EqQB..."}}`（在 `content_block_stop` 前发出，用于校验思考块完整性）
+- 若 `display: "omitted"`：思考块仍出现，`thinking` 字段为空，只有 `signature`；`thinking_delta` 可能带空串（见 §2.3、§6）。
+
+### 4.5 思考块的回传要求（新增，访问 2026-10-13）
+
+来源：`https://platform.claude.com/docs/en/build-with-claude/thinking.md`（Preserving thinking blocks / Redacted thinking blocks / Thinking encryption）与 `https://platform.claude.com/docs/en/build-with-claude/thinking-tool-workflows.md`（Echo the assistant message exactly as received）。访问 2026-10-13。
+
+- **工具轮必须回传**：调用工具时，assistant 消息里的 `thinking` 块必须**完整、未修改**地回传，并与它所伴随的 `tool_use` 一起。官方原文：「Pass every `thinking` block back to the API complete and unmodified, alongside the `tool_use` block it accompanied.」
+- **顺序**：「Within the latest assistant message, the sequence of consecutive `thinking` blocks must match what the model generated in the original request: you can't rearrange, edit, or partially drop them.」修改过的思考块会被 400 拒绝。
+- **必须包含 `redacted_thinking`**：它形状为 `{"type":"redacted_thinking","data":"..."}`，`data` 不透明；官方明确「pass `redacted_thinking` blocks back ... unchanged」，并警告只过滤 `block.type == "thinking"` 会静默丢掉它们。
+- **`signature` 不透明**：「don't interpret or parse it」；回传时值不得改。它是块级加密思考，服务器用它重建思考。
+- **更早轮次可省**：「Required: within a tool-use turn, pass thinking blocks back. Recommended: across turns, pass everything back. Allowed: outside tool use, omit prior turns' thinking.」即**同一个 assistant 轮**内的思考块必须回传；更早轮的可以省略。本 adapter 选择**不省略**：凡是收到过的思考块都保留在 `provider_payload` 并回传（更简单，且官方说服务端会自行过滤。）
+- **本 adapter 的回传方式**：`ModelResponse.provider_payload` 存一个 JSON **数组**，元素是流里按序出现的 `thinking`/`redacted_thinking` 块（`thinking` 块的 `thinking`/`signature` 由 delta 拼出，其它字段来自 `content_block_start`；`redacted_thinking` 块整个 `content_block_start` 对象原样保留）。`request.rs` 构造 assistant 消息时把这些块放在 `content` 文本块与 `tool_use` 块**之前**（官方 `[thinking, text, tool_use]` 形状）。`OpaqueJson` 保字节，JSONL 往返后签名值不变；重建请求时会经 `serde_json::Value` 序列化，键序可能规整（与 ADR 0007 J3 同类取舍），但**每个块的字段值与文本不变**。
 
 ### 4.3 `message_delta`
 
@@ -146,7 +172,9 @@ Anthropic 的 `ContentBlockParam` 文档列出的输入块类型里**没有**音
 
 - **未验证**：`max_tokens` 是否被官方标为 required（见 §2 的证据与说明）。
 - **未验证**：工具名含 `.`/`:` 等非 `^[a-zA-Z0-9_-]{1,128}$` 字符时 Anthropic 是否拒绝（未实测，官方只给了 pattern）。
-- **未实现**：扩展思考（extended thinking）。请求侧不主动发送 `thinking`（可由 `extra_body` 传入，但本 adapter 不为其做映射）；响应侧 `thinking`/`signature` 块与 `thinking_delta`/`signature_delta` 一律**忽略**，不作为 `ModelTextDelta` 发出（否则会污染 Core 的取消前缀，ADR 0003 F2），也不写入 `provider_payload`。后果：开了 thinking 且用工具时，官方要求把思考块**原样**回传（api/messages 的 thinking 块说明），本 adapter 做不到——**该组合未实现**。
+- **已实现（2026-10-13）**：扩展思考。请求侧由 `AnthropicConfig::thinking`（`ThinkingConfig::Enabled{budget_tokens}` / `Adaptive`）控制，默认关闭；响应侧 `thinking`/`redacted_thinking` 块存入 `ModelResponse.provider_payload`，下次请求原样前置回传（ADR 0014 R10）。**不**接进 `reasoning`，也不发 UI 事件（验收 8）。未实现的部分：不解析 `display`/`block_binding` 等 `thinking` 子字段（可经 `extra_body` 传，但本 adapter 不看）；不做 `budget_tokens`/`temperature`/`tool_choice` 的本地合法性校验（服务器权威，见 §2.3）。
+- **未验证**：`redacted_thinking` 块是否可能带 delta（官方示例只在 `content_block_start` 给 `data`；本 adapter 对其 delta 视同无）。
+- **未验证**：`thinking` 块在流里能否穿插在文本/工具块之间（官方示例总是思考在前；本 adapter 按块下标保序，不论位置，回传时统一前置。**若**官方允许思考块出现在 `tool_use` 之后且要求同样保持相对位置，本 adapter 的前置策略会不满足——官方文档未说明这种顺序，记此风险）。
 - **未实现**：服务器工具块（`server_tool_use`、`web_search_tool_result`、`web_fetch_*`、`code_execution_*` 等）——一律忽略，不作为 `ToolCall`（Core 规定「provider 自己执行的工具绝不表示为 `ToolCall`」）。
 - **未实现**：`stop_details`、`container`、`citations`、`tool_choice`（请求侧）、`anthropic-beta` 头、prompt caching 的 `cache_control`、`metadata`。
 - **未验证**：官方 API 的真实网络行为（本 adapter 只在进程内 mock 上测试，未访问真实 API，未使用任何真实 key）。
@@ -154,6 +182,9 @@ Anthropic 的 `ContentBlockParam` 文档列出的输入块类型里**没有**音
 
 ## 7. 官方文档页面清单（访问 2026-10-12）
 
+- `https://platform.claude.com/docs/en/build-with-claude/thinking`（思考概念、`display`、流式、工具轮回传、加密、`redacted_thinking`；访问 2026-10-13）
+- `https://platform.claude.com/docs/en/build-with-claude/extended-thinking`（`thinking: {type:"enabled",budget_tokens}`、约束、adaptive 迁移；访问 2026-10-13）
+- `https://platform.claude.com/docs/en/build-with-claude/thinking-tool-workflows`（两轮工具往返的逐字示例；访问 2026-10-13）
 - `https://platform.claude.com/docs/en/build-with-claude/streaming`（事件序列、delta 类型、错误事件）
 - `https://platform.claude.com/docs/en/api/messages`（端点、头、请求体、域类型：`Message`/`Usage`/`ContentBlock*`/`StopReason`/`Tool*`）
 - `https://platform.claude.com/docs/en/api/versioning`（`anthropic-version`）

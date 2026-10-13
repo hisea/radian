@@ -72,3 +72,21 @@ Notes:
 No existing variant, field or behavior was changed; only additions. The one behavior that
 changed is intentional and specified: an unknown on-disk enum value is now `Unknown` instead
 of a corruption error (ADR 0006 §7(d)).
+
+## Round 3：resume 恢复基线（`restore_budget_baseline`）
+
+一次性检出 `/tmp/radian-mut`（`git worktree add --detach HEAD`，HEAD = `b9c43c2`，含 B/C 全部改动）；
+每个变异恢复文件、`git status --short` 为空后才继续；`cargo test -p agent-core --test budget
+--no-fail-fast`。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M9 | `restore_budget_baseline` 把越界前缀 clamp 进 transcript 而不是返回 `false`（伪造一个基线） | caught (rc 101) | `a_prefix_outside_the_transcript_leaves_the_estimate_alone` |
+| M10 | 重算基线大小用**整个** transcript 而不是 `transcript[..prefix_len]` | caught (rc 101) | `a_restored_baseline_matches_an_uninterrupted_projection` |
+
+M10 是「恢复的投影必须与不中断一直跑相同」的反向证明：前缀取错，投影就与 live 不同。
+
+## Round 3：runtime 侧（见 `crates/radian-runtime/MUTATIONS.md`）
+
+「resume 不恢复基线」「恢复了错误的那次报告（first-wins）」「`BudgetRelax::take` 的 `swap` 改
+`load`」三条变异在 `radian-runtime` 的 budget 测试里被抓住，记录在那里。

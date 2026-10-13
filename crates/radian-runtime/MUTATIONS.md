@@ -40,3 +40,19 @@ collide" (M-D6).
 - M2 was two edits (an extra `seq` advance plus a guard change) because `cancel` must be made
   to *observably* occupy the queue.
 - M-D3 was two edits (remove the boundary call, add a mid-turn call) for the same reason.
+
+## ADR 0015 resume 基线 + BudgetRelax 清理（`/tmp/radian-mut`，base `b9c43c2`）
+
+一次性检出 `git worktree add --detach HEAD`（HEAD = `b9c43c2`），每个变异用 `git checkout --`
+恢复、`git status --short` 为空；全部 `cargo test -p radian-runtime --test budget --no-fail-fast`。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M-B1 | `Driver::open` 不再调用 `restore_budget_baseline`（resume 后只能估算） | ✅ failed (rc 101) | `resume_restores_the_reported_baseline` |
+| M-B2 | `reported_baseline` 让**第一条**带 `input` 的报告胜出（`baseline.is_none()` 才写） | ✅ failed (rc 101) | `resume_uses_an_earlier_report_when_the_last_has_no_input` |
+| M-B3 | `BudgetRelax::take` 用 `load(false)` 代替 `swap(false)`（标志永不清除） | ✅ failed (rc 101) | `relaxing_once_sends_the_blocked_request_and_restores_the_guard` |
+
+M-B3 正是本切片补的洞：原测试只跑两轮，`load` 变异照样绿。第三轮（不重新 `relax_once`）让
+「标志泄漏到下一轮」可观察，才抓住它。M-B2 的变异是「取错那次报告」的实例（first-wins）；取
+「最后一条报告」而不要求它带 `input` 的变异由同一测试覆盖（输出-only 报告若被当成 0，投影与
+基线就不是 900）。
