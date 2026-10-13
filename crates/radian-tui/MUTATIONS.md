@@ -99,3 +99,21 @@ is held by a test rather than left implicit.
 
 5/5 抓住，无漏网、无等价变异。M9 是「先建会话再检查」的实例；M10 是「工作区错误仍走 sandbox 文案」；
 M11 是「退出不打印原因」；M12 是「panic 不写日志」；M13 是「日志里带 header 值」。
+
+## `--version` (2026-10-13)
+
+Base HEAD = `8e5fc47`. Source restored from a copy in `target/mut-bak/` and compared with
+`cmp` (`git status --short` shows only the intended edits afterwards); the mutation was run
+in place with `cargo test -p radian-tui --test version --no-fail-fast`.
+
+| # | Requirement mutated | Mutation | Caught by |
+|---|---|---|---|
+| V1 | `--version` exists and prints the package version | `version` removed from the `#[command]` attribute (clap then has no `--version` at all) | `version.rs::version_prints_the_program_name_and_the_cargo_package_version` FAILED (exit code 2 instead of 0: clap rejects the unknown flag) |
+| V2 | the version comes from `Cargo.toml`, not a literal | `version = "7.7.7"` written into the attribute instead of the bare `version` (which is `crate_version!`) | `version.rs::version_prints_the_program_name_and_the_cargo_package_version` FAILED (`--version must print the package version 0.1.0: stdout "radian-tui 7.7.7\n"`) |
+
+2/2 caught. The test also pins the exact line (`radian-tui <version>` on stdout, empty
+stderr), so a version that is printed to stderr, or with a wrong name, fails too.
+
+V2's complement (the version really tracks `Cargo.toml`) was checked by setting both
+packages to `9.9.9`: the binaries then print `9.9.9` and the tests stay green — no assertion
+is pinned to the literal `0.1.0`.

@@ -22,6 +22,10 @@ The key is read only from the environment variable, never from the command line;
 printed and never written to the session file. The session's config snapshot records the
 provider name and the model, not the key or a header value.
 
+`--version` prints `agent <version>` and exits 0 before any setup runs: no key is read, no
+session file is created, and no network is touched. The version is the package's own
+(`CARGO_PKG_VERSION` in `Cargo.toml`), never a literal in the source.
+
 ## Sessions
 
 Every run is a durable session: one JSONL file per conversation.

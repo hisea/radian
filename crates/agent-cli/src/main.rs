@@ -63,7 +63,11 @@ const CONTINUE_MESSAGE: &str = "continue";
 const INBOX_CAPACITY: usize = 64;
 
 #[derive(Parser)]
-#[command(name = "agent", about = "Chat with a model, with optional MCP tools")]
+#[command(
+    name = "agent",
+    version,
+    about = "Chat with a model, with optional MCP tools"
+)]
 struct Cli {
     /// Model name sent to the API. Required to run a conversation (`-p` or interactive); the
     /// session-management commands (`--list`, `--export`, `--search`) do not need a model and

@@ -35,6 +35,7 @@ use ratatui::crossterm::event::{self, Event, KeyEventKind};
 #[derive(Parser, Debug)]
 #[command(
     name = "radian-tui",
+    version,
     about = "Full-screen TUI for the radian agent runtime"
 )]
 struct Cli {

@@ -87,6 +87,7 @@ The transcript owns its scrolling:
 | 14 | `--header` `{session_id}` expands for new and resumed sessions; `authorization` and a malformed header are refused without echoing the value | `tests/pty.rs` |
 | 15 | `--mcp-config` mounts the fixture; its tool runs through the approval dialog; the status bar shows the connected servers/tools; the startup notice names the MCP sandbox gap | `tests/pty.rs` |
 | 16 | the status bar shows the tier, reported usage (or `none`) and the MCP counts; a 60-column terminal drops the long segments and marks it | `tests/status.rs` |
+| 17 | `--version` prints `<program> <CARGO_PKG_VERSION>` and exits 0 without entering the terminal | `tests/version.rs` |
 | — | Enter=followup idle / steer running; Ctrl-C cancel-then-quit | `tests/input.rs` |
 
 ## Must be hand-tested in a real terminal
@@ -242,6 +243,7 @@ prints its own message; the sidecar log is the copy that is guaranteed redacted.
 Everything that can fail runs **before** the session file is created, so a failed start leaves
 the session directory untouched and the same `--session-id` can be retried:
 
+0. `--version` is answered by the argument parser and exits 0 before any of this runs;
 1. session directory and id resolution; id validation;
 2. `--header` parsing (values collected for panic-log redaction);
 3. workspace validation (`radian_host::resolve_workspace`: exists, is a directory, readable,
@@ -297,12 +299,17 @@ by one is resumable by the other:
 ## Flags
 
 `--model`, `--base-url`, `--api-key-env` (default `OPENAI_API_KEY`), `--header NAME=VALUE`,
-`--system`, `--session-dir`, `--session-id`, `--resume`, `--list`, `--workspace DIR`,
-`--mcp-config FILE`,
+`--system`, `--session-dir`, `--session-id`, `--resume`, `--list`, `--version`,
+`--workspace DIR`, `--mcp-config FILE`,
 `--profile safe|workspace-write|full-access` (default `workspace-write`),
 `--approval on-ask|always|never` (default `on-ask`), `--allow-shell-command PREFIX`,
 `--context-window TOKENS`. The key is read only from the named environment variable and is
 never printed.
+
+`--version` prints `radian-tui <version>` and exits 0 before anything else runs: no
+`--model` is needed, no key is read, no session file is created, and the terminal is never
+entered. The version is the package's own (`CARGO_PKG_VERSION` in `Cargo.toml`), never a
+literal in the source.
 
 `--header`, `--mcp-config` and the session-id rules are the **same code** `agent-cli` uses
 (`crates/radian-host`), so the two hosts cannot drift: `{session_id}` expands to the

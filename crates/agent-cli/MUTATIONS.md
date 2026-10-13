@@ -152,3 +152,21 @@ M14 的断言特意包含 clap 的 `Usage:` 行：只断言 `--model` 字样的�
 
 测试里的伪造文件 `dir/x.jsonl` 的 `SessionCreated.workspace` 故意写成当前工作区，所以只靠
 工作区比对是挡不住的；M16 证明去掉 id 校验后它会被导出，而校验在场时被拒。
+
+## `--version` (2026-10-13)
+
+Base HEAD = `8e5fc47`. Source restored from a copy in `target/mut-bak/` and compared with
+`cmp` (`git status --short` shows only the intended edits afterwards); the mutation was run
+in place with `cargo test -p agent-cli --test version --no-fail-fast`.
+
+| # | Requirement mutated | Mutation | Caught by |
+|---|---|---|---|
+| V1 | `--version` exists and prints the package version | `version` removed from the `#[command]` attribute (clap then has no `--version` at all) | `version.rs::version_prints_the_program_name_and_the_cargo_package_version` FAILED (exit code 2 instead of 0: clap rejects the unknown flag) |
+| V2 | the version comes from `Cargo.toml`, not a literal | `version = "7.7.7"` written into the attribute instead of the bare `version` (which is `crate_version!`) | `version.rs::version_prints_the_program_name_and_the_cargo_package_version` FAILED (same assertion, with `--version must print the package version 0.1.0`) |
+
+2/2 caught. The test also pins the exact line (`agent <version>` on stdout, empty stderr), so
+a version that is printed to stderr, or that uses the package name (`agent-cli`), fails too.
+
+V2's complement (the version really tracks `Cargo.toml`) was checked by setting both packages
+to `9.9.9`: the binaries then print `9.9.9` and the tests stay green — no assertion is pinned
+to the literal `0.1.0`.
