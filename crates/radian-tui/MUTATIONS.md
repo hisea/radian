@@ -179,3 +179,14 @@ Base `dc307e6` · 一次性检出 `/tmp/covf-mut` · 独立 `CARGO_TARGET_DIR` �
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
 | M10 | `dispatch` 去掉 `/compact` 分支（当成未知命令） | `command::tests::compact_is_a_control_request_with_optional_instructions` | ✅ failed |
+
+## sessions：picker 与 /sessions //export（Phase 4）
+
+Base: `9daed70` · 一次性检出 `/tmp/sessions-mut`（detached，跑完删除）· `--no-fail-fast`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M1 | picker 忽略 workspace 过滤（`index.list(None)`） | `pty::pty_pick_lists_filters_and_resumes_the_chosen_session`（断言 `other` 不出现） | ✅ failed |
+| M2 | `Esc` 返回 `New`（建会话文件） | `pty::pty_pick_starts_new_and_escape_leaves_no_session`（断言没有新 `.jsonl`） | ✅ failed |
+| M3 | `/export` 跳过已存在检查 | `pty::pty_sessions_and_export_commands`（断言 `ready exists`） | ✅ failed |
+| M5 | `/sessions` 落到 `Message`（发给模型） | `pty::pty_sessions_and_export_commands`（断言 `--resume cmd`） | ✅ failed |
