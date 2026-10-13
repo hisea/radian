@@ -195,3 +195,117 @@ model 层的 `name` 都**没有**被解析。
   的来源；`anthropic`/`openai` 没有 `api`，描述符要自带默认。
 - `env` 数组可作为「该 provider 的 key 环境变量名」的参考，但 ADR 0026 D2 已决定 key **只从
   `auth.json`**，所以 `env` 只用于 `/login` 的提示，不作为运行时来源。
+
+---
+
+## 3. opencode-go 用量接口的响应格式（ADR 0027 C4）
+
+**来源**：`monotykamary/pi-opencode-go-provider`，commit
+`aec40ba1708832a14e50cc9975ece45a2d6346dc`（2026-10-13T06:42:55Z，release v1.1.23），文件
+`usage.ts`、`usage-controller.ts`、`config.ts`。从 `raw.githubusercontent.com` 只读读取，访问
+2026-10-13。**没有**用任何真实 key 调这个接口。
+
+### 3.1 请求
+
+`usage.ts` 顶部的注释与 `USAGE_URL` 常量：
+
+- URL：`GET https://opencode.ai/zen/go/v1/usage`（`usage.ts`：`export const USAGE_URL = "..."`）。
+- 方法：`GET`。
+- 请求头（`usage-controller.ts` 的 `fetch` 调用）：`accept: application/json`、
+  `authorization: Bearer <api-key>`。key 来自 `ctx.modelRegistry.getApiKeyForProvider("opencode-go")`，
+  回退到 `process.env.OPENCODE_API_KEY`。
+- 超时：`REQUEST_TIMEOUT_MS = 10_000`（10 秒），与调用方的 `AbortController` 一起用
+  `AbortSignal.any`。
+- 服务器来源（注释给出）：`sst/opencode packages/console/app/src/routes/zen/go/v1/usage.ts`、
+  `packages/console/core/src/subscription.ts`。
+
+### 3.2 响应 JSON 形状
+
+`usage.ts` 顶部注释原文：
+
+> `200 { "usage": { "rolling" | "weekly" | "monthly": { "status": "ok" | "rate-limited", "percent": 0-100, "resetsAt": "<ISO-8601>" } } }`
+> `401 AuthError (missing/unknown key), 403 EntitlementError (no Go plan)`
+
+- 顶层键 `usage`；三个窗口键 `rolling` / `weekly` / `monthly`（`UsageWindowKey`）。
+- 每个窗口：`status`（`"ok"` / `"rate-limited"`，其它归 `"unknown"`）、`percent`（0–100，**已用**占比）、
+  `resetsAt`（ISO-8601 字符串；`parseResetAt` 也接受 epoch 秒/毫秒）。
+- 窗口标签：`rolling`→`"5h"`、`weekly`→`"7d"`、`monthly`→`"30d"`（`USAGE_WINDOW_LABELS`）。
+- **`bankedResets` 是可选的**，注释写明「The Go API does not expose this today」，`parseUsageSnapshot`
+  里 `parseBankedResets` 取不到就返回 `null`，不显示。
+- 金额上限**不在线上**：`USAGE_LIMITS_NOTE = "5h $12 · 7d $30 · 30d $60"` 只是展示用的常量。
+- 解析失败（没有可用窗口）返回 `undefined`，调用方报「no data」，不编 0。
+
+### 3.3 `5h: 80%` 是剩余量还是已用量
+
+**剩余量。** `usage.ts` 的 `UsageWindow` 注释与 `parseWindow` 写得很明确：
+
+- 线上 `percent` = **已用**占比：注释原文「`percent` is the share of the window budget already spent
+  (`floor(min(100, usage / limit * 100))`, forced to 100 once the window is rate limited)」。
+- `parseWindow` 存 `usedPercent = clampPercent(percent)`，并算
+  `remainingPercent: 100 - usedPercent`。
+- 所有展示（`usageSegments`、`formatUsageDetail`、`line()`）都用 `remainingPercent`。
+  所以 widget 里的 `5h: 80%` 是**还剩 80%**。这与 ADR 0027 C4「百分比是剩余量，不是已用量」一致。
+- 颜色阈值也按剩余量：剩余 ≤ 30% → `warning`，剩余 ≤ 10% 或 `rate-limited` → `critical`
+  （`WARNING_REMAINING_PERCENT = 30`、`CRITICAL_REMAINING_PERCENT = 10`）。
+
+### 3.4 刷新周期与错误处理
+
+- **默认 60 秒**：`config.ts` 的 `DEFAULT_USAGE_CONFIG.refreshIntervalMs = 60_000`；可配范围
+  `MIN_USAGE_REFRESH_MS = 15_000`、`MAX_USAGE_REFRESH_MS = 10 * 60_000`（15 秒–10 分钟，
+  `clampRefreshInterval`）。与 ADR 0027 C4「默认 60 秒，可在 15 秒到 10 分钟之间配置」一致。
+- **触发时机**（`usage-controller.ts`）：`start()` 时 `refresh(..., { force: true })` 一次；然后
+  `setInterval(..., config.refreshIntervalMs)`；另外「session start, timer, turn/model events」也会
+  触发（模块注释）；`/opencode-go-usage`（`notify`）**总是**轮询。没有 UI（print/JSON 模式、子 agent）
+  时**完全不轮询**（`hasUI(ctx)`）。
+- **跨进程去重**：`USAGE_SYNC_TTL_MS = 30_000`（默认轮询间隔的一半）。每 30 秒最多一个进程真正轮询，
+  把快照写到 `<agentDir>/cache/opencode-go-usage.json`，其余进程读该文件。写盘的对象是
+  `{ version: 1, keyFingerprint, fetchedAt, snapshot }`——**只存 key 指纹，不存 key**。
+- **错误处理**：
+  - 非 2xx：`usageHttpErrorMessage(status, payload)` 给可读信息——401 →
+    `"OpenCode Go rejected the API key (401)"`；403 → `"This key has no OpenCode Go subscription (403)"`；
+    其它 → `"OpenCode Go usage request failed ({status})"`；若 `payload.error.message` 有值则附上。
+  - 失败时**保留上一次的快照**，把 `usageError` 设上；`isStale()` 为真时 `line()` 在末尾加 ` · stale`。
+  - 没有 key → `MISSING_KEY_MESSAGE`（提示设 `OPENCODE_API_KEY` 或写进 auth.json），清空快照。
+  - 失败被 `catch` 住，不向调用方抛；只有 `/opencode-go-usage`（notify）会额外发一条 warning notice。
+- 其它默认（`config.ts`）：`placement: "belowEditor"`、`showResetTimes: true`、
+  `showOnlyOnProvider: true`（只在当前模型来自 opencode-go 时显示）。
+
+---
+
+## 对 ADR 0026 / 0027 的影响
+
+### 成立的提议
+
+- **ADR 0026 D6（跨 provider 切换进首版）**：现有适配器**已经**丢弃对方特有的
+  `reasoning`（两家）与 `provider_payload`（OpenAI 侧），不会把对方的内容原样发出去；两家的 id 都满足
+  Anthropic 的 `^[a-zA-Z0-9_-]+$`。所以「切到另一家」在请求构造上是**安全**的（内容被丢弃，不报错，
+  除 1.2 里那个今天不可达的非数组 payload 例外）。
+- **ADR 0026 D0**：目录的 provider `api` 可作为 `opencode-go`/`opencode`/`deepseek` 的默认 base URL；
+  model `name` 可作为显示名来源。
+- **ADR 0027 C2** 的 `{display_name}`：目录**有** model `name`，可作回退。
+- **ADR 0027 C4** 的 URL、认证、响应形状、刷新周期、错误处理、`5h: 80%` 是剩余量——**全部与代码一致**。
+
+### 要改的提议 / 实现注意
+
+- **ADR 0026 D6 的「两套契约测试里各加一条」按现状做不到**：共享契约 crate 的 `ContractHarness`
+  没有请求体访问器，`check_*` 只断言响应。要么把用例放在两家的 `tests/http.rs`（用 `MockServer` 的
+  `requests()`），要么先给契约加一个请求捕获出口（例如 `fn last_request(&self) -> Option<Value>`）再写
+  `check_foreign_history`。这是接口扩展，需要 决定。
+- **`Catalog::parse` 要加解析**：现在只读 `limit.{context,output,input}`；要用 `name` 作 `display_name`
+  或 `api` 作默认 base URL，得加字段（只加，不改现有语义）。
+- **非数组 `provider_payload`**：Anthropic 侧现在报 `Protocol`。跨 provider 时若第三方 provider 写了
+  非数组 payload，会让整轮失败。今天不可达；加第三家前要么保证 payload 只在 Anthropic adapter 里产生，
+  要么决定是否把「不是数组」降级为忽略（**需要 决定**；ADR 0014 R10 的立场是宁可报错）。
+
+### 仍未核实
+
+- **OpenAI 对 `tool_call_id` 的格式约束**：本片没有查 OpenAI 官方文档；OpenAI 兼容适配器服务许多端点，
+  各家的约束可能不同。Anthropic 侧的 `^[a-zA-Z0-9_-]+$` 已从官方 API 文档核实。
+- **`provider_payload` 非数组时 Anthropic 的真实服务器反应**：本片只核实了 adapter 会返回
+  `Protocol`（本地），没有真实端点验证服务器会怎么拒绝。
+- **`reasoning_options` / `reasoning` / `tool_call` 等能力位是否对所有 provider 可靠**：只看了缓存里的
+  取值，没有核对 models.dev 的 schema 或各 provider 文档。
+- **opencode-go 的 `bankedResets` 未来是否上线**：代码注释说今天不暴露；若上线，ADR 0027 C4 的显示
+  可能要加一段。
+- **`resetsAt` 是否总是 ISO-8601**：`parseResetAt` 同时接受 epoch 秒/毫秒，说明实现者见过别的形态；
+  线上实际形态本片未在真实响应里验证。
