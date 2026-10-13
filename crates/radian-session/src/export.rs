@@ -253,6 +253,36 @@ fn event_data_value(
             json!({"call_id": call_id, "result": serde_json::to_value(result)?})
         }
         EventData::ModelUsageRecorded { usage } => json!({"usage": serde_json::to_value(usage)?}),
+        EventData::CompactionUsageRecorded {
+            revision,
+            model,
+            usage,
+        } => json!({
+            "revision": revision,
+            "model": model,
+            "usage": serde_json::to_value(usage)?,
+        }),
+        EventData::ContextCompacted {
+            revision,
+            source_revision,
+            source_len,
+            summary,
+            first_kept,
+            tokens_before,
+            tokens_after,
+            below_target,
+            model,
+        } => json!({
+            "revision": revision,
+            "source_revision": source_revision,
+            "source_len": source_len,
+            "summary": summary,
+            "first_kept": first_kept,
+            "tokens_before": tokens_before,
+            "tokens_after": tokens_after,
+            "below_target": below_target,
+            "model": model,
+        }),
         EventData::InboxEnqueued {
             message,
             message_id,

@@ -52,6 +52,12 @@ impl Inner {
             JournalRecord::ToolExecutionStarted { call_id, .. } => format!("started:{call_id}"),
             JournalRecord::ToolExecutionSettled { call_id, .. } => format!("settled:{call_id}"),
             JournalRecord::ModelUsage { .. } => "usage".into(),
+            JournalRecord::CompactionUsage { revision, .. } => {
+                format!("compaction-usage:{revision}")
+            }
+            JournalRecord::ContextCompacted { revision, .. } => {
+                format!("compacted:{revision}")
+            }
         };
         if let Some(delay) = self.delay {
             if let Some(log) = &self.log {

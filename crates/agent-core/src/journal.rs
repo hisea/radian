@@ -48,6 +48,28 @@ pub enum JournalRecord {
     /// Written only when the response carried usage; failure to append fails the turn like any
     /// other write (J6).
     ModelUsage { usage: ModelUsage },
+    /// The real usage of one summarization model call (ADR 0018). Written as soon as the call
+    /// returns, whether or not the compaction it belongs to commits, so the session's usage
+    /// total includes it. It is **not** a `ModelUsage`: it must never move the budget baseline.
+    CompactionUsage {
+        revision: u64,
+        model: String,
+        usage: ModelUsage,
+    },
+    /// The candidate record of one compaction (ADR 0018). It carries the new view it wants to
+    /// install; the compaction only takes effect when the following `TranscriptReplaced`
+    /// commits under the same `revision` (ADR 0019). A candidate with no commit is ignored.
+    ContextCompacted {
+        revision: u64,
+        source_revision: u64,
+        source_len: usize,
+        summary: String,
+        first_kept: usize,
+        tokens_before: u64,
+        tokens_after: u64,
+        below_target: bool,
+        model: String,
+    },
 }
 
 /// Why a journal write was refused.
@@ -162,6 +184,22 @@ impl TranscriptFold {
             JournalRecord::ModelUsage { .. } => {
                 if self.pending.is_some() {
                     return Err(self.unexpected("a usage record appeared inside it"));
+                }
+                Ok(())
+            }
+            // ADR 0018: the compaction candidate and its usage belong to the revision they
+            // describe and are written before the replacement segment opens. Inside a pending
+            // segment they are as illegal as any other foreign record, and neither changes the
+            // history by itself.
+            JournalRecord::CompactionUsage { .. } => {
+                if self.pending.is_some() {
+                    return Err(self.unexpected("a compaction usage record appeared inside it"));
+                }
+                Ok(())
+            }
+            JournalRecord::ContextCompacted { .. } => {
+                if self.pending.is_some() {
+                    return Err(self.unexpected("a ContextCompacted record appeared inside it"));
                 }
                 Ok(())
             }

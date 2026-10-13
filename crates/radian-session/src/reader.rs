@@ -26,7 +26,7 @@ pub(crate) const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 
 /// The v1 events known to a schema-v1 reader (ADR 0006 §4). Anything else is unknown and
 /// handled by the `critical` policy.
-pub(crate) const KNOWN_EVENTS: [&str; 20] = [
+pub(crate) const KNOWN_EVENTS: [&str; 21] = [
     "SessionCreated",
     "InboxEnqueued",
     "InputClaimed",
@@ -42,6 +42,7 @@ pub(crate) const KNOWN_EVENTS: [&str; 20] = [
     "TurnFailed",
     "ConfigChanged",
     "ContextCompacted",
+    "CompactionUsageRecorded",
     "Rewound",
     "ContextBudgetReached",
     "PermissionResolved",
@@ -79,6 +80,27 @@ pub enum EventData {
     },
     ModelUsageRecorded {
         usage: ModelUsage,
+    },
+    /// The real usage of one summarization model call (ADR 0018). Audit only: it does not
+    /// change the history and is **not** a budget baseline.
+    CompactionUsageRecorded {
+        revision: u64,
+        model: String,
+        usage: ModelUsage,
+    },
+    /// The candidate record of one compaction (ADR 0018). The compaction only takes effect
+    /// when the following replacement commits under the same revision; on its own it changes
+    /// no history.
+    ContextCompacted {
+        revision: u64,
+        source_revision: u64,
+        source_len: u64,
+        summary: String,
+        first_kept: u64,
+        tokens_before: u64,
+        tokens_after: u64,
+        below_target: bool,
+        model: String,
     },
     // Runtime events (ADR 0006 §5.5–§5.7). They are typed so a round trip is exact, and
     // they are deliberately **not** mapped to `JournalRecord`: they are not transcript
@@ -479,6 +501,54 @@ where
                 )?;
                 EventData::ModelUsageRecorded { usage: d.usage }
             }
+            "CompactionUsageRecorded" => {
+                let d: CompactionUsageData = data_of(raw, lineno, path)?;
+                fold_push(
+                    &mut fold,
+                    JournalRecord::CompactionUsage {
+                        revision: d.revision,
+                        model: d.model.clone(),
+                        usage: d.usage.clone(),
+                    },
+                    path,
+                    lineno,
+                )?;
+                EventData::CompactionUsageRecorded {
+                    revision: d.revision,
+                    model: d.model,
+                    usage: d.usage,
+                }
+            }
+            "ContextCompacted" => {
+                let d: ContextCompactedData = data_of(raw, lineno, path)?;
+                fold_push(
+                    &mut fold,
+                    JournalRecord::ContextCompacted {
+                        revision: d.revision,
+                        source_revision: d.source_revision,
+                        source_len: d.source_len as usize,
+                        summary: d.summary.clone(),
+                        first_kept: d.first_kept as usize,
+                        tokens_before: d.tokens_before,
+                        tokens_after: d.tokens_after,
+                        below_target: d.below_target,
+                        model: d.model.clone(),
+                    },
+                    path,
+                    lineno,
+                )?;
+                EventData::ContextCompacted {
+                    revision: d.revision,
+                    source_revision: d.source_revision,
+                    source_len: d.source_len,
+                    summary: d.summary,
+                    first_kept: d.first_kept,
+                    tokens_before: d.tokens_before,
+                    tokens_after: d.tokens_after,
+                    below_target: d.below_target,
+                    model: d.model,
+                }
+            }
             "PermissionResolved" => {
                 let d: PermissionResolvedData = data_of(raw, lineno, path)?;
                 EventData::PermissionResolved {
@@ -672,6 +742,20 @@ impl Session {
         &self.uncommitted
     }
 
+    /// The revision of the last committed replacement, or 0 when the file has none (ADR
+    /// 0018). A host restores `AgentSession::transcript_revision` from this on resume, so the
+    /// next automatic compaction uses a strictly larger revision.
+    pub fn last_committed_revision(&self) -> u64 {
+        self.events
+            .iter()
+            .filter_map(|event| match &event.data {
+                EventData::TranscriptReplacementCommitted { revision, .. } => Some(*revision),
+                _ => None,
+            })
+            .next_back()
+            .unwrap_or(0)
+    }
+
     /// Maps the parsed events back to core records. This is the only place that knows the
     /// disk-event shape; folding then reuses `agent_core::{replay, repair, recover}`.
     pub fn journal_records(&self) -> Vec<JournalRecord> {
@@ -716,6 +800,36 @@ impl Session {
                 }
                 EventData::ModelUsageRecorded { usage } => Some(JournalRecord::ModelUsage {
                     usage: usage.clone(),
+                }),
+                EventData::CompactionUsageRecorded {
+                    revision,
+                    model,
+                    usage,
+                } => Some(JournalRecord::CompactionUsage {
+                    revision: *revision,
+                    model: model.clone(),
+                    usage: usage.clone(),
+                }),
+                EventData::ContextCompacted {
+                    revision,
+                    source_revision,
+                    source_len,
+                    summary,
+                    first_kept,
+                    tokens_before,
+                    tokens_after,
+                    below_target,
+                    model,
+                } => Some(JournalRecord::ContextCompacted {
+                    revision: *revision,
+                    source_revision: *source_revision,
+                    source_len: *source_len as usize,
+                    summary: summary.clone(),
+                    first_kept: *first_kept as usize,
+                    tokens_before: *tokens_before,
+                    tokens_after: *tokens_after,
+                    below_target: *below_target,
+                    model: model.clone(),
                 }),
                 // Runtime events are not transcript records: `replay`/`repair`/`recover`
                 // must never see them (ADR 0006 §12).
@@ -800,6 +914,26 @@ struct SettledData {
 #[derive(Deserialize)]
 struct UsageData {
     usage: ModelUsage,
+}
+
+#[derive(Deserialize)]
+struct CompactionUsageData {
+    revision: u64,
+    model: String,
+    usage: ModelUsage,
+}
+
+#[derive(Deserialize)]
+struct ContextCompactedData {
+    revision: u64,
+    source_revision: u64,
+    source_len: u64,
+    summary: String,
+    first_kept: u64,
+    tokens_before: u64,
+    tokens_after: u64,
+    below_target: bool,
+    model: String,
 }
 
 #[derive(Deserialize)]

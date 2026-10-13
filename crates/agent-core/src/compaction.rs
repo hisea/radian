@@ -35,6 +35,10 @@ pub const MAX_KEEP_TARGET: u64 = 20_000;
 /// The smallest keep target `K` (ADR 0018: `max(2048, …)`).
 pub const MIN_KEEP_TARGET: u64 = 2_048;
 
+/// The summarizer is the current conversation model (ADR 0018 `[compaction] model =
+/// "current"`); this is the `model` value the compaction records carry.
+pub const COMPACTION_MODEL_CURRENT: &str = "current";
+
 /// The default summary length ceiling (ADR 0018 says the summary must be within a limit but
 /// does not fix one; this slice fixes 8192 tokens, deliberately not `B`).
 pub const DEFAULT_SUMMARY_MAX_TOKENS: u64 = 8_192;
@@ -359,4 +363,38 @@ fn truncate_chars(text: &str, limit: usize) -> (String, Option<usize>) {
         return (text.to_owned(), None);
     }
     (text.chars().take(limit).collect(), Some(total - limit))
+}
+
+/// Whether `message` is a compaction summary: a user message whose `origin.kind` is
+/// `"compaction_summary"` (ADR 0018). A host, exporter or reader uses this instead of parsing
+/// the text.
+pub fn is_compaction_summary(message: &Message) -> bool {
+    is_compaction_summary_origin(message)
+}
+
+fn is_compaction_summary_origin(message: &Message) -> bool {
+    let Message::User { meta, .. } = message else {
+        return false;
+    };
+    let Some(origin) = meta.origin.as_ref() else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(origin.get()) else {
+        return false;
+    };
+    value.get("kind").and_then(Value::as_str) == Some("compaction_summary")
+}
+
+/// The rolling summary text of a compaction-summary message, with the fixed
+/// [`SUMMARY_MESSAGE_PREFIX`] removed. `None` when `message` is not one.
+pub fn compaction_summary_text(message: &Message) -> Option<String> {
+    if !is_compaction_summary_origin(message) {
+        return None;
+    }
+    let Message::User { content, .. } = message else {
+        return None;
+    };
+    let text = joined_text(content);
+    let rest = text.strip_prefix(SUMMARY_MESSAGE_PREFIX)?;
+    Some(rest.trim().to_owned())
 }

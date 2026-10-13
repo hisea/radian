@@ -83,6 +83,8 @@ const EVT_TRANSCRIPT_REPLACEMENT_ABORTED: (&str, bool) = ("TranscriptReplacement
 const EVT_TOOL_STARTED: (&str, bool) = ("ToolExecutionStarted", true);
 const EVT_TOOL_SETTLED: (&str, bool) = ("ToolExecutionSettled", true);
 const EVT_USAGE: (&str, bool) = ("ModelUsageRecorded", false);
+const EVT_COMPACTION_USAGE: (&str, bool) = ("CompactionUsageRecorded", false);
+const EVT_CONTEXT_COMPACTED: (&str, bool) = ("ContextCompacted", false);
 
 /// One JSONL session file plus its single-writer lock and running `seq` counter. It
 /// implements [`TranscriptJournal`], so it plugs directly into
@@ -476,6 +478,26 @@ struct UsageData<'a> {
     usage: &'a ModelUsage,
 }
 
+#[derive(Serialize)]
+struct CompactionUsageData<'a> {
+    revision: u64,
+    model: &'a str,
+    usage: &'a ModelUsage,
+}
+
+#[derive(Serialize)]
+struct ContextCompactedData<'a> {
+    revision: u64,
+    source_revision: u64,
+    source_len: usize,
+    summary: &'a str,
+    first_kept: usize,
+    tokens_before: u64,
+    tokens_after: u64,
+    below_target: bool,
+    model: &'a str,
+}
+
 /// How one core record changes the replacement-segment gate (ADR 0018 §A).
 #[derive(Debug, Clone, Copy)]
 enum GateEffect {
@@ -543,6 +565,42 @@ fn render_record(record: &JournalRecord) -> Option<((&'static str, bool), Render
             Render::Settled(SettledData { call_id, result }),
         ),
         JournalRecord::ModelUsage { usage } => (EVT_USAGE, Render::Usage(UsageData { usage })),
+        JournalRecord::CompactionUsage {
+            revision,
+            model,
+            usage,
+        } => (
+            EVT_COMPACTION_USAGE,
+            Render::CompactionUsage(CompactionUsageData {
+                revision: *revision,
+                model,
+                usage,
+            }),
+        ),
+        JournalRecord::ContextCompacted {
+            revision,
+            source_revision,
+            source_len,
+            summary,
+            first_kept,
+            tokens_before,
+            tokens_after,
+            below_target,
+            model,
+        } => (
+            EVT_CONTEXT_COMPACTED,
+            Render::ContextCompacted(ContextCompactedData {
+                revision: *revision,
+                source_revision: *source_revision,
+                source_len: *source_len,
+                summary,
+                first_kept: *first_kept,
+                tokens_before: *tokens_before,
+                tokens_after: *tokens_after,
+                below_target: *below_target,
+                model,
+            }),
+        ),
         _ => return None,
     };
     Some((event, data))
@@ -555,6 +613,8 @@ enum Render<'a> {
     Started(StartedData<'a>),
     Settled(SettledData<'a>),
     Usage(UsageData<'a>),
+    CompactionUsage(CompactionUsageData<'a>),
+    ContextCompacted(ContextCompactedData<'a>),
 }
 
 impl Serialize for Render<'_> {
@@ -566,6 +626,8 @@ impl Serialize for Render<'_> {
             Render::Started(d) => d.serialize(serializer),
             Render::Settled(d) => d.serialize(serializer),
             Render::Usage(d) => d.serialize(serializer),
+            Render::CompactionUsage(d) => d.serialize(serializer),
+            Render::ContextCompacted(d) => d.serialize(serializer),
         }
     }
 }

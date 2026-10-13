@@ -59,6 +59,32 @@ pub enum AgentEvent {
         revision: u64,
         len: usize,
     },
+    /// Automatic compaction is about to summarize (ADR 0018). `tokens_before` is the
+    /// projection that crossed the input budget; `keep_target` is the planned kept suffix.
+    CompactionStarted {
+        revision: u64,
+        tokens_before: u64,
+        keep_target: u64,
+    },
+    /// The compaction committed and the request is being rebuilt. `below_target` says the
+    /// compacted view fit the budget but missed the 75% target, so the rest of this turn will
+    /// not compact again.
+    CompactionFinished {
+        revision: u64,
+        tokens_before: u64,
+        tokens_after: u64,
+        below_target: bool,
+    },
+    /// The compaction failed; the turn ends `failed` without sending the oversized request.
+    /// `reason` is the `Display` of the `CompactionError`.
+    CompactionFailed {
+        reason: String,
+    },
+    /// The projection is over `B` but the history already fits the keep target, so there is
+    /// nothing worth summarizing. The request is sent as it is.
+    CompactionSkipped {
+        reason: String,
+    },
     /// Emitted by tool sessions.
     ToolProgress {
         index: usize,

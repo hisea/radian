@@ -40,8 +40,8 @@ pub use model::{
     ModelUsage, StopReason,
 };
 pub use outcome::{
-    CancelReason, IncompleteReason, ResumeState, RunError, RunOutcome, RunStatus, SessionError,
-    Step,
+    CancelReason, CompactionError, IncompleteReason, ResumeState, RunError, RunOutcome,
+    RunStatus, SessionError, Step,
 };
 pub mod budget;
 pub mod compaction;

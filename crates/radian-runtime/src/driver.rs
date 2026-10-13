@@ -79,6 +79,9 @@ struct Recovery {
     /// for restoring the context-budget baseline (ADR 0015 C1). `None` means no report in the
     /// current transcript revision, so the projection stays a pure estimate.
     budget_baseline: Option<(usize, u64)>,
+    /// The revision of the last committed replacement (ADR 0018), 0 when the file has none,
+    /// so the next automatic compaction uses a strictly larger revision.
+    transcript_revision: u64,
 }
 
 /// The per-session driver.
@@ -126,6 +129,9 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         if let Some((prefix_len, input)) = recovery.budget_baseline {
             session.restore_budget_baseline(prefix_len, input);
         }
+        // ADR 0018 §B: the next compaction's revision must be strictly larger than the last
+        // committed one, so it is restored from the file too.
+        session.restore_transcript_revision(recovery.transcript_revision);
         Ok(Self {
             inbox,
             session,
@@ -536,7 +542,10 @@ fn message_meta_id(message: &Message) -> Option<MessageId> {
 /// step is committed. The tool-call hooks fail closed instead (they resolve the call with a
 /// `hook_error` result and continue), so they never reach here.
 fn is_fatal(error: &RunError) -> bool {
-    !matches!(error, RunError::Model(_) | RunError::Hook { .. })
+    !matches!(
+        error,
+        RunError::Model(_) | RunError::Hook { .. } | RunError::Compaction(_)
+    )
 }
 
 /// Maps the core's `RunStatus` to the ADR 0006 §5.6 wire shape.
@@ -693,6 +702,7 @@ async fn recover(journal: &SessionJournal) -> Result<Recovery, DriverError> {
         next_turn,
         next_config_revision,
         budget_baseline: reported_baseline(&parsed),
+        transcript_revision: parsed.last_committed_revision(),
     })
 }
 
