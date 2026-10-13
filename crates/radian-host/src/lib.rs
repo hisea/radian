@@ -7,6 +7,7 @@
 //! of a host that is the same whether the user is at a line prompt or a full-screen UI. The
 //! two binaries still decide their own flags, startup text and error wording.
 
+mod catalog;
 mod describe;
 mod diagnostics;
 mod headers;
@@ -16,10 +17,15 @@ mod session_id;
 mod tools;
 mod workspace;
 
+pub use catalog::{
+    CACHE_TTL, CATALOG_URL, Catalog, FETCH_TIMEOUT, ModelLimit, Window, WindowQuery, WindowSource,
+    cache_path, host_of, provider_for_host, resolve,
+};
 pub use describe::{CLI_WORDING, TUI_WORDING, Wording, describe};
 pub use diagnostics::{
-    CleanReport, MAX_TOTAL_BYTES, Platform, RETENTION, append, clean, clean_startup, clean_with,
-    diagnostics_dir, diagnostics_dir_for, is_diagnostic_file, now_millis, panic_log_name,
+    CleanReport, MAX_TOTAL_BYTES, Platform, RETENTION, append, cache_dir, cache_dir_for, clean,
+    clean_startup, clean_with, diagnostics_dir, diagnostics_dir_for, is_diagnostic_file,
+    now_millis, panic_log_name,
 };
 pub use headers::{SESSION_PLACEHOLDER, parse_headers};
 pub use mcp::load_mcp_config;

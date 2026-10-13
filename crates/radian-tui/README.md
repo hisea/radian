@@ -314,8 +314,8 @@ by one is resumable by the other:
 `--profile safe|workspace|full` (default `workspace`; the old `workspace-write`/`full-access`
 are accepted aliases but not listed),
 `--approval on-ask|always|never` (default `on-ask`), `--allow-shell-command PREFIX`,
-`--context-window TOKENS`. The key is read only from the named environment variable and is
-never printed.
+`--context-window TOKENS`, `--offline-catalog`, `--catalog-provider PROVIDER`. The key is
+read only from the named environment variable and is never printed.
 
 `--version` prints `radian-tui <version>` and exits 0 before anything else runs: no
 `--model` is needed, no key is read, no session file is created, and the terminal is never
@@ -395,10 +395,23 @@ When a call needs the human, the input box is replaced by an approval box:
 The prompt shows the **resolved** resource, never the raw argument: `a/../b` must not read as
 if it stayed under `a/`. While the box is up, other keys do not type into the input.
 
-## Context budget
+## Context budget and the model catalog
 
-`--context-window TOKENS` configures the ADR 0015 guard. Omitted means **off**: the app does
-not guess a window and the status bar says `context guard off (no window configured)`.
+The window comes from `--context-window TOKENS` (explicit; it never fetches — an existing
+cache is read only for the `input`/`output` numbers), or from the **models.dev catalog**
+matched by `(provider, model)` (ADR 0018). The provider is `--catalog-provider`, or derived
+from the `--base-url` hostname (`opencode.ai` → `opencode`, `api.anthropic.com` → `anthropic`,
+`api.openai.com` → `openai`, `api.deepseek.com` → `deepseek`, ...). The catalog is a
+read-only GET with no key, header or user data, cached under the user cache directory and
+refreshed at most once every 24 h (3 s timeout; a failure falls back to the cache);
+`--offline-catalog` never goes out. With neither, the window is **unknown**, the guard is
+off, and the startup notice says so.
+
+The startup notice names the source (`window 1000000 from models.dev (opencode/…, context
+1000000, input 922000, output 384000, cached 3 h ago)`, `window 5000 from --context-window`,
+or `unknown: context guard off`). The catalog reports `context`/`input`/`output` separately;
+this build hands `min(I, C)` to the guard (temporary: the compaction slice will use
+`B = min(I, C − R)`).
 
 When a turn ends because the next request would cross the threshold, the transcript gets a
 notice and the status bar shows the numbers. The wording depends on where the number came

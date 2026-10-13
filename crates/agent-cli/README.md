@@ -88,14 +88,31 @@ stdout carries only the model's visible answer (so `-p` can be piped). Status, t
 and **reasoning** go to stderr; reasoning is prefixed `[reasoning]` and kept on its own
 lines, never mixed with the answer (ADR 0014).
 
-## Context budget (ADR 0015)
+## Context budget (ADR 0015) and the model catalog (ADR 0018)
 
-The guard is opt-in: **there is no default window**. Without `--context-window` no window is
-guessed (a model-name-to-window table ages, and most of its numbers are remembered rather
-than known — ADR 0015 C1), the guard is off, and the startup says so.
+The window comes from one of three places, in order:
 
-- `--context-window <TOKENS>` is the model's window; `--context-threshold <PERCENT>`
-  (default 80) is the line at which the next request is not sent.
+1. **`--context-window <TOKENS>`** — explicit, and always wins. It never fetches: only an
+   already-existing cache is read for the `input`/`output` numbers, and with no cache just the
+   explicit number is used.
+2. **The models.dev catalog**, matched by `(provider, model)`. The provider is
+   `--catalog-provider`, or derived from the `--base-url` hostname (`opencode.ai` →
+   `opencode`, `api.anthropic.com` → `anthropic`, `api.openai.com` → `openai`,
+   `api.deepseek.com` → `deepseek`, ...). The catalog is a read-only GET with **no key, no
+   header and no user data**, cached owner-only under `<cache>/radian/catalog/models.json`
+   and refreshed at most once every 24 h (3 s timeout; a failed fetch falls back to the
+   cache). `--offline-catalog` never goes out; `--catalog-provider` overrides the hostname
+   mapping.
+3. Neither: the window is **unknown**, the guard is off, and the startup says so. No window
+   is guessed (a model-name-to-window table would age and be mostly remembered numbers —
+   ADR 0015 C1).
+
+The catalog reports `context` (C), `input` (I) and `output` separately. This build hands
+`min(I, C)` to the guard as the window (temporary: the compaction slice will use
+`B = min(I, C − R)`), and the startup line shows whichever of the three numbers exist.
+
+- `--context-threshold <PERCENT>` (default 80) is the line at which the next request is not
+  sent.
 - The stop names its source. A provider-reported input is shown as `(reported N)`; a report
   plus local growth shows both parts, `(reported B + estimated G)`; with no report at all the
   number is `~N (estimated)`. An estimate is never presented as a precise report.

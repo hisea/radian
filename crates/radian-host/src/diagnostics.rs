@@ -33,6 +33,21 @@ pub enum Platform {
     Linux,
 }
 
+/// The user **cache root** for this program: `…/radian/` (ADR 0013 decision 4). Diagnostics
+/// and the model catalog (ADR 0018) both live under it, so there is one cache rule.
+pub fn cache_dir_for(platform: Platform, home: &Path, xdg_cache_home: Option<&Path>) -> PathBuf {
+    match platform {
+        Platform::MacOs => home.join("Library/Caches/radian"),
+        Platform::Linux => {
+            let base = xdg_cache_home
+                .filter(|path| path.is_absolute())
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| home.join(".cache"));
+            base.join("radian")
+        }
+    }
+}
+
 /// The diagnostics directory for `platform`, given the resolved `HOME` and `XDG_CACHE_HOME`.
 ///
 /// Pure so both rules are testable on one machine. On Linux an `XDG_CACHE_HOME` that is not
@@ -43,32 +58,41 @@ pub fn diagnostics_dir_for(
     home: &Path,
     xdg_cache_home: Option<&Path>,
 ) -> PathBuf {
-    match platform {
-        Platform::MacOs => home.join("Library/Caches/radian/diagnostics"),
-        Platform::Linux => {
-            let base = xdg_cache_home
-                .filter(|path| path.is_absolute())
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| home.join(".cache"));
-            base.join("radian/diagnostics")
-        }
+    cache_dir_for(platform, home, xdg_cache_home).join("diagnostics")
+}
+
+/// The cache root for this process, or `None` when there is no `HOME`.
+pub fn cache_dir() -> Option<PathBuf> {
+    Some(cache_dir_for(
+        current_platform(),
+        &home_dir()?,
+        xdg_cache_home().as_deref(),
+    ))
+}
+
+fn current_platform() -> Platform {
+    if cfg!(target_os = "macos") {
+        Platform::MacOs
+    } else {
+        Platform::Linux
     }
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+}
+
+fn xdg_cache_home() -> Option<PathBuf> {
+    std::env::var_os("XDG_CACHE_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 /// The diagnostics directory for this process, or `None` when there is no `HOME`.
 pub fn diagnostics_dir() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)?;
-    let platform = if cfg!(target_os = "macos") {
-        Platform::MacOs
-    } else {
-        Platform::Linux
-    };
-    let xdg = std::env::var_os("XDG_CACHE_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
-    Some(diagnostics_dir_for(platform, &home, xdg.as_deref()))
+    Some(cache_dir()?.join("diagnostics"))
 }
 
 /// The file name for one session's panic log: `<session-id>-<unix-millis>.panic.log`. The

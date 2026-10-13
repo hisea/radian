@@ -15,5 +15,13 @@ radian-coding = { path = "../radian-coding" }
 radian-sandbox = { path = "../radian-sandbox" }
 # Reused for the owner-only file/directory creation (ADR 0013) in `diagnostics`.
 radian-session = { path = "../radian-session" }
+# The model catalog fetches over HTTP (ADR 0018); the same client the adapters use, so no new
+# dependency is introduced.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "system-proxy"] }
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+# The catalog tests use the adapter's local mock HTTP server, never the real network.
+agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible", features = ["testing"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
