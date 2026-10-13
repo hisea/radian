@@ -1874,11 +1874,13 @@ async fn a_killed_session_resumes_without_replaying_the_tool() {
     })
     .await;
     // With `--yes` the loop reads during the turn, so this line becomes a steer. Wait until
-    // it is durably claimed (a second InputClaimed) before killing.
+    // it is durably enqueued (a second InboxEnqueued) before killing. The claim now happens
+    // at the step boundary — the driver's wake branch only handles cancellation — so a steer
+    // that arrives mid-step is requeued from its InboxEnqueued record on recovery.
     first.write("steer-line\n").await;
-    wait_until("the steer to be claimed", || {
+    wait_until("the steer to be enqueued", || {
         std::fs::read_to_string(&path)
-            .map(|text| text.matches("\"InputClaimed\"").count() >= 2)
+            .map(|text| text.matches("\"InboxEnqueued\"").count() >= 2)
             .unwrap_or(false)
     })
     .await;
