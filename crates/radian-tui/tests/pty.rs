@@ -3338,9 +3338,10 @@ async fn pty_a_rebound_send_key_sends_and_enter_does_not() {
 }
 
 /// The `[config]` line is a startup diagnostic printed on the normal screen, **before** the
-/// alternate screen is entered. Printed inside it, the raw text sits in cells the renderer's
-/// diff then skips (both buffers hold a space there), so it never gets erased and corrupts the
-/// first transcript row. This pins the row and the absence of the line.
+/// alternate screen is entered. Printed inside it, the raw text sits in cells that the
+/// renderer's diff then skips (both buffers hold a space there), so it is never erased and
+/// corrupts the first transcript row — a resumed history is exactly that row. Both the byte
+/// order and the rendered row are pinned.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn pty_the_config_line_is_not_written_inside_the_alternate_screen() {
@@ -3348,7 +3349,24 @@ async fn pty_the_config_line_is_not_written_inside_the_alternate_screen() {
     let dir = TempDir::new("config-screen");
     let config = dir.path().join("config.toml");
     std::fs::write(&config, "schema_version = 1\n").unwrap();
-    let server = MockServer::start(vec![text_reply("OK")]).await;
+    let path = dir.path().join("screen-me.jsonl");
+    let journal = radian_session::SessionJournal::create(
+        &path,
+        "screen-me",
+        radian_session::SessionCreatedData::new("/tmp", json!({})),
+    )
+    .expect("create the session file");
+    use agent_core::TranscriptJournal;
+    journal
+        .append(agent_core::JournalRecord::Message {
+            index: 0,
+            message: agent_core::Message::user("hello parent config"),
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let server = MockServer::start(vec![text_reply("never")]).await;
     let mut pty = Pty::spawn(
         &[
             "--config",
@@ -3359,23 +3377,30 @@ async fn pty_the_config_line_is_not_written_inside_the_alternate_screen() {
             &server.base_url,
             "--session-dir",
             dir.path().to_str().unwrap(),
-            "--session-id",
-            "config-screen",
+            "--resume",
+            "screen-me",
         ],
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
-    pty.send(b"hello parent config\r");
-    assert!(pty.wait_for_screen("OK", 15), "{}", pty.screen());
-    let screen = pty.screen();
     assert!(
-        !screen.contains("[config]"),
-        "the config line leaked into the alternate screen:\n{screen}"
+        pty.wait_for_screen("> hello parent config", 10),
+        "the first transcript row is corrupted:\n{}",
+        pty.screen()
+    );
+    let raw = String::from_utf8_lossy(&pty.raw()).into_owned();
+    let alt = raw
+        .find("\u{1b}[?1049h")
+        .expect("the alternate screen is entered");
+    let line = raw.find("[config]").expect("the config line is printed");
+    assert!(
+        line < alt,
+        "the config line is printed inside the alternate screen:\n{raw}"
     );
     assert!(
-        screen.contains("> hello parent config"),
-        "the config line corrupted the first transcript row:\n{screen}"
+        !pty.screen().contains("[config]"),
+        "the config line leaked into the alternate screen:\n{}",
+        pty.screen()
     );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
