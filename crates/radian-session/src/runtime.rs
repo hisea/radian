@@ -18,6 +18,9 @@ use serde_json::Value;
 pub enum InboxLane {
     NextTurn,
     NextStep,
+    /// A value this version does not know (ADR 0006 §7(d)).
+    #[serde(other)]
+    Unknown,
 }
 
 /// How a turn ended (ADR 0006 §5.6). This is the Core `RunStatus` set, snake_case.
@@ -37,6 +40,7 @@ pub enum TurnOutcome {
     Cancelled,
     /// An outcome value this reader does not know (a future writer's value). A v1 reader
     /// maps it here instead of refusing the file (ADR 0006 §7(d)).
+    #[serde(other)]
     Unknown,
 }
 
@@ -52,6 +56,9 @@ pub enum TurnReason {
     UnknownStopReason,
     Requested,
     DeadlineExceeded,
+    /// A value this version does not know (ADR 0006 §7(d)).
+    #[serde(other)]
+    Unknown,
 }
 
 /// How a permission decision came out (ADR 0006 §5.9).
@@ -62,6 +69,9 @@ pub enum PermissionDecision {
     Allow,
     Deny,
     Rewrite,
+    /// A value this version does not know (ADR 0006 §7(d)).
+    #[serde(other)]
+    Unknown,
 }
 
 /// Who made a permission decision (ADR 0006 §5.9).
@@ -71,6 +81,9 @@ pub enum PermissionDecision {
 pub enum PermissionApprover {
     User,
     Policy,
+    /// A value this version does not know (ADR 0006 §7(d)).
+    #[serde(other)]
+    Unknown,
 }
 
 /// One durable fact the runtime owns. `#[non_exhaustive]`: `ContextCompacted`, `Rewound`,

@@ -467,6 +467,10 @@ fn lane_of(lane: InboxLane) -> Lane {
     match lane {
         InboxLane::NextTurn => Lane::NextTurn,
         InboxLane::NextStep => Lane::NextStep,
+        // A lane this version does not know (a newer writer). Requeue as a next-turn input:
+        // dropping it would lose the user's task, and `NextTurn` is the safest lane for a
+        // v1 reader that cannot know the future semantics (ADR 0006 §7(c)/(d)).
+        InboxLane::Unknown => Lane::NextTurn,
     }
 }
 

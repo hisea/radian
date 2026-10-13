@@ -351,8 +351,10 @@ async fn the_index_includes_runtime_events_like_any_other_line() {
     assert!(inbox.byte_offset > 0);
 }
 
+/// ADR 0006 §7(d): a known field with an unknown enum value maps to `Unknown`; it is not
+/// corruption and does not stop the file from opening.
 #[tokio::test]
-async fn an_unknown_enum_value_in_a_runtime_event_is_corruption() {
+async fn an_unknown_enum_value_in_a_runtime_event_maps_to_unknown() {
     let dir = TempDir::new("runtime-unknown-value");
     let path = dir.file("s.jsonl");
     let journal = SessionJournal::create(&path, "sid", created()).unwrap();
@@ -365,11 +367,13 @@ async fn an_unknown_enum_value_in_a_runtime_event_is_corruption() {
     raw.push('\n');
     std::fs::write(&path, raw).unwrap();
 
-    let error = Session::open(&path).unwrap_err();
-    assert!(
-        matches!(error, radian_session::ReadError::Corrupt { line: 2, .. }),
-        "{error:?}"
-    );
+    let session = Session::open(&path).unwrap();
+    assert!(session.skipped().is_empty());
+    let outcome = session.events().iter().find_map(|event| match &event.data {
+        EventData::TurnFinished { outcome, .. } => Some(*outcome),
+        _ => None,
+    });
+    assert_eq!(outcome, Some(TurnOutcome::Unknown));
 }
 
 /// The runtime appends its events while the core is appending journal records, through the

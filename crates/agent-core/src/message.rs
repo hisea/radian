@@ -182,6 +182,11 @@ pub enum InputSource {
     Mcp,
     Subagent,
     System,
+    /// A value this version does not know: a newer writer's source. A v1 reader maps it
+    /// here instead of refusing the line (ADR 0006 §7(d)); the raw JSONL keeps the original
+    /// string, but this in-memory value does not.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Host-owned metadata attached to any message. Invisible to model adapters; carried by
@@ -367,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn input_sources_round_trip_as_snake_case_and_reject_unknown_values() {
+    fn input_sources_round_trip_as_snake_case_and_map_unknown_values() {
         let cases = [
             (InputSource::User, "user"),
             (InputSource::SlashCommand, "slash_command"),
@@ -387,7 +392,12 @@ mod tests {
                 source
             );
         }
-        assert!(serde_json::from_str::<InputSource>("\"future_source\"").is_err());
+        // A value from a future writer is read as `Unknown`, never a parse error (ADR 0006
+        // §7(d)); refusing it would make an old reader unable to open a newer session.
+        assert_eq!(
+            serde_json::from_str::<InputSource>("\"future_source\"").unwrap(),
+            InputSource::Unknown
+        );
     }
 
     #[test]
