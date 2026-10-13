@@ -394,16 +394,18 @@ fn check_summary_rejects_empty_and_overlong() {
 #[test]
 fn the_summary_message_carries_the_system_source_and_origin() {
     let kept = vec![Message::user("next")];
-    let history = compacted_history("the summary", &kept).unwrap();
+    let history = compacted_history("the summary", &[], &kept).unwrap();
     assert_eq!(history.len(), 2);
     let Message::User { meta, .. } = &history[0] else {
         panic!("the summary must be a user message");
     };
     assert_eq!(meta.source, Some(InputSource::System));
-    assert_eq!(
-        meta.origin.as_ref().unwrap().get(),
-        r#"{"kind":"compaction_summary"}"#
+    let origin = meta.origin.as_ref().unwrap().get().to_string();
+    assert!(
+        origin.contains(r#""kind":"compaction_summary""#),
+        "{origin}"
     );
+    assert!(origin.contains(r#""user_messages":[]"#), "{origin}");
     assert!(
         history[0].text().contains("the summary"),
         "{:?}",
@@ -415,9 +417,9 @@ fn the_summary_message_carries_the_system_source_and_origin() {
 #[test]
 fn compacted_history_refuses_an_invalid_kept_suffix() {
     // A call with no result must not be committed as part of a compacted history.
-    assert!(compacted_history("s", &[assistant_calls(&["a"])]).is_err());
+    assert!(compacted_history("s", &[], &[assistant_calls(&["a"])]).is_err());
     // A result with no call is invalid too.
-    assert!(compacted_history("s", &[tool("a")]).is_err());
+    assert!(compacted_history("s", &[], &[tool("a")]).is_err());
 }
 
 // ---------- randomized validity ----------
@@ -488,7 +490,7 @@ fn plan_and_compaction_are_valid_for_many_histories() {
             "seed {seed}: the cut is not a unit boundary: {plan:?}"
         );
         let kept = &history[plan.first_kept..];
-        let compacted = compacted_history("summary", kept)
+        let compacted = compacted_history("summary", &[], kept)
             .unwrap_or_else(|error| panic!("seed {seed}: {error}"));
         assert_eq!(compacted.len(), kept.len() + 1, "seed {seed}");
     }
@@ -591,7 +593,7 @@ fn only_user_messages_are_retained() {
 #[test]
 fn the_summary_message_is_not_retained() {
     use agent_core::{compacted_history, select_user_messages};
-    let history = compacted_history("a summary", &[]).unwrap();
+    let history = compacted_history("a summary", &[], &[]).unwrap();
     let kept = select_user_messages(&[], &history, None);
     assert!(kept.is_empty(), "{kept:?}");
 }
@@ -726,4 +728,97 @@ fn a_rolling_compaction_keeps_the_previous_list_and_its_first() {
         texts(&kept),
         ["the original task", "an earlier message", "a new message"]
     );
+}
+
+/// ADR 0018: the body carries the model's summary and then the verbatim user
+/// messages, but `compaction_summary_text` returns only the summary, and the list is read back
+/// from `origin`, never parsed out of the body.
+#[test]
+fn the_verbatim_messages_are_written_and_read_back_from_origin() {
+    use agent_core::{RetainedUserMessage, compaction_summary_text, compaction_user_messages};
+    // JSON special characters and a separator that looks like the heading, so the round trip
+    // is proven to be exact rather than a parse.
+    let kept = vec![
+        RetainedUserMessage {
+            text: "the first \"task\"\nwith a newline and a } brace".into(),
+        },
+        RetainedUserMessage {
+            text: "---\nUser messages kept verbatim (oldest first):".into(),
+        },
+    ];
+    let history = compacted_history("the model summary", &kept, &[]).unwrap();
+    let summary = &history[0];
+    assert_eq!(
+        compaction_summary_text(summary).as_deref(),
+        Some("the model summary"),
+        "only the model's summary comes back"
+    );
+    assert_eq!(
+        compaction_user_messages(summary),
+        kept,
+        "the list round-trips through origin exactly"
+    );
+    // The body does render them for the model.
+    assert!(
+        summary.text().contains("the first \"task\""),
+        "{:?}",
+        summary.text()
+    );
+}
+
+/// An old summary message has no `user_messages` field, so it reads back as an empty list and
+/// nothing is migrated.
+#[test]
+fn an_old_summary_reads_back_an_empty_list() {
+    use agent_core::{compaction_user_messages, is_compaction_summary};
+    let old = Message::User {
+        content: vec![ContentPart::text(
+            "This is a summary of the earlier conversation. Continue the work from it.\n\nold",
+        )],
+        meta: MessageMeta {
+            source: Some(InputSource::System),
+            origin: Some(
+                agent_core::OpaqueJson::parse(r#"{"kind":"compaction_summary"}"#).unwrap(),
+            ),
+            ..MessageMeta::default()
+        },
+    };
+    assert!(is_compaction_summary(&old));
+    assert!(compaction_user_messages(&old).is_empty());
+}
+
+/// A rolling compaction replaces the omission marker instead of accumulating one per round.
+#[test]
+fn a_second_compaction_does_not_stack_omission_markers() {
+    use agent_core::{omitted_marker, select_user_messages};
+    let budget = Some(4_000);
+    let mut first = vec![user_sourced("the task", Some(InputSource::User))];
+    for index in 0..8 {
+        first.push(user_sourced(
+            &format!("message {index} {}", "y".repeat(600)),
+            Some(InputSource::User),
+        ));
+    }
+    let kept = select_user_messages(&[], &first, budget);
+    let markers = texts(&kept)
+        .iter()
+        .filter(|text| text.contains("earlier user messages omitted"))
+        .count();
+    assert_eq!(markers, 1, "{:?}", texts(&kept));
+
+    // The next round: `kept` is the previous list, and one new message arrives.
+    let next = vec![user_sourced("a new message", Some(InputSource::User))];
+    let rolled = select_user_messages(&kept, &next, budget);
+    let markers = texts(&rolled)
+        .iter()
+        .filter(|text| text.contains("earlier user messages omitted"))
+        .count();
+    assert_eq!(markers, 1, "{:?}", texts(&rolled));
+    assert_eq!(texts(&rolled)[0], "the task", "the first stays first");
+    assert_eq!(
+        texts(&rolled).last().map(String::as_str),
+        Some("a new message"),
+        "the newest is kept"
+    );
+    assert_eq!(omitted_marker(1), "[1 earlier user messages omitted]");
 }

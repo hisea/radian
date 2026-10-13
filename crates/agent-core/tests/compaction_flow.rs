@@ -251,6 +251,7 @@ async fn a_compaction_reuses_the_previous_summary() {
     let agent = compaction_agent(model.clone(), 3_000, true);
     let history = compaction::compacted_history(
         "old summary text",
+        &[],
         &[Message::user("x".repeat(16_000)), Message::user("last")],
     )
     .unwrap();

@@ -460,7 +460,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         let summary = summary.expect("the loop sets it or returns");
 
         let new_history =
-            match compaction::compacted_history(&summary, &transcript[plan.first_kept..]) {
+            match compaction::compacted_history(&summary, &[], &transcript[plan.first_kept..]) {
                 Ok(history) => history,
                 Err(error) => {
                     events.emit(AgentEvent::CompactionFailed {

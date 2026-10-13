@@ -154,6 +154,12 @@ pub fn summary_system_prompt(max_tokens: u64) -> String {
 pub const SUMMARY_MESSAGE_PREFIX: &str = "\
 This is a summary of the earlier conversation. Continue the work from it.";
 
+/// The heading that separates the model's summary from the verbatim user messages in the
+/// summary message's body (ADR 0018). The model's summary never contains it: it is
+/// the split point [`compaction_summary_text`] uses, and the user messages are read back from
+/// `origin`, never parsed out of the body.
+pub const USER_MESSAGES_HEADING: &str = "\n\n---\nUser messages kept verbatim (oldest first):";
+
 /// The summary length ceiling for an input budget `B`:
 /// `min(K, max(8192, ⌊B/8⌋))` with `K = keep_target(B)`. The old fixed [`DEFAULT_SUMMARY_MAX_TOKENS`]
 /// was too small for a large window: the rolling summary grows with every compaction, and at
@@ -408,22 +414,44 @@ pub fn shorten_request(overlong_summary: &str, target_tokens: u64) -> ModelReque
 /// The compacted history: the summary message followed by `kept` unchanged.
 ///
 /// The summary is a [`Message::User`] with `source = System` and an
-/// `origin = {"kind":"compaction_summary"}` marker, so a host, an exporter or a future
-/// compactor can recognize it without parsing the text. The result must pass
-/// [`validate_history`]; a failure is returned, never committed.
-pub fn compacted_history(summary: &str, kept: &[Message]) -> Result<Vec<Message>, SessionError> {
+/// `origin = {"kind":"compaction_summary","user_messages":[…]}` marker, so a host, an exporter
+/// or a future compactor can recognize it without parsing the text. `user_messages` are the
+/// user's words Core carries verbatim (ADR 0018): they are rendered into the body
+/// for the model, and written into `origin` so [`compaction_user_messages`] reads them back
+/// without parsing the body. The result must pass [`validate_history`]; a failure is returned,
+/// never committed.
+pub fn compacted_history(
+    summary: &str,
+    user_messages: &[RetainedUserMessage],
+    kept: &[Message],
+) -> Result<Vec<Message>, SessionError> {
+    let mut body = format!("{SUMMARY_MESSAGE_PREFIX}\n\n{}", summary.trim());
+    if !user_messages.is_empty() {
+        body.push_str(USER_MESSAGES_HEADING);
+        body.push('\n');
+        for (index, message) in user_messages.iter().enumerate() {
+            body.push_str(&format!(
+                "--- user message {} ---\n{}\n",
+                index + 1,
+                message.text
+            ));
+        }
+    }
+    let origin = serde_json::json!({
+        "kind": "compaction_summary",
+        "user_messages": user_messages
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>(),
+    });
     let mut history = Vec::with_capacity(kept.len() + 1);
     history.push(Message::User {
-        content: vec![ContentPart::text(format!(
-            "{SUMMARY_MESSAGE_PREFIX}\n\n{}",
-            summary.trim()
-        ))],
+        content: vec![ContentPart::text(body)],
         meta: MessageMeta {
             id: None,
             source: Some(InputSource::System),
             origin: Some(
-                OpaqueJson::parse(r#"{"kind":"compaction_summary"}"#)
-                    .expect("the origin literal is valid JSON"),
+                OpaqueJson::parse(origin.to_string()).expect("the origin we build is valid JSON"),
             ),
         },
     });
@@ -520,8 +548,10 @@ fn is_compaction_summary_origin(message: &Message) -> bool {
     value.get("kind").and_then(Value::as_str) == Some("compaction_summary")
 }
 
-/// The rolling summary text of a compaction-summary message, with the fixed
-/// [`SUMMARY_MESSAGE_PREFIX`] removed. `None` when `message` is not one.
+/// The rolling **model** summary of a compaction-summary message: the fixed
+/// [`SUMMARY_MESSAGE_PREFIX`] removed, and everything from [`USER_MESSAGES_HEADING`] on cut
+/// off (the verbatim user messages are not part of the model's summary). `None` when `message`
+/// is not one.
 pub fn compaction_summary_text(message: &Message) -> Option<String> {
     if !is_compaction_summary_origin(message) {
         return None;
@@ -531,7 +561,41 @@ pub fn compaction_summary_text(message: &Message) -> Option<String> {
     };
     let text = joined_text(content);
     let rest = text.strip_prefix(SUMMARY_MESSAGE_PREFIX)?;
-    Some(rest.trim().to_owned())
+    let summary = match rest.find(USER_MESSAGES_HEADING) {
+        Some(index) => &rest[..index],
+        None => rest,
+    };
+    Some(summary.trim().to_owned())
+}
+
+/// The user messages a compaction-summary message carries verbatim (ADR 0018),
+/// read from `origin` — never parsed out of the body. An old summary message (or any message
+/// that is not one) has no such field, so it reads back as an empty list; nothing is migrated.
+pub fn compaction_user_messages(message: &Message) -> Vec<RetainedUserMessage> {
+    let Message::User { meta, .. } = message else {
+        return Vec::new();
+    };
+    let Some(origin) = meta.origin.as_ref() else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<Value>(origin.get()) else {
+        return Vec::new();
+    };
+    if value.get("kind").and_then(Value::as_str) != Some("compaction_summary") {
+        return Vec::new();
+    }
+    value
+        .get("user_messages")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(Value::as_str)
+                .map(|text| RetainedUserMessage {
+                    text: text.to_owned(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 // ---------- ADR 0018: the user's words, kept verbatim ----------
@@ -562,10 +626,23 @@ pub fn user_message_budget(input_budget: Option<u64>) -> (u64, u64) {
 }
 
 /// One user message Core carries verbatim across a compaction: its text, with every attached
-/// file replaced by a `[file: P, N lines]` placeholder.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// file replaced by a `[file: P, N lines]` placeholder. It is also the shape written into the
+/// summary message's `origin`, so the list reads back exactly.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RetainedUserMessage {
     pub text: String,
+}
+
+/// The line that names the user messages a budget dropped (ADR 0018). It rides in
+/// the retained list so the model sees that something is missing; [`select_user_messages`]
+/// recognizes and replaces it on the next rolling compaction instead of accumulating it.
+pub fn omitted_marker(count: usize) -> String {
+    format!("[{count} earlier user messages omitted]")
+}
+
+/// Whether `text` is an omission marker rather than a real user message.
+fn is_omitted_marker(text: &str) -> bool {
+    text.starts_with('[') && text.ends_with("earlier user messages omitted]")
 }
 
 /// Whether `message` is a user message Core keeps verbatim (ADR 0018): a
@@ -652,7 +729,11 @@ pub fn select_user_messages(
     newly_summarized: &[Message],
     input_budget: Option<u64>,
 ) -> Vec<RetainedUserMessage> {
-    let mut texts: Vec<String> = previous.iter().map(|kept| kept.text.clone()).collect();
+    let mut texts: Vec<String> = previous
+        .iter()
+        .filter(|kept| !is_omitted_marker(&kept.text))
+        .map(|kept| kept.text.clone())
+        .collect();
     for message in newly_summarized {
         if let Some(text) = retained_text(message) {
             texts.push(text);
@@ -698,7 +779,7 @@ pub fn select_user_messages(
     out.push(RetainedUserMessage { text: first });
     if omitted > 0 {
         out.push(RetainedUserMessage {
-            text: format!("[{omitted} earlier user messages omitted]"),
+            text: omitted_marker(omitted),
         });
     }
     out.extend(kept.into_iter().map(|text| RetainedUserMessage { text }));
