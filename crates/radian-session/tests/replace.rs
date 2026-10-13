@@ -9,7 +9,7 @@ mod common;
 
 use agent_core::{JournalRecord, Message, TranscriptJournal};
 use common::{TempDir, created};
-use radian_session::{Session, SessionJournal};
+use radian_session::{RecoveredReplacement, Session, SessionJournal};
 
 const SID: &str = "replace-sid";
 
@@ -161,5 +161,63 @@ async fn resume_continues_after_a_replacement_and_its_appends() {
             Message::assistant("grown"),
             Message::user("after resume"),
         ]
+    );
+}
+
+/// A crash mid-replacement leaves a short segment at end of file. `resume` can continue
+/// appending (ADR 0005) and the file stays readable: a non-message append leaves the segment
+/// short, so the recovery diagnostic survives.
+#[tokio::test]
+async fn resume_continues_after_a_short_replacement() {
+    let dir = TempDir::new("replace-short-resume");
+    let path = dir.file("s.jsonl");
+    let journal = SessionJournal::create(&path, SID, created()).unwrap();
+    journal
+        .append(JournalRecord::TranscriptReplaced {
+            revision: 1,
+            len: 2,
+        })
+        .await
+        .unwrap();
+    journal
+        .append(JournalRecord::Message {
+            index: 0,
+            message: Message::user("prefix"),
+        })
+        .await
+        .unwrap();
+    let next = journal.next_seq();
+    drop(journal);
+
+    let before = Session::open(&path).unwrap();
+    assert_eq!(before.history().unwrap(), vec![Message::user("prefix")]);
+    assert_eq!(
+        before.recovered_replacement(),
+        Some(RecoveredReplacement {
+            revision: 1,
+            declared: 2,
+            written: 1,
+        })
+    );
+
+    let journal = SessionJournal::resume(&path, SID).unwrap();
+    assert_eq!(journal.next_seq(), next);
+    journal
+        .append(JournalRecord::ModelUsage {
+            usage: agent_core::ModelUsage::default(),
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let after = Session::open(&path).unwrap();
+    assert_eq!(after.history().unwrap(), vec![Message::user("prefix")]);
+    assert_eq!(
+        after.recovered_replacement(),
+        Some(RecoveredReplacement {
+            revision: 1,
+            declared: 2,
+            written: 1,
+        })
     );
 }

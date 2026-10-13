@@ -1,17 +1,23 @@
-//! Phase 7 findings: places where the code and ADR 0006 disagree.
+//! Phase 7 findings: places where the code and ADR 0006 disagreed, and their regressions.
 //!
-//! The fuzz and crash tests found these; they are reproduced here minimally. The two
-//! `#[ignore]`d tests assert what the ADR requires and currently **fail** — they are the
-//! reproduction, not a regression guard. Run them with `--ignored`:
+//! The fuzz and crash tests found these. Two are still reproduced as `#[ignore]`d tests that
+//! assert what the ADR requires and currently **fail**; they are the reproduction, not a
+//! regression guard. Run them with `--ignored`:
 //!
 //! ```sh
 //! cargo test -p radian-session --test findings -- --ignored
 //! ```
+//!
+//! The crash-mid-replacement finding (ADR 0005) is fixed and its test is a normal regression
+//! here; the replacement-segment tests live in `replace.rs`.
 
 mod common;
 
+use agent_core::Message;
 use common::TempDir;
-use radian_session::{ReadError, Session, SessionCreatedData, SessionJournal};
+use radian_session::{
+    ReadError, RecoveredReplacement, Session, SessionCreatedData, SessionJournal,
+};
 use serde_json::json;
 
 const SID: &str = "finding-sid";
@@ -89,14 +95,12 @@ fn resume_should_refuse_an_interior_empty_line() {
     );
 }
 
-/// Finding 3 (design question, ADR 0005): `replace_transcript` journals one
-/// `TranscriptReplaced { len }` marker and then `len` messages. A crash between them leaves a
-/// committed marker whose replacement is short. The reader refuses the whole file with
-/// `BadReplacementLen` rather than recovering the previous history or the partial
-/// replacement. This test pins the current behavior; whether it should recover is the owner's
-/// call (it is not an ADR violation, the ADR is silent on a crash mid-replacement).
+/// A crash between `TranscriptReplaced` and its messages leaves a committed marker whose
+/// replacement is short. ADR 0005 line 92 makes the new replacement's written prefix the
+/// recoverable state, so the read succeeds with that prefix and reports the diagnostic. The
+/// torn tail (the half-written second message) is dropped first.
 #[test]
-fn a_crash_mid_replacement_is_refused_as_an_incomplete_replacement() {
+fn a_crash_mid_replacement_is_recovered_as_the_written_prefix() {
     let dir = TempDir::new("finding-mid-replacement");
     let path = dir.file("s.jsonl");
     let marker = envelope(
@@ -131,16 +135,66 @@ fn a_crash_mid_replacement_is_refused_as_an_incomplete_replacement() {
     );
     std::fs::write(&path, body).unwrap();
 
+    let session = Session::open(&path).unwrap();
+    assert_eq!(session.history().unwrap(), vec![Message::user("a")]);
+    assert_eq!(
+        session.recovered_replacement(),
+        Some(RecoveredReplacement {
+            revision: 1,
+            declared: 2,
+            written: 1,
+        })
+    );
+    // The half-written message was dropped, not counted.
+    assert_eq!(session.events().len(), 3);
+}
+
+/// A short segment followed by another `TranscriptReplaced` is still corruption: the previous
+/// marker's `len` can never be satisfied and a new revision begins.
+#[test]
+fn a_short_replacement_followed_by_another_replacement_is_refused() {
+    let dir = TempDir::new("finding-short-then-marker");
+    let path = dir.file("s.jsonl");
+    let body = [
+        envelope(
+            0,
+            "SessionCreated",
+            true,
+            json!({"workspace": "/w", "config_snapshot": {}}),
+        ),
+        envelope(
+            1,
+            "TranscriptReplaced",
+            true,
+            json!({"revision": 1, "len": 2}),
+        ),
+        envelope(
+            2,
+            "MessageAppended",
+            true,
+            json!({"index": 0, "message": {"user": {"content": []}}}),
+        ),
+        envelope(
+            3,
+            "TranscriptReplaced",
+            true,
+            json!({"revision": 2, "len": 1}),
+        ),
+    ]
+    .join("\n");
+    std::fs::write(&path, format!("{body}\n")).unwrap();
+
     let error = Session::open(&path).unwrap_err();
     assert!(
         matches!(
             error,
             ReadError::BadReplacementLen {
+                line: 4,
                 len: 2,
                 count: 1,
                 ..
             }
         ),
-        "expected the incomplete replacement to be named: {error:?}"
+        "expected the short segment to be named at the new marker: {error:?}"
     );
 }
