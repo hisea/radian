@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use agent_provider_anthropic::testing as anth;
 use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
 use portable_pty::{CommandBuilder, PtySize};
 use serde_json::json;
@@ -1876,5 +1877,71 @@ fn pty_a_panic_writes_a_redacted_panic_log() {
     assert!(
         log.contains("<redacted>"),
         "redaction marker missing: {log}"
+    );
+}
+
+// ---------- provider selection: anthropic (Phase 7 / anthost) ----------
+
+/// One Anthropic text reply (the minimal end_turn stream).
+fn anth_text_reply(text: &str) -> anth::Reply {
+    anth::Reply::sse(&[
+        anth::message_start(Some(json!({"input_tokens": 3, "output_tokens": 1}))),
+        anth::text_start(0),
+        anth::text_delta(0, text),
+        anth::block_stop(0),
+        anth::message_delta("end_turn", Some(json!({"output_tokens": 2}))),
+        anth::message_stop(),
+    ])
+}
+
+/// `--provider anthropic` in the TUI talks the Messages API and shows the reply; the session
+/// snapshot names anthropic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_anthropic_provider_sends_a_messages_request_and_renders_the_reply() {
+    let _serial = pty_guard();
+    let server = anth::MockServer::start(vec![anth_text_reply("ANTHROPIC-TUI-REPLY")]).await;
+    let dir = TempDir::new("anthropic");
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "claude",
+            "--provider",
+            "anthropic",
+            "--base-url",
+            &server.base_url,
+            "--api-key-env",
+            "ANTHROPIC_API_KEY",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "anthro",
+        ],
+        &[("ANTHROPIC_API_KEY", "sk-ant-tui-key")],
+        24,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"hello\r");
+    assert!(
+        pty.wait_for_screen("ANTHROPIC-TUI-REPLY", 20),
+        "the reply is not on screen:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1, "one request expected");
+    assert_eq!(requests[0].path, "/v1/messages");
+    assert_eq!(requests[0].header("x-api-key"), Some("sk-ant-tui-key"));
+    assert_eq!(requests[0].header("anthropic-version"), Some("2023-06-01"));
+
+    // The snapshot names the real provider, and never the key.
+    let session = std::fs::read_to_string(dir.path().join("anthro.jsonl")).unwrap();
+    assert!(session.contains("\"provider\":\"anthropic\""), "{session}");
+    assert!(
+        !session.contains("sk-ant-tui-key"),
+        "the key reached the session file"
     );
 }

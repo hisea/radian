@@ -9,6 +9,9 @@ publish = false
 [dependencies]
 agent-core = { path = "../agent-core" }
 agent-extensions = { path = "../agent-extensions" }
+agent-provider-anthropic = { path = "../agent-provider-anthropic" }
+agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible" }
 radian-coding = { path = "../radian-coding" }
+radian-sandbox = { path = "../radian-sandbox" }
 serde.workspace = true
 serde_json.workspace = true

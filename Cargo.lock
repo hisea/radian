@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "agent-core",
  "agent-extensions",
+ "agent-provider-anthropic",
  "agent-provider-openai-compatible",
  "clap",
  "futures-util",
@@ -2142,7 +2143,10 @@ version = "0.1.0"
 dependencies = [
  "agent-core",
  "agent-extensions",
+ "agent-provider-anthropic",
+ "agent-provider-openai-compatible",
  "radian-coding",
+ "radian-sandbox",
  "serde",
  "serde_json",
 ]
@@ -2166,6 +2170,7 @@ name = "radian-runtime"
 version = "0.1.0"
 dependencies = [
  "agent-core",
+ "agent-provider-anthropic",
  "radian-session",
  "serde_json",
  "thiserror 2.0.21",
@@ -2213,6 +2218,7 @@ version = "0.1.0"
 dependencies = [
  "agent-core",
  "agent-extensions",
+ "agent-provider-anthropic",
  "agent-provider-openai-compatible",
  "clap",
  "futures-util",

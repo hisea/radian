@@ -1,8 +1,26 @@
 # agent-cli
 
-`agent` is a chat client: one OpenAI-compatible model, optional MCP servers, optional
-built-in file/git tools (`--workspace`), and sessions that are written to disk through
-`radian-runtime` / `radian-session`.
+`agent` is a chat client: one model (OpenAI-compatible or Anthropic), optional MCP servers,
+optional built-in file/git tools (`--workspace`), and sessions that are written to disk
+through `radian-runtime` / `radian-session`.
+
+## Providers
+
+`--provider` picks the wire protocol; the default is unchanged.
+
+- `openai-compatible` (default): `/chat/completions`. `--base-url` defaults to
+  `https://api.openai.com/v1`; the key comes from `$OPENAI_API_KEY` unless `--api-key-env`
+  names another variable.
+- `anthropic`: the Messages API (`/v1/messages`). `--base-url` defaults to
+  `https://api.anthropic.com`; the key comes from `$ANTHROPIC_API_KEY` unless `--api-key-env`
+  names another variable. `--max-tokens` (default 4096) is sent because the Messages API
+  requires the field. `--thinking off|adaptive|enabled:<budget>` enables extended thinking
+  (default `off`; `adaptive` is the recommended mode on Claude 4.6+); `enabled:<budget>`
+  sends `{"type":"enabled","budget_tokens":N}`.
+
+The key is read only from the environment variable, never from the command line; it is never
+printed and never written to the session file. The session's config snapshot records the
+provider name and the model, not the key or a header value.
 
 ## Sessions
 
