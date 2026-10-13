@@ -175,7 +175,9 @@ fn tool_calls_and_results_are_shown() {
 #[test]
 fn the_status_line_shows_model_and_turn_state() {
     let mut app = App::new("my-model", "s");
-    app.apply_event(&AgentEvent::TurnStarted);
+    // The turn state is a session fact: the event sink writes it to the projection
+    // (ADR 0023 U5), so the test writes it there too.
+    app.projection.set_turn(radian_tui::TurnState::Running);
     app.entries.push(Entry::new(EntryKind::User, "hi"));
     let terminal = render(&mut app, 60, 10);
     let text = screen(&terminal);

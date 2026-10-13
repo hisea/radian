@@ -19,35 +19,29 @@ use std::time::Duration;
 
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::Notify;
-use tokio::task::JoinHandle;
 
-use agent_core::{
-    Agent, AgentConfig, AgentEvent, ContextBudget, EventSink, InputSource, RunStatus, TurnOptions,
-};
-use agent_extensions::{McpServerConfig, McpToolProvider};
+use agent_core::{AgentEvent, ContextBudget, EventSink, InputSource, RunStatus, TurnOptions};
+use agent_extensions::McpServerConfig;
 use clap::Parser;
-use radian_coding::CodingTools;
+use radian_host::memory::MemoryService;
 use radian_host::memory::commands::{self, CommandError, MemoryCommand};
-use radian_host::memory::{InjectionConfig, MemoryHooks, MemoryService, MemoryTools, ProjectState};
 use radian_host::{
     DEFAULT_MAX_TOKENS, HostModel, ModelArgs, Provider, SESSION_PLACEHOLDER, Thinking, build_model,
     check_provider_flags, generate_session_id, load_mcp_config, parse_headers, resolve_workspace,
     validate_session_id,
 };
-use radian_permissions::{Approver, PermissionHooks};
-use radian_runtime::{CancelCause, Driver, DriverError, Inbox, InboxError};
-use radian_session::{EventData, Index, Session, SessionCreatedData, SessionJournal};
+use radian_permissions::{Approver, AuditSink, PermissionHooks};
+use radian_runtime::{CancelCause, Inbox, InboxError};
+use radian_session::{EventData, Index, Session};
 use tokio::sync::{Mutex, mpsc};
 
 use crate::approval::{AutoApprover, JournalAudit, TERMINAL_SOURCE, TerminalApprover};
-use crate::tools::CliTools;
 
 /// Exit code for usage and configuration errors, matching clap's own usage failures.
 const USAGE_ERROR: i32 = 2;
 
 /// How many inputs may wait in the inbox. Bounded on purpose (ADR 0011 L4): a full queue
 /// refuses and hands the message back instead of dropping it.
-const INBOX_CAPACITY: usize = 64;
 
 #[derive(Parser)]
 #[command(
@@ -1100,72 +1094,16 @@ fn redact(text: &str, secrets: &[String]) -> String {
     out
 }
 
-/// Opens (or resumes) the session file. The caller has already resolved `session_id`.
-fn open_journal(
-    cli: &Cli,
-    session_id: &str,
-    workspace: &str,
-    provider: Provider,
-    model: &str,
-) -> Result<Arc<SessionJournal>, SetupError> {
-    let dir = session_dir(cli)?;
-    let path = dir.join(format!("{session_id}.jsonl"));
-    if cli.resume.is_some() {
-        if !path.exists() {
-            return Err(SetupError(format!(
-                "no session {session_id:?} in {}",
-                dir.display()
-            )));
-        }
-        let journal = SessionJournal::resume(&path, session_id)
-            .map_err(|e| SetupError(format!("cannot resume session {session_id:?}: {e}")))?;
-        return Ok(Arc::new(journal));
-    }
-    radian_session::ensure_private_dir(&dir)
-        .map_err(|e| SetupError(format!("cannot create {}: {e}", dir.display())))?;
-    // The snapshot is a model route reference only: never the key, a header value or a
-    // base URL that could carry credentials (ADR 0008 §4, ADR 0013).
-    let created = SessionCreatedData::new(
-        workspace,
-        serde_json::json!({"provider": provider.as_str(), "model": model}),
-    );
-    let journal = match SessionJournal::create(&path, session_id, created) {
-        Ok(journal) => Arc::new(journal),
-        // A complete session already occupies the file. Rewrite the message to name the
-        // command that continues it, with the id the user passed (dogfooding D15). A torn
-        // tail is still truncated by `create`, so this only fires for a real session.
-        Err(radian_session::WriteError::NotEmpty { .. }) => {
-            return Err(SetupError(format!(
-                "session {session_id:?} already exists in {}; continue it with \
-                 `--resume {session_id}`",
-                dir.display()
-            )));
-        }
-        Err(e) => {
-            return Err(SetupError(format!(
-                "cannot create session {session_id:?}: {e}"
-            )));
-        }
-    };
-    Ok(journal)
-}
-
 async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     let interactive = cli.prompt.is_none();
     let lines = LineHub::spawn();
     // One-shot mode with no terminal on stdin has nobody to ask; interactive mode reads its
     // answers from the same line hub as the prompt loop.
     let can_ask = interactive || std::io::stdin().is_terminal();
-    let agent_config = AgentConfig {
-        system_prompt: setup.system_prompt,
-        context_budget: setup.context_budget,
-        auto_compact: setup.auto_compact,
-        ..AgentConfig::default()
-    };
 
-    // The profile and the sandbox: what may run, and what the OS enforces. `full` is
-    // only reachable because the user named it; a failed probe is an error, never a fallback.
-    // All of this runs **before** the session file is created (dogfooding D2).
+    // The profile and the sandbox: what may run, and what the OS enforces. `full` is only
+    // reachable because the user named it; a failed probe is an error, never a fallback. All
+    // of this runs **before** the session file is created (dogfooding D2).
     let profile_arg = setup.profile;
     let workspace_path = setup.workspace.clone();
     let permission_profile =
@@ -1179,15 +1117,110 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     // service is the same one `agent memory` uses. `None` only when neither `RADIAN_HOME` nor
     // `HOME` is set; then memory is simply off for this run.
     let memory_root = radian_host::memory_dir();
-    let injection_config = InjectionConfig::default();
-    let mut sandbox_deny_read = vec![sessions_for_deny];
+    let mut sandbox_deny_read = vec![sessions_for_deny.clone()];
     if let Some(memory) = &memory_root {
         sandbox_deny_read.push(memory.clone());
     }
     let sandbox = profile::build_sandbox(profile_arg, &workspace_path, &sandbox_deny_read)?;
-    let (profile_line, sandbox_facts) = profile::describe(profile_arg, sandbox.as_ref());
-    eprintln!("[profile] {profile_line}");
-    eprintln!("[sandbox] {sandbox_facts}");
+
+    // The approver and the audit sink. `--yes` swaps the approver for one that answers "allow
+    // once" without asking; rules and the sandbox are untouched by it. The audit sink is a
+    // channel whose drain task is spawned once the session (and its journal) exists.
+    let approver: Arc<dyn Approver> = if cli.yes {
+        Arc::new(AutoApprover)
+    } else {
+        Arc::new(TerminalApprover {
+            lines: lines.clone(),
+            can_ask,
+        })
+    };
+    let (audit_tx, mut audit_rx) = mpsc::unbounded_channel();
+    let audit: Arc<
+        dyn Fn(Arc<radian_session::SessionJournal>) -> Arc<dyn AuditSink> + Send + Sync,
+    > = {
+        let tx = audit_tx.clone();
+        Arc::new(move |_journal| JournalAudit::new(tx.clone()) as Arc<dyn AuditSink>)
+    };
+    let ui = Arc::new(Ui::default());
+    let projection = Arc::new(radian_host::SessionProjection::new());
+    let signals = spawn_signals();
+    let driver_ended = Arc::new(Notify::new());
+    let runtime_events = {
+        let secrets = Arc::new(setup.secrets.clone());
+        Arc::new(move |event: &radian_session::RuntimeEvent| {
+            if let radian_session::RuntimeEvent::TurnFailed { message, .. } = event {
+                let message = redact(message, &secrets);
+                eprintln!("agent: {message}");
+                // ADR 0018's fallback: a recognizable context overflow gets one extra line.
+                if radian_host::is_context_overflow(&message) {
+                    eprintln!("agent: {}", radian_host::CONTEXT_OVERFLOW_HELP);
+                }
+            }
+        })
+    };
+
+    // ADR 0023 U5: the one place a session is established; `radian-tui` calls the same function
+    // with its own bindings.
+    let session = radian_host::open_session(
+        radian_host::SessionSetup {
+            session_id: radian_host::SessionId::new(setup.session_id.clone()),
+            session_dir: sessions_for_deny.clone(),
+            workspace: workspace_path.clone(),
+            coding_root: cli.workspace.clone().map(std::path::PathBuf::from),
+            model: setup.model,
+            servers: setup.servers,
+            system_prompt: setup.system_prompt.clone(),
+            context_budget: setup.context_budget,
+            auto_compact: setup.auto_compact,
+            sandbox,
+            tier: profile_arg.preset(),
+            profile: permission_profile,
+            memory_root,
+            resume: cli.resume.is_some(),
+            config_snapshot: serde_json::json!({
+                "provider": setup.provider.as_str(),
+                "model": setup.model_name,
+            }),
+            turn_options: TurnOptions {
+                max_model_calls: setup.max_model_calls,
+                deadline: None,
+                ..TurnOptions::default()
+            },
+            turn_timeout: setup.turn_timeout_secs.map(Duration::from_secs),
+            wording: radian_host::CLI_WORDING,
+            capabilities: radian_host::SessionCapability::ALL.to_vec(),
+        },
+        radian_host::HostBindings {
+            approver,
+            audit,
+            events: Arc::clone(&ui) as Arc<dyn EventSink>,
+            projection,
+            runtime_events,
+            driver_stopped: {
+                let ended = Arc::clone(&driver_ended);
+                Arc::new(move || ended.notify_one())
+            },
+            before_driver: None,
+            memory_warning: Arc::new(|message: &str| eprintln!("[memory] {message}")),
+        },
+    )
+    .await
+    .map_err(|error| SetupError(error.to_string()))?;
+    let session = Arc::new(session);
+
+    // The audit drain task: every decision goes into the channel and is appended here. It is
+    // flushed by dropping the senders and awaiting the task before the process exits.
+    let audit_journal = Arc::clone(session.journal());
+    let audit_task = tokio::spawn(async move {
+        while let Some(event) = audit_rx.recv().await {
+            let _ = audit_journal.append_runtime_event(event).await;
+        }
+    });
+
+    // The startup lines, in the order this host has always printed them. The facts come from
+    // the session; the wording is the host's (ADR 0012 decision 4).
+    eprintln!("[profile] {}", session.facts().profile_line);
+    eprintln!("[sandbox] {}", session.facts().sandbox_facts);
     // ADR 0008: which file was read and what was ignored (never a value).
     match &setup.config_path {
         Some(path) => eprintln!("[config] {}", path.display()),
@@ -1215,158 +1248,18 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             setup.window.describe()
         ),
     }
-    // ADR 0021 D2/D6: the project state and the injection budget, before the session exists.
-    let memory_service = memory_root
-        .as_ref()
-        .map(|root| MemoryService::open(&workspace_path, root));
-    match &memory_service {
-        Some(service) => match service.state() {
-            Ok(ProjectState::Known(project)) => eprintln!(
-                "[memory] project {project}; injection on, up to {} tokens",
-                injection_config.max_tokens
-            ),
-            Ok(ProjectState::Unlinked { .. }) => eprintln!(
-                "[memory] no project linked; global memory only (run `agent memory project new` \
-                 or `agent memory relink <ProjectId>`); injection on, up to {} tokens",
-                injection_config.max_tokens
-            ),
-            Err(error) => eprintln!("[memory] unavailable: {error}"),
-        },
-        None => eprintln!("[memory] disabled (no RADIAN_HOME or HOME)"),
-    }
-    let memory_tools = memory_service
-        .as_ref()
-        .map(|service| MemoryTools::new(service.clone()));
+    eprintln!("{}", session.facts().memory_notice);
 
-    // The built-in tools exist only with `--workspace`. `shell` is present only when a
-    // sandbox exists, which is exactly `workspace`/`full` with a workspace.
-    let coding = if cli.workspace.is_some() {
-        let tools = match sandbox {
-            Some(sandbox) => CodingTools::with_sandbox(&workspace_path, sandbox).map_err(|e| {
-                SetupError(format!("--workspace {}: {e}", workspace_path.display()))
-            })?,
-            None => CodingTools::new(&workspace_path).map_err(|e| {
-                SetupError(format!("--workspace {}: {e}", workspace_path.display()))
-            })?,
-        };
-        Some(tools)
-    } else {
-        None
-    };
-
-    // Every startup check that can fail is done. Only now is the session file created; a
-    // failure above leaves the session directory untouched (dogfooding D2).
-    let journal = open_journal(
-        &cli,
-        &setup.session_id,
-        &workspace_path.to_string_lossy(),
-        setup.provider,
-        &setup.model_name,
-    )?;
-    // The permission layer replaces the CLI's own approval hook: rules, "allow for this
-    // session" grants, and the audit record. `--yes` swaps the approver for one that answers
-    // "allow once" without asking; rules and the sandbox are untouched by it.
-    let approver: Arc<dyn Approver> = if cli.yes {
-        Arc::new(AutoApprover)
-    } else {
-        Arc::new(TerminalApprover {
-            lines: lines.clone(),
-            can_ask,
-        })
-    };
-    let (audit_tx, mut audit_rx) = mpsc::unbounded_channel();
-    let audit_journal = Arc::clone(&journal);
-    let audit_task = tokio::spawn(async move {
-        while let Some(event) = audit_rx.recv().await {
-            let _ = audit_journal.append_runtime_event(event).await;
-        }
-    });
-    let audit = JournalAudit::new(audit_tx.clone());
-    let hooks = Arc::new(PermissionHooks::new(
-        permission_profile,
-        Some(approver),
-        audit,
-    ));
-    // ADR 0021 D6: injection runs in the same hook chain, after the permission layer. A
-    // memory failure is a warning line, never a failed turn.
-    let memory_hooks = Arc::new(MemoryHooks::new(
-        memory_service.clone(),
-        Arc::clone(&journal),
-        injection_config,
-        Arc::new(|message: &str| eprintln!("[memory] {message}")),
-    ));
-    let agent = Arc::new(
-        Agent::new(
-            setup.model,
-            CliTools::new(coding, memory_tools, McpToolProvider::new(setup.servers)),
-        )
-        .with_config(agent_config)
-        .with_hooks((Arc::clone(&hooks), Arc::clone(&memory_hooks))),
-    );
-
-    let inbox = Inbox::durable(INBOX_CAPACITY, Arc::clone(&journal));
-    let ui = Arc::new(Ui::default());
-    let signals = spawn_signals();
-    // The approval prompt and the prompt loop share stdin. While approval may read, the
-    // loop must not compete for a line; with `--yes` (or nobody to ask) it may.
+    // The approval prompt and the prompt loop share stdin. While approval may read, the loop
+    // must not compete for a line; with `--yes` (or nobody to ask) it may.
     ui.set_approval_may_read(can_ask && !cli.yes);
-    let options = TurnOptions {
-        max_model_calls: setup.max_model_calls,
-        deadline: None,
-        ..TurnOptions::default()
-    };
-    let session_path = journal.path().to_path_buf();
-    let session_id = setup.session_id.clone();
-    let mut driver = Driver::open(
-        &agent,
-        journal,
-        Arc::clone(&inbox),
-        Arc::clone(&ui) as Arc<dyn EventSink>,
-        options,
-    )
-    .await
-    .map_err(|e| {
-        // The MCP server **processes** start here. The session file already exists and its
-        // durable content is real, so it is kept; the error says how to continue it.
-        SetupError(format!(
-            "cannot open the session: {e}\n  the session file {} exists; after fixing the \
-             problem, continue it with `--resume {session_id}`",
-            session_path.display()
-        ))
-    })?;
-    // A per-turn timeout: the driver computes a fresh deadline at each turn's start.
-    driver.set_turn_timeout(setup.turn_timeout_secs.map(Duration::from_secs));
-    // ADR 0017: a model error ends the turn, not the session. The driver hands the masked
-    // message to this listener; the host redacts it against its own secrets and prints it to
-    // stderr. Interactive mode then reads the next line; one-shot still exits 1.
-    let secrets_for_errors = Arc::new(setup.secrets.clone());
-    driver.set_runtime_events(Arc::new(move |event: &radian_session::RuntimeEvent| {
-        if let radian_session::RuntimeEvent::TurnFailed { message, .. } = event {
-            let message = redact(message, &secrets_for_errors);
-            eprintln!("agent: {message}");
-            // ADR 0018's fallback: a recognizable context overflow gets one extra line, since
-            // the automatic compaction that would retry it is not implemented yet. The host
-            // only has the text, so the prefix is what identifies it.
-            if radian_host::is_context_overflow(&message) {
-                eprintln!("agent: {}", radian_host::CONTEXT_OVERFLOW_HELP);
-            }
-        }
-    }));
-    let driver_ended = Arc::new(Notify::new());
-    let ended = Arc::clone(&driver_ended);
-    let task = tokio::spawn(async move {
-        let result = driver.run().await;
-        ended.notify_one();
-        result
-    });
-
     let mut run = Run {
-        inbox,
-        hooks: Arc::clone(&hooks),
+        inbox: Arc::clone(session.inbox()),
+        hooks: Arc::clone(session.hooks()),
         ui: Arc::clone(&ui),
         driver_ended,
         signals,
-        task,
+        session: Arc::clone(&session),
         secrets: setup.secrets.clone(),
     };
     let code = if let Some(prompt) = cli.prompt {
@@ -1375,12 +1268,10 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         interactive_loop(&mut run, &lines).await
     };
     ui.end_of_turn();
-    // Flush the audit: dropping every holder of the hooks (the agent, the loop context and
-    // this function) and the last sender closes the channel, and the task writes what is
-    // left before it ends. Nothing may exit before this.
+    // Flush the audit: dropping the session drops the agent and the hooks, and dropping the
+    // last sender closes the channel; the task writes what is left before it ends.
     drop(run);
-    drop(agent);
-    drop(hooks);
+    drop(session);
     drop(audit_tx);
     let _ = audit_task.await;
     Ok(code)
@@ -1409,7 +1300,8 @@ struct Run {
     ui: Arc<Ui>,
     driver_ended: Arc<Notify>,
     signals: mpsc::UnboundedReceiver<()>,
-    task: JoinHandle<Result<(), DriverError>>,
+    /// The session facade (ADR 0023 U5): its driver handle, its journal and its projection.
+    session: Arc<radian_host::LocalSession>,
     secrets: Vec<String>,
 }
 
@@ -1439,7 +1331,7 @@ async fn one_shot(run: &mut Run, prompt: String) -> i32 {
     if let Err(error) = enqueue_input(&run.inbox, &run.hooks, prompt, TERMINAL_SOURCE, false).await
     {
         eprintln!("agent: {}", redact(&error.to_string(), &run.secrets));
-        let _ = shutdown(&run.inbox, &run.ui, &mut run.task).await;
+        let _ = shutdown(&run.inbox, &run.ui, &run.session).await;
         return 1;
     }
     let mut cancelling = false;
@@ -1452,12 +1344,12 @@ async fn one_shot(run: &mut Run, prompt: String) -> i32 {
     )
     .await
     {
-        TurnEnd::Forced => return force_exit(&mut run.task).await,
-        TurnEnd::DriverEnded => return report_task(&mut run.task, &run.secrets).await,
+        TurnEnd::Forced => return force_exit(&run.session).await,
+        TurnEnd::DriverEnded => return report_task(&run.session, &run.secrets).await,
         TurnEnd::Done => {}
     }
     if let Some(code) = report_error(
-        &shutdown(&run.inbox, &run.ui, &mut run.task).await,
+        &shutdown(&run.inbox, &run.ui, &run.session).await,
         &run.secrets,
     ) {
         return code;
@@ -1532,8 +1424,8 @@ async fn interactive_loop(run: &mut Run, lines: &LineHub) -> i32 {
         .await
         {
             Next::Leave => break,
-            Next::Forced => return force_exit(&mut run.task).await,
-            Next::DriverEnded => return report_task(&mut run.task, &run.secrets).await,
+            Next::Forced => return force_exit(&run.session).await,
+            Next::DriverEnded => return report_task(&run.session, &run.secrets).await,
             Next::Again => continue,
             Next::Line(line) => {
                 let line = line.trim();
@@ -1583,7 +1475,7 @@ async fn interactive_loop(run: &mut Run, lines: &LineHub) -> i32 {
         }
     }
     if let Some(code) = report_error(
-        &shutdown(&run.inbox, &run.ui, &mut run.task).await,
+        &shutdown(&run.inbox, &run.ui, &run.session).await,
         &run.secrets,
     ) {
         return code;
@@ -1654,38 +1546,40 @@ fn on_signal(ui: &Ui, inbox: &Inbox, cancelling: &mut bool) -> Next {
 async fn shutdown(
     inbox: &Arc<Inbox>,
     ui: &Arc<Ui>,
-    task: &mut JoinHandle<Result<(), DriverError>>,
+    session: &Arc<radian_host::LocalSession>,
 ) -> Result<(), String> {
     // Let queued inputs run: closing now would abandon them.
     while ui.busy() || !inbox.is_empty().await {
         ui.finished.notified().await;
     }
     inbox.close();
-    match task.await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(error)) => Err(error.to_string()),
-        Err(join) => Err(format!("the driver task ended unexpectedly: {join}")),
+    match session.join().await {
+        radian_host::DriverEnd::Ok => Ok(()),
+        radian_host::DriverEnd::Failed(error) => Err(error),
+        radian_host::DriverEnd::Panicked(message) => {
+            Err(format!("the driver task ended unexpectedly: {message}"))
+        }
     }
 }
 
 /// Aborts the driver: the session is dropped, which kills the tool processes at once. Used
 /// only for the forced second Ctrl-C.
-async fn force_exit(task: &mut JoinHandle<Result<(), DriverError>>) -> i32 {
-    task.abort();
-    let _ = task.await;
+async fn force_exit(session: &Arc<radian_host::LocalSession>) -> i32 {
+    session.abort();
+    let _ = session.join().await;
     130
 }
 
 /// Awaits the driver task once and reports its error, if any.
-async fn report_task(task: &mut JoinHandle<Result<(), DriverError>>, secrets: &[String]) -> i32 {
-    match task.await {
-        Ok(Ok(())) => 0,
-        Ok(Err(error)) => {
-            eprintln!("agent: {}", redact(&error.to_string(), secrets));
+async fn report_task(session: &Arc<radian_host::LocalSession>, secrets: &[String]) -> i32 {
+    match session.join().await {
+        radian_host::DriverEnd::Ok => 0,
+        radian_host::DriverEnd::Failed(error) => {
+            eprintln!("agent: {}", redact(&error, secrets));
             1
         }
-        Err(join) => {
-            eprintln!("agent: the driver task ended unexpectedly: {join}");
+        radian_host::DriverEnd::Panicked(message) => {
+            eprintln!("agent: the driver task ended unexpectedly: {message}");
             1
         }
     }

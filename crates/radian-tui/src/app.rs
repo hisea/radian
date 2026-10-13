@@ -11,11 +11,9 @@
 //! wrapper that resolves and updates.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use agent_core::{
-    AgentEvent, BudgetReport, CompactionOutcome, ContentPart, Message, ModelUsage, RunStatus,
-    UsageSource,
-};
+use agent_core::{AgentEvent, BudgetReport, CompactionOutcome, ContentPart, Message, UsageSource};
 use radian_host::memory::commands::MemoryCommand;
 use radian_permissions::{ApprovalOutcome, ApprovalRequest};
 use radian_session::RuntimeEvent;
@@ -26,8 +24,13 @@ use crate::composer::Composer;
 use crate::find::FindState;
 use crate::keys::{Action, Keymap};
 use crate::mention::{Completion, ExpandError, Expansion};
-use crate::projection::StreamSnapshot;
+use crate::projection::{SessionProjection, StreamSnapshot};
 use crate::theme::{Theme, ThemeName};
+
+// ADR 0023 U5: the turn state is a **session fact**, so it lives in the projection
+// (`radian-host`) and `App` only reads it. Re-exported here so the existing `app::TurnState`
+// path keeps working.
+pub use radian_host::projection::TurnState;
 
 /// What kind of transcript line an entry is. The renderer maps this to a style; the tests
 /// assert that reasoning and assistant text are distinguishable by style and position.
@@ -98,23 +101,6 @@ impl WrapCache {
 impl PartialEq for WrapCache {
     fn eq(&self, _: &Self) -> bool {
         true
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TurnState {
-    Idle,
-    Running,
-    Cancelled,
-}
-
-impl TurnState {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Idle => "idle",
-            Self::Running => "running",
-            Self::Cancelled => "cancelled",
-        }
     }
 }
 
@@ -212,6 +198,9 @@ pub enum Input {
     CompactDone(Result<CompactionOutcome, String>),
     /// A `/sessions`, `/export` or `/fork` finished: the notices to show.
     SessionDone(Vec<String>),
+    /// The session's facade refused a command (ADR 0023 U5): an undeclared capability. The UI
+    /// shows a notice instead of failing the loop.
+    CommandRefused(radian_host::CommandRefused),
 }
 
 /// The result of [`Effect::RunMemoryCommand`]. The executor decides nothing: a command that
@@ -389,7 +378,10 @@ pub struct App {
     /// True while the view is pinned to the newest line. Scrolling up clears it; scrolling
     /// back to the bottom, or new content while it is set, pins it again.
     pub follow: bool,
-    pub turn: TurnState,
+    /// The session facts (ADR 0023 U5): turn, usage, budget, tier, MCP counts, the last tool
+    /// call and the streaming buffer. `App` holds a **read handle** only; the host's
+    /// `SessionFacade` owns the projection, and every fact is written there, never here.
+    pub projection: Arc<SessionProjection>,
     pub quit: bool,
     pub note: Option<String>,
     /// Set while a tool call waits for the human; keys answer it instead of typing. The reply
@@ -406,20 +398,6 @@ pub struct App {
     pub theme: Theme,
     /// The key bindings (config `tui.keybindings`), defaulting to the pre-config key table.
     pub keymap: Keymap,
-    /// The effective input budget `B`, if any; `None` means no budget is configured.
-    pub context_window: Option<u64>,
-    /// The most recent budget report, for the status bar.
-    pub budget_report: Option<BudgetReport>,
-    /// The permission tier's display name (ADR 0012), set by the host at startup.
-    pub tier: Option<String>,
-    /// Provider-reported usage totals for this session. `None` means the provider never
-    /// reported that field; it is never filled with an estimate or a zero.
-    pub usage_input: Option<u64>,
-    pub usage_output: Option<u64>,
-    /// How many MCP servers are configured, and the servers/tools the opened session
-    /// reported (`None` until it opens). Plain numbers, so the app needs no MCP dependency.
-    pub mcp_configured: usize,
-    pub mcp_open: Option<(usize, usize)>,
     pub total_lines: usize,
     pub view_height: u16,
     pub max_scroll: usize,
@@ -448,7 +426,7 @@ impl App {
             history_stash: String::new(),
             scroll: 0,
             follow: true,
-            turn: TurnState::Idle,
+            projection: Arc::new(SessionProjection::new()),
             quit: false,
             note: None,
             pending_approval: None,
@@ -457,13 +435,6 @@ impl App {
             pending_expand: None,
             theme: Theme::default(),
             keymap: Keymap::default(),
-            context_window: None,
-            budget_report: None,
-            tier: None,
-            usage_input: None,
-            usage_output: None,
-            mcp_configured: 0,
-            mcp_open: None,
             total_lines: 0,
             view_height: 0,
             max_scroll: 0,
@@ -475,13 +446,16 @@ impl App {
     }
 
     /// Records the effective input budget `B` (no budget is configured when this is `None`).
+    ///
+    /// The host normally writes this through the projection when it opens the session; the
+    /// method is the seam the tests use.
     pub fn set_context_window(&mut self, input_budget: Option<u64>) {
-        self.context_window = input_budget;
+        self.projection.set_context_window(input_budget);
     }
 
     /// Records the permission tier's display name, for the status bar.
     pub fn set_tier(&mut self, tier: impl Into<String>) {
-        self.tier = Some(tier.into());
+        self.projection.set_tier(Some(tier.into()));
     }
 
     /// Whether this process has a memory root, for `/memory`. Set once at startup; the service
@@ -514,8 +488,13 @@ impl App {
     /// Records the MCP state: how many servers are configured, and what the opened session
     /// reported (if it has opened).
     pub fn set_mcp(&mut self, configured: usize, open: Option<(usize, usize)>) {
-        self.mcp_configured = configured;
-        self.mcp_open = open;
+        self.projection.set_mcp(configured, open);
+    }
+
+    /// Replaces the read handle with the host's projection, so the renderer reads the same
+    /// facts the facade owns.
+    pub fn set_projection(&mut self, projection: Arc<SessionProjection>) {
+        self.projection = projection;
     }
 
     /// Records the transcript viewport. Called by the renderer with the measured transcript
@@ -740,6 +719,13 @@ impl App {
                 }
                 UpdateResult::dirty()
             }
+            Input::CommandRefused(refused) => {
+                self.push_notice(format!(
+                    "the session refused `{}`: {}",
+                    refused.command, refused.reason
+                ));
+                UpdateResult::dirty()
+            }
         }
     }
 
@@ -832,9 +818,15 @@ impl App {
         }
     }
 
+    /// The current turn state, read from the projection (ADR 0023 U5). `update` reads it to
+    /// decide between cancel and quit, and between a steer and a follow-up; it never writes it.
+    fn turn(&self) -> TurnState {
+        self.projection.read().turn()
+    }
+
     /// Cancels a running turn, or quits when idle.
     fn cancel_or_quit(&mut self) -> UpdateResult {
-        if self.turn == TurnState::Running {
+        if self.turn() == TurnState::Running {
             UpdateResult::quiet(Effect::Cancel)
         } else {
             self.quit = true;
@@ -1011,7 +1003,7 @@ impl App {
     /// result becomes the follow-up or steer effect. Whether it steers is decided here, because
     /// the turn state is app state.
     fn begin_send(&mut self, text: String) -> UpdateResult {
-        let kind = if self.turn == TurnState::Running {
+        let kind = if self.turn() == TurnState::Running {
             PendingSend::Steer
         } else {
             PendingSend::Followup
@@ -1228,7 +1220,7 @@ impl App {
             command::Outcome::Fork => {
                 // ADR 0022 §1: fork only when the session is idle. The decision is app state,
                 // so it is made here rather than in the loop.
-                if self.turn == TurnState::Running {
+                if self.turn() == TurnState::Running {
                     self.push_notice(
                         "finish the current turn before forking (`/fork` needs an idle session)",
                     );
@@ -1251,18 +1243,10 @@ impl App {
     /// channel, which the loop owns).
     pub fn apply_event(&mut self, event: &AgentEvent) -> Vec<Effect> {
         match event {
-            AgentEvent::TurnStarted => self.turn = TurnState::Running,
-            // ADR 0018: the request carries its projection and budget `B`, for the status bar.
-            AgentEvent::ModelRequestStarted { budget, .. } => {
-                self.turn = TurnState::Running;
-                self.budget_report = budget.clone();
-            }
-            // Usage is the provider's own report; each present field is added to the session
-            // total, and a field that was never reported stays `None` (never a zero). A
-            // response without usage is not an event here at all.
-            AgentEvent::ModelResponseReceived {
-                usage: Some(usage), ..
-            } => self.add_usage(usage),
+            // ADR 0023 U5: the turn, budget, usage and tool facts are written to the session
+            // projection by the event sink (`ProjectionSink`), never here. `App` handles only
+            // the transcript, the note and the effects.
+            AgentEvent::TurnStarted | AgentEvent::ModelRequestStarted { .. } => {}
             AgentEvent::ToolStarted { name, .. } => {
                 self.note = Some(format!("tool {name} running"));
             }
@@ -1293,11 +1277,7 @@ impl App {
                     format!("compaction failed: {reason}"),
                 ));
             }
-            AgentEvent::RunFinished { status } => {
-                self.turn = match status {
-                    RunStatus::Cancelled(_) => TurnState::Cancelled,
-                    _ => TurnState::Idle,
-                };
+            AgentEvent::RunFinished { status: _ } => {
                 self.note = None;
                 // The turn is over, so no approval can still be waiting: a cancelled turn
                 // already resolved the hook's `ask` as a denial. Clearing the prompt must also
@@ -1313,17 +1293,6 @@ impl App {
             _ => {}
         }
         Vec::new()
-    }
-
-    /// Adds one provider-reported usage to the session totals. A field the provider did not
-    /// report is left alone; it is never treated as zero.
-    fn add_usage(&mut self, usage: &ModelUsage) {
-        if let Some(input) = usage.input {
-            self.usage_input = Some(self.usage_input.unwrap_or(0).saturating_add(input));
-        }
-        if let Some(output) = usage.output {
-            self.usage_output = Some(self.usage_output.unwrap_or(0).saturating_add(output));
-        }
     }
 
     /// Sets the live entry of `kind` to `text` (creating it when it does not exist yet). The

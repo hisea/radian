@@ -180,18 +180,3 @@ fn unavailable(profile: ProfileArg, mode: SandboxMode) -> String {
 fn probe_failure_injected() -> bool {
     std::env::var("RADIAN_SANDBOX_PROBE_FAIL").is_ok_and(|value| value == "1")
 }
-
-/// The two startup lines: what was chosen, and what it actually means.
-///
-/// The wording follows ADR 0012 decision 4: it must **not** claim credential isolation.
-/// The macOS backend leaves `mach-lookup` open, so IPC is not contained, and "sensitive
-/// directories are not readable" is not the same as "your credentials are safe".
-pub(crate) fn describe(profile: ProfileArg, sandbox: Option<&Sandbox>) -> (String, String) {
-    // The shared text lives in `radian-host` (dogfooding D5); this host keeps only its
-    // wording: `agent` has MCP tools and names the confined subject accordingly.
-    radian_host::describe(
-        profile.preset().sandbox_mode(),
-        sandbox,
-        radian_host::CLI_WORDING,
-    )
-}

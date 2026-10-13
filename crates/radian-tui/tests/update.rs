@@ -85,7 +85,7 @@ fn every_slash_command_produces_its_effect() {
 #[test]
 fn fork_is_refused_while_a_turn_runs() {
     let mut app = App::new("m", "s");
-    app.turn = TurnState::Running;
+    app.projection.set_turn(TurnState::Running);
     let effects = submit(&mut app, "/fork");
     assert!(effects.is_empty(), "no fork while running: {effects:?}");
     assert!(
@@ -207,15 +207,34 @@ fn an_input_that_changes_nothing_is_not_dirty() {
     let none = app.on_key(key(KeyCode::F(5)));
     assert!(!none.dirty && none.effects.is_empty());
     // Cancel and quit leave the frame alone (the turn state changes when the turn ends).
-    app.turn = TurnState::Running;
+    app.projection.set_turn(TurnState::Running);
     let cancel = app.on_key(ctrl(KeyCode::Char('c')));
     assert_eq!(cancel.effects, vec![Effect::Cancel]);
     assert!(!cancel.dirty, "cancelling does not repaint");
-    app.turn = TurnState::Idle;
+    app.projection.set_turn(TurnState::Idle);
     assert!(
         !app.on_key(ctrl(KeyCode::Char('c'))).dirty,
         "quitting neither"
     );
     // Typing does.
     assert!(app.on_key(key(KeyCode::Char('a'))).dirty);
+}
+
+/// ADR 0023 U5: a command the session's facade refuses (an undeclared capability) becomes a
+/// notice, not a failed loop. The UI declares what it can do from `capabilities()`, but the
+/// facade is the authority.
+#[test]
+fn a_refused_command_is_shown_as_a_notice() {
+    let mut app = App::new("m", "s");
+    let refused = radian_host::CommandRefused::undeclared(
+        &radian_host::SessionCommand::SendFollowup("hi".into()),
+    );
+    let result = app.update(Input::CommandRefused(refused));
+    assert!(result.dirty, "a notice is a visible change");
+    let shown = notices(&app);
+    assert_eq!(shown.len(), 1, "{shown:?}");
+    assert!(
+        shown[0].contains("refused `send`") && shown[0].contains("does not declare"),
+        "{shown:?}"
+    );
 }

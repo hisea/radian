@@ -284,8 +284,8 @@ fn perf_render_streaming() {
 
     let mut apps: Vec<App> = (0..4)
         .map(|_| {
-            let mut app = new_app(1_000);
-            app.turn = TurnState::Running;
+            let app = new_app(1_000);
+            app.projection.set_turn(TurnState::Running);
             app
         })
         .collect();

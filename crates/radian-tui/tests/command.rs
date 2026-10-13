@@ -138,7 +138,7 @@ fn a_double_slash_sends_the_message_with_one_slash() {
             Effect::SendFollowup("/hi".into())
         ]
     );
-    app.turn = TurnState::Running;
+    app.projection.set_turn(TurnState::Running);
     assert_eq!(
         submit(&mut app, &service, "//steer me"),
         vec![
@@ -173,7 +173,7 @@ fn a_memory_read_runs_and_is_never_sent() {
     );
 
     // While a turn runs a read command still runs and does not steer the turn.
-    app.turn = TurnState::Running;
+    app.projection.set_turn(TurnState::Running);
     let effects = submit(&mut app, &service, "/memory list");
     assert!(
         matches!(

@@ -143,7 +143,7 @@ async fn ctrl_c_while_a_prompt_is_up_cancels_instead_of_answering() {
     // The receiver is dropped without awaiting: Ctrl-C must not answer the prompt, so the
     // channel stays open until the turn actually ends and the prompt is cleared.
     let (_reply, _answer) = prompt(&mut app);
-    app.turn = radian_tui::TurnState::Running;
+    app.projection.set_turn(radian_tui::TurnState::Running);
     let result = app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
     assert_eq!(result.effects, vec![Effect::Cancel]);
     assert!(
