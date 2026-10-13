@@ -123,19 +123,14 @@ async fn no_window_configured_disables_the_guard() {
     assert_eq!(chat.context_budget_status(), &BudgetStatus::Disabled);
 }
 
-/// 4. The Continue path: one relaxed request goes out, and the guard applies again after it.
+/// 4. The Continue path: one relaxed request goes out, and the guard applies again after it
+///    — both for the same turn's next request and for a later turn.
 #[tokio::test]
 async fn relaxing_once_sends_that_request_and_restores_the_guard() {
     let model = ScriptedModel::new([
-        Reply::Respond(ModelResponse {
-            reasoning: Vec::new(),
-            content: vec![],
-            tool_calls: vec![call("c1", "echo", big_args())],
-            provider_payload: None,
-            stop_reason: StopReason::ToolUse,
-            usage: None,
-        }),
-        text("done"),
+        calls(vec![call("c1", "echo", big_args())]),
+        calls(vec![call("c2", "echo", big_args())]),
+        text("never sent"),
     ]);
     let tools = MemTools::new(vec![(spec("echo"), Behavior::Echo)]);
     let mut chat = with_budget(model.clone(), tools, ContextBudget::new(1000))
@@ -151,7 +146,8 @@ async fn relaxing_once_sends_that_request_and_restores_the_guard() {
     block_report(&first.status);
     assert_eq!(model.requests().len(), 1);
 
-    // Turn 2: the host chose Continue; the over-budget request goes out once.
+    // Turn 2: the host chose Continue. The over-budget request goes out once, then the same
+    // turn's next request is protected again.
     let second = chat
         .run_turn(
             "continue",
@@ -163,10 +159,10 @@ async fn relaxing_once_sends_that_request_and_restores_the_guard() {
         )
         .await
         .unwrap();
-    assert_eq!(second.status, RunStatus::Completed);
+    block_report(&second.status);
     assert_eq!(model.requests().len(), 2);
 
-    // Turn 3: the exemption was consumed; the same oversized history blocks again.
+    // Turn 3: the exemption was for one request last turn, not for the session.
     let third = chat
         .run_turn("more", TurnOptions::default(), &NoopSink)
         .await
