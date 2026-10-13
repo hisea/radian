@@ -61,6 +61,10 @@ struct Pty {
     parser: Parser,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     processed: usize,
+    /// A private `HOME` for the app: its catalog cache lives here, never in the user's real
+    /// cache. Held only so the directory is removed when the pty is dropped.
+    #[allow(dead_code)]
+    home: TempDir,
 }
 
 impl Pty {
@@ -96,6 +100,13 @@ impl Pty {
             }
         }
         cmd.env("TERM", "xterm-256color");
+        // Tests must not read the user's catalog cache or reach the real models.dev. A fresh
+        // `HOME` isolates the cache; the catalog URL points at a closed local port, so a
+        // lookup fails fast and the window is unknown. A test that wants the catalog
+        // overrides both through `envs`.
+        let home = TempDir::new("home");
+        cmd.env("HOME", home.path().as_os_str());
+        cmd.env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json");
         for (name, value) in envs {
             cmd.env(name, value);
         }
@@ -119,6 +130,7 @@ impl Pty {
             parser: Parser::new(rows, cols, 5000),
             child,
             processed: 0,
+            home,
         }
     }
 
@@ -2299,4 +2311,39 @@ async fn pty_a_model_error_is_shown_and_the_session_continues() {
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
     assert_eq!(server.requests().len(), 2, "both turns reached the model");
+}
+
+/// ADR 0018: the startup notice names the window and where it came from. An explicit
+/// `--context-window` needs no catalog, so this is deterministic without a mock catalog.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_the_startup_notice_names_the_window_source() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("catalog-window");
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "catalog-window",
+            "--context-window",
+            "5000",
+            "--profile",
+            "full",
+        ],
+        24,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("context: window 5000 from --context-window", 10),
+        "the startup notice does not name the explicit window:\n{}",
+        pty.screen()
+    );
+    pty.quit();
 }

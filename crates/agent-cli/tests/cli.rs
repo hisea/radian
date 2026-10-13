@@ -133,6 +133,12 @@ fn spawn_agent(args: &[&str], envs: &[(&str, &str)]) -> Child {
         .args(args)
         .env_remove("OPENAI_API_KEY")
         .env("RADIAN_SESSION_DIR", fresh_session_dir())
+        // Tests must not read the user's catalog cache or reach the real models.dev. A fresh
+        // `HOME` isolates the cache; the catalog URL points at a closed local port, so a
+        // lookup fails fast and the window is unknown. A test that wants the catalog
+        // overrides both through `envs`.
+        .env("HOME", fresh_session_dir())
+        .env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json")
         .envs(envs.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -2577,7 +2583,7 @@ async fn without_a_window_the_guard_is_off_and_says_so() {
 
     assert_eq!(code, 0, "{stderr}");
     assert!(stderr.contains("context guard off"), "{stderr}");
-    assert!(stderr.contains("no --context-window"), "{stderr}");
+    assert!(stderr.contains("unknown: context guard off"), "{stderr}");
     assert!(
         !stderr.contains("the model request was not sent"),
         "{stderr}"
@@ -2941,6 +2947,9 @@ fn spawn_agent_in(session_dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> C
         .args(args)
         .env_remove("OPENAI_API_KEY")
         .env("RADIAN_SESSION_DIR", session_dir)
+        // Isolate the catalog cache and the network, like `spawn_agent` above.
+        .env("HOME", fresh_session_dir())
+        .env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json")
         .envs(envs.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -4374,4 +4383,108 @@ async fn one_shot_model_error_still_exits_one_and_shows_the_error() {
     assert_eq!(code, 1, "{stderr}");
     assert!(stderr.contains("HTTP 500"), "{stderr}");
     assert!(stdout.is_empty(), "stdout must stay model-only: {stdout}");
+}
+
+// ---------- model catalog: the startup window line (ADR 0018) ----------
+
+const CATALOG_JSON: &str = r#"{
+  "opencode": {
+    "id": "opencode",
+    "models": {
+      "deepseek-v4.1-flash": {"id": "deepseek-v4.1-flash",
+        "limit": {"context": 1000000, "input": 922000, "output": 384000}}
+    }
+  }
+}"#;
+
+/// The explicit window is named on startup and wins over the catalog.
+#[tokio::test]
+async fn the_startup_line_names_an_explicit_window() {
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--context-window",
+                "5000",
+                "--offline-catalog",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("window 5000 from --context-window"),
+        "{stderr}"
+    );
+}
+
+/// With no window and an empty cache, the guard is off and says so.
+#[tokio::test]
+async fn the_startup_line_is_unknown_without_a_window() {
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let home = scratch("no-window-home");
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--offline-catalog",
+                "-p",
+                "hi",
+            ],
+            &[("HOME", home.to_str().unwrap())],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("unknown: context guard off"), "{stderr}");
+}
+
+/// The catalog line names the provider/model and the numbers, and the numbers show separately.
+#[tokio::test]
+async fn the_startup_line_names_the_catalog() {
+    let provider = MockServer::start(vec![text_reply("ok")]).await;
+    let catalog = MockServer::start(vec![Reply::status(200, CATALOG_JSON)]).await;
+    let catalog_url = format!("{}/api.json", catalog.base_url);
+    let home = scratch("catalog-home");
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "deepseek-v4.1-flash",
+                "--base-url",
+                &provider.base_url,
+                "--catalog-provider",
+                "opencode",
+                "-p",
+                "hi",
+            ],
+            &[
+                ("HOME", home.to_str().unwrap()),
+                ("RADIAN_CATALOG_URL", catalog_url.as_str()),
+            ],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("window 922000 from models.dev (opencode/deepseek-v4.1-flash"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("context 1000000"), "{stderr}");
+    assert!(stderr.contains("input 922000"), "{stderr}");
+    assert!(stderr.contains("output 384000"), "{stderr}");
+    assert_eq!(catalog.requests().len(), 1, "the catalog was fetched once");
 }

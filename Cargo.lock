@@ -2148,8 +2148,10 @@ dependencies = [
  "radian-coding",
  "radian-sandbox",
  "radian-session",
+ "reqwest",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
