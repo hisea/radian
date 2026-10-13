@@ -126,3 +126,16 @@ Notes:
 
 4/4 抓住，无漏网、无等价变异。M10 的 key 断言由 `sk-` 模式兜底，所以真正抓变异的是 header 值那一条
 （header 值没有内置模式，只有 `with_secret` 会把它换掉）。
+
+## 第二轮：--model 必填性与 search 的索引位置（2026-10-13）
+
+一次性检出 `/tmp/clisess2-mut`（base `d4034ba`），每个变异用 `git checkout --` 恢复，
+`git status --short` 为空；`cargo test -p agent-cli --no-fail-fast <精确测试名>`。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M14 | 交互模式不带 `--model` 也能启动（去掉 clap 的 `required_unless_present_any` 并让 `model_name` 默认成 `"m"`） | ✅ failed | `a_conversation_still_requires_a_model`（不再有 clap 的 `Usage:` 行；实际是后面的 “no API key” 退出 2） |
+| M15 | `--search` 的缓存写成 `.jsonl` 名（`index.db` → `search.jsonl`），即看起来像新建了一个会话文件 | ✅ failed | `session_commands_do_not_touch_the_session_directory`（`created or modified a .jsonl file`，`index.db` 也不再出现） |
+
+M14 的断言特意包含 clap 的 `Usage:` 行：只断言 `--model` 字样的话，后面的 setup 错误也含它，变异就抓不住
+了（第一次写测试时正是这个洞）。M15 覆盖 brief 要求的「search 写进了一个新的 .jsonl」。
