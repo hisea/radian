@@ -71,3 +71,18 @@ M24 与 M17–M23 不同：那些是 adapter 单测/直接 `complete` 层面，M
 | M26 | `run` 去掉 `idle_timeout` 的 `tokio::time::timeout` 包裹（空闲超时不生效） | 抓住（看门狗触发） | `a_silent_server_hits_the_idle_timeout` |
 | M27 | `complete` 去掉取消 `select!` 分支（取消后不返回） | 抓住（看门狗触发） | `cancelling_returns_instead_of_hanging` |
 | M28 | `finish` 容忍 `done=false`/缺 `stop_reason`（中途断开当作成功） | 抓住 (rc=101) | `an_early_eof_after_deltas_is_a_transport_error` |
+
+## ADR 0018 超长错误分类（overflow，2026-10-13）
+
+一次性 worktree `/tmp/radian-overflow-mut`（HEAD = `cc71ab4`，独立 target），`--no-fail-fast`；
+变异后 `git checkout --`、`git status --short` 为空。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M29 | 分类忽略状态码（`is_overflow_signature` 不按 status 配对，`classify_overflow` 的门也去掉） | 抓住 (rc=101) | `overflow::tests::other_statuses_are_not_overflows`（`500`/`429` 的 400 形态被判为超长） |
+| M30 | 不看 `error.type`（只看 message；413 无条件成立） | 抓住 (rc=101) | `overflow::tests::the_error_type_matters` |
+| M31 | `mask()` 对 `ContextOverflow` 不 scrub | 抓住 (rc=101) | `a_context_overflow_body_that_echoes_the_key_is_masked` |
+
+**等价变异（记录，不是漏网）**：只把 `classify_overflow` 的门从 `400|413` 改成 `400|413|429`
+（不动 `is_overflow_signature`）不改变行为——`is_overflow_signature` 自己也按 status 配对，429
+仍返回 false。真正改变行为的是 M29。

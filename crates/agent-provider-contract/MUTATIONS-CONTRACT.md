@@ -16,3 +16,15 @@
 | 10 凭据不泄漏 | C10：`mask()` 不再调用（错误原文透出） | `contract_10_secret_not_leaked` FAILED（错误文本含 secret） |
 
 结论：10 条契约全部有"变异 → 契约测试失败"的证据。没有没抓住的变异；C4b 专门验证了条目 4 的变异不误伤条目 3（分片装配是独立行为）。
+## ADR 0018：`check_context_overflow` 的出口（overflow，2026-10-13）
+
+一次性 worktree `/tmp/radian-overflow-mut`（HEAD = `cc71ab4`，独立 target），`--no-fail-fast`；
+变异后 `git checkout --`。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| C11 | `check_context_overflow` 在 harness 声明 `None` 时直接 `return`，把反例也跳过 | 抓住 (rc=101) | `tests::a_plain_400_is_never_an_overflow_even_without_a_declaration`（`#[should_panic]`：反例被跳过就不 panic，测试失败） |
+
+结论：出口 3 的「反例对所有 provider 都跑、与声明无关」由契约 crate 自己的假 provider 测试
+钉住（声明即分类、无声明只跳过正例、误判在无声明 harness 上失败）；两家 adapter 的
+`contract_11_context_overflow` 另外证明「声明即分类」。
