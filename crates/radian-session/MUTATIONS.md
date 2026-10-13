@@ -149,3 +149,18 @@ Base `2d01d9b` · 一次性 worktree `/tmp/memsvcb-mut` · `git checkout --` 还
 | # | 变异 | 结果 | 抓住它的测试 |
 |---|---|---|---|
 | M13 | `MemoryInjected` 的 `critical` 改为 `true` | ✅ 抓住 | `runtime_events::memory_injected_round_trips_without_content_and_is_not_critical` |
+
+## ADR 0019 收尾：resume 先校验后截尾
+
+Base: `3035930` · one-shot worktree `/tmp/0019b-mut`（detached，跑完删除）· 每个变异 `--no-fail-fast`
+跑完即 `git checkout -- .`，结束时 `git status --short` 为空。
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| N1 | `resume` 恢复旧顺序（先 `set_len` 截 torn tail，后 `Session::open` 校验） | `replace::resume_refuses_a_corrupt_file_without_touching_it`（`replace-resume-corrupt-pending-event` 这一例：字节不再相同） | ✅ failed |
+| N2 | `resume` 忽略写 abort 的错误（`let _ = journal.write_line(Aborted)`）并返回 `Ok` | `replace::resume_reports_a_failed_abort_write_and_appends_nothing` | ✅ failed |
+
+2/2 caught。N2 的测试用 `testing` feature 的故障接缝（`fail_next_aborted_write()`，在
+`write_locked` 真正 `write_all` 之前返回 `io::Error`），所以文件字节完全不变——测试断言的是
+"不变"而不是"只多一段 torn tail"。跑 N2 用 `cargo test -p radian-session --features testing
+--test replace`；默认 `cargo test --workspace` 不含该用例（接缝只在 `testing` feature 下编译）。

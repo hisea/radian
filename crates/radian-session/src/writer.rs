@@ -166,14 +166,10 @@ impl SessionJournal {
             }
             .into());
         }
-        if scan.torn {
-            file.set_len(scan.offset_after_last_lf)
-                .map_err(|e| io_err(&path, e))?;
-        }
-        // ADR 0019 §6/§7: a file that ends inside a pending replacement is closed with an
-        // explicit abort before any append. The read side is the validator, so a corrupt
-        // file is refused here and nothing is written. An already-aborted segment is closed,
-        // so a second `resume` does not repeat the write.
+        // ADR 0019 §6/§7: validate before touching the file. `Session::open` ignores a torn
+        // tail and folds the committed prefix, so a corrupt file is refused with its bytes
+        // exactly as they were — the torn tail is not truncated first. An already-aborted
+        // segment is closed, so a second `resume` does not repeat the abort.
         let parsed = crate::reader::Session::open(&path)?;
         let abort_revision = parsed
             .uncommitted_replacements()
@@ -181,6 +177,11 @@ impl SessionJournal {
             .rev()
             .find(|segment| segment.end == agent_core::ReplacementEnd::EndOfFile)
             .map(|segment| segment.revision);
+        // Only now that the file is known sound is the torn tail (ADR 0006 §3.2) removed.
+        if scan.torn {
+            file.set_len(scan.offset_after_last_lf)
+                .map_err(|e| io_err(&path, e))?;
+        }
         let journal = SessionJournal {
             path,
             session_id: session_id.to_owned(),
@@ -279,6 +280,11 @@ fn write_locked(
     (event, critical): (&str, bool),
     data: &RawValue,
 ) -> std::io::Result<()> {
+    // A test-only seam: fail before any byte is written, so the file stays untouched.
+    #[cfg(feature = "testing")]
+    if take_aborted_write_failure(event) {
+        return Err(std::io::Error::other("injected: the abort write failed"));
+    }
     let seq = writer.next_seq;
     let line = Line {
         schema_version: SCHEMA_VERSION,
@@ -297,6 +303,24 @@ fn write_locked(
     writer.file.sync_all()?;
     writer.next_seq = seq + 1;
     Ok(())
+}
+
+/// Test-only fault seam (ADR 0019 §7): arm a one-shot failure for the next
+/// `TranscriptReplacementAborted` write, so an integration test can see `resume` surface
+/// the error without touching the file. Compiled only with the `testing` feature.
+#[cfg(feature = "testing")]
+pub fn fail_next_aborted_write() {
+    FAIL_NEXT_ABORTED_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(feature = "testing")]
+static FAIL_NEXT_ABORTED_WRITE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(feature = "testing")]
+fn take_aborted_write_failure(event: &str) -> bool {
+    event == EVT_TRANSCRIPT_REPLACEMENT_ABORTED.0
+        && FAIL_NEXT_ABORTED_WRITE.swap(false, std::sync::atomic::Ordering::SeqCst)
 }
 
 fn invalid_data(path: &Path, e: serde_json::Error) -> WriteError {
