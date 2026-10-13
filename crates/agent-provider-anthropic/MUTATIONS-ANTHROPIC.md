@@ -60,3 +60,14 @@ M22 的 UI 侧断言（`http.rs`）与 lib 单测都覆盖；两条都是对新�
 
 M24 与 M17–M23 不同：那些是 adapter 单测/直接 `complete` 层面，M24 是**跨关闭与 resume**
 的端到端断言（thinking 块连同 signature 必须从 JSONL 读回后原样回传）。
+
+## 网络异常矩阵追加（resilience，2026-10-16）
+
+一次性 worktree `/tmp/resil-mut`（从 `20a8ac7` 创建，用完删除），`--no-fail-fast`，每个变异后从副本还原。
+
+| # | 变异 | 结果 | 抓住它的测试（`tests/resilience.rs`） |
+|---|---|---|---|
+| M25 | `mask` 的 scrub 改成恒等（错误里带上 key） | 抓住 (rc=101) | `a_stream_error_that_echoes_the_key_is_masked` |
+| M26 | `run` 去掉 `idle_timeout` 的 `tokio::time::timeout` 包裹（空闲超时不生效） | 抓住（看门狗触发） | `a_silent_server_hits_the_idle_timeout` |
+| M27 | `complete` 去掉取消 `select!` 分支（取消后不返回） | 抓住（看门狗触发） | `cancelling_returns_instead_of_hanging` |
+| M28 | `finish` 容忍 `done=false`/缺 `stop_reason`（中途断开当作成功） | 抓住 (rc=101) | `an_early_eof_after_deltas_is_a_transport_error` |

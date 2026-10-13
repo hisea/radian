@@ -48,6 +48,26 @@ pub enum DriverError {
     Replay(#[from] agent_core::ReplayError),
 }
 
+/// A host callback for the runtime events the driver writes, so a host can react to a
+/// `TurnFailed` (ADR 0017) without polling the journal. `agent_core::AgentEvent` is left
+/// unchanged: a new variant there would be a Core public-API change, and the failure is a
+/// runtime event, not a core one.
+///
+/// A closure `Fn(&RuntimeEvent)` implements this, so a host installs one with
+/// `driver.set_runtime_events(Arc::new(move |event| { ... }))`.
+pub trait RuntimeEvents: Send + Sync {
+    fn on_runtime_event(&self, event: &RuntimeEvent);
+}
+
+impl<F> RuntimeEvents for F
+where
+    F: Fn(&RuntimeEvent) + Send + Sync,
+{
+    fn on_runtime_event(&self, event: &RuntimeEvent) {
+        self(event);
+    }
+}
+
 /// What recovery learned from the session file before the session was opened.
 struct Recovery {
     history: Vec<Message>,
@@ -97,6 +117,9 @@ pub struct Driver<M: Model, P: ToolProvider, H: Hooks> {
     turn_timeout: Option<std::time::Duration>,
     /// The host's one-shot context-budget relax (ADR 0015 C5), consumed by the next turn.
     budget_relax: BudgetRelax,
+    /// A host listener for the runtime events this driver writes (ADR 0017). `None` keeps the
+    /// behavior a host that never installed one had before.
+    runtime_events: Option<Arc<dyn RuntimeEvents>>,
     next_turn: u64,
     next_config_revision: u64,
     closed: bool,
@@ -137,6 +160,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             options,
             turn_timeout: None,
             budget_relax: BudgetRelax::default(),
+            runtime_events: None,
             next_turn: recovery.next_turn,
             next_config_revision: recovery.next_config_revision,
             closed: false,
@@ -180,6 +204,13 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
     /// (ADR 0015 C5); the guard is back for the request after that.
     pub fn budget_relax(&self) -> BudgetRelax {
         self.budget_relax.clone()
+    }
+
+    /// Installs the host listener for the runtime events this driver writes (ADR 0017). The
+    /// driver calls it for `TurnFailed` so a host can show the error without reading the
+    /// journal. Set it before `run()`; the last one wins.
+    pub fn set_runtime_events(&mut self, sink: Arc<dyn RuntimeEvents>) {
+        self.runtime_events = Some(sink);
     }
 
     pub fn is_closed(&self) -> bool {
@@ -240,6 +271,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         let journal = Arc::clone(&self.journal);
         let inbox = Arc::clone(&self.inbox);
         let live: Arc<dyn EventSink> = Arc::clone(&self.live);
+        let runtime_events = self.runtime_events.clone();
         let mut options = self.options.clone();
         if let Some(timeout) = self.turn_timeout {
             options.deadline = Some(tokio::time::Instant::now() + timeout);
@@ -261,6 +293,10 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             .await?;
 
         let mut claimed: Vec<MessageId> = vec![entry.id.clone()];
+        // Every claimed input, so an accepted-but-unapplied steer can go back to the inbox
+        // (ADR 0011: no input is dropped). `entry` is cloned before its message moves into
+        // the run.
+        let mut claimed_entries: Vec<InboxEntry> = vec![entry.clone()];
         let mut admitted: HashSet<MessageId> = HashSet::new();
         let tap = Tap::new(&*live);
 
@@ -268,9 +304,19 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         let steering = run.steering_handle();
         let cancellation = run.cancellation_handle();
         // Anything already waiting in the next_step lane joins before the first request.
-        drain_steering(&inbox, &journal, &steering, &turn_id, &mut claimed).await?;
+        drain_steering(
+            &inbox,
+            &journal,
+            &steering,
+            &turn_id,
+            &mut claimed,
+            &mut claimed_entries,
+        )
+        .await?;
 
         let cancel_generation = inbox.cancel_generation();
+        // ADR 0017: a model error ends **this turn**, not the session. Every other `RunError`
+        // (journal, poisoned, hook, session) is still fatal and propagates here.
         let outcome = loop {
             let mut step = Box::pin(run.step(&tap));
             let result = loop {
@@ -280,20 +326,63 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
                         if inbox.cancel_generation() != cancel_generation {
                             cancellation.cancel();
                         }
-                        drain_steering(&inbox, &journal, &steering, &turn_id, &mut claimed).await?;
+                        drain_steering(&inbox, &journal, &steering, &turn_id, &mut claimed, &mut claimed_entries).await?;
                     }
                 }
             };
             admit_seen(&journal, &claimed, &mut admitted, &tap).await?;
-            match result? {
-                Step::Continue => {
-                    drain_steering(&inbox, &journal, &steering, &turn_id, &mut claimed).await?;
+            match result {
+                Ok(Step::Continue) => {
+                    drain_steering(
+                        &inbox,
+                        &journal,
+                        &steering,
+                        &turn_id,
+                        &mut claimed,
+                        &mut claimed_entries,
+                    )
+                    .await?;
                 }
-                Step::Finished(outcome) => break outcome,
+                Ok(Step::Finished(outcome)) => break Ok(outcome),
+                // ADR 0017: a model error ends the turn; every other error ends the session.
+                Err(error) if is_fatal(&error) => return Err(error.into()),
+                Err(error) => break Err(error),
             }
         };
         drop(run);
         admit_seen(&journal, &claimed, &mut admitted, &tap).await?;
+        // A steer Core accepted but never applied (the turn ended first) goes back to the
+        // inbox front, in order, so the next turn uses it (ADR 0011). This covers both the
+        // normal finish and the model-error finish (ADR 0017).
+        requeue_unadmitted(&inbox, &claimed_entries, &admitted).await;
+
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(RunError::Model(error)) => {
+                // The adapter already masked its own key and header values; the host redacts
+                // the text against its own secret list before showing it.
+                let message = error.to_string();
+                let failed = RuntimeEvent::TurnFailed {
+                    turn_id: turn_id.clone(),
+                    message,
+                };
+                journal.append_runtime_event(failed.clone()).await?;
+                if let Some(sink) = &runtime_events {
+                    sink.on_runtime_event(&failed);
+                }
+                journal
+                    .append_runtime_event(RuntimeEvent::TurnFinished {
+                        turn_id,
+                        outcome: TurnOutcome::Failed,
+                        reason: None,
+                        stop_reason: None,
+                    })
+                    .await?;
+                // The driver keeps running: the next input opens a fresh turn.
+                return Ok(());
+            }
+            Err(_) => unreachable!("only model errors break the loop as Err"),
+        };
 
         // The budget stop's numbers, written beside the outcome so a reader can see why the
         // turn ended and whether the projection was reported or estimated (ADR 0015 C6).
@@ -347,6 +436,7 @@ async fn drain_steering(
     steering: &SteeringHandle,
     turn_id: &str,
     claimed: &mut Vec<MessageId>,
+    claimed_entries: &mut Vec<InboxEntry>,
 ) -> Result<(), DriverError> {
     let mut batch = Vec::new();
     while let Some(entry) = inbox.claim_next_step().await {
@@ -370,8 +460,20 @@ async fn drain_steering(
             message,
             seq,
         } = entry;
-        match steering.steer(message) {
-            Ok(()) => claimed.push(id),
+        match steering.steer(message.clone()) {
+            Ok(()) => {
+                claimed.push(id.clone());
+                // Core accepted the steer, but it is only applied at the next safe point. If
+                // the turn ends first, the entry goes back to the inbox (see
+                // `requeue_unadmitted`), so an accepted steer is never dropped in-process.
+                claimed_entries.push(InboxEntry {
+                    id,
+                    lane,
+                    source,
+                    message,
+                    seq,
+                });
+            }
             Err(agent_core::SteerError::RunFinished(message)) => {
                 // The turn is winding down: put it back so it is not lost. The claim above
                 // stays truthful until recovery requeues it (ADR 0011 L3-2).
@@ -391,6 +493,20 @@ async fn drain_steering(
         }
     }
     Ok(())
+}
+
+/// Puts every claimed input that never reached the transcript back at the front of its lane,
+/// in claim order, so the next turn uses it. A steer Core accepted but never applied (the
+/// turn ended first) lands here; without it the input would be lost until a restart. The
+/// journal already has `InputClaimed` for it and no `InputAdmitted`, which is exactly what
+/// `recover` requeues, so the record stays truthful.
+async fn requeue_unadmitted(inbox: &Inbox, claimed: &[InboxEntry], admitted: &HashSet<MessageId>) {
+    // Front-most last: a single front-push per entry restores the original order.
+    for entry in claimed.iter().rev() {
+        if !admitted.contains(&entry.id) {
+            inbox.requeue_front(entry.clone()).await;
+        }
+    }
 }
 
 /// Writes `InputAdmitted` for every claimed id the transcript has actually taken.
@@ -460,6 +576,14 @@ fn message_meta_id(message: &Message) -> Option<MessageId> {
         | Message::Assistant { meta, .. }
         | Message::Tool { meta, .. } => meta.id.clone(),
     }
+}
+
+/// ADR 0017: only a model error ends the turn instead of the session. Journal, poisoned,
+/// hook and session errors are fatal — the session state may be damaged or unusable, so the
+/// driver must stop rather than keep writing to it. This is the single place the policy
+/// lives; `run_turn` calls it.
+fn is_fatal(error: &RunError) -> bool {
+    !matches!(error, RunError::Model(_))
 }
 
 /// Maps the core's `RunStatus` to the ADR 0006 §5.6 wire shape.
@@ -675,4 +799,28 @@ fn turn_number(turn_id: &str) -> u64 {
         .strip_prefix("t-")
         .and_then(|n| n.parse().ok())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_core::{HookError, HookPoint, ModelError, SessionError};
+
+    /// ADR 0017: the classification the driver uses. A model error is the only non-fatal one;
+    /// journal, poisoned, hook and session errors must keep ending the session.
+    #[test]
+    fn only_model_errors_are_non_fatal() {
+        assert!(!is_fatal(&RunError::Model(ModelError::Transport(
+            "http 500".into()
+        ))));
+        assert!(is_fatal(&RunError::Journal(JournalError(
+            "write failed".into()
+        ))));
+        assert!(is_fatal(&RunError::Poisoned));
+        assert!(is_fatal(&RunError::Hook {
+            point: HookPoint::BeforeToolCall,
+            error: HookError("hook refused".into()),
+        }));
+        assert!(is_fatal(&RunError::Session(SessionError::Poisoned)));
+    }
 }

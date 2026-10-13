@@ -25,7 +25,7 @@ pub(crate) const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 
 /// The v1 events known to a schema-v1 reader (ADR 0006 §4). Anything else is unknown and
 /// handled by the `critical` policy.
-pub(crate) const KNOWN_EVENTS: [&str; 17] = [
+pub(crate) const KNOWN_EVENTS: [&str; 18] = [
     "SessionCreated",
     "InboxEnqueued",
     "InputClaimed",
@@ -36,6 +36,7 @@ pub(crate) const KNOWN_EVENTS: [&str; 17] = [
     "ToolExecutionSettled",
     "TranscriptReplaced",
     "TurnFinished",
+    "TurnFailed",
     "ConfigChanged",
     "ContextCompacted",
     "Rewound",
@@ -94,6 +95,12 @@ pub enum EventData {
         outcome: TurnOutcome,
         reason: Option<TurnReason>,
         stop_reason: Option<String>,
+    },
+    /// A model request failed and ended the turn (ADR 0017). Typed for an exact round trip;
+    /// audit only, never a transcript record.
+    TurnFailed {
+        turn_id: String,
+        message: String,
     },
     ConfigChanged {
         revision: u64,
@@ -461,6 +468,13 @@ where
                     stop_reason: d.stop_reason,
                 }
             }
+            "TurnFailed" => {
+                let d: TurnFailedData = data_of(raw, lineno, path)?;
+                EventData::TurnFailed {
+                    turn_id: d.turn_id,
+                    message: d.message,
+                }
+            }
             "ConfigChanged" => {
                 let d: ConfigChangedData = data_of(raw, lineno, path)?;
                 EventData::ConfigChanged {
@@ -634,6 +648,7 @@ impl Session {
                 | EventData::InputAdmitted { .. }
                 | EventData::TurnStarted { .. }
                 | EventData::TurnFinished { .. }
+                | EventData::TurnFailed { .. }
                 | EventData::ConfigChanged { .. }
                 | EventData::ContextBudgetReached { .. }
                 | EventData::PermissionResolved { .. }
@@ -739,6 +754,12 @@ struct TurnFinishedData {
     reason: Option<TurnReason>,
     #[serde(default)]
     stop_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TurnFailedData {
+    turn_id: String,
+    message: String,
 }
 
 #[derive(Deserialize)]

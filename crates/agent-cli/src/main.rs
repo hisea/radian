@@ -895,6 +895,15 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     })?;
     // A per-turn timeout: the driver computes a fresh deadline at each turn's start.
     driver.set_turn_timeout(setup.turn_timeout_secs.map(Duration::from_secs));
+    // ADR 0017: a model error ends the turn, not the session. The driver hands the masked
+    // message to this listener; the host redacts it against its own secrets and prints it to
+    // stderr. Interactive mode then reads the next line; one-shot still exits 1.
+    let secrets_for_errors = Arc::new(setup.secrets.clone());
+    driver.set_runtime_events(Arc::new(move |event: &radian_session::RuntimeEvent| {
+        if let radian_session::RuntimeEvent::TurnFailed { message, .. } = event {
+            eprintln!("agent: {}", redact(message, &secrets_for_errors));
+        }
+    }));
     // The handle the interactive loop uses to say "continue once" (ADR 0015 C5).
     let driver_relax = driver.budget_relax();
     let driver_ended = Arc::new(Notify::new());

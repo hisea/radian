@@ -56,3 +56,29 @@ M-B3 正是本切片补的洞：原测试只跑两轮，`load` 变异照样绿�
 「标志泄漏到下一轮」可观察，才抓住它。M-B2 的变异是「取错那次报告」的实例（first-wins）；取
 「最后一条报告」而不要求它带 `input` 的变异由同一测试覆盖（输出-only 报告若被当成 0，投影与
 基线就不是 900）。
+
+## 模型错误只结束这一轮（ADR 0017，2026-10-13）
+
+一次性 worktree `/tmp/resil2-mut`（从 `159489f` 创建，用完删除，**不共享 target 目录**），
+`--no-fail-fast`；每个变异后从副本还原，`git status --short` 为空。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M1 | `is_fatal` 恒为 `true`（模型错误仍让 driver 结束） | ✅ 抓住 (rc=101) | `driver::tests::only_model_errors_are_non_fatal` |
+| M2 | 模型错误路径不写 `TurnFinished` | ✅ 抓住 (rc=101) | `provider_failure::a_failed_model_request_ends_the_turn_and_writes_turn_finished` |
+| M3 | adapter 的 `mask` 改成恒等（`TurnFailed.message` 带上 key） | ✅ 抓住 (rc=101) | `provider_failure::the_turn_failed_message_never_contains_the_key` |
+| M4 | `is_fatal` 把 `Journal` 也算非致命 | ✅ 抓住 (rc=101) | `driver::tests::only_model_errors_are_non_fatal` |
+
+M3 改的是 `agent-provider-anthropic/src/model.rs` 的 `mask`（与上一轮 M25 同一处），本轮由新的
+**落盘记录**测试抓住：`TurnFailed.message` 会写进会话文件，因此它不能含 key。
+
+## 已 claim 未 admit 的 steer 要回队（ADR 0011，2026-10-13）
+
+一次性 worktree `/tmp/resil3-mut`（从 `c0640b7` 创建，用完删除，**不共享 target 目录**），
+`--no-fail-fast`；变异后从副本还原，`git status --short` 为空。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M5 | 去掉 `requeue_unadmitted` 调用（回到旧行为：claim 了但没应用就丢） | ✅ 抓住 (rc=101) | `steering_after_failure::a_steer_accepted_during_a_failing_turn_is_requeued_and_used_once` 与 `..._max_tokens_finish_...`（两条都失败） |
+
+M5 同时证明"必须先在旧代码上失败"：去掉 requeue 就是旧代码，两条测试都失败。

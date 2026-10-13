@@ -121,6 +121,11 @@ pub enum RuntimeEvent {
         /// [`TurnReason::UnknownStopReason`].
         stop_reason: Option<String>,
     },
+    /// A turn ended because the model request failed (ADR 0017). Audit only:
+    /// `critical = false`. `message` is the adapter's error text, already masked; it is the
+    /// only place the host learns *why* a `TurnFinished { outcome: failed }` happened without
+    /// reading the live event stream. A reader that skips it still sees the terminal record.
+    TurnFailed { turn_id: String, message: String },
     /// A configuration change was applied (ADR 0006 §5.7). `change` stays opaque here; the
     /// registry and the slots own its meaning. The optional `profile_ref` sibling of §5.7 is
     /// not exposed yet (no producer in this phase).
@@ -159,6 +164,7 @@ impl RuntimeEvent {
             RuntimeEvent::InputAdmitted { .. } => "InputAdmitted",
             RuntimeEvent::TurnStarted { .. } => "TurnStarted",
             RuntimeEvent::TurnFinished { .. } => "TurnFinished",
+            RuntimeEvent::TurnFailed { .. } => "TurnFailed",
             RuntimeEvent::ConfigChanged { .. } => "ConfigChanged",
             RuntimeEvent::ContextBudgetReached { .. } => "ContextBudgetReached",
             RuntimeEvent::PermissionResolved { .. } => "PermissionResolved",
@@ -175,9 +181,9 @@ impl RuntimeEvent {
             | RuntimeEvent::TurnStarted { .. }
             | RuntimeEvent::TurnFinished { .. }
             | RuntimeEvent::ConfigChanged { .. } => true,
-            RuntimeEvent::ContextBudgetReached { .. } | RuntimeEvent::PermissionResolved { .. } => {
-                false
-            }
+            RuntimeEvent::TurnFailed { .. }
+            | RuntimeEvent::ContextBudgetReached { .. }
+            | RuntimeEvent::PermissionResolved { .. } => false,
         }
     }
 
@@ -237,6 +243,12 @@ pub(crate) struct TurnFinishedData<'a> {
 }
 
 #[derive(Serialize)]
+pub(crate) struct TurnFailedData<'a> {
+    pub turn_id: &'a str,
+    pub message: &'a str,
+}
+
+#[derive(Serialize)]
 pub(crate) struct ConfigChangedData<'a> {
     pub revision: u64,
     pub change: &'a Value,
@@ -273,6 +285,7 @@ pub(crate) enum RuntimeData<'a> {
     InputAdmitted(InputAdmittedData<'a>),
     TurnStarted(TurnStartedData<'a>),
     TurnFinished(TurnFinishedData<'a>),
+    TurnFailed(TurnFailedData<'a>),
     ConfigChanged(ConfigChangedData<'a>),
     ContextBudgetReached(ContextBudgetReachedData<'a>),
     PermissionResolved(PermissionResolvedData<'a>),
@@ -286,6 +299,7 @@ impl Serialize for RuntimeData<'_> {
             RuntimeData::InputAdmitted(d) => d.serialize(serializer),
             RuntimeData::TurnStarted(d) => d.serialize(serializer),
             RuntimeData::TurnFinished(d) => d.serialize(serializer),
+            RuntimeData::TurnFailed(d) => d.serialize(serializer),
             RuntimeData::ConfigChanged(d) => d.serialize(serializer),
             RuntimeData::ContextBudgetReached(d) => d.serialize(serializer),
             RuntimeData::PermissionResolved(d) => d.serialize(serializer),
@@ -334,6 +348,9 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
             reason: reason.as_ref(),
             stop_reason: stop_reason.as_deref(),
         }),
+        RuntimeEvent::TurnFailed { turn_id, message } => {
+            RuntimeData::TurnFailed(TurnFailedData { turn_id, message })
+        }
         RuntimeEvent::ConfigChanged { revision, change } => {
             RuntimeData::ConfigChanged(ConfigChangedData {
                 revision: *revision,

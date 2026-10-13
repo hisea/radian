@@ -4320,3 +4320,58 @@ async fn search_redacts_the_key_from_a_snippet() {
     );
     assert!(stdout.contains("<redacted>"), "{stdout}");
 }
+
+// ---------- model errors end the turn, not the session (ADR 0017) ----------
+
+/// Interactive mode: a 500 is shown on stderr and the prompt comes back; the next line runs a
+/// new turn that succeeds. The driver is not ended by the model error.
+#[tokio::test]
+async fn an_interactive_model_error_is_shown_and_the_session_continues() {
+    let server = MockServer::start(vec![
+        Reply::status(500, "provider is down"),
+        text_reply("SECOND-OK"),
+    ])
+    .await;
+    let mut cli = Running::spawn(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--session-id",
+            "recover",
+        ],
+        &[("OPENAI_API_KEY", KEY)],
+    );
+    cli.wait_for_stderr("> ").await;
+    cli.write("first\n").await;
+    // The error text reaches stderr (masked by the adapter and the host).
+    cli.wait_for_stderr("HTTP 500").await;
+    cli.wait_for_stderr("provider is down").await;
+    // The prompt is back: the session did not exit.
+    cli.wait_for_stderr_count("> ", 2).await;
+    cli.write("second\n").await;
+    cli.wait_for_stderr_count("> ", 3).await;
+    cli.write("/exit\n").await;
+    let (code, stdout, stderr) = cli.finish_open(Duration::from_secs(5)).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("SECOND-OK"), "{stdout}");
+    assert_eq!(server.requests().len(), 2, "both turns reached the model");
+}
+
+/// One-shot mode is unchanged: a model error still exits 1, and the message is on stderr.
+#[tokio::test]
+async fn one_shot_model_error_still_exits_one_and_shows_the_error() {
+    let server = MockServer::start(vec![Reply::status(500, "provider is down")]).await;
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
+            &[("OPENAI_API_KEY", KEY)],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("HTTP 500"), "{stderr}");
+    assert!(stdout.is_empty(), "stdout must stay model-only: {stdout}");
+}

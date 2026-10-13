@@ -391,3 +391,75 @@ async fn after_tool_call_cannot_change_call_id() {
         .await;
     assert!(reopened.is_ok());
 }
+
+// ---------- hook error investigation (ADR 0017, item 5) ----------
+
+/// A `before_tool_call` hook that always fails, so the turn ends as `RunError::Hook`.
+struct FailBeforeTool;
+
+impl Hooks for FailBeforeTool {
+    async fn before_tool_call(
+        &self,
+        _cx: &HookContext,
+        _call: &ToolCall,
+    ) -> Result<ToolDecision, HookError> {
+        Err(HookError::new("the hook refused to run the tool"))
+    }
+}
+
+/// Investigation only (ADR 0017 item 5): the model already produced an assistant message with
+/// `tool_calls`, then `before_tool_call` fails. `fail_hook` ends the turn as `Failed` without
+/// repairing the transcript, so the assistant tool call stays with **no** result. The next
+/// turn would send that unpaired call, which both providers reject as an invalid request.
+///
+/// The desired behavior is asserted here (every declared call has a result); it fails today,
+/// hence `#[ignore]`. Run with `--ignored` to reproduce. Hook errors stay fatal until this is
+/// decided; this test exists so the decision has a repro.
+#[tokio::test]
+#[ignore = "known gap: a failed before_tool_call hook leaves an unpaired tool call (ADR 0017 item 5)"]
+async fn a_before_tool_hook_error_does_not_leave_unpaired_tool_calls() {
+    let model = ScriptedModel::new([
+        calls(vec![call("c1", "echo", json!({}))]),
+        text("never reached"),
+    ]);
+    let tools = MemTools::new(vec![(spec("echo"), Behavior::Echo)]);
+    let a = Arc::new(Agent::new(model, tools).with_hooks(FailBeforeTool));
+    let mut chat = a.open_session().await.unwrap();
+
+    let error = chat
+        .run_turn("go", TurnOptions::default(), &NoopSink)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            RunError::Hook {
+                point: HookPoint::BeforeToolCall,
+                ..
+            }
+        ),
+        "{error}"
+    );
+
+    let transcript = chat.transcript();
+    let declared: Vec<String> = transcript
+        .iter()
+        .flat_map(|message| match message {
+            Message::Assistant { tool_calls, .. } => {
+                tool_calls.iter().map(|c| c.id.clone()).collect::<Vec<_>>()
+            }
+            _ => Vec::new(),
+        })
+        .collect();
+    let answered: Vec<String> = transcript
+        .iter()
+        .filter_map(|message| match message {
+            Message::Tool { result, .. } => Some(result.call_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        declared, answered,
+        "every tool call must have a result before the next request: {transcript:?}"
+    );
+}
