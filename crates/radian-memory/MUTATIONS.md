@@ -27,3 +27,22 @@ visible in the page cache, and only a power loss or kernel crash distinguishes "
 test environment**, not a test hole: the fsync stays because ADR 0021 D3 requires the rewrite
 to be durable (crash at any step ⇒ old log or new log, never a partial file), and it is the
 same class as `radian-session`'s documented `sync_all` mutation.
+
+## Round 2: the review's two correctness defects and the decisions
+
+Base: `0b8578d` · one-shot worktree `/tmp/memstore2-mut` (deleted after) · each mutation run with
+`cargo test -p radian-memory --no-fail-fast`, then `git checkout -- .`; `git status --short`
+empty at the end.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| M8 | `open_locked` stops revalidating `(dev, ino)` | `purge_race::a_writer_that_opened_the_old_inode_retries_after_a_replace` | ✅ failed |
+| M9 | `split` drops the target lock before the write | `split::a_move_holds_the_target_lock_between_the_check_and_the_write` | ✅ failed |
+| M10 | a half-finished move is not recognized on re-run | `split::a_half_finished_move_is_completed_on_a_rerun` | ✅ failed |
+| M11 | an unknown `kind` makes the scope fail to open | `crash::an_unknown_kind_is_forward_compatible` | ✅ failed |
+| M12 | an import `key` change is silently applied | `markdown::an_import_that_changes_key_or_kind_is_rejected_not_silently_applied` | ✅ failed |
+
+5/5 caught. M8's test is the deterministic form of the reviewer's repro (the replace happens in
+a thread-local open hook, between `open()` and the lock); M9 uses the move hook to check the
+target log is locked at the check-to-write point. M7 from round 1 (the directory fsync) stays
+as the documented equivalent mutation.
