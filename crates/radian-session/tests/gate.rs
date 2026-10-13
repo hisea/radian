@@ -14,6 +14,9 @@ use radian_session::{
 };
 
 const SID: &str = "gate-sid";
+/// The injected-failure test has its own session id: the fault seam is keyed by session, so
+/// the other tests here (which share `SID`) can never consume its armed failure.
+const FAIL_SID: &str = "gate-fail-sid";
 
 fn inbox_event(text: &str) -> RuntimeEvent {
     RuntimeEvent::InboxEnqueued {
@@ -101,7 +104,7 @@ async fn a_runtime_event_waits_for_the_replacement_segment_to_close() {
 async fn a_failed_segment_write_fails_the_waiter_and_the_file_still_resumes() {
     let dir = TempDir::new("gate-poison");
     let path = dir.file("s.jsonl");
-    let writer = Arc::new(SessionJournal::create(&path, SID, created()).unwrap());
+    let writer = Arc::new(SessionJournal::create(&path, FAIL_SID, created()).unwrap());
     writer
         .append(JournalRecord::TranscriptReplaced {
             revision: 2,
@@ -117,7 +120,7 @@ async fn a_failed_segment_write_fails_the_waiter_and_the_file_still_resumes() {
         .await
         .unwrap();
 
-    radian_session::fail_next_write("TranscriptReplacementCommitted");
+    radian_session::fail_next_write(FAIL_SID, "TranscriptReplacementCommitted");
     let waiter = Arc::clone(&writer);
     let task = tokio::spawn(async move { waiter.append_runtime_event(inbox_event("hello")).await });
     tokio::time::timeout(Duration::from_secs(5), writer.wait_for_gate_waiter())
@@ -152,7 +155,7 @@ async fn a_failed_segment_write_fails_the_waiter_and_the_file_still_resumes() {
     );
     drop(writer);
     {
-        let _resumed = SessionJournal::resume(&path, SID).unwrap();
+        let _resumed = SessionJournal::resume(&path, FAIL_SID).unwrap();
     }
     let session = Session::open(&path).unwrap();
     assert_eq!(

@@ -13,6 +13,9 @@ use radian_session::{
 };
 
 const SID: &str = "replace-sid";
+/// The injected-abort-failure test has its own session id; the fault seam is keyed by
+/// session, so a parallel `resume` test that writes an abort cannot consume it.
+const ABORT_FAIL_SID: &str = "replace-abort-fail";
 
 fn envelope(seq: u64, event: &str, data: serde_json::Value) -> String {
     format!(
@@ -757,7 +760,7 @@ fn resume_refuses_a_corrupt_file_without_touching_it() {
 async fn resume_reports_a_failed_abort_write_and_appends_nothing() {
     let dir = TempDir::new("replace-resume-abort-fail");
     let path = dir.file("s.jsonl");
-    let journal = SessionJournal::create(&path, SID, created()).unwrap();
+    let journal = SessionJournal::create(&path, ABORT_FAIL_SID, created()).unwrap();
     journal
         .append(JournalRecord::TranscriptReplaced {
             revision: 4,
@@ -775,8 +778,8 @@ async fn resume_reports_a_failed_abort_write_and_appends_nothing() {
     drop(journal);
 
     let before = std::fs::read(&path).unwrap();
-    radian_session::fail_next_aborted_write();
-    match SessionJournal::resume(&path, SID) {
+    radian_session::fail_next_aborted_write(ABORT_FAIL_SID);
+    match SessionJournal::resume(&path, ABORT_FAIL_SID) {
         Err(WriteError::Io { .. }) => {}
         Err(other) => panic!("expected the injected I/O failure, got {other:?}"),
         Ok(_) => panic!("a failed abort write must fail the resume"),
@@ -788,7 +791,7 @@ async fn resume_reports_a_failed_abort_write_and_appends_nothing() {
     );
 
     // The seam is one-shot: the next resume (without arming it) writes the abort and succeeds.
-    SessionJournal::resume(&path, SID).unwrap();
+    SessionJournal::resume(&path, ABORT_FAIL_SID).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
     assert_eq!(
         text.matches("\"event\":\"TranscriptReplacementAborted\"")
