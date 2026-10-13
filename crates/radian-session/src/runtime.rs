@@ -28,6 +28,9 @@ pub enum TurnOutcome {
     Completed,
     Refused,
     BudgetExceeded,
+    /// The next request would have exceeded the context budget, so it was not sent (ADR
+    /// 0015). The numbers ride on a sibling `ContextBudgetReached` event.
+    ContextBudget,
     Failed,
     Poisoned,
     Incomplete,

@@ -400,6 +400,9 @@ fn wire_outcome(outcome: &RunOutcome) -> (TurnOutcome, Option<TurnReason>, Optio
         RunStatus::Completed => (TurnOutcome::Completed, None, None),
         RunStatus::Refused => (TurnOutcome::Refused, None, None),
         RunStatus::BudgetExceeded => (TurnOutcome::BudgetExceeded, None, None),
+        // The numbers (source, projection, window) ride on a sibling ContextBudgetReached
+        // event in `run_turn`; the outcome alone is the distinguishable reason.
+        RunStatus::ContextBudget(_) => (TurnOutcome::ContextBudget, None, None),
         RunStatus::Failed => (TurnOutcome::Failed, None, None),
         RunStatus::Poisoned => (TurnOutcome::Poisoned, None, None),
         RunStatus::Incomplete(reason) => match reason {
