@@ -85,6 +85,11 @@ struct Cli {
     #[arg(long, value_name = "POLICY", default_value = "on-ask")]
     approval: String,
 
+    /// Approve every tool call without asking, like `agent --yes`. Not "allow everything":
+    /// `deny` rules still deny and the sandbox still applies; only the question is removed.
+    #[arg(long)]
+    yes: bool,
+
     /// Allow a shell command prefix without asking, repeatable (e.g. `--allow-shell-command
     /// "git status"`). Only a *simple* command matches: any shell metacharacter keeps the
     /// call at `ask`. Write these at the subcommand level, never at a bare program name.
@@ -213,9 +218,16 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
     let profile =
         radian_tui::profile::build_profile(tier, Path::new(&workspace), &cli.allow_shell_command)?
             .with_approval(approval);
+    // `--yes` swaps the approver for one that answers "allow once" without asking; rules,
+    // the sandbox and the audit record are untouched by it (same as `agent --yes`).
+    let approver: Arc<dyn Approver> = if cli.yes {
+        Arc::new(AutoApprover)
+    } else {
+        Arc::new(TuiApprover { tx: approval_tx })
+    };
     let hooks = Arc::new(PermissionHooks::new(
         profile,
-        Some(Arc::new(TuiApprover { tx: approval_tx })),
+        Some(approver),
         Arc::new(JournalAudit {
             journal: Arc::clone(&journal),
             runtime: runtime.handle().clone(),
@@ -303,6 +315,12 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
         radian_tui::EntryKind::Notice,
         meaning,
     ));
+    if cli.yes {
+        app.entries.push(radian_tui::Entry::new(
+            radian_tui::EntryKind::Notice,
+            "--yes: tool calls are approved without asking; deny rules and the sandbox still apply",
+        ));
+    }
     app.entries.push(radian_tui::Entry::new(
         radian_tui::EntryKind::Notice,
         match &cli.resume {
@@ -672,6 +690,19 @@ impl Approver for TuiApprover {
                 .await
                 .map_err(|_| ApprovalError("the approval was abandoned".into()))
         })
+    }
+}
+
+/// The `--yes` approver: answers "allow once" without asking. Every decision still goes
+/// through the rules first and is still written to the audit record.
+struct AutoApprover;
+
+impl Approver for AutoApprover {
+    fn decide(
+        &self,
+        _request: ApprovalRequest,
+    ) -> futures_util::future::BoxFuture<'_, Result<ApprovalOutcome, ApprovalError>> {
+        Box::pin(async { Ok(ApprovalOutcome::AllowOnce) })
     }
 }
 

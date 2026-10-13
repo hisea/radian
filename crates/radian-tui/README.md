@@ -241,6 +241,13 @@ Every call goes through `radian-permissions` (ADR 0012) as a `Hooks` implementat
 - `--approval on-ask|always|never` picks the `ApprovalPolicy` (default `on-ask`). `always`
   asks for every call a rule does not deny, which is how the dialog is exercised with the
   built-in tools; `never` turns `ask` into a denial.
+- `--yes` answers every `ask` with "allow once" and shows no dialog, the same as
+  `agent --yes`. It removes the question only: `deny` rules still deny, the sandbox still
+  applies, every decision is still audited, and the startup says it is on. With
+  `workspace-write` this means "the sandbox is the boundary"; with `full-access` there is no
+  boundary left, so read the profile line before you use it. Tested by
+  `pty_yes_runs_an_ask_without_a_prompt_and_still_audits_it` (a mutation that keeps the
+  dialog approver under `--yes` makes it fail).
 - The turn source is set to `User` before each turn; the permission layer treats an unset
   source as non-human and denies, so a forgotten setter fails closed.
 - Every decision is written to the session journal as a `PermissionResolved` (audit only,

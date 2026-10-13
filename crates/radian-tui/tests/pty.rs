@@ -1154,3 +1154,68 @@ async fn pty_reasoning_is_not_sent_back_to_the_provider() {
 
     pty.quit();
 }
+
+/// `--yes` removes the question, not the rules: a shell command under `workspace-write`
+/// (which would ask) runs without a prompt, through the sandbox, and the decision is still
+/// written to the audit record.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_yes_runs_an_ask_without_a_prompt_and_still_audits_it() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("yes");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        tool_reply(
+            "call_1",
+            "shell",
+            &json!({"command": "echo YES-RAN; echo x | cat"}).to_string(),
+        ),
+        text_reply("YES-DONE"),
+    ])
+    .await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "yes",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--yes",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.screen()
+            .contains("--yes: tool calls are approved without asking"),
+        "the startup must say approvals are off:\n{}",
+        pty.screen()
+    );
+    pty.send(b"go\r");
+    assert!(
+        pty.wait_for_screen("YES-DONE", 30),
+        "the command did not run without a prompt:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("approve tool call?"),
+        "--yes must not show a prompt:\n{}",
+        pty.screen()
+    );
+    assert!(pty.screen().contains("YES-RAN"), "{}", pty.screen());
+
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+    let session = std::fs::read_to_string(dir.path().join("yes.jsonl")).unwrap();
+    assert!(
+        session.contains("PermissionResolved") && session.contains("\"decision\":\"allow\""),
+        "the decision must still be audited: {session}"
+    );
+}
