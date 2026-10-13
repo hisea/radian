@@ -55,8 +55,9 @@ the composer.
 | PageUp / PageDown | scroll the transcript a page |
 | Shift-Up / Shift-Down | scroll the transcript one line |
 | Ctrl-Home / Ctrl-End | scroll the transcript to its top / bottom |
-| Esc | close the `@` candidate list if it is up; otherwise clear a non-empty input first (the line stays in the history, so `Up` finds it); with an empty input, cancel the running turn / quit |
+| Esc | close the find box or the `@` candidate list if one is up; otherwise clear a non-empty input first (the line stays in the history, so `Up` finds it); with an empty input, cancel the running turn / quit |
 | Ctrl-C | cancel the running turn; when idle, quit |
+| Ctrl-F | open the in-transcript search box (`find: <query>`, replacing the input line; the message draft is kept). Type to search the displayed transcript case-insensitively; a second Ctrl-F or Enter is the earlier match, Shift-Enter or Ctrl-G the later one (no wrap); the status bar shows `match i/N`; Esc closes the box where the viewport is |
 | bracketed paste | inserts at the cursor, `\r\n` normalized to `\n`, and never sends |
 
 Shift-Enter needs a terminal with the enhanced keyboard protocol; Ctrl-J works everywhere.
@@ -187,6 +188,11 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   scannable, does typing a filter feel responsive, is the highlighted row obvious, and does
   `Tab` full-text search read clearly (the snippet vs the summary)? Is it obvious that `Esc`
   leaves and `n` starts fresh? pty automation asserts the rows and the keys, not the feel.
+- **in-transcript search**: in a long session, `Ctrl-F` and type a word that appears once
+  near the top. Does the jump land where you expect, is the highlighted match obvious, and is
+  `match i/N` readable? Press Enter / Ctrl-G a few times: does moving between matches feel
+  like a terminal's scrollback search, and does Esc leave you where you were? pty automation
+  asserts the jump and the status, not the feel.
 - **`/help` and a `/memory` write**: type `/help` (a notice, no model request), then
   `/memory forget <id>` — is the `[y/N]` prompt obvious and does `n` feel like a cancel? pty
   automation asserts the notices and the keys, not the readability.
