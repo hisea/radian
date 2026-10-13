@@ -291,3 +291,16 @@ x86_64 与其它发行版。
 （ADR 0020 之前）；ADR 0020 新增的 5 例在 Linux 上的复核见下一节。第 7 条的两个进度测试由评审者
 另行修正（见 `crates/agent-extensions/tests/mcp.rs` 的注释）。第 8 条用预编译测试二进制代替
 沙箱内 `cargo test`，评审者接受：测的是同一段 bind/openpty 代码。
+
+## ADR 0020 与进度测试的 Linux 复核（评审者本人，2026-10-13）
+
+同一 VM，源码为 main 247750b 加进度测试修正（ea9cbd3），`git archive` 同步到 `/tmp/radian-linux/src`。
+
+- `cargo test -p radian-sandbox --no-fail-fast`：单元 8/8、`workspace_write_is_compatible…` 1/1、
+  `linux_escape_matrix` 通过（含 ADR 0020 的 `radian_home` 组）。跑完 `pgrep bwrap`、`mcp_echo` 无孤儿。
+- `agent-cli` 的 ADR 0020 端到端测试 4/4：`radian_home_places_sessions_under_the_radian_root`、
+  `radian_session_dir_overrides_radian_home`、`workspace_shell_cannot_read_the_sessions_directory`、
+  `workspace_shell_cannot_read_a_moved_sessions_directory`（`bwrap` 实际遮住会话目录，含 `--session-dir` 移走的）。
+- `radian-host` 全部通过。
+- 进度测试直接跑测试二进制：`settled_progress_arrives_in_order` **0/40 失败**，
+  `progress_does_not_reset_the_call_deadline` **0/30 失败**（修正前分别是 15/40、1/30）。
