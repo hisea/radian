@@ -186,15 +186,15 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         self.turn_timeout = timeout;
     }
 
-    /// Installs the host listener for the runtime events this driver writes (ADR 0017). The
-    /// driver calls it for `TurnFailed` so a host can show the error without reading the
-    /// journal. Set it before `run()`; the last one wins.
     /// Test seam: the wake-branch signal (fired when the turn loop enters the wake branch).
     #[cfg(feature = "testing")]
     pub fn testing_wake_branch(&self) -> Arc<tokio::sync::Notify> {
         Arc::clone(&self.testing_wake_branch)
     }
 
+    /// Installs the host listener for the runtime events this driver writes (ADR 0017). The
+    /// driver calls it for `TurnFailed` so a host can show the error without reading the
+    /// journal. Set it before `run()`; the last one wins.
     pub fn set_runtime_events(&mut self, sink: Arc<dyn RuntimeEvents>) {
         self.runtime_events = Some(sink);
     }
