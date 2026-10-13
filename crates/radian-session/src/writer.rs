@@ -19,14 +19,25 @@ use crate::runtime::{RuntimeEvent, runtime_data};
 /// The schema version this crate writes and accepts.
 pub(crate) const SCHEMA_VERSION: u64 = 1;
 
+/// The parent a forked session came from (ADR 0022). `seq` is the parent's fork point: the
+/// seq of a `TurnFinished` (or 0 for "the session start"), which is also what the parent's
+/// `SessionForked` records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkParent {
+    pub session_id: String,
+    pub seq: u64,
+}
+
 /// What a new session file's `SessionCreated` line carries. `workspace` and
-/// `config_snapshot` are required by ADR 0006 §5.1; the reserved optional fields
-/// (`agent_id`/`profile_ref`/`workspace_binding`/`parent`) are Phase 6 additions and are
-/// not exposed yet.
+/// `config_snapshot` are required by ADR 0006 §5.1. `parent` is set only for a forked session
+/// (ADR 0022); the other reserved optional fields (`agent_id`/`profile_ref`/
+/// `workspace_binding`) stay unexposed and unvalidated.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionCreatedData {
     pub workspace: String,
     pub config_snapshot: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<ForkParent>,
 }
 
 impl SessionCreatedData {
@@ -34,6 +45,21 @@ impl SessionCreatedData {
         Self {
             workspace: workspace.into(),
             config_snapshot,
+            parent: None,
+        }
+    }
+
+    /// The `SessionCreated` payload of a forked child: `parent` names the parent and its fork
+    /// point (ADR 0022 §3).
+    pub fn forked(
+        workspace: impl Into<String>,
+        config_snapshot: Value,
+        parent: ForkParent,
+    ) -> Self {
+        Self {
+            workspace: workspace.into(),
+            config_snapshot,
+            parent: Some(parent),
         }
     }
 }
