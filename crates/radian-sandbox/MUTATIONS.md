@@ -76,3 +76,13 @@ seatbelt 即使 `(allow file-ioctl)`（过滤或不过滤）也拒 `TIOCSTI`（�
 `memory/`，0700），这是对"运行时自己不会创建 `memory/`"的必要保证；`memory_unreadable` 用例
 （M2）证明遮住确实生效。**未验证**：如果将来 `memory/` 由别处延迟创建，且在某个 shell 命令的
 bwrap 参数构造之前它仍不存在，那个窗口不会被遮住。
+
+## sbxnest：工作区在禁读目录内
+
+Base: `cd89c9d` · 一次性检出 `/tmp/sbxnest-mut2`（detached，跑完删除）· `--no-fail-fast`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| N1 | `from_policy` 不做 `workspace inside deny_read` 检查 | `backend::a_workspace_inside_a_denied_directory_is_refused` | ✅ failed |
+
+1/1 抓住。

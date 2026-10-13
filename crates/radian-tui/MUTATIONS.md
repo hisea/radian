@@ -160,3 +160,14 @@ Base `4bf767d` · 一次性 worktree `/tmp/memtui-mut`（从 HEAD 建，做完�
 | M5 | 未知命令发给模型（只拦 `/help`、`/memory`） | `tests/command.rs::help_and_unbalanced_quotes_are_notices_and_send_nothing` | ✅ |
 
 4/4 全抓。M4（`confirmed=false` 仍执行写操作）在 `radian-host/MUTATIONS.md`。
+
+## sbxnest：shell pty 测试不再“空过”
+
+Base: `cd89c9d` · 一次性检出 `/tmp/sbxnest-mut`（detached，跑完删除）· `--no-fail-fast`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| S1 | shell 工具不执行、直接返回空 `Outcome::default()`（`radian-coding/src/shell.rs`） | `pty::pty_yes_runs_an_ask_without_a_prompt_and_still_audits_it`、`pty::pty_a_compound_shell_command_always_asks` | ✅ failed |
+
+2/2 抓住。改后的断言要求命令输出（`sum=42` / `ALLOWED-OUTPUT-42`，都不出现在命令文本里），
+所以“命令没跑”不再能通过。

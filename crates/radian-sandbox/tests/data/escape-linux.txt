@@ -32,12 +32,20 @@ git_readonly     git_status_ok                    ok       ok       ok  PASS
 git_readonly     git_log_ok                       ok       ok       ok  PASS
 sensitive_read   fake_ssh_key_unreadable        fail   denied       ok  PASS
 sensitive_read   normal_file_still_readable       ok       ok       ok  PASS
+radian_home      sessions_unreadable            fail   denied       ok  PASS
+radian_home      memory_unreadable              fail   denied       ok  PASS
+radian_home      config_readable                  ok       ok       ok  PASS
+radian_home      cache_readable                   ok       ok       ok  PASS
+radian_home      moved_sessions_unreadable      fail   denied       ok  PASS
+deny_inside_workspace nested_sessions_unreadable     fail   denied       ok  PASS
+deny_inside_workspace workspace_elsewhere_readable       ok       ok       ok  PASS
+deny_inside_workspace workspace_elsewhere_writable       ok       ok       ok  PASS
 mcp_stdio        initialize_list_echo             ok       ok       ok  PASS
 signals          signal_own_child_ok              ok       ok       ok  PASS
 signals          signal_own_grandchild_ok         ok       ok       ok  PASS
 signals          signal_outside_process         fail   denied       ok  PASS
 
-34 cases, 0 failed
+42 cases, 0 failed
 
 orphan check:
 (no orphan processes)
