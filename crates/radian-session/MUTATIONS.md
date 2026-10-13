@@ -192,3 +192,16 @@ Base: `b20cc3b` · 一次性检出 `/tmp/ccore-mutA`（detached，跑完删除�
 | macOS：整只 append 二进制，20 并行 ×5 轮（100 次） | 1 失败 | 0 失败 |
 
 `crates/radian-session/tests/append.rs` 的模块注释记了根因与生产为何不受影响。
+
+## fork：ADR 0022 会话 fork
+
+Base: `fcd0c26` · 一次性检出 `/tmp/fork-mut`（detached，跑完删除）· `--no-fail-fast`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| F1 | 允许 turn 中途 fork（去掉轮间边界检查） | `fork::a_seq_inside_a_turn_is_refused`、`a_seq_inside_a_replacement_segment_is_refused` | ✅ failed |
+| F2 | 物化时不应用已提交的替换（`record_from_event` 丢掉 `TranscriptReplaced`，拿原始消息） | `fork::a_committed_compaction_is_in_effect_in_the_child` | ✅ failed |
+| F3 | 先写父 `SessionForked` 再写子文件 | `fork::a_child_failure_leaves_the_parent_untouched` | ✅ failed |
+| F4 | `SessionForked.parent_seq` 写成 `point.seq + 1` | `fork::the_parent_gains_only_the_forked_record_and_the_seqs_match` | ✅ failed |
+
+4/4 抓住。

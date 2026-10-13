@@ -68,10 +68,21 @@ creates or modifies a session file (`.jsonl`).
   from the JSONL, never a session file (ADR 0006 §10). `--export` reads the JSONL directly
   and does not touch the index.
 
-These are their own mode: `--export`/`--search`/`--list` conflict with `--prompt`,
+- **`--fork <parent>`** (ADR 0022): create a child session whose initial history is the
+  parent's **effective** history at a turn boundary (a committed compaction is in effect, an
+  uncommitted replacement is dropped, unpaired calls are repaired). `--at <seq>` picks a
+  boundary; omitted, the parent's last `TurnFinished` is used. `--session-id <child>` names
+  the child (generated otherwise). It needs no model and no key, and the child inherits the
+  parent's workspace and config snapshot. The child is written and fsynced **first**; the
+  parent then gains exactly one `SessionForked`, so it never records a child that does not
+  exist. A parent another process is writing is refused with exit 1, without waiting.
+  - A fork point must be a turn boundary: a mid-turn seq, a seq inside a replacement
+    segment, an unknown seq and a seq past the end are each refused with the reason.
+
+These are their own mode: `--export`/`--search`/`--list`/`--fork` conflict with `--prompt`,
 `--resume` and each other, and `--list`/`--search` also conflict with `--session-id` (a
-listing does not use one); clap rejects a combination with exit 2. `--model` is only required
-for a conversation (`-p` or interactive).
+listing does not use one; `--fork` uses it to name the child); clap rejects a combination with
+exit 2. `--model` is only required for a conversation (`-p` or interactive).
 
 A closed stdout is not an error: `agent --list | head -1` (and the same for `--export`,
 `--search` and every `agent memory` subcommand) stops quietly with **exit 0** and prints

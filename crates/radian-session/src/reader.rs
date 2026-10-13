@@ -772,95 +772,111 @@ impl Session {
     /// Maps the parsed events back to core records. This is the only place that knows the
     /// disk-event shape; folding then reuses `agent_core::{replay, repair, recover}`.
     pub fn journal_records(&self) -> Vec<JournalRecord> {
-        self.events
-            .iter()
-            .filter_map(|event| match &event.data {
-                EventData::MessageAppended { index, message } => Some(JournalRecord::Message {
-                    index: *index as usize,
-                    message: message.clone(),
-                }),
-                EventData::TranscriptReplaced { revision, len } => {
-                    Some(JournalRecord::TranscriptReplaced {
-                        revision: *revision,
-                        len: *len as usize,
-                    })
-                }
-                EventData::TranscriptReplacementCommitted { revision, len } => {
-                    Some(JournalRecord::TranscriptReplacementCommitted {
-                        revision: *revision,
-                        len: *len as usize,
-                    })
-                }
-                EventData::TranscriptReplacementAborted { revision } => {
-                    Some(JournalRecord::TranscriptReplacementAborted {
-                        revision: *revision,
-                    })
-                }
-                EventData::ToolExecutionStarted {
-                    call_id,
-                    name,
-                    arguments,
-                } => Some(JournalRecord::ToolExecutionStarted {
-                    call_id: call_id.clone(),
-                    name: name.clone(),
-                    arguments: arguments.clone(),
-                }),
-                EventData::ToolExecutionSettled { call_id, result } => {
-                    Some(JournalRecord::ToolExecutionSettled {
-                        call_id: call_id.clone(),
-                        result: result.clone(),
-                    })
-                }
-                EventData::ModelUsageRecorded { usage } => Some(JournalRecord::ModelUsage {
-                    usage: usage.clone(),
-                }),
-                EventData::CompactionUsageRecorded {
-                    revision,
-                    model,
-                    usage,
-                } => Some(JournalRecord::CompactionUsage {
-                    revision: *revision,
-                    model: model.clone(),
-                    usage: usage.clone(),
-                }),
-                EventData::ContextCompacted {
-                    revision,
-                    source_revision,
-                    source_len,
-                    summary,
-                    first_kept,
-                    tokens_before,
-                    tokens_after,
-                    below_target,
-                    model,
-                } => Some(JournalRecord::ContextCompacted {
-                    revision: *revision,
-                    source_revision: *source_revision,
-                    source_len: *source_len as usize,
-                    summary: summary.clone(),
-                    first_kept: *first_kept as usize,
-                    tokens_before: *tokens_before,
-                    tokens_after: *tokens_after,
-                    below_target: *below_target,
-                    model: model.clone(),
-                }),
-                // Runtime events are not transcript records: `replay`/`repair`/`recover`
-                // must never see them (ADR 0006 §12).
-                EventData::InboxEnqueued { .. }
-                | EventData::InputClaimed { .. }
-                | EventData::InputAdmitted { .. }
-                | EventData::TurnStarted { .. }
-                | EventData::TurnFinished { .. }
-                | EventData::TurnFailed { .. }
-                | EventData::ConfigChanged { .. }
-                | EventData::ContextBudgetReached { .. }
-                | EventData::PermissionResolved { .. }
-                | EventData::MemoryInjected { .. }
-                | EventData::Other(_) => None,
-            })
-            .collect()
+        self.journal_records_through(u64::MAX)
     }
 
+    /// Like [`Session::journal_records`], but only events with `seq <= max_seq`. The fork
+    /// point uses this: a parent's effective history at a turn boundary is the fold of every
+    /// record up to and including that boundary.
+    pub fn journal_records_through(&self, max_seq: u64) -> Vec<JournalRecord> {
+        self.events
+            .iter()
+            .filter(|event| event.seq <= max_seq)
+            .filter_map(record_from_event)
+            .collect()
+    }
+}
+
+/// One parsed event as a core record, or `None` for a runtime event: `replay`/`repair`/
+/// `recover` must never see those (ADR 0006 §12).
+fn record_from_event(event: &SessionEvent) -> Option<JournalRecord> {
+    match &event.data {
+        EventData::MessageAppended { index, message } => Some(JournalRecord::Message {
+            index: *index as usize,
+            message: message.clone(),
+        }),
+        EventData::TranscriptReplaced { revision, len } => {
+            Some(JournalRecord::TranscriptReplaced {
+                revision: *revision,
+                len: *len as usize,
+            })
+        }
+        EventData::TranscriptReplacementCommitted { revision, len } => {
+            Some(JournalRecord::TranscriptReplacementCommitted {
+                revision: *revision,
+                len: *len as usize,
+            })
+        }
+        EventData::TranscriptReplacementAborted { revision } => {
+            Some(JournalRecord::TranscriptReplacementAborted {
+                revision: *revision,
+            })
+        }
+        EventData::ToolExecutionStarted {
+            call_id,
+            name,
+            arguments,
+        } => Some(JournalRecord::ToolExecutionStarted {
+            call_id: call_id.clone(),
+            name: name.clone(),
+            arguments: arguments.clone(),
+        }),
+        EventData::ToolExecutionSettled { call_id, result } => {
+            Some(JournalRecord::ToolExecutionSettled {
+                call_id: call_id.clone(),
+                result: result.clone(),
+            })
+        }
+        EventData::ModelUsageRecorded { usage } => Some(JournalRecord::ModelUsage {
+            usage: usage.clone(),
+        }),
+        EventData::CompactionUsageRecorded {
+            revision,
+            model,
+            usage,
+        } => Some(JournalRecord::CompactionUsage {
+            revision: *revision,
+            model: model.clone(),
+            usage: usage.clone(),
+        }),
+        EventData::ContextCompacted {
+            revision,
+            source_revision,
+            source_len,
+            summary,
+            first_kept,
+            tokens_before,
+            tokens_after,
+            below_target,
+            model,
+        } => Some(JournalRecord::ContextCompacted {
+            revision: *revision,
+            source_revision: *source_revision,
+            source_len: *source_len as usize,
+            summary: summary.clone(),
+            first_kept: *first_kept as usize,
+            tokens_before: *tokens_before,
+            tokens_after: *tokens_after,
+            below_target: *below_target,
+            model: model.clone(),
+        }),
+        // Runtime events are not transcript records: `replay`/`repair`/`recover`
+        // must never see them (ADR 0006 §12).
+        EventData::InboxEnqueued { .. }
+        | EventData::InputClaimed { .. }
+        | EventData::InputAdmitted { .. }
+        | EventData::TurnStarted { .. }
+        | EventData::TurnFinished { .. }
+        | EventData::TurnFailed { .. }
+        | EventData::ConfigChanged { .. }
+        | EventData::ContextBudgetReached { .. }
+        | EventData::PermissionResolved { .. }
+        | EventData::MemoryInjected { .. }
+        | EventData::Other(_) => None,
+    }
+}
+
+impl Session {
     /// The repaired transcript: `recover` over the mapped records, so unpaired tool calls
     /// get the ADR 0002 synthetic results. Empty file → empty history.
     pub fn history(&self) -> Result<Vec<Message>, ReadError> {

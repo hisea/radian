@@ -5570,3 +5570,126 @@ async fn list_and_search_refuse_session_id() {
         assert!(stderr.contains("--session-id"), "args {args:?}: {stderr}");
     }
 }
+
+// ---------- session fork (ADR 0022) ----------
+
+/// Writes a parent with one finished turn: `PARENT-TEXT` as the first user message. Returns
+/// the `TurnFinished` seq (the fork boundary the CLI should default to).
+async fn write_turn_session(sessions: &Path, id: &str, workspace: &str) -> u64 {
+    use agent_core::{JournalRecord, Message, TranscriptJournal};
+    let path = sessions.join(format!("{id}.jsonl"));
+    let journal = radian_session::SessionJournal::create(
+        &path,
+        id,
+        radian_session::SessionCreatedData::new(workspace, json!({})),
+    )
+    .unwrap();
+    journal
+        .append_runtime_event(radian_session::RuntimeEvent::TurnStarted {
+            turn_id: "t-1".into(),
+        })
+        .await
+        .unwrap();
+    journal
+        .append(JournalRecord::Message {
+            index: 0,
+            message: Message::user("PARENT-TEXT"),
+        })
+        .await
+        .unwrap();
+    let seq = journal.next_seq();
+    journal
+        .append_runtime_event(radian_session::RuntimeEvent::TurnFinished {
+            turn_id: "t-1".into(),
+            outcome: radian_session::TurnOutcome::Completed,
+            reason: None,
+            stop_reason: None,
+        })
+        .await
+        .unwrap();
+    drop(journal);
+    seq
+}
+
+/// `agent --fork` creates a child with the parent's history, records the lineage in both
+/// files, and refuses a parent another process holds.
+#[tokio::test]
+async fn fork_creates_a_child_and_refuses_a_locked_parent() {
+    let dir = scratch("fork-cli");
+    let sessions = dir.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let workspace = canonical(&ws);
+    let boundary = write_turn_session(&sessions, "parent", &workspace).await;
+
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                // No --model: --fork is a session command.
+                "--fork",
+                "parent",
+                "--session-id",
+                "child",
+                "--session-dir",
+                sessions.to_str().unwrap(),
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stdout.contains(&format!("forked parent at seq {boundary} into child")),
+        "{stdout}"
+    );
+    assert!(stdout.contains("--resume child"), "{stdout}");
+
+    // The child's initial history is the parent's one turn.
+    let child = std::fs::read_to_string(sessions.join("child.jsonl")).unwrap();
+    assert!(
+        child.contains(&format!(
+            "\"parent\":{{\"session_id\":\"parent\",\"seq\":{boundary}}}"
+        )),
+        "{child}"
+    );
+    assert!(child.contains("PARENT-TEXT"), "{child}");
+
+    // The parent gained exactly one SessionForked with the same seq.
+    let parent = std::fs::read_to_string(sessions.join("parent.jsonl")).unwrap();
+    assert_eq!(parent.matches("\"event\":\"SessionForked\"").count(), 1);
+    assert!(
+        parent.contains(&format!(
+            "\"child_session_id\":\"child\",\"parent_seq\":{boundary}"
+        )),
+        "{parent}"
+    );
+
+    // A parent another process is writing must be refused with exit 1, not waited for.
+    let held =
+        radian_session::SessionJournal::resume(sessions.join("parent.jsonl"), "parent").unwrap();
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--fork",
+                "parent",
+                "--session-id",
+                "child-2",
+                "--session-dir",
+                sessions.to_str().unwrap(),
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("being written by another process"),
+        "{stderr}"
+    );
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(!sessions.join("child-2.jsonl").exists());
+    drop(held);
+}

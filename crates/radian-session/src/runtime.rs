@@ -170,6 +170,14 @@ pub enum RuntimeEvent {
     /// carry no content; a reader uses them to see *which* records were injected, not to
     /// rebuild the request.
     MemoryInjected { records: Vec<MemoryInjectedRecord> },
+    /// A child session was forked from this one (ADR 0022 §3). Audit only: `critical = false`.
+    /// The child's own `SessionCreated.parent` is the authority on the lineage; this record is
+    /// the parent's index of it. `parent_seq` names the fork point and matches the child's
+    /// `parent.seq`.
+    SessionForked {
+        child_session_id: String,
+        parent_seq: u64,
+    },
 }
 
 impl RuntimeEvent {
@@ -186,6 +194,7 @@ impl RuntimeEvent {
             RuntimeEvent::ContextBudgetReached { .. } => "ContextBudgetReached",
             RuntimeEvent::PermissionResolved { .. } => "PermissionResolved",
             RuntimeEvent::MemoryInjected { .. } => "MemoryInjected",
+            RuntimeEvent::SessionForked { .. } => "SessionForked",
         }
     }
 
@@ -202,7 +211,8 @@ impl RuntimeEvent {
             RuntimeEvent::TurnFailed { .. }
             | RuntimeEvent::ContextBudgetReached { .. }
             | RuntimeEvent::PermissionResolved { .. }
-            | RuntimeEvent::MemoryInjected { .. } => false,
+            | RuntimeEvent::MemoryInjected { .. }
+            | RuntimeEvent::SessionForked { .. } => false,
         }
     }
 
@@ -297,6 +307,12 @@ pub(crate) struct PermissionResolvedData<'a> {
 }
 
 #[derive(Serialize)]
+pub(crate) struct SessionForkedData<'a> {
+    pub child_session_id: &'a str,
+    pub parent_seq: u64,
+}
+
+#[derive(Serialize)]
 pub(crate) struct MemoryInjectedData<'a> {
     pub records: &'a [MemoryInjectedRecord],
 }
@@ -314,6 +330,7 @@ pub(crate) enum RuntimeData<'a> {
     ContextBudgetReached(ContextBudgetReachedData<'a>),
     PermissionResolved(PermissionResolvedData<'a>),
     MemoryInjected(MemoryInjectedData<'a>),
+    SessionForked(SessionForkedData<'a>),
 }
 
 impl Serialize for RuntimeData<'_> {
@@ -329,6 +346,7 @@ impl Serialize for RuntimeData<'_> {
             RuntimeData::ContextBudgetReached(d) => d.serialize(serializer),
             RuntimeData::PermissionResolved(d) => d.serialize(serializer),
             RuntimeData::MemoryInjected(d) => d.serialize(serializer),
+            RuntimeData::SessionForked(d) => d.serialize(serializer),
         }
     }
 }
@@ -416,5 +434,12 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
         RuntimeEvent::MemoryInjected { records } => {
             RuntimeData::MemoryInjected(MemoryInjectedData { records })
         }
+        RuntimeEvent::SessionForked {
+            child_session_id,
+            parent_seq,
+        } => RuntimeData::SessionForked(SessionForkedData {
+            child_session_id,
+            parent_seq: *parent_seq,
+        }),
     }
 }

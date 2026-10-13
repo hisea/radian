@@ -1,0 +1,6 @@
+{"schema_version":1,"session_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","seq":0,"ts":"2026-10-13T00:00:00.000000Z","event":"SessionCreated","critical":true,"data":{"workspace":"/work/example","config_snapshot":{}}}
+{"schema_version":1,"session_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","seq":1,"ts":"2026-10-13T00:00:01.000000Z","event":"TurnStarted","critical":true,"data":{"turn_id":"t-1"}}
+{"schema_version":1,"session_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","seq":2,"ts":"2026-10-13T00:00:02.000000Z","event":"MessageAppended","critical":true,"data":{"index":0,"message":{"user":{"content":[{"text":{"text":"parent user"}}]}}}}
+{"schema_version":1,"session_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","seq":3,"ts":"2026-10-13T00:00:03.000000Z","event":"MessageAppended","critical":true,"data":{"index":1,"message":{"assistant":{"content":[{"text":{"text":"parent assistant"}}]}}}}
+{"schema_version":1,"session_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","seq":4,"ts":"2026-10-13T00:00:04.000000Z","event":"TurnFinished","critical":true,"data":{"turn_id":"t-1","outcome":"completed"}}
+{"schema_version":1,"session_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","seq":5,"ts":"2026-10-13T00:00:05.000000Z","event":"SessionForked","critical":false,"data":{"child_session_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","parent_seq":4}}
