@@ -239,7 +239,7 @@ A8 说明共享队列的按 session 隔离没有因为两种请求共用一条�
 
 ## ADR 0023 Step 1 · PR ④：Session Facade 与投影（2026-10-13）
 
-Base `7b811b7` · 一次性检出 `/tmp/s1d-mut`（detached，跑完删除）· 独立 target · `--no-fail-fast`；
+Base `7b811b7`（合并 PR ③ 后的 `5dcac58` 上原样重跑，同样 4/4 抓住）· 一次性检出（detached，跑完删除）· 独立 target · `--no-fail-fast`；
 每个变异后从副本还原，结束时 `git status --short` 只剩变异脚本。
 
 | # | 变异 | 结果 | 抓住它的测试 |

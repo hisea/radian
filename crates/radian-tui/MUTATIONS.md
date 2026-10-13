@@ -422,7 +422,7 @@ Base `9a62193` · 一次性 worktree `/tmp/s1b-mut` · 独立 `CARGO_TARGET_DIR`
 
 ## ADR 0023 Step 1 · PR ④：投影读取与通知（2026-10-13）
 
-Base `7b811b7` · 一次性检出 `/tmp/s1d-mut`（detached，跑完删除）· `--no-fail-fast`；
+Base `7b811b7`（合并 PR ③ 后的 `5dcac58` 上原样重跑，同样 4/4 抓住）· 一次性检出（detached，跑完删除）· `--no-fail-fast`；
 变异后从副本还原。
 
 | # | 变异 | 结果 | 抓住它的测试 |
