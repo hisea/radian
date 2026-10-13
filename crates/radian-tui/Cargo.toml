@@ -28,6 +28,12 @@ serde_json.workspace = true
 unicode-width = "0.2.2"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "process", "signal"] }
 
+[target.'cfg(unix)'.dependencies]
+# `poll(2)` detects a terminal that has gone away (the pty master closed) before crossterm's
+# event reader busy-loops on the resulting EOF; see `read_input` in `main.rs`. Already in the
+# dependency tree (a dev-dependency of this crate and a transitive dependency elsewhere).
+libc = "0.2"
+
 [target.'cfg(unix)'.dev-dependencies]
 # The panic-path test checks that a child process group is really gone.
 libc = "0.2"

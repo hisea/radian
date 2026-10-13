@@ -65,6 +65,9 @@ struct Pty {
 }
 impl Drop for Pty {
     fn drop(&mut self) {
+        // This harness spawns the binary **directly** (`Command::new(BIN)`, no `sh` wrapper),
+        // so `child.kill()` is already the app kill and leaves no orphan. (`tests/pty.rs` used
+        // a shell wrapper and had to switch to a process-group kill.)
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

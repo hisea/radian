@@ -221,7 +221,7 @@ fn main() -> ExitCode {
             // A clean exit still says why, on the normal screen (dogfooding D4). `--list`
             // prints its own output and passes `None`.
             if let Some(reason) = reason {
-                eprintln!("radian-tui: {reason}");
+                print_exit_line(&reason);
             }
             // A signal-driven exit is still an orderly one, but the caller asked us to stop:
             // report it the way a shell does, 128 + the signal number.
@@ -231,7 +231,7 @@ fn main() -> ExitCode {
             }
         }
         Ok(Err(message)) => {
-            eprintln!("radian-tui: {message}");
+            print_exit_line(&message);
             ExitCode::from(1)
         }
         Err(_) => {
@@ -244,10 +244,18 @@ fn main() -> ExitCode {
             if let Some(path) = radian_tui::terminal::panic_log_path() {
                 message.push_str(&format!(" (panic log: {})", path.display()));
             }
-            eprintln!("radian-tui: {message}");
+            print_exit_line(&message);
             ExitCode::from(101)
         }
     }
+}
+
+/// Prints the exit reason on the normal screen. `eprintln!` panics when the terminal is
+/// already gone (a closed pty makes the write fail), which would turn a clean exit into 101;
+/// a failure to print the line is not a failure to exit.
+fn print_exit_line(message: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "radian-tui: {message}");
 }
 
 fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, String> {
@@ -723,6 +731,134 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
     }))
 }
 
+/// What one input poll found.
+enum Input {
+    Event(Event),
+    Idle,
+    /// The terminal is gone: the pty master closed, the ssh session dropped, ...
+    Gone,
+}
+
+/// The tty's readiness as `poll(2)` sees it.
+#[cfg(unix)]
+enum Tty {
+    Readable,
+    Idle,
+    /// The master end closed (`POLLHUP`) or the fd is unusable.
+    Gone,
+}
+
+#[cfg(unix)]
+fn tty_readiness(timeout: Duration) -> Tty {
+    let mut fd = libc::pollfd {
+        fd: libc::STDIN_FILENO,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let millis = timeout.as_millis().min(i32::MAX as u128) as i32;
+    // SAFETY: `fd` is a valid `pollfd` for the duration of the call.
+    let ready = unsafe { libc::poll(&mut fd, 1, millis) };
+    if ready < 0 {
+        // EINTR is a signal (SIGWINCH, SIGTERM/SIGHUP): report Idle and let the loop check
+        // `signals::received` on its next turn.
+        return if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            Tty::Idle
+        } else {
+            Tty::Gone
+        };
+    }
+    if ready == 0 {
+        return Tty::Idle;
+    }
+    if fd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+        return Tty::Gone;
+    }
+    if fd.revents & libc::POLLIN != 0 {
+        Tty::Readable
+    } else {
+        Tty::Idle
+    }
+}
+
+/// Asks crossterm for the next event. Safe only when the tty is readable (a pending byte) or
+/// crossterm already holds a parsed event: its reader reads the fd, and a read that returns
+/// EOF loops forever (see [`read_input`]).
+fn crossterm_event() -> Input {
+    match event::read() {
+        Ok(event) => Input::Event(event),
+        Err(_) => Input::Gone,
+    }
+}
+
+/// Polls stdin for one input event, bounded by `timeout`.
+///
+/// `crossterm::event::poll`/`read` cannot drive the loop directly: when the terminal has gone
+/// away, the Unix event source keeps reading a tty that now returns EOF (`read` = 0) and never
+/// returns to the caller, so the app spins forever (crossterm 0.29.0; 16 orphaned `radian-tui`
+/// processes at 15–25% CPU). So the readiness check is `poll(2)`, which reports `POLLHUP` once
+/// the pty master is closed, and the caller leaves through the ordinary clean-exit path.
+///
+/// crossterm reads up to 1024 bytes per call and buffers the extra events, so after a readable
+/// tty is drained the remaining events must still be returned: `event::poll(0)` checks those
+/// buffers before it touches the fd, and returns false immediately when they are empty and the
+/// fd has nothing (it is not at EOF here — `poll(2)` just said so).
+#[cfg(unix)]
+fn read_input(timeout: Duration) -> Input {
+    match tty_readiness(timeout) {
+        Tty::Gone => Input::Gone,
+        Tty::Readable => crossterm_event(),
+        Tty::Idle => match event::poll(Duration::ZERO) {
+            Ok(true) => crossterm_event(),
+            Ok(false) => Input::Idle,
+            Err(_) => Input::Gone,
+        },
+    }
+}
+
+#[cfg(not(unix))]
+fn read_input(timeout: Duration) -> Input {
+    match event::poll(timeout) {
+        Ok(true) => match event::read() {
+            Ok(event) => Input::Event(event),
+            Err(_) => Input::Gone,
+        },
+        Ok(false) => Input::Idle,
+        Err(_) => Input::Gone,
+    }
+}
+
+/// Whether an I/O error means the terminal went away (`EIO`/`EPIPE`) rather than a real
+/// failure.
+fn terminal_gone(error: &std::io::Error) -> bool {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::UnexpectedEof
+    ) {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        if error.raw_os_error() == Some(libc::EIO) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Draws one frame. A draw that fails because the terminal is gone is the same event as
+/// [`Input::Gone`]: report it so the caller leaves cleanly instead of erroring out. `Ok(false)`
+/// means "the terminal is gone".
+fn draw_frame(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    app: &mut App,
+) -> Result<bool, String> {
+    match terminal.draw(|frame| radian_tui::render::draw(frame, app)) {
+        Ok(_) => Ok(true),
+        Err(error) if terminal_gone(&error) => Ok(false),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn ui_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
@@ -761,15 +897,23 @@ fn ui_loop(
             app.quit = true;
             // One last frame, so the notice is what the user sees before the screen is
             // restored.
-            terminal
-                .draw(|frame| radian_tui::render::draw(frame, app))
-                .map_err(|e| e.to_string())?;
+            // The last frame is best-effort: the terminal may already be gone.
+            let _ = draw_frame(terminal, app)?;
             break;
         }
         // A short poll keeps rendering responsive without blocking on input; it is a UI
-        // refresh interval, not a synchronization device.
-        if event::poll(Duration::from_millis(50)).map_err(|e| e.to_string())? {
-            match event::read().map_err(|e| e.to_string())? {
+        // refresh interval, not a synchronization device. `read_input` also reports a
+        // terminal that has gone away, which crossterm's own poll cannot (see its docs).
+        match read_input(Duration::from_millis(50)) {
+            Input::Gone => {
+                // The terminal went away (the pty master closed, the ssh session dropped):
+                // leave through the ordinary clean-exit path. The terminal restore is
+                // best-effort (it is already gone), the session is closed below, and no
+                // signal was received, so the exit code is the ordinary 0.
+                app.quit = true;
+                break;
+            }
+            Input::Event(event) => match event {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     if let Some(send) = app.on_key(key) {
                         dispatch(send, app, workspace, runtime, inbox, hooks)?;
@@ -777,7 +921,8 @@ fn ui_loop(
                 }
                 Event::Paste(text) => app.input.insert_str(&text),
                 _ => {}
-            }
+            },
+            Input::Idle => {}
         }
         while let Ok(event) = rx.try_recv() {
             app.apply_event(&event);
@@ -842,9 +987,11 @@ fn ui_loop(
             Err(std::sync::mpsc::TryRecvError::Empty) => true,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
         });
-        terminal
-            .draw(|frame| radian_tui::render::draw(frame, app))
-            .map_err(|e| e.to_string())?;
+        if !draw_frame(terminal, app)? {
+            // The terminal went away between the input poll and the frame: leave cleanly.
+            app.quit = true;
+            break;
+        }
         // The cursor is visible only while the input box is editable.
         radian_tui::terminal::set_cursor_visible(app.input_editable());
     }

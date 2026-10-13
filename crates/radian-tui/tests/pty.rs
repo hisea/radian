@@ -32,6 +32,15 @@ impl TempDir {
 
 impl Drop for Pty {
     fn drop(&mut self) {
+        // Kill the app, not just the shell that started it. `portable-pty` calls `setsid()`,
+        // so the shell is a process-group leader and the app it starts is in the same group:
+        // a group kill reaps both. Killing only the shell (what `child.kill()` does) left the
+        // app orphaned once the pty master closed -- that is how 16 `radian-tui` processes
+        // survived their tests at 15-25% CPU.
+        if let Some(pid) = self.child.process_id() {
+            // SAFETY: SIGKILL to a process group this test owns.
+            unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -69,7 +78,8 @@ struct Pty {
 
 impl Pty {
     /// Spawns the bin under `sh -c '"$@"; echo EXITED:$?; stty -a'` so the same pty reports
-    /// the exit code and the tty state after the app exits.
+    /// the exit code and the tty state after the app exits. `Drop` kills the whole process
+    /// group (the shell and the app), never just the shell.
     fn spawn(args: &[&str], rows: u16, cols: u16) -> Self {
         Self::spawn_with_env(args, &[], rows, cols)
     }
@@ -226,6 +236,13 @@ impl Pty {
     fn screen(&mut self) -> String {
         self.pump();
         self.parser.screen().contents()
+    }
+
+    /// The shell's pid, which is also the process group id: `portable-pty` calls `setsid()`
+    /// and the shell has no job control, so the app it starts is in the same group. A group
+    /// with no members therefore means the app is gone.
+    fn process_group(&self) -> Option<i32> {
+        self.child.process_id().map(|pid| pid as i32)
     }
 }
 
@@ -3446,4 +3463,140 @@ async fn pty_fork_refuses_while_a_turn_runs() {
         .collect();
     assert_eq!(jsonl, vec!["running.jsonl".to_owned()], "{jsonl:?}");
     pty.quit();
+}
+
+// ---------- the terminal going away, and a panicking test's cleanup ----------
+
+/// The terminal going away (the pty master closes; an ssh session drops) must end the app
+/// cleanly, not leave it spinning. This drives the binary **directly** (no shell wrapper), so
+/// the test can close every master fd without killing anything, and waits on the process
+/// itself: a bounded watchdog is the判据, no CPU assertion.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_closed_master_ends_the_app_cleanly() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("master-gone");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    // The sessions directory is a sibling of the workspace: the sandbox refuses a workspace
+    // inside it (ADR 0020).
+    let sessions = dir.path().join("sessions");
+    let portable_pty::PtyPair { slave, master } = portable_pty::native_pty_system()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+
+    let mut cmd = CommandBuilder::new(BIN);
+    cmd.args([
+        "--model",
+        "mock",
+        "--base-url",
+        "http://127.0.0.1:1/v1",
+        "--session-dir",
+        sessions.to_str().unwrap(),
+        "--session-id",
+        "master-gone",
+        "--offline-catalog",
+        "--workspace",
+        ws.to_str().unwrap(),
+    ]);
+    let home = TempDir::new("master-gone-home");
+    cmd.env_clear();
+    for name in ["PATH", "TMPDIR", "LANG"] {
+        if let Ok(value) = std::env::var(name) {
+            cmd.env(name, value);
+        }
+    }
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("HOME", home.path().as_os_str());
+    cmd.env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json");
+    let mut child = slave.spawn_command(cmd).unwrap();
+    let mut reader = master.try_clone_reader().unwrap();
+
+    // Wait for the first frame (the input box), bounded.
+    let mut bytes = Vec::new();
+    let mut buf = [0u8; 4096];
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline && !String::from_utf8_lossy(&bytes).contains("message") {
+        match reader.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => bytes.extend_from_slice(&buf[..n]),
+        }
+    }
+    assert!(
+        String::from_utf8_lossy(&bytes).contains("message"),
+        "the app never drew its input box; output was: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+
+    // Close the terminal: every master fd. No signal is sent.
+    drop(reader);
+    drop(master);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the app did not exit within 5 s of its terminal closing"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// A pty test that panics must not leave the app behind: `Drop` runs during the unwind and
+/// kills the whole process group. `portable-pty` calls `setsid()`, so the shell's pid is the
+/// group id and the app it started is in the same group; an empty group means no orphan.
+#[test]
+fn a_panicking_pty_test_leaves_no_app_process() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("panicking-test");
+    let group_file = dir.path().join("group");
+    let group_file_clone = group_file.clone();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut pty = Pty::spawn(
+            &[
+                "--model",
+                "mock",
+                "--base-url",
+                "http://127.0.0.1:1/v1",
+                "--session-dir",
+                dir.path().to_str().unwrap(),
+                "--session-id",
+                "panicking-test",
+            ],
+            20,
+            80,
+        );
+        assert!(pty.wait_for_screen("message", 20), "the app did not start");
+        std::fs::write(
+            &group_file_clone,
+            pty.process_group().expect("the shell pid").to_string(),
+        )
+        .unwrap();
+        panic!("this pty test panics on purpose");
+    }));
+    assert!(result.is_err(), "the closure must panic");
+
+    let pgid: i32 = std::fs::read_to_string(&group_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while group_alive(pgid) {
+        assert!(
+            Instant::now() < deadline,
+            "the app's process group {pgid} outlived the panicking test"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
