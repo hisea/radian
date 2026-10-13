@@ -175,3 +175,20 @@ Base: `b20cc3b` · 一次性检出 `/tmp/ccore-mutA`（detached，跑完删除�
 
 1/1 抓住。两个测试都用 `testing` 接缝 `wait_for_gate_waiter()` 同步（外加 5 秒 watchdog 超时，
 超时只是安全网）；去掉闸门后等待者不再注册，超时触发，测试失败而不是挂起。
+
+## flake2：append 测试的 flock 继承窗口
+
+不是代码变异，是一次**并发 flake 的修复前后测量**。根因：`flock` 属于打开文件描述；同一测试
+进程里一个测试 `fork` 子进程时，子进程在 `[fork, exec)` 窗口继承父进程的 fd，父进程随后 close
+再 reopen 同一文件时 `try_lock_exclusive` 看到假的 `Locked`。修法：`append.rs` 里一个进程级
+`static SERIAL` 把「spawn 子进程的测试」与「持有/重开 journal 的测试」串行化（只有该二进制 spawn
+子进程；每个集成测试文件是独立进程，跨二进制不会互相影响）。生产在启动时锁一次会话文件，任何子
+进程创建之前，不受影响。
+
+| 平台 / 命令 | 修复前 | 修复后 |
+|---|---|---|
+| Linux VM：`append <a_torn_tail…> <a_killed_writer…> --exact`，10 并行 ×5 轮（50 次） | 2 失败 | 0 失败 |
+| Linux VM：整只 append 二进制，20 并行 ×3 轮（60 次） | （未单测） | 0 失败 |
+| macOS：整只 append 二进制，20 并行 ×5 轮（100 次） | 1 失败 | 0 失败 |
+
+`crates/radian-session/tests/append.rs` 的模块注释记了根因与生产为何不受影响。
