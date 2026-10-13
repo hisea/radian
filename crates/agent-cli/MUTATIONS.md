@@ -200,3 +200,14 @@ M10 的变异只在报错字符串上；测试还断言已有 `.jsonl` 字节不
 |---|---|---|---|
 | M1 | 宿主不把实际会话目录加进 `deny_read` | ✅ 抓住 (rc=101) | `workspace_shell_cannot_read_the_sessions_directory` 与 `workspace_shell_cannot_read_a_moved_sessions_directory`（两条都失败） |
 | M5 | `session_dir` 仍用旧的数据目录（`~/.local/share/radian/sessions`） | ✅ 抓住 (rc=101) | `radian_home_places_sessions_under_the_radian_root` |
+
+## ADR 0021 M1 第二片：`agent memory` 的确认（2026-10-13）
+
+Base `5d80946` · 一次性 worktree `/tmp/memsvc-mut` · 独立 `CARGO_TARGET_DIR` ·
+`cargo test -p agent-cli --test cli memory --no-fail-fast`，变异后 `git checkout --` 还原。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M3 | 非 tty 下跳过确认（`if !stdin().is_terminal()` 改 `if false`） | ✅ 抓住 (rc=101) | `memory_forget_needs_confirmation_off_a_terminal`（期望退出 2，得到 1）与 `memory_split_and_merge_move_records_between_projects`（期望拒绝，结果没拒绝） |
+
+M3 只改一行条件；两个测试都断言「未确认时既不执行也不返回 0」，而不是只看 stderr。
