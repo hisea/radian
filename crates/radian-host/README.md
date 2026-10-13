@@ -91,7 +91,7 @@ so a moved repository still matches its old project.
 | A subdirectory finds the repository above it | `a_subdirectory_finds_the_repository_above_it` | `src/memory/identity.rs` |
 | Outside a repository the canonical workspace is the key (and a symlink shares it) | `outside_a_repository_the_canonical_workspace_is_the_key` | `src/memory/identity.rs` |
 | A relative `gitdir:`/`commondir` is resolved | `a_relative_gitdir_and_commondir_are_resolved` | `src/memory/identity.rs` |
-| A missing `commondir` falls back to the layout | `a_missing_commondir_falls_back_to_the_layout` | `src/memory/identity.rs` |
+| A missing `commondir` means the gitdir is the common dir; a submodule is its own project | `a_missing_commondir_means_the_gitdir_is_the_common_dir`, `a_submodule_is_its_own_project_not_the_superprojects` | `src/memory/identity.rs` |
 | A real worktree shares the main repository's key, and matches `git rev-parse --git-common-dir` | `a_worktree_and_its_main_repository_share_one_key`, `the_identity_matches_git_common_dir_when_git_is_available` | `src/memory/identity.rs` |
 | An unlinked workspace refuses a Project write and registers nothing | `an_unlinked_workspace_refuses_a_project_write_and_still_reads_global` | `src/memory/service.rs` |
 | A signed-off project write reads back and is `Source::User` | `a_project_write_reads_back_after_creating_the_project` | `src/memory/service.rs` |

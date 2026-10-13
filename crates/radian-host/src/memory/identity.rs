@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 ///   itself);
 /// - a **file** → the `gitdir:` pointer is resolved (a relative value against the file's
 ///   directory), then the common dir is read from `<gitdir>/commondir` (a relative value
-///   against the gitdir); when that file is absent, the `<common>/worktrees/<name>` layout
-///   gives the gitdir's grandparent. A pointer that cannot be read or resolved falls through
+///   against the gitdir); when that file is absent the gitdir itself is the common dir (a
+///   submodule's `<super>/.git/modules/<name>`). A pointer that cannot be read or resolved falls through
 ///   to the workspace path.
 /// - no `.git` at all → the workspace's canonical path.
 ///
@@ -88,8 +88,10 @@ fn common_dir_from_gitfile(dot_git: &Path) -> Option<PathBuf> {
     };
     let gitdir = canonical(&pointer);
 
-    // `commondir` is the authoritative pointer (usually `../..`); the grandparent is the
-    // documented `<common>/worktrees/<name>` layout, used only when the file is absent.
+    // `commondir` is the authoritative pointer (git writes it for every linked worktree,
+    // usually `../..`). Without it the gitdir **is** the common dir: that is a submodule,
+    // whose gitdir is `<super>/.git/modules/<name>` — taking the grandparent there would
+    // silently give the submodule the superproject's identity.
     let common = std::fs::read_to_string(gitdir.join("commondir"))
         .ok()
         .map(|text| text.trim().to_owned())
@@ -102,12 +104,7 @@ fn common_dir_from_gitfile(dot_git: &Path) -> Option<PathBuf> {
                 gitdir.join(path)
             }
         })
-        .or_else(|| {
-            gitdir
-                .parent()
-                .and_then(Path::parent)
-                .map(Path::to_path_buf)
-        })?;
+        .unwrap_or(gitdir);
     Some(canonical(&common))
 }
 
@@ -220,18 +217,64 @@ mod tests {
 
     /// Without a `commondir` file, `<common>/worktrees/<name>` still gives the common dir.
     #[test]
-    fn a_missing_commondir_falls_back_to_the_layout() {
+    fn a_missing_commondir_means_the_gitdir_is_the_common_dir() {
+        // git's rule: `commondir` absent → the gitdir itself is the common dir (a submodule's
+        // `<super>/.git/modules/<name>`). Never the grandparent: that would be the
+        // superproject's `.git`.
         let dir = scratch("no-commondir");
-        let common = dir.join("main").join(".git");
-        let gitdir = common.join("worktrees").join("wt");
+        let gitdir = dir.join("super").join(".git").join("modules").join("sub");
         std::fs::create_dir_all(&gitdir).unwrap();
-        let wt = dir.join("wt");
-        std::fs::create_dir_all(&wt).unwrap();
-        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
+        let sub = dir.join("super").join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join(".git"), "gitdir: ../.git/modules/sub\n").unwrap();
         assert_eq!(
-            project_identity_key(&wt),
-            std::fs::canonicalize(&common).unwrap()
+            project_identity_key(&sub),
+            std::fs::canonicalize(&gitdir).unwrap()
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_submodule_is_its_own_project_not_the_superprojects() {
+        if !git_available() {
+            eprintln!("skipping: git is not on PATH");
+            return;
+        }
+        let dir = scratch("submodule");
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        git(&sub, &["init", "-q"]);
+        git(&sub, &["config", "user.email", "t@example.invalid"]);
+        git(&sub, &["config", "user.name", "t"]);
+        git(&sub, &["commit", "-q", "--allow-empty", "-m", "s"]);
+        let sup = dir.join("super");
+        std::fs::create_dir_all(&sup).unwrap();
+        git(&sup, &["init", "-q"]);
+        git(
+            &sup,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                sub.to_str().unwrap(),
+                "sub",
+            ],
+        );
+
+        let super_key = project_identity_key(&sup);
+        let sub_key = project_identity_key(&sup.join("sub"));
+        assert_ne!(super_key, sub_key, "a submodule is not its superproject");
+        // What git itself says the submodule's common dir is.
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .current_dir(sup.join("sub"))
+            .output()
+            .unwrap();
+        let git_says =
+            std::fs::canonicalize(String::from_utf8(out.stdout).unwrap().trim()).unwrap();
+        assert_eq!(sub_key, git_says);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
