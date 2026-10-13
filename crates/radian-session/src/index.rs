@@ -131,7 +131,13 @@ pub struct Index {
 impl Index {
     /// Opens (creating if needed) the index at `path`, in WAL mode with a busy timeout
     /// (plan Phase 1), and ensures the schema exists.
+    ///
+    /// The database file is created owner-only (ADR 0013); SQLite creates its `-wal`/`-shm`
+    /// siblings with the database's own mode, so they inherit it. An existing wider file is
+    /// only warned about, never changed.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, IndexError> {
+        let path = path.as_ref();
+        crate::fs::ensure_private_file(path)?;
         let conn = Connection::open(path)?;
         // WAL lets readers run while a writer holds the write lock; the busy timeout makes
         // a contended writer wait instead of failing immediately.
