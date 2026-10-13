@@ -773,3 +773,22 @@ async fn the_shell_description_points_file_viewing_at_read_and_list() {
     }
     assert!(checked >= 1, "no shell was built to check");
 }
+
+/// ADR 0020 decision 4: the sandbox's in-workspace temp directory is `.radian-sandbox/`, not
+/// `.radian/`, so it cannot collide with `~/.radian/` when the workspace is `$HOME`.
+#[tokio::test]
+async fn the_sandbox_tmpdir_is_dot_radian_sandbox() {
+    let dir = TempDir::new("shell-tmpdir");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let Some(confined) = tools_with(SandboxMode::WorkspaceWrite, &root, &[]) else {
+        return; // no working backend here: skip rather than pretend
+    };
+    let (ok, text) = sh(&confined, "printf '%s' \"$TMPDIR\"").await;
+    assert!(ok, "{text}");
+    assert!(text.contains(".radian-sandbox/tmp"), "{text}");
+    assert!(
+        root.join(".radian-sandbox/tmp").exists(),
+        "the tmp directory must be inside the workspace"
+    );
+}

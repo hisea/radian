@@ -326,15 +326,10 @@ async fn pty_end_to_end_conversation_and_clean_exit() {
     assert!(dir.path().join("e2e.jsonl").exists());
 }
 
-/// The diagnostics directory the app will use when `HOME`/`XDG_CACHE_HOME` are `home`
-/// (ADR 0013 decision 4). The platform rule matches the one `radian-host` resolves at runtime.
+/// The diagnostics directory the app will use when `HOME` is `home` (ADR 0020):
+/// `<home>/.radian/cache/diagnostics`.
 fn diagnostics_dir(home: &Path) -> PathBuf {
-    let platform = if cfg!(target_os = "macos") {
-        radian_host::Platform::MacOs
-    } else {
-        radian_host::Platform::Linux
-    };
-    radian_host::diagnostics_dir_for(platform, home, Some(home))
+    radian_host::diagnostics_dir_for(&home.join(".radian"))
 }
 
 /// The panic hook restores the terminal before the panic message is printed, and the panic log
@@ -357,7 +352,7 @@ fn pty_panic_path_restores_the_terminal() {
             sessions.to_str().unwrap(),
             "--panic-after-enter",
         ],
-        &[("HOME", home), ("XDG_CACHE_HOME", home)],
+        &[("HOME", home)],
         20,
         80,
     );
@@ -434,7 +429,7 @@ fn pty_an_unwritable_diagnostics_directory_is_only_a_notice() {
             "--panic-message",
             "boom",
         ],
-        &[("HOME", home), ("XDG_CACHE_HOME", home)],
+        &[("HOME", home)],
         20,
         100,
     );
@@ -1951,11 +1946,7 @@ fn pty_a_panic_writes_a_redacted_panic_log() {
             "--panic-message",
             &format!("boom {secret} and {key}"),
         ],
-        &[
-            ("OPENAI_API_KEY", key),
-            ("HOME", home),
-            ("XDG_CACHE_HOME", home),
-        ],
+        &[("OPENAI_API_KEY", key), ("HOME", home)],
         20,
         100,
     );

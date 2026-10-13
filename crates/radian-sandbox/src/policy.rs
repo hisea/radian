@@ -241,7 +241,7 @@ fn collect_git(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
             continue;
         }
         let Ok(meta) = entry.metadata() else { continue };
-        if meta.is_dir() && name != ".radian" {
+        if meta.is_dir() && name != ".radian-sandbox" {
             collect_git(&path, depth + 1, out);
         }
     }

@@ -5,4 +5,4 @@ spikes/*/target/
 /scratchpad/
 
 # The sandbox gives commands a TMPDIR (and on Linux a HOME) inside the workspace.
-.radian/
+.radian-sandbox/

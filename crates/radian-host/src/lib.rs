@@ -11,6 +11,7 @@ mod catalog;
 mod describe;
 mod diagnostics;
 mod headers;
+mod home;
 mod mcp;
 mod model;
 mod session_id;
@@ -23,11 +24,16 @@ pub use catalog::{
 };
 pub use describe::{CLI_WORDING, TUI_WORDING, Wording, describe};
 pub use diagnostics::{
-    CleanReport, MAX_TOTAL_BYTES, Platform, RETENTION, append, cache_dir, cache_dir_for, clean,
-    clean_startup, clean_with, diagnostics_dir, diagnostics_dir_for, is_diagnostic_file,
-    now_millis, panic_log_name,
+    CleanReport, MAX_TOTAL_BYTES, RETENTION, append, cache_dir, clean, clean_startup, clean_with,
+    diagnostics_dir, is_diagnostic_file, now_millis, panic_log_name,
 };
 pub use headers::{SESSION_PLACEHOLDER, parse_headers};
+pub use home::{
+    RADIAN_HOME_ENV, cache_dir_for, catalog_cache, catalog_cache_for, config_dir, config_dir_for,
+    diagnostics_dir_for, ensure_private_dir, legacy_sessions_dirs_for, legacy_sessions_hint,
+    legacy_sessions_hint_for, memory_dir, memory_dir_for, radian_home, radian_home_for,
+    sessions_dir, sessions_dir_for,
+};
 pub use mcp::load_mcp_config;
 pub use model::{
     DEFAULT_MAX_TOKENS, HostModel, MIN_THINKING_BUDGET, ModelArgs, Provider, Thinking, build_model,

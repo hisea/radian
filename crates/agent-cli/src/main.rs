@@ -307,6 +307,14 @@ async fn run(cli: Cli) -> i32 {
             return USAGE_ERROR;
         }
     };
+    // ADR 0020 decision 5: never move a user's data; print a copy-pasteable command instead.
+    // Only when the default location is in use (an explicit --session-dir opted out).
+    if cli.session_dir.is_none()
+        && std::env::var("RADIAN_SESSION_DIR").map_or(true, |dir| dir.is_empty())
+        && let Some(hint) = radian_host::legacy_sessions_hint()
+    {
+        eprintln!("{hint}");
+    }
     let redact_secrets = setup.secrets.clone();
     match chat(setup, cli).await {
         Ok(code) => code,
@@ -469,11 +477,9 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
 /// Where session files live: `--session-dir`, then `RADIAN_SESSION_DIR`, then the user's
 /// data directory.
 ///
-/// Sessions are durable records, not a cache: ADR 0013 decision 4 says the journal is not
-/// subject to cache cleanup, so this is the platform's *data* directory —
-/// `$XDG_DATA_HOME/radian/sessions` (defaulting to `~/.local/share/radian/sessions`) on
-/// Linux, `~/Library/Application Support/radian/sessions` on macOS. Never a cache or temp
-/// path.
+/// Sessions are durable records, not a cache (ADR 0013 decision 4), and since ADR 0020 they
+/// live under `~/.radian/sessions` (`$RADIAN_HOME/sessions` when that is set) — the same
+/// root as the config and cache, but the sandbox denies read on this subdirectory.
 fn session_dir(cli: &Cli) -> Result<PathBuf, SetupError> {
     if let Some(dir) = &cli.session_dir {
         return Ok(PathBuf::from(dir));
@@ -483,24 +489,10 @@ fn session_dir(cli: &Cli) -> Result<PathBuf, SetupError> {
     {
         return Ok(PathBuf::from(dir));
     }
-    let home = std::env::var("HOME")
-        .map_err(|_| SetupError("no HOME to place sessions under; pass --session-dir".into()))?;
-    if let Ok(xdg) = std::env::var("XDG_DATA_HOME")
-        && !xdg.is_empty()
-    {
-        return Ok(PathBuf::from(xdg).join("radian").join("sessions"));
-    }
-    if cfg!(target_os = "macos") {
-        Ok(PathBuf::from(home)
-            .join("Library/Application Support")
-            .join("radian")
-            .join("sessions"))
-    } else {
-        Ok(PathBuf::from(home)
-            .join(".local/share")
-            .join("radian")
-            .join("sessions"))
-    }
+    // ADR 0020: the default is `~/.radian/sessions` (or `$RADIAN_HOME/sessions`).
+    radian_host::sessions_dir().ok_or_else(|| {
+        SetupError("no RADIAN_HOME or HOME to place sessions under; pass --session-dir".into())
+    })
 }
 
 /// The workspace a session belongs to: `--workspace` when given, else the current
@@ -810,7 +802,16 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     let workspace_path = setup.workspace.clone();
     let permission_profile =
         profile::build_profile(profile_arg, &workspace_path, &cli.allow_shell_command)?;
-    let sandbox = profile::build_sandbox(profile_arg, &workspace_path)?;
+    // ADR 0020 decision 3: the sandbox denies read on the **actual** sessions directory and
+    // the memory directory. Create them owner-only first so Linux's bwrap (which can only mask
+    // paths that exist) can hide them.
+    let sessions_for_deny = session_dir(&cli)?;
+    let _ = radian_host::ensure_private_dir(&sessions_for_deny);
+    let mut sandbox_deny_read = vec![sessions_for_deny];
+    if let Some(memory) = radian_host::memory_dir() {
+        sandbox_deny_read.push(memory);
+    }
+    let sandbox = profile::build_sandbox(profile_arg, &workspace_path, &sandbox_deny_read)?;
     let (profile_line, sandbox_facts) = profile::describe(profile_arg, sandbox.as_ref());
     eprintln!("[profile] {profile_line}");
     eprintln!("[sandbox] {sandbox_facts}");

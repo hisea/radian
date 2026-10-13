@@ -227,7 +227,7 @@ pub(crate) fn apply_env(command: &mut Command, policy: &SandboxPolicy) {
 /// The per-session temp directory, always inside the workspace so it is writable under
 /// `workspace-write`. Created on demand.
 pub(crate) fn workspace_tmp(policy: &SandboxPolicy) -> std::path::PathBuf {
-    let tmp = policy.workspace.join(".radian").join("tmp");
+    let tmp = policy.workspace.join(".radian-sandbox").join("tmp");
     let _ = std::fs::create_dir_all(&tmp);
     tmp
 }
