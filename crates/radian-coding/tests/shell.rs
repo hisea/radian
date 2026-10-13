@@ -743,3 +743,36 @@ async fn full_access_is_never_the_default() {
         "{error}"
     );
 }
+
+/// Dogfooding D10: the model used `shell` (`cat -n`, `sed -n`) for 101 of 111 calls and `read`
+/// 3 times, filling the context with uncapped dumps. The description steers file viewing to
+/// `read`/`list`, in the enforced mode and in the unsandboxed one.
+#[tokio::test]
+async fn the_shell_description_points_file_viewing_at_read_and_list() {
+    let dir = TempDir::new("shell-spec-d10");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let mut checked = 0;
+    for tools in [
+        tools_with(SandboxMode::WorkspaceWrite, &root, &[]),
+        Some(transparent_tools(&root)),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let session = tools.open_session().await.unwrap();
+        let spec = session
+            .tool_specs()
+            .iter()
+            .find(|spec| spec.name == "shell")
+            .expect("shell is advertised with a sandbox");
+        assert!(
+            spec.description
+                .contains("prefer the `read` and `list` tools"),
+            "{}",
+            spec.description
+        );
+        checked += 1;
+    }
+    assert!(checked >= 1, "no shell was built to check");
+}

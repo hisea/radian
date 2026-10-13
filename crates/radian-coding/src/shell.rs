@@ -70,7 +70,11 @@ pub(crate) fn spec(mode: SandboxMode) -> ToolSpec {
     ToolSpec {
         name: "shell".into(),
         description: format!(
-            "Run a shell command with `/bin/sh -c`. {confinement} Each stream's output is \
+            "Run a shell command with `/bin/sh -c`. {confinement} To look at a file or a \
+             directory, prefer the `read` and `list` tools over `cat`, `sed -n` or `ls`: they \
+             report truncation and total size, and they use less of the context window. Use \
+             `shell` to run programs (builds, tests, searches across many files). Each stream's \
+             output is \
              capped: past the budget the start and the end are kept and the middle is \
              replaced by a marker naming the discarded bytes (the end is always kept, \
              because that is where a failing command's error is). The process group is \
