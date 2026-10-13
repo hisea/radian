@@ -112,9 +112,12 @@ async fn an_overflow_with_no_window_compacts_to_half_and_retries_once() {
         "one conversation, one summary, one retry"
     );
     assert!(requests[0].system_prompt.is_none());
-    assert_eq!(
-        requests[1].system_prompt.as_deref(),
-        Some(compaction::SUMMARY_SYSTEM_PROMPT)
+    assert!(
+        requests[1]
+            .system_prompt
+            .as_deref()
+            .unwrap()
+            .starts_with(compaction::SUMMARY_SYSTEM_PROMPT)
     );
     assert!(compaction::is_compaction_summary(&requests[2].messages[0]));
 
@@ -356,9 +359,12 @@ async fn compact_now_commits_and_passes_the_instructions() {
     // The instructions appear in the one summary request.
     let requests = model.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(
-        requests[0].system_prompt.as_deref(),
-        Some(compaction::SUMMARY_SYSTEM_PROMPT)
+    assert!(
+        requests[0]
+            .system_prompt
+            .as_deref()
+            .unwrap()
+            .starts_with(compaction::SUMMARY_SYSTEM_PROMPT)
     );
     assert!(
         requests[0].messages[0]
@@ -452,4 +458,89 @@ async fn a_cancelled_compact_now_commits_nothing() {
         !kinds.iter().any(|k| k.starts_with("replaced")),
         "{kinds:?}"
     );
+}
+
+// ---------- dogfood7: an over-long summary is shortened on the retry ----------
+
+fn compaction_usage_count(journal: &RecordingJournal) -> usize {
+    journal
+        .records()
+        .iter()
+        .filter(|record| matches!(record, JournalRecord::CompactionUsage { .. }))
+        .count()
+}
+
+/// A manual `/compact` whose first summary is over the limit shortens it on the retry.
+#[tokio::test]
+async fn compact_now_shortens_an_overlong_summary() {
+    let overlong = "L".repeat(40_000);
+    let model = ScriptedModel::new([
+        summary_reply(&overlong, 50),
+        summary_reply("the shorter summary", 10),
+    ]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = overflow_agent(model.clone(), None, true);
+    let mut session = agent
+        .open_session_with_journal(big_prefix_history(), journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let outcome = session
+        .compact_now(None, &CancellationToken::new(), &recorder)
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, CompactionOutcome::Compacted { .. }),
+        "expected a commit, got {outcome:?}"
+    );
+    let requests = model.requests();
+    assert_eq!(requests.len(), 2, "summary, shortening retry");
+    // No budget: keep = 20000, so the ceiling is min(8192, 20000) = 8192; 80% is 6553.
+    let shorten_prompt = requests[1].system_prompt.as_deref().unwrap();
+    assert!(shorten_prompt.contains("6553 tokens"), "{shorten_prompt}");
+    let body = requests[1].messages[0].text();
+    assert!(
+        body.contains(&overlong),
+        "the over-long summary is not the input"
+    );
+    assert!(!body.contains("Conversation to summarize"), "{body}");
+    assert_eq!(compaction_usage_count(&journal), 2);
+}
+
+/// The provider-overflow fallback shortens an over-long summary on its one retry, then sends
+/// the compacted request.
+#[tokio::test]
+async fn the_overflow_fallback_shortens_an_overlong_summary() {
+    let overlong = "L".repeat(40_000);
+    let model = ScriptedModel::new([
+        overflow("prompt is too long"),
+        summary_reply(&overlong, 50),
+        summary_reply("the shorter summary", 10),
+        text("done"),
+    ]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = overflow_agent(model.clone(), None, true);
+    let mut session = agent
+        .open_session_with_journal(big_prefix_history(), journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let outcome = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(session.transcript_revision(), 1, "the fallback committed");
+    let requests = model.requests();
+    assert_eq!(
+        requests.len(),
+        4,
+        "conversation, summary, shorten, retried conversation"
+    );
+    let body = requests[2].messages[0].text();
+    assert!(body.contains(&overlong), "{body}");
+    assert!(!body.contains("Conversation to summarize"), "{body}");
+    assert_eq!(compaction_usage_count(&journal), 2);
 }
