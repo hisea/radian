@@ -3,7 +3,11 @@
 use futures_util::future::BoxFuture;
 
 /// What the human is shown. `reason` is the rule's reason when an `ask` rule matched.
+///
+/// `#[non_exhaustive]`: a host builds one through [`ApprovalRequest::new`], so a future field
+/// can be added without breaking external constructors.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct ApprovalRequest {
     pub request_id: String,
     pub call_id: String,
@@ -18,6 +22,30 @@ pub struct ApprovalRequest {
     /// The call's arguments, for the prompt to display. Opaque to this layer.
     pub arguments: serde_json::Value,
     pub reason: Option<String>,
+}
+
+impl ApprovalRequest {
+    /// Builds one request. `resource` is what the call wrote; `resolved_resource` is what the
+    /// rules matched (see the field docs) and must be the one a prompt shows.
+    pub fn new(
+        request_id: impl Into<String>,
+        call_id: impl Into<String>,
+        tool: impl Into<String>,
+        resource: impl Into<String>,
+        resolved_resource: impl Into<String>,
+        arguments: serde_json::Value,
+        reason: Option<String>,
+    ) -> Self {
+        Self {
+            request_id: request_id.into(),
+            call_id: call_id.into(),
+            tool: tool.into(),
+            resource: resource.into(),
+            resolved_resource: resolved_resource.into(),
+            arguments,
+            reason,
+        }
+    }
 }
 
 /// The human's answer. `AllowForSession` is a real-time grant (ADR 0004): it applies to the
