@@ -36,3 +36,34 @@ Ctrl-C once cancels the turn; a second Ctrl-C while it is winding down exits 130
 stdout carries only the model's visible answer (so `-p` can be piped). Status, tool lines
 and **reasoning** go to stderr; reasoning is prefixed `[reasoning]` and kept on its own
 lines, never mixed with the answer (ADR 0014).
+
+## Profiles, the sandbox, and permissions
+
+`--profile` picks the three layers of ADR 0012 at once:
+
+| Profile | Sandbox | Shell | MCP | Built-in files |
+|---|---|---|---|---|
+| `safe` | not needed (nothing executes) | not offered | denied | read/list/git allowed; write/patch denied |
+| `workspace-write` (default) | enforced (macOS seatbelt / Linux bubblewrap) | offered, sandboxed | asks | write/patch allowed under the workspace |
+| `full-access` | none (chosen explicitly) | offered, **not sandboxed** | allowed | write/patch allowed under the workspace |
+
+- **`full-access` is never a default.** The default is `workspace-write`.
+- **Without `--workspace` no write or execute tool exists at all**: the built-in tools are
+  only mounted with a workspace, and `shell` additionally needs a sandbox.
+- **A failed probe refuses to run.** If the backend is missing or its probe fails, the CLI
+  exits with an error instead of falling back to an unsandboxed run. There is no degrade path.
+- **`--yes` is not "allow everything".** It swaps the approver for one that answers "allow
+  once" without asking; `deny` rules still deny, `allow` rules still allow, and the sandbox is
+  untouched.
+- **Approval** shows the tool and its resource (the full command for `shell`) and offers
+  `y` (once), `a` (this session) or anything else (deny). Ctrl-C while waiting cancels the
+  turn. "This session" grants are in memory only and are gone after `--resume`.
+- **`--allow-shell-command PREFIX`** allows one simple shell command prefix without asking
+  (e.g. `--allow-shell-command "git status"`). It replaces the blanket "shell asks" rule, so
+  unmatched commands still ask; a composite command (`git status; rm -x`) never matches.
+- **Audit**: every decision writes one `PermissionResolved` to the session file, with
+  `approver = policy` for a rule/grant decision and `user` for an answered prompt.
+
+The startup lines state the profile, the backend and what it actually enforces. They never
+claim credential isolation: the macOS backend leaves `mach-lookup` open, so the IPC boundary
+is not tightened (ADR 0012 decision 4). MCP server processes are not sandboxed by this build.

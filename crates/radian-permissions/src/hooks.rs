@@ -61,6 +61,24 @@ impl PermissionHooks {
         *self.source.lock().unwrap()
     }
 
+    /// Reports the source of an input that was just **admitted** into the current turn — the
+    /// input that started it, and every `steer`/`inject` admitted while it runs.
+    ///
+    /// The turn's effective source only ever **lowers** (ADR 0012 decision 5): a non-human
+    /// input admitted mid-turn takes the turn's rights down to non-human, and a later `User`
+    /// input cannot raise it back. Use [`PermissionHooks::set_turn_source`] at the start of a
+    /// turn to reset.
+    ///
+    /// An unset source ranks lowest (it is already treated as non-human), so observing a
+    /// `User` input on a fresh instance does **not** raise it: a host that forgets the reset
+    /// fails closed.
+    pub fn observe_input_source(&self, source: InputSource) {
+        let mut current = self.source.lock().unwrap();
+        if rank(Some(source)) < rank(*current) {
+            *current = Some(source);
+        }
+    }
+
     /// Grants "allow for this session" for one tool and resource. The next matching call is
     /// allowed without asking; the grant is in memory only and dies with this instance.
     pub fn grant_for_session(&self, tool: impl Into<String>, resource: impl Into<String>) {
@@ -249,6 +267,19 @@ impl Hooks for PermissionHooks {
         call: &ToolCall,
     ) -> impl Future<Output = Result<ToolDecision, HookError>> + Send {
         self.decide(cx, call)
+    }
+}
+
+/// Permission rank of a turn source: `User` is the highest, unset is the lowest. Every
+/// non-`User` source ranks the same, because the layer only ever asks "is this a human
+/// turn?" — the deny path is identical for all of them, so a finer order would be a claim
+/// with no consumer (and `InputSource` is `#[non_exhaustive]`, so a future variant lands on
+/// the fail-safe side).
+fn rank(source: Option<InputSource>) -> u8 {
+    match source {
+        None => 0,
+        Some(InputSource::User) => 2,
+        Some(_) => 1,
     }
 }
 

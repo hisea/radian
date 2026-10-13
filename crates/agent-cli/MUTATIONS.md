@@ -69,3 +69,31 @@ and asserts the forced exit happened in under 1 s (i.e. it did not wait out the 
 
 `second_sigint_exits_130` was then run **30 times** with `--no-fail-fast`; all 30 passed
 (0 failures). Outputs: `/tmp/a66-30runs/run-{1..30}.txt`.
+
+## Profiles, sandbox and permissions (Phase 3 / cli-tools)
+
+One-shot worktree `/tmp/cli-tools-mut` at `9f8a5bc`, `cargo test -q ... --no-fail-fast`,
+`git checkout --` after each; `git status --short` empty at the end.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| M1 | `default_profile()` returns `full-access` | `full_access_is_not_the_default_and_no_write_tools_without_a_workspace` | ✅ failed |
+| M2 | an injected probe failure returns `Ok(None)` (degrade to unsandboxed) | `a_failed_sandbox_probe_refuses_instead_of_degrading` | ✅ failed |
+| M3 | `Action::Deny` is downgraded to `Ask` (so `--yes` would allow it) | `yes_does_not_bypass_a_deny_rule` | ✅ failed |
+| M4 | the shell `allow` matcher drops the "simple command" requirement and matches across separators | `a_composite_shell_command_always_asks` | ✅ failed (see note) |
+| M5 | the permission layer stops racing the approver against cancellation | `cancelling_at_the_shell_approval_does_not_hang` | ✅ failed (the CLI hangs; the test's watchdog fires) |
+| M6 | `observe_input_source` overwrites instead of only lowering | `radian-permissions::the_turn_source_only_ever_lowers` | ✅ failed |
+| M7 | `workspace-write` builds the sandbox as `full-access` | `shell_cannot_write_outside_the_workspace` | ✅ failed |
+
+Notes:
+
+- **M4's first form was an equivalent mutation**: normalizing separators alone changed
+  nothing, because `simple_prefix_matches` still returned early on `!is_simple`. Both edits
+  are needed; with both, the composite is allowed and the test fails.
+- **"A session grant survives `--resume`" has no natural mutation.** The grant lives only in
+  the `PermissionHooks` instance (a `HashSet` in memory) and is never serialized anywhere, and
+  `--resume` is a new process. Making it survive would mean persisting it — a new feature, not
+  a one-line change — so the property is structural; `radian-permissions` covers the layer
+  (`a_session_grant_applies_to_the_next_call_and_not_after_resume`) and the CLI test covers
+  the process boundary.
+- M5 was run with a 120 s cap; the test's own watchdog is what fires.
