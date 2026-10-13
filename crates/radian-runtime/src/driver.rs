@@ -293,6 +293,10 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             .await?;
 
         let mut claimed: Vec<MessageId> = vec![entry.id.clone()];
+        // Every claimed input, so an accepted-but-unapplied steer can go back to the inbox
+        // (ADR 0011: no input is dropped). `entry` is cloned before its message moves into
+        // the run.
+        let mut claimed_entries: Vec<InboxEntry> = vec![entry.clone()];
         let mut admitted: HashSet<MessageId> = HashSet::new();
         let tap = Tap::new(&*live);
 
@@ -300,7 +304,15 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         let steering = run.steering_handle();
         let cancellation = run.cancellation_handle();
         // Anything already waiting in the next_step lane joins before the first request.
-        drain_steering(&inbox, &journal, &steering, &turn_id, &mut claimed).await?;
+        drain_steering(
+            &inbox,
+            &journal,
+            &steering,
+            &turn_id,
+            &mut claimed,
+            &mut claimed_entries,
+        )
+        .await?;
 
         let cancel_generation = inbox.cancel_generation();
         // ADR 0017: a model error ends **this turn**, not the session. Every other `RunError`
@@ -314,14 +326,22 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
                         if inbox.cancel_generation() != cancel_generation {
                             cancellation.cancel();
                         }
-                        drain_steering(&inbox, &journal, &steering, &turn_id, &mut claimed).await?;
+                        drain_steering(&inbox, &journal, &steering, &turn_id, &mut claimed, &mut claimed_entries).await?;
                     }
                 }
             };
             admit_seen(&journal, &claimed, &mut admitted, &tap).await?;
             match result {
                 Ok(Step::Continue) => {
-                    drain_steering(&inbox, &journal, &steering, &turn_id, &mut claimed).await?;
+                    drain_steering(
+                        &inbox,
+                        &journal,
+                        &steering,
+                        &turn_id,
+                        &mut claimed,
+                        &mut claimed_entries,
+                    )
+                    .await?;
                 }
                 Ok(Step::Finished(outcome)) => break Ok(outcome),
                 // ADR 0017: a model error ends the turn; every other error ends the session.
@@ -331,6 +351,10 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         };
         drop(run);
         admit_seen(&journal, &claimed, &mut admitted, &tap).await?;
+        // A steer Core accepted but never applied (the turn ended first) goes back to the
+        // inbox front, in order, so the next turn uses it (ADR 0011). This covers both the
+        // normal finish and the model-error finish (ADR 0017).
+        requeue_unadmitted(&inbox, &claimed_entries, &admitted).await;
 
         let outcome = match outcome {
             Ok(outcome) => outcome,
@@ -412,6 +436,7 @@ async fn drain_steering(
     steering: &SteeringHandle,
     turn_id: &str,
     claimed: &mut Vec<MessageId>,
+    claimed_entries: &mut Vec<InboxEntry>,
 ) -> Result<(), DriverError> {
     let mut batch = Vec::new();
     while let Some(entry) = inbox.claim_next_step().await {
@@ -435,8 +460,20 @@ async fn drain_steering(
             message,
             seq,
         } = entry;
-        match steering.steer(message) {
-            Ok(()) => claimed.push(id),
+        match steering.steer(message.clone()) {
+            Ok(()) => {
+                claimed.push(id.clone());
+                // Core accepted the steer, but it is only applied at the next safe point. If
+                // the turn ends first, the entry goes back to the inbox (see
+                // `requeue_unadmitted`), so an accepted steer is never dropped in-process.
+                claimed_entries.push(InboxEntry {
+                    id,
+                    lane,
+                    source,
+                    message,
+                    seq,
+                });
+            }
             Err(agent_core::SteerError::RunFinished(message)) => {
                 // The turn is winding down: put it back so it is not lost. The claim above
                 // stays truthful until recovery requeues it (ADR 0011 L3-2).
@@ -456,6 +493,20 @@ async fn drain_steering(
         }
     }
     Ok(())
+}
+
+/// Puts every claimed input that never reached the transcript back at the front of its lane,
+/// in claim order, so the next turn uses it. A steer Core accepted but never applied (the
+/// turn ended first) lands here; without it the input would be lost until a restart. The
+/// journal already has `InputClaimed` for it and no `InputAdmitted`, which is exactly what
+/// `recover` requeues, so the record stays truthful.
+async fn requeue_unadmitted(inbox: &Inbox, claimed: &[InboxEntry], admitted: &HashSet<MessageId>) {
+    // Front-most last: a single front-push per entry restores the original order.
+    for entry in claimed.iter().rev() {
+        if !admitted.contains(&entry.id) {
+            inbox.requeue_front(entry.clone()).await;
+        }
+    }
 }
 
 /// Writes `InputAdmitted` for every claimed id the transcript has actually taken.
