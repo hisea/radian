@@ -127,13 +127,11 @@ fn record_panic(info: &std::panic::PanicHookInfo<'_>) -> String {
             redacted.replace('\n', " ")
         );
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            // Owner-only diagnostics directory and file (ADR 0013): the panic text can carry
+            // a header value or the key, so both are private.
+            let _ = radian_session::ensure_private_dir(parent);
         }
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-        {
+        if let Ok(mut file) = radian_session::open_private_append(&path) {
             let _ = file.write_all(line.as_bytes());
             let _ = file.flush();
         }

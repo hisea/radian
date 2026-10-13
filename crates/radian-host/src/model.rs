@@ -153,10 +153,20 @@ impl Model for HostModel {
     }
 }
 
+/// The configured endpoint as it may appear in an error: credentials and query values are
+/// removed (ADR 0013 T4). The provider crate owns the rule; this is the host's name for it so
+/// both hosts redact identically. The two adapters' implementations are identical.
+pub fn redact_base_url(raw: &str) -> String {
+    agent_provider_openai_compatible::redact_url(raw)
+}
+
 /// Builds the provider adapter named by `args.provider`. The error is the same shape the
 /// hosts already printed for a bad `--base-url`.
 pub fn build_model(args: ModelArgs) -> Result<HostModel, String> {
     let base_url = args.base_url.as_str();
+    // Any message that names the endpoint must redact it: `--base-url` can carry userinfo or
+    // a query token, and an error is as readable as Debug output (ADR 0013 T4).
+    let shown_url = redact_base_url(base_url);
     match args.provider {
         Provider::OpenAiCompatible => {
             let mut config = OpenAiCompatibleConfig::new(base_url, &args.model);
@@ -167,7 +177,7 @@ pub fn build_model(args: ModelArgs) -> Result<HostModel, String> {
             config.include_usage = args.include_usage;
             OpenAiCompatible::new(config)
                 .map(HostModel::OpenAi)
-                .map_err(|e| format!("--base-url {base_url}: {e}"))
+                .map_err(|e| format!("--base-url {shown_url}: {e}"))
         }
         Provider::Anthropic => {
             // Manual extended thinking has a documented range; fail here (before the session
@@ -193,7 +203,7 @@ pub fn build_model(args: ModelArgs) -> Result<HostModel, String> {
             }
             Anthropic::new(config)
                 .map(HostModel::Anthropic)
-                .map_err(|e| format!("--base-url {base_url}: {e}"))
+                .map_err(|e| format!("--base-url {shown_url}: {e}"))
         }
     }
 }

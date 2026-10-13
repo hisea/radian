@@ -123,7 +123,10 @@ pub(crate) fn openai_host_is_default(host: &str) -> bool {
 
 /// The URL without credentials: userinfo is dropped, query values and the fragment are
 /// masked. A URL that does not parse is not echoed at all.
-pub(crate) fn redact_url(raw: &str) -> String {
+///
+/// Public because a host that names the configured endpoint in an error must redact it the
+/// same way (ADR 0013 T4); `agent-provider-anthropic` has an identical copy.
+pub fn redact_url(raw: &str) -> String {
     let Ok(mut url) = reqwest::Url::parse(raw) else {
         return "<unparseable url>".into();
     };
