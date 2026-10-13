@@ -139,3 +139,16 @@ Notes:
 
 M14 的断言特意包含 clap 的 `Usage:` 行：只断言 `--model` 字样的话，后面的 setup 错误也含它，变异就抓不住
 了（第一次写测试时正是这个洞）。M15 覆盖 brief 要求的「search 写进了一个新的 .jsonl」。
+
+## 第三轮：--export 的 session id 校验（2026-10-13）
+
+一次性检出 `/tmp/clisess3-mut`（base `421221b`），变异后
+`cargo test -p agent-cli --no-fail-fast export_refuses_a_path_like_session_id`，用 `git checkout --`
+恢复、`git status --short` 为空。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M16 | `--export` 不调用 `validate_session_id`（直接拿 id 拼文件名） | ✅ failed | `export_refuses_a_path_like_session_id`（`../x` 读到上级伪造文件，退出 0） |
+
+测试里的伪造文件 `dir/x.jsonl` 的 `SessionCreated.workspace` 故意写成当前工作区，所以只靠
+工作区比对是挡不住的；M16 证明去掉 id 校验后它会被导出，而校验在场时被拒。
