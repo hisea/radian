@@ -88,6 +88,10 @@ async fn a_dropped_waiter_disappears_and_a_late_answer_is_late() {
     assert_eq!(queue.answer(dropped_id, 9), Err(Answered::Late));
     assert_eq!(queue.len(), 1, "the abandoned request is gone");
     assert_eq!(queue.head().unwrap().request_id, kept_id);
+    // A second abandoned waiter is dropped by `len`/`head`, not only by `answer`.
+    let (_dropped2_id, dropped2) = queue.push("s", 5);
+    drop(dropped2);
+    assert_eq!(queue.len(), 1, "len drops an abandoned waiter");
     assert!(queue.answer(kept_id, 20).is_ok());
     assert_eq!(kept.await.unwrap(), 20);
     assert_eq!(queue.answer(999, 0), Err(Answered::Unknown));
