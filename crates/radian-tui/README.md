@@ -57,6 +57,8 @@ the rest is sent as an ordinary message.
 |---|---|
 | `/help` | list the commands |
 | `/compact [note]` | summarize the history now and keep the recent part (ADR 0018) |
+| `/sessions [query]` | list this workspace's recent sessions (20), or search their message text; each line carries a copyable `--resume <id>` |
+| `/export [md\|json] [path] [--force]` | export **this** session (default `md`, default `<workspace>/radian-<id>.<ext>`) |
 | `/memory <command> …` | the same durable-memory commands as `agent memory` (ADR 0021 D7): `list`, `search`, `show`, `add`, `edit`, `archive`, `restore`, `forget`, `purge`, `confirm`, `export`, `import`, `project` / `project new`, `relink`, `split`, `merge` |
 
 - Arguments are split with shell quoting, so `/memory add "two words"` is one argument.
@@ -69,6 +71,12 @@ the rest is sent as an ordinary message.
 - `/compact [note]` asks the runtime to summarize the history now (ADR 0018); the driver runs
   it between turns, so a running turn finishes first, and the result is a notice. Ctrl-C/Esc
   cancels an in-flight compaction without committing.
+- `/sessions` and `/export` are host work, not transcript changes: the event loop runs them
+  where the session directory, workspace and secrets are known. `/sessions` never switches
+  sessions in place — reopen with `--resume <id>` or `--pick`. `/export` uses the same
+  `radian-host` renderer as `agent --export` (redacted, read-only JSONL), writes atomically,
+  and refuses to overwrite without `--force`; a relative path is resolved against the
+  workspace, an absolute one may point anywhere the user named.
 - An unknown command is an error notice, never a message to the model.
 - The grammar and the execution are `radian_host::memory::commands`, shared byte-for-byte with
   the CLI; the TUI only adds the framework and the notices.
@@ -114,6 +122,7 @@ The transcript owns its scrolling:
 | 15 | `--mcp-config` mounts the fixture; its tool runs through the approval dialog; the status bar shows the connected servers/tools; the startup notice names the MCP sandbox gap | `tests/pty.rs` |
 | 16 | the status bar shows the tier, reported usage (or `none`) and the MCP counts; a 60-column terminal drops the long segments and marks it | `tests/status.rs` |
 | 17 | `--version` prints `<program> <CARGO_PKG_VERSION>` and exits 0 without entering the terminal | `tests/version.rs` |
+| 18 | `--pick` lists this workspace's sessions, filters, full-text searches, resumes the choice (the next request carries its history), `n` starts new, `Esc` exits 0 with no session file; `/sessions` lists a copyable `--resume`; `/export` writes and refuses to overwrite without `--force` | `tests/pty.rs`, `tests/sessions.rs` (host) |
 | — | Enter=followup idle / steer running; Ctrl-C cancel-then-quit | `tests/input.rs` |
 
 ## Must be hand-tested in a real terminal
@@ -144,6 +153,10 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
 - **the MCP approval box**: with `--mcp-config`, an MCP tool call prompts like any other. Is
   the tool name (`server__tool`) and the argument preview clear at your width, and is it
   obvious the server runs outside the sandbox (the startup notice says so)?
+- **the picker**: run with `--pick` in a workspace that has a few sessions. Is the list
+  scannable, does typing a filter feel responsive, is the highlighted row obvious, and does
+  `Tab` full-text search read clearly (the snippet vs the summary)? Is it obvious that `Esc`
+  leaves and `n` starts fresh? pty automation asserts the rows and the keys, not the feel.
 - **`/help` and a `/memory` write**: type `/help` (a notice, no model request), then
   `/memory forget <id>` — is the `[y/N]` prompt obvious and does `n` feel like a cancel? pty
   automation asserts the notices and the keys, not the readability.
@@ -256,6 +269,7 @@ Whatever ended the app, the normal screen now says why, once, after the terminal
 | driver task panics | 1 | `radian-tui: the driver task ended unexpectedly: <join error>: <redacted panic>` |
 | the app itself panics (`main` thread) | 101 | `radian-tui: the app panicked: <redacted panic> (panic log: <path>)` |
 | `--list` | 0 | none: the listing is the output |
+| `--pick` quit (Esc/Ctrl-C) | 0 | none: the picker created nothing |
 
 Every line is a single `eprintln!` and therefore ends in `\n`; `TtyGuard::restore` also writes
 `\r\n` after leaving the alternate screen, so the shell never prints its "no newline" `%`.
@@ -332,13 +346,18 @@ by one is resumable by the other:
   same history.
 - `--list` prints this workspace's sessions (id, created, last activity, message count) and
   exits without touching the terminal.
+- `--pick` shows a full-screen picker of this workspace's sessions **before** the main UI:
+  `Up`/`Down` select, type to filter by id/summary, `Tab` (or `Ctrl-S`) toggles full-text
+  search, `Enter` resumes the selection, `n` starts a new session, `Esc`/`Ctrl-C` quits. It
+  never creates a session file. `--pick` conflicts with `--resume` and `--session-id`. With no
+  sessions it goes straight to a new session and says so.
 
 `--resume` and `--session-id` are mutually exclusive, as are `--resume` and `--list`.
 
 ## Flags
 
 `--model`, `--base-url`, `--api-key-env` (default `OPENAI_API_KEY`), `--header NAME=VALUE`,
-`--system`, `--session-dir`, `--session-id`, `--resume`, `--list`, `--version`,
+`--system`, `--session-dir`, `--session-id`, `--resume`, `--list`, `--pick`, `--version`,
 `--workspace DIR`, `--mcp-config FILE`,
 `--profile safe|workspace|full` (default `workspace`; the old `workspace-write`/`full-access`
 are accepted aliases but not listed),
