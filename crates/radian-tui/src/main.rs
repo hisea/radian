@@ -40,8 +40,10 @@ use ratatui::crossterm::event::{self, Event, KeyEventKind};
     about = "Full-screen TUI for the radian agent runtime"
 )]
 struct Cli {
+    /// Model name sent to the API. Required unless the config file's `model.model` provides
+    /// it.
     #[arg(long)]
-    model: String,
+    model: Option<String>,
 
     /// Provider wire protocol: `openai-compatible` (the default, unchanged) or `anthropic`.
     #[arg(long, value_name = "PROVIDER")]
@@ -56,6 +58,11 @@ struct Cli {
     /// printed. Defaults to `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`.
     #[arg(long, value_name = "VAR")]
     api_key_env: Option<String>,
+
+    /// The configuration file (ADR 0008). Overrides `RADIAN_CONFIG` and
+    /// `~/.radian/config/config.toml`. Read-only: this slice never writes it.
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
 
     /// `max_tokens` for anthropic (the Messages API requires it). Ignored for
     /// openai-compatible. Defaults to 16384.
@@ -107,9 +114,10 @@ struct Cli {
     mcp_config: Option<String>,
 
     /// The permission tier (ADR 0016): `safe` denies file modification, `workspace`
-    /// allows writes that resolve inside the workspace, `full` also allows MCP.
-    #[arg(long, value_name = "TIER", default_value = "workspace")]
-    profile: String,
+    /// allows writes that resolve inside the workspace, `full` also allows MCP. Defaults to
+    /// the config file's `permissions.profile`, then `workspace`.
+    #[arg(long, value_name = "TIER")]
+    profile: Option<String>,
 
     /// How `ask` is resolved (ADR 0012's ApprovalPolicy): `on-ask` asks when a rule says so,
     /// `always` asks for every call a rule does not deny, `never` turns `ask` into a denial.
@@ -314,15 +322,47 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
         (None, None) => radian_host::generate_session_id(),
     };
     validate_session_id(&session_id)?;
-    // The provider names the defaults; an explicit flag always wins.
-    let provider = Provider::from_name(cli.provider.as_deref().unwrap_or("openai-compatible"))?;
+    // ADR 0008: the config file provides defaults; every CLI flag wins. A refused file fails
+    // startup before any session file exists.
+    let config =
+        radian_host::load_config(cli.config.as_deref()).map_err(|error| error.to_string())?;
+    if config.read_only {
+        eprintln!(
+            "[config] schema_version {} is newer than the supported v{}; reading it read-only",
+            config.schema_version.unwrap_or(0),
+            radian_host::SUPPORTED_SCHEMA_VERSION
+        );
+    }
+    // A keymap conflict refuses startup before the terminal is entered.
+    if let Err(error) = radian_tui::keys::Keymap::from_config(&config.tui.keybindings) {
+        return Err(format!("config: {error}"));
+    }
+    let model_name = cli
+        .model
+        .clone()
+        .or_else(|| config.model.model.clone())
+        .ok_or_else(|| {
+            "no model: pass --model, or set model.model in the config file".to_string()
+        })?;
+    let profile_name = cli
+        .profile
+        .clone()
+        .or_else(|| config.permissions.profile.clone())
+        .unwrap_or_else(|| "workspace".to_string());
+    let provider_name = cli
+        .provider
+        .clone()
+        .or_else(|| config.model.provider.clone());
+    let provider = Provider::from_name(provider_name.as_deref().unwrap_or("openai-compatible"))?;
     let base_url = cli
         .base_url
         .clone()
+        .or_else(|| config.model.base_url.clone())
         .unwrap_or_else(|| provider.default_base_url().to_owned());
     let api_key_env = cli
         .api_key_env
         .clone()
+        .or_else(|| config.model.api_key_env.clone())
         .unwrap_or_else(|| provider.default_api_key_env().to_owned());
     let thinking = match cli.thinking.as_deref() {
         Some(value) => value.parse::<Thinking>()?,
@@ -331,7 +371,15 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
     // `--thinking` and `--max-tokens` are Anthropic-only; under openai-compatible they would
     // be ignored, so this is an error before the session file exists (dogfooding D15).
     check_provider_flags(provider, thinking, cli.max_tokens)?;
-    let headers = parse_headers(&cli.header, &session_id)?;
+    // The config's headers come first, so a `--header` of the same name wins.
+    let mut header_args: Vec<String> = config
+        .model
+        .headers
+        .iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect();
+    header_args.extend(cli.header.iter().cloned());
+    let headers = parse_headers(&header_args, &session_id)?;
     // Header values and the key must not reach the panic log (dogfooding D4).
     let mut secrets: Vec<String> = headers.iter().map(|(_, value)| value.clone()).collect();
     let key = std::env::var(&api_key_env).ok().filter(|k| !k.is_empty());
@@ -346,7 +394,7 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
     let model = build_model(ModelArgs {
         provider,
         base_url,
-        model: cli.model.clone(),
+        model: model_name.clone(),
         api_key: key,
         headers,
         // The TUI has no `--include-usage` flag; the adapter's default policy applies.
@@ -357,7 +405,7 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
     // The permission tier and the sandbox. For an enforced tier a probe failure is an error
     // here, never a fallback to an unsandboxed run (ADR 0012 decision 2). Still before
     // the session file exists, so a refusal leaves nothing behind (dogfooding D2).
-    let tier = radian_tui::profile::parse_tier(&cli.profile)?;
+    let tier = radian_tui::profile::parse_tier(&profile_name)?;
     // ADR 0020 decision 3: the sandbox denies read on the **actual** sessions directory and
     // the memory directory. Create them owner-only first so Linux's bwrap (which can only mask
     // paths that exist) can hide them.
@@ -426,10 +474,10 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
         Provider::OpenAiCompatible => None,
     };
     let window = runtime.block_on(radian_host::resolve(&radian_host::WindowQuery::production(
-        cli.context_window,
+        cli.context_window.or(config.model.context_window),
         cli.catalog_provider.clone(),
         &catalog_base_url,
-        cli.model.clone(),
+        model_name.clone(),
         request_max_output,
         cli.offline_catalog,
     )));
@@ -452,6 +500,7 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
         &dir,
         &workspace_path.to_string_lossy(),
         provider,
+        &model_name,
     )?;
     // D4: panics after this point get a log in the diagnostics directory (ADR 0013 decision
     // 4), not next to the session: the session is the authoritative record and must not be
@@ -483,7 +532,7 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
         // No window known means the budget is off, never a guessed default (ADR 0015); the
         // window comes from the catalog or `--context-window` (ADR 0018).
         context_budget: window.budget.map(ContextBudget::new),
-        auto_compact: !cli.no_auto_compact,
+        auto_compact: !cli.no_auto_compact && config.compaction.auto.unwrap_or(true),
         ..AgentConfig::default()
     };
 
@@ -588,6 +637,25 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
     if let Some(path) = &cli.freeze_draw {
         let _ = FREEZE_DRAW.set(path.clone());
     }
+    // ADR 0008: the `[config]` line and its warnings are startup diagnostics and belong on
+    // the normal screen, **before** the alternate screen is entered. Printed inside it, a
+    // stray `eprintln!` writes cells the renderer's diff then skips (both buffers see a
+    // space), so the raw text stays on screen and corrupts the first row.
+    let mut app = App::new(model_name.clone(), session_id.clone());
+    // `Tab` (the `complete` action) completes `@` file references against the workspace.
+    app.set_workspace(workspace_path.clone());
+    app.set_context_window(window.budget);
+    let config_warnings = app
+        .apply_config(&config, radian_tui::theme::Theme::no_color_env())
+        .map_err(|error| format!("config: {error}"))?;
+    match &config.source {
+        Some(path) => eprintln!("[config] {}", path.display()),
+        None => eprintln!("[config] none"),
+    }
+    for warning in &config_warnings {
+        eprintln!("[config] {warning}");
+    }
+
     let mut guard =
         radian_tui::terminal::TtyGuard::enter().map_err(|e| format!("terminal: {e}"))?;
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))
@@ -623,10 +691,6 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
             .map_err(|e| format!("child.pid: {e}"))?;
         panic!("radian-tui: panic path test with a child in flight");
     }
-    let mut app = App::new(cli.model.clone(), session_id.clone());
-    // `Tab` completes `@` file references against the workspace.
-    app.set_workspace(workspace_path.clone());
-    app.set_context_window(window.budget);
     app.set_tier(tier.as_str());
     app.set_mcp(mcp_configured, mcp_open);
     // `/memory` runs against the same service the agent's tools and injection use.
@@ -1385,6 +1449,7 @@ fn open_journal(
     dir: &Path,
     workspace: &str,
     provider: Provider,
+    model: &str,
 ) -> Result<Arc<SessionJournal>, String> {
     let path = dir.join(format!("{session_id}.jsonl"));
     if cli.resume.is_some() {
@@ -1401,7 +1466,7 @@ fn open_journal(
     // URL that could carry credentials (ADR 0008 §4, ADR 0013).
     let created = SessionCreatedData::new(
         workspace,
-        serde_json::json!({"provider": provider.as_str(), "model": cli.model}),
+        serde_json::json!({"provider": provider.as_str(), "model": model}),
     );
     match SessionJournal::create(&path, session_id, created) {
         Ok(journal) => Ok(Arc::new(journal)),

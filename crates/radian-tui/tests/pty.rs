@@ -187,6 +187,8 @@ impl Pty {
         // overrides both through `envs`.
         let home = TempDir::new("home");
         cmd.env("HOME", home.path().as_os_str());
+        // `cmd.env_clear()` above is what makes this hermetic: neither `RADIAN_HOME` nor
+        // `RADIAN_CONFIG` reaches the child, so a config can only come from this temp `HOME`.
         cmd.env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json");
         for (name, value) in envs {
             cmd.env(name, value);
@@ -968,17 +970,17 @@ async fn pty_an_over_budget_request_is_still_sent() {
             dir.path().to_str().unwrap(),
             "--session-id",
             "budget-over",
-            // B = C - R = 17000 - 16384 = 616. The input is sent as one bracketed paste:
-            // a raw burst of 4 000 keys makes the app redraw once per key, which is O(n^2)
-            // and timed out on a slow Linux VM.
+            // ADR 0018: R = min(16384, C/4) = 250, so B = C - R = 750. The input is
+            // sent as one bracketed paste: a raw burst of 4 000 keys makes the app redraw once
+            // per key, which is O(n^2) and timed out on a slow Linux VM.
             "--context-window",
-            "17000",
+            "1000",
         ],
         30,
         110,
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
-    // ~1000 estimated tokens, over B = 616.
+    // ~1000 estimated tokens, over B = 750.
     pty.send(format!("\x1b[200~{}\x1b[201~\r", "x".repeat(4_000)).as_bytes());
     assert!(
         pty.wait_for_screen("OVER-BUDGET-REPLY", 20),
@@ -992,7 +994,7 @@ async fn pty_an_over_budget_request_is_still_sent() {
         "the projection is labelled as an estimate: {screen}"
     );
     assert!(
-        screen.contains("/ 616"),
+        screen.contains("/ 750"),
         "the status bar shows the projection over B: {screen}"
     );
     pty.quit();
@@ -2699,7 +2701,7 @@ async fn pty_the_startup_notice_names_the_window_source() {
         110,
     );
     assert!(
-        pty.wait_for_screen("B 3616 from --context-window", 10),
+        pty.wait_for_screen("B 15000 from --context-window", 10),
         "the startup notice does not name the explicit window and its B:\n{}",
         pty.screen()
     );
@@ -3376,6 +3378,163 @@ async fn pty_sessions_and_export_commands() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
+// ---------- the configuration file (ADR 0008) ----------
+
+/// A rebound `send` key sends, and `Enter` (rebound to newline in the same file) does not:
+/// the request text carries the newline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_rebound_send_key_sends_and_enter_does_not() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("config-send");
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "schema_version = 1\n[tui.keybindings]\nsend = [\"ctrl-s\"]\nnewline = [\"enter\"]\n",
+    )
+    .unwrap();
+    let server = MockServer::start(vec![text_reply("SENT")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--config",
+            config.to_str().unwrap(),
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "rebind",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"hi");
+    pty.send(b"\r"); // Enter: a newline, not a send
+    pty.send(&[0x13]); // Ctrl-S: the rebound send
+    assert!(pty.wait_for_screen("SENT", 15), "{}", pty.screen());
+    assert_eq!(server.requests().len(), 1, "only Ctrl-S sent");
+    assert_eq!(
+        last_user_text(&server, 0),
+        "hi\n",
+        "Enter added the newline"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// The `[config]` line is a startup diagnostic printed on the normal screen, **before** the
+/// alternate screen is entered. Printed inside it, the raw text sits in cells that the
+/// renderer's diff then skips (both buffers hold a space there), so it is never erased and
+/// corrupts the first transcript row — a resumed history is exactly that row. Both the byte
+/// order and the rendered row are pinned.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_the_config_line_is_not_written_inside_the_alternate_screen() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("config-screen");
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, "schema_version = 1\n").unwrap();
+    let path = dir.path().join("screen-me.jsonl");
+    let journal = radian_session::SessionJournal::create(
+        &path,
+        "screen-me",
+        radian_session::SessionCreatedData::new("/tmp", json!({})),
+    )
+    .expect("create the session file");
+    use agent_core::TranscriptJournal;
+    journal
+        .append(agent_core::JournalRecord::Message {
+            index: 0,
+            message: agent_core::Message::user("hello parent config"),
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--config",
+            config.to_str().unwrap(),
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--resume",
+            "screen-me",
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("> hello parent config", 10),
+        "the first transcript row is corrupted:\n{}",
+        pty.screen()
+    );
+    let raw = String::from_utf8_lossy(&pty.raw()).into_owned();
+    let alt = raw
+        .find("\u{1b}[?1049h")
+        .expect("the alternate screen is entered");
+    let line = raw.find("[config]").expect("the config line is printed");
+    assert!(
+        line < alt,
+        "the config line is printed inside the alternate screen:\n{raw}"
+    );
+    assert!(
+        !pty.screen().contains("[config]"),
+        "the config line leaked into the alternate screen:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// One key bound to two actions refuses startup, naming the conflict.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_keymap_conflict_refuses_to_start() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("config-conflict");
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "schema_version = 1\n[tui.keybindings]\nsend = [\"ctrl-j\"]\n",
+    )
+    .unwrap();
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--config",
+            config.to_str().unwrap(),
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "conflict",
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_exit(10).is_some(),
+        "the app must refuse to start"
+    );
+    assert_ne!(pty.app_exit_code(), Some(0));
+    let raw = String::from_utf8_lossy(&pty.raw()).into_owned();
+    assert!(raw.contains("ctrl-j") && raw.contains("newline"), "{raw}");
+    assert!(!sessions.join("conflict.jsonl").exists(), "no session file");
+}
+
 /// `/fork` (ADR 0022): when idle it creates a child with the parent's history; while a turn
 /// is running it is refused; the child resumes normally.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3534,6 +3693,77 @@ async fn pty_fork_refuses_while_a_turn_runs() {
         .collect();
     assert_eq!(jsonl, vec!["running.jsonl".to_owned()], "{jsonl:?}");
     pty.quit();
+}
+
+/// Phase 5: `Ctrl-F` searches the transcript and jumps to an earlier match.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_find_jumps_to_an_earlier_match() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("find-pty");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    // A long transcript: the first reply holds the marker, seven more fill it.
+    let mut replies = vec![text_reply("ALPHA-MARKER")];
+    for i in 2..=8 {
+        let filler = (0..12)
+            .map(|j| format!("filler-{i}-line-{j}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        replies.push(text_reply(&filler));
+    }
+    let server = MockServer::start(replies).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "find",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"m1\r");
+    assert!(pty.wait_for_screen("ALPHA-MARKER", 15), "{}", pty.screen());
+    for i in 2..=8 {
+        pty.send(format!("m{i}\r").as_bytes());
+        assert!(
+            pty.wait_for_screen(&format!("filler-{i}-line-11"), 15),
+            "{}",
+            pty.screen()
+        );
+    }
+    assert!(
+        !pty.screen().contains("ALPHA-MARKER"),
+        "the marker should have scrolled off:\n{}",
+        pty.screen()
+    );
+
+    // Ctrl-F opens the box; typing jumps to the earlier match.
+    pty.send(&[0x06]);
+    pty.send(b"ALPHA");
+    assert!(
+        pty.wait_for_screen("match 1/1", 10),
+        "the find status is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("ALPHA-MARKER", 10),
+        "the match did not scroll into view:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
 }
 
 // ---------- the terminal going away, and a panicking test's cleanup ----------

@@ -46,6 +46,17 @@ impl ProfileArg {
     }
 }
 
+/// The config file's `permissions.profile` name. The config reader has already restricted it
+/// to the known names; this maps them onto the CLI's values (old aliases included).
+pub(crate) fn parse_profile(name: &str) -> Result<ProfileArg, SetupError> {
+    match name {
+        "safe" => Ok(ProfileArg::Safe),
+        "workspace" | "workspace-write" => Ok(ProfileArg::WorkspaceWrite),
+        "full" | "full-access" => Ok(ProfileArg::FullAccess),
+        other => Err(SetupError(format!("unknown profile {other:?}"))),
+    }
+}
+
 /// The default profile: **`workspace-write`**, never `full-access`.
 ///
 /// Rationale: it is the least surprising useful mode. The built-in file tools are confined by

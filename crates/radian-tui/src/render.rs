@@ -5,7 +5,7 @@ use std::borrow::Cow;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -15,20 +15,7 @@ use radian_permissions::ApprovalRequest;
 use crate::app::{
     App, Entry, EntryKind, TurnState, WrapKey, budget_status_text, mcp_text, usage_text,
 };
-
-/// Reasoning is dim and italic; it must be visually distinct from assistant text (ADR 0014).
-pub fn reasoning_style() -> Style {
-    Style::default()
-        .fg(Color::DarkGray)
-        .add_modifier(Modifier::ITALIC | Modifier::DIM)
-}
-
-/// The marker on an interrupted assistant prefix (ADR 0003).
-pub fn interrupted_style() -> Style {
-    Style::default()
-        .fg(Color::Yellow)
-        .add_modifier(Modifier::BOLD)
-}
+use crate::theme::Theme;
 
 /// Hard-wraps `text` to `width` display columns, breaking on spaces where possible and on
 /// character boundaries otherwise (CJK has no spaces). Newlines start a new line.
@@ -64,29 +51,37 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
     out
 }
 
-fn marker(kind: EntryKind) -> (&'static str, Style) {
+/// The visible marker for an entry kind (the transcript's `> `, `~ `, …).
+fn marker_prefix(kind: EntryKind) -> &'static str {
     match kind {
-        EntryKind::User => (
-            "> ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        EntryKind::Assistant => ("  ", Style::default()),
-        EntryKind::Reasoning => ("~ ", reasoning_style()),
-        EntryKind::ToolCall => ("-> ", Style::default().fg(Color::Blue)),
-        EntryKind::ToolResult => ("<- ", Style::default().fg(Color::Green)),
-        EntryKind::Notice => ("* ", Style::default().fg(Color::DarkGray)),
+        EntryKind::User => "> ",
+        EntryKind::Assistant => "  ",
+        EntryKind::Reasoning => "~ ",
+        EntryKind::ToolCall => "-> ",
+        EntryKind::ToolResult => "<- ",
+        EntryKind::Notice => "* ",
     }
 }
 
-fn body_style(entry: &Entry) -> Style {
+fn marker(kind: EntryKind, theme: &Theme) -> (&'static str, Style) {
+    let style = match kind {
+        EntryKind::User => theme.user,
+        EntryKind::Assistant => Style::default(),
+        EntryKind::Reasoning => theme.reasoning,
+        EntryKind::ToolCall => theme.tool_call,
+        EntryKind::ToolResult => theme.tool_result,
+        EntryKind::Notice => theme.notice,
+    };
+    (marker_prefix(kind), style)
+}
+
+fn body_style(entry: &Entry, theme: &Theme) -> Style {
     match entry.kind {
-        EntryKind::Reasoning => reasoning_style(),
-        EntryKind::ToolCall => Style::default().fg(Color::Blue),
-        EntryKind::ToolResult if entry.is_error => Style::default().fg(Color::Red),
-        EntryKind::ToolResult => Style::default().fg(Color::Green),
-        EntryKind::Notice => Style::default().fg(Color::DarkGray),
+        EntryKind::Reasoning => theme.reasoning,
+        EntryKind::ToolCall => theme.tool_call,
+        EntryKind::ToolResult if entry.is_error => theme.tool_result_error,
+        EntryKind::ToolResult => theme.tool_result,
+        EntryKind::Notice => theme.notice,
         EntryKind::User | EntryKind::Assistant => {
             if entry.interrupted {
                 Style::default().add_modifier(Modifier::ITALIC)
@@ -107,13 +102,22 @@ fn display_text(entry: &Entry) -> Cow<'_, str> {
     }
 }
 
+/// The wrapped display lines of `entry`'s body (the prefix and the interrupted marker are not
+/// included), at `width`. The renderer wraps exactly these, and [`crate::find`] matches
+/// against exactly these, so a folded `@` attachment is shown and searched as its
+/// `[file: path, N lines]` line, never as the hidden content.
+pub fn display_lines(entry: &Entry, width: usize) -> Vec<String> {
+    let prefix = marker_prefix(entry.kind);
+    let body_width = width.saturating_sub(prefix.width()).max(1);
+    wrap(&display_text(entry), body_width)
+}
+
 /// One entry's styled lines. An interrupted assistant entry gets an explicit marker on its
 /// last line.
-fn entry_lines(entry: &Entry, width: usize) -> Vec<Line<'static>> {
-    let (prefix, prefix_style) = marker(entry.kind);
-    let body_width = width.saturating_sub(prefix.width()).max(1);
-    let wrapped = wrap(&display_text(entry), body_width);
-    let style = body_style(entry);
+fn entry_lines(entry: &Entry, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let (prefix, prefix_style) = marker(entry.kind, theme);
+    let wrapped = display_lines(entry, width);
+    let style = body_style(entry, theme);
     let last = wrapped.len().saturating_sub(1);
     let mut lines = Vec::with_capacity(wrapped.len());
     for (i, row) in wrapped.into_iter().enumerate() {
@@ -124,7 +128,7 @@ fn entry_lines(entry: &Entry, width: usize) -> Vec<Line<'static>> {
         };
         let mut spans = vec![Span::styled(lead, prefix_style), Span::styled(row, style)];
         if entry.interrupted && i == last {
-            spans.push(Span::styled(" [interrupted]", interrupted_style()));
+            spans.push(Span::styled(" [interrupted]", theme.interrupted));
         }
         lines.push(Line::from(spans));
     }
@@ -138,9 +142,7 @@ fn entry_line_count(entry: &mut Entry, width: usize) -> usize {
     if let Some(lines) = entry.wrap_cache.get(width, text_len, entry.interrupted) {
         return lines;
     }
-    let (prefix, _) = marker(entry.kind);
-    let body_width = width.saturating_sub(prefix.width()).max(1);
-    let lines = wrap(&display_text(entry), body_width).len();
+    let lines = display_lines(entry, width).len();
     entry.wrap_cache.set(WrapKey {
         width,
         text_len,
@@ -153,10 +155,10 @@ fn entry_line_count(entry: &mut Entry, width: usize) -> usize {
 /// Wraps the whole transcript into styled lines. The frame does not use this (it wraps only
 /// the visible entries, see [`visible_lines`]); it is the reference the virtualized path is
 /// tested against.
-pub fn transcript_lines(entries: &[Entry], width: usize) -> Vec<Line<'static>> {
+pub fn transcript_lines(entries: &[Entry], width: usize, theme: &Theme) -> Vec<Line<'static>> {
     entries
         .iter()
-        .flat_map(|entry| entry_lines(entry, width))
+        .flat_map(|entry| entry_lines(entry, width, theme))
         .collect()
 }
 
@@ -169,6 +171,7 @@ pub fn visible_lines(
     width: usize,
     start: usize,
     height: usize,
+    theme: &Theme,
 ) -> (usize, Vec<Line<'static>>) {
     let counts: Vec<usize> = entries
         .iter_mut()
@@ -185,7 +188,7 @@ pub fn visible_lines(
         if next > start {
             let skip = start.saturating_sub(line);
             out.extend(
-                entry_lines(entry, width)
+                entry_lines(entry, width, theme)
                     .into_iter()
                     .skip(skip)
                     .take(height - out.len()),
@@ -252,6 +255,51 @@ fn approval_height(request: &ApprovalRequest, width: usize) -> u16 {
     (rows as u16 + 2).clamp(5, 14)
 }
 
+/// Marks every occurrence of `query` (case-insensitive) in a rendered line with
+/// `Modifier::REVERSED` (no new theme colours). The query is matched against the line's own
+/// spans, which are the displayed text.
+pub fn highlight(line: Line<'static>, query: &str) -> Line<'static> {
+    if query.is_empty() {
+        return line;
+    }
+    let needle = query.to_lowercase();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for span in line.spans {
+        let style = span.style;
+        let text = span.content.into_owned();
+        // Case-insensitive without changing byte offsets: ASCII lowercases 1:1, so slicing the
+        // original by the haystack's offsets is safe there. For non-ASCII, fall back to a
+        // case-sensitive search on the original text (still byte-safe).
+        let (haystack, fold) = if text.is_ascii() && query.is_ascii() {
+            (text.to_lowercase(), true)
+        } else {
+            (text.clone(), false)
+        };
+        let needle = if fold {
+            needle.clone()
+        } else {
+            query.to_owned()
+        };
+        let mut start = 0usize;
+        while let Some(pos) = haystack[start..].find(&needle) {
+            let at = start + pos;
+            if at > start {
+                spans.push(Span::styled(text[start..at].to_string(), style));
+            }
+            let end = at + needle.len();
+            spans.push(Span::styled(
+                text[at..end].to_string(),
+                style.add_modifier(Modifier::REVERSED),
+            ));
+            start = end;
+        }
+        if start < text.len() {
+            spans.push(Span::styled(text[start..].to_string(), style));
+        }
+    }
+    Line::from(spans)
+}
+
 /// One status-bar segment: its text and its style.
 struct Segment {
     text: String,
@@ -263,9 +311,9 @@ struct Segment {
 /// tier, the usage and the MCP state survive and only the long context/scroll text can go.
 fn status_segments(app: &App) -> Vec<Segment> {
     let turn_style = match app.turn {
-        TurnState::Idle => Style::default().fg(Color::Green),
-        TurnState::Running => Style::default().fg(Color::Yellow),
-        TurnState::Cancelled => Style::default().fg(Color::Red),
+        TurnState::Idle => app.theme.turn_idle,
+        TurnState::Running => app.theme.turn_running,
+        TurnState::Cancelled => app.theme.turn_cancelled,
     };
     let position = if app.max_scroll == 0 {
         "all".to_string()
@@ -275,26 +323,33 @@ fn status_segments(app: &App) -> Vec<Segment> {
     let mut segments = vec![
         Segment {
             text: format!(" {} ", app.model_name),
-            style: Style::default().fg(Color::Cyan),
+            style: app.theme.model,
         },
         Segment {
             text: app.turn.label().to_string(),
             style: turn_style,
         },
     ];
+    // Phase 5: the find match position is high priority, so a narrow terminal keeps it.
+    if let Some(status) = app.find_state().and_then(crate::find::FindState::status) {
+        segments.push(Segment {
+            text: status,
+            style: app.theme.find,
+        });
+    }
     if let Some(tier) = &app.tier {
         segments.push(Segment {
             text: tier.clone(),
-            style: Style::default().fg(Color::Blue),
+            style: app.theme.tier,
         });
     }
     segments.push(Segment {
         text: usage_text(app.usage_input, app.usage_output),
-        style: Style::default().fg(Color::Green),
+        style: app.theme.usage,
     });
     segments.push(Segment {
         text: mcp_text(app.mcp_configured, app.mcp_open),
-        style: Style::default().fg(Color::Cyan),
+        style: app.theme.mcp,
     });
     // ADR 0018: over the input budget `B` the request is still sent, but the status bar
     // warns (the existing warning colour).
@@ -304,11 +359,11 @@ fn status_segments(app: &App) -> Vec<Segment> {
         .is_some_and(agent_core::over_budget);
     segments.push(Segment {
         text: budget_status_text(app.context_window, app.budget_report.as_ref()),
-        style: Style::default().fg(if over_budget {
-            Color::Yellow
+        style: if over_budget {
+            app.theme.budget_over
         } else {
-            Color::Magenta
-        }),
+            app.theme.budget
+        },
     });
     segments.push(Segment {
         text: format!(
@@ -320,7 +375,7 @@ fn status_segments(app: &App) -> Vec<Segment> {
     if let Some(note) = &app.note {
         segments.push(Segment {
             text: note.clone(),
-            style: Style::default().fg(Color::Yellow),
+            style: app.theme.note,
         });
     }
     segments
@@ -330,7 +385,7 @@ fn status_segments(app: &App) -> Vec<Segment> {
 /// the right (the least important) and a `…` marks the truncation, so the line never wraps
 /// and never pushes the model off the screen. The last segment is never dropped, so a very
 /// narrow terminal still shows something.
-fn fit_segments(segments: Vec<Segment>, width: usize) -> Line<'static> {
+fn fit_segments(segments: Vec<Segment>, width: usize, theme: &Theme) -> Line<'static> {
     const SEP: &str = " │ ";
     let measure = |segments: &[Segment]| -> usize {
         segments
@@ -357,13 +412,13 @@ fn fit_segments(segments: Vec<Segment>, width: usize) -> Line<'static> {
         spans.push(Span::styled(segment.text, segment.style));
     }
     if dropped {
-        spans.push(Span::styled("…", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled("…", theme.truncation));
     }
     Line::from(spans)
 }
 
 fn status_line(app: &App, width: usize) -> Line<'static> {
-    fit_segments(status_segments(app), width)
+    fit_segments(status_segments(app), width, &app.theme)
 }
 
 /// Draws one frame. Also feeds the measured transcript size back into `app` so scroll keys
@@ -389,13 +444,23 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // total before the visible window is cut.
     let width = chunks[0].width as usize;
     let height = chunks[0].height as usize;
-    let (total, _) = visible_lines(&mut app.entries, width, 0, 0);
+    let theme = app.theme;
+    // The find matcher wraps at the same width; a resize recomputes it (once, not per frame).
+    app.set_transcript_width(width);
+    let (total, _) = visible_lines(&mut app.entries, width, 0, 0, &theme);
     app.set_viewport(chunks[0].height, total);
-    let (_, visible) = visible_lines(&mut app.entries, width, app.scroll, height);
+    let (_, visible) = visible_lines(&mut app.entries, width, app.scroll, height, &theme);
+    let visible = match app.find_state() {
+        Some(find) => visible
+            .into_iter()
+            .map(|line| highlight(line, &find.query))
+            .collect(),
+        None => visible,
+    };
     frame.render_widget(Paragraph::new(visible), chunks[0]);
 
     if !completion.is_empty() {
-        let style = Style::default().fg(Color::DarkGray);
+        let style = theme.completion;
         let lines: Vec<Line> = completion
             .into_iter()
             .map(|row| Line::from(Span::styled(row, style)))
@@ -407,12 +472,22 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(prompt) => {
             let block = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Yellow))
+                .border_style(app.theme.approval_border)
                 .title(" approve tool call? ");
             let text = Paragraph::new(approval_text(&prompt.request))
                 .block(block)
                 .wrap(Wrap { trim: false });
             frame.render_widget(text, chunks[2]);
+        }
+        None if app.find.is_some() => {
+            // The find box replaces the input box's line; the input text itself is untouched
+            // and comes back when the box closes.
+            let find = app.find.as_ref().expect("checked");
+            let text = format!("find: {}", find.query);
+            let paragraph = Paragraph::new(text)
+                .block(Block::default().borders(Borders::ALL).title(" find "))
+                .wrap(Wrap { trim: false });
+            frame.render_widget(paragraph, chunks[2]);
         }
         None => {
             let inner_width = chunks[2].width.saturating_sub(2).max(1) as usize;
@@ -430,7 +505,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 rows[offset..].join("\n")
             };
             let style = if empty {
-                Style::default().fg(Color::DarkGray)
+                app.theme.hint
             } else {
                 Style::default()
             };

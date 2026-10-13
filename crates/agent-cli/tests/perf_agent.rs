@@ -56,8 +56,19 @@ impl Drop for Agent {
 impl Agent {
     fn spawn(args: &[&str]) -> Self {
         let start = Instant::now();
+        // Hermetic like the other harnesses: a fresh `~/.radian` root and `HOME`, and no
+        // `RADIAN_CONFIG`, so a perf run can never read the user's real config file.
+        let home = std::env::temp_dir().join(format!(
+            "agent-perf-home-{}-{:?}",
+            std::process::id(),
+            std::time::Instant::now()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
         let mut child = Command::new(BIN)
             .args(args)
+            .env_remove("RADIAN_CONFIG")
+            .env("RADIAN_HOME", &home)
+            .env("HOME", &home)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())

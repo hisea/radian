@@ -139,6 +139,10 @@ fn spawn_agent(args: &[&str], envs: &[(&str, &str)]) -> Child {
         // overrides both through `envs`.
         .env("HOME", fresh_session_dir())
         .env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json")
+        // No test may read the user's real config file: pin the whole `~/.radian` root and
+        // drop `RADIAN_CONFIG` (either could otherwise point at a real file).
+        .env("RADIAN_HOME", fresh_session_dir())
+        .env_remove("RADIAN_CONFIG")
         .envs(envs.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -2626,8 +2630,10 @@ async fn without_a_window_the_budget_is_off_and_says_so() {
 #[tokio::test]
 async fn an_over_budget_request_is_still_sent_and_the_turn_completes() {
     let (_dir, ws) = budget_workspace("budget-over");
+    // C = 20000, so R = 5000 and B = 15000 (ADR 0018); the reported input (20000)
+    // is over it.
     let server = MockServer::start(vec![
-        used_tool_reply("c1", "write", r#"{"path":"f.txt","content":"x"}"#, 9000),
+        used_tool_reply("c1", "write", r#"{"path":"f.txt","content":"x"}"#, 20000),
         text_reply("done"),
     ])
     .await;
@@ -2654,7 +2660,7 @@ async fn an_over_budget_request_is_still_sent_and_the_turn_completes() {
     .await;
 
     assert_eq!(code, 0, "{stderr}");
-    assert!(stderr.contains("B 3616 from --context-window"), "{stderr}");
+    assert!(stderr.contains("B 15000 from --context-window"), "{stderr}");
     assert_eq!(
         server.requests().len(),
         2,
@@ -2663,29 +2669,34 @@ async fn an_over_budget_request_is_still_sent_and_the_turn_completes() {
 }
 
 /// 3: a context window that cannot hold the output reservation is a startup error, before the
-/// session file or any request (ADR 0018). `C <= R` is impossible, so it is refused, never
-/// silently clamped.
+/// session file or any request (ADR 0018). With revision 4's adaptive `R` it needs the
+/// request's own output to reach `C`: Anthropic sends `max_tokens = 16384` by default, so an
+/// 8192-token window cannot hold the reservation.
 #[tokio::test]
 async fn a_context_window_at_or_below_the_reservation_is_rejected() {
     let (_dir, ws) = budget_workspace("budget-too-small");
-    let server = MockServer::start(vec![]).await;
+    let server = anth::MockServer::start(vec![]).await;
 
     let (code, _, stderr) = feed_and_wait(
         spawn_agent(
             &[
                 "--model",
-                "m",
+                "claude-x",
+                "--provider",
+                "anthropic",
                 "--base-url",
                 &server.base_url,
+                "--api-key-env",
+                "ANTHROPIC_API_KEY",
                 "--workspace",
                 ws.to_str().unwrap(),
                 "--yes",
                 "--context-window",
-                "16384",
+                "8192",
                 "-p",
                 "go",
             ],
-            &[],
+            &[("ANTHROPIC_API_KEY", "sk-ant-test-key")],
         ),
         "",
     )
@@ -2706,8 +2717,9 @@ async fn a_context_window_at_or_below_the_reservation_is_rejected() {
 async fn an_over_budget_turn_records_a_normal_outcome() {
     let sessions = fresh_session_dir();
     let (_dir, ws) = budget_workspace("budget-durable");
+    // C = 20000 -> B = 15000; the reported input (20000) is over it.
     let server = MockServer::start(vec![
-        used_tool_reply("c1", "write", r#"{"path":"f.txt","content":"x"}"#, 9000),
+        used_tool_reply("c1", "write", r#"{"path":"f.txt","content":"x"}"#, 20000),
         text_reply("done"),
     ])
     .await;
@@ -2757,9 +2769,11 @@ fn spawn_agent_in(session_dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> C
         .args(args)
         .env_remove("OPENAI_API_KEY")
         .env("RADIAN_SESSION_DIR", session_dir)
-        // Isolate the catalog cache and the network, like `spawn_agent` above.
+        // Isolate the catalog cache, the `~/.radian` root and the network, like `spawn_agent`.
         .env("HOME", fresh_session_dir())
         .env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json")
+        .env("RADIAN_HOME", fresh_session_dir())
+        .env_remove("RADIAN_CONFIG")
         .envs(envs.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -3734,20 +3748,27 @@ async fn session_commands_do_not_need_a_model() {
     assert!(stdout.contains("nm"), "{stdout}");
 }
 
-/// A conversation still requires `--model`: `-p` and interactive mode are usage errors
-/// without it (exit 2, before any session is created). The `Usage:` line proves clap parsed
-/// the arguments and refused, rather than a later setup step failing.
+/// A conversation still requires a model: with no `--model` and no `model.model` in the
+/// config file, `-p` and interactive mode are usage errors (exit 2, before any session is
+/// created). The decision moved from clap to `setup` so the config file can supply it.
 #[tokio::test]
 async fn a_conversation_still_requires_a_model() {
+    // The setup check runs **before** the API-key lookup, and its wording is unique: asserting
+    // only `--model` would also be satisfied by the later "no API key" error, so a mutation
+    // that dropped the model requirement would slip past. Assert the sentence itself.
     let (code, _, stderr) = feed_and_wait(spawn_agent(&["-p", "hi"], &[]), "").await;
     assert_eq!(code, 2, "{stderr}");
-    assert!(stderr.contains("--model"), "{stderr}");
-    assert!(stderr.contains("Usage:"), "{stderr}");
+    assert!(
+        stderr.contains("no model: pass --model, or set model.model in the config file"),
+        "{stderr}"
+    );
 
     let (code, _, stderr) = feed_and_wait(spawn_agent(&[], &[]), "").await;
     assert_eq!(code, 2, "{stderr}");
-    assert!(stderr.contains("--model"), "{stderr}");
-    assert!(stderr.contains("Usage:"), "{stderr}");
+    assert!(
+        stderr.contains("no model: pass --model, or set model.model in the config file"),
+        "{stderr}"
+    );
 }
 
 /// `--export` validates the id as a session id before using it as a file name: a path-like
@@ -4304,8 +4325,9 @@ async fn the_startup_line_names_an_explicit_window() {
     )
     .await;
     assert_eq!(code, 0, "{stderr}");
-    assert!(stderr.contains("B 3616 from --context-window"), "{stderr}");
-    assert!(stderr.contains("R 16384"), "{stderr}");
+    // C = 20000 -> R = 5000 (a quarter of the window), B = 15000.
+    assert!(stderr.contains("B 15000 from --context-window"), "{stderr}");
+    assert!(stderr.contains("R 5000"), "{stderr}");
 }
 
 /// `--no-auto-compact` is shown on the startup line; the default is on (ADR 0018).
@@ -4431,7 +4453,12 @@ fn spawn_agent_bare(args: &[&str], envs: &[(&str, &str)]) -> Child {
         .args(args)
         .env_remove("OPENAI_API_KEY")
         .env_remove("RADIAN_SESSION_DIR")
+        // The whole root is the test's to control, but it still must not be the real one:
+        // a fresh `HOME` makes the `$HOME/.radian` fallback hermetic, and `RADIAN_CONFIG`
+        // (which would win over both) is dropped.
+        .env("HOME", fresh_session_dir())
         .env_remove("RADIAN_HOME")
+        .env_remove("RADIAN_CONFIG")
         .envs(envs.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -5206,6 +5233,227 @@ async fn an_interactive_compact_is_a_command_and_compactfoo_is_a_message() {
     assert_eq!(stderr.matches("nothing to compact").count(), 2, "{stderr}");
     assert_eq!(server.requests().len(), 1, "only `/compactfoo` was a turn");
     assert_eq!(last_user_text(&messages_of(&server, 0)), "/compactfoo");
+}
+
+// ---------- the configuration file (ADR 0008) ----------
+
+/// A `--config` file supplies the model (so `--model` is not needed), and a `--model` on the
+/// command line overrides it. `RADIAN_CONFIG` is the fallback when `--config` is absent.
+#[tokio::test]
+async fn a_config_file_supplies_the_model_and_the_cli_overrides_it() {
+    let dir = scratch("config-model");
+    let config = dir.join("config.toml");
+    std::fs::write(
+        &config,
+        "schema_version = 1\n[model]\nmodel = \"config-model\"\n",
+    )
+    .unwrap();
+    let server = MockServer::start(vec![text_reply("A"), text_reply("B"), text_reply("C")]).await;
+    let sessions = dir.join("sessions");
+
+    // No `--model`: the config supplies it.
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--config",
+                config.to_str().unwrap(),
+                "--base-url",
+                &server.base_url,
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("[config]"),
+        "the startup line names the file: {stderr}"
+    );
+    assert_eq!(server.requests()[0].json()["model"], "config-model");
+
+    // `--model` wins over the file.
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--config",
+                config.to_str().unwrap(),
+                "--model",
+                "cli-model",
+                "--base-url",
+                &server.base_url,
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(server.requests()[1].json()["model"], "cli-model");
+
+    // `RADIAN_CONFIG` is the fallback.
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--base-url",
+                &server.base_url,
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "-p",
+                "hi",
+            ],
+            &[("RADIAN_CONFIG", config.to_str().unwrap())],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(server.requests()[2].json()["model"], "config-model");
+}
+
+/// A `schema_version` below the supported one is refused at startup, before any session file
+/// exists (ADR 0008 §5.3: no v0→v1 path, and the file is never rewritten).
+#[tokio::test]
+async fn a_lower_schema_version_refuses_to_start_without_creating_a_session() {
+    let dir = scratch("config-lower");
+    let config = dir.join("config.toml");
+    std::fs::write(&config, "schema_version = 0\n[model]\nmodel = \"m\"\n").unwrap();
+    let sessions = dir.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--config",
+                config.to_str().unwrap(),
+                "--base-url",
+                &server.base_url,
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("schema_version"), "{stderr}");
+    assert!(
+        jsonl_snapshot(&sessions).is_empty(),
+        "no session file may be created: {:?}",
+        dir_names(&sessions)
+    );
+    assert!(server.requests().is_empty(), "no request is sent");
+}
+
+/// A plaintext secret in the config is refused, and the error never echoes the value.
+#[tokio::test]
+async fn a_plaintext_secret_in_the_config_is_refused_without_echoing_it() {
+    let dir = scratch("config-secret");
+    let config = dir.join("config.toml");
+    std::fs::write(
+        &config,
+        "schema_version = 1\n[model]\nmodel = \"m\"\napi_key = \"sk-live-abcdef123456\"\n",
+    )
+    .unwrap();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--config",
+                config.to_str().unwrap(),
+                "--base-url",
+                &server.base_url,
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("api_key"), "{stderr}");
+    assert!(
+        !stderr.contains("sk-live"),
+        "the value must not be echoed: {stderr}"
+    );
+}
+
+/// The config reader takes `schema_version = 0` from **the harness's temp `RADIAN_HOME`** and
+/// names that path: the reader and the harness agree on the root, so a test config lives in
+/// the temp directory and never in the user's real one.
+#[tokio::test]
+async fn a_failing_config_in_the_temp_radian_home_is_read_and_named() {
+    let dir = scratch("config-rh");
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config = config_dir.join("config.toml");
+    std::fs::write(&config, "schema_version = 0\n").unwrap();
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &["--model", "m", "-p", "hi"],
+            &[("RADIAN_HOME", dir.to_str().unwrap())],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("older than the supported"), "{stderr}");
+    assert!(
+        stderr.contains(&config.display().to_string()),
+        "the refusal names the temp config: {stderr}"
+    );
+    // The refusal happens before any API key is read.
+    assert!(!stderr.contains("no API key"), "{stderr}");
+}
+
+/// The harness must never read the user's real `~/.radian/config/config.toml`. `spawn_agent`
+/// pins the whole root (`RADIAN_HOME`) and drops `RADIAN_CONFIG`, so a `HOME` whose
+/// `.radian/config/config.toml` would refuse startup is **not** consulted: the run reports
+/// `[config] none` and reaches the model. Without the pin it would refuse with the version
+/// error instead — the test would fail.
+#[tokio::test]
+async fn the_harness_never_reads_a_config_outside_its_temp_root() {
+    let dir = scratch("config-fake-home");
+    let config_dir = dir.join(".radian").join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("config.toml"), "schema_version = 0\n").unwrap();
+
+    // A local mock keeps the run past the API-key check, so the `[config]` startup line is
+    // reached.
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
+            &[("HOME", dir.to_str().unwrap())],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        !stderr.contains("older than the supported"),
+        "a config outside the harness root must not be read: {stderr}"
+    );
+    assert!(
+        stderr.contains("[config] none"),
+        "the harness resolved no config file at all: {stderr}"
+    );
+    assert_eq!(server.requests().len(), 1, "the run reached the model");
 }
 
 // ---------- dogfooding D21: a closed stdout is not a panic ----------

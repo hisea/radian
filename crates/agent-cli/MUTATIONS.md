@@ -236,3 +236,25 @@ Base `a0e8b4c` · 一次性检出 `/tmp/df7-mut`（detached，独立 target，�
 | M10 | `radian_host::output::write_stdout` 在写错误时 `.unwrap()`（BrokenPipe 仍 panic） | ✅ failed | `cli::a_closed_stdout_is_not_a_panic_for_every_output_command`（exit 101；TUI 的 `list::a_closed_stdout_is_not_a_panic` 走同一 helper） |
 | M11 | `OutputError::BrokenPipe` 的退出码改成 1 | ✅ failed | `cli::a_closed_stdout_is_not_a_panic_for_every_output_command` |
 | M12 | `--session-id` 不与 `--list`/`--search` 互斥（去掉 conflicts） | ✅ failed | `cli::list_and_search_refuse_session_id` |
+
+## Phase 4：配置的优先级（ADR 0008）
+
+Base `8028d9e` · 一次性 worktree `/tmp/config-mut` · 独立 `CARGO_TARGET_DIR` · `git checkout --` 还原。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M1 | CLI 不再覆盖配置（`model.model` 反而优先） | `cli::a_config_file_supplies_the_model_and_the_cli_overrides_it` | ✅ |
+
+## config 第二轮：缺模型的判别力 + harness 不读真实配置
+
+Base `79f60cb` · 一次性 worktree `/tmp/config2-mut` · 独立 `CARGO_TARGET_DIR` ·
+`git checkout --` 还原、`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M13 | `model_name` 不再报错（`.ok_or_else(..)` → `.unwrap_or("mutant-default-model")`，即去掉 setup 的模型校验） | `cli::a_conversation_still_requires_a_model` | ✅ failed（stderr 变成 `no API key: …`，没有那句独有的 `no model: …`） |
+| M14 | `spawn_agent` 不再钉 `RADIAN_HOME`（去掉 `.env("RADIAN_HOME", …)`） | `cli::the_harness_never_reads_a_config_outside_its_temp_root` | ✅ failed（`HOME/.radian/config/config.toml` 被读到，启动被 v0 配置拒绝） |
+
+诚实补充：M13 里旧断言 `stderr.contains("--model")` 在当前 API key 文案下**也会**失败（那段文案
+只含 `--api-key-env`），所以这次加强与其说是补漏，不如说是把判据钉成那句独有文案；但它必须
+与“落到 API key 错误”区分开，这一点现在由整句断言保证。

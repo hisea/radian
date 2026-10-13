@@ -227,7 +227,6 @@ Base: `9daed70` · 一次性检出 `/tmp/sessions-mut`（detached，跑完删除
 | M3 | `/export` 跳过已存在检查 | `pty::pty_sessions_and_export_commands`（断言 `ready exists`） | ✅ failed |
 | M5 | `/sessions` 落到 `Message`（发给模型） | `pty::pty_sessions_and_export_commands`（断言 `--resume cmd`） | ✅ failed |
 
-
 ## tab：`@` 补全接到 Tab（Phase 4）
 
 Base `81ea117` · 一次性检出 `/tmp/radian-tab-mut`（detached，独立 target，跑完删除）·
@@ -246,6 +245,25 @@ Base `81ea117` · 一次性检出 `/tmp/radian-tab-mut`（detached，独立 targ
 所以屏幕测试抓不住——补了“无 `@` 但匹配文件”的用例与 `completion_rows` 的直接单测（`81ea117`）
 后才抓住，记录在此。
 
+## Phase 4：主题与按键（ADR 0008 `tui.*`）
+
+Base `8028d9e` · 一次性 worktree `/tmp/config-mut` · 独立 `CARGO_TARGET_DIR` · `git checkout --` 还原。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M6 | 冲突的按键绑定被接受（不做 conflict 检查） | `keys::tests::a_second_action_on_the_same_key_is_a_startup_error`、`config::a_keymap_conflict_is_a_startup_error` | ✅ |
+| M7 | `NO_COLOR` 被忽略 | `theme::tests::no_color_forces_mono`、`config::a_configured_theme_is_applied_and_no_color_forces_mono` | ✅ |
+
+## config 第二轮：Tab 补全改为 `complete` 动作
+
+Base `79f60cb` · 一次性 worktree `/tmp/config2-mut` · 独立 `CARGO_TARGET_DIR` ·
+`git checkout --` 还原、`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M25 | `Action::Complete` 变空操作 | `mention_tab`（3 passed / 7 failed） | ✅ |
+| M26 | `complete` 失去默认键（`DEFAULT_KEYS` 去掉 `("complete", &["tab"])`） | `mention_tab`（3 passed / 7 failed） | ✅ |
+
 ## fork：TUI `/fork` 的运行中拒绝
 
 Base: `fcd0c26` · 一次性检出 `/tmp/fork-mut`（detached，跑完删除）· `--no-fail-fast`。
@@ -255,6 +273,49 @@ Base: `fcd0c26` · 一次性检出 `/tmp/fork-mut`（detached，跑完删除）�
 | F5 | 去掉 `/fork` 的 `TurnState::Running` 检查（运行中也允许） | `pty::pty_fork_refuses_while_a_turn_runs` | ✅ failed |
 
 1/1 抓住。
+
+## config 第三轮：`[config]` 必须在进备用屏之前打印
+
+Base `bb214e4` · 一次性 worktree `/tmp/config3-mut` · 独立 `CARGO_TARGET_DIR` ·
+`git checkout --` 还原、`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M27 | 把 `[config]` 行/警告的 `eprintln!` 移回 `TtyGuard::enter()` 之后（在备用屏里打印） | `pty_the_config_line_is_not_written_inside_the_alternate_screen`、`pty_fork_creates_a_resumable_child_when_idle` | ✅ failed（两屏都渲染成 `> hello]parent…`） |
+
+这个 bug 是 main 的 fork 测试抓出来的：mutation 证明**我自己的第一条回归测试漏了**它——
+没有 resumed history 时用户行不是第一行，陈旧的 `[config]` 单元落在启动 notice 上。改成
+`--resume` 一条历史（第一行就是用户行，和 fork 的情形一样）并同时断言字节顺序后，两个测试
+都能抓住。
+
+## find：Phase 5 transcript 内搜索
+
+Base: `45947ad` · 一次性检出 `/tmp/find-mut`（detached，跑完删除）· `--no-fail-fast`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| N1 | 大小写敏感匹配（去掉 `to_lowercase`） | `find::matching_is_case_insensitive_and_per_line`（lib）、`find::ctrl_f_opens_and_typing_jumps_to_the_nearest_match_above`（app） | ✅ failed |
+| N2 | 匹配折叠前的文件内容（`display_lines` 用 `entry.text`） | `find::a_folded_attachment_is_matched_by_its_display_text`（lib） | ✅ failed |
+| N3 | 到头循环（`prev` 从第一个绕到最后一个） | `find::navigation_does_not_wrap_and_anchors_above`（lib）、`find::prev_walks_earlier_and_next_walks_later_without_wrapping`（app） | ✅ failed |
+| N4 | `Esc` 关闭时跳回底部 | `find::escape_closes_and_leaves_the_viewport_where_it_is`（app） | ✅ failed |
+| N5 | 跳转后仍 `follow` | `find::ctrl_f_opens_and_typing_jumps_to_the_nearest_match_above`（app） | ✅ failed |
+
+5/5 抓住。N1/N2/N3 各自有 lib 单测与 app 断言两层（我第一轮误用 `--test find` 跑 lib 单测名，过滤器匹配 0 个测试而假通过；改到 `--lib`/app 后抓住）。
+
+## find 纳入 Keymap（两个上下文）
+
+Base `f2270e0` · 一次性 worktree `/tmp/config4-mut` · 独立 `CARGO_TARGET_DIR` ·
+`git checkout -- .` 还原、`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M28 | find 层永不被查询（`if false && self.find.is_some()`） | `tests/find.rs`（6/8 failed：`ctrl_f_opens_…`、`prev_walks_…`、`escape_closes_…`、`backspace_…`、`a_query_with_no_match_…`、`a_search_over_fifty_thousand_…`） | ✅ |
+| M29 | 搜索框里 `enter` 不再是 `find_prev`（去掉 `find_prev` 默认里的 `enter`） | `find::prev_walks_earlier_and_next_walks_later_without_wrapping`、`find::escape_closes_and_leaves_the_viewport_where_it_is` | ✅ |
+| M30 | `find` 失去默认键 `ctrl-f` | `tests/find.rs`（6/8 failed） | ✅ |
+| M31 | 冲突检查跨两个上下文（把两层并成一层查） | `keys::tests::a_binding_only_conflicts_with_its_own_layer`、`a_configured_action_replaces_its_default_keys`、`unknown_actions_and_keys_are_warnings_not_errors` | ✅ |
+
+4/4 全抓。M31 是「不该报的冲突」这一类：分层之后 `enter` 同时是 `send` 与 `find_prev`，跨层检查会把
+默认配置都判成冲突。
 
 ## orphan-spin：终端消失与 pty harness 的孤儿
 

@@ -1,0 +1,762 @@
+//! The **read-only** configuration file reader (ADR 0008; its location is ADR 0020's
+//! `~/.radian/config/config.toml`).
+//!
+//! This slice only reads: there is no migration entry point and nothing is ever written back,
+//! so ADR 0008 §5.4's "write-back must be faithful or refused" cannot be violated here (the
+//! reader never writes).
+//!
+//! The rules the reader enforces (each one is a test):
+//!
+//! - `schema_version` is required and an integer; `1` is current, a **higher** version is read
+//!   in read-only mode with a warning (unknown keys are ignored), a **lower** version is
+//!   refused (there is no v0→v1 migration path);
+//! - a secret slot's value must be a `SecretRef` table (`from`/`name`); a bare string is
+//!   refused, and **only `from = "env"` is supported** this version;
+//! - an obviously secret-looking string anywhere is refused (a heuristic, not a boundary);
+//! - an unknown `permissions` value is refused (fail-closed); an unknown `tui.*` value is
+//!   ignored with a warning;
+//! - a missing file is an empty configuration (never created).
+//!
+//! No error message ever carries a value that could be a secret: the plaintext and heuristic
+//! errors name the key path and nothing else.
+
+use std::fmt;
+use std::path::{Path, PathBuf};
+
+use toml::Value;
+use toml::map::Map;
+
+/// The `schema_version` this reader understands.
+pub const SUPPORTED_SCHEMA_VERSION: u64 = 1;
+
+/// The environment variable that overrides the config path.
+pub const RADIAN_CONFIG_ENV: &str = "RADIAN_CONFIG";
+
+/// The file name inside `~/.radian/config/`.
+pub const CONFIG_FILE_NAME: &str = "config.toml";
+
+/// Keys whose bare (string) value is a plaintext secret (ADR 0008 §4.2 rule 1).
+const SENSITIVE_KEYS: [&str; 7] = [
+    "api_key",
+    "apikey",
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "authorization",
+];
+
+/// The obvious secret prefixes (ADR 0008 §4.2 rule 2, matching the reference checker).
+const SECRET_PREFIXES: [&str; 6] = ["sk-", "sk_", "xoxb-", "ghp_", "AKIA", "Bearer "];
+
+/// Why the configuration was refused. The `Display` never contains a secret value.
+#[derive(Debug)]
+pub enum ConfigError {
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    Parse {
+        path: PathBuf,
+        message: String,
+    },
+    MissingVersion {
+        path: PathBuf,
+    },
+    VersionTooOld {
+        path: PathBuf,
+        supported: u64,
+        found: i64,
+    },
+    PlaintextSecret {
+        path: PathBuf,
+        key: String,
+    },
+    SecretLookalike {
+        path: PathBuf,
+        key: String,
+    },
+    SecretRef {
+        path: PathBuf,
+        key: String,
+        message: String,
+    },
+    WrongType {
+        path: PathBuf,
+        key: String,
+        expected: &'static str,
+    },
+    UnknownProfile {
+        path: PathBuf,
+        value: String,
+    },
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConfigError::Read { path, source } => {
+                write!(f, "{}: cannot read: {source}", path.display())
+            }
+            ConfigError::Parse { path, message } => {
+                write!(f, "{}: invalid TOML: {message}", path.display())
+            }
+            ConfigError::MissingVersion { path } => write!(
+                f,
+                "{}: missing or non-integer schema_version",
+                path.display()
+            ),
+            ConfigError::VersionTooOld {
+                path,
+                supported,
+                found,
+            } => write!(
+                f,
+                "{}: schema_version {found} is older than the supported v{supported}; there is no \
+                 migration for it in this version (the file is never rewritten)",
+                path.display()
+            ),
+            ConfigError::PlaintextSecret { path, key } => write!(
+                f,
+                "{}: `{key}` must be a SecretRef table ({{ from = \"env\", name = \"…\" }}), \
+                 never a plaintext value",
+                path.display()
+            ),
+            ConfigError::SecretLookalike { path, key } => write!(
+                f,
+                "{}: `{key}` looks like a plaintext secret; configuration files must not contain \
+                 secret values",
+                path.display()
+            ),
+            ConfigError::SecretRef { path, key, message } => {
+                write!(f, "{}: `{key}`: {message}", path.display())
+            }
+            ConfigError::WrongType {
+                path,
+                key,
+                expected,
+            } => write!(f, "{}: `{key}` must be {expected}", path.display()),
+            ConfigError::UnknownProfile { path, value } => write!(
+                f,
+                "{}: permissions.profile = {value:?} is not one of safe|workspace|full \
+                 (or the aliases); refusing rather than guessing",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
+/// The wired model route (ADR 0008 §2). Every field is `None` when the file did not set it;
+/// the host then keeps its own default and the command line always wins.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelConfig {
+    pub provider: Option<String>,
+    pub base_url: Option<String>,
+    pub model: Option<String>,
+    /// The environment variable named by `model.api_key`'s `SecretRef` (equivalent to
+    /// `--api-key-env`). The value itself is never in the file.
+    pub api_key_env: Option<String>,
+    pub headers: Vec<(String, String)>,
+    pub context_window: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PermissionsConfig {
+    pub profile: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CompactionConfig {
+    pub auto: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TuiConfig {
+    pub theme: Option<String>,
+    /// The raw `tui.keybindings` table: action name → key strings. The TUI parses and
+    /// validates it (its key grammar belongs to the terminal layer).
+    pub keybindings: Vec<(String, Vec<String>)>,
+}
+
+/// One parsed configuration file.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Config {
+    /// The path actually read, or `None` when there was no file.
+    pub source: Option<PathBuf>,
+    /// The file's `schema_version`, when read.
+    pub schema_version: Option<u64>,
+    /// True when the file's version is **higher** than supported: the known keys are
+    /// interpreted, unknown ones ignored, and the file must never be rewritten.
+    pub read_only: bool,
+    pub model: ModelConfig,
+    pub permissions: PermissionsConfig,
+    pub compaction: CompactionConfig,
+    pub tui: TuiConfig,
+    /// Known-but-unwired and unknown keys, as dotted paths, for the startup line. Never a
+    /// value.
+    pub skipped: Vec<String>,
+}
+
+/// The path a configuration is read from: `explicit` > `RADIAN_CONFIG` > `<root>/config/config.toml`.
+/// Pure, so the precedence is testable without the environment.
+pub fn resolve_path(
+    explicit: Option<&Path>,
+    env: Option<&str>,
+    radian_home: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(path) = explicit.filter(|path| !path.as_os_str().is_empty()) {
+        return Some(path.to_path_buf());
+    }
+    if let Some(path) = env.filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(path));
+    }
+    radian_home.map(|root| crate::home::config_dir_for(root).join(CONFIG_FILE_NAME))
+}
+
+/// Resolves the path for this process and reads it. A missing file is an empty configuration
+/// (it is never created). The command line's `--config` wins over `RADIAN_CONFIG`, which wins
+/// over `~/.radian/config/config.toml`.
+pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
+    let env = std::env::var(RADIAN_CONFIG_ENV).ok();
+    let home = crate::home::radian_home();
+    let path = resolve_path(explicit, env.as_deref(), home.as_deref());
+    match path {
+        None => Ok(Config::default()),
+        Some(path) => match std::fs::read_to_string(&path) {
+            Ok(text) => parse(&path, &text),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+            Err(error) => Err(ConfigError::Read {
+                path,
+                source: error,
+            }),
+        },
+    }
+}
+
+/// Parses one configuration document. Split out so the fixture consistency test can feed the
+/// `docs/schema/config/` files directly.
+pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
+    let doc: Value = toml::from_str(text).map_err(|error| ConfigError::Parse {
+        path: path.to_path_buf(),
+        message: error.to_string(),
+    })?;
+    let table = doc.as_table().ok_or_else(|| ConfigError::Parse {
+        path: path.to_path_buf(),
+        message: "the top level is not a table".into(),
+    })?;
+
+    // §5.1/§5.2/§5.3: the version is checked before anything else.
+    let version = match table.get("schema_version") {
+        Some(Value::Integer(version)) => *version,
+        _ => {
+            return Err(ConfigError::MissingVersion {
+                path: path.to_path_buf(),
+            });
+        }
+    };
+    if version < SUPPORTED_SCHEMA_VERSION as i64 {
+        return Err(ConfigError::VersionTooOld {
+            path: path.to_path_buf(),
+            supported: SUPPORTED_SCHEMA_VERSION,
+            found: version,
+        });
+    }
+    let read_only = version > SUPPORTED_SCHEMA_VERSION as i64;
+
+    // §4.2: plaintext (and lookalike) secrets are refused wherever they appear.
+    check_no_plaintext(table, "", path)?;
+    check_secret_refs(table, "", path)?;
+
+    let mut config = Config {
+        source: Some(path.to_path_buf()),
+        schema_version: Some(version as u64),
+        read_only,
+        ..Config::default()
+    };
+
+    for (key, value) in table {
+        match key.as_str() {
+            "schema_version" => {}
+            "model" => parse_model(value, path, read_only, &mut config)?,
+            "permissions" => parse_permissions(value, path, read_only, &mut config)?,
+            "compaction" => parse_compaction(value, path, &mut config)?,
+            "tui" => parse_tui(value, path, &mut config)?,
+            // Known by the ADR, not wired in this slice: the hosts take MCP servers from
+            // `--mcp-config`. Ignored, and named on the startup line.
+            "mcp" => config.skipped.push("mcp".into()),
+            other => config.skipped.push(other.to_owned()),
+        }
+    }
+    config.skipped.sort();
+    config.skipped.dedup();
+    Ok(config)
+}
+
+fn parse_model(
+    value: &Value,
+    path: &Path,
+    read_only: bool,
+    config: &mut Config,
+) -> Result<(), ConfigError> {
+    let Some(table) = value.as_table() else {
+        return Err(wrong_type(path, "model", "a table"));
+    };
+    for (key, value) in table {
+        match (key.as_str(), value) {
+            ("provider", Value::String(s)) => config.model.provider = Some(s.clone()),
+            ("base_url", Value::String(s)) => config.model.base_url = Some(s.clone()),
+            ("model", Value::String(s)) => config.model.model = Some(s.clone()),
+            ("api_key", Value::Table(secret)) => {
+                // The shape was validated by `check_secret_refs`; `from` is `env`.
+                config.model.api_key_env = secret
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+            }
+            ("headers", Value::Table(headers)) => {
+                for (name, value) in headers {
+                    if let Value::String(value) = value {
+                        config.model.headers.push((name.clone(), value.clone()));
+                    } else {
+                        config.skipped.push(format!("model.headers.{name}"));
+                    }
+                }
+            }
+            ("context_window", Value::Integer(window)) if *window > 0 => {
+                config.model.context_window = Some(*window as u64);
+            }
+            ("context_window", _) => {
+                return Err(wrong_type(
+                    path,
+                    "model.context_window",
+                    "a positive integer",
+                ));
+            }
+            // Known by the ADR, not wired here (the host's `--include-usage` controls it).
+            ("include_usage", _) => config.skipped.push("model.include_usage".into()),
+            (other, _) => {
+                if !read_only || table.contains_key(other) {
+                    config.skipped.push(format!("model.{other}"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The profile names ADR 0008 §2 lists (`ask`/`allow`/`deny`) plus the tiers ADR 0012/0016
+/// define. A value outside this set is refused rather than guessed (fail-closed).
+const KNOWN_PROFILES: [&str; 8] = [
+    "safe",
+    "workspace",
+    "workspace-write",
+    "full",
+    "full-access",
+    "ask",
+    "allow",
+    "deny",
+];
+
+fn parse_permissions(
+    value: &Value,
+    path: &Path,
+    read_only: bool,
+    config: &mut Config,
+) -> Result<(), ConfigError> {
+    let Some(table) = value.as_table() else {
+        return Err(wrong_type(path, "permissions", "a table"));
+    };
+    for (key, value) in table {
+        match (key.as_str(), value) {
+            ("profile", Value::String(profile)) => {
+                if !KNOWN_PROFILES.contains(&profile.as_str()) {
+                    if read_only {
+                        // A higher schema_version may define a profile this version does not
+                        // know; read-only mode ignores it instead of refusing the file.
+                        config.skipped.push("permissions.profile".into());
+                    } else {
+                        return Err(ConfigError::UnknownProfile {
+                            path: path.to_path_buf(),
+                            value: profile.clone(),
+                        });
+                    }
+                } else if matches!(
+                    profile.as_str(),
+                    "safe" | "workspace" | "workspace-write" | "full" | "full-access"
+                ) {
+                    config.permissions.profile = Some(profile.clone());
+                } else {
+                    // The ADR's `ask`/`allow`/`deny` names have no tier in this build; ignoring
+                    // them keeps the host's default (never widens permissions).
+                    config.skipped.push("permissions.profile".into());
+                }
+            }
+            (other, _) => config.skipped.push(format!("permissions.{other}")),
+        }
+    }
+    Ok(())
+}
+
+fn parse_compaction(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
+    let Some(table) = value.as_table() else {
+        return Err(wrong_type(path, "compaction", "a table"));
+    };
+    for (key, value) in table {
+        match (key.as_str(), value) {
+            ("auto", Value::Boolean(auto)) => config.compaction.auto = Some(*auto),
+            ("auto", _) => return Err(wrong_type(path, "compaction.auto", "a boolean")),
+            (other, _) => config.skipped.push(format!("compaction.{other}")),
+        }
+    }
+    Ok(())
+}
+
+fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
+    let Some(table) = value.as_table() else {
+        return Err(wrong_type(path, "tui", "a table"));
+    };
+    for (key, value) in table {
+        match (key.as_str(), value) {
+            ("theme", Value::String(theme))
+                if matches!(theme.as_str(), "dark" | "light" | "mono") =>
+            {
+                config.tui.theme = Some(theme.clone());
+            }
+            // An unknown or non-string theme is a display preference: ignore it (and say so),
+            // never refuse the file.
+            ("theme", _) => config.skipped.push("tui.theme".into()),
+            ("keybindings", Value::Table(bindings)) => {
+                for (action, keys) in bindings {
+                    match keys.as_array() {
+                        Some(keys) => {
+                            let keys: Vec<String> = keys
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_owned)
+                                .collect();
+                            config.tui.keybindings.push((action.clone(), keys));
+                        }
+                        None => config.skipped.push(format!("tui.keybindings.{action}")),
+                    }
+                }
+            }
+            ("keybindings", _) => return Err(wrong_type(path, "tui.keybindings", "a table")),
+            (other, _) => config.skipped.push(format!("tui.{other}")),
+        }
+    }
+    Ok(())
+}
+
+fn wrong_type(path: &Path, key: &str, expected: &'static str) -> ConfigError {
+    ConfigError::WrongType {
+        path: path.to_path_buf(),
+        key: key.to_owned(),
+        expected,
+    }
+}
+
+/// The `path.key` spelling the checker uses, for error messages and the skipped list.
+fn join(path: &str, key: &str) -> String {
+    if path.is_empty() {
+        key.to_owned()
+    } else {
+        format!("{path}.{key}")
+    }
+}
+
+/// §4.2: a bare string on a sensitive key, or an obviously secret-looking string anywhere, is
+/// refused. The `key` in the error is a path, never the value.
+fn check_no_plaintext(
+    table: &Map<String, Value>,
+    path: &str,
+    file: &Path,
+) -> Result<(), ConfigError> {
+    for (key, value) in table {
+        let here = join(path, key);
+        match value {
+            Value::Table(table) => check_no_plaintext(table, &here, file)?,
+            Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    if let Value::Table(table) = item {
+                        check_no_plaintext(table, &format!("{here}[{index}]"), file)?;
+                    }
+                }
+            }
+            Value::String(text) => {
+                if SENSITIVE_KEYS.contains(&key.to_ascii_lowercase().as_str()) {
+                    return Err(ConfigError::PlaintextSecret {
+                        path: file.to_path_buf(),
+                        key: here,
+                    });
+                }
+                if looks_like_secret(text) {
+                    return Err(ConfigError::SecretLookalike {
+                        path: file.to_path_buf(),
+                        key: here,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// The heuristic of ADR 0008 §4.2 rule 2, byte-for-byte the reference checker's.
+fn looks_like_secret(text: &str) -> bool {
+    if SECRET_PREFIXES
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
+    {
+        return true;
+    }
+    text.len() >= 40
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// §4.1: every sensitive key must be a `SecretRef` table. `from`/`name` are required, `name`
+/// is a non-empty string, and **only `from = "env"` is supported by this version**.
+fn check_secret_refs(
+    table: &Map<String, Value>,
+    path: &str,
+    file: &Path,
+) -> Result<(), ConfigError> {
+    for (key, value) in table {
+        let here = join(path, key);
+        if SENSITIVE_KEYS.contains(&key.to_ascii_lowercase().as_str()) {
+            let Some(secret) = value.as_table() else {
+                return Err(ConfigError::SecretRef {
+                    path: file.to_path_buf(),
+                    key: here,
+                    message: "must be a SecretRef table ({ from = \"env\", name = \"…\" })".into(),
+                });
+            };
+            let from = secret
+                .get("from")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if from != "env" {
+                let message = if from.is_empty() {
+                    "SecretRef.from must be \"env\"".to_owned()
+                } else {
+                    format!("SecretRef.from = {from:?}; this version only supports \"env\"")
+                };
+                return Err(ConfigError::SecretRef {
+                    path: file.to_path_buf(),
+                    key: here,
+                    message,
+                });
+            }
+            match secret.get("name").and_then(Value::as_str) {
+                Some(name) if !name.is_empty() => {}
+                _ => {
+                    return Err(ConfigError::SecretRef {
+                        path: file.to_path_buf(),
+                        key: here,
+                        message: "SecretRef.name must be a non-empty string".into(),
+                    });
+                }
+            }
+            let extra: Vec<&String> = secret
+                .keys()
+                .filter(|key| !matches!(key.as_str(), "from" | "name"))
+                .collect();
+            if !extra.is_empty() {
+                return Err(ConfigError::SecretRef {
+                    path: file.to_path_buf(),
+                    key: here,
+                    message: format!("SecretRef has unknown fields {extra:?}"),
+                });
+            }
+        } else {
+            match value {
+                Value::Table(table) => check_secret_refs(table, &here, file)?,
+                Value::Array(items) => {
+                    for (index, item) in items.iter().enumerate() {
+                        if let Value::Table(table) = item {
+                            check_secret_refs(table, &format!("{here}[{index}]"), file)?;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_str(text: &str) -> Result<Config, ConfigError> {
+        parse(Path::new("/tmp/test/config.toml"), text)
+    }
+
+    #[test]
+    fn resolve_path_prefers_explicit_then_env_then_the_radian_home() {
+        let home = Path::new("/home/u/.radian");
+        assert_eq!(
+            resolve_path(
+                Some(Path::new("/etc/radian.toml")),
+                Some("/env.toml"),
+                Some(home)
+            ),
+            Some(PathBuf::from("/etc/radian.toml"))
+        );
+        assert_eq!(
+            resolve_path(None, Some("/env.toml"), Some(home)),
+            Some(PathBuf::from("/env.toml"))
+        );
+        assert_eq!(
+            resolve_path(None, None, Some(home)),
+            Some(PathBuf::from("/home/u/.radian/config/config.toml"))
+        );
+        assert_eq!(resolve_path(None, None, None), None);
+    }
+
+    #[test]
+    fn a_minimal_file_wires_the_known_keys() {
+        let config = parse_str(
+            r#"
+schema_version = 1
+[model]
+provider = "anthropic"
+base_url = "https://example.com"
+model = "m-1"
+context_window = 200000
+api_key = { from = "env", name = "EXAMPLE_KEY" }
+[model.headers]
+x-a = "1"
+[permissions]
+profile = "full"
+[compaction]
+auto = false
+[tui]
+theme = "light"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.model.provider.as_deref(), Some("anthropic"));
+        assert_eq!(
+            config.model.base_url.as_deref(),
+            Some("https://example.com")
+        );
+        assert_eq!(config.model.model.as_deref(), Some("m-1"));
+        assert_eq!(config.model.context_window, Some(200_000));
+        assert_eq!(config.model.api_key_env.as_deref(), Some("EXAMPLE_KEY"));
+        assert_eq!(
+            config.model.headers,
+            vec![("x-a".to_string(), "1".to_string())]
+        );
+        assert_eq!(config.permissions.profile.as_deref(), Some("full"));
+        assert_eq!(config.compaction.auto, Some(false));
+        assert_eq!(config.tui.theme.as_deref(), Some("light"));
+    }
+
+    #[test]
+    fn a_missing_version_and_a_lower_version_are_refused() {
+        assert!(matches!(
+            parse_str("schema_version = \"1\"\n").unwrap_err(),
+            ConfigError::MissingVersion { .. }
+        ));
+        assert!(matches!(
+            parse_str("schema_version = 0\n").unwrap_err(),
+            ConfigError::VersionTooOld { found: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn a_higher_version_is_read_only_with_a_warning_not_a_refusal() {
+        let config = parse_str("schema_version = 99\n[model]\nmodel = \"m-99\"\n").unwrap();
+        assert!(config.read_only);
+        assert_eq!(config.schema_version, Some(99));
+        assert_eq!(config.model.model.as_deref(), Some("m-99"));
+    }
+
+    #[test]
+    fn a_bare_secret_is_refused_without_echoing_the_value() {
+        let error =
+            parse_str("schema_version = 1\n[model]\napi_key = \"super-secret\"\n").unwrap_err();
+        let text = error.to_string();
+        assert!(!text.contains("super-secret"), "{text}");
+        assert!(text.contains("api_key"), "{text}");
+        assert!(matches!(error, ConfigError::PlaintextSecret { .. }));
+    }
+
+    #[test]
+    fn a_secret_lookalike_anywhere_is_refused_without_echoing_it() {
+        let error =
+            parse_str("schema_version = 1\n[tui]\nstatus_template = \"sk-live-abcdef123456\"\n")
+                .unwrap_err();
+        let text = error.to_string();
+        assert!(!text.contains("sk-live"), "{text}");
+        assert!(matches!(error, ConfigError::SecretLookalike { .. }));
+    }
+
+    #[test]
+    fn a_secret_ref_with_a_non_env_source_is_refused() {
+        let error = parse_str(
+            "schema_version = 1\n[model]\napi_key = { from = \"keychain\", name = \"x\" }\n",
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("only supports \"env\""),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_profile_is_refused_and_an_unknown_theme_is_ignored() {
+        let error =
+            parse_str("schema_version = 1\n[permissions]\nprofile = \"future\"\n").unwrap_err();
+        assert!(
+            matches!(error, ConfigError::UnknownProfile { .. }),
+            "{error}"
+        );
+
+        let config = parse_str("schema_version = 1\n[tui]\ntheme = \"future\"\n").unwrap();
+        assert_eq!(config.tui.theme, None);
+        assert!(config.skipped.contains(&"tui.theme".to_string()));
+    }
+
+    #[test]
+    fn the_adrs_ask_allow_deny_profiles_are_known_and_ignored() {
+        let config = parse_str("schema_version = 1\n[permissions]\nprofile = \"ask\"\n").unwrap();
+        assert_eq!(config.permissions.profile, None, "no tier in this build");
+        assert!(config.skipped.contains(&"permissions.profile".to_string()));
+    }
+
+    #[test]
+    fn unknown_and_unwired_keys_are_collected() {
+        let config = parse_str(
+            r#"
+schema_version = 1
+future_top = 1
+[model]
+include_usage = true
+future_option = "alpha"
+[mcp.servers]
+"#,
+        )
+        .unwrap();
+        assert!(config.skipped.contains(&"future_top".to_string()));
+        assert!(config.skipped.contains(&"model.include_usage".to_string()));
+        assert!(config.skipped.contains(&"model.future_option".to_string()));
+        assert!(config.skipped.contains(&"mcp".to_string()));
+    }
+
+    #[test]
+    fn keybindings_are_carried_raw_for_the_tui() {
+        let config =
+            parse_str("schema_version = 1\n[tui.keybindings]\nsend = [\"ctrl-s\"]\n").unwrap();
+        assert_eq!(
+            config.tui.keybindings,
+            vec![("send".to_string(), vec!["ctrl-s".to_string()])]
+        );
+    }
+}

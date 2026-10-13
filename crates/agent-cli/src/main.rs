@@ -55,18 +55,17 @@ const INBOX_CAPACITY: usize = 64;
     version,
     about = "Chat with a model, with optional MCP tools",
     // A subcommand (`agent memory …`) is a mode of its own, like `--list`: it must not need
-    // `--model`. `required_unless_present_any` cannot name a subcommand, so this attribute
-    // lifts the requirement whenever one is used.
+    // `--model`. `--model` is not clap-required at all now (the config file may supply it),
+    // so this is a no-op today; it stays so a future required argument cannot leak into the
+    // subcommand modes.
     subcommand_negates_reqs = true
 )]
 struct Cli {
-    /// Model name sent to the API. Required to run a conversation (`-p` or interactive); the
-    /// session-management commands (`--list`, `--export`, `--search`) do not need a model and
-    /// do not read the key.
-    #[arg(
-        long,
-        required_unless_present_any = ["list", "export", "search", "fork"]
-    )]
+    /// Model name sent to the API. Required to run a conversation (`-p` or interactive)
+    /// unless the config file's `model.model` provides it; the print-and-exit modes
+    /// (`--list`, `--export`, `--search`, `--fork`) do not need a model and do not read the
+    /// key.
+    #[arg(long)]
     model: Option<String>,
 
     /// Provider wire protocol: `openai-compatible` (the default, unchanged) or `anthropic`.
@@ -83,6 +82,11 @@ struct Cli {
     /// (openai-compatible) or `ANTHROPIC_API_KEY` (anthropic).
     #[arg(long, value_name = "VAR")]
     api_key_env: Option<String>,
+
+    /// The configuration file (ADR 0008). Overrides `RADIAN_CONFIG` and
+    /// `~/.radian/config/config.toml`. Read-only: this slice never writes it.
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
 
     /// `max_tokens` for anthropic (the Messages API requires it). Ignored for
     /// openai-compatible. Defaults to 16384.
@@ -330,10 +334,16 @@ fn finish(result: Result<(), OutputError>) -> i32 {
 /// The `--model` value. Clap requires it unless `--list`, `--export` or `--search` is present,
 /// so a conversation always has one; this makes the failure explicit instead of a panic if
 /// that invariant ever changes.
-fn model_name(cli: &Cli) -> Result<&str, SetupError> {
+fn model_name<'a>(
+    cli: &'a Cli,
+    config: &'a radian_host::config::Config,
+) -> Result<&'a str, SetupError> {
     cli.model
         .as_deref()
-        .ok_or_else(|| SetupError("--model is required to run a conversation".into()))
+        .or(config.model.model.as_deref())
+        .ok_or_else(|| {
+            SetupError("no model: pass --model, or set model.model in the config file".into())
+        })
 }
 
 /// The `--format` value for `--export`.
@@ -565,9 +575,37 @@ struct Setup {
     /// The key and every custom header value: redacted from all error output, never printed
     /// and never written to the session file.
     secrets: Vec<String>,
+    /// The resolved model name (CLI or config), for the session's config snapshot.
+    model_name: String,
+    /// The resolved permission profile (CLI flag, config, or the default).
+    profile: profile::ProfileArg,
+    /// The config file actually read, for the `[config]` startup line.
+    config_path: Option<PathBuf>,
+    /// Known-but-unwired and unknown config keys, named (never their values) at startup.
+    config_skipped: Vec<String>,
 }
 
 async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
+    // ADR 0008: the config file provides defaults; every CLI flag wins. A refused file (a
+    // plaintext secret, an unknown permission value, an older schema_version) fails startup
+    // before any session file exists.
+    let config = radian_host::load_config(cli.config.as_deref())
+        .map_err(|error| SetupError(format!("config: {error}")))?;
+    if config.read_only {
+        eprintln!(
+            "[config] schema_version {} is newer than the supported v{}; reading it read-only",
+            config.schema_version.unwrap_or(0),
+            radian_host::SUPPORTED_SCHEMA_VERSION
+        );
+    }
+    let model_name = model_name(cli, &config)?.to_owned();
+    let profile = match cli.profile {
+        Some(profile) => profile,
+        None => match config.permissions.profile.as_deref() {
+            Some(name) => profile::parse_profile(name)?,
+            None => profile::default_profile(),
+        },
+    };
     let system_prompt = match (&cli.system, &cli.system_file) {
         (Some(text), _) => Some(text.clone()),
         (None, Some(path)) => Some(
@@ -576,16 +614,22 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         ),
         _ => None,
     };
-    // The provider names the defaults; an explicit flag always wins.
-    let provider = Provider::from_name(cli.provider.as_deref().unwrap_or("openai-compatible"))
+    // The provider names the defaults; an explicit flag wins, then the config.
+    let provider_name = cli
+        .provider
+        .clone()
+        .or_else(|| config.model.provider.clone());
+    let provider = Provider::from_name(provider_name.as_deref().unwrap_or("openai-compatible"))
         .map_err(SetupError)?;
     let base_url = cli
         .base_url
         .clone()
+        .or_else(|| config.model.base_url.clone())
         .unwrap_or_else(|| provider.default_base_url().to_owned());
     let api_key_env = cli
         .api_key_env
         .clone()
+        .or_else(|| config.model.api_key_env.clone())
         .unwrap_or_else(|| provider.default_api_key_env().to_owned());
     let thinking = match cli.thinking.as_deref() {
         Some(value) => value.parse::<Thinking>().map_err(SetupError)?,
@@ -617,11 +661,18 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     // message) and leaves nothing behind (D2). `radian-host` owns the rule for both hosts.
     let workspace = resolve_workspace(cli.workspace.as_deref().map(std::path::Path::new))
         .map_err(SetupError)?;
-    let uses_placeholder = cli
-        .header
+    // The config's headers come first, so a `--header` of the same name wins.
+    let mut header_args: Vec<String> = config
+        .model
+        .headers
+        .iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect();
+    header_args.extend(cli.header.iter().cloned());
+    let uses_placeholder = header_args
         .iter()
         .any(|item| item.contains(SESSION_PLACEHOLDER));
-    let headers = parse_headers(&cli.header, &session_id).map_err(SetupError)?;
+    let headers = parse_headers(&header_args, &session_id).map_err(SetupError)?;
     if uses_placeholder && cli.session_id.is_none() && cli.resume.is_none() {
         // Only when the generated id is actually observable: it is what makes the routing
         // reusable across processes.
@@ -633,7 +684,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     let model = build_model(ModelArgs {
         provider,
         base_url,
-        model: model_name(cli)?.to_owned(),
+        model: model_name.clone(),
         api_key: key.clone(),
         headers: headers.clone(),
         include_usage: cli.include_usage,
@@ -650,7 +701,8 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     let mut secrets: Vec<String> = key.into_iter().collect();
     secrets.extend(headers.into_iter().map(|(_, value)| value));
     secrets.retain(|secret| !secret.is_empty());
-    if cli.context_window == Some(0) {
+    let context_window = cli.context_window.or(config.model.context_window);
+    if context_window == Some(0) {
         return Err(SetupError(
             "--context-window must be at least 1 token".into(),
         ));
@@ -665,10 +717,10 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         Provider::OpenAiCompatible => None,
     };
     let window = radian_host::resolve(&radian_host::WindowQuery::production(
-        cli.context_window,
+        context_window,
         cli.catalog_provider.clone(),
         &catalog_base_url,
-        model_name(cli)?,
+        &model_name,
         request_max_output,
         cli.offline_catalog,
     ))
@@ -696,10 +748,15 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         turn_timeout_secs: cli.turn_timeout_secs,
         context_budget,
         window,
-        auto_compact: !cli.no_auto_compact,
+        // `--no-auto-compact` wins; otherwise the config may turn it off.
+        auto_compact: !cli.no_auto_compact && config.compaction.auto.unwrap_or(true),
         session_id,
         workspace,
         secrets,
+        model_name,
+        profile,
+        config_path: config.source.clone(),
+        config_skipped: config.skipped.clone(),
     })
 }
 
@@ -972,6 +1029,7 @@ fn open_journal(
     session_id: &str,
     workspace: &str,
     provider: Provider,
+    model: &str,
 ) -> Result<Arc<SessionJournal>, SetupError> {
     let dir = session_dir(cli)?;
     let path = dir.join(format!("{session_id}.jsonl"));
@@ -992,7 +1050,7 @@ fn open_journal(
     // base URL that could carry credentials (ADR 0008 §4, ADR 0013).
     let created = SessionCreatedData::new(
         workspace,
-        serde_json::json!({"provider": provider.as_str(), "model": model_name(cli)?}),
+        serde_json::json!({"provider": provider.as_str(), "model": model}),
     );
     let journal = match SessionJournal::create(&path, session_id, created) {
         Ok(journal) => Arc::new(journal),
@@ -1031,7 +1089,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     // The profile and the sandbox: what may run, and what the OS enforces. `full` is
     // only reachable because the user named it; a failed probe is an error, never a fallback.
     // All of this runs **before** the session file is created (dogfooding D2).
-    let profile_arg = cli.profile.unwrap_or_else(profile::default_profile);
+    let profile_arg = setup.profile;
     let workspace_path = setup.workspace.clone();
     let permission_profile =
         profile::build_profile(profile_arg, &workspace_path, &cli.allow_shell_command)?;
@@ -1053,6 +1111,14 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     let (profile_line, sandbox_facts) = profile::describe(profile_arg, sandbox.as_ref());
     eprintln!("[profile] {profile_line}");
     eprintln!("[sandbox] {sandbox_facts}");
+    // ADR 0008: which file was read and what was ignored (never a value).
+    match &setup.config_path {
+        Some(path) => eprintln!("[config] {}", path.display()),
+        None => eprintln!("[config] none"),
+    }
+    for key in &setup.config_skipped {
+        eprintln!("[config] ignored key `{key}`");
+    }
     // The numbers, the effective input budget B, and where they came from (ADR 0018).
     let compaction = if setup.auto_compact {
         "automatic compaction on"
@@ -1118,6 +1184,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         &setup.session_id,
         &workspace_path.to_string_lossy(),
         setup.provider,
+        &setup.model_name,
     )?;
     // The permission layer replaces the CLI's own approval hook: rules, "allow for this
     // session" grants, and the audit record. `--yes` swaps the approver for one that answers

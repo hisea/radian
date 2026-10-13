@@ -12,6 +12,9 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::command::{self, PendingCommand};
 use crate::composer::Composer;
+use crate::find::FindState;
+use crate::keys::{Action, Keymap};
+use crate::theme::{Theme, ThemeName};
 
 /// A tool call waiting for the human. `reply` is the channel the permission layer awaits; the
 /// answer is sent by the UI thread, so the waiting future never blocks it.
@@ -209,6 +212,10 @@ pub struct App {
     /// The host's memory service, or `None` when this process has no memory root. `/memory`
     /// runs against the same service the agent's own tools use.
     pub memory: Option<MemoryService>,
+    /// The color theme (config `tui.theme`, `NO_COLOR`).
+    pub theme: Theme,
+    /// The key bindings (config `tui.keybindings`), defaulting to the pre-config key table.
+    pub keymap: Keymap,
     /// The effective input budget `B`, if any; `None` means no budget is configured.
     pub context_window: Option<u64>,
     /// The most recent budget report, for the status bar.
@@ -232,6 +239,11 @@ pub struct App {
     /// The candidates from the last `Tab`, shown above the input box. `None` when no list is
     /// up; any key other than `Tab` dismisses it.
     pub completion: Option<Vec<String>>,
+    /// The open in-transcript search box (Phase 5), or `None`. While it is open the input box
+    /// is shown as `find: <query>` and typed keys edit the query instead of the message.
+    pub find: Option<FindState>,
+    /// The transcript width the renderer last used, so a find recomputes on a resize.
+    pub transcript_width: usize,
 }
 
 impl App {
@@ -254,6 +266,8 @@ impl App {
             pending_compact: None,
             pending_session: None,
             memory: None,
+            theme: Theme::default(),
+            keymap: Keymap::default(),
             context_window: None,
             budget_report: None,
             tier: None,
@@ -266,6 +280,8 @@ impl App {
             max_scroll: 0,
             workspace: None,
             completion: None,
+            find: None,
+            transcript_width: 80,
         }
     }
 
@@ -282,6 +298,27 @@ impl App {
     /// The host's memory service, for `/memory`. Set once at startup.
     pub fn set_memory(&mut self, memory: Option<MemoryService>) {
         self.memory = memory;
+    }
+
+    /// Applies the wired `tui.*` configuration. A bad keymap (a key bound to two actions) is
+    /// an error the host turns into a startup refusal; unknown actions/keys are warnings.
+    pub fn apply_config(
+        &mut self,
+        config: &radian_host::config::Config,
+        no_color: bool,
+    ) -> Result<Vec<String>, String> {
+        let name = config.tui.theme.as_deref().and_then(ThemeName::parse);
+        self.theme = Theme::resolve(name, no_color);
+        let keymap = Keymap::from_config(&config.tui.keybindings).map_err(|e| e.to_string())?;
+        let mut warnings = keymap.warnings.clone();
+        self.keymap = keymap;
+        warnings.extend(
+            config
+                .skipped
+                .iter()
+                .map(|key| format!("ignored key `{key}`")),
+        );
+        Ok(warnings)
     }
 
     /// Records the MCP state: how many servers are configured, and what the opened session
@@ -328,6 +365,88 @@ impl App {
         self.follow = true;
     }
 
+    // ---------- in-transcript search (Phase 5) ----------
+
+    /// Records the transcript width the renderer used. A width change re-wraps the transcript,
+    /// so an open find box recomputes its matches — once per resize, never per frame.
+    pub fn set_transcript_width(&mut self, width: usize) {
+        if self.transcript_width == width {
+            return;
+        }
+        self.transcript_width = width;
+        if self.find.is_some() {
+            self.find_recompute();
+        }
+    }
+
+    /// The open find box, if any.
+    pub fn find_state(&self) -> Option<&FindState> {
+        self.find.as_ref()
+    }
+
+    /// Opens the find box anchored at the current viewport top (`Ctrl-F`). Refused while an
+    /// approval or `/memory` confirmation prompt is up.
+    pub fn find_open(&mut self) {
+        if !self.input_editable() || self.find.is_some() {
+            return;
+        }
+        self.find = Some(FindState::open(self.scroll));
+    }
+
+    /// Closes the find box; the viewport stays where it is (`Esc`).
+    pub fn find_close(&mut self) {
+        self.find = None;
+    }
+
+    /// The earlier match (`Enter`, or `Ctrl-F` again).
+    pub fn find_prev(&mut self) {
+        if let Some(find) = self.find.as_mut() {
+            find.prev();
+        }
+        self.find_jump();
+    }
+
+    /// The later match (`Shift-Enter`, `Ctrl-G`).
+    pub fn find_next(&mut self) {
+        if let Some(find) = self.find.as_mut() {
+            find.next();
+        }
+        self.find_jump();
+    }
+
+    fn find_recompute(&mut self) {
+        let width = self.transcript_width;
+        if let Some(find) = self.find.as_mut() {
+            find.recompute(&self.entries, width);
+        }
+        self.find_jump();
+    }
+
+    fn find_push(&mut self, c: char) {
+        if let Some(find) = self.find.as_mut() {
+            find.query.push(c);
+        }
+        self.find_recompute();
+    }
+
+    fn find_backspace(&mut self) {
+        if let Some(find) = self.find.as_mut() {
+            find.query.pop();
+        }
+        self.find_recompute();
+    }
+
+    /// Centers the current match in the viewport and stops following the bottom. A search that
+    /// matches nothing leaves the viewport alone.
+    fn find_jump(&mut self) {
+        let Some(line) = self.find.as_ref().and_then(FindState::current_line) else {
+            return;
+        };
+        let height = usize::from(self.view_height.max(1));
+        self.scroll = crate::find::centered_scroll(line, height, self.max_scroll);
+        self.follow = false;
+    }
+
     /// Shows an approval prompt. If one was already up it is denied rather than dropped: the
     /// permission layer awaits one call at a time, so this should not happen, and a silent
     /// drop would leave that call waiting forever.
@@ -347,94 +466,125 @@ impl App {
     }
 
     /// Handles one key event and returns the inbox action it implies, if any.
+    ///
+    /// The keys are looked up in the [`Keymap`] (config `tui.keybindings`); ordinary
+    /// printable characters are inserted at the cursor and are never bindings, so typing can
+    /// not be broken by a bad keymap. The approval and command-confirmation prompts are
+    /// handled first and are deliberately not rebindable.
     pub fn on_key(&mut self, key: KeyEvent) -> Option<Send> {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-        let alt = key.modifiers.contains(KeyModifiers::ALT);
-        // Ctrl-C always means "cancel the turn / quit", even while a prompt is up: the
-        // permission layer races the approval against cancellation, so the waiting call then
-        // resolves as a denial and the prompt is cleared by `RunFinished`.
-        if ctrl && key.code == KeyCode::Char('c') {
-            return if self.turn == TurnState::Running {
-                Some(Send::Cancel)
-            } else {
-                self.quit = true;
-                Some(Send::Quit)
-            };
-        }
-        // While a prompt is up, keys answer it and never type into the input box.
+        // While a prompt is up, its own keys answer it and never type into the input box.
+        // `y`/`a`/`n` and `Esc` are hardcoded **before** the keymap, so a `tui.keybindings`
+        // entry can never take them over (rebinding them could approve a call the user meant
+        // to deny). Cancel (Ctrl-C) still works; every other key is ignored.
         if self.pending_approval.is_some() {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    self.answer_approval(ApprovalOutcome::AllowOnce)
+                    self.answer_approval(ApprovalOutcome::AllowOnce);
+                    return None;
                 }
                 KeyCode::Char('a') | KeyCode::Char('A') => {
-                    self.answer_approval(ApprovalOutcome::AllowForSession)
+                    self.answer_approval(ApprovalOutcome::AllowForSession);
+                    return None;
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    self.answer_approval(ApprovalOutcome::Deny { reason: None })
+                    self.answer_approval(ApprovalOutcome::Deny { reason: None });
+                    return None;
                 }
                 _ => {}
             }
+            if self.keymap.action_for(&key) == Some(Action::Cancel) {
+                return self.cancel_or_quit();
+            }
             return None;
         }
-        // A `/memory` write waiting for `y`: keys answer it and never type into the input box.
-        if let Some(pending) = self.pending_command.take() {
+        // A `/memory` write waiting for `y`: same hardcoded keys, same cancel exception.
+        if self.pending_command.is_some()
+            && matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'))
+        {
+            let pending = self.pending_command.take().expect("checked just above");
+            self.run_confirmed(pending);
+            return None;
+        }
+        if self.pending_command.is_some()
+            && matches!(
+                key.code,
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc
+            )
+        {
+            self.pending_command = None;
+            self.push_notice("cancelled");
+            return None;
+        }
+        if self.pending_command.is_some() {
+            if self.keymap.action_for(&key) == Some(Action::Cancel) {
+                return self.cancel_or_quit();
+            }
+            return None;
+        }
+        // Cancel/quit works even while a prompt is up: the permission layer races the
+        // approval against cancellation, so the waiting call resolves as a denial.
+        let action = self.keymap.action_for(&key);
+        if action == Some(Action::Cancel) {
+            return self.cancel_or_quit();
+        }
+        // The `@` completion list (Phase 4): the escape action closes it (and does not clear
+        // the input); any key other than the completion action dismisses it, because typing
+        // continues the word and the list would be stale.
+        if action == Some(Action::Escape) && self.completion.is_some() {
+            self.completion = None;
+            return None;
+        }
+        if action != Some(Action::Complete) {
+            self.completion = None;
+        }
+        // The find box (Phase 5) is a layer over the transcript: while it is open its keys are
+        // looked up first, so `enter` is the earlier match there and the send key in the
+        // transcript. `ctrl-f` is both "open the box" and "earlier match"; `esc` closes it.
+        if self.find.is_some() {
+            if let Some(action) = self.keymap.find_action_for(&key) {
+                return self.dispatch(action);
+            }
             match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => self.run_confirmed(pending),
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    self.push_notice("cancelled");
+                KeyCode::Backspace => {
+                    self.find_backspace();
+                    return None;
                 }
-                _ => self.pending_command = Some(pending),
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.find_push(c);
+                    return None;
+                }
+                // PageUp/PageDown, Home/End and the arrows keep reaching the transcript
+                // layer, so the box does not trap navigation.
+                _ => {}
             }
-            return None;
         }
-        // The `@` completion list: `Esc` closes it (and does not clear the input); any other
-        // key than `Tab` dismisses it, because typing continues the word and the list would
-        // be stale.
-        if key.code == KeyCode::Esc && self.completion.is_some() {
-            self.completion = None;
-            return None;
+        if let Some(action) = action {
+            return self.dispatch(action);
         }
-        if key.code != KeyCode::Tab {
-            self.completion = None;
+        // Any other plain character is text, never a binding.
+        if let KeyCode::Char(c) = key.code
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::ALT)
+        {
+            self.input.insert_char(c);
         }
-        match key.code {
-            // --- input editing (ADR 0009 Phase 4) ---
-            // Ctrl-A / Ctrl-E: the start / end of the input line.
-            KeyCode::Char('a') if ctrl => {
-                self.input.line_start();
-                None
-            }
-            KeyCode::Char('e') if ctrl => {
-                self.input.line_end();
-                None
-            }
-            // Ctrl-K / Ctrl-U: kill to the end / start of the line.
-            KeyCode::Char('k') if ctrl => {
-                self.input.kill_to_line_end();
-                None
-            }
-            KeyCode::Char('u') if ctrl => {
-                self.input.kill_to_line_start();
-                None
-            }
-            // Ctrl-W: delete the previous word.
-            KeyCode::Char('w') if ctrl => {
-                self.input.delete_word();
-                None
-            }
-            // Newline: Ctrl-J and Alt-Enter work on every terminal; Shift-Enter needs the
-            // enhanced keyboard protocol (see the README's manual-test list).
-            KeyCode::Char('j') if ctrl => {
-                self.input.insert_char('\n');
-                None
-            }
-            KeyCode::Enter if shift || alt => {
-                self.input.insert_char('\n');
-                None
-            }
-            KeyCode::Enter => {
+        None
+    }
+
+    /// Cancels a running turn, or quits when idle.
+    fn cancel_or_quit(&mut self) -> Option<Send> {
+        if self.turn == TurnState::Running {
+            Some(Send::Cancel)
+        } else {
+            self.quit = true;
+            Some(Send::Quit)
+        }
+    }
+
+    /// Runs one keymap action. The default bindings reproduce the pre-keymap key table.
+    fn dispatch(&mut self, action: Action) -> Option<Send> {
+        match action {
+            Action::Send => {
                 let text = std::mem::take(&mut self.input).text();
                 self.history_cursor = None;
                 self.history_stash.clear();
@@ -465,52 +615,35 @@ impl App {
                     Some(Send::Followup(text))
                 }
             }
-            // Horizontal movement; Ctrl/Alt makes it word-wise.
-            KeyCode::Left if ctrl || alt => {
-                self.input.word_left();
+            Action::Newline => {
+                self.input.insert_char('\n');
                 None
             }
-            KeyCode::Right if ctrl || alt => {
-                self.input.word_right();
-                None
-            }
-            KeyCode::Left => {
+            Action::CursorLeft => {
                 self.input.left();
                 None
             }
-            KeyCode::Right => {
+            Action::CursorRight => {
                 self.input.right();
                 None
             }
-            // Home / End are the input line's start / end; Ctrl-Home / Ctrl-End scroll the
-            // transcript to its top / bottom.
-            KeyCode::Home if ctrl => {
-                self.set_scroll(0);
+            Action::WordLeft => {
+                self.input.word_left();
                 None
             }
-            KeyCode::End if ctrl => {
-                self.scroll_to_bottom();
+            Action::WordRight => {
+                self.input.word_right();
                 None
             }
-            KeyCode::Home => {
+            Action::LineStart => {
                 self.input.line_start();
                 None
             }
-            KeyCode::End => {
+            Action::LineEnd => {
                 self.input.line_end();
                 None
             }
-            // Up / Down browse history from the first / last input line, and move inside a
-            // multi-line input otherwise. Shift-Up / Shift-Down scroll the transcript by one.
-            KeyCode::Up if shift => {
-                self.scroll_by(-1);
-                None
-            }
-            KeyCode::Down if shift => {
-                self.scroll_by(1);
-                None
-            }
-            KeyCode::Up => {
+            Action::HistoryPrev => {
                 if self.input.is_first_line() {
                     self.history_up();
                 } else {
@@ -518,7 +651,7 @@ impl App {
                 }
                 None
             }
-            KeyCode::Down => {
+            Action::HistoryNext => {
                 if self.input.is_last_line() {
                     self.history_down();
                 } else {
@@ -526,33 +659,80 @@ impl App {
                 }
                 None
             }
-            KeyCode::PageUp => {
-                self.scroll_by(-(self.view_height.max(1) as i32));
-                None
-            }
-            KeyCode::PageDown => {
-                self.scroll_by(self.view_height.max(1) as i32);
-                None
-            }
-            KeyCode::Delete => {
-                self.input.delete();
-                None
-            }
-            KeyCode::Backspace => {
+            Action::DeleteBefore => {
                 self.input.backspace();
                 None
             }
+            Action::DeleteUnder => {
+                self.input.delete();
+                None
+            }
             // Tab: complete the `@` file reference at the cursor (Phase 4). On any other
-            // word Tab does nothing, so the key stays free for a future binding.
-            KeyCode::Tab => {
+            // word it does nothing, so the key stays free for a future binding.
+            Action::Complete => {
                 self.complete_mention();
                 None
             }
-            KeyCode::Char(c) if !ctrl => {
-                self.input.insert_char(c);
+            // --- in-transcript search (Phase 5) ---
+            // `find` opens the box; a second `find` (Ctrl-F by default) is the earlier match,
+            // which is exactly the historical behavior.
+            Action::Find => {
+                if self.find.is_some() {
+                    self.find_prev();
+                } else {
+                    self.find_open();
+                }
                 None
             }
-            KeyCode::Esc => {
+            Action::FindPrev => {
+                self.find_prev();
+                None
+            }
+            Action::FindNext => {
+                self.find_next();
+                None
+            }
+            Action::FindClose => {
+                self.find_close();
+                None
+            }
+            Action::DeleteWord => {
+                self.input.delete_word();
+                None
+            }
+            Action::DeleteToLineStart => {
+                self.input.kill_to_line_start();
+                None
+            }
+            Action::DeleteToLineEnd => {
+                self.input.kill_to_line_end();
+                None
+            }
+            Action::ScrollPageUp => {
+                self.scroll_by(-(self.view_height.max(1) as i32));
+                None
+            }
+            Action::ScrollPageDown => {
+                self.scroll_by(self.view_height.max(1) as i32);
+                None
+            }
+            Action::ScrollLineUp => {
+                self.scroll_by(-1);
+                None
+            }
+            Action::ScrollLineDown => {
+                self.scroll_by(1);
+                None
+            }
+            Action::ScrollTop => {
+                self.set_scroll(0);
+                None
+            }
+            Action::ScrollBottom => {
+                self.scroll_to_bottom();
+                None
+            }
+            Action::Escape => {
                 // A non-empty input is cleared first (kept in the history, so `Up` finds it);
                 // an empty one cancels a running turn or quits.
                 if !self.input.is_empty() {
@@ -561,14 +741,11 @@ impl App {
                     self.history_cursor = None;
                     self.history_stash.clear();
                     None
-                } else if self.turn == TurnState::Running {
-                    Some(Send::Cancel)
                 } else {
-                    self.quit = true;
-                    Some(Send::Quit)
+                    self.cancel_or_quit()
                 }
             }
-            _ => None,
+            Action::Cancel => self.cancel_or_quit(),
         }
     }
 

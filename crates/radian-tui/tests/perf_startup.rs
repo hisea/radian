@@ -112,6 +112,8 @@ impl Pty {
         }
         cmd.env("TERM", "xterm-256color");
         cmd.env("HOME", home.path());
+        // `cmd.env_clear()` above is what makes this hermetic: neither `RADIAN_HOME` nor
+        // `RADIAN_CONFIG` reaches the child, so a config can only come from this temp `HOME`.
         // No real models.dev from a test (ADR 0018): a closed local port fails fast.
         cmd.env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json");
         let child = cmd.spawn().unwrap();

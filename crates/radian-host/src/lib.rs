@@ -8,6 +8,7 @@
 //! two binaries still decide their own flags, startup text and error wording.
 
 mod catalog;
+pub mod config;
 mod describe;
 mod diagnostics;
 mod errors;
@@ -23,9 +24,14 @@ mod tools;
 mod workspace;
 
 pub use catalog::{
-    CACHE_TTL, CATALOG_URL, Catalog, FETCH_TIMEOUT, ModelLimit, OUTPUT_RESERVATION, Window,
+    CACHE_TTL, CATALOG_URL, Catalog, FETCH_TIMEOUT, ModelLimit, OUTPUT_RESERVATION_CAP, Window,
     WindowCheck, WindowQuery, WindowSource, cache_path, host_of, input_budget,
     output_ceiling_warning, output_reservation, provider_for_host, resolve,
+};
+pub use config::{
+    CONFIG_FILE_NAME, CompactionConfig, Config, ConfigError, ModelConfig, PermissionsConfig,
+    RADIAN_CONFIG_ENV, SUPPORTED_SCHEMA_VERSION, TuiConfig, load as load_config,
+    parse as parse_config, resolve_path as resolve_config_path,
 };
 pub use describe::{CLI_WORDING, TUI_WORDING, Wording, describe};
 pub use diagnostics::{
