@@ -1,4 +1,4 @@
-//! Loading the MCP server config file into [`McpServerConfig`]s.
+//! Loading the `--mcp-config` server config file into [`McpServerConfig`]s.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -36,7 +36,7 @@ struct ServerEntry {
 
 /// Parses and validates the file. Duplicate ids fail here, before any process starts: the
 /// id is the tool alias prefix, so two servers sharing one would collide mid-session.
-pub(crate) fn load_mcp_config(path: &str) -> Result<Vec<McpServerConfig>, String> {
+pub fn load_mcp_config(path: &str) -> Result<Vec<McpServerConfig>, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("--mcp-config {path}: {e}"))?;
     let parsed: ConfigFile = serde_json::from_str(&text)
         .map_err(|e| format!("--mcp-config {path}: not valid MCP config JSON: {e}"))?;
@@ -68,4 +68,29 @@ pub(crate) fn load_mcp_config(path: &str) -> Result<Vec<McpServerConfig>, String
         servers.push(config);
     }
     Ok(servers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write(dir: &std::path::Path, name: &str, text: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_duplicate_server_id_is_refused_before_any_process_starts() {
+        let dir = std::env::temp_dir().join(format!("radian-host-mcp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = write(
+            &dir,
+            "dup.json",
+            r#"{"servers":[{"id":"a","command":"true"},{"id":"a","command":"true"}]}"#,
+        );
+        let error = load_mcp_config(path.to_str().unwrap()).unwrap_err();
+        assert!(error.contains("duplicate server id"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

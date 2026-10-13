@@ -155,8 +155,9 @@ pub fn describe(tier: Tier, sandbox: Option<&Sandbox>) -> (String, String) {
             ),
             "shell and the built-in tools: writes are confined to the workspace, repository \
              metadata is read-only, sensitive directories are not readable by default, and the \
-             network is off. The IPC boundary is not tightened, so this is not a complete \
-             credential boundary"
+             network is off. MCP servers are NOT sandboxed in this build and run with your full \
+             access. The IPC boundary is not tightened, so this is not a complete credential \
+             boundary"
                 .into(),
         ),
         (Tier::FullAccess, _) => (

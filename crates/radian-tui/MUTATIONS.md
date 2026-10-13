@@ -56,3 +56,29 @@ files restored after each; `git status --short` empty at the end.
 | M7 | the shell prompt shows the whole command | `approval_text` truncates the resolved resource to 40 chars | `pty_shell_approval_shows_the_command_and_the_truncation_marker` |
 
 7/7 caught; no misses.
+
+## Slice D: MCP, shared header parsing and the full status bar
+
+Base: `82f5849` · one-shot worktree `/tmp/tuid-mut` (created from HEAD, deleted after) · a
+private `CARGO_TARGET_DIR` (`/tmp/tuid-mut-target`) so no mutation artifact can leak into the
+main worktree's build · each mutation run with `--no-fail-fast`, then `git checkout -- .`;
+`git status --short` empty at the end. The pty tests spawn the real binary under a pty.
+
+| # | Requirement mutated | Mutation | Caught by |
+|---|---|---|---|
+| M1 | `{session_id}` expands to the session id | the placeholder replacement becomes `value.to_string()` | `headers::tests::a_value_can_reference_the_session_id`, `pty_a_header_value_expands_the_session_id`, `pty_a_resumed_session_header_uses_the_resumed_id` |
+| M2 | a malformed header never echoes its value | the error appends `{item}` | `headers::tests::a_malformed_header_never_echoes_its_value`, `pty_a_malformed_header_error_does_not_echo_its_value` |
+| M3 | `authorization` is refused | the refusal block is deleted | `headers::tests::an_authorization_header_is_refused_without_its_value`, `pty_an_authorization_header_is_refused_without_echoing_its_value` |
+| M4 | a duplicate tool name fails instead of shadowing | the check in `merge_tool_specs` is deleted (MCP silently wins) | `tools::tests::a_duplicate_tool_name_is_refused_not_shadowed` |
+| M5 | the workspace-write notice names the MCP sandbox gap | the sentence is deleted from the meaning line | `pty_the_workspace_write_notice_names_the_mcp_sandbox_gap` |
+| M6 | no reported usage says `none`, never `0` | `usage none` becomes `usage 0/0` | `a_session_without_reports_says_none_and_never_invents_a_zero` |
+| M7 | a narrow bar keeps the key segments | `mcp` and `context` swap places, so 60 columns drops `mcp` | `a_narrow_status_bar_keeps_the_key_segments_and_does_not_wrap` |
+| M8 | the status reports what connected | the `McpStatus` assignment in `open_session` is deleted | `the_provider_reports_what_the_opened_session_connected` |
+
+8/8 caught; no misses and no equivalent mutants.
+
+**Note on M4's reachability.** With the current alias scheme (`server__tool`) a real MCP
+server cannot produce a built-in tool name, so the collision is not reachable end-to-end. The
+check stays as defence in depth and is tested directly through `merge_tool_specs`, which is
+public for exactly that reason. A silent override would be the dangerous failure, so the rule
+is held by a test rather than left implicit.

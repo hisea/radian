@@ -28,13 +28,37 @@ const REAP_LIMIT: Duration = Duration::from_secs(2);
 #[derive(Debug, Clone)]
 pub struct McpToolProvider {
     servers: Arc<Vec<McpServerConfig>>,
+    status: Arc<Mutex<Option<McpStatus>>>,
+}
+
+/// What one opened session's MCP servers look like, for a host's status display. Counts only:
+/// the provider does not expose server or tool identities to the host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct McpStatus {
+    /// Servers that started and completed their handshake.
+    pub servers: usize,
+    /// Tools those servers listed.
+    pub tools: usize,
 }
 
 impl McpToolProvider {
     pub fn new(servers: Vec<McpServerConfig>) -> Self {
         Self {
             servers: Arc::new(servers),
+            status: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// How many servers are configured. Known before any session opens, so a host can show it
+    /// while the session is still starting.
+    pub fn configured(&self) -> usize {
+        self.servers.len()
+    }
+
+    /// The servers and tools the last opened session has, or `None` before one has opened.
+    /// A host that shows this reports what actually connected, not what was configured.
+    pub fn status(&self) -> Option<McpStatus> {
+        *self.status.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -55,11 +79,17 @@ impl ToolProvider for McpToolProvider {
             }
         }
         match routes(&servers) {
-            Ok((specs, routes)) => Ok(McpSession {
-                servers,
-                specs,
-                routes,
-            }),
+            Ok((specs, routes)) => {
+                *self.status.lock().unwrap_or_else(|e| e.into_inner()) = Some(McpStatus {
+                    servers: servers.len(),
+                    tools: specs.len(),
+                });
+                Ok(McpSession {
+                    servers,
+                    specs,
+                    routes,
+                })
+            }
             Err(e) => {
                 stop_all(&mut servers).await;
                 Err(e)

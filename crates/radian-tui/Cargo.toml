@@ -11,9 +11,11 @@ path = "src/main.rs"
 
 [dependencies]
 agent-core = { path = "../agent-core" }
+agent-extensions = { path = "../agent-extensions" }
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible" }
 futures-util.workspace = true
 radian-coding = { path = "../radian-coding" }
+radian-host = { path = "../radian-host" }
 radian-permissions = { path = "../radian-permissions" }
 radian-runtime = { path = "../radian-runtime" }
 radian-sandbox = { path = "../radian-sandbox" }

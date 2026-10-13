@@ -11,13 +11,13 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
 use agent_core::{
-    Agent, AgentConfig, AgentEvent, ContextBudget, EventSink, InputSource, NoTools, ToolCall,
-    ToolContext, ToolError, ToolFailure, ToolOutput, ToolProvider, ToolSession, ToolSpec,
-    TurnOptions,
+    Agent, AgentConfig, AgentEvent, ContextBudget, EventSink, InputSource, TurnOptions,
 };
+use agent_extensions::McpToolProvider;
 use agent_provider_openai_compatible::{ApiKey, OpenAiCompatible, OpenAiCompatibleConfig};
 use clap::Parser;
-use radian_coding::{CodingSession, CodingTools};
+use radian_coding::CodingTools;
+use radian_host::{HostTools, load_mcp_config, parse_headers, validate_session_id};
 use radian_permissions::{
     ApprovalError, ApprovalOutcome, ApprovalRequest, Approver, AuditSink, PermissionHooks,
     PermissionResolved, runtime_event,
@@ -74,6 +74,12 @@ struct Cli {
     /// (read/write/patch/list, git_status/git_diff). No shell is provided.
     #[arg(long, value_name = "DIR")]
     workspace: Option<PathBuf>,
+
+    /// A JSON file listing MCP stdio servers to start (`{"servers": [...]}`), the same format
+    /// `agent-cli` reads. Under `workspace-write` their tools ask before running and the
+    /// servers themselves are **not** sandboxed (ADR 0012 option B).
+    #[arg(long, value_name = "FILE")]
+    mcp_config: Option<String>,
 
     /// The permission tier (ADR 0012): `safe` denies file modification, `workspace-write`
     /// allows writes that resolve inside the workspace, `full-access` also allows MCP.
@@ -174,14 +180,19 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
     if cli.list {
         return list_sessions(&cli);
     }
-    let model = build_model(&cli)?;
     let dir = session_dir(&cli)?;
     let workspace = session_workspace(&cli)?;
+    // The session id is resolved before the headers: a `{session_id}` in a header expands to
+    // this process's id, and `--resume` uses the id being resumed. The parser is the same one
+    // `agent-cli` uses, so `{session_id}`, name validation and the `authorization` refusal
+    // behave identically in both hosts.
     let session_id = match (&cli.resume, &cli.session_id) {
         (Some(id), _) | (None, Some(id)) => id.clone(),
-        (None, None) => generate_session_id(),
+        (None, None) => radian_host::generate_session_id(),
     };
     validate_session_id(&session_id)?;
+    let headers = parse_headers(&cli.header, &session_id)?;
+    let model = build_model(&cli, headers)?;
     let journal = open_journal(&cli, &session_id, &dir, &workspace)?;
     // The history of a resumed session is rendered before the first frame, so the transcript
     // shows it from the start. `Driver::open` recovers the same history from the journal for
@@ -214,7 +225,16 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
     let sandbox = radian_tui::profile::build_sandbox(tier, Path::new(&workspace))?;
     // The description is taken before the sandbox moves into the tools.
     let (startup, meaning) = radian_tui::profile::describe(tier, sandbox.as_ref());
-    let tools = build_tools(cli.workspace.as_deref(), sandbox)?;
+    // The MCP servers use the same config file format as `agent-cli`; `HostTools` mounts them
+    // beside the built-in tools and refuses a duplicate tool name rather than shadowing one.
+    let servers = match &cli.mcp_config {
+        Some(path) => load_mcp_config(path)?,
+        None => Vec::new(),
+    };
+    let mcp = McpToolProvider::new(servers);
+    let mcp_configured = mcp.configured();
+    let coding = build_coding_tools(cli.workspace.as_deref(), sandbox)?;
+    let tools = HostTools::new(coding, mcp.clone());
     let (approval_tx, approval_rx) = std::sync::mpsc::channel::<ApprovalPrompt>();
     let approval = match cli.approval.as_str() {
         "on-ask" => radian_permissions::ApprovalPolicy::OnAsk,
@@ -262,6 +282,10 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
             },
         ))
         .map_err(|e| format!("driver: {e}"))?;
+
+    // The session is open now, so the MCP status is known: the servers and tools that actually
+    // connected, not just what was configured.
+    let mcp_open = mcp.status().map(|status| (status.servers, status.tools));
 
     // The driver runs until the UI asks it to stop; dropping its `run()` future releases the
     // borrow so `shutdown()` can be called.
@@ -317,6 +341,8 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
     }
     let mut app = App::new(cli.model.clone(), session_id.clone());
     app.set_context_window(cli.context_window);
+    app.set_tier(tier.as_str());
+    app.set_mcp(mcp_configured, mcp_open);
     for message in &history {
         app.push_message(message);
     }
@@ -529,34 +555,6 @@ fn session_workspace(cli: &Cli) -> Result<String, String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
-/// A per-process identifier, opaque to the server (the same shape `agent-cli` generates).
-fn generate_session_id() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{nanos:x}-{:x}", std::process::id())
-}
-
-/// A session id becomes a file name, so it must not be able to escape the session directory
-/// or name another file.
-fn validate_session_id(id: &str) -> Result<(), String> {
-    let ok = !id.is_empty()
-        && id.len() <= 128
-        && id != "."
-        && id != ".."
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
-    if ok {
-        Ok(())
-    } else {
-        Err(format!(
-            "session id {id:?} must be 1-128 characters of [A-Za-z0-9._-]"
-        ))
-    }
-}
-
 /// Opens (or resumes) the session file. The caller has already resolved `session_id`.
 fn open_journal(
     cli: &Cli,
@@ -621,65 +619,25 @@ fn list_sessions(cli: &Cli) -> Result<(), String> {
     Ok(())
 }
 
-/// The tool provider the TUI mounts. An enum rather than two code paths so `Agent` keeps one
-/// type; `NoTools` is the no-`--workspace` case.
-enum TuiTools {
-    None(NoTools),
-    Coding(Box<CodingTools>),
-}
-
-enum TuiSession {
-    None(NoTools),
-    Coding(Box<CodingSession>),
-}
-
-fn build_tools(workspace: Option<&Path>, sandbox: Option<Sandbox>) -> Result<TuiTools, String> {
+/// The built-in coding tools the TUI mounts, if `--workspace` was given. `shell` exists only
+/// when a sandbox does (radian-coding refuses to advertise it otherwise); without one (the
+/// `safe` tier) the file tools are still there, confined by their own workspace boundary.
+fn build_coding_tools(
+    workspace: Option<&Path>,
+    sandbox: Option<Sandbox>,
+) -> Result<Option<CodingTools>, String> {
     match (workspace, sandbox) {
-        // With a sandbox, `shell` exists and only ever runs under it (radian-coding refuses to
-        // advertise it otherwise). Without one (the `safe` tier), the file tools are still
-        // there, confined by their own workspace boundary.
         (Some(dir), Some(sandbox)) => {
             let tools = CodingTools::with_sandbox(dir, sandbox)
                 .map_err(|e| format!("--workspace {}: {e}", dir.display()))?;
-            Ok(TuiTools::Coding(Box::new(tools)))
+            Ok(Some(tools))
         }
         (Some(dir), None) => {
             let tools =
                 CodingTools::new(dir).map_err(|e| format!("--workspace {}: {e}", dir.display()))?;
-            Ok(TuiTools::Coding(Box::new(tools)))
+            Ok(Some(tools))
         }
-        (None, _) => Ok(TuiTools::None(NoTools)),
-    }
-}
-
-impl ToolProvider for TuiTools {
-    type Session = TuiSession;
-
-    async fn open_session(&self) -> Result<TuiSession, ToolError> {
-        Ok(match self {
-            TuiTools::None(tools) => TuiSession::None(tools.open_session().await?),
-            TuiTools::Coding(tools) => TuiSession::Coding(Box::new(tools.open_session().await?)),
-        })
-    }
-}
-
-impl ToolSession for TuiSession {
-    fn tool_specs(&self) -> &[ToolSpec] {
-        match self {
-            TuiSession::None(session) => session.tool_specs(),
-            TuiSession::Coding(session) => session.tool_specs(),
-        }
-    }
-
-    async fn execute(
-        &self,
-        call: &ToolCall,
-        cx: ToolContext<'_>,
-    ) -> Result<ToolOutput, ToolFailure> {
-        match self {
-            TuiSession::None(session) => session.execute(call, cx).await,
-            TuiSession::Coding(session) => session.execute(call, cx).await,
-        }
+        (None, _) => Ok(None),
     }
 }
 
@@ -738,7 +696,7 @@ impl AuditSink for JournalAudit {
     }
 }
 
-fn build_model(cli: &Cli) -> Result<OpenAiCompatible, String> {
+fn build_model(cli: &Cli, headers: Vec<(String, String)>) -> Result<OpenAiCompatible, String> {
     let key = std::env::var(&cli.api_key_env)
         .ok()
         .filter(|k| !k.is_empty());
@@ -746,12 +704,10 @@ fn build_model(cli: &Cli) -> Result<OpenAiCompatible, String> {
     if let Some(key) = key {
         config = config.with_api_key(ApiKey::new(key));
     }
-    for header in &cli.header {
-        let (name, value) = header
-            .split_once('=')
-            .ok_or_else(|| format!("--header must be NAME=VALUE: {header:?}"))?;
-        config.headers.push((name.to_string(), value.to_string()));
-    }
+    // Parsed by `radian_host::parse_headers`: `{session_id}` already expanded, names
+    // validated, `authorization` refused. This function never touches the raw `--header`
+    // strings, so a malformed one cannot leak its value here.
+    config.headers = headers;
     OpenAiCompatible::new(config).map_err(|e| format!("--base-url {}: {e}", cli.base_url))
 }
 

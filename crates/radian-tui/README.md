@@ -17,7 +17,7 @@ scrolls itself, streaming text and reasoning, and clean terminal recovery.
 ├──────────────────────────────────────────────────────────────┤
 │ message  (type here)                                          │
 └──────────────────────────────────────────────────────────────┘
- model │ idle/running/cancelled │ scroll N/M follow|paused
+ model │ idle/running/cancelled │ tier │ usage in/out │ mcp servers/tools │ context │ scroll N/M
 ```
 
 | Key | Action |
@@ -68,6 +68,9 @@ The transcript owns its scrolling:
 | 11 | a failed sandbox probe refuses instead of running unsandboxed | `tests/pty.rs` |
 | 12 | shell approval shows the whole command; a capped result keeps the truncation marker visible; a compound command always asks | `tests/pty.rs` |
 | 13 | budget stop sends nothing and shows the honest wording; continue relaxes one request; the guard resumes; no window says the guard is off | `tests/pty.rs`, `tests/budget.rs` |
+| 14 | `--header` `{session_id}` expands for new and resumed sessions; `authorization` and a malformed header are refused without echoing the value | `tests/pty.rs` |
+| 15 | `--mcp-config` mounts the fixture; its tool runs through the approval dialog; the status bar shows the connected servers/tools; the startup notice names the MCP sandbox gap | `tests/pty.rs` |
+| 16 | the status bar shows the tier, reported usage (or `none`) and the MCP counts; a 60-column terminal drops the long segments and marks it | `tests/status.rs` |
 | — | Enter=followup idle / steer running; Ctrl-C cancel-then-quit | `tests/input.rs` |
 
 ## Must be hand-tested in a real terminal
@@ -95,6 +98,12 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   **terminal emulator's own** (drag to select, Cmd-C on macOS, or the emulator's copy key).
   The caveat ADR 0009 notes applies: a selection that spans the input box and the transcript
   follows the emulator's rules, not ours. Verify it selects what you expect.
+- **the MCP approval box**: with `--mcp-config`, an MCP tool call prompts like any other. Is
+  the tool name (`server__tool`) and the argument preview clear at your width, and is it
+  obvious the server runs outside the sandbox (the startup notice says so)?
+- **the status bar at your usual width**: is the tier / usage / mcp / context order readable,
+  and does the truncation (`…`) drop what you would have dropped? The pty and `TestBackend`
+  tests assert the text and the 60-column rule, not the feel.
 
 Suggested 3-line manual pass (in a throwaway terminal, not your working one):
 
@@ -121,10 +130,11 @@ was not recorded. **All items passed**:
 
 The owner has usability feedback on the UI that is not recorded yet; it comes later.
 
-Gap found while preparing the test: the TUI's `--header` takes a literal value and has no
-`{session_id}` placeholder, unlike `agent-cli`. For the opencode endpoint the test had to pass
-the same literal as the session id and the header. **Follow-up:** support the placeholder in
-the TUI, or share the header parsing with `agent-cli`.
+Gap found while preparing the test: the TUI's `--header` took a literal value and had no
+`{session_id}` placeholder, unlike `agent-cli`. **Fixed in slice D**: both hosts now use
+`radian-host`'s parser, so `{session_id}` expands (for `--session-id` and `--resume`),
+`authorization` is refused, names are validated, and a malformed argument never echoes its
+value.
 
 ## The panic path unwinds, with a bounded runtime shutdown (2026-10-12)
 
@@ -207,10 +217,16 @@ by one is resumable by the other:
 
 `--model`, `--base-url`, `--api-key-env` (default `OPENAI_API_KEY`), `--header NAME=VALUE`,
 `--system`, `--session-dir`, `--session-id`, `--resume`, `--list`, `--workspace DIR`,
+`--mcp-config FILE`,
 `--profile safe|workspace-write|full-access` (default `workspace-write`),
 `--approval on-ask|always|never` (default `on-ask`), `--allow-shell-command PREFIX`,
 `--context-window TOKENS`. The key is read only from the named environment variable and is
 never printed.
+
+`--header`, `--mcp-config` and the session-id rules are the **same code** `agent-cli` uses
+(`crates/radian-host`), so the two hosts cannot drift: `{session_id}` expands to the
+process's id (or the resumed one), `authorization` is refused because the key has one source,
+and a malformed argument is reported without echoing its value.
 
 ## Tools, permissions and the approval dialog
 
@@ -308,6 +324,45 @@ Keys, while the input box is empty (so typing is never swallowed):
 
 There is no fork option: an option that does nothing would be worse than its absence (Phase 5
 owns fork/rewind).
+
+## MCP servers
+
+`--mcp-config FILE` starts MCP stdio servers from the same JSON file `agent-cli` reads:
+
+```json
+{"servers": [{"id": "fx", "command": "/path/to/server", "args": [], "env": {},
+             "call_timeout_secs": 30}]}
+```
+
+- The servers' tools are mounted beside the built-in tools under `server__tool` aliases
+  (`crates/radian-host`'s provider). A name collision fails the session rather than silently
+  shadowing a built-in tool.
+- Under `workspace-write` an MCP call is an `ask`: it goes through the same approval dialog
+  as a built-in tool. `safe` denies MCP; `full-access` allows it.
+- **The servers themselves are not sandboxed** (ADR 0012 option B). The `workspace-write`
+  startup notice says so, because the notice is the only safeguard.
+
+## Status bar
+
+The bottom line carries, most important first:
+
+| Segment | Shows |
+|---|---|
+| model | the `--model` value |
+| turn | `idle` / `running` / `cancelled` |
+| tier | `safe` / `workspace-write` / `full-access` |
+| usage | `usage <input>/<output>` from **provider-reported** totals; `-` for a field never reported, `none` for a session with no reports |
+| mcp | `mcp off`, `mcp N/…` (configured, not open) or `mcp servers/tools` (what connected) |
+| context | the ADR 0015 wording above |
+| scroll | `scroll N/M follow|paused` |
+
+Usage is never estimated: if the provider reports no usage, the bar says `usage none`, and a
+half-reported response shows only the half it reported.
+
+**Narrow terminals**: segments are ordered most-important-first, and the line never wraps.
+When they do not fit, the rightmost segments are dropped one at a time and a `…` marks the
+truncation. At 60 columns the model, turn, tier, usage and MCP counts survive; the long
+context text and the scroll position are the first to go. The last segment is never dropped.
 
 ## Tool display
 

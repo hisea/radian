@@ -10,7 +10,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use radian_permissions::ApprovalRequest;
 
-use crate::app::{App, Entry, EntryKind, TurnState, budget_status_text};
+use crate::app::{App, Entry, EntryKind, TurnState, budget_status_text, mcp_text, usage_text};
 
 /// Reasoning is dim and italic; it must be visually distinct from assistant text (ADR 0014).
 pub fn reasoning_style() -> Style {
@@ -176,7 +176,16 @@ fn approval_height(request: &ApprovalRequest, width: usize) -> u16 {
     (rows as u16 + 2).clamp(5, 14)
 }
 
-fn status_line(app: &App) -> Line<'static> {
+/// One status-bar segment: its text and its style.
+struct Segment {
+    text: String,
+    style: Style,
+}
+
+/// The status-bar segments, most important first. The order is the truncation order: a narrow
+/// terminal drops the rightmost segments first, so the model, the turn state, the permission
+/// tier, the usage and the MCP state survive and only the long context/scroll text can go.
+fn status_segments(app: &App) -> Vec<Segment> {
     let turn_style = match app.turn {
         TurnState::Idle => Style::default().fg(Color::Green),
         TurnState::Running => Style::default().fg(Color::Yellow),
@@ -187,32 +196,88 @@ fn status_line(app: &App) -> Line<'static> {
     } else {
         format!("{}/{}", app.scroll, app.max_scroll)
     };
-    let mut spans = vec![
-        Span::styled(
-            format!(" {} ", app.model_name),
-            Style::default().fg(Color::Cyan),
-        ),
-        Span::raw("│ "),
-        Span::styled(app.turn.label(), turn_style),
-        Span::raw(format!(
-            " │ scroll {position} {} ",
-            if app.follow { "follow" } else { "paused" }
-        )),
+    let mut segments = vec![
+        Segment {
+            text: format!(" {} ", app.model_name),
+            style: Style::default().fg(Color::Cyan),
+        },
+        Segment {
+            text: app.turn.label().to_string(),
+            style: turn_style,
+        },
     ];
-    spans.push(Span::styled(
-        format!(
-            " │ {} ",
-            budget_status_text(app.context_window, app.budget_report.as_ref())
+    if let Some(tier) = &app.tier {
+        segments.push(Segment {
+            text: tier.clone(),
+            style: Style::default().fg(Color::Blue),
+        });
+    }
+    segments.push(Segment {
+        text: usage_text(app.usage_input, app.usage_output),
+        style: Style::default().fg(Color::Green),
+    });
+    segments.push(Segment {
+        text: mcp_text(app.mcp_configured, app.mcp_open),
+        style: Style::default().fg(Color::Cyan),
+    });
+    segments.push(Segment {
+        text: budget_status_text(app.context_window, app.budget_report.as_ref()),
+        style: Style::default().fg(Color::Magenta),
+    });
+    segments.push(Segment {
+        text: format!(
+            "scroll {position} {}",
+            if app.follow { "follow" } else { "paused" }
         ),
-        Style::default().fg(Color::Magenta),
-    ));
+        style: Style::default(),
+    });
     if let Some(note) = &app.note {
-        spans.push(Span::styled(
-            note.clone(),
-            Style::default().fg(Color::Yellow),
-        ));
+        segments.push(Segment {
+            text: note.clone(),
+            style: Style::default().fg(Color::Yellow),
+        });
+    }
+    segments
+}
+
+/// Fits the segments into `width` display columns. Segments that do not fit are dropped from
+/// the right (the least important) and a `…` marks the truncation, so the line never wraps
+/// and never pushes the model off the screen. The last segment is never dropped, so a very
+/// narrow terminal still shows something.
+fn fit_segments(segments: Vec<Segment>, width: usize) -> Line<'static> {
+    const SEP: &str = " │ ";
+    let measure = |segments: &[Segment]| -> usize {
+        segments
+            .iter()
+            .map(|segment| UnicodeWidthStr::width(segment.text.as_str()))
+            .sum::<usize>()
+            + UnicodeWidthStr::width(SEP) * segments.len().saturating_sub(1)
+    };
+    let mut segments = segments;
+    let mut dropped = false;
+    while measure(&segments) > width && segments.len() > 1 {
+        segments.pop();
+        dropped = true;
+    }
+    // The marker itself needs a column.
+    while dropped && measure(&segments) + 1 > width && segments.len() > 1 {
+        segments.pop();
+    }
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (index, segment) in segments.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw(SEP));
+        }
+        spans.push(Span::styled(segment.text, segment.style));
+    }
+    if dropped {
+        spans.push(Span::styled("…", Style::default().fg(Color::DarkGray)));
     }
     Line::from(spans)
+}
+
+fn status_line(app: &App, width: usize) -> Line<'static> {
+    fit_segments(status_segments(app), width)
 }
 
 /// Draws one frame. Also feeds the measured transcript size back into `app` so scroll keys
@@ -269,5 +334,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
     }
 
-    frame.render_widget(Paragraph::new(status_line(app)), chunks[2]);
+    frame.render_widget(
+        Paragraph::new(status_line(app, chunks[2].width as usize)),
+        chunks[2],
+    );
 }
