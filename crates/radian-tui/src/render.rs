@@ -310,7 +310,11 @@ struct Segment {
 /// terminal drops the rightmost segments first, so the model, the turn state, the permission
 /// tier, the usage and the MCP state survive and only the long context/scroll text can go.
 fn status_segments(app: &App) -> Vec<Segment> {
-    let turn_style = match app.turn {
+    // The session facts come from the projection, not from `App` (ADR 0023 U5). One read, so
+    // the whole status bar is one instant.
+    let session = app.projection.read();
+    let turn = session.turn();
+    let turn_style = match turn {
         TurnState::Idle => app.theme.turn_idle,
         TurnState::Running => app.theme.turn_running,
         TurnState::Cancelled => app.theme.turn_cancelled,
@@ -326,7 +330,7 @@ fn status_segments(app: &App) -> Vec<Segment> {
             style: app.theme.model,
         },
         Segment {
-            text: app.turn.label().to_string(),
+            text: turn.label().to_string(),
             style: turn_style,
         },
     ];
@@ -337,28 +341,25 @@ fn status_segments(app: &App) -> Vec<Segment> {
             style: app.theme.find,
         });
     }
-    if let Some(tier) = &app.tier {
+    if let Some(tier) = session.tier() {
         segments.push(Segment {
-            text: tier.clone(),
+            text: tier.to_owned(),
             style: app.theme.tier,
         });
     }
     segments.push(Segment {
-        text: usage_text(app.usage_input, app.usage_output),
+        text: usage_text(session.usage_input(), session.usage_output()),
         style: app.theme.usage,
     });
     segments.push(Segment {
-        text: mcp_text(app.mcp_configured, app.mcp_open),
+        text: mcp_text(session.mcp_configured(), session.mcp_open()),
         style: app.theme.mcp,
     });
     // ADR 0018: over the input budget `B` the request is still sent, but the status bar
     // warns (the existing warning colour).
-    let over_budget = app
-        .budget_report
-        .as_ref()
-        .is_some_and(agent_core::over_budget);
+    let over_budget = session.budget().is_some_and(agent_core::over_budget);
     segments.push(Segment {
-        text: budget_status_text(app.context_window, app.budget_report.as_ref()),
+        text: budget_status_text(session.context_window(), session.budget()),
         style: if over_budget {
             app.theme.budget_over
         } else {

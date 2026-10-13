@@ -236,3 +236,18 @@ Base `4866944` · 一次性检出 `/tmp/ask-mut`（detached，跑完删除）· 
 
 2/2 抓住。A7 说明"session 关闭 → 问题得到 `prompter_gone`"这条映射有测试钉住；
 A8 说明共享队列的按 session 隔离没有因为两种请求共用一条队列而丢失。
+
+## ADR 0023 Step 1 · PR ④：Session Facade 与投影（2026-10-13）
+
+Base `7b811b7`（合并 PR ③ 后的 `5dcac58` 上原样重跑，同样 4/4 抓住）· 一次性检出（detached，跑完删除）· 独立 target · `--no-fail-fast`；
+每个变异后从副本还原，结束时 `git status --short` 只剩变异脚本。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| S1 | `LocalSession::command` 去掉能力校验（直接执行） | ✅ 抓住 | `session::a_local_session_refuses_a_command_it_does_not_declare` |
+| S2 | `SessionProjection::write` 先置脏标志、后写值 | ✅ 抓住 | `projection::tests::the_value_is_written_before_the_flag_is_set` |
+| S3 | `open_session` 忽略 `SessionSetup.capabilities`，一律声明全部能力 | ✅ 抓住 | `session::a_local_session_refuses_a_command_it_does_not_declare` |
+| S4 | `open_session` 不写 MCP 事实（`projection.set_mcp`） | ✅ 抓住 | `radian-tui` 的 `pty_mcp_tools_run_through_approval_and_the_status_bar_shows_them` |
+
+4/4 抓住。S1 与 S3 是同一个断言的两次独立破坏：一次在**执行前**的校验，一次在**声明**的来源；
+宿主"再次校验、不信任 UI"的两半都被钉住。S2 同时说明"先写值、再置标志"的顺序不是注释。

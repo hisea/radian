@@ -2,14 +2,12 @@
 //! and `radian-tui` mount exactly the same combination — built-in coding tools plus MCP
 //! servers behind one `ToolProvider` — and the same duplicate-name rule.
 
-pub use radian_host::HostTools as CliTools;
-
 #[cfg(test)]
 mod tests {
-    use super::*;
     use agent_core::{CancellationToken, ToolProvider, ToolSession};
     use agent_extensions::McpToolProvider;
     use radian_coding::CodingTools;
+    use radian_host::HostTools as CliTools;
 
     fn scratch(name: &str) -> std::path::PathBuf {
         let dir =

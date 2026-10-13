@@ -2152,11 +2152,13 @@ dependencies = [
  "radian-coding",
  "radian-memory",
  "radian-permissions",
+ "radian-runtime",
  "radian-sandbox",
  "radian-session",
  "reqwest",
  "serde",
  "serde_json",
+ "thiserror 2.0.21",
  "tokio",
  "toml",
 ]

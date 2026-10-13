@@ -48,7 +48,9 @@ fn assert_tiers(app: &App) {
 #[test]
 fn ctrl_c_cancels_while_an_approval_modal_is_open() {
     let mut app = App::new("m", "s");
-    app.update(Input::Event(AgentEvent::TurnStarted));
+    // The turn state is a session fact written by the event sink (ADR 0023 U5), so the test
+    // sets it on the projection the way the sink would.
+    app.projection.set_turn(TurnState::Running);
     app.update(Input::Approval(request()));
     assert!(app.pending_approval().is_some());
     assert_tiers(&app);
@@ -160,7 +162,8 @@ fn a_rebound_escape_still_reaches_the_transcript() {
     app.on_key(ctrl(KeyCode::Char('x')));
     assert_eq!(app.input.text(), "");
     // The state is running so an empty input would cancel; it is empty only after the clear.
-    let _ = app.turn == TurnState::Idle;
+    // The turn state is a session fact, read from the projection (ADR 0023 U5).
+    let _ = app.projection.read().turn() == TurnState::Idle;
 }
 
 /// Unconsumed input falls toward the surface: while the find overlay is open, PageUp still

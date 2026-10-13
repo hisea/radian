@@ -42,7 +42,7 @@ fn enter_expands_then_sends_a_followup_when_idle_and_a_steer_while_running() {
     let result = app.update(Input::MentionsExpanded(Ok(expanded("hello"))));
     assert_eq!(result.effects, vec![Effect::SendFollowup("hello".into())]);
 
-    app.turn = TurnState::Running;
+    app.projection.set_turn(TurnState::Running);
     app.input = "change of plan".into();
     assert_eq!(
         press(&mut app, key(KeyCode::Enter)),
@@ -118,7 +118,7 @@ fn shift_enter_inserts_a_newline() {
 #[test]
 fn ctrl_c_cancels_a_running_turn_and_quits_when_idle() {
     let mut app = App::new("m", "s");
-    app.turn = TurnState::Running;
+    app.projection.set_turn(TurnState::Running);
     assert_eq!(
         press(
             &mut app,
@@ -128,7 +128,7 @@ fn ctrl_c_cancels_a_running_turn_and_quits_when_idle() {
     );
     assert!(!app.quit);
 
-    app.turn = TurnState::Idle;
+    app.projection.set_turn(TurnState::Idle);
     assert_eq!(
         press(
             &mut app,

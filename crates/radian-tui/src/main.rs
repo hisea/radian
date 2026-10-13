@@ -11,27 +11,20 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
-use agent_core::{
-    Agent, AgentConfig, AgentEvent, ContextBudget, EventSink, InputSource, TurnOptions,
-};
-use agent_extensions::McpToolProvider;
+use agent_core::{AgentEvent, ContextBudget, EventSink, TurnOptions};
 use clap::Parser;
-use radian_coding::CodingTools;
-use radian_host::memory::{InjectionConfig, MemoryHooks, MemoryService, MemoryTools, ProjectState};
+use radian_host::memory::MemoryService;
 use radian_host::{
-    DEFAULT_MAX_TOKENS, HostTools, ModelArgs, Provider, Thinking, build_model,
-    check_provider_flags, load_mcp_config, parse_headers, validate_session_id,
+    DEFAULT_MAX_TOKENS, ModelArgs, Provider, Thinking, build_model, check_provider_flags,
+    load_mcp_config, parse_headers, validate_session_id,
 };
 use radian_permissions::{
-    ApprovalError, ApprovalOutcome, ApprovalRequest, Approver, AuditSink, PermissionHooks,
-    PermissionResolved, runtime_event,
+    ApprovalError, ApprovalOutcome, ApprovalRequest, Approver, AuditSink, PermissionResolved,
+    runtime_event,
 };
-use radian_runtime::{CancelCause, Driver, Inbox};
-use radian_sandbox::Sandbox;
-use radian_session::{Index, SessionCreatedData, SessionJournal};
+use radian_session::{Index, SessionJournal};
 use radian_tui::app::{App, Effect, Input as AppInput, MemoryResult, PickerData};
 use radian_tui::events::{ApprovalPrompt, InputEvent, ProjectionSink, UiEvent};
-use radian_tui::projection::SessionProjection;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
@@ -441,40 +434,13 @@ fn run(
         sandbox_deny_read.push(memory.clone());
     }
     let sandbox = radian_tui::profile::build_sandbox(tier, &workspace_path, &sandbox_deny_read)?;
-    // The description is taken before the sandbox moves into the tools.
-    let (startup, meaning) = radian_tui::profile::describe(tier, sandbox.as_ref());
     // The MCP config file is read and validated here: before any server process starts and
-    // before a session file exists, so a bad file leaves nothing behind (dogfooding D2).
+    // before a session file exists, so a bad file leaves nothing behind (dogfooding D2). The
+    // MCP provider itself, the memory service and the coding tools are built by
+    // `radian_host::open_session` (ADR 0023 U5).
     let servers = match &cli.mcp_config {
         Some(path) => load_mcp_config(path)?,
         None => Vec::new(),
-    };
-    let mcp = McpToolProvider::new(servers);
-    let mcp_configured = mcp.configured();
-    let coding = build_coding_tools(cli.workspace.as_deref(), sandbox)?;
-    // ADR 0021: the same service `agent memory` uses, plus the agent tools and the injection
-    // hook. `None` only when neither `RADIAN_HOME` nor `HOME` is set.
-    let injection_config = InjectionConfig::default();
-    let memory_service = memory_root
-        .as_ref()
-        .map(|root| MemoryService::open(&workspace_path, root));
-    let memory_tools = memory_service
-        .as_ref()
-        .map(|service| MemoryTools::new(service.clone()));
-    let memory_notice = match &memory_service {
-        Some(service) => match service.state() {
-            Ok(ProjectState::Known(project)) => format!(
-                "[memory] project {project}; injection on, up to {} tokens",
-                injection_config.max_tokens
-            ),
-            Ok(ProjectState::Unlinked { .. }) => format!(
-                "[memory] no project linked; global memory only (`agent memory project new` or \
-                 `relink`); injection on, up to {} tokens",
-                injection_config.max_tokens
-            ),
-            Err(error) => format!("[memory] unavailable: {error}"),
-        },
-        None => "[memory] disabled (no RADIAN_HOME or HOME)".to_owned(),
     };
     let approval = match cli.approval.as_str() {
         "on-ask" => radian_permissions::ApprovalPolicy::OnAsk,
@@ -517,16 +483,6 @@ fn run(
         eprintln!("{warning}");
     }
 
-    // Every startup check that can fail is done. Only now is the session file created; a
-    // failure above leaves the session directory untouched (dogfooding D2).
-    let journal = open_journal(
-        &cli,
-        &session_id,
-        &dir,
-        &workspace_path.to_string_lossy(),
-        provider,
-        &model_name,
-    )?;
     // D4: panics after this point get a log in the diagnostics directory (ADR 0013 decision
     // 4), not next to the session: the session is the authoritative record and must not be
     // treated as a cache. Set before the terminal is entered; the hook reads it on a panic.
@@ -538,35 +494,11 @@ fn run(
     });
     let secrets_for_errors = Arc::new(secrets.clone());
     radian_tui::terminal::set_panic_log(panic_log, secrets);
-    // The history of a resumed session is rendered before the first frame, so the transcript
-    // shows it from the start. `Driver::open` recovers the same history from the journal for
-    // the model; this is only the view of it.
-    let history = if cli.resume.is_some() {
-        radian_session::Session::open(dir.join(format!("{session_id}.jsonl")))
-            .and_then(|session| session.history())
-            .map_err(|e| format!("cannot read session {session_id:?}: {e}"))?
-    } else {
-        Vec::new()
-    };
-    let inbox = Inbox::durable(64, Arc::clone(&journal));
 
-    // The projection holds the streaming deltas; the sink forwards everything else as a fact
-    // (ADR 0023 U2). One session in this build, so one projection.
-    let projection = Arc::new(SessionProjection::new());
+    // The session facts the renderer reads, and the sink that writes them (ADR 0023 U2/U5).
+    let projection = Arc::new(radian_host::SessionProjection::new());
     let live: Arc<dyn EventSink> =
         Arc::new(ProjectionSink::new(tx.clone(), Arc::clone(&projection)));
-    let agent_config = AgentConfig {
-        system_prompt: cli.system.clone(),
-        // No window known means the budget is off, never a guessed default (ADR 0015); the
-        // window comes from the catalog or `--context-window` (ADR 0018).
-        context_budget: window.budget.map(ContextBudget::new),
-        auto_compact: !cli.no_auto_compact && config.compaction.auto.unwrap_or(true),
-        ..AgentConfig::default()
-    };
-
-    // Tools, permissions and approval. The permission layer decides allow/ask/deny; this
-    // process is the host that answers `ask` through the UI, and writes every decision to the
-    // session journal as a `PermissionResolved` (audit only, ADR 0006 §5.9).
     // `--yes` swaps the approver for one that answers "allow once" without asking; rules,
     // the sandbox and the audit record are untouched by it (same as `agent --yes`).
     let approver: Arc<dyn Approver> = if cli.yes {
@@ -574,98 +506,99 @@ fn run(
     } else {
         Arc::new(TuiApprover { tx: tx.clone() })
     };
-    let hooks = Arc::new(PermissionHooks::new(
-        profile,
-        Some(approver),
-        Arc::new(JournalAudit {
-            journal: Arc::clone(&journal),
-            runtime: runtime.handle().clone(),
-        }),
-    ));
-    // ADR 0021 D6: injection is the second hook in the chain; a memory failure is a notice,
-    // never a failed turn.
-    let memory_hooks = Arc::new(MemoryHooks::new(
-        memory_service.clone(),
-        Arc::clone(&journal),
-        injection_config,
-        Arc::new(|message: &str| eprintln!("radian-tui: [memory] {message}")),
-    ));
-    let agent = Arc::new(
-        Agent::new(model, HostTools::new(coding, memory_tools, mcp.clone()))
-            .with_config(agent_config)
-            .with_hooks((Arc::clone(&hooks), Arc::clone(&memory_hooks))),
-    );
+    // The audit sink needs the journal, which `open_session` creates; the binding is a factory
+    // for that reason.
+    let audit: Arc<dyn Fn(Arc<SessionJournal>) -> Arc<dyn AuditSink> + Send + Sync> = {
+        let runtime = runtime.handle().clone();
+        Arc::new(move |journal: Arc<SessionJournal>| -> Arc<dyn AuditSink> {
+            Arc::new(JournalAudit {
+                journal,
+                runtime: runtime.clone(),
+            })
+        })
+    };
+    let runtime_events = {
+        let tx = tx.clone();
+        let secrets = Arc::clone(&secrets_for_errors);
+        Arc::new(move |event: &radian_session::RuntimeEvent| {
+            let redacted = match event {
+                radian_session::RuntimeEvent::TurnFailed { turn_id, message } => {
+                    radian_session::RuntimeEvent::TurnFailed {
+                        turn_id: turn_id.clone(),
+                        message: radian_tui::terminal::redact(message, &secrets),
+                    }
+                }
+                other => other.clone(),
+            };
+            let _ = tx.send(UiEvent::Runtime(redacted));
+        })
+    };
+    let driver_stopped = {
+        let tx = tx.clone();
+        Arc::new(move || {
+            let _ = tx.send(UiEvent::DriverStopped);
+        })
+    };
+    let before_driver: Option<Arc<dyn Fn() + Send + Sync>> = cli
+        .panic_in_driver
+        .then(|| Arc::new(panic_in_driver) as Arc<dyn Fn() + Send + Sync>);
+    let memory_warning = Arc::new(|message: &str| eprintln!("radian-tui: [memory] {message}"));
 
-    // MCP server **processes** start here, when the tool session opens. The session file
-    // already exists, so the failure is reported with the way to continue it; the file is
-    // kept because its durable content is real and a later `--resume` can use it.
-    let journal_path = dir.join(format!("{session_id}.jsonl"));
-    let mut driver = runtime
-        .block_on(Driver::open(
-            &agent,
-            Arc::clone(&journal),
-            Arc::clone(&inbox),
-            live,
-            TurnOptions {
-                max_model_calls: Some(cli.max_model_calls),
-                ..TurnOptions::default()
+    // ADR 0023 U5: the one place a session is established; `agent-cli` calls the same function
+    // with its own bindings. Every startup check that can fail has already run, so this is the
+    // first thing that creates durable state.
+    let session = runtime
+        .block_on(radian_host::open_session(
+            radian_host::SessionSetup {
+                session_id: radian_host::SessionId::new(session_id.clone()),
+                session_dir: dir.clone(),
+                workspace: workspace_path.clone(),
+                coding_root: cli.workspace.clone(),
+                model,
+                servers,
+                system_prompt: cli.system.clone(),
+                context_budget: window.budget.map(ContextBudget::new),
+                auto_compact: !cli.no_auto_compact && config.compaction.auto.unwrap_or(true),
+                sandbox,
+                tier: tier.preset(),
+                profile,
+                memory_root,
+                resume: cli.resume.is_some(),
+                config_snapshot: serde_json::json!({
+                    "provider": provider.as_str(),
+                    "model": cli.model,
+                }),
+                turn_options: TurnOptions {
+                    max_model_calls: Some(cli.max_model_calls),
+                    ..TurnOptions::default()
+                },
+                turn_timeout: None,
+                wording: radian_host::TUI_WORDING,
+                capabilities: radian_host::SessionCapability::ALL.to_vec(),
+            },
+            radian_host::HostBindings {
+                approver,
+                audit,
+                events: live,
+                projection: Arc::clone(&projection),
+                runtime_events,
+                driver_stopped,
+                before_driver,
+                memory_warning,
             },
         ))
-        .map_err(|e| {
-            format!(
-                "driver: {e}\n  the session file {} exists; after fixing the problem, \
-                 continue it with `--resume {session_id}`",
-                journal_path.display()
-            )
-        })?;
-
-    // ADR 0017: the driver reports a failed turn over a runtime-event channel. The UI shows
-    // the (host-redacted) message as a transcript notice and stays usable; the driver keeps
-    // running. `AgentEvent` is unchanged, so this is a separate channel.
-    let runtime_tx = tx.clone();
-    let secrets_for_events = Arc::clone(&secrets_for_errors);
-    driver.set_runtime_events(Arc::new(move |event: &radian_session::RuntimeEvent| {
-        let redacted = match event {
-            radian_session::RuntimeEvent::TurnFailed { turn_id, message } => {
-                radian_session::RuntimeEvent::TurnFailed {
-                    turn_id: turn_id.clone(),
-                    message: radian_tui::terminal::redact(message, &secrets_for_events),
-                }
-            }
-            other => other.clone(),
-        };
-        let _ = runtime_tx.send(UiEvent::Runtime(redacted));
-    }));
-
-    // The session is open now, so the MCP status is known: the servers and tools that actually
-    // connected, not just what was configured.
-    let mcp_open = mcp.status().map(|status| (status.servers, status.tools));
-
-    // The driver runs until the UI asks it to stop; dropping its `run()` future releases the
-    // borrow so `shutdown()` can be called.
-    let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
-    let panic_in_driver = cli.panic_in_driver;
-    let driver_task = runtime.spawn(async move {
-        if panic_in_driver {
-            panic!("radian-tui: driver task panic test");
-        }
-        tokio::select! {
-            result = driver.run() => result,
-            _ = &mut stop_rx => {
-                driver.shutdown();
-                driver.run().await
-            }
-        }
-    });
-    // The driver's end is an event, not something the loop polls (ADR 0023 U2). The watcher
-    // owns the handle and hands the result back through a oneshot for the exit code.
-    let (driver_done_tx, driver_done_rx) = tokio::sync::oneshot::channel();
-    let driver_events = tx.clone();
-    runtime.spawn(async move {
-        let result = driver_task.await;
-        let _ = driver_events.send(UiEvent::DriverStopped);
-        let _ = driver_done_tx.send(result);
-    });
+        .map_err(|error| error.to_string())?;
+    let memory_service = session.memory().cloned();
+    // The history of a resumed session is rendered before the first frame, so the transcript
+    // shows it from the start. `Driver::open` recovers the same history from the journal for
+    // the model; this is only the view of it.
+    let history = if cli.resume.is_some() {
+        radian_session::Session::open(session.journal_path())
+            .and_then(|history| history.history())
+            .map_err(|e| format!("cannot read session {session_id:?}: {e}"))?
+    } else {
+        Vec::new()
+    };
 
     if let Some(path) = &cli.block_input {
         let _ = BLOCK_INPUT.set(path.clone());
@@ -699,9 +632,11 @@ fn run(
     // stray `eprintln!` writes cells the renderer's diff then skips (both buffers see a
     // space), so the raw text stays on screen and corrupts the first row.
     let mut app = App::new(model_name.clone(), session_id.clone());
+    // The renderer reads the session facts from the projection the host owns, not a private
+    // copy (ADR 0023 U5).
+    app.set_projection(Arc::clone(&projection));
     // `Tab` (the `complete` action) completes `@` file references against the workspace.
     app.set_workspace(workspace_path.clone());
-    app.set_context_window(window.budget);
     let config_warnings = app
         .apply_config(&config, radian_tui::theme::Theme::no_color_env())
         .map_err(|error| format!("config: {error}"))?;
@@ -748,10 +683,8 @@ fn run(
             .map_err(|e| format!("child.pid: {e}"))?;
         panic!("radian-tui: panic path test with a child in flight");
     }
-    app.set_tier(tier.as_str());
-    app.set_mcp(mcp_configured, mcp_open);
     // `/memory` runs against the same service the agent's tools and injection use.
-    app.set_memory_enabled(memory_service.is_some());
+    app.set_memory_enabled(session.facts().memory_enabled);
     for message in &history {
         app.push_message(message);
     }
@@ -767,12 +700,12 @@ fn run(
     }
     app.entries.push(radian_tui::Entry::new(
         radian_tui::EntryKind::Notice,
-        format!("profile: {startup}"),
+        format!("profile: {}", session.facts().profile_line),
     ));
     // ADR 0012 decision 4: the meaning line must not claim credential isolation.
     app.entries.push(radian_tui::Entry::new(
         radian_tui::EntryKind::Notice,
-        meaning,
+        session.facts().sandbox_facts.clone(),
     ));
     // ADR 0018: the window and exactly where it came from.
     app.entries.push(radian_tui::Entry::new(
@@ -782,7 +715,7 @@ fn run(
     // ADR 0021 D2/D6: the project state and the injection budget.
     app.entries.push(radian_tui::Entry::new(
         radian_tui::EntryKind::Notice,
-        memory_notice,
+        session.facts().memory_notice.clone(),
     ));
     if cli.yes {
         app.entries.push(radian_tui::Entry::new(
@@ -816,12 +749,15 @@ fn run(
         workspace: workspace_path.to_string_lossy().into_owned(),
         session_id: session_id.clone(),
         secrets: secrets_for_errors.as_ref().clone(),
-        journal: Arc::clone(&journal),
+        journal: Arc::clone(session.journal()),
         config_snapshot: serde_json::json!({
             "provider": provider.as_str(),
             "model": cli.model,
         }),
     };
+    let session = Arc::new(session);
+    let facade: Arc<dyn radian_host::SessionFacade> =
+        Arc::clone(&session) as Arc<dyn radian_host::SessionFacade>;
     let outcome = ui_loop(
         &mut terminal,
         &mut app,
@@ -829,11 +765,9 @@ fn run(
         &rx,
         &tx,
         runtime,
-        &inbox,
-        &hooks,
+        &facade,
         &session_host,
         &memory_service,
-        &projection,
     );
     // Tell a pending signal task that the loop left on its own, so it does not force-exit.
     radian_tui::signals::confirm_exit();
@@ -845,26 +779,21 @@ fn run(
         eprintln!("[draft] cannot write {}: {error}", draft.display());
     }
 
-    let _ = stop_tx.send(());
+    session.stop();
     // The driver task is the session: if it died, the failure is the app's failure. A panic
-    // inside it was caught by the runtime, so the watcher hands back a `JoinError`, and the
-    // message the hook recorded is printed now that the alternate screen is gone.
-    // `Ok(Err(..))` is the driver's own error; `Err` from the inner result is the `JoinError` of
-    // a panicking driver; the outer `Err` would be the watcher task dying, which cannot happen.
-    match runtime.block_on(driver_done_rx) {
-        Ok(Ok(Ok(()))) => {}
-        Ok(Ok(Err(error))) => return Err(format!("driver: {error}")),
-        Ok(Err(join_error)) => {
-            let mut message = format!("the driver task ended unexpectedly: {join_error}");
+    // inside it was caught by the runtime, so `join` reports it, and the message the hook
+    // recorded is printed now that the alternate screen is gone.
+    match runtime.block_on(session.join()) {
+        radian_host::DriverEnd::Ok => {}
+        radian_host::DriverEnd::Failed(error) => return Err(format!("driver: {error}")),
+        radian_host::DriverEnd::Panicked(message) => {
+            let mut message = format!("the driver task ended unexpectedly: {message}");
             if let Some(panic) = radian_tui::terminal::last_panic() {
                 // One line: the normal screen gets one reason line (dogfooding D4).
                 message.push_str(": ");
                 message.push_str(&panic);
             }
             return Err(message);
-        }
-        Err(_) => {
-            return Err("the driver task ended unexpectedly: its watcher stopped".to_string());
         }
     }
     // A failure in the UI loop is the app's failure too; the terminal is already restored.
@@ -878,6 +807,11 @@ fn run(
 
 /// Test hook (`--block-input`): a path whose creation marks "the read is now blocked forever".
 /// Set once in `run`; `read_input` writes it and parks.
+/// Test hook (`--panic-in-driver`): the driver task panics, so the exit path can be checked.
+fn panic_in_driver() {
+    panic!("radian-tui: driver task panic test");
+}
+
 static BLOCK_INPUT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
 /// Parks forever when the `--block-input` test hook is on, writing its marker once.
@@ -1094,15 +1028,30 @@ fn coalesce_resize(rows: u16, cols: u16) -> InputEvent {
 
 /// The loop's side of the world (ADR 0023 U2/U3): everything handling an event or running an
 /// effect needs. The app stays pure; this is where the outside lives.
+/// What a `Dirty` notification means (ADR 0023 U2): clear the flag **first**, then read the
+/// projection, and always draw a frame when the read succeeded. The frame reads the projection
+/// for every other fact (turn, usage, budget, tier, MCP), so a fact-only update with an empty
+/// streaming buffer still changes what is on screen. `false` means another `Dirty` is already
+/// in flight, so this one is coalesced away.
+fn apply_dirty(app: &mut App) -> bool {
+    match app.projection.take_snapshot() {
+        Some(snapshot) => {
+            app.update(AppInput::Stream(snapshot));
+            true
+        }
+        None => false,
+    }
+}
+
 struct LoopContext<'a> {
     workspace: &'a Path,
     runtime: &'a tokio::runtime::Runtime,
-    inbox: &'a Arc<Inbox>,
-    hooks: &'a Arc<PermissionHooks>,
+    /// The UI's one handle on the session (ADR 0023 U5): commands go through it, and it
+    /// re-validates the capability the UI declared.
+    session: &'a Arc<dyn radian_host::SessionFacade>,
     memory: &'a Option<MemoryService>,
     host: &'a SessionHost,
     tx: &'a Sender<UiEvent>,
-    projection: &'a SessionProjection,
     /// The reply channels of the approval prompts on screen, by request id.
     approval_replies: HashMap<String, tokio::sync::oneshot::Sender<ApprovalOutcome>>,
     /// The signal that stopped the loop, if any: it decides the reason line (and, in `main`,
@@ -1128,15 +1077,7 @@ impl LoopContext<'_> {
             UiEvent::Input(InputEvent::Resize { rows, cols }) => {
                 app.update(AppInput::Resize { rows, cols })
             }
-            UiEvent::Dirty => {
-                // ADR 0023 U2: clear the flag **first**, then read the projection. An update
-                // that happens after this swap sets the flag again and sends another `Dirty`,
-                // so no wake-up is lost.
-                match self.projection.take_snapshot() {
-                    Some(snapshot) => app.update(AppInput::Stream(snapshot)),
-                    None => return false,
-                }
-            }
+            UiEvent::Dirty => return apply_dirty(app),
             UiEvent::Signal(signal) => {
                 // Leave through the ordinary clean-exit path: the terminal is restored, the
                 // driver is stopped, and `main` prints the reason (a signal exits
@@ -1172,26 +1113,13 @@ impl LoopContext<'_> {
     /// picks it up on the next round.
     fn execute(&mut self, effect: Effect) -> Result<(), String> {
         match effect {
+            // ADR 0023 U5: the UI asks the session through its facade; the facade declares
+            // what it can do and re-checks when the command runs.
             Effect::SendFollowup(text) => {
-                // `HookContext` has no source field, so the host declares each turn's source
-                // before it starts; an unset source is treated as non-human and denied.
-                self.hooks.set_turn_source(Some(InputSource::User));
-                self.runtime
-                    .block_on(self.inbox.followup(text, InputSource::User))
-                    .map(|_| ())
-                    .map_err(|e| e.to_string())
+                self.command(radian_host::SessionCommand::SendFollowup(text))
             }
-            Effect::Steer(text) => {
-                self.hooks.set_turn_source(Some(InputSource::User));
-                self.runtime
-                    .block_on(self.inbox.steer(text, InputSource::User))
-                    .map(|_| ())
-                    .map_err(|e| e.to_string())
-            }
-            Effect::Cancel => {
-                self.inbox.cancel(CancelCause::Requested);
-                Ok(())
-            }
+            Effect::Steer(text) => self.command(radian_host::SessionCommand::Steer(text)),
+            Effect::Cancel => self.command(radian_host::SessionCommand::Cancel),
             Effect::Quit => Ok(()),
             Effect::AnswerApproval {
                 request_id,
@@ -1247,14 +1175,15 @@ impl LoopContext<'_> {
                 Ok(())
             }
             Effect::Compact { instructions } => {
-                // The driver runs the request between turns, so this must not block the UI:
-                // spawn it and send the result as an event when it lands.
-                let inbox = Arc::clone(self.inbox);
+                // The facade runs the request between turns and reports the outcome here; the
+                // result becomes an event like every other effect result.
                 let tx = self.tx.clone();
-                self.runtime.spawn(async move {
-                    let result = inbox.compact(instructions).await;
-                    let _ = tx.send(UiEvent::Command(AppInput::CompactDone(result)));
-                });
+                self.session.compact(
+                    instructions,
+                    Box::new(move |result| {
+                        let _ = tx.send(UiEvent::Command(AppInput::CompactDone(result)));
+                    }),
+                );
                 Ok(())
             }
             Effect::Session(request) => {
@@ -1266,6 +1195,19 @@ impl LoopContext<'_> {
                 self.send(load_picker(self.host, query));
                 Ok(())
             }
+        }
+    }
+
+    /// Runs one session command. A refusal the facade reports (an undeclared capability) is a
+    /// notice, not a fatal loop error; an inbox rejection keeps its old path.
+    fn command(&mut self, command: radian_host::SessionCommand) -> Result<(), String> {
+        match self.session.command(command) {
+            Ok(()) => Ok(()),
+            Err(refused) if refused.capability.is_some() => {
+                self.send(AppInput::CommandRefused(refused));
+                Ok(())
+            }
+            Err(refused) => Err(refused.reason),
         }
     }
 
@@ -1283,21 +1225,17 @@ fn ui_loop(
     rx: &Receiver<UiEvent>,
     tx: &Sender<UiEvent>,
     runtime: &tokio::runtime::Runtime,
-    inbox: &Arc<Inbox>,
-    hooks: &Arc<PermissionHooks>,
+    session: &Arc<dyn radian_host::SessionFacade>,
     host: &SessionHost,
     memory: &Option<MemoryService>,
-    projection: &SessionProjection,
 ) -> Result<Option<i32>, String> {
     let mut ctx = LoopContext {
         workspace,
         runtime,
-        inbox,
-        hooks,
+        session,
         memory,
         host,
         tx,
-        projection,
         approval_replies: HashMap::new(),
         signal: None,
     };
@@ -1552,45 +1490,6 @@ fn session_workspace(cli: &Cli) -> Result<String, String> {
         .into_owned())
 }
 
-/// Opens (or resumes) the session file. The caller has already resolved `session_id`.
-fn open_journal(
-    cli: &Cli,
-    session_id: &str,
-    dir: &Path,
-    workspace: &str,
-    provider: Provider,
-    model: &str,
-) -> Result<Arc<SessionJournal>, String> {
-    let path = dir.join(format!("{session_id}.jsonl"));
-    if cli.resume.is_some() {
-        if !path.exists() {
-            return Err(format!("no session {session_id:?} in {}", dir.display()));
-        }
-        return SessionJournal::resume(&path, session_id)
-            .map(Arc::new)
-            .map_err(|e| format!("cannot resume session {session_id:?}: {e}"));
-    }
-    radian_session::ensure_private_dir(dir)
-        .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    // The snapshot is a model route reference only: never the key, a header value or a base
-    // URL that could carry credentials (ADR 0008 §4, ADR 0013).
-    let created = SessionCreatedData::new(
-        workspace,
-        serde_json::json!({"provider": provider.as_str(), "model": model}),
-    );
-    match SessionJournal::create(&path, session_id, created) {
-        Ok(journal) => Ok(Arc::new(journal)),
-        // A complete session already occupies the file. Name the command that continues it
-        // (dogfooding D15); a torn tail is still truncated by `create`.
-        Err(radian_session::WriteError::NotEmpty { .. }) => Err(format!(
-            "session {session_id:?} already exists in {}; continue it with `--resume \
-             {session_id}`",
-            dir.display()
-        )),
-        Err(e) => Err(format!("cannot create session {session_id:?}: {e}")),
-    }
-}
-
 /// `--list`: this workspace's sessions, newest activity first. Same columns as `agent-cli`.
 /// The Phase 4 startup picker: opens the workspace index, lists the sessions, and (when there
 /// are any) runs the full-screen picker. `Ok(None)` means there are no sessions yet, so the
@@ -1674,28 +1573,6 @@ fn list_sessions(cli: &Cli) -> Result<(), ListError> {
     Ok(())
 }
 
-/// The built-in coding tools the TUI mounts, if `--workspace` was given. `shell` exists only
-/// when a sandbox does (radian-coding refuses to advertise it otherwise); without one (the
-/// `safe` tier) the file tools are still there, confined by their own workspace boundary.
-fn build_coding_tools(
-    workspace: Option<&Path>,
-    sandbox: Option<Sandbox>,
-) -> Result<Option<CodingTools>, String> {
-    match (workspace, sandbox) {
-        (Some(dir), Some(sandbox)) => {
-            let tools = CodingTools::with_sandbox(dir, sandbox)
-                .map_err(|e| format!("--workspace {}: {e}", dir.display()))?;
-            Ok(Some(tools))
-        }
-        (Some(dir), None) => {
-            let tools =
-                CodingTools::new(dir).map_err(|e| format!("--workspace {}: {e}", dir.display()))?;
-            Ok(Some(tools))
-        }
-        (None, _) => Ok(None),
-    }
-}
-
 /// The host side of `ask`: forwards the request to the UI thread and waits for the answer.
 /// The permission layer races this future against the turn's cancellation, so a prompt that
 /// is never answered (Ctrl-C, quit) resolves as a denial instead of hanging.
@@ -1754,6 +1631,24 @@ impl AuditSink for JournalAudit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR 0023 U5: a fact-only update (usage, budget, tier, MCP) wakes the UI with a `Dirty`
+    /// and the buffer is empty. The loop must still draw a frame, or the status bar would stay
+    /// stale until some unrelated event arrived.
+    #[test]
+    fn a_dirty_notification_with_an_empty_stream_still_draws() {
+        let projection = Arc::new(radian_host::SessionProjection::new());
+        let mut app = App::new("m", "s");
+        app.set_projection(Arc::clone(&projection));
+        // The fact-only update: no delta, so the stream snapshot is empty.
+        assert!(projection.set_context_window(Some(1000)));
+        assert!(
+            apply_dirty(&mut app),
+            "a fact update must draw a frame even with an empty stream"
+        );
+        // And a second `Dirty` that finds the flag already cleared is coalesced away.
+        assert!(!apply_dirty(&mut app));
+    }
 
     #[test]
     fn the_default_model_call_limit_is_the_tui_one_not_the_cores() {

@@ -1,7 +1,7 @@
 //! The context-budget projection in the status bar (ADR 0015 wording, ADR 0018 `T / B`).
 //! Pure `App` state plus the formatting functions, so it runs everywhere.
 
-use agent_core::{AgentEvent, BudgetReport, UsageSource};
+use agent_core::{AgentEvent, BudgetReport, EventSink, UsageSource};
 use radian_tui::App;
 use radian_tui::app::{budget_status_text, budget_text};
 
@@ -76,17 +76,26 @@ fn no_budget_says_off_and_claims_no_number() {
     );
 }
 
+/// ADR 0023 U5: the request's budget is a **session fact**, so the event sink writes it into
+/// the projection and `App` never holds it. The status bar then reads the projection.
 #[test]
 fn a_request_started_event_sets_the_status_bar_report() {
-    let mut app = App::new("m", "s");
-    app.set_context_window(Some(16_000));
+    use std::sync::Arc;
+    use std::sync::mpsc::channel;
+
+    let app = App::new("m", "s");
+    app.projection.set_context_window(Some(16_000));
     let report = report(UsageSource::ReportedPlusEstimate);
-    app.apply_event(&AgentEvent::ModelRequestStarted {
+    let (tx, _rx) = channel();
+    let sink = radian_tui::events::ProjectionSink::new(tx, Arc::clone(&app.projection));
+    sink.emit(AgentEvent::ModelRequestStarted {
         model_call: 1,
         budget: Some(report.clone()),
     });
-    assert_eq!(app.budget_report.as_ref(), Some(&report));
-    let text = budget_status_text(app.context_window, app.budget_report.as_ref());
+    let session = app.projection.read();
+    assert_eq!(session.budget(), Some(&report));
+    assert_eq!(session.turn(), radian_tui::TurnState::Running);
+    let text = budget_status_text(session.context_window(), session.budget());
     assert!(text.contains("12340"), "{text}");
     assert!(text.contains("/ 16000"), "{text}");
 }

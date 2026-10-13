@@ -19,6 +19,8 @@ pub mod memory;
 mod model;
 mod output;
 pub mod pending;
+pub mod projection;
+pub mod session;
 mod session_id;
 pub mod sessions;
 mod tools;
@@ -57,6 +59,13 @@ pub use output::{StdoutError, write_line, write_stdout};
 pub use pending::{
     Abandoned, Answered, PendingAnswer, PendingQueue, PendingRequest, PendingResponse, PendingView,
     QueuedApprover, QueuedPrompter,
+};
+pub use projection::{
+    LastToolCall, ProjectionRead, SessionProjection, StreamKind, StreamSnapshot, TurnState,
+};
+pub use session::{
+    CommandRefused, DriverEnd, HostBindings, LocalSession, SessionCapability, SessionCommand,
+    SessionError, SessionFacade, SessionFacts, SessionId, SessionSetup, open_session,
 };
 pub use session_id::{generate_session_id, validate_session_id};
 pub use sessions::{

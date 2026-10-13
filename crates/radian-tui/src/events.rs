@@ -12,12 +12,12 @@
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
-use agent_core::{AgentEvent, EventSink};
+use agent_core::{AgentEvent, EventSink, RunStatus};
 use radian_permissions::{ApprovalOutcome, ApprovalRequest};
 use ratatui::crossterm::event::KeyEvent;
 
 use crate::app::Input as AppInput;
-use crate::projection::{SessionProjection, StreamKind};
+use crate::projection::{LastToolCall, SessionProjection, StreamKind, TurnState};
 
 /// One event on the UI's single channel (ADR 0023 U2).
 pub enum UiEvent {
@@ -76,6 +76,39 @@ impl ProjectionSink {
             let _ = self.tx.send(UiEvent::Dirty);
         }
     }
+
+    /// Writes the session facts one event carries into the projection (ADR 0023 U5). Returns
+    /// whether the UI must be woken. `App` never writes these; it handles the transcript, the
+    /// note and the effects only.
+    fn fact(&self, event: &AgentEvent) -> bool {
+        match event {
+            AgentEvent::TurnStarted => self.projection.set_turn(TurnState::Running),
+            // ADR 0018: the request carries its projection and budget `B`, for the status bar.
+            AgentEvent::ModelRequestStarted { budget, .. } => {
+                self.projection.set_request_started(budget.clone())
+            }
+            // Usage is the provider's own report; each present field is added to the session
+            // total, and a field that was never reported stays `None` (never a zero). A
+            // response without usage carries no fact.
+            AgentEvent::ModelResponseReceived {
+                usage: Some(usage), ..
+            } => self.projection.add_usage(usage),
+            AgentEvent::ToolStarted {
+                index,
+                call_id,
+                name,
+            } => self.projection.set_last_tool(LastToolCall {
+                index: *index,
+                call_id: call_id.clone(),
+                name: name.clone(),
+            }),
+            AgentEvent::RunFinished { status } => self.projection.set_turn(match status {
+                RunStatus::Cancelled(_) => TurnState::Cancelled,
+                _ => TurnState::Idle,
+            }),
+            _ => false,
+        }
+    }
 }
 
 impl EventSink for ProjectionSink {
@@ -90,6 +123,12 @@ impl EventSink for ProjectionSink {
             // The committed message replaces the live view, so the stream buffer is done.
             AgentEvent::TranscriptAppended { .. } => self.projection.clear_stream(),
             _ => {}
+        }
+        // The fact is written to the projection, and the event still goes on the channel:
+        // facts are never dropped (ADR 0023 U2), and `App` handles the transcript, the note
+        // and the effects of the same event.
+        if self.fact(&event) {
+            let _ = self.tx.send(UiEvent::Dirty);
         }
         let _ = self.tx.send(UiEvent::Agent(event));
     }
@@ -136,6 +175,39 @@ mod tests {
             "the update after the read wakes it"
         );
         assert_eq!(projection.snapshot().assistant, "abc");
+    }
+
+    /// ADR 0023 U5: a fact event is written to the projection, and the UI is woken with a
+    /// `Dirty` (not with the event alone, which the renderer does not read for facts).
+    #[test]
+    fn a_fact_event_writes_the_projection_and_wakes_the_ui() {
+        let (sink, projection, rx) = sink();
+        sink.emit(AgentEvent::ModelResponseReceived {
+            stop_reason: agent_core::StopReason::EndTurn,
+            tool_calls: 0,
+            usage: Some(agent_core::ModelUsage {
+                input: Some(5),
+                output: Some(2),
+                ..agent_core::ModelUsage::default()
+            }),
+        });
+        {
+            let read = projection.read();
+            assert_eq!(read.usage_input(), Some(5));
+            assert_eq!(read.usage_output(), Some(2));
+        }
+        let events: Vec<UiEvent> = rx.try_iter().collect();
+        assert!(
+            events.iter().any(|event| matches!(event, UiEvent::Dirty)),
+            "the fact update must wake the UI"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                UiEvent::Agent(AgentEvent::ModelResponseReceived { .. })
+            )),
+            "and the fact itself still reaches the channel"
+        );
     }
 
     /// Deltas are not facts; a commit is, and it ends the stream.

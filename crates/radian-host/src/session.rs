@@ -1,0 +1,712 @@
+//! The Session Facade (ADR 0023 U5): the UI's one handle on a session, and the in-process
+//! implementation `open_session` builds for both binaries.
+//!
+//! The facade is a **door, not an owner**: the inbox, the driver, the journal, the tool
+//! session and the approval routing belong to the runtime and the host. The UI holds an
+//! `Arc<dyn SessionFacade>`, reads the projection through it, and sends commands; a command a
+//! facade does not declare is refused, and `LocalSession` checks again when it runs one — the
+//! host does not trust the UI's copy of the capability list.
+//!
+//! `open_session` is the one place that establishes a session: the journal, the permission and
+//! memory hooks, the combined tools, the driver, the inbox and the projection. `agent-cli` and
+//! `radian-tui` differ only in what they inject (their approver, audit sink, event sink,
+//! runtime-event handler, wording and startup lines), which is [`HostBindings`].
+
+use std::fmt;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use agent_core::{Agent, AgentConfig, ContextBudget, EventSink, TurnOptions};
+use agent_extensions::{McpServerConfig, McpToolProvider};
+use radian_coding::CodingTools;
+use radian_permissions::{Approver, AuditSink, PermissionHooks, Preset, Profile};
+use radian_runtime::{CancelCause, Driver, Inbox, RuntimeEvents};
+use radian_sandbox::Sandbox;
+use radian_session::{SessionCreatedData, SessionJournal};
+
+use crate::describe::{Wording, describe};
+use crate::memory::{InjectionConfig, MemoryHooks, MemoryService, MemoryTools, ProjectState};
+use crate::model::HostModel;
+use crate::projection::{ProjectionRead, SessionProjection};
+use crate::tools::HostTools;
+
+/// A session's stable identifier: the session file's name and `SessionCreated.session_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SessionId(String);
+
+impl SessionId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// What a facade can do (ADR 0023 U5). The UI must not infer capability from the concrete
+/// type; it reads this list, and the facade re-checks it when a command runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionCapability {
+    /// Read the projection.
+    Observe,
+    /// Start a new turn.
+    SendMessage,
+    /// Redirect the running turn.
+    Steer,
+    /// Cancel the running turn.
+    Cancel,
+    /// Answer a pending approval or question.
+    AnswerRequest,
+}
+
+impl SessionCapability {
+    /// Every capability the in-process session serves; what a normal host declares.
+    pub const ALL: [SessionCapability; 5] = [
+        SessionCapability::Observe,
+        SessionCapability::SendMessage,
+        SessionCapability::Steer,
+        SessionCapability::Cancel,
+        SessionCapability::AnswerRequest,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Observe => "observe",
+            Self::SendMessage => "send",
+            Self::Steer => "steer",
+            Self::Cancel => "cancel",
+            Self::AnswerRequest => "answer",
+        }
+    }
+}
+
+/// A command the UI asks a session to perform.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionCommand {
+    /// Start a new turn: `Inbox::followup`.
+    SendFollowup(String),
+    /// Redirect the running turn: `Inbox::steer`.
+    Steer(String),
+    /// Cancel the running turn.
+    Cancel,
+    /// Ask the runtime to compact the context (the TUI's `/compact`). Turn-shaped work, so it
+    /// needs the same capability as sending.
+    Compact { instructions: Option<String> },
+}
+
+impl SessionCommand {
+    /// The capability a session must declare to accept this command.
+    pub fn capability(&self) -> SessionCapability {
+        match self {
+            Self::SendFollowup(_) | Self::Compact { .. } => SessionCapability::SendMessage,
+            Self::Steer(_) => SessionCapability::Steer,
+            Self::Cancel => SessionCapability::Cancel,
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::SendFollowup(_) => "send",
+            Self::Steer(_) => "steer",
+            Self::Cancel => "cancel",
+            Self::Compact { .. } => "compact",
+        }
+    }
+}
+
+/// A command was refused. `undeclared` is the capability check; any other reason is the inbox
+/// rejecting the input (closed, full, not a user message).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("`{command}` was refused: {reason}")]
+pub struct CommandRefused {
+    pub command: String,
+    /// `Some` when the facade does not declare the capability; `None` when the inbox rejected
+    /// the input (closed, full, not a user message).
+    pub capability: Option<String>,
+    pub reason: String,
+}
+
+impl CommandRefused {
+    /// The facade does not declare the capability the command needs.
+    pub fn undeclared(command: &SessionCommand) -> Self {
+        let capability = command.capability();
+        Self {
+            command: command.name().to_string(),
+            capability: Some(capability.as_str().to_string()),
+            reason: format!(
+                "this session does not declare the `{}` capability",
+                capability.as_str()
+            ),
+        }
+    }
+
+    /// The capability check passed; the inbox refused the input.
+    pub fn inbox(command: &str, error: &radian_runtime::InboxError) -> Self {
+        Self {
+            command: command.to_string(),
+            capability: None,
+            reason: error.to_string(),
+        }
+    }
+}
+
+/// The UI's one handle on a session (ADR 0023 U5).
+pub trait SessionFacade: Send + Sync {
+    fn id(&self) -> &SessionId;
+    fn capabilities(&self) -> &[SessionCapability];
+    fn projection(&self) -> ProjectionRead<'_>;
+    fn command(&self, command: SessionCommand) -> Result<(), CommandRefused>;
+
+    /// Ask the runtime to compact the context (the TUI's `/compact`). `command` cannot carry
+    /// the outcome, and the UI must not hold the inbox, so the result comes back through
+    /// `on_done`. Needs the same capability as sending.
+    fn compact(
+        &self,
+        instructions: Option<String>,
+        on_done: Box<dyn FnOnce(Result<agent_core::CompactionOutcome, String>) + Send>,
+    );
+}
+
+/// How the driver task ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DriverEnd {
+    /// The driver ended cleanly.
+    Ok,
+    /// The driver returned an error.
+    Failed(String),
+    /// The task panicked, was aborted, or its watcher is gone.
+    Panicked(String),
+}
+
+impl DriverEnd {
+    pub fn is_ok(&self) -> bool {
+        matches!(self, Self::Ok)
+    }
+}
+
+/// The driver's task handle: the host asks it to stop or aborts it, and waits once.
+struct DriverTask {
+    stop: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    abort: tokio::task::AbortHandle,
+    done: Mutex<Option<tokio::sync::oneshot::Receiver<DriverEnd>>>,
+}
+
+/// Why a session could not be opened.
+#[derive(Debug, thiserror::Error)]
+pub enum SessionError {
+    #[error("{0}")]
+    Message(String),
+}
+
+/// The values a host resolves before the session exists. Both binaries build this from their
+/// own flags and config; `open_session` does the rest.
+pub struct SessionSetup {
+    pub session_id: SessionId,
+    /// Where session files live (the host resolved `--session-dir`/`RADIAN_SESSION_DIR`/home).
+    pub session_dir: PathBuf,
+    /// The canonical workspace the tools and the permission rules are rooted at.
+    pub workspace: PathBuf,
+    /// The `--workspace` flag: the built-in coding tools exist only when it was given.
+    pub coding_root: Option<PathBuf>,
+    pub model: HostModel,
+    pub servers: Vec<McpServerConfig>,
+    pub system_prompt: Option<String>,
+    pub context_budget: Option<ContextBudget>,
+    pub auto_compact: bool,
+    /// The sandbox `shell` runs under; `None` for the safe tier.
+    pub sandbox: Option<Sandbox>,
+    /// The tier, for the startup description.
+    pub tier: Preset,
+    /// The permission profile (the host adds its own `allow` rules and approval policy).
+    pub profile: Profile,
+    /// The memory root, or `None` when neither `RADIAN_HOME` nor `HOME` is set.
+    pub memory_root: Option<PathBuf>,
+    /// `true` to resume an existing session file, `false` to create one.
+    pub resume: bool,
+    /// The `SessionCreated` snapshot (a route reference: never a key or a header value).
+    pub config_snapshot: serde_json::Value,
+    pub turn_options: TurnOptions,
+    /// A per-turn timeout (the CLI's `--turn-timeout-secs`).
+    pub turn_timeout: Option<Duration>,
+    /// The host's startup wording (ADR 0012 decision 4).
+    pub wording: Wording,
+    /// What the facade declares it can do (ADR 0023 U5). A host grants all five; a test can
+    /// grant fewer, and the facade then refuses the commands it cannot serve.
+    pub capabilities: Vec<SessionCapability>,
+}
+
+/// What the host injects. Everything here is host-specific; nothing is a session fact.
+pub struct HostBindings {
+    /// The human for `ask` decisions.
+    pub approver: Arc<dyn Approver>,
+    /// Where permission decisions are written (audit). A factory: the audit sink needs the
+    /// journal, and `open_session` creates it.
+    pub audit: Arc<dyn Fn(Arc<SessionJournal>) -> Arc<dyn AuditSink> + Send + Sync>,
+    /// The sink for committed `AgentEvent`s (the TUI's channel sink, the CLI's line UI).
+    pub events: Arc<dyn EventSink>,
+    /// The session's facts; the same handle the host's event sink writes.
+    pub projection: Arc<SessionProjection>,
+    /// Called for a failed turn (ADR 0017).
+    pub runtime_events: Arc<dyn RuntimeEvents>,
+    /// Called once when the driver task ends (the TUI sends an event, the CLI notifies).
+    pub driver_stopped: Arc<dyn Fn() + Send + Sync>,
+    /// Runs at the start of the driver task (a TUI test hook panics here).
+    pub before_driver: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// A memory hook's warning line (the two hosts prefix it differently).
+    pub memory_warning: Arc<dyn Fn(&str) + Send + Sync>,
+}
+
+/// The facts the host renders its own way (the CLI's `eprintln!` lines, the TUI's notices).
+pub struct SessionFacts {
+    /// The `[profile]` line.
+    pub profile_line: String,
+    /// The `[sandbox]` line.
+    pub sandbox_facts: String,
+    /// The `[memory]` line.
+    pub memory_notice: String,
+    /// Whether this process has a memory root (`/memory` is refused without one).
+    pub memory_enabled: bool,
+    /// How many MCP servers were configured.
+    pub mcp_configured: usize,
+    /// The servers/tools that actually connected, once the session is open.
+    pub mcp_open: Option<(usize, usize)>,
+}
+
+/// The in-process facade: it owns the inbox, the driver handle, the projection and the
+/// approval routing (the injected approver), and serves the UI.
+pub struct LocalSession {
+    id: SessionId,
+    workspace: PathBuf,
+    journal_path: PathBuf,
+    journal: Arc<SessionJournal>,
+    inbox: Arc<Inbox>,
+    hooks: Arc<PermissionHooks>,
+    projection: Arc<SessionProjection>,
+    memory: Option<MemoryService>,
+    runtime: tokio::runtime::Handle,
+    driver: DriverTask,
+    capabilities: Vec<SessionCapability>,
+    facts: SessionFacts,
+    config_snapshot: serde_json::Value,
+}
+
+impl LocalSession {
+    pub fn id(&self) -> &SessionId {
+        &self.id
+    }
+
+    pub fn workspace(&self) -> &Path {
+        &self.workspace
+    }
+
+    pub fn journal_path(&self) -> &Path {
+        &self.journal_path
+    }
+
+    /// The journal, for host work that reads the session file (`/export`, `/sessions`).
+    pub fn journal(&self) -> &Arc<SessionJournal> {
+        &self.journal
+    }
+
+    pub fn projection(&self) -> &Arc<SessionProjection> {
+        &self.projection
+    }
+
+    /// The inbox, for a host whose loop is not the TUI's: the CLI's line loop enqueues with a
+    /// source and a turn-in-flight decision that the facade's commands do not carry.
+    pub fn inbox(&self) -> &Arc<Inbox> {
+        &self.inbox
+    }
+
+    /// The permission hooks, for the same reason: the CLI sets the turn source per input.
+    pub fn hooks(&self) -> &Arc<PermissionHooks> {
+        &self.hooks
+    }
+
+    pub fn memory(&self) -> Option<&MemoryService> {
+        self.memory.as_ref()
+    }
+
+    pub fn capabilities(&self) -> &[SessionCapability] {
+        &self.capabilities
+    }
+
+    pub fn facts(&self) -> &SessionFacts {
+        &self.facts
+    }
+
+    pub fn config_snapshot(&self) -> &serde_json::Value {
+        &self.config_snapshot
+    }
+
+    /// Asks the driver to stop gracefully (idempotent).
+    pub fn stop(&self) {
+        if let Some(stop) = self.driver.stop.lock().unwrap().take() {
+            let _ = stop.send(());
+        }
+    }
+
+    /// Aborts the driver task: the session is dropped, which kills the tool processes at once.
+    pub fn abort(&self) {
+        self.driver.abort.abort();
+    }
+
+    /// Waits for the driver task. Callable once; a second call reports `Panicked`.
+    pub async fn join(&self) -> DriverEnd {
+        let done = self.driver.done.lock().unwrap().take();
+        match done {
+            Some(done) => done
+                .await
+                .unwrap_or_else(|_| DriverEnd::Panicked("the driver watcher stopped".into())),
+            None => DriverEnd::Panicked("the driver task was already joined".into()),
+        }
+    }
+}
+
+impl SessionFacade for LocalSession {
+    fn id(&self) -> &SessionId {
+        &self.id
+    }
+
+    fn capabilities(&self) -> &[SessionCapability] {
+        &self.capabilities
+    }
+
+    fn projection(&self) -> ProjectionRead<'_> {
+        self.projection.read()
+    }
+
+    /// Re-validates the capability, then runs the command. The check is here as well as in the
+    /// UI: a facade whose list the UI ignored still refuses.
+    fn command(&self, command: SessionCommand) -> Result<(), CommandRefused> {
+        let capability = command.capability();
+        if !self.capabilities.contains(&capability) {
+            return Err(CommandRefused::undeclared(&command));
+        }
+        let name = command.name();
+        match command {
+            SessionCommand::SendFollowup(text) => {
+                // `HookContext` has no source field, so the host declares each turn's source
+                // before it starts; an unset source is treated as non-human and denied.
+                self.hooks
+                    .set_turn_source(Some(agent_core::InputSource::User));
+                self.runtime
+                    .block_on(self.inbox.followup(text, agent_core::InputSource::User))
+                    .map(|_| ())
+                    .map_err(|error| CommandRefused::inbox(name, &error))
+            }
+            SessionCommand::Steer(text) => {
+                self.hooks
+                    .set_turn_source(Some(agent_core::InputSource::User));
+                self.runtime
+                    .block_on(self.inbox.steer(text, agent_core::InputSource::User))
+                    .map(|_| ())
+                    .map_err(|error| CommandRefused::inbox(name, &error))
+            }
+            SessionCommand::Cancel => {
+                self.inbox.cancel(CancelCause::Requested);
+                Ok(())
+            }
+            SessionCommand::Compact { .. } => Err(CommandRefused {
+                command: "compact".into(),
+                capability: None,
+                reason: "use `SessionFacade::compact`, which carries the outcome".into(),
+            }),
+        }
+    }
+
+    fn compact(
+        &self,
+        instructions: Option<String>,
+        on_done: Box<dyn FnOnce(Result<agent_core::CompactionOutcome, String>) + Send>,
+    ) {
+        if !self.capabilities.contains(&SessionCapability::SendMessage) {
+            on_done(Err(
+                "this session does not declare the `send` capability".into()
+            ));
+            return;
+        }
+        // The driver runs the request between turns, so this must not block the UI: spawn it
+        // and report the outcome through the callback.
+        self.runtime.spawn({
+            let inbox = Arc::clone(&self.inbox);
+            async move {
+                let result = inbox.compact(instructions).await;
+                on_done(result);
+            }
+        });
+    }
+}
+
+/// Opens a session (ADR 0023 U5). This is the one place a session is established: the journal,
+/// the hooks, the combined tools, the driver, the inbox and the projection.
+///
+/// Async because opening the driver is (MCP servers start and the journal is recovered); a
+/// synchronous host calls it with `runtime.block_on`.
+pub async fn open_session(
+    setup: SessionSetup,
+    bindings: HostBindings,
+) -> Result<LocalSession, SessionError> {
+    let HostBindings {
+        approver,
+        audit,
+        events,
+        projection,
+        runtime_events,
+        driver_stopped,
+        before_driver,
+        memory_warning,
+    } = bindings;
+    let runtime = tokio::runtime::Handle::current();
+    let SessionSetup {
+        session_id,
+        session_dir,
+        workspace,
+        coding_root,
+        model,
+        servers,
+        system_prompt,
+        context_budget,
+        auto_compact,
+        sandbox,
+        tier,
+        profile,
+        memory_root,
+        resume,
+        config_snapshot,
+        turn_options,
+        turn_timeout,
+        wording,
+        capabilities,
+    } = setup;
+
+    // The startup description, before the sandbox moves into the tools.
+    let (profile_line, sandbox_facts) = describe(tier.sandbox_mode(), sandbox.as_ref(), wording);
+    let coding = build_coding_tools(coding_root.as_deref(), sandbox)?;
+    let injection_config = InjectionConfig::default();
+    let memory = memory_root
+        .as_ref()
+        .map(|root| MemoryService::open(&workspace, root));
+    let memory_tools = memory
+        .as_ref()
+        .map(|service| MemoryTools::new(service.clone()));
+    let memory_notice = memory_notice(&memory, &injection_config);
+    let mcp = McpToolProvider::new(servers);
+    let mcp_configured = mcp.configured();
+
+    // The session file. Every check that can fail has already run in the host, so this is the
+    // first thing that creates durable state.
+    let journal_path = session_dir.join(format!("{}.jsonl", session_id.as_str()));
+    let journal = open_journal(
+        &session_id,
+        &session_dir,
+        &workspace,
+        resume,
+        &config_snapshot,
+        &journal_path,
+    )?;
+    let inbox = Inbox::durable(64, Arc::clone(&journal));
+
+    let agent_config = AgentConfig {
+        system_prompt,
+        context_budget,
+        auto_compact,
+        ..AgentConfig::default()
+    };
+    let hooks = Arc::new(PermissionHooks::new(
+        profile,
+        Some(approver),
+        audit(Arc::clone(&journal)),
+    ));
+    let memory_hooks = Arc::new(MemoryHooks::new(
+        memory.clone(),
+        Arc::clone(&journal),
+        injection_config,
+        memory_warning,
+    ));
+    let agent = Arc::new(
+        Agent::new(model, HostTools::new(coding, memory_tools, mcp.clone()))
+            .with_config(agent_config)
+            .with_hooks((Arc::clone(&hooks), Arc::clone(&memory_hooks))),
+    );
+
+    // MCP server **processes** start here, when the tool session opens. The session file
+    // already exists, so a failure names the way to continue it.
+    let mut driver = Driver::open(
+        &agent,
+        Arc::clone(&journal),
+        Arc::clone(&inbox),
+        events,
+        turn_options,
+    )
+    .await
+    .map_err(|error| {
+        SessionError::Message(format!(
+            "cannot open the session: {error}\n  the session file {} exists; after fixing the \
+             problem, continue it with `--resume {}`",
+            journal_path.display(),
+            session_id
+        ))
+    })?;
+    driver.set_turn_timeout(turn_timeout);
+    driver.set_runtime_events(runtime_events);
+
+    // The session is open, so the MCP status is known: what actually connected.
+    let mcp_open = mcp.status().map(|status| (status.servers, status.tools));
+    projection.set_mcp(mcp_configured, mcp_open);
+    projection.set_context_window(
+        context_budget
+            .as_ref()
+            .map(|budget| budget.input_budget_tokens),
+    );
+    projection.set_tier(Some(tier.as_str().to_string()));
+
+    // The driver runs until the host asks it to stop; dropping its `run()` future releases the
+    // borrow so `shutdown()` can be called. Its end is reported by the injected callback, and
+    // the result is handed back through a oneshot for the exit code.
+    let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+        if let Some(before) = before_driver {
+            before();
+        }
+        tokio::select! {
+            result = driver.run() => result,
+            _ = &mut stop_rx => {
+                driver.shutdown();
+                driver.run().await
+            }
+        }
+    });
+    let abort = task.abort_handle();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let end = match task.await {
+            Ok(Ok(())) => DriverEnd::Ok,
+            Ok(Err(error)) => DriverEnd::Failed(error.to_string()),
+            Err(join) => DriverEnd::Panicked(join.to_string()),
+        };
+        driver_stopped();
+        let _ = done_tx.send(end);
+    });
+
+    let facts = SessionFacts {
+        profile_line,
+        sandbox_facts,
+        memory_notice,
+        memory_enabled: memory.is_some(),
+        mcp_configured,
+        mcp_open,
+    };
+    Ok(LocalSession {
+        id: session_id,
+        workspace,
+        journal_path,
+        journal,
+        inbox,
+        hooks,
+        projection,
+        memory,
+        runtime,
+        driver: DriverTask {
+            stop: Mutex::new(Some(stop_tx)),
+            abort,
+            done: Mutex::new(Some(done_rx)),
+        },
+        capabilities,
+        facts,
+        config_snapshot,
+    })
+}
+
+/// Creates or resumes the session file. The caller has already validated everything that can
+/// fail, so this only reports the file's own state.
+fn open_journal(
+    session_id: &SessionId,
+    dir: &Path,
+    workspace: &Path,
+    resume: bool,
+    config_snapshot: &serde_json::Value,
+    path: &Path,
+) -> Result<Arc<SessionJournal>, SessionError> {
+    if resume {
+        if !path.exists() {
+            return Err(SessionError::Message(format!(
+                "no session {:?} in {}",
+                session_id.as_str(),
+                dir.display()
+            )));
+        }
+        return SessionJournal::resume(path, session_id.as_str())
+            .map(Arc::new)
+            .map_err(|error| {
+                SessionError::Message(format!(
+                    "cannot resume session {:?}: {error}",
+                    session_id.as_str()
+                ))
+            });
+    }
+    crate::ensure_private_dir(dir).map_err(|error| {
+        SessionError::Message(format!("cannot create {}: {error}", dir.display()))
+    })?;
+    // The snapshot is a model route reference only: never the key, a header value or a base
+    // URL that could carry credentials (ADR 0008 §4, ADR 0013).
+    let created = SessionCreatedData::new(workspace.to_string_lossy(), config_snapshot.clone());
+    match SessionJournal::create(path, session_id.as_str(), created) {
+        Ok(journal) => Ok(Arc::new(journal)),
+        Err(radian_session::WriteError::NotEmpty { .. }) => Err(SessionError::Message(format!(
+            "session {:?} already exists in {}; continue it with `--resume {}`",
+            session_id.as_str(),
+            dir.display(),
+            session_id
+        ))),
+        Err(error) => Err(SessionError::Message(format!(
+            "cannot create session {:?}: {error}",
+            session_id.as_str()
+        ))),
+    }
+}
+
+fn build_coding_tools(
+    workspace: Option<&Path>,
+    sandbox: Option<Sandbox>,
+) -> Result<Option<CodingTools>, SessionError> {
+    match (workspace, sandbox) {
+        (Some(dir), Some(sandbox)) => {
+            CodingTools::with_sandbox(dir, sandbox)
+                .map(Some)
+                .map_err(|error| {
+                    SessionError::Message(format!("--workspace {}: {error}", dir.display()))
+                })
+        }
+        (Some(dir), None) => CodingTools::new(dir).map(Some).map_err(|error| {
+            SessionError::Message(format!("--workspace {}: {error}", dir.display()))
+        }),
+        (None, _) => Ok(None),
+    }
+}
+
+fn memory_notice(memory: &Option<MemoryService>, config: &InjectionConfig) -> String {
+    match memory {
+        Some(service) => match service.state() {
+            Ok(ProjectState::Known(project)) => format!(
+                "[memory] project {project}; injection on, up to {} tokens",
+                config.max_tokens
+            ),
+            Ok(ProjectState::Unlinked { .. }) => format!(
+                "[memory] no project linked; global memory only (run `agent memory project new` \
+                 or `agent memory relink <ProjectId>`); injection on, up to {} tokens",
+                config.max_tokens
+            ),
+            Err(error) => format!("[memory] unavailable: {error}"),
+        },
+        None => "[memory] disabled (no RADIAN_HOME or HOME)".to_owned(),
+    }
+}
