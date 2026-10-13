@@ -352,6 +352,16 @@ impl TranscriptFold {
     pub fn is_call_declared(&self, call_id: &str) -> bool {
         self.declared_calls.contains(call_id)
     }
+
+    /// The effective history with `repair` applied (ADR 0002): the committed messages plus a
+    /// synthetic result for every unpaired call of the current revision. Read-only, so an
+    /// incremental reader (ADR 0023 U6's `JournalTail`) can ask for the history without
+    /// finishing the fold; it matches `recover`'s result for the records folded so far.
+    pub fn recovered_history(&self) -> Vec<Message> {
+        let mut history = self.history.clone();
+        history.extend(repair_with(&self.history, &self.settled, &self.started));
+        history
+    }
 }
 
 fn repair_with(

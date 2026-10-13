@@ -205,3 +205,17 @@ Base: `fcd0c26` · 一次性检出 `/tmp/fork-mut`（detached，跑完删除）�
 | F4 | `SessionForked.parent_seq` 写成 `point.seq + 1` | `fork::the_parent_gains_only_the_forked_record_and_the_seqs_match` | ✅ failed |
 
 4/4 抓住。
+
+## tail：ADR 0023 U6 增量只读读取器
+
+Base: `3653071` · 在本任务工作树内逐条施加后从副本还原（`--no-fail-fast`）· `git status --short` 结束后干净。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| T1 | `LineScanner::push` 不校验 `seq` 连续（`if false && header.seq != self.expect_seq`） | `tail::a_bad_seq_line_is_refused_like_open` | ✅ failed |
+| T2 | torn tail 推进偏移（`*offset += n` 后 `break`） | `tail::a_torn_tail_is_not_read_until_complete`、`tail::incremental_polls_equal_a_fresh_open_at_every_split` | ✅ failed |
+| T3 | 每次 `poll` 重建 `LineScanner`（pending 状态不跨 poll 保留） | `tail::a_pending_segment_spans_polls`、`tail::a_torn_tail_is_not_read_until_complete`、`tail::a_replaced_or_truncated_file_resets`、`tail::incremental_polls_equal_a_fresh_open_at_every_split` | ✅ failed |
+| T4 | 截断不触发 Reset（reset 条件去掉 `meta.len() < self.offset`） | `tail::a_replaced_or_truncated_file_resets` | ✅ failed |
+
+4/4 抓住。T1 的校验与一次性 `Session::open` 共用同一个 `LineScanner`，所以变异同时也会让
+`read_fixtures` 失败；这里记的是新增的 tail 侧测试。

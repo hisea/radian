@@ -232,21 +232,10 @@ where
     })?;
     let mut reader = BufReader::new(file);
     let mut line: Vec<u8> = Vec::new();
-    let mut lineno: u64 = 0;
-    let mut expect_seq: u64 = 0;
-    // ADR 0019: the one replacement state machine shared with `replay`/`repair`. The reader
-    // only adds its own structural checks (envelope, seq, critical, tool-marker call_ids).
-    let mut fold = TranscriptFold::new();
-    let mut marker_line: Option<u64> = None;
-    let mut uncommitted_lines: Vec<u64> = Vec::new();
-    let mut schema_version: Option<u64> = None;
-    let mut session_id = String::new();
-    let mut skipped = Vec::new();
-    let mut event_count: u64 = 0;
+    let mut scanner = LineScanner::new();
     // Byte offset where the current line starts, and the end of the last committed line.
     let mut line_offset: u64 = 0;
     let mut committed_bytes: u64 = 0;
-
     loop {
         line.clear();
         let n = {
@@ -266,7 +255,7 @@ where
             if line.len() > MAX_LINE_BYTES {
                 return Err(E::from(ReadError::Corrupt {
                     path: path.to_path_buf(),
-                    line: lineno + 1,
+                    line: scanner.lineno() + 1,
                     column: MAX_LINE_BYTES,
                     message: format!("line exceeds the {MAX_LINE_BYTES}-byte cap"),
                 }));
@@ -276,25 +265,78 @@ where
             // end of the previous complete line.
             break;
         }
-        lineno += 1;
         let raw = std::str::from_utf8(&line[..line.len() - 1]).map_err(|e| {
             E::from(ReadError::Corrupt {
                 path: path.to_path_buf(),
-                line: lineno,
+                line: scanner.lineno() + 1,
                 column: e.valid_up_to(),
                 message: "line is not valid UTF-8".into(),
             })
         })?;
+        let event = scanner.push::<E>(raw, path, line_offset, n as u64)?;
+        committed_bytes = line_offset + n as u64;
+        line_offset = committed_bytes;
+        if let Some(event) = event {
+            on_event(event)?;
+        }
+    }
+
+    Ok(scanner.finish(committed_bytes))
+}
+
+/// The per-line parser and validator, shared by the full scan and by [`JournalTail`]. It
+/// keeps the running state (expected seq, the [`TranscriptFold`], the schema/session id and
+/// the skipped list) so an incremental reader never re-parses a prefix.
+pub(crate) struct LineScanner {
+    schema_version: Option<u64>,
+    session_id: String,
+    expect_seq: u64,
+    // ADR 0019: the one replacement state machine shared with `replay`/`repair`. The reader
+    // only adds its own structural checks (envelope, seq, critical, tool-marker call_ids).
+    fold: TranscriptFold,
+    marker_line: Option<u64>,
+    uncommitted_lines: Vec<u64>,
+    skipped: Vec<(u64, String)>,
+    event_count: u64,
+    /// Complete lines parsed so far (1-based for the first line).
+    lineno: u64,
+}
+
+impl LineScanner {
+    pub(crate) fn new() -> Self {
+        Self {
+            schema_version: None,
+            session_id: String::new(),
+            expect_seq: 0,
+            fold: TranscriptFold::new(),
+            marker_line: None,
+            uncommitted_lines: Vec::new(),
+            skipped: Vec::new(),
+            event_count: 0,
+            lineno: 0,
+        }
+    }
+
+    /// Parses one complete LF-terminated line (`raw` without the LF). Returns the accepted
+    /// event, or `None` for a skipped unknown non-critical event.
+    pub(crate) fn push<E: From<ReadError>>(
+        &mut self,
+        raw: &str,
+        path: &Path,
+        byte_offset: u64,
+        line_len: u64,
+    ) -> Result<Option<SessionEvent>, E> {
+        self.lineno += 1;
         let header: Header = serde_json::from_str(raw).map_err(|e| {
             E::from(ReadError::Corrupt {
                 path: path.to_path_buf(),
-                line: lineno,
+                line: self.lineno,
                 column: e.column(),
                 message: e.to_string(),
             })
         })?;
 
-        match schema_version {
+        match self.schema_version {
             None => {
                 if header.schema_version > SCHEMA_VERSION {
                     return Err(E::from(ReadError::SchemaTooNew {
@@ -309,32 +351,32 @@ where
                         found: header.schema_version,
                     }));
                 }
-                schema_version = Some(header.schema_version);
-                session_id = header.session_id.clone();
+                self.schema_version = Some(header.schema_version);
+                self.session_id = header.session_id.clone();
             }
             Some(version) => {
-                if header.schema_version != version || header.session_id != session_id {
+                if header.schema_version != version || header.session_id != self.session_id {
                     return Err(E::from(ReadError::Envelope {
                         path: path.to_path_buf(),
-                        line: lineno,
+                        line: self.lineno,
                         message: "schema_version or session_id changed mid-file".into(),
                     }));
                 }
             }
         }
-        if header.seq != expect_seq {
+        if header.seq != self.expect_seq {
             return Err(E::from(ReadError::BadSeq {
                 path: path.to_path_buf(),
-                line: lineno,
-                expected: expect_seq,
+                line: self.lineno,
+                expected: self.expect_seq,
                 found: header.seq,
             }));
         }
-        expect_seq += 1;
+        self.expect_seq += 1;
         if header.event == "SessionCreated" && header.seq != 0 {
             return Err(E::from(ReadError::SessionCreatedNotFirst {
                 path: path.to_path_buf(),
-                line: lineno,
+                line: self.lineno,
             }));
         }
 
@@ -342,20 +384,17 @@ where
         let ts = header.ts;
         let event = header.event;
         let critical = header.critical;
-        // The accepted/committed line ends here, whatever it turns out to be.
-        committed_bytes = line_offset + n as u64;
 
         if !KNOWN_EVENTS.contains(&event.as_str()) {
             if critical {
                 return Err(E::from(ReadError::UnknownCritical {
                     path: path.to_path_buf(),
-                    line: lineno,
+                    line: self.lineno,
                     event,
                 }));
             }
-            skipped.push((seq, event));
-            line_offset = committed_bytes;
-            continue;
+            self.skipped.push((seq, event));
+            return Ok(None);
         }
 
         // ADR 0019 §2: inside a pending replacement only its own contiguous messages, its
@@ -370,10 +409,10 @@ where
                 | "ToolExecutionSettled"
                 | "ModelUsageRecorded"
         );
-        if fold.is_pending() && !transcript_record {
+        if self.fold.is_pending() && !transcript_record {
             return Err(E::from(ReadError::Corrupt {
                 path: path.to_path_buf(),
-                line: lineno,
+                line: self.lineno,
                 column: 0,
                 message: format!(
                     "{event} appeared inside a transcript replacement; only its messages, \
@@ -384,15 +423,15 @@ where
 
         let data = match event.as_str() {
             "MessageAppended" => {
-                let d: MessageData = data_of(raw, lineno, path)?;
+                let d: MessageData = data_of(raw, self.lineno, path)?;
                 fold_push(
-                    &mut fold,
+                    &mut self.fold,
                     JournalRecord::Message {
                         index: d.index as usize,
                         message: d.message.clone(),
                     },
                     path,
-                    lineno,
+                    self.lineno,
                 )?;
                 EventData::MessageAppended {
                     index: d.index,
@@ -400,73 +439,74 @@ where
                 }
             }
             "TranscriptReplaced" => {
-                let d: ReplacedData = data_of(raw, lineno, path)?;
+                let d: ReplacedData = data_of(raw, self.lineno, path)?;
                 fold_push(
-                    &mut fold,
+                    &mut self.fold,
                     JournalRecord::TranscriptReplaced {
                         revision: d.revision,
                         len: d.len as usize,
                     },
                     path,
-                    lineno,
+                    self.lineno,
                 )?;
-                marker_line = Some(lineno);
+                self.marker_line = Some(self.lineno);
                 EventData::TranscriptReplaced {
                     revision: d.revision,
                     len: d.len,
                 }
             }
             "TranscriptReplacementCommitted" => {
-                let d: ReplacedData = data_of(raw, lineno, path)?;
+                let d: ReplacedData = data_of(raw, self.lineno, path)?;
                 fold_push(
-                    &mut fold,
+                    &mut self.fold,
                     JournalRecord::TranscriptReplacementCommitted {
                         revision: d.revision,
                         len: d.len as usize,
                     },
                     path,
-                    lineno,
+                    self.lineno,
                 )?;
-                marker_line = None;
+                self.marker_line = None;
                 EventData::TranscriptReplacementCommitted {
                     revision: d.revision,
                     len: d.len,
                 }
             }
             "TranscriptReplacementAborted" => {
-                let d: AbortedData = data_of(raw, lineno, path)?;
+                let d: AbortedData = data_of(raw, self.lineno, path)?;
                 fold_push(
-                    &mut fold,
+                    &mut self.fold,
                     JournalRecord::TranscriptReplacementAborted {
                         revision: d.revision,
                     },
                     path,
-                    lineno,
+                    self.lineno,
                 )?;
-                uncommitted_lines.push(marker_line.take().unwrap_or(0));
+                self.uncommitted_lines
+                    .push(self.marker_line.take().unwrap_or(0));
                 EventData::TranscriptReplacementAborted {
                     revision: d.revision,
                 }
             }
             "ToolExecutionStarted" => {
-                let d: StartedData = data_of(raw, lineno, path)?;
-                if !fold.is_call_declared(&d.call_id) {
+                let d: StartedData = data_of(raw, self.lineno, path)?;
+                if !self.fold.is_call_declared(&d.call_id) {
                     return Err(E::from(ReadError::OrphanToolMarker {
                         path: path.to_path_buf(),
-                        line: lineno,
+                        line: self.lineno,
                         event: "ToolExecutionStarted".into(),
                         call_id: d.call_id,
                     }));
                 }
                 fold_push(
-                    &mut fold,
+                    &mut self.fold,
                     JournalRecord::ToolExecutionStarted {
                         call_id: d.call_id.clone(),
                         name: d.name.clone(),
                         arguments: d.arguments.clone(),
                     },
                     path,
-                    lineno,
+                    self.lineno,
                 )?;
                 EventData::ToolExecutionStarted {
                     call_id: d.call_id,
@@ -475,23 +515,23 @@ where
                 }
             }
             "ToolExecutionSettled" => {
-                let d: SettledData = data_of(raw, lineno, path)?;
-                if !fold.is_call_declared(&d.call_id) {
+                let d: SettledData = data_of(raw, self.lineno, path)?;
+                if !self.fold.is_call_declared(&d.call_id) {
                     return Err(E::from(ReadError::OrphanToolMarker {
                         path: path.to_path_buf(),
-                        line: lineno,
+                        line: self.lineno,
                         event: "ToolExecutionSettled".into(),
                         call_id: d.call_id,
                     }));
                 }
                 fold_push(
-                    &mut fold,
+                    &mut self.fold,
                     JournalRecord::ToolExecutionSettled {
                         call_id: d.call_id.clone(),
                         result: d.result.clone(),
                     },
                     path,
-                    lineno,
+                    self.lineno,
                 )?;
                 EventData::ToolExecutionSettled {
                     call_id: d.call_id,
@@ -499,28 +539,28 @@ where
                 }
             }
             "ModelUsageRecorded" => {
-                let d: UsageData = data_of(raw, lineno, path)?;
+                let d: UsageData = data_of(raw, self.lineno, path)?;
                 fold_push(
-                    &mut fold,
+                    &mut self.fold,
                     JournalRecord::ModelUsage {
                         usage: d.usage.clone(),
                     },
                     path,
-                    lineno,
+                    self.lineno,
                 )?;
                 EventData::ModelUsageRecorded { usage: d.usage }
             }
             "CompactionUsageRecorded" => {
-                let d: CompactionUsageData = data_of(raw, lineno, path)?;
+                let d: CompactionUsageData = data_of(raw, self.lineno, path)?;
                 fold_push(
-                    &mut fold,
+                    &mut self.fold,
                     JournalRecord::CompactionUsage {
                         revision: d.revision,
                         model: d.model.clone(),
                         usage: d.usage.clone(),
                     },
                     path,
-                    lineno,
+                    self.lineno,
                 )?;
                 EventData::CompactionUsageRecorded {
                     revision: d.revision,
@@ -529,9 +569,9 @@ where
                 }
             }
             "ContextCompacted" => {
-                let d: ContextCompactedData = data_of(raw, lineno, path)?;
+                let d: ContextCompactedData = data_of(raw, self.lineno, path)?;
                 fold_push(
-                    &mut fold,
+                    &mut self.fold,
                     JournalRecord::ContextCompacted {
                         revision: d.revision,
                         source_revision: d.source_revision,
@@ -544,7 +584,7 @@ where
                         model: d.model.clone(),
                     },
                     path,
-                    lineno,
+                    self.lineno,
                 )?;
                 EventData::ContextCompacted {
                     revision: d.revision,
@@ -559,7 +599,7 @@ where
                 }
             }
             "PermissionResolved" => {
-                let d: PermissionResolvedData = data_of(raw, lineno, path)?;
+                let d: PermissionResolvedData = data_of(raw, self.lineno, path)?;
                 EventData::PermissionResolved {
                     request_id: d.request_id,
                     call_id: d.call_id,
@@ -569,11 +609,11 @@ where
                 }
             }
             "MemoryInjected" => {
-                let d: MemoryInjectedData = data_of(raw, lineno, path)?;
+                let d: MemoryInjectedData = data_of(raw, self.lineno, path)?;
                 EventData::MemoryInjected { records: d.records }
             }
             "InboxEnqueued" => {
-                let d: InboxEnqueuedData = data_of(raw, lineno, path)?;
+                let d: InboxEnqueuedData = data_of(raw, self.lineno, path)?;
                 EventData::InboxEnqueued {
                     message: d.message,
                     message_id: d.message_id,
@@ -582,25 +622,25 @@ where
                 }
             }
             "InputClaimed" => {
-                let d: InputClaimedData = data_of(raw, lineno, path)?;
+                let d: InputClaimedData = data_of(raw, self.lineno, path)?;
                 EventData::InputClaimed {
                     message_ids: d.message_ids,
                     turn_id: d.turn_id,
                 }
             }
             "InputAdmitted" => {
-                let d: InputAdmittedData = data_of(raw, lineno, path)?;
+                let d: InputAdmittedData = data_of(raw, self.lineno, path)?;
                 EventData::InputAdmitted {
                     message_id: d.message_id,
                     transcript_index: d.transcript_index,
                 }
             }
             "TurnStarted" => {
-                let d: TurnStartedData = data_of(raw, lineno, path)?;
+                let d: TurnStartedData = data_of(raw, self.lineno, path)?;
                 EventData::TurnStarted { turn_id: d.turn_id }
             }
             "TurnFinished" => {
-                let d: TurnFinishedData = data_of(raw, lineno, path)?;
+                let d: TurnFinishedData = data_of(raw, self.lineno, path)?;
                 EventData::TurnFinished {
                     turn_id: d.turn_id,
                     outcome: d.outcome,
@@ -609,21 +649,21 @@ where
                 }
             }
             "TurnFailed" => {
-                let d: TurnFailedData = data_of(raw, lineno, path)?;
+                let d: TurnFailedData = data_of(raw, self.lineno, path)?;
                 EventData::TurnFailed {
                     turn_id: d.turn_id,
                     message: d.message,
                 }
             }
             "ConfigChanged" => {
-                let d: ConfigChangedData = data_of(raw, lineno, path)?;
+                let d: ConfigChangedData = data_of(raw, self.lineno, path)?;
                 EventData::ConfigChanged {
                     revision: d.revision,
                     change: d.change,
                 }
             }
             "ContextBudgetReached" => {
-                let d: ContextBudgetReachedData = data_of(raw, lineno, path)?;
+                let d: ContextBudgetReachedData = data_of(raw, self.lineno, path)?;
                 EventData::ContextBudgetReached {
                     turn_id: d.turn_id,
                     source: d.source,
@@ -635,51 +675,63 @@ where
                 }
             }
             _ => {
-                let value = data_value(raw, lineno, path).map_err(E::from)?;
+                let value = data_value(raw, self.lineno, path).map_err(E::from)?;
                 EventData::Other(value)
             }
         };
 
-        on_event(SessionEvent {
+        self.event_count += 1;
+        Ok(Some(SessionEvent {
             seq,
             ts,
             event,
             critical,
-            byte_offset: line_offset,
-            line_len: n as u64,
+            byte_offset,
+            line_len,
             data,
-        })?;
-        event_count += 1;
-        line_offset = committed_bytes;
+        }))
     }
 
-    // A segment still open at end of file is uncommitted; record its marker line before the
-    // fold closes it.
-    if fold.is_pending() {
-        uncommitted_lines.push(marker_line.unwrap_or(0));
-    }
-    let fold = fold.finish();
-    let uncommitted = fold
-        .uncommitted()
-        .iter()
-        .zip(uncommitted_lines.iter().copied())
-        .map(|(segment, line)| UncommittedReplacement {
-            revision: segment.revision,
-            declared_len: segment.declared_len as u64,
-            written: segment.written as u64,
-            line,
-            end: segment.end,
-        })
-        .collect();
+    pub(crate) fn finish(mut self, committed_bytes: u64) -> ScanSummary {
+        // A segment still open at end of file is uncommitted; record its marker line before the
+        // fold closes it.
+        if self.fold.is_pending() {
+            self.uncommitted_lines.push(self.marker_line.unwrap_or(0));
+        }
+        let fold = self.fold.finish();
+        let uncommitted = fold
+            .uncommitted()
+            .iter()
+            .zip(self.uncommitted_lines.iter().copied())
+            .map(|(segment, line)| UncommittedReplacement {
+                revision: segment.revision,
+                declared_len: segment.declared_len as u64,
+                written: segment.written as u64,
+                line,
+                end: segment.end,
+            })
+            .collect();
 
-    Ok(ScanSummary {
-        session_id,
-        schema_version: schema_version.unwrap_or(SCHEMA_VERSION),
-        committed_bytes,
-        event_count,
-        skipped,
-        uncommitted,
-    })
+        ScanSummary {
+            session_id: self.session_id,
+            schema_version: self.schema_version.unwrap_or(SCHEMA_VERSION),
+            committed_bytes,
+            event_count: self.event_count,
+            skipped: self.skipped,
+            uncommitted,
+        }
+    }
+
+    /// Complete lines parsed so far (the next complete line is `lineno() + 1`).
+    pub(crate) fn lineno(&self) -> u64 {
+        self.lineno
+    }
+
+    /// The repaired effective history so far (ADR 0019/0002), matching
+    /// `Session::open(..).history()` for the prefix read.
+    pub(crate) fn recovered_history(&self) -> Vec<Message> {
+        self.fold.recovered_history()
+    }
 }
 
 /// A fully parsed session file. Unknown non-critical events are not part of `events`; they

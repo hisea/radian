@@ -25,6 +25,7 @@ mod gate;
 mod index;
 mod reader;
 mod runtime;
+mod tail;
 mod writer;
 
 /// Re-exported so a reader of [`UncommittedReplacement::end`] need not depend on `agent-core`
@@ -52,6 +53,7 @@ pub use runtime::{
     InboxLane, MemoryInjectedRecord, PermissionApprover, PermissionDecision, RuntimeEvent,
     TurnOutcome, TurnReason,
 };
+pub use tail::{JournalTail, TailUpdate};
 pub use writer::{ForkParent, SessionCreatedData, SessionJournal, WriteError, now_utc};
 
 /// Fault-injection seams, compiled only with the `testing` feature. Off by default so a
