@@ -430,7 +430,7 @@ continue it: `... the session file <path> exists; after fixing the problem, cont
 - Frame timing under load (the spike measured p95 ≪ 16 ms; this skeleton was not benchmarked).
 - `Shift-Enter` on terminals without the enhanced keyboard protocol.
 - Windows and Linux ptys; only macOS was exercised.
-- Large transcripts: virtualized since 2026-10-13 (dogfooding D9; `tests/virtual.rs`, frame times in `docs/perf-baseline.md` §4). Not done: the first frame after resuming a large session still measures every entry once.
+- Large transcripts: virtualized since 2026-10-13 (dogfooding D9; `tests/virtual.rs`, frame times in `docs/perf-baseline.md` §4). Not done: the first frame after resuming a large session still measures every entry once (ADR 0023 Step 0 measured it: 50k messages → **2.2–4.7 s** to the first frame; a width change also re-wraps the whole transcript, ~70 ms at 50k). Those Step 0 numbers come from `TestBackend` and a real pty (`crates/radian-tui/tests/perf_render.rs`): they measure our render cost and the bytes arriving at a pty, **not** the draw latency of a real terminal emulator.
 
 ## Sessions
 
