@@ -15,7 +15,7 @@ use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::io::AsyncBufReadExt;
@@ -66,9 +66,14 @@ const INBOX_CAPACITY: usize = 64;
 #[derive(Parser)]
 #[command(name = "agent", about = "Chat with a model, with optional MCP tools")]
 struct Cli {
-    /// Model name sent to the API.
-    #[arg(long)]
-    model: String,
+    /// Model name sent to the API. Required to run a conversation (`-p` or interactive); the
+    /// session-management commands (`--list`, `--export`, `--search`) do not need a model and
+    /// do not read the key.
+    #[arg(
+        long,
+        required_unless_present_any = ["list", "export", "search"]
+    )]
+    model: Option<String>,
 
     /// Everything before `/chat/completions`.
     #[arg(long, default_value = "https://api.openai.com/v1")]
@@ -206,6 +211,15 @@ struct Cli {
 /// Why startup failed. The message must not contain the key.
 pub(crate) struct SetupError(pub(crate) String);
 
+/// The `--model` value. Clap requires it unless `--list`, `--export` or `--search` is present,
+/// so a conversation always has one; this makes the failure explicit instead of a panic if
+/// that invariant ever changes.
+fn model_name(cli: &Cli) -> Result<&str, SetupError> {
+    cli.model
+        .as_deref()
+        .ok_or_else(|| SetupError("--model is required to run a conversation".into()))
+}
+
 /// The `--format` value for `--export`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 enum ExportFormat {
@@ -313,7 +327,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
             cli.api_key_env, cli.base_url
         )));
     }
-    let mut config = OpenAiCompatibleConfig::new(&cli.base_url, &cli.model);
+    let mut config = OpenAiCompatibleConfig::new(&cli.base_url, model_name(cli)?);
     if let Some(key) = &key {
         config = config.with_api_key(ApiKey::new(key.clone()));
     }
@@ -433,12 +447,14 @@ fn session_workspace(cli: &Cli) -> Result<String, SetupError> {
     )
 }
 
-/// `--list`: the sessions of this workspace, newest activity first.
-fn list_sessions(cli: &Cli) -> Result<(), SetupError> {
+/// Opens the workspace's session index and rebuilds it from the JSONL files. The index is a
+/// disposable cache (ADR 0006 §10): the `.jsonl` files are the authority, and nothing here
+/// writes one. `None` means the session directory does not exist yet.
+fn open_workspace_index(cli: &Cli) -> Result<Option<(PathBuf, Index, String)>, SetupError> {
     let dir = session_dir(cli)?;
     let workspace = session_workspace(cli)?;
     if !dir.exists() {
-        return Ok(()); // no sessions yet
+        return Ok(None);
     }
     let mut index = Index::open(dir.join("index.db")).map_err(|e| {
         SetupError(format!(
@@ -449,6 +465,14 @@ fn list_sessions(cli: &Cli) -> Result<(), SetupError> {
     index
         .rebuild_dir(&dir)
         .map_err(|e| SetupError(format!("cannot rebuild the session index: {e}")))?;
+    Ok(Some((dir, index, workspace)))
+}
+
+/// `--list`: the sessions of this workspace, newest activity first.
+fn list_sessions(cli: &Cli) -> Result<(), SetupError> {
+    let Some((_dir, index, workspace)) = open_workspace_index(cli)? else {
+        return Ok(()); // no sessions yet
+    };
     let sessions = index
         .list(Some(&workspace))
         .map_err(|e| SetupError(format!("cannot list sessions: {e}")))?;
@@ -558,23 +582,13 @@ fn export_secrets(cli: &Cli) -> Vec<String> {
 }
 
 /// `--search`: substring search over the current workspace's message text, using the same
-/// `Index::search` the index cache is built on.
+/// `Index::search` the `--list` cache is built on. The index lives beside the sessions in
+/// `index.db`; it is a disposable cache, never a session file (ADR 0006 §10).
 fn search_sessions(cli: &Cli, query: &str) -> Result<(), SetupError> {
-    let dir = session_dir(cli)?;
-    let workspace = session_workspace(cli)?;
-    if !dir.exists() {
+    let Some((_dir, index, workspace)) = open_workspace_index(cli)? else {
         eprintln!("no match");
         return Ok(());
-    }
-    // A read-only command must not write into the session directory (the JSONL is the
-    // authority; the index is disposable, ADR 0006 §10), so the index is built in a private
-    // temp directory and removed on drop.
-    let scratch = TempIndex::new()?;
-    let mut index = Index::open(scratch.path())
-        .map_err(|e| SetupError(format!("cannot open a search index: {e}")))?;
-    index
-        .rebuild_dir(&dir)
-        .map_err(|e| SetupError(format!("cannot index {}: {e}", dir.display())))?;
+    };
     let hits = index
         .search(query, Some(&workspace), SEARCH_LIMIT)
         .map_err(|e| SetupError(format!("cannot search: {e}")))?;
@@ -609,37 +623,6 @@ fn search_sessions(cli: &Cli, query: &str) -> Result<(), SetupError> {
 /// multi-line message carries) becomes a single space.
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// A disposable SQLite index in the system temp directory, removed on drop. `--search` must
-/// not create anything in the session directory, and the index is re-derivable from the
-/// JSONL (ADR 0006 §10).
-struct TempIndex {
-    dir: PathBuf,
-}
-
-impl TempIndex {
-    fn new() -> Result<Self, SetupError> {
-        static SEARCH_INDEXES: AtomicU64 = AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "radian-cli-search-{}-{}",
-            std::process::id(),
-            SEARCH_INDEXES.fetch_add(1, Ordering::SeqCst)
-        ));
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| SetupError(format!("cannot create a search index dir: {e}")))?;
-        Ok(Self { dir })
-    }
-
-    fn path(&self) -> PathBuf {
-        self.dir.join("index.db")
-    }
-}
-
-impl Drop for TempIndex {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
 }
 
 /// Like the provider's own rule: localhost, 127.0.0.1 and ::1 may go without a key.
@@ -697,7 +680,7 @@ fn open_journal(
     // base URL that could carry credentials (ADR 0008 §4, ADR 0013).
     let created = SessionCreatedData::new(
         workspace,
-        serde_json::json!({"provider": "openai-compatible", "model": cli.model}),
+        serde_json::json!({"provider": "openai-compatible", "model": model_name(cli)?}),
     );
     let journal = SessionJournal::create(&path, session_id, created)
         .map_err(|e| SetupError(format!("cannot create session {session_id:?}: {e}")))?;

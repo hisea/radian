@@ -24,8 +24,8 @@ Every run is a durable session: one JSONL file per conversation.
 ## Session management
 
 Three read-only commands work on the sessions of the **current workspace** (`--workspace`,
-else the current directory). None of them starts the model, and none writes into the session
-directory.
+else the current directory). None of them starts the model, none needs `--model`, and none
+creates or modifies a session file (`.jsonl`).
 
 - **`--list`**: id, created, last activity and message count, newest first.
 - **`--export <id>`**: the session as Markdown on stdout by default;
@@ -41,12 +41,14 @@ directory.
   - The export reads the session JSONL directly; it does not create or update the index.
 - **`--search <text>`**: substring search over the visible message text, one tab-separated
   row per hit: `session-id`, last activity, and the hit snippet on a single line. No match
-  prints nothing on stdout, says `no match` on stderr and exits 0. It builds a disposable
-  index in the system temp directory, so the session directory stays untouched (ADR 0006
-  §10: the JSONL is the authority, the index is disposable).
+  prints nothing on stdout, says `no match` on stderr and exits 0. `--list` and `--search`
+  share the `index.db` cache in the session directory; it is disposable and re-derivable
+  from the JSONL, never a session file (ADR 0006 §10). `--export` reads the JSONL directly
+  and does not touch the index.
 
-All three exit without a model call, and `--export`/`--search` conflict with `--prompt`,
-`--resume` and `--list` (clap rejects a combination with exit 2).
+These are their own mode: `--export`/`--search`/`--list` conflict with `--prompt`,
+`--resume` and each other (clap rejects a combination with exit 2), and `--model` is only
+required for a conversation (`-p` or interactive).
 
 ## Input
 

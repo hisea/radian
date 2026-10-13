@@ -3148,6 +3148,27 @@ fn dir_names(dir: &Path) -> Vec<String> {
     names
 }
 
+/// The `.jsonl` session files in a directory, name and bytes. `index.db` and its WAL files
+/// are a disposable cache (ADR 0006 §10), not session files, so they are excluded.
+fn jsonl_snapshot(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut snapshot: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "jsonl")
+        })
+        .map(|path| {
+            (
+                path.file_name().unwrap().to_string_lossy().into_owned(),
+                std::fs::read(&path).unwrap(),
+            )
+        })
+        .collect();
+    snapshot.sort();
+    snapshot
+}
+
 /// Acceptance 1: `--export` renders the conversation as Markdown by default and as JSON with
 /// `--format json`.
 #[tokio::test]
@@ -3465,8 +3486,7 @@ async fn session_commands_do_not_touch_the_session_directory() {
     )
     .await;
     assert_eq!(code, 0, "{stderr}");
-    let before = dir_names(&sessions);
-    let before_bytes = std::fs::read(sessions.join("keep.jsonl")).unwrap();
+    let before = jsonl_snapshot(&sessions);
 
     let base = [
         "--model",
@@ -3486,14 +3506,15 @@ async fn session_commands_do_not_touch_the_session_directory() {
     assert_eq!(code, 0, "{stderr}");
 
     assert_eq!(
-        dir_names(&sessions),
+        jsonl_snapshot(&sessions),
         before,
-        "the session commands wrote a file"
+        "a session command created or modified a .jsonl file"
     );
-    assert_eq!(
-        std::fs::read(sessions.join("keep.jsonl")).unwrap(),
-        before_bytes,
-        "the session file was modified"
+    // The search cache (`index.db`) may be created or updated: it is disposable, not a
+    // session (ADR 0006 §10).
+    assert!(
+        dir_names(&sessions).iter().any(|name| name == "index.db"),
+        "this test no longer exercises the shared index cache"
     );
 }
 
@@ -3508,4 +3529,63 @@ async fn session_commands_conflict_with_a_prompt() {
     .await;
     assert_eq!(code, 2);
     assert!(stderr.contains("cannot be used with"), "{stderr}");
+}
+
+/// `--model` is not required for the session-management commands: none of them starts a
+/// conversation or reads the key.
+#[tokio::test]
+async fn session_commands_do_not_need_a_model() {
+    let dir = scratch("no-model");
+    let sessions = dir.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    write_session(
+        &sessions,
+        "nm",
+        &canonical(&ws),
+        "NO-MODEL-TEXT",
+        None,
+        None,
+    );
+    let base = [
+        "--session-dir",
+        sessions.to_str().unwrap(),
+        "--workspace",
+        ws.to_str().unwrap(),
+    ];
+
+    let mut list_args = base.to_vec();
+    list_args.push("--list");
+    let (code, stdout, stderr) = feed_and_wait(spawn_agent(&list_args, &[]), "").await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("nm"), "{stdout}");
+
+    let mut export_args = base.to_vec();
+    export_args.extend_from_slice(&["--export", "nm"]);
+    let (code, stdout, stderr) = feed_and_wait(spawn_agent(&export_args, &[]), "").await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("NO-MODEL-TEXT"), "{stdout}");
+
+    let mut search_args = base.to_vec();
+    search_args.extend_from_slice(&["--search", "NO-MODEL-TEXT"]);
+    let (code, stdout, stderr) = feed_and_wait(spawn_agent(&search_args, &[]), "").await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("nm"), "{stdout}");
+}
+
+/// A conversation still requires `--model`: `-p` and interactive mode are usage errors
+/// without it (exit 2, before any session is created). The `Usage:` line proves clap parsed
+/// the arguments and refused, rather than a later setup step failing.
+#[tokio::test]
+async fn a_conversation_still_requires_a_model() {
+    let (code, _, stderr) = feed_and_wait(spawn_agent(&["-p", "hi"], &[]), "").await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("--model"), "{stderr}");
+    assert!(stderr.contains("Usage:"), "{stderr}");
+
+    let (code, _, stderr) = feed_and_wait(spawn_agent(&[], &[]), "").await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("--model"), "{stderr}");
+    assert!(stderr.contains("Usage:"), "{stderr}");
 }
