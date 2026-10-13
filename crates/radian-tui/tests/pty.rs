@@ -3287,3 +3287,74 @@ async fn pty_sessions_and_export_commands() {
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
 }
+
+/// Phase 5: `Ctrl-F` searches the transcript and jumps to an earlier match.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_find_jumps_to_an_earlier_match() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("find-pty");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    // A long transcript: the first reply holds the marker, seven more fill it.
+    let mut replies = vec![text_reply("ALPHA-MARKER")];
+    for i in 2..=8 {
+        let filler = (0..12)
+            .map(|j| format!("filler-{i}-line-{j}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        replies.push(text_reply(&filler));
+    }
+    let server = MockServer::start(replies).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "find",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"m1\r");
+    assert!(pty.wait_for_screen("ALPHA-MARKER", 15), "{}", pty.screen());
+    for i in 2..=8 {
+        pty.send(format!("m{i}\r").as_bytes());
+        assert!(
+            pty.wait_for_screen(&format!("filler-{i}-line-11"), 15),
+            "{}",
+            pty.screen()
+        );
+    }
+    assert!(
+        !pty.screen().contains("ALPHA-MARKER"),
+        "the marker should have scrolled off:\n{}",
+        pty.screen()
+    );
+
+    // Ctrl-F opens the box; typing jumps to the earlier match.
+    pty.send(&[0x06]);
+    pty.send(b"ALPHA");
+    assert!(
+        pty.wait_for_screen("match 1/1", 10),
+        "the find status is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("ALPHA-MARKER", 10),
+        "the match did not scroll into view:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}

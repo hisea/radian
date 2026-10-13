@@ -334,6 +334,13 @@ fn status_segments(app: &App) -> Vec<Segment> {
             style: turn_style,
         },
     ];
+    // Phase 5: the find match position is high priority, so a narrow terminal keeps it.
+    if let Some(status) = app.find_state().and_then(crate::find::FindState::status) {
+        segments.push(Segment {
+            text: status,
+            style: Style::default().fg(Color::Yellow),
+        });
+    }
     if let Some(tier) = &app.tier {
         segments.push(Segment {
             text: tier.clone(),
@@ -369,13 +376,6 @@ fn status_segments(app: &App) -> Vec<Segment> {
         ),
         style: Style::default(),
     });
-    // Phase 5: the find box's match position, next to the scroll position.
-    if let Some(status) = app.find_state().and_then(crate::find::FindState::status) {
-        segments.push(Segment {
-            text: status,
-            style: Style::default().fg(Color::Yellow),
-        });
-    }
     if let Some(note) = &app.note {
         segments.push(Segment {
             text: note.clone(),
