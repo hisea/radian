@@ -59,8 +59,8 @@ struct Pty {
     first_byte: Arc<Mutex<Option<Instant>>>,
     start: Instant,
     child: Child,
-    /// A per-pty `HOME`: diagnostics (ADR 0013) and any default session directory resolve
-    /// under it, so a manual `--ignored` run never writes to the real `HOME`.
+    /// A per-pty `HOME`: `~/.radian/` (ADR 0020) resolves under it, so a manual `--ignored`
+    /// run never writes to the real `HOME`.
     _home: TempDir,
 }
 impl Drop for Pty {
@@ -109,7 +109,8 @@ impl Pty {
         }
         cmd.env("TERM", "xterm-256color");
         cmd.env("HOME", home.path());
-        cmd.env("XDG_CACHE_HOME", home.path());
+        // No real models.dev from a test (ADR 0018): a closed local port fails fast.
+        cmd.env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json");
         let child = cmd.spawn().unwrap();
 
         let mut master = File::from(master);

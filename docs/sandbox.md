@@ -283,3 +283,11 @@ deps/pty-… --exact pty_end_to_end_conversation_and_clean_exit → ok (EXIT=0) 
 
 **未验证**：`cargo test` 整体在沙箱内运行（上述原因）；`network_safe` 之外的细粒度网络；
 x86_64 与其它发行版。
+
+**评审补充（合并时，2026-10-13）**：第 6 条的 pty harness 修复与 main 上已有的修复重叠（目录缓存
+那一片已给 `tests/pty.rs` 私有 `HOME`）；合并取 main 的版本。ADR 0020 之后诊断与缓存都在
+`$HOME/.radian/` 下，`XDG_CACHE_HOME` 不再起作用，所以 `tests/perf_startup.rs` 去掉了它，改为
+与 `tests/pty.rs` 一样把 `RADIAN_CATALOG_URL` 指向关闭的本地端口。本节的逃逸矩阵是 34 例
+（ADR 0020 之前）；ADR 0020 新增的 5 例在 Linux 上的复核见下一节。第 7 条的两个进度测试由评审者
+另行修正（见 `crates/agent-extensions/tests/mcp.rs` 的注释）。第 8 条用预编译测试二进制代替
+沙箱内 `cargo test`，评审者接受：测的是同一段 bind/openpty 代码。
