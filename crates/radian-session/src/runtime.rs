@@ -48,6 +48,25 @@ pub enum TurnReason {
     DeadlineExceeded,
 }
 
+/// How a permission decision came out (ADR 0006 §5.9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum PermissionDecision {
+    Allow,
+    Deny,
+    Rewrite,
+}
+
+/// Who made a permission decision (ADR 0006 §5.9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum PermissionApprover {
+    User,
+    Policy,
+}
+
 /// One durable fact the runtime owns. `#[non_exhaustive]`: `ContextCompacted`, `Rewound`,
 /// `SessionForked` and `PermissionResolved` will be added when their producers exist.
 #[derive(Debug, Clone, PartialEq)]
@@ -87,6 +106,15 @@ pub enum RuntimeEvent {
     /// registry and the slots own its meaning. The optional `profile_ref` sibling of §5.7 is
     /// not exposed yet (no producer in this phase).
     ConfigChanged { revision: u64, change: Value },
+    /// One permission decision (ADR 0006 §5.9). Audit only: `critical = false`, it does not
+    /// take part in state reconstruction and is **not** replayed on resume.
+    PermissionResolved {
+        request_id: String,
+        call_id: String,
+        decision: PermissionDecision,
+        approver: PermissionApprover,
+        reason: Option<String>,
+    },
 }
 
 impl RuntimeEvent {
@@ -99,11 +127,12 @@ impl RuntimeEvent {
             RuntimeEvent::TurnStarted { .. } => "TurnStarted",
             RuntimeEvent::TurnFinished { .. } => "TurnFinished",
             RuntimeEvent::ConfigChanged { .. } => "ConfigChanged",
+            RuntimeEvent::PermissionResolved { .. } => "PermissionResolved",
         }
     }
 
-    /// The `critical` flag (ADR 0006 §4). Every runtime event here is critical: skipping one
-    /// would rebuild the wrong inbox/turn/config state.
+    /// The `critical` flag (ADR 0006 §4). Every runtime event here is critical except
+    /// `PermissionResolved`: it is audit, not state, so a reader may skip it.
     pub fn critical(&self) -> bool {
         match self {
             RuntimeEvent::InboxEnqueued { .. }
@@ -112,6 +141,24 @@ impl RuntimeEvent {
             | RuntimeEvent::TurnStarted { .. }
             | RuntimeEvent::TurnFinished { .. }
             | RuntimeEvent::ConfigChanged { .. } => true,
+            RuntimeEvent::PermissionResolved { .. } => false,
+        }
+    }
+
+    /// Builds a `PermissionResolved` event (ADR 0006 §5.9).
+    pub fn permission_resolved(
+        request_id: String,
+        call_id: String,
+        decision: PermissionDecision,
+        approver: PermissionApprover,
+        reason: Option<String>,
+    ) -> Self {
+        RuntimeEvent::PermissionResolved {
+            request_id,
+            call_id,
+            decision,
+            approver,
+            reason,
         }
     }
 }
@@ -159,6 +206,16 @@ pub(crate) struct ConfigChangedData<'a> {
     pub change: &'a Value,
 }
 
+#[derive(Serialize)]
+pub(crate) struct PermissionResolvedData<'a> {
+    pub request_id: &'a str,
+    pub call_id: &'a str,
+    pub decision: PermissionDecision,
+    pub approver: PermissionApprover,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'a str>,
+}
+
 /// The `data` view of one runtime event. A manual enum (like the transcript writer's
 /// `Render`) keeps the field order of the ADR and avoids an externally tagged wrapper.
 pub(crate) enum RuntimeData<'a> {
@@ -168,6 +225,7 @@ pub(crate) enum RuntimeData<'a> {
     TurnStarted(TurnStartedData<'a>),
     TurnFinished(TurnFinishedData<'a>),
     ConfigChanged(ConfigChangedData<'a>),
+    PermissionResolved(PermissionResolvedData<'a>),
 }
 
 impl Serialize for RuntimeData<'_> {
@@ -179,6 +237,7 @@ impl Serialize for RuntimeData<'_> {
             RuntimeData::TurnStarted(d) => d.serialize(serializer),
             RuntimeData::TurnFinished(d) => d.serialize(serializer),
             RuntimeData::ConfigChanged(d) => d.serialize(serializer),
+            RuntimeData::PermissionResolved(d) => d.serialize(serializer),
         }
     }
 }
@@ -230,5 +289,18 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
                 change,
             })
         }
+        RuntimeEvent::PermissionResolved {
+            request_id,
+            call_id,
+            decision,
+            approver,
+            reason,
+        } => RuntimeData::PermissionResolved(PermissionResolvedData {
+            request_id,
+            call_id,
+            decision: *decision,
+            approver: *approver,
+            reason: reason.as_deref(),
+        }),
     }
 }

@@ -229,6 +229,19 @@ fn event_data_value(
         EventData::ConfigChanged { revision, change } => {
             json!({"revision": revision, "change": change})
         }
+        EventData::PermissionResolved {
+            request_id,
+            call_id,
+            decision,
+            approver,
+            reason,
+        } => json!({
+            "request_id": request_id,
+            "call_id": call_id,
+            "decision": decision,
+            "approver": approver,
+            "reason": reason,
+        }),
         EventData::Other(value) => value.clone(),
     };
     Ok(value)

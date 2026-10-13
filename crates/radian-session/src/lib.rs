@@ -34,5 +34,7 @@ pub use index::{
     read_line_at,
 };
 pub use reader::{EventData, Session, SessionEvent};
-pub use runtime::{InboxLane, RuntimeEvent, TurnOutcome, TurnReason};
+pub use runtime::{
+    InboxLane, PermissionApprover, PermissionDecision, RuntimeEvent, TurnOutcome, TurnReason,
+};
 pub use writer::{SessionCreatedData, SessionJournal, WriteError};
