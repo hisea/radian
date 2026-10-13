@@ -5305,7 +5305,7 @@ async fn fork_creates_a_child_and_refuses_a_locked_parent() {
 
     // A parent another process is writing must be refused with exit 1, not waited for.
     let held =
-        radian_session::SessionJournal::resume(&sessions.join("parent.jsonl"), "parent").unwrap();
+        radian_session::SessionJournal::resume(sessions.join("parent.jsonl"), "parent").unwrap();
     let (code, stdout, stderr) = feed_and_wait(
         spawn_agent(
             &[
