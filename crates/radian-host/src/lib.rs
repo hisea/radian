@@ -18,7 +18,9 @@ mod workspace;
 pub use describe::{CLI_WORDING, TUI_WORDING, Wording, describe};
 pub use headers::{SESSION_PLACEHOLDER, parse_headers};
 pub use mcp::load_mcp_config;
-pub use model::{DEFAULT_MAX_TOKENS, HostModel, ModelArgs, Provider, Thinking, build_model};
+pub use model::{
+    DEFAULT_MAX_TOKENS, HostModel, MIN_THINKING_BUDGET, ModelArgs, Provider, Thinking, build_model,
+};
 pub use session_id::{generate_session_id, validate_session_id};
 pub use tools::{HostSession, HostTools, merge_tool_specs};
 pub use workspace::resolve_workspace;

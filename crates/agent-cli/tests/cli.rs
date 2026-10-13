@@ -3141,7 +3141,7 @@ async fn anthropic_provider_sends_a_messages_request_and_shows_the_reply() {
     let body = requests[0].json();
     assert_eq!(body["model"], "claude-x");
     // `max_tokens` is required by the Messages API and the host fills it in.
-    assert_eq!(body["max_tokens"], 4096, "{body}");
+    assert_eq!(body["max_tokens"], 16384, "{body}");
     // Default thinking is off: the request has no `thinking` key at all.
     assert!(body.get("thinking").is_none(), "{body}");
 }
@@ -3199,8 +3199,8 @@ async fn anthropic_thinking_modes_are_sent_in_the_body() {
     for (mode, expected) in [
         ("adaptive", json!({"type": "adaptive"})),
         (
-            "enabled:2048",
-            json!({"type": "enabled", "budget_tokens": 2048}),
+            "enabled:8192",
+            json!({"type": "enabled", "budget_tokens": 8192}),
         ),
     ] {
         let server = anth::MockServer::start(vec![anth_text_reply("ok")]).await;
@@ -3307,5 +3307,51 @@ async fn the_default_provider_still_sends_an_openai_request() {
     assert_eq!(
         request.header("authorization"),
         Some(format!("Bearer {KEY}").as_str())
+    );
+}
+
+/// `--thinking enabled:<budget>` is checked before the session file exists: the budget must be
+/// `>= 1024` and `< --max-tokens` (Anthropic's rule, wire notes §2.3). Both a budget equal to
+/// `max_tokens` (16384 default) and one below 1024 are usage errors and leave no session file.
+#[tokio::test]
+async fn anthropic_rejects_a_thinking_budget_out_of_range_before_creating_a_session() {
+    let server = anth::MockServer::start(vec![anth_text_reply("ok")]).await;
+    for (mode, budget) in [("enabled:16384", 16384u64), ("enabled:1000", 1000)] {
+        let dir = fresh_session_dir();
+        let (code, _, stderr) = feed_and_wait(
+            spawn_agent_in(
+                &dir,
+                &[
+                    "--model",
+                    "claude",
+                    "--provider",
+                    "anthropic",
+                    "--base-url",
+                    &server.base_url,
+                    "--thinking",
+                    mode,
+                    "-p",
+                    "hi",
+                ],
+                &[("ANTHROPIC_API_KEY", "sk-ant-budget")],
+            ),
+            "",
+        )
+        .await;
+        assert_eq!(code, 2, "{mode} must be a usage error: {stderr}");
+        assert!(stderr.contains("out of range"), "{mode}: {stderr}");
+        assert!(
+            stderr.contains(&format!("enabled:{budget}")),
+            "the message must name the budget: {stderr}"
+        );
+        // The rule and both numbers are in the message.
+        assert!(stderr.contains("1024"), "{mode}: {stderr}");
+        assert!(stderr.contains("16384"), "{mode}: {stderr}");
+        // No session file was created, and no request was sent.
+        assert_session_dir_empty(&dir);
+    }
+    assert!(
+        server.requests().is_empty(),
+        "an out-of-range budget must not reach the model"
     );
 }

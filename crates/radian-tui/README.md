@@ -18,7 +18,7 @@ scrolls itself, streaming text and reasoning, and clean terminal recovery.
   names another variable.
 - `anthropic`: the Messages API (`/v1/messages`); `--base-url` defaults to
   `https://api.anthropic.com`, the key comes from `$ANTHROPIC_API_KEY` unless `--api-key-env`
-  names another variable. `--max-tokens` (default 4096) is required by the Messages API, and
+  names another variable. `--max-tokens` (default 16384) is required by the Messages API, and
   `--thinking off|adaptive|enabled:<budget>` enables extended thinking (default `off`).
 
 The key is read only from the environment variable and is redacted from the panic log along

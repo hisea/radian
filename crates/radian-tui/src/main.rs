@@ -56,7 +56,7 @@ struct Cli {
     api_key_env: Option<String>,
 
     /// `max_tokens` for anthropic (the Messages API requires it). Ignored for
-    /// openai-compatible. Defaults to 4096.
+    /// openai-compatible. Defaults to 16384.
     #[arg(long, value_name = "N")]
     max_tokens: Option<u32>,
 

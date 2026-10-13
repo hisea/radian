@@ -13,7 +13,7 @@ through `radian-runtime` / `radian-session`.
   names another variable.
 - `anthropic`: the Messages API (`/v1/messages`). `--base-url` defaults to
   `https://api.anthropic.com`; the key comes from `$ANTHROPIC_API_KEY` unless `--api-key-env`
-  names another variable. `--max-tokens` (default 4096) is sent because the Messages API
+  names another variable. `--max-tokens` (default 16384) is sent because the Messages API
   requires the field. `--thinking off|adaptive|enabled:<budget>` enables extended thinking
   (default `off`; `adaptive` is the recommended mode on Claude 4.6+); `enabled:<budget>`
   sends `{"type":"enabled","budget_tokens":N}`.

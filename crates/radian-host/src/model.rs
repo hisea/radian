@@ -15,9 +15,18 @@ use agent_provider_anthropic::{Anthropic, AnthropicConfig, ThinkingConfig};
 use agent_provider_openai_compatible::{OpenAiCompatible, OpenAiCompatibleConfig};
 
 /// The `max_tokens` sent to Anthropic when `--max-tokens` is not given. The Messages API
-/// requires the field and defines no server-side default, so the host must pick one; 4096 is
-/// the adapter's own default and a reasonable ceiling for one coding answer. Overridable.
-pub const DEFAULT_MAX_TOKENS: u32 = 4096;
+/// requires the field and defines no server-side default, so the host must pick one. It
+/// counts **thinking tokens and the answer together** (wire notes §2.3), so a thinking turn
+/// needs room for both: 4096 truncated thinking coding answers, and 16384 is within the output
+/// ceiling of the current Claude models. Older models are set smaller with `--max-tokens`.
+/// Overridable.
+pub const DEFAULT_MAX_TOKENS: u32 = 16384;
+
+/// Anthropic's manual extended thinking requires `budget_tokens >= 1024` and
+/// `budget_tokens < max_tokens` (wire notes §2.3). Interleaved thinking, which relaxes this,
+/// is not enabled by this adapter, so the regular rule is checked **host-side, before the
+/// session file is created**. The adapter still does not validate locally.
+pub const MIN_THINKING_BUDGET: u32 = 1024;
 
 /// Which provider wire protocol a host talks. The names are the CLI values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,7 +107,7 @@ impl FromStr for Thinking {
                     .parse::<u32>()
                     .map(|budget_tokens| Self::Enabled { budget_tokens })
                     .map_err(|_| {
-                        format!("--thinking {other:?} needs a u32 budget, e.g. enabled:4096")
+                        format!("--thinking {other:?} needs a u32 budget, e.g. enabled:8192")
                     }),
                 None => Err(format!(
                     "--thinking {other:?} is not one of off, adaptive, enabled:<budget>"
@@ -161,6 +170,18 @@ pub fn build_model(args: ModelArgs) -> Result<HostModel, String> {
                 .map_err(|e| format!("--base-url {base_url}: {e}"))
         }
         Provider::Anthropic => {
+            // Manual extended thinking has a documented range; fail here (before the session
+            // file exists) with both numbers rather than let the API reject the request.
+            if let Thinking::Enabled { budget_tokens } = args.thinking
+                && !(MIN_THINKING_BUDGET..args.max_tokens).contains(&budget_tokens)
+            {
+                return Err(format!(
+                    "--thinking enabled:{budget_tokens} is out of range: Anthropic requires the \
+                     budget to be >= {MIN_THINKING_BUDGET} and < --max-tokens ({}); interleaved \
+                     thinking, which would relax this, is not enabled by this adapter",
+                    args.max_tokens
+                ));
+            }
             let mut config = AnthropicConfig::new(base_url, &args.model);
             if let Some(key) = &args.api_key {
                 config = config.with_api_key(agent_provider_anthropic::ApiKey::new(key));
