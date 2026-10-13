@@ -688,6 +688,8 @@ pub async fn check_error_classification<M: Model, H: ContractHarness<M>>(h: &H) 
 pub async fn check_context_overflow<M: Model, H: ContractHarness<M>>(h: &H) {
     for (code, body) in [
         (400u16, "bad request"),
+        // The generic phrase must never be an overflow, at any status.
+        (400, "too many tokens"),
         (429, "too many tokens"),
         (500, "context_length_exceeded"),
     ] {
