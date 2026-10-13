@@ -1,6 +1,8 @@
 //! Rendering: the transcript view with its own scrolling, the input box, and the status
 //! line. Pure given an `App`, so `TestBackend` can assert on the result.
 
+use std::borrow::Cow;
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
@@ -95,12 +97,22 @@ fn body_style(entry: &Entry) -> Style {
     }
 }
 
+/// The text a frame shows for `entry`. A user message's `@` attachments are folded to one
+/// `[file: P, N lines]` line each; every other entry shows its text unchanged. Display only:
+/// the message (and the journal) keep the full text.
+fn display_text(entry: &Entry) -> Cow<'_, str> {
+    match entry.kind {
+        EntryKind::User => crate::mention::fold_files(&entry.text),
+        _ => Cow::Borrowed(&entry.text),
+    }
+}
+
 /// One entry's styled lines. An interrupted assistant entry gets an explicit marker on its
 /// last line.
 fn entry_lines(entry: &Entry, width: usize) -> Vec<Line<'static>> {
     let (prefix, prefix_style) = marker(entry.kind);
     let body_width = width.saturating_sub(prefix.width()).max(1);
-    let wrapped = wrap(&entry.text, body_width);
+    let wrapped = wrap(&display_text(entry), body_width);
     let style = body_style(entry);
     let last = wrapped.len().saturating_sub(1);
     let mut lines = Vec::with_capacity(wrapped.len());
@@ -128,7 +140,7 @@ fn entry_line_count(entry: &mut Entry, width: usize) -> usize {
     }
     let (prefix, _) = marker(entry.kind);
     let body_width = width.saturating_sub(prefix.width()).max(1);
-    let lines = wrap(&entry.text, body_width).len();
+    let lines = wrap(&display_text(entry), body_width).len();
     entry.wrap_cache.set(WrapKey {
         width,
         text_len,
@@ -184,14 +196,13 @@ pub fn visible_lines(
     (total, out)
 }
 
+/// The tallest the input box grows before it scrolls internally instead.
+const MAX_INPUT_ROWS: usize = 10;
+
 fn input_height(app: &App, width: usize) -> u16 {
-    let text = if app.input.is_empty() {
-        String::new()
-    } else {
-        app.input.clone()
-    };
-    let rows = wrap(&text, width.saturating_sub(2).max(1)).len().max(1);
-    (rows as u16 + 2).clamp(3, 8)
+    let inner = width.saturating_sub(2).max(1);
+    let rows = crate::composer::rows(&app.input.text(), inner).len();
+    (rows.clamp(1, MAX_INPUT_ROWS) as u16) + 2
 }
 
 /// The approval prompt's text. The **resolved** resource is what is shown: `a/../secret`
@@ -391,20 +402,37 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             frame.render_widget(text, chunks[1]);
         }
         None => {
-            let hint = if app.input.is_empty() {
+            let inner_width = chunks[1].width.saturating_sub(2).max(1) as usize;
+            let visible = chunks[1].height.saturating_sub(2).max(1) as usize;
+            let text = app.input.text();
+            let rows = crate::composer::rows(&text, inner_width);
+            let (cursor_row, cursor_col) = app.input.cursor_cell(inner_width);
+            // Keep the cursor in view when the text is taller than the box.
+            let offset = cursor_row.saturating_sub(visible.saturating_sub(1));
+            let offset = offset.min(rows.len().saturating_sub(1));
+            let empty = app.input.is_empty();
+            let shown = if empty {
                 "(type a message, Enter to send, Ctrl-J for a new line)".to_string()
             } else {
-                app.input.clone()
+                rows[offset..].join("\n")
             };
-            let style = if app.input.is_empty() {
+            let style = if empty {
                 Style::default().fg(Color::DarkGray)
             } else {
                 Style::default()
             };
-            let input = Paragraph::new(Span::styled(hint, style))
+            let input = Paragraph::new(Span::styled(shown, style))
                 .block(Block::default().borders(Borders::ALL).title(" message "))
                 .wrap(Wrap { trim: false });
             frame.render_widget(input, chunks[1]);
+            if app.input_editable() {
+                // The inner area starts one cell in from the border; a full row clamps the
+                // cursor to its last cell rather than onto the border.
+                let col = cursor_col.min(inner_width.saturating_sub(1)) as u16;
+                let x = chunks[1].x + 1 + col;
+                let y = chunks[1].y + 1 + (cursor_row - offset) as u16;
+                frame.set_cursor_position((x, y));
+            }
         }
     }
 

@@ -603,6 +603,16 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
     for message in &history {
         app.push_message(message);
     }
+    app.prefill_history(&history);
+    // A draft from a previous exit is restored once, when resuming the same session.
+    if cli.resume.is_some() {
+        let path = radian_tui::composer::draft_path(&dir, &session_id);
+        match radian_tui::composer::take_draft(&path) {
+            Ok(Some(text)) => app.input.set_text(&text),
+            Ok(None) => {}
+            Err(error) => eprintln!("[draft] cannot read {}: {error}", path.display()),
+        }
+    }
     app.entries.push(radian_tui::Entry::new(
         radian_tui::EntryKind::Notice,
         format!("profile: {startup}"),
@@ -658,6 +668,7 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
     let outcome = ui_loop(
         &mut terminal,
         &mut app,
+        &workspace_path,
         &rx,
         &runtime_rx,
         &approval_rx,
@@ -668,6 +679,12 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
         &session_host,
     );
     guard.restore();
+    // The draft is written on every clean exit (normal quit, Ctrl-C, SIGTERM/SIGHUP). A panic
+    // never reaches here, so the panic path does no file I/O.
+    let draft = radian_tui::composer::draft_path(&dir, &session_id);
+    if let Err(error) = radian_tui::composer::save_draft(&draft, &app.input.text()) {
+        eprintln!("[draft] cannot write {}: {error}", draft.display());
+    }
 
     let _ = stop_tx.send(());
     // The driver task is the session: if it died, the failure is the app's failure. A panic
@@ -700,6 +717,7 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
 fn ui_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App,
+    workspace: &Path,
     rx: &Receiver<AgentEvent>,
     runtime_events: &Receiver<radian_session::RuntimeEvent>,
     approvals: &Receiver<ApprovalPrompt>,
@@ -744,10 +762,10 @@ fn ui_loop(
             match event::read().map_err(|e| e.to_string())? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     if let Some(send) = app.on_key(key) {
-                        dispatch(send, runtime, inbox, hooks)?;
+                        dispatch(send, app, workspace, runtime, inbox, hooks)?;
                     }
                 }
-                Event::Paste(text) => app.input.push_str(&text),
+                Event::Paste(text) => app.input.insert_str(&text),
                 _ => {}
             }
         }
@@ -817,6 +835,8 @@ fn ui_loop(
         terminal
             .draw(|frame| radian_tui::render::draw(frame, app))
             .map_err(|e| e.to_string())?;
+        // The cursor is visible only while the input box is editable.
+        radian_tui::terminal::set_cursor_visible(app.input_editable());
     }
     Ok(())
 }
@@ -992,12 +1012,20 @@ fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
 
 fn dispatch(
     send: Send,
+    app: &mut App,
+    workspace: &Path,
     runtime: &tokio::runtime::Runtime,
     inbox: &Arc<Inbox>,
     hooks: &Arc<PermissionHooks>,
 ) -> Result<(), String> {
     match send {
         Send::Followup(text) => {
+            // `@` references expand here, before the text reaches the inbox, so the journal
+            // stores exactly what the model sees. A failed expansion is not sent and the
+            // input is restored.
+            let Some(text) = prepare_message(app, workspace, text) else {
+                return Ok(());
+            };
             // `HookContext` has no source field, so the host declares each turn's source
             // before it starts; an unset source is treated as non-human and denied.
             hooks.set_turn_source(Some(InputSource::User));
@@ -1007,6 +1035,9 @@ fn dispatch(
                 .map_err(|e| e.to_string())
         }
         Send::Steer(text) => {
+            let Some(text) = prepare_message(app, workspace, text) else {
+                return Ok(());
+            };
             hooks.set_turn_source(Some(InputSource::User));
             runtime
                 .block_on(inbox.steer(text, InputSource::User))
@@ -1018,6 +1049,44 @@ fn dispatch(
             Ok(())
         }
         Send::Quit => Ok(()),
+    }
+}
+
+/// Expands the `@` references in a user message.
+///
+/// On success, shows the `attached N file(s)` notice (and a warning per reference that
+/// resolved outside the workspace) and returns the text to send. On failure, shows the
+/// reasons and puts the original text back in the input box; returns `None`, so nothing is
+/// sent and the user can fix the message.
+fn prepare_message(app: &mut App, workspace: &Path, text: String) -> Option<String> {
+    match radian_tui::mention::expand(&text, workspace) {
+        Ok(expansion) => {
+            for warning in &expansion.warnings {
+                app.entries.push(radian_tui::Entry::new(
+                    radian_tui::EntryKind::Notice,
+                    warning.clone(),
+                ));
+            }
+            if !expansion.attached.is_empty() {
+                app.entries.push(radian_tui::Entry::new(
+                    radian_tui::EntryKind::Notice,
+                    format!(
+                        "attached {} file(s): {}",
+                        expansion.attached.len(),
+                        expansion.attached.join(", ")
+                    ),
+                ));
+            }
+            Some(expansion.text)
+        }
+        Err(error) => {
+            app.entries.push(radian_tui::Entry::new(
+                radian_tui::EntryKind::Notice,
+                format!("not sent: {error}"),
+            ));
+            app.restore_input(text);
+            None
+        }
     }
 }
 

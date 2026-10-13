@@ -182,3 +182,25 @@ fn live_deltas_are_replaced_by_the_committed_message_not_duplicated() {
     assert_eq!(assistant.len(), 1, "the live view is replaced, not kept");
     assert_eq!(assistant[0].text, "hello");
 }
+
+/// An `@` file attachment is folded to one line for display; the message itself is unchanged
+/// (the journal keeps the full text).
+#[test]
+fn a_user_file_attachment_is_folded_to_one_line() {
+    let mut app = App::new("mock", "s");
+    app.entries.push(Entry::new(
+        EntryKind::User,
+        "look\n\n<file path=\"notes.txt\">\nhello\nworld\n</file>",
+    ));
+    let text = screen(&render(&mut app, 80, 12));
+    assert!(text.contains("[file: notes.txt, 2 lines]"), "{text}");
+    assert!(
+        !text.contains("hello"),
+        "the content must not be shown: {text}"
+    );
+    assert!(text.contains("look"), "{text}");
+    assert_eq!(
+        app.entries[0].text, "look\n\n<file path=\"notes.txt\">\nhello\nworld\n</file>",
+        "the entry text is the full message"
+    );
+}

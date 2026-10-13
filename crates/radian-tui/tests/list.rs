@@ -92,3 +92,23 @@ async fn list_prints_this_workspaces_sessions_and_exits() {
     let line = out.lines().find(|l| l.contains("list-me")).unwrap();
     assert_eq!(line.split('\t').count(), 4, "{line:?}");
 }
+
+/// A `.draft` file next to the sessions is not a session: `--list` (and the index rebuild) only
+/// reads `*.jsonl`.
+#[tokio::test]
+async fn a_draft_file_is_not_listed_as_a_session() {
+    let dir = TempDir::new("draft-list");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    write_session(dir.path(), "real", &ws).await;
+    std::fs::write(dir.path().join("real.draft"), "unsent").unwrap();
+    std::fs::write(dir.path().join("ghost.draft"), "also unsent").unwrap();
+
+    let out = run_list(dir.path(), &ws);
+    assert!(out.contains("real"), "{out}");
+    assert!(
+        !out.contains("ghost"),
+        "a .draft must not be a session: {out}"
+    );
+    assert!(!out.contains("draft"), "no .draft row: {out}");
+}

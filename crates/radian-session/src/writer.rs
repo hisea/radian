@@ -353,7 +353,7 @@ fn write_locked(
 ) -> std::io::Result<()> {
     // A test-only seam: fail before any byte is written, so the file stays untouched.
     #[cfg(feature = "testing")]
-    if take_write_failure(event) {
+    if take_write_failure(session_id, event) {
         return Err(std::io::Error::other("injected: the write failed"));
     }
     let seq = writer.next_seq;
@@ -439,31 +439,41 @@ impl SegmentPause {
     }
 }
 
-/// Test-only fault seam: arm a one-shot failure for the next write of `event`, so an
-/// integration test can see the error path without touching the file. Compiled only with the
-/// `testing` feature.
+/// Test-only fault seam: arm a one-shot failure for the next write of `event` **in the
+/// session `session_id`**, so an integration test can see the error path without touching the
+/// file. Keyed by session so tests running in parallel in one process cannot consume each
+/// other's armed failure. Compiled only with the `testing` feature.
 #[cfg(feature = "testing")]
-pub fn fail_next_write(event: &'static str) {
-    *FAIL_NEXT_WRITE.lock().unwrap_or_else(|e| e.into_inner()) = Some(event);
+pub fn fail_next_write(session_id: &str, event: &'static str) {
+    FAIL_NEXT_WRITE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((session_id.to_owned(), event));
 }
 
-/// Test-only fault seam (ADR 0019 §7): the next `TranscriptReplacementAborted` write fails.
+/// Test-only fault seam (ADR 0019 §7): the next `TranscriptReplacementAborted` write in the
+/// session `session_id` fails.
 #[cfg(feature = "testing")]
-pub fn fail_next_aborted_write() {
-    fail_next_write(EVT_TRANSCRIPT_REPLACEMENT_ABORTED.0);
+pub fn fail_next_aborted_write(session_id: &str) {
+    fail_next_write(session_id, EVT_TRANSCRIPT_REPLACEMENT_ABORTED.0);
 }
 
 #[cfg(feature = "testing")]
-static FAIL_NEXT_WRITE: std::sync::Mutex<Option<&'static str>> = std::sync::Mutex::new(None);
+static FAIL_NEXT_WRITE: std::sync::Mutex<Vec<(String, &'static str)>> =
+    std::sync::Mutex::new(Vec::new());
 
 #[cfg(feature = "testing")]
-fn take_write_failure(event: &str) -> bool {
-    let mut slot = FAIL_NEXT_WRITE.lock().unwrap_or_else(|e| e.into_inner());
-    if slot.as_deref() == Some(event) {
-        *slot = None;
-        true
-    } else {
-        false
+fn take_write_failure(session_id: &str, event: &str) -> bool {
+    let mut armed = FAIL_NEXT_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    match armed
+        .iter()
+        .position(|(sid, armed_event)| sid == session_id && *armed_event == event)
+    {
+        Some(index) => {
+            armed.remove(index);
+            true
+        }
+        None => false,
     }
 }
 
