@@ -199,7 +199,8 @@ pub enum WindowSource {
 pub struct Window {
     /// The effective input budget `B`, or `None` when it cannot be computed (window unknown).
     pub budget: Option<u64>,
-    /// `Some` when the window cannot hold the output reservation: the host must refuse.
+    /// `Some` when the window cannot hold the output reservation. See [`Window::startup_check`]
+    /// for what a host does with it.
     pub error: Option<String>,
     /// `C`: `--context-window` when given, else the catalog's `limit.context`.
     pub context: Option<u64>,
@@ -213,7 +214,35 @@ pub struct Window {
     pub limit: Option<ModelLimit>,
 }
 
+/// What a host does at startup with a [`Window`] whose `C ≤ R`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WindowCheck {
+    /// Nothing to report.
+    Ok,
+    /// The user's own `--context-window` cannot hold the reservation: refuse to start.
+    Refuse(String),
+    /// The catalog's window cannot hold the reservation (a small model): warn, and run with
+    /// the budget off. Refusing would make a small-window model unusable for a number the user
+    /// never typed; the provider's own overflow error still ends a turn (ADR 0017).
+    Warn(String),
+}
+
 impl Window {
+    /// The startup decision for `C ≤ R`: refuse for an explicit `--context-window`, warn for
+    /// a catalog window (the budget is already `None` then).
+    pub fn startup_check(&self) -> WindowCheck {
+        match (&self.error, &self.source) {
+            (None, _) => WindowCheck::Ok,
+            (Some(error), WindowSource::Explicit) => {
+                WindowCheck::Refuse(format!("--context-window: {error}"))
+            }
+            (Some(error), _) => WindowCheck::Warn(format!(
+                "[budget] warning: the catalog's window for this model {error}; the context \
+                 budget is off"
+            )),
+        }
+    }
+
     fn unknown() -> Self {
         Self {
             budget: None,
@@ -604,6 +633,44 @@ mod tests {
         assert!(Catalog::parse("[]").is_none());
         assert!(Catalog::parse("not json").is_none());
         assert!(Catalog::parse("").is_none());
+    }
+
+    #[test]
+    fn a_small_catalog_window_warns_and_an_explicit_one_refuses() {
+        let explicit = build_window(Some(8_192), None, None, None, WindowSource::Explicit, None);
+        assert_eq!(explicit.budget, None);
+        assert!(
+            matches!(explicit.startup_check(), WindowCheck::Refuse(ref m) if m.starts_with("--context-window: ")),
+            "{:?}",
+            explicit.startup_check()
+        );
+        let catalog = build_window(
+            Some(8_192),
+            None,
+            None,
+            None,
+            WindowSource::Catalog {
+                provider: "p".into(),
+                model: "m".into(),
+                age: None,
+            },
+            None,
+        );
+        assert_eq!(catalog.budget, None);
+        assert!(
+            matches!(catalog.startup_check(), WindowCheck::Warn(ref m) if !m.contains("--context-window:")),
+            "{:?}",
+            catalog.startup_check()
+        );
+        let fine = build_window(
+            Some(100_000),
+            None,
+            None,
+            None,
+            WindowSource::Explicit,
+            None,
+        );
+        assert_eq!(fine.startup_check(), WindowCheck::Ok);
     }
 
     #[test]

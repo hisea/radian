@@ -290,7 +290,7 @@ fn status_segments(app: &App) -> Vec<Segment> {
     let over_budget = app
         .budget_report
         .as_ref()
-        .is_some_and(|report| report.projected_tokens > report.input_budget_tokens);
+        .is_some_and(agent_core::over_budget);
     segments.push(Segment {
         text: budget_status_text(app.context_window, app.budget_report.as_ref()),
         style: Style::default().fg(if over_budget {

@@ -356,8 +356,12 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
         request_max_output,
         cli.offline_catalog,
     )));
-    if let Some(error) = &window.error {
-        return Err(format!("--context-window: {error}"));
+    // ADR 0018: `C ≤ R` refuses an explicit `--context-window` and only warns for a catalog
+    // window (the budget is then off).
+    match window.startup_check() {
+        radian_host::WindowCheck::Ok => {}
+        radian_host::WindowCheck::Refuse(message) => return Err(message),
+        radian_host::WindowCheck::Warn(message) => eprintln!("{message}"),
     }
     if let Some(warning) = radian_host::output_ceiling_warning(request_max_output, window.output) {
         eprintln!("{warning}");
