@@ -93,7 +93,11 @@ impl Theme {
             tool_call: style(Some(Color::Blue), Modifier::empty()),
             tool_result: style(Some(Color::Green), Modifier::empty()),
             tool_result_error: style(Some(Color::Red), Modifier::empty()),
-            notice: style(Some(Color::DarkGray), Modifier::empty()),
+            // The owner's UI review (2026-10-13): `DarkGray` (ANSI 8) is too dark to read on a
+            // dark background. A notice is ordinary information, so it uses the terminal's
+            // **default foreground** (readable on any background); a hint steps down to `Gray`
+            // (ANSI 7, light on dark) but stays legible.
+            notice: style(None, Modifier::empty()),
             turn_idle: style(Some(Color::Green), Modifier::empty()),
             turn_running: style(Some(Color::Yellow), Modifier::empty()),
             turn_cancelled: style(Some(Color::Red), Modifier::empty()),
@@ -106,7 +110,7 @@ impl Theme {
             note: style(Some(Color::Yellow), Modifier::empty()),
             truncation: style(Some(Color::DarkGray), Modifier::empty()),
             approval_border: style(Some(Color::Yellow), Modifier::empty()),
-            hint: style(Some(Color::DarkGray), Modifier::empty()),
+            hint: style(Some(Color::Gray), Modifier::empty()),
             completion: style(Some(Color::DarkGray), Modifier::empty()),
             find: style(Some(Color::Yellow), Modifier::empty()),
         }
@@ -123,7 +127,11 @@ impl Theme {
             tool_call: style(Some(Color::Blue), Modifier::empty()),
             tool_result: style(Some(Color::Green), Modifier::empty()),
             tool_result_error: style(Some(Color::Red), Modifier::empty()),
-            notice: style(Some(Color::DarkGray), Modifier::empty()),
+            // The owner's UI review (2026-10-13): `DarkGray` (ANSI 8) is too dark to read on a
+            // dark background. A notice is ordinary information, so it uses the terminal's
+            // **default foreground** (readable on any background); a hint steps down to `Gray`
+            // (ANSI 7, light on dark) but stays legible.
+            notice: style(None, Modifier::empty()),
             turn_idle: style(Some(Color::Green), Modifier::empty()),
             turn_running: style(Some(Color::Magenta), Modifier::empty()),
             turn_cancelled: style(Some(Color::Red), Modifier::empty()),
@@ -245,10 +253,33 @@ mod tests {
         assert_eq!(dark.user.fg, Some(Color::Cyan));
         assert_eq!(dark.tool_call.fg, Some(Color::Blue));
         assert_eq!(dark.tool_result.fg, Some(Color::Green));
-        assert_eq!(dark.notice.fg, Some(Color::DarkGray));
         assert_eq!(dark.budget.fg, Some(Color::Magenta));
         assert_eq!(dark.approval_border.fg, Some(Color::Yellow));
         assert!(dark.reasoning.add_modifier.contains(Modifier::ITALIC));
+    }
+
+    /// The owner's UI review: a notice or a hint has to be readable on the background it is
+    /// for. `DarkGray` (ANSI 8) is too dark on the dark palette; on the light palette it is
+    /// dark text, which is fine, so only the dark one is pinned away from it.
+    #[test]
+    fn dark_notices_and_hints_are_not_dark_gray() {
+        let dark = Theme::dark();
+        assert_eq!(
+            dark.notice.fg, None,
+            "a notice uses the terminal's default foreground"
+        );
+        assert_ne!(dark.hint.fg, Some(Color::DarkGray));
+        assert_eq!(dark.hint.fg, Some(Color::Gray));
+        // Reasoning stays deliberately weak — the owner asked for that explicitly.
+        assert_eq!(dark.reasoning.fg, Some(Color::DarkGray));
+
+        let light = Theme::light();
+        assert_eq!(light.notice.fg, None, "readable on light too");
+        assert_eq!(
+            light.hint.fg,
+            Some(Color::DarkGray),
+            "dark text on a light background"
+        );
     }
 
     #[test]
