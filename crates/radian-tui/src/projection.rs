@@ -211,6 +211,35 @@ mod tests {
         assert_eq!(snapshot.assistant, "answer");
     }
 
+    /// There is no loom here (adding a dependency is out of scope), so the memory order is
+    /// pinned **structurally**: the flag's two swaps must be `Release`/`Acquire`. The program
+    /// order is covered by the interleaving test above; the memory order is what makes that
+    /// order meaningful across threads.
+    #[test]
+    fn the_dirty_flag_is_release_and_acquire_never_relaxed() {
+        // Only the non-test part: the assertions below quote the very strings they forbid.
+        let source = include_str!("projection.rs");
+        let source = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        let code: String = source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            code.contains("self.dirty.swap(true, Ordering::Release)"),
+            "the producer's flag write must be Release"
+        );
+        assert!(
+            code.contains("self.dirty.swap(false, Ordering::Acquire)"),
+            "the UI's flag clear must be Acquire"
+        );
+        assert!(
+            !code.contains("dirty.swap(true, Ordering::Relaxed)")
+                && !code.contains("dirty.swap(false, Ordering::Relaxed)"),
+            "Relaxed is not allowed for the flag"
+        );
+    }
+
     #[test]
     fn clear_stream_drops_the_live_view() {
         let projection = SessionProjection::new();

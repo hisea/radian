@@ -392,3 +392,30 @@ Base `e1d664b` · 一次性 worktree `/tmp/s1a-mut` · 独立 `CARGO_TARGET_DIR`
 「输入字符关闭列表」，而字符那条清理在 `Input::Char` 分支里，M31 只删掉带 action 的那条。
 补了 `a_bound_key_dismisses_the_list_too`（列表显示时按 `Up`）之后抓住；这条测试是变异暴露出的
 覆盖缺口，不是事后凑数。
+
+## ADR 0023 Step 1 ②：事件驱动循环与脏通知
+
+Base `9a62193` · 一次性 worktree `/tmp/s1b-mut` · 独立 `CARGO_TARGET_DIR` ·
+每个变异 `git checkout -- .` 还原、`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M32 | 生产者不检查原值，每个 delta 都发 `Dirty` | `events::tests::the_sink_sends_one_dirty_until_the_ui_looks`、`deltas_are_not_facts_and_a_commit_clears_the_stream` | ✅ |
+| M33 | UI 先读投影再清标志（顺序反了） | `projection::tests::an_update_between_the_clear_and_the_read_is_not_lost` | ✅ |
+| M34 | 脏标志用 `Relaxed` | `projection::tests::the_dirty_flag_is_release_and_acquire_never_relaxed` | ✅（见下） |
+| M35 | 信号任务不发事件（只设标志，靠 3 秒兜底） | `pty_a_signal_while_idle_leaves_immediately`（3.95 s 才退出 = 兜底） | ✅ |
+| M36 | 每轮不设事实上限（一次排空） | `pty_a_flooding_producer_still_draws_and_answers_keys`（2 秒窗口只剩 1 帧） | ✅ |
+| M37 | 空闲时按超时重绘（回到轮询行为） | `pty_an_idle_screen_is_not_redrawn` | ✅ |
+| M38 | 输入线程吞掉挂断（不发 `TerminalGone`） | `pty_a_closed_master_ends_the_app_cleanly` | ✅ |
+| M39 | driver watcher 不发 `DriverStopped` | `pty_a_driver_panic_exits_orderly_and_restores_the_terminal`（15 s 超时） | ✅ |
+| M40 | 提交不清空流式缓冲 | `events::tests::deltas_are_not_facts_and_a_commit_clears_the_stream` | ✅ |
+| M41 | 效果结果不回送（`ExpandMentions` 丢结果） | `pty_end_to_end_conversation_and_clean_exit` | ✅ |
+
+10/10 抓住。两点诚实说明：
+
+- **M34**：本仓库没有 loom（不加依赖），单线程测试观察不到内存序。所以补了一个**结构测试**
+  `the_dirty_flag_is_release_and_acquire_never_relaxed`（只扫非测试部分，避免自己引用到被禁的字符串），
+  它把标志的两次 `swap` 钉成 `Release`/`Acquire`；**程序顺序**由 M33 的交替测试覆盖，**内存序**由这条
+  结构测试覆盖。这是"loom 不可用"下能做到的最好，不是等价替代。
+- **M40**：第一次只跑了 pty 套件，**没被抓住**（单轮会话里陈旧的缓冲不会被看见）；跑
+  `--lib events` 后被单测抓住。记录在此，避免下次再误判。
