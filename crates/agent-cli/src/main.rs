@@ -235,6 +235,11 @@ struct Cli {
     /// `--base-url` hostname; e.g. `opencode.ai` → `opencode`).
     #[arg(long, value_name = "PROVIDER")]
     catalog_provider: Option<String>,
+
+    /// Turn automatic compaction off. Over the input budget `B` the request is then sent
+    /// unchanged (ADR 0018).
+    #[arg(long)]
+    no_auto_compact: bool,
 }
 
 /// Why startup failed. The message must not contain the key.
@@ -963,6 +968,8 @@ struct Setup {
     context_budget: Option<ContextBudget>,
     /// The window and where it came from (ADR 0018), for the startup line.
     window: radian_host::Window,
+    /// Whether the core compacts a request over `B` before sending it (ADR 0018).
+    auto_compact: bool,
     /// The session id this process uses: the file name, and the `{session_id}` header value.
     session_id: String,
     /// The validated, canonical workspace (dogfooding D1). Resolved in `setup`, before any
@@ -1103,6 +1110,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         turn_timeout_secs: cli.turn_timeout_secs,
         context_budget,
         window,
+        auto_compact: !cli.no_auto_compact,
         session_id,
         workspace,
         secrets,
@@ -1427,6 +1435,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     let agent_config = AgentConfig {
         system_prompt: setup.system_prompt,
         context_budget: setup.context_budget,
+        auto_compact: setup.auto_compact,
         ..AgentConfig::default()
     };
 
@@ -1451,15 +1460,23 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     eprintln!("[profile] {profile_line}");
     eprintln!("[sandbox] {sandbox_facts}");
     // The numbers, the effective input budget B, and where they came from (ADR 0018).
+    let compaction = if setup.auto_compact {
+        "automatic compaction on"
+    } else {
+        "automatic compaction off"
+    };
     match &setup.context_budget {
         Some(budget) => eprintln!(
             "[budget] {}; a provider-reported input is trusted as reported and only the growth \
              after it is estimated ({} ASCII bytes per token, at least 1 token per non-ASCII \
-             character)",
+             character); {compaction}",
             setup.window.describe(),
             budget.bytes_per_token
         ),
-        None => eprintln!("[budget] {} (ADR 0018)", setup.window.describe()),
+        None => eprintln!(
+            "[budget] {} (ADR 0018); {compaction}",
+            setup.window.describe()
+        ),
     }
 
     // The built-in tools exist only with `--workspace`. `shell` is present only when a
@@ -2054,6 +2071,35 @@ impl EventSink for Ui {
                 } else {
                     eprintln!("[tool {index}] finished");
                 }
+            }
+            AgentEvent::CompactionStarted {
+                tokens_before,
+                keep_target,
+                ..
+            } => {
+                eprintln!(
+                    "[compaction] {tokens_before} tokens over the input budget; summarizing \
+                     (keep target {keep_target})"
+                );
+            }
+            AgentEvent::CompactionFinished {
+                tokens_before,
+                tokens_after,
+                below_target,
+                ..
+            } => {
+                let note = if below_target {
+                    " (below target; no further compaction this turn)"
+                } else {
+                    ""
+                };
+                eprintln!("[compaction] {tokens_before} tokens → {tokens_after} tokens{note}");
+            }
+            AgentEvent::CompactionFailed { reason } => {
+                eprintln!("[compaction] failed: {reason}");
+            }
+            AgentEvent::CompactionSkipped { reason } => {
+                eprintln!("[compaction] skipped: {reason}");
             }
             AgentEvent::RunFinished { status } => {
                 if self.reasoning_open.swap(false, Ordering::Relaxed) {

@@ -559,10 +559,9 @@ async fn a_replacement_abort_keeps_the_usage_and_recovers_the_old_history() {
     // re-journal it (D8); the journal holds only the input and the failed compaction. The
     // turn's input is at index `before.len()`, so no replacement segment started.
     assert!(
-        records.iter().all(|r| !matches!(
-            r,
-            JournalRecord::TranscriptReplacementCommitted { .. }
-        )),
+        records
+            .iter()
+            .all(|r| !matches!(r, JournalRecord::TranscriptReplacementCommitted { .. })),
         "nothing committed"
     );
     let _ = before;

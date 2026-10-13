@@ -4207,7 +4207,7 @@ async fn a_context_overflow_error_adds_a_hint() {
     assert_eq!(code, 1, "{stderr}");
     assert!(stderr.contains("model context overflow"), "{stderr}");
     assert!(
-        stderr.contains("automatic compaction is not implemented"),
+        stderr.contains("automatic compaction could not keep the request"),
         "the hint must be shown: {stderr}"
     );
     assert!(stdout.is_empty(), "stdout must stay model-only: {stdout}");
@@ -4251,6 +4251,55 @@ async fn the_startup_line_names_an_explicit_window() {
     assert_eq!(code, 0, "{stderr}");
     assert!(stderr.contains("B 3616 from --context-window"), "{stderr}");
     assert!(stderr.contains("R 16384"), "{stderr}");
+}
+
+/// `--no-auto-compact` is shown on the startup line; the default is on (ADR 0018).
+#[tokio::test]
+async fn the_startup_line_names_compaction_state() {
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--context-window",
+                "20000",
+                "--offline-catalog",
+                "--no-auto-compact",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("automatic compaction off"), "{stderr}");
+
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--context-window",
+                "20000",
+                "--offline-catalog",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("automatic compaction on"), "{stderr}");
 }
 
 /// With no window and an empty cache, there is no budget and the startup says so.

@@ -431,6 +431,32 @@ impl App {
                 self.note = Some(format!("tool {name} running"));
             }
             AgentEvent::TranscriptAppended { message, .. } => self.push_message(message),
+            // ADR 0018: compaction is visible to the user as it happens.
+            AgentEvent::CompactionStarted { tokens_before, .. } => {
+                self.note = Some("compacting context".to_string());
+                self.entries.push(Entry::new(
+                    EntryKind::Notice,
+                    format!("context over the budget ({tokens_before} tokens); compacting…"),
+                ));
+            }
+            AgentEvent::CompactionFinished {
+                tokens_before,
+                tokens_after,
+                ..
+            } => {
+                self.note = None;
+                self.entries.push(Entry::new(
+                    EntryKind::Notice,
+                    format!("context compacted ({tokens_before} → {tokens_after} tokens)"),
+                ));
+            }
+            AgentEvent::CompactionFailed { reason } => {
+                self.note = None;
+                self.entries.push(Entry::new(
+                    EntryKind::Notice,
+                    format!("compaction failed: {reason}"),
+                ));
+            }
             AgentEvent::RunFinished { status } => {
                 self.turn = match status {
                     RunStatus::Cancelled(_) => TurnState::Cancelled,

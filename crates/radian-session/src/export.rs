@@ -161,21 +161,42 @@ pub fn export_markdown(session: &Session, opts: &ExportOptions) -> Result<String
     ));
 
     let committed = committed_message_seqs(session);
+    // ADR 0018: only a committed compaction is shown; a candidate with no commit is invisible.
+    let committed_revisions: std::collections::HashSet<u64> = session
+        .events()
+        .iter()
+        .filter_map(|event| match &event.data {
+            EventData::TranscriptReplacementCommitted { revision, .. } => Some(*revision),
+            _ => None,
+        })
+        .collect();
     for event in session.events() {
-        let EventData::MessageAppended { message, .. } = &event.data else {
-            continue;
-        };
-        if !committed.contains(&event.seq) {
-            continue;
+        match &event.data {
+            EventData::ContextCompacted {
+                revision,
+                tokens_before,
+                tokens_after,
+                ..
+            } if committed_revisions.contains(revision) => {
+                out.push_str(&format!(
+                    "_context compacted ({tokens_before} → {tokens_after} tokens)_\n\n"
+                ));
+            }
+            EventData::MessageAppended { message, .. } => {
+                if !committed.contains(&event.seq) {
+                    continue;
+                }
+                let role = match message {
+                    Message::User { .. } => "user",
+                    Message::Assistant { .. } => "assistant",
+                    Message::Tool { .. } => "tool",
+                };
+                out.push_str(&format!("## {role} (seq {})\n\n", event.seq));
+                out.push_str(&render_message(message, opts));
+                out.push('\n');
+            }
+            _ => {}
         }
-        let role = match message {
-            Message::User { .. } => "user",
-            Message::Assistant { .. } => "assistant",
-            Message::Tool { .. } => "tool",
-        };
-        out.push_str(&format!("## {role} (seq {})\n\n", event.seq));
-        out.push_str(&render_message(message, opts));
-        out.push('\n');
     }
 
     // Redaction is a whole-document pass as well, so a secret in a field this renderer did

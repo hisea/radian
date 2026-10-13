@@ -339,3 +339,22 @@ fn the_replacement_fixtures_agree_with_the_reference_checker() {
         "{mismatch:?}"
     );
 }
+
+/// ADR 0018 fixtures: the reader parses the compaction usage, the candidate and the committed
+/// replacement; a candidate with no commit leaves the old history. This is the Rust half of the
+/// differential check with `docs/schema/check-fixtures.sh`.
+#[test]
+fn the_compaction_fixtures_agree_with_the_reference_checker() {
+    let committed = Session::open(fixture("compaction-committed.jsonl")).unwrap();
+    assert_eq!(committed.last_committed_revision(), 1);
+    let history = committed.history().unwrap();
+    assert_eq!(history.len(), 2, "{history:?}");
+    assert!(agent_core::compaction::is_compaction_summary(&history[0]));
+    assert_eq!(history[1].text(), "old two");
+
+    // The candidate-only file never replaced anything: the old history stands.
+    let candidate = Session::open(fixture("compaction-candidate-only.jsonl")).unwrap();
+    assert_eq!(candidate.last_committed_revision(), 0);
+    assert_eq!(candidate.history().unwrap(), vec![Message::user("old")]);
+    assert!(candidate.uncommitted_replacements().is_empty());
+}

@@ -142,6 +142,11 @@ struct Cli {
     #[arg(long, value_name = "PROVIDER")]
     catalog_provider: Option<String>,
 
+    /// Turn automatic compaction off. Over the input budget `B` the request is then sent
+    /// unchanged (ADR 0018).
+    #[arg(long)]
+    no_auto_compact: bool,
+
     #[arg(long)]
     system: Option<String>,
 
@@ -406,6 +411,7 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
         // No window known means the budget is off, never a guessed default (ADR 0015); the
         // window comes from the catalog or `--context-window` (ADR 0018).
         context_budget: window.budget.map(ContextBudget::new),
+        auto_compact: !cli.no_auto_compact,
         ..AgentConfig::default()
     };
 
@@ -674,7 +680,7 @@ fn ui_loop(
                     format!("turn failed: {message}"),
                 ));
                 // ADR 0018's fallback: a recognizable context overflow gets one extra line,
-                // since the automatic compaction that would retry it is not implemented yet.
+                // since automatic compaction did not keep the request inside the window.
                 // The host only has the text, so the prefix is what identifies it.
                 if radian_host::is_context_overflow(&message) {
                     app.entries.push(radian_tui::Entry::new(

@@ -2300,7 +2300,7 @@ async fn pty_a_context_overflow_is_shown_with_a_hint() {
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("automatic compaction is not implemented", 20),
+        pty.wait_for_screen("automatic compaction could not keep the request", 20),
         "the hint is not shown:\n{}",
         pty.screen()
     );

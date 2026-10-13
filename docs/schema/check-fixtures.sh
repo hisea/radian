@@ -16,7 +16,7 @@ KNOWN_EVENTS = {
     "TranscriptReplaced", "TranscriptReplacementCommitted", "TranscriptReplacementAborted",
     "TurnFinished", "ConfigChanged", "ContextCompacted",
     "Rewound", "ContextBudgetReached", "PermissionResolved", "ModelUsageRecorded",
-    "SessionForked",
+    "CompactionUsageRecorded", "SessionForked",
 }
 # ADR 0005/0006 §5.5：InputSource 的 snake_case 全集。
 SOURCES = {
@@ -89,6 +89,21 @@ EXPECT = {
     "replace-commit-mismatch.jsonl": dict(
         outcome="replacement_mismatch_reject",
         events=4,
+    ),
+    "compaction-committed.jsonl": dict(
+        outcome="accept",
+        events=9,
+        skips=[],
+        replacement=(6, 1, 2),
+        uncommitted=[],
+        repair={},
+    ),
+    "compaction-candidate-only.jsonl": dict(
+        outcome="accept",
+        events=4,
+        skips=[],
+        uncommitted=[],
+        repair={},
     ),
     "replace-resets-index.jsonl": dict(
         outcome="accept",

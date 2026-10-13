@@ -9,11 +9,12 @@
 pub const CONTEXT_OVERFLOW_PREFIX: &str = agent_core::CONTEXT_OVERFLOW_PREFIX;
 
 /// The one-line help a host adds when a turn failed because the input was over the model's
-/// context window. Automatic compaction (ADR 0018) is not implemented yet, and since the budget
-/// guard is gone a smaller `--context-window` no longer stops a request, so the only remedy
-/// today is a new session.
+/// context window. Automatic compaction (ADR 0018) normally keeps the request inside the
+/// window, so a provider overflow means it could not: a larger `--context-window` or a new
+/// session is the remedy. (Compacting-and-retrying a provider overflow is the next slice.)
 pub const CONTEXT_OVERFLOW_HELP: &str = "the input is over the model's context window and \
-    automatic compaction is not implemented yet; start a new session to continue";
+    automatic compaction could not keep the request within it; raise --context-window or start \
+    a new session to continue";
 
 /// Whether a `TurnFailed.message` is a context overflow.
 pub fn is_context_overflow(message: &str) -> bool {

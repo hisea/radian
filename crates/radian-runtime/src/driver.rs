@@ -764,7 +764,9 @@ fn turn_number(turn_id: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{HookError, HookPoint, ModelError, SessionError};
+    use agent_core::{
+        CompactionError, HookError, HookPoint, Message, ModelError, ModelUsage, SessionError,
+    };
 
     /// ADR 0017: the classification the driver uses. A model or hook error is non-fatal;
     /// journal, poisoned and session errors must keep ending the session.
@@ -780,7 +782,95 @@ mod tests {
         assert!(is_fatal(&RunError::Journal(JournalError(
             "write failed".into()
         ))));
+        // ADR 0018: a compaction failure fails this turn like a model error, not the session.
+        assert!(!is_fatal(&RunError::Compaction(
+            CompactionError::Insufficient {
+                before: 10,
+                after: 10,
+                budget: 5,
+            }
+        )));
         assert!(is_fatal(&RunError::Poisoned));
         assert!(is_fatal(&RunError::Session(SessionError::Poisoned)));
+    }
+
+    /// ADR 0018: the budget baseline comes only from `ModelUsageRecorded` after the last
+    /// committed replacement; a pre-replacement report and a `CompactionUsageRecorded` are
+    /// both ignored.
+    #[tokio::test]
+    async fn the_baseline_ignores_usage_before_a_replacement() {
+        use agent_core::{JournalRecord, TranscriptJournal};
+        use radian_session::{SessionCreatedData, SessionJournal};
+
+        let dir = std::env::temp_dir().join(format!("radian-baseline-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+        let journal = SessionJournal::create(
+            &path,
+            "s",
+            SessionCreatedData::new("/w", serde_json::json!({})),
+        )
+        .unwrap();
+        let usage = |input: u64| ModelUsage {
+            input: Some(input),
+            ..Default::default()
+        };
+        journal
+            .append(JournalRecord::Message {
+                index: 0,
+                message: Message::user("old"),
+            })
+            .await
+            .unwrap();
+        journal
+            .append(JournalRecord::Message {
+                index: 1,
+                message: Message::assistant("a"),
+            })
+            .await
+            .unwrap();
+        journal
+            .append(JournalRecord::ModelUsage { usage: usage(500) })
+            .await
+            .unwrap();
+        journal
+            .append(JournalRecord::TranscriptReplaced {
+                revision: 1,
+                len: 1,
+            })
+            .await
+            .unwrap();
+        journal
+            .append(JournalRecord::Message {
+                index: 0,
+                message: Message::user("summary"),
+            })
+            .await
+            .unwrap();
+        journal
+            .append(JournalRecord::TranscriptReplacementCommitted {
+                revision: 1,
+                len: 1,
+            })
+            .await
+            .unwrap();
+        journal
+            .append(JournalRecord::CompactionUsage {
+                revision: 2,
+                model: "current".into(),
+                usage: usage(999),
+            })
+            .await
+            .unwrap();
+        drop(journal);
+
+        let session = Session::open(&path).unwrap();
+        assert_eq!(
+            reported_baseline(&session),
+            None,
+            "the pre-replacement usage and the compaction usage are not baselines"
+        );
+        assert_eq!(session.last_committed_revision(), 1);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
