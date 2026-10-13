@@ -91,3 +91,17 @@ Base `ccc3af1` · 在本任务工作树内逐条施加后从副本还原（`--no
 
 3/3 抓住。C2 只在“`B/8` 超过 8192 且 `B/4` 被 `K` 截住”时与正确值不同，所以只有大窗口（`B=103616`）
 的断言能区分；小窗口（`B=16000`）那条不区分，正如 brief 所要求。
+
+## sumsect：摘要是为了「接着干」（方案 B / dogfood9）
+
+Base `3d7066b` · 在本任务工作树内逐条施加后从副本还原（`--no-fail-fast`）· `git status --short`
+结束后干净。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| V1 | `SUMMARY_SYSTEM_PROMPT` 删掉 `## Verified facts (do not re-check)` 整节 | `compaction::the_summary_request_serializes_text_and_truncates_tool_results` | ✅ failed |
+| V2 | 删掉「计划不算」的限制语（`SUMMARY_PLANS_ARE_NOT_FACTS` 不再出现在提示词里） | `compaction::the_summary_request_serializes_text_and_truncates_tool_results` | ✅ failed |
+| V3 | `shorten_request` 的正文去掉「保留 Verified facts」那句 | `compaction::the_shorten_request_carries_only_the_overlong_summary`、`compaction_flow::an_overlong_summary_is_shortened_on_the_retry` | ✅ failed |
+
+3/3 抓住。测试断言用的是 `SUMMARY_PLANS_ARE_NOT_FACTS` / `SUMMARY_SHORTEN_KEEPS_FACTS` 两个稳定子串
+常量，不绑定整段措辞；V2/V3 因此精确地落在「规则是否还在」上。

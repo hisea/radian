@@ -47,21 +47,57 @@ pub const DEFAULT_SUMMARY_MAX_TOKENS: u64 = 8_192;
 /// reach the summarizer.
 pub const TOOL_RESULT_LIMIT_CHARS: usize = 2_000;
 
-/// The fixed part of the summary system prompt (ADR 0018's structure). It asks for the seven
-/// sections by name and forbids inventing anything, because the summary becomes part of the
-/// next request's context. The length ceiling is added by [`summary_system_prompt`], which
+/// The rule for the `Verified facts` section: only
+/// what the conversation actually verified. Plans and intentions are explicitly excluded. The
+/// prompt quotes this sentence; the constant is the stable substring a test asserts, so the
+/// wording can change without binding the test to the whole paragraph.
+pub const SUMMARY_PLANS_ARE_NOT_FACTS: &str =
+    "Plans, assumptions and intentions are not facts and must not appear here";
+
+/// The rule that shortening and a rolling update must not drop a verified fact (owner,
+/// 2026-10-13, plan B / dogfood9): merge wording, but keep every entry. The stable substring
+/// a test asserts.
+pub const SUMMARY_SHORTEN_KEEPS_FACTS: &str = "every verified fact must survive";
+
+/// The fixed part of the summary system prompt (ADR 0018 §摘要, revision 5 / plan B). It asks
+/// for the sections by name and forbids inventing anything, because the summary becomes part of
+/// the next request's context. The length ceiling is added by [`summary_system_prompt`], which
 /// depends on the compaction.
 pub const SUMMARY_SYSTEM_PROMPT: &str = "\
 You are compressing a coding conversation so another agent can continue the work. \
 Produce one structured summary with exactly these sections, in this order:
 
 ## Goal
+What the user asked for, in their own words where possible \u{2014} quote the user; do not only paraphrase.
+
 ## Constraints
+The rules, limits and preferences that must hold.
+
 ## Progress
+### Done
+What is finished, with the exact commands and results.
+### In progress
+What is partly done.
+### Pending
+What is not started.
+
+## Verified facts (do not re-check)
+Only facts the conversation actually verified belong here: commands that ran with their results, and conclusions drawn from code that was read. Plans, assumptions and intentions are not facts and must not appear here. State how each fact was verified (which command, or which file and line). Do not re-check these facts later.
+
+## Current work
+The one thing being worked on right before this summary, down to the file and the function.
+
+## Next step
+Exactly one step, and it must continue directly from Current work.
+
 ## Key decisions
-## Next steps
+The decisions taken and why.
+
 ## Critical context
+Anything else the next agent must know: the environment, gotchas, exact error text.
+
 ## Files read and modified
+Every file touched, with its path.
 
 Keep every section concise. Preserve exact file paths, function names, commands, and error \
 messages. Include only what the conversation contains; never invent or guess. Output only the \
@@ -89,7 +125,8 @@ pub fn summary_system_prompt(max_tokens: u64) -> String {
     format!(
         "{SUMMARY_SYSTEM_PROMPT}\n\nThe entire summary must be shorter than {max_tokens} tokens \
          (about {} English words; that is an approximation, 1 token ≈ 0.75 words). Drop details \
-         that are no longer important if you must. This applies when updating a previous summary \
+         that are no longer important if you must, but {SUMMARY_SHORTEN_KEEPS_FACTS} \u{2014} merge its \
+         wording if you must, never delete it. This applies when updating a previous summary \
          too: shorten it, do not only append.",
         approx_words(max_tokens)
     )
@@ -330,11 +367,13 @@ pub fn summary_request(
 /// [`shorten_target`], below the enforced limit to leave margin.
 pub fn shorten_request(overlong_summary: &str, target_tokens: u64) -> ModelRequest {
     let body = format!(
-        "The summary below is over the length limit. Rewrite it shorter, keeping exactly the \
-         seven sections and what they say; drop details that are no longer important. The result \
-         must be shorter than {target_tokens} tokens (about {} English words; that is an \
-         approximation, 1 token ≈ 0.75 words). Do not add new content and do not only append: \
-         the whole summary must fit.\n\n<summary-to-shorten>\n{overlong_summary}\n</summary-to-shorten>",
+        "The summary below is over the length limit. Rewrite it shorter, keeping the same sections \
+         and what they say. Do not drop any entry from the `Verified facts` section: \
+         {SUMMARY_SHORTEN_KEEPS_FACTS} \u{2014} merge its wording if you must, never delete it. Drop \
+         details that are no longer important. The result must be shorter than {target_tokens} \
+         tokens (about {} English words; that is an approximation, 1 token ≈ 0.75 words). Do not \
+         add new content and do not only append: the whole summary must fit.\n\n\
+         <summary-to-shorten>\n{overlong_summary}\n</summary-to-shorten>",
         approx_words(target_tokens)
     );
     ModelRequest {

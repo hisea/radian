@@ -827,7 +827,11 @@ async fn an_overlong_summary_is_shortened_on_the_retry() {
         body.contains(&overlong),
         "the over-long summary is not the input"
     );
-    assert!(body.contains("seven sections"), "{body}");
+    assert!(!body.contains("seven"), "{body}");
+    assert!(
+        body.contains(agent_core::SUMMARY_SHORTEN_KEEPS_FACTS),
+        "the shorten prompt must protect Verified facts: {body}"
+    );
     assert!(
         !body.contains("Conversation to summarize") && !body.contains("xxxx"),
         "the retry must not resend the conversation: {body}"

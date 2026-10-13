@@ -2,9 +2,10 @@
 //! `summary_request`, `check_summary` and `compacted_history`.
 
 use agent_core::{
-    ContentPart, InputSource, Message, MessageMeta, PlanError, SummaryError, ToolCall, ToolResult,
-    check_summary, compacted_history, keep_target, message_tokens, plan, shorten_request,
-    shorten_target, summary_max_tokens, summary_request, units,
+    ContentPart, InputSource, Message, MessageMeta, PlanError, SUMMARY_PLANS_ARE_NOT_FACTS,
+    SUMMARY_SHORTEN_KEEPS_FACTS, SummaryError, ToolCall, ToolResult, check_summary,
+    compacted_history, keep_target, message_tokens, plan, shorten_request, shorten_target,
+    summary_max_tokens, summary_request, units,
 };
 use serde_json::{Value, json};
 
@@ -222,8 +223,13 @@ fn the_summary_request_serializes_text_and_truncates_tool_results() {
         "## Goal",
         "## Constraints",
         "## Progress",
+        "### Done",
+        "### In progress",
+        "### Pending",
+        "## Verified facts (do not re-check)",
+        "## Current work",
+        "## Next step",
         "## Key decisions",
-        "## Next steps",
         "## Critical context",
         "## Files read and modified",
     ] {
@@ -232,6 +238,19 @@ fn the_summary_request_serializes_text_and_truncates_tool_results() {
             "the prompt lacks {section}: {system}"
         );
     }
+    // dogfood9 / plan B: the `Verified facts` section is restricted to what the conversation
+    // actually checked; plans do not count. The test uses the stable substring constant, not
+    // the whole paragraph.
+    assert!(
+        system.contains(SUMMARY_PLANS_ARE_NOT_FACTS),
+        "the prompt does not exclude plans from Verified facts: {system}"
+    );
+    // `Current work` names the file/function and `Next step` is a single continuation.
+    assert!(
+        system.contains("down to the file and the function"),
+        "{system}"
+    );
+    assert!(system.contains("Exactly one step"), "{system}");
 
     let body = request.messages[0].text();
     assert!(body.contains("hello"), "{body}");
@@ -277,7 +296,11 @@ fn the_shorten_request_carries_only_the_overlong_summary() {
     assert!(system.contains("6553 tokens"), "{system}");
     let body = request.messages[0].text();
     assert!(body.contains("OVERLONG SUMMARY BODY"), "{body}");
-    assert!(body.contains("seven sections"), "{body}");
+    // No fixed count ("seven") and the facts-survive rule.
+    assert!(!body.contains("seven"), "{body}");
+    assert!(body.contains(SUMMARY_SHORTEN_KEEPS_FACTS), "{body}");
+    // The rolling-update note (the ceiling paragraph) carries the same rule.
+    assert!(system.contains(SUMMARY_SHORTEN_KEEPS_FACTS), "{system}");
     assert!(!body.contains("Conversation to summarize"), "{body}");
 }
 
