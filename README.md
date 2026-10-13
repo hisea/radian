@@ -46,6 +46,11 @@ Two more binaries exist but are not part of the product surface: `agent-extensio
 - **The configuration file (ADR 0008)** is implemented read-only: `--config`/`RADIAN_CONFIG`/
   `~/.radian/config/config.toml`, with `model.*`, `permissions.profile` and `compaction.auto`
   wired as defaults (the command line wins). It never contains a secret value.
+- **Pi configuration migration (Phase 5)** is implemented: `agent config import-pi --from
+  <pi-agent-dir>` drafts a Radian configuration (stdout) plus a mapping report (stderr). It
+  reads only the directory you name, never `auth.json`, never a secret value, and writes
+  nothing without `--write` (which refuses an existing file). Radian does **not** promise
+  compatibility with Pi's file format: see [`docs/pi-migration.md`](docs/pi-migration.md).
 - **Session fork (ADR 0022)** is implemented: `agent --fork <parent> [--at <seq>]
   [--session-id <child>]` and the TUI `/fork`. The fork point is a parent turn boundary; the
   child materializes the parent's effective history there (a committed compaction in effect, an
