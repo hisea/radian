@@ -122,6 +122,12 @@ fn tab_on_a_word_that_is_not_a_reference_does_nothing() {
     app.on_key(tab());
     assert_eq!(app.input, "mail a@b.com");
     assert!(app.completion.is_none());
+
+    // A word that would match a file, but has no `@`, is still not a reference.
+    let mut app = app_with(dir.path(), "notes");
+    app.on_key(tab());
+    assert_eq!(app.input, "notes");
+    assert!(app.completion.is_none());
 }
 
 #[test]

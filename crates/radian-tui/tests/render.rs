@@ -235,6 +235,15 @@ fn the_completion_list_truncates_on_a_narrow_terminal() {
     assert!(text.contains("a-very-long"), "{text}");
 }
 
+/// `completion_rows` itself truncates, so the rule is testable without a terminal that
+/// clips: a row longer than the width is cut to exactly the width.
+#[test]
+fn completion_rows_truncates_to_the_width() {
+    let mut app = App::new("m", "s");
+    app.completion = Some(vec!["a-very-long-name.txt".into()]);
+    assert_eq!(render::completion_rows(&app, 6), vec!["a-very".to_string()]);
+}
+
 #[test]
 fn the_completion_list_shows_ten_then_more() {
     let mut app = App::new("m", "s");
