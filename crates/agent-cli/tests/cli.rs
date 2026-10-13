@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
@@ -112,10 +113,25 @@ fn echo_then(final_text: &str) -> Vec<Reply> {
     ]
 }
 
+/// A fresh session directory per spawn. Tests must never write to the user's real data
+/// directory; a test that needs two processes to share sessions passes `--session-dir`
+/// explicitly, which overrides this.
+fn fresh_session_dir() -> PathBuf {
+    static SESSION_DIRS: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "agent-cli-sessions-{}-{}",
+        std::process::id(),
+        SESSION_DIRS.fetch_add(1, Ordering::SeqCst)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
 fn spawn_agent(args: &[&str], envs: &[(&str, &str)]) -> Child {
     Command::new(agent_bin())
         .args(args)
         .env_remove("OPENAI_API_KEY")
+        .env("RADIAN_SESSION_DIR", fresh_session_dir())
         .envs(envs.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1099,7 +1115,7 @@ async fn second_sigint_exits_130() {
     let log = dir.join("fixture.log");
     let config = mcp_config(&dir, &log);
     // `freeze` blocks the fixture's reading thread, so after the first Ctrl-C the client
-    // waits out its full 2s cancel grace for a ping that can never be answered: a real,
+    // waits out its full 2s MCP cancel grace for a ping that can never be answered: a real,
     // bounded wind-down window for the second Ctrl-C.
     let server = MockServer::start(vec![tool_reply("call_1", "fx__freeze", "{}")]).await;
     let mut child = Running::spawn(
@@ -1125,13 +1141,24 @@ async fn second_sigint_exits_130() {
     })
     .await;
     sigint(&child.child);
-    // Comfortably inside the 2s grace window the first signal opened.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // State gate, not a timer: wait until the CLI reports the wind-down, which proves the
+    // first Ctrl-C was handled while the turn is still winding down (the MCP cancel grace
+    // keeps it there), then send the second one.
+    child.wait_for_stderr("Ctrl-C again to quit").await;
+    let forced_at = Instant::now();
     sigint(&child.child);
 
-    let (code, _, _) = child.finish().await;
+    // Keep stdin open while waiting: closing it would race an EOF against the second signal,
+    // and this test is about the signal, not about EOF.
+    let (code, _, stderr) = child.finish_open(EXIT_WATCHDOG).await;
 
-    assert_eq!(code, 130);
+    assert_eq!(code, 130, "{stderr}");
+    // The second signal forces the exit; it does not wait out the MCP cancel grace (2s).
+    assert!(
+        forced_at.elapsed() < Duration::from_millis(1000),
+        "the forced exit waited instead of forcing: {:?}",
+        forced_at.elapsed()
+    );
     assert!(
         start.elapsed() < Duration::from_secs(8),
         "{:?}",
@@ -1389,5 +1416,465 @@ async fn without_workspace_the_built_in_tools_do_not_exist() {
     assert!(
         result.contains("no tool named"),
         "without --workspace there is no `write`: {result}"
+    );
+}
+
+// ---------- sessions on disk (Phase 2 / B) ----------
+
+/// 1: a new session writes a valid, contiguous JSONL with the runtime's events.
+#[tokio::test]
+async fn a_new_session_writes_a_valid_jsonl() {
+    let sessions = fresh_session_dir();
+    let server = MockServer::start(vec![text_reply("hi")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--session-id",
+                "s-one",
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "-p",
+                "hello",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+
+    let path = sessions.join("s-one.jsonl");
+    let session = radian_session::Session::open(&path).unwrap();
+    let seqs: Vec<u64> = session.events().iter().map(|e| e.seq).collect();
+    assert_eq!(
+        seqs,
+        (0..seqs.len() as u64).collect::<Vec<_>>(),
+        "seq is contiguous"
+    );
+    for event in [
+        "SessionCreated",
+        "InboxEnqueued",
+        "InputClaimed",
+        "InputAdmitted",
+        "TurnFinished",
+    ] {
+        assert!(
+            session.events().iter().any(|e| e.event == event),
+            "missing {event} in {:?}",
+            session
+                .events()
+                .iter()
+                .map(|e| &e.event)
+                .collect::<Vec<_>>()
+        );
+    }
+    // The one-shot turn is on disk, not only in memory.
+    assert_eq!(session.history().unwrap().len(), 2);
+    // The terminal input is recorded as human input (ADR 0011 L2): the permission layer
+    // relies on this value, so it must not be `None` or some other source.
+    let enqueued = session
+        .events()
+        .iter()
+        .find(|e| e.event == "InboxEnqueued")
+        .expect("the input was enqueued");
+    match &enqueued.data {
+        radian_session::EventData::InboxEnqueued { source, .. } => {
+            assert_eq!(*source, agent_core::InputSource::User)
+        }
+        other => panic!("expected InboxEnqueued, got {other:?}"),
+    }
+}
+
+/// 2: `--resume` puts the previous history in front of the new request.
+#[tokio::test]
+async fn resume_carries_the_previous_history() {
+    let sessions = fresh_session_dir();
+    let dir = sessions.to_str().unwrap();
+    let server = MockServer::start(vec![text_reply("one"), text_reply("two")]).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--session-id",
+                "s-resume",
+                "--session-dir",
+                dir,
+                "-p",
+                "first",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--resume",
+                "s-resume",
+                "--session-dir",
+                dir,
+                "-p",
+                "second",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+
+    let second = messages_of(&server, 1);
+    assert_eq!(last_user_text(&second), "second");
+    let texts: Vec<&str> = second
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["content"].as_str().unwrap_or_default())
+        .collect();
+    assert!(
+        texts.contains(&"first"),
+        "the resumed request lacks the old input: {second}"
+    );
+    assert!(
+        texts.contains(&"one"),
+        "the resumed request lacks the old answer: {second}"
+    );
+}
+
+/// 4: `--list` shows only the sessions of the current workspace.
+#[tokio::test]
+async fn list_shows_only_the_current_workspace() {
+    let sessions = fresh_session_dir();
+    let dir = sessions.to_str().unwrap();
+    let ws_a = sessions.join("ws-a");
+    let ws_b = sessions.join("ws-b");
+    std::fs::create_dir_all(&ws_a).unwrap();
+    std::fs::create_dir_all(&ws_b).unwrap();
+    let server = MockServer::start(vec![text_reply("a"), text_reply("b")]).await;
+
+    for (id, workspace) in [("a-1", &ws_a), ("b-1", &ws_b)] {
+        let (code, _, stderr) = feed_and_wait(
+            spawn_agent(
+                &[
+                    "--model",
+                    "m",
+                    "--base-url",
+                    &server.base_url,
+                    "--workspace",
+                    workspace.to_str().unwrap(),
+                    "--session-id",
+                    id,
+                    "--session-dir",
+                    dir,
+                    "-p",
+                    "hi",
+                ],
+                &[],
+            ),
+            "",
+        )
+        .await;
+        assert_eq!(code, 0, "{stderr}");
+    }
+
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--workspace",
+                ws_a.to_str().unwrap(),
+                "--session-dir",
+                dir,
+                "--list",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("a-1"), "{stdout}");
+    assert!(
+        !stdout.contains("b-1"),
+        "another workspace leaked in: {stdout}"
+    );
+    // The row carries id, created, last activity and a message count.
+    let row = stdout.lines().find(|l| l.contains("a-1")).unwrap();
+    assert_eq!(row.split('\t').count(), 4, "{row}");
+    assert_eq!(row.split('\t').nth(3).unwrap(), "2", "{row}");
+}
+
+/// 5: reasoning is printed apart from the visible answer.
+#[tokio::test]
+async fn reasoning_is_printed_apart_from_the_answer() {
+    let server = MockServer::start(vec![Reply::sse(&[
+        chunk(
+            json!({"role": "assistant", "reasoning_content": "thinking hard"}),
+            None,
+        ),
+        chunk(json!({"content": "the answer"}), None),
+        chunk(json!({}), Some("stop")),
+    ])])
+    .await;
+
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout, "the answer\n", "stdout carries only the answer");
+    assert!(stderr.contains("[reasoning]"), "{stderr}");
+    assert!(stderr.contains("thinking hard"), "{stderr}");
+    assert!(
+        !stdout.contains("thinking hard"),
+        "reasoning leaked to stdout"
+    );
+}
+
+/// 6: a second process cannot open a session another process holds.
+#[tokio::test]
+async fn a_second_process_cannot_open_the_same_session() {
+    let sessions = fresh_session_dir();
+    let dir = sessions.to_str().unwrap();
+    let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
+
+    let mut first = Running::spawn(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--session-id",
+            "s-lock",
+            "--session-dir",
+            dir,
+        ],
+        &[],
+    );
+    first.write("go\n").await;
+    wait_until("the model request", || server.requests().len() == 1).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--resume",
+                "s-lock",
+                "--session-dir",
+                dir,
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("locked") || stderr.contains("another writer"),
+        "{stderr}"
+    );
+
+    // Release the first process and let it leave.
+    sigint(&first.child);
+    first.wait_for_stderr("Cancelled").await;
+    first.write("/exit\n").await;
+    let (code, _, _) = first.finish().await;
+    assert_eq!(code, 0);
+}
+
+/// 7: the session file carries neither the API key nor a header value.
+#[tokio::test]
+async fn the_session_file_contains_no_key_or_header_values() {
+    let sessions = fresh_session_dir();
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--session-id",
+                "s-secret",
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "--api-key-env",
+                "AGENT_CLI_FILE_KEY",
+                "--header",
+                "x-team-token=file-secret-value",
+                "-p",
+                "hi",
+            ],
+            &[("AGENT_CLI_FILE_KEY", KEY)],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+
+    let body = std::fs::read_to_string(sessions.join("s-secret.jsonl")).unwrap();
+    assert!(!body.contains(KEY), "the key reached the session file");
+    assert!(
+        !body.contains("file-secret-value"),
+        "a header value reached the session file"
+    );
+    assert!(!body.contains("Authorization"), "{body}");
+}
+
+/// 3: the process is killed mid-turn (`kill -9`), and `--resume` recovers: the unpaired tool
+/// is classified and **not** replayed, and the input that was claimed but never admitted
+/// comes back instead of being lost.
+#[tokio::test]
+async fn a_killed_session_resumes_without_replaying_the_tool() {
+    let sessions = fresh_session_dir();
+    let dir = sessions.to_str().unwrap();
+    let scratch = scratch("kill-resume");
+    let log = scratch.join("fixture.log");
+    let config = mcp_config(&scratch, &log);
+    let path = sessions.join("s-kill.jsonl");
+    // `fx__sleep` ignores cancellation, so the turn is genuinely mid-tool when the process
+    // dies; the fixture has no `FIXTURE_IGNORE_EOF`, so killing the CLI releases it.
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "fx__sleep", "{\"ms\": 30000}"),
+        text_reply("done"),
+    ])
+    .await;
+
+    let mut first = Running::spawn(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--yes",
+            "--mcp-config",
+            config.to_str().unwrap(),
+            "--session-id",
+            "s-kill",
+            "--session-dir",
+            dir,
+        ],
+        &[],
+    );
+    first.write("go\n").await;
+    wait_until("the tool call to start", || {
+        std::fs::read_to_string(&log)
+            .map(|text| text.contains("tools/call"))
+            .unwrap_or(false)
+    })
+    .await;
+    // With `--yes` the loop reads during the turn, so this line becomes a steer. Wait until
+    // it is durably claimed (a second InputClaimed) before killing.
+    first.write("steer-line\n").await;
+    wait_until("the steer to be claimed", || {
+        std::fs::read_to_string(&path)
+            .map(|text| text.matches("\"InputClaimed\"").count() >= 2)
+            .unwrap_or(false)
+    })
+    .await;
+
+    // The genuine crash: SIGKILL, no chance to flush anything.
+    first.child.kill().await.unwrap();
+    let _ = first.child.wait().await;
+    let pid = fixture_pid(&log);
+    assert!(
+        gone_within(pid, STATE_WATCHDOG).await,
+        "the fixture survived the killed CLI"
+    );
+
+    // What the crash left: the tool started, never settled.
+    let crashed = std::fs::read_to_string(&path).unwrap();
+    assert!(crashed.contains("\"ToolExecutionStarted\""), "{crashed}");
+    assert!(!crashed.contains("\"ToolExecutionSettled\""), "{crashed}");
+    assert_eq!(
+        crashed.matches("tools/call").count(),
+        0,
+        "the session file must not contain fixture logs"
+    );
+    let calls_before = log_lines(&log)
+        .iter()
+        .filter(|line| line.contains("tools/call"))
+        .count();
+    assert_eq!(calls_before, 1);
+
+    // Resume: the repaired result is written back, the steer is requeued and applied, and
+    // the tool is not run again.
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--yes",
+                "--mcp-config",
+                config.to_str().unwrap(),
+                "--resume",
+                "s-kill",
+                "--session-dir",
+                dir,
+                "-p",
+                "next",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+
+    let session = radian_session::Session::open(&path).unwrap();
+    let history = session.history().unwrap();
+    let texts: Vec<String> = history.iter().map(agent_core::Message::text).collect();
+    assert!(
+        texts.contains(&"steer-line".to_owned()),
+        "the claimed steer was lost: {texts:?}"
+    );
+    let repaired = history.iter().find_map(|m| match m {
+        agent_core::Message::Tool { result, .. } if result.call_id == "call_1" => Some(result),
+        _ => None,
+    });
+    assert_eq!(
+        repaired.and_then(|r| r.error_code.as_deref()),
+        Some("outcome_unknown_after_crash"),
+        "the unpaired call was not classified: {history:?}"
+    );
+    // The tool was not replayed: still exactly one fixture call, in the first process.
+    let calls_after = log_lines(&log)
+        .iter()
+        .filter(|line| line.contains("tools/call"))
+        .count();
+    assert_eq!(calls_after, 1, "the sleep was replayed on resume");
+    // The steer was admitted in the resumed turn, not merely left in the queue.
+    let events = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        events.matches("\"InputAdmitted\"").count() >= 2,
+        "the requeued steer was never admitted: {events}"
     );
 }

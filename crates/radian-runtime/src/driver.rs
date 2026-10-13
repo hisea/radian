@@ -15,7 +15,7 @@
 //! Extensions (MCP servers) are re-opened when the session is reopened; their in-process
 //! state does **not** survive a process restart (plan Phase 2, last point).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use agent_core::{
@@ -66,6 +66,9 @@ pub struct Driver<M: Model, P: ToolProvider, H: Hooks> {
     slot: Arc<ConfigSlot>,
     queue: Arc<ConfigQueue>,
     options: TurnOptions,
+    /// A per-turn time limit: each turn's deadline is computed when the turn starts, so it
+    /// is fresh rather than an absolute instant fixed at startup.
+    turn_timeout: Option<std::time::Duration>,
     next_turn: u64,
     next_config_revision: u64,
     closed: bool,
@@ -98,6 +101,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             slot: ConfigSlot::new(serde_json::Value::Null),
             queue: ConfigQueue::new(),
             options,
+            turn_timeout: None,
             next_turn: recovery.next_turn,
             next_config_revision: recovery.next_config_revision,
             closed: false,
@@ -123,6 +127,12 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         self.journal.session_id()
     }
 
+    /// Sets a per-turn time limit. Each turn gets a deadline computed at its start, so this
+    /// applies to every turn rather than only the first.
+    pub fn set_turn_timeout(&mut self, timeout: Option<std::time::Duration>) {
+        self.turn_timeout = timeout;
+    }
+
     pub fn is_closed(&self) -> bool {
         self.closed
     }
@@ -135,20 +145,32 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
     }
 
     /// The driver loop: apply pending configuration at each turn boundary, claim the next
-    /// `next_turn` input, run one turn, repeat. Returns when [`Driver::shutdown`] is called.
+    /// `next_turn` input, run one turn, repeat. Returns when [`Driver::shutdown`] or
+    /// `Inbox::close` is called (or after an error).
+    ///
+    /// The session is closed on **both** paths, so a host that exits after an error still
+    /// releases the tool session (for MCP, the servers shut down gracefully instead of being
+    /// dropped). A forced exit that aborts the task drops the driver instead, which kills
+    /// the servers' process groups — that is the supported use of an abort.
     pub async fn run(&mut self) -> Result<(), DriverError> {
-        while !self.closed {
+        let result = self.run_loop().await;
+        let closed = self.session.close().await;
+        match (result, closed) {
+            (Err(error), _) => Err(error),
+            (Ok(()), Err(error)) => Err(DriverError::Session(SessionError::Tools(error))),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+
+    async fn run_loop(&mut self) -> Result<(), DriverError> {
+        while !self.closed && !self.inbox.is_closed() {
             let Some(entry) = self.inbox.claim_next_turn().await else {
-                // Idle. A `followup`/`steer`/`cancel` wakes us; `inject` does not.
+                // Idle. A `followup`/`steer`/`cancel`/`close` wakes us; `inject` does not.
                 self.inbox.wake_signal().await;
                 continue;
             };
             self.run_turn(entry).await?;
         }
-        self.session
-            .close()
-            .await
-            .map_err(|e| DriverError::Session(SessionError::Tools(e)))?;
         Ok(())
     }
 
@@ -169,7 +191,10 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         let journal = Arc::clone(&self.journal);
         let inbox = Arc::clone(&self.inbox);
         let live: Arc<dyn EventSink> = Arc::clone(&self.live);
-        let options = self.options.clone();
+        let mut options = self.options.clone();
+        if let Some(timeout) = self.turn_timeout {
+            options.deadline = Some(tokio::time::Instant::now() + timeout);
+        }
 
         journal
             .append_runtime_event(RuntimeEvent::InputClaimed {
@@ -184,7 +209,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             .await?;
 
         let mut claimed: Vec<MessageId> = vec![entry.id.clone()];
-        let admitted: HashSet<MessageId> = HashSet::new();
+        let mut admitted: HashSet<MessageId> = HashSet::new();
         let tap = Tap::new(&*live);
 
         let mut run = self.session.start_turn_with(entry.message, options)?;
@@ -207,7 +232,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
                     }
                 }
             };
-            admit_seen(&journal, &claimed, &admitted, &tap).await?;
+            admit_seen(&journal, &claimed, &mut admitted, &tap).await?;
             match result? {
                 Step::Continue => {
                     drain_steering(&inbox, &journal, &steering, &turn_id, &mut claimed).await?;
@@ -216,7 +241,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             }
         };
         drop(run);
-        admit_seen(&journal, &claimed, &admitted, &tap).await?;
+        admit_seen(&journal, &claimed, &mut admitted, &tap).await?;
 
         let (outcome, reason, stop_reason) = wire_outcome(&outcome);
         journal
@@ -304,7 +329,7 @@ async fn drain_steering(
 async fn admit_seen(
     journal: &SessionJournal,
     claimed: &[MessageId],
-    admitted: &HashSet<MessageId>,
+    admitted: &mut HashSet<MessageId>,
     tap: &Tap<'_>,
 ) -> Result<(), DriverError> {
     for id in claimed {
@@ -318,6 +343,8 @@ async fn admit_seen(
                     transcript_index: index,
                 })
                 .await?;
+            // Record it, or the next call would write the same admission again.
+            admitted.insert(id.clone());
         }
     }
     Ok(())
@@ -437,8 +464,21 @@ async fn recover(journal: &SessionJournal) -> Result<Recovery, DriverError> {
             .await?;
     }
 
+    // The transcript is the authority on whether an input was admitted: the input is
+    // committed at the **start** of a step, while `InputAdmitted` is written after the step
+    // returns. A crash in between leaves the message in the transcript without the record —
+    // requeueing it would replay it (ADR 0011 L3-1: "already in the transcript, do not
+    // replay"). Its `meta.id` is the identity link (ADR 0006 §5.5).
+    let mut in_transcript: HashMap<MessageId, usize> = HashMap::new();
+    for (index, message) in replayed.iter().enumerate() {
+        if let Some(id) = message_meta_id(message) {
+            in_transcript.entry(id).or_insert(index);
+        }
+    }
+
     let mut enqueued: Vec<(MessageId, InboxLane, Message, u64)> = Vec::new();
     let mut admitted: HashSet<MessageId> = HashSet::new();
+    let mut recorded_admitted: HashSet<MessageId> = HashSet::new();
     let mut next_turn = 1u64;
     // ADR 0006 §5.7: the session-local config revision starts at 1.
     let mut next_config_revision = 1u64;
@@ -451,6 +491,7 @@ async fn recover(journal: &SessionJournal) -> Result<Recovery, DriverError> {
                 ..
             } => enqueued.push((message_id.clone(), *lane, message.clone(), event.seq)),
             EventData::InputAdmitted { message_id, .. } => {
+                recorded_admitted.insert(message_id.clone());
                 admitted.insert(message_id.clone());
             }
             EventData::TurnStarted { turn_id } | EventData::TurnFinished { turn_id, .. } => {
@@ -460,6 +501,23 @@ async fn recover(journal: &SessionJournal) -> Result<Recovery, DriverError> {
                 next_config_revision = next_config_revision.max(revision + 1);
             }
             _ => {}
+        }
+    }
+
+    // Catch the admission record up for anything the transcript already holds, so the
+    // journal and the transcript agree before the session is reopened.
+    for (id, _, _, _) in &enqueued {
+        if recorded_admitted.contains(id) {
+            continue;
+        }
+        if let Some(index) = in_transcript.get(id) {
+            journal
+                .append_runtime_event(RuntimeEvent::InputAdmitted {
+                    message_id: id.clone(),
+                    transcript_index: *index,
+                })
+                .await?;
+            admitted.insert(id.clone());
         }
     }
 

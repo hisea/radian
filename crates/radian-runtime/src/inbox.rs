@@ -147,6 +147,10 @@ pub struct Inbox {
     wake: Notify,
     next_seq: AtomicU64,
     next_id: AtomicU64,
+    /// A per-process prefix so ids never collide across a restart: the numeric counter
+    /// alone would restart at 1 in a new process and a resumed session would see two
+    /// different inputs with the same id (ADR 0006 §5.5 keys recovery on `message_id`).
+    id_prefix: String,
     /// Number of `cancel` calls (all of them), for observability.
     cancel_calls: AtomicU64,
     /// Increments on the first `cancel` of the current episode; a repeated `cancel` before
@@ -188,6 +192,7 @@ impl Inbox {
             wake: Notify::new(),
             next_seq: AtomicU64::new(0),
             next_id: AtomicU64::new(0),
+            id_prefix: format!("inbox-{}-", id_nonce()),
             cancel_calls: AtomicU64::new(0),
             cancel_generation: AtomicU64::new(0),
             cancelled: AtomicBool::new(false),
@@ -259,7 +264,7 @@ impl Inbox {
             Some(existing) => existing.clone(),
             None => {
                 let n = self.next_id.fetch_add(1, Ordering::SeqCst) + 1;
-                let id = MessageId(format!("inbox-{n}"));
+                let id = MessageId(format!("{}{n}", self.id_prefix));
                 set_message_meta_id(&mut message, id.clone());
                 id
             }
@@ -394,14 +399,31 @@ impl Inbox {
         *self.lock_cause() = None;
     }
 
-    /// Rejects all future input.
+    /// Rejects all future input and wakes the driver so it can notice and stop. Closing is
+    /// how a host shuts a driver down without holding `&mut Driver` (the driver owns itself
+    /// on its task).
     pub fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
+        self.wake.notify_one();
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
     }
 
     fn lock_cause(&self) -> std::sync::MutexGuard<'_, Option<CancelCause>> {
         self.last_cause.lock().unwrap_or_else(|e| e.into_inner())
     }
+}
+
+/// A value that differs between processes (and between runs): the process id plus the
+/// wall clock in nanoseconds. Ids only need to be unique, not ordered or guessable.
+fn id_nonce() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{:x}{:x}", std::process::id(), nanos)
 }
 
 fn message_meta_id(message: &Message) -> Option<&MessageId> {
@@ -467,6 +489,17 @@ mod tests {
         assert_eq!(entry.id, id);
         assert_eq!(message_meta_id(&entry.message), Some(&id));
         assert_eq!(entry.message_meta_source(), Some(InputSource::User));
+    }
+
+    #[tokio::test]
+    async fn two_inboxes_never_generate_the_same_id() {
+        // Across a restart the counter restarts at 1; the per-process prefix is what keeps a
+        // resumed session's ids distinct from the previous process's.
+        let first = Inbox::new(4);
+        let second = Inbox::new(4);
+        let a = first.followup("a", InputSource::User).await.unwrap();
+        let b = second.followup("b", InputSource::User).await.unwrap();
+        assert_ne!(a, b);
     }
 
     #[tokio::test]

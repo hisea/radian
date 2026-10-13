@@ -176,6 +176,29 @@ async fn durable_event_order_and_index_correspondence() {
     }
 }
 
+/// Each admitted input is recorded exactly once, however many steps the turn takes.
+#[tokio::test]
+async fn each_input_is_admitted_once() {
+    let model = ScriptedModel::new([calls(vec![call("c1", "echo", json!({}))]), text("done")]);
+    let tools = MemTools::new();
+    let (mut driver, env) = open_env("admit-once", model, tools).await;
+    let handle = tokio::spawn(async move { driver.run().await });
+
+    let followup = env.inbox.followup("go", InputSource::User).await.unwrap();
+    let steer = env.inbox.steer("also", InputSource::User).await.unwrap();
+    env.recorder.wait_finished().await;
+    handle.abort();
+    let _ = handle.await;
+
+    for id in [&followup.0, &steer.0] {
+        let count = common::events(&env.path)
+            .iter()
+            .filter(|(name, _, data)| name == "InputAdmitted" && data["message_id"] == json!(id))
+            .count();
+        assert_eq!(count, 1, "{id} was admitted {count} times");
+    }
+}
+
 // ---------- 9. configuration applies at the turn boundary ----------
 
 #[tokio::test]
@@ -235,6 +258,35 @@ async fn a_config_change_is_not_seen_by_the_turn_that_queued_it() {
     assert!(events.iter().any(|(n, _, data)| n == "ConfigChanged"
         && data["revision"] == 1
         && data["change"]["route"] == "fast"));
+}
+
+// ---------- the per-turn timeout ----------
+
+#[tokio::test(start_paused = true)]
+async fn a_turn_timeout_ends_the_turn_as_deadline_exceeded() {
+    let model = ScriptedModel::new([]);
+    model.hang_at(0);
+    let tools = MemTools::new();
+    let (mut driver, env) = open_env("timeout", model, tools).await;
+    driver.set_turn_timeout(Some(std::time::Duration::from_secs(1)));
+    let handle = tokio::spawn(async move {
+        let _ = driver.run().await;
+    });
+
+    env.inbox.followup("go", InputSource::User).await.unwrap();
+    // Under paused time the deadline fires as soon as the runtime is idle (the model is
+    // hanging), so this resolves without a real wait.
+    env.recorder.wait_finished().await;
+    handle.abort();
+    let _ = handle.await;
+
+    let events = common::events(&env.path);
+    let finished = events
+        .iter()
+        .find(|(name, _, _)| name == "TurnFinished")
+        .expect("the turn finished durably");
+    assert_eq!(finished.2["outcome"], "cancelled");
+    assert_eq!(finished.2["reason"], "deadline_exceeded");
 }
 
 // ---------- 10. the public API never exposes `ActiveRun` ----------
