@@ -267,3 +267,87 @@ async fn blocking_does_not_change_the_transcript() {
     assert!(snaps[1].len() > snaps[0].len());
     assert_eq!(chat.transcript().len(), 3);
 }
+
+/// 6. A session resumed from a reported usage restores that baseline, and its next projection
+///    is exactly what an uninterrupted session would have projected over the same transcript
+///    and configuration. The restore recomputes the request size with the same rule, so the
+///    two reports are equal field for field.
+#[tokio::test]
+async fn a_restored_baseline_matches_an_uninterrupted_projection() {
+    let budget = ContextBudget::new(2000);
+
+    // Uninterrupted: turn 1 reports input 900; turn 2 is checked against the live baseline.
+    let mut live = with_budget(
+        ScriptedModel::new([text_with_usage("first", 900), text("second")]),
+        NoTools,
+        budget,
+    )
+    .open_session()
+    .await
+    .unwrap();
+    live.run_turn("one", TurnOptions::default(), &NoopSink)
+        .await
+        .unwrap();
+    live.run_turn("two", TurnOptions::default(), &NoopSink)
+        .await
+        .unwrap();
+    let live_status = live.context_budget_status().clone();
+
+    // Resumed: the same transcript and config, with the reported baseline restored. The
+    // request that produced the report held only the first user message, so its prefix is 1.
+    let agent = Arc::new(
+        Agent::new(ScriptedModel::new([text("second")]), NoTools).with_config(AgentConfig {
+            context_budget: Some(budget),
+            ..Default::default()
+        }),
+    );
+    let mut resumed = agent
+        .open_session_with_history(vec![Message::user("one"), Message::assistant("first")])
+        .await
+        .unwrap();
+    assert!(
+        resumed.restore_budget_baseline(1, 900),
+        "the prefix is inside the transcript"
+    );
+    resumed
+        .run_turn("two", TurnOptions::default(), &NoopSink)
+        .await
+        .unwrap();
+    let resumed_status = resumed.context_budget_status().clone();
+
+    assert_eq!(
+        resumed_status, live_status,
+        "resume must not change the projection"
+    );
+    let BudgetStatus::Ok(report) = &resumed_status else {
+        panic!("expected an under-threshold report, got {resumed_status:?}");
+    };
+    assert_eq!(report.source, UsageSource::ReportedPlusEstimate);
+    assert_eq!(report.baseline_input_tokens, Some(900));
+    assert!(report.estimated_growth_tokens.unwrap() > 0);
+}
+
+/// A prefix outside the transcript is refused rather than turned into a baseline of zero: the
+/// projection stays a pure estimate.
+#[tokio::test]
+async fn a_prefix_outside_the_transcript_leaves_the_estimate_alone() {
+    let agent = Arc::new(
+        Agent::new(ScriptedModel::new([text("ok")]), NoTools).with_config(AgentConfig {
+            context_budget: Some(ContextBudget::new(1000)),
+            ..Default::default()
+        }),
+    );
+    let mut chat = agent
+        .open_session_with_history(vec![Message::user("one")])
+        .await
+        .unwrap();
+    assert!(!chat.restore_budget_baseline(9, 500));
+    chat.run_turn("two", TurnOptions::default(), &NoopSink)
+        .await
+        .unwrap();
+    let BudgetStatus::Ok(report) = chat.context_budget_status() else {
+        panic!("expected a report");
+    };
+    assert_eq!(report.source, UsageSource::Estimated);
+    assert_eq!(report.baseline_input_tokens, None);
+}

@@ -56,6 +56,10 @@ struct Recovery {
     requeue: Vec<InboxEntry>,
     next_turn: u64,
     next_config_revision: u64,
+    /// The last provider-reported `input` and the transcript prefix (length) that produced it,
+    /// for restoring the context-budget baseline (ADR 0015 C1). `None` means no report in the
+    /// current transcript revision, so the projection stays a pure estimate.
+    budget_baseline: Option<(usize, u64)>,
 }
 
 /// The host's "continue past a context-budget stop" request (ADR 0015 C5).
@@ -117,6 +121,13 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
                 Arc::clone(&journal) as Arc<dyn TranscriptJournal>,
             )
             .await?;
+        let mut session = session;
+        // ADR 0015 C1: a resume recovers the reported `input` baseline from the journal, so
+        // the guard does not restart from a pure estimate. `false` (a shorter history) keeps
+        // the estimate rather than inventing a baseline.
+        if let Some((prefix_len, input)) = recovery.budget_baseline {
+            session.restore_budget_baseline(prefix_len, input);
+        }
         Ok(Self {
             inbox,
             session,
@@ -608,7 +619,44 @@ async fn recover(journal: &SessionJournal) -> Result<Recovery, DriverError> {
         requeue,
         next_turn,
         next_config_revision,
+        budget_baseline: reported_baseline(&parsed),
     })
+}
+
+/// The last provider-reported `input` in the **current** transcript revision, with the length
+/// of the transcript that produced it (ADR 0015 C1).
+///
+/// `ModelUsageRecorded` follows the assistant `MessageAppended` of the response it priced
+/// (ADR 0007 J5), and a request's `messages` is exactly the transcript before that assistant
+/// message. So the request prefix length is the preceding assistant message's `index`. A
+/// `TranscriptReplaced` starts a new revision whose indexes restart at zero; an earlier
+/// revision's usage must not be paired with the new transcript, so both trackers reset there.
+/// A usage event without a preceding assistant message, or without `input` (ADR 0007: not
+/// reported, not zero), is skipped; an earlier report that does have `input` stays usable.
+fn reported_baseline(session: &Session) -> Option<(usize, u64)> {
+    let mut last_assistant: Option<usize> = None;
+    let mut baseline = None;
+    for event in session.events() {
+        match &event.data {
+            EventData::TranscriptReplaced { .. } => {
+                last_assistant = None;
+                baseline = None;
+            }
+            EventData::MessageAppended { index, message } => {
+                last_assistant = match message {
+                    Message::Assistant { .. } => Some(*index as usize),
+                    _ => None,
+                };
+            }
+            EventData::ModelUsageRecorded { usage } => {
+                if let (Some(input), Some(prefix_len)) = (usage.input, last_assistant) {
+                    baseline = Some((prefix_len, input));
+                }
+            }
+            _ => {}
+        }
+    }
+    baseline
 }
 
 /// The source is recorded on the message when it is enqueued; a message without one never

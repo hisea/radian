@@ -257,3 +257,216 @@ async fn wait_for_turns(path: &Path, n: usize) {
     }
     panic!("fewer than {n} TurnFinished events landed in {path:?}");
 }
+
+/// Resumes a driver over an existing session file (the previous driver's journal handle must
+/// already be dropped, so the single-writer lock is free). Returns the driver, the inbox (held
+/// so the journal stays locked) and the live-event recorder.
+#[allow(clippy::type_complexity)]
+async fn resume_driver(
+    path: &Path,
+    model: Arc<ScriptedModel>,
+    budget: Option<ContextBudget>,
+) -> (
+    Driver<Arc<ScriptedModel>, MemTools, ()>,
+    Arc<Inbox>,
+    Arc<Recorder>,
+) {
+    let journal = Arc::new(SessionJournal::resume(path, "sid").unwrap());
+    let inbox = Inbox::durable(16, Arc::clone(&journal));
+    let recorder = Arc::new(Recorder::default());
+    let agent = Arc::new(Agent::new(Arc::clone(&model), MemTools::new()).with_config(
+        AgentConfig {
+            context_budget: budget,
+            ..Default::default()
+        },
+    ));
+    let driver = Driver::open(
+        &agent,
+        journal,
+        Arc::clone(&inbox),
+        Arc::clone(&recorder) as Arc<dyn agent_core::EventSink>,
+        TurnOptions::default(),
+    )
+    .await
+    .unwrap();
+    (driver, inbox, recorder)
+}
+
+/// 9. A session that reported `input`, resumed from its file, restores that value as the
+///    baseline: the next request is projected from `ReportedPlusEstimate` with the reported
+///    number, not from a fresh estimate.
+#[tokio::test]
+async fn resume_restores_the_reported_baseline() {
+    let model = ScriptedModel::new([used(text("first"), 900)]);
+    let (mut driver, env) = open_env(
+        "resume-baseline",
+        Arc::clone(&model),
+        MemTools::new(),
+        Some(ContextBudget::new(1000)),
+    )
+    .await;
+    let handle = tokio::spawn(async move {
+        let _ = driver.run().await;
+    });
+    env.inbox.followup("go", InputSource::User).await.unwrap();
+    wait_for_turns(&env.path, 1).await;
+    handle.abort();
+    let _ = handle.await;
+    let path = env.path.clone();
+    // The durable inbox holds a journal handle; drop it so the resume can take the lock.
+    drop(env.inbox);
+
+    let resumed_model = Arc::new(ScriptedModel::new([text("never sent")]));
+    let (mut driver2, inbox2, recorder2) = resume_driver(
+        &path,
+        Arc::clone(&resumed_model),
+        Some(ContextBudget::new(1000)),
+    )
+    .await;
+    let handle2 = tokio::spawn(async move {
+        let _ = driver2.run().await;
+    });
+    inbox2.followup("more", InputSource::User).await.unwrap();
+    let _ = recorder2.wait_finished().await;
+    handle2.abort();
+    let _ = handle2.await;
+
+    // The restored baseline (900) already reaches the line, so the request was not sent.
+    assert_eq!(resumed_model.requests().len(), 0);
+    let session = Session::open(&path).unwrap();
+    let report = session.events().iter().find_map(|event| match &event.data {
+        EventData::ContextBudgetReached {
+            source,
+            baseline_input_tokens,
+            ..
+        } => Some((*source, *baseline_input_tokens)),
+        _ => None,
+    });
+    assert_eq!(
+        report,
+        Some((UsageSource::ReportedPlusEstimate, Some(900))),
+        "the resumed projection carries the last reported input"
+    );
+}
+
+/// 10. A session with no reported usage stays a pure estimate across a resume.
+#[tokio::test]
+async fn resume_without_a_usage_report_stays_estimated() {
+    let model = ScriptedModel::new([text("first")]);
+    let (mut driver, env) = open_env(
+        "resume-estimate",
+        Arc::clone(&model),
+        MemTools::new(),
+        Some(ContextBudget::new(1000)),
+    )
+    .await;
+    let handle = tokio::spawn(async move {
+        let _ = driver.run().await;
+    });
+    env.inbox.followup("go", InputSource::User).await.unwrap();
+    wait_for_turns(&env.path, 1).await;
+    handle.abort();
+    let _ = handle.await;
+    let path = env.path.clone();
+    drop(env.inbox);
+
+    let resumed_model = Arc::new(ScriptedModel::new([text("never sent")]));
+    let (mut driver2, inbox2, recorder2) = resume_driver(
+        &path,
+        Arc::clone(&resumed_model),
+        Some(ContextBudget::new(100)),
+    )
+    .await;
+    let handle2 = tokio::spawn(async move {
+        let _ = driver2.run().await;
+    });
+    // 2000 chars are ~500 estimated tokens, past the 80-token line.
+    inbox2
+        .followup("x".repeat(2000), InputSource::User)
+        .await
+        .unwrap();
+    let _ = recorder2.wait_finished().await;
+    handle2.abort();
+    let _ = handle2.await;
+
+    assert_eq!(resumed_model.requests().len(), 0);
+    let session = Session::open(&path).unwrap();
+    let report = session.events().iter().find_map(|event| match &event.data {
+        EventData::ContextBudgetReached {
+            source,
+            baseline_input_tokens,
+            ..
+        } => Some((*source, *baseline_input_tokens)),
+        _ => None,
+    });
+    assert_eq!(report, Some((UsageSource::Estimated, None)));
+}
+
+/// 11. The last report has no `input` (only `output`), so resume falls back to the earlier
+///     report that does and restores *that* number.
+#[tokio::test]
+async fn resume_uses_an_earlier_report_when_the_last_has_no_input() {
+    let output_only = ModelResponse {
+        content: vec![agent_core::ContentPart::text("third")],
+        usage: Some(ModelUsage {
+            output: Some(5),
+            ..Default::default()
+        }),
+        ..text("third")
+    };
+    let model = ScriptedModel::new([
+        used(text("first"), 100),
+        used(text("second"), 900),
+        output_only,
+    ]);
+    let (mut driver, env) = open_env(
+        "resume-earlier",
+        Arc::clone(&model),
+        MemTools::new(),
+        // Large enough that all three turns run; resume afterwards uses a small window.
+        Some(ContextBudget::new(100_000)),
+    )
+    .await;
+    let handle = tokio::spawn(async move {
+        let _ = driver.run().await;
+    });
+    for (n, input) in [(1usize, "one"), (2, "two"), (3, "three")] {
+        env.inbox.followup(input, InputSource::User).await.unwrap();
+        wait_for_turns(&env.path, n).await;
+    }
+    handle.abort();
+    let _ = handle.await;
+    let path = env.path.clone();
+    drop(env.inbox);
+
+    let resumed_model = Arc::new(ScriptedModel::new([text("never sent")]));
+    let (mut driver2, inbox2, recorder2) = resume_driver(
+        &path,
+        Arc::clone(&resumed_model),
+        Some(ContextBudget::new(1000)),
+    )
+    .await;
+    let handle2 = tokio::spawn(async move {
+        let _ = driver2.run().await;
+    });
+    inbox2.followup("four", InputSource::User).await.unwrap();
+    let _ = recorder2.wait_finished().await;
+    handle2.abort();
+    let _ = handle2.await;
+
+    assert_eq!(resumed_model.requests().len(), 0);
+    let session = Session::open(&path).unwrap();
+    let baseline = session.events().iter().find_map(|event| match &event.data {
+        EventData::ContextBudgetReached {
+            source,
+            baseline_input_tokens,
+            ..
+        } => Some((*source, *baseline_input_tokens)),
+        _ => None,
+    });
+    assert_eq!(
+        baseline,
+        Some((UsageSource::ReportedPlusEstimate, Some(900))),
+        "the output-only report is skipped, not treated as zero"
+    );
+}
