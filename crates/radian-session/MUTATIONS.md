@@ -125,3 +125,19 @@ tests in `crates/agent-cli/tests/cli.rs`.
 behaviours (the SQLite sibling modes and the two redaction fixes). The `-wal`/`-shm` modes are
 inherited from the database file, so M4 fails on `index.db` first and the siblings never get a
 chance to differ.
+
+## ADR 0019：reader / writer 与唯一状态机
+
+Base: `8858046` · one-shot worktree `/tmp/0019-mut`（detached，跑完删除）· 每个变异 `--no-fail-fast`
+跑完即 `git checkout -- .`，结束时 `git status --short` 为空。Core 侧三项（提交、待定段前缀、
+段内第二个 marker）记在 `crates/agent-core/MUTATIONS-0019.md`。
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| M4 | writer `resume` 不写 `TranscriptReplacementAborted`（`let _ = abort_revision`） | `replace::resume_aborts_a_pending_segment_and_the_next_append_is_normal` | ✅ failed |
+| M5 | writer `resume` 只要有未提交段就写 abort（`.last()` 取代 `.find(EndOfFile)`） | `replace::resume_does_not_repeat_the_abort` | ✅ failed |
+| M7 | reader 绕过状态机（`fold_push` 丢弃 `fold.push` 的错误） | `findings::a_second_replacement_inside_a_pending_segment_is_refused`、`replace::a_message_beyond_the_declared_len_is_corruption`、`a_commit_without_a_replacement_is_corruption`、`a_mismatched_commit_is_corruption`、`a_mismatched_abort_is_corruption` | ✅ failed |
+
+3/3 caught。M7 一次改 reader，五个 corruption 用例同时失败，证明 reader 的结构检查确实走
+Core 的状态机而不是第二套规则。只读打开不写盘这一条没有做人工变异：`a_crash_mid_replacement_recovers_the_old_history`
+在 `Session::open` 前后比较文件字节，且 `resume_*` 用例在 resume 前比较字节；这里只记录未变异。
