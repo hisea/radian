@@ -156,7 +156,21 @@ Base `a0e8b4c` · 一次性检出 `/tmp/df7-mut` · 独立 target · `--no-fail-
 `split` 的读取是只读的（`store().records(&Scope::Project(from))`），确认前不写任何东西；
 M6 证明「全部不存在」是退出 1 的错误，而不是一次空确认。
 
-## Phase 4：只读配置读取器（ADR 0008）
+## ADR 0018：自适应 `R`
+
+Base `0a3c197` · 一次性检出 `/tmp/adaptr-mut`（detached，独立 target，跑完删除）· `--no-fail-fast` ·
+每个变异 `git checkout --` 还原、`git status --short` 为空。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M7 | 仍用固定 16384（`R = max(16384, request)`） | ✅ failed | `catalog::tests::the_output_reservation_scales_with_the_window_and_the_request`；也由 `cli::the_startup_line_names_an_explicit_window` 抓住（B 回到 3616） |
+| M8 | `⌊C/4⌋` 写成 `⌊C/2⌋` | ✅ failed | 同上（C=8192 → 4096 而非 2048） |
+| M9 | 忽略请求的 max_output（去掉 `.max(request)`） | ✅ failed | 同上（C=8192 + max_tokens=16384 应得 16384） |
+| M10 | `C` 未知时返回上限 16384（而不是 0/请求值） | ✅ failed | 同上（`output_reservation(None, None)` 应为 0） |
+
+4/4 全抓。M7 走单元与 CLI 两条路径：固定预留会让 `--context-window 20000` 的 `B` 回到旧的 3616。
+
+## Phase 4：只读配置读取器（ADR 0008，条目重编号为 M11–M14，避免与 main 的 M7–M10 撞号）
 
 Base `8028d9e` · 一次性 worktree `/tmp/config-mut`（从 HEAD 建，做完删掉）· **独立
 `CARGO_TARGET_DIR`** · 每个变异跑 `cargo test -p radian-host`、
@@ -166,10 +180,10 @@ Base `8028d9e` · 一次性 worktree `/tmp/config-mut`（从 HEAD 建，做完�
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
-| M7 | 敏感键裸字符串被接受（明文密钥） | `config::tests::a_bare_secret_is_refused_without_echoing_the_value`、`config_fixtures::the_reader_matches_the_reference_checker` | ✅ |
-| M8 | 拒绝信息回显密钥值（把值拼进 `key` 路径） | `config::tests::a_bare_secret_is_refused_without_echoing_the_value`、`config_fixtures::the_refusal_messages_never_echo_a_value`、`cli::a_plaintext_secret_in_the_config_is_refused_without_echoing_it` | ✅ |
-| M9 | 更低的 `schema_version` 被静默接受 | `config::tests::a_missing_version_and_a_lower_version_are_refused`、`config_fixtures::the_reader_matches_the_reference_checker`、`cli::a_lower_schema_version_refuses_to_start_without_creating_a_session` | ✅ |
-| M10 | 未知 `permissions.profile` 被当作已知档位 | `config::tests::an_unknown_profile_is_refused_and_an_unknown_theme_is_ignored` | ✅ |
+| M11 | 敏感键裸字符串被接受（明文密钥） | `config::tests::a_bare_secret_is_refused_without_echoing_the_value`、`config_fixtures::the_reader_matches_the_reference_checker` | ✅ |
+| M12 | 拒绝信息回显密钥值（把值拼进 `key` 路径） | `config::tests::a_bare_secret_is_refused_without_echoing_the_value`、`config_fixtures::the_refusal_messages_never_echo_a_value`、`cli::a_plaintext_secret_in_the_config_is_refused_without_echoing_it` | ✅ |
+| M13 | 更低的 `schema_version` 被静默接受 | `config::tests::a_missing_version_and_a_lower_version_are_refused`、`config_fixtures::the_reader_matches_the_reference_checker`、`cli::a_lower_schema_version_refuses_to_start_without_creating_a_session` | ✅ |
+| M14 | 未知 `permissions.profile` 被当作已知档位 | `config::tests::an_unknown_profile_is_refused_and_an_unknown_theme_is_ignored` | ✅ |
 
 4/4 抓住。（这些变异跑里 `bad_mcp_config_exits_two_with_the_path` 也出现在失败列表——它是并发 cargo
 运行的 watchdog 抖动，干净树上单跑 3 次都过，不是变异引起的。）

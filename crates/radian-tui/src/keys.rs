@@ -42,6 +42,27 @@ pub enum Action {
     Cancel,
     /// Complete the `@` file reference at the cursor (Phase 4).
     Complete,
+    /// Open the in-transcript search box (Phase 5); when the box is already open, the earlier
+    /// match — that is the historical `Ctrl-F` behavior.
+    Find,
+    /// The earlier match (the find box is open).
+    FindPrev,
+    /// The later match (the find box is open).
+    FindNext,
+    /// Close the find box (the find box is open).
+    FindClose,
+}
+
+/// The interaction layer a binding lives in. The find box is a layer over the transcript: while
+/// it is open its keys are looked up **first**, so `enter` can be the earlier match there and
+/// the send key in the transcript without either being a conflict. A binding only ever
+/// conflicts with another binding in its own layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Context {
+    /// The message box and the transcript.
+    Main,
+    /// The in-transcript search box.
+    Find,
 }
 
 impl Action {
@@ -72,6 +93,18 @@ impl Action {
             Action::Escape => "escape",
             Action::Cancel => "cancel",
             Action::Complete => "complete",
+            Action::Find => "find",
+            Action::FindPrev => "find_prev",
+            Action::FindNext => "find_next",
+            Action::FindClose => "find_close",
+        }
+    }
+
+    /// The layer this action's keys live in.
+    pub fn context(self) -> Context {
+        match self {
+            Action::FindPrev | Action::FindNext | Action::FindClose => Context::Find,
+            _ => Context::Main,
         }
     }
 
@@ -109,6 +142,10 @@ const DEFAULT_BINDINGS: &[(&str, Action)] = &[
     ("escape", Action::Escape),
     ("cancel", Action::Cancel),
     ("complete", Action::Complete),
+    ("find", Action::Find),
+    ("find_prev", Action::FindPrev),
+    ("find_next", Action::FindNext),
+    ("find_close", Action::FindClose),
 ];
 
 /// The default key strings per action.
@@ -137,6 +174,17 @@ const DEFAULT_KEYS: &[(&str, &[&str])] = &[
     ("escape", &["esc"]),
     ("cancel", &["ctrl-c"]),
     ("complete", &["tab"]),
+    ("find", &["ctrl-f"]),
+];
+
+/// The find box's default keys. These are looked up before the transcript layer while the box
+/// is open. `ctrl-f` is both "open the box" (transcript) and "earlier match" (box), exactly as
+/// the hardcoded behavior was; `enter` is the earlier match here and the send key in the
+/// transcript.
+const FIND_DEFAULT_KEYS: &[(&str, &[&str])] = &[
+    ("find_prev", &["enter", "ctrl-f"]),
+    ("find_next", &["shift-enter", "ctrl-g"]),
+    ("find_close", &["esc"]),
 ];
 
 /// One key and its modifiers.
@@ -257,6 +305,29 @@ fn codes_match(left: &KeyCode, right: &KeyCode) -> bool {
     }
 }
 
+fn lookup(bindings: &[(KeyPress, Action)], key: &KeyEvent) -> Option<Action> {
+    bindings
+        .iter()
+        .find(|(press, _)| press.matches(key))
+        .map(|(_, action)| *action)
+}
+
+/// One key bound to two actions in the same layer.
+fn check_layer(bindings: &[(KeyPress, Action)]) -> Result<(), KeymapError> {
+    for (index, (press, action)) in bindings.iter().enumerate() {
+        for (other_press, other) in &bindings[index + 1..] {
+            if press == other_press && action != other {
+                return Err(KeymapError::Conflict {
+                    key: press.to_string(),
+                    first: action.name().to_owned(),
+                    second: other.name().to_owned(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Why a keymap was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeymapError {
@@ -285,6 +356,8 @@ impl std::error::Error for KeymapError {}
 #[derive(Debug, Clone)]
 pub struct Keymap {
     bindings: Vec<(KeyPress, Action)>,
+    /// The find box's layer, looked up before `bindings` while the box is open.
+    find_bindings: Vec<(KeyPress, Action)>,
     /// Unknown actions and unparsable keys, for the startup line.
     pub warnings: Vec<String>,
 }
@@ -298,15 +371,19 @@ impl Default for Keymap {
 impl Keymap {
     /// The built-in map (today's behavior).
     pub fn builtin() -> Self {
-        let mut bindings = Vec::new();
-        for (name, keys) in DEFAULT_KEYS {
-            let action = Action::from_name(name).expect("a built-in action name");
-            for key in *keys {
-                bindings.push((KeyPress::parse(key).expect("a built-in key"), action));
+        let built = |table: &[(&str, &[&str])]| {
+            let mut bindings = Vec::new();
+            for (name, keys) in table {
+                let action = Action::from_name(name).expect("a built-in action name");
+                for key in *keys {
+                    bindings.push((KeyPress::parse(key).expect("a built-in key"), action));
+                }
             }
-        }
+            bindings
+        };
         Self {
-            bindings,
+            bindings: built(DEFAULT_KEYS),
+            find_bindings: built(FIND_DEFAULT_KEYS),
             warnings: Vec::new(),
         }
     }
@@ -331,36 +408,33 @@ impl Keymap {
                         .push(format!("tui.keybindings.{name}: {error} ignored")),
                 }
             }
-            map.bindings.retain(|(_, bound)| *bound != action);
+            let layer = match action.context() {
+                Context::Main => &mut map.bindings,
+                Context::Find => &mut map.find_bindings,
+            };
+            layer.retain(|(_, bound)| *bound != action);
             for press in parsed {
-                map.bindings.push((press, action));
+                layer.push((press, action));
             }
         }
         map.check_conflicts()?;
         Ok(map)
     }
 
-    /// The action a key event performs, if any.
+    /// The action a key event performs in the transcript, if any.
     pub fn action_for(&self, key: &KeyEvent) -> Option<Action> {
-        self.bindings
-            .iter()
-            .find(|(press, _)| press.matches(key))
-            .map(|(_, action)| *action)
+        lookup(&self.bindings, key)
+    }
+
+    /// The action a key event performs while the find box is open, if any. Looked up before
+    /// [`Self::action_for`], so the box's layer wins while it is up.
+    pub fn find_action_for(&self, key: &KeyEvent) -> Option<Action> {
+        lookup(&self.find_bindings, key)
     }
 
     fn check_conflicts(&self) -> Result<(), KeymapError> {
-        for (index, (press, action)) in self.bindings.iter().enumerate() {
-            for (other_press, other) in &self.bindings[index + 1..] {
-                if press == other_press && action != other {
-                    return Err(KeymapError::Conflict {
-                        key: press.to_string(),
-                        first: action.name().to_owned(),
-                        second: other.name().to_owned(),
-                    });
-                }
-            }
-        }
-        Ok(())
+        check_layer(&self.bindings)?;
+        check_layer(&self.find_bindings)
     }
 }
 
@@ -460,6 +534,79 @@ mod tests {
         assert_eq!(
             map.action_for(&event(KeyCode::Char('s'), KeyModifiers::CONTROL)),
             Some(Action::Send)
+        );
+    }
+
+    #[test]
+    fn the_find_box_is_a_second_layer() {
+        let map = Keymap::builtin();
+        // The transcript: `enter` sends, `ctrl-f` opens the box.
+        assert_eq!(
+            map.action_for(&event(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(Action::Send)
+        );
+        assert_eq!(
+            map.action_for(&event(KeyCode::Char('f'), KeyModifiers::CONTROL)),
+            Some(Action::Find)
+        );
+        // The box: `enter` and `ctrl-f` are the earlier match, `shift-enter`/`ctrl-g` the later
+        // one, `esc` closes it.
+        for key in [
+            event(KeyCode::Enter, KeyModifiers::NONE),
+            event(KeyCode::Char('f'), KeyModifiers::CONTROL),
+        ] {
+            assert_eq!(map.find_action_for(&key), Some(Action::FindPrev), "{key:?}");
+        }
+        for key in [
+            event(KeyCode::Enter, KeyModifiers::SHIFT),
+            event(KeyCode::Char('g'), KeyModifiers::CONTROL),
+        ] {
+            assert_eq!(map.find_action_for(&key), Some(Action::FindNext), "{key:?}");
+        }
+        assert_eq!(
+            map.find_action_for(&event(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(Action::FindClose)
+        );
+        assert_eq!(
+            map.find_action_for(&event(KeyCode::Char('z'), KeyModifiers::NONE)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_binding_only_conflicts_with_its_own_layer() {
+        // `enter` is `send` in the transcript and `find_prev` in the box: not a conflict.
+        let map = Keymap::from_config(&[("find_prev".into(), vec!["enter".into()])]).unwrap();
+        assert_eq!(
+            map.find_action_for(&event(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(Action::FindPrev)
+        );
+        assert_eq!(
+            map.action_for(&event(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(Action::Send)
+        );
+        // Two actions of the same layer still conflict.
+        let error = Keymap::from_config(&[("find_next".into(), vec!["enter".into()])]).unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("enter"), "{text}");
+        assert!(
+            text.contains("find_prev") && text.contains("find_next"),
+            "{text}"
+        );
+        // Rebinding a box action replaces its defaults in the box layer only.
+        let map = Keymap::from_config(&[("find_close".into(), vec!["ctrl-x".into()])]).unwrap();
+        assert_eq!(
+            map.find_action_for(&event(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+            Some(Action::FindClose)
+        );
+        assert_eq!(
+            map.find_action_for(&event(KeyCode::Esc, KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(
+            map.action_for(&event(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(Action::Escape),
+            "the transcript's `escape` is untouched"
         );
     }
 

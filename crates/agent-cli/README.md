@@ -182,10 +182,13 @@ The context window `C` comes from one of three places, in order:
    ADR 0015 C1).
 
 The catalog reports `context` (C), `input` (I) and `output` separately. The effective input
-budget is **`B = min(I, C − R)`**, where **`R = max(16384, the request's max output)`** is the
-reservation kept for the answer and the next round. A missing `I` falls back to `C − R`; a
-missing `C` leaves `B = I`. **`C ≤ R` is a startup error** (the window cannot hold the
-reservation), never a silently clamped number.
+budget is **`B = min(I, C − R)`**, where **`R = max(min(16384, ⌊C/4⌋), the request's max
+output)`** (ADR 0018) is the reservation kept for the answer and the next round: a
+quarter of the window, capped at 16384, raised by the output the request itself sends. A
+missing `I` falls back to `C − R`; a missing `C` leaves `B = I`. **`C ≤ R` is a startup error**
+(the window cannot hold the reservation), never a silently clamped number; with the adaptive
+`R` it takes the request's own output reaching `C` (for example Anthropic's default
+`max_tokens = 16384` against an 8192-token window).
 
 - The startup `[budget]` line shows `C`, `I`, `output`, `R` and `B`, and where they came from.
   The catalog's `output` is only **checked** against the request's max output (a warning); it

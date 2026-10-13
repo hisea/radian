@@ -7,6 +7,7 @@
 pub mod app;
 pub mod command;
 pub mod composer;
+pub mod find;
 pub mod keys;
 pub mod mention;
 pub mod picker;

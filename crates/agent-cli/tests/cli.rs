@@ -2630,8 +2630,10 @@ async fn without_a_window_the_budget_is_off_and_says_so() {
 #[tokio::test]
 async fn an_over_budget_request_is_still_sent_and_the_turn_completes() {
     let (_dir, ws) = budget_workspace("budget-over");
+    // C = 20000, so R = 5000 and B = 15000 (ADR 0018); the reported input (20000)
+    // is over it.
     let server = MockServer::start(vec![
-        used_tool_reply("c1", "write", r#"{"path":"f.txt","content":"x"}"#, 9000),
+        used_tool_reply("c1", "write", r#"{"path":"f.txt","content":"x"}"#, 20000),
         text_reply("done"),
     ])
     .await;
@@ -2658,7 +2660,7 @@ async fn an_over_budget_request_is_still_sent_and_the_turn_completes() {
     .await;
 
     assert_eq!(code, 0, "{stderr}");
-    assert!(stderr.contains("B 3616 from --context-window"), "{stderr}");
+    assert!(stderr.contains("B 15000 from --context-window"), "{stderr}");
     assert_eq!(
         server.requests().len(),
         2,
@@ -2667,29 +2669,34 @@ async fn an_over_budget_request_is_still_sent_and_the_turn_completes() {
 }
 
 /// 3: a context window that cannot hold the output reservation is a startup error, before the
-/// session file or any request (ADR 0018). `C <= R` is impossible, so it is refused, never
-/// silently clamped.
+/// session file or any request (ADR 0018). With revision 4's adaptive `R` it needs the
+/// request's own output to reach `C`: Anthropic sends `max_tokens = 16384` by default, so an
+/// 8192-token window cannot hold the reservation.
 #[tokio::test]
 async fn a_context_window_at_or_below_the_reservation_is_rejected() {
     let (_dir, ws) = budget_workspace("budget-too-small");
-    let server = MockServer::start(vec![]).await;
+    let server = anth::MockServer::start(vec![]).await;
 
     let (code, _, stderr) = feed_and_wait(
         spawn_agent(
             &[
                 "--model",
-                "m",
+                "claude-x",
+                "--provider",
+                "anthropic",
                 "--base-url",
                 &server.base_url,
+                "--api-key-env",
+                "ANTHROPIC_API_KEY",
                 "--workspace",
                 ws.to_str().unwrap(),
                 "--yes",
                 "--context-window",
-                "16384",
+                "8192",
                 "-p",
                 "go",
             ],
-            &[],
+            &[("ANTHROPIC_API_KEY", "sk-ant-test-key")],
         ),
         "",
     )
@@ -2710,8 +2717,9 @@ async fn a_context_window_at_or_below_the_reservation_is_rejected() {
 async fn an_over_budget_turn_records_a_normal_outcome() {
     let sessions = fresh_session_dir();
     let (_dir, ws) = budget_workspace("budget-durable");
+    // C = 20000 -> B = 15000; the reported input (20000) is over it.
     let server = MockServer::start(vec![
-        used_tool_reply("c1", "write", r#"{"path":"f.txt","content":"x"}"#, 9000),
+        used_tool_reply("c1", "write", r#"{"path":"f.txt","content":"x"}"#, 20000),
         text_reply("done"),
     ])
     .await;
@@ -4317,8 +4325,9 @@ async fn the_startup_line_names_an_explicit_window() {
     )
     .await;
     assert_eq!(code, 0, "{stderr}");
-    assert!(stderr.contains("B 3616 from --context-window"), "{stderr}");
-    assert!(stderr.contains("R 16384"), "{stderr}");
+    // C = 20000 -> R = 5000 (a quarter of the window), B = 15000.
+    assert!(stderr.contains("B 15000 from --context-window"), "{stderr}");
+    assert!(stderr.contains("R 5000"), "{stderr}");
 }
 
 /// `--no-auto-compact` is shown on the startup line; the default is on (ADR 0018).

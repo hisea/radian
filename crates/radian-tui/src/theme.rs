@@ -63,6 +63,8 @@ pub struct Theme {
     pub hint: Style,
     /// The `@` file-reference completion list (Phase 4).
     pub completion: Style,
+    /// The find match position in the status bar (Phase 5).
+    pub find: Style,
 }
 
 fn style(color: Option<Color>, modifiers: Modifier) -> Style {
@@ -106,6 +108,7 @@ impl Theme {
             approval_border: style(Some(Color::Yellow), Modifier::empty()),
             hint: style(Some(Color::DarkGray), Modifier::empty()),
             completion: style(Some(Color::DarkGray), Modifier::empty()),
+            find: style(Some(Color::Yellow), Modifier::empty()),
         }
     }
 
@@ -135,6 +138,7 @@ impl Theme {
             approval_border: style(Some(Color::Red), Modifier::empty()),
             hint: style(Some(Color::DarkGray), Modifier::empty()),
             completion: style(Some(Color::DarkGray), Modifier::empty()),
+            find: style(Some(Color::Magenta), Modifier::empty()),
         }
     }
 
@@ -163,6 +167,7 @@ impl Theme {
             approval_border: style(None, Modifier::BOLD),
             hint: style(None, Modifier::DIM),
             completion: style(None, Modifier::DIM),
+            find: style(None, Modifier::BOLD),
         }
     }
 
@@ -193,7 +198,7 @@ impl Theme {
     }
 
     /// Every style this theme defines, for the "mono has no colors" test.
-    pub fn styles(&self) -> [Style; 21] {
+    pub fn styles(&self) -> [Style; 22] {
         [
             self.reasoning,
             self.interrupted,
@@ -216,6 +221,7 @@ impl Theme {
             self.approval_border,
             self.hint,
             self.completion,
+            self.find,
         ]
     }
 }

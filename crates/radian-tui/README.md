@@ -55,8 +55,9 @@ the composer.
 | PageUp / PageDown | scroll the transcript a page |
 | Shift-Up / Shift-Down | scroll the transcript one line |
 | Ctrl-Home / Ctrl-End | scroll the transcript to its top / bottom |
-| Esc | close the `@` candidate list if it is up; otherwise clear a non-empty input first (the line stays in the history, so `Up` finds it); with an empty input, cancel the running turn / quit |
+| Esc | (`escape` in the transcript, `find_close` in the find box) close the find box or the `@` candidate list if one is up; otherwise clear a non-empty input first (the line stays in the history, so `Up` finds it); with an empty input, cancel the running turn / quit |
 | Ctrl-C | cancel the running turn; when idle, quit |
+| Ctrl-F (`find` in the transcript, `find_prev` in the find box) | open the in-transcript search box (`find: <query>`, replacing the input line; the message draft is kept). Type to search the displayed transcript case-insensitively; a second Ctrl-F or Enter is the earlier match, Shift-Enter or Ctrl-G the later one (no wrap); the status bar shows `match i/N`; Esc closes the box where the viewport is |
 | bracketed paste | inserts at the cursor, `\r\n` normalized to `\n`, and never sends |
 
 Shift-Enter needs a terminal with the enhanced keyboard protocol; Ctrl-J works everywhere.
@@ -83,6 +84,8 @@ send = ["ctrl-s"]              # replaces the default `enter`
 newline = ["ctrl-j", "alt-enter", "shift-enter"]
 history_prev = ["up"]
 complete = ["tab"]             # the `@` file-reference completion
+find = ["ctrl-f"]              # open the in-transcript search box
+find_next = ["ctrl-g", "shift-enter"]
 ```
 
 - `theme`: `dark` is the original palette, `light` re-picks it for a light background, `mono`
@@ -91,20 +94,26 @@ complete = ["tab"]             # the `@` file-reference completion
 - `keybindings` maps an **action** to one or more key strings; a listed action's keys
   **replace** its defaults. Key strings are `[ctrl-][alt-][shift-]key` (`enter`, `ctrl-j`,
   `alt-enter`, `shift-up`, `pageup`, `space`, a single character, …). An unknown action or key
-  is ignored with a warning; **one key bound to two actions refuses startup** (the message
-  names the key and both actions).
+  is ignored with a warning; **one key bound to two actions of the same context refuses
+  startup** (the message names the key and both actions).
 - Actions: `send`, `newline`, `cursor_left`, `cursor_right`, `word_left`, `word_right`,
   `line_start`, `line_end`, `history_prev`, `history_next`, `delete_before`, `delete_under`,
   `delete_word`, `delete_to_line_start`, `delete_to_line_end`, `scroll_page_up`,
   `scroll_page_down`, `scroll_line_up`, `scroll_line_down`, `scroll_top`, `scroll_bottom`,
-  `escape`, `cancel`, `complete`. The defaults are exactly the table above, so an empty config
-  changes nothing.
+  `escape`, `cancel`, `complete`, `find`, `find_prev`, `find_next`, `find_close`. The
+  defaults are exactly the table above, so an empty config changes nothing.
 - **The approval and command-confirmation prompts are not rebindable.** `y`/`a`/`n` and `Esc`
   are handled before the keymap, so a bad keybinding cannot approve a tool call the user meant
   to deny; `cancel` still works while a prompt is up.
+- There are two **contexts**, and a binding only conflicts with another binding of its own
+  context. The find box (`find_prev`, `find_next`, `find_close`) is a layer over the
+  transcript: while it is open its keys are looked up first, so `enter` is `find_prev` there
+  and `send` in the transcript, and `ctrl-f` is both "open the box" (`find`) and "earlier
+  match" (`find_prev`), exactly as the pre-keymap behavior was.
 - While the `@` completion list is showing, `escape` only closes the list (it does not clear
   the input), and any key other than `complete` dismisses it. Both follow the keymap, so a
-  rebound `escape`/`complete` moves that behavior too.
+  rebound `escape`/`complete` moves that behavior too. Likewise `find_close`'s `esc` closes the
+  box before `escape` would clear the input.
 - Note that rebinding `send` away from `enter` leaves `enter` a no-op unless `newline` is given
   it too (as in the example) — the keys are a total map, not layered.
 
@@ -232,6 +241,11 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   scannable, does typing a filter feel responsive, is the highlighted row obvious, and does
   `Tab` full-text search read clearly (the snippet vs the summary)? Is it obvious that `Esc`
   leaves and `n` starts fresh? pty automation asserts the rows and the keys, not the feel.
+- **in-transcript search**: in a long session, `Ctrl-F` and type a word that appears once
+  near the top. Does the jump land where you expect, is the highlighted match obvious, and is
+  `match i/N` readable? Press Enter / Ctrl-G a few times: does moving between matches feel
+  like a terminal's scrollback search, and does Esc leave you where you were? pty automation
+  asserts the jump and the status, not the feel.
 - **`/help` and a `/memory` write**: type `/help` (a notice, no model request), then
   `/memory forget <id>` — is the `[y/N]` prompt obvious and does `n` feel like a cancel? pty
   automation asserts the notices and the keys, not the readability.
@@ -551,11 +565,13 @@ refreshed at most once every 24 h (3 s timeout; a failure falls back to the cach
 `--offline-catalog` never goes out. With neither, `C` is **unknown**, there is no budget, and
 the startup notice says so.
 
-The effective input budget is **`B = min(I, C − R)`**, with **`R = max(16384, the request's max
-output)`** (ADR 0018). The startup notice names the source and every number
+The effective input budget is **`B = min(I, C − R)`**, with **`R = max(min(16384, ⌊C/4⌋), the
+request's max output)`** (ADR 0018: a quarter of the window, capped at 16384, raised
+by the output the request itself sends). The startup notice names the source and every number
 (`C 1000000, I 922000, output 384000, R 16384, B 922000 from models.dev (opencode/…, cached 3 h
-ago)`, `B 3616 from --context-window`, or a `no budget` line). `C ≤ R` is refused at startup:
-the window cannot hold the reservation.
+ago)`, `B 15000 from --context-window` for C = 20000, or a `no budget` line). `C ≤ R` is refused
+at startup: the window cannot hold the reservation (with the adaptive `R` it needs the request's
+own output to reach `C`).
 
 The status bar shows the projection `T` over `B` whenever a request is made, and highlights it
 when `T` is over `B`. Crossing `B` does **not** stop the turn (ADR 0018): the request is sent
