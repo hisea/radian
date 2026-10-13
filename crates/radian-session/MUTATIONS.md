@@ -141,3 +141,11 @@ Base: `8858046` · one-shot worktree `/tmp/0019-mut`（detached，跑完删除�
 3/3 caught。M7 一次改 reader，五个 corruption 用例同时失败，证明 reader 的结构检查确实走
 Core 的状态机而不是第二套规则。只读打开不写盘这一条没有做人工变异：`a_crash_mid_replacement_recovers_the_old_history`
 在 `Session::open` 前后比较文件字节，且 `resume_*` 用例在 resume 前比较字节；这里只记录未变异。
+
+## ADR 0021 M1 第三片：`MemoryInjected`（2026-10-13）
+
+Base `2d01d9b` · 一次性 worktree `/tmp/memsvcb-mut` · `git checkout --` 还原。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M13 | `MemoryInjected` 的 `critical` 改为 `true` | ✅ 抓住 | `runtime_events::memory_injected_round_trips_without_content_and_is_not_critical` |
