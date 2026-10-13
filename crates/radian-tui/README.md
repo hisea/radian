@@ -157,6 +157,7 @@ The file is read the same way as the CLI's (`--config`, `RADIAN_CONFIG`,
 schema_version = 1
 [tui]
 theme = "dark"                 # dark | light | mono
+mouse = true                   # the wheel scrolls the transcript (default true)
 
 [tui.keybindings]
 send = ["ctrl-s"]              # replaces the default `enter`
@@ -170,6 +171,14 @@ find_next = ["ctrl-g", "shift-enter"]
 - `theme`: `dark` is the original palette, `light` re-picks it for a light background, `mono`
   uses no color at all (bold/underline/dim only). A non-empty `NO_COLOR` environment variable
   forces `mono` (<https://no-color.org>). An unknown theme is ignored with a warning.
+- `mouse` (default `true`): the app enables button + wheel reporting (`CSI ?1000h`) with SGR
+  coordinates (`CSI ?1006h`), so a wheel notch scrolls the transcript instead of the terminal
+  translating it to arrow keys (dogfood p5: the wheel called the input history). Deliberately
+  **not** `?1002h`/`?1003h` (any-motion): a pointer move is not input and never causes a frame.
+  With `mouse = false` the app sends no mouse sequence at all and behaves exactly as before.
+  **Cost**: while reporting is on, a plain drag selects via the app rather than the emulator;
+  most terminals still select with Shift held, but that is the emulator's choice and is not
+  guaranteed here. Set `mouse = false` to keep native selection always.
 - `keybindings` maps an **action** to one or more key strings; a listed action's keys
   **replace** its defaults. Key strings are `[ctrl-][alt-][shift-]key` (`enter`, `ctrl-j`,
   `alt-enter`, `shift-up`, `pageup`, `space`, a single character, …). An unknown action or key
@@ -307,10 +316,17 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
 - **the budget status segment**: with a small `--context-window`, is the `T / B` projection
   and the reported-vs-estimated wording readable at your width, and does the over-budget
   highlight stand out without looking like an error?
-- **mouse selection/copy**: this app does **not** enable mouse capture, so selection is the
-  **terminal emulator's own** (drag to select, Cmd-C on macOS, or the emulator's copy key).
-  The caveat ADR 0009 notes applies: a selection that spans the input box and the transcript
-  follows the emulator's rules, not ours. Verify it selects what you expect.
+- **mouse selection/copy**: with the default `tui.mouse = true`, the app reports the wheel
+  (and buttons) with `?1000h ?1006h`, so a plain drag no longer selects in the emulator. Try
+  **Shift+drag** (most terminals) or set `mouse = false` in the config to restore the
+  emulator's own selection (drag, Cmd-C on macOS, or the emulator's copy key) — then the wheel
+  is back to the terminal's alternate-scroll translation and no longer scrolls the app.
+  Whichever way, verify that the selection and copy do what you expect.
+- **the mouse wheel**: with `tui.mouse = true` (default), type a draft in the message box and
+  scroll the wheel **up** — the transcript must move up by three lines per notch and the draft
+  must stay (dogfood p5 was the wheel replacing it with the input history). Scroll down: it
+  returns toward the bottom. Open the session picker (`/sessions`) and scroll: the selection
+  moves, not the transcript. Open the approval prompt and scroll: nothing moves.
 - **the MCP approval box**: with `--mcp-config`, an MCP tool call prompts like any other. Is
   the tool name (`server__tool`) and the argument preview clear at your width, and is it
   obvious the server runs outside the sandbox (the startup notice says so)?

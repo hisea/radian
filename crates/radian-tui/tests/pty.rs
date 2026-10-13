@@ -4198,3 +4198,368 @@ fn pty_a_flooding_producer_still_draws_and_answers_keys() {
     );
     pty.quit();
 }
+
+// ---------- the mouse wheel (ADR 0023 U2, plan B) ----------
+
+/// The SGR report for one wheel notch: `ESC[<64;x;yM` is up, `ESC[<65;x;yM` is down.
+/// crossterm's `parse_csi` (`b'<'` at :171) dispatches these to `parse_csi_sgr_mouse`
+/// (:718), and `parse_cb` (:776) maps button 4/5 to `ScrollUp`/`ScrollDown` (:789-790).
+fn wheel(up: bool) -> Vec<u8> {
+    if up {
+        b"\x1b[<64;10;10M".to_vec()
+    } else {
+        b"\x1b[<65;10;10M".to_vec()
+    }
+}
+
+/// The mouse-reporting sequences, as bytes in the raw output.
+const MOUSE_ON: &str = "\u{1b}[?1000h";
+const MOUSE_SGR_ON: &str = "\u{1b}[?1006h";
+const MOUSE_OFF: &str = "\u{1b}[?1000l";
+const MOUSE_SGR_OFF: &str = "\u{1b}[?1006l";
+
+/// The app enabled reporting and released it again; the any-motion forms (`?1002h`/`?1003h`)
+/// are never sent (a pointer move must not flood the input thread).
+fn assert_mouse_released(pty: &Pty, label: &str) {
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    assert!(
+        raw.contains(MOUSE_ON),
+        "{label}: reporting was never enabled: {raw}"
+    );
+    assert!(
+        raw.contains(MOUSE_SGR_OFF) && raw.contains(MOUSE_OFF),
+        "{label}: the mouse was not released: {raw}"
+    );
+    assert!(
+        !raw.contains("\u{1b}[?1002h") && !raw.contains("\u{1b}[?1003h"),
+        "{label}: any-motion reporting must never be enabled: {raw}"
+    );
+}
+
+/// dogfood p5: a wheel-up scrolls the transcript and leaves the input box alone. The old
+/// alternate-scroll behavior turned the wheel into `Up`, which replaced the draft with the
+/// previous history entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_wheel_scrolls_the_transcript_not_the_input_history() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("mouse-scroll");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    // A long transcript: the first reply scrolls off.
+    let mut replies = vec![text_reply("FIRST-MARKER")];
+    for i in 2..=8 {
+        let filler = (0..12)
+            .map(|j| format!("filler-{i}-line-{j}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        replies.push(text_reply(&filler));
+    }
+    let server = MockServer::start(replies).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "mouse",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        24,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"m1\r");
+    assert!(pty.wait_for_screen("FIRST-MARKER", 15), "{}", pty.screen());
+    for i in 2..=8 {
+        pty.send(format!("m{i}\r").as_bytes());
+        assert!(
+            pty.wait_for_screen(&format!("filler-{i}-line-11"), 15),
+            "{}",
+            pty.screen()
+        );
+    }
+    assert!(
+        !pty.screen().contains("FIRST-MARKER"),
+        "the marker should have scrolled off:\n{}",
+        pty.screen()
+    );
+    // A draft in the input box; the last history entry is `m8`.
+    pty.send(b"half-written-draft");
+    assert!(
+        pty.wait_for_screen("half-written-draft", 5),
+        "{}",
+        pty.screen()
+    );
+    assert!(String::from_utf8_lossy(&pty.raw()).contains(MOUSE_ON));
+
+    // Enough notches (3 lines each) to bring the first reply back into view.
+    for _ in 0..40 {
+        pty.send(&wheel(true));
+    }
+    assert!(
+        pty.wait_for_screen("FIRST-MARKER", 5),
+        "the wheel did not scroll the transcript up:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.screen().contains("half-written-draft"),
+        "the wheel replaced the input draft with history:\n{}",
+        pty.screen()
+    );
+
+    // Wheel down returns toward the bottom.
+    for _ in 0..40 {
+        pty.send(&wheel(false));
+    }
+    assert!(
+        pty.wait_until(5, |screen| !screen.contains("FIRST-MARKER")),
+        "the wheel did not scroll the transcript back down:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+    assert_mouse_released(&pty, "normal quit");
+}
+
+/// A `Moved` report is not input: it is dropped before the channel (so it cannot cause a
+/// frame). The app also never enables any-motion reporting.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_mouse_move_is_dropped() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("mouse-move");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let server = MockServer::start(vec![text_reply("R")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "move",
+        ],
+        20,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"draft");
+    assert!(pty.wait_for_screen("draft", 5), "{}", pty.screen());
+    // A motion report (`ESC[<35;x;yM` = Moved) and a click must change nothing: the draft
+    // stays, and the app never enabled any-motion reporting.
+    pty.send(b"\x1b[<35;10;10M");
+    pty.send(b"\x1b[<0;10;10M");
+    // The next key proves the app is alive and the draft survived.
+    pty.send(b"-ok");
+    assert!(
+        pty.wait_for_screen("draft-ok", 5),
+        "a mouse move or click consumed input:\n{}",
+        pty.screen()
+    );
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    assert!(
+        !raw.contains("\u{1b}[?1002h") && !raw.contains("\u{1b}[?1003h"),
+        "any-motion reporting must never be enabled: {raw}"
+    );
+    pty.quit();
+}
+
+/// `tui.mouse = false` sends no mouse sequence at all, so the terminal keeps its native
+/// selection/copy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_mouse_off_sends_no_reporting_sequence() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("mouse-off");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, "schema_version = 1\n[tui]\nmouse = false\n").unwrap();
+    let server = MockServer::start(vec![text_reply("R")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--config",
+            config.to_str().unwrap(),
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "mouse-off",
+        ],
+        20,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    assert!(
+        !raw.contains(MOUSE_ON),
+        "mouse off must not enable reporting: {raw}"
+    );
+    assert!(
+        !raw.contains(MOUSE_OFF) && !raw.contains(MOUSE_SGR_ON) && !raw.contains(MOUSE_SGR_OFF),
+        "mouse off must send no mouse sequence: {raw}"
+    );
+}
+
+/// Every exit path releases the mouse: the ordinary quit, a panic, and a signal.
+#[test]
+fn pty_every_exit_path_releases_the_mouse() {
+    // The ordinary quit (the `Drop` of the guard).
+    {
+        let _serial = pty_guard();
+        let dir = TempDir::new("mouse-quit");
+        let mut pty = Pty::spawn(
+            &[
+                "--model",
+                "mock",
+                "--base-url",
+                "http://127.0.0.1:1/v1",
+                "--session-dir",
+                dir.path().to_str().unwrap(),
+                "--session-id",
+                "quit",
+            ],
+            20,
+            100,
+        );
+        assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+        pty.quit();
+        assert_eq!(pty.app_exit_code(), Some(0));
+        assert_mouse_released(&pty, "quit");
+    }
+    // The panic hook restores the terminal (and releases the mouse).
+    {
+        let _serial = pty_guard();
+        let dir = TempDir::new("mouse-panic");
+        let mut pty = Pty::spawn(
+            &[
+                "--model",
+                "mock",
+                "--base-url",
+                "http://127.0.0.1:1/v1",
+                "--session-dir",
+                dir.path().to_str().unwrap(),
+                "--session-id",
+                "panic",
+                "--panic-after-enter",
+            ],
+            20,
+            100,
+        );
+        assert!(
+            pty.wait_for_exit(10).is_some(),
+            "the app did not exit on panic"
+        );
+        assert_mouse_released(&pty, "panic");
+    }
+    // A signal leaves through the ordinary clean-exit path.
+    {
+        let _serial = pty_guard();
+        let dir = TempDir::new("mouse-signal");
+        let mut pty = Pty::spawn(
+            &[
+                "--model",
+                "mock",
+                "--base-url",
+                "http://127.0.0.1:1/v1",
+                "--session-dir",
+                dir.path().to_str().unwrap(),
+                "--session-id",
+                "signal",
+            ],
+            20,
+            100,
+        );
+        assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+        let pid = app_pid(&pty);
+        let status = std::process::Command::new("kill")
+            .arg("-TERM")
+            .arg(&pid)
+            .status()
+            .unwrap();
+        assert!(status.success(), "kill -TERM {pid}");
+        assert!(pty.wait_for_exit(15).is_some(), "the app did not exit");
+        assert_eq!(pty.app_exit_code(), Some(143));
+        assert_mouse_released(&pty, "signal");
+    }
+}
+
+/// With an overlay open, the wheel scrolls the overlay, not the transcript: the picker's
+/// selected row moves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_the_wheel_scrolls_an_open_overlay() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("mouse-overlay");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let workspace = std::fs::canonicalize(&ws)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    seed_session(&sessions, "alpha", &workspace, "ALPHA").await;
+    seed_session(&sessions, "beta", &workspace, "BETA").await;
+    let server = MockServer::start(vec![text_reply("R")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "current",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        24,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"/sessions\r");
+    assert!(
+        pty.wait_for_screen("filter:", 10),
+        "the picker did not open:\n{}",
+        pty.screen()
+    );
+    let before = pty.screen();
+    let before_hint = before
+        .split("--resume ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .expect("a --resume hint")
+        .to_string();
+    // One notch down moves the picker's selection; the hint names a different session.
+    pty.send(&wheel(false));
+    assert!(
+        pty.wait_until(5, |screen| {
+            screen
+                .split("--resume ")
+                .nth(1)
+                .and_then(|rest| rest.split_whitespace().next())
+                != Some(before_hint.as_str())
+        }),
+        "the wheel did not move the picker's selection:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}

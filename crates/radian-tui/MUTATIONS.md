@@ -450,3 +450,17 @@ Base `677ca35` · 在本任务工作树内逐条施加后从副本还原（`--no
 
 4/4 抓住。L1 的“放到栈之后”是：去掉栈前的 `cancel` 检查、放到 while 循环之后；审批 Modal 会先吞掉
 Ctrl-C，测试随即失败。L3 把模态的硬编码分派整段删掉，`y` 于是落到 `Keymap`/被吞，两条重绑测试失败。
+
+## mouse（提交 1）：滚轮滚 transcript（ADR 0023 U2 方案 B）
+
+Base `0063dae` · 在本任务工作树内逐条施加后从副本还原（`--no-fail-fast`）· `git status --short`
+结束后干净。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M1 | 开成 crossterm 的 `EnableMouseCapture` 风格（多开 `?1002h`/`?1003h` any-motion） | `pty_a_mouse_move_is_dropped`、`pty_every_exit_path_releases_the_mouse`、`pty_wheel_scrolls_the_transcript_not_the_input_history`（都断言无 `?1002h`/`?1003h`） | ✅ failed |
+| M2 | panic 路径不关上报（`MOUSE_REPORTING` 在 hook 里先置 false） | `pty_every_exit_path_releases_the_mouse`（panic 分支） | ✅ failed |
+| M3 | 滚轮映射成 `Up`（`Action::HistoryPrev`） | `mouse::a_wheel_up_scrolls_and_keeps_the_input_box`、`mouse::a_wheel_down_scrolls_back`、`pty_wheel_scrolls_the_transcript_not_the_input_history` | ✅ failed |
+| M4 | `tui.mouse = false` 仍开上报（`enter` 忽略参数） | `pty_mouse_off_sends_no_reporting_sequence` | ✅ failed |
+
+4/4 抓住。

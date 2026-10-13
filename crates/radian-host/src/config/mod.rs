@@ -180,6 +180,10 @@ pub struct TuiConfig {
     /// The raw `tui.keybindings` table: action name → key strings. The TUI parses and
     /// validates it (its key grammar belongs to the terminal layer).
     pub keybindings: Vec<(String, Vec<String>)>,
+    /// `tui.mouse`: whether the terminal reports the mouse wheel (ADR 0023 U2, plan B).
+    /// `None` means the default, **on**; the TUI reads `unwrap_or(true)`. `false` sends no
+    /// mouse sequence at all and leaves the terminal's native selection/copy alone.
+    pub mouse: Option<bool>,
 }
 
 /// One parsed configuration file.
@@ -445,6 +449,10 @@ fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
                 }
             }
             ("keybindings", _) => return Err(wrong_type(path, "tui.keybindings", "a table")),
+            ("mouse", Value::Boolean(mouse)) => config.tui.mouse = Some(*mouse),
+            // A non-boolean mouse is a display preference: ignore it (and say so), never
+            // refuse the file.
+            ("mouse", _) => config.skipped.push("tui.mouse".into()),
             (other, _) => config.skipped.push(format!("tui.{other}")),
         }
     }
@@ -658,6 +666,23 @@ theme = "light"
         assert_eq!(config.permissions.profile.as_deref(), Some("full"));
         assert_eq!(config.compaction.auto, Some(false));
         assert_eq!(config.tui.theme.as_deref(), Some("light"));
+    }
+
+    /// `tui.mouse` is an optional tri-state: absent = the default (on), `true`/`false` are
+    /// carried verbatim, and a wrong type is a display preference (skipped, never a refusal).
+    #[test]
+    fn the_tui_mouse_flag_is_carried_and_a_wrong_type_is_skipped() {
+        assert_eq!(parse_str("schema_version = 1\n").unwrap().tui.mouse, None);
+        assert_eq!(
+            parse_str("schema_version = 1\n[tui]\nmouse = false\n")
+                .unwrap()
+                .tui
+                .mouse,
+            Some(false)
+        );
+        let config = parse_str("schema_version = 1\n[tui]\nmouse = \"yes\"\n").unwrap();
+        assert_eq!(config.tui.mouse, None);
+        assert!(config.skipped.contains(&"tui.mouse".to_string()));
     }
 
     #[test]

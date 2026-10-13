@@ -229,7 +229,7 @@ impl Picker {
 pub fn run(rows: Vec<SessionRow>, index: Option<Index>, workspace: &str) -> io::Result<Outcome> {
     let mut picker = Picker::new(rows, index, workspace);
     picker.focus();
-    let mut guard = TtyGuard::enter()?;
+    let mut guard = TtyGuard::enter(false)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let outcome = loop {
         terminal.draw(|frame| draw(frame, frame.area(), &picker))?;

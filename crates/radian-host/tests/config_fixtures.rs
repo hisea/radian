@@ -54,6 +54,15 @@ fn the_unknown_fields_are_ignored_but_reported() {
     assert!(config.skipped.contains(&"tui.theme".to_string()));
 }
 
+/// The minimal fixture carries the known `tui.mouse` preference (`false`): the reader keeps
+/// the value, so the TUI can honor it (ADR 0023 U2, plan B).
+#[test]
+fn the_tui_mouse_preference_is_read_from_the_minimal_fixture() {
+    let (path, text) = fixture("minimal.toml");
+    let config = config::parse(&path, &text).unwrap();
+    assert_eq!(config.tui.mouse, Some(false));
+}
+
 /// The refusal messages never echo a value that could be a secret.
 #[test]
 fn the_refusal_messages_never_echo_a_value() {

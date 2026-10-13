@@ -167,6 +167,18 @@ pub enum Modal {
     // would be a third `Modal` variant with its own form keys, but this build does not have it.
 }
 
+/// One mouse-wheel notch (ADR 0023 U2, plan B). The input thread maps crossterm's
+/// `MouseEventKind::ScrollUp`/`ScrollDown` to this; no other mouse event reaches the app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseScrollDirection {
+    Up,
+    Down,
+}
+
+/// How many transcript lines one wheel notch scrolls. A constant, not a magic number: the
+/// wheel is a coarse gesture (a notch is not a line), and this is the one place to tune it.
+pub const MOUSE_WHEEL_LINES: usize = 3;
+
 /// The wording for a budget report. ADR 0015 C1: a reported number, a reported baseline plus
 /// an estimated growth, and a pure estimate must be distinguishable, and a mixed value must
 /// **not** be presented as a report.
@@ -610,6 +622,42 @@ impl App {
     pub fn scroll_to_bottom(&mut self) {
         self.scroll = self.max_scroll;
         self.follow = true;
+    }
+
+    /// One mouse-wheel notch (ADR 0023 U2, plan B). It acts on the topmost **scrollable**
+    /// layer: a modal consumes it (the approval prompt does not scroll), a picker overlay moves
+    /// its selection, the `@` completion list consumes it (it has no scroll state of its own,
+    /// and the transcript behind it must not move), and otherwise the transcript scrolls. The
+    /// transcript path goes through the same [`Action::ScrollLineUp`]/[`Action::ScrollLineDown`]
+    /// code as the keys, `MOUSE_WHEEL_LINES` lines per notch.
+    pub fn mouse_scroll(&mut self, direction: MouseScrollDirection) -> UpdateResult {
+        if self.has_modal() {
+            return UpdateResult::none();
+        }
+        if self.picker().is_some() {
+            let key = match direction {
+                MouseScrollDirection::Up => KeyCode::Up,
+                MouseScrollDirection::Down => KeyCode::Down,
+            };
+            // A list selection is discrete: one notch moves it one row (the transcript below
+            // is the one that scrolls `MOUSE_WHEEL_LINES`).
+            return self.picker_key(KeyEvent::new(key, KeyModifiers::NONE));
+        }
+        if self.completion().is_some() {
+            return UpdateResult::none();
+        }
+        let action = match direction {
+            MouseScrollDirection::Up => Action::ScrollLineUp,
+            MouseScrollDirection::Down => Action::ScrollLineDown,
+        };
+        let mut dirty = false;
+        for _ in 0..MOUSE_WHEEL_LINES {
+            dirty |= self.update_action(action).dirty;
+        }
+        UpdateResult {
+            dirty,
+            effects: Vec::new(),
+        }
     }
 
     // ---------- the layer stack (ADR 0023 U4) ----------

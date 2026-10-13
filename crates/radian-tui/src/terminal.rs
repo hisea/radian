@@ -4,6 +4,7 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ratatui::crossterm::cursor::{Hide, Show};
 use ratatui::crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
@@ -12,6 +13,27 @@ use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 
+/// Whether mouse reporting is on. A process-global rather than a [`TtyGuard`] field because
+/// the panic hook constructs a bare `TtyGuard` to restore the terminal and must know whether
+/// to send the `l` sequences (ADR 0023 U2).
+static MOUSE_REPORTING: AtomicBool = AtomicBool::new(false);
+
+/// Turns mouse reporting on (`\x1b[?1000h\x1b[?1006h`) or off (the `l` forms).
+///
+/// Deliberately **not** crossterm's `EnableMouseCapture`: that also enables `?1002h`
+/// (button-motion) and `?1003h` (any-motion), so a pointer move would flood the input thread
+/// (crossterm 0.29.0 `event.rs:325-333`). We only need button + wheel presses (`?1000h`),
+/// SGR-encoded (`?1006h`) so the coordinates do not overflow past column 223.
+fn write_mouse(enabled: bool) -> io::Result<()> {
+    let mut out = io::stdout();
+    if enabled {
+        out.write_all(b"\x1b[?1000h\x1b[?1006h")?;
+    } else {
+        out.write_all(b"\x1b[?1006l\x1b[?1000l")?;
+    }
+    out.flush()
+}
+
 /// Owns the terminal's modified state. `Drop` restores it, so a normal return, an error
 /// return and a panic unwind all restore; a `panic::set_hook` covers the process abort path.
 pub struct TtyGuard {
@@ -19,7 +41,10 @@ pub struct TtyGuard {
 }
 
 impl TtyGuard {
-    pub fn enter() -> io::Result<Self> {
+    /// Enters raw mode and the alternate screen. `mouse` says whether to also turn mouse
+    /// reporting on (`tui.mouse`, default on): `false` sends no mouse sequence at all, so the
+    /// terminal keeps its native selection/copy and behaves exactly as before.
+    pub fn enter(mouse: bool) -> io::Result<Self> {
         enable_raw_mode()?;
         let mut out = io::stdout();
         // If entering the alternate screen fails, put the terminal back before returning:
@@ -27,6 +52,16 @@ impl TtyGuard {
         if let Err(error) = execute!(out, EnterAlternateScreen, EnableBracketedPaste, Hide) {
             let _ = disable_raw_mode();
             return Err(error);
+        }
+        if mouse {
+            // Set the flag before the write: if the write fails partway, `restore` still
+            // sends the `l` forms, which are harmless when the `h` never took effect.
+            MOUSE_REPORTING.store(true, Ordering::SeqCst);
+            if let Err(error) = write_mouse(true) {
+                let mut guard = Self { active: true };
+                guard.restore();
+                return Err(error);
+            }
         }
         Ok(Self { active: true })
     }
@@ -38,6 +73,12 @@ impl TtyGuard {
         }
         self.active = false;
         let mut out = io::stdout();
+        // Turn mouse reporting off first (only if it was ever on), before leaving the
+        // alternate screen. Done through the global, so the panic hook's bare guard does it
+        // too.
+        if MOUSE_REPORTING.swap(false, Ordering::SeqCst) {
+            let _ = write_mouse(false);
+        }
         let _ = execute!(out, Show, DisableBracketedPaste, LeaveAlternateScreen);
         let _ = out.flush();
         let _ = disable_raw_mode();

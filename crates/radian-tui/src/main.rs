@@ -27,7 +27,7 @@ use radian_tui::app::{App, Effect, Input as AppInput, MemoryResult, PickerData};
 use radian_tui::events::{ApprovalPrompt, InputEvent, ProjectionSink, UiEvent};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::crossterm::event::{self, Event, KeyEventKind};
+use ratatui::crossterm::event::{self, Event};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -648,8 +648,8 @@ fn run(
         eprintln!("[config] {warning}");
     }
 
-    let mut guard =
-        radian_tui::terminal::TtyGuard::enter().map_err(|e| format!("terminal: {e}"))?;
+    let mut guard = radian_tui::terminal::TtyGuard::enter(config.tui.mouse.unwrap_or(true))
+        .map_err(|e| format!("terminal: {e}"))?;
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))
         .map_err(|e| format!("terminal: {e}"))?;
     if cli.panic_after_enter {
@@ -997,12 +997,14 @@ fn spawn_input_thread(tx: Sender<UiEvent>) {
                     return;
                 }
                 Input::Event(event) => {
+                    // A resize burst coalesces to the last one; everything else goes through
+                    // the one pure event map (which drops clicks, drags and moves).
                     let event = match event {
-                        Event::Key(key) if key.kind == KeyEventKind::Release => continue,
-                        Event::Key(key) => InputEvent::Key(key),
-                        Event::Paste(text) => InputEvent::Paste(text),
                         Event::Resize(rows, cols) => coalesce_resize(rows, cols),
-                        _ => continue,
+                        other => match radian_tui::events::input_event(other) {
+                            Some(event) => event,
+                            None => continue,
+                        },
                     };
                     if tx.send(UiEvent::Input(event)).is_err() {
                         return;
@@ -1077,6 +1079,7 @@ impl LoopContext<'_> {
             UiEvent::Input(InputEvent::Resize { rows, cols }) => {
                 app.update(AppInput::Resize { rows, cols })
             }
+            UiEvent::Input(InputEvent::MouseScroll(direction)) => app.mouse_scroll(direction),
             UiEvent::Dirty => return apply_dirty(app),
             UiEvent::Signal(signal) => {
                 // Leave through the ordinary clean-exit path: the terminal is restored, the
