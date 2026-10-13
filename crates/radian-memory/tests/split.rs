@@ -65,7 +65,9 @@ fn a_move_holds_the_target_lock_between_the_check_and_the_write() {
             false
         }));
     }
-    let report = store.split(&a, &[record.id.clone()], &b).unwrap();
+    let report = store
+        .split(&a, std::slice::from_ref(&record.id), &b)
+        .unwrap();
     assert_eq!(report.moved, vec![record.id]);
     assert!(
         locked.load(Ordering::SeqCst),
@@ -83,7 +85,9 @@ fn a_half_finished_move_is_completed_on_a_rerun() {
 
     // Crash between the target `Created` and the source `Forgotten`.
     radian_memory::set_move_hook(Box::new(|phase| phase == MovePhase::AfterTargetAppend));
-    let error = store.split(&a, &[record.id.clone()], &b).unwrap_err();
+    let error = store
+        .split(&a, std::slice::from_ref(&record.id), &b)
+        .unwrap_err();
     assert!(matches!(error, MemoryError::SimulatedCrash), "{error}");
     assert_eq!(store.records(&project("pb")).unwrap().len(), 1);
     assert_eq!(store.records(&project("pa")).unwrap().len(), 1);
@@ -94,7 +98,9 @@ fn a_half_finished_move_is_completed_on_a_rerun() {
     assert_eq!(view[0].scope, project("pb"));
 
     // Re-running the same move completes it instead of making a conflict.
-    let report = store.split(&a, &[record.id.clone()], &b).unwrap();
+    let report = store
+        .split(&a, std::slice::from_ref(&record.id), &b)
+        .unwrap();
     assert_eq!(report.moved, vec![record.id.clone()]);
     assert!(report.conflicts.is_empty(), "{report:?}");
     assert!(store.records(&project("pa")).unwrap().is_empty());
