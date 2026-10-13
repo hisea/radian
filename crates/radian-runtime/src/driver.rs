@@ -115,13 +115,12 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         let recovery = recover(&journal).await?;
         // Requeue before opening: the inputs are promises that must survive the restart.
         inbox.restore(recovery.requeue).await;
-        let session = agent
+        let mut session = agent
             .open_session_with_journal(
                 recovery.history,
                 Arc::clone(&journal) as Arc<dyn TranscriptJournal>,
             )
             .await?;
-        let mut session = session;
         // ADR 0015 C1: a resume recovers the reported `input` baseline from the journal, so
         // the guard does not restart from a pure estimate. `false` (a shorter history) keeps
         // the estimate rather than inventing a baseline.
