@@ -67,6 +67,7 @@ The transcript owns its scrolling:
 | 10 | driver task panic: orderly exit, terminal restored, failure reported | `tests/pty.rs` |
 | 11 | a failed sandbox probe refuses instead of running unsandboxed | `tests/pty.rs` |
 | 12 | shell approval shows the whole command; a capped result keeps the truncation marker visible; a compound command always asks | `tests/pty.rs` |
+| 13 | budget stop sends nothing and shows the honest wording; continue relaxes one request; the guard resumes; no window says the guard is off | `tests/pty.rs`, `tests/budget.rs` |
 | — | Enter=followup idle / steer running; Ctrl-C cancel-then-quit | `tests/input.rs` |
 
 ## Must be hand-tested in a real terminal
@@ -186,8 +187,9 @@ by one is resumable by the other:
 `--model`, `--base-url`, `--api-key-env` (default `OPENAI_API_KEY`), `--header NAME=VALUE`,
 `--system`, `--session-dir`, `--session-id`, `--resume`, `--list`, `--workspace DIR`,
 `--profile safe|workspace-write|full-access` (default `workspace-write`),
-`--approval on-ask|always|never` (default `on-ask`), `--allow-shell-command PREFIX`. The key is
-read only from the named environment variable and is never printed.
+`--approval on-ask|always|never` (default `on-ask`), `--allow-shell-command PREFIX`,
+`--context-window TOKENS`. The key is read only from the named environment variable and is
+never printed.
 
 ## Tools, permissions and the approval dialog
 
@@ -243,6 +245,36 @@ When a call needs the human, the input box is replaced by an approval box:
 
 The prompt shows the **resolved** resource, never the raw argument: `a/../b` must not read as
 if it stayed under `a/`. While the box is up, other keys do not type into the input.
+
+## Context budget
+
+`--context-window TOKENS` configures the ADR 0015 guard. Omitted means **off**: the app does
+not guess a window and the status bar says `context guard off (no window configured)`.
+
+When a turn ends because the next request would cross the threshold, the transcript gets a
+notice and the status bar shows the numbers. The wording depends on where the number came
+from (ADR 0015 C1) — a report, a report plus an estimate, and a pure estimate are three
+different things:
+
+| Source | Wording |
+|---|---|
+| reported | `context 12,340 of 16,000 at 80% (reported)` |
+| reported + estimate | `context 12,340 of 16,000 at 80% (reported 12,000 + estimated 340)` |
+| estimate | `context ~12,340 of 16,000 at 80% (estimated)` |
+| no window | `context guard off (no window configured)` — no number at all |
+
+The mixed value is never shown as a plain report, and a projection that has no reported
+baseline is marked `~… (estimated)`.
+
+Keys, while the input box is empty (so typing is never swallowed):
+
+| Key | Action |
+|---|---|
+| `c` | continue once: the next turn's first request passes the guard, then the guard applies again |
+| Esc | dismiss the notice (the next message is a normal, guarded turn) |
+
+There is no fork option: an option that does nothing would be worse than its absence (Phase 5
+owns fork/rewind).
 
 ## Tool display
 

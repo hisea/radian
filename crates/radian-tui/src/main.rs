@@ -11,8 +11,9 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
 use agent_core::{
-    Agent, AgentConfig, AgentEvent, EventSink, InputSource, NoTools, ToolCall, ToolContext,
-    ToolError, ToolFailure, ToolOutput, ToolProvider, ToolSession, ToolSpec, TurnOptions,
+    Agent, AgentConfig, AgentEvent, ContextBudget, EventSink, InputSource, NoTools, ToolCall,
+    ToolContext, ToolError, ToolFailure, ToolOutput, ToolProvider, ToolSession, ToolSpec,
+    TurnOptions,
 };
 use agent_provider_openai_compatible::{ApiKey, OpenAiCompatible, OpenAiCompatibleConfig};
 use clap::Parser;
@@ -89,6 +90,11 @@ struct Cli {
     /// call at `ask`. Write these at the subcommand level, never at a bare program name.
     #[arg(long = "allow-shell-command", value_name = "PREFIX")]
     allow_shell_command: Vec<String>,
+
+    /// The model's context window in tokens (ADR 0015). Omitted means the context-budget
+    /// guard is **off**: the app does not guess a window, and the status bar says so.
+    #[arg(long, value_name = "TOKENS")]
+    context_window: Option<u64>,
 
     #[arg(long)]
     system: Option<String>,
@@ -177,6 +183,8 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
     let live: Arc<dyn EventSink> = Arc::new(ChannelSink(tx));
     let agent_config = AgentConfig {
         system_prompt: cli.system.clone(),
+        // No window configured means the guard is off, never a guessed default (ADR 0015).
+        context_budget: cli.context_window.map(ContextBudget::new),
         ..AgentConfig::default()
     };
 
@@ -231,6 +239,9 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
 
     // The driver runs until the UI asks it to stop; dropping its `run()` future releases the
     // borrow so `shutdown()` can be called.
+    // The handle the UI uses for a context-budget "continue": it must be taken before the
+    // driver moves onto its task.
+    let relax_budget = driver.relax_budget();
     let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
     let panic_in_driver = cli.panic_in_driver;
     let driver_task = runtime.spawn(async move {
@@ -279,6 +290,7 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
         panic!("radian-tui: panic path test with a child in flight");
     }
     let mut app = App::new(cli.model.clone(), session_id.clone());
+    app.set_context_window(cli.context_window);
     for message in &history {
         app.push_message(message);
     }
@@ -315,6 +327,7 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
         &inbox,
         &hooks,
         &driver_task,
+        &relax_budget,
     );
     guard.restore();
 
@@ -347,6 +360,7 @@ fn ui_loop(
     inbox: &Arc<Inbox>,
     hooks: &Arc<PermissionHooks>,
     driver_task: &tokio::task::JoinHandle<Result<(), radian_runtime::DriverError>>,
+    relax_budget: &radian_runtime::RelaxBudget,
 ) -> Result<(), String> {
     while !app.quit {
         // The driver task is the session. If it ends — normally or by panicking — the UI has
@@ -373,7 +387,7 @@ fn ui_loop(
             match event::read().map_err(|e| e.to_string())? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     if let Some(send) = app.on_key(key) {
-                        dispatch(send, runtime, inbox, hooks)?;
+                        dispatch(send, runtime, inbox, hooks, relax_budget)?;
                     }
                 }
                 Event::Paste(text) => app.input.push_str(&text),
@@ -400,8 +414,20 @@ fn dispatch(
     runtime: &tokio::runtime::Runtime,
     inbox: &Arc<Inbox>,
     hooks: &Arc<PermissionHooks>,
+    relax_budget: &radian_runtime::RelaxBudget,
 ) -> Result<(), String> {
     match send {
+        // ADR 0015 C5's "continue": the next turn's first model request passes the guard once,
+        // and the guard applies again after it. The turn is opened with a message of the
+        // host's own ("continue"), which is what the user chose.
+        Send::ContinueBudget => {
+            relax_budget.relax_once();
+            hooks.set_turn_source(Some(InputSource::User));
+            runtime
+                .block_on(inbox.followup("continue", InputSource::User))
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
         Send::Followup(text) => {
             // `HookContext` has no source field, so the host declares each turn's source
             // before it starts; an unset source is treated as non-human and denied.

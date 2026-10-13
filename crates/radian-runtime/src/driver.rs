@@ -16,6 +16,7 @@
 //! state does **not** survive a process restart (plan Phase 2, last point).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent_core::{
@@ -57,6 +58,19 @@ struct Recovery {
     next_config_revision: u64,
 }
 
+/// A host-side handle for the context-budget "continue" (ADR 0015 C5). Obtained from
+/// [`Driver::relax_budget`] and usable from another task while the driver runs.
+#[derive(Clone, Default)]
+pub struct RelaxBudget(Arc<AtomicBool>);
+
+impl RelaxBudget {
+    /// Ask for one relaxed request: the next turn's first model request passes the
+    /// context-budget guard once. Idempotent; the driver consumes it at the turn boundary.
+    pub fn relax_once(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
 /// The per-session driver.
 pub struct Driver<M: Model, P: ToolProvider, H: Hooks> {
     inbox: Arc<Inbox>,
@@ -69,6 +83,10 @@ pub struct Driver<M: Model, P: ToolProvider, H: Hooks> {
     /// A per-turn time limit: each turn's deadline is computed when the turn starts, so it
     /// is fresh rather than an absolute instant fixed at startup.
     turn_timeout: Option<std::time::Duration>,
+    /// Set by the host through [`Driver::relax_budget`] to let the **next** turn's first
+    /// model request pass the context-budget guard once (ADR 0015 C5). Consumed at the turn
+    /// boundary, so later turns are guarded again.
+    relax_budget: Arc<AtomicBool>,
     next_turn: u64,
     next_config_revision: u64,
     closed: bool,
@@ -102,6 +120,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             queue: ConfigQueue::new(),
             options,
             turn_timeout: None,
+            relax_budget: Arc::new(AtomicBool::new(false)),
             next_turn: recovery.next_turn,
             next_config_revision: recovery.next_config_revision,
             closed: false,
@@ -136,6 +155,14 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
 
     /// Sets a per-turn time limit. Each turn gets a deadline computed at its start, so this
     /// applies to every turn rather than only the first.
+    /// A handle that asks for one relaxed request (ADR 0015 C5's "continue"): the next
+    /// turn's first model request passes the context-budget guard, and the guard applies
+    /// again after it. The handle is `Send + Sync` and can be cloned before the driver is
+    /// moved onto its task; the driver consumes the request at the next turn boundary.
+    pub fn relax_budget(&self) -> RelaxBudget {
+        RelaxBudget(Arc::clone(&self.relax_budget))
+    }
+
     pub fn set_turn_timeout(&mut self, timeout: Option<std::time::Duration>) {
         self.turn_timeout = timeout;
     }
@@ -202,6 +229,9 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         if let Some(timeout) = self.turn_timeout {
             options.deadline = Some(tokio::time::Instant::now() + timeout);
         }
+        // One-shot: the host asked for the next turn's first request to pass the guard
+        // (ADR 0015 C5). Later turns are guarded again.
+        options.context_budget_relax = self.relax_budget.swap(false, Ordering::SeqCst);
 
         journal
             .append_runtime_event(RuntimeEvent::InputClaimed {
