@@ -177,6 +177,39 @@ mod tests {
         assert_eq!(projection.snapshot().assistant, "abc");
     }
 
+    /// ADR 0023 U5: a fact event is written to the projection, and the UI is woken with a
+    /// `Dirty` (not with the event alone, which the renderer does not read for facts).
+    #[test]
+    fn a_fact_event_writes_the_projection_and_wakes_the_ui() {
+        let (sink, projection, rx) = sink();
+        sink.emit(AgentEvent::ModelResponseReceived {
+            stop_reason: agent_core::StopReason::EndTurn,
+            tool_calls: 0,
+            usage: Some(agent_core::ModelUsage {
+                input: Some(5),
+                output: Some(2),
+                ..agent_core::ModelUsage::default()
+            }),
+        });
+        {
+            let read = projection.read();
+            assert_eq!(read.usage_input(), Some(5));
+            assert_eq!(read.usage_output(), Some(2));
+        }
+        let events: Vec<UiEvent> = rx.try_iter().collect();
+        assert!(
+            events.iter().any(|event| matches!(event, UiEvent::Dirty)),
+            "the fact update must wake the UI"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                UiEvent::Agent(AgentEvent::ModelResponseReceived { .. })
+            )),
+            "and the fact itself still reaches the channel"
+        );
+    }
+
     /// Deltas are not facts; a commit is, and it ends the stream.
     #[test]
     fn deltas_are_not_facts_and_a_commit_clears_the_stream() {

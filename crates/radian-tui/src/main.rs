@@ -1028,6 +1028,21 @@ fn coalesce_resize(rows: u16, cols: u16) -> InputEvent {
 
 /// The loop's side of the world (ADR 0023 U2/U3): everything handling an event or running an
 /// effect needs. The app stays pure; this is where the outside lives.
+/// What a `Dirty` notification means (ADR 0023 U2): clear the flag **first**, then read the
+/// projection, and always draw a frame when the read succeeded. The frame reads the projection
+/// for every other fact (turn, usage, budget, tier, MCP), so a fact-only update with an empty
+/// streaming buffer still changes what is on screen. `false` means another `Dirty` is already
+/// in flight, so this one is coalesced away.
+fn apply_dirty(app: &mut App) -> bool {
+    match app.projection.take_snapshot() {
+        Some(snapshot) => {
+            app.update(AppInput::Stream(snapshot));
+            true
+        }
+        None => false,
+    }
+}
+
 struct LoopContext<'a> {
     workspace: &'a Path,
     runtime: &'a tokio::runtime::Runtime,
@@ -1062,21 +1077,7 @@ impl LoopContext<'_> {
             UiEvent::Input(InputEvent::Resize { rows, cols }) => {
                 app.update(AppInput::Resize { rows, cols })
             }
-            UiEvent::Dirty => {
-                // ADR 0023 U2: clear the flag **first**, then read the projection. An update
-                // that happens after this swap sets the flag again and sends another `Dirty`,
-                // so no wake-up is lost.
-                match app.projection.take_snapshot() {
-                    Some(snapshot) => {
-                        app.update(AppInput::Stream(snapshot));
-                        // The frame reads the projection for every other fact (turn, usage,
-                        // budget, tier, MCP), so a notification always means a frame — even
-                        // when the streaming buffer itself is empty.
-                        return true;
-                    }
-                    None => return false,
-                }
-            }
+            UiEvent::Dirty => return apply_dirty(app),
             UiEvent::Signal(signal) => {
                 // Leave through the ordinary clean-exit path: the terminal is restored, the
                 // driver is stopped, and `main` prints the reason (a signal exits
@@ -1661,6 +1662,24 @@ impl AuditSink for JournalAudit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR 0023 U5: a fact-only update (usage, budget, tier, MCP) wakes the UI with a `Dirty`
+    /// and the buffer is empty. The loop must still draw a frame, or the status bar would stay
+    /// stale until some unrelated event arrived.
+    #[test]
+    fn a_dirty_notification_with_an_empty_stream_still_draws() {
+        let projection = Arc::new(radian_host::SessionProjection::new());
+        let mut app = App::new("m", "s");
+        app.set_projection(Arc::clone(&projection));
+        // The fact-only update: no delta, so the stream snapshot is empty.
+        assert!(projection.set_context_window(Some(1000)));
+        assert!(
+            apply_dirty(&mut app),
+            "a fact update must draw a frame even with an empty stream"
+        );
+        // And a second `Dirty` that finds the flag already cleared is coalesced away.
+        assert!(!apply_dirty(&mut app));
+    }
 
     #[test]
     fn the_default_model_call_limit_is_the_tui_one_not_the_cores() {
