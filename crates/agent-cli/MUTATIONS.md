@@ -106,7 +106,7 @@ Notes:
 
 | # | 变异 | 结果 | 抓住它的测试 |
 |---|---|---|---|
-| M8 | `chat` 在检查之前创建会话文件（把 `open_journal` 提到 `profile`/`sandbox`/`coding` 之前） | ✅ failed | `a_failed_probe_leaves_no_session_and_the_retry_creates_one`（`left files behind: ["retry.jsonl"]`） |
+| M9 | `chat` 在检查之前创建会话文件（把 `open_journal` 提到 `profile`/`sandbox`/`coding` 之前） | ✅ failed | `a_failed_probe_leaves_no_session_and_the_retry_creates_one`（`left files behind: ["retry.jsonl"]`） |
 
 「先建会话再检查」的 CLI 实例。工作区错误在 `setup` 里已经验证，所以用探测失败（sandbox 在
 `chat`）更能直接观察「检查失败仍留下文件」。
