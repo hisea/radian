@@ -301,3 +301,18 @@ Base: `45947ad` · 一次性检出 `/tmp/find-mut`（detached，跑完删除）�
 | N5 | 跳转后仍 `follow` | `find::ctrl_f_opens_and_typing_jumps_to_the_nearest_match_above`（app） | ✅ failed |
 
 5/5 抓住。N1/N2/N3 各自有 lib 单测与 app 断言两层（我第一轮误用 `--test find` 跑 lib 单测名，过滤器匹配 0 个测试而假通过；改到 `--lib`/app 后抓住）。
+
+## find 纳入 Keymap（两个上下文）
+
+Base `f2270e0` · 一次性 worktree `/tmp/config4-mut` · 独立 `CARGO_TARGET_DIR` ·
+`git checkout -- .` 还原、`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M28 | find 层永不被查询（`if false && self.find.is_some()`） | `tests/find.rs`（6/8 failed：`ctrl_f_opens_…`、`prev_walks_…`、`escape_closes_…`、`backspace_…`、`a_query_with_no_match_…`、`a_search_over_fifty_thousand_…`） | ✅ |
+| M29 | 搜索框里 `enter` 不再是 `find_prev`（去掉 `find_prev` 默认里的 `enter`） | `find::prev_walks_earlier_and_next_walks_later_without_wrapping`、`find::escape_closes_and_leaves_the_viewport_where_it_is` | ✅ |
+| M30 | `find` 失去默认键 `ctrl-f` | `tests/find.rs`（6/8 failed） | ✅ |
+| M31 | 冲突检查跨两个上下文（把两层并成一层查） | `keys::tests::a_binding_only_conflicts_with_its_own_layer`、`a_configured_action_replaces_its_default_keys`、`unknown_actions_and_keys_are_warnings_not_errors` | ✅ |
+
+4/4 全抓。M31 是「不该报的冲突」这一类：分层之后 `enter` 同时是 `send` 与 `find_prev`，跨层检查会把
+默认配置都判成冲突。
