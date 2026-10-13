@@ -456,6 +456,10 @@ fn wire_outcome(outcome: &RunOutcome) -> (TurnOutcome, Option<TurnReason>, Optio
                 None,
             ),
         },
+        // `RunStatus` is `#[non_exhaustive]`: a future terminal reason maps to `Unknown`
+        // rather than breaking this build. The same commit that adds a Core variant must
+        // give it a real mapping here (ADR 0006 §7(d)).
+        _ => (TurnOutcome::Unknown, None, None),
     }
 }
 

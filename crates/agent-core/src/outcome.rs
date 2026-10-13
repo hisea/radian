@@ -21,7 +21,11 @@ pub enum CancelReason {
 }
 
 /// How a turn ended.
+///
+/// `#[non_exhaustive]`: new terminal reasons are expected (the plan adds more), and a
+/// downstream exhaustive match must not break when one lands. Match with a wildcard arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RunStatus {
     Completed,
     Incomplete(IncompleteReason),

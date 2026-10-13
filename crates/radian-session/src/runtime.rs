@@ -35,6 +35,9 @@ pub enum TurnOutcome {
     Poisoned,
     Incomplete,
     Cancelled,
+    /// An outcome value this reader does not know (a future writer's value). A v1 reader
+    /// maps it here instead of refusing the file (ADR 0006 §7(d)).
+    Unknown,
 }
 
 /// The `reason` sub-field of `TurnFinished` (ADR 0006 §5.6). Required when `outcome` is
