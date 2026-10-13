@@ -4,11 +4,32 @@
 //! with `child_` are no-ops unless the parent sets an env var), has the child write a
 //! genuine partial line, and then `kill -9`s it (Rust's `Child::kill` sends SIGKILL on
 //! Unix).
+//!
+//! # Why these tests take a process-wide lock
+//!
+//! `flock` is attached to the **open file description**. When one test spawns a child
+//! process, the child inherits the parent's file descriptors until it `exec`s; an inherited
+//! descriptor shares the parent's open file description, so the parent's `flock` stays held
+//! for the whole `[fork, exec)` window even after the parent closes its own descriptor. If
+//! another test in the same process closes and reopens the same still-to-be-created file in
+//! that window, its `try_lock_exclusive` sees a false `Locked` and fails. The window is tiny
+//! but real: 1 in 100 full-binary runs here, and 4 in 12 parallel runs of just the two
+//! affected tests (see the flake report in the commit that added [`SERIAL`]).
+//!
+//! Serializing the tests that spawn a child with the ones that hold or reopen a journal
+//! closes the window: a victim can no longer be between `close` and `try_lock` while a
+//! sibling is forking. Production is unaffected: a host locks the session file once at
+//! startup, before any child process exists.
+//!
+//! Only tests in **this** binary can interfere: each integration-test file is its own
+//! process, and a child inherits only its own parent's descriptors. Only this file spawns
+//! children, so the lock lives here rather than in `common`.
 
 mod common;
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, MutexGuard};
 
 use agent_core::{JournalRecord, Message, TranscriptJournal};
 use common::{TempDir, created};
@@ -18,8 +39,20 @@ fn session_id() -> &'static str {
     "sid-crash"
 }
 
+/// Serializes every test here that spawns a child or holds/reopens a journal. See the module
+/// doc; the two classes must never overlap. A poisoned lock is reused (a panicking test must
+/// not deadlock the rest).
+static SERIAL: Mutex<()> = Mutex::new(());
+
+fn serial() -> MutexGuard<'static, ()> {
+    SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[tokio::test]
 async fn a_torn_tail_is_truncated_before_appending() {
+    let _serial = serial();
     let dir = TempDir::new("torn");
     let path = dir.file("s.jsonl");
     let sid = session_id();
@@ -75,6 +108,7 @@ async fn a_torn_tail_is_truncated_before_appending() {
 
 #[test]
 fn a_killed_writer_leaves_only_a_torn_tail() {
+    let _serial = serial();
     let dir = TempDir::new("kill");
     let path = dir.file("s.jsonl");
 
@@ -159,6 +193,7 @@ async fn child_crash_writer() {
 
 #[tokio::test]
 async fn a_second_writer_in_this_process_is_refused() {
+    let _serial = serial();
     let dir = TempDir::new("lock-inproc");
     let path = dir.file("s.jsonl");
     let _first = SessionJournal::create(&path, session_id(), created()).unwrap();
@@ -177,6 +212,7 @@ async fn a_second_writer_in_this_process_is_refused() {
 
 #[test]
 fn a_second_writer_in_another_process_is_refused() {
+    let _serial = serial();
     let dir = TempDir::new("lock-crossproc");
     let path = dir.file("s.jsonl");
     let _first = SessionJournal::create(&path, session_id(), created()).unwrap();
