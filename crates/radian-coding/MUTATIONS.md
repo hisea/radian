@@ -64,3 +64,28 @@ processes left (`ps` check).
 
 7/7 caught; no misses. M2 is the one that shows the "kill the direct child only" bug is a
 real hazard: with it the background `sleep 600` is still alive after the timeout.
+
+## `shell` output truncation (follow-up: head+tail, per stream)
+
+Base: `e0fd49a` · one-shot worktree `/tmp/shell-mut2` (created from HEAD, deleted after) ·
+each mutation run with `cargo test -p radian-coding --test shell <test> -- --exact
+--no-fail-fast`; files restored after each; `git status --short` empty at the end.
+
+The first seven mutations were re-run against the new reader (M3 now removes the caps
+entirely rather than the old shared budget), plus three for the new behaviour:
+
+| # | Requirement mutated | Mutation | Result |
+|---|---|---|---|
+| M1–M2, M4–M7 | as above | as above | ✅ caught (same tests) |
+| M3 | output cap | `head_cap = usize::MAX; tail_cap = 0` (keep everything) | ✅ caught (`output_over_the_cap_is_truncated_and_reported`) |
+| M8 | keep the tail | `tail_cap = 0` (head only) | ✅ caught (`the_end_of_a_long_output_is_kept`; the final `ERROR:` line is gone) |
+| M9 | per-stream budget | stderr is read with budget `0` — the observable consequence of one shared budget already spent by stdout | ✅ caught (`each_stream_has_its_own_budget`) |
+| M10 | render the tail | drop the tail from `Capped::render` (keep head + marker) | ✅ caught (`the_end_of_a_long_output_is_kept`) |
+
+10/10 caught; no misses. M9 is an equivalent mutation rather than a literal shared-budget
+rewrite: with one budget, a flooding stdout leaves stderr nothing, which is exactly what
+`read_capped(stderr, 0)` models, and the test asserts the stderr line survives.
+
+Memory is not asserted by a mutation but by a unit test (`the_reader_keeps_a_bounded_head_and_tail`,
+50 MiB through a 64 KiB cap) and an end-to-end one (`memory_does_not_grow_with_the_output`,
+50 MiB through a real process: peak RSS grew by ~688 KiB, measured with `getrusage`).

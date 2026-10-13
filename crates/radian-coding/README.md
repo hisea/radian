@@ -15,7 +15,7 @@ contract; this file is the practical summary.
 | `list` | `Shared` | List a directory, sorted, with kind and size; symlinks shown but not followed; capped by `max_entries`. |
 | `git_status` | `Shared` | `git status --porcelain=v1 --branch --untracked-files=all`. |
 | `git_diff` | `Shared` | `git diff [--cached] [-- <path>]`; the path must stay inside the workspace. |
-| `shell` | `Exclusive` | `/bin/sh -c <command>` **through a sandbox**, with `cwd` (workspace-relative) and `timeout_secs`. Present only when the host built the tools with a `Sandbox`. |
+| `shell` | `Exclusive` | `/bin/sh -c <command>` **through a sandbox**, with `cwd` (workspace-relative), `timeout_secs` and `max_output_bytes`. Present only when the host built the tools with a `Sandbox`. |
 
 `write`/`patch` are `Exclusive` because they mutate files: running them alone keeps each
 edit's read-modify-write atomic with respect to the other tools and avoids two writers
@@ -31,7 +31,7 @@ racing on one file. The read-only tools are `Shared` so a batch of reads/diffs c
 | `max_list_entries` / `default_list_entries` | 5000 / 500 | Bound the listing result. |
 | `max_git_output_bytes` | 1 MiB | Bound git output, truncated on a character boundary with a marker. |
 | `git_timeout` | 10 s | A hung git must not hang the turn. |
-| `max_shell_output_bytes` | 256 KiB (stdout+stderr combined) | Four times the default `read` budget: enough for a build/test log tail, small enough not to dominate the context. Truncation is reported in the text and in `structured.stdout_truncated_bytes`/`stderr_truncated_bytes`. |
+| `default_shell_output_bytes` / `max_shell_output_bytes` | 64 KiB / 1 MiB, **per stream** | Aligned with `read`'s default and hard cap. Past the budget the first quarter and the last three quarters are kept and the middle is replaced by a marker naming the discarded bytes; the tail is larger because a failing build's error is at the end. `max_output_bytes` lets the model raise it, clamped to the hard cap. Discarded bytes are reported per stream in the text and in `structured.*_truncated_bytes`. |
 | `default_shell_timeout` / `max_shell_timeout` | 60 s / 600 s | A model-supplied `timeout_secs` is clamped to the maximum, and the clamp is reported. |
 
 ## What is enforced, and what is not
@@ -66,7 +66,10 @@ Enforced (each with tests in `tests/escaping.rs` and `tests/mutation.rs`):
   when building the sandbox, and the tool description says "NOT sandboxed".
   Independently of the mode, the tool kills the whole process group on timeout,
   cancellation and leader exit, and filters the environment to the sandbox whitelist, so a
-  model-controlled shell never inherits the host's API keys.
+  model-controlled shell never inherits the host's API keys. Output is read as a stream:
+  only a bounded head and a trimmed tail are retained, so a command that prints gigabytes
+  cannot grow this process's memory (50 MiB through a 64 KiB budget grows peak RSS by about
+  688 KiB, measured).
 
 ## Mounting
 
