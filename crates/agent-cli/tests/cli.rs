@@ -2053,6 +2053,18 @@ async fn the_startup_text_does_not_claim_credential_isolation() {
     }
     // The honest limit is stated instead.
     assert!(stderr.contains("not tightened"), "{stderr}");
+    // ADR 0012, decision 2026-10-12 (option B): MCP servers keep running unsandboxed
+    // under workspace-write, and the notice is what tells the user so. With that choice this
+    // sentence is the only safeguard, so a test has to hold it in place.
+    assert!(
+        stderr.contains("MCP servers are NOT sandboxed"),
+        "the notice must say MCP runs outside the sandbox: {stderr}"
+    );
+    // ...and must not claim, unqualified, that every write is confined.
+    assert!(
+        !stderr.contains("[sandbox] writes are confined to the workspace"),
+        "{stderr}"
+    );
 }
 
 /// Every tool result text in request `n` (a batch has more than one).
