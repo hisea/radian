@@ -160,6 +160,40 @@ pub fn redact_base_url(raw: &str) -> String {
     agent_provider_openai_compatible::redact_url(raw)
 }
 
+/// Checks the Anthropic-only flags against the chosen provider.
+///
+/// `--thinking` and `--max-tokens` only mean something to the Anthropic adapter. Under
+/// `openai-compatible` they would be **silently ignored**, which is worse than a clear usage
+/// error, so the host refuses them before any session file is created. The hosts pass the raw
+/// flag values: `max_tokens` is `None` when the user did not pass it, so the default is not
+/// mistaken for an explicit choice.
+pub fn check_provider_flags(
+    provider: Provider,
+    thinking: Thinking,
+    max_tokens: Option<u32>,
+) -> Result<(), String> {
+    if provider == Provider::Anthropic {
+        return Ok(());
+    }
+    let mut offending = Vec::new();
+    if thinking != Thinking::Off {
+        offending.push("--thinking");
+    }
+    if max_tokens.is_some() {
+        offending.push("--max-tokens");
+    }
+    if offending.is_empty() {
+        return Ok(());
+    }
+    let flags = offending.join(" and ");
+    Err(format!(
+        "{flags} only appl{} to --provider anthropic and would be ignored under {}; remove \
+         {flags}, or pass --provider anthropic",
+        if offending.len() == 1 { "ies" } else { "y" },
+        provider.as_str(),
+    ))
+}
+
 /// Builds the provider adapter named by `args.provider`. The error is the same shape the
 /// hosts already printed for a bad `--base-url`.
 pub fn build_model(args: ModelArgs) -> Result<HostModel, String> {
@@ -205,5 +239,52 @@ pub fn build_model(args: ModelArgs) -> Result<HostModel, String> {
                 .map(HostModel::Anthropic)
                 .map_err(|e| format!("--base-url {shown_url}: {e}"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn anthropic_only_flags_are_refused_for_openai_compatible() {
+        for (thinking, max_tokens) in [
+            (Thinking::Adaptive, None),
+            (
+                Thinking::Enabled {
+                    budget_tokens: 8192,
+                },
+                None,
+            ),
+            (Thinking::Off, Some(100)),
+            (Thinking::Adaptive, Some(100)),
+        ] {
+            let error = check_provider_flags(Provider::OpenAiCompatible, thinking, max_tokens)
+                .expect_err("an Anthropic-only flag under openai-compatible is an error");
+            assert!(error.contains("anthropic"), "{error}");
+            if thinking != Thinking::Off {
+                assert!(error.contains("--thinking"), "{error}");
+            }
+            if max_tokens.is_some() {
+                assert!(error.contains("--max-tokens"), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_default_openai_arguments_are_accepted() {
+        check_provider_flags(Provider::OpenAiCompatible, Thinking::Off, None).unwrap();
+    }
+
+    #[test]
+    fn anthropic_accepts_both_flags() {
+        check_provider_flags(
+            Provider::Anthropic,
+            Thinking::Enabled {
+                budget_tokens: 8192,
+            },
+            Some(16384),
+        )
+        .unwrap();
     }
 }

@@ -221,10 +221,36 @@ fn tool_result_content(server: &MockServer, n: usize) -> String {
         .unwrap()
 }
 
-fn scratch(name: &str) -> PathBuf {
+/// A per-test scratch directory under the system temp directory, removed on drop.
+///
+/// A **passing** test removes it, so these no longer pile up inside a sandbox's workspace
+/// `TMPDIR` (dogfooding D14). A **failing** test keeps it and prints its path, so the state
+/// that made it fail is still there to inspect.
+struct ScratchDir(PathBuf);
+
+impl std::ops::Deref for ScratchDir {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!("[scratch] kept for debugging: {}", self.0.display());
+            return;
+        }
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn scratch(name: &str) -> ScratchDir {
     let dir = std::env::temp_dir().join(format!("agent-cli-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    dir
+    ScratchDir(dir)
 }
 
 /// Polls `predicate` until it holds, bounded; a sleep here is only the poll interval, never
@@ -2513,7 +2539,7 @@ fn used_tool_reply(id: &str, name: &str, arguments: &str, input: u64) -> Reply {
     ])
 }
 
-fn budget_workspace(label: &str) -> (PathBuf, PathBuf) {
+fn budget_workspace(label: &str) -> (ScratchDir, PathBuf) {
     let dir = scratch(label);
     let ws = dir.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
@@ -3937,6 +3963,135 @@ async fn export_redacts_the_anthropic_key_without_api_key_env() {
         "the anthropic key leaked: {stdout}"
     );
     assert!(stdout.contains("<redacted>"), "{stdout}");
+}
+
+// ---------- small fixes: existing session id, provider flags, scratch cleanup ----------
+
+/// D15: naming an existing session with `--session-id` points at the command that continues
+/// it, and does not touch the file.
+#[tokio::test]
+async fn session_id_already_exists_points_at_resume() {
+    let dir = scratch("dup-id");
+    let sessions = dir.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("one")]).await;
+    let args = [
+        "--model",
+        "m",
+        "--base-url",
+        &server.base_url,
+        "--workspace",
+        ws.to_str().unwrap(),
+        "--session-id",
+        "dup",
+        "--session-dir",
+        sessions.to_str().unwrap(),
+        "-p",
+        "hi",
+    ];
+    let (code, _, stderr) = feed_and_wait(spawn_agent(&args, &[]), "").await;
+    assert_eq!(code, 0, "{stderr}");
+    let before = std::fs::read(sessions.join("dup.jsonl")).unwrap();
+
+    let (code, _, stderr) = feed_and_wait(spawn_agent(&args, &[]), "").await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("already exists"), "{stderr}");
+    assert!(stderr.contains("--resume dup"), "{stderr}");
+    assert_eq!(
+        std::fs::read(sessions.join("dup.jsonl")).unwrap(),
+        before,
+        "the existing session must not be touched"
+    );
+}
+
+/// `--thinking` and `--max-tokens` are Anthropic-only: under the default openai-compatible
+/// provider they are a usage error before any session file exists, not a silent no-op.
+#[tokio::test]
+async fn anthropic_only_flags_are_refused_under_openai_compatible() {
+    for (label, extra) in [
+        ("thinking", vec!["--thinking", "adaptive"]),
+        ("max-tokens", vec!["--max-tokens", "100"]),
+    ] {
+        let dir = scratch(&format!("flag-{label}"));
+        let sessions = dir.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let mut args = vec![
+            "--model",
+            "m",
+            "--base-url",
+            "http://127.0.0.1:9/v1",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "flagged",
+            "-p",
+            "hi",
+        ];
+        args.extend(extra);
+        let (code, stdout, stderr) = feed_and_wait(spawn_agent(&args, &[]), "").await;
+        assert_eq!(code, 2, "{label}: {stderr}");
+        assert!(stderr.contains("anthropic"), "{label}: {stderr}");
+        assert!(stdout.is_empty(), "{label}: {stdout}");
+        assert!(
+            std::fs::read_dir(&sessions).unwrap().next().is_none(),
+            "{label}: a session file was created"
+        );
+    }
+}
+
+/// The same flags work under `--provider anthropic`: `--max-tokens` reaches the body and
+/// `--thinking adaptive` becomes the `thinking` object.
+#[tokio::test]
+async fn anthropic_provider_accepts_thinking_and_max_tokens() {
+    let server = anth::MockServer::start(vec![anth_text_reply("THINK-OK")]).await;
+    let dir = scratch("anthropic-flags");
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent_in(
+            &dir,
+            &[
+                "--model",
+                "claude-x",
+                "--provider",
+                "anthropic",
+                "--base-url",
+                &server.base_url,
+                "--api-key-env",
+                "ANTHROPIC_API_KEY",
+                "--thinking",
+                "adaptive",
+                "--max-tokens",
+                "4096",
+                "-p",
+                "hi",
+            ],
+            &[("ANTHROPIC_API_KEY", "sk-ant-test-key")],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("THINK-OK"), "{stdout}");
+    let body = server.requests()[0].json();
+    assert_eq!(body["max_tokens"], 4096, "{body}");
+    assert_eq!(body["thinking"], json!({"type": "adaptive"}), "{body}");
+}
+
+/// D14: a scratch directory is removed when its guard drops, so a passing test leaves
+/// nothing behind under `TMPDIR`.
+#[test]
+fn scratch_directories_are_removed_when_the_guard_drops() {
+    let path = {
+        let dir = scratch("scratch-drop");
+        assert!(dir.exists(), "{}", dir.display());
+        dir.to_path_buf()
+    };
+    assert!(
+        !path.exists(),
+        "the scratch guard must remove {}",
+        path.display()
+    );
 }
 
 /// A new session directory and file are owner-only (ADR 0013): a session is potentially
