@@ -303,7 +303,17 @@ where
                     }));
                 }
                 index_next += 1;
-                messages_since += 1;
+                // The replacement segment is exactly the `len` messages that follow its
+                // marker. Once they have all arrived the segment is closed and later
+                // `MessageAppended` records are normal transcript growth, not more of the
+                // replacement (ADR 0006 §5.11). Counting them forever made a session
+                // unreadable as soon as it was appended to after a replacement.
+                if let Some(len) = pending_len {
+                    messages_since += 1;
+                    if messages_since == len {
+                        pending_len = None;
+                    }
+                }
                 EventData::MessageAppended {
                     index: d.index,
                     message: d.message,
