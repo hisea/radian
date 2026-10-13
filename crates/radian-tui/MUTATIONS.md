@@ -179,3 +179,22 @@ Base `dc307e6` · 一次性检出 `/tmp/covf-mut` · 独立 `CARGO_TARGET_DIR` �
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
 | M10 | `dispatch` 去掉 `/compact` 分支（当成未知命令） | `command::tests::compact_is_a_control_request_with_optional_instructions` | ✅ failed |
+
+## Phase 4：composer（编辑、多行、历史、草稿）
+
+Base `0994b19` · 一次性 worktree `/tmp/composer-mut`（从 HEAD 建，做完删掉）· **独立
+`CARGO_TARGET_DIR`** · 每个变异跑 `cargo test -p radian-tui --lib`、
+`cargo test -p radian-tui --test composer --test cursor`、
+`cargo test -p radian-tui --test pty pty_a_draft_is_written`（都 `--no-fail-fast`），然后
+`git checkout -- .`；`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M1 | Backspace 删末尾而不是光标前 | `composer::tests::backspace_deletes_before_the_cursor_not_at_the_end` | ✅ |
+| M2 | 光标格按 UTF-8 字节而不是显示宽度 | `composer::tests::utf8_and_wide_characters_are_never_split`、`cursor::the_cursor_cell_counts_display_width_not_chars` | ✅ |
+| M3 | Up 在非首行也取历史 | `composer::up_moves_inside_a_multiline_input_instead_of_the_history` | ✅ |
+| M4 | Esc 非空也直接退出 | `composer::esc_clears_a_non_empty_input_and_quits_only_when_empty` | ✅ |
+| M5 | `take_draft` 不删除文件 | `composer::tests::a_draft_round_trips_owner_only_and_an_empty_one_removes_it`、`pty_a_draft_is_written_on_exit_and_restored_by_resume` | ✅ |
+| M6 | 草稿写到会话目录之外（`temp_dir`） | `pty_a_draft_is_written_on_exit_and_restored_by_resume` | ✅ |
+
+6/6 全抓。
