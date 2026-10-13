@@ -37,6 +37,40 @@ stdout carries only the model's visible answer (so `-p` can be piped). Status, t
 and **reasoning** go to stderr; reasoning is prefixed `[reasoning]` and kept on its own
 lines, never mixed with the answer (ADR 0014).
 
+## Context budget (ADR 0015)
+
+The guard is opt-in: **there is no default window**. Without `--context-window` no window is
+guessed (a model-name-to-window table ages, and most of its numbers are remembered rather
+than known — ADR 0015 C1), the guard is off, and the startup says so.
+
+- `--context-window <TOKENS>` is the model's window; `--context-threshold <PERCENT>`
+  (default 80) is the line at which the next request is not sent.
+- The stop names its source. A provider-reported input is shown as `(reported N)`; a report
+  plus local growth shows both parts, `(reported B + estimated G)`; with no report at all the
+  number is `~N (estimated)`. An estimate is never presented as a precise report.
+- **Interactive**: after a stop the CLI offers `[c] continue` (the next request is let
+  through once; the request after it is checked again, so this is not a switch) or `[n] stop`
+  (the turn ends; the session keeps accepting turns). A Ctrl-C at this prompt also stops.
+  `fork` is **not implemented** in this build, and it is not offered as an option.
+- Continuing sends the user message `continue`: a user message is the only way to open a new
+  turn, and it records the choice truthfully. The transcript itself is never edited
+  (ADR 0015 C7).
+- **`-p` never continues on its own.** It prints the stop and exits 3 (see Exit codes), so a
+  script can tell a budget stop from a failure.
+- The reported-input baseline is in memory only. After `--resume` the projection is an
+  estimate (the transcript carries no provider report to restore), so a resumed session can
+  stop earlier or later than the one that wrote it.
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | the turn completed |
+| 1 | the turn failed, or the driver ended with an error |
+| 2 | usage or setup error (including a failed sandbox probe) |
+| 3 | the context-budget guard stopped the turn in `-p` mode |
+| 130 | forced exit after a second Ctrl-C |
+
 ## Profiles, the sandbox, and permissions
 
 `--profile` picks the three layers of ADR 0012 at once:
