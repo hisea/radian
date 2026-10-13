@@ -309,12 +309,17 @@ async fn the_parent_gains_only_the_forked_record_and_the_seqs_match() {
     };
     assert_eq!(data["parent"]["seq"], json!(boundary));
     assert_eq!(data["parent"]["session_id"], json!(parent));
-    assert!(
-        session
-            .events()
-            .iter()
-            .any(|event| event.event == "SessionForked")
-    );
+    // The parent's SessionForked carries the same seq and names the child.
+    let forked = session
+        .events()
+        .iter()
+        .find(|event| event.event == "SessionForked")
+        .expect("the parent has SessionForked");
+    let EventData::Other(forked) = &forked.data else {
+        panic!("SessionForked is kept as Other");
+    };
+    assert_eq!(forked["parent_seq"], json!(boundary), "{forked}");
+    assert_eq!(forked["child_session_id"], json!(child), "{forked}");
 }
 
 #[tokio::test]
