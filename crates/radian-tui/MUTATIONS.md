@@ -264,12 +264,13 @@ Base `84ca71d` · 一次性检出 `/tmp/orphan-mut`（detached，独立 target�
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
 | O1 | `Pty::Drop` 只杀外层 shell（去掉 process-group kill） | `pty::a_panicking_pty_test_leaves_no_app_process` | ✅ failed（该变异运行本身也如预期留下孤儿，已清理） |
-| O2 | 屏蔽两条退出路径（`Input::Gone` 什么都不做，且 draw 失败不再按终端消失处理） | `pty::pty_a_closed_master_ends_the_app_cleanly` | ✅ failed（退出码 1，不是干净的 0） |
+| O2 | 屏蔽两条退出路径（`Input::Gone` 什么都不做，且 draw 失败不再按终端消失处理） | `pty::pty_a_closed_master_ends_the_app_cleanly` | ✅ failed（5s watchdog 内不退出） |
 | O3 | `tty_readiness` 把 `POLLHUP` 当成 `Readable`（进入 crossterm 的 EOF 死循环） | 同上 | ✅ failed（5s watchdog 内不退出） |
 
-3/3 全抓。O2/O3 走同一条端到端测试（关掉 pty master、断言有界时间内干净退出）；O1 走"panicking
-测试不留进程"这条。O3 起初没被抓住，因为最早的测试用了带控制终端的 pty：master 关闭会送 SIGHUP，
-信号标志让循环照常退出；换成无控制终端的 `openpty`（纯 EOF）后抓住。
+3/3 全抓。O1 走"panicking 测试不留进程"这条。**O2/O3 的记录在 orphan-spin-3 被更正**：上面的
+`pty_a_closed_master_ends_the_app_cleanly` 当时其实是被**绘制失败**那条路救走的（app 每帧都会写
+~30 字节的游标定位，与画面是否变化无关），所以 O3 时灵时不灵；`--freeze-draw` 之后绘制被冻结，
+O2/O3 才确定性地由输入侧判据抓住。见下一节。
 
 ## orphan-spin-2：信号任务的兜底（同一分支第二个提交）
 
@@ -281,3 +282,29 @@ Base `f3f38d5` · 一次性检出 `/tmp/op2-mut`（detached，独立 target，�
 | O4 | 去掉信号任务的 3 秒兜底（`EXIT_WATCHDOG` 超时不再 `exit(128+signal)`） | `pty::pty_a_hung_main_loop_still_exits_on_a_signal` | ✅ failed（10s watchdog 内不退出） |
 
 1/1 抓住。该变异运行本身靠新增的 `KillOnDrop` 守护清理，未留下孤儿。
+
+## orphan-spin-3：让"关闭 master"的测试只走输入侧（同一分支第三个提交）
+
+评审发现：`pty_a_closed_master_ends_the_app_cleanly` 并没有在测"读到 EOF 的路径"。评审的变异
+（`tty_readiness` 里 `... != 0 && false`，屏蔽 `POLLHUP`）当时仍能在 0.82 s 内通过——进程是从
+**绘制失败**那条路退出的（`draw_frame` → `terminal_gone(EIO)`），而且时灵时不灵。
+
+**核实（评审的推断部分不成立）**：app 每帧都会写 ~30 字节（`\x1b[39m\x1b[49m\x1b[59m\x1b[0m
+\x1b[?25h\x1b[28;2H`，即样式复位 + 显示光标 + 定位），**与画面是否变化无关**，所以"画面不变
+就不写字节"不是原因；真正原因是**绘制路径一直活着**，关掉 master 之后它总是会撞上 EIO，和输入
+侧的 `poll(2)` 抢跑。哪个先到取决于关闭时刻主循环在 `read` 还是 `draw`，所以旧测试 flaky。
+（另有一个独立的坑：首帧比 pty 输出缓冲大，父进程不读时 app 会阻塞在 `draw` 里。）
+
+**修法**：新增测试接缝 `--freeze-draw <FILE>`：第一帧画完后写 marker，之后 `draw_frame` 直接
+返回、不再画。测试等 marker 出现（同时 drain master）、关掉 master，于是**只有**输入侧能退出。
+
+Base `b60099b`（加 `--freeze-draw` 后未提交的工作树，独立构建）· `--no-fail-fast` · 每个变异
+`git checkout --`/副本还原、`git status --short` 为空。
+
+| # | 变异 | 结果 | 抓住它的测试 | 备注 |
+|---|---|---|---|---|
+| O5 | `tty_readiness` 里 `fd.revents & (POLLHUP\|POLLERR\|POLLNVAL) != 0 && false`（评审那一行，屏蔽 HUP 检测） | ✅ failed ×3（5s watchdog 内不退出） | `pty::pty_a_closed_master_ends_the_app_cleanly` | 加 `--freeze-draw` 前：flaky（一次通过、一次超时），因为绘制路径可能救场；加之后 3/3 确定性失败 |
+| O2′ | 上面 O2（屏蔽两条退出路径）在 `--freeze-draw` 下重跑 | ✅ failed（watchdog 内不退出） | 同上 | 更正 O2 的旧记录（旧记录写的是"退出码 1"，那是绘制路径的结果） |
+
+变异 O5 用了两次结果：**未加接缝**时该测试通过（bug 没被抓住），**加了接缝**后 3/3 失败
+（被抓住）。两次都记在这里。

@@ -181,6 +181,12 @@ struct Cli {
     /// the marker and then signals, so the main loop is provably inside the read.
     #[arg(long, hide = true, value_name = "FILE")]
     block_input: Option<PathBuf>,
+
+    /// Test hook: after the first frame, write this marker and stop drawing. With no further
+    /// writes, closing the pty cannot be noticed by a failed draw, so the input poll is the
+    /// only way out -- which is what `pty_a_closed_master_ends_the_app_cleanly` must exercise.
+    #[arg(long, hide = true, value_name = "FILE")]
+    freeze_draw: Option<PathBuf>,
 }
 
 /// The TUI's per-turn model call limit when `--max-model-calls` is not given (decision
@@ -579,6 +585,9 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
     if let Some(path) = &cli.block_input {
         let _ = BLOCK_INPUT.set(path.clone());
     }
+    if let Some(path) = &cli.freeze_draw {
+        let _ = FREEZE_DRAW.set(path.clone());
+    }
     let mut guard =
         radian_tui::terminal::TtyGuard::enter().map_err(|e| format!("terminal: {e}"))?;
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))
@@ -893,6 +902,11 @@ fn terminal_is_gone() -> bool {
     }
 }
 
+/// Test hook (`--freeze-draw`): once the marker exists, `draw_frame` stops drawing. The app
+/// still writes ~30 bytes per frame when idle (the cursor position), so a *content*-static
+/// frame is not enough to keep a closed pty off the draw path; this is.
+static FREEZE_DRAW: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
 /// Draws one frame. A draw that fails because the terminal is gone is the same event as
 /// [`Input::Gone`]: report it so the caller leaves cleanly instead of erroring out. `Ok(false)`
 /// means "the terminal is gone".
@@ -900,8 +914,18 @@ fn draw_frame(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App,
 ) -> Result<bool, String> {
+    if let Some(path) = FREEZE_DRAW.get() {
+        if path.exists() {
+            return Ok(true);
+        }
+    }
     match terminal.draw(|frame| radian_tui::render::draw(frame, app)) {
-        Ok(_) => Ok(true),
+        Ok(_) => {
+            if let Some(path) = FREEZE_DRAW.get() {
+                let _ = std::fs::write(path, "drawn\n");
+            }
+            Ok(true)
+        }
         Err(error) if terminal_gone(&error) || terminal_is_gone() => Ok(false),
         Err(error) => Err(error.to_string()),
     }

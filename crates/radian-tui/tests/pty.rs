@@ -111,7 +111,16 @@ fn spawn_direct(args: &[&str], home: &std::path::Path) -> (KillOnDrop, std::fs::
     cmd.stderr(std::process::Stdio::from(slave));
     let child = KillOnDrop(cmd.spawn().unwrap());
     drop(cmd);
-    (child, std::fs::File::from(master))
+    let master = std::fs::File::from(master);
+    // The first frame is larger than the pty output buffer, so the app blocks in `draw` until
+    // the parent drains it; a non-blocking master lets the tests drain without a reader thread
+    // (and still lets them close the only master fd).
+    // SAFETY: `master` is a valid fd; F_SETFL is async-signal-safe.
+    unsafe {
+        use std::os::fd::AsRawFd;
+        libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK);
+    }
+    (child, master)
 }
 
 const BIN: &str = env!("CARGO_BIN_EXE_radian-tui");
@@ -3532,8 +3541,13 @@ async fn pty_fork_refuses_while_a_turn_runs() {
 /// The terminal going away (the pty master closes; an ssh session drops) must end the app
 /// cleanly, not leave it spinning. This drives the binary **directly** through a plain
 /// `openpty` with **no controlling terminal**, so closing the master is a pure EOF (no
-/// SIGHUP): that is the read/EOF path on its own. The test waits on the process itself; a
-/// bounded watchdog is the判据, no CPU assertion.
+/// SIGHUP).
+///
+/// `--freeze-draw` makes the app stop drawing after the first frame: with no further writes,
+/// closing the pty cannot be noticed by a failed draw, so this test exercises the **input**
+/// `poll(2)` path and nothing else. (Without it the app still writes ~30 bytes per frame when
+/// idle -- the cursor position -- so the draw path usually wins the race, and a mutation that
+/// disables the `POLLHUP` check would slip through.)
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
@@ -3545,6 +3559,7 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
     // The sessions directory is a sibling of the workspace: the sandbox refuses a workspace
     // inside it (ADR 0020).
     let sessions = dir.path().join("sessions");
+    let frozen = dir.path().join("frozen");
     let home = TempDir::new("master-gone-home");
     let (mut child, mut master) = spawn_direct(
         &[
@@ -3559,25 +3574,34 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
             "--offline-catalog",
             "--workspace",
             ws.to_str().unwrap(),
+            "--freeze-draw",
+            frozen.to_str().unwrap(),
         ],
         home.path(),
     );
 
-    // Wait for the first frame (the input box), bounded.
-    let mut bytes = Vec::new();
-    let mut buf = [0u8; 4096];
+    // The first frame is drawn (its marker exists); from now on the app writes nothing.
+    let mut drained = Vec::new();
+    let mut buf = [0u8; 65536];
     let deadline = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < deadline && !String::from_utf8_lossy(&bytes).contains("message") {
-        match master.read(&mut buf) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => bytes.extend_from_slice(&buf[..n]),
+    while !frozen.exists() {
+        // Drain the output: the first frame is larger than the pty buffer, so the app is
+        // blocked in `draw` (and has not written the marker yet) until someone reads. The
+        // master is non-blocking, so an empty read is a no-op, not a wait.
+        if let Ok(n) = master.read(&mut buf) {
+            drained.extend_from_slice(&buf[..n]);
         }
+        assert!(
+            Instant::now() < deadline,
+            "the app never drew its first frame; path {frozen:?}; output: {}",
+            String::from_utf8_lossy(&drained)
+        );
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "the app exited before the frame"
+        );
+        std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(
-        String::from_utf8_lossy(&bytes).contains("message"),
-        "the app never drew its input box; output was: {}",
-        String::from_utf8_lossy(&bytes)
-    );
 
     // Close the terminal: the master fd. No signal is sent (no controlling terminal).
     drop(master);
@@ -3589,16 +3613,16 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
         }
         assert!(
             Instant::now() < deadline,
-            "the app did not exit within 5 s of its terminal closing; output was: {}",
-            String::from_utf8_lossy(&bytes)
+            "the app did not exit within 5 s of its terminal closing: the input POLLHUP path \
+             did not fire, and drawing is frozen (--freeze-draw) so the draw path cannot rescue \
+             it either"
         );
         std::thread::sleep(Duration::from_millis(20));
     };
     assert_eq!(
         status.code(),
         Some(0),
-        "the terminal-gone exit is the ordinary clean one (exit 0, no signal): {status:?}; output was: {}",
-        String::from_utf8_lossy(&bytes)
+        "the terminal-gone exit is the ordinary clean one (exit 0, no signal): {status:?}"
     );
 }
 
