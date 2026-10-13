@@ -192,6 +192,9 @@ pub struct App {
     /// Set by `/compact`; the event loop runs it on the runtime and shows the outcome. `Some`
     /// is a request, the inner value the optional instructions.
     pub pending_compact: Option<Option<String>>,
+    /// Set by `/sessions` or `/export`; the event loop runs it with the session directory and
+    /// the host's secrets and shows the result as notices.
+    pub pending_session: Option<command::SessionOutcome>,
     /// The host's memory service, or `None` when this process has no memory root. `/memory`
     /// runs against the same service the agent's own tools use.
     pub memory: Option<MemoryService>,
@@ -229,6 +232,7 @@ impl App {
             pending_approval: None,
             pending_command: None,
             pending_compact: None,
+            pending_session: None,
             memory: None,
             context_window: None,
             budget_report: None,
@@ -472,6 +476,12 @@ impl App {
             // result as a notice when it finishes.
             command::Outcome::Compact(instructions) => {
                 self.pending_compact = Some(instructions);
+            }
+            command::Outcome::Sessions(query) => {
+                self.pending_session = Some(command::SessionOutcome::List(query));
+            }
+            command::Outcome::Export(request) => {
+                self.pending_session = Some(command::SessionOutcome::Export(request));
             }
             // `dispatch` only returns `Message` for an empty token list, already rejected.
             command::Outcome::Message => {}

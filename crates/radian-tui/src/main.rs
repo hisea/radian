@@ -89,6 +89,12 @@ struct Cli {
     #[arg(long)]
     list: bool,
 
+    /// Show a full-screen picker for this workspace's sessions before opening one (Phase 4):
+    /// Up/Down select, type to filter, Tab full-text search, Enter resume, n new, Esc quit.
+    /// Conflicts with `--resume`/`--session-id`; it does not create a session file.
+    #[arg(long, conflicts_with_all = ["resume", "session_id"])]
+    pick: bool,
+
     /// Expose the built-in file and read-only git tools rooted at this directory
     /// (read/write/patch/list, git_status/git_diff). No shell is provided.
     #[arg(long, value_name = "DIR")]
@@ -244,7 +250,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, String> {
+fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, String> {
     if cli.list {
         return list_sessions(&cli).map(|()| None);
     }
@@ -258,6 +264,23 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
         && let Some(hint) = radian_host::legacy_sessions_hint()
     {
         eprintln!("{hint}");
+    }
+    // Phase 4: choose a session before the session id (and any header that expands it) is
+    // resolved, and before any session file exists. A `Resume` becomes the ordinary
+    // `--resume`; `Quit` exits with nothing created.
+    let mut pick_notice = false;
+    if cli.pick {
+        let workspace = radian_host::resolve_workspace(cli.workspace.as_deref())?
+            .to_string_lossy()
+            .into_owned();
+        match pick_session(&dir, &workspace)? {
+            // No sessions yet: go straight to a new one, with a notice (a list of nothing is
+            // not worth a full-screen flash).
+            None => pick_notice = true,
+            Some(radian_tui::picker::Outcome::Quit) => return Ok(None),
+            Some(radian_tui::picker::Outcome::New) => {}
+            Some(radian_tui::picker::Outcome::Resume(id)) => cli.resume = Some(id),
+        }
     }
     // The session id is resolved before the headers: a `{session_id}` in a header expands to
     // this process's id, and `--resume` uses the id being resumed. The parser is the same one
@@ -501,12 +524,13 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
     // the (host-redacted) message as a transcript notice and stays usable; the driver keeps
     // running. `AgentEvent` is unchanged, so this is a separate channel.
     let (runtime_tx, runtime_rx) = std::sync::mpsc::channel::<radian_session::RuntimeEvent>();
+    let secrets_for_events = Arc::clone(&secrets_for_errors);
     driver.set_runtime_events(Arc::new(move |event: &radian_session::RuntimeEvent| {
         let redacted = match event {
             radian_session::RuntimeEvent::TurnFailed { turn_id, message } => {
                 radian_session::RuntimeEvent::TurnFailed {
                     turn_id: turn_id.clone(),
-                    message: radian_tui::terminal::redact(message, &secrets_for_errors),
+                    message: radian_tui::terminal::redact(message, &secrets_for_events),
                 }
             }
             other => other.clone(),
@@ -604,6 +628,12 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
             "--yes: tool calls are approved without asking; deny rules and the sandbox still apply",
         ));
     }
+    if pick_notice {
+        app.entries.push(radian_tui::Entry::new(
+            radian_tui::EntryKind::Notice,
+            "no sessions for this workspace yet; starting a new one",
+        ));
+    }
     app.entries.push(radian_tui::Entry::new(
         radian_tui::EntryKind::Notice,
         match &cli.resume {
@@ -619,6 +649,12 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
         },
     ));
 
+    let session_host = SessionHost {
+        dir: dir.clone(),
+        workspace: workspace_path.to_string_lossy().into_owned(),
+        session_id: session_id.clone(),
+        secrets: secrets_for_errors.as_ref().clone(),
+    };
     let outcome = ui_loop(
         &mut terminal,
         &mut app,
@@ -629,6 +665,7 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
         &inbox,
         &hooks,
         &driver_task,
+        &session_host,
     );
     guard.restore();
 
@@ -670,6 +707,7 @@ fn ui_loop(
     inbox: &Arc<Inbox>,
     hooks: &Arc<PermissionHooks>,
     driver_task: &tokio::task::JoinHandle<Result<(), radian_runtime::DriverError>>,
+    host: &SessionHost,
 ) -> Result<(), String> {
     // Manual `/compact` runs on the runtime (the driver executes it between turns); its
     // result arrives over these channels and becomes a notice.
@@ -749,6 +787,11 @@ fn ui_loop(
             });
             pending_compacts.push(rx);
         }
+        // `/sessions` and `/export` are host work (the index / a file), not transcript
+        // changes; run them here where the session directory, workspace and secrets are known.
+        if let Some(request) = app.pending_session.take() {
+            handle_session_request(app, host, request);
+        }
         pending_compacts.retain(|rx| match rx.try_recv() {
             Ok(Ok(agent_core::CompactionOutcome::Compacted {
                 tokens_before,
@@ -774,6 +817,175 @@ fn ui_loop(
         terminal
             .draw(|frame| radian_tui::render::draw(frame, app))
             .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// The host facts `/sessions` and `/export` need: where sessions live, which workspace this
+/// process belongs to, the current session id and the values to redact.
+struct SessionHost {
+    dir: PathBuf,
+    workspace: String,
+    session_id: String,
+    secrets: Vec<String>,
+}
+
+/// Runs one `/sessions` or `/export` request and pushes the result as notices.
+fn handle_session_request(
+    app: &mut App,
+    host: &SessionHost,
+    request: radian_tui::command::SessionOutcome,
+) {
+    match request {
+        radian_tui::command::SessionOutcome::List(query) => {
+            match session_lines(host, query.as_deref()) {
+                Ok(lines) => {
+                    for line in lines {
+                        app.push_notice(line);
+                    }
+                }
+                Err(message) => app.push_notice(message),
+            }
+        }
+        radian_tui::command::SessionOutcome::Export(request) => {
+            match export_current(host, &request) {
+                Ok(path) => app.push_notice(format!("exported to {path}")),
+                Err(message) => app.push_notice(message),
+            }
+        }
+    }
+}
+
+/// The `/sessions` lines: the recent list or the full-text hits, at most 20, each with a
+/// copyable `--resume <id>`. A workspace with no sessions (or no matches) is one notice.
+fn session_lines(host: &SessionHost, query: Option<&str>) -> Result<Vec<String>, String> {
+    let Some(index) = radian_host::sessions::open_index(&host.dir)? else {
+        return Ok(vec!["no sessions for this workspace yet".to_owned()]);
+    };
+    let mut lines = Vec::new();
+    match query {
+        Some(query) => {
+            let hits = radian_host::sessions::search(&index, &host.workspace, query, 20)?;
+            if hits.is_empty() {
+                return Ok(vec![format!("no match for {query:?}")]);
+            }
+            for hit in hits {
+                let snippet = radian_tui::terminal::redact(&hit.snippet, &host.secrets);
+                lines.push(format!(
+                    "{}  {}  {}  --resume {}",
+                    hit.session_id,
+                    hit.last_ts.as_deref().unwrap_or("-"),
+                    snippet,
+                    hit.session_id
+                ));
+            }
+        }
+        None => {
+            let rows = radian_host::sessions::list(&index, &host.workspace)?;
+            if rows.is_empty() {
+                return Ok(vec!["no sessions for this workspace yet".to_owned()]);
+            }
+            for row in rows.into_iter().take(20) {
+                lines.push(format!(
+                    "{}  {}  {} messages  {}  --resume {}",
+                    row.session_id,
+                    row.last_ts.as_deref().unwrap_or("-"),
+                    row.message_count,
+                    row.summary,
+                    row.session_id
+                ));
+            }
+        }
+    }
+    lines.push(
+        "this process does not switch sessions in place; reopen with `--resume <id>` or `--pick`"
+            .to_owned(),
+    );
+    Ok(lines)
+}
+
+/// `/export`: render the current session with the shared host layer, check overwrite, and
+/// write atomically. Returns the absolute path for the notice.
+fn export_current(
+    host: &SessionHost,
+    request: &radian_tui::command::ExportRequest,
+) -> Result<String, String> {
+    let extension = request.format.extension();
+    let path = match &request.path {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            if path.is_absolute() {
+                path
+            } else {
+                PathBuf::from(&host.workspace).join(path)
+            }
+        }
+        None => {
+            PathBuf::from(&host.workspace).join(format!("radian-{}.{extension}", host.session_id))
+        }
+    };
+    if path.exists() && !request.force {
+        return Err(format!(
+            "{} already exists; `/export {} {} --force` overwrites it",
+            path.display(),
+            match request.format {
+                radian_host::Format::Markdown => "md",
+                radian_host::Format::Json => "json",
+            },
+            path.display()
+        ));
+    }
+    let settings = radian_host::ExportSettings {
+        include_reasoning: false,
+        include_provider_payload: false,
+        secrets: host.secrets.clone(),
+    };
+    let rendered = radian_host::sessions::export(
+        &host.dir,
+        &host.workspace,
+        &host.session_id,
+        request.format,
+        &settings,
+    )?;
+    write_atomic(&path, &rendered)?;
+    Ok(std::fs::canonicalize(&path)
+        .unwrap_or(path)
+        .display()
+        .to_string())
+}
+
+/// Writes `contents` to `path` atomically: a sibling temp file, then a rename. 0644 (the file
+/// is for the user; it is not a session file).
+fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
+    static EXPORT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    let seq = EXPORT_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp = parent.join(format!(".radian-export-{}-{seq}.tmp", std::process::id()));
+    let write = || -> std::io::Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o644);
+        }
+        let mut file = options.open(&tmp)?;
+        use std::io::Write;
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()
+    };
+    if let Err(error) = write() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("cannot write {}: {error}", path.display()));
+    }
+    if let Err(error) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("cannot replace {}: {error}", path.display()));
     }
     Ok(())
 }
@@ -876,6 +1088,26 @@ fn open_journal(
 }
 
 /// `--list`: this workspace's sessions, newest activity first. Same columns as `agent-cli`.
+/// The Phase 4 startup picker: opens the workspace index, lists the sessions, and (when there
+/// are any) runs the full-screen picker. `Ok(None)` means there are no sessions yet, so the
+/// caller starts a new one with a notice instead of flashing an empty list.
+fn pick_session(
+    dir: &Path,
+    workspace: &str,
+) -> Result<Option<radian_tui::picker::Outcome>, String> {
+    let index = radian_host::sessions::open_index(dir)?;
+    let rows = match &index {
+        Some(index) => radian_host::sessions::list(index, workspace)?,
+        None => Vec::new(),
+    };
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    radian_tui::picker::run(&rows, index.as_ref(), workspace)
+        .map(Some)
+        .map_err(|e| format!("picker: {e}"))
+}
+
 fn list_sessions(cli: &Cli) -> Result<(), String> {
     let dir = session_dir(cli)?;
     let workspace = session_workspace(cli)?;

@@ -15,6 +15,9 @@ use radian_host::memory::commands::{self, CommandOutput, MemoryCommand};
 pub const HELP: &str = "\
 /help                 list the commands
 /compact [note]       summarize the history now and keep the recent part (ADR 0018)
+/sessions [query]     list this workspace's recent sessions, or search their text
+/export [md|json] [path] [--force]
+                      export this session (default md, default <workspace>/radian-<id>.<ext>)
 /memory <command>     durable memory: list, search, show, add, edit, archive, restore,
                       forget, purge, confirm, export, import, project, relink, split, merge
 //…                   send a message that starts with `/`";
@@ -36,8 +39,29 @@ pub enum Outcome {
     /// A manual `/compact` (ADR 0018): the host runs it on the runtime, between turns, and
     /// shows the outcome as a notice. `Some(instructions)` is the optional note.
     Compact(Option<String>),
+    /// `/sessions [query]`: the host lists or searches this workspace's sessions. `Some` is a
+    /// full-text query, `None` the recent list.
+    Sessions(Option<String>),
+    /// `/export …`: the host exports the current session and writes the file.
+    Export(ExportRequest),
     /// Not a command after all (an empty token list); the caller sends the line.
     Message,
+}
+
+/// A parsed `/export` request. The host resolves the path, checks overwrite and writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportRequest {
+    pub format: radian_host::Format,
+    pub path: Option<String>,
+    pub force: bool,
+}
+
+/// The host-level work a slash command asks for: neither touches the transcript, so the app
+/// records the request and the event loop runs it with the session directory and secrets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionOutcome {
+    List(Option<String>),
+    Export(ExportRequest),
 }
 
 /// Interprets a trimmed line that starts with `/`. `memory` is the host's service, or `None`
@@ -51,6 +75,8 @@ pub fn dispatch(line: &str, memory: Option<&MemoryService>) -> Outcome {
         Some("/help") => Outcome::Notices(vec![HELP.to_owned()]),
         Some("/memory") => memory_command(&tokens[1..], memory),
         Some("/compact") => Outcome::Compact(compact_instructions(&tokens[1..])),
+        Some("/sessions") => Outcome::Sessions(sessions_query(&tokens[1..])),
+        Some("/export") => export_request(&tokens[1..]),
         Some(other) => Outcome::Notices(vec![format!("unknown command {other}; /help lists them")]),
         None => Outcome::Message,
     }
@@ -61,6 +87,40 @@ fn compact_instructions(args: &[String]) -> Option<String> {
     let joined = args.join(" ");
     let joined = joined.trim();
     (!joined.is_empty()).then(|| joined.to_owned())
+}
+
+/// The optional `/sessions` query: the arguments joined with spaces, or `None` when empty.
+fn sessions_query(args: &[String]) -> Option<String> {
+    let joined = args.join(" ");
+    let joined = joined.trim();
+    (!joined.is_empty()).then(|| joined.to_owned())
+}
+
+/// `/export [md|json] [path] [--force]`. The format defaults to Markdown, the path to
+/// `<workspace>/radian-<id>.<ext>`. An unrecognized token is the path; `--force` allows
+/// overwriting. More than one path is a usage error the user sees as a notice.
+fn export_request(args: &[String]) -> Outcome {
+    let mut format = radian_host::Format::Markdown;
+    let mut path: Option<String> = None;
+    let mut force = false;
+    for arg in args {
+        match arg.as_str() {
+            "md" | "markdown" => format = radian_host::Format::Markdown,
+            "json" => format = radian_host::Format::Json,
+            "--force" => force = true,
+            other if path.is_none() => path = Some(other.to_owned()),
+            other => {
+                return Outcome::Notices(vec![format!(
+                    "unexpected extra path {other:?}; usage: /export [md|json] [path] [--force]"
+                )]);
+            }
+        }
+    }
+    Outcome::Export(ExportRequest {
+        format,
+        path,
+        force,
+    })
 }
 
 fn memory_command(args: &[String], memory: Option<&MemoryService>) -> Outcome {
@@ -162,6 +222,52 @@ mod tests {
             1
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sessions_and_export_parse() {
+        assert!(matches!(
+            dispatch("/sessions", None),
+            Outcome::Sessions(None)
+        ));
+        match dispatch("/sessions parser bug", None) {
+            Outcome::Sessions(Some(query)) => assert_eq!(query, "parser bug"),
+            other => panic!("expected a sessions query, got {other:?}"),
+        }
+        match dispatch("/export", None) {
+            Outcome::Export(request) => {
+                assert_eq!(request.format, radian_host::Format::Markdown);
+                assert!(request.path.is_none());
+                assert!(!request.force);
+            }
+            other => panic!("expected an export request, got {other:?}"),
+        }
+        match dispatch("/export json out.json --force", None) {
+            Outcome::Export(request) => {
+                assert_eq!(request.format, radian_host::Format::Json);
+                assert_eq!(request.path.as_deref(), Some("out.json"));
+                assert!(request.force);
+            }
+            other => panic!("expected an export request, got {other:?}"),
+        }
+        // A bare path is the path, not the format.
+        match dispatch("/export result.txt", None) {
+            Outcome::Export(request) => {
+                assert_eq!(request.format, radian_host::Format::Markdown);
+                assert_eq!(request.path.as_deref(), Some("result.txt"));
+            }
+            other => panic!("expected an export request, got {other:?}"),
+        }
+        match dispatch("/export a b", None) {
+            Outcome::Notices(notices) => {
+                assert!(notices[0].contains("unexpected extra path"), "{notices:?}")
+            }
+            other => panic!("expected a usage notice, got {other:?}"),
+        }
+        assert!(
+            HELP.contains("/sessions") && HELP.contains("/export"),
+            "{HELP}"
+        );
     }
 
     #[test]
