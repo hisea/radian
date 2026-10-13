@@ -112,7 +112,14 @@ impl JournalTail {
                 message: format!("the session file was already reported corrupt: {text}"),
             });
         }
-        let meta = std::fs::metadata(&self.path).map_err(|source| ReadError::Open {
+        // Open first, then take the identity from the **opened** file: a `metadata(path)` taken
+        // before the open could describe a file that a rename has replaced in between, and the
+        // old offset would then be applied to the new file.
+        let mut file = File::open(&self.path).map_err(|source| ReadError::Open {
+            path: self.path.clone(),
+            source,
+        })?;
+        let meta = file.metadata().map_err(|source| ReadError::Open {
             path: self.path.clone(),
             source,
         })?;
@@ -124,10 +131,6 @@ impl JournalTail {
         }
         self.identity = identity;
 
-        let mut file = File::open(&self.path).map_err(|source| ReadError::Open {
-            path: self.path.clone(),
-            source,
-        })?;
         let events =
             match read_new_lines(&mut file, &self.path, &mut self.offset, &mut self.scanner) {
                 Ok(events) => events,
