@@ -15,3 +15,12 @@ The shared `describe` (item 2) is a pure text move; the two startup-text tests t
 are `the_startup_text_does_not_claim_credential_isolation` (agent-cli) and
 `pty_the_workspace_write_notice_names_the_mcp_sandbox_gap` (radian-tui); both were run and
 pass, and there is no separate behavior to mutate beyond the wording those tests already fix.
+
+## 追加（anthost-2，thinking 预算检查）
+
+Base `5188989` · one-shot worktree `/tmp/anthost-mut2` · `--no-fail-fast`；每个变异后从副本还原。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M5 | 检查上界写成 `<=`（允许 `budget == max_tokens`） | ✅ 抓住 (rc=101) | `anthropic_rejects_a_thinking_budget_out_of_range_before_creating_a_session`（`enabled:16384` 那轮） |
+| M6 | 去掉下界（`0..max_tokens`，允许 `enabled:1000`） | ✅ 抓住 (rc=101) | 同上（`enabled:1000` 那轮） |
