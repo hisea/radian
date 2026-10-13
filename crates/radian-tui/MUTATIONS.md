@@ -117,3 +117,11 @@ stderr), so a version that is printed to stderr, or with a wrong name, fails too
 V2's complement (the version really tracks `Cargo.toml`) was checked by setting both
 packages to `9.9.9`: the binaries then print `9.9.9` and the tests stay green — no assertion
 is pinned to the literal `0.1.0`.
+
+## 追加（smallfixes，D15 报错）
+
+Base `f552250` · one-shot worktree `/tmp/small-mut` · `--no-fail-fast`；变异后 `git checkout --` 还原。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M10 | 已存在会话的报错不含 `--resume <id>` | ✅ 抓住 (rc=101) | `pty_session_id_already_exists_points_at_resume`（还断言未进备用屏、已有文件字节不变） |

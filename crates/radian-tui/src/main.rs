@@ -17,8 +17,8 @@ use agent_extensions::McpToolProvider;
 use clap::Parser;
 use radian_coding::CodingTools;
 use radian_host::{
-    DEFAULT_MAX_TOKENS, HostTools, ModelArgs, Provider, Thinking, build_model, load_mcp_config,
-    parse_headers, validate_session_id,
+    DEFAULT_MAX_TOKENS, HostTools, ModelArgs, Provider, Thinking, build_model,
+    check_provider_flags, load_mcp_config, parse_headers, validate_session_id,
 };
 use radian_permissions::{
     ApprovalError, ApprovalOutcome, ApprovalRequest, Approver, AuditSink, PermissionHooks,
@@ -253,6 +253,9 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
         Some(value) => value.parse::<Thinking>()?,
         None => Thinking::Off,
     };
+    // `--thinking` and `--max-tokens` are Anthropic-only; under openai-compatible they would
+    // be ignored, so this is an error before the session file exists (dogfooding D15).
+    check_provider_flags(provider, thinking, cli.max_tokens)?;
     let headers = parse_headers(&cli.header, &session_id)?;
     // Header values and the key must not reach the panic log (dogfooding D4).
     let mut secrets: Vec<String> = headers.iter().map(|(_, value)| value.clone()).collect();
@@ -697,9 +700,17 @@ fn open_journal(
         workspace,
         serde_json::json!({"provider": provider.as_str(), "model": cli.model}),
     );
-    SessionJournal::create(&path, session_id, created)
-        .map(Arc::new)
-        .map_err(|e| format!("cannot create session {session_id:?}: {e}"))
+    match SessionJournal::create(&path, session_id, created) {
+        Ok(journal) => Ok(Arc::new(journal)),
+        // A complete session already occupies the file. Name the command that continues it
+        // (dogfooding D15); a torn tail is still truncated by `create`.
+        Err(radian_session::WriteError::NotEmpty { .. }) => Err(format!(
+            "session {session_id:?} already exists in {}; continue it with `--resume \
+             {session_id}`",
+            dir.display()
+        )),
+        Err(e) => Err(format!("cannot create session {session_id:?}: {e}")),
+    }
 }
 
 /// `--list`: this workspace's sessions, newest activity first. Same columns as `agent-cli`.

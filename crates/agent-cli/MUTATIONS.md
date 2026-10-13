@@ -170,3 +170,15 @@ a version that is printed to stderr, or that uses the package name (`agent-cli`)
 V2's complement (the version really tracks `Cargo.toml`) was checked by setting both packages
 to `9.9.9`: the binaries then print `9.9.9` and the tests stay green — no assertion is pinned
 to the literal `0.1.0`.
+
+## 追加（smallfixes，D15 报错与 D14 清理）
+
+Base `f552250` · one-shot worktree `/tmp/small-mut` · `--no-fail-fast`；每个变异后从副本还原，
+`git status --short` 为空。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M10 | 已存在会话的报错不含 `--resume <id>`（换成 "it holds a complete session"） | ✅ 抓住 (rc=101) | `session_id_already_exists_points_at_resume` |
+| M11 | `ScratchDir::drop` 不删除目录 | ✅ 抓住 (rc=101) | `scratch_directories_are_removed_when_the_guard_drops` |
+
+M10 的变异只在报错字符串上；测试还断言已有 `.jsonl` 字节不变，所以「顺手覆盖文件」也会被抓。

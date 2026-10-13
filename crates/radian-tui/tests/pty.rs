@@ -2022,3 +2022,107 @@ async fn pty_anthropic_provider_sends_a_messages_request_and_renders_the_reply()
         "the key reached the session file"
     );
 }
+
+/// D15: naming an existing session with `--session-id` points at `--resume`, fails before the
+/// terminal is entered, and does not touch the file.
+#[test]
+fn pty_session_id_already_exists_points_at_resume() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("dup-id");
+    // First run: create the session, then leave via the panic hook (quick, no server needed).
+    let mut first = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "dup",
+            "--panic-after-enter",
+        ],
+        20,
+        80,
+    );
+    assert!(
+        first.wait_for_exit(15).is_some(),
+        "the first run did not exit"
+    );
+    assert!(dir.path().join("dup.jsonl").exists());
+    let before = std::fs::read(dir.path().join("dup.jsonl")).unwrap();
+
+    let mut second = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "dup",
+        ],
+        20,
+        80,
+    );
+    assert!(
+        second.wait_for_exit(15).is_some(),
+        "the second run did not exit"
+    );
+    assert_eq!(second.app_exit_code(), Some(1));
+    let raw = String::from_utf8_lossy(&second.raw()).to_string();
+    assert!(raw.contains("already exists"), "{raw}");
+    assert!(raw.contains("--resume dup"), "{raw}");
+    assert!(
+        !raw.contains("\u{1b}[?1049h"),
+        "the refusal must not enter the alternate screen: {raw}"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("dup.jsonl")).unwrap(),
+        before,
+        "the existing session must not be touched"
+    );
+}
+
+/// `--thinking` and `--max-tokens` are Anthropic-only: under the default openai-compatible
+/// provider the TUI refuses them before the terminal, and creates no session file.
+#[test]
+fn pty_anthropic_only_flags_are_refused_under_openai_compatible() {
+    let _serial = pty_guard();
+    for (label, extra) in [
+        ("thinking", ["--thinking", "adaptive"]),
+        ("max-tokens", ["--max-tokens", "100"]),
+    ] {
+        let dir = TempDir::new(&format!("flag-{label}"));
+        let session_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let mut args = vec![
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            session_dir.to_str().unwrap(),
+            "--session-id",
+            "flagged",
+        ];
+        args.extend(extra);
+        let mut pty = Pty::spawn(&args, 20, 80);
+        assert!(
+            pty.wait_for_exit(15).is_some(),
+            "{label}: the refusal did not exit"
+        );
+        assert_eq!(pty.app_exit_code(), Some(1), "{label}");
+        let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+        assert!(raw.contains("anthropic"), "{label}: {raw}");
+        assert!(
+            !raw.contains("\u{1b}[?1049h"),
+            "{label}: must fail before the terminal: {raw}"
+        );
+        assert!(
+            std::fs::read_dir(&session_dir).unwrap().next().is_none(),
+            "{label}: a session file was created"
+        );
+    }
+}
