@@ -21,6 +21,11 @@ pub use budget::{
     BudgetReport, BudgetStatus, ContextBudget, DEFAULT_BYTES_PER_TOKEN, RequestSize, UsageSource,
     estimate_tokens, over_budget,
 };
+pub use compaction::{
+    DEFAULT_SUMMARY_MAX_TOKENS, MAX_KEEP_TARGET, MIN_KEEP_TARGET, Plan, PlanError,
+    SUMMARY_MESSAGE_PREFIX, SUMMARY_SYSTEM_PROMPT, SummaryError, TOOL_RESULT_LIMIT_CHARS,
+    check_summary, compacted_history, keep_target, message_tokens, plan, summary_request, units,
+};
 pub use event::{AgentEvent, EventSink, NoopSink};
 pub use hooks::{HookContext, HookError, HookPoint, Hooks, ToolDecision};
 pub use journal::{
@@ -38,6 +43,7 @@ pub use outcome::{
     Step,
 };
 pub mod budget;
+pub mod compaction;
 pub use steering::{SteerError, SteerMode, SteeringHandle};
 pub use tool::{
     NoTools, ToolConcurrency, ToolContext, ToolError, ToolFailure, ToolOutput, ToolProvider,
