@@ -192,6 +192,23 @@ fn typing_dismisses_the_list() {
     assert!(app.completion.is_none());
 }
 
+/// A key with an action of its own dismisses the stale list too (not just typing).
+#[test]
+fn a_bound_key_dismisses_the_list_too() {
+    let dir = TempDir::new("bound-key");
+    dir.write("notes.txt", "x");
+    dir.write("notes.md", "x");
+    let mut app = app_with(dir.path(), "@no");
+    tab_complete(&mut app, dir.path());
+    tab_complete(&mut app, dir.path());
+    assert!(app.completion.is_some());
+    app.on_key(key(KeyCode::Up));
+    assert!(
+        app.completion.is_none(),
+        "the list was computed for a word the key may have changed"
+    );
+}
+
 #[test]
 fn without_a_workspace_tab_does_nothing() {
     let mut app = App::new("m", "s");

@@ -369,3 +369,26 @@ Base `b60099b`（加 `--freeze-draw` 后未提交的工作树，独立构建）�
 
 变异 O5 用了两次结果：**未加接缝**时该测试通过（bug 没被抓住），**加了接缝**后 3/3 失败
 （被抓住）。两次都记在这里。
+
+## ADR 0023 Step 1 ①：Action/Effect 与纯 `App::update`
+
+Base `e1d664b` · 一次性 worktree `/tmp/s1a-mut` · 独立 `CARGO_TARGET_DIR` ·
+每个变异 `git checkout -- .` 还原、`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M22 | `@` 展开失败时丢掉输入（去掉 `restore_input`） | `input::a_failed_expansion_puts_the_input_back_and_sends_nothing` | ✅ |
+| M23 | `AnswerApproval` 被吞掉（清掉 prompt 但不产生 effect） | `approval::keys_answer_the_prompt` | ✅ |
+| M24 | `/memory` 写命令跳过确认（`confirmed: false` → `true`） | `command::a_memory_read_runs_and_is_never_sent`、`a_confirmed_forget_waits_for_y_and_n_keeps_the_record`、`a_pending_confirmation_keeps_keys_out_of_the_input_box` | ✅ |
+| M25 | `Steer`/`SendFollowup` 在运行/空闲时选反 | `input::enter_expands_then_sends_a_followup_when_idle_and_a_steer_while_running`、`ctrl_j_inserts_a_newline_and_enter_sends_the_whole_text` | ✅ |
+| M26 | `app.rs` 重新直接调 `mention::complete`（读目录） | `purity::app_rs_is_pure` | ✅ |
+| M27 | `app.rs` 重新 `use std::fs` | `purity::app_rs_is_pure` | ✅ |
+| M28 | turn 结束时清 prompt 但不发 `AbandonApproval`（回复通道留在循环里） | `approval::a_finished_turn_abandons_a_prompt_that_was_never_answered` | ✅ |
+| M29 | `/fork` 在 turn 运行时也被允许（去掉空闲检查） | `update::fork_is_refused_while_a_turn_runs` | ✅ |
+| M30 | 输入字符绕过 find 框（直接进消息框） | `find`（6/8 failed） | ✅ |
+| M31 | 候选列表只被 `escape` 关闭，带 action 的键不再关闭它 | `mention_tab::a_bound_key_dismisses_the_list_too` | ✅ |
+
+10/10 抓住。**诚实补充（M31）**：第一轮它**没被抓住**——`typing_dismisses_the_list` 只覆盖了
+「输入字符关闭列表」，而字符那条清理在 `Input::Char` 分支里，M31 只删掉带 action 的那条。
+补了 `a_bound_key_dismisses_the_list_too`（列表显示时按 `Up`）之后抓住；这条测试是变异暴露出的
+覆盖缺口，不是事后凑数。
