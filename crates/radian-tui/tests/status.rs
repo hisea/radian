@@ -38,12 +38,12 @@ fn response(input: Option<u64>, output: Option<u64>) -> AgentEvent {
 #[test]
 fn the_status_bar_shows_the_tier_reported_usage_and_mcp_counts() {
     let mut app = App::new("mock", "s");
-    app.set_tier("workspace-write");
+    app.set_tier("workspace");
     app.set_mcp(1, Some((1, 15)));
     app.apply_event(&response(Some(1200), Some(340)));
 
     let text = screen(&mut app, 140, 12);
-    assert!(text.contains("workspace-write"), "{text}");
+    assert!(text.contains("workspace"), "{text}");
     assert!(text.contains("usage 1200/340"), "{text}");
     assert!(text.contains("mcp 1/15"), "{text}");
     assert!(
@@ -81,12 +81,12 @@ fn a_session_without_reports_says_none_and_never_invents_a_zero() {
 #[test]
 fn a_narrow_status_bar_keeps_the_key_segments_and_does_not_wrap() {
     let mut app = App::new("mock", "s");
-    app.set_tier("workspace-write");
+    app.set_tier("workspace");
     app.set_mcp(1, Some((1, 15)));
     app.apply_event(&response(Some(1200), Some(340)));
 
     let text = screen(&mut app, 60, 12);
-    for needle in ["mock", "workspace-write", "usage 1200/340", "mcp 1/15"] {
+    for needle in ["mock", "workspace", "usage 1200/340", "mcp 1/15"] {
         assert!(
             text.contains(needle),
             "60 columns dropped {needle:?}: {text}"

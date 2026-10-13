@@ -89,3 +89,15 @@ rewrite: with one budget, a flooding stdout leaves stderr nothing, which is exac
 Memory is not asserted by a mutation but by a unit test (`the_reader_keeps_a_bounded_head_and_tail`,
 50 MiB through a 64 KiB cap) and an end-to-end one (`memory_does_not_grow_with_the_output`,
 50 MiB through a real process: peak RSS grew by ~688 KiB, measured with `getrusage`).
+
+## ADR 0016：shell 的 setsid（2026-10-13）
+
+一次性检出 `/tmp/tiers-mut`（base `9c060d2`），`--no-fail-fast`，变异后 `git checkout --` 恢复。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M10 | 去掉 `shell.rs` 的 `pre_exec(setsid)`（既不 setsid 也不建进程组） | ✅ failed | `a_timeout_kills_the_whole_process_group`、`cancellation_kills_the_whole_process_group`（`killpg` 打不到子进程组） |
+
+**注意**：M10 不是被 `tiocsti_outside_terminal` 抓住的。逃逸矩阵不经过 shell 工具，而两个后端
+（macOS seatbelt / Linux bwrap）各自就会拒 `TIOCSTI`，所以矩阵对 setsid 不敏感（详见
+`radian-sandbox/MUTATIONS.md` 的 LM6）。setsid 的可观测后果是**进程组清理**，由上述两个用例钉住。

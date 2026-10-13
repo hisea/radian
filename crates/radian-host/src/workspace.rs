@@ -55,7 +55,7 @@ mod tests {
         let error = resolve_workspace(Some(&missing)).unwrap_err();
         assert!(error.contains(&missing.display().to_string()), "{error}");
         assert!(!error.contains("sandbox"), "{error}");
-        assert!(!error.contains("full-access"), "{error}");
+        assert!(!error.contains("--profile"), "{error}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -66,7 +66,7 @@ mod tests {
         std::fs::write(&file, "x").unwrap();
         let error = resolve_workspace(Some(&file)).unwrap_err();
         assert!(error.contains("not a directory"), "{error}");
-        assert!(!error.contains("full-access"), "{error}");
+        assert!(!error.contains("--profile"), "{error}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

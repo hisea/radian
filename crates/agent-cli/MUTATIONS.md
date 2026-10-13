@@ -182,3 +182,11 @@ Base `f552250` · one-shot worktree `/tmp/small-mut` · `--no-fail-fast`；每�
 | M11 | `ScratchDir::drop` 不删除目录 | ✅ 抓住 (rc=101) | `scratch_directories_are_removed_when_the_guard_drops` |
 
 M10 的变异只在报错字符串上；测试还断言已有 `.jsonl` 字节不变，所以「顺手覆盖文件」也会被抓。
+
+## ADR 0016：档位别名（2026-10-13）
+
+一次性检出 `/tmp/tiers-mut`（base `9c060d2`），`--no-fail-fast`，变异后 `git checkout --` 恢复。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M10 | 删掉 `ProfileArg` 的 `alias = "workspace-write"` / `alias = "full-access"` | ✅ failed | `tier_names_and_aliases_are_accepted_but_help_lists_only_new_names`（旧名不再被接受） |

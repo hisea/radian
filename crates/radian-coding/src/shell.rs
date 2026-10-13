@@ -15,10 +15,14 @@
 //!   the environment to the policy whitelist; for `FullAccess` the backend is transparent, so
 //!   this module applies the same whitelist itself. A model-controlled shell never inherits
 //!   the host's API keys in either mode.
-//! - The command runs in its own process group, and the group is killed as soon as the
-//!   leader exits (and on timeout or cancellation), so `sh -c 'sleep 600 &'` cannot leave a
-//!   stray background process behind. A command that deliberately escapes the group with
-//!   `setsid` is out of scope; the drain is bounded so even that cannot hang the tool.
+//! - The command runs in its own **session and process group** (`setsid`), so it has no
+//!   controlling terminal and its whole group is killed on exit, timeout or cancellation.
+//!   `setsid` rather than `process_group(0)`: std applies `setpgid(0, 0)` before any
+//!   `pre_exec` closure runs, and a process-group leader cannot `setsid` (EPERM). `setsid`
+//!   already creates a new group, so `killpg` still reaches the whole tree. No controlling
+//!   terminal also means a sandboxed command cannot `TIOCSTI` its way into the host terminal
+//!   (ADR 0016). A command that deliberately escapes the group some other way is out of
+//!   scope; the drain is bounded so even that cannot hang the tool.
 //! - Output is capped; the model is told how many bytes were discarded.
 
 use std::io::Read;
@@ -52,9 +56,10 @@ const REAP_GRACE: Duration = Duration::from_secs(10);
 pub(crate) fn spec(mode: SandboxMode) -> ToolSpec {
     let confinement = match mode {
         SandboxMode::WorkspaceWrite => {
-            "The command runs under the OS sandbox in `workspace-write` mode: writes are \
+            "The command runs under the OS sandbox in `workspace` mode: writes are \
              confined to the workspace, the repository's `.git` is read-only, sensitive \
-             directories such as `~/.ssh` are not readable, and the network is off. \
+             directories such as `~/.ssh` are not readable, and the network is **on** \
+             (outbound and local-loopback connect, bind and listen are allowed). \
              `git commit` fails by design (the sandbox keeps `.git` read-only)."
         }
         SandboxMode::Safe => {
@@ -62,7 +67,7 @@ pub(crate) fn spec(mode: SandboxMode) -> ToolSpec {
              read-only and the network is off."
         }
         SandboxMode::FullAccess => {
-            "**The command is NOT sandboxed** (`full-access`): it can read and write \
+            "**The command is NOT sandboxed** (`full`): it can read and write \
              anywhere the user can, including the network. The user chose this mode \
              explicitly; it is never a default."
         }
@@ -341,7 +346,20 @@ impl Supervised {
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
-            command.process_group(0);
+            // `setsid` makes the child a session leader with a new process group and **no
+            // controlling terminal**. It replaces `process_group(0)`: std runs `setpgid(0, 0)`
+            // before the `pre_exec` closures, and a process-group leader cannot `setsid`
+            // (EPERM). `setsid` already creates the group, so `killpg(pid, ...)` still reaches
+            // the whole tree. No controlling terminal is also what stops `TIOCSTI` into the
+            // host terminal (ADR 0016).
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
         }
         let mut child: Child = command.spawn()?;
         let pid = child.id();

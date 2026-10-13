@@ -9,7 +9,7 @@
       "name": "outside_absolute",
       "note": "",
       "passed": true,
-      "sandbox_detail": "/bin/sh: /private<tmpdir>/radian-sandbox-escape-11813-0/outside/absolute.txt: Operation not permitted",
+      "sandbox_detail": "/bin/sh: /private<tmpdir>/radian-sandbox-escape-42411-0/outside/absolute.txt: Operation not permitted",
       "sandbox_succeeded": false
     },
     {
@@ -31,7 +31,7 @@
       "name": "outside_via_symlink",
       "note": "",
       "passed": true,
-      "sandbox_detail": "/bin/sh: /private<tmpdir>/radian-sandbox-escape-11813-0/ws/leak/via_symlink.txt: Operation not permitted",
+      "sandbox_detail": "/bin/sh: /private<tmpdir>/radian-sandbox-escape-42411-0/ws/leak/via_symlink.txt: Operation not permitted",
       "sandbox_succeeded": false
     },
     {
@@ -42,7 +42,7 @@
       "name": "outside_tmp",
       "note": "",
       "passed": true,
-      "sandbox_detail": "/bin/sh: /private<tmpdir>/radian-sandbox-escape-11813-0/outside/tmp.txt: Operation not permitted",
+      "sandbox_detail": "/bin/sh: /private<tmpdir>/radian-sandbox-escape-42411-0/outside/tmp.txt: Operation not permitted",
       "sandbox_succeeded": false
     },
     {
@@ -53,7 +53,7 @@
       "name": "symlinked_parent_dir",
       "note": "",
       "passed": true,
-      "sandbox_detail": "/bin/sh: /private<tmpdir>/radian-sandbox-escape-11813-0/ws/leak/new.txt: Operation not permitted",
+      "sandbox_detail": "/bin/sh: /private<tmpdir>/radian-sandbox-escape-42411-0/ws/leak/new.txt: Operation not permitted",
       "sandbox_succeeded": false
     },
     {
@@ -64,22 +64,77 @@
       "name": "write_through_workspace_symlink",
       "note": "",
       "passed": true,
-      "sandbox_detail": "/bin/sh: /private<tmpdir>/radian-sandbox-escape-11813-0/ws/leak/again.txt: Operation not permitted",
+      "sandbox_detail": "/bin/sh: /private<tmpdir>/radian-sandbox-escape-42411-0/ws/leak/again.txt: Operation not permitted",
       "sandbox_succeeded": false
     },
     {
       "control_detail": "",
       "control_succeeded": true,
       "expect": "must_fail",
-      "group": "network_off",
+      "group": "network_safe",
       "name": "connect_local_port",
-      "note": "sandbox has no network; control connects to a listener this test owns",
+      "note": "safe has no network; the control connects to a listener this test owns",
       "passed": true,
-      "sandbox_detail": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    import socket,sys; s=socket.create_connection((\"127.0.0.1\",51877),2); s.close(); sys.exit(0)\n                         ~~~~…",
+      "sandbox_detail": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    import socket,sys; s=socket.create_connection((\"127.0.0.1\",61880),2); s.close(); sys.exit(0)\n                         ~~~~…",
       "sandbox_succeeded": false
     },
     {
-      "control_detail": "claude-code_2-1-294_agent",
+      "control_detail": "",
+      "control_succeeded": true,
+      "expect": "must_succeed",
+      "group": "network_workspace",
+      "name": "connect_local_port",
+      "note": "",
+      "passed": true,
+      "sandbox_detail": "",
+      "sandbox_succeeded": true
+    },
+    {
+      "control_detail": "",
+      "control_succeeded": true,
+      "expect": "must_succeed",
+      "group": "network_workspace",
+      "name": "bind_local_port",
+      "note": "",
+      "passed": true,
+      "sandbox_detail": "",
+      "sandbox_succeeded": true
+    },
+    {
+      "control_detail": "",
+      "control_succeeded": true,
+      "expect": "must_succeed",
+      "group": "network_workspace",
+      "name": "connect_external",
+      "note": "",
+      "passed": true,
+      "sandbox_detail": "",
+      "sandbox_succeeded": true
+    },
+    {
+      "control_detail": "",
+      "control_succeeded": true,
+      "expect": "must_succeed",
+      "group": "devices",
+      "name": "openpty",
+      "note": "",
+      "passed": true,
+      "sandbox_detail": "",
+      "sandbox_succeeded": true
+    },
+    {
+      "control_detail": "master_bytes=1 injector=",
+      "control_succeeded": true,
+      "expect": "must_fail",
+      "group": "devices",
+      "name": "tiocsti_outside_terminal",
+      "note": "the sandbox cannot inject into an outside terminal; the control (same slave as its controlling terminal) can",
+      "passed": true,
+      "sandbox_detail": "master_bytes=0 injector=Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    import os,fcntl,termios,sys; fd=os.open(sys.argv[1], os.O_RDWR|os.O_NOCTTY); fcntl.ioctl(fd, termios.TIOCSTI, b\"X\")\n      …",
+      "sandbox_succeeded": false
+    },
+    {
+      "control_detail": "pi",
       "control_succeeded": true,
       "expect": "must_fail",
       "group": "environment",
@@ -90,14 +145,14 @@
       "sandbox_succeeded": false
     },
     {
-      "control_detail": "<home>/.bun/bin:<home>/.local/state/fnm_multishells/76860_1791774217719/bin:.cargo/bin/:<home>/Code/Go/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/System/Cryptexes/App/usr/bin…",
+      "control_detail": "<home>/.pi/agent/bin:<home>/.bun/bin:<home>/.local/state/fnm_multishells/19281_1791818474580/bin:.cargo/bin/:<home>/Code/Go/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/Sys…",
       "control_succeeded": true,
       "expect": "must_succeed",
       "group": "environment",
       "name": "whitelisted_path_visible",
       "note": "",
       "passed": true,
-      "sandbox_detail": "<home>/.bun/bin:<home>/.local/state/fnm_multishells/76860_1791774217719/bin:.cargo/bin/:<home>/Code/Go/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/System/Cryptexes/App/usr/bin…",
+      "sandbox_detail": "<home>/.pi/agent/bin:<home>/.bun/bin:<home>/.local/state/fnm_multishells/19281_1791818474580/bin:.cargo/bin/:<home>/Code/Go/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/Sys…",
       "sandbox_succeeded": true
     },
     {
@@ -108,7 +163,7 @@
       "name": "nested_sh_confined",
       "note": "",
       "passed": true,
-      "sandbox_detail": "sh: /private<tmpdir>/radian-sandbox-escape-11813-0/outside/nested.txt: Operation not permitted",
+      "sandbox_detail": "sh: /private<tmpdir>/radian-sandbox-escape-42411-0/outside/nested.txt: Operation not permitted",
       "sandbox_succeeded": false
     },
     {
@@ -152,7 +207,7 @@
       "name": "write_hook",
       "note": "",
       "passed": true,
-      "sandbox_detail": "/bin/sh: /private<tmpdir>/radian-sandbox-escape-11813-0/ws/proj/.git/hooks/pre-commit: Operation not permitted",
+      "sandbox_detail": "/bin/sh: /private<tmpdir>/radian-sandbox-escape-42411-0/ws/proj/.git/hooks/pre-commit: Operation not permitted",
       "sandbox_succeeded": false
     },
     {
@@ -163,7 +218,7 @@
       "name": "write_config",
       "note": "",
       "passed": true,
-      "sandbox_detail": "/bin/sh: /private<tmpdir>/radian-sandbox-escape-11813-0/ws/proj/.git/config: Operation not permitted",
+      "sandbox_detail": "/bin/sh: /private<tmpdir>/radian-sandbox-escape-42411-0/ws/proj/.git/config: Operation not permitted",
       "sandbox_succeeded": false
     },
     {
@@ -174,7 +229,7 @@
       "name": "write_info",
       "note": "",
       "passed": true,
-      "sandbox_detail": "/bin/sh: /private<tmpdir>/radian-sandbox-escape-11813-0/ws/proj/.git/info/exclude: Operation not permitted",
+      "sandbox_detail": "/bin/sh: /private<tmpdir>/radian-sandbox-escape-42411-0/ws/proj/.git/info/exclude: Operation not permitted",
       "sandbox_succeeded": false
     },
     {
@@ -196,7 +251,7 @@
       "name": "git_add",
       "note": "",
       "passed": true,
-      "sandbox_detail": "error: key does not contain a section: x\nfatal: Unable to create '/private<tmpdir>/radian-sandbox-escape-11813-0/ws/proj/.git/index.lock': Operation not permitt…",
+      "sandbox_detail": "error: key does not contain a section: x\nfatal: Unable to create '/private<tmpdir>/radian-sandbox-escape-42411-0/ws/proj/.git/index.lock': Operation not permitt…",
       "sandbox_succeeded": false
     },
     {
@@ -207,7 +262,7 @@
       "name": "worktree_pointer",
       "note": "",
       "passed": true,
-      "sandbox_detail": "/bin/sh: /private<tmpdir>/radian-sandbox-escape-11813-0/ws/wt/.git: Operation not permitted",
+      "sandbox_detail": "/bin/sh: /private<tmpdir>/radian-sandbox-escape-42411-0/ws/wt/.git: Operation not permitted",
       "sandbox_succeeded": false
     },
     {
@@ -218,7 +273,7 @@
       "name": "shared_gitdir",
       "note": "",
       "passed": true,
-      "sandbox_detail": "/bin/sh: /private<tmpdir>/radian-sandbox-escape-11813-0/main/.git/worktrees/wt/gitdir: Operation not permitted",
+      "sandbox_detail": "/bin/sh: /private<tmpdir>/radian-sandbox-escape-42411-0/main/.git/worktrees/wt/gitdir: Operation not permitted",
       "sandbox_succeeded": false
     },
     {
@@ -229,7 +284,7 @@
       "name": "shared_git_via_symlink",
       "note": "",
       "passed": true,
-      "sandbox_detail": "/bin/sh: /private<tmpdir>/radian-sandbox-escape-11813-0/ws/wt/leakgit/hooks/x: Operation not permitted",
+      "sandbox_detail": "/bin/sh: /private<tmpdir>/radian-sandbox-escape-42411-0/ws/wt/leakgit/hooks/x: Operation not permitted",
       "sandbox_succeeded": false
     },
     {
@@ -244,14 +299,14 @@
       "sandbox_succeeded": true
     },
     {
-      "control_detail": "55f43f6 init | error: key does not contain a section: x",
+      "control_detail": "357635f init | error: key does not contain a section: x",
       "control_succeeded": true,
       "expect": "must_succeed",
       "group": "git_readonly",
       "name": "git_log_ok",
       "note": "",
       "passed": true,
-      "sandbox_detail": "55f43f6 init | error: key does not contain a section: x",
+      "sandbox_detail": "357635f init | error: key does not contain a section: x",
       "sandbox_succeeded": true
     },
     {
@@ -262,7 +317,7 @@
       "name": "fake_ssh_key_unreadable",
       "note": "",
       "passed": true,
-      "sandbox_detail": "cat: /private<tmpdir>/radian-sandbox-escape-11813-0/home/.ssh/id_ed25519: Operation not permitted",
+      "sandbox_detail": "cat: /private<tmpdir>/radian-sandbox-escape-42411-0/home/.ssh/id_ed25519: Operation not permitted",
       "sandbox_succeeded": false
     },
     {
@@ -299,14 +354,14 @@
       "sandbox_succeeded": true
     },
     {
-      "control_detail": "sh: line 1: 13005 Terminated: 15          sleep 5",
+      "control_detail": "sh: line 1: 43042 Terminated: 15          sleep 5",
       "control_succeeded": true,
       "expect": "must_succeed",
       "group": "signals",
       "name": "signal_own_grandchild_ok",
       "note": "",
       "passed": true,
-      "sandbox_detail": "sh: line 1: 12987 Terminated: 15          sleep 5",
+      "sandbox_detail": "sh: line 1: 43036 Terminated: 15          sleep 5",
       "sandbox_succeeded": true
     },
     {
@@ -317,7 +372,7 @@
       "name": "signal_outside_process",
       "note": "a same-user process outside the sandbox, started by this test",
       "passed": true,
-      "sandbox_detail": "/bin/sh: line 0: kill: (13018) - Operation not permitted",
+      "sandbox_detail": "/bin/sh: line 0: kill: (43054) - Operation not permitted",
       "sandbox_succeeded": false
     }
   ],

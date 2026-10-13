@@ -6,11 +6,17 @@
 
 **消费者（2026-10-12，Phase 3 shell 切片）：** `radian-coding` 的 `shell` 工具是第一个消费者
 （`CodingTools::with_sandbox`）；没有 `Sandbox` 时它根本不注册。三点值得记在这里：① `FullAccess`
-下后端是透明的（不探测、不包裹），但 shell 工具仍自己按 `allow_env` 清环境——**full-access 是
-"文件系统/网络不设限"，不是"把宿主环境交给模型控制的 shell"**；**full-access 不放开环境变量白名单**
-＼�。② 进程组清理（超时/取消/leader 退出都杀整组）是 shell 工具自己的职责，
-不是沙箱的，见 `crates/radian-coding/src/shell.rs`。③ 输出截断也是 shell 工具自己的策略：每流独立
-预算、保留头尾（尾部更大，因为失败命令的错误在末尾）、边读边丢，沙箱不参与。
+下后端是透明的（不探测、不包裹），但 shell 工具仍自己按 `allow_env` 清环境——**full 是
+"文件系统/网络不设限"，不是"把宿主环境交给模型控制的 shell"**；**full 不放开环境变量白名单**
+＼�。② 进程组清理：shell 工具用 `setsid` 让子进程自成会话与进程组
+（没有控制终端），超时/取消/leader 退出都杀整组（ADR 0016 取代了原先的 `process_group(0)`）。
+③ 输出截断也是 shell 工具自己的策略：每流独立预算、保留头尾（尾部更大，因为失败命令的错误在
+末尾）、边读边丢，沙箱不参与。
+
+**ADR 0016（2026-10-13）：** `workspace` 档位改为**开网**（出站与本机回环 connect/bind/listen），
+并放开 **pty**（`/dev/ptmx` 与 `/dev/ttys[0-9]+` 的写与 `file-ioctl`，后者**只**对这两类路径）；
+`safe` 仍关网、无设备。shell 工具用 `setsid` 让受约束命令没有控制终端，配合内核的
+controlling-terminal 检查堵住 `TIOCSTI`（矩阵新增 `tiocsti_outside_terminal`）。
 
 ## 硬规则：请求沙箱但后端不可用 = 明确失败
 
@@ -36,7 +42,7 @@ macOS 版本漂移（spike 记录过 `process-fork*` 变 unbound）。探针在�
   `--bind`；git 元数据 `--ro-bind` 覆盖；敏感目录 `--tmpfs`（目录）或 `/dev/null`（文件）；
   `--clearenv` + 白名单；`HOME`/`TMPDIR` 在工作区内。
 
-## 逃逸清单（两平台各 29 例，全部带"关掉沙箱后成功"的对照）
+## 逃逸清单（两平台各 34 例，全部带"关掉沙箱后成功"的对照）
 
 `radian-sandbox` 的 `harness`（`testing` feature）跑同一套矩阵：每条"应当失败"的用例都在
 `WorkspaceWrite` 下跑一次、在 `FullAccess` 对照下跑同一命令。`Case::passed()` 要求
@@ -64,14 +70,14 @@ macOS 版本漂移（spike 记录过 `process-fork*` 变 unbound）。探针在�
 `sandbox-exec` 实测了五种写法（自己的子进程 / 孙进程 / 同 profile 的另一个沙箱实例 / 沙箱外同组进程）：
 `(target self)` 全拒；`(target children)` 拒孙进程；`(target pgrp)` 与不带过滤的 `(allow signal)`
 **能杀沙箱外同进程组的进程**，不可用；`(target same-sandbox)` 子孙可、另一实例拒、外部拒——采用它。
-Linux 的 bwrap 带 `--unshare-pid`，沙箱内看不到外部 pid，本来就满足（VM 上同一矩阵 29/29）。
+Linux 的 bwrap 带 `--unshare-pid`，沙箱内看不到外部 pid，本来就满足（VM 上同一矩阵 34/34）。
 矩阵的 `signals` 组钉住这三条；去掉规则、换成 `children`、换成不带过滤的 `signal` 三个变异各被抓住。
 
 **Linux 与 macOS 的一个差异（已写进代码注释）**：bwrap 无法为**尚不存在**的敏感路径建挂载点
 （根是只读的），因此只 mask 已存在的 deny 路径；SBPL 可以给未来才会创建的路径写规则。默认 deny
 列表里不存在的项在 Linux 上暂不 mask。
 
-## 敏感目录禁读的兼容性轮次（macOS，`workspace-write` + 默认 deny 列表）
+## 敏感目录禁读的兼容性轮次（macOS，`workspace` + 默认 deny 列表）
 
 `crates/radian-sandbox/tests/compat_macos.rs` 逐条跑并断言：
 
@@ -81,7 +87,7 @@ Linux 的 bwrap 带 `--unshare-pid`，沙箱内看不到外部 pid，本来就�
 | `ssh -V` | ✅ | 只打印版本，不读 `~/.ssh` |
 | `cargo --version` | ✅ | |
 | **`cargo build`（无依赖项目，`--offline`）** | ✅ | spike 未验证项：可在沙箱内 build；`target/` 在工作区内，`~/.cargo`/`~/.rustup` 可读，`TMPDIR` 指向工作区 |
-| `git add` / `git commit` | ❌ | **设计使然**：`.git` 有意只读（ADR 0012）。需要提交时应在沙箱外或 `full-access` 下做；不为此放宽规则 |
+| `git add` / `git commit` | ❌ | **设计使然**：`.git` 有意只读（ADR 0012）。需要提交时应在沙箱外或 `full` 下做；不为此放宽规则 |
 
 **没有为兼容性放宽任何规则**：唯一新增的放行是 `/dev/null`（git 需要）与 `TMPDIR` 指向工作区内
 （两平台一致），都属于"工作区可写"的既有语义。不接受的做法——比如为了 `git commit` 而让 `.git`

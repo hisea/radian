@@ -117,13 +117,13 @@ struct Cli {
     mcp_config: Option<String>,
 
     /// Expose the built-in file and read-only git tools rooted at this directory
-    /// (read/write/patch/list, git_status/git_diff). Under `workspace-write` this also
+    /// (read/write/patch/list, git_status/git_diff). Under `workspace` this also
     /// exposes `shell`, which runs only inside the sandbox.
     #[arg(long)]
     workspace: Option<String>,
 
-    /// Permission profile: `safe` (read-only, no shell, no MCP), `workspace-write` (the
-    /// default: writes confined to the workspace, `shell` sandboxed), or `full-access`
+    /// Permission profile: `safe` (read-only, no shell, no MCP), `workspace` (the
+    /// default: writes confined to the workspace, `shell` sandboxed, network on), or `full`
     /// (explicitly unsandboxed; never a default).
     #[arg(long, value_name = "PROFILE")]
     profile: Option<profile::ProfileArg>,
@@ -779,7 +779,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         ..AgentConfig::default()
     };
 
-    // The profile and the sandbox: what may run, and what the OS enforces. `full-access` is
+    // The profile and the sandbox: what may run, and what the OS enforces. `full` is
     // only reachable because the user named it; a failed probe is an error, never a fallback.
     // All of this runs **before** the session file is created (dogfooding D2).
     let profile_arg = cli.profile.unwrap_or_else(profile::default_profile);
@@ -807,7 +807,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     }
 
     // The built-in tools exist only with `--workspace`. `shell` is present only when a
-    // sandbox exists, which is exactly `workspace-write`/`full-access` with a workspace.
+    // sandbox exists, which is exactly `workspace`/`full` with a workspace.
     let coding = if cli.workspace.is_some() {
         let tools = match sandbox {
             Some(sandbox) => CodingTools::with_sandbox(&workspace_path, sandbox).map_err(|e| {

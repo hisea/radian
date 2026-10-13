@@ -125,3 +125,11 @@ Base `f552250` · one-shot worktree `/tmp/small-mut` · `--no-fail-fast`；变�
 | # | 变异 | 结果 | 抓住它的测试 |
 |---|---|---|---|
 | M10 | 已存在会话的报错不含 `--resume <id>` | ✅ 抓住 (rc=101) | `pty_session_id_already_exists_points_at_resume`（还断言未进备用屏、已有文件字节不变） |
+
+## ADR 0016：档位别名（2026-10-13）
+
+一次性检出 `/tmp/tiers-mut`（base `9c060d2`），变异后 `git checkout --` 恢复。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M10 | `parse_tier` 去掉 `workspace-write` / `full-access` 两个别名分支 | ✅ failed | `profile::tests::tier_names_and_aliases_parse` |
