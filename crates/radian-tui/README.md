@@ -376,14 +376,15 @@ by one is resumable by the other:
   history comes from the journal (`radian-runtime` recovers it); the transcript view is the
   same history.
 - `--list` prints this workspace's sessions (id, created, last activity, message count) and
-  exits without touching the terminal.
+  exits without touching the terminal. A closed stdout (`radian-tui --list | head -1`) stops
+  quietly with exit 0, never a panic (dogfooding D21).
 - `--pick` shows a full-screen picker of this workspace's sessions **before** the main UI:
   `Up`/`Down` select, type to filter by id/summary, `Tab` (or `Ctrl-S`) toggles full-text
   search, `Enter` resumes the selection, `n` starts a new session, `Esc`/`Ctrl-C` quits. It
   never creates a session file. `--pick` conflicts with `--resume` and `--session-id`. With no
   sessions it goes straight to a new session and says so.
 
-`--resume` and `--session-id` are mutually exclusive, as are `--resume` and `--list`.
+`--resume`, `--session-id` and `--list` are mutually exclusive pairwise.
 
 ## Flags
 

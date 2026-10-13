@@ -252,7 +252,10 @@ fn main() -> ExitCode {
 
 fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, String> {
     if cli.list {
-        return list_sessions(&cli).map(|()| None);
+        return match list_sessions(&cli) {
+            Ok(()) | Err(ListError::BrokenPipe) => Ok(None),
+            Err(ListError::Failed(message)) => Err(message),
+        };
     }
     // ADR 0013 decision 4: diagnostics live in the user cache directory, and cleanup runs at
     // startup. A failure is one line, never a fault.
@@ -1177,7 +1180,33 @@ fn pick_session(
         .map_err(|e| format!("picker: {e}"))
 }
 
-fn list_sessions(cli: &Cli) -> Result<(), String> {
+/// Why the TUI's `--list` stopped. A closed stdout (`radian-tui --list | head`) is a normal
+/// stop, not a failure (dogfooding D21), so it is kept apart from a real error.
+enum ListError {
+    /// A real failure: exit 1 with this message.
+    Failed(String),
+    /// stdout's reader went away: exit 0, no message.
+    BrokenPipe,
+}
+
+impl From<String> for ListError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+impl From<radian_host::StdoutError> for ListError {
+    fn from(error: radian_host::StdoutError) -> Self {
+        match error {
+            radian_host::StdoutError::BrokenPipe => Self::BrokenPipe,
+            radian_host::StdoutError::Failed(error) => {
+                Self::Failed(format!("cannot write to stdout: {error}"))
+            }
+        }
+    }
+}
+
+fn list_sessions(cli: &Cli) -> Result<(), ListError> {
     let dir = session_dir(cli)?;
     let workspace = session_workspace(cli)?;
     if !dir.exists() {
@@ -1202,13 +1231,13 @@ fn list_sessions(cli: &Cli) -> Result<(), String> {
                     .count()
             })
             .unwrap_or(0);
-        println!(
+        radian_host::write_line(&format!(
             "{}\t{}\t{}\t{}",
             session.session_id,
             session.created_ts.as_deref().unwrap_or("-"),
             session.last_ts.as_deref().unwrap_or("-"),
             messages
-        );
+        ))?;
     }
     Ok(())
 }
