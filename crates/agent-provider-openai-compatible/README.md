@@ -107,8 +107,13 @@ compiled only under the feature (ADR 0013: no test server ships in the product).
   bytes off the wire.
 - **`[DONE]` without a finish reason is inferred** as `stop` (or `tool_calls` when calls are
   present). That is an inference, not something the provider said.
-- **Error classification is by status only**: 5xx/408/429 → `Transport`, other non-2xx →
-  `Protocol`. A provider that signals a request error with a 500 is classified as transport.
+- **Error classification is by status, with one narrow exception**: 5xx/408/429 →
+  `Transport`, other non-2xx → `Protocol`. A provider that signals a request error with a 500
+  is classified as transport. The exception is ADR 0018's **context overflow**: a 400/413 whose
+  JSON carries `error.code == "context_length_exceeded"` or a context-shaped `error.message`
+  (or, mid-stream, the same code/message) becomes `ContextOverflow`. 429/5xx are never an
+  overflow, and generic "too many tokens" wording is deliberately excluded (it is as likely to
+  be a rate limit).
 - **The two adapters are not identical**, and this is intentional: the Anthropic one has no
   `stream_options`, no `include_usage`, and its own usage field names. The shared contract suite
   is what keeps them comparable.

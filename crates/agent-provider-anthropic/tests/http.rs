@@ -133,6 +133,21 @@ async fn complete_once(
     model.complete(request, cx).await.unwrap()
 }
 
+async fn complete_error(server: &MockServer) -> ModelError {
+    let model = model(server);
+    let request = ModelRequest {
+        system_prompt: None,
+        messages: vec![Message::user("hi")],
+        tools: Vec::new(),
+        settings: Value::Null,
+    };
+    let cx = ModelContext {
+        cancellation: CancellationToken::new(),
+        events: &NoopSink,
+    };
+    model.complete(request, cx).await.unwrap_err()
+}
+
 // ---------- the request ----------
 
 #[tokio::test]
@@ -886,6 +901,43 @@ async fn total_is_never_invented_when_the_provider_omits_it() {
 }
 
 // ---------- errors, secrets and config ----------
+
+/// ADR 0018: a recognizable context-overflow 400 becomes `ContextOverflow`, not a generic
+/// `Protocol`, so a host can tell them apart.
+#[tokio::test]
+async fn a_recognizable_context_overflow_is_its_own_error() {
+    let server = MockServer::start(vec![Reply::status(
+        400,
+        r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 210000 tokens > 200000 maximum"}}"#,
+    )])
+    .await;
+    let error = complete_error(&server).await;
+    assert!(
+        matches!(&error, ModelError::ContextOverflow(text) if text.contains("prompt is too long")),
+        "{error}"
+    );
+}
+
+/// A plain 400 stays a `Protocol` error; the message alone is not enough without the type.
+#[tokio::test]
+async fn a_plain_400_is_not_a_context_overflow() {
+    let server = MockServer::start(vec![Reply::status(400, "bad request")]).await;
+    let error = complete_error(&server).await;
+    assert!(matches!(error, ModelError::Protocol(_)), "{error}");
+}
+
+/// The overflow body can echo the key like any other; it must be masked.
+#[tokio::test]
+async fn a_context_overflow_body_that_echoes_the_key_is_masked() {
+    let server = MockServer::start(vec![Reply::status(
+        400,
+        r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long; key sk-ant-secret-key"}}"#,
+    )])
+    .await;
+    let error = complete_error(&server).await;
+    assert!(matches!(error, ModelError::ContextOverflow(_)), "{error}");
+    assert!(!error.to_string().contains("sk-ant-secret-key"), "{error}");
+}
 
 #[tokio::test]
 async fn an_http_error_body_that_echoes_the_key_is_masked() {

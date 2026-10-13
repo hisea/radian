@@ -41,6 +41,22 @@ impl agent_provider_contract::ContractHarness<OpenAiCompatible> for OpenAiHarnes
             OpenAiCompatibleConfig::new(base, "contract-model").with_api_key(ApiKey::new(SECRET));
         OpenAiCompatible::new(config).expect("a local mock config is valid")
     }
+
+    fn context_overflow(&self) -> Option<Wire> {
+        // OpenAI's real 400 shape for an over-length prompt (Completions/Responses API): the
+        // structured code `context_length_exceeded` plus the "maximum context length" message.
+        Some(Wire::Status {
+            code: 400,
+            body: json!({
+                "error": {
+                    "message": "This model's maximum context length is 16385 tokens. However, your messages resulted in 20000 tokens.",
+                    "type": "invalid_request_error",
+                    "code": "context_length_exceeded"
+                }
+            })
+            .to_string(),
+        })
+    }
 }
 
 impl OpenAiHarness {
@@ -308,4 +324,9 @@ async fn contract_9_cancellation() {
 #[tokio::test]
 async fn contract_10_secret_not_leaked() {
     contract::check_secret_not_leaked(&harness()).await
+}
+
+#[tokio::test]
+async fn contract_11_context_overflow() {
+    contract::check_context_overflow(&harness()).await
 }

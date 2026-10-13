@@ -2267,6 +2267,52 @@ async fn pty_a_model_error_is_shown_and_the_session_continues() {
     assert_eq!(server.requests().len(), 2, "both turns reached the model");
 }
 
+/// ADR 0018's fallback: a recognizable context-overflow error is shown, followed by the
+/// one-line hint, and the session stays usable (the error ends the turn, ADR 0017).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_context_overflow_is_shown_with_a_hint() {
+    let _serial = pty_guard();
+    let body = r#"{"error":{"message":"This model's maximum context length is 16385 tokens. However, your messages resulted in 20000 tokens.","type":"invalid_request_error","code":"context_length_exceeded"}}"#;
+    let server = MockServer::start(vec![Reply::status(400, body), text_reply("SECOND-OK")]).await;
+    let dir = TempDir::new("overflow");
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "overflow",
+        ],
+        24,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"first\r");
+    assert!(
+        pty.wait_for_screen("model context overflow", 20),
+        "the overflow is not shown:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("automatic compaction is not implemented", 20),
+        "the hint is not shown:\n{}",
+        pty.screen()
+    );
+    // Still usable: a second line opens a new turn that succeeds.
+    pty.send(b"second\r");
+    assert!(
+        pty.wait_for_screen("SECOND-OK", 20),
+        "the session did not continue:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
 /// ADR 0018: the startup notice names the window and where it came from. An explicit
 /// `--context-window` needs no catalog, so this is deterministic without a mock catalog.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

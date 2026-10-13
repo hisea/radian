@@ -60,6 +60,22 @@ impl agent_provider_contract::ContractHarness<Anthropic> for AnthropicHarness {
         // leave `total` None; the contract asserts that absence rather than skipping it.
         &[UsageField::Total]
     }
+
+    fn context_overflow(&self) -> Option<Wire> {
+        // Anthropic's real 400 shape for an over-length prompt: `invalid_request_error` with
+        // the "prompt is too long" message.
+        Some(Wire::Status {
+            code: 400,
+            body: json!({
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "prompt is too long: 210000 tokens > 200000 maximum"
+                }
+            })
+            .to_string(),
+        })
+    }
 }
 
 impl AnthropicHarness {
@@ -295,6 +311,11 @@ async fn contract_9_cancellation() {
 #[tokio::test]
 async fn contract_10_secret_not_leaked() {
     contract::check_secret_not_leaked(&harness()).await
+}
+
+#[tokio::test]
+async fn contract_11_context_overflow() {
+    contract::check_context_overflow(&harness()).await
 }
 
 /// The hatch cannot be widened into an opt-out: a harness that declares every usage field

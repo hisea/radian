@@ -849,6 +849,10 @@ fn the_key_is_hidden_from_debug_output() {
 // ---------- secrets in errors ----------
 
 async fn run_error(model: OpenAiCompatible) -> String {
+    run_model_error(model).await.to_string()
+}
+
+async fn run_model_error(model: OpenAiCompatible) -> ModelError {
     let mut session = chat(model, NoTools).await;
     let error = session
         .run_turn("hi", TurnOptions::default(), &NoopSink)
@@ -857,7 +861,7 @@ async fn run_error(model: OpenAiCompatible) -> String {
     let RunError::Model(model_error) = error else {
         panic!("expected a model error")
     };
-    model_error.to_string()
+    model_error
 }
 
 #[tokio::test]
@@ -872,6 +876,37 @@ async fn an_http_error_body_that_echoes_the_key_is_masked() {
 
     assert!(message.contains("Incorrect API key provided"), "{message}");
     assert!(!message.contains("sk-secret-key"), "{message}");
+}
+
+/// ADR 0018: a recognizable context-overflow 400 becomes `ContextOverflow`, not a generic
+/// `Protocol`, so a host can tell them apart.
+#[tokio::test]
+async fn a_recognizable_context_overflow_is_its_own_error() {
+    let body = r#"{"error":{"message":"This model's maximum context length is 16385 tokens. However, your messages resulted in 20000 tokens.","type":"invalid_request_error","code":"context_length_exceeded"}}"#;
+    let server = MockServer::start(vec![Reply::status(400, body)]).await;
+    let error = run_model_error(model(&server)).await;
+    assert!(
+        matches!(&error, ModelError::ContextOverflow(text) if text.contains("16385")),
+        "{error}"
+    );
+}
+
+/// A plain 400 (no overflow code or message) stays a `Protocol` error.
+#[tokio::test]
+async fn a_plain_400_is_not_a_context_overflow() {
+    let server = MockServer::start(vec![Reply::status(400, "bad request")]).await;
+    let error = run_model_error(model(&server)).await;
+    assert!(matches!(error, ModelError::Protocol(_)), "{error}");
+}
+
+/// The overflow body can echo the key like any other; it must be masked.
+#[tokio::test]
+async fn a_context_overflow_body_that_echoes_the_key_is_masked() {
+    let body = r#"{"error":{"message":"maximum context length is 100 tokens; key sk-secret-key","type":"invalid_request_error","code":"context_length_exceeded"}}"#;
+    let server = MockServer::start(vec![Reply::status(400, body)]).await;
+    let error = run_model_error(model(&server)).await;
+    assert!(matches!(error, ModelError::ContextOverflow(_)), "{error}");
+    assert!(!error.to_string().contains("sk-secret-key"), "{error}");
 }
 
 #[tokio::test]

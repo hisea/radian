@@ -71,7 +71,7 @@ uses **both** escape hatches, each with the provider documentation as the reason
 
 | Check | Test | File |
 |---|---|---|
-| 1 plain text; 2 streamed deltas in order; 3a/3b one and several tool calls; 4 split arguments rejoined; 5 call ids unique; 6 finish reasons; 7a usage shapes; 7b `total` not computed; 8 error classification; 9 cancellation; 10 secret not leaked | `contract_1_plain_text` … `contract_10_secret_not_leaked` | `tests/contract.rs` |
+| 1 plain text; 2 streamed deltas in order; 3a/3b one and several tool calls; 4 split arguments rejoined; 5 call ids unique; 6 finish reasons; 7a usage shapes; 7b `total` not computed; 8 error classification; 9 cancellation; 10 secret not leaked; 11 context overflow | `contract_1_plain_text` … `contract_11_context_overflow` | `tests/contract.rs` |
 | The usage hatch cannot be widened into an opt-out: declaring every field unreported fails before the check can pass vacuously | `declaring_every_usage_field_unreported_is_refused` (`#[should_panic]`) | `tests/contract.rs` |
 
 Wire-level behaviour, over a real HTTP mock (`tests/http.rs`) and in unit tests:

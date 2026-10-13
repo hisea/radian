@@ -4190,6 +4190,29 @@ async fn one_shot_model_error_still_exits_one_and_shows_the_error() {
     assert!(stdout.is_empty(), "stdout must stay model-only: {stdout}");
 }
 
+/// ADR 0018's fallback: a recognizable context-overflow error is classified as such and gets
+/// one extra hint line (the automatic compaction is a later slice); it still exits 1.
+#[tokio::test]
+async fn a_context_overflow_error_adds_a_hint() {
+    let body = r#"{"error":{"message":"This model's maximum context length is 16385 tokens. However, your messages resulted in 20000 tokens.","type":"invalid_request_error","code":"context_length_exceeded"}}"#;
+    let server = MockServer::start(vec![Reply::status(400, body)]).await;
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
+            &[("OPENAI_API_KEY", KEY)],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("model context overflow"), "{stderr}");
+    assert!(
+        stderr.contains("automatic compaction is not implemented"),
+        "the hint must be shown: {stderr}"
+    );
+    assert!(stdout.is_empty(), "stdout must stay model-only: {stdout}");
+}
+
 // ---------- model catalog: the startup window line (ADR 0018) ----------
 
 const CATALOG_JSON: &str = r#"{

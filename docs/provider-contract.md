@@ -56,7 +56,7 @@ OpenAI 专有（只属于 http.rs，契约不管）：请求体/header 的形状
 
 > **在 `ContractHarness` 里显式声明，然后要么按「缺席」断言，要么按「不适用」跳过——绝不允许静默跳过，也绝不允许为了让契约通过而伪造 provider 行为。**
 
-只有**显式声明**能改变检查；默认声明是「全都支持/全都报告」。目前有两个出口，都是接 Anthropic adapter 时暴露出来的真实缺口：
+只有**显式声明**能改变检查；默认声明是「全都支持/全都报告」。目前有三个出口，前两个是接 Anthropic adapter 时暴露出来的真实缺口，第三个是 ADR 0018 的「可识别超长错误」加的：
 
 ### 出口 1：finish reason（跳过被声明的项）
 
@@ -72,9 +72,18 @@ OpenAI 专有（只属于 http.rs，契约不管）：请求体/header 的形状
 
 两个出口都有「声明了就生效、没声明就必须满足」的测试，以及「声明了却仍然填值」的变异被抓住（见 `crates/agent-provider-contract/src/lib.rs` 的 `tests` 与 `crates/agent-provider-anthropic/MUTATIONS-ANTHROPIC.md`）。OpenAI adapter 两个出口都**不声明**，它的 12 个契约测试保持全绿。
 
+### 出口 3：可识别的超长错误（ADR 0018，**反例对所有 provider 都跑**）
+
+`fn context_overflow(&self) -> Option<Wire> { None }`。provider 真实可识别的「输入超出上下文窗口」错误（状态码 + 正文）；`None` 是「这家 provider 没有可识别的超长错误」，不是静默跳过。`check_context_overflow` 分两部分：
+
+1. **无条件**（与声明无关）：`HTTP 400 "bad request"`、`HTTP 429 "too many tokens"`、`HTTP 500 "context_length_exceeded"` 都**不是** `ModelError::ContextOverflow`。429/5xx 永远不是超长——即使正文里有 `context_length_exceeded`（那可能是 TPM 限流）。
+2. 声明了 `Some(wire)` 的 harness：该 wire 必须变成 `ContextOverflow`，错误消息引用 provider 正文，且不含 harness 的 secret。声明了却分类不出来，或没声明却被分类成超长，都失败。
+
+契约 crate 自己的 `tests` 用一个假 provider 钉住三件事：声明即分类、无声明只跳过正例（反例照跑）、把普通 400 误判成超长会在**没有声明**的 harness 上失败——这条专门防「默认 `None` 就把反例也省了」的变异。两家的 `context_overflow` 都返回真实的 400 形态（OpenAI 的 `context_length_exceeded`；Anthropic 的 `prompt is too long`），对应测试 `contract_11_context_overflow`。
+
 ## Anthropic adapter 已接入
 
-`crates/agent-provider-anthropic`（API key 认证，无 OAuth）的 12 个契约测试全部委托给同一套检查，现已全绿。线格式依据（官方 URL + 访问日期）、`stop_reason` 取值集合与 usage 字段全集见 `docs/providers/anthropic-wire-notes.md`。
+`crates/agent-provider-anthropic`（API key 认证，无 OAuth）的 13 个契约测试全部委托给同一套检查，现已全绿（含 `contract_11_context_overflow`）。线格式依据（官方 URL + 访问日期）、`stop_reason` 取值集合与 usage 字段全集见 `docs/providers/anthropic-wire-notes.md`。
 
 ## 接第三家时预计会暴露的地方（2026-10-12 评估，非结论）
 
