@@ -67,6 +67,14 @@ fn text_reply(text: &str) -> Reply {
     ])
 }
 
+/// Waits for a turn to finish, with a bound: a mutation that makes the driver die instead of
+/// continuing would otherwise hang the test binary.
+async fn wait_turn(recorder: &Recorder) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), recorder.wait_finished())
+        .await
+        .expect("a turn must finish");
+}
+
 fn last_status(recorder: &Recorder) -> Option<RunStatus> {
     recorder
         .events()
@@ -151,12 +159,12 @@ async fn a_before_model_hook_error_ends_the_turn_and_the_session_continues() {
 
     // Turn 1: the tool runs, then `before_model_call` fails on the second call.
     inbox.followup("first", InputSource::User).await.unwrap();
-    recorder.wait_finished().await;
+    wait_turn(&recorder).await;
     assert_eq!(last_status(&recorder), Some(RunStatus::Failed));
 
     // Turn 2: the hook allows it, and the model answers.
     inbox.followup("second", InputSource::User).await.unwrap();
-    recorder.wait_finished().await;
+    wait_turn(&recorder).await;
     assert_eq!(last_status(&recorder), Some(RunStatus::Completed));
     inbox.close();
     handle
