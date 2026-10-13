@@ -4450,3 +4450,41 @@ async fn pty_two_approvals_are_shown_in_order() {
         pty.screen()
     );
 }
+
+/// ADR 0024 Q5: `--approval never` only affects approvals. The user is still there, so the
+/// TUI still registers `ask_user`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_approval_never_still_registers_ask_user() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("ask-never");
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("NEVER-DONE")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "ask-never",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--approval",
+            "never",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("ask_user: on", 10),
+        "`--approval never` must not turn ask_user off: {}",
+        pty.screen()
+    );
+}

@@ -195,6 +195,16 @@ fn drafts_are_kept_between_questions() {
     app.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
     assert_eq!(form(&app).answers[0].text.text(), "first");
     assert_eq!(form(&app).answers[1].text.text(), "second");
+    // A re-sync of the **same** head keeps the form, so a redraw never loses a draft
+    // (ADR 0023 U7: the modal is driven by the head, not by every notification).
+    let head = PendingView {
+        request_id: 7,
+        origin: "session".into(),
+        request: PendingRequest::Question(radian_coding::QuestionRequest::new(Vec::new())),
+    };
+    app.update(Input::Pending(Some(Box::new(head)), 1));
+    assert_eq!(form(&app).answers[0].text.text(), "first");
+    assert_eq!(form(&app).answers[1].text.text(), "second");
     // And the submit carries both.
     app.on_key(tab());
     app.on_key(key(KeyCode::Enter));

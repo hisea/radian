@@ -163,8 +163,10 @@ fn a_second_approval_does_not_supersede_the_first() {
     );
     assert_eq!(app.pending, 2, "the status bar counts the queue");
 
-    // When the first is answered, the second becomes the head.
-    app.update(Input::Pending(Some(Box::new(second)), 1));
+    // When the first is answered, the second becomes the head. Moving to it must not answer
+    // (deny) the first: the queue already did, and a second answer would be a late one.
+    let result = app.update(Input::Pending(Some(Box::new(second)), 1));
+    assert!(result.effects.is_empty(), "{:?}", result.effects);
     assert!(app.pending_approval().is_some());
     assert_eq!(app.pending, 1);
 }
