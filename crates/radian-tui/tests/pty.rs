@@ -1818,6 +1818,65 @@ async fn pty_a_binary_attachment_is_not_sent_and_the_input_is_kept() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
+/// `Tab` completes an `@` reference in the input box; `Enter` then attaches the file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_tab_completes_an_at_reference_and_enter_attaches_it() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("tab-mention");
+    let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::write(ws.join("notes.txt"), "alpha\nbeta\n").unwrap();
+    let server = MockServer::start(vec![text_reply("TAB-OK")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "tab",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send("看 @no".as_bytes());
+    pty.send(b"\t");
+    assert!(
+        pty.wait_for_screen("@notes.txt", 10),
+        "Tab did not complete the reference:\n{}",
+        pty.screen()
+    );
+    pty.send(b"\r");
+    assert!(
+        pty.wait_for_screen("TAB-OK", 20),
+        "the turn did not run:\n{}",
+        pty.screen()
+    );
+    assert_eq!(server.requests().len(), 1);
+    let body = server.requests()[0].json();
+    let user = body["messages"]
+        .as_array()
+        .expect("messages is an array")
+        .iter()
+        .find(|message| message["role"] == "user")
+        .and_then(|message| message["content"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(user.contains("看 @notes.txt"), "{user}");
+    assert!(user.contains("<file path=\"notes.txt\">"), "{user}");
+    assert!(user.contains("alpha\nbeta"), "{user}");
+
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
 /// The session directory, created empty by the caller, must stay empty when startup fails.
 fn assert_session_dir_empty(dir: &Path) {
     let names: Vec<String> = std::fs::read_dir(dir)

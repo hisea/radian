@@ -571,6 +571,8 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
         panic!("radian-tui: panic path test with a child in flight");
     }
     let mut app = App::new(cli.model.clone(), session_id.clone());
+    // `Tab` completes `@` file references against the workspace.
+    app.set_workspace(workspace_path.clone());
     app.set_context_window(window.budget);
     app.set_tier(tier.as_str());
     app.set_mcp(mcp_configured, mcp_open);

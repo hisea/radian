@@ -204,3 +204,43 @@ fn a_user_file_attachment_is_folded_to_one_line() {
         "the entry text is the full message"
     );
 }
+
+/// The `@` completion list is drawn above the input box and is clipped to the terminal width.
+#[test]
+fn the_completion_list_sits_above_the_input_and_truncates() {
+    let mut app = App::new("m", "s");
+    app.input = "@no".into();
+    app.completion = Some(vec!["notes.txt".into(), "notes.md".into()]);
+    let text = screen(&render(&mut app, 40, 12));
+    assert!(text.contains("notes.txt"), "{text}");
+    assert!(text.contains("notes.md"), "{text}");
+    let candidate = text.find("notes.md").expect("the list is shown");
+    let input = text.rfind("@no").expect("the input box is shown");
+    assert!(
+        candidate < input,
+        "the list must be above the input:\n{text}"
+    );
+}
+
+#[test]
+fn the_completion_list_truncates_on_a_narrow_terminal() {
+    let mut app = App::new("m", "s");
+    app.input = "@".into();
+    app.completion = Some(vec!["a-very-long-candidate-name.txt".into()]);
+    let text = screen(&render(&mut app, 12, 10));
+    assert!(
+        !text.contains("a-very-long-candidate-name.txt"),
+        "the row must be clipped, not wrapped:\n{text}"
+    );
+    assert!(text.contains("a-very-long"), "{text}");
+}
+
+#[test]
+fn the_completion_list_shows_ten_then_more() {
+    let mut app = App::new("m", "s");
+    app.completion = Some((0..15).map(|i| format!("file{i:02}.txt")).collect());
+    let text = screen(&render(&mut app, 40, 20));
+    assert!(text.contains("file09.txt"), "{text}");
+    assert!(!text.contains("file10.txt"), "{text}");
+    assert!(text.contains("+5 more"), "{text}");
+}
