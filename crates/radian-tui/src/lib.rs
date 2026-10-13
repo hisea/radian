@@ -17,5 +17,5 @@ pub mod signals;
 pub mod terminal;
 pub mod theme;
 
-pub use app::{App, ApprovalPrompt, Entry, EntryKind, Send, TurnState};
+pub use app::{App, Effect, Entry, EntryKind, Input, MemoryResult, TurnState, UpdateResult};
 pub use composer::Composer;

@@ -1,7 +1,7 @@
 //! The input composer in `App`: history, Esc, arrow keys and the editing keys (ADR 0009
 //! Phase 4). Pure app state, so no process is started.
 
-use radian_tui::app::{App, Send};
+use radian_tui::app::{App, Effect};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 fn key(code: KeyCode) -> KeyEvent {
@@ -21,7 +21,7 @@ fn up_browses_history_and_down_returns_to_the_draft() {
     let mut app = App::new("m", "s");
     for line in ["first", "second"] {
         app.input.set_text(line);
-        assert!(app.on_key(key(KeyCode::Enter)).is_some());
+        assert!(!app.on_key(key(KeyCode::Enter)).effects.is_empty());
     }
     app.input.set_text("draft");
 
@@ -95,9 +95,8 @@ fn shift_up_scrolls_the_transcript() {
 fn esc_clears_a_non_empty_input_and_quits_only_when_empty() {
     let mut app = App::new("m", "s");
     app.input.set_text("unsent");
-    assert_eq!(
-        app.on_key(key(KeyCode::Esc)),
-        None,
+    assert!(
+        app.on_key(key(KeyCode::Esc)).effects.is_empty(),
         "Esc clears, it does not quit"
     );
     assert!(app.input.is_empty());
@@ -107,7 +106,7 @@ fn esc_clears_a_non_empty_input_and_quits_only_when_empty() {
     assert_eq!(app.input, "unsent");
 
     app.input.clear();
-    assert_eq!(app.on_key(key(KeyCode::Esc)), Some(Send::Quit));
+    assert_eq!(app.on_key(key(KeyCode::Esc)).effects, vec![Effect::Quit]);
     assert!(app.quit);
 }
 
@@ -116,13 +115,15 @@ fn enter_clears_the_input_and_records_every_submitted_line() {
     let mut app = App::new("m", "s");
     app.input.set_text("hello");
     assert_eq!(
-        app.on_key(key(KeyCode::Enter)),
-        Some(Send::Followup("hello".into()))
+        app.on_key(key(KeyCode::Enter)).effects,
+        vec![Effect::ExpandMentions {
+            text: "hello".into()
+        }]
     );
     assert!(app.input.is_empty());
     // A slash command is recorded too, and is not sent to the model.
     app.input.set_text("/help");
-    assert_eq!(app.on_key(key(KeyCode::Enter)), None);
+    assert!(app.on_key(key(KeyCode::Enter)).effects.is_empty());
     assert!(app.input.is_empty());
     assert_eq!(app.history, vec!["hello".to_string(), "/help".to_string()]);
 }

@@ -426,7 +426,7 @@ fn status_line(app: &App, width: usize) -> Line<'static> {
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let middle = match &app.pending_approval {
-        Some(prompt) => approval_height(&prompt.request, area.width as usize),
+        Some(prompt) => approval_height(prompt, area.width as usize),
         None => input_height(app, area.width as usize),
     };
     // The `@` completion list sits just above the input box (and never over an approval
@@ -474,7 +474,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 .borders(Borders::ALL)
                 .border_style(app.theme.approval_border)
                 .title(" approve tool call? ");
-            let text = Paragraph::new(approval_text(&prompt.request))
+            let text = Paragraph::new(approval_text(prompt))
                 .block(block)
                 .wrap(Wrap { trim: false });
             frame.render_widget(text, chunks[2]);

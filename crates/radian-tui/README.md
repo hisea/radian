@@ -9,6 +9,35 @@ scrolls itself, streaming text and reasoning, and clean terminal recovery.
 > screen. The tests never do: they drive the binary through `portable-pty` and read a `vt100`
 > screen model, or use `ratatui`'s `TestBackend`.
 
+## Architecture: Action → Effect (ADR 0023 U3)
+
+The app is a pure state machine. One function changes it:
+
+```rust
+App::update(input: Input) -> UpdateResult { dirty: bool, effects: Vec<Effect> }
+```
+
+- **`Input`** is either an interaction intent (`Action`, from the keymap; `Char`, a typed
+  character; `FindBackspace`; `Paste`; `Resize`; the hardcoded approval and confirmation
+  answers) or a host fact (an `AgentEvent`, a runtime event, an approval request, and the
+  result of an effect).
+- **`Effect`** is everything that needs the outside world: `SendFollowup`/`Steer`/`Cancel`/
+  `Quit`, `AnswerApproval`/`AbandonApproval`, `ExpandMentions` (the `@` expansion reads
+  files), `CompleteMention` (reads a directory), `RunMemoryCommand`, `Compact`, and `Session`
+  (`/sessions`, `/export`, `/fork`).
+- The event loop in `main.rs` runs the effects and feeds their results back as inputs. A key
+  press is resolved by `App::key_input` (the keymap plus the current layer) and `App::on_key`
+  is the thin wrapper around it.
+- **`update` never** does I/O, touches the runtime, reads a file or a directory, or calls the
+  memory service. `tests/purity.rs` asserts that structurally (it greps `src/app.rs` for
+  `std::fs`, `MemoryService`, `tokio`, and the `@` calls).
+- `dirty` says whether the renderer's input may have changed, so the loop can skip a frame;
+  an input that changes nothing (an unbound key, cancel, quit) is not dirty.
+
+Because of this, most behavior tests are pure `update` tests (`tests/update.rs`,
+`tests/input.rs`, `tests/command.rs`, `tests/approval.rs`); the pty tests keep the terminal
+state, the real key protocol and the recovery paths.
+
 ## Providers
 
 `--provider` picks the wire protocol; the default is unchanged.

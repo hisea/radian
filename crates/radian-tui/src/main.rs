@@ -4,6 +4,7 @@
 //! Never run this in a shared terminal by hand without expecting it to take over: it enters
 //! the alternate screen and raw mode. The tests drive it through a pty.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
 use std::sync::Arc;
@@ -28,7 +29,7 @@ use radian_permissions::{
 use radian_runtime::{CancelCause, Driver, Inbox};
 use radian_sandbox::Sandbox;
 use radian_session::{Index, SessionCreatedData, SessionJournal};
-use radian_tui::app::{App, ApprovalPrompt, Send};
+use radian_tui::app::{App, Effect, Input as AppInput, MemoryResult};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
@@ -694,7 +695,7 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
     app.set_tier(tier.as_str());
     app.set_mcp(mcp_configured, mcp_open);
     // `/memory` runs against the same service the agent's tools and injection use.
-    app.set_memory(memory_service.clone());
+    app.set_memory_enabled(memory_service.is_some());
     for message in &history {
         app.push_message(message);
     }
@@ -777,6 +778,7 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
         &hooks,
         &driver_task,
         &session_host,
+        &memory_service,
     );
     // Tell a pending signal task that the loop left on its own, so it does not force-exit.
     radian_tui::signals::confirm_exit();
@@ -993,6 +995,14 @@ fn draw_frame(
     }
 }
 
+/// A tool call waiting for the human: the request the UI shows, and the channel the permission
+/// layer awaits. The **loop** owns the channel (ADR 0023 U3: `update` is pure), keyed by
+/// `request_id` so an answer or an abandon can find it.
+struct ApprovalPrompt {
+    request: ApprovalRequest,
+    reply: tokio::sync::oneshot::Sender<ApprovalOutcome>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn ui_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
@@ -1006,10 +1016,16 @@ fn ui_loop(
     hooks: &Arc<PermissionHooks>,
     driver_task: &tokio::task::JoinHandle<Result<(), radian_runtime::DriverError>>,
     host: &SessionHost,
+    memory: &Option<MemoryService>,
 ) -> Result<(), String> {
+    // The reply channels of the approval prompts on screen, by request id.
+    let mut approval_replies: HashMap<String, tokio::sync::oneshot::Sender<ApprovalOutcome>> =
+        HashMap::new();
     // Manual `/compact` runs on the runtime (the driver executes it between turns); its
-    // result arrives over these channels and becomes a notice.
-    let mut pending_compacts: Vec<std::sync::mpsc::Receiver<Result<_, String>>> = Vec::new();
+    // result arrives over its own channel and becomes a notice.
+    let mut pending_compacts: Vec<
+        std::sync::mpsc::Receiver<Result<agent_core::CompactionOutcome, String>>,
+    > = Vec::new();
     while !app.quit {
         // SIGTERM/SIGHUP: leave exactly like a quit, so the terminal is restored and the
         // reason is printed on the normal screen (dogfooding D7). No last frame: after a
@@ -1030,14 +1046,15 @@ fn ui_loop(
             ));
             app.quit = true;
             // One last frame, so the notice is what the user sees before the screen is
-            // restored.
-            // The last frame is best-effort: the terminal may already be gone.
+            // restored. The last frame is best-effort: the terminal may already be gone.
             let _ = draw_frame(terminal, app)?;
             break;
         }
-        // A short poll keeps rendering responsive without blocking on input; it is a UI
-        // refresh interval, not a synchronization device. `read_input` also reports a
-        // terminal that has gone away, which crossterm's own poll cannot (see its docs).
+        // Every input goes through `App::update`, which returns the effects to run. A short
+        // poll keeps rendering responsive without blocking on input; it is a UI refresh
+        // interval, not a synchronization device. `read_input` also reports a terminal that
+        // has gone away, which crossterm's own poll cannot (see its docs).
+        let mut effects: Vec<Effect> = Vec::new();
         match read_input(Duration::from_millis(50)) {
             Input::Gone => {
                 // The terminal went away (the pty master closed, the ssh session dropped):
@@ -1049,73 +1066,50 @@ fn ui_loop(
             }
             Input::Event(event) => match event {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
-                    if let Some(send) = app.on_key(key) {
-                        dispatch(send, app, workspace, runtime, inbox, hooks)?;
-                    }
+                    effects.extend(app.on_key(key).effects);
                 }
-                Event::Paste(text) => app.input.insert_str(&text),
+                Event::Paste(text) => effects.extend(app.update(AppInput::Paste(text)).effects),
+                Event::Resize(rows, cols) => {
+                    effects.extend(app.update(AppInput::Resize { rows, cols }).effects);
+                }
                 _ => {}
             },
             Input::Idle => {}
         }
         while let Ok(event) = rx.try_recv() {
-            app.apply_event(&event);
+            effects.extend(app.update(AppInput::Event(event)).effects);
         }
-        // ADR 0017: a failed turn is shown in the transcript; the session stays open.
         while let Ok(event) = runtime_events.try_recv() {
-            if let radian_session::RuntimeEvent::TurnFailed { message, .. } = event {
-                app.entries.push(radian_tui::Entry::new(
-                    radian_tui::EntryKind::Notice,
-                    format!("turn failed: {message}"),
-                ));
-                // ADR 0018's fallback: a recognizable context overflow gets one extra line,
-                // since automatic compaction did not keep the request inside the window.
-                // The host only has the text, so the prefix is what identifies it.
-                if radian_host::is_context_overflow(&message) {
-                    app.entries.push(radian_tui::Entry::new(
-                        radian_tui::EntryKind::Notice,
-                        radian_host::CONTEXT_OVERFLOW_HELP.to_string(),
-                    ));
-                }
-            }
+            effects.extend(app.update(AppInput::Runtime(event)).effects);
         }
         // A tool call waiting for the human: show it. The answer goes back over the prompt's
-        // own channel when a key is pressed, so this loop never blocks on the decision.
+        // own channel when the app answers (an effect), so this loop never blocks on it.
         while let Ok(prompt) = approvals.try_recv() {
-            app.request_approval(prompt);
+            approval_replies.insert(prompt.request.request_id.clone(), prompt.reply);
+            effects.extend(app.update(AppInput::Approval(prompt.request)).effects);
         }
-        // `/compact`: hand it to the runtime and show the outcome when it finishes. The
-        // driver runs it between turns, so a running turn finishes first.
-        if let Some(instructions) = app.pending_compact.take() {
-            let inbox = Arc::clone(inbox);
-            let (tx, rx) = std::sync::mpsc::channel();
-            runtime.spawn(async move {
-                let _ = tx.send(inbox.compact(instructions).await);
-            });
-            pending_compacts.push(rx);
-        }
-        // `/sessions` and `/export` are host work (the index / a file), not transcript
-        // changes; run them here where the session directory, workspace and secrets are known.
-        if let Some(request) = app.pending_session.take() {
-            handle_session_request(app, host, runtime, request);
+        // Effects run here, and their results come back as inputs — which may produce more
+        // effects, so this is a worklist, in order.
+        let mut queue: std::collections::VecDeque<Effect> = effects.into();
+        while let Some(effect) = queue.pop_front() {
+            let results = execute_effect(
+                effect,
+                workspace,
+                runtime,
+                inbox,
+                hooks,
+                memory,
+                host,
+                &mut approval_replies,
+                &mut pending_compacts,
+            )?;
+            for input in results {
+                queue.extend(app.update(input).effects);
+            }
         }
         pending_compacts.retain(|rx| match rx.try_recv() {
-            Ok(Ok(agent_core::CompactionOutcome::Compacted {
-                tokens_before,
-                tokens_after,
-                ..
-            })) => {
-                app.push_notice(format!(
-                    "compaction: {tokens_before} → {tokens_after} tokens"
-                ));
-                false
-            }
-            Ok(Ok(agent_core::CompactionOutcome::NothingToCompact)) => {
-                app.push_notice("compaction: nothing to compact");
-                false
-            }
-            Ok(Err(message)) => {
-                app.push_notice(format!("compaction failed: {message}"));
+            Ok(result) => {
+                app.update(AppInput::CompactDone(result));
                 false
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => true,
@@ -1132,6 +1126,107 @@ fn ui_loop(
     Ok(())
 }
 
+/// Runs one effect (ADR 0023 U3). The inputs it returns are the effect's results; the caller
+/// feeds them back to `update`. Nothing here decides app state.
+#[allow(clippy::too_many_arguments)]
+fn execute_effect(
+    effect: Effect,
+    workspace: &Path,
+    runtime: &tokio::runtime::Runtime,
+    inbox: &Arc<Inbox>,
+    hooks: &Arc<PermissionHooks>,
+    memory: &Option<MemoryService>,
+    host: &SessionHost,
+    approval_replies: &mut HashMap<String, tokio::sync::oneshot::Sender<ApprovalOutcome>>,
+    pending_compacts: &mut Vec<
+        std::sync::mpsc::Receiver<Result<agent_core::CompactionOutcome, String>>,
+    >,
+) -> Result<Vec<AppInput>, String> {
+    match effect {
+        Effect::SendFollowup(text) => {
+            // `HookContext` has no source field, so the host declares each turn's source
+            // before it starts; an unset source is treated as non-human and denied.
+            hooks.set_turn_source(Some(InputSource::User));
+            runtime
+                .block_on(inbox.followup(text, InputSource::User))
+                .map(|_| Vec::new())
+                .map_err(|e| e.to_string())
+        }
+        Effect::Steer(text) => {
+            hooks.set_turn_source(Some(InputSource::User));
+            runtime
+                .block_on(inbox.steer(text, InputSource::User))
+                .map(|_| Vec::new())
+                .map_err(|e| e.to_string())
+        }
+        Effect::Cancel => {
+            inbox.cancel(CancelCause::Requested);
+            Ok(Vec::new())
+        }
+        Effect::Quit => Ok(Vec::new()),
+        Effect::AnswerApproval {
+            request_id,
+            outcome,
+        } => {
+            if let Some(reply) = approval_replies.remove(&request_id) {
+                let _ = reply.send(outcome);
+            }
+            Ok(Vec::new())
+        }
+        Effect::AbandonApproval { request_id } => {
+            // Dropping the channel is what makes the waiting call resolve as abandoned (a
+            // denial), exactly as dropping the prompt used to.
+            approval_replies.remove(&request_id);
+            Ok(Vec::new())
+        }
+        // `@` expansion and completion read files, so they are effects; their results come
+        // back as inputs.
+        Effect::ExpandMentions { text } => Ok(vec![AppInput::MentionsExpanded(
+            radian_tui::mention::expand(&text, workspace),
+        )]),
+        Effect::CompleteMention { text, cursor } => Ok(vec![AppInput::CompletionReady(
+            radian_tui::mention::complete(&text, cursor, workspace),
+        )]),
+        Effect::RunMemoryCommand { command, confirmed } => {
+            let result = match memory {
+                Some(service) => {
+                    let json = command.json();
+                    match radian_host::memory::commands::execute(
+                        service,
+                        command.clone(),
+                        confirmed,
+                        json,
+                    ) {
+                        Ok(output) => match output.needs_confirmation {
+                            Some(prompt) => MemoryResult::NeedsConfirmation { command, prompt },
+                            None => {
+                                MemoryResult::Output(radian_tui::command::output_notices(&output))
+                            }
+                        },
+                        Err(error) => MemoryResult::Failed(error.message),
+                    }
+                }
+                None => MemoryResult::Failed("memory is disabled (no RADIAN_HOME or HOME)".into()),
+            };
+            Ok(vec![AppInput::MemoryCommandDone(result)])
+        }
+        Effect::Compact { instructions } => {
+            // The driver runs the request between turns, so this must not block the UI: spawn
+            // it and drain the result on a later pass.
+            let inbox = Arc::clone(inbox);
+            let (tx, rx) = std::sync::mpsc::channel();
+            runtime.spawn(async move {
+                let _ = tx.send(inbox.compact(instructions).await);
+            });
+            pending_compacts.push(rx);
+            Ok(Vec::new())
+        }
+        Effect::Session(request) => Ok(vec![AppInput::SessionDone(handle_session_request(
+            host, runtime, request,
+        ))]),
+    }
+}
+
 /// The host facts `/sessions` and `/export` need: where sessions live, which workspace this
 /// process belongs to, the current session id and the values to redact.
 struct SessionHost {
@@ -1146,38 +1241,29 @@ struct SessionHost {
     config_snapshot: serde_json::Value,
 }
 
-/// Runs one `/sessions` or `/export` request and pushes the result as notices.
+/// Runs one `/sessions`, `/export` or `/fork` request and returns the notices to show. Pure
+/// from `App`'s point of view: the app turns these lines into entries (ADR 0023 U3).
 fn handle_session_request(
-    app: &mut App,
     host: &SessionHost,
     runtime: &tokio::runtime::Runtime,
     request: radian_tui::command::SessionOutcome,
-) {
+) -> Vec<String> {
     match request {
         radian_tui::command::SessionOutcome::List(query) => {
             match session_lines(host, query.as_deref()) {
-                Ok(lines) => {
-                    for line in lines {
-                        app.push_notice(line);
-                    }
-                }
-                Err(message) => app.push_notice(message),
+                Ok(lines) => lines,
+                Err(message) => vec![message],
             }
         }
         radian_tui::command::SessionOutcome::Export(request) => {
             match export_current(host, &request) {
-                Ok(path) => app.push_notice(format!("exported to {path}")),
-                Err(message) => app.push_notice(message),
+                Ok(path) => vec![format!("exported to {path}")],
+                Err(message) => vec![message],
             }
         }
         radian_tui::command::SessionOutcome::Fork => {
-            // ADR 0022 §1: fork only when the session is idle.
-            if app.turn == radian_tui::TurnState::Running {
-                app.push_notice(
-                    "finish the current turn before forking (`/fork` needs an idle session)",
-                );
-                return;
-            }
+            // ADR 0022 §1: `update` only asks for a fork when the session is idle, so there is
+            // no state check here.
             let child_id = radian_host::generate_session_id();
             let child_path = host.dir.join(format!("{child_id}.jsonl"));
             let request = radian_session::ForkRequest {
@@ -1190,11 +1276,11 @@ fn handle_session_request(
                 config_snapshot: host.config_snapshot.clone(),
             };
             match runtime.block_on(radian_session::fork_with_journal(request, &host.journal)) {
-                Ok(outcome) => app.push_notice(format!(
+                Ok(outcome) => vec![format!(
                     "forked at seq {} into {}; open it with `radian-tui --resume {}`                      (this window keeps the parent)",
                     outcome.seq, outcome.child_id, outcome.child_id
-                )),
-                Err(error) => app.push_notice(format!("fork failed: {error}")),
+                )],
+                Err(error) => vec![format!("fork failed: {error}")],
             }
         }
     }
@@ -1332,86 +1418,6 @@ fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
         return Err(format!("cannot replace {}: {error}", path.display()));
     }
     Ok(())
-}
-
-fn dispatch(
-    send: Send,
-    app: &mut App,
-    workspace: &Path,
-    runtime: &tokio::runtime::Runtime,
-    inbox: &Arc<Inbox>,
-    hooks: &Arc<PermissionHooks>,
-) -> Result<(), String> {
-    match send {
-        Send::Followup(text) => {
-            // `@` references expand here, before the text reaches the inbox, so the journal
-            // stores exactly what the model sees. A failed expansion is not sent and the
-            // input is restored.
-            let Some(text) = prepare_message(app, workspace, text) else {
-                return Ok(());
-            };
-            // `HookContext` has no source field, so the host declares each turn's source
-            // before it starts; an unset source is treated as non-human and denied.
-            hooks.set_turn_source(Some(InputSource::User));
-            runtime
-                .block_on(inbox.followup(text, InputSource::User))
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-        }
-        Send::Steer(text) => {
-            let Some(text) = prepare_message(app, workspace, text) else {
-                return Ok(());
-            };
-            hooks.set_turn_source(Some(InputSource::User));
-            runtime
-                .block_on(inbox.steer(text, InputSource::User))
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-        }
-        Send::Cancel => {
-            inbox.cancel(CancelCause::Requested);
-            Ok(())
-        }
-        Send::Quit => Ok(()),
-    }
-}
-
-/// Expands the `@` references in a user message.
-///
-/// On success, shows the `attached N file(s)` notice (and a warning per reference that
-/// resolved outside the workspace) and returns the text to send. On failure, shows the
-/// reasons and puts the original text back in the input box; returns `None`, so nothing is
-/// sent and the user can fix the message.
-fn prepare_message(app: &mut App, workspace: &Path, text: String) -> Option<String> {
-    match radian_tui::mention::expand(&text, workspace) {
-        Ok(expansion) => {
-            for warning in &expansion.warnings {
-                app.entries.push(radian_tui::Entry::new(
-                    radian_tui::EntryKind::Notice,
-                    warning.clone(),
-                ));
-            }
-            if !expansion.attached.is_empty() {
-                app.entries.push(radian_tui::Entry::new(
-                    radian_tui::EntryKind::Notice,
-                    format!(
-                        "attached {} file(s): {}",
-                        expansion.attached.len(),
-                        expansion.attached.join(", ")
-                    ),
-                ));
-            }
-            Some(expansion.text)
-        }
-        Err(error) => {
-            app.entries.push(radian_tui::Entry::new(
-                radian_tui::EntryKind::Notice,
-                format!("not sent: {error}"),
-            ));
-            app.restore_input(text);
-            None
-        }
-    }
 }
 
 /// Where session files live: `--session-dir`, then `RADIAN_SESSION_DIR`, then the platform's

@@ -1,27 +1,32 @@
-//! The UI state: transcript entries, the input buffer, scroll-follow logic, and key
-//! handling. It contains no terminal I/O, so the whole thing is driven by tests in memory.
+//! The UI state and the one function that changes it: [`App::update`] (ADR 0023 U3).
+//!
+//! `update` is **pure**: it never does I/O, never touches the runtime, never reads a file or a
+//! directory, and never calls into a service. Everything that needs the outside world comes
+//! back as an [`Effect`], which the event loop in `main.rs` runs; the result returns as another
+//! [`Input`]. `tests/purity.rs` asserts the structure (no `std::fs`, no `MemoryService`, no
+//! `tokio`, no `mention::expand`/`complete` call in this file).
+//!
+//! A key press is resolved to an [`Input`] by [`App::key_input`] (the keymap plus the current
+//! layer: approval prompt, `/memory` confirmation, find box), and [`App::on_key`] is the thin
+//! wrapper that resolves and updates.
 
 use std::path::PathBuf;
 
 use agent_core::{
-    AgentEvent, BudgetReport, ContentPart, Message, ModelUsage, RunStatus, UsageSource,
+    AgentEvent, BudgetReport, CompactionOutcome, ContentPart, Message, ModelUsage, RunStatus,
+    UsageSource,
 };
-use radian_host::memory::MemoryService;
+use radian_host::memory::commands::MemoryCommand;
 use radian_permissions::{ApprovalOutcome, ApprovalRequest};
+use radian_session::RuntimeEvent;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::command::{self, PendingCommand};
 use crate::composer::Composer;
 use crate::find::FindState;
 use crate::keys::{Action, Keymap};
+use crate::mention::{Completion, ExpandError, Expansion};
 use crate::theme::{Theme, ThemeName};
-
-/// A tool call waiting for the human. `reply` is the channel the permission layer awaits; the
-/// answer is sent by the UI thread, so the waiting future never blocks it.
-pub struct ApprovalPrompt {
-    pub request: ApprovalRequest,
-    pub reply: tokio::sync::oneshot::Sender<ApprovalOutcome>,
-}
 
 /// What kind of transcript line an entry is. The renderer maps this to a style; the tests
 /// assert that reasoning and assistant text are distinguishable by style and position.
@@ -165,16 +170,200 @@ pub fn mcp_text(configured: usize, open: Option<(usize, usize)>) -> String {
     }
 }
 
-/// What the event loop must do with the inbox after a key press.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Send {
-    /// A new turn: `Inbox::followup`.
-    Followup(String),
+/// One input to [`App::update`]: an interaction intent, or a fact from the host.
+///
+/// [`Input::Action`] is the keymap's semantic action. [`Input::Char`] and
+/// [`Input::FindBackspace`] are the two editing intents that are deliberately **not** bindings
+/// (typing, and the find box's own backspace, which belongs to the box like the approval keys
+/// belong to the prompt). Everything else is a host fact or the result of an [`Effect`].
+#[derive(Debug)]
+pub enum Input {
+    /// A semantic action, from the keymap or synthesized by the host.
+    Action(Action),
+    /// A printable character typed into the focused text field.
+    Char(char),
+    /// The find box's backspace (not keymap-driven).
+    FindBackspace,
+    /// A bracketed paste: inserted at the cursor.
+    Paste(String),
+    /// The terminal was resized. The renderer re-measures on the next frame.
+    Resize { rows: u16, cols: u16 },
+    /// The hardcoded answer to the approval prompt on screen (`y`/`a`/`n`/`Esc`).
+    ApprovalAnswer(ApprovalOutcome),
+    /// The hardcoded answer to a `/memory` confirmation (`true` = confirmed).
+    ConfirmCommand(bool),
+    /// A live agent event.
+    Event(AgentEvent),
+    /// A runtime event (ADR 0017's turn failure).
+    Runtime(RuntimeEvent),
+    /// An approval request arrived from the permission layer.
+    Approval(ApprovalRequest),
+    /// An `@` expansion finished (the result of [`Effect::ExpandMentions`]).
+    MentionsExpanded(Result<Expansion, ExpandError>),
+    /// An `@` completion finished (`None` = nothing to complete).
+    CompletionReady(Option<Completion>),
+    /// A `/memory` command finished (the result of [`Effect::RunMemoryCommand`]).
+    MemoryCommandDone(MemoryResult),
+    /// A manual `/compact` finished (the result of [`Effect::Compact`]).
+    CompactDone(Result<CompactionOutcome, String>),
+    /// A `/sessions`, `/export` or `/fork` finished: the notices to show.
+    SessionDone(Vec<String>),
+}
+
+/// The result of [`Effect::RunMemoryCommand`]. The executor decides nothing: a command that
+/// writes comes back as [`MemoryResult::NeedsConfirmation`] and `update` arms the prompt.
+#[derive(Debug)]
+pub enum MemoryResult {
+    /// The command ran; these lines are the notices to show.
+    Output(Vec<String>),
+    /// The command writes and needs the user's `y` first.
+    NeedsConfirmation {
+        command: MemoryCommand,
+        prompt: String,
+    },
+    /// The command failed; this is the message to show.
+    Failed(String),
+}
+
+/// An external action. `update` returns these; the event loop runs them. An effect that has a
+/// result reports it back as an [`Input`] (`ExpandMentions` → `MentionsExpanded`, and so on).
+#[derive(Debug, Clone)]
+pub enum Effect {
+    /// Start a new turn: `Inbox::followup`.
+    SendFollowup(String),
     /// Redirect the running turn: `Inbox::steer`.
     Steer(String),
     /// Cancel the running turn.
     Cancel,
+    /// Leave the app.
     Quit,
+    /// Answer the approval prompt `request_id` is showing. The loop owns the reply channel.
+    AnswerApproval {
+        request_id: String,
+        outcome: ApprovalOutcome,
+    },
+    /// Drop the reply channel of `request_id` without answering: the permission layer treats a
+    /// dropped channel as an abandoned request (a denial). This is what clearing the prompt
+    /// used to do, and it is why the loop must be told.
+    AbandonApproval { request_id: String },
+    /// Expand the `@` references in `text` (reads files).
+    ExpandMentions { text: String },
+    /// Complete the `@` reference at the cursor (reads a directory).
+    CompleteMention { text: String, cursor: usize },
+    /// Run a `/memory` command through the shared executor (`confirmed` skips the prompt).
+    RunMemoryCommand {
+        command: MemoryCommand,
+        confirmed: bool,
+    },
+    /// Run a manual `/compact` on the runtime, between turns.
+    Compact { instructions: Option<String> },
+    /// Run a `/sessions`, `/export` or `/fork` request.
+    Session(command::SessionOutcome),
+}
+
+/// Effects are compared by **meaning** in the tests. `MemoryCommand` (a clap enum) has no
+/// `PartialEq`, so two memory effects are equal when their parsed form is identical.
+impl PartialEq for Effect {
+    fn eq(&self, other: &Self) -> bool {
+        use Effect::*;
+        match (self, other) {
+            (SendFollowup(a), SendFollowup(b)) | (Steer(a), Steer(b)) => a == b,
+            (Cancel, Cancel) | (Quit, Quit) => true,
+            (
+                AnswerApproval {
+                    request_id: a,
+                    outcome: ao,
+                },
+                AnswerApproval {
+                    request_id: b,
+                    outcome: bo,
+                },
+            ) => a == b && ao == bo,
+            (AbandonApproval { request_id: a }, AbandonApproval { request_id: b }) => a == b,
+            (ExpandMentions { text: a }, ExpandMentions { text: b }) => a == b,
+            (
+                CompleteMention {
+                    text: a,
+                    cursor: ac,
+                },
+                CompleteMention {
+                    text: b,
+                    cursor: bc,
+                },
+            ) => a == b && ac == bc,
+            (
+                RunMemoryCommand {
+                    command: a,
+                    confirmed: ac,
+                },
+                RunMemoryCommand {
+                    command: b,
+                    confirmed: bc,
+                },
+            ) => ac == bc && format!("{a:?}") == format!("{b:?}"),
+            (Compact { instructions: a }, Compact { instructions: b }) => a == b,
+            (Session(a), Session(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+/// What one [`App::update`] produced.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct UpdateResult {
+    /// Whether the state the renderer reads may have changed. A false positive only costs a
+    /// frame; the event loop's zero-redraw rule (ADR 0023 U2) is about *no input at all*.
+    pub dirty: bool,
+    /// The external actions the loop must run, in order.
+    pub effects: Vec<Effect>,
+}
+
+impl UpdateResult {
+    /// Nothing happened.
+    fn none() -> Self {
+        Self::default()
+    }
+
+    /// The state changed.
+    fn dirty() -> Self {
+        Self {
+            dirty: true,
+            effects: Vec::new(),
+        }
+    }
+
+    /// The state changed and the loop has work to do.
+    fn effect(effect: Effect) -> Self {
+        Self {
+            dirty: true,
+            effects: vec![effect],
+        }
+    }
+
+    /// The loop has work to do, but nothing the renderer reads changed.
+    fn quiet(effect: Effect) -> Self {
+        Self {
+            dirty: false,
+            effects: vec![effect],
+        }
+    }
+}
+
+/// Which inbox call an in-flight `@` expansion is for, so its result can become the right
+/// effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingSend {
+    Followup,
+    Steer,
+}
+
+/// The send that is waiting for its `@` expansion: `update` produced
+/// [`Effect::ExpandMentions`] and remembers what to do when [`Input::MentionsExpanded`]
+/// arrives.
+#[derive(Debug)]
+struct PendingExpand {
+    kind: PendingSend,
+    text: String,
 }
 
 pub struct App {
@@ -199,19 +388,16 @@ pub struct App {
     pub turn: TurnState,
     pub quit: bool,
     pub note: Option<String>,
-    /// Set while a tool call waits for the human; keys answer it instead of typing.
-    pub pending_approval: Option<ApprovalPrompt>,
+    /// Set while a tool call waits for the human; keys answer it instead of typing. The reply
+    /// channel lives in the event loop, which owns the handoff back to the permission layer.
+    pub pending_approval: Option<ApprovalRequest>,
     /// Set while a `/memory` write waits for the user's `y`; keys answer it instead of typing.
     pub pending_command: Option<PendingCommand>,
-    /// Set by `/compact`; the event loop runs it on the runtime and shows the outcome. `Some`
-    /// is a request, the inner value the optional instructions.
-    pub pending_compact: Option<Option<String>>,
-    /// Set by `/sessions` or `/export`; the event loop runs it with the session directory and
-    /// the host's secrets and shows the result as notices.
-    pub pending_session: Option<command::SessionOutcome>,
-    /// The host's memory service, or `None` when this process has no memory root. `/memory`
-    /// runs against the same service the agent's own tools use.
-    pub memory: Option<MemoryService>,
+    /// Whether this process has a memory root. `/memory` runs through the loop, which owns the
+    /// service; without one the command is refused with the same notice as before.
+    pub memory_enabled: bool,
+    /// The send waiting for its `@` expansion (see [`Effect::ExpandMentions`]).
+    pending_expand: Option<PendingExpand>,
     /// The color theme (config `tui.theme`, `NO_COLOR`).
     pub theme: Theme,
     /// The key bindings (config `tui.keybindings`), defaulting to the pre-config key table.
@@ -263,9 +449,8 @@ impl App {
             note: None,
             pending_approval: None,
             pending_command: None,
-            pending_compact: None,
-            pending_session: None,
-            memory: None,
+            memory_enabled: false,
+            pending_expand: None,
             theme: Theme::default(),
             keymap: Keymap::default(),
             context_window: None,
@@ -295,9 +480,10 @@ impl App {
         self.tier = Some(tier.into());
     }
 
-    /// The host's memory service, for `/memory`. Set once at startup.
-    pub fn set_memory(&mut self, memory: Option<MemoryService>) {
-        self.memory = memory;
+    /// Whether this process has a memory root, for `/memory`. Set once at startup; the service
+    /// itself stays on the loop's side (ADR 0023 U3).
+    pub fn set_memory_enabled(&mut self, enabled: bool) {
+        self.memory_enabled = enabled;
     }
 
     /// Applies the wired `tui.*` configuration. A bad keymap (a key bound to two actions) is
@@ -450,28 +636,96 @@ impl App {
     /// Shows an approval prompt. If one was already up it is denied rather than dropped: the
     /// permission layer awaits one call at a time, so this should not happen, and a silent
     /// drop would leave that call waiting forever.
-    pub fn request_approval(&mut self, prompt: ApprovalPrompt) {
-        if let Some(previous) = self.pending_approval.replace(prompt) {
-            let _ = previous.reply.send(ApprovalOutcome::Deny {
-                reason: Some("superseded by another approval request".into()),
+    fn request_approval(&mut self, request: ApprovalRequest) -> UpdateResult {
+        let mut effects = Vec::new();
+        if let Some(previous) = self.pending_approval.replace(request) {
+            effects.push(Effect::AnswerApproval {
+                request_id: previous.request_id,
+                outcome: ApprovalOutcome::Deny {
+                    reason: Some("superseded by another approval request".into()),
+                },
             });
+        }
+        UpdateResult {
+            dirty: true,
+            effects,
         }
     }
 
     /// Answers the pending prompt and clears it. A no-op when nothing is pending.
-    pub fn answer_approval(&mut self, outcome: ApprovalOutcome) {
-        if let Some(prompt) = self.pending_approval.take() {
-            let _ = prompt.reply.send(outcome);
+    fn answer_approval(&mut self, outcome: ApprovalOutcome) -> UpdateResult {
+        match self.pending_approval.take() {
+            Some(request) => UpdateResult::quiet(Effect::AnswerApproval {
+                request_id: request.request_id,
+                outcome,
+            }),
+            None => UpdateResult::none(),
         }
     }
 
-    /// Handles one key event and returns the inbox action it implies, if any.
+    /// The single state-change entry point (ADR 0023 U3). Pure: no I/O, no runtime, no
+    /// service. Anything that needs the outside world comes back as an [`Effect`].
+    pub fn update(&mut self, input: Input) -> UpdateResult {
+        match input {
+            Input::Action(action) => {
+                // The `@` completion list: any key other than `complete` dismisses it, because
+                // typing continues the word and the list would be stale. `escape` only closes
+                // the list and keeps the input, so it does not reach its own action here.
+                if self.completion.is_some() && action != Action::Complete {
+                    self.completion = None;
+                    if action == Action::Escape {
+                        return UpdateResult::dirty();
+                    }
+                }
+                self.update_action(action)
+            }
+            Input::Char(c) => {
+                self.completion = None;
+                if self.find.is_some() {
+                    self.find_push(c);
+                } else {
+                    self.input.insert_char(c);
+                }
+                UpdateResult::dirty()
+            }
+            Input::FindBackspace => {
+                self.completion = None;
+                self.find_backspace();
+                UpdateResult::dirty()
+            }
+            // A bracketed paste is text for the message box, exactly as before.
+            Input::Paste(text) => {
+                self.input.insert_str(&text);
+                UpdateResult::dirty()
+            }
+            Input::Resize { .. } => UpdateResult::dirty(),
+            Input::ApprovalAnswer(outcome) => self.answer_approval(outcome),
+            Input::ConfirmCommand(confirmed) => self.confirm_command(confirmed),
+            Input::Event(event) => UpdateResult {
+                dirty: true,
+                effects: self.apply_event(&event),
+            },
+            Input::Runtime(event) => self.apply_runtime_event(&event),
+            Input::Approval(request) => self.request_approval(request),
+            Input::MentionsExpanded(result) => self.mentions_expanded(result),
+            Input::CompletionReady(completion) => self.completion_ready(completion),
+            Input::MemoryCommandDone(result) => self.memory_command_done(result),
+            Input::CompactDone(result) => self.compact_done(result),
+            Input::SessionDone(notices) => {
+                for notice in notices {
+                    self.push_notice(notice);
+                }
+                UpdateResult::dirty()
+            }
+        }
+    }
+
+    /// Resolves one key event to an [`Input`] through the keymap and the current layer. Pure.
     ///
-    /// The keys are looked up in the [`Keymap`] (config `tui.keybindings`); ordinary
-    /// printable characters are inserted at the cursor and are never bindings, so typing can
-    /// not be broken by a bad keymap. The approval and command-confirmation prompts are
-    /// handled first and are deliberately not rebindable.
-    pub fn on_key(&mut self, key: KeyEvent) -> Option<Send> {
+    /// The layers, in order: the approval prompt's hardcoded keys, the `/memory`
+    /// confirmation's hardcoded keys, cancel, the `@` completion list, the find box's own
+    /// layer, the transcript layer, and finally "a plain character is text, never a binding".
+    fn key_input(&self, key: &KeyEvent) -> Option<Input> {
         // While a prompt is up, its own keys answer it and never type into the input box.
         // `y`/`a`/`n` and `Esc` are hardcoded **before** the keymap, so a `tui.keybindings`
         // entry can never take them over (rebinding them could approve a call the user meant
@@ -479,79 +733,54 @@ impl App {
         if self.pending_approval.is_some() {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    self.answer_approval(ApprovalOutcome::AllowOnce);
-                    return None;
+                    return Some(Input::ApprovalAnswer(ApprovalOutcome::AllowOnce));
                 }
                 KeyCode::Char('a') | KeyCode::Char('A') => {
-                    self.answer_approval(ApprovalOutcome::AllowForSession);
-                    return None;
+                    return Some(Input::ApprovalAnswer(ApprovalOutcome::AllowForSession));
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    self.answer_approval(ApprovalOutcome::Deny { reason: None });
-                    return None;
+                    return Some(Input::ApprovalAnswer(ApprovalOutcome::Deny {
+                        reason: None,
+                    }));
                 }
                 _ => {}
             }
-            if self.keymap.action_for(&key) == Some(Action::Cancel) {
-                return self.cancel_or_quit();
+            if self.keymap.action_for(key) == Some(Action::Cancel) {
+                return Some(Input::Action(Action::Cancel));
             }
             return None;
         }
         // A `/memory` write waiting for `y`: same hardcoded keys, same cancel exception.
-        if self.pending_command.is_some()
-            && matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'))
-        {
-            let pending = self.pending_command.take().expect("checked just above");
-            self.run_confirmed(pending);
-            return None;
-        }
-        if self.pending_command.is_some()
-            && matches!(
-                key.code,
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc
-            )
-        {
-            self.pending_command = None;
-            self.push_notice("cancelled");
-            return None;
-        }
         if self.pending_command.is_some() {
-            if self.keymap.action_for(&key) == Some(Action::Cancel) {
-                return self.cancel_or_quit();
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    return Some(Input::ConfirmCommand(true));
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    return Some(Input::ConfirmCommand(false));
+                }
+                _ => {}
+            }
+            if self.keymap.action_for(key) == Some(Action::Cancel) {
+                return Some(Input::Action(Action::Cancel));
             }
             return None;
         }
-        // Cancel/quit works even while a prompt is up: the permission layer races the
-        // approval against cancellation, so the waiting call resolves as a denial.
-        let action = self.keymap.action_for(&key);
+        let action = self.keymap.action_for(key);
         if action == Some(Action::Cancel) {
-            return self.cancel_or_quit();
+            return Some(Input::Action(Action::Cancel));
         }
-        // The `@` completion list (Phase 4): the escape action closes it (and does not clear
-        // the input); any key other than the completion action dismisses it, because typing
-        // continues the word and the list would be stale.
-        if action == Some(Action::Escape) && self.completion.is_some() {
-            self.completion = None;
-            return None;
-        }
-        if action != Some(Action::Complete) {
-            self.completion = None;
-        }
-        // The find box (Phase 5) is a layer over the transcript: while it is open its keys are
-        // looked up first, so `enter` is the earlier match there and the send key in the
-        // transcript. `ctrl-f` is both "open the box" and "earlier match"; `esc` closes it.
+        // The find box is a layer over the transcript: while it is open its keys are looked up
+        // first, so `enter` is the earlier match there and the send key in the transcript.
+        // `ctrl-f` is both "open the box" and "earlier match"; `esc` closes it.
         if self.find.is_some() {
-            if let Some(action) = self.keymap.find_action_for(&key) {
-                return self.dispatch(action);
+            if let Some(action) = self.keymap.find_action_for(key) {
+                return Some(Input::Action(action));
             }
             match key.code {
-                KeyCode::Backspace => {
-                    self.find_backspace();
-                    return None;
-                }
+                KeyCode::Backspace => return Some(Input::FindBackspace),
                 KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.find_push(c);
-                    return None;
+                    return Some(Input::Char(c));
                 }
                 // PageUp/PageDown, Home/End and the arrows keep reaching the transcript
                 // layer, so the box does not trap navigation.
@@ -559,37 +788,46 @@ impl App {
             }
         }
         if let Some(action) = action {
-            return self.dispatch(action);
+            return Some(Input::Action(action));
         }
         // Any other plain character is text, never a binding.
         if let KeyCode::Char(c) = key.code
             && !key.modifiers.contains(KeyModifiers::CONTROL)
             && !key.modifiers.contains(KeyModifiers::ALT)
         {
-            self.input.insert_char(c);
+            return Some(Input::Char(c));
         }
         None
     }
 
+    /// The terminal's entry point: resolve the key, then [`App::update`]. A thin wrapper —
+    /// everything that changes state lives in `update`.
+    pub fn on_key(&mut self, key: KeyEvent) -> UpdateResult {
+        match self.key_input(&key) {
+            Some(input) => self.update(input),
+            None => UpdateResult::none(),
+        }
+    }
+
     /// Cancels a running turn, or quits when idle.
-    fn cancel_or_quit(&mut self) -> Option<Send> {
+    fn cancel_or_quit(&mut self) -> UpdateResult {
         if self.turn == TurnState::Running {
-            Some(Send::Cancel)
+            UpdateResult::quiet(Effect::Cancel)
         } else {
             self.quit = true;
-            Some(Send::Quit)
+            UpdateResult::quiet(Effect::Quit)
         }
     }
 
     /// Runs one keymap action. The default bindings reproduce the pre-keymap key table.
-    fn dispatch(&mut self, action: Action) -> Option<Send> {
+    fn update_action(&mut self, action: Action) -> UpdateResult {
         match action {
             Action::Send => {
                 let text = std::mem::take(&mut self.input).text();
                 self.history_cursor = None;
                 self.history_stash.clear();
                 if text.trim().is_empty() {
-                    return None;
+                    return UpdateResult::dirty();
                 }
                 // Every submitted line (messages and `//` escapes and `/…` commands) joins the
                 // session history; browsing edits never change it.
@@ -597,51 +835,41 @@ impl App {
                 let trimmed = text.trim();
                 // `//x` is the escape: send it as the ordinary message `/x`.
                 if let Some(escaped) = trimmed.strip_prefix("//") {
-                    let message = format!("/{escaped}");
-                    return if self.turn == TurnState::Running {
-                        Some(Send::Steer(message))
-                    } else {
-                        Some(Send::Followup(message))
-                    };
+                    return self.begin_send(format!("/{escaped}"));
                 }
                 // A `/…` line is a command: it never reaches the model or the journal.
                 if trimmed.starts_with('/') {
-                    self.run_slash_command(trimmed);
-                    return None;
+                    return self.run_slash_command(trimmed);
                 }
-                if self.turn == TurnState::Running {
-                    Some(Send::Steer(text))
-                } else {
-                    Some(Send::Followup(text))
-                }
+                self.begin_send(text)
             }
             Action::Newline => {
                 self.input.insert_char('\n');
-                None
+                UpdateResult::dirty()
             }
             Action::CursorLeft => {
                 self.input.left();
-                None
+                UpdateResult::dirty()
             }
             Action::CursorRight => {
                 self.input.right();
-                None
+                UpdateResult::dirty()
             }
             Action::WordLeft => {
                 self.input.word_left();
-                None
+                UpdateResult::dirty()
             }
             Action::WordRight => {
                 self.input.word_right();
-                None
+                UpdateResult::dirty()
             }
             Action::LineStart => {
                 self.input.line_start();
-                None
+                UpdateResult::dirty()
             }
             Action::LineEnd => {
                 self.input.line_end();
-                None
+                UpdateResult::dirty()
             }
             Action::HistoryPrev => {
                 if self.input.is_first_line() {
@@ -649,7 +877,7 @@ impl App {
                 } else {
                     self.input.up();
                 }
-                None
+                UpdateResult::dirty()
             }
             Action::HistoryNext => {
                 if self.input.is_last_line() {
@@ -657,21 +885,28 @@ impl App {
                 } else {
                     self.input.down();
                 }
-                None
+                UpdateResult::dirty()
             }
             Action::DeleteBefore => {
                 self.input.backspace();
-                None
+                UpdateResult::dirty()
             }
             Action::DeleteUnder => {
                 self.input.delete();
-                None
+                UpdateResult::dirty()
             }
-            // Tab: complete the `@` file reference at the cursor (Phase 4). On any other
-            // word it does nothing, so the key stays free for a future binding.
+            // Tab: complete the `@` file reference at the cursor (Phase 4). On any other word
+            // it does nothing, so the key stays free for a future binding. Reading the
+            // directory is the loop's job: this only asks for it.
             Action::Complete => {
-                self.complete_mention();
-                None
+                if self.workspace.is_none() {
+                    self.completion = None;
+                    return UpdateResult::dirty();
+                }
+                UpdateResult::quiet(Effect::CompleteMention {
+                    text: self.input.text(),
+                    cursor: self.input.cursor(),
+                })
             }
             // --- in-transcript search (Phase 5) ---
             // `find` opens the box; a second `find` (Ctrl-F by default) is the earlier match,
@@ -682,55 +917,55 @@ impl App {
                 } else {
                     self.find_open();
                 }
-                None
+                UpdateResult::dirty()
             }
             Action::FindPrev => {
                 self.find_prev();
-                None
+                UpdateResult::dirty()
             }
             Action::FindNext => {
                 self.find_next();
-                None
+                UpdateResult::dirty()
             }
             Action::FindClose => {
                 self.find_close();
-                None
+                UpdateResult::dirty()
             }
             Action::DeleteWord => {
                 self.input.delete_word();
-                None
+                UpdateResult::dirty()
             }
             Action::DeleteToLineStart => {
                 self.input.kill_to_line_start();
-                None
+                UpdateResult::dirty()
             }
             Action::DeleteToLineEnd => {
                 self.input.kill_to_line_end();
-                None
+                UpdateResult::dirty()
             }
             Action::ScrollPageUp => {
                 self.scroll_by(-(self.view_height.max(1) as i32));
-                None
+                UpdateResult::dirty()
             }
             Action::ScrollPageDown => {
                 self.scroll_by(self.view_height.max(1) as i32);
-                None
+                UpdateResult::dirty()
             }
             Action::ScrollLineUp => {
                 self.scroll_by(-1);
-                None
+                UpdateResult::dirty()
             }
             Action::ScrollLineDown => {
                 self.scroll_by(1);
-                None
+                UpdateResult::dirty()
             }
             Action::ScrollTop => {
                 self.set_scroll(0);
-                None
+                UpdateResult::dirty()
             }
             Action::ScrollBottom => {
                 self.scroll_to_bottom();
-                None
+                UpdateResult::dirty()
             }
             Action::Escape => {
                 // A non-empty input is cleared first (kept in the history, so `Up` finds it);
@@ -740,13 +975,153 @@ impl App {
                     self.history.push(text);
                     self.history_cursor = None;
                     self.history_stash.clear();
-                    None
+                    UpdateResult::dirty()
                 } else {
                     self.cancel_or_quit()
                 }
             }
             Action::Cancel => self.cancel_or_quit(),
         }
+    }
+
+    /// Starts a send. The `@` references are expanded by the loop first (an effect), and the
+    /// result becomes the follow-up or steer effect. Whether it steers is decided here, because
+    /// the turn state is app state.
+    fn begin_send(&mut self, text: String) -> UpdateResult {
+        let kind = if self.turn == TurnState::Running {
+            PendingSend::Steer
+        } else {
+            PendingSend::Followup
+        };
+        self.pending_expand = Some(PendingExpand {
+            kind,
+            text: text.clone(),
+        });
+        UpdateResult::effect(Effect::ExpandMentions { text })
+    }
+
+    /// The hardcoded answer to a `/memory` confirmation: `y` runs the command (through the
+    /// loop), `n`/`Esc` cancels it.
+    fn confirm_command(&mut self, confirmed: bool) -> UpdateResult {
+        let Some(pending) = self.pending_command.take() else {
+            return UpdateResult::none();
+        };
+        if !confirmed {
+            self.push_notice("cancelled");
+            return UpdateResult::dirty();
+        }
+        UpdateResult::effect(Effect::RunMemoryCommand {
+            command: pending.command,
+            confirmed: true,
+        })
+    }
+
+    /// ADR 0017: a failed turn is shown in the transcript; the session stays open.
+    fn apply_runtime_event(&mut self, event: &RuntimeEvent) -> UpdateResult {
+        if let RuntimeEvent::TurnFailed { message, .. } = event {
+            self.entries.push(Entry::new(
+                EntryKind::Notice,
+                format!("turn failed: {message}"),
+            ));
+            // ADR 0018's fallback: a recognizable context overflow gets one extra line, since
+            // automatic compaction did not keep the request inside the window. The host only
+            // has the text, so the prefix is what identifies it.
+            if radian_host::is_context_overflow(message) {
+                self.entries.push(Entry::new(
+                    EntryKind::Notice,
+                    radian_host::CONTEXT_OVERFLOW_HELP.to_string(),
+                ));
+            }
+            return UpdateResult::dirty();
+        }
+        UpdateResult::none()
+    }
+
+    /// The `@` expansion finished. On success the send effect is produced, with the notices the
+    /// expansion reported; on failure the original text goes back into the input box, so
+    /// nothing is sent and the user can fix the message.
+    fn mentions_expanded(&mut self, result: Result<Expansion, ExpandError>) -> UpdateResult {
+        let Some(pending) = self.pending_expand.take() else {
+            return UpdateResult::none();
+        };
+        match result {
+            Ok(expansion) => {
+                for warning in &expansion.warnings {
+                    self.entries
+                        .push(Entry::new(EntryKind::Notice, warning.clone()));
+                }
+                if !expansion.attached.is_empty() {
+                    self.entries.push(Entry::new(
+                        EntryKind::Notice,
+                        format!(
+                            "attached {} file(s): {}",
+                            expansion.attached.len(),
+                            expansion.attached.join(", ")
+                        ),
+                    ));
+                }
+                let effect = match pending.kind {
+                    PendingSend::Followup => Effect::SendFollowup(expansion.text),
+                    PendingSend::Steer => Effect::Steer(expansion.text),
+                };
+                UpdateResult::effect(effect)
+            }
+            Err(error) => {
+                self.entries
+                    .push(Entry::new(EntryKind::Notice, format!("not sent: {error}")));
+                self.restore_input(pending.text);
+                UpdateResult::dirty()
+            }
+        }
+    }
+
+    /// The `@` completion finished: apply it, or clear the list when there is nothing.
+    fn completion_ready(&mut self, completion: Option<Completion>) -> UpdateResult {
+        match completion {
+            Some(completion) if !completion.candidates.is_empty() => {
+                self.apply_completion(completion);
+            }
+            _ => self.completion = None,
+        }
+        UpdateResult::dirty()
+    }
+
+    /// A `/memory` command finished: show its output, or arm the confirmation prompt.
+    fn memory_command_done(&mut self, result: MemoryResult) -> UpdateResult {
+        match result {
+            MemoryResult::Output(lines) => {
+                for line in lines {
+                    self.push_notice(line);
+                }
+            }
+            MemoryResult::NeedsConfirmation { command, prompt } => {
+                self.entries
+                    .push(Entry::new(EntryKind::Notice, format!("{prompt} [y/N]")));
+                self.pending_command = Some(PendingCommand { command, prompt });
+            }
+            MemoryResult::Failed(message) => self.push_notice(message),
+        }
+        UpdateResult::dirty()
+    }
+
+    /// A manual `/compact` finished (ADR 0018).
+    fn compact_done(&mut self, result: Result<CompactionOutcome, String>) -> UpdateResult {
+        match result {
+            Ok(CompactionOutcome::Compacted {
+                tokens_before,
+                tokens_after,
+                ..
+            }) => {
+                self.push_notice(format!(
+                    "compaction: {tokens_before} → {tokens_after} tokens"
+                ));
+            }
+            Ok(CompactionOutcome::NothingToCompact) => {
+                self.push_notice("compaction: nothing to compact");
+            }
+            Err(message) => self.push_notice(format!("compaction failed: {message}")),
+        }
+        UpdateResult::dirty()
     }
 
     /// True while the input box is editable: no approval or command prompt is up, so the
@@ -802,55 +1177,43 @@ impl App {
         }
     }
 
-    /// Runs one `/…` line: the notices become transcript entries, and a command that writes
-    /// arms `pending_command` instead of running. The line is not sent anywhere.
-    fn run_slash_command(&mut self, line: &str) {
-        match command::dispatch(line, self.memory.as_ref()) {
+    /// Runs one `/…` line. Parsing is pure; everything that touches the world becomes an
+    /// effect, and its result comes back as another [`Input`]. The line is not sent anywhere.
+    fn run_slash_command(&mut self, line: &str) -> UpdateResult {
+        match command::parse(line, self.memory_enabled) {
             command::Outcome::Notices(notices) => {
                 for notice in notices {
-                    self.entries.push(Entry::new(EntryKind::Notice, notice));
+                    self.push_notice(notice);
                 }
+                UpdateResult::dirty()
             }
-            command::Outcome::Confirm(pending) => {
-                self.entries.push(Entry::new(
-                    EntryKind::Notice,
-                    format!("{} [y/N]", pending.prompt),
-                ));
-                self.pending_command = Some(pending);
-            }
-            // `/compact` is asynchronous: the event loop runs it on the runtime and pushes the
-            // result as a notice when it finishes.
+            command::Outcome::Memory(command) => UpdateResult::effect(Effect::RunMemoryCommand {
+                command,
+                confirmed: false,
+            }),
+            // `/compact` is asynchronous: the loop runs it on the runtime between turns and the
+            // result comes back as `Input::CompactDone`.
             command::Outcome::Compact(instructions) => {
-                self.pending_compact = Some(instructions);
+                UpdateResult::effect(Effect::Compact { instructions })
             }
             command::Outcome::Sessions(query) => {
-                self.pending_session = Some(command::SessionOutcome::List(query));
+                UpdateResult::effect(Effect::Session(command::SessionOutcome::List(query)))
             }
             command::Outcome::Export(request) => {
-                self.pending_session = Some(command::SessionOutcome::Export(request));
+                UpdateResult::effect(Effect::Session(command::SessionOutcome::Export(request)))
             }
             command::Outcome::Fork => {
-                self.pending_session = Some(command::SessionOutcome::Fork);
-            }
-            // `dispatch` only returns `Message` for an empty token list, already rejected.
-            command::Outcome::Message => {}
-        }
-    }
-
-    /// Runs a confirmed `/memory` command and shows its output.
-    fn run_confirmed(&mut self, pending: PendingCommand) {
-        let json = pending.command.json();
-        let Some(service) = self.memory.as_ref() else {
-            self.push_notice("memory is disabled (no RADIAN_HOME or HOME)");
-            return;
-        };
-        match radian_host::memory::commands::execute(service, pending.command, true, json) {
-            Ok(output) => {
-                for notice in command::output_notices(&output) {
-                    self.entries.push(Entry::new(EntryKind::Notice, notice));
+                // ADR 0022 §1: fork only when the session is idle. The decision is app state,
+                // so it is made here rather than in the loop.
+                if self.turn == TurnState::Running {
+                    self.push_notice(
+                        "finish the current turn before forking (`/fork` needs an idle session)",
+                    );
+                    return UpdateResult::dirty();
                 }
+                UpdateResult::effect(Effect::Session(command::SessionOutcome::Fork))
             }
-            Err(error) => self.push_notice(error.message),
+            command::Outcome::Message => UpdateResult::none(),
         }
     }
 
@@ -861,7 +1224,9 @@ impl App {
 
     /// Applies a live event. Deltas build `live` entries; the committed message
     /// (`TranscriptAppended`) replaces them, so a dropped delta can never leave a duplicate.
-    pub fn apply_event(&mut self, event: &AgentEvent) {
+    /// Returns the effects the event implies (clearing an approval prompt abandons its reply
+    /// channel, which the loop owns).
+    pub fn apply_event(&mut self, event: &AgentEvent) -> Vec<Effect> {
         match event {
             AgentEvent::TurnStarted => self.turn = TurnState::Running,
             // ADR 0018: the request carries its projection and budget `B`, for the status bar.
@@ -916,12 +1281,19 @@ impl App {
                 };
                 self.note = None;
                 // The turn is over, so no approval can still be waiting: a cancelled turn
-                // already resolved the hook's `ask` as a denial. Dropping the prompt (and its
-                // reply channel) leaves nothing behind.
-                self.pending_approval = None;
+                // already resolved the hook's `ask` as a denial. Clearing the prompt must also
+                // drop the reply channel — the loop owns it, so it is told to abandon the
+                // request (a dropped channel is what the permission layer sees as abandoned).
+                return match self.pending_approval.take() {
+                    Some(request) => vec![Effect::AbandonApproval {
+                        request_id: request.request_id,
+                    }],
+                    None => Vec::new(),
+                };
             }
             _ => {}
         }
+        Vec::new()
     }
 
     /// Adds one provider-reported usage to the session totals. A field the provider did not
@@ -1015,31 +1387,15 @@ impl App {
         self.workspace = Some(workspace.into());
     }
 
-    /// `Tab` on an `@` word (Phase 4):
+    /// Applies one `@` completion (Phase 4):
     ///
     /// * one candidate: insert it; a directory keeps its trailing `/`, a file gets a trailing
     ///   space so the next word can be typed;
     /// * several: extend the word to their longest common prefix; a second `Tab` already at
-    ///   that prefix shows the candidate list (the renderer draws `self.completion`);
-    /// * none: leave the text alone;
-    /// * the cursor is not on an `@` word: do nothing.
+    ///   that prefix shows the candidate list (the renderer draws `self.completion`).
     ///
-    /// Only the text between `@` and the cursor is replaced; text after the cursor is kept.
-    fn complete_mention(&mut self) {
-        let Some(workspace) = self.workspace.clone() else {
-            self.completion = None;
-            return;
-        };
-        let Some(completion) =
-            crate::mention::complete(&self.input.text(), self.input.cursor(), &workspace)
-        else {
-            self.completion = None;
-            return;
-        };
-        if completion.candidates.is_empty() {
-            self.completion = None;
-            return;
-        }
+    /// Reading the directory happens in the loop; this is only the state change.
+    fn apply_completion(&mut self, completion: Completion) {
         if completion.candidates.len() == 1 {
             let candidate = &completion.candidates[0];
             let insert = if candidate.ends_with('/') {

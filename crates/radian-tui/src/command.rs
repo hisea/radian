@@ -4,11 +4,10 @@
 //! model, the transcript or the session journal. `//…` is the escape — one `/` is dropped and
 //! the rest is sent as an ordinary message.
 //!
-//! [`dispatch`] parses the line and, for `/memory`, runs the **same** `radian-host::memory`
-//! command set `agent memory` uses (one clap grammar, one executor). Adding a command is one
-//! arm here.
+//! [`parse`] only **parses**: running a command is an effect the event loop executes, so the
+//! app stays pure (ADR 0023 U3). `/memory` runs the same `radian-host::memory` command set
+//! `agent memory` uses (one clap grammar, one executor). Adding a command is one arm here.
 
-use radian_host::memory::MemoryService;
 use radian_host::memory::commands::{self, CommandOutput, MemoryCommand};
 
 /// The `/help` text. Kept short; the full grammar is `radian_host::memory::commands`.
@@ -24,20 +23,23 @@ pub const HELP: &str = "\
 //…                   send a message that starts with `/`";
 
 /// A memory command waiting for the user's confirmation. Only the destructive commands
-/// (`forget`, `purge`, `split`, `merge`) ask (ADR 0021 D7); the rest run immediately.
+/// (`forget`, `purge`, `split`, `merge`) ask (ADR 0021 D7); the rest run immediately. `update`
+/// builds one when the executor reports [`radian_host::memory::commands::CommandOutput::
+/// needs_confirmation`].
 #[derive(Debug)]
 pub struct PendingCommand {
     pub command: MemoryCommand,
     pub prompt: String,
 }
 
-/// What one submitted `/…` line meant.
+/// What one submitted `/…` line meant. Parsing only: running the command is the loop's job
+/// (ADR 0023 U3), and whether a write needs confirmation is the executor's answer.
 #[derive(Debug)]
 pub enum Outcome {
     /// Show these lines as notices and keep the line out of the conversation.
     Notices(Vec<String>),
-    /// The command writes and must be confirmed before it runs.
-    Confirm(PendingCommand),
+    /// A `/memory` command to run through the shared executor.
+    Memory(MemoryCommand),
     /// A manual `/compact` (ADR 0018): the host runs it on the runtime, between turns, and
     /// shows the outcome as a notice. `Some(instructions)` is the optional note.
     Compact(Option<String>),
@@ -69,16 +71,17 @@ pub enum SessionOutcome {
     Fork,
 }
 
-/// Interprets a trimmed line that starts with `/`. `memory` is the host's service, or `None`
-/// when this process has no memory root.
-pub fn dispatch(line: &str, memory: Option<&MemoryService>) -> Outcome {
+/// Interprets a trimmed line that starts with `/`. `memory_enabled` says whether this process
+/// has a memory root; without one `/memory` is refused with a notice. Pure: it never runs a
+/// command (ADR 0023 U3).
+pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
     let tokens = match shlex::split(line) {
         Some(tokens) => tokens,
         None => return Outcome::Notices(vec![format!("unbalanced quotes in {line:?}")]),
     };
     match tokens.first().map(String::as_str) {
         Some("/help") => Outcome::Notices(vec![HELP.to_owned()]),
-        Some("/memory") => memory_command(&tokens[1..], memory),
+        Some("/memory") => memory_command(&tokens[1..], memory_enabled),
         Some("/compact") => Outcome::Compact(compact_instructions(&tokens[1..])),
         Some("/sessions") => Outcome::Sessions(sessions_query(&tokens[1..])),
         Some("/export") => export_request(&tokens[1..]),
@@ -129,24 +132,16 @@ fn export_request(args: &[String]) -> Outcome {
     })
 }
 
-fn memory_command(args: &[String], memory: Option<&MemoryService>) -> Outcome {
-    let Some(service) = memory else {
+fn memory_command(args: &[String], memory_enabled: bool) -> Outcome {
+    if !memory_enabled {
         return Outcome::Notices(vec![
             "memory is disabled (no RADIAN_HOME or HOME)".to_owned(),
         ]);
-    };
-    let command = match commands::parse_args(args) {
-        Ok(command) => command,
+    }
+    match commands::parse_args(args) {
+        Ok(command) => Outcome::Memory(command),
         // clap's own error/help text is shown as a notice; the program does not exit.
-        Err(error) => return Outcome::Notices(vec![error.to_string().trim_end().to_owned()]),
-    };
-    let json = command.json();
-    match commands::execute(service, command.clone(), false, json) {
-        Ok(output) => match output.needs_confirmation {
-            Some(prompt) => Outcome::Confirm(PendingCommand { command, prompt }),
-            None => Outcome::Notices(output_notices(&output)),
-        },
-        Err(error) => Outcome::Notices(vec![error.message]),
+        Err(error) => Outcome::Notices(vec![error.to_string().trim_end().to_owned()]),
     }
 }
 
@@ -167,80 +162,54 @@ pub fn output_notices(output: &CommandOutput) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use radian_host::memory::{MemoryService, ScopeSelection, WriteScope};
-    use radian_memory::Kind;
-    use std::path::PathBuf;
-
-    fn scratch(label: &str) -> PathBuf {
-        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let dir =
-            std::env::temp_dir().join(format!("radian-tui-cmd-{}-{label}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    fn service(label: &str) -> (PathBuf, MemoryService) {
-        let dir = scratch(label);
-        let ws = dir.join("ws");
-        std::fs::create_dir_all(&ws).unwrap();
-        let service = MemoryService::open(&ws, dir.join("memory"));
-        service.create_project().unwrap();
-        (dir, service)
-    }
 
     #[test]
     fn help_and_unknown_commands_are_notices() {
-        match dispatch("/help", None) {
+        match parse("/help", false) {
             Outcome::Notices(notices) => assert!(notices[0].contains("/memory"), "{notices:?}"),
             other => panic!("expected notices, got {other:?}"),
         }
-        match dispatch("/nope", None) {
+        match parse("/nope", false) {
             Outcome::Notices(notices) => {
                 assert!(notices[0].contains("unknown command /nope"), "{notices:?}")
             }
             other => panic!("expected notices, got {other:?}"),
         }
-        match dispatch("/memory add \"unbalanced", None) {
+        match parse("/memory add \"unbalanced", true) {
             Outcome::Notices(notices) => assert!(notices[0].contains("unbalanced quotes")),
             other => panic!("expected a quote error, got {other:?}"),
         }
     }
 
+    /// Parsing only: the command comes back untouched, and whether it needs confirmation is
+    /// the executor's answer (ADR 0023 U3), not this layer's.
     #[test]
-    fn memory_writes_become_a_confirmation() {
-        let (dir, service) = service("confirm");
-        let record = service
-            .add(WriteScope::Project, Kind::Fact, None, "keep".into())
-            .unwrap();
-        let line = format!("/memory forget {}", record.id);
-        match dispatch(&line, Some(&service)) {
-            Outcome::Confirm(pending) => assert!(pending.prompt.contains("forget")),
-            other => panic!("expected a confirmation, got {other:?}"),
+    fn a_memory_write_parses_to_a_command_without_running_it() {
+        match parse("/memory forget abc", true) {
+            Outcome::Memory(command) => {
+                let debug = format!("{command:?}");
+                assert!(debug.contains("Forget"), "{debug}");
+                assert!(debug.contains("abc"), "{debug}");
+            }
+            other => panic!("expected a memory command, got {other:?}"),
         }
-        // Nothing was written by the dispatch itself.
-        assert_eq!(
-            service
-                .list(ScopeSelection::ProjectOnly, false)
-                .unwrap()
-                .len(),
-            1
-        );
-        let _ = std::fs::remove_dir_all(&dir);
+        // A command that does not parse is a notice, not a panic and not an exit.
+        match parse("/memory forget", true) {
+            Outcome::Notices(notices) => {
+                assert!(!notices.is_empty());
+            }
+            other => panic!("expected a usage notice, got {other:?}"),
+        }
     }
 
     #[test]
     fn sessions_and_export_parse() {
-        assert!(matches!(
-            dispatch("/sessions", None),
-            Outcome::Sessions(None)
-        ));
-        match dispatch("/sessions parser bug", None) {
+        assert!(matches!(parse("/sessions", false), Outcome::Sessions(None)));
+        match parse("/sessions parser bug", false) {
             Outcome::Sessions(Some(query)) => assert_eq!(query, "parser bug"),
             other => panic!("expected a sessions query, got {other:?}"),
         }
-        match dispatch("/export", None) {
+        match parse("/export", false) {
             Outcome::Export(request) => {
                 assert_eq!(request.format, radian_host::Format::Markdown);
                 assert!(request.path.is_none());
@@ -248,7 +217,7 @@ mod tests {
             }
             other => panic!("expected an export request, got {other:?}"),
         }
-        match dispatch("/export json out.json --force", None) {
+        match parse("/export json out.json --force", false) {
             Outcome::Export(request) => {
                 assert_eq!(request.format, radian_host::Format::Json);
                 assert_eq!(request.path.as_deref(), Some("out.json"));
@@ -257,14 +226,14 @@ mod tests {
             other => panic!("expected an export request, got {other:?}"),
         }
         // A bare path is the path, not the format.
-        match dispatch("/export result.txt", None) {
+        match parse("/export result.txt", false) {
             Outcome::Export(request) => {
                 assert_eq!(request.format, radian_host::Format::Markdown);
                 assert_eq!(request.path.as_deref(), Some("result.txt"));
             }
             other => panic!("expected an export request, got {other:?}"),
         }
-        match dispatch("/export a b", None) {
+        match parse("/export a b", false) {
             Outcome::Notices(notices) => {
                 assert!(notices[0].contains("unexpected extra path"), "{notices:?}")
             }
@@ -278,16 +247,16 @@ mod tests {
 
     #[test]
     fn compact_is_a_control_request_with_optional_instructions() {
-        assert!(matches!(dispatch("/compact", None), Outcome::Compact(None)));
-        match dispatch("/compact focus on the parser", None) {
+        assert!(matches!(parse("/compact", false), Outcome::Compact(None)));
+        match parse("/compact focus on the parser", false) {
             Outcome::Compact(Some(note)) => assert_eq!(note, "focus on the parser"),
             other => panic!("expected a compact request, got {other:?}"),
         }
     }
 
     #[test]
-    fn memory_is_disabled_without_a_service() {
-        match dispatch("/memory list", None) {
+    fn memory_is_disabled_without_a_root() {
+        match parse("/memory list", false) {
             Outcome::Notices(notices) => assert!(notices[0].contains("disabled")),
             other => panic!("expected a notice, got {other:?}"),
         }
