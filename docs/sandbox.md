@@ -186,6 +186,9 @@ auto-maintenance**（git 2.55 会跑；macOS 的 2.53 不跑），与本切片�
 **启动开销**（VM 本机重测，20 次）：裸 `true` 中位 0.93 ms，沙箱内 8.73 ms，**~7.8 ms**（与旧值
 ~8.0 ms 一致）。
 
+**2026-10-13 ADR 0020 追加**：矩阵新增 `radian_home` 组 5 条（sessions/memory 拒，config/cache
+可，`--session-dir` 移动目录拒）。同一 VM 上重跑 **39/39 PASS**（macOS 本机同样 39/39）。
+
 ## 未验证 / 已知边界
 
 - **只在 macOS 27.0.1（arm64）与一台 aarch64 Arch ARM VM（内核 7.2.6、bwrap 0.12.0、git 2.55.0）
