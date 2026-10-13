@@ -2906,3 +2906,187 @@ async fn the_stop_is_durable_and_a_resume_keeps_the_history() {
         "the resumed request lacks the old input: {resumed}"
     );
 }
+
+/// Like [`spawn_agent`], but uses a caller-owned session directory, so a test can assert
+/// that a failed start left it empty (dogfooding D2).
+fn spawn_agent_in(session_dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Child {
+    Command::new(agent_bin())
+        .args(args)
+        .env_remove("OPENAI_API_KEY")
+        .env("RADIAN_SESSION_DIR", session_dir)
+        .envs(envs.iter().copied())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn agent")
+}
+
+fn assert_session_dir_empty(dir: &Path) {
+    let names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names.is_empty(),
+        "a failed start left files behind: {names:?}"
+    );
+}
+
+/// Acceptance 1 (CLI): a `--workspace` that does not exist is a workspace error that names
+/// the path, does not blame the sandbox, does not suggest `full-access`, and creates no
+/// session file (dogfooding D1/D2).
+#[tokio::test]
+async fn a_missing_workspace_is_a_workspace_error_and_leaves_no_session() {
+    let dir = scratch("missing-ws");
+    let session_dir = dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let missing = dir.join("no-such-workspace");
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent_in(
+            &session_dir,
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                "http://127.0.0.1:9/v1",
+                "--workspace",
+                missing.to_str().unwrap(),
+                "--session-dir",
+                session_dir.to_str().unwrap(),
+                "--session-id",
+                "missing-ws",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains(missing.to_str().unwrap()), "{stderr}");
+    assert!(
+        !stderr.contains("sandbox backend"),
+        "a bad workspace must not blame the sandbox: {stderr}"
+    );
+    assert!(
+        !stderr.contains("full-access"),
+        "a bad workspace must not suggest full-access: {stderr}"
+    );
+    assert!(stdout.is_empty(), "{stdout}");
+    assert_session_dir_empty(&session_dir);
+}
+
+/// Acceptance 2 and 4 (CLI): a failed sandbox probe refuses, leaves no session file, and the
+/// same `--session-id` with corrected parameters then creates the session (dogfooding D2).
+#[tokio::test]
+async fn a_failed_probe_leaves_no_session_and_the_retry_creates_one() {
+    let dir = scratch("probe-no-session");
+    let session_dir = dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("done")]).await;
+    let base_url = server.base_url.clone();
+    let ws_str = ws.to_str().unwrap().to_owned();
+    let sessions = session_dir.to_str().unwrap().to_owned();
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent_in(
+            &session_dir,
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &base_url,
+                "--workspace",
+                &ws_str,
+                "--yes",
+                "-p",
+                "hi",
+                "--session-dir",
+                &sessions,
+                "--session-id",
+                "retry",
+            ],
+            &[("RADIAN_SANDBOX_PROBE_FAIL", "1")],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("sandbox backend is unavailable") || stderr.contains("cannot be enforced"),
+        "{stderr}"
+    );
+    assert_session_dir_empty(&session_dir);
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent_in(
+            &session_dir,
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &base_url,
+                "--workspace",
+                &ws_str,
+                "--yes",
+                "-p",
+                "hi",
+                "--session-dir",
+                &sessions,
+                "--session-id",
+                "retry",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        session_dir.join("retry.jsonl").exists(),
+        "the corrected retry created the session"
+    );
+}
+
+/// Acceptance 3 (CLI): a malformed `--mcp-config` fails before the session file exists.
+#[tokio::test]
+async fn a_bad_mcp_config_leaves_no_session() {
+    let dir = scratch("bad-mcp");
+    let session_dir = dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let bad = write_file(&dir, "bad.json", "{\"servers\": [], \"bogus\": 1}");
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent_in(
+            &session_dir,
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                "http://127.0.0.1:9/v1",
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--mcp-config",
+                bad.to_str().unwrap(),
+                "--session-dir",
+                session_dir.to_str().unwrap(),
+                "--session-id",
+                "bad-mcp",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains(bad.to_str().unwrap()), "{stderr}");
+    assert_session_dir_empty(&session_dir);
+}

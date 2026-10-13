@@ -2,6 +2,7 @@
 //! guard that restores all of them on every exit path.
 
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use ratatui::crossterm::cursor::{Hide, Show};
@@ -21,7 +22,12 @@ impl TtyGuard {
     pub fn enter() -> io::Result<Self> {
         enable_raw_mode()?;
         let mut out = io::stdout();
-        execute!(out, EnterAlternateScreen, EnableBracketedPaste, Hide)?;
+        // If entering the alternate screen fails, put the terminal back before returning:
+        // there is no guard yet for `Drop` to restore (dogfooding D4's exit-path audit).
+        if let Err(error) = execute!(out, EnterAlternateScreen, EnableBracketedPaste, Hide) {
+            let _ = disable_raw_mode();
+            return Err(error);
+        }
         Ok(Self { active: true })
     }
 
@@ -48,13 +54,89 @@ impl Drop for TtyGuard {
     }
 }
 
-/// The most recent panic message, so `main` can print it after the alternate screen is gone
+/// The most recent panic summary, so `main` can print it after the alternate screen is gone
 /// (a panic on a spawned task writes into the alternate screen, where nobody will see it).
 static LAST_PANIC: Mutex<Option<String>> = Mutex::new(None);
 
-/// The message of the last panic, if any.
+/// Where a panic is also appended, and the values that must not appear there. Set once the
+/// session id and directory are known (dogfooding D4).
+static PANIC_LOG: Mutex<Option<PanicLog>> = Mutex::new(None);
+
+struct PanicLog {
+    path: PathBuf,
+    /// Header values and the API key: the panic text must not carry them into the log.
+    secrets: Vec<String>,
+}
+
+/// The message of the last panic, if any, collapsed to one line (the terminal gets one line;
+/// the multi-line detail lives in the panic log).
+///
+/// The summary is already redacted because [`record_panic`] stored the redacted text.
 pub fn last_panic() -> Option<String> {
     LAST_PANIC.lock().ok().and_then(|slot| slot.clone())
+}
+
+/// Records where a panic should also be written. Called once per session, before the
+/// terminal is entered. `secrets` (header values, the API key) are redacted out of both the
+/// stored summary and the log line.
+pub fn set_panic_log(path: PathBuf, secrets: Vec<String>) {
+    if let Ok(mut slot) = PANIC_LOG.lock() {
+        *slot = Some(PanicLog { path, secrets });
+    }
+}
+
+/// The first line of a panic payload, with the values in `secrets` replaced. One line is
+/// what the normal screen gets; the full text goes to the log.
+fn redact(text: &str, secrets: &[String]) -> String {
+    let mut out = text.to_owned();
+    for secret in secrets {
+        if !secret.is_empty() {
+            out = out.replace(secret.as_str(), "<redacted>");
+        }
+    }
+    out
+}
+
+/// Records the panic summary (for the exit line) and appends a timestamped line to the panic
+/// log, if one was set. Never panics itself: a panic hook that panicked would abort.
+fn record_panic(info: &std::panic::PanicHookInfo<'_>) {
+    let thread = std::thread::current()
+        .name()
+        .unwrap_or("<unnamed>")
+        .to_owned();
+    let full = info.to_string();
+    let (path, secrets) = match PANIC_LOG.lock() {
+        Ok(slot) => match slot.as_ref() {
+            Some(log) => (Some(log.path.clone()), log.secrets.clone()),
+            None => (None, Vec::new()),
+        },
+        Err(_) => (None, Vec::new()),
+    };
+    let redacted = redact(&full, &secrets);
+    // The exit line is one line: keep the first line of the panic report.
+    let summary = redacted.lines().next().unwrap_or("").to_owned();
+    if let Ok(mut slot) = LAST_PANIC.lock() {
+        *slot = Some(summary);
+    }
+    if let Some(path) = path {
+        let line = format!(
+            "{} thread={} {}\n",
+            radian_session::now_utc(),
+            thread,
+            redacted.replace('\n', " ")
+        );
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = file.write_all(line.as_bytes());
+            let _ = file.flush();
+        }
+    }
 }
 
 /// Installs a panic hook that restores the terminal **only when the panicking thread is the
@@ -71,9 +153,7 @@ pub fn last_panic() -> Option<String> {
 pub fn install_panic_hook() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        if let Ok(mut slot) = LAST_PANIC.lock() {
-            *slot = Some(info.to_string());
-        }
+        record_panic(info);
         if std::thread::current().name() == Some("main") {
             let mut guard = TtyGuard { active: true };
             guard.restore();

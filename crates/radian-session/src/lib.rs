@@ -37,4 +37,4 @@ pub use reader::{EventData, Session, SessionEvent};
 pub use runtime::{
     InboxLane, PermissionApprover, PermissionDecision, RuntimeEvent, TurnOutcome, TurnReason,
 };
-pub use writer::{SessionCreatedData, SessionJournal, WriteError};
+pub use writer::{SessionCreatedData, SessionJournal, WriteError, now_utc};

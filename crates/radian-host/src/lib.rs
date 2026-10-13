@@ -11,8 +11,10 @@ mod headers;
 mod mcp;
 mod session_id;
 mod tools;
+mod workspace;
 
 pub use headers::{SESSION_PLACEHOLDER, parse_headers};
 pub use mcp::load_mcp_config;
 pub use session_id::{generate_session_id, validate_session_id};
 pub use tools::{HostSession, HostTools, merge_tool_specs};
+pub use workspace::resolve_workspace;
