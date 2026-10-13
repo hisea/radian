@@ -36,8 +36,8 @@ Two more binaries exist but are not part of the product surface: `agent-extensio
 
 ## Status (2026-10-13)
 
-- **The `~/.radian/` layout (ADR 0020)** is implemented: `config/`, `cache/` and `memory/` are
-  readable by the sandbox; `sessions/` and `memory/` are denied. `RADIAN_HOME` overrides the
+- **The `~/.radian/` layout (ADR 0020)** is implemented: `config/` and `cache/` are readable
+  by the sandbox; `sessions/` and `memory/` are denied. `RADIAN_HOME` overrides the
   root. (`--session-dir` / `RADIAN_SESSION_DIR` still override only the sessions directory.)
 - **Memory M1 (ADR 0021)** is implemented: the `agent memory` CLI commands, the TUI `/memory`
   slash command (same commands), the agent's `memory_search` / `memory_get` / `memory_save` /
@@ -186,8 +186,7 @@ never reached by forgetting a flag.
   Write these at the subcommand level, never at a bare program name.
 
 Common exit codes: `agent` uses 0 (turn completed), 1 (turn failed), 2 (usage/setup error,
-including a failed sandbox probe), 3 (the context-budget guard stopped a `-p` turn), 130
-(forced exit after a second Ctrl-C). `radian-tui` uses 0 (clean quit), 1 (startup refusal or a
+including a failed sandbox probe) and 130 (forced exit after a second Ctrl-C). `radian-tui` uses 0 (clean quit), 1 (startup refusal or a
 driver error), 101 (the app panicked), and 128 + the signal number on SIGTERM/SIGHUP.
 
 ## Docs
