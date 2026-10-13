@@ -222,3 +222,17 @@ Base: `433cdce` · 一次性检出 `/tmp/s1q-mut`（detached，跑完删除）·
 | P5 | 顺序改为 LIFO（`push_front`） | `pending::two_sessions_keep_arrival_order_and_do_not_overwrite_each_other` | ✅ failed |
 
 5/5 抓住。P1/P3 起初漏过：原测试在 `answer` 前先调了 `len()`，把放弃的元素清掉，于是走了"id 不存在"的 Late 分支、也没覆盖 `len` 清理；改成先 `answer`（走 `send` 失败路径）、再加一个"drop 后不 answer 只 `len`"的元素后抓住。
+
+## ADR 0024：问题的待决队列（2026-10-13）
+
+Base `4866944` · 一次性检出 `/tmp/ask-mut`（detached，跑完删除）· 独立 target ·
+`cargo test -p radian-host --test pending_questions` · 变异后从副本还原。
+审批侧的 `tests/pending.rs` 一行未改、照常通过（`QueuedApprover` 加了默认类型参数）。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| A7 | `abort_session_all` 把问题以 `Ok(答案)` 而不是 `Err(PromptError::Gone)` 结算 | ✅ 抓住 | `a_closed_session_aborts_its_questions_with_prompter_gone`、`a_shared_queue_session_close_aborts_both_kinds`、`a_late_answer_is_ignored` |
+| A8 | `abort_session_all` 去掉 origin 判断（中止所有 session） | ✅ 抓住 | `a_closed_session_aborts_its_questions_with_prompter_gone`（另一个 session 的问题被误中止） |
+
+2/2 抓住。A7 说明"session 关闭 → 问题得到 `prompter_gone`"这条映射有测试钉住；
+A8 说明共享队列的按 session 隔离没有因为两种请求共用一条队列而丢失。

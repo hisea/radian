@@ -7,6 +7,8 @@ description = "Built-in coding tools (read/write/patch/list + read-only git) wit
 
 [dependencies]
 agent-core = { path = "../agent-core" }
+# `Prompter::ask` returns a boxed future (ADR 0024 Q1), the same shape as `Approver::decide`.
+futures-util.workspace = true
 # `shell` runs only through this crate's backends; it is never invoked without one.
 radian-sandbox = { path = "../radian-sandbox" }
 serde.workspace = true
@@ -21,3 +23,7 @@ libc = "0.2"
 [target.'cfg(unix)'.dev-dependencies]
 # The shell tests check that a killed process group has no members left.
 libc = "0.2"
+
+[dev-dependencies]
+# The `ask_user` journal test needs the journal test double (feature `testing`).
+agent-core = { path = "../agent-core", features = ["testing"] }

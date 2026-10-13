@@ -2130,6 +2130,7 @@ name = "radian-coding"
 version = "0.1.0"
 dependencies = [
  "agent-core",
+ "futures-util",
  "libc",
  "radian-sandbox",
  "serde",

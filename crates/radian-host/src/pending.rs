@@ -1,10 +1,11 @@
 //! The host-side pending-request queue (ADR 0023 U7).
 //!
-//! An approval (today) and a structured question (ADR 0024 Q1/Q4, later) are both "the model
-//! is waiting for the human". The queue keeps them in **arrival order**, each tagged with the
-//! session that asked, and hands the UI one request at a time. It is synchronous and
-//! thread-safe: the permission layer's `Approver` pushes from a tokio worker, the UI reads the
-//! head from its own thread.
+//! An approval and a structured question (ADR 0024 Q1/Q4) are both "the model is waiting for
+//! the human". The queue keeps them in **arrival order**, each tagged with the session that
+//! asked, and hands the UI one request at a time. It is synchronous and thread-safe: the
+//! permission layer's `Approver` and the tool's `Prompter` push from a tokio worker, the UI
+//! reads the head from its own thread. [`PendingRequest`]/[`PendingResponse`] are what let one
+//! queue hold both kinds.
 //!
 //! # Lifecycle
 //!
@@ -15,7 +16,7 @@
 //! | a request arrives | `push` appends it, returns the waiting end; the arrival order is the display order | the queue |
 //! | the user answers the head | `answer(id, resp)` completes that element and removes it | the UI |
 //! | the wait gives up (turn cancelled, UI abandoned it) | the receiver is dropped; `head`/`len` drop the element the next time they run, and `PendingAnswer::drop` wakes the UI immediately | the permission layer + the queue |
-//! | the session closes with requests pending | `abort_session` completes them all with the fail-closed denial and removes them | the host |
+//! | the session closes with requests pending | `abort_session` (approval-only queue) denies; `abort_session_all` (shared queue) denies approvals and gives questions `PromptError::Gone` | the host |
 //! | the UI exits / the host shuts down | the queue is dropped, so every remaining waiting end sees the sender dropped ("abandoned"), exactly as before | `Drop` |
 //! | a late answer (the wait is gone, or the element was aborted) | `answer` returns [`Answered::Late`] and changes nothing | the queue |
 //! | an answer for an id that was never issued | `answer` returns [`Answered::Unknown`] | the queue |
@@ -32,8 +33,26 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context as TaskContext, Poll};
 
 use futures_util::future::BoxFuture;
+use radian_coding::{PromptError, Prompter, QuestionAnswer, QuestionRequest};
 use radian_permissions::{ApprovalError, ApprovalOutcome, ApprovalRequest, Approver};
 use tokio::sync::{oneshot, watch};
+
+/// One pending request: an approval or a structured question. ADR 0023 U7 gives approvals and
+/// questions **one** queue so the UI shows them in a single arrival order; this enum is what
+/// lets one `PendingQueue` hold both without either side knowing about the other's type.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PendingRequest {
+    Approval(ApprovalRequest),
+    Question(QuestionRequest),
+}
+
+/// The answer to a [`PendingRequest`]. A question's answer is itself a `Result`: a decline or
+/// a gone prompter is an outcome of asking, not a panic (ADR 0024 Q4).
+#[derive(Debug, Clone, PartialEq)]
+pub enum PendingResponse {
+    Approval(ApprovalOutcome),
+    Question(Result<QuestionAnswer, PromptError>),
+}
 
 /// The request the UI should show: its id, the session that asked, and the request itself.
 #[derive(Debug, Clone, PartialEq)]
@@ -296,6 +315,43 @@ impl<Req: Clone, Resp> PendingQueue<Req, Resp> {
     }
 }
 
+impl PendingQueue<PendingRequest, PendingResponse> {
+    /// Session close (ADR 0023 U7): completes **every** pending request of `origin` with its
+    /// kind's abort outcome and removes them. An approval is denied (fail-closed, ADR 0012); a
+    /// question gets [`PromptError::Gone`], which the tool turns into the `prompter_gone`
+    /// failure. Other sessions are untouched. Returns how many were completed.
+    pub fn abort_session_all(&self, origin: &str) -> usize {
+        let mut aborted = 0usize;
+        let mut remaining = VecDeque::with_capacity(self.lock().entries.len());
+        {
+            let mut state = self.lock();
+            while let Some(entry) = state.entries.pop_front() {
+                if entry.origin != origin {
+                    remaining.push_back(entry);
+                    continue;
+                }
+                aborted += 1;
+                let response = match &entry.request {
+                    PendingRequest::Approval(_) => {
+                        PendingResponse::Approval(ApprovalOutcome::Deny {
+                            reason: Some("session closed".into()),
+                        })
+                    }
+                    PendingRequest::Question(_) => {
+                        PendingResponse::Question(Err(PromptError::Gone))
+                    }
+                };
+                let _ = entry.reply.send(response);
+            }
+            state.entries = remaining;
+        }
+        if aborted > 0 {
+            self.bump();
+        }
+        aborted
+    }
+}
+
 /// Drops elements whose waiting end is gone; returns whether anything was dropped.
 fn retain_open<Req, Resp>(state: &mut State<Req, Resp>) -> bool {
     let before = state.entries.len();
@@ -305,23 +361,26 @@ fn retain_open<Req, Resp>(state: &mut State<Req, Resp>) -> bool {
 
 /// The approval-shaped view of the queue: [`Approver::decide`] pushes and waits. A session
 /// closing aborts its own requests with the fail-closed denial (ADR 0012).
-pub struct QueuedApprover {
-    queue: Arc<PendingQueue<ApprovalRequest, ApprovalOutcome>>,
+///
+/// The type parameter is the queue it pushes into. The default is the approval-only queue, so
+/// an existing `QueuedApprover::new(approval_queue, …)` is unchanged; the host passes the
+/// shared [`PendingRequest`]/[`PendingResponse`] queue for approvals and questions together.
+pub struct QueuedApprover<Q = PendingQueue<ApprovalRequest, ApprovalOutcome>> {
+    queue: Arc<Q>,
     origin: String,
 }
 
-impl QueuedApprover {
+impl<Q> QueuedApprover<Q> {
     /// `origin` is the session id this approver answers for.
-    pub fn new(
-        queue: Arc<PendingQueue<ApprovalRequest, ApprovalOutcome>>,
-        origin: impl Into<String>,
-    ) -> Self {
+    pub fn new(queue: Arc<Q>, origin: impl Into<String>) -> Self {
         Self {
             queue,
             origin: origin.into(),
         }
     }
+}
 
+impl QueuedApprover<PendingQueue<ApprovalRequest, ApprovalOutcome>> {
     /// Completes every pending approval of this session with `Deny`, the fail-closed outcome
     /// (ADR 0012), and returns how many were denied. Call it when the session closes.
     pub fn abort_session(&self) -> usize {
@@ -334,7 +393,15 @@ impl QueuedApprover {
     }
 }
 
-impl Approver for QueuedApprover {
+impl QueuedApprover<PendingQueue<PendingRequest, PendingResponse>> {
+    /// Completes every pending request of this session (approvals and questions) with its
+    /// kind's abort outcome; see [`PendingQueue::abort_session_all`].
+    pub fn abort_session(&self) -> usize {
+        self.queue.abort_session_all(&self.origin)
+    }
+}
+
+impl Approver for QueuedApprover<PendingQueue<ApprovalRequest, ApprovalOutcome>> {
     fn decide(
         &self,
         request: ApprovalRequest,
@@ -345,6 +412,70 @@ impl Approver for QueuedApprover {
                 .wait()
                 .await
                 .map_err(|_| ApprovalError("the approval was abandoned".into()))
+        })
+    }
+}
+
+impl Approver for QueuedApprover<PendingQueue<PendingRequest, PendingResponse>> {
+    fn decide(
+        &self,
+        request: ApprovalRequest,
+    ) -> BoxFuture<'_, Result<ApprovalOutcome, ApprovalError>> {
+        Box::pin(async move {
+            let (_request_id, answer) = self
+                .queue
+                .push(self.origin.clone(), PendingRequest::Approval(request));
+            match answer.wait().await {
+                Ok(PendingResponse::Approval(outcome)) => Ok(outcome),
+                // A question response for an approval, or an abandoned waiter: an internal
+                // failure, which the permission hook fails closed on (ADR 0012).
+                Ok(PendingResponse::Question(_)) | Err(_) => {
+                    Err(ApprovalError("the approval was abandoned".into()))
+                }
+            }
+        })
+    }
+}
+
+/// The question-shaped view of the shared queue: [`Prompter::ask`] pushes and waits. A session
+/// closing aborts its own questions with [`PromptError::Gone`] (ADR 0024 Q4).
+pub struct QueuedPrompter {
+    queue: Arc<PendingQueue<PendingRequest, PendingResponse>>,
+    origin: String,
+}
+
+impl QueuedPrompter {
+    /// `origin` is the session id this prompter asks for; it is shown with the question so a
+    /// multi-session UI can say who is asking (ADR 0024 Q2).
+    pub fn new(
+        queue: Arc<PendingQueue<PendingRequest, PendingResponse>>,
+        origin: impl Into<String>,
+    ) -> Self {
+        Self {
+            queue,
+            origin: origin.into(),
+        }
+    }
+
+    /// Completes every pending request of this session with its kind's abort outcome and
+    /// returns how many were completed. Call it when the session closes.
+    pub fn abort_session(&self) -> usize {
+        self.queue.abort_session_all(&self.origin)
+    }
+}
+
+impl Prompter for QueuedPrompter {
+    fn ask(&self, request: QuestionRequest) -> BoxFuture<'_, Result<QuestionAnswer, PromptError>> {
+        Box::pin(async move {
+            let (_request_id, answer) = self
+                .queue
+                .push(self.origin.clone(), PendingRequest::Question(request));
+            match answer.wait().await {
+                Ok(PendingResponse::Question(result)) => result,
+                // An approval response for a question, or an abandoned waiter (the UI exited
+                // or the queue was dropped): the prompter is gone.
+                Ok(PendingResponse::Approval(_)) | Err(_) => Err(PromptError::Gone),
+            }
         })
     }
 }

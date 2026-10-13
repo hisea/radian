@@ -74,6 +74,7 @@ impl Profile {
         Self::build(Preset::Safe, workspace, |_ws| {
             let mut rules = read_only();
             rules.extend(memory_rules());
+            rules.extend(always_allowed());
             rules.extend([
                 Rule::new(
                     ToolMatcher::Name("write".into()),
@@ -104,6 +105,7 @@ impl Profile {
         Self::build(Preset::WorkspaceWrite, workspace, |ws| {
             let mut rules = read_only();
             rules.extend(memory_rules());
+            rules.extend(always_allowed());
             rules.extend(write_under(ws));
             rules.extend([
                 Rule::new(
@@ -121,6 +123,7 @@ impl Profile {
         Self::build(Preset::FullAccess, workspace, |ws| {
             let mut rules = read_only();
             rules.extend(memory_rules());
+            rules.extend(always_allowed());
             rules.extend(write_under(ws));
             rules.extend([
                 // Still ask: full-access is not "run anything silently".
@@ -221,6 +224,17 @@ fn read_only() -> Vec<Rule> {
         .collect()
 }
 
+/// Fixed `allow` in every tier (ADR 0024 Q6): `ask_user` writes nothing and runs nothing, so
+/// it never prompts. It still goes through the ordinary hook path, and the answer is data — it
+/// grants no permission for the calls the model makes afterwards.
+fn always_allowed() -> Vec<Rule> {
+    vec![Rule::new(
+        ToolMatcher::Name("ask_user".into()),
+        ResourceMatcher::Any,
+        Action::Allow,
+    )]
+}
+
 /// File modification allowed only when the resolved path stays under the workspace.
 fn write_under(workspace: &Path) -> Vec<Rule> {
     ["write", "patch"]
@@ -278,6 +292,21 @@ mod tests {
             ] {
                 assert_eq!(action(&profile, name), Action::Ask, "{tier}: {name}");
             }
+        }
+    }
+
+    /// ADR 0024 Q6: `ask_user` writes nothing and runs nothing, so every tier allows it and it
+    /// never prompts. Removing the rule would make it fall through to the default `ask`.
+    #[test]
+    fn ask_user_is_allowed_in_every_tier() {
+        let ws = std::env::temp_dir();
+        for profile in [
+            Profile::safe(&ws).unwrap(),
+            Profile::workspace_write(&ws).unwrap(),
+            Profile::full_access(&ws).unwrap(),
+        ] {
+            let tier = profile.preset.as_str();
+            assert_eq!(action(&profile, "ask_user"), Action::Allow, "{tier}");
         }
     }
 }

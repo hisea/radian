@@ -44,6 +44,7 @@
 //!   is read as a stream, retaining only a bounded head and a trimmed tail, so a command that
 //!   prints gigabytes cannot grow this process's memory.
 
+mod ask;
 mod git;
 mod list;
 mod patch;
@@ -53,6 +54,11 @@ mod shell;
 mod workspace;
 mod write;
 
+pub use ask::{
+    MAX_DESCRIPTION_CHARS, MAX_ID_CHARS, MAX_LABEL_CHARS, MAX_OPTIONS, MAX_PROMPT_CHARS,
+    MAX_QUESTIONS, PromptError, Prompter, Question, QuestionAnswer, QuestionKind, QuestionOption,
+    QuestionReply, QuestionRequest,
+};
 pub use provider::{CodingSession, CodingTools, CodingToolsError, Limits};
 pub use workspace::WorkspaceError;
 

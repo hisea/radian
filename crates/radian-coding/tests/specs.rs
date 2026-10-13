@@ -47,3 +47,50 @@ async fn agent_core_accepts_the_built_in_tool_specs() {
     let mut chat = agent.open_session().await.unwrap();
     chat.close().await.unwrap();
 }
+
+/// ADR 0024 Q1: with a prompter, `ask_user` is appended and its schema passes the same
+/// preflight (`ToolRegistry::new` compiles every `input_schema` and rejects duplicates).
+#[tokio::test]
+async fn agent_core_accepts_the_ask_user_spec() {
+    use futures_util::future::BoxFuture;
+    use radian_coding::{PromptError, Prompter, QuestionAnswer, QuestionRequest};
+
+    struct NeverPrompter;
+
+    impl Prompter for NeverPrompter {
+        fn ask(
+            &self,
+            _request: QuestionRequest,
+        ) -> BoxFuture<'_, Result<QuestionAnswer, PromptError>> {
+            Box::pin(async { Err(PromptError::Gone) })
+        }
+    }
+
+    let dir = TempDir::new("specs-ask");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let coding = tools(&root).with_prompter(Arc::new(NeverPrompter));
+
+    let session = coding.open_session().await.unwrap();
+    let names: Vec<&str> = session
+        .tool_specs()
+        .iter()
+        .map(|spec| spec.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "read",
+            "write",
+            "patch",
+            "list",
+            "git_status",
+            "git_diff",
+            "ask_user"
+        ]
+    );
+
+    let agent = Arc::new(Agent::new(NeverModel, coding));
+    let mut chat = agent.open_session().await.unwrap();
+    chat.close().await.unwrap();
+}
