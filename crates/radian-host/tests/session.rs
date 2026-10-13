@@ -48,6 +48,14 @@ impl Drop for Scratch {
 
 /// Opens a session that declares only `Observe`.
 async fn observe_only(label: &str) -> (Scratch, Arc<radian_host::LocalSession>) {
+    open_with(label, vec![SessionCapability::Observe]).await
+}
+
+/// Opens a session with `capabilities`.
+async fn open_with(
+    label: &str,
+    capabilities: Vec<SessionCapability>,
+) -> (Scratch, Arc<radian_host::LocalSession>) {
     let scratch = Scratch::new(label);
     let workspace = scratch.0.join("ws");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -65,7 +73,7 @@ async fn observe_only(label: &str) -> (Scratch, Arc<radian_host::LocalSession>) 
     let profile = Profile::safe(&workspace).unwrap();
     let session = open_session(
         SessionSetup {
-            session_id: SessionId::new("observe-only"),
+            session_id: SessionId::new(label),
             session_dir: scratch.0.clone(),
             workspace: workspace.clone(),
             coding_root: None,
@@ -83,7 +91,7 @@ async fn observe_only(label: &str) -> (Scratch, Arc<radian_host::LocalSession>) 
             turn_options: TurnOptions::default(),
             turn_timeout: None,
             wording: radian_host::CLI_WORDING,
-            capabilities: vec![SessionCapability::Observe],
+            capabilities,
         },
         HostBindings {
             approvals: radian_host::ApprovalRouting::Direct(Arc::new(AllowAll)),
@@ -125,7 +133,7 @@ async fn a_local_session_refuses_a_command_it_does_not_declare() {
     // Every command that needs an undeclared capability is refused, and the projection is
     // still readable (the facade serves `Observe`).
     assert!(session.command(SessionCommand::Cancel).is_err());
-    assert_eq!(session.id().as_str(), "observe-only");
+    assert_eq!(session.id().as_str(), "refuse");
     assert_eq!(
         session.projection().read().turn(),
         radian_host::TurnState::Idle
@@ -230,6 +238,47 @@ async fn a_local_session_without_the_capability_refuses_compact() {
         "the refusal names the missing capability"
     );
 
+    session.stop();
+    let _ = session.join().await;
+    drop(scratch);
+}
+
+/// The answer path checks the capability too (ADR 0023 U5's `AnswerRequest`): a facade that
+/// declares only `Observe` cannot answer an approval, so a UI that ignored the capability
+/// list still cannot resolve one.
+#[tokio::test]
+async fn a_local_session_without_the_capability_refuses_an_answer() {
+    let (scratch, session) = observe_only("answer").await;
+    assert_eq!(session.capabilities(), [SessionCapability::Observe]);
+
+    let refused = session
+        .answer(
+            1,
+            radian_host::PendingResponse::Approval(ApprovalOutcome::AllowOnce),
+        )
+        .expect_err("a session that cannot answer must refuse");
+    assert_eq!(refused.command, "answer");
+    assert_eq!(refused.capability.as_deref(), Some("answer"));
+
+    session.stop();
+    let _ = session.join().await;
+    drop(scratch);
+}
+
+/// A late answer (the request is already gone) is silently ignored, not an error: ADR 0024 Q4
+/// says a request that was already completed or abandoned must not be completed twice. The
+/// facade hides `Answered::Late`/`Unknown` from the UI, which has nothing useful to do with it.
+#[tokio::test]
+async fn a_late_answer_is_silently_ignored() {
+    let (scratch, session) = open_with("late", SessionCapability::ALL.to_vec()).await;
+    assert!(session.queue().is_empty());
+    session
+        .answer(
+            7,
+            radian_host::PendingResponse::Approval(ApprovalOutcome::AllowOnce),
+        )
+        .expect("a late answer is ignored, not refused");
+    assert!(session.queue().is_empty());
     session.stop();
     let _ = session.join().await;
     drop(scratch);

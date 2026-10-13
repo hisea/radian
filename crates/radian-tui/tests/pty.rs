@@ -4378,3 +4378,75 @@ async fn pty_ctrl_c_during_a_question_cancels_without_an_answer() {
     );
     assert!(!pty.screen().contains("ASK-DONE"));
 }
+
+/// ADR 0023 U7 end to end: two tool calls that need approval are asked one after the other, in
+/// order, and the status bar counts the queue. The second never replaces the first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_two_approvals_are_shown_in_order() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("two-approvals");
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        tool_reply("c1", "write", r#"{"path":"a.txt","content":"one"}"#),
+        tool_reply("c2", "write", r#"{"path":"b.txt","content":"two"}"#),
+        text_reply("BOTH-DONE"),
+    ])
+    .await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "two-approvals",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--approval",
+            "always",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"go\r");
+    assert!(
+        pty.wait_for_screen("approve tool call?", 20),
+        "no approval prompt: {}",
+        pty.screen()
+    );
+    assert!(
+        pty.screen().contains("a.txt"),
+        "the first prompt names the first path: {}",
+        pty.screen()
+    );
+    // ADR 0023 U7: the status bar counts the pending queue.
+    assert!(
+        pty.wait_for_screen("1 pending", 10),
+        "the status bar must count the queue: {}",
+        pty.screen()
+    );
+    pty.send(b"y");
+    assert!(
+        pty.wait_for_screen("b.txt", 20),
+        "the second approval must follow the first: {}",
+        pty.screen()
+    );
+    assert!(
+        pty.screen().contains("approve tool call?"),
+        "the second prompt is shown, not merged: {}",
+        pty.screen()
+    );
+    pty.send(b"y");
+    assert!(
+        pty.wait_for_screen("BOTH-DONE", 20),
+        "the turn must continue after both approvals: {}",
+        pty.screen()
+    );
+}

@@ -5973,3 +5973,44 @@ fn config_import_pi_survives_a_closed_stdout() {
     assert_eq!(status.code(), Some(0), "stderr {stderr}");
     assert!(!stderr.contains("panicked"), "{stderr}");
 }
+
+/// ADR 0024 Q5: `agent` has no interactive user, so it does **not** register `ask_user` and
+/// says so on its startup line. The TUI is the only host that registers it.
+#[tokio::test]
+async fn the_startup_line_says_ask_user_is_off() {
+    let (_dir, ws) = budget_workspace("ask-off");
+    let server = MockServer::start(vec![text_reply("done")]).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--yes",
+                "-p",
+                "go",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("ask_user: off (no interactive user)"),
+        "the startup line must say ask_user is off: {stderr}"
+    );
+    // The model was never offered the tool: the request's tool list has no `ask_user`.
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1, "{stderr}");
+    assert!(
+        !requests[0].body.contains("ask_user"),
+        "agent must not advertise ask_user: {}",
+        requests[0].body
+    );
+}
