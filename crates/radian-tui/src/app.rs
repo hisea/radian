@@ -640,3 +640,14 @@ pub fn text_of(parts: &[ContentPart]) -> String {
         .collect::<Vec<_>>()
         .join("")
 }
+
+/// The `@`-mention slice needs exactly one `App` method. Kept in its own block at the end of
+/// the file so it merges cleanly with the composer work that owns the rest of the input
+/// handling.
+impl App {
+    /// Puts `text` back into the input box. An expansion failure must not lose the message
+    /// the user typed.
+    pub fn restore_input(&mut self, text: String) {
+        self.input = text;
+    }
+}

@@ -1,6 +1,8 @@
 //! Rendering: the transcript view with its own scrolling, the input box, and the status
 //! line. Pure given an `App`, so `TestBackend` can assert on the result.
 
+use std::borrow::Cow;
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
@@ -95,12 +97,22 @@ fn body_style(entry: &Entry) -> Style {
     }
 }
 
+/// The text a frame shows for `entry`. A user message's `@` attachments are folded to one
+/// `[file: P, N lines]` line each; every other entry shows its text unchanged. Display only:
+/// the message (and the journal) keep the full text.
+fn display_text(entry: &Entry) -> Cow<'_, str> {
+    match entry.kind {
+        EntryKind::User => crate::mention::fold_files(&entry.text),
+        _ => Cow::Borrowed(&entry.text),
+    }
+}
+
 /// One entry's styled lines. An interrupted assistant entry gets an explicit marker on its
 /// last line.
 fn entry_lines(entry: &Entry, width: usize) -> Vec<Line<'static>> {
     let (prefix, prefix_style) = marker(entry.kind);
     let body_width = width.saturating_sub(prefix.width()).max(1);
-    let wrapped = wrap(&entry.text, body_width);
+    let wrapped = wrap(&display_text(entry), body_width);
     let style = body_style(entry);
     let last = wrapped.len().saturating_sub(1);
     let mut lines = Vec::with_capacity(wrapped.len());
@@ -128,7 +140,7 @@ fn entry_line_count(entry: &mut Entry, width: usize) -> usize {
     }
     let (prefix, _) = marker(entry.kind);
     let body_width = width.saturating_sub(prefix.width()).max(1);
-    let lines = wrap(&entry.text, body_width).len();
+    let lines = wrap(&display_text(entry), body_width).len();
     entry.wrap_cache.set(WrapKey {
         width,
         text_len,

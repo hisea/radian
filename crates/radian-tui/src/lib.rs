@@ -6,6 +6,7 @@
 
 pub mod app;
 pub mod command;
+pub mod mention;
 pub mod profile;
 pub mod render;
 pub mod signals;

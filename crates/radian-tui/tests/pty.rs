@@ -1698,6 +1698,126 @@ async fn pty_max_model_calls_limits_the_turn() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
+/// An `@` reference attaches the file: the request the model receives carries a
+/// `<file path="…">` block with the contents, and the transcript folds it to one line.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_an_at_reference_attaches_the_file_and_folds_it() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("mention");
+    let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::write(ws.join("notes.txt"), "alpha\nbeta\n").unwrap();
+    let server = MockServer::start(vec![text_reply("MENTION-OK")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "mention",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send("看看 @notes.txt\r".as_bytes());
+    assert!(
+        pty.wait_for_screen("MENTION-OK", 20),
+        "the reply is missing:\n{}",
+        pty.screen()
+    );
+    assert_eq!(server.requests().len(), 1);
+    let body = server.requests()[0].json();
+    let user = body["messages"]
+        .as_array()
+        .expect("messages is an array")
+        .iter()
+        .find(|message| message["role"] == "user")
+        .and_then(|message| message["content"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        user.contains("看看 @notes.txt"),
+        "the text is unchanged: {user}"
+    );
+    assert!(user.contains("<file path=\"notes.txt\">"), "{user}");
+    assert!(
+        user.contains("alpha\nbeta"),
+        "the content is attached: {user}"
+    );
+    // The transcript shows the folded form, not the file body.
+    assert!(
+        pty.screen().contains("[file: notes.txt,"),
+        "the attachment is not folded:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("alpha"),
+        "the file body must not be shown:\n{}",
+        pty.screen()
+    );
+
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// A binary attachment is not sent at all: the request never reaches the model, a notice
+/// names the file, and the input box still holds the message.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_binary_attachment_is_not_sent_and_the_input_is_kept() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("mention-binary");
+    let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::write(ws.join("blob.bin"), [0u8, 1, 2, 255]).unwrap();
+    let server = MockServer::start(vec![text_reply("SHOULD-NOT-ARRIVE")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "mention-binary",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"see @blob.bin\r");
+    assert!(
+        pty.wait_for_screen("not sent:", 10),
+        "no failure notice:\n{}",
+        pty.screen()
+    );
+    assert!(
+        server.requests().is_empty(),
+        "a binary attachment must not be sent"
+    );
+    assert!(pty.screen().contains("blob.bin"), "{}", pty.screen());
+    assert!(
+        pty.screen().contains("see @blob.bin"),
+        "the input was lost:\n{}",
+        pty.screen()
+    );
+
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
 /// The session directory, created empty by the caller, must stay empty when startup fails.
 fn assert_session_dir_empty(dir: &Path) {
     let names: Vec<String> = std::fs::read_dir(dir)
