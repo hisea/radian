@@ -225,18 +225,28 @@ Whatever ended the app, the normal screen now says why, once, after the terminal
 | startup/config refusal (bad workspace, failed probe, bad MCP file, bad header, ...) | 1 | `radian-tui: <the error>` (terminal never entered) |
 | driver task ends with a `RunError` | 1 | `radian-tui: driver: <error>` |
 | driver task panics | 1 | `radian-tui: the driver task ended unexpectedly: <join error>: <redacted panic>` |
-| the app itself panics (`main` thread) | 101 | `radian-tui: the app panicked: <redacted panic>` |
+| the app itself panics (`main` thread) | 101 | `radian-tui: the app panicked: <redacted panic> (panic log: <path>)` |
 | `--list` | 0 | none: the listing is the output |
 
 Every line is a single `eprintln!` and therefore ends in `\n`; `TtyGuard::restore` also writes
 `\r\n` after leaving the alternate screen, so the shell never prints its "no newline" `%`.
 
-A panic is also appended to `<session-dir>/<id>.panic.log` (`radian_session::now_utc()`
-timestamp, thread name, panic text), with header values and the API key replaced by
-`<redacted>`. The log is set once the session exists and before the terminal is entered
-(`terminal::set_panic_log`); a panic before that has no log. The default Rust panic hook still
-prints its own message; the sidecar log is the copy that is guaranteed redacted. Tested by
-`pty_clean_exit_prints_one_reason_line` and `pty_a_panic_writes_a_redacted_panic_log`.
+A panic is also appended to the **diagnostics directory** (ADR 0013 decision 4), named
+`<session-id>-<unix-millis>.panic.log` (a `radian_session::now_utc()` timestamp, the thread
+name, the panic text), with header values and the API key replaced by `<redacted>`. macOS uses
+`~/Library/Caches/radian/diagnostics`; Linux uses `$XDG_CACHE_HOME/radian/diagnostics` (or
+`~/.cache/radian/diagnostics` when it is unset or relative). The directory is `0700` and the
+file `0600`; files older than 7 days are removed, and the total is capped at 50 MiB by dropping
+the oldest first — at startup and again before each write. The session directory is never
+touched by this cleanup.
+
+The log is set once the session exists and before the terminal is entered
+(`terminal::set_panic_log`); a panic before that has no log. The exit line names the log path.
+A diagnostics write or cleanup that fails is one `[diagnostics]` line on stderr, never a fault:
+the run continues and the panic still exits 101. Tested by
+`pty_clean_exit_prints_one_reason_line`, `pty_a_panic_writes_a_redacted_panic_log`,
+`pty_panic_path_restores_the_terminal` and
+`pty_an_unwritable_diagnostics_directory_is_only_a_notice`.
 
 ## Startup order (2026-10-13, dogfooding D1/D2)
 

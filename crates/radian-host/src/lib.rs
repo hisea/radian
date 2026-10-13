@@ -8,6 +8,7 @@
 //! two binaries still decide their own flags, startup text and error wording.
 
 mod describe;
+mod diagnostics;
 mod headers;
 mod mcp;
 mod model;
@@ -16,6 +17,10 @@ mod tools;
 mod workspace;
 
 pub use describe::{CLI_WORDING, TUI_WORDING, Wording, describe};
+pub use diagnostics::{
+    CleanReport, MAX_TOTAL_BYTES, Platform, RETENTION, append, clean, clean_startup, clean_with,
+    diagnostics_dir, diagnostics_dir_for, is_diagnostic_file, now_millis, panic_log_name,
+};
 pub use headers::{SESSION_PLACEHOLDER, parse_headers};
 pub use mcp::load_mcp_config;
 pub use model::{
