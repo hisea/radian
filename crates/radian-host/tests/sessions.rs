@@ -137,3 +137,22 @@ fn export_refuses_another_workspace_and_a_path_like_id() {
         sessions::export(dir.path(), "/work/ws", "../x", Format::Markdown, &settings).unwrap_err();
     assert!(error.contains("session id"), "{error}");
 }
+
+#[test]
+fn export_redacts_known_secrets() {
+    let dir = TempDir::new("redact");
+    write_session(
+        dir.path(),
+        "in-ws",
+        "/work/ws",
+        "the key is SUPER-SECRET-KEY",
+    );
+    let settings = ExportSettings {
+        secrets: vec!["SUPER-SECRET-KEY".to_owned()],
+        ..ExportSettings::default()
+    };
+    let markdown =
+        sessions::export(dir.path(), "/work/ws", "in-ws", Format::Markdown, &settings).unwrap();
+    assert!(!markdown.contains("SUPER-SECRET-KEY"), "{markdown}");
+    assert!(markdown.contains("<redacted>"), "{markdown}");
+}

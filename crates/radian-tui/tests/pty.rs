@@ -163,6 +163,21 @@ impl Pty {
         }
     }
 
+    /// Waits until `predicate` holds for the current screen contents. The predicate is the
+    /// synchronization; the deadline only bounds a failure.
+    fn wait_until(&mut self, secs: u64, predicate: impl Fn(&str) -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        loop {
+            if predicate(&self.screen()) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// Waits without killing: on timeout the caller decides (the `Drop` impl still kills).
     fn wait_for_exit(&mut self, secs: u64) -> Option<u32> {
         let deadline = Instant::now() + Duration::from_secs(secs);
@@ -2604,6 +2619,335 @@ async fn pty_compact_shows_its_result_without_a_model_request() {
         server.requests().is_empty(),
         "a /compact must not reach the model"
     );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// Waits until `path`'s contents contain `needle`. The file is the synchronization (the app
+/// writes it from its own task); the deadline only bounds a failure.
+fn wait_for_file(path: &Path, needle: &str, secs: u64) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        if std::fs::read_to_string(path)
+            .map(|text| text.contains(needle))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Writes a session with one user turn and one assistant reply, using the storage API. The
+/// workspace must be the canonical string the index will match.
+async fn seed_session(dir: &Path, id: &str, workspace: &str, user: &str) {
+    let path = dir.join(format!("{id}.jsonl"));
+    let journal = radian_session::SessionJournal::create(
+        &path,
+        id,
+        radian_session::SessionCreatedData::new(workspace, json!({})),
+    )
+    .expect("create the session file");
+    use agent_core::TranscriptJournal;
+    journal
+        .append(agent_core::JournalRecord::Message {
+            index: 0,
+            message: agent_core::Message::user(user),
+        })
+        .await
+        .unwrap();
+    journal
+        .append(agent_core::JournalRecord::Message {
+            index: 1,
+            message: agent_core::Message::assistant("REPLY"),
+        })
+        .await
+        .unwrap();
+    drop(journal);
+}
+
+/// The picker lists this workspace's sessions, filters, resumes the chosen one, and the next
+/// model request carries that session's history.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_pick_lists_filters_and_resumes_the_chosen_session() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("pick");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let workspace = std::fs::canonicalize(&ws)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    seed_session(&sessions, "alpha", &workspace, "ALPHA-HISTORY").await;
+    seed_session(&sessions, "beta", &workspace, "BETA-HISTORY").await;
+    // Another workspace's session must never be listed.
+    seed_session(&sessions, "other", "/work/somewhere-else", "OTHER-HISTORY").await;
+
+    let server = MockServer::start(vec![text_reply("PICKED-REPLY")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--pick",
+        ],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("alpha", 10),
+        "the picker did not list alpha:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("beta", 10),
+        "the picker did not list beta:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("other"),
+        "the picker listed another workspace's session:\n{}",
+        pty.screen()
+    );
+    // Type a filter. Without filtering, Enter would resume the first row (alpha); resuming
+    // beta proves the filter selected it.
+    pty.send(b"beta");
+    assert!(
+        pty.wait_until(5, |screen| !screen.contains("alpha")),
+        "the filter did not narrow the list:\n{}",
+        pty.screen()
+    );
+    pty.send(b"\r");
+    assert!(
+        pty.wait_for_screen("resumed session beta", 10),
+        "Enter did not resume the filtered row:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("BETA-HISTORY", 5),
+        "the resumed history is not on screen:\n{}",
+        pty.screen()
+    );
+    // The next request carries the resumed history, not the other session's.
+    pty.send(b"continue\r");
+    assert!(
+        pty.wait_for_screen("PICKED-REPLY", 15),
+        "the resumed session did not run a turn:\n{}",
+        pty.screen()
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert!(
+        requests[0].body.contains("BETA-HISTORY"),
+        "{}",
+        requests[0].body
+    );
+    assert!(
+        !requests[0].body.contains("ALPHA-HISTORY"),
+        "{}",
+        requests[0].body
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// `n` starts a new session; `Esc` quits with code 0 and creates no session file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_pick_starts_new_and_escape_leaves_no_session() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("pick-new");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let workspace = std::fs::canonicalize(&ws)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    seed_session(&sessions, "alpha", &workspace, "ALPHA-HISTORY").await;
+
+    let jsonl = |dir: &Path| -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".jsonl"))
+            .collect();
+        names.sort();
+        names
+    };
+    let before = jsonl(&sessions);
+
+    // Esc: quit with code 0 and no new session file.
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--pick",
+        ],
+        24,
+        100,
+    );
+    assert!(pty.wait_for_screen("alpha", 10), "{}", pty.screen());
+    pty.send(&[0x1b]); // Esc
+    assert!(pty.wait_for_exit(10).is_some(), "Esc did not quit");
+    assert_eq!(pty.app_exit_code(), Some(0));
+    assert_eq!(jsonl(&sessions), before, "Esc created a session file");
+
+    // `n`: a new session.
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--pick",
+        ],
+        24,
+        100,
+    );
+    assert!(pty.wait_for_screen("alpha", 10), "{}", pty.screen());
+    pty.send(b"n");
+    assert!(
+        pty.wait_for_screen("new session", 10),
+        "`n` did not start a new session:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+}
+
+/// `--pick` with no sessions goes straight to a new session with a notice (no empty list).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_pick_without_sessions_starts_a_new_one() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("pick-none");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--pick",
+        ],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("no sessions for this workspace yet", 10),
+        "the no-session notice is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("new session", 10),
+        "the picker did not fall through to a new session:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+}
+
+/// `/sessions` lists the current workspace's sessions with a copyable `--resume`; `/export`
+/// writes the current session and refuses to overwrite without `--force`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_sessions_and_export_commands() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("sess-cmd");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("SESSION-REPLY")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "cmd",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"session body text\r");
+    assert!(pty.wait_for_screen("SESSION-REPLY", 15), "{}", pty.screen());
+
+    // `/sessions` names the current session and the way to reopen it.
+    pty.send(b"/sessions\r");
+    assert!(
+        pty.wait_for_screen("--resume cmd", 10),
+        "the session list is missing the resume hint:\n{}",
+        pty.screen()
+    );
+
+    // `/export` writes the default `<workspace>/radian-cmd.md`.
+    pty.send(b"/export\r");
+    assert!(
+        pty.wait_for_screen("exported to", 10),
+        "no export notice:\n{}",
+        pty.screen()
+    );
+    let export = ws.join("radian-cmd.md");
+    assert!(
+        wait_for_file(&export, "session body text", 10),
+        "the export file was not written with the session text"
+    );
+
+    // Without `--force` it refuses; with `--force` it overwrites.
+    pty.send(b"/export\r");
+    assert!(
+        // The notice wraps, so match a fragment that stays on one line.
+        pty.wait_for_screen("ready exists", 10),
+        "the overwrite refusal is missing:\n{}",
+        pty.screen()
+    );
+    std::fs::write(&export, "OLD").unwrap();
+    pty.send(b"/export md radian-cmd.md --force\r");
+    assert!(
+        wait_for_file(&export, "session body text", 10),
+        "the forced export did not overwrite the file"
+    );
+    let text = std::fs::read_to_string(&export).unwrap();
+    assert!(!text.contains("OLD"), "{text}");
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
 }
