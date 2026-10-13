@@ -97,16 +97,13 @@ pub enum SessionCommand {
     Steer(String),
     /// Cancel the running turn.
     Cancel,
-    /// Ask the runtime to compact the context (the TUI's `/compact`). Turn-shaped work, so it
-    /// needs the same capability as sending.
-    Compact { instructions: Option<String> },
 }
 
 impl SessionCommand {
     /// The capability a session must declare to accept this command.
     pub fn capability(&self) -> SessionCapability {
         match self {
-            Self::SendFollowup(_) | Self::Compact { .. } => SessionCapability::SendMessage,
+            Self::SendFollowup(_) => SessionCapability::SendMessage,
             Self::Steer(_) => SessionCapability::Steer,
             Self::Cancel => SessionCapability::Cancel,
         }
@@ -117,7 +114,6 @@ impl SessionCommand {
             Self::SendFollowup(_) => "send",
             Self::Steer(_) => "steer",
             Self::Cancel => "cancel",
-            Self::Compact { .. } => "compact",
         }
     }
 }
@@ -415,11 +411,6 @@ impl SessionFacade for LocalSession {
                 self.inbox.cancel(CancelCause::Requested);
                 Ok(())
             }
-            SessionCommand::Compact { .. } => Err(CommandRefused {
-                command: "compact".into(),
-                capability: None,
-                reason: "use `SessionFacade::compact`, which carries the outcome".into(),
-            }),
         }
     }
 

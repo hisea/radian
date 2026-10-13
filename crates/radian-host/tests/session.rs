@@ -204,3 +204,31 @@ async fn a_local_session_accepts_a_declared_command() {
     session.stop();
     let _ = session.join().await;
 }
+
+/// The compact path checks the capability too (PR ④'s review found this unchecked). A session
+/// that declares only `Observe` must refuse it **immediately**, without touching the inbox:
+/// a real request would be async (it is a control request the driver answers).
+#[tokio::test]
+async fn a_local_session_without_the_capability_refuses_compact() {
+    let (scratch, session) = observe_only("compact").await;
+    assert_eq!(session.capabilities(), [SessionCapability::Observe]);
+
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    session.compact(
+        None,
+        Box::new(move |result| {
+            let _ = tx.send(result);
+        }),
+    );
+    let result = rx
+        .try_recv()
+        .expect("a refused compact must report immediately, without an inbox request");
+    assert!(
+        result.unwrap_err().contains("does not declare"),
+        "the refusal names the missing capability"
+    );
+
+    session.stop();
+    let _ = session.join().await;
+    drop(scratch);
+}
