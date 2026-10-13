@@ -544,3 +544,76 @@ async fn the_overflow_fallback_shortens_an_overlong_summary() {
     assert!(!body.contains("Conversation to summarize"), "{body}");
     assert_eq!(compaction_usage_count(&journal), 2);
 }
+
+// ---------- dogfood9: the summary ceiling scales with the window ----------
+
+/// The overflow fallback scales the ceiling with the window it knows about.
+#[tokio::test]
+async fn the_fallback_scales_the_summary_ceiling_with_the_window() {
+    let model = ScriptedModel::new([
+        overflow("prompt is too long"),
+        summary_reply("a short summary", 50),
+        text("done"),
+    ]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = overflow_agent(model.clone(), Some(103_616), true);
+    let mut session = agent
+        .open_session_with_journal(big_prefix_history(), journal)
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let outcome = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    let requests = model.requests();
+    // 0: the overflowing request, 1: the summary, 2: the retried conversation.
+    assert!(requests.len() >= 2, "{}", requests.len());
+    let prompt = requests[1].system_prompt.as_deref().unwrap();
+    assert!(prompt.contains("12952 tokens"), "{prompt}");
+    assert!(!prompt.contains("8192 tokens"), "{prompt}");
+}
+
+/// A manual `/compact` uses the window when it has one and the fixed default when it does not.
+#[tokio::test]
+async fn compact_now_scales_the_summary_ceiling_with_the_window() {
+    // With a window: the scaled ceiling.
+    let model = ScriptedModel::new([summary_reply("a short summary", 50)]);
+    let agent = overflow_agent(model.clone(), Some(103_616), true);
+    let mut session = agent
+        .open_session_with_journal(big_prefix_history(), Arc::new(RecordingJournal::new()))
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+    session
+        .compact_now(None, &CancellationToken::new(), &recorder)
+        .await
+        .unwrap();
+    let prompt = model.requests()[0]
+        .system_prompt
+        .as_deref()
+        .unwrap()
+        .to_string();
+    assert!(prompt.contains("12952 tokens"), "{prompt}");
+
+    // No window: the fixed default (there is no `B` to scale against).
+    let model = ScriptedModel::new([summary_reply("a short summary", 50)]);
+    let agent = overflow_agent(model.clone(), None, true);
+    let mut session = agent
+        .open_session_with_journal(big_prefix_history(), Arc::new(RecordingJournal::new()))
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+    session
+        .compact_now(None, &CancellationToken::new(), &recorder)
+        .await
+        .unwrap();
+    let prompt = model.requests()[0]
+        .system_prompt
+        .as_deref()
+        .unwrap()
+        .to_string();
+    assert!(prompt.contains("8192 tokens"), "{prompt}");
+}

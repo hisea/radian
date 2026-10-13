@@ -77,3 +77,17 @@ Base: `4ff7528` · 一次性检出 `/tmp/sumlen-mut`（detached，跑完删除�
 | S4 | 空摘要也走缩短请求 | `compaction_flow::an_empty_summary_resends_the_original_request` | ✅ failed |
 
 4/4 抓住。
+
+## sumcap：摘要上限随窗口缩放（dogfood9）
+
+Base `ccc3af1` · 在本任务工作树内逐条施加后从副本还原（`--no-fail-fast`）· `git status --short`
+结束后干净。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| C1 | `summary_max_tokens` 恒返回 8192（旧行为） | `compaction::the_summary_ceiling_scales_with_the_window`、`the_scaled_ceiling_reaches_the_prompt_and_the_check`、`compaction_flow::the_auto_path_scales_the_summary_ceiling_with_the_window`、`compaction_overflow::the_fallback_scales_the_summary_ceiling_with_the_window`、`compact_now_scales_the_summary_ceiling_with_the_window`（并连带 `an_overlong_summary_is_shortened_on_the_retry`、`two_overlong_summaries_fail_the_turn`，因为小 `B` 时 8192 ≠ `K`） | ✅ failed |
+| C2 | `B/8` 写成 `B/4`（超过 `K` 时被 `min` 截住） | `compaction::the_summary_ceiling_scales_with_the_window`（`103616` → 20000 ≠ 12952）、`the_scaled_ceiling_reaches_the_prompt_and_the_check`、三条路径各自的缩放测试 | ✅ failed |
+| C3 | 超长兜底路径漏改（`summary_budget: None`） | `compaction_overflow::the_fallback_scales_the_summary_ceiling_with_the_window` | ✅ failed |
+
+3/3 抓住。C2 只在“`B/8` 超过 8192 且 `B/4` 被 `K` 截住”时与正确值不同，所以只有大窗口（`B=103616`）
+的断言能区分；小窗口（`B=16000`）那条不区分，正如 brief 所要求。

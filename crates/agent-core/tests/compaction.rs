@@ -4,7 +4,7 @@
 use agent_core::{
     ContentPart, InputSource, Message, MessageMeta, PlanError, SummaryError, ToolCall, ToolResult,
     check_summary, compacted_history, keep_target, message_tokens, plan, shorten_request,
-    shorten_target, summary_request, units,
+    shorten_target, summary_max_tokens, summary_request, units,
 };
 use serde_json::{Value, json};
 
@@ -441,4 +441,38 @@ fn plan_and_compaction_are_valid_for_many_histories() {
             .unwrap_or_else(|error| panic!("seed {seed}: {error}"));
         assert_eq!(compacted.len(), kept.len() + 1, "seed {seed}");
     }
+}
+
+/// dogfood9: the summary ceiling scales with the window, not a fixed 8192.
+#[test]
+fn the_summary_ceiling_scales_with_the_window() {
+    // 120K window (B = 103616, the dogfood9 example): keep_target = 20000, B/8 = 12952, so
+    // 12952 (the shortening retry still wrote 8725 tokens at the old 8192 ceiling).
+    assert_eq!(summary_max_tokens(103_616), 12_952);
+    // A smaller window keeps the keep target: keep_target(16000) = 4000.
+    assert_eq!(summary_max_tokens(16_000), 4_000);
+    // At B/8 == the default the min picks the default; below that it still does.
+    assert_eq!(summary_max_tokens(65_536), 8_192);
+    assert_eq!(summary_max_tokens(4_000), 2_048);
+}
+
+/// The scaled ceiling reaches both the prompt (what the model is told) and the check (what
+/// the core enforces): a summary between the old 8192 and the scaled 12952 passes only the
+/// scaled one.
+#[test]
+fn the_scaled_ceiling_reaches_the_prompt_and_the_check() {
+    let max = summary_max_tokens(103_616);
+    let prompt = agent_core::summary_system_prompt(max);
+    assert!(prompt.contains("12952 tokens"), "{prompt}");
+
+    // ~10000 tokens by the default 4-bytes-per-token ruler: over the old default, under the
+    // scaled one.
+    let text = "a".repeat(40_000);
+    let tokens = message_tokens(&Message::user(&text));
+    assert!(tokens > 8_192 && tokens <= max, "{tokens}");
+    assert!(
+        check_summary(&text, 8_192).is_err(),
+        "the old fixed ceiling would reject it"
+    );
+    assert_eq!(check_summary(&text, max).unwrap().len(), text.len());
 }
