@@ -144,6 +144,18 @@ Base: `9daed70` · 一次性检出 `/tmp/sessions-mut`（detached，跑完删除
 |---|---|---|---|
 | M4 | `sessions::export` 不传 secrets 给 `ExportOptions` | `sessions::export_redacts_known_secrets` | ✅ failed |
 
+## dogfooding D22：`split` 的确认提示
+
+Base `a0e8b4c` · 一次性检出 `/tmp/df7-mut` · 独立 target · `--no-fail-fast`。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M5 | `split` 提示仍数参数（`move {ids.len()} record(s)`） | ✅ failed | `memory::commands::tests::the_split_prompt_counts_the_records_that_exist` |
+| M6 | 全部 id 都不存在时仍进入确认（去掉 early error） | ✅ failed | 同上 |
+
+`split` 的读取是只读的（`store().records(&Scope::Project(from))`），确认前不写任何东西；
+M6 证明「全部不存在」是退出 1 的错误，而不是一次空确认。
+
 ## ADR 0018：自适应 `R`
 
 Base `0a3c197` · 一次性检出 `/tmp/adaptr-mut`（detached，独立 target，跑完删除）· `--no-fail-fast` ·

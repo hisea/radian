@@ -36,7 +36,7 @@ use radian_host::{
 };
 use radian_permissions::{Approver, PermissionHooks};
 use radian_runtime::{CancelCause, Driver, DriverError, Inbox, InboxError};
-use radian_session::{Index, SessionCreatedData, SessionJournal};
+use radian_session::{EventData, Index, Session, SessionCreatedData, SessionJournal};
 use tokio::sync::{Mutex, mpsc};
 
 use crate::approval::{AutoApprover, JournalAudit, TERMINAL_SOURCE, TerminalApprover};
@@ -65,7 +65,7 @@ struct Cli {
     /// do not read the key.
     #[arg(
         long,
-        required_unless_present_any = ["list", "export", "search"]
+        required_unless_present_any = ["list", "export", "search", "fork"]
     )]
     model: Option<String>,
 
@@ -137,7 +137,11 @@ struct Cli {
     /// A stable session identifier for this process: used verbatim as the session file's
     /// name, and available to `--header` values as `{session_id}`. Generated once per
     /// process when omitted.
-    #[arg(long, value_name = "VALUE", conflicts_with = "resume")]
+    #[arg(
+        long,
+        value_name = "VALUE",
+        conflicts_with_all = ["resume", "list", "search"]
+    )]
     session_id: Option<String>,
 
     /// Resume an existing session by id.
@@ -165,6 +169,19 @@ struct Cli {
         conflicts_with_all = ["prompt", "resume", "list", "export"]
     )]
     search: Option<String>,
+
+    /// Fork a session (ADR 0022): create a new session whose initial history is the parent's
+    /// effective history at a turn boundary. Needs no model and reads no key.
+    #[arg(
+        long,
+        value_name = "SESSION_ID",
+        conflicts_with_all = ["prompt", "resume", "list", "export", "search"]
+    )]
+    fork: Option<String>,
+
+    /// The parent seq to fork at. Omitted, the parent's last turn boundary is used.
+    #[arg(long, value_name = "SEQ", requires = "fork")]
+    at: Option<u64>,
 
     /// Manage durable memory (ADR 0021): `agent memory --help`. Needs no `--model`, reads no
     /// key, creates no session file and never touches the network. Memory is shared across
@@ -237,6 +254,79 @@ struct Cli {
 /// Why startup failed. The message must not contain the key.
 pub(crate) struct SetupError(pub(crate) String);
 
+/// Why a "print and exit" command (`--list`, `--search`, `--export`, `agent memory`) stopped.
+///
+/// A closed stdout (`agent --list | head`) is a normal way to stop, not a failure (dogfooding
+/// D21); it is kept apart from a real error so it exits 0 with no message.
+pub(crate) enum OutputError {
+    /// A setup, usage or memory-command failure: the message is printed, this code returned.
+    Failed { message: String, code: i32 },
+    /// stdout's reader went away: stop silently with exit code 0.
+    BrokenPipe,
+    /// Another stdout write error: one stderr line, exit code 1.
+    Write(std::io::Error),
+}
+
+impl From<SetupError> for OutputError {
+    fn from(error: SetupError) -> Self {
+        Self::Failed {
+            message: error.0,
+            code: USAGE_ERROR,
+        }
+    }
+}
+
+impl From<CommandError> for OutputError {
+    fn from(error: CommandError) -> Self {
+        Self::Failed {
+            message: error.message,
+            code: error.code,
+        }
+    }
+}
+
+impl From<radian_host::StdoutError> for OutputError {
+    fn from(error: radian_host::StdoutError) -> Self {
+        match error {
+            radian_host::StdoutError::BrokenPipe => Self::BrokenPipe,
+            radian_host::StdoutError::Failed(error) => Self::Write(error),
+        }
+    }
+}
+
+impl OutputError {
+    /// The process exit code for this failure.
+    fn exit_code(&self) -> i32 {
+        match self {
+            OutputError::Failed { code, .. } => *code,
+            OutputError::BrokenPipe => 0,
+            OutputError::Write(_) => 1,
+        }
+    }
+
+    /// The line to print to stderr, if any. A broken pipe prints nothing.
+    fn message(&self) -> Option<String> {
+        match self {
+            OutputError::Failed { message, .. } => Some(format!("agent: {message}")),
+            OutputError::BrokenPipe => None,
+            OutputError::Write(error) => Some(format!("agent: cannot write to stdout: {error}")),
+        }
+    }
+}
+
+/// Prints an output command's failure (if any) and returns its exit code.
+fn finish(result: Result<(), OutputError>) -> i32 {
+    match result {
+        Ok(()) => 0,
+        Err(error) => {
+            if let Some(line) = error.message() {
+                eprintln!("{line}");
+            }
+            error.exit_code()
+        }
+    }
+}
+
 /// The `--model` value. Clap requires it unless `--list`, `--export` or `--search` is present,
 /// so a conversation always has one; this makes the failure explicit instead of a panic if
 /// that invariant ever changes.
@@ -266,19 +356,13 @@ enum Command {
 }
 
 fn run_memory(cli: &Cli, command: MemoryCommand) -> i32 {
-    match memory_command(cli, command) {
-        Ok(()) => 0,
-        Err(error) => {
-            eprintln!("agent: {}", error.message);
-            error.code
-        }
-    }
+    finish(memory_command(cli, command))
 }
 
 /// Runs one `agent memory` subcommand. Deliberately before `setup`: no model, no key, no
 /// session file, no network. The grammar and the execution live in
 /// `radian_host::memory::commands`, shared byte-for-byte with the TUI's `/memory`.
-fn memory_command(cli: &Cli, command: MemoryCommand) -> Result<(), CommandError> {
+fn memory_command(cli: &Cli, command: MemoryCommand) -> Result<(), OutputError> {
     let workspace = resolve_workspace(cli.workspace.as_deref().map(std::path::Path::new))
         .map_err(CommandError::usage)?;
     let root = radian_host::memory_dir()
@@ -299,7 +383,7 @@ fn memory_command(cli: &Cli, command: MemoryCommand) -> Result<(), CommandError>
     if let Some(note) = &output.note {
         eprintln!("{note}");
     }
-    print!("{}", output.text);
+    radian_host::write_stdout(&output.text)?;
     Ok(())
 }
 
@@ -413,31 +497,22 @@ async fn run(mut cli: Cli) -> i32 {
         }
     }
     if cli.list {
-        return match list_sessions(&cli) {
-            Ok(()) => 0,
-            Err(e) => {
-                eprintln!("agent: {}", e.0);
-                USAGE_ERROR
-            }
-        };
+        return finish(list_sessions(&cli));
     }
     // The session-management commands never touch the model or the network: they run before
     // `setup` (so no key is required) and never create a session file.
     if let Some(session_id) = &cli.export {
-        return match export_session(&cli, session_id) {
-            Ok(()) => 0,
-            Err(e) => {
-                eprintln!("agent: {}", e.0);
-                USAGE_ERROR
-            }
-        };
+        return finish(export_session(&cli, session_id));
     }
     if let Some(query) = &cli.search {
-        return match search_sessions(&cli, query) {
+        return finish(search_sessions(&cli, query));
+    }
+    if let Some(parent_id) = &cli.fork {
+        return match fork_session(&cli, parent_id).await {
             Ok(()) => 0,
-            Err(e) => {
-                eprintln!("agent: {}", e.0);
-                USAGE_ERROR
+            Err((message, code)) => {
+                eprintln!("agent: {message}");
+                code
             }
         };
     }
@@ -672,18 +747,18 @@ fn session_index(cli: &Cli) -> Result<Option<(Index, String)>, SetupError> {
 }
 
 /// `--list`: the sessions of this workspace, newest activity first.
-fn list_sessions(cli: &Cli) -> Result<(), SetupError> {
+fn list_sessions(cli: &Cli) -> Result<(), OutputError> {
     let Some((index, workspace)) = session_index(cli)? else {
         return Ok(()); // no sessions yet
     };
     for row in radian_host::sessions::list(&index, &workspace).map_err(SetupError)? {
-        println!(
+        radian_host::write_line(&format!(
             "{}\t{}\t{}\t{}",
             row.session_id,
             row.created_ts.as_deref().unwrap_or("-"),
             row.last_ts.as_deref().unwrap_or("-"),
             row.message_count
-        );
+        ))?;
     }
     Ok(())
 }
@@ -694,7 +769,7 @@ const SEARCH_LIMIT: usize = 200;
 /// `--export`: one session of the current workspace, Markdown or JSON. It reads the session
 /// file directly (no index), so a read-only command writes nothing into the session
 /// directory.
-fn export_session(cli: &Cli, session_id: &str) -> Result<(), SetupError> {
+fn export_session(cli: &Cli, session_id: &str) -> Result<(), OutputError> {
     let dir = session_dir(cli)?;
     let workspace = session_workspace(cli)?;
     let format = match cli.format {
@@ -717,12 +792,13 @@ fn export_session(cli: &Cli, session_id: &str) -> Result<(), SetupError> {
                 return Err(SetupError(format!(
                     "{} already exists; pass --force to overwrite it",
                     path.display()
-                )));
+                ))
+                .into());
             }
             std::fs::write(path, rendered)
                 .map_err(|e| SetupError(format!("cannot write {}: {e}", path.display())))?;
         }
-        None => print!("{rendered}"),
+        None => radian_host::write_stdout(&rendered)?,
     }
     Ok(())
 }
@@ -760,7 +836,7 @@ fn export_secrets(cli: &Cli) -> Vec<String> {
 /// `--search`: substring search over the current workspace's message text, using the same
 /// `Index::search` the `--list` cache is built on. The index lives beside the sessions in
 /// `index.db`; it is a disposable cache, never a session file (ADR 0006 §10).
-fn search_sessions(cli: &Cli, query: &str) -> Result<(), SetupError> {
+fn search_sessions(cli: &Cli, query: &str) -> Result<(), OutputError> {
     let Some((index, workspace)) = session_index(cli)? else {
         eprintln!("no match");
         return Ok(());
@@ -776,17 +852,91 @@ fn search_sessions(cli: &Cli, query: &str) -> Result<(), SetupError> {
         // The snippet is session content and can carry a model-echoed key or header value;
         // redact the known secrets exactly like `--export` (ADR 0013 decision 3).
         let snippet = redact(&hit.snippet, &secrets);
-        println!(
+        radian_host::write_line(&format!(
             "{}\t{}\t{}",
             hit.session_id,
             hit.last_ts.as_deref().unwrap_or("-"),
             snippet
-        );
+        ))?;
     }
     Ok(())
 }
 
 /// Like the provider's own rule: localhost, 127.0.0.1 and ::1 may go without a key.
+/// `--fork <parent>` (ADR 0022): create a child session from the parent's effective history
+/// at a turn boundary. No model, no key, no network. A parent another process is writing exits
+/// 1 rather than waiting; other failures are usage errors.
+async fn fork_session(cli: &Cli, parent_id: &str) -> Result<(), (String, i32)> {
+    let usage = |message: String| (message, USAGE_ERROR);
+    validate_session_id(parent_id).map_err(usage)?;
+    let dir = session_dir(cli).map_err(|e| (e.0, USAGE_ERROR))?;
+    let parent_path = dir.join(format!("{parent_id}.jsonl"));
+    if !parent_path.exists() {
+        return Err(usage(format!(
+            "no session {parent_id:?} in {}",
+            dir.display()
+        )));
+    }
+    let child_id = cli
+        .session_id
+        .clone()
+        .unwrap_or_else(radian_host::generate_session_id);
+    validate_session_id(&child_id).map_err(usage)?;
+    let child_path = dir.join(format!("{child_id}.jsonl"));
+    if child_path.exists() {
+        return Err(usage(format!(
+            "session {child_id:?} already exists; pass --session-id with a new id"
+        )));
+    }
+    let parent = Session::open(&parent_path)
+        .map_err(|e| usage(format!("cannot read session {parent_id:?}: {e}")))?;
+    // ADR 0022 §5: the child shares the parent's workspace and inherits its config snapshot.
+    let created = created_data(&parent);
+    let workspace = created
+        .and_then(|data| data["workspace"].as_str().map(str::to_owned))
+        .ok_or_else(|| usage(format!("session {parent_id:?} has no workspace")))?;
+    let config_snapshot = created
+        .and_then(|data| data.get("config_snapshot").cloned())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let request = radian_session::ForkRequest {
+        parent_path,
+        parent_id: parent_id.to_owned(),
+        seq: cli.at,
+        child_path,
+        child_id: child_id.clone(),
+        workspace,
+        config_snapshot,
+    };
+    match radian_session::fork(request).await {
+        Ok(outcome) => {
+            println!(
+                "forked {parent_id} at seq {} into {}",
+                outcome.seq, outcome.child_id
+            );
+            println!("continue it with `--resume {}`", outcome.child_id);
+            Ok(())
+        }
+        // The parent is being written by another process: say so and exit 1, do not wait.
+        Err(radian_session::ForkError::Parent {
+            source: radian_session::WriteError::Locked { .. },
+            ..
+        }) => Err((
+            format!("session {parent_id:?} is being written by another process; stop it first"),
+            1,
+        )),
+        Err(error) => Err(usage(error.to_string())),
+    }
+}
+
+/// The parsed `SessionCreated` data of a session, so a fork can inherit the parent's
+/// workspace and model-route reference.
+fn created_data(session: &Session) -> Option<&serde_json::Value> {
+    session.events().iter().find_map(|event| match &event.data {
+        EventData::Other(data) if event.event == "SessionCreated" => Some(data),
+        _ => None,
+    })
+}
+
 fn is_local_base_url(base_url: &str) -> bool {
     let Some((_, rest)) = base_url.split_once("://") else {
         return false;

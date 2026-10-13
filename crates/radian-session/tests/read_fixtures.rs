@@ -358,3 +358,45 @@ fn the_compaction_fixtures_agree_with_the_reference_checker() {
     assert_eq!(candidate.history().unwrap(), vec![Message::user("old")]);
     assert!(candidate.uncommitted_replacements().is_empty());
 }
+
+/// ADR 0022 fixtures: the reader accepts a parent with `SessionForked` and a child with
+/// `SessionCreated.parent`; the two seqs agree. Rust half of the differential check with
+/// `docs/schema/check-fixtures.sh`.
+#[test]
+fn the_fork_fixtures_agree_with_the_reference_checker() {
+    let parent = Session::open(fixture("fork-parent.jsonl")).unwrap();
+    let forked = parent
+        .events()
+        .iter()
+        .find(|event| event.event == "SessionForked")
+        .expect("the parent has SessionForked");
+    let EventData::Other(data) = &forked.data else {
+        panic!("SessionForked is kept as Other");
+    };
+    assert_eq!(
+        data["child_session_id"],
+        serde_json::json!("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+    );
+    assert_eq!(data["parent_seq"], serde_json::json!(4));
+
+    let child = Session::open(fixture("fork-child.jsonl")).unwrap();
+    assert_eq!(
+        child.history().unwrap(),
+        vec![
+            Message::user("parent user"),
+            Message::assistant("parent assistant")
+        ]
+    );
+    let created = child
+        .events()
+        .iter()
+        .find(|event| event.event == "SessionCreated")
+        .unwrap();
+    let EventData::Other(created) = &created.data else {
+        panic!("SessionCreated is kept as Other");
+    };
+    assert_eq!(
+        created["parent"]["seq"], data["parent_seq"],
+        "the child's parent.seq equals the parent's parent_seq"
+    );
+}

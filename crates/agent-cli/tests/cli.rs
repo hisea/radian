@@ -5216,3 +5216,250 @@ async fn an_interactive_compact_is_a_command_and_compactfoo_is_a_message() {
     assert_eq!(server.requests().len(), 1, "only `/compactfoo` was a turn");
     assert_eq!(last_user_text(&messages_of(&server, 0)), "/compactfoo");
 }
+
+// ---------- dogfooding D21: a closed stdout is not a panic ----------
+
+/// A stdout whose reader is already gone, so the child's first write is `EPIPE` no matter how
+/// much it writes: the read end is closed before the child starts, which does not depend on
+/// the pipe buffer size. `SIGPIPE` stays ignored (Rust's default), so the write returns
+/// `BrokenPipe` instead of killing the process.
+#[cfg(unix)]
+fn closed_stdout() -> Stdio {
+    use std::os::unix::io::FromRawFd;
+    let mut fds = [0i32; 2];
+    // SAFETY: a fresh pipe; both fds are owned here.
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    // SAFETY: closing a fd we own.
+    unsafe { libc::close(fds[0]) };
+    // SAFETY: `fds[1]` is an owned write fd, moved into the child's stdout.
+    unsafe { Stdio::from_raw_fd(fds[1]) }
+}
+
+/// D21: every "print and exit" command must treat a closed stdout as a normal stop: exit 0,
+/// no panic on stderr.
+#[cfg(unix)]
+#[test]
+fn a_closed_stdout_is_not_a_panic_for_every_output_command() {
+    let dir = scratch("sigpipe");
+    let sessions = dir.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    write_session(
+        &sessions,
+        "s1",
+        &canonical(&ws),
+        "hello sigpipe",
+        None,
+        None,
+    );
+
+    // One memory record, so `agent memory list` has a line to write.
+    let home = scratch("sigpipe-home");
+    let add = std::process::Command::new(agent_bin())
+        .args(["memory", "add", "--global", "a memory record"])
+        .env("RADIAN_HOME", home.as_os_str())
+        .env("HOME", home.as_os_str())
+        .env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run agent memory add");
+    assert!(
+        add.status.success(),
+        "agent memory add failed: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+
+    let sessions_arg = sessions.to_str().unwrap();
+    let ws_arg = ws.to_str().unwrap();
+    let home_arg = home.to_str().unwrap();
+    let cases: Vec<Vec<&str>> = vec![
+        vec![
+            "--model",
+            "m",
+            "--session-dir",
+            sessions_arg,
+            "--workspace",
+            ws_arg,
+            "--list",
+        ],
+        vec![
+            "--model",
+            "m",
+            "--session-dir",
+            sessions_arg,
+            "--workspace",
+            ws_arg,
+            "--search",
+            "hello",
+        ],
+        vec![
+            "--model",
+            "m",
+            "--session-dir",
+            sessions_arg,
+            "--workspace",
+            ws_arg,
+            "--export",
+            "s1",
+        ],
+        vec!["memory", "list", "--global"],
+    ];
+    for args in cases {
+        let mut child = std::process::Command::new(agent_bin())
+            .args(&args)
+            .env("RADIAN_HOME", home_arg)
+            .env("HOME", home_arg)
+            .env("RADIAN_SESSION_DIR", sessions_arg)
+            .env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json")
+            .stdin(Stdio::null())
+            .stdout(closed_stdout())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn agent");
+        let mut stderr = String::new();
+        std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut stderr).unwrap();
+        let status = child.wait().expect("wait");
+        assert_eq!(status.code(), Some(0), "args {args:?}: stderr {stderr}");
+        assert!(!stderr.contains("panicked"), "args {args:?}: {stderr}");
+    }
+}
+
+/// D22 wording: `--list`/`--search` no longer silently ignore `--session-id`; clap refuses the
+/// combination with a usage error (exit 2).
+#[tokio::test]
+async fn list_and_search_refuse_session_id() {
+    for args in [
+        vec!["--list", "--session-id", "x"],
+        vec!["--search", "x", "--session-id", "x"],
+    ] {
+        let (code, _, stderr) = feed_and_wait(spawn_agent(&args, &[]), "").await;
+        assert_eq!(code, 2, "args {args:?}: {stderr}");
+        assert!(stderr.contains("--session-id"), "args {args:?}: {stderr}");
+    }
+}
+
+// ---------- session fork (ADR 0022) ----------
+
+/// Writes a parent with one finished turn: `PARENT-TEXT` as the first user message. Returns
+/// the `TurnFinished` seq (the fork boundary the CLI should default to).
+async fn write_turn_session(sessions: &Path, id: &str, workspace: &str) -> u64 {
+    use agent_core::{JournalRecord, Message, TranscriptJournal};
+    let path = sessions.join(format!("{id}.jsonl"));
+    let journal = radian_session::SessionJournal::create(
+        &path,
+        id,
+        radian_session::SessionCreatedData::new(workspace, json!({})),
+    )
+    .unwrap();
+    journal
+        .append_runtime_event(radian_session::RuntimeEvent::TurnStarted {
+            turn_id: "t-1".into(),
+        })
+        .await
+        .unwrap();
+    journal
+        .append(JournalRecord::Message {
+            index: 0,
+            message: Message::user("PARENT-TEXT"),
+        })
+        .await
+        .unwrap();
+    let seq = journal.next_seq();
+    journal
+        .append_runtime_event(radian_session::RuntimeEvent::TurnFinished {
+            turn_id: "t-1".into(),
+            outcome: radian_session::TurnOutcome::Completed,
+            reason: None,
+            stop_reason: None,
+        })
+        .await
+        .unwrap();
+    drop(journal);
+    seq
+}
+
+/// `agent --fork` creates a child with the parent's history, records the lineage in both
+/// files, and refuses a parent another process holds.
+#[tokio::test]
+async fn fork_creates_a_child_and_refuses_a_locked_parent() {
+    let dir = scratch("fork-cli");
+    let sessions = dir.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let workspace = canonical(&ws);
+    let boundary = write_turn_session(&sessions, "parent", &workspace).await;
+
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                // No --model: --fork is a session command.
+                "--fork",
+                "parent",
+                "--session-id",
+                "child",
+                "--session-dir",
+                sessions.to_str().unwrap(),
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stdout.contains(&format!("forked parent at seq {boundary} into child")),
+        "{stdout}"
+    );
+    assert!(stdout.contains("--resume child"), "{stdout}");
+
+    // The child's initial history is the parent's one turn.
+    let child = std::fs::read_to_string(sessions.join("child.jsonl")).unwrap();
+    assert!(
+        child.contains(&format!(
+            "\"parent\":{{\"session_id\":\"parent\",\"seq\":{boundary}}}"
+        )),
+        "{child}"
+    );
+    assert!(child.contains("PARENT-TEXT"), "{child}");
+
+    // The parent gained exactly one SessionForked with the same seq.
+    let parent = std::fs::read_to_string(sessions.join("parent.jsonl")).unwrap();
+    assert_eq!(parent.matches("\"event\":\"SessionForked\"").count(), 1);
+    assert!(
+        parent.contains(&format!(
+            "\"child_session_id\":\"child\",\"parent_seq\":{boundary}"
+        )),
+        "{parent}"
+    );
+
+    // A parent another process is writing must be refused with exit 1, not waited for.
+    let held =
+        radian_session::SessionJournal::resume(sessions.join("parent.jsonl"), "parent").unwrap();
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--fork",
+                "parent",
+                "--session-id",
+                "child-2",
+                "--session-dir",
+                sessions.to_str().unwrap(),
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("being written by another process"),
+        "{stderr}"
+    );
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(!sessions.join("child-2.jsonl").exists());
+    drop(held);
+}

@@ -16,13 +16,15 @@ pub const HELP: &str = "\
 /help                 list the commands
 /compact [note]       summarize the history now and keep the recent part (ADR 0018)
 /sessions [query]     list this workspace's recent sessions, or search their text
+/fork                 fork this session at its last turn boundary (ADR 0022)
 /export [md|json] [path] [--force]
                       export this session (default md, default <workspace>/radian-<id>.<ext>)
 /memory <command>     durable memory: list, search, show, add, edit, archive, restore,
                       forget, purge, confirm, export, import, project, relink, split, merge
 //…                   send a message that starts with `/`";
 
-/// A memory write waiting for the user's `y`.
+/// A memory command waiting for the user's confirmation. Only the destructive commands
+/// (`forget`, `purge`, `split`, `merge`) ask (ADR 0021 D7); the rest run immediately.
 #[derive(Debug)]
 pub struct PendingCommand {
     pub command: MemoryCommand,
@@ -44,6 +46,8 @@ pub enum Outcome {
     Sessions(Option<String>),
     /// `/export …`: the host exports the current session and writes the file.
     Export(ExportRequest),
+    /// `/fork`: the host forks the current (idle) session at its last turn boundary.
+    Fork,
     /// Not a command after all (an empty token list); the caller sends the line.
     Message,
 }
@@ -62,6 +66,7 @@ pub struct ExportRequest {
 pub enum SessionOutcome {
     List(Option<String>),
     Export(ExportRequest),
+    Fork,
 }
 
 /// Interprets a trimmed line that starts with `/`. `memory` is the host's service, or `None`
@@ -77,6 +82,7 @@ pub fn dispatch(line: &str, memory: Option<&MemoryService>) -> Outcome {
         Some("/compact") => Outcome::Compact(compact_instructions(&tokens[1..])),
         Some("/sessions") => Outcome::Sessions(sessions_query(&tokens[1..])),
         Some("/export") => export_request(&tokens[1..]),
+        Some("/fork") => Outcome::Fork,
         Some(other) => Outcome::Notices(vec![format!("unknown command {other}; /help lists them")]),
         None => Outcome::Message,
     }

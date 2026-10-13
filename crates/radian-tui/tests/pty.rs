@@ -3287,3 +3287,163 @@ async fn pty_sessions_and_export_commands() {
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
 }
+
+/// `/fork` (ADR 0022): when idle it creates a child with the parent's history; while a turn
+/// is running it is refused; the child resumes normally.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_fork_creates_a_resumable_child_when_idle() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("fork-pty");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    let server = MockServer::start(vec![text_reply("PARENT-DONE")]).await;
+    let mut parent = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "parent",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        30,
+        110,
+    );
+    assert!(parent.wait_for_screen("message", 10), "{}", parent.screen());
+    parent.send(b"hello parent\r");
+    assert!(
+        parent.wait_for_screen("PARENT-DONE", 15),
+        "{}",
+        parent.screen()
+    );
+
+    parent.send(b"/fork\r");
+    assert!(
+        parent.wait_for_screen("forked at seq", 10),
+        "the fork notice is missing:\n{}",
+        parent.screen()
+    );
+    // The child is the only new `.jsonl`.
+    let child_id = std::fs::read_dir(&sessions)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .find(|name| name.ends_with(".jsonl") && name != "parent.jsonl")
+        .map(|name| name.trim_end_matches(".jsonl").to_owned())
+        .expect("a child session file");
+    assert!(
+        parent.wait_for_screen(&format!("--resume {child_id}"), 10),
+        "the notice does not name the child:\n{}",
+        parent.screen()
+    );
+    parent.quit();
+    assert_eq!(parent.app_exit_code(), Some(0));
+
+    // The child resumes and its history is the parent's turn.
+    let server = MockServer::start(vec![text_reply("CHILD-DONE")]).await;
+    let mut child = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--resume",
+            &child_id,
+        ],
+        30,
+        110,
+    );
+    assert!(
+        child.wait_for_screen("hello parent", 10),
+        "the child history is not rendered:\n{}",
+        child.screen()
+    );
+    child.send(b"continue\r");
+    assert!(
+        child.wait_for_screen("CHILD-DONE", 15),
+        "{}",
+        child.screen()
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert!(
+        requests[0].body.contains("hello parent"),
+        "the request lacks the forked history: {}",
+        requests[0].body
+    );
+    child.quit();
+    assert_eq!(child.app_exit_code(), Some(0));
+}
+
+/// `/fork` while a turn is running is refused with a notice and creates nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_fork_refuses_while_a_turn_runs() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("fork-pty-running");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    // A shell tool call that sleeps keeps the turn running while the input box is free.
+    let server = MockServer::start(vec![
+        tool_reply(
+            "call_1",
+            "shell",
+            &json!({"command": "sleep 5"}).to_string(),
+        ),
+        text_reply("NEVER"),
+    ])
+    .await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "running",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--yes",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"go\r");
+    assert!(
+        pty.wait_for_screen("sleep 5", 15),
+        "the sleeping tool call did not start:\n{}",
+        pty.screen()
+    );
+
+    pty.send(b"/fork\r");
+    assert!(
+        pty.wait_for_screen("finish the current turn before forking", 10),
+        "a running turn must refuse /fork:\n{}",
+        pty.screen()
+    );
+    // No child file was created.
+    let jsonl: Vec<String> = std::fs::read_dir(&sessions)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".jsonl"))
+        .collect();
+    assert_eq!(jsonl, vec!["running.jsonl".to_owned()], "{jsonl:?}");
+    pty.quit();
+}

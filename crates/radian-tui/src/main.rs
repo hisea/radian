@@ -252,7 +252,10 @@ fn main() -> ExitCode {
 
 fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, String> {
     if cli.list {
-        return list_sessions(&cli).map(|()| None);
+        return match list_sessions(&cli) {
+            Ok(()) | Err(ListError::BrokenPipe) => Ok(None),
+            Err(ListError::Failed(message)) => Err(message),
+        };
     }
     // ADR 0013 decision 4: diagnostics live in the user cache directory, and cleanup runs at
     // startup. A failure is one line, never a fault.
@@ -666,6 +669,11 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
         workspace: workspace_path.to_string_lossy().into_owned(),
         session_id: session_id.clone(),
         secrets: secrets_for_errors.as_ref().clone(),
+        journal: Arc::clone(&journal),
+        config_snapshot: serde_json::json!({
+            "provider": provider.as_str(),
+            "model": cli.model,
+        }),
     };
     let outcome = ui_loop(
         &mut terminal,
@@ -810,7 +818,7 @@ fn ui_loop(
         // `/sessions` and `/export` are host work (the index / a file), not transcript
         // changes; run them here where the session directory, workspace and secrets are known.
         if let Some(request) = app.pending_session.take() {
-            handle_session_request(app, host, request);
+            handle_session_request(app, host, runtime, request);
         }
         pending_compacts.retain(|rx| match rx.try_recv() {
             Ok(Ok(agent_core::CompactionOutcome::Compacted {
@@ -850,12 +858,18 @@ struct SessionHost {
     workspace: String,
     session_id: String,
     secrets: Vec<String>,
+    /// The parent's writer, so `/fork` records the lineage through the same single-writer lock
+    /// instead of opening a second one (ADR 0022 §1).
+    journal: Arc<SessionJournal>,
+    /// The child's `SessionCreated.config_snapshot` (a model-route reference).
+    config_snapshot: serde_json::Value,
 }
 
 /// Runs one `/sessions` or `/export` request and pushes the result as notices.
 fn handle_session_request(
     app: &mut App,
     host: &SessionHost,
+    runtime: &tokio::runtime::Runtime,
     request: radian_tui::command::SessionOutcome,
 ) {
     match request {
@@ -873,6 +887,33 @@ fn handle_session_request(
             match export_current(host, &request) {
                 Ok(path) => app.push_notice(format!("exported to {path}")),
                 Err(message) => app.push_notice(message),
+            }
+        }
+        radian_tui::command::SessionOutcome::Fork => {
+            // ADR 0022 §1: fork only when the session is idle.
+            if app.turn == radian_tui::TurnState::Running {
+                app.push_notice(
+                    "finish the current turn before forking (`/fork` needs an idle session)",
+                );
+                return;
+            }
+            let child_id = radian_host::generate_session_id();
+            let child_path = host.dir.join(format!("{child_id}.jsonl"));
+            let request = radian_session::ForkRequest {
+                parent_path: host.journal.path().to_path_buf(),
+                parent_id: host.session_id.clone(),
+                seq: None,
+                child_path,
+                child_id: child_id.clone(),
+                workspace: host.workspace.clone(),
+                config_snapshot: host.config_snapshot.clone(),
+            };
+            match runtime.block_on(radian_session::fork_with_journal(request, &host.journal)) {
+                Ok(outcome) => app.push_notice(format!(
+                    "forked at seq {} into {}; open it with `radian-tui --resume {}`                      (this window keeps the parent)",
+                    outcome.seq, outcome.child_id, outcome.child_id
+                )),
+                Err(error) => app.push_notice(format!("fork failed: {error}")),
             }
         }
     }
@@ -1179,7 +1220,33 @@ fn pick_session(
         .map_err(|e| format!("picker: {e}"))
 }
 
-fn list_sessions(cli: &Cli) -> Result<(), String> {
+/// Why the TUI's `--list` stopped. A closed stdout (`radian-tui --list | head`) is a normal
+/// stop, not a failure (dogfooding D21), so it is kept apart from a real error.
+enum ListError {
+    /// A real failure: exit 1 with this message.
+    Failed(String),
+    /// stdout's reader went away: exit 0, no message.
+    BrokenPipe,
+}
+
+impl From<String> for ListError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+impl From<radian_host::StdoutError> for ListError {
+    fn from(error: radian_host::StdoutError) -> Self {
+        match error {
+            radian_host::StdoutError::BrokenPipe => Self::BrokenPipe,
+            radian_host::StdoutError::Failed(error) => {
+                Self::Failed(format!("cannot write to stdout: {error}"))
+            }
+        }
+    }
+}
+
+fn list_sessions(cli: &Cli) -> Result<(), ListError> {
     let dir = session_dir(cli)?;
     let workspace = session_workspace(cli)?;
     if !dir.exists() {
@@ -1204,13 +1271,13 @@ fn list_sessions(cli: &Cli) -> Result<(), String> {
                     .count()
             })
             .unwrap_or(0);
-        println!(
+        radian_host::write_line(&format!(
             "{}\t{}\t{}\t{}",
             session.session_id,
             session.created_ts.as_deref().unwrap_or("-"),
             session.last_ts.as_deref().unwrap_or("-"),
             messages
-        );
+        ))?;
     }
     Ok(())
 }

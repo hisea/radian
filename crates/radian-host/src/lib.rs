@@ -16,6 +16,7 @@ mod home;
 mod mcp;
 pub mod memory;
 mod model;
+mod output;
 mod session_id;
 pub mod sessions;
 mod tools;
@@ -44,6 +45,7 @@ pub use model::{
     DEFAULT_MAX_TOKENS, HostModel, MIN_THINKING_BUDGET, ModelArgs, Provider, Thinking, build_model,
     check_provider_flags, redact_base_url,
 };
+pub use output::{StdoutError, write_line, write_stdout};
 pub use session_id::{generate_session_id, validate_session_id};
 pub use sessions::{
     ExportSettings, Format, SEARCH_LIMIT, SUMMARY_MAX_CHARS, SearchRow, SessionRow,
