@@ -43,6 +43,12 @@ pub struct AnthropicConfig {
     /// The `max_tokens` request field. Anthropic lists it without an `optional` qualifier and
     /// every official example carries it, so the adapter always sends it.
     pub max_tokens: u32,
+    /// Extended thinking, off by default. When `Some`, the request carries the `thinking`
+    /// object and the adapter preserves the response's `thinking`/`redacted_thinking` blocks
+    /// (signatures included) in the assistant message's `provider_payload`, so a later tool
+    /// turn echoes them back unchanged (ADR 0014 R10; wire notes §2.3/§4.2). `None` sends no
+    /// `thinking` key and leaves the request byte-identical to the pre-thinking adapter.
+    pub thinking: Option<ThinkingConfig>,
     /// Sent with every request, after the built-in headers.
     pub headers: Vec<(String, String)>,
     /// Merged into the request body (e.g. `temperature`, `top_p`), under the per-request
@@ -53,9 +59,22 @@ pub struct AnthropicConfig {
     /// How long the server may stay silent mid-response before the request fails. There is no
     /// total time limit: a long answer is fine while bytes keep coming.
     pub idle_timeout: Duration,
-    /// Cap on the text and tool-call arguments of one response. A server that never stops
-    /// cannot grow host memory past it.
+    /// Cap on the text, thinking and tool-call argument bytes of one response. A server that
+    /// never stops cannot grow host memory past it.
     pub max_response_bytes: usize,
+}
+
+/// Extended thinking (ADR 0014 R10). Enabling it is the host's decision; the adapter never
+/// turns it on by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingConfig {
+    /// Manual extended thinking: `{"type":"enabled","budget_tokens":N}`. The API requires
+    /// `budget_tokens >= 1024` and `< max_tokens` (wire notes §2.3). Deprecated on Claude 4.6
+    /// and rejected by Claude 4.7+; use [`ThinkingConfig::Adaptive`] on those models.
+    Enabled { budget_tokens: u32 },
+    /// Adaptive thinking: `{"type":"adaptive"}`. The model decides whether and how much to
+    /// think; the recommended mode on Claude 4.6+ (wire notes §2.3).
+    Adaptive,
 }
 
 /// Header values are hidden: custom headers often carry credentials such as `X-API-Key`.
@@ -68,6 +87,7 @@ impl fmt::Debug for AnthropicConfig {
             .field("api_key", &self.api_key)
             .field("anthropic_version", &self.anthropic_version)
             .field("max_tokens", &self.max_tokens)
+            .field("thinking", &self.thinking)
             .field("headers", &header_names)
             .field("extra_body", &self.extra_body)
             .field("connect_timeout", &self.connect_timeout)
@@ -85,6 +105,7 @@ impl AnthropicConfig {
             api_key: None,
             anthropic_version: DEFAULT_ANTHROPIC_VERSION.into(),
             max_tokens: 4096,
+            thinking: None,
             headers: Vec::new(),
             extra_body: Map::new(),
             connect_timeout: Duration::from_secs(30),
@@ -100,6 +121,11 @@ impl AnthropicConfig {
 
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = max_tokens;
+        self
+    }
+
+    pub fn with_thinking(mut self, thinking: ThinkingConfig) -> Self {
+        self.thinking = Some(thinking);
         self
     }
 

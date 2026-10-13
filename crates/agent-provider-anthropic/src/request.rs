@@ -1,9 +1,11 @@
 //! `ModelRequest` -> Anthropic Messages request body. Pure, so it is tested without a server.
 
-use agent_core::{ContentPart, Message, ModelError, ModelRequest, ToolCall, ToolResult};
+use agent_core::{
+    ContentPart, Message, ModelError, ModelRequest, OpaqueJson, ToolCall, ToolResult,
+};
 use serde_json::{Map, Value, json};
 
-use crate::config::AnthropicConfig;
+use crate::config::{AnthropicConfig, ThinkingConfig};
 
 /// Keys the adapter owns. Settings may not override them. `max_tokens` is here because
 /// Anthropic requires it and the adapter always sends it (see the wire notes §2).
@@ -35,10 +37,27 @@ pub(crate) fn build_body(
     body.insert("model".into(), json!(config.model));
     body.insert("max_tokens".into(), json!(config.max_tokens));
     body.insert("stream".into(), json!(true));
+    // The config wins over any `thinking` passed through `extra_body`/`settings`, but when no
+    // thinking is configured the key is simply absent, so a thinking-free request is
+    // byte-identical to the adapter before this feature (acceptance 5).
+    if let Some(thinking) = config.thinking {
+        body.insert(
+            "thinking".into(),
+            match thinking {
+                ThinkingConfig::Enabled { budget_tokens } => {
+                    json!({"type": "enabled", "budget_tokens": budget_tokens})
+                }
+                ThinkingConfig::Adaptive => json!({"type": "adaptive"}),
+            },
+        );
+    }
     if let Some(system) = &request.system_prompt {
         body.insert("system".into(), json!(system));
     }
-    body.insert("messages".into(), Value::Array(messages(&request.messages)));
+    body.insert(
+        "messages".into(),
+        Value::Array(messages(&request.messages)?),
+    );
     if !request.tools.is_empty() {
         let tools: Vec<Value> = request
             .tools
@@ -69,7 +88,7 @@ fn settings_object(settings: &Value) -> Result<Map<String, Value>, ModelError> {
 /// Anthropic has no `tool` role: tool results are `tool_result` blocks inside a `user`
 /// message. Consecutive results are merged into one user message, matching the official
 /// round-trip example (wire notes §2.1).
-fn messages(messages: &[Message]) -> Vec<Value> {
+fn messages(messages: &[Message]) -> Result<Vec<Value>, ModelError> {
     let mut out = Vec::new();
     let mut index = 0;
     while index < messages.len() {
@@ -81,9 +100,14 @@ fn messages(messages: &[Message]) -> Vec<Value> {
             Message::Assistant {
                 content,
                 tool_calls,
+                provider_payload,
                 ..
             } => {
-                out.push(assistant_message(content, tool_calls));
+                out.push(assistant_message(
+                    content,
+                    tool_calls,
+                    provider_payload.as_ref(),
+                )?);
                 index += 1;
             }
             Message::Tool { .. } => {
@@ -96,7 +120,7 @@ fn messages(messages: &[Message]) -> Vec<Value> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 fn user_message(content: &[ContentPart]) -> Value {
@@ -111,10 +135,48 @@ fn user_message(content: &[ContentPart]) -> Value {
     json!({"role": "user", "content": content})
 }
 
-fn assistant_message(content: &[ContentPart], tool_calls: &[ToolCall]) -> Value {
-    let mut blocks = blocks(content);
-    blocks.extend(tool_calls.iter().map(tool_use_block));
-    json!({"role": "assistant", "content": blocks})
+fn assistant_message(
+    content: &[ContentPart],
+    tool_calls: &[ToolCall],
+    provider_payload: Option<&OpaqueJson>,
+) -> Result<Value, ModelError> {
+    // Anthropic requires the thinking/redacted_thinking blocks of the assistant turn to be
+    // echoed back complete and unmodified, before the tool_use they accompanied; the payload
+    // holds exactly those blocks, in the order they were streamed (ADR 0014 R10; wire notes
+    // §4.5).
+    let mut preserved = thinking_blocks(provider_payload)?;
+    preserved.extend(blocks(content));
+    preserved.extend(tool_calls.iter().map(tool_use_block));
+    Ok(json!({"role": "assistant", "content": preserved}))
+}
+
+/// The preserved `thinking`/`redacted_thinking` blocks from an assistant message's
+/// `provider_payload`, in order. Only those two block types are returned: the rest of an
+/// assistant message is rebuilt from `content` and `tool_calls`, so re-inserting an opaque
+/// block of another type would duplicate or misplace it. A payload that is not a JSON array
+/// is a protocol error rather than a silent drop (a dropped thinking block makes the
+/// provider reject the request).
+fn thinking_blocks(payload: Option<&OpaqueJson>) -> Result<Vec<Value>, ModelError> {
+    let Some(payload) = payload else {
+        return Ok(Vec::new());
+    };
+    let value: Value = serde_json::from_str(payload.get()).map_err(|error| {
+        ModelError::Protocol(format!("provider_payload is not valid JSON: {error}"))
+    })?;
+    let Value::Array(blocks) = value else {
+        return Err(ModelError::Protocol(
+            "provider_payload must be a JSON array of content blocks".into(),
+        ));
+    };
+    Ok(blocks
+        .into_iter()
+        .filter(|block| {
+            matches!(
+                block["type"].as_str(),
+                Some("thinking" | "redacted_thinking")
+            )
+        })
+        .collect())
 }
 
 /// Text and image blocks; every other `ContentPart` becomes a short text placeholder, so the
@@ -499,5 +561,133 @@ mod tests {
         let cfg = config().with_max_tokens(123);
         let body = build_body(&request(vec![Message::user("hi")]), &cfg).unwrap();
         assert_eq!(body["max_tokens"], 123);
+    }
+
+    /// Acceptance 5: with thinking off (the default), the body carries no `thinking` key, so
+    /// it is byte-identical to the adapter before extended thinking existed.
+    #[test]
+    fn thinking_off_leaves_the_request_body_unchanged() {
+        let body = build_body(&request(vec![Message::user("hi")]), &config()).unwrap();
+        assert_eq!(
+            body,
+            json!({
+                "model": "claude-test",
+                "max_tokens": 4096,
+                "stream": true,
+                "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+            })
+        );
+        assert!(!body.to_string().contains("thinking"), "{body}");
+    }
+
+    #[test]
+    fn thinking_enabled_sends_the_manual_object() {
+        let cfg = config().with_thinking(crate::config::ThinkingConfig::Enabled {
+            budget_tokens: 4096,
+        });
+        let body = build_body(&request(vec![Message::user("hi")]), &cfg).unwrap();
+        assert_eq!(
+            body["thinking"],
+            json!({"type": "enabled", "budget_tokens": 4096})
+        );
+    }
+
+    #[test]
+    fn thinking_adaptive_sends_the_adaptive_object() {
+        let cfg = config().with_thinking(crate::config::ThinkingConfig::Adaptive);
+        let body = build_body(&request(vec![Message::user("hi")]), &cfg).unwrap();
+        assert_eq!(body["thinking"], json!({"type": "adaptive"}));
+    }
+
+    #[test]
+    fn configured_thinking_wins_over_extra_body() {
+        let mut cfg = config().with_thinking(crate::config::ThinkingConfig::Adaptive);
+        cfg.extra_body.insert(
+            "thinking".into(),
+            json!({"type": "enabled", "budget_tokens": 1}),
+        );
+        let body = build_body(&request(vec![Message::user("hi")]), &cfg).unwrap();
+        assert_eq!(body["thinking"], json!({"type": "adaptive"}));
+    }
+
+    fn assistant_with_payload(payload: &str, calls: Vec<ToolCall>) -> Message {
+        Message::Assistant {
+            content: vec![ContentPart::text("visible")],
+            reasoning: Vec::new(),
+            tool_calls: calls,
+            provider_payload: Some(OpaqueJson::parse(payload).unwrap()),
+            interrupted: false,
+            meta: MessageMeta::default(),
+        }
+    }
+
+    /// Acceptance 6 and 7: the preserved thinking and redacted_thinking blocks go back before
+    /// the `tool_use`, in the order they were streamed, with their signatures unchanged.
+    #[test]
+    fn preserved_thinking_blocks_are_echoed_before_tool_use_in_order() {
+        let payload = r#"[{"type":"thinking","thinking":"first","signature":"sig-1"},{"type":"redacted_thinking","data":"opaque"},{"type":"thinking","thinking":"second","signature":"sig-2"}]"#;
+        let body = build_body(
+            &request(vec![
+                Message::user("what?"),
+                assistant_with_payload(payload, vec![call("toolu_1", "t", json!({"x": 1}))]),
+                Message::Tool {
+                    result: ToolResult::success("toolu_1", vec![ContentPart::text("ok")]),
+                    meta: MessageMeta::default(),
+                },
+            ]),
+            &config(),
+        )
+        .unwrap();
+        assert_eq!(
+            body["messages"][1]["content"],
+            json!([
+                {"type": "thinking", "thinking": "first", "signature": "sig-1"},
+                {"type": "redacted_thinking", "data": "opaque"},
+                {"type": "thinking", "thinking": "second", "signature": "sig-2"},
+                {"type": "text", "text": "visible"},
+                {"type": "tool_use", "id": "toolu_1", "name": "t", "input": {"x": 1}}
+            ])
+        );
+    }
+
+    /// Acceptance 9: a payload that came back from the transcript JSON (as the session file
+    /// stores it) still rebuilds the same blocks. The JSONL round trip itself is pinned in
+    /// `radian-session`; this pins the adapter side of it.
+    #[test]
+    fn a_payload_read_back_from_json_still_echoes_thinking() {
+        let payload = r#"[{"type":"thinking","thinking":"why","signature":"sig-1"}]"#;
+        let message = assistant_with_payload(payload, vec![call("toolu_1", "t", json!({}))]);
+        let stored = serde_json::to_string(&message).unwrap();
+        let read_back: Message = serde_json::from_str(&stored).unwrap();
+        let body = build_body(&request(vec![read_back]), &config()).unwrap();
+        assert_eq!(
+            body["messages"][0]["content"][0],
+            json!({"type": "thinking", "thinking": "why", "signature": "sig-1"})
+        );
+    }
+
+    #[test]
+    fn a_provider_payload_that_is_not_an_array_is_refused() {
+        let body = build_body(
+            &request(vec![assistant_with_payload(
+                r#"{"type":"thinking"}"#,
+                vec![],
+            )]),
+            &config(),
+        );
+        assert!(matches!(body, Err(ModelError::Protocol(_))), "{body:?}");
+    }
+
+    #[test]
+    fn an_empty_provider_payload_array_sends_the_plain_assistant() {
+        let body = build_body(
+            &request(vec![assistant_with_payload("[]", vec![])]),
+            &config(),
+        )
+        .unwrap();
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!([{"type": "text", "text": "visible"}])
+        );
     }
 }

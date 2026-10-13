@@ -13,7 +13,7 @@ use agent_provider_anthropic::testing::{
     MockServer, Reply, block_stop, error, input_json_delta, message_delta, message_start,
     message_stop, ping, text_delta, text_start, tool_start,
 };
-use agent_provider_anthropic::{Anthropic, AnthropicConfig, ApiKey, ConfigError};
+use agent_provider_anthropic::{Anthropic, AnthropicConfig, ApiKey, ConfigError, ThinkingConfig};
 use serde_json::{Value, json};
 
 // ---------- helpers ----------
@@ -427,6 +427,94 @@ async fn thinking_and_server_tool_blocks_are_not_content() {
     let response = complete_once(&server, |_| {}).await;
     assert_eq!(response.content, vec![ContentPart::text("the answer")]);
     assert!(response.tool_calls.is_empty());
+    // The thinking block is preserved for the next request, not exposed as content.
+    let payload = response
+        .provider_payload
+        .expect("the thinking block is kept");
+    let payload: Value = serde_json::from_str(payload.get()).unwrap();
+    assert_eq!(
+        payload,
+        json!([{"type": "thinking", "thinking": "internal reasoning", "signature": "EqQB"}])
+    );
+}
+
+/// Acceptance 6 and 8: a thinking-plus-tool_use turn sends the `thinking` object, keeps the
+/// block out of `reasoning` and the UI events, and echoes it back (signature intact) before
+/// the `tool_use` on the next request.
+#[tokio::test]
+async fn a_thinking_turn_echoes_the_blocks_back_on_the_next_request() {
+    let server = MockServer::start(vec![
+        Reply::sse(&[
+            message_start(None),
+            json!({"type": "content_block_start", "index": 0,
+                   "content_block": {"type": "thinking", "thinking": "", "signature": ""}}),
+            json!({"type": "content_block_delta", "index": 0,
+                   "delta": {"type": "thinking_delta", "thinking": "I should add."}}),
+            json!({"type": "content_block_delta", "index": 0,
+                   "delta": {"type": "signature_delta", "signature": "EqQBsig"}}),
+            block_stop(0),
+            tool_start(1, Some("toolu_1"), "add", json!({})),
+            input_json_delta(1, "{\"a\":2,\"b\":3}"),
+            block_stop(1),
+            message_delta("tool_use", None),
+            message_stop(),
+        ]),
+        text_reply("It is 5."),
+    ])
+    .await;
+    let recorder = Recorder::default();
+    let mut session = chat(
+        model_with(&server, |c| {
+            c.thinking = Some(ThinkingConfig::Enabled {
+                budget_tokens: 1024,
+            });
+        }),
+        Calc,
+    )
+    .await;
+
+    let outcome = session
+        .run_turn("what is 2+3?", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+
+    // The first request carries the configured `thinking` object.
+    assert_eq!(
+        server.requests()[0].json()["thinking"],
+        json!({"type": "enabled", "budget_tokens": 1024})
+    );
+    // The second request echoes the assistant turn with the thinking block first.
+    let second = server.requests()[1].json();
+    assert_eq!(
+        second["messages"][1],
+        json!({
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "I should add.", "signature": "EqQBsig"},
+                {"type": "tool_use", "id": "toolu_1", "name": "add", "input": {"a": 2, "b": 3}}
+            ]
+        })
+    );
+    // Acceptance 8: thinking text is not in `reasoning` and emits no UI event.
+    let history = session.history_for_resume().history;
+    for message in &history {
+        if let Message::Assistant { reasoning, .. } = message {
+            assert!(
+                reasoning.is_empty(),
+                "thinking must not enter reasoning: {message:?}"
+            );
+        }
+    }
+    assert!(
+        !recorder
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ModelReasoningDelta { .. })),
+        "thinking must not reach the UI as reasoning"
+    );
 }
 
 #[tokio::test]

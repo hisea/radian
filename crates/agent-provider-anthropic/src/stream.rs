@@ -23,11 +23,26 @@ struct PartialCall {
     saw_delta: bool,
 }
 
+/// One `thinking` or `redacted_thinking` block, accumulated so it can be passed back to the
+/// provider unchanged (ADR 0014 R10). `start` is the `content_block_start` object verbatim, so
+/// fields this adapter does not know still round-trip; `thinking`/`signature` are filled from
+/// the deltas. A `redacted_thinking` block carries its opaque `data` in `start` and gets no
+/// deltas.
+#[derive(Debug)]
+struct ThinkingAccum {
+    start: Value,
+    thinking: String,
+    signature: String,
+}
+
 enum Block {
     Text(String),
     Tool(PartialCall),
-    /// A block kind the adapter does not implement (thinking, server tools, ...). Its deltas
-    /// are ignored, never turned into text or tool calls.
+    /// A `thinking`/`redacted_thinking` block, preserved for `provider_payload`. It is never
+    /// turned into text or reasoning: it is provider-visible protocol data (ADR 0014 R10).
+    Thinking(ThinkingAccum),
+    /// A block kind the adapter does not implement (server tools, ...). Its deltas are
+    /// ignored, never turned into text or tool calls.
     Ignored,
 }
 
@@ -148,12 +163,16 @@ impl<'a> Assembler<'a> {
                             saw_delta: false,
                         })
                     }
-                    // thinking, server_tool_use, web_search_tool_result, ...: not implemented.
-                    // Extended thinking is deliberately **not** wired into the reasoning
-                    // channel: its thinking/signature blocks must be passed back verbatim in
-                    // tool turns, which belongs to `provider_payload`, not to the
-                    // provider-invisible `reasoning` field (ADR 0014 R10). Anthropic
-                    // reasoning parsing is unimplemented, not supported.
+                    // thinking / redacted_thinking: preserved verbatim for the provider_payload
+                    // so a tool turn can echo it back (ADR 0014 R10). This is **not** the
+                    // reasoning channel: thinking text must never become visible content or a
+                    // UI event.
+                    "thinking" | "redacted_thinking" => Block::Thinking(ThinkingAccum {
+                        start: block.clone(),
+                        thinking: block["thinking"].as_str().unwrap_or("").to_owned(),
+                        signature: block["signature"].as_str().unwrap_or("").to_owned(),
+                    }),
+                    // server_tool_use, web_search_tool_result, ...: not implemented.
                     _ => Block::Ignored,
                 };
                 self.set_block(index, started);
@@ -182,8 +201,25 @@ impl<'a> Assembler<'a> {
                             }
                         }
                     }
-                    // `thinking_delta` / `signature_delta` are deliberately dropped: emitting
-                    // them as text would corrupt the core's interrupted prefix (ADR 0003 F2).
+                    // Thinking deltas are kept in the block, never emitted as text or
+                    // reasoning (ADR 0014 R10): emitting them would corrupt the core's
+                    // interrupted prefix (ADR 0003 F2) and leak hidden reasoning to the UI.
+                    "thinking_delta" => {
+                        if let Some(text) = delta["thinking"].as_str() {
+                            self.account(text.len())?;
+                            if let Some(Block::Thinking(acc)) = self.blocks.get_mut(index) {
+                                acc.thinking.push_str(text);
+                            }
+                        }
+                    }
+                    "signature_delta" => {
+                        if let Some(signature) = delta["signature"].as_str() {
+                            self.account(signature.len())?;
+                            if let Some(Block::Thinking(acc)) = self.blocks.get_mut(index) {
+                                acc.signature.push_str(signature);
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -250,10 +286,26 @@ impl<'a> Assembler<'a> {
 
         let mut content = Vec::new();
         let mut tool_calls = Vec::new();
+        let mut preserved = Vec::new();
         for (n, block) in self.blocks.into_iter().enumerate() {
             match block {
                 Block::Text(text) if !text.is_empty() => content.push(ContentPart::text(text)),
                 Block::Text(_) | Block::Ignored => {}
+                Block::Thinking(acc) => {
+                    let ThinkingAccum {
+                        mut start,
+                        thinking,
+                        signature,
+                    } = acc;
+                    // A redacted block carries its opaque `data` in `start`; leave it as-is.
+                    // A regular block takes the deltas' thinking/signature, so the signature
+                    // value is byte-identical to what the provider sent.
+                    if start["type"].as_str() == Some("thinking") {
+                        start["thinking"] = Value::String(thinking);
+                        start["signature"] = Value::String(signature);
+                    }
+                    preserved.push(start);
+                }
                 Block::Tool(call) => {
                     let arguments = call_arguments(&call);
                     tool_calls.push(ToolCall {
@@ -268,11 +320,24 @@ impl<'a> Assembler<'a> {
             reasoning: Vec::new(),
             content,
             tool_calls,
-            provider_payload: None,
+            provider_payload: provider_payload(preserved),
             stop_reason: map_stop_reason(&reason),
             usage: self.usage.as_ref().map(UsageAccum::to_model_usage),
         })
     }
+}
+
+/// The blocks to pass back to the provider, as one opaque JSON array (ADR 0014 R10). `None`
+/// when the response had no thinking/redacted_thinking blocks, so a thinking-free response is
+/// unchanged.
+fn provider_payload(blocks: Vec<Value>) -> Option<OpaqueJson> {
+    if blocks.is_empty() {
+        return None;
+    }
+    Some(
+        OpaqueJson::parse(Value::Array(blocks).to_string())
+            .expect("a JSON array built from JSON values is valid JSON"),
+    )
 }
 
 fn index_of(event: &Value) -> usize {
@@ -485,11 +550,19 @@ mod tests {
     }
 
     #[test]
-    fn thinking_and_server_tool_blocks_are_ignored() {
-        let response = assemble(&[
+    fn thinking_blocks_are_preserved_and_never_become_content() {
+        let sink = Recorder::default();
+        let mut assembler = Assembler::new(&sink, usize::MAX);
+        for data in [
             message_start(None),
-            start(0, json!({"type": "thinking", "thinking": "", "signature": ""})),
-            delta(0, json!({"type": "thinking_delta", "thinking": "secret reasoning"})),
+            start(
+                0,
+                json!({"type": "thinking", "thinking": "", "signature": ""}),
+            ),
+            delta(
+                0,
+                json!({"type": "thinking_delta", "thinking": "secret reasoning"}),
+            ),
             delta(0, json!({"type": "signature_delta", "signature": "EqQB"})),
             stop(0),
             start(
@@ -502,10 +575,112 @@ mod tests {
             stop(2),
             message_delta("end_turn"),
             message_stop(),
+        ] {
+            assembler.feed(&data).unwrap();
+        }
+        let response = assembler.finish(HashSet::new()).unwrap();
+
+        // The thinking block is provider-visible protocol data, not visible content and not
+        // the reasoning channel (ADR 0014 R10).
+        assert_eq!(response.content, vec![ContentPart::text("answer")]);
+        assert!(response.reasoning.is_empty());
+        assert!(response.tool_calls.is_empty());
+        let payload = response
+            .provider_payload
+            .expect("the thinking block is kept");
+        let payload: Value = serde_json::from_str(payload.get()).unwrap();
+        assert_eq!(
+            payload,
+            json!([{"type": "thinking", "thinking": "secret reasoning", "signature": "EqQB"}])
+        );
+        // No thinking text reached the UI: only the visible text delta was emitted.
+        let events = sink.0.lock().unwrap().clone();
+        assert_eq!(
+            events,
+            [AgentEvent::ModelTextDelta {
+                text: "answer".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn redacted_thinking_blocks_round_trip_verbatim() {
+        let response = assemble(&[
+            message_start(None),
+            start(
+                0,
+                json!({"type": "redacted_thinking", "data": "EmgBAQ...opaque"}),
+            ),
+            stop(0),
+            start(1, json!({"type": "text", "text": ""})),
+            delta(1, json!({"type": "text_delta", "text": "answer"})),
+            stop(1),
+            message_delta("end_turn"),
+            message_stop(),
         ])
         .unwrap();
-        assert_eq!(response.content, vec![ContentPart::text("answer")]);
-        assert!(response.tool_calls.is_empty());
+        let payload = response.provider_payload.expect("redacted block kept");
+        let payload: Value = serde_json::from_str(payload.get()).unwrap();
+        assert_eq!(
+            payload,
+            json!([{"type": "redacted_thinking", "data": "EmgBAQ...opaque"}])
+        );
+    }
+
+    #[test]
+    fn thinking_blocks_keep_their_streamed_order() {
+        let response = assemble(&[
+            message_start(None),
+            start(
+                0,
+                json!({"type": "thinking", "thinking": "", "signature": ""}),
+            ),
+            delta(0, json!({"type": "thinking_delta", "thinking": "one"})),
+            delta(
+                0,
+                json!({"type": "signature_delta", "signature": "sig-one"}),
+            ),
+            stop(0),
+            start(1, json!({"type": "redacted_thinking", "data": "opaque"})),
+            stop(1),
+            start(
+                2,
+                json!({"type": "thinking", "thinking": "", "signature": ""}),
+            ),
+            delta(2, json!({"type": "thinking_delta", "thinking": "two"})),
+            delta(
+                2,
+                json!({"type": "signature_delta", "signature": "sig-two"}),
+            ),
+            stop(2),
+            message_delta("end_turn"),
+            message_stop(),
+        ])
+        .unwrap();
+        let payload: Value =
+            serde_json::from_str(response.provider_payload.unwrap().get()).unwrap();
+        assert_eq!(
+            payload,
+            json!([
+                {"type": "thinking", "thinking": "one", "signature": "sig-one"},
+                {"type": "redacted_thinking", "data": "opaque"},
+                {"type": "thinking", "thinking": "two", "signature": "sig-two"}
+            ])
+        );
+    }
+
+    #[test]
+    fn a_response_without_thinking_has_no_provider_payload() {
+        let response = assemble(&[
+            message_start(None),
+            start(0, json!({"type": "text", "text": ""})),
+            delta(0, json!({"type": "text_delta", "text": "plain"})),
+            stop(0),
+            message_delta("end_turn"),
+            message_stop(),
+        ])
+        .unwrap();
+        assert!(response.provider_payload.is_none());
     }
 
     #[test]

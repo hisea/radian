@@ -78,6 +78,47 @@ fn json_export_omits_provider_payload_by_default_and_includes_it_when_opted_in()
     );
 }
 
+/// Acceptance 10: thinking blocks and their signatures live in `provider_payload`, so the
+/// default export excludes them too; opting into the payload is the only way to get them.
+#[test]
+fn thinking_blocks_are_excluded_from_the_default_export() {
+    let dir = TempDir::new("export-thinking");
+    let path = dir.file("thinking.jsonl");
+    let sid = "sid-thinking";
+    let lines = [
+        json!({"schema_version":1,"session_id":sid,"seq":0,
+            "ts":"2026-10-12T08:00:00.000000Z","event":"SessionCreated","critical":true,
+            "data":{"workspace":"/work/thinking","config_snapshot":{}}}),
+        json!({"schema_version":1,"session_id":sid,"seq":1,
+            "ts":"2026-10-12T08:00:01.000000Z","event":"MessageAppended","critical":true,
+            "data":{"index":0,"message":{"user":{"content":[{"text":{"text":"hi"}}]}}}}),
+        json!({"schema_version":1,"session_id":sid,"seq":2,
+        "ts":"2026-10-12T08:00:02.000000Z","event":"MessageAppended","critical":true,
+        "data":{"index":1,"message":{"assistant":{
+            "content":[{"text":{"text":"answer"}}],
+            "provider_payload":[{"type":"thinking","thinking":"secret chain of thought","signature":"sig-opaque-marker"}]
+        }}}}),
+    ];
+    let mut out = String::new();
+    for line in lines {
+        out.push_str(&line.to_string());
+        out.push('\n');
+    }
+    std::fs::write(&path, out).unwrap();
+    let session = Session::open(&path).unwrap();
+
+    let default = export_json(&session, &ExportOptions::new()).unwrap();
+    assert!(!default.contains("sig-opaque-marker"), "{default}");
+    assert!(!default.contains("secret chain of thought"), "{default}");
+
+    let with_payload = export_json(
+        &session,
+        &ExportOptions::new().include_provider_payload(true),
+    )
+    .unwrap();
+    assert!(with_payload.contains("sig-opaque-marker"), "{with_payload}");
+}
+
 #[test]
 fn markdown_export_follows_the_same_payload_default() {
     let dir = TempDir::new("export-md");
