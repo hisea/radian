@@ -30,3 +30,35 @@ So this is an **equivalent mutation under the test environment**, not a test hol
 
 - M1 was run against `read_fixtures` as well and did not fail there: that suite reads the repository's own fixture files, which are not produced by this crate's writer. The writer-side suite is the one that owns writer invariants.
 - The lock guarantee is verified in two ways: two independent `File` handles in one process (kernel `flock` still conflicts) and a spawned child process that must report `LOCKED`.
+## Phase 7: corruption fuzz and crash injection
+
+Base: `015ffbb` · one-shot worktree `/tmp/fuzz-mut` (created from HEAD, deleted after) · a
+private `CARGO_TARGET_DIR` so no mutation artifact can leak into the main worktree's build ·
+each mutation run with `cargo test -p radian-session --no-fail-fast`, then `git checkout -- .`;
+`git status --short` empty at the end.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| M1 | reader: a torn tail is treated as a committed event (`break` → `line.push(b'\n')`) | `read_fixtures::a_torn_tail_is_dropped_at_read_time`, `index::a_torn_tail_is_not_indexed_and_is_picked_up_after_truncate_and_append`, `index::a_deleted_index_rebuilds_to_the_same_rows`, `findings::a_crash_mid_replacement_is_refused_as_an_incomplete_replacement` | ✅ failed |
+| M2 | reader: a line that is not UTF-8 or not JSON is silently skipped (and `seq` advanced) | `read_fixtures::a_bad_json_line_names_its_line_number`, `fuzz::corruption_replay_is_total_and_never_writes_the_file` | ✅ failed |
+| M3 | reader: an unknown `critical:true` event is skipped instead of refused | `read_fixtures::an_unknown_critical_event_refuses_the_file_with_line_and_event`, `fuzz::corruption_replay_is_total_and_never_writes_the_file` | ✅ failed |
+| M4 | writer: `resume` does not truncate the torn tail before appending | `append::a_torn_tail_is_truncated_before_appending`, `crash_inject::every_partial_line_is_truncated_before_the_next_append`, `index::a_torn_tail_is_not_indexed_and_is_picked_up_after_truncate_and_append`, `write::the_new_method_truncates_a_torn_tail_like_every_other_line` | ✅ failed |
+| M5 | reader: the read truncates the torn tail in place (writes the file) | `fuzz::corruption_replay_is_total_and_never_writes_the_file` | ✅ failed |
+| M6 | index: `message_index` is no longer recorded (index disagrees with the reader) | `fuzz::corruption_replay_is_total_and_never_writes_the_file`, `index::every_indexed_field_is_derivable_from_the_jsonl`, and three more index tests | ✅ failed |
+| M7 | writer: `resume` reuses the last `seq` instead of continuing | `crash_inject::every_partial_line_is_truncated_before_the_next_append`, `append::a_torn_tail_is_truncated_before_appending`, `e2e::repair_write_back_appends_normally_and_keeps_seq_continuous`, and four more | ✅ failed |
+
+7/7 caught, no misses. M1–M4 are the brief's required mutations; M6/M7 were added because the
+fuzz's index-vs-reader comparison and the crash test's `next_seq` assertion are the parts of
+this slice's own tests that do new work.
+
+**Where the catch came from.** M1–M4 were caught by an *existing* test as well as the new
+ones, which is the right shape: the new tests do not replace the pinned regressions, they widen
+the input space (every line × every partial length; every mutation class × every seed). M5 is
+caught only by the fuzz's byte-for-byte before/after assertion, and M6 only by the fuzz's
+index comparison plus the index suite — no existing test would have noticed a reader that
+"helpfully" rewrites the file.
+
+**A note on M2's size.** The mutation is not a one-line change: skipping a line has to advance
+`expect_seq` and `line_offset` too, or the next line fails `BadSeq` and the "silent" skip is
+not silent at all. The faithful mutation is the one in the table; it is caught by the fuzz's
+"an event that vanished must appear in `skipped`" rule.
