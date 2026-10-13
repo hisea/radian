@@ -72,6 +72,47 @@ These are their own mode: `--export`/`--search`/`--list` conflict with `--prompt
 `--resume` and each other (clap rejects a combination with exit 2), and `--model` is only
 required for a conversation (`-p` or interactive).
 
+## Memory (`agent memory …`)
+
+`agent memory` is the user side of ADR 0021 (M1): durable memory shared across sessions,
+stored under `~/.radian/memory/` (`$RADIAN_HOME/memory`). It is its own mode: **no `--model`,
+no key, no session file, no network**. Put `--workspace <dir>` before `memory` to name the
+workspace; the default is the current directory.
+
+Memory is scoped to a **project** (a git repository, shared by all its worktrees through the
+git common dir, or the canonical workspace path outside a repository) and to **Global**. Reads
+default to Project then Global, with a Project record overriding a Global one with the same
+key. Writes default to Project; `--global` writes a Global record.
+
+| Command | What it does |
+|---|---|
+| `list [--global\|--project] [--all]` | Active records (`--all` adds archived), Project first; `--json` for machine output |
+| `search <词…> [--global\|--project]` | keyword search (every word must match); `--json` |
+| `show <id> [--global\|--project]` | one record; `--json` |
+| `add [--global] [--kind preference\|decision\|fact\|lesson] [--key KEY] <内容\|->` | a new record; `-` reads stdin; the default kind is `fact` |
+| `edit <id> --revision N <内容\|->` | change the content |
+| `archive <id> --revision N` / `restore <id> --revision N` | lifecycle |
+| `confirm <id> --revision N` | confirm an Agent/Import record (its `source` is kept) |
+| `forget <id>` | logical delete (never resurrected by a rebuild); needs confirmation |
+| `purge [--global\|--project]` | physically rewrite the log, removing forgotten content; needs confirmation |
+| `export [--global\|--project]` / `import [--global\|--project] <文件\|->` | the editable Markdown view |
+| `project` / `project new` | show the identity key and project state, or register it; `--json` |
+| `relink <ProjectId>` | attach this workspace to an existing project |
+| `split <from> <to> <id…>` / `merge <into> <from>` | move records between projects; need confirmation |
+
+- **No silent project identity** (ADR 0021 D2): a workspace whose identity key is not in the
+  registry is *unlinked*. `project new` registers it; `project` shows candidates (projects
+  whose identity key has the same repository name) and `relink` attaches it. Until then,
+  Project reads and writes fail with a message naming the candidates and `--global`; Global
+  still works.
+- **Confirmations** (`forget`, `purge`, `split`, `merge`): a terminal asks `y/N`; `--yes`
+  skips it; **without a terminal and without `--yes` the command refuses, exits 2 and does
+  nothing**.
+- Every user command writes `source: user`; the store applies the revision and same-key rules
+  (`KeyConflict`, `RevisionConflict`).
+- **Exit codes**: 0 on success; 1 for a conflict, a missing record or an unlinked workspace;
+  2 for a usage error or a refused confirmation (plus clap's own usage failures).
+
 ## Input
 
 While a turn is in flight, a line typed at the prompt is a **steer** (it changes the current
