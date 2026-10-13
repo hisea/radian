@@ -175,6 +175,12 @@ struct Cli {
     /// be exercised.
     #[arg(long, hide = true)]
     panic_in_driver: bool,
+
+    /// Test hook: block the event read forever (writing this marker file first), standing in
+    /// for crossterm's reader spinning on a terminal that has gone away. The pty test waits for
+    /// the marker and then signals, so the main loop is provably inside the read.
+    #[arg(long, hide = true, value_name = "FILE")]
+    block_input: Option<PathBuf>,
 }
 
 /// The TUI's per-turn model call limit when `--max-model-calls` is not given (decision
@@ -570,6 +576,9 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
         }
     });
 
+    if let Some(path) = &cli.block_input {
+        let _ = BLOCK_INPUT.set(path.clone());
+    }
     let mut guard =
         radian_tui::terminal::TtyGuard::enter().map_err(|e| format!("terminal: {e}"))?;
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))
@@ -696,6 +705,8 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
         &driver_task,
         &session_host,
     );
+    // Tell a pending signal task that the loop left on its own, so it does not force-exit.
+    radian_tui::signals::confirm_exit();
     guard.restore();
     // The draft is written on every clean exit (normal quit, Ctrl-C, SIGTERM/SIGHUP). A panic
     // never reaches here, so the panic path does no file I/O.
@@ -729,6 +740,24 @@ fn run(mut cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>
         Some(signal) => format!("received {}; {saved}", radian_tui::signals::name(signal)),
         None => saved,
     }))
+}
+
+/// Test hook (`--block-input`): a path whose creation marks "the read is now blocked forever".
+/// Set once in `run`; `read_input` writes it and parks.
+static BLOCK_INPUT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Parks forever when the `--block-input` test hook is on, writing its marker once.
+fn block_input_if_asked() {
+    let Some(path) = BLOCK_INPUT.get() else {
+        return;
+    };
+    static MARKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !MARKED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        let _ = std::fs::write(path, "blocked\n");
+    }
+    loop {
+        std::thread::park();
+    }
 }
 
 /// What one input poll found.
@@ -800,10 +829,14 @@ fn crossterm_event() -> Input {
 ///
 /// crossterm reads up to 1024 bytes per call and buffers the extra events, so after a readable
 /// tty is drained the remaining events must still be returned: `event::poll(0)` checks those
-/// buffers before it touches the fd, and returns false immediately when they are empty and the
-/// fd has nothing (it is not at EOF here — `poll(2)` just said so).
+/// buffers before it touches the fd. This covers the common case, but it has a window — the
+/// tty can hang up between `poll(2)` and this call, and a half-read escape sequence can make
+/// crossterm read again — and then crossterm's reader loops on EOF. The `signals` task is the
+/// backstop for that window: a hang-up is a SIGHUP (or the signal task's own watchdog), and it
+/// exits the process when the loop does not confirm within [`signals`]'s watchdog.
 #[cfg(unix)]
 fn read_input(timeout: Duration) -> Input {
+    block_input_if_asked();
     match tty_readiness(timeout) {
         Tty::Gone => Input::Gone,
         Tty::Readable => crossterm_event(),
@@ -817,6 +850,7 @@ fn read_input(timeout: Duration) -> Input {
 
 #[cfg(not(unix))]
 fn read_input(timeout: Duration) -> Input {
+    block_input_if_asked();
     match event::poll(timeout) {
         Ok(true) => match event::read() {
             Ok(event) => Input::Event(event),

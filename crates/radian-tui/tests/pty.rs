@@ -63,6 +63,57 @@ impl Drop for KillOnDrop {
     }
 }
 
+/// Spawns the binary directly on a plain pty: **no controlling terminal** (so closing the
+/// master is a pure EOF, no SIGHUP) and `FD_CLOEXEC` on the master (without it the child
+/// inherits the master and the pty never sees EOF). `home` is a private HOME the caller keeps
+/// alive. Returns the child (killed on drop) and the master for reading/closing.
+fn spawn_direct(args: &[&str], home: &std::path::Path) -> (KillOnDrop, std::fs::File) {
+    use std::os::fd::FromRawFd;
+    let mut master_fd: libc::c_int = -1;
+    let mut slave_fd: libc::c_int = -1;
+    let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+    size.ws_row = 24;
+    size.ws_col = 100;
+    // SAFETY: `openpty` writes the two fds and reads the null termios/name pointers.
+    let rc = unsafe {
+        libc::openpty(
+            &mut master_fd,
+            &mut slave_fd,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::addr_of_mut!(size),
+        )
+    };
+    assert_eq!(rc, 0, "openpty failed");
+    // SAFETY: `master_fd` is a valid fd; F_SETFD is async-signal-safe.
+    unsafe { libc::fcntl(master_fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    // SAFETY: the fds are fresh from `openpty`; `OwnedFd` closes them.
+    let (master, slave) = unsafe {
+        (
+            std::os::fd::OwnedFd::from_raw_fd(master_fd),
+            std::os::fd::OwnedFd::from_raw_fd(slave_fd),
+        )
+    };
+
+    let mut cmd = std::process::Command::new(BIN);
+    cmd.args(args);
+    cmd.env_clear();
+    for name in ["PATH", "TMPDIR", "LANG"] {
+        if let Ok(value) = std::env::var(name) {
+            cmd.env(name, value);
+        }
+    }
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("HOME", home.as_os_str());
+    cmd.env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json");
+    cmd.stdin(std::process::Stdio::from(slave.try_clone().unwrap()));
+    cmd.stdout(std::process::Stdio::from(slave.try_clone().unwrap()));
+    cmd.stderr(std::process::Stdio::from(slave));
+    let child = KillOnDrop(cmd.spawn().unwrap());
+    drop(cmd);
+    (child, std::fs::File::from(master))
+}
+
 const BIN: &str = env!("CARGO_BIN_EXE_radian-tui");
 
 /// The pty tests spawn real processes and mock servers; run them one at a time so the
@@ -3487,8 +3538,6 @@ async fn pty_fork_refuses_while_a_turn_runs() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn pty_a_closed_master_ends_the_app_cleanly() {
-    use std::os::fd::FromRawFd;
-
     let _serial = pty_guard();
     let dir = TempDir::new("master-gone");
     let ws = dir.path().join("ws");
@@ -3496,71 +3545,23 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
     // The sessions directory is a sibling of the workspace: the sandbox refuses a workspace
     // inside it (ADR 0020).
     let sessions = dir.path().join("sessions");
-
-    let mut master_fd: libc::c_int = -1;
-    let mut slave_fd: libc::c_int = -1;
-    let mut size: libc::winsize = unsafe { std::mem::zeroed() };
-    size.ws_row = 24;
-    size.ws_col = 100;
-    // SAFETY: `openpty` writes the two fds and reads the null termios/name pointers.
-    let rc = unsafe {
-        libc::openpty(
-            &mut master_fd,
-            &mut slave_fd,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::addr_of_mut!(size),
-        )
-    };
-    assert_eq!(rc, 0, "openpty failed");
-    // `openpty` does not set close-on-exec, and `Command` only sets up stdin/stdout/stderr:
-    // without this the child inherits the master and the pty never sees EOF when the parent
-    // closes its copy (the app would block instead of leaving).
-    // SAFETY: `master_fd` is a valid fd; F_SETFD is async-signal-safe.
-    unsafe { libc::fcntl(master_fd, libc::F_SETFD, libc::FD_CLOEXEC) };
-    // SAFETY: the fds are fresh from `openpty`; `OwnedFd` closes them.
-    let (master, slave) = unsafe {
-        (
-            std::os::fd::OwnedFd::from_raw_fd(master_fd),
-            std::os::fd::OwnedFd::from_raw_fd(slave_fd),
-        )
-    };
-
     let home = TempDir::new("master-gone-home");
-    let mut cmd = std::process::Command::new(BIN);
-    cmd.args([
-        "--model",
-        "mock",
-        "--base-url",
-        "http://127.0.0.1:1/v1",
-        "--session-dir",
-        sessions.to_str().unwrap(),
-        "--session-id",
-        "master-gone",
-        "--offline-catalog",
-        "--workspace",
-        ws.to_str().unwrap(),
-    ]);
-    cmd.env_clear();
-    for name in ["PATH", "TMPDIR", "LANG"] {
-        if let Ok(value) = std::env::var(name) {
-            cmd.env(name, value);
-        }
-    }
-    cmd.env("TERM", "xterm-256color");
-    cmd.env("HOME", home.path().as_os_str());
-    cmd.env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json");
-    let err_path = dir.path().join("stderr.txt");
-    let err_file = std::fs::File::create(&err_path).unwrap();
-    cmd.stdin(std::process::Stdio::from(slave.try_clone().unwrap()));
-    cmd.stdout(std::process::Stdio::from(slave.try_clone().unwrap()));
-    cmd.stderr(std::process::Stdio::from(err_file));
-    // A guard kills the child on every path, including a panic in an assertion below.
-    let mut child = KillOnDrop(cmd.spawn().unwrap());
-    // Close the parent's copies of the slave: the app has its own. (`cmd` owns the clones it
-    // was given, so it goes too.)
-    drop(cmd);
-    let mut master = std::fs::File::from(master);
+    let (mut child, mut master) = spawn_direct(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "master-gone",
+            "--offline-catalog",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        home.path(),
+    );
 
     // Wait for the first frame (the input box), bounded.
     let mut bytes = Vec::new();
@@ -3588,15 +3589,87 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
         }
         assert!(
             Instant::now() < deadline,
-            "the app did not exit within 5 s of its terminal closing; stderr: {}",
-            std::fs::read_to_string(&err_path).unwrap_or_default()
+            "the app did not exit within 5 s of its terminal closing; output was: {}",
+            String::from_utf8_lossy(&bytes)
         );
         std::thread::sleep(Duration::from_millis(20));
     };
-    assert!(
-        status.success(),
-        "the terminal-gone exit is the ordinary clean one (exit 0, no signal): {status:?}; stderr: {}",
-        std::fs::read_to_string(&err_path).unwrap_or_default()
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "the terminal-gone exit is the ordinary clean one (exit 0, no signal): {status:?}; output was: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+}
+
+/// The remaining window: the main loop can be stuck **inside crossterm's reader** (the tty can
+/// hang up between `poll(2)` and crossterm's read, or a half-read escape sequence can make it
+/// read again), so the loop never sees the signal flag. `--block-input` parks the read after
+/// writing a marker, standing in for that spin; a SIGHUP must still end the process, forced by
+/// the signal task's watchdog with the shell convention 128+SIGHUP.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_hung_main_loop_still_exits_on_a_signal() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("hung-loop");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let sessions = dir.path().join("sessions");
+    let marker = dir.path().join("blocked");
+    let home = TempDir::new("hung-loop-home");
+    let (mut child, _master) = spawn_direct(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "hung-loop",
+            "--offline-catalog",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--block-input",
+            marker.to_str().unwrap(),
+        ],
+        home.path(),
+    );
+
+    // The loop is stuck once the marker exists (a state check, not a sleep for sync).
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !marker.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the app never entered the blocked input read"
+        );
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "the app exited before the signal"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // The main loop cannot see this (it is parked), so the signal task's watchdog must exit.
+    // SAFETY: signal delivery to our own child process.
+    unsafe { libc::kill(child.0.id() as libc::pid_t, libc::SIGHUP) };
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the hung main loop did not exit within 10 s of a signal"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(
+        status.code(),
+        Some(128 + 1),
+        "a hung main loop must exit 128+SIGHUP: {status:?}"
     );
 }
 
