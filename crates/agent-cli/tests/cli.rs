@@ -3589,3 +3589,45 @@ async fn a_conversation_still_requires_a_model() {
     assert!(stderr.contains("--model"), "{stderr}");
     assert!(stderr.contains("Usage:"), "{stderr}");
 }
+
+/// `--export` validates the id as a session id before using it as a file name: a path-like
+/// value must not be able to read a `.jsonl` outside the session directory. The forged file
+/// one level up claims the current workspace, so the workspace check alone would let it
+/// through; the id validation is what refuses it.
+#[tokio::test]
+async fn export_refuses_a_path_like_session_id() {
+    let dir = scratch("export-path-id");
+    let sessions = dir.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    // `dir/x.jsonl` is `sessions/../x.jsonl`; its workspace is the current one on purpose.
+    write_session(
+        &dir,
+        "x",
+        &canonical(&ws),
+        "OUTSIDE-THE-SESSION-DIR",
+        None,
+        None,
+    );
+    let base = [
+        "--model",
+        "m",
+        "--session-dir",
+        sessions.to_str().unwrap(),
+        "--workspace",
+        ws.to_str().unwrap(),
+    ];
+    for bad in ["../x", "a/b", ".."] {
+        let mut args = base.to_vec();
+        args.extend_from_slice(&["--export", bad]);
+        let (code, stdout, stderr) = feed_and_wait(spawn_agent(&args, &[]), "").await;
+        assert_eq!(code, 2, "{bad:?}: {stderr}");
+        assert!(stderr.contains("session id"), "{bad:?}: {stderr}");
+        assert!(stdout.is_empty(), "{bad:?}: {stdout}");
+        assert!(
+            !stderr.contains("OUTSIDE-THE-SESSION-DIR"),
+            "{bad:?}: the error leaked file content: {stderr}"
+        );
+    }
+}

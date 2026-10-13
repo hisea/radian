@@ -504,6 +504,10 @@ const SEARCH_LIMIT: usize = 200;
 /// file directly (no index), so a read-only command writes nothing into the session
 /// directory.
 fn export_session(cli: &Cli, session_id: &str) -> Result<(), SetupError> {
+    // The id becomes a file name; validate it like every other entry point so `../x` or `a/b`
+    // cannot name a file outside the session directory. Without this, the workspace check
+    // below is the only guard, and a forged file that claims the current workspace passes it.
+    validate_session_id(session_id).map_err(SetupError)?;
     let dir = session_dir(cli)?;
     let workspace = session_workspace(cli)?;
     let path = dir.join(format!("{session_id}.jsonl"));
