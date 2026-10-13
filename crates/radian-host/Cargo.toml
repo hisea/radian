@@ -13,5 +13,7 @@ agent-provider-anthropic = { path = "../agent-provider-anthropic" }
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible" }
 radian-coding = { path = "../radian-coding" }
 radian-sandbox = { path = "../radian-sandbox" }
+# Reused for the owner-only file/directory creation (ADR 0013) in `diagnostics`.
+radian-session = { path = "../radian-session" }
 serde.workspace = true
 serde_json.workspace = true

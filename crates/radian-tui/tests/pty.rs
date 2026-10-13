@@ -314,14 +314,28 @@ async fn pty_end_to_end_conversation_and_clean_exit() {
     assert!(dir.path().join("e2e.jsonl").exists());
 }
 
-/// The panic hook restores the terminal before the panic message is printed.
+/// The diagnostics directory the app will use when `HOME`/`XDG_CACHE_HOME` are `home`
+/// (ADR 0013 decision 4). The platform rule matches the one `radian-host` resolves at runtime.
+fn diagnostics_dir(home: &Path) -> PathBuf {
+    let platform = if cfg!(target_os = "macos") {
+        radian_host::Platform::MacOs
+    } else {
+        radian_host::Platform::Linux
+    };
+    radian_host::diagnostics_dir_for(platform, home, Some(home))
+}
+
+/// The panic hook restores the terminal before the panic message is printed, and the panic log
+/// goes to the diagnostics directory, not next to the session (ADR 0013 decision 4).
 #[test]
 fn pty_panic_path_restores_the_terminal() {
     let _serial = pty_guard();
     let dir = TempDir::new("panic");
     // A directory that does not exist yet, so the app creates it owner-only.
     let sessions = dir.path().join("sessions");
-    let mut pty = Pty::spawn(
+    let diagnostics = diagnostics_dir(dir.path());
+    let home = dir.path().to_str().unwrap();
+    let mut pty = Pty::spawn_with_env(
         &[
             "--model",
             "mock",
@@ -331,6 +345,7 @@ fn pty_panic_path_restores_the_terminal() {
             sessions.to_str().unwrap(),
             "--panic-after-enter",
         ],
+        &[("HOME", home), ("XDG_CACHE_HOME", home)],
         20,
         80,
     );
@@ -348,6 +363,11 @@ fn pty_panic_path_restores_the_terminal() {
     assert!(raw_text.contains("panicked"), "panic message printed");
     assert!(raw_text.contains("icanon"), "cooked mode restored");
     assert!(!raw_text.contains("-icanon"), "raw mode not restored");
+    // The exit line names the panic log so the user can find it.
+    assert!(
+        raw_text.contains("panic log:"),
+        "the exit line must name the panic log: {raw_text}"
+    );
 
     // The diagnostics directory and the panic log are owner-only (ADR 0013).
     #[cfg(unix)]
@@ -355,13 +375,74 @@ fn pty_panic_path_restores_the_terminal() {
         use std::os::unix::fs::PermissionsExt;
         let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&sessions), 0o700, "the session directory must be 0700");
-        let log = std::fs::read_dir(&sessions)
+        assert_eq!(
+            mode(&diagnostics),
+            0o700,
+            "the diagnostics directory must be 0700"
+        );
+        let log = std::fs::read_dir(&diagnostics)
             .unwrap()
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
             .find(|path| path.to_string_lossy().ends_with(".panic.log"))
             .expect("a panic log was written");
         assert_eq!(mode(&log), 0o600, "the panic log must be 0600");
+        // Nothing was written next to the session.
+        let beside = std::fs::read_dir(&sessions)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .any(|path| path.to_string_lossy().ends_with(".panic.log"));
+        assert!(
+            !beside,
+            "the panic log must not live in the session directory"
+        );
     }
+}
+
+/// A diagnostics write that cannot happen is one line on stderr, never a fault: the run
+/// continues and a panic still exits 101 (ADR 0013 decision 4).
+#[test]
+fn pty_an_unwritable_diagnostics_directory_is_only_a_notice() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("panic-unwritable");
+    let home = dir.path();
+    // Make the resolved diagnostics path a regular file: creating or writing under it fails.
+    let diagnostics = diagnostics_dir(home);
+    std::fs::create_dir_all(diagnostics.parent().unwrap()).unwrap();
+    std::fs::write(&diagnostics, b"not a directory").unwrap();
+    let sessions = home.join("sessions");
+    let home = home.to_str().unwrap();
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--panic-message",
+            "boom",
+        ],
+        &[("HOME", home), ("XDG_CACHE_HOME", home)],
+        20,
+        100,
+    );
+    assert!(pty.wait_for_exit(15).is_some(), "the app did not exit");
+    assert_eq!(
+        pty.app_exit_code(),
+        Some(101),
+        "a diagnostics failure must not change the panic exit"
+    );
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    assert!(
+        raw.contains("[diagnostics]"),
+        "the failure is a one-line notice: {raw}"
+    );
+    assert!(
+        raw.contains("panicked"),
+        "the panic reason is still shown: {raw}"
+    );
+    // The blocking file is untouched.
+    assert_eq!(std::fs::read(&diagnostics).unwrap(), b"not a directory");
 }
 
 /// Waits until `predicate` holds, bounded. The sleep is a poll interval, not the
@@ -1839,6 +1920,8 @@ async fn pty_clean_exit_prints_one_reason_line() {
 fn pty_a_panic_writes_a_redacted_panic_log() {
     let _serial = pty_guard();
     let dir = TempDir::new("panic-log");
+    let sessions = dir.path().join("sessions");
+    let home = dir.path().to_str().unwrap();
     let secret = "SECRET-HEADER-VALUE-xyz";
     let key = "SECRET-KEY-abc";
     let mut pty = Pty::spawn_with_env(
@@ -1848,7 +1931,7 @@ fn pty_a_panic_writes_a_redacted_panic_log() {
             "--base-url",
             "http://127.0.0.1:1/v1",
             "--session-dir",
-            dir.path().to_str().unwrap(),
+            sessions.to_str().unwrap(),
             "--session-id",
             "panic-log",
             "--header",
@@ -1856,7 +1939,11 @@ fn pty_a_panic_writes_a_redacted_panic_log() {
             "--panic-message",
             &format!("boom {secret} and {key}"),
         ],
-        &[("OPENAI_API_KEY", key)],
+        &[
+            ("OPENAI_API_KEY", key),
+            ("HOME", home),
+            ("XDG_CACHE_HOME", home),
+        ],
         20,
         100,
     );
@@ -1873,7 +1960,28 @@ fn pty_a_panic_writes_a_redacted_panic_log() {
         "the panic reason is on the normal screen: {after}"
     );
 
-    let log_path = dir.path().join("panic-log.panic.log");
+    // The log lives in the diagnostics directory (ADR 0013 decision 4), named for the session
+    // and the time, not next to the session.
+    let diagnostics = diagnostics_dir(dir.path());
+    let log_path = std::fs::read_dir(&diagnostics)
+        .unwrap_or_else(|e| panic!("no diagnostics directory {}: {e}", diagnostics.display()))
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .find(|path| path.to_string_lossy().ends_with(".panic.log"))
+        .unwrap_or_else(|| panic!("no panic log in {}", diagnostics.display()));
+    let name = log_path.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(
+        name.starts_with("panic-log-"),
+        "the log names the session: {name}"
+    );
+    assert!(
+        !sessions
+            .read_dir()
+            .map(|mut entries| entries.any(|entry| entry
+                .map(|entry| entry.path().to_string_lossy().ends_with(".panic.log"))
+                .unwrap_or(false)))
+            .unwrap_or(false),
+        "the panic log must not live in the session directory"
+    );
     let log = std::fs::read_to_string(&log_path)
         .unwrap_or_else(|e| panic!("no panic log at {}: {e}", log_path.display()));
     assert!(log.contains("boom"), "the panic text is in the log: {log}");

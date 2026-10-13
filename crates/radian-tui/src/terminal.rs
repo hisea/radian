@@ -78,11 +78,19 @@ pub fn last_panic() -> Option<String> {
 
 /// Records where a panic should also be written. Called once per session, before the
 /// terminal is entered. `secrets` (header values, the API key) are redacted out of both the
-/// stored summary and the log line.
-pub fn set_panic_log(path: PathBuf, secrets: Vec<String>) {
+/// stored summary and the log line. `None` (no diagnostics directory) disables the log.
+pub fn set_panic_log(path: Option<PathBuf>, secrets: Vec<String>) {
     if let Ok(mut slot) = PANIC_LOG.lock() {
-        *slot = Some(PanicLog { path, secrets });
+        *slot = path.map(|path| PanicLog { path, secrets });
     }
+}
+
+/// Where the panic log is being written, for the exit line (dogfooding D4).
+pub fn panic_log_path() -> Option<PathBuf> {
+    PANIC_LOG
+        .lock()
+        .ok()
+        .and_then(|slot| slot.as_ref().map(|log| log.path.clone()))
 }
 
 /// The first line of a panic payload, with the values in `secrets` replaced. One line is
@@ -126,14 +134,10 @@ fn record_panic(info: &std::panic::PanicHookInfo<'_>) -> String {
             thread,
             redacted.replace('\n', " ")
         );
-        if let Some(parent) = path.parent() {
-            // Owner-only diagnostics directory and file (ADR 0013): the panic text can carry
-            // a header value or the key, so both are private.
-            let _ = radian_session::ensure_private_dir(parent);
-        }
-        if let Ok(mut file) = radian_session::open_private_append(&path) {
-            let _ = file.write_all(line.as_bytes());
-            let _ = file.flush();
+        // The diagnostics directory (ADR 0013 decision 4): owner-only, cleaned before the
+        // write, and a failure is one line rather than a fault.
+        if let Err(error) = radian_host::append(&path, &line) {
+            eprintln!("[diagnostics] cannot write {}: {error}", path.display());
         }
     }
     format!("thread '{thread}' {redacted}")

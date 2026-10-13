@@ -2147,6 +2147,7 @@ dependencies = [
  "agent-provider-openai-compatible",
  "radian-coding",
  "radian-sandbox",
+ "radian-session",
  "serde",
  "serde_json",
 ]

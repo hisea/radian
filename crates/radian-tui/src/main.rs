@@ -219,6 +219,10 @@ fn main() -> ExitCode {
                 message.push_str(": ");
                 message.push_str(&panic);
             }
+            // D4: say where the full panic text went.
+            if let Some(path) = radian_tui::terminal::panic_log_path() {
+                message.push_str(&format!(" (panic log: {})", path.display()));
+            }
             eprintln!("radian-tui: {message}");
             ExitCode::from(101)
         }
@@ -229,6 +233,9 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
     if cli.list {
         return list_sessions(&cli).map(|()| None);
     }
+    // ADR 0013 decision 4: diagnostics live in the user cache directory, and cleanup runs at
+    // startup. A failure is one line, never a fault.
+    radian_host::clean_startup();
     let dir = session_dir(&cli)?;
     // The session id is resolved before the headers: a `{session_id}` in a header expands to
     // this process's id, and `--resume` uses the id being resumed. The parser is the same one
@@ -317,9 +324,16 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
         &workspace_path.to_string_lossy(),
         provider,
     )?;
-    // D4: panics after this point get a sidecar log next to the session. Set before the
-    // terminal is entered; the hook reads it whenever a panic happens.
-    radian_tui::terminal::set_panic_log(dir.join(format!("{session_id}.panic.log")), secrets);
+    // D4: panics after this point get a log in the diagnostics directory (ADR 0013 decision
+    // 4), not next to the session: the session is the authoritative record and must not be
+    // treated as a cache. Set before the terminal is entered; the hook reads it on a panic.
+    let panic_log = radian_host::diagnostics_dir().map(|dir| {
+        dir.join(radian_host::panic_log_name(
+            &session_id,
+            radian_host::now_millis(),
+        ))
+    });
+    radian_tui::terminal::set_panic_log(panic_log, secrets);
     // The history of a resumed session is rendered before the first frame, so the transcript
     // shows it from the start. `Driver::open` recovers the same history from the journal for
     // the model; this is only the view of it.
