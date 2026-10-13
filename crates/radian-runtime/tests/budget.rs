@@ -230,5 +230,30 @@ async fn relaxing_once_sends_the_blocked_request_and_restores_the_guard() {
         2,
         "the relaxed request was sent, and the one after it was blocked again"
     );
+
+    // Turn 3: no new `relax_once`. The flag was consumed by turn 2, so the first request is
+    // blocked again; a `take` that left the flag set (`load` instead of `swap`) would let it
+    // through and send a third request.
+    env.inbox.followup("more", InputSource::User).await.unwrap();
+    wait_for_turns(&env.path, 3).await;
+    assert_eq!(
+        model.requests().len(),
+        2,
+        "the one-shot relax must not leak into a later turn"
+    );
     handle.abort();
+}
+
+/// Waits (without sleeping) until `n` turns have durably finished, whatever their outcome.
+async fn wait_for_turns(path: &Path, n: usize) {
+    for _ in 0..1_000_000 {
+        let count = std::fs::read_to_string(path)
+            .map(|text| text.matches("\"TurnFinished\"").count())
+            .unwrap_or(0);
+        if count >= n {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("fewer than {n} TurnFinished events landed in {path:?}");
 }
