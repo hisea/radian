@@ -311,3 +311,81 @@ async fn each_decision_emits_exactly_one_permission_resolved() {
         assert_eq!(events[0].approver, AuditApprover::Policy);
     }
 }
+
+/// Test 12: the effective turn source only ever lowers (ADR 0012 decision 5). A user turn
+/// that later admits a non-human input loses the grant and can no longer turn `ask` into
+/// `allow`; a later human input cannot raise it back; the next turn's reset restores it.
+#[tokio::test]
+async fn the_turn_source_only_ever_lowers() {
+    let dir = TempDir::new("observe");
+    let approver = ScriptedApprover::scripted(vec![ApprovalOutcome::AllowForSession]);
+    let hooks = make_hooks(
+        asking_profile(&dir),
+        Arc::clone(&approver),
+        Arc::new(RecordingAudit::default()),
+    );
+    let cx = ctx();
+
+    // A user turn obtains a session grant.
+    hooks.set_turn_source(Some(InputSource::User));
+    assert!(matches!(
+        decide(&hooks, &cx, &shell()).await.unwrap(),
+        ToolDecision::Allow
+    ));
+    assert_eq!(approver.calls(), 1);
+
+    // A subagent input is admitted mid-turn: the effective source lowers to it.
+    hooks.observe_input_source(InputSource::Subagent);
+    assert_eq!(hooks.turn_source(), Some(InputSource::Subagent));
+    // The grant no longer applies, and `ask` cannot become `allow`.
+    assert!(matches!(
+        decide(&hooks, &cx, &shell()).await.unwrap(),
+        ToolDecision::Deny { .. }
+    ));
+    assert_eq!(approver.calls(), 1, "a non-human turn must not ask");
+
+    // Observing a human input afterwards does not raise it back.
+    hooks.observe_input_source(InputSource::User);
+    assert_eq!(
+        hooks.turn_source(),
+        Some(InputSource::Subagent),
+        "observe must never raise the source"
+    );
+    assert!(matches!(
+        decide(&hooks, &cx, &shell()).await.unwrap(),
+        ToolDecision::Deny { .. }
+    ));
+
+    // The next turn's reset restores it; the grant itself was never revoked.
+    hooks.set_turn_source(Some(InputSource::User));
+    assert!(matches!(
+        decide(&hooks, &cx, &shell()).await.unwrap(),
+        ToolDecision::Allow
+    ));
+    assert_eq!(approver.calls(), 1);
+}
+
+/// An unset source ranks lowest, so observing cannot raise it: a host that forgets the
+/// turn-start reset stays fail-closed.
+#[tokio::test]
+async fn observing_on_an_unset_source_stays_non_human() {
+    let dir = TempDir::new("observe-unset");
+    let approver = ScriptedApprover::scripted(vec![ApprovalOutcome::AllowOnce]);
+    let hooks = make_hooks(
+        asking_profile(&dir),
+        Arc::clone(&approver),
+        Arc::new(RecordingAudit::default()),
+    );
+
+    hooks.observe_input_source(InputSource::User);
+    assert_eq!(
+        hooks.turn_source(),
+        None,
+        "an unset source must not be raised"
+    );
+    assert!(matches!(
+        decide(&hooks, &ctx(), &shell()).await.unwrap(),
+        ToolDecision::Deny { .. }
+    ));
+    assert_eq!(approver.calls(), 0);
+}
