@@ -237,7 +237,12 @@ async fn a_silent_server_hits_the_idle_timeout() {
     let model = model_with(&server, |config| {
         config.idle_timeout = Duration::from_millis(50);
     });
-    let error = complete(&model, &NoopSink).await.unwrap_err();
+    // The watchdog is a failure bound, not a measurement: without the idle timeout the
+    // request would hang forever.
+    let error = tokio::time::timeout(Duration::from_secs(5), complete(&model, &NoopSink))
+        .await
+        .expect("the idle timeout must fire, not hang")
+        .unwrap_err();
     assert!(
         matches!(&error, ModelError::Transport(m) if m.contains("sent nothing")),
         "{error}"
@@ -262,7 +267,10 @@ async fn cancelling_returns_instead_of_hanging() {
         token.cancel();
     };
     // The watchdog is a failure bound, not a measurement: `complete` must return on its own.
-    let (result, ()) = tokio::join!(run, cancel);
+    let joined = tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(run, cancel) })
+        .await
+        .expect("complete must return on cancellation, not hang");
+    let (result, ()) = joined;
     let error = result.unwrap_err();
     assert!(
         matches!(&error, ModelError::Transport(m) if m.contains("cancelled")),
