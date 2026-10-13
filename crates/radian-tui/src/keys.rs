@@ -51,6 +51,20 @@ pub enum Action {
     FindNext,
     /// Close the find box (the find box is open).
     FindClose,
+    /// The question form (ADR 0024 Q7): the next question, or the overview from the last one.
+    FormNext,
+    /// The previous question.
+    FormPrev,
+    /// Move the option cursor up.
+    FormUp,
+    /// Move the option cursor down.
+    FormDown,
+    /// Select the highlighted option (toggle it for a `multi` question).
+    FormSelect,
+    /// On the last question: the overview. On the overview: submit.
+    FormSubmit,
+    /// Decline the whole request (asked once: the second press declines).
+    FormDecline,
 }
 
 /// The interaction layer a binding lives in. The find box is a layer over the transcript: while
@@ -63,6 +77,9 @@ pub enum Context {
     Main,
     /// The in-transcript search box.
     Find,
+    /// The structured-question form (ADR 0024 Q7). Its keys are rebindable; the approval and
+    /// confirmation keys are not.
+    Form,
 }
 
 impl Action {
@@ -97,6 +114,13 @@ impl Action {
             Action::FindPrev => "find_prev",
             Action::FindNext => "find_next",
             Action::FindClose => "find_close",
+            Action::FormNext => "form_next",
+            Action::FormPrev => "form_prev",
+            Action::FormUp => "form_up",
+            Action::FormDown => "form_down",
+            Action::FormSelect => "form_select",
+            Action::FormSubmit => "form_submit",
+            Action::FormDecline => "form_decline",
         }
     }
 
@@ -104,6 +128,13 @@ impl Action {
     pub fn context(self) -> Context {
         match self {
             Action::FindPrev | Action::FindNext | Action::FindClose => Context::Find,
+            Action::FormNext
+            | Action::FormPrev
+            | Action::FormUp
+            | Action::FormDown
+            | Action::FormSelect
+            | Action::FormSubmit
+            | Action::FormDecline => Context::Form,
             _ => Context::Main,
         }
     }
@@ -146,6 +177,13 @@ const DEFAULT_BINDINGS: &[(&str, Action)] = &[
     ("find_prev", Action::FindPrev),
     ("find_next", Action::FindNext),
     ("find_close", Action::FindClose),
+    ("form_next", Action::FormNext),
+    ("form_prev", Action::FormPrev),
+    ("form_up", Action::FormUp),
+    ("form_down", Action::FormDown),
+    ("form_select", Action::FormSelect),
+    ("form_submit", Action::FormSubmit),
+    ("form_decline", Action::FormDecline),
 ];
 
 /// The default key strings per action.
@@ -181,6 +219,18 @@ const DEFAULT_KEYS: &[(&str, &[&str])] = &[
 /// is open. `ctrl-f` is both "open the box" (transcript) and "earlier match" (box), exactly as
 /// the hardcoded behavior was; `enter` is the earlier match here and the send key in the
 /// transcript.
+/// The question form's default keys (ADR 0024 Q7). Unlike the approval's, these are in the
+/// keymap and can be rebound.
+const FORM_DEFAULT_KEYS: &[(&str, &[&str])] = &[
+    ("form_next", &["tab"]),
+    ("form_prev", &["backtab", "shift-tab"]),
+    ("form_up", &["up"]),
+    ("form_down", &["down"]),
+    ("form_select", &["space"]),
+    ("form_submit", &["enter"]),
+    ("form_decline", &["esc"]),
+];
+
 const FIND_DEFAULT_KEYS: &[(&str, &[&str])] = &[
     ("find_prev", &["enter", "ctrl-f"]),
     ("find_next", &["shift-enter", "ctrl-g"]),
@@ -358,6 +408,8 @@ pub struct Keymap {
     bindings: Vec<(KeyPress, Action)>,
     /// The find box's layer, looked up before `bindings` while the box is open.
     find_bindings: Vec<(KeyPress, Action)>,
+    /// The question form's layer (ADR 0024 Q7), looked up while a question modal is on top.
+    form_bindings: Vec<(KeyPress, Action)>,
     /// Unknown actions and unparsable keys, for the startup line.
     pub warnings: Vec<String>,
 }
@@ -384,6 +436,7 @@ impl Keymap {
         Self {
             bindings: built(DEFAULT_KEYS),
             find_bindings: built(FIND_DEFAULT_KEYS),
+            form_bindings: built(FORM_DEFAULT_KEYS),
             warnings: Vec::new(),
         }
     }
@@ -411,6 +464,7 @@ impl Keymap {
             let layer = match action.context() {
                 Context::Main => &mut map.bindings,
                 Context::Find => &mut map.find_bindings,
+                Context::Form => &mut map.form_bindings,
             };
             layer.retain(|(_, bound)| *bound != action);
             for press in parsed {
@@ -432,9 +486,16 @@ impl Keymap {
         lookup(&self.find_bindings, key)
     }
 
+    /// The action a key event performs while a question form is on top (ADR 0024 Q7). Looked
+    /// up before [`Self::action_for`], so the form's layer wins while it is up.
+    pub fn form_action_for(&self, key: &KeyEvent) -> Option<Action> {
+        lookup(&self.form_bindings, key)
+    }
+
     fn check_conflicts(&self) -> Result<(), KeymapError> {
         check_layer(&self.bindings)?;
-        check_layer(&self.find_bindings)
+        check_layer(&self.find_bindings)?;
+        check_layer(&self.form_bindings)
     }
 }
 

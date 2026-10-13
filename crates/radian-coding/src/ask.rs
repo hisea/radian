@@ -1,9 +1,12 @@
 //! `ask_user`: the model asks the human a structured question and waits (ADR 0024).
 //!
-//! The tool itself knows nothing about a UI. The host injects a [`Prompter`] with
-//! [`crate::CodingTools::with_prompter`]; a host without one does not advertise the tool at
-//! all, so a model never asks into the void. The wait is raced against
-//! [`agent_core::ToolContext::cancellation`] and **never** fabricates an answer.
+//! The tool itself knows nothing about a UI. The host injects a [`Prompter`] through
+//! [`AskTools`]; a host without one does not mount the provider at all, so a model never asks
+//! into the void. The wait is raced against [`agent_core::ToolContext::cancellation`] and
+//! **never** fabricates an answer.
+//!
+//! `ask_user` is its **own** provider, not a member of [`crate::CodingTools`]: a host with no
+//! `--workspace` has no coding tools, but a model can still ask a question (ADR 0024 Q5).
 //!
 //! The question and the answer are durable without a new record: the question is the call's
 //! `arguments` and the answer its final result, both already journaled (ADR 0002 E1).
@@ -11,7 +14,10 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use agent_core::{ContentPart, ToolConcurrency, ToolContext, ToolFailure, ToolOutput, ToolSpec};
+use agent_core::{
+    ContentPart, ToolCall, ToolConcurrency, ToolContext, ToolError, ToolFailure, ToolOutput,
+    ToolProvider, ToolSession, ToolSpec,
+};
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -443,5 +449,54 @@ fn render_reply(question: &Question, reply: Option<&QuestionReply>) -> String {
         "(no answer)".into()
     } else {
         parts.join(", ")
+    }
+}
+
+/// `ask_user` on its own (ADR 0024 Q1/Q5): a host mounts this when a human is there to answer,
+/// whether or not it also mounts the coding tools.
+pub struct AskTools {
+    prompter: Arc<dyn Prompter>,
+}
+
+impl AskTools {
+    pub fn new(prompter: Arc<dyn Prompter>) -> Self {
+        Self { prompter }
+    }
+}
+
+/// One session's view of `ask_user`. Holds only the prompter and the spec.
+pub struct AskSession {
+    prompter: Arc<dyn Prompter>,
+    specs: Vec<ToolSpec>,
+}
+
+impl ToolProvider for AskTools {
+    type Session = AskSession;
+
+    async fn open_session(&self) -> Result<Self::Session, ToolError> {
+        Ok(AskSession {
+            prompter: Arc::clone(&self.prompter),
+            specs: vec![spec()],
+        })
+    }
+}
+
+impl ToolSession for AskSession {
+    fn tool_specs(&self) -> &[ToolSpec] {
+        &self.specs
+    }
+
+    async fn execute(
+        &self,
+        call: &ToolCall,
+        cx: ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolFailure> {
+        match call.name.as_str() {
+            "ask_user" => run(&self.prompter, &call.arguments, &cx).await,
+            other => Err(fail(
+                "unknown_tool",
+                format!("`{other}` is not one of the question tools"),
+            )),
+        }
     }
 }

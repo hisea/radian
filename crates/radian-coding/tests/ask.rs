@@ -13,7 +13,7 @@ use agent_core::{
 use common::{TempDir, text};
 use futures_util::future::BoxFuture;
 use radian_coding::{
-    CodingTools, PromptError, Prompter, QuestionAnswer, QuestionReply, QuestionRequest,
+    AskTools, CodingTools, PromptError, Prompter, QuestionAnswer, QuestionReply, QuestionRequest,
 };
 use serde_json::{Value, json};
 
@@ -69,7 +69,7 @@ fn workspace(label: &str) -> (TempDir, CodingTools) {
 }
 
 async fn ask_with(
-    tools: &CodingTools,
+    tools: &AskTools,
     arguments: Value,
     cancellation: CancellationToken,
 ) -> Result<ToolOutput, ToolFailure> {
@@ -88,7 +88,7 @@ async fn ask_with(
     session.execute(&call, cx).await
 }
 
-async fn ask(tools: &CodingTools, arguments: Value) -> Result<ToolOutput, ToolFailure> {
+async fn ask(tools: &AskTools, arguments: Value) -> Result<ToolOutput, ToolFailure> {
     ask_with(tools, arguments, CancellationToken::new()).await
 }
 
@@ -113,12 +113,13 @@ fn code(failure: &ToolFailure) -> &str {
     failure.code.as_str()
 }
 
-/// ADR 0024 Q5: a host with no interactive user does not advertise the tool at all.
+/// ADR 0024 Q5: a host with no interactive user does not mount the provider at all, so the
+/// model never sees `ask_user`. The coding tools never advertise it either: it is its own
+/// provider, so a host without a workspace still has it.
 #[tokio::test]
-async fn without_a_prompter_the_tool_is_not_advertised() {
-    let (_dir, tools) = workspace("ask-off");
-    assert!(!tools.has_prompter());
-    let session = tools.open_session().await.unwrap();
+async fn without_the_provider_the_tool_is_not_advertised() {
+    let (_dir, coding) = workspace("ask-off");
+    let session = coding.open_session().await.unwrap();
     let names: Vec<&str> = session
         .tool_specs()
         .iter()
@@ -126,20 +127,32 @@ async fn without_a_prompter_the_tool_is_not_advertised() {
         .collect();
     assert!(
         !names.contains(&"ask_user"),
-        "a host without a prompter must not advertise ask_user: {names:?}"
+        "the coding tools must not advertise ask_user: {names:?}"
     );
     // A hand-built call is a refusal, never a hang.
-    let failure = ask(&tools, args(vec![question("q")])).await.unwrap_err();
+    let failure = session
+        .execute(
+            &ToolCall {
+                id: "ask-1".into(),
+                name: "ask_user".into(),
+                arguments: args(vec![question("q")]),
+            },
+            ToolContext {
+                cancellation: CancellationToken::new(),
+                events: &NoopSink,
+                index: 0,
+            },
+        )
+        .await
+        .unwrap_err();
     assert_eq!(code(&failure), "unknown_tool");
 }
 
 /// ADR 0024 Q1: with a prompter the tool appears, and it runs alone in its batch.
 #[tokio::test]
 async fn with_a_prompter_the_tool_is_advertised_and_exclusive() {
-    let (_dir, tools) = workspace("ask-on");
     let prompter = ScriptedPrompter::answering(QuestionAnswer::new("q-1", Vec::new()));
-    let tools = tools.with_prompter(prompter);
-    assert!(tools.has_prompter());
+    let tools = AskTools::new(prompter);
     let session = tools.open_session().await.unwrap();
     let spec = session
         .tool_specs()
@@ -153,7 +166,6 @@ async fn with_a_prompter_the_tool_is_advertised_and_exclusive() {
 /// question.
 #[tokio::test]
 async fn the_answer_is_structured_json_and_readable_text() {
-    let (_dir, tools) = workspace("ask-answer");
     let prompter = ScriptedPrompter::answering(QuestionAnswer::new(
         "q-17",
         vec![
@@ -175,7 +187,7 @@ async fn the_answer_is_structured_json_and_readable_text() {
             },
         ],
     ));
-    let tools = tools.with_prompter(prompter);
+    let tools = AskTools::new(prompter);
     let arguments = args(vec![
         json!({
             "id": "loader",
@@ -307,7 +319,7 @@ async fn every_question_limit_is_an_invalid_arguments_failure() {
     let prompter = ScriptedPrompter::answering(QuestionAnswer::new("q-1", Vec::new()));
     for (what, arguments) in cases {
         let prompter_dyn: Arc<dyn Prompter> = prompter.clone();
-        let tools = CodingTools::new(&ws).unwrap().with_prompter(prompter_dyn);
+        let tools = AskTools::new(prompter_dyn);
         let failure = ask(&tools, arguments)
             .await
             .expect_err(&format!("{what} must be refused"));
@@ -352,7 +364,7 @@ async fn an_answer_that_does_not_match_the_questions_is_rejected() {
     std::fs::create_dir_all(&ws).unwrap();
     for (what, request, answers) in cases {
         let prompter = ScriptedPrompter::answering(QuestionAnswer::new("q-1", answers));
-        let tools = CodingTools::new(&ws).unwrap().with_prompter(prompter);
+        let tools = AskTools::new(prompter);
         let failure = ask(&tools, request).await.expect_err(what);
         assert_eq!(code(&failure), "invalid_answer", "{what}: {failure:?}");
     }
@@ -361,9 +373,8 @@ async fn an_answer_that_does_not_match_the_questions_is_rejected() {
 /// ADR 0024 Q4: cancellation wins the race and **no** answer is built.
 #[tokio::test]
 async fn a_cancelled_ask_is_cancelled_and_never_answers() {
-    let (_dir, tools) = workspace("ask-cancel");
     let prompter = ScriptedPrompter::hanging();
-    let tools = tools.with_prompter(prompter);
+    let tools = AskTools::new(prompter);
     let token = CancellationToken::new();
     token.cancel();
     let failure = ask_with(&tools, args(vec![question("q")]), token)
@@ -375,8 +386,7 @@ async fn a_cancelled_ask_is_cancelled_and_never_answers() {
 /// ADR 0024 Q4: an explicit decline is `user_declined`, not an internal error.
 #[tokio::test]
 async fn a_declined_ask_is_user_declined() {
-    let (_dir, tools) = workspace("ask-declined");
-    let tools = tools.with_prompter(ScriptedPrompter::failing(PromptError::Declined));
+    let tools = AskTools::new(ScriptedPrompter::failing(PromptError::Declined));
     let failure = ask(&tools, args(vec![question("q")])).await.unwrap_err();
     assert_eq!(code(&failure), "user_declined");
 }
@@ -384,8 +394,7 @@ async fn a_declined_ask_is_user_declined() {
 /// ADR 0024 Q4: a dropped prompter (the UI exited, the session closed) is `prompter_gone`.
 #[tokio::test]
 async fn a_gone_prompter_is_prompter_gone() {
-    let (_dir, tools) = workspace("ask-gone");
-    let tools = tools.with_prompter(ScriptedPrompter::failing(PromptError::Gone));
+    let tools = AskTools::new(ScriptedPrompter::failing(PromptError::Gone));
     let failure = ask(&tools, args(vec![question("q")])).await.unwrap_err();
     assert_eq!(code(&failure), "prompter_gone");
 }
@@ -393,8 +402,7 @@ async fn a_gone_prompter_is_prompter_gone() {
 /// ADR 0024 Q4: a prompter that itself fails is a distinct, visible failure.
 #[tokio::test]
 async fn a_failed_prompter_is_prompter_error() {
-    let (_dir, tools) = workspace("ask-error");
-    let tools = tools.with_prompter(ScriptedPrompter::failing(PromptError::Failed(
+    let tools = AskTools::new(ScriptedPrompter::failing(PromptError::Failed(
         "the channel closed".into(),
     )));
     let failure = ask(&tools, args(vec![question("q")])).await.unwrap_err();
@@ -406,7 +414,6 @@ async fn a_failed_prompter_is_prompter_error() {
 /// `(no answer)` rather than an empty line.
 #[tokio::test]
 async fn a_text_answer_renders_its_text() {
-    let (_dir, tools) = workspace("ask-text");
     let prompter = ScriptedPrompter::answering(QuestionAnswer::new(
         "q-2",
         vec![
@@ -421,7 +428,7 @@ async fn a_text_answer_renders_its_text() {
             },
         ],
     ));
-    let tools = tools.with_prompter(prompter);
+    let tools = AskTools::new(prompter);
     let output = ask(
         &tools,
         args(vec![

@@ -14,7 +14,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_core::{AgentEvent, BudgetReport, CompactionOutcome, ContentPart, Message, UsageSource};
+use radian_coding::PromptError;
 use radian_host::memory::commands::MemoryCommand;
+use radian_host::{PendingRequest, PendingResponse, PendingView};
 use radian_permissions::{ApprovalOutcome, ApprovalRequest};
 use radian_session::RuntimeEvent;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -26,6 +28,7 @@ use crate::keys::{Action, Keymap};
 use crate::mention::{Completion, ExpandError, Expansion};
 use crate::picker::{Outcome as PickerOutcome, Picker};
 use crate::projection::{SessionProjection, StreamSnapshot};
+use crate::question::{FormKey, FormOutcome, QuestionForm};
 use crate::theme::{Theme, ThemeName};
 
 // ADR 0023 U5: the turn state is a **session fact**, so it lives in the projection
@@ -157,14 +160,27 @@ pub enum Overlay {
     Picker(Picker),
 }
 
+/// One approval as the UI shows it: the queue's id (ADR 0023 U7), the session that asked and
+/// the request itself. The queue id is what the answer names, not the permission layer's own
+/// `request_id`.
+#[derive(Debug, Clone)]
+pub struct PendingApproval {
+    pub request_id: u64,
+    pub origin: String,
+    pub request: ApprovalRequest,
+}
+
 /// The state of one [`Tier::Modal`] layer.
 pub enum Modal {
-    /// A tool call waiting for `y`/`a`/`n`.
-    Approval(ApprovalRequest),
-    /// A `/memory` write waiting for `y`/`n`.
+    /// A tool call waiting for `y`/`a`/`n`. The keys are hardcoded (ADR 0023 U4, invariant 2).
+    /// Boxed, like the question: the two payloads are much larger than the confirmation's.
+    Approval(Box<PendingApproval>),
+    /// A `/memory` write waiting for `y`/`n`. Also hardcoded.
     ConfirmCommand(PendingCommand),
-    // A structured question (the `ask_user` request) is the documented extension point: it
-    // would be a third `Modal` variant with its own form keys, but this build does not have it.
+    /// A structured question (ADR 0024 Q7). Its keys are the rebindable `form` layer, so it is
+    /// the one modal whose input goes through the keymap. Boxed: the form is much larger than
+    /// the other variants, and a `Modal` sits in every `Layer`.
+    Question(Box<QuestionForm>),
 }
 
 /// One mouse-wheel notch (ADR 0023 U2, plan B). The input thread maps crossterm's
@@ -272,8 +288,11 @@ pub enum Input {
     Event(AgentEvent),
     /// A runtime event (ADR 0017's turn failure).
     Runtime(RuntimeEvent),
-    /// An approval request arrived from the permission layer.
-    Approval(ApprovalRequest),
+    /// The pending queue's head changed (ADR 0023 U7): the request to show, and how many are
+    /// queued. `None` means nothing is pending.
+    Pending(Option<Box<PendingView<PendingRequest>>>, usize),
+    /// One key inside the question form (ADR 0024 Q7).
+    Form(FormKey),
     /// An `@` expansion finished (the result of [`Effect::ExpandMentions`]).
     MentionsExpanded(Result<Expansion, ExpandError>),
     /// An `@` completion finished (`None` = nothing to complete).
@@ -338,15 +357,12 @@ pub enum Effect {
     Cancel,
     /// Leave the app.
     Quit,
-    /// Answer the approval prompt `request_id` is showing. The loop owns the reply channel.
-    AnswerApproval {
-        request_id: String,
-        outcome: ApprovalOutcome,
+    /// Answer the pending request `request_id` (ADR 0023 U7). The loop runs it through the
+    /// session's facade, which re-validates the `AnswerRequest` capability.
+    AnswerRequest {
+        request_id: u64,
+        response: PendingResponse,
     },
-    /// Drop the reply channel of `request_id` without answering: the permission layer treats a
-    /// dropped channel as an abandoned request (a denial). This is what clearing the prompt
-    /// used to do, and it is why the loop must be told.
-    AbandonApproval { request_id: String },
     /// Expand the `@` references in `text` (reads files).
     ExpandMentions { text: String },
     /// Complete the `@` reference at the cursor (reads a directory).
@@ -374,16 +390,15 @@ impl PartialEq for Effect {
             (SendFollowup(a), SendFollowup(b)) | (Steer(a), Steer(b)) => a == b,
             (Cancel, Cancel) | (Quit, Quit) => true,
             (
-                AnswerApproval {
+                AnswerRequest {
                     request_id: a,
-                    outcome: ao,
+                    response: ao,
                 },
-                AnswerApproval {
+                AnswerRequest {
                     request_id: b,
-                    outcome: bo,
+                    response: bo,
                 },
             ) => a == b && ao == bo,
-            (AbandonApproval { request_id: a }, AbandonApproval { request_id: b }) => a == b,
             (ExpandMentions { text: a }, ExpandMentions { text: b }) => a == b,
             (
                 CompleteMention {
@@ -496,6 +511,11 @@ pub struct App {
     pub projection: Arc<SessionProjection>,
     pub quit: bool,
     pub note: Option<String>,
+    /// How many requests the queue holds (ADR 0023 U7), for the status bar.
+    pub pending: usize,
+    /// The last request the UI answered: the queue's head stays that request for a moment, and
+    /// re-showing it would flash a form the user just submitted.
+    last_answered: Option<u64>,
     /// The layer stack (ADR 0023 U4): [`Layer::Surface`] at index 0, then overlays and modals
     /// above it. Only [`App::push_overlay`]/[`App::push_modal`] and the matching removals
     /// change it, so the tier rules hold by construction.
@@ -540,6 +560,8 @@ impl App {
             projection: Arc::new(SessionProjection::new()),
             quit: false,
             note: None,
+            pending: 0,
+            last_answered: None,
             layers: vec![Layer::Surface],
             memory_enabled: false,
             pending_expand: None,
@@ -772,7 +794,7 @@ impl App {
     /// The approval prompt on screen, if any.
     pub fn pending_approval(&self) -> Option<&ApprovalRequest> {
         self.layers.iter().rev().find_map(|layer| match layer {
-            Layer::Modal(Modal::Approval(request)) => Some(request),
+            Layer::Modal(Modal::Approval(prompt)) => Some(&prompt.request),
             _ => None,
         })
     }
@@ -924,36 +946,111 @@ impl App {
         self.follow = false;
     }
 
-    /// Shows an approval prompt. If one was already up it is denied rather than dropped: the
-    /// permission layer awaits one call at a time, so this should not happen, and a silent
-    /// drop would leave that call waiting forever.
-    fn request_approval(&mut self, request: ApprovalRequest) -> UpdateResult {
-        let mut effects = Vec::new();
-        if let Some(Modal::Approval(previous)) =
-            self.remove_modal(|modal| matches!(modal, Modal::Approval(_)))
-        {
-            effects.push(Effect::AnswerApproval {
-                request_id: previous.request_id,
-                outcome: ApprovalOutcome::Deny {
-                    reason: Some("superseded by another approval request".into()),
-                },
-            });
+    /// Shows the queue's head (ADR 0023 U7). The head is the only pending request on screen:
+    /// a second request waits in the queue instead of superseding the first. A head that is
+    /// already shown keeps its state, so a question's drafts survive a redraw.
+    fn sync_pending(
+        &mut self,
+        head: Option<Box<PendingView<PendingRequest>>>,
+        len: usize,
+    ) -> UpdateResult {
+        self.pending = len;
+        let head_id = head.as_ref().map(|view| view.request_id);
+        if head_id != self.last_answered {
+            // The head moved on, so a request answered a moment ago is gone for good.
+            self.last_answered = None;
         }
-        self.push_modal(Modal::Approval(request));
-        UpdateResult {
-            dirty: true,
-            effects,
+        let showing = self.layers.iter().rev().find_map(|layer| match layer {
+            Layer::Modal(Modal::Approval(prompt)) => Some(prompt.request_id),
+            Layer::Modal(Modal::Question(form)) => Some(form.request_id),
+            _ => None,
+        });
+        if showing == head_id {
+            return UpdateResult::dirty();
+        }
+        // A different request (or none): drop the old modal and show the new head.
+        self.remove_modal(|modal| matches!(modal, Modal::Approval(_) | Modal::Question(_)));
+        let Some(view) = head else {
+            return UpdateResult::dirty();
+        };
+        if Some(view.request_id) == self.last_answered {
+            return UpdateResult::dirty();
+        }
+        match view.request {
+            PendingRequest::Approval(request) => {
+                self.push_modal(Modal::Approval(Box::new(PendingApproval {
+                    request_id: view.request_id,
+                    origin: view.origin,
+                    request,
+                })))
+            }
+            PendingRequest::Question(request) => self.push_modal(Modal::Question(Box::new(
+                QuestionForm::new(view.request_id, view.origin, request.questions),
+            ))),
+        }
+        UpdateResult::dirty()
+    }
+
+    /// Answers the pending approval and clears it. A no-op when nothing is pending.
+    fn answer_approval(&mut self, outcome: ApprovalOutcome) -> UpdateResult {
+        match self.remove_modal(|modal| matches!(modal, Modal::Approval(_))) {
+            Some(Modal::Approval(prompt)) => {
+                self.last_answered = Some(prompt.request_id);
+                UpdateResult::quiet(Effect::AnswerRequest {
+                    request_id: prompt.request_id,
+                    response: PendingResponse::Approval(outcome),
+                })
+            }
+            _ => UpdateResult::none(),
         }
     }
 
-    /// Answers the pending prompt and clears it. A no-op when nothing is pending.
-    fn answer_approval(&mut self, outcome: ApprovalOutcome) -> UpdateResult {
-        match self.remove_modal(|modal| matches!(modal, Modal::Approval(_))) {
-            Some(Modal::Approval(request)) => UpdateResult::quiet(Effect::AnswerApproval {
-                request_id: request.request_id,
-                outcome,
-            }),
-            _ => UpdateResult::none(),
+    /// One key inside the question form (ADR 0024 Q7).
+    fn form_key(&mut self, key: FormKey) -> UpdateResult {
+        let Some(index) = self
+            .layers
+            .iter()
+            .rposition(|layer| matches!(layer, Layer::Modal(Modal::Question(_))))
+        else {
+            return UpdateResult::none();
+        };
+        let outcome = match &mut self.layers[index] {
+            Layer::Modal(Modal::Question(form)) => form.key(key),
+            _ => return UpdateResult::none(),
+        };
+        match outcome {
+            FormOutcome::Stay => UpdateResult::dirty(),
+            FormOutcome::Blocked(id) => {
+                self.push_notice(format!(
+                    "`{id}` is required: answer it before submitting (Tab to it)"
+                ));
+                UpdateResult::dirty()
+            }
+            FormOutcome::Answer(answer) => {
+                let request_id = self.question_request_id(index);
+                self.remove_modal(|modal| matches!(modal, Modal::Question(_)));
+                self.last_answered = request_id;
+                UpdateResult::quiet(Effect::AnswerRequest {
+                    request_id: request_id.unwrap_or_default(),
+                    response: PendingResponse::Question(Ok(answer)),
+                })
+            }
+            FormOutcome::Decline => {
+                let request_id = self.question_request_id(index);
+                self.remove_modal(|modal| matches!(modal, Modal::Question(_)));
+                self.last_answered = request_id;
+                UpdateResult::quiet(Effect::AnswerRequest {
+                    request_id: request_id.unwrap_or_default(),
+                    response: PendingResponse::Question(Err(PromptError::Declined)),
+                })
+            }
+        }
+    }
+
+    fn question_request_id(&self, index: usize) -> Option<u64> {
+        match self.layers.get(index) {
+            Some(Layer::Modal(Modal::Question(form))) => Some(form.request_id),
+            _ => None,
         }
     }
 
@@ -1019,7 +1116,8 @@ impl App {
                 effects: self.apply_event(&event),
             },
             Input::Runtime(event) => self.apply_runtime_event(&event),
-            Input::Approval(request) => self.request_approval(request),
+            Input::Pending(head, len) => self.sync_pending(head, len),
+            Input::Form(key) => self.form_key(key),
             Input::MentionsExpanded(result) => self.mentions_expanded(result),
             Input::CompletionReady(completion) => self.completion_ready(completion),
             Input::MemoryCommandDone(result) => self.memory_command_done(result),
@@ -1065,6 +1163,24 @@ impl App {
         let action = self.keymap.action_for(key);
         if action == Some(Action::Cancel) {
             return Some(Input::Action(Action::Cancel));
+        }
+        // The question form is the one modal whose keys are rebindable (ADR 0024 Q7): its own
+        // actions come from the `form` layer, and everything else that can edit text goes to
+        // the focused field. A key the form does not want is swallowed, never passed down.
+        if matches!(self.top_modal(), Some(Modal::Question(_))) {
+            if let Some(action) = self.keymap.form_action_for(key) {
+                return Some(Input::Form(FormKey::Action(action)));
+            }
+            if let KeyCode::Char(c) = key.code
+                && !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+            {
+                return Some(Input::Form(FormKey::Char(c)));
+            }
+            if let Some(action) = self.keymap.action_for(key) {
+                return Some(Input::Form(FormKey::Action(action)));
+            }
+            return None;
         }
 
         /// What a layer did with one key.
@@ -1166,6 +1282,9 @@ impl App {
                 }
                 _ => None,
             },
+            // The question form's keys are the rebindable `form` layer (ADR 0024 Q7), not
+            // hardcoded: `key_input` looks them up when this modal is on top.
+            Modal::Question(_) => None,
             Modal::ConfirmCommand(_) => match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => Some(Input::ConfirmCommand(true)),
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
@@ -1416,6 +1535,15 @@ impl App {
                     self.cancel_or_quit()
                 }
             }
+            // The form actions normally arrive as `Input::Form`; a main-layer binding to one
+            // would still land here, so route it to the form rather than dropping it.
+            Action::FormNext
+            | Action::FormPrev
+            | Action::FormUp
+            | Action::FormDown
+            | Action::FormSelect
+            | Action::FormSubmit
+            | Action::FormDecline => self.form_key(FormKey::Action(action)),
             Action::Cancel => self.cancel_or_quit(),
         }
     }
@@ -1703,17 +1831,12 @@ impl App {
                 ));
             }
             AgentEvent::RunFinished { status: _ } => {
+                // The turn is over. A pending approval is not cleared here: the permission
+                // layer raced the wait against the turn's cancellation, so its waiter is gone,
+                // the queue drops the element and wakes the UI (ADR 0023 U7). Driving the modal
+                // from the queue alone is what makes "the waiter gave up" and "the turn ended"
+                // the same event.
                 self.note = None;
-                // The turn is over, so no approval can still be waiting: a cancelled turn
-                // already resolved the hook's `ask` as a denial. Clearing the prompt must also
-                // drop the reply channel — the loop owns it, so it is told to abandon the
-                // request (a dropped channel is what the permission layer sees as abandoned).
-                return match self.remove_modal(|modal| matches!(modal, Modal::Approval(_))) {
-                    Some(Modal::Approval(request)) => vec![Effect::AbandonApproval {
-                        request_id: request.request_id,
-                    }],
-                    _ => Vec::new(),
-                };
             }
             _ => {}
         }

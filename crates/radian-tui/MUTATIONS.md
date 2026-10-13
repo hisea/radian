@@ -500,3 +500,22 @@ Base `1e3fec4` · 在本任务工作树内施加后从副本还原（`--no-fail-
 3/3 抓住。W7 的测试用 `spawn_direct_keeping_slave` 保留 pty slave 的一个 `dup`——`dup` 共享同一个打开
 文件描述，所以子进程在 fd 1 上设/还原的 `O_NONBLOCK` 标志在子进程退出后仍能在该描述上读到（新 `open`
 得到的是新描述，证明不了）。变异去掉还原那步后该断言失败，说明测试确实观测到标志。
+
+## ADR 0023 Step 1 · PR ⑤（TUI 侧）与 ADR 0024 的 TUI 部分（2026-10-13）
+
+Base `6d22bf0` · 一次性检出 `/tmp/s1e-mut`（detached，跑完删除）· 独立 target ·
+`--no-fail-fast`；每个变异后从副本还原，结束时 `git status --short` 只剩变异脚本。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| S1 | 恢复 supersede：新的请求到达时把旧的审批**拒绝**掉 | ✅ 抓住 | `approval::a_second_approval_does_not_supersede_the_first` |
+| S2 | `LocalSession::answer` 去掉 `AnswerRequest` 校验 | ✅ 抓住 | `radian-host` 的 `session::a_local_session_without_the_capability_refuses_an_answer` |
+| S3 | 队首消失时仍保留 Modal（通知/清理没接上） | ✅ 抓住 | `approval::the_queue_head_drives_the_prompt_not_the_turn`、`keys_answer_the_prompt_with_the_queue_id` |
+| S4 | `Esc` 不确认、直接拒答 | ✅ 抓住 | `question::esc_asks_once_before_declining` |
+| S5 | 必答未答也能提交 | ✅ 抓住 | `question::a_required_question_blocks_the_submit` |
+| S6 | `--approval never` 时不注册 `ask_user` | ✅ 抓住 | `pty::pty_approval_never_still_registers_ask_user` |
+| S7 | session 关闭时审批以 `AllowOnce` 完成（不是 fail-closed 的 `Deny`） | ✅ 抓住 | `radian-host` 的 `pending_questions::a_shared_queue_session_close_aborts_both_kinds` |
+
+7/7 抓住。S1 是评审点名要恢复的旧行为：变异后 UI 会为旧请求发一条 Deny 效果，测试断言
+"移动队首不产生效果"随即失败。S3 是"等待方放弃后 Modal 仍显示"：变异让 `head == None` 时不清
+Modal，三条队列驱动测试失败。S7 说明 session 关闭的 fail-closed 语义没有被队列改造稀释。

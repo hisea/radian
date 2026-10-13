@@ -2,6 +2,7 @@
 //! Pure `App` state, so the regression (dogfood p5) has a fast test.
 
 use agent_core::Message;
+use radian_host::{PendingRequest, PendingView};
 use radian_permissions::ApprovalRequest;
 use radian_tui::app::{App, Input, MOUSE_WHEEL_LINES, MouseScrollDirection, Overlay};
 use radian_tui::picker::Picker;
@@ -17,6 +18,15 @@ fn request() -> ApprovalRequest {
         json!({}),
         None,
     )
+}
+
+/// The queue's view of that request, the way the loop shows the head (ADR 0023 U7).
+fn view() -> PendingView<PendingRequest> {
+    PendingView {
+        request_id: 1,
+        origin: "session".into(),
+        request: PendingRequest::Approval(request()),
+    }
 }
 
 /// A transcript long enough to scroll, with the viewport pinned to the bottom.
@@ -65,7 +75,7 @@ fn a_wheel_down_scrolls_back() {
 #[test]
 fn a_modal_swallows_the_wheel() {
     let mut app = scrolled_app();
-    app.update(Input::Approval(request()));
+    app.update(Input::Pending(Some(Box::new(view())), 1));
     let before = app.scroll;
     let result = app.mouse_scroll(MouseScrollDirection::Up);
     assert!(!result.dirty);

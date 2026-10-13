@@ -18,6 +18,15 @@ fn ctrl(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::CONTROL)
 }
 
+/// The queue's view of the approval (ADR 0023 U7): the id the UI shows and answers.
+fn approval_view() -> radian_host::PendingView<radian_host::PendingRequest> {
+    radian_host::PendingView {
+        request_id: 1,
+        origin: "session".into(),
+        request: radian_host::PendingRequest::Approval(request()),
+    }
+}
+
 fn request() -> ApprovalRequest {
     ApprovalRequest::new(
         "perm-1",
@@ -51,7 +60,7 @@ fn ctrl_c_cancels_while_an_approval_modal_is_open() {
     // The turn state is a session fact written by the event sink (ADR 0023 U5), so the test
     // sets it on the projection the way the sink would.
     app.projection.set_turn(TurnState::Running);
-    app.update(Input::Approval(request()));
+    app.update(Input::Pending(Some(Box::new(approval_view())), 1));
     assert!(app.pending_approval().is_some());
     assert_tiers(&app);
 
@@ -60,18 +69,19 @@ fn ctrl_c_cancels_while_an_approval_modal_is_open() {
     assert_eq!(result.effects, vec![Effect::Cancel]);
     assert!(app.pending_approval().is_some());
 
-    // The cancelled turn resolves the waiting `ask` as a denial: the modal is cleared and the
-    // loop is told to drop the reply channel (a dropped channel is an abandoned request).
+    // The cancelled turn makes the permission layer's waiter give up. The queue drops the
+    // element and wakes the UI (ADR 0023 U7), so the modal goes with the head; the turn event
+    // itself does not touch it.
     let result = app.update(Input::Event(AgentEvent::RunFinished {
         status: RunStatus::Cancelled(CancelReason::Requested),
     }));
-    assert!(app.pending_approval().is_none());
-    assert_eq!(
-        result.effects,
-        vec![Effect::AbandonApproval {
-            request_id: "perm-1".into()
-        }]
+    assert!(result.effects.is_empty(), "{:?}", result.effects);
+    assert!(
+        app.pending_approval().is_some(),
+        "the queue's head still stands until the waiter is gone"
     );
+    app.update(Input::Pending(None, 0));
+    assert!(app.pending_approval().is_none());
 }
 
 /// Invariant 2 (ADR 0023 U4): the approval keys are hardcoded, so `tui.keybindings` can never
@@ -89,13 +99,13 @@ fn the_approval_keys_survive_a_keymap_that_rebinds_y() {
         )
         .expect("a valid config");
         app.apply_config(&config, false).expect("a valid keymap");
-        app.update(Input::Approval(request()));
+        app.update(Input::Pending(Some(Box::new(approval_view())), 1));
         let result = app.on_key(key(KeyCode::Char('y')));
         assert_eq!(
             result.effects,
-            vec![Effect::AnswerApproval {
-                request_id: "perm-1".into(),
-                outcome: ApprovalOutcome::AllowOnce,
+            vec![Effect::AnswerRequest {
+                request_id: 1,
+                response: radian_host::PendingResponse::Approval(ApprovalOutcome::AllowOnce),
             }],
             "`y` must still approve with {bindings:?}"
         );
@@ -108,7 +118,7 @@ fn the_approval_keys_survive_a_keymap_that_rebinds_y() {
 #[test]
 fn an_overlay_pushed_while_a_modal_is_up_stays_below_it() {
     let mut app = App::new("m", "s");
-    app.update(Input::Approval(request()));
+    app.update(Input::Pending(Some(Box::new(approval_view())), 1));
     // A push that ignores the rule would land on top; `push_overlay` must not.
     app.push_overlay(Overlay::Find(FindState::open(0)));
     assert_tiers(&app);
@@ -128,9 +138,11 @@ fn an_overlay_pushed_while_a_modal_is_up_stays_below_it() {
     let result = app.on_key(key(KeyCode::Char('n')));
     assert_eq!(
         result.effects,
-        vec![Effect::AnswerApproval {
-            request_id: "perm-1".into(),
-            outcome: ApprovalOutcome::Deny { reason: None },
+        vec![Effect::AnswerRequest {
+            request_id: 1,
+            response: radian_host::PendingResponse::Approval(ApprovalOutcome::Deny {
+                reason: None
+            }),
         }]
     );
     assert!(app.find_state().is_some(), "the overlay is untouched");
@@ -220,10 +232,20 @@ fn app_has_no_four_option_fields() {
 #[test]
 fn an_overlay_never_lands_between_two_modals() {
     let mut app = App::new("m", "s");
-    app.push_modal(Modal::Approval(request()));
-    let mut second = request();
-    second.request_id = "perm-2".into();
-    app.push_modal(Modal::Approval(second));
+    app.push_modal(Modal::Approval(Box::new(
+        radian_tui::app::PendingApproval {
+            request_id: 1,
+            origin: "session".into(),
+            request: request(),
+        },
+    )));
+    app.push_modal(Modal::Approval(Box::new(
+        radian_tui::app::PendingApproval {
+            request_id: 2,
+            origin: "session".into(),
+            request: request(),
+        },
+    )));
     app.push_overlay(Overlay::Find(FindState::open(0)));
     assert_tiers(&app);
     let overlay = app

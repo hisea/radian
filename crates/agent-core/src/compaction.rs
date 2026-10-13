@@ -47,21 +47,63 @@ pub const DEFAULT_SUMMARY_MAX_TOKENS: u64 = 8_192;
 /// reach the summarizer.
 pub const TOOL_RESULT_LIMIT_CHARS: usize = 2_000;
 
-/// The fixed part of the summary system prompt (ADR 0018's structure). It asks for the seven
-/// sections by name and forbids inventing anything, because the summary becomes part of the
-/// next request's context. The length ceiling is added by [`summary_system_prompt`], which
+/// The rule for the `Verified facts` section: only
+/// what the conversation actually verified. Plans and intentions are explicitly excluded. The
+/// prompt quotes this sentence; the constant is the stable substring a test asserts, so the
+/// wording can change without binding the test to the whole paragraph.
+pub const SUMMARY_PLANS_ARE_NOT_FACTS: &str =
+    "Plans, assumptions and intentions are not facts and must not appear here";
+
+/// The rule that `Verified facts` is chronological (oldest first, new facts appended at the
+/// end), so "delete the oldest first" has a defined meaning. Quoted in the summary prompt and
+/// the shorten body; the stable substring a test asserts.
+pub const SUMMARY_FACTS_ORDER_RULE: &str =
+    "list the facts in chronological order, oldest first, and append each new fact at the end";
+
+/// The rule for choosing which fact to delete when the section is over its ceiling: the
+/// oldest one, and only when it is no longer relevant to the Goal and the current work. Quoted
+/// in the summary prompt and the shorten body; the stable substring a test asserts.
+pub const SUMMARY_FACTS_DELETE_OLDEST: &str = "delete the oldest fact first";
+
+/// The fixed part of the summary system prompt (ADR 0018 §摘要, revision 5 / plan B). It asks
+/// for the sections by name and forbids inventing anything, because the summary becomes part of
+/// the next request's context. The length ceiling is added by [`summary_system_prompt`], which
 /// depends on the compaction.
 pub const SUMMARY_SYSTEM_PROMPT: &str = "\
 You are compressing a coding conversation so another agent can continue the work. \
 Produce one structured summary with exactly these sections, in this order:
 
 ## Goal
+What the user asked for, in their own words where possible \u{2014} quote the user; do not only paraphrase.
+
 ## Constraints
+The rules, limits and preferences that must hold.
+
 ## Progress
+### Done
+What is finished, with the exact commands and results.
+### In progress
+What is partly done.
+### Pending
+What is not started.
+
+## Verified facts (do not re-check)
+Only facts the conversation actually verified belong here: commands that ran with their results, and conclusions drawn from code that was read. Plans, assumptions and intentions are not facts and must not appear here. State how each fact was verified (which command, or which file and line), and do not re-check these facts later. Keep the section ordered: list the facts in chronological order, oldest first, and append each new fact at the end (a rolling update keeps that order). When the summary is over the length limit, first drop stale details from the other sections; delete a fact only when it is no longer relevant to the Goal and to the Pending or In progress work, and then delete the oldest fact first.
+
+## Current work
+The one thing being worked on right before this summary, down to the file and the function.
+
+## Next step
+Exactly one step, and it must continue directly from Current work.
+
 ## Key decisions
-## Next steps
+The decisions taken and why.
+
 ## Critical context
+Anything else the next agent must know: the environment, gotchas, exact error text.
+
 ## Files read and modified
+Every file touched, with its path.
 
 Keep every section concise. Preserve exact file paths, function names, commands, and error \
 messages. Include only what the conversation contains; never invent or guess. Output only the \
@@ -76,6 +118,14 @@ pub fn shorten_target(max_tokens: u64) -> u64 {
     max_tokens.saturating_mul(SHORTEN_TARGET_PERCENT) / 100
 }
 
+/// The token ceiling for the `Verified facts` section **alone**: one third of the whole
+/// summary ceiling. A named number, not just "delete by priority", because the model cannot
+/// count tokens: when everything else is trimmed and the section
+/// still overflows, the retry needs a concrete target to delete toward.
+pub fn verified_facts_max_tokens(max_tokens: u64) -> u64 {
+    max_tokens / 3
+}
+
 /// The word count the prompt quotes for a token ceiling. ADR 0018's ruler is 1 token ≈ 0.75
 /// English words; the prompt says so, because the model cannot count tokens.
 fn approx_words(tokens: u64) -> u64 {
@@ -86,12 +136,16 @@ fn approx_words(tokens: u64) -> u64 {
 /// `check_summary` enforces, stated in tokens and in approximate English words (dogfood7: the
 /// model wrote a 10k-token summary twice because nothing told it the limit).
 pub fn summary_system_prompt(max_tokens: u64) -> String {
+    let facts = verified_facts_max_tokens(max_tokens);
     format!(
         "{SUMMARY_SYSTEM_PROMPT}\n\nThe entire summary must be shorter than {max_tokens} tokens \
-         (about {} English words; that is an approximation, 1 token ≈ 0.75 words). Drop details \
-         that are no longer important if you must. This applies when updating a previous summary \
-         too: shorten it, do not only append.",
-        approx_words(max_tokens)
+         (about {} English words; that is an approximation, 1 token ≈ 0.75 words), and the \
+         Verified facts section alone must be at most {facts} tokens (about {} English words; \
+         same approximation). When the summary is over the limit, drop stale details from the \
+         other sections first, then follow the Verified facts deletion rule above. This applies \
+         when updating a previous summary too: shorten it, do not only append.",
+        approx_words(max_tokens),
+        approx_words(facts)
     )
 }
 
@@ -329,13 +383,19 @@ pub fn summary_request(
 /// not tempted to write another 10k-token roll-up (dogfood7). `target_tokens` is
 /// [`shorten_target`], below the enforced limit to leave margin.
 pub fn shorten_request(overlong_summary: &str, target_tokens: u64) -> ModelRequest {
+    let facts = verified_facts_max_tokens(target_tokens);
     let body = format!(
-        "The summary below is over the length limit. Rewrite it shorter, keeping exactly the \
-         seven sections and what they say; drop details that are no longer important. The result \
-         must be shorter than {target_tokens} tokens (about {} English words; that is an \
-         approximation, 1 token ≈ 0.75 words). Do not add new content and do not only append: \
-         the whole summary must fit.\n\n<summary-to-shorten>\n{overlong_summary}\n</summary-to-shorten>",
-        approx_words(target_tokens)
+        "The summary below is over the length limit. Rewrite it shorter, keeping the same sections. \
+         When the summary is over the limit, first drop stale details from the other sections; \
+         delete a fact only when it is no longer relevant to the Goal and to the Pending or In \
+         progress work, and then delete the oldest fact first (list the facts in chronological \
+         order, oldest first, and append each new fact at the end). The whole summary must be \
+         shorter than {target_tokens} tokens (about {} English words; that is an approximation, \
+         1 token ≈ 0.75 words), and the Verified facts section alone must be at most {facts} \
+         tokens (about {} English words). Do not add new content and do not only append: the \
+         whole summary must fit.\n\n<summary-to-shorten>\n{overlong_summary}\n</summary-to-shorten>",
+        approx_words(target_tokens),
+        approx_words(facts)
     );
     ModelRequest {
         system_prompt: Some(summary_system_prompt(target_tokens)),

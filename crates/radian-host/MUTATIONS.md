@@ -251,3 +251,17 @@ Base `7b811b7`（合并 PR ③ 后的 `5dcac58` 上原样重跑，同样 4/4 抓
 
 4/4 抓住。S1 与 S3 是同一个断言的两次独立破坏：一次在**执行前**的校验，一次在**声明**的来源；
 宿主"再次校验、不信任 UI"的两半都被钉住。S2 同时说明"先写值、再置标志"的顺序不是注释。
+
+## s1e-2：`ask_user` 的注册与关闭时的队列中止（2026-10-13）
+
+Base `17fb385` · 一次性检出 `/tmp/s1e2-mut`（detached，跑完删除）· `--no-fail-fast`；
+变异后从副本还原。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| T1 | 只有给了 `--workspace`（有编码工具）时才注册 `ask_user` | ✅ 抓住 | `radian-tui` 的 `pty_ask_user_is_registered_without_a_workspace` |
+| T2 | `LocalSession::stop` 不中止队列（恢复成只靠进程退出 drop） | ✅ 抓住 | `session::stopping_a_session_aborts_its_pending_requests` |
+
+2/2 抓住。T1 就是审查发现的那条：没有 `--workspace` 时模型看不到 `ask_user`，而启动行仍说 `on`——
+变异后启动行与实际注册都由 `SessionFacts` 反映，测试的两条断言同时失败。T2 恢复成"进程退出时靠 drop
+得到 abandoned"的碰巧 fail-closed；带 watchdog 的测试在 2 s 内拿不到中止结果即失败。

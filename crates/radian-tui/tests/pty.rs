@@ -333,6 +333,21 @@ impl Pty {
             .ok()
     }
 
+    /// Waits until `needle` is **gone** from the screen (a modal that was cleared).
+    fn wait_until_gone(&mut self, needle: &str, secs: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        loop {
+            self.pump();
+            if !self.parser.screen().contents().contains(needle) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     fn screen(&mut self) -> String {
         self.pump();
         self.parser.screen().contents()
@@ -4880,5 +4895,328 @@ async fn pty_the_watchdog_restores_the_stdout_flags() {
         flags & libc::O_NONBLOCK,
         0,
         "the watchdog left O_NONBLOCK set on the shared terminal description"
+    );
+}
+
+// ---------- ADR 0024: the structured question (ask_user) ----------
+
+/// The `ask_user` arguments the ask tests use: one single, one multi, one text; all required.
+fn ask_questions() -> serde_json::Value {
+    json!({"questions": [
+        {"id": "loader", "prompt": "How should it load?", "kind": "single",
+         "options": [{"id": "builtin", "label": "Built-in"}, {"id": "process", "label": "Plugins"}],
+         "required": true},
+        {"id": "tiers", "prompt": "Which tiers ship?", "kind": "multi",
+         "options": [{"id": "safe", "label": "Safe"}, {"id": "workspace", "label": "Workspace"}],
+         "required": true},
+        {"id": "name", "prompt": "What is it called?", "kind": "text", "required": true}
+    ]})
+}
+
+/// `ask_user` with those questions, then the text reply.
+fn ask_reply(done: &str) -> Vec<Reply> {
+    vec![
+        tool_reply("call_ask", "ask_user", &ask_questions().to_string()),
+        text_reply(done),
+    ]
+}
+
+/// ADR 0024 Q5/Q7 end to end: the TUI registers `ask_user`, shows the form, and the turn
+/// continues after three answers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_ask_user_answers_three_questions_and_the_turn_continues() {
+    let _serial = pty_guard();
+    // The workspace is a **sibling** of the session directory: the sandbox denies read on the
+    // sessions directory, so a workspace inside it could not be both hidden and usable (the
+    // linux3 finding).
+    let dir = TempDir::new("ask");
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(ask_reply("ASK-DONE")).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "ask",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        40,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // ADR 0024 Q5: this host has an interactive user, so the startup line says so.
+    assert!(
+        pty.wait_for_screen("ask_user: on", 10),
+        "the startup line must say ask_user is on: {}",
+        pty.screen()
+    );
+    pty.send(b"go\r");
+    assert!(
+        pty.wait_for_screen("How should it load?", 20),
+        "no question form: {}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("question 1/3", 20),
+        "the title must name the position: {}",
+        pty.screen()
+    );
+    // Question 1 (single): select the highlighted option.
+    pty.send(b" ");
+    pty.send(b"\t");
+    // Question 2 (multi): select the highlighted option.
+    pty.send(b" ");
+    pty.send(b"\t");
+    // Question 3 (text): type.
+    pty.send(b"radian");
+    // Enter -> the overview, Enter -> submit.
+    pty.send(b"\r");
+    assert!(
+        pty.wait_for_screen("overview", 20),
+        "the overview must be shown: {}",
+        pty.screen()
+    );
+    pty.send(b"\r");
+    assert!(
+        pty.wait_for_screen("ASK-DONE", 30),
+        "the turn must continue after the answers: {}",
+        pty.screen()
+    );
+}
+
+/// ADR 0024 Q4: Ctrl-C while a question is up cancels the turn, the form goes with the waiter
+/// (ADR 0023 U7), and **no** answer is sent: the model is never asked again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_ctrl_c_during_a_question_cancels_without_an_answer() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("ask-cancel");
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        Reply::sse(&[
+            chunk(json!({"role": "assistant", "content": "WORKING"}), None),
+            chunk(
+                json!({"tool_calls": [{"index": 0, "id": "call_ask", "type": "function",
+                    "function": {"name": "ask_user", "arguments": ask_questions().to_string()}}]}),
+                None,
+            ),
+            chunk(json!({}), Some("tool_calls")),
+        ]),
+        text_reply("ASK-DONE"),
+    ])
+    .await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "ask-cancel",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        40,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"go\r");
+    assert!(
+        pty.wait_for_screen("How should it load?", 20),
+        "no question form: {}",
+        pty.screen()
+    );
+    // The streamed text before the question is drawn normally, not lost.
+    assert!(
+        pty.screen().contains("WORKING"),
+        "the streamed text must still be on screen: {}",
+        pty.screen()
+    );
+    pty.send(&[0x03]);
+    // The form's own title, not the prompt: the transcript shows the tool call's arguments,
+    // which contain the prompt text.
+    assert!(
+        pty.wait_until_gone("question 1/3", 20),
+        "the form must go with the cancelled wait: {}",
+        pty.screen()
+    );
+    // One request only: the tool never returned an answer, so the model was never asked again.
+    assert_eq!(
+        server.requests().len(),
+        1,
+        "a cancelled question must not produce an answer"
+    );
+    assert!(!pty.screen().contains("ASK-DONE"));
+}
+
+/// ADR 0023 U7 end to end: two tool calls that need approval are asked one after the other, in
+/// order, and the status bar counts the queue. The second never replaces the first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_two_approvals_are_shown_in_order() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("two-approvals");
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        tool_reply("c1", "write", r#"{"path":"a.txt","content":"one"}"#),
+        tool_reply("c2", "write", r#"{"path":"b.txt","content":"two"}"#),
+        text_reply("BOTH-DONE"),
+    ])
+    .await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "two-approvals",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--approval",
+            "always",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"go\r");
+    assert!(
+        pty.wait_for_screen("approve tool call?", 20),
+        "no approval prompt: {}",
+        pty.screen()
+    );
+    assert!(
+        pty.screen().contains("a.txt"),
+        "the first prompt names the first path: {}",
+        pty.screen()
+    );
+    // ADR 0023 U7: the status bar counts the pending queue.
+    assert!(
+        pty.wait_for_screen("1 pending", 10),
+        "the status bar must count the queue: {}",
+        pty.screen()
+    );
+    pty.send(b"y");
+    assert!(
+        pty.wait_for_screen("b.txt", 20),
+        "the second approval must follow the first: {}",
+        pty.screen()
+    );
+    assert!(
+        pty.screen().contains("approve tool call?"),
+        "the second prompt is shown, not merged: {}",
+        pty.screen()
+    );
+    pty.send(b"y");
+    assert!(
+        pty.wait_for_screen("BOTH-DONE", 20),
+        "the turn must continue after both approvals: {}",
+        pty.screen()
+    );
+}
+
+/// ADR 0024 Q5: `--approval never` only affects approvals. The user is still there, so the
+/// TUI still registers `ask_user`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_approval_never_still_registers_ask_user() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("ask-never");
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("NEVER-DONE")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "ask-never",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--approval",
+            "never",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("ask_user: on", 10),
+        "`--approval never` must not turn ask_user off: {}",
+        pty.screen()
+    );
+}
+
+/// ADR 0024 Q5: `radian-tui` registers `ask_user` even with **no** `--workspace` (so no coding
+/// tools). The startup line must reflect the actual registration, not the host's intent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_ask_user_is_registered_without_a_workspace() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("ask-no-ws");
+    let server = MockServer::start(vec![text_reply("NO-WS-DONE")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "ask-no-ws",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("ask_user: on", 10),
+        "the startup line must say ask_user is on: {}",
+        pty.screen()
+    );
+    pty.send(b"go\r");
+    assert!(
+        pty.wait_for_screen("NO-WS-DONE", 20),
+        "the turn must run: {}",
+        pty.screen()
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1, "{}", pty.screen());
+    let body = &requests[0].body;
+    assert!(
+        body.contains("ask_user"),
+        "the request's tool list must offer ask_user without --workspace: {body}"
+    );
+    assert!(
+        !body.contains("\"name\":\"read\""),
+        "no coding tools exist without --workspace: {body}"
     );
 }

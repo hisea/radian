@@ -2,9 +2,11 @@
 //! `summary_request`, `check_summary` and `compacted_history`.
 
 use agent_core::{
-    ContentPart, InputSource, Message, MessageMeta, PlanError, SummaryError, ToolCall, ToolResult,
+    ContentPart, InputSource, Message, MessageMeta, PlanError, SUMMARY_FACTS_DELETE_OLDEST,
+    SUMMARY_FACTS_ORDER_RULE, SUMMARY_PLANS_ARE_NOT_FACTS, SummaryError, ToolCall, ToolResult,
     check_summary, compacted_history, keep_target, message_tokens, plan, shorten_request,
-    shorten_target, summary_max_tokens, summary_request, units,
+    shorten_target, summary_max_tokens, summary_request, summary_system_prompt, units,
+    verified_facts_max_tokens,
 };
 use serde_json::{Value, json};
 
@@ -222,8 +224,13 @@ fn the_summary_request_serializes_text_and_truncates_tool_results() {
         "## Goal",
         "## Constraints",
         "## Progress",
+        "### Done",
+        "### In progress",
+        "### Pending",
+        "## Verified facts (do not re-check)",
+        "## Current work",
+        "## Next step",
         "## Key decisions",
-        "## Next steps",
         "## Critical context",
         "## Files read and modified",
     ] {
@@ -232,6 +239,23 @@ fn the_summary_request_serializes_text_and_truncates_tool_results() {
             "the prompt lacks {section}: {system}"
         );
     }
+    // dogfood9 / plan B: the `Verified facts` section is restricted to what the conversation
+    // actually checked; plans do not count. The test uses the stable substring constant, not
+    // the whole paragraph.
+    assert!(
+        system.contains(SUMMARY_PLANS_ARE_NOT_FACTS),
+        "the prompt does not exclude plans from Verified facts: {system}"
+    );
+    // dogfood9 follow-up: a concrete deletion priority and a chronological order, so "delete
+    // the oldest" is executable by a model that cannot count tokens.
+    assert!(system.contains(SUMMARY_FACTS_ORDER_RULE), "{system}");
+    assert!(system.contains(SUMMARY_FACTS_DELETE_OLDEST), "{system}");
+    // `Current work` names the file/function and `Next step` is a single continuation.
+    assert!(
+        system.contains("down to the file and the function"),
+        "{system}"
+    );
+    assert!(system.contains("Exactly one step"), "{system}");
 
     let body = request.messages[0].text();
     assert!(body.contains("hello"), "{body}");
@@ -271,14 +295,41 @@ fn the_summary_request_states_the_length_ceiling() {
 
 #[test]
 fn the_shorten_request_carries_only_the_overlong_summary() {
-    let request = shorten_request("OVERLONG SUMMARY BODY", shorten_target(8_192));
+    let target = shorten_target(8_192);
+    let request = shorten_request("OVERLONG SUMMARY BODY", target);
     let system = request.system_prompt.as_deref().unwrap();
     // 80% of 8192 is 6553.
     assert!(system.contains("6553 tokens"), "{system}");
     let body = request.messages[0].text();
     assert!(body.contains("OVERLONG SUMMARY BODY"), "{body}");
-    assert!(body.contains("seven sections"), "{body}");
+    // No fixed count ("seven").
+    assert!(!body.contains("seven"), "{body}");
+    // The deletion priority and the chronological order are stated in the retry too.
+    assert!(body.contains(SUMMARY_FACTS_ORDER_RULE), "{body}");
+    assert!(body.contains(SUMMARY_FACTS_DELETE_OLDEST), "{body}");
+    // The retry names the same one-third ceiling for `Verified facts` (`target / 3`).
+    assert_eq!(verified_facts_max_tokens(target), 2_184);
+    assert!(body.contains("2184 tokens"), "{body}");
+    assert!(body.contains("1638 English words"), "{body}");
+    // The old contradiction ("must survive" / "never delete") is gone from both.
+    for text in [system, body.as_str()] {
+        assert!(!text.contains("must survive"), "{text}");
+        assert!(!text.contains("never delete"), "{text}");
+    }
     assert!(!body.contains("Conversation to summarize"), "{body}");
+}
+
+/// The `Verified facts` section has its own named ceiling (one third), stated with the same
+/// token + word ruler as the whole summary.
+#[test]
+fn the_summary_prompt_states_the_verified_facts_ceiling() {
+    let max = 12_952;
+    assert_eq!(verified_facts_max_tokens(max), 4_317);
+    let prompt = summary_system_prompt(max);
+    assert!(prompt.contains("4317 tokens"), "{prompt}");
+    assert!(prompt.contains("3237 English words"), "{prompt}");
+    assert!(!prompt.contains("must survive"), "{prompt}");
+    assert!(!prompt.contains("never delete"), "{prompt}");
 }
 
 #[test]

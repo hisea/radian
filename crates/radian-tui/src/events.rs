@@ -13,7 +13,6 @@ use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
 use agent_core::{AgentEvent, EventSink, RunStatus};
-use radian_permissions::{ApprovalOutcome, ApprovalRequest};
 use ratatui::crossterm::event::{Event, KeyEvent, KeyEventKind, MouseEventKind};
 
 use crate::app::{Input as AppInput, MouseScrollDirection};
@@ -26,8 +25,8 @@ pub enum UiEvent {
     Agent(AgentEvent),
     /// A runtime event (ADR 0017's turn failure).
     Runtime(radian_session::RuntimeEvent),
-    /// A tool call waiting for the human.
-    Approval(ApprovalPrompt),
+    /// The pending queue changed (ADR 0023 U7): the UI re-reads its head.
+    Pending,
     /// The result of an effect, as the input it becomes (ADR 0023 U3).
     Command(AppInput),
     /// The projection changed. At most one is in flight per session.
@@ -74,14 +73,6 @@ pub fn input_event(event: Event) -> Option<InputEvent> {
         },
         _ => None,
     }
-}
-
-/// A tool call waiting for the human: the request the UI shows, and the channel the permission
-/// layer awaits. The **loop** owns the channel (ADR 0023 U3: `update` is pure), keyed by
-/// `request_id` so an answer or an abandon can find it.
-pub struct ApprovalPrompt {
-    pub request: ApprovalRequest,
-    pub reply: tokio::sync::oneshot::Sender<ApprovalOutcome>,
 }
 
 /// Forwards core events to the UI thread (ADR 0023 U2). Deltas are **not** forwarded: they

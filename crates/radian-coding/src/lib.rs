@@ -1,6 +1,7 @@
 //! Built-in coding tools for radian: `read`, `write`, `patch`, `list`, `git_status`,
-//! `git_diff`, and (only when the host supplies a sandbox) `shell`. See `README.md` next to
-//! this crate for the tool/limit tables.
+//! `git_diff`, and (only when the host supplies a sandbox) `shell`. [`AskTools`] is the
+//! separate `ask_user` provider: a host with no workspace still mounts it (ADR 0024 Q5). See
+//! `README.md` next to this crate for the tool/limit tables.
 //!
 //! Every tool operates under one workspace root given by the host. The file tools enforce the
 //! path boundary **here**, per call (see below); `shell` adds the OS sandbox as defence in
@@ -55,9 +56,9 @@ mod workspace;
 mod write;
 
 pub use ask::{
-    MAX_DESCRIPTION_CHARS, MAX_ID_CHARS, MAX_LABEL_CHARS, MAX_OPTIONS, MAX_PROMPT_CHARS,
-    MAX_QUESTIONS, PromptError, Prompter, Question, QuestionAnswer, QuestionKind, QuestionOption,
-    QuestionReply, QuestionRequest,
+    AskSession, AskTools, MAX_DESCRIPTION_CHARS, MAX_ID_CHARS, MAX_LABEL_CHARS, MAX_OPTIONS,
+    MAX_PROMPT_CHARS, MAX_QUESTIONS, PromptError, Prompter, Question, QuestionAnswer, QuestionKind,
+    QuestionOption, QuestionReply, QuestionRequest,
 };
 pub use provider::{CodingSession, CodingTools, CodingToolsError, Limits};
 pub use workspace::WorkspaceError;

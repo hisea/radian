@@ -192,16 +192,20 @@ find_next = ["ctrl-g", "shift-enter"]
   `line_start`, `line_end`, `history_prev`, `history_next`, `delete_before`, `delete_under`,
   `delete_word`, `delete_to_line_start`, `delete_to_line_end`, `scroll_page_up`,
   `scroll_page_down`, `scroll_line_up`, `scroll_line_down`, `scroll_top`, `scroll_bottom`,
-  `escape`, `cancel`, `complete`, `find`, `find_prev`, `find_next`, `find_close`. The
-  defaults are exactly the table above, so an empty config changes nothing.
+  `escape`, `cancel`, `complete`, `find`, `find_prev`, `find_next`, `find_close`,
+  `form_next`, `form_prev`, `form_up`, `form_down`, `form_select`, `form_submit`,
+  `form_decline`. The defaults are exactly the table above, so an empty config changes nothing.
 - **The approval and command-confirmation prompts are not rebindable.** `y`/`a`/`n` and `Esc`
   are handled before the keymap, so a bad keybinding cannot approve a tool call the user meant
   to deny; `cancel` still works while a prompt is up.
-- There are two **contexts**, and a binding only conflicts with another binding of its own
+- There are three **contexts**, and a binding only conflicts with another binding of its own
   context. The find box (`find_prev`, `find_next`, `find_close`) is a layer over the
   transcript: while it is open its keys are looked up first, so `enter` is `find_prev` there
   and `send` in the transcript, and `ctrl-f` is both "open the box" (`find`) and "earlier
-  match" (`find_prev`), exactly as the pre-keymap behavior was.
+  match" (`find_prev`), exactly as the pre-keymap behavior was. The **question form**
+  (`form_next`, `form_prev`, `form_up`, `form_down`, `form_select`, `form_submit`,
+  `form_decline`) is the third: it is the one modal whose keys are rebindable (ADR 0024 Q7),
+  and `cancel` (Ctrl-C) still runs before it.
 - While the `@` completion list is showing, `escape` only closes the list (it does not clear
   the input), and any key other than `complete` dismisses it. Both follow the keymap, so a
   rebound `escape`/`complete` moves that behavior too. Likewise `find_close`'s `esc` closes the
@@ -650,6 +654,46 @@ When a call needs the human, the input box is replaced by an approval box:
 
 The prompt shows the **resolved** resource, never the raw argument: `a/../b` must not read as
 if it stayed under `a/`. While the box is up, other keys do not type into the input.
+
+### The pending queue and the structured question (ADR 0023 U7 / ADR 0024)
+
+Approvals and `ask_user` questions share **one** arrival-ordered queue in `radian-host`
+(`PendingQueue`), and the UI shows its head: a second request waits behind the first instead of
+superseding it. The queue is a wake-up source (its `watch` receiver is a `UiEvent::Pending`), so
+a waiter that gives up — a cancelled turn — removes the modal immediately, without waiting for
+anything else. The status bar counts the queue (`N pending`) while it is not empty. Answering
+goes through the session facade (`answer`), which re-validates the `AnswerRequest` capability,
+so a facade without it refuses with a notice rather than resolving a request.
+
+`radian-tui` always registers `ask_user` (ADR 0024 Q5); `agent` never does and its startup line
+says `ask_user: off (no interactive user)`. The tool is fixed `allow` in every tier (ADR 0024
+Q6): it writes nothing and runs nothing, and the answer is data, not a permission.
+
+A question request is one `Modal::Question` with a form (ADR 0024 Q7):
+
+```
+┌ question 1/3 from <session> ────────────────────────────────┐
+│ How should the UI extension be loaded?                      │
+│ > (•) Built-in Rust components                              │
+│   ( ) External process plugins                              │
+│ Tab next · Space select · Enter next/submit · Esc decline   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+| Key | Action |
+|---|---|
+| `Tab` / `Shift-Tab` (`form_next`/`form_prev`) | the next/previous question, wrapping |
+| `Up` / `Down` (`form_up`/`form_down`) | the option cursor; the list scrolls to keep it visible |
+| `Space` (`form_select`) | choose the highlighted option (toggle it for a `multi` question) |
+| `Enter` (`form_submit`) | the next question, then the overview; in the overview, submit |
+| `Esc` (`form_decline`) | ask once; a second `Esc` declines (`user_declined`) |
+| typing | the focused free-text field (a `text` question, or the `Other` row), with the composer's editing keys |
+
+A `required` question with no answer blocks the submit with a notice. The drafts live in the
+form, so moving between questions keeps them. These are the **only** rebindable modal keys; the
+approval's `y`/`a`/`n`/`Esc` stay hardcoded, and Ctrl-C still cancels the turn before the form
+sees the key (ADR 0023 U4, invariant 1). While a question is up, the model's streamed text
+before it stays on screen.
 
 ## Context budget and the model catalog
 

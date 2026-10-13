@@ -11,13 +11,16 @@ use agent_core::{
     ToolCall, ToolContext, ToolError, ToolFailure, ToolOutput, ToolProvider, ToolSession, ToolSpec,
 };
 use agent_extensions::{McpSession, McpToolProvider};
-use radian_coding::{CodingSession, CodingTools};
+use radian_coding::{AskSession, AskTools, CodingSession, CodingTools};
 
 use crate::memory::{MemorySession, MemoryTools};
 
 pub struct HostTools {
     coding: Option<CodingTools>,
     memory: Option<MemoryTools>,
+    /// `ask_user` (ADR 0024 Q5). Separate from the coding tools: a host with no workspace
+    /// still has a human to ask.
+    ask: Option<AskTools>,
     mcp: McpToolProvider,
 }
 
@@ -30,18 +33,28 @@ impl HostTools {
         Self {
             coding,
             memory,
+            ask: None,
             mcp,
         }
+    }
+
+    /// Mounts `ask_user`. The host calls this only when a human is there to answer; without it
+    /// the model's tool list has no `ask_user` at all.
+    pub fn with_ask(mut self, ask: AskTools) -> Self {
+        self.ask = Some(ask);
+        self
     }
 }
 
 pub struct HostSession {
     coding: Option<CodingSession>,
     memory: Option<MemorySession>,
+    ask: Option<AskSession>,
     mcp: McpSession,
     specs: Vec<ToolSpec>,
     coding_names: HashSet<String>,
     memory_names: HashSet<String>,
+    ask_names: HashSet<String>,
 }
 
 impl ToolProvider for HostTools {
@@ -58,9 +71,14 @@ impl ToolProvider for HostTools {
             Some(memory) => Some(memory.open_session().await?),
             None => None,
         };
+        let ask = match &self.ask {
+            Some(ask) => Some(ask.open_session().await?),
+            None => None,
+        };
 
         let mut coding_names = HashSet::new();
         let mut memory_names = HashSet::new();
+        let mut ask_names = HashSet::new();
         let mut built_in_specs: Vec<ToolSpec> = Vec::new();
         if let Some(coding) = &coding {
             for spec in coding.tool_specs() {
@@ -74,15 +92,23 @@ impl ToolProvider for HostTools {
                 built_in_specs.push(spec.clone());
             }
         }
+        if let Some(ask) = &ask {
+            for spec in ask.tool_specs() {
+                ask_names.insert(spec.name.clone());
+                built_in_specs.push(spec.clone());
+            }
+        }
         let specs = merge_tool_specs(built_in_specs, mcp.tool_specs().to_vec())?;
 
         Ok(HostSession {
             coding,
             memory,
+            ask,
             mcp,
             specs,
             coding_names,
             memory_names,
+            ask_names,
         })
     }
 }
@@ -97,7 +123,15 @@ impl ToolSession for HostSession {
         call: &ToolCall,
         cx: ToolContext<'_>,
     ) -> Result<ToolOutput, ToolFailure> {
-        if self.memory_names.contains(&call.name) {
+        if self.ask_names.contains(&call.name) {
+            match &self.ask {
+                Some(ask) => ask.execute(call, cx).await,
+                None => Err(ToolFailure::new(
+                    "unknown_tool",
+                    format!("`{}` has no question session", call.name),
+                )),
+            }
+        } else if self.memory_names.contains(&call.name) {
             match &self.memory {
                 Some(memory) => memory.execute(call, cx).await,
                 None => Err(ToolFailure::new(

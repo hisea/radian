@@ -66,31 +66,19 @@ async fn agent_core_accepts_the_ask_user_spec() {
         }
     }
 
-    let dir = TempDir::new("specs-ask");
-    let root = dir.file("ws");
-    std::fs::create_dir_all(&root).unwrap();
-    let coding = tools(&root).with_prompter(Arc::new(NeverPrompter));
+    // `ask_user` is its own provider (ADR 0024 Q5), so it is accepted on its own too — that is
+    // what lets a host with no workspace mount it.
+    let ask = radian_coding::AskTools::new(Arc::new(NeverPrompter));
 
-    let session = coding.open_session().await.unwrap();
+    let session = ask.open_session().await.unwrap();
     let names: Vec<&str> = session
         .tool_specs()
         .iter()
         .map(|spec| spec.name.as_str())
         .collect();
-    assert_eq!(
-        names,
-        [
-            "read",
-            "write",
-            "patch",
-            "list",
-            "git_status",
-            "git_diff",
-            "ask_user"
-        ]
-    );
+    assert_eq!(names, ["ask_user"]);
 
-    let agent = Arc::new(Agent::new(NeverModel, coding));
+    let agent = Arc::new(Agent::new(NeverModel, ask));
     let mut chat = agent.open_session().await.unwrap();
     chat.close().await.unwrap();
 }
