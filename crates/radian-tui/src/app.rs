@@ -12,6 +12,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::command::{self, PendingCommand};
 use crate::composer::Composer;
+use crate::find::FindState;
 
 /// A tool call waiting for the human. `reply` is the channel the permission layer awaits; the
 /// answer is sent by the UI thread, so the waiting future never blocks it.
@@ -232,6 +233,11 @@ pub struct App {
     /// The candidates from the last `Tab`, shown above the input box. `None` when no list is
     /// up; any key other than `Tab` dismisses it.
     pub completion: Option<Vec<String>>,
+    /// The open in-transcript search box (Phase 5), or `None`. While it is open the input box
+    /// is shown as `find: <query>` and typed keys edit the query instead of the message.
+    pub find: Option<FindState>,
+    /// The transcript width the renderer last used, so a find recomputes on a resize.
+    pub transcript_width: usize,
 }
 
 impl App {
@@ -266,6 +272,8 @@ impl App {
             max_scroll: 0,
             workspace: None,
             completion: None,
+            find: None,
+            transcript_width: 80,
         }
     }
 
@@ -326,6 +334,88 @@ impl App {
     pub fn scroll_to_bottom(&mut self) {
         self.scroll = self.max_scroll;
         self.follow = true;
+    }
+
+    // ---------- in-transcript search (Phase 5) ----------
+
+    /// Records the transcript width the renderer used. A width change re-wraps the transcript,
+    /// so an open find box recomputes its matches — once per resize, never per frame.
+    pub fn set_transcript_width(&mut self, width: usize) {
+        if self.transcript_width == width {
+            return;
+        }
+        self.transcript_width = width;
+        if self.find.is_some() {
+            self.find_recompute();
+        }
+    }
+
+    /// The open find box, if any.
+    pub fn find_state(&self) -> Option<&FindState> {
+        self.find.as_ref()
+    }
+
+    /// Opens the find box anchored at the current viewport top (`Ctrl-F`). Refused while an
+    /// approval or `/memory` confirmation prompt is up.
+    pub fn find_open(&mut self) {
+        if !self.input_editable() || self.find.is_some() {
+            return;
+        }
+        self.find = Some(FindState::open(self.scroll));
+    }
+
+    /// Closes the find box; the viewport stays where it is (`Esc`).
+    pub fn find_close(&mut self) {
+        self.find = None;
+    }
+
+    /// The earlier match (`Enter`, or `Ctrl-F` again).
+    pub fn find_prev(&mut self) {
+        if let Some(find) = self.find.as_mut() {
+            find.prev();
+        }
+        self.find_jump();
+    }
+
+    /// The later match (`Shift-Enter`, `Ctrl-G`).
+    pub fn find_next(&mut self) {
+        if let Some(find) = self.find.as_mut() {
+            find.next();
+        }
+        self.find_jump();
+    }
+
+    fn find_recompute(&mut self) {
+        let width = self.transcript_width;
+        if let Some(find) = self.find.as_mut() {
+            find.recompute(&self.entries, width);
+        }
+        self.find_jump();
+    }
+
+    fn find_push(&mut self, c: char) {
+        if let Some(find) = self.find.as_mut() {
+            find.query.push(c);
+        }
+        self.find_recompute();
+    }
+
+    fn find_backspace(&mut self) {
+        if let Some(find) = self.find.as_mut() {
+            find.query.pop();
+        }
+        self.find_recompute();
+    }
+
+    /// Centers the current match in the viewport and stops following the bottom. A search that
+    /// matches nothing leaves the viewport alone.
+    fn find_jump(&mut self) {
+        let Some(line) = self.find.as_ref().and_then(FindState::current_line) else {
+            return;
+        };
+        let height = usize::from(self.view_height.max(1));
+        self.scroll = crate::find::centered_scroll(line, height, self.max_scroll);
+        self.follow = false;
     }
 
     /// Shows an approval prompt. If one was already up it is denied rather than dropped: the
@@ -398,6 +488,50 @@ impl App {
         }
         if key.code != KeyCode::Tab {
             self.completion = None;
+        }
+        // --- in-transcript search (Phase 5) ---
+        // Ctrl-F opens the box; a second Ctrl-F is the earlier match. It never reaches the
+        // input box while the box is open.
+        if ctrl && key.code == KeyCode::Char('f') {
+            if self.find.is_some() {
+                self.find_prev();
+            } else {
+                self.find_open();
+            }
+            return None;
+        }
+        if self.find.is_some() {
+            match key.code {
+                KeyCode::Esc => {
+                    self.find_close();
+                    return None;
+                }
+                // Shift-Enter and Ctrl-G: the later match.
+                KeyCode::Enter if shift => {
+                    self.find_next();
+                    return None;
+                }
+                KeyCode::Char('g') if ctrl => {
+                    self.find_next();
+                    return None;
+                }
+                // Enter (and Ctrl-F, handled above): the earlier match.
+                KeyCode::Enter => {
+                    self.find_prev();
+                    return None;
+                }
+                KeyCode::Backspace => {
+                    self.find_backspace();
+                    return None;
+                }
+                KeyCode::Char(c) if !ctrl => {
+                    self.find_push(c);
+                    return None;
+                }
+                // PageUp/PageDown, Home/End and the arrows keep scrolling the transcript, so
+                // the box does not trap navigation.
+                _ => {}
+            }
         }
         match key.code {
             // --- input editing (ADR 0009 Phase 4) ---

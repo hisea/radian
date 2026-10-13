@@ -107,12 +107,21 @@ fn display_text(entry: &Entry) -> Cow<'_, str> {
     }
 }
 
+/// The wrapped display lines of `entry`'s body (the prefix and the interrupted marker are not
+/// included), at `width`. The renderer wraps exactly these, and [`crate::find`] matches
+/// against exactly these, so a folded `@` attachment is shown and searched as its
+/// `[file: path, N lines]` line, never as the hidden content.
+pub fn display_lines(entry: &Entry, width: usize) -> Vec<String> {
+    let (prefix, _) = marker(entry.kind);
+    let body_width = width.saturating_sub(prefix.width()).max(1);
+    wrap(&display_text(entry), body_width)
+}
+
 /// One entry's styled lines. An interrupted assistant entry gets an explicit marker on its
 /// last line.
 fn entry_lines(entry: &Entry, width: usize) -> Vec<Line<'static>> {
     let (prefix, prefix_style) = marker(entry.kind);
-    let body_width = width.saturating_sub(prefix.width()).max(1);
-    let wrapped = wrap(&display_text(entry), body_width);
+    let wrapped = display_lines(entry, width);
     let style = body_style(entry);
     let last = wrapped.len().saturating_sub(1);
     let mut lines = Vec::with_capacity(wrapped.len());
@@ -138,9 +147,7 @@ fn entry_line_count(entry: &mut Entry, width: usize) -> usize {
     if let Some(lines) = entry.wrap_cache.get(width, text_len, entry.interrupted) {
         return lines;
     }
-    let (prefix, _) = marker(entry.kind);
-    let body_width = width.saturating_sub(prefix.width()).max(1);
-    let lines = wrap(&display_text(entry), body_width).len();
+    let lines = display_lines(entry, width).len();
     entry.wrap_cache.set(WrapKey {
         width,
         text_len,
@@ -252,6 +259,51 @@ fn approval_height(request: &ApprovalRequest, width: usize) -> u16 {
     (rows as u16 + 2).clamp(5, 14)
 }
 
+/// Marks every occurrence of `query` (case-insensitive) in a rendered line with
+/// `Modifier::REVERSED` (no new theme colours). The query is matched against the line's own
+/// spans, which are the displayed text.
+pub fn highlight(line: Line<'static>, query: &str) -> Line<'static> {
+    if query.is_empty() {
+        return line;
+    }
+    let needle = query.to_lowercase();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for span in line.spans {
+        let style = span.style;
+        let text = span.content.into_owned();
+        // Case-insensitive without changing byte offsets: ASCII lowercases 1:1, so slicing the
+        // original by the haystack's offsets is safe there. For non-ASCII, fall back to a
+        // case-sensitive search on the original text (still byte-safe).
+        let (haystack, fold) = if text.is_ascii() && query.is_ascii() {
+            (text.to_lowercase(), true)
+        } else {
+            (text.clone(), false)
+        };
+        let needle = if fold {
+            needle.clone()
+        } else {
+            query.to_owned()
+        };
+        let mut start = 0usize;
+        while let Some(pos) = haystack[start..].find(&needle) {
+            let at = start + pos;
+            if at > start {
+                spans.push(Span::styled(text[start..at].to_string(), style));
+            }
+            let end = at + needle.len();
+            spans.push(Span::styled(
+                text[at..end].to_string(),
+                style.add_modifier(Modifier::REVERSED),
+            ));
+            start = end;
+        }
+        if start < text.len() {
+            spans.push(Span::styled(text[start..].to_string(), style));
+        }
+    }
+    Line::from(spans)
+}
+
 /// One status-bar segment: its text and its style.
 struct Segment {
     text: String,
@@ -317,6 +369,13 @@ fn status_segments(app: &App) -> Vec<Segment> {
         ),
         style: Style::default(),
     });
+    // Phase 5: the find box's match position, next to the scroll position.
+    if let Some(status) = app.find_state().and_then(crate::find::FindState::status) {
+        segments.push(Segment {
+            text: status,
+            style: Style::default().fg(Color::Yellow),
+        });
+    }
     if let Some(note) = &app.note {
         segments.push(Segment {
             text: note.clone(),
@@ -389,9 +448,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // total before the visible window is cut.
     let width = chunks[0].width as usize;
     let height = chunks[0].height as usize;
+    // The find matcher wraps at the same width; a resize recomputes it (once, not per frame).
+    app.set_transcript_width(width);
     let (total, _) = visible_lines(&mut app.entries, width, 0, 0);
     app.set_viewport(chunks[0].height, total);
     let (_, visible) = visible_lines(&mut app.entries, width, app.scroll, height);
+    let visible = match app.find_state() {
+        Some(find) => visible
+            .into_iter()
+            .map(|line| highlight(line, &find.query))
+            .collect(),
+        None => visible,
+    };
     frame.render_widget(Paragraph::new(visible), chunks[0]);
 
     if !completion.is_empty() {
@@ -413,6 +481,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 .block(block)
                 .wrap(Wrap { trim: false });
             frame.render_widget(text, chunks[2]);
+        }
+        None if app.find.is_some() => {
+            // The find box replaces the input box's line; the input text itself is untouched
+            // and comes back when the box closes.
+            let find = app.find.as_ref().expect("checked");
+            let text = format!("find: {}", find.query);
+            let paragraph = Paragraph::new(text)
+                .block(Block::default().borders(Borders::ALL).title(" find "))
+                .wrap(Wrap { trim: false });
+            frame.render_widget(paragraph, chunks[2]);
         }
         None => {
             let inner_width = chunks[2].width.saturating_sub(2).max(1) as usize;
