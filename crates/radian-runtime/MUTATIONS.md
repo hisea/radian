@@ -82,3 +82,22 @@ M3 改的是 `agent-provider-anthropic/src/model.rs` 的 `mask`（与上一轮 M
 | M5 | 去掉 `requeue_unadmitted` 调用（回到旧行为：claim 了但没应用就丢） | ✅ 抓住 (rc=101) | `steering_after_failure::a_steer_accepted_during_a_failing_turn_is_requeued_and_used_once` 与 `..._max_tokens_finish_...`（两条都失败） |
 
 M5 同时证明"必须先在旧代码上失败"：去掉 requeue 就是旧代码，两条测试都失败。
+
+## hook 错误也非致命（ADR 0017 第三轮，2026-10-13）
+
+一次性 worktree `/tmp/hookerr-mut`（从 `7baa68e` 创建，用完删除，**不共享 target 目录**），
+`--no-fail-fast`；变异后从副本还原，`git status --short` 为空。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M6 | `is_fatal` 把 `Hook` 改回致命 | ✅ 抓住（unit rc=101；e2e rc=101，看门狗 5s 触发） | `driver::tests::only_model_and_hook_errors_are_non_fatal` 与 `hook_failure::a_before_model_hook_error_ends_the_turn_and_the_session_continues` |
+| M7 | `is_fatal` 把 `Journal` 也算非致命 | ✅ 抓住 (unit rc=101) | `driver::tests::only_model_and_hook_errors_are_non_fatal` |
+
+**两条变异未运行，因为对应的修复代码不存在**（brief 要求的另外两条）：
+
+- "hook 失败不补结果"、"已执行的调用也被覆盖成错误" —— 前提不成立。复核发现
+  `before_tool_call`/`after_tool_call` 的错误**不结束本轮**（fail closed：给该调用一条
+  `hook_error` 结果并继续），而会 `RunError::Hook` 的两个点（`before_model_call` /
+  `after_model_response`）都在本步 assistant 消息 commit **之前**跑，本批次没有未完成的调用。
+  所以没有"补结果"的代码可变异；正确性由 `agent-core::hooks` 的两条测试与
+  `hook_failure` 的端到端测试钉住（transcript 每个 tool_call 都有结果）。
