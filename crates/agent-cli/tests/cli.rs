@@ -4626,3 +4626,52 @@ async fn workspace_shell_cannot_read_the_sessions_directory() {
         "a shell result was expected: {result}"
     );
 }
+
+/// ADR 0020 acceptance 2: a `--session-dir` that does not exist yet must still be denied. The
+/// host creates it 0700 **before** building the sandbox, because Linux's bwrap can only mask
+/// paths that already exist; without that, the session file (created after the sandbox) would
+/// be readable. This is the case that only fails on Linux if the create-before-deny is missing.
+#[tokio::test]
+async fn workspace_shell_cannot_read_a_moved_sessions_directory() {
+    let dir = scratch("shell-deny-moved");
+    let radian_home = dir.join("rh");
+    let custom = dir.join("custom-sessions"); // does not exist yet
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    let command = format!("cat {}/moved.jsonl", custom.display());
+    let server = MockServer::start(vec![
+        tool_reply("c1", "shell", &json!({ "command": command }).to_string()),
+        text_reply("SAW-DENIED"),
+    ])
+    .await;
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent_bare(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--yes",
+                "--session-dir",
+                custom.to_str().unwrap(),
+                "--session-id",
+                "moved",
+                "-p",
+                "go",
+            ],
+            &[("RADIAN_HOME", radian_home.to_str().unwrap())],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("SAW-DENIED"), "{stdout}");
+    let result = tool_result_content(&server, 1);
+    assert!(
+        !result.contains("SessionCreated"),
+        "the sandbox read the session file: {result}"
+    );
+}
