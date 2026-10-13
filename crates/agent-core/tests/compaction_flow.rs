@@ -923,3 +923,47 @@ async fn two_overlong_summaries_fail_the_turn() {
         "no candidate is written"
     );
 }
+
+// ---------- dogfood9: the summary ceiling scales with the window ----------
+
+/// The proactive path passes the window's scaled ceiling into the summary prompt: `B = 103616`
+/// gives `summary_max_tokens = 12952`, not the old fixed 8192.
+#[tokio::test]
+async fn the_auto_path_scales_the_summary_ceiling_with_the_window() {
+    let model = ScriptedModel::new([summary_reply("a short summary", 50), text("done")]);
+    let journal = Arc::new(RecordingJournal::new());
+    // One token per byte, so the first message is 104000 projected tokens, over B = 103616.
+    let agent = compaction_agent(model.clone(), 103_616, true);
+    let mut session = agent
+        .open_session_with_journal(
+            vec![
+                Message::user("x".repeat(104_000)),
+                Message::assistant("ok"),
+                Message::user("last"),
+            ],
+            journal,
+        )
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let outcome = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(
+        session.transcript_revision(),
+        1,
+        "the proactive path committed"
+    );
+
+    let requests = model.requests();
+    assert!(requests.len() >= 2, "{}", requests.len());
+    let prompt = requests[0].system_prompt.as_deref().unwrap();
+    assert!(prompt.contains("12952 tokens"), "{prompt}");
+    assert!(
+        !prompt.contains("8192 tokens"),
+        "the fixed ceiling must not be used for an automatic compaction: {prompt}"
+    );
+}

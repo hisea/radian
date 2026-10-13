@@ -232,6 +232,10 @@ struct CompactionRun<'a> {
     request: &'a mut ModelRequest,
     tokens_before: u64,
     keep: u64,
+    /// The input budget `B` the summary ceiling scales with
+    /// ([`compaction::summary_max_tokens`]); `None` means no window, so the ceiling is the
+    /// fixed [`compaction::DEFAULT_SUMMARY_MAX_TOKENS`].
+    summary_budget: Option<u64>,
     gain: Gain,
     trigger: CompactionTrigger,
     instructions: Option<String>,
@@ -278,6 +282,11 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
                 request: &mut request,
                 tokens_before,
                 keep,
+                summary_budget: self
+                    .agent
+                    .config
+                    .context_budget
+                    .map(|config| config.input_budget_tokens),
                 gain: Gain::Any,
                 trigger: CompactionTrigger::Manual,
                 instructions,
@@ -316,6 +325,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
             request,
             tokens_before,
             keep,
+            summary_budget,
             gain,
             trigger,
             instructions,
@@ -362,7 +372,11 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         } else {
             transcript[..plan.first_kept].to_vec()
         };
-        let summary_max = compaction::DEFAULT_SUMMARY_MAX_TOKENS.min(keep);
+        // The summary ceiling scales with the window; no window
+        // falls back to the fixed default.
+        let summary_max = summary_budget
+            .map(compaction::summary_max_tokens)
+            .unwrap_or(compaction::DEFAULT_SUMMARY_MAX_TOKENS);
 
         let mut summary = None;
         // The first call summarizes the conversation. The one controlled retry (ADR 0018)
@@ -1121,6 +1135,10 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
                             request: &mut request,
                             tokens_before,
                             keep: compaction::MAX_KEEP_TARGET,
+                            summary_budget: agent
+                                .config
+                                .context_budget
+                                .map(|config| config.input_budget_tokens),
                             gain: Gain::Half { reference },
                             trigger: CompactionTrigger::Overflow,
                             instructions: None,
@@ -1266,6 +1284,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
                 request,
                 tokens_before,
                 keep: compaction::keep_target(budget.input_budget_tokens),
+                summary_budget: Some(budget.input_budget_tokens),
                 gain: Gain::Budget {
                     input_budget: budget.input_budget_tokens,
                 },

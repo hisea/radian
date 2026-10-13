@@ -100,6 +100,18 @@ pub fn summary_system_prompt(max_tokens: u64) -> String {
 pub const SUMMARY_MESSAGE_PREFIX: &str = "\
 This is a summary of the earlier conversation. Continue the work from it.";
 
+/// The summary length ceiling for an input budget `B`:
+/// `min(K, max(8192, ⌊B/8⌋))` with `K = keep_target(B)`. The old fixed [`DEFAULT_SUMMARY_MAX_TOKENS`]
+/// was too small for a large window: the rolling summary grows with every compaction, and at
+/// 120K (`B = 103616`) the shortening retry still produced 8725 tokens, over 8192, and failed
+/// the whole turn. The ceiling now grows with the window — 12952 there — while never exceeding
+/// the keep target. A smaller window keeps `K` (`B = 16000` → 4000). When there is **no
+/// budget**, the caller uses [`DEFAULT_SUMMARY_MAX_TOKENS`] (8192) directly, because there is
+/// no window to scale against.
+pub fn summary_max_tokens(input_budget: u64) -> u64 {
+    keep_target(input_budget).min(DEFAULT_SUMMARY_MAX_TOKENS.max(input_budget / 8))
+}
+
 /// ADR 0018's keep target `K = min(20000, max(2048, ⌊input_budget/4⌋))`. A target, not a hard
 /// limit: a single atomic unit larger than `K` is still kept in full.
 pub fn keep_target(input_budget: u64) -> u64 {
