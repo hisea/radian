@@ -50,15 +50,16 @@ impl Drop for TtyGuard {
 /// Installs a panic hook that restores the terminal before the default hook prints. The
 /// hook owns a fresh guard because the real one is a local in `main` and may not be
 /// reachable from the panicking frame.
+///
+/// It deliberately does **not** exit. `main` catches the unwind, shuts the runtime down with
+/// a bound (which drops the in-flight tool futures and the `kill_on_drop` child processes
+/// they own) and then exits 101. Exiting here would skip that cleanup and orphan any child
+/// process the turn had started.
 pub fn install_panic_hook() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let mut guard = TtyGuard { active: true };
         guard.restore();
         default(info);
-        // Do not unwind: dropping the tokio runtime and the session while a spawned driver
-        // task is parked can block, and the terminal is already restored. Exit with the
-        // conventional panic code instead.
-        std::process::exit(101);
     }));
 }

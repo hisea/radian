@@ -2199,6 +2199,7 @@ dependencies = [
  "agent-core",
  "agent-provider-openai-compatible",
  "clap",
+ "libc",
  "portable-pty",
  "radian-runtime",
  "radian-session",

@@ -301,6 +301,69 @@ fn pty_panic_path_restores_the_terminal() {
     assert!(!raw_text.contains("-icanon"), "raw mode not restored");
 }
 
+/// Waits until `predicate` holds, bounded. The sleep is a poll interval, not the
+/// synchronization itself.
+fn gone_within(pid: i32, limit: Duration) -> bool {
+    let deadline = Instant::now() + limit;
+    while Instant::now() < deadline {
+        // SAFETY: signal 0 only checks that the process exists.
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
+fn group_alive(pgid: i32) -> bool {
+    // SAFETY: signal 0 only checks that the group has a member.
+    unsafe { libc::killpg(pgid, 0) == 0 }
+}
+
+/// The panic path must not orphan a child the turn had started. The test child is put in its
+/// own process group, so "no orphan" is asserted on the group as well as the pid.
+#[test]
+fn pty_panic_path_does_not_orphan_a_child() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("panic-child");
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--panic-with-child",
+            "600",
+        ],
+        20,
+        80,
+    );
+    assert!(
+        pty.wait_for_exit(15).is_some(),
+        "the app did not exit after the panic"
+    );
+    assert_eq!(pty.app_exit_code(), Some(101), "panic must exit 101");
+    let raw_text = String::from_utf8_lossy(&pty.raw()).to_string();
+    assert!(raw_text.contains("\u{1b}[?1049l"), "left alternate screen");
+    assert!(raw_text.contains("icanon"), "cooked mode restored");
+
+    let pid: i32 = std::fs::read_to_string(dir.path().join("child.pid"))
+        .expect("the app wrote child.pid before panicking")
+        .trim()
+        .parse()
+        .expect("a pid");
+    assert!(
+        gone_within(pid, Duration::from_secs(10)),
+        "the child {pid} outlived the panic"
+    );
+    assert!(
+        !group_alive(pid),
+        "the child's process group {pid} still has members"
+    );
+}
+
 /// A bracketed paste arrives whole and multi-line in the input box.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 // The test body blocks on the pty on purpose; the lock serializes the four pty tests.

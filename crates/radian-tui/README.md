@@ -89,24 +89,27 @@ cargo run -p radian-tui -- --model <model> --base-url <...> --session-dir /tmp/r
 #    is clean (no `%`) and `stty -a` still shows `icanon`.
 ```
 
-## Review note: the panic path exits without unwinding (2026-10-12)
+## The panic path unwinds, with a bounded runtime shutdown (2026-10-12)
 
-The panic hook restores the terminal and then calls `process::exit(101)` instead of letting
-the panic unwind, because unwinding drops the tokio runtime and that drop hangs on the
-blocking stdin reader (the same hang `agent-cli` avoids with `shutdown_background`).
+Slice A's panic hook restored the terminal and then called `process::exit(101)`, which skips
+every `Drop`. That was safe only while the TUI owned no child processes. Slice B wires the
+built-in file tools, whose `git_status`/`git_diff` spawn `git`, so the precondition no longer
+holds.
 
-Accepted **for now**, because of two facts checked in review:
+`main` now keeps the runtime outside `run`, catches the panic with `catch_unwind`, shuts the
+runtime down with `shutdown_timeout(2s)` — dropping the in-flight tool futures and, with them,
+the `kill_on_drop` children they own — and only then exits 101. The hook restores the terminal
+and returns; it no longer exits.
 
-- **Durable data is safe.** Every journal append is fsynced before it returns (ADR 0001 D3),
-  so an abrupt exit loses at most a torn tail, which the reader truncates (ADR 0006 §3.2).
-- **No child process can be orphaned today.** `radian-tui` does not depend on
-  `agent-extensions` or `radian-coding`, so it spawns no MCP servers and no shell.
+Why this rather than "kill the registered process groups inside the hook": the TUI does not
+know the pids (they are created inside `radian-coding`), and registering them would mean
+changing that crate's internals. Unwinding plus a bounded shutdown reuses the `kill_on_drop`
+contract the tools already rely on, and `pty_panic_path_does_not_orphan_a_child` exercises it:
+a child in its own process group is running when the panic fires, and the test asserts both
+the pid and the group are gone.
 
-**This stops being true the moment the TUI owns child processes.** Skipping unwinding skips
-every `Drop`, including the ones that kill MCP server process groups and (later) sandboxed
-shell children. Before the TUI gains MCP or the shell tool, the panic path must either kill
-the registered process groups itself before `exit`, or unwind with the runtime shut down via
-`shutdown_background`. Treat this as a precondition of that slice, not a follow-up.
+Durable data was already safe (every append is fsynced, ADR 0001 D3; a torn tail is truncated
+on read, ADR 0006 §3.2) and stays so.
 
 ## Not verified
 

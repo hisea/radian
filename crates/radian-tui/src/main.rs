@@ -5,7 +5,7 @@
 //! the alternate screen and raw mode. The tests drive it through a pty.
 
 use std::path::PathBuf;
-use std::process::ExitCode;
+use std::process::{ExitCode, Stdio};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
@@ -51,6 +51,11 @@ struct Cli {
     /// Test hook: enter the terminal, then panic, so the restore hook can be exercised.
     #[arg(long, hide = true)]
     panic_after_enter: bool,
+
+    /// Test hook: start a `sleep` child in its own process group, write its pid to
+    /// `<session-dir>/child.pid`, then panic. The pty test asserts the child is not orphaned.
+    #[arg(long, hide = true, value_name = "SECS")]
+    panic_with_child: Option<u64>,
 }
 
 /// Forwards core events to the UI thread. `emit` must be short and non-blocking (ADR 0010),
@@ -66,16 +71,34 @@ impl EventSink for ChannelSink {
 fn main() -> ExitCode {
     radian_tui::terminal::install_panic_hook();
     let cli = Cli::parse();
-    match run(cli) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(message) => {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            eprintln!("radian-tui: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    // A panic must not unwind through a runtime *drop*: that drop can wait on a parked task
+    // and hang. Catch it here, shut the runtime down with a bound (which drops the in-flight
+    // tool futures, and with them the `kill_on_drop` child processes they own), then exit
+    // 101. The panic hook restores the terminal and returns; it no longer exits, because
+    // exiting here would skip exactly that cleanup.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(cli, &runtime)));
+    runtime.shutdown_timeout(Duration::from_secs(2));
+    match result {
+        Ok(Ok(())) => ExitCode::SUCCESS,
+        Ok(Err(message)) => {
             eprintln!("radian-tui: {message}");
             ExitCode::from(1)
         }
+        Err(_) => ExitCode::from(101),
     }
 }
 
-fn run(cli: Cli) -> Result<(), String> {
+fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
     let model = build_model(&cli)?;
     std::fs::create_dir_all(&cli.session_dir)
         .map_err(|e| format!("--session-dir {}: {e}", cli.session_dir.display()))?;
@@ -105,10 +128,6 @@ fn run(cli: Cli) -> Result<(), String> {
     };
     let agent = Arc::new(Agent::new(model, NoTools).with_config(agent_config));
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| e.to_string())?;
     let mut driver = runtime
         .block_on(Driver::open(
             &agent,
@@ -139,6 +158,31 @@ fn run(cli: Cli) -> Result<(), String> {
     if cli.panic_after_enter {
         panic!("radian-tui: panic path test");
     }
+    if let Some(secs) = cli.panic_with_child {
+        // Test hook: a child in its own process group is running when the panic happens.
+        // The panic path must leave no orphan behind.
+        let (pid_tx, pid_rx) = tokio::sync::oneshot::channel();
+        runtime.spawn(async move {
+            let mut command = tokio::process::Command::new("sleep");
+            command
+                .arg(secs.to_string())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true);
+            #[cfg(unix)]
+            command.process_group(0);
+            let mut child = command.spawn().expect("spawn the test child");
+            let _ = pid_tx.send(child.id().unwrap_or(0));
+            let _ = child.wait().await;
+        });
+        let pid = runtime
+            .block_on(pid_rx)
+            .map_err(|_| "the test child did not start".to_string())?;
+        std::fs::write(cli.session_dir.join("child.pid"), pid.to_string())
+            .map_err(|e| format!("child.pid: {e}"))?;
+        panic!("radian-tui: panic path test with a child in flight");
+    }
     let mut app = App::new(cli.model.clone(), session_id.clone());
     app.entries.push(radian_tui::Entry::new(
         radian_tui::EntryKind::Notice,
@@ -147,7 +191,7 @@ fn run(cli: Cli) -> Result<(), String> {
         ),
     ));
 
-    let outcome = ui_loop(&mut terminal, &mut app, &rx, &runtime, &inbox);
+    let outcome = ui_loop(&mut terminal, &mut app, &rx, runtime, &inbox);
     guard.restore();
 
     let _ = stop_tx.send(());
