@@ -17,8 +17,8 @@ use agent_extensions::McpToolProvider;
 use clap::Parser;
 use radian_coding::CodingTools;
 use radian_host::{
-    DEFAULT_MAX_TOKENS, HostTools, ModelArgs, Provider, Thinking, build_model, load_mcp_config,
-    parse_headers, validate_session_id,
+    DEFAULT_MAX_TOKENS, HostTools, ModelArgs, Provider, Thinking, build_model,
+    check_provider_flags, load_mcp_config, parse_headers, validate_session_id,
 };
 use radian_permissions::{
     ApprovalError, ApprovalOutcome, ApprovalRequest, Approver, AuditSink, PermissionHooks,
@@ -253,6 +253,9 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
         Some(value) => value.parse::<Thinking>()?,
         None => Thinking::Off,
     };
+    // `--thinking` and `--max-tokens` are Anthropic-only; under openai-compatible they would
+    // be ignored, so this is an error before the session file exists (dogfooding D15).
+    check_provider_flags(provider, thinking, cli.max_tokens)?;
     let headers = parse_headers(&cli.header, &session_id)?;
     // Header values and the key must not reach the panic log (dogfooding D4).
     let mut secrets: Vec<String> = headers.iter().map(|(_, value)| value.clone()).collect();

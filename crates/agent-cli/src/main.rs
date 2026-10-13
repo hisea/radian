@@ -31,7 +31,8 @@ use clap::Parser;
 use radian_coding::CodingTools;
 use radian_host::{
     DEFAULT_MAX_TOKENS, HostModel, ModelArgs, Provider, SESSION_PLACEHOLDER, Thinking, build_model,
-    generate_session_id, load_mcp_config, parse_headers, resolve_workspace, validate_session_id,
+    check_provider_flags, generate_session_id, load_mcp_config, parse_headers, resolve_workspace,
+    validate_session_id,
 };
 use radian_permissions::{Approver, PermissionHooks};
 use radian_runtime::{BudgetRelax, CancelCause, Driver, DriverError, Inbox, InboxError};
@@ -353,6 +354,9 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         Some(value) => value.parse::<Thinking>().map_err(SetupError)?,
         None => Thinking::Off,
     };
+    // `--thinking` and `--max-tokens` are Anthropic-only; under openai-compatible they would
+    // be ignored, so this is a usage error before the session file exists (dogfooding D15).
+    check_provider_flags(provider, thinking, cli.max_tokens).map_err(SetupError)?;
     let key = std::env::var(&api_key_env).ok().filter(|k| !k.is_empty());
     if key.is_none() && !is_local_base_url(&base_url) {
         return Err(SetupError(format!(

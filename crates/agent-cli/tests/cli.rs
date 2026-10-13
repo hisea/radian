@@ -3938,3 +3938,77 @@ async fn export_redacts_the_anthropic_key_without_api_key_env() {
     );
     assert!(stdout.contains("<redacted>"), "{stdout}");
 }
+
+// ---------- small fixes: existing session id, provider flags, scratch cleanup ----------
+
+/// `--thinking` and `--max-tokens` are Anthropic-only: under the default openai-compatible
+/// provider they are a usage error before any session file exists, not a silent no-op.
+#[tokio::test]
+async fn anthropic_only_flags_are_refused_under_openai_compatible() {
+    for (label, extra) in [
+        ("thinking", vec!["--thinking", "adaptive"]),
+        ("max-tokens", vec!["--max-tokens", "100"]),
+    ] {
+        let dir = scratch(&format!("flag-{label}"));
+        let sessions = dir.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let mut args = vec![
+            "--model",
+            "m",
+            "--base-url",
+            "http://127.0.0.1:9/v1",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "flagged",
+            "-p",
+            "hi",
+        ];
+        args.extend(extra);
+        let (code, stdout, stderr) = feed_and_wait(spawn_agent(&args, &[]), "").await;
+        assert_eq!(code, 2, "{label}: {stderr}");
+        assert!(stderr.contains("anthropic"), "{label}: {stderr}");
+        assert!(stdout.is_empty(), "{label}: {stdout}");
+        assert!(
+            std::fs::read_dir(&sessions).unwrap().next().is_none(),
+            "{label}: a session file was created"
+        );
+    }
+}
+
+/// The same flags work under `--provider anthropic`: `--max-tokens` reaches the body and
+/// `--thinking adaptive` becomes the `thinking` object.
+#[tokio::test]
+async fn anthropic_provider_accepts_thinking_and_max_tokens() {
+    let server = anth::MockServer::start(vec![anth_text_reply("THINK-OK")]).await;
+    let dir = scratch("anthropic-flags");
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent_in(
+            &dir,
+            &[
+                "--model",
+                "claude-x",
+                "--provider",
+                "anthropic",
+                "--base-url",
+                &server.base_url,
+                "--api-key-env",
+                "ANTHROPIC_API_KEY",
+                "--thinking",
+                "adaptive",
+                "--max-tokens",
+                "4096",
+                "-p",
+                "hi",
+            ],
+            &[("ANTHROPIC_API_KEY", "sk-ant-test-key")],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("THINK-OK"), "{stdout}");
+    let body = server.requests()[0].json();
+    assert_eq!(body["max_tokens"], 4096, "{body}");
+    assert_eq!(body["thinking"], json!({"type": "adaptive"}), "{body}");
+}
