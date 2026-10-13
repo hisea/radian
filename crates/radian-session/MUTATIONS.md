@@ -87,3 +87,19 @@ unaffected by construction.
 M5 is the mutation the brief asked for: with the tightened fuzz oracle (a torn tail must read
 back, not error) the fuzz now catches a reader that stops dropping the torn tail. Before the
 tightening it was only caught by the `read_fixtures`/`index` tests.
+
+## Phase 7 fixes, round 2: a short replacement before a new marker
+
+Base: `d5d936d` · one-shot worktree `/tmp/sessfix2-mut` (created from HEAD, deleted after) · a
+private `CARGO_TARGET_DIR` · each mutation run with `--no-fail-fast` against
+`cargo test -p radian-session` and `cargo test -p agent-core --features journal-selfcheck`,
+then `git checkout -- .`; `git status --short` empty at the end.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| M6 | reader: a short segment before a new `TranscriptReplaced` is refused again | `findings::a_short_replacement_followed_by_another_replacement_reads_back`, `replace::resume_continues_after_a_short_replacement_is_replaced_again` | ✅ failed |
+| M2 | reader: a short segment at end of file is refused again (recheck after the round-2 change) | `findings::a_crash_mid_replacement_is_recovered_as_the_written_prefix`, `replace::resume_continues_after_a_short_replacement`, `fuzz::corruption_replay_is_total_and_never_writes_the_file` | ✅ failed |
+
+2/2 caught; `agent-core --features journal-selfcheck` failed on neither, as before. The M6
+catch is exactly the two new tests, so the decision "accept a short segment before a new
+marker" is pinned.
