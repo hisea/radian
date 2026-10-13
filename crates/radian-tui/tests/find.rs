@@ -1,7 +1,7 @@
 //! In-transcript search (Phase 5): the app-level key flow and the viewport jump.
 
 use radian_permissions::ApprovalRequest;
-use radian_tui::app::{App, ApprovalPrompt, Entry, EntryKind};
+use radian_tui::app::{App, Entry, EntryKind, Input};
 use radian_tui::render;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -170,19 +170,15 @@ fn ctrl_f_is_refused_while_an_approval_is_pending() {
     let mut app = App::new("m", "s");
     fill(&mut app, &[5]);
     render(&mut app);
-    let (reply, _answer) = tokio::sync::oneshot::channel();
-    app.request_approval(ApprovalPrompt {
-        request: ApprovalRequest::new(
-            "perm-1",
-            "call-1",
-            "write",
-            "/ws/out.txt",
-            "/ws/out.txt",
-            json!({"path": "out.txt"}),
-            None,
-        ),
-        reply,
-    });
+    app.update(Input::Approval(ApprovalRequest::new(
+        "perm-1",
+        "call-1",
+        "write",
+        "/ws/out.txt",
+        "/ws/out.txt",
+        json!({"path": "out.txt"}),
+        None,
+    )));
     app.on_key(ctrl('f'));
     assert!(app.find_state().is_none(), "no find box over an approval");
 }

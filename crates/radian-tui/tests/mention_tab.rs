@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use radian_tui::app::App;
+use radian_tui::app::{App, Effect, Input};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// A temp directory with a unique name (no dev-dependency on a tempdir crate).
@@ -45,6 +45,20 @@ fn tab() -> KeyEvent {
     key(KeyCode::Tab)
 }
 
+/// Presses Tab the way the event loop does: the effect reads the directory, and its result
+/// goes back into `update`. Panics if Tab asks for anything else — it must never send.
+fn tab_complete(app: &mut App, workspace: &Path) {
+    let effects = app.on_key(tab()).effects;
+    assert_eq!(effects.len(), 1, "{effects:?}");
+    match &effects[0] {
+        Effect::CompleteMention { text, cursor } => {
+            let completion = radian_tui::mention::complete(text, *cursor, workspace);
+            app.update(Input::CompletionReady(completion));
+        }
+        other => panic!("Tab must only ask for a completion, got {other:?}"),
+    }
+}
+
 fn app_with(workspace: &Path, text: &str) -> App {
     let mut app = App::new("m", "s");
     app.set_workspace(workspace.to_path_buf());
@@ -57,7 +71,7 @@ fn a_unique_file_candidate_completes_and_adds_a_space() {
     let dir = TempDir::new("unique");
     dir.write("notes.txt", "x");
     let mut app = app_with(dir.path(), "see @not");
-    assert_eq!(app.on_key(tab()), None);
+    tab_complete(&mut app, dir.path());
     assert_eq!(app.input, "see @notes.txt ");
     assert!(app.completion.is_none());
 }
@@ -67,7 +81,7 @@ fn a_unique_directory_candidate_keeps_the_trailing_slash() {
     let dir = TempDir::new("dir");
     dir.write("sub/inner.txt", "x");
     let mut app = app_with(dir.path(), "@su");
-    app.on_key(tab());
+    tab_complete(&mut app, dir.path());
     assert_eq!(app.input, "@sub/");
     assert!(app.completion.is_none());
 }
@@ -78,12 +92,12 @@ fn several_candidates_complete_to_the_common_prefix_then_list() {
     dir.write("notes.txt", "x");
     dir.write("notes.md", "x");
     let mut app = app_with(dir.path(), "@no");
-    app.on_key(tab());
+    tab_complete(&mut app, dir.path());
     assert_eq!(app.input, "@notes.", "the common prefix is inserted");
     assert!(app.completion.is_none(), "no list while the prefix grows");
 
     // A second Tab, already at the prefix, shows the list instead of changing the text.
-    app.on_key(tab());
+    tab_complete(&mut app, dir.path());
     assert_eq!(app.input, "@notes.");
     assert_eq!(
         app.completion.as_deref(),
@@ -97,8 +111,8 @@ fn esc_closes_the_list_without_clearing_the_input() {
     dir.write("notes.txt", "x");
     dir.write("notes.md", "x");
     let mut app = app_with(dir.path(), "@no");
-    app.on_key(tab());
-    app.on_key(tab());
+    tab_complete(&mut app, dir.path());
+    tab_complete(&mut app, dir.path());
     assert!(app.completion.is_some());
     app.on_key(key(KeyCode::Esc));
     assert!(app.completion.is_none());
@@ -113,19 +127,19 @@ fn tab_on_a_word_that_is_not_a_reference_does_nothing() {
     let dir = TempDir::new("none-at");
     dir.write("notes.txt", "x");
     let mut app = app_with(dir.path(), "plain");
-    app.on_key(tab());
+    tab_complete(&mut app, dir.path());
     assert_eq!(app.input, "plain");
     assert!(app.completion.is_none());
 
     // An email is not a reference either.
     let mut app = app_with(dir.path(), "mail a@b.com");
-    app.on_key(tab());
+    tab_complete(&mut app, dir.path());
     assert_eq!(app.input, "mail a@b.com");
     assert!(app.completion.is_none());
 
     // A word that would match a file, but has no `@`, is still not a reference.
     let mut app = app_with(dir.path(), "notes");
-    app.on_key(tab());
+    tab_complete(&mut app, dir.path());
     assert_eq!(app.input, "notes");
     assert!(app.completion.is_none());
 }
@@ -134,7 +148,7 @@ fn tab_on_a_word_that_is_not_a_reference_does_nothing() {
 fn no_candidate_leaves_the_text_alone() {
     let dir = TempDir::new("no-candidate");
     let mut app = app_with(dir.path(), "@nothing");
-    app.on_key(tab());
+    tab_complete(&mut app, dir.path());
     assert_eq!(app.input, "@nothing");
     assert!(app.completion.is_none());
 }
@@ -144,7 +158,7 @@ fn chinese_file_names_complete() {
     let dir = TempDir::new("cjk");
     dir.write("笔记.txt", "x");
     let mut app = app_with(dir.path(), "@笔");
-    app.on_key(tab());
+    tab_complete(&mut app, dir.path());
     assert_eq!(app.input, "@笔记.txt ");
 }
 
@@ -158,7 +172,7 @@ fn a_cursor_in_the_middle_replaces_only_the_prefix_before_it() {
     for _ in 0..3 {
         app.input.right();
     }
-    app.on_key(tab());
+    tab_complete(&mut app, dir.path());
     assert_eq!(
         app.input, "@notes.txt XYZ",
         "only the text before the cursor is replaced"
@@ -171,18 +185,36 @@ fn typing_dismisses_the_list() {
     dir.write("notes.txt", "x");
     dir.write("notes.md", "x");
     let mut app = app_with(dir.path(), "@no");
-    app.on_key(tab());
-    app.on_key(tab());
+    tab_complete(&mut app, dir.path());
+    tab_complete(&mut app, dir.path());
     assert!(app.completion.is_some());
     app.on_key(key(KeyCode::Char('x')));
     assert!(app.completion.is_none());
+}
+
+/// A key with an action of its own dismisses the stale list too (not just typing).
+#[test]
+fn a_bound_key_dismisses_the_list_too() {
+    let dir = TempDir::new("bound-key");
+    dir.write("notes.txt", "x");
+    dir.write("notes.md", "x");
+    let mut app = app_with(dir.path(), "@no");
+    tab_complete(&mut app, dir.path());
+    tab_complete(&mut app, dir.path());
+    assert!(app.completion.is_some());
+    app.on_key(key(KeyCode::Up));
+    assert!(
+        app.completion.is_none(),
+        "the list was computed for a word the key may have changed"
+    );
 }
 
 #[test]
 fn without_a_workspace_tab_does_nothing() {
     let mut app = App::new("m", "s");
     app.input = "@no".into();
-    app.on_key(tab());
+    let result = app.on_key(tab());
+    assert!(result.effects.is_empty(), "{:?}", result.effects);
     assert_eq!(app.input, "@no");
     assert!(app.completion.is_none());
 }

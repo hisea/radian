@@ -2,7 +2,7 @@
 //! `App`, the theme screenshot, and the rebind/conflict rules.
 
 use radian_permissions::ApprovalOutcome;
-use radian_tui::app::{App, ApprovalPrompt, Send};
+use radian_tui::app::{App, Effect, Input};
 use radian_tui::theme::ThemeName;
 use radian_tui::{render, theme};
 use ratatui::Terminal;
@@ -59,15 +59,16 @@ fn a_rebound_send_key_sends_and_enter_becomes_a_no_op() {
     )
     .unwrap();
     app.input.set_text("hello");
-    assert_eq!(
-        app.on_key(key(KeyCode::Enter)),
-        None,
+    assert!(
+        app.on_key(key(KeyCode::Enter)).effects.is_empty(),
         "Enter no longer sends"
     );
     assert_eq!(app.input, "hello", "the text is still there");
     assert_eq!(
-        app.on_key(ctrl(KeyCode::Char('s'))),
-        Some(Send::Followup("hello".into()))
+        app.on_key(ctrl(KeyCode::Char('s'))).effects,
+        vec![Effect::ExpandMentions {
+            text: "hello".into()
+        }]
     );
 }
 
@@ -96,22 +97,24 @@ fn the_approval_keys_cannot_be_taken_over_by_the_keymap() {
         false,
     )
     .unwrap();
-    let (reply, mut answer) = tokio::sync::oneshot::channel();
-    app.request_approval(ApprovalPrompt {
-        request: radian_permissions::ApprovalRequest::new(
-            "perm-1",
-            "call-1",
-            "write",
-            "/ws/out.txt",
-            "/ws/out.txt",
-            serde_json::json!({}),
-            None,
-        ),
-        reply,
-    });
-    assert_eq!(app.on_key(key(KeyCode::Char('y'))), None);
+    app.update(Input::Approval(radian_permissions::ApprovalRequest::new(
+        "perm-1",
+        "call-1",
+        "write",
+        "/ws/out.txt",
+        "/ws/out.txt",
+        serde_json::json!({}),
+        None,
+    )));
+    // The hardcoded prompt key wins over the keymap: it answers, it does not cancel.
+    assert_eq!(
+        app.on_key(key(KeyCode::Char('y'))).effects,
+        vec![Effect::AnswerApproval {
+            request_id: "perm-1".into(),
+            outcome: ApprovalOutcome::AllowOnce,
+        }]
+    );
     assert!(!app.quit, "the prompt key did not cancel/quit");
-    assert!(matches!(answer.try_recv(), Ok(ApprovalOutcome::AllowOnce)));
 }
 
 /// The find box is a layer, so its keys are rebindable without touching the transcript.
