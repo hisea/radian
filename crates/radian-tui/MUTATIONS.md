@@ -419,3 +419,19 @@ Base `9a62193` · 一次性 worktree `/tmp/s1b-mut` · 独立 `CARGO_TARGET_DIR`
   结构测试覆盖。这是"loom 不可用"下能做到的最好，不是等价替代。
 - **M40**：第一次只跑了 pty 套件，**没被抓住**（单轮会话里陈旧的缓冲不会被看见）；跑
   `--lib events` 后被单测抓住。记录在此，避免下次再误判。
+
+## ADR 0023 Step 1 · PR ④：投影读取与通知（2026-10-13）
+
+Base `7b811b7` · 一次性检出 `/tmp/s1d-mut`（detached，跑完删除）· `--no-fail-fast`；
+变异后从副本还原。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| S5 | `ProjectionSink` 不再写 usage 事实（只转发事件） | ✅ 抓住 | `events::tests::a_fact_event_writes_the_projection_and_wakes_the_ui` |
+| S6 | `ProjectionSink` 写事实但不发 `Dirty` | ✅ 抓住 | 同上（少了唤醒） |
+| S7 | `apply_dirty` 改成 `app.update(..).dirty`：空流的事实更新不再画帧 | ✅ 抓住 | `tests::a_dirty_notification_with_an_empty_stream_still_draws` |
+| S8 | `App::update(Input::CommandRefused)` 不显示 Notice | ✅ 抓住 | `update::a_refused_command_is_shown_as_a_notice` |
+
+4/4 抓住。S5/S6 是"投影写了"与"UI 被唤醒"两件事各自被破坏；S7 对应评审要求的"投影更新但 UI 不重画"
+变异（`App` 旧字段已删，编译即可证明状态栏不再读它们，所以改用这条）；S8 钉住能力拒绝是**一条
+Notice**而不是让循环失败。
