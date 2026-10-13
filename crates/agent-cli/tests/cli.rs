@@ -3967,6 +3967,45 @@ async fn export_redacts_the_anthropic_key_without_api_key_env() {
 
 // ---------- small fixes: existing session id, provider flags, scratch cleanup ----------
 
+/// D15: naming an existing session with `--session-id` points at the command that continues
+/// it, and does not touch the file.
+#[tokio::test]
+async fn session_id_already_exists_points_at_resume() {
+    let dir = scratch("dup-id");
+    let sessions = dir.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("one")]).await;
+    let args = [
+        "--model",
+        "m",
+        "--base-url",
+        &server.base_url,
+        "--workspace",
+        ws.to_str().unwrap(),
+        "--session-id",
+        "dup",
+        "--session-dir",
+        sessions.to_str().unwrap(),
+        "-p",
+        "hi",
+    ];
+    let (code, _, stderr) = feed_and_wait(spawn_agent(&args, &[]), "").await;
+    assert_eq!(code, 0, "{stderr}");
+    let before = std::fs::read(sessions.join("dup.jsonl")).unwrap();
+
+    let (code, _, stderr) = feed_and_wait(spawn_agent(&args, &[]), "").await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("already exists"), "{stderr}");
+    assert!(stderr.contains("--resume dup"), "{stderr}");
+    assert_eq!(
+        std::fs::read(sessions.join("dup.jsonl")).unwrap(),
+        before,
+        "the existing session must not be touched"
+    );
+}
+
 /// `--thinking` and `--max-tokens` are Anthropic-only: under the default openai-compatible
 /// provider they are a usage error before any session file exists, not a silent no-op.
 #[tokio::test]

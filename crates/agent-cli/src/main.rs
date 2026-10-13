@@ -739,9 +739,25 @@ fn open_journal(
         workspace,
         serde_json::json!({"provider": provider.as_str(), "model": model_name(cli)?}),
     );
-    let journal = SessionJournal::create(&path, session_id, created)
-        .map_err(|e| SetupError(format!("cannot create session {session_id:?}: {e}")))?;
-    Ok(Arc::new(journal))
+    let journal = match SessionJournal::create(&path, session_id, created) {
+        Ok(journal) => Arc::new(journal),
+        // A complete session already occupies the file. Rewrite the message to name the
+        // command that continues it, with the id the user passed (dogfooding D15). A torn
+        // tail is still truncated by `create`, so this only fires for a real session.
+        Err(radian_session::WriteError::NotEmpty { .. }) => {
+            return Err(SetupError(format!(
+                "session {session_id:?} already exists in {}; continue it with \
+                 `--resume {session_id}`",
+                dir.display()
+            )));
+        }
+        Err(e) => {
+            return Err(SetupError(format!(
+                "cannot create session {session_id:?}: {e}"
+            )));
+        }
+    };
+    Ok(journal)
 }
 
 async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {

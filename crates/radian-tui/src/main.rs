@@ -700,9 +700,17 @@ fn open_journal(
         workspace,
         serde_json::json!({"provider": provider.as_str(), "model": cli.model}),
     );
-    SessionJournal::create(&path, session_id, created)
-        .map(Arc::new)
-        .map_err(|e| format!("cannot create session {session_id:?}: {e}"))
+    match SessionJournal::create(&path, session_id, created) {
+        Ok(journal) => Ok(Arc::new(journal)),
+        // A complete session already occupies the file. Name the command that continues it
+        // (dogfooding D15); a torn tail is still truncated by `create`.
+        Err(radian_session::WriteError::NotEmpty { .. }) => Err(format!(
+            "session {session_id:?} already exists in {}; continue it with `--resume \
+             {session_id}`",
+            dir.display()
+        )),
+        Err(e) => Err(format!("cannot create session {session_id:?}: {e}")),
+    }
 }
 
 /// `--list`: this workspace's sessions, newest activity first. Same columns as `agent-cli`.
