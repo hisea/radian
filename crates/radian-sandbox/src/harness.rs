@@ -13,6 +13,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -153,6 +154,9 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
 
     let policy = SandboxPolicy::workspace_write(&ws)?.deny_read(home.join(".ssh"));
     let sandbox = Sandbox::from_policy(policy.clone())?;
+    // ADR 0016: the network cases are asserted against `safe` (off) and `workspace` (on),
+    // so the rig needs both enforced sandboxes as well as the transparent control.
+    let safe = Sandbox::from_policy(SandboxPolicy::safe(&ws)?.deny_read(home.join(".ssh")))?;
     let control = Sandbox::new(SandboxMode::FullAccess, &ws)?;
     let worktree_name = wt
         .file_name()
@@ -172,7 +176,9 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
     };
     rig.escape_writes(&sandbox, &control);
     rig.symlink_escapes(&sandbox, &control);
-    rig.network(&sandbox, &control);
+    rig.network(&safe, &sandbox, &control);
+    rig.pty_ok(&sandbox, &control);
+    rig.tiocsti_outside_terminal(&sandbox, &control);
     rig.environment(&sandbox, &control, &secret_name, &secret_value);
     rig.nested_shell(&sandbox, &control);
     rig.normal_use(&sandbox, &control);
@@ -286,27 +292,130 @@ impl Rig {
         );
     }
 
-    fn network(&mut self, sandbox: &Sandbox, control: &Sandbox) {
-        let g = "network_off";
+    fn network(&mut self, safe: &Sandbox, workspace: &Sandbox, control: &Sandbox) {
+        let connect_script = |port: u16| {
+            format!(
+                "python3 -c 'import socket,sys; s=socket.create_connection((\"127.0.0.1\",{port}),2); s.close(); sys.exit(0)'"
+            )
+        };
+        // `safe` still has no network: the control connects to a listener this test owns.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local listener");
         let port = listener.local_addr().unwrap().port();
-        let script = format!(
-            "python3 -c 'import socket,sys; s=socket.create_connection((\"127.0.0.1\",{port}),2); s.close(); sys.exit(0)'"
-        );
-        let sb = run_shell(sandbox, &script);
-        // Only the control reaches the listener; accept exactly that one connection.
-        let accept = std::thread::spawn(move || {
-            let _ = listener.accept();
-        });
+        let script = connect_script(port);
+        let sb = run_shell(safe, &script);
         let ct = run_shell(control, &script);
-        let _ = accept.join();
+        drop(listener);
         self.record(
-            g,
+            "network_safe",
             "connect_local_port",
             Expect::MustFail,
             sb,
             ct,
-            "sandbox has no network; control connects to a listener this test owns",
+            "safe has no network; the control connects to a listener this test owns",
+        );
+
+        // `workspace` (ADR 0016) can connect to loopback, bind/listen, and reach out.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local listener");
+        let port = listener.local_addr().unwrap().port();
+        let script = connect_script(port);
+        self.sh_case(
+            workspace,
+            control,
+            "network_workspace",
+            "connect_local_port",
+            Expect::MustSucceed,
+            &script,
+        );
+        drop(listener);
+        self.sh_case(
+            workspace,
+            control,
+            "network_workspace",
+            "bind_local_port",
+            Expect::MustSucceed,
+            "python3 -c 'import socket; s=socket.socket(); s.bind((\"127.0.0.1\",0)); s.listen(1); s.close()'",
+        );
+        // An actual outbound connection (the ADR measured 1.1.1.1:443). Both the sandbox and
+        // the control need it to succeed, so a machine without internet fails the case.
+        self.sh_case(
+            workspace,
+            control,
+            "network_workspace",
+            "connect_external",
+            Expect::MustSucceed,
+            "python3 -c 'import socket; s=socket.create_connection((\"1.1.1.1\",443),4); s.close()'",
+        );
+    }
+
+    /// ADR 0016: the `workspace` tier can `openpty()` (the pty device rules).
+    fn pty_ok(&mut self, sandbox: &Sandbox, control: &Sandbox) {
+        self.sh_case(
+            sandbox,
+            control,
+            "devices",
+            "openpty",
+            Expect::MustSucceed,
+            "python3 -c 'import pty; m, s = pty.openpty()'",
+        );
+    }
+
+    /// ADR 0016: a sandboxed command must not be able to `TIOCSTI` into a terminal held
+    /// **outside** the sandbox. The judge is the master side: it must receive no byte from the
+    /// sandbox and must receive the injected byte from the control, which makes the same
+    /// outside slave its controlling terminal (proving the test can inject at all).
+    #[cfg(unix)]
+    fn tiocsti_outside_terminal(&mut self, sandbox: &Sandbox, control: &Sandbox) {
+        let Some(pty) = OutsidePty::open() else {
+            self.record(
+                "devices",
+                "tiocsti_outside_terminal",
+                Expect::MustFail,
+                Outcome {
+                    succeeded: true,
+                    detail: "could not create an outside pty".into(),
+                },
+                Outcome {
+                    succeeded: false,
+                    detail: "could not create an outside pty".into(),
+                },
+                "setup failed: no outside pty",
+            );
+            return;
+        };
+        let slave = pty.slave_path.to_string_lossy().into_owned();
+        // The sandboxed command only does TIOCSTI: without a controlling terminal (or with a
+        // different one) the kernel refuses it.
+        let no_ctty = format!(
+            "python3 -c 'import os,fcntl,termios,sys; fd=os.open(sys.argv[1], os.O_RDWR|os.O_NOCTTY); fcntl.ioctl(fd, termios.TIOCSTI, b\"X\")' {slave}"
+        );
+        let (sb_exit, sb_bytes) = run_shell_with_pty(sandbox, &no_ctty, &pty);
+        // The control makes the outside slave its controlling terminal first, so the ioctl is
+        // allowed and the byte is echoed back to the master.
+        let with_ctty = format!(
+            "python3 -c 'import os,fcntl,termios,sys; os.setsid(); fd=os.open(sys.argv[1], os.O_RDWR|os.O_NOCTTY); fcntl.ioctl(fd, termios.TIOCSCTTY, 0); fcntl.ioctl(fd, termios.TIOCSTI, b\"X\")' {slave}"
+        );
+        let (ct_exit, ct_bytes) = run_shell_with_pty(control, &with_ctty, &pty);
+        self.record(
+            "devices",
+            "tiocsti_outside_terminal",
+            Expect::MustFail,
+            Outcome {
+                succeeded: !sb_bytes.is_empty(),
+                detail: format!(
+                    "master_bytes={} injector={}",
+                    sb_bytes.len(),
+                    sb_exit.detail
+                ),
+            },
+            Outcome {
+                succeeded: !ct_bytes.is_empty(),
+                detail: format!(
+                    "master_bytes={} injector={}",
+                    ct_bytes.len(),
+                    ct_exit.detail
+                ),
+            },
+            "the sandbox cannot inject into an outside terminal; the control (same slave as its controlling terminal) can",
         );
     }
 
@@ -565,30 +674,175 @@ fn run_shell(sandbox: &Sandbox, script: &str) -> Outcome {
     run_outcome(command)
 }
 
+/// Runs a shell script while draining an outside pty's master, so a control process that
+/// makes that pty its controlling terminal can exit (macOS blocks the exit until the master
+/// is read) and so the injected byte is observed on the master. Returns the child's outcome
+/// and every byte read from the master.
+#[cfg(unix)]
+fn run_shell_with_pty(sandbox: &Sandbox, script: &str, pty: &OutsidePty) -> (Outcome, Vec<u8>) {
+    let mut command = match sandbox.command("/bin/sh", ["-c", script]) {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                Outcome {
+                    succeeded: false,
+                    detail: format!("sandbox error: {e}"),
+                },
+                Vec::new(),
+            );
+        }
+    };
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            return (
+                Outcome {
+                    succeeded: false,
+                    detail: format!("spawn error: {e}"),
+                },
+                Vec::new(),
+            );
+        }
+    };
+    let master = pty.master;
+    let drain = std::thread::spawn(move || drain_master(master, Duration::from_secs(2)));
+    let output = child.wait_with_output();
+    let bytes = drain.join().unwrap_or_default();
+    let outcome = match output {
+        Ok(output) => outcome_from(output),
+        Err(e) => Outcome {
+            succeeded: false,
+            detail: format!("wait error: {e}"),
+        },
+    };
+    (outcome, bytes)
+}
+
+/// Reads an outside pty's master until a byte arrives, the slave side goes away, or the
+/// deadline passes.
+#[cfg(unix)]
+fn drain_master(master: std::os::fd::RawFd, deadline: Duration) -> Vec<u8> {
+    let start = std::time::Instant::now();
+    let mut out = Vec::new();
+    let mut buf = [0u8; 256];
+    while start.elapsed() < deadline {
+        let mut pfd = libc::pollfd {
+            fd: master,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: `pfd` is one valid pollfd; poll only reads/writes it.
+        let ready = unsafe { libc::poll(&mut pfd, 1, 50) };
+        if ready < 0 {
+            break;
+        }
+        if ready == 0 || pfd.revents & libc::POLLIN == 0 {
+            continue;
+        }
+        // SAFETY: the buffer is valid for `buf.len()` bytes.
+        let n = unsafe { libc::read(master, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
+        if n <= 0 {
+            break;
+        }
+        out.extend_from_slice(&buf[..n as usize]);
+        // One injected byte is enough for the judge.
+        break;
+    }
+    out
+}
+
+/// A pty held **outside** any sandbox, used by the `TIOCSTI` case. The master is read by the
+/// test; the slave path is handed to the sandboxed command.
+#[cfg(unix)]
+struct OutsidePty {
+    master: std::os::fd::RawFd,
+    /// Kept open for the case's lifetime: a master with no slave holder reads EIO, and the
+    /// injected byte is buffered here until the drain reads it.
+    slave: std::os::fd::RawFd,
+    slave_path: std::ffi::CString,
+}
+
+#[cfg(unix)]
+impl OutsidePty {
+    fn open() -> Option<Self> {
+        // SAFETY: plain libc calls with no memory-safety preconditions; every failure path
+        // closes what it opened.
+        unsafe {
+            let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+            if master < 0 {
+                return None;
+            }
+            if libc::grantpt(master) != 0 || libc::unlockpt(master) != 0 {
+                libc::close(master);
+                return None;
+            }
+            let name = libc::ptsname(master);
+            if name.is_null() {
+                libc::close(master);
+                return None;
+            }
+            let slave_path = std::ffi::CStr::from_ptr(name).to_owned();
+            let slave = libc::open(name, libc::O_RDWR | libc::O_NOCTTY);
+            if slave < 0 {
+                libc::close(master);
+                return None;
+            }
+            // ECHO on, so a `TIOCSTI` byte is echoed back to the master (the judge).
+            let mut term: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(slave, &mut term) == 0 {
+                term.c_lflag |= libc::ECHO;
+                let _ = libc::tcsetattr(slave, libc::TCSANOW, &term);
+            }
+            Some(Self {
+                master,
+                slave,
+                slave_path,
+            })
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for OutsidePty {
+    fn drop(&mut self) {
+        // SAFETY: both fds were returned by libc open/posix_openpt and are closed once.
+        unsafe {
+            libc::close(self.slave);
+            libc::close(self.master);
+        }
+    }
+}
+
 fn run_outcome(mut command: Command) -> Outcome {
     match command.output() {
-        Ok(output) => {
-            let mut detail = String::new();
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stdout.trim().is_empty() {
-                detail.push_str(stdout.trim());
-            }
-            if !stderr.trim().is_empty() {
-                if !detail.is_empty() {
-                    detail.push_str(" | ");
-                }
-                detail.push_str(stderr.trim());
-            }
-            Outcome {
-                succeeded: output.status.success(),
-                detail: truncate(&detail, 200),
-            }
-        }
+        Ok(output) => outcome_from(output),
         Err(e) => Outcome {
             succeeded: false,
             detail: format!("spawn failed: {e}"),
         },
+    }
+}
+
+fn outcome_from(output: std::process::Output) -> Outcome {
+    let mut detail = String::new();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stdout.trim().is_empty() {
+        detail.push_str(stdout.trim());
+    }
+    if !stderr.trim().is_empty() {
+        if !detail.is_empty() {
+            detail.push_str(" | ");
+        }
+        detail.push_str(stderr.trim());
+    }
+    Outcome {
+        succeeded: output.status.success(),
+        detail: truncate(&detail, 200),
     }
 }
 

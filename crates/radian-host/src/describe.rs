@@ -49,26 +49,27 @@ pub fn describe(
         ),
         (SandboxMode::WorkspaceWrite, Some(sandbox)) => (
             format!(
-                "workspace-write · sandbox {} (probe: {})",
+                "workspace · sandbox {} (probe: {})",
                 sandbox.backend_name(),
                 sandbox.probe().detail
             ),
             format!(
                 "{}: writes are confined to the workspace, repository metadata is read-only, \
-                 sensitive directories are not readable by default, and the network is off. MCP \
+                 sensitive directories are not readable by default, and the network is **on** \
+                 (outbound and local-loopback connect, bind and listen are allowed). MCP \
                  servers are NOT sandboxed in this build and run with your full access. The IPC \
                  boundary is not tightened, so this is not a complete credential boundary",
                 wording.confined_subject
             ),
         ),
         (SandboxMode::FullAccess, _) => (
-            "full-access (chosen explicitly; never a default)".into(),
+            "full (chosen explicitly; never a default)".into(),
             "no sandbox: commands can read and write anywhere you can, including the network"
                 .into(),
         ),
         // Unreachable: an enforced mode always has a sandbox or the build failed.
         (SandboxMode::WorkspaceWrite, None) => (
-            "workspace-write (sandbox missing)".into(),
+            "workspace (sandbox missing)".into(),
             "the sandbox is missing; this must not happen".into(),
         ),
     }

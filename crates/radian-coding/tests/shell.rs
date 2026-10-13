@@ -223,7 +223,7 @@ async fn an_unavailable_backend_never_yields_a_sandbox_or_a_shell() {
     assert!(!spec_names(&tools).await.iter().any(|name| name == "shell"));
 }
 
-// ---------- 3. workspace-write confines the shell (each failure has a contrast) ----------
+// ---------- 3. workspace confines the shell (each failure has a contrast) ----------
 
 /// Runs one `sh -c` script through the tool and returns (succeeded, text).
 async fn sh(tools: &CodingTools, script: &str) -> (bool, String) {
@@ -295,23 +295,20 @@ async fn workspace_write_confines_the_shell() {
         "the default deny list must cover ~/.ssh"
     );
 
-    // (d) connecting to a local port fails confined, succeeds unconfined.
+    // (d) connecting to a local port succeeds in both (ADR 0016: the `workspace` tier opens
+    // the network). `safe` is the one that keeps it off; the harness covers that contrast.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a local listener");
     let port = listener.local_addr().unwrap().port();
     let script = format!(
         "python3 -c 'import socket,sys; s=socket.create_connection((\"127.0.0.1\",{port}),5); s.close(); sys.exit(0)'"
     );
     let (ok, _) = sh(&confined, &script).await;
-    assert!(!ok, "the sandbox has no network, so the connect must fail");
-    let accept = std::thread::spawn(move || {
-        let _ = listener.accept();
-    });
+    assert!(ok, "workspace has network on, so the connect must succeed");
     let (ok, _) = sh(&open, &script).await;
     assert!(
         ok,
         "the control must connect to the listener this test owns"
     );
-    let _ = accept.join();
 }
 
 // ---------- 4/5. timeout and cancellation kill the whole process group ----------

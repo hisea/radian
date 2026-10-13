@@ -14,7 +14,9 @@ use crate::error::SandboxError;
 pub enum SandboxMode {
     /// Read-only: the workspace is not writable, and no network unless requested.
     Safe,
-    /// The workspace is writable; repository metadata and sensitive directories are not.
+    /// The workspace is writable; repository metadata and sensitive directories are not. The
+    /// network is **on** (ADR 0016): outbound and local-loopback connect/bind/listen are
+    /// allowed, because an agent that cannot run the project's own tests is not useful.
     WorkspaceWrite,
     /// Explicitly unsandboxed. The user chose this; the runtime never selects it.
     FullAccess,
@@ -24,8 +26,8 @@ impl SandboxMode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Safe => "safe",
-            Self::WorkspaceWrite => "workspace-write",
-            Self::FullAccess => "full-access",
+            Self::WorkspaceWrite => "workspace",
+            Self::FullAccess => "full",
         }
     }
 
@@ -42,7 +44,8 @@ pub struct SandboxPolicy {
     pub mode: SandboxMode,
     /// Canonical workspace root. The only writable place in `workspace-write`.
     pub workspace: PathBuf,
-    /// `true` allows network; the default is off.
+    /// `true` allows network; the default follows the mode: **off for `safe`, on for
+    /// `workspace`** (ADR 0016). A caller can still override it with [`SandboxPolicy::network`].
     pub network: bool,
     /// Paths inside (or outside) the workspace that must stay read-only, e.g. `.git`.
     pub read_only: Vec<PathBuf>,
@@ -87,13 +90,13 @@ pub const DEFAULT_DENY_READ: &[&str] = &[
 ];
 
 impl SandboxPolicy {
-    /// A `workspace-write` policy: canonical workspace, discovered git metadata read-only,
-    /// default sensitive paths denied, no network, default environment.
+    /// A `workspace` policy: canonical workspace, discovered git metadata read-only,
+    /// default sensitive paths denied, **network on** (ADR 0016), default environment.
     pub fn workspace_write(workspace: impl AsRef<Path>) -> Result<Self, SandboxError> {
         Self::new(SandboxMode::WorkspaceWrite, workspace)
     }
 
-    /// A `safe` (read-only) policy.
+    /// A `safe` (read-only, network off) policy.
     pub fn safe(workspace: impl AsRef<Path>) -> Result<Self, SandboxError> {
         Self::new(SandboxMode::Safe, workspace)
     }
@@ -105,7 +108,8 @@ impl SandboxPolicy {
         Ok(Self {
             mode,
             workspace,
-            network: false,
+            // ADR 0016: the workspace tier opens the network; safe keeps it off.
+            network: matches!(mode, SandboxMode::WorkspaceWrite),
             read_only,
             deny_read,
             allow_env: DEFAULT_ALLOW_ENV.iter().map(|s| (*s).to_owned()).collect(),

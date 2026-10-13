@@ -28,11 +28,13 @@ pub enum Preset {
 }
 
 impl Preset {
+    /// The user-visible tier name. `workspace-write`/`full-access` remain accepted as CLI
+    /// aliases, but this is the name the hosts print and the status bar shows (ADR 0016).
     pub fn as_str(self) -> &'static str {
         match self {
             Preset::Safe => "safe",
-            Preset::WorkspaceWrite => "workspace-write",
-            Preset::FullAccess => "full-access",
+            Preset::WorkspaceWrite => "workspace",
+            Preset::FullAccess => "full",
         }
     }
 

@@ -20,11 +20,15 @@ use radian_sandbox::{Sandbox, SandboxMode};
 
 use crate::SetupError;
 
-/// The `--profile` value. A product concept (ADR 0012 P1), not a backend flag.
+/// The `--profile` value. A product concept (ADR 0012 P1), not a backend flag. The names are
+/// `safe`/`workspace`/`full` (ADR 0016); the old `workspace-write`/`full-access` are accepted
+/// aliases but are deliberately **not** listed in `--help`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum ProfileArg {
     Safe,
+    #[value(name = "workspace", alias = "workspace-write")]
     WorkspaceWrite,
+    #[value(name = "full", alias = "full-access")]
     FullAccess,
 }
 
@@ -133,7 +137,7 @@ pub(crate) fn build_sandbox(
 fn unavailable(profile: ProfileArg, mode: SandboxMode) -> String {
     format!(
         "the `{}` sandbox backend is unavailable or failed its probe, so `{}` cannot be \
-         enforced; refusing to run. Install/fix the backend, or pass `--profile full-access` \
+         enforced; refusing to run. Install/fix the backend, or pass `--profile full` \
          if you really mean to run without a sandbox (that is never the default)",
         mode.as_str(),
         profile.as_str()

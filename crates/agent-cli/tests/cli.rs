@@ -1978,8 +1978,8 @@ async fn full_access_is_not_the_default_and_no_write_tools_without_a_workspace()
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("done"), "{stdout}");
     // The default is named on startup, and it is not full-access.
-    assert!(stderr.contains("[profile] workspace-write"), "{stderr}");
-    assert!(!stderr.contains("full-access (chosen"), "{stderr}");
+    assert!(stderr.contains("[profile] workspace"), "{stderr}");
+    assert!(!stderr.contains("full (chosen"), "{stderr}");
     // Neither tool is advertised, so the model cannot even ask for one.
     let names = advertised_tools(&server, 0);
     for absent in ["write", "patch", "shell"] {
@@ -2063,7 +2063,7 @@ async fn the_startup_text_does_not_claim_credential_isolation() {
     .await;
 
     assert_eq!(code, 0, "{stderr}");
-    assert!(stderr.contains("[profile] workspace-write"), "{stderr}");
+    assert!(stderr.contains("[profile] workspace"), "{stderr}");
     assert!(stderr.contains("[sandbox]"), "{stderr}");
     for phrase in [
         "credentials are isolated",
@@ -2999,8 +2999,8 @@ async fn a_missing_workspace_is_a_workspace_error_and_leaves_no_session() {
         "a bad workspace must not blame the sandbox: {stderr}"
     );
     assert!(
-        !stderr.contains("full-access"),
-        "a bad workspace must not suggest full-access: {stderr}"
+        !stderr.contains("--profile"),
+        "a bad workspace must not suggest a profile (old or new name): {stderr}"
     );
     assert!(stdout.is_empty(), "{stdout}");
     assert_session_dir_empty(&session_dir);
@@ -4092,4 +4092,52 @@ fn scratch_directories_are_removed_when_the_guard_drops() {
         "the scratch guard must remove {}",
         path.display()
     );
+}
+
+/// ADR 0016: the tier names are `safe`/`workspace`/`full`; the old names stay accepted as
+/// aliases but are not advertised in `--help`.
+#[tokio::test]
+async fn tier_names_and_aliases_are_accepted_but_help_lists_only_new_names() {
+    let (code, stdout, stderr) = feed_and_wait(spawn_agent(&["--help"], &[]), "").await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("workspace"), "{stdout}");
+    assert!(stdout.contains("full"), "{stdout}");
+    assert!(stdout.contains("safe"), "{stdout}");
+    assert!(
+        !stdout.contains("workspace-write"),
+        "the old name must not be advertised: {stdout}"
+    );
+    assert!(
+        !stdout.contains("full-access"),
+        "the old name must not be advertised: {stdout}"
+    );
+
+    for profile in [
+        "safe",
+        "workspace",
+        "full",
+        "workspace-write",
+        "full-access",
+    ] {
+        let dir = scratch(&format!("alias-{profile}"));
+        let sessions = dir.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let (code, _, stderr) = feed_and_wait(
+            spawn_agent(
+                &[
+                    "--model",
+                    "m",
+                    "--profile",
+                    profile,
+                    "--session-dir",
+                    sessions.to_str().unwrap(),
+                    "--list",
+                ],
+                &[],
+            ),
+            "",
+        )
+        .await;
+        assert_eq!(code, 0, "{profile}: {stderr}");
+    }
 }

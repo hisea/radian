@@ -1655,8 +1655,8 @@ fn pty_a_missing_workspace_is_a_workspace_error_and_leaves_no_session() {
         "a bad workspace must not blame the sandbox: {raw}"
     );
     assert!(
-        !raw.contains("full-access"),
-        "a bad workspace must not suggest full-access: {raw}"
+        !raw.contains("--profile"),
+        "a bad workspace must not suggest a profile (old or new name): {raw}"
     );
     assert!(
         !raw.contains("\u{1b}[?1049h"),

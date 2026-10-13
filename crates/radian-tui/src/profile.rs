@@ -41,10 +41,10 @@ impl Tier {
 pub fn parse_tier(value: &str) -> Result<Tier, String> {
     match value {
         "safe" => Ok(Tier::Safe),
-        "workspace-write" => Ok(Tier::WorkspaceWrite),
-        "full-access" => Ok(Tier::FullAccess),
+        "workspace" | "workspace-write" => Ok(Tier::WorkspaceWrite),
+        "full" | "full-access" => Ok(Tier::FullAccess),
         other => Err(format!(
-            "--profile {other:?} is not one of safe, workspace-write, full-access"
+            "--profile {other:?} is not one of safe, workspace, full"
         )),
     }
 }
@@ -147,4 +147,27 @@ pub fn describe(tier: Tier, sandbox: Option<&Sandbox>) -> (String, String) {
         sandbox,
         radian_host::TUI_WORDING,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tier_names_and_aliases_parse() {
+        for (name, tier) in [
+            ("safe", Tier::Safe),
+            ("workspace", Tier::WorkspaceWrite),
+            ("workspace-write", Tier::WorkspaceWrite),
+            ("full", Tier::FullAccess),
+            ("full-access", Tier::FullAccess),
+        ] {
+            assert_eq!(parse_tier(name).unwrap(), tier, "{name}");
+        }
+        let error = parse_tier("bogus").unwrap_err();
+        assert!(error.contains("workspace"), "{error}");
+        assert!(error.contains("full"), "{error}");
+        assert!(!error.contains("workspace-write"), "{error}");
+        assert!(!error.contains("full-access"), "{error}");
+    }
 }

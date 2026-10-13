@@ -164,6 +164,10 @@ pub(crate) fn profile_text(policy: &SandboxPolicy) -> String {
             "(allow file-write* (subpath {}))\n",
             sbpl_string(&policy.workspace.to_string_lossy())
         ));
+        // The pty the tools need (ADR 0016). `openpty` needs to write both the master and the
+        // slave and to ioctl them; a bare `(allow pseudo-tty)` or an unfiltered `file-ioctl`
+        // is not used. Measured on macOS 27: this filtered pair makes `os.openpty()` work.
+        profile.push_str(PTY_ALLOW);
         // Read-only carve-outs (git metadata): deeper deny over the workspace allow.
         for path in &policy.read_only {
             profile.push_str(&format!("(deny file-write* {})\n", target(path)));
@@ -171,6 +175,14 @@ pub(crate) fn profile_text(policy: &SandboxPolicy) -> String {
     }
     profile
 }
+
+/// The pty rules for the `workspace` tier. `file-ioctl` is filtered to exactly the pty
+/// devices, so it cannot be used to ioctl anything else (TIOCSTI is then blocked by the
+/// kernel's controlling-terminal check plus the shell tool's `setsid`; see the matrix).
+const PTY_ALLOW: &str = concat!(
+    "(allow file-write* (literal \"/dev/ptmx\") (regex #\"^/dev/ttys[0-9]+$\"))\n",
+    "(allow file-ioctl (literal \"/dev/ptmx\") (regex #\"^/dev/ttys[0-9]+$\"))\n",
+);
 
 /// A directory is matched with `subpath`, a file with `literal` (a worktree pointer file is
 /// a regular file, and `subpath` would not match it).

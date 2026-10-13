@@ -95,14 +95,14 @@ struct Cli {
     workspace: Option<PathBuf>,
 
     /// A JSON file listing MCP stdio servers to start (`{"servers": [...]}`), the same format
-    /// `agent-cli` reads. Under `workspace-write` their tools ask before running and the
+    /// `agent-cli` reads. Under `workspace` their tools ask before running and the
     /// servers themselves are **not** sandboxed (ADR 0012 option B).
     #[arg(long, value_name = "FILE")]
     mcp_config: Option<String>,
 
-    /// The permission tier (ADR 0012): `safe` denies file modification, `workspace-write`
-    /// allows writes that resolve inside the workspace, `full-access` also allows MCP.
-    #[arg(long, value_name = "TIER", default_value = "workspace-write")]
+    /// The permission tier (ADR 0016): `safe` denies file modification, `workspace`
+    /// allows writes that resolve inside the workspace, `full` also allows MCP.
+    #[arg(long, value_name = "TIER", default_value = "workspace")]
     profile: String,
 
     /// How `ask` is resolved (ADR 0012's ApprovalPolicy): `on-ask` asks when a rule says so,

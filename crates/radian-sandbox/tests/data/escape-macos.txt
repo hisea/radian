@@ -8,7 +8,12 @@ escape_write     outside_via_symlink            fail   denied       ok  PASS
 escape_write     outside_tmp                    fail   denied       ok  PASS
 symlink          symlinked_parent_dir           fail   denied       ok  PASS
 symlink          write_through_workspace_symlink     fail   denied       ok  PASS
-network_off      connect_local_port             fail   denied       ok  PASS
+network_safe     connect_local_port             fail   denied       ok  PASS
+network_workspace connect_local_port               ok       ok       ok  PASS
+network_workspace bind_local_port                  ok       ok       ok  PASS
+network_workspace connect_external                 ok       ok       ok  PASS
+devices          openpty                          ok       ok       ok  PASS
+devices          tiocsti_outside_terminal       fail   denied       ok  PASS
 environment      unlisted_var_hidden            fail   denied       ok  PASS
 environment      whitelisted_path_visible         ok       ok       ok  PASS
 inheritance      nested_sh_confined             fail   denied       ok  PASS
@@ -32,7 +37,7 @@ signals          signal_own_child_ok              ok       ok       ok  PASS
 signals          signal_own_grandchild_ok         ok       ok       ok  PASS
 signals          signal_outside_process         fail   denied       ok  PASS
 
-29 cases, 0 failed
+34 cases, 0 failed
 
 orphan check:
 (no orphan processes)
