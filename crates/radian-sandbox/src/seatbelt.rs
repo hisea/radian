@@ -242,6 +242,24 @@ mod tests {
     }
 
     #[test]
+    fn the_pty_ioctl_allow_is_filtered_to_the_pty_devices() {
+        let profile = profile_text(&policy());
+        // The ioctl allow is filtered: an unfiltered `(allow file-ioctl)` would open every
+        // device, which ADR 0016 forbids even though the escape matrix cannot tell them apart.
+        assert!(
+            profile.contains(
+                "(allow file-ioctl (literal \"/dev/ptmx\") (regex #\"^/dev/ttys[0-9]+$\"))"
+            ),
+            "{profile}"
+        );
+        assert!(!profile.contains("(allow file-ioctl)\n"), "{profile}");
+        assert!(
+            profile.contains("(allow file-write* (literal \"/dev/ptmx\")"),
+            "{profile}"
+        );
+    }
+
+    #[test]
     fn signals_are_confined_to_the_same_sandbox() {
         let profile = profile_text(&policy());
         assert!(profile.contains("(allow signal (target same-sandbox))"));
