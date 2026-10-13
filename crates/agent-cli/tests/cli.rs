@@ -1115,7 +1115,7 @@ async fn second_sigint_exits_130() {
     let log = dir.join("fixture.log");
     let config = mcp_config(&dir, &log);
     // `freeze` blocks the fixture's reading thread, so after the first Ctrl-C the client
-    // waits out its full 2s cancel grace for a ping that can never be answered: a real,
+    // waits out its full 2s MCP cancel grace for a ping that can never be answered: a real,
     // bounded wind-down window for the second Ctrl-C.
     let server = MockServer::start(vec![tool_reply("call_1", "fx__freeze", "{}")]).await;
     let mut child = Running::spawn(
@@ -1141,13 +1141,24 @@ async fn second_sigint_exits_130() {
     })
     .await;
     sigint(&child.child);
-    // Comfortably inside the 2s grace window the first signal opened.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // State gate, not a timer: wait until the CLI reports the wind-down, which proves the
+    // first Ctrl-C was handled while the turn is still winding down (the MCP cancel grace
+    // keeps it there), then send the second one.
+    child.wait_for_stderr("Ctrl-C again to quit").await;
+    let forced_at = Instant::now();
     sigint(&child.child);
 
-    let (code, _, _) = child.finish().await;
+    // Keep stdin open while waiting: closing it would race an EOF against the second signal,
+    // and this test is about the signal, not about EOF.
+    let (code, _, stderr) = child.finish_open(EXIT_WATCHDOG).await;
 
-    assert_eq!(code, 130);
+    assert_eq!(code, 130, "{stderr}");
+    // The second signal forces the exit; it does not wait out the MCP cancel grace (2s).
+    assert!(
+        forced_at.elapsed() < Duration::from_millis(1000),
+        "the forced exit waited instead of forcing: {:?}",
+        forced_at.elapsed()
+    );
     assert!(
         start.elapsed() < Duration::from_secs(8),
         "{:?}",

@@ -512,6 +512,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
 
     let inbox = Inbox::durable(INBOX_CAPACITY, Arc::clone(&journal));
     let ui = Arc::new(Ui::default());
+    let mut signals = spawn_signals();
     // The approval prompt and the prompt loop share stdin. While approval may read, the
     // loop must not compete for a line; with `--yes` (or nobody to ask) it may.
     ui.set_approval_may_read(can_ask && !cli.yes);
@@ -541,9 +542,27 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
 
     let secrets = setup.secrets.clone();
     let code = if let Some(prompt) = cli.prompt {
-        one_shot(&inbox, &ui, prompt, &driver_ended, &mut task, &secrets).await
+        one_shot(
+            &inbox,
+            &ui,
+            prompt,
+            &driver_ended,
+            &mut signals,
+            &mut task,
+            &secrets,
+        )
+        .await
     } else {
-        interactive_loop(&inbox, &ui, &lines, &driver_ended, &mut task, &secrets).await
+        interactive_loop(
+            &inbox,
+            &ui,
+            &lines,
+            &driver_ended,
+            &mut signals,
+            &mut task,
+            &secrets,
+        )
+        .await
     };
     ui.end_of_turn();
     Ok(code)
@@ -555,6 +574,7 @@ async fn one_shot(
     ui: &Arc<Ui>,
     prompt: String,
     driver_ended: &Arc<Notify>,
+    signals: &mut mpsc::UnboundedReceiver<()>,
     task: &mut JoinHandle<Result<(), DriverError>>,
     secrets: &[String],
 ) -> i32 {
@@ -564,7 +584,7 @@ async fn one_shot(
         return 1;
     }
     let mut cancelling = false;
-    match wait_for_turn(ui, inbox, driver_ended, &mut cancelling).await {
+    match wait_for_turn(ui, inbox, driver_ended, signals, &mut cancelling).await {
         TurnEnd::Forced => return force_exit(task).await,
         TurnEnd::DriverEnded => return report_task(task, secrets).await,
         TurnEnd::Done => {}
@@ -588,6 +608,7 @@ async fn interactive_loop(
     ui: &Arc<Ui>,
     lines: &LineHub,
     driver_ended: &Arc<Notify>,
+    signals: &mut mpsc::UnboundedReceiver<()>,
     task: &mut JoinHandle<Result<(), DriverError>>,
     secrets: &[String],
 ) -> i32 {
@@ -599,7 +620,7 @@ async fn interactive_loop(
             eprint!("> ");
             let _ = std::io::stderr().flush();
         }
-        match next_event(lines, ui, inbox, driver_ended, &mut cancelling).await {
+        match next_event(lines, ui, inbox, driver_ended, signals, &mut cancelling).await {
             Next::Leave => break,
             Next::Forced => return force_exit(task).await,
             Next::DriverEnded => return report_task(task, secrets).await,
@@ -668,27 +689,33 @@ async fn next_event(
     ui: &Ui,
     inbox: &Inbox,
     driver_ended: &Arc<Notify>,
+    signals: &mut mpsc::UnboundedReceiver<()>,
     cancelling: &mut bool,
 ) -> Next {
     let read_lines = !ui.busy() || !ui.approval_may_read();
+    // `biased` with the signal first: a pending Ctrl-C must beat a ready EOF or a turn that
+    // just ended, or a forced exit could be skipped in favour of a graceful one.
     tokio::select! {
+        biased;
+        _ = signals.recv() => on_signal(ui, inbox, cancelling),
+        _ = driver_ended.notified() => Next::DriverEnded,
+        _ = ui.finished.notified(), if ui.busy() => Next::Again,
         line = lines.next(), if read_lines => match line {
             Some(line) => Next::Line(line),
             None => Next::Leave,
         },
-        _ = ui.finished.notified(), if ui.busy() => Next::Again,
-        _ = driver_ended.notified() => Next::DriverEnded,
-        _ = tokio::signal::ctrl_c() => on_signal(ui, inbox, cancelling),
     }
 }
 
 fn on_signal(ui: &Ui, inbox: &Inbox, cancelling: &mut bool) -> Next {
+    // The second Ctrl-C of an open wind-down always forces, even if the turn ended in the
+    // meantime: the user asked twice for it.
+    if *cancelling {
+        return Next::Forced;
+    }
     if !ui.busy() {
         // At the prompt, Ctrl-C means leave, like EOF.
         return Next::Leave;
-    }
-    if *cancelling {
-        return Next::Forced;
     }
     *cancelling = true;
     inbox.cancel(CancelCause::Requested);
@@ -753,23 +780,25 @@ async fn wait_for_turn(
     ui: &Ui,
     inbox: &Inbox,
     driver_ended: &Arc<Notify>,
+    signals: &mut mpsc::UnboundedReceiver<()>,
     cancelling: &mut bool,
 ) -> TurnEnd {
     loop {
         tokio::select! {
-            _ = ui.finished.notified() => return TurnEnd::Done,
-            _ = driver_ended.notified() => return TurnEnd::DriverEnded,
-            _ = tokio::signal::ctrl_c() => {
-                if !ui.busy() {
-                    return TurnEnd::Done;
-                }
+            biased;
+            _ = signals.recv() => {
                 if *cancelling {
                     return TurnEnd::Forced;
+                }
+                if !ui.busy() {
+                    return TurnEnd::Done;
                 }
                 *cancelling = true;
                 inbox.cancel(CancelCause::Requested);
                 eprintln!("agent: cancelling (Ctrl-C again to quit)");
             }
+            _ = driver_ended.notified() => return TurnEnd::DriverEnded,
+            _ = ui.finished.notified() => return TurnEnd::Done,
         }
     }
 }
@@ -780,6 +809,32 @@ enum TurnEnd {
     Forced,
     /// The driver stopped before the turn finished (an error).
     DriverEnded,
+}
+
+/// One long-lived SIGINT listener.
+///
+/// `tokio::signal::ctrl_c()` does **not** buffer: every call creates a fresh watch receiver,
+/// so a signal that arrives while no `ctrl_c()` future is registered is lost. Awaiting a
+/// fresh `ctrl_c()` on each loop iteration (as this CLI first did) therefore dropped the
+/// second Ctrl-C of a wind-down now and then, and the CLI left with code 0 instead of 130.
+/// One task loops on `ctrl_c()` and forwards into a channel, so no signal can fall between
+/// two calls.
+fn spawn_signals() -> mpsc::UnboundedReceiver<()> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        loop {
+            if tokio::signal::ctrl_c().await.is_err() {
+                // The handler could not be installed (it can be retried); do not drop the
+                // channel, or the loop would spin on a closed receiver.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+            if tx.send(()).is_err() {
+                break;
+            }
+        }
+    });
+    rx
 }
 
 /// Reads stdin on one dedicated task and hands each line to whoever needs it next: the
