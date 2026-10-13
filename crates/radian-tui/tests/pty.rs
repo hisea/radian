@@ -861,16 +861,18 @@ async fn pty_an_over_budget_request_is_still_sent() {
             dir.path().to_str().unwrap(),
             "--session-id",
             "budget-over",
-            // B = C - R = 20000 - 16384 = 3616.
+            // B = C - R = 17000 - 16384 = 616. Small, so the input that crosses it is short:
+            // every typed byte is a key event the app renders, and 20 000 of them timed out
+            // under load.
             "--context-window",
-            "20000",
+            "17000",
         ],
         30,
         110,
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
-    // ~5000 estimated tokens, over B = 3616.
-    pty.send(format!("{}\r", "x".repeat(20_000)).as_bytes());
+    // ~1000 estimated tokens, over B = 616.
+    pty.send(format!("{}\r", "x".repeat(4_000)).as_bytes());
     assert!(
         pty.wait_for_screen("OVER-BUDGET-REPLY", 20),
         "the over-budget request must still be sent:\n{}",
@@ -883,7 +885,7 @@ async fn pty_an_over_budget_request_is_still_sent() {
         "the projection is labelled as an estimate: {screen}"
     );
     assert!(
-        screen.contains("/ 3616"),
+        screen.contains("/ 616"),
         "the status bar shows the projection over B: {screen}"
     );
     pty.quit();
