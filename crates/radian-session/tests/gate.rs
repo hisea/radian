@@ -5,6 +5,7 @@
 mod common;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use agent_core::{InputSource, JournalRecord, Message, MessageId, TranscriptJournal};
 use common::{TempDir, created};
@@ -40,7 +41,11 @@ async fn a_runtime_event_waits_for_the_replacement_segment_to_close() {
 
     let waiter = Arc::clone(&writer);
     let task = tokio::spawn(async move { waiter.append_runtime_event(inbox_event("hello")).await });
-    writer.wait_for_gate_waiter().await;
+    // The gate is the synchronization; the timeout is only a safety net so a missing gate
+    // fails the test instead of hanging it.
+    tokio::time::timeout(Duration::from_secs(5), writer.wait_for_gate_waiter())
+        .await
+        .expect("the host append must wait while the segment is open");
     assert!(writer.segment_open());
 
     writer
@@ -115,7 +120,9 @@ async fn a_failed_segment_write_fails_the_waiter_and_the_file_still_resumes() {
     radian_session::fail_next_write("TranscriptReplacementCommitted");
     let waiter = Arc::clone(&writer);
     let task = tokio::spawn(async move { waiter.append_runtime_event(inbox_event("hello")).await });
-    writer.wait_for_gate_waiter().await;
+    tokio::time::timeout(Duration::from_secs(5), writer.wait_for_gate_waiter())
+        .await
+        .expect("the host append must wait while the segment is open");
     let commit = writer
         .append(JournalRecord::TranscriptReplacementCommitted {
             revision: 2,
