@@ -270,3 +270,14 @@ Base `84ca71d` · 一次性检出 `/tmp/orphan-mut`（detached，独立 target�
 3/3 全抓。O2/O3 走同一条端到端测试（关掉 pty master、断言有界时间内干净退出）；O1 走"panicking
 测试不留进程"这条。O3 起初没被抓住，因为最早的测试用了带控制终端的 pty：master 关闭会送 SIGHUP，
 信号标志让循环照常退出；换成无控制终端的 `openpty`（纯 EOF）后抓住。
+
+## orphan-spin-2：信号任务的兜底（同一分支第二个提交）
+
+Base `f3f38d5` · 一次性检出 `/tmp/op2-mut`（detached，独立 target，跑完删除）· `--no-fail-fast` ·
+变异后 `git checkout --` 还原、`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| O4 | 去掉信号任务的 3 秒兜底（`EXIT_WATCHDOG` 超时不再 `exit(128+signal)`） | `pty::pty_a_hung_main_loop_still_exits_on_a_signal` | ✅ failed（10s watchdog 内不退出） |
+
+1/1 抓住。该变异运行本身靠新增的 `KillOnDrop` 守护清理，未留下孤儿。
