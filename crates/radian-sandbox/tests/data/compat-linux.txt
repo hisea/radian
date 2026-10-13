@@ -1,0 +1,30 @@
+# Linux compatibility findings — independent re-run, 2026-10-12
+# VM: Arch Linux ARM aarch64, kernel 7.2.6-1-aarch64-ARCH, bwrap 0.12.0, git 2.55.0,
+#     Rust 1.88.0 (rustup minimal, installed under /tmp; see docs/sandbox.md).
+# Produced by crates/radian-sandbox/tests/compat_linux.rs (3/3 runs passed).
+
+sandbox: workspace-write, default sensitive-read denies
+
+git status       ok
+git log          ok  aaab876 init
+git config get   ok  compat@example.com
+git commit       FAILED  fatal: Unable to create '.../repo/.git/index.lock': Read-only file system
+git add          FAILED  fatal: Unable to create '.../repo/.git/index.lock': Read-only file system
+ssh -V           ok  OpenSSH_10.5p1, OpenSSL 3.6.4 25 Aug 2026
+cargo --version  ok  cargo 1.88.0 (873a06493 2025-05-10)
+cargo build --offline (project depends on itoa)  ok  (binary at proj/target/debug/compat-linux-probe)
+
+# Escape matrix, independent run (sandbox-escape --out):
+#   26/26 PASS; zero structural differences vs tests/data/escape-linux.{txt,json}
+#   (group/case/expect/sandbox/control/verdict columns and the JSON
+#    sandbox_succeeded/control_succeeded/passed booleans).
+#   ps after the run: no bwrap / mcp_echo.py / sandbox-exec orphans.
+
+# Backend unavailable, PATH without bwrap (restorable; no system file touched):
+#   ./target/debug/sandbox-escape -> exit 2
+#   "sandbox backend unavailable: sandbox: linux-bwrap is not available: bwrap could not be
+#    run: No such file or directory (os error 2); run is refused (never unsandboxed)"
+
+# git.rs flake (fixed in this branch): `.git/objects/maintenance.lock` from git's background
+# auto-maintenance (git 2.55; macOS git 2.53 does not run it). Mutation without the
+# maintenance.auto=false / gc.auto=0 pin: 5 failures / 20 runs; with the pin: 0 / 20.

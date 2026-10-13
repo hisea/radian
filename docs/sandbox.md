@@ -116,9 +116,61 @@ scp <user>@<host>:/tmp/radian-sandbox-evidence/escape-linux.* crates/radian-sand
 VM 上只写 `/tmp` 下自建目录，不碰 `~/.ssh` 或任何真实凭据。矩阵的敏感读用例使用自建的假 key，
 并且只重定向到 `/dev/null`、只看退出码，从不读内容。
 
+## Linux 独立复核（2026-10-12，评审者本人在 VM 上重跑）
+
+**环境**：`ssh <user>@<host>`，Arch Linux ARM（aarch64，内核 7.2.6，bwrap 0.12.0，git 2.55.0）。
+第一条命令确认 `uname -s` = Linux。为了跑**真正的测试套件**（而不是交叉编译的驱动），在 VM 里装了
+Rust：下载 `rustup-init`（static.rust-lang.org，aarch64）后用
+`RUSTUP_HOME=/tmp/radian-rust/rustup CARGO_HOME=/tmp/radian-rust/cargo ./rustup-init -y --profile
+minimal --default-toolchain 1.88.0 --no-modify-path` 安装，全部落在 `/tmp`，**未动系统文件、未动
+`~/.ssh` 或任何凭据**。仓库用 tar 同步到 `/tmp/radian-linux/src`；因 `/tmp` 是 3.9G tmpfs，构建加
+`CARGO_PROFILE_DEV_DEBUG=0` 只为缩小目标目录。
+
+**1. 逃逸矩阵（独立重跑）**：`cargo test -p radian-sandbox` 的 `linux_escape_matrix` 通过；另用
+`sandbox-escape --out` 独立跑一次，**26/26 PASS**，并与仓库里的 `escape-linux.{txt,json}` 逐条比对
+（表的 group/case/expect/sandbox/control/verdict 列与 JSON 的
+`sandbox_succeeded`/`control_succeeded`/`passed`）**零差异**。每条"应当失败"都带关沙箱对照；矩阵
+结束后 VM `ps` 无 `bwrap`/`mcp_echo.py`/`sandbox-exec` 孤儿。
+
+**2. shell 工具（Linux 首跑）**：`cargo test -p radian-coding --test shell` **12/12 通过**：
+
+- 超时与取消杀整个进程组：`a_timeout_kills_the_whole_process_group`、
+  `cancellation_kills_the_whole_process_group`；跑完 VM `ps` 无 `sleep 600` 孤儿。
+- 输出截断保留头尾：`the_end_of_a_long_output_is_kept`（尾部 `ERROR:` 行存活）、
+  `each_stream_has_its_own_budget`、`memory_does_not_grow_with_the_output`（50 MiB 进 64 KiB 预算）。
+- 环境变量不外泄：`the_host_environment_does_not_reach_the_shell`。
+- `workspace-write` 边界：`workspace_write_confines_the_shell`（工作区内写成功、工作区外写失败、
+  denied 读失败、连本机端口失败；每项带关沙箱对照）。
+- 后端不可用不降级：把 `bwrap` 从 PATH 拿掉（可还原，不改系统文件），
+  `sandbox-escape` 退出 2 且打印 `run is refused (never unsandboxed)`。
+
+**3. 带依赖的 `cargo build`**：新增 `crates/radian-sandbox/tests/compat_linux.rs`（Linux-only，
+镜像 `compat_macos.rs`），用一个依赖 `itoa` 的真项目 `cargo build --offline`，**成功**，产物在
+工作区 `target/debug/` 内；`git status/log/config`、`ssh -V`、`cargo --version` 可用，
+`git add`/`git commit` 按设计被 `.git` 只读拒绝。3/3 次通过。证据 `tests/data/compat-linux.txt`。
+（VM 的 cargo/rustup 在 `/tmp` 下，测试把 `CARGO_HOME`/`RUSTUP_HOME` 加入 `allow_env`；CI 里它们在
+`~/.cargo`/`~/.rustup`，本就在默认 allow 的 `HOME` 之下。）
+
+**4. 发现并修复**：`radian-coding/tests/git.rs` 的
+`git_status_and_diff_report_the_worktree_and_leave_dot_git_untouched` 在 Linux 上约 **1/3 概率失败**，
+差分定位到 `.git/objects/maintenance.lock` 出现。根因是 setup 的 `git commit` 触发了 git 的**后台
+auto-maintenance**（git 2.55 会跑；macOS 的 2.53 不跑），与本切片的只读 git 工具无关。修复：测试仓库
+`git config maintenance.auto false` + `gc.auto 0`。变异（去掉这两行）在 VM 上 20 次跑出 **5 次失败**；
+带上修复 20 次 **0 失败**。**未改动任何产品规则**。
+
+**5. `agent-cli` 档位接线（Linux 首跑）**：先 `cargo build -p agent-extensions --bin mcp-fixture`
+（`cargo test -p agent-cli` 单独跑不会自动构建它，测试里有明确的报错提示），再
+`cargo test -p agent-cli` **49/49 通过**，连跑 3 次稳定。含
+`a_failed_sandbox_probe_refuses_instead_of_degrading`（探针失败即拒绝，模型一次都没跑）、
+`the_startup_text_does_not_claim_credential_isolation`、默认 `workspace-write`、无沙箱不注册 `shell`。
+
+**启动开销**（VM 本机重测，20 次）：裸 `true` 中位 0.93 ms，沙箱内 8.73 ms，**~7.8 ms**（与旧值
+~8.0 ms 一致）。
+
 ## 未验证 / 已知边界
 
-- **只在 macOS 27.0.1（arm64）与一台 aarch64 Arch ARM VM（内核 7.2.6、bwrap 0.12.0）上跑过**；
+- **只在 macOS 27.0.1（arm64）与一台 aarch64 Arch ARM VM（内核 7.2.6、bwrap 0.12.0、git 2.55.0）
+  上跑过**；
   其他 macOS 版本、发行版、x86_64、容器内、setuid bwrap、无特权 userns 被禁用的发行版均未验证。
 - **没有测** `network = true` 的细粒度（只做全开/全关）；`mach-lookup` 最小化未做；时间注入类
   逃生未系统测试（`already-open fd` 不受限，spawner 不向子进程传可写 fd，但没有专门用例）。
@@ -130,6 +182,6 @@ VM 上只写 `/tmp` 下自建目录，不碰 `~/.ssh` 或任何真实凭据。�
 
 1. **复现步骤里的文件名错了，已改。** 二进制叫 `sandbox-escape`（`Cargo.toml` 的 `[[bin]] name`），`scp … /tmp/` 后它在 `/tmp/sandbox-escape`，而原文下一行运行的是 `/tmp/radian-sandbox-escape`——照原文复现会直接失败。评审者按原文执行时撞上，已改成 `/tmp/sandbox-escape`。
 2. **"真实 `cargo build` 能跑"的覆盖范围比测试本身更宽，但要说准。** 仓库里的兼容性测试验的是一个**零依赖**的 hello-world（`--offline`）。评审者另外在本机（macOS）沙箱里做了一次**带依赖的真实构建**：一个依赖 `serde_json` 的项目（共 11 个包，依赖从本机 cargo 缓存读取、`--offline`、网络关闭、`Cargo.lock` 在沙箱外预先生成），`cargo build` **成功**，用时约 8 秒。该探针依赖本机缓存状态，因此没有提交成测试。**未验证**：需要联网拉依赖的构建（`workspace-write` 默认关网，这类构建按设计会失败）、带 build script 写工作区外路径的 crate、其他构建系统。
-3. **Linux 结果本轮评审未能独立重跑。** 驱动可以按文档交叉编译（得到静态链接的 aarch64 ELF），但评审时 VM 已不可达（`ssh: … No route to host`）。所以 Linux 的 26/26 目前**以本文作者提交的证据为准**（`tests/data/escape-linux.{txt,json}`），评审者核对了证据文件格式与"每条失败都带关沙箱对照"的列，但没有在 VM 上再跑一次。上一轮 Linux spike 的 26 条中的同类用例评审者是独立复现过的（见 `docs/spikes/linux-sandbox.md`）。
+3. **Linux 结果本轮评审未能独立重跑。**（**后续已补**：2026-10-12 评审者在 VM 上独立重跑，26/26，零差异；见文末“Linux 独立复核”节。） 驱动可以按文档交叉编译（得到静态链接的 aarch64 ELF），但评审时 VM 已不可达（`ssh: … No route to host`）。所以 Linux 的 26/26 目前**以本文作者提交的证据为准**（`tests/data/escape-linux.{txt,json}`），评审者核对了证据文件格式与"每条失败都带关沙箱对照"的列，但没有在 VM 上再跑一次。上一轮 Linux spike 的 26 条中的同类用例评审者是独立复现过的（见 `docs/spikes/linux-sandbox.md`）。
 4. **本切片在 owner 的 Mac 上装了 rustup target `aarch64-unknown-linux-musl`**（用于交叉编译 VM 上跑的驱动）。这是一次开发环境改动，不影响仓库，但值得知道。
 5. **`git add`/`git commit` 在 `workspace-write` 下失败是设计结果**（`.git` 只读覆盖，ADR 0012），不是兼容性缺陷。含义：在该档位下 agent 不能自己提交；提交是宿主或用户在沙箱外做的事——这与计划 Phase 6c "apply/merge/push 保持独立审批步骤" 一致。
