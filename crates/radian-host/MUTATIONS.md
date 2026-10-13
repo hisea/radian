@@ -143,3 +143,17 @@ Base: `9daed70` · 一次性检出 `/tmp/sessions-mut`（detached，跑完删除
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
 | M4 | `sessions::export` 不传 secrets 给 `ExportOptions` | `sessions::export_redacts_known_secrets` | ✅ failed |
+
+## ADR 0018：自适应 `R`
+
+Base `0a3c197` · 一次性检出 `/tmp/adaptr-mut`（detached，独立 target，跑完删除）· `--no-fail-fast` ·
+每个变异 `git checkout --` 还原、`git status --short` 为空。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M7 | 仍用固定 16384（`R = max(16384, request)`） | ✅ failed | `catalog::tests::the_output_reservation_scales_with_the_window_and_the_request`；也由 `cli::the_startup_line_names_an_explicit_window` 抓住（B 回到 3616） |
+| M8 | `⌊C/4⌋` 写成 `⌊C/2⌋` | ✅ failed | 同上（C=8192 → 4096 而非 2048） |
+| M9 | 忽略请求的 max_output（去掉 `.max(request)`） | ✅ failed | 同上（C=8192 + max_tokens=16384 应得 16384） |
+| M10 | `C` 未知时返回上限 16384（而不是 0/请求值） | ✅ failed | 同上（`output_reservation(None, None)` 应为 0） |
+
+4/4 全抓。M7 走单元与 CLI 两条路径：固定预留会让 `--context-window 20000` 的 `B` 回到旧的 3616。
