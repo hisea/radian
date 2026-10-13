@@ -216,3 +216,21 @@ Base `c2a668d` · 一次性检出 `/tmp/radian-mention-mut`（detached，独立 
 | M18 | 不再总是跳过 `.git` / `.radian-sandbox` | `mention::tests::hidden_entries_need_a_leading_dot_and_git_is_always_skipped` | ✅ failed |
 
 8/8 全抓，无等价变异。M15 走 pty（发送路径），其余走纯函数单测。
+
+## tab：`@` 补全接到 Tab（Phase 4）
+
+Base `81ea117` · 一次性检出 `/tmp/radian-tab-mut`（detached，独立 target，跑完删除）·
+`--no-fail-fast` · 每个变异 `git checkout --` 还原、`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M19 | 唯一候选的替换区间错位（`range.start + 1`） | `mention_tab::a_unique_file_candidate_completes_and_adds_a_space` | ✅ failed |
+| M20 | 目录也加空格（不再保留尾 `/`） | `mention_tab::a_unique_directory_candidate_keeps_the_trailing_slash` | ✅ failed |
+| M21 | 第二次 Tab 不显示候选列表 | `mention_tab::several_candidates_complete_to_the_common_prefix_then_list` | ✅ failed |
+| M22 | 非 `@` 词也补全（`mention::complete` 不要求 `@`） | `mention_tab::tab_on_a_word_that_is_not_a_reference_does_nothing` | ✅ failed |
+| M23 | `Esc` 不关闭列表（落到清空输入的分支） | `mention_tab::esc_closes_the_list_without_clearing_the_input` | ✅ failed |
+| M24 | `truncate_columns` 不截断 | `render::completion_rows_truncates_to_the_width` | ✅ failed |
+
+6/6 全抓。M22、M24 起初有漏：`plain`/`mail a@b` 本来就不匹配文件，而 `Paragraph` 自己会裁剪，
+所以屏幕测试抓不住——补了“无 `@` 但匹配文件”的用例与 `completion_rows` 的直接单测（`81ea117`）
+后才抓住，记录在此。
