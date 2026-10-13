@@ -281,9 +281,10 @@ const KINDS: [Kind; 12] = [
 /// What the contract requires for a mutation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Expected {
-    /// Only committed bytes can be lost (truncation, a removed final LF). A successful read's
-    /// folded records are a prefix of the base; an error is legitimate when the surviving
-    /// prefix is internally inconsistent (a `TranscriptReplaced` whose messages were lost).
+    /// Only committed bytes can be lost (truncation, a removed final LF). The read **must**
+    /// succeed: dropping a torn tail is not a reason to refuse the file, and ADR 0005 makes a
+    /// replacement cut short at end of file recoverable. The folded records are a prefix of
+    /// the base.
     SuffixLoss,
     /// Envelope-only byte damage. A successful read keeps the base's records in order minus
     /// any event the damage turned into an unknown non-critical one, and every vanished event
@@ -691,7 +692,10 @@ fn run_case(base: &Base, seed: u64, kind: Kind) {
             );
             match kind.expected() {
                 Expected::Refused => {}
-                Expected::SuffixLoss | Expected::EnvelopeEither | Expected::DataEither => {}
+                Expected::SuffixLoss => panic!(
+                    "losing a committed suffix (a torn tail) must still read: {context}: {error}"
+                ),
+                Expected::EnvelopeEither | Expected::DataEither => {}
                 Expected::SkippedAppend | Expected::KnownAppend => {
                     panic!("appended content must be readable: {context}: {error}")
                 }
