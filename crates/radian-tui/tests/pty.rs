@@ -3228,3 +3228,91 @@ async fn pty_sessions_and_export_commands() {
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
 }
+
+// ---------- the configuration file (ADR 0008) ----------
+
+/// A rebound `send` key sends, and `Enter` (rebound to newline in the same file) does not:
+/// the request text carries the newline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_rebound_send_key_sends_and_enter_does_not() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("config-send");
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "schema_version = 1\n[tui.keybindings]\nsend = [\"ctrl-s\"]\nnewline = [\"enter\"]\n",
+    )
+    .unwrap();
+    let server = MockServer::start(vec![text_reply("SENT")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--config",
+            config.to_str().unwrap(),
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "rebind",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"hi");
+    pty.send(b"\r"); // Enter: a newline, not a send
+    pty.send(&[0x13]); // Ctrl-S: the rebound send
+    assert!(pty.wait_for_screen("SENT", 15), "{}", pty.screen());
+    assert_eq!(server.requests().len(), 1, "only Ctrl-S sent");
+    assert_eq!(
+        last_user_text(&server, 0),
+        "hi\n",
+        "Enter added the newline"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// One key bound to two actions refuses startup, naming the conflict.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_keymap_conflict_refuses_to_start() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("config-conflict");
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "schema_version = 1\n[tui.keybindings]\nsend = [\"ctrl-j\"]\n",
+    )
+    .unwrap();
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--config",
+            config.to_str().unwrap(),
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "conflict",
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_exit(10).is_some(),
+        "the app must refuse to start"
+    );
+    assert_ne!(pty.app_exit_code(), Some(0));
+    let raw = String::from_utf8_lossy(&pty.raw()).into_owned();
+    assert!(raw.contains("ctrl-j") && raw.contains("newline"), "{raw}");
+    assert!(!sessions.join("conflict.jsonl").exists(), "no session file");
+}

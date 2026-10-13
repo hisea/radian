@@ -43,6 +43,9 @@ Two more binaries exist but are not part of the product surface: `agent-extensio
   slash command (same commands), the agent's `memory_search` / `memory_get` / `memory_save` /
   `memory_revise` tools (writes always ask), and deterministic injection with the
   `MemoryInjected` audit event.
+- **The configuration file (ADR 0008)** is implemented read-only: `--config`/`RADIAN_CONFIG`/
+  `~/.radian/config/config.toml`, with `model.*`, `permissions.profile` and `compaction.auto`
+  wired as defaults (the command line wins). It never contains a secret value.
 - **Automatic compaction (ADR 0018)** is implemented: the proactive budget path, the
   provider-overflow fallback (compact to half and retry once), and a manual `/compact` in both
   hosts. `--no-auto-compact` turns off the proactive path only; the overflow fallback still
@@ -148,6 +151,48 @@ Resume a session written by either host:
 per-turn model-call fuse is `--max-model-calls` (default 1000, far above the core's 32).
 Keys, the approval box, the status bar and the context-budget wording are in
 `crates/radian-tui/README.md`.
+
+## Configuration file (ADR 0008)
+
+Both hosts read `~/.radian/config/config.toml` (`$RADIAN_HOME/config/config.toml`) unless
+`--config FILE` or `RADIAN_CONFIG` names another path. A missing file is an empty configuration
+and is never created. The file is **read-only** in this build: there is no `config migrate` and
+nothing is ever written back.
+
+```toml
+schema_version = 1
+
+[model]
+provider = "openai-compatible"
+base_url = "https://api.openai.com/v1"
+model = "gpt-5"
+context_window = 200000
+api_key = { from = "env", name = "OPENAI_API_KEY" }   # a reference; never a value
+
+[model.headers]
+x-tenant = "team"
+
+[permissions]
+profile = "workspace"        # safe | workspace | full
+
+[compaction]
+auto = true
+
+[tui]
+theme = "dark"               # dark | light | mono; NO_COLOR forces mono
+```
+
+- **The command line always wins**; the file only supplies defaults.
+- **A secret value is never accepted.** `api_key`/`token`/`password`/… must be a `SecretRef`
+  (`{ from = "env", name = "…" }`; this version supports `env` only), and a secret-looking
+  string anywhere in the file is refused. A refusal names the key path and never the value.
+- `schema_version` is required and an integer. A **newer** version is read read-only with a
+  warning; an **older** one is refused (there is no migration).
+- An unknown `permissions` value is refused (fail-closed); an unknown `tui.*` value and any
+  unknown field is ignored with a warning. Startup prints `[config] <path|none>` and the
+  ignored keys (never values).
+- The file is **sandbox-readable** (ADR 0020), which is exactly why it holds references, never
+  keys.
 
 ## Permission tiers
 

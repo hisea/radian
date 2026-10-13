@@ -185,6 +185,23 @@ reservation), never a silently clamped number.
   `/compact [note]` — a whole line, not a message, and not available in `-p` — which
   summarizes on demand between turns; Ctrl-C cancels it without committing.
 
+## Configuration file (ADR 0008)
+
+Read-only, read from `--config FILE`, else `RADIAN_CONFIG`, else
+`~/.radian/config/config.toml` (`$RADIAN_HOME/config/config.toml`; ADR 0020). A missing file is
+an empty configuration and is never created. The file is a **default**; every flag wins.
+
+Wired here: `model.provider`, `model.base_url`, `model.model` (so `--model` is optional when it
+is set), `model.api_key` (a `{ from = "env", name = "…" }` reference, equivalent to
+`--api-key-env`), `model.headers` (equivalent to `--header`), `model.context_window`,
+`permissions.profile`, `compaction.auto`. `mcp.*` and `model.include_usage` are known and not
+wired yet; the startup names every ignored key (never a value).
+
+A secret **value** is refused: a bare string on `api_key`/`token`/… and a secret-looking string
+anywhere (the ADR 0008 §4.2 heuristic) both fail startup, and the message names the key path
+without echoing the value. `schema_version` is required; a newer one is read read-only with a
+warning, an older one is refused. See the root `README.md` for the example file.
+
 ## Exit codes
 
 | Code | Meaning |

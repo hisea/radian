@@ -25,6 +25,9 @@ radian-session = { path = "../radian-session" }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "system-proxy"] }
 serde.workspace = true
 serde_json.workspace = true
+# The read-only configuration file (ADR 0008) is TOML (its fixtures are TOML). Parsing only:
+# this slice never writes the file, so `toml_edit` is not needed.
+toml = "0.8"
 
 [dev-dependencies]
 # The catalog tests use the adapter's local mock HTTP server, never the real network.

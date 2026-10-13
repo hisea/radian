@@ -60,6 +60,42 @@ the composer.
 
 Shift-Enter needs a terminal with the enhanced keyboard protocol; Ctrl-J works everywhere.
 
+### Theme and keybindings (config `tui.*`)
+
+The file is read the same way as the CLI's (`--config`, `RADIAN_CONFIG`,
+`~/.radian/config/config.toml`); every flag still wins.
+
+```toml
+schema_version = 1
+[tui]
+theme = "dark"                 # dark | light | mono
+
+[tui.keybindings]
+send = ["ctrl-s"]              # replaces the default `enter`
+newline = ["ctrl-j", "alt-enter", "shift-enter"]
+history_prev = ["up"]
+```
+
+- `theme`: `dark` is the original palette, `light` re-picks it for a light background, `mono`
+  uses no color at all (bold/underline/dim only). A non-empty `NO_COLOR` environment variable
+  forces `mono` (<https://no-color.org>). An unknown theme is ignored with a warning.
+- `keybindings` maps an **action** to one or more key strings; a listed action's keys
+  **replace** its defaults. Key strings are `[ctrl-][alt-][shift-]key` (`enter`, `ctrl-j`,
+  `alt-enter`, `shift-up`, `pageup`, `space`, a single character, …). An unknown action or key
+  is ignored with a warning; **one key bound to two actions refuses startup** (the message
+  names the key and both actions).
+- Actions: `send`, `newline`, `cursor_left`, `cursor_right`, `word_left`, `word_right`,
+  `line_start`, `line_end`, `history_prev`, `history_next`, `delete_before`, `delete_under`,
+  `delete_word`, `delete_to_line_start`, `delete_to_line_end`, `scroll_page_up`,
+  `scroll_page_down`, `scroll_line_up`, `scroll_line_down`, `scroll_top`, `scroll_bottom`,
+  `escape`, `cancel`. The defaults are exactly the table above, so an empty config changes
+  nothing.
+- **The approval and command-confirmation prompts are not rebindable.** `y`/`a`/`n` and `Esc`
+  are handled before the keymap, so a bad keybinding cannot approve a tool call the user meant
+  to deny; `cancel` still works while a prompt is up.
+- Note that rebinding `send` away from `enter` leaves `enter` a no-op unless `newline` is given
+  it too (as in the example) — the keys are a total map, not layered.
+
 The history is this session's submitted lines (messages and `/…` commands). A resume rebuilds
 it from the journal's user messages. It is not persisted on its own.
 

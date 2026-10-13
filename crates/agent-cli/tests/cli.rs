@@ -3734,20 +3734,18 @@ async fn session_commands_do_not_need_a_model() {
     assert!(stdout.contains("nm"), "{stdout}");
 }
 
-/// A conversation still requires `--model`: `-p` and interactive mode are usage errors
-/// without it (exit 2, before any session is created). The `Usage:` line proves clap parsed
-/// the arguments and refused, rather than a later setup step failing.
+/// A conversation still requires a model: with no `--model` and no `model.model` in the
+/// config file, `-p` and interactive mode are usage errors (exit 2, before any session is
+/// created). The decision moved from clap to `setup` so the config file can supply it.
 #[tokio::test]
 async fn a_conversation_still_requires_a_model() {
     let (code, _, stderr) = feed_and_wait(spawn_agent(&["-p", "hi"], &[]), "").await;
     assert_eq!(code, 2, "{stderr}");
     assert!(stderr.contains("--model"), "{stderr}");
-    assert!(stderr.contains("Usage:"), "{stderr}");
 
     let (code, _, stderr) = feed_and_wait(spawn_agent(&[], &[]), "").await;
     assert_eq!(code, 2, "{stderr}");
     assert!(stderr.contains("--model"), "{stderr}");
-    assert!(stderr.contains("Usage:"), "{stderr}");
 }
 
 /// `--export` validates the id as a session id before using it as a file name: a path-like
@@ -5206,4 +5204,161 @@ async fn an_interactive_compact_is_a_command_and_compactfoo_is_a_message() {
     assert_eq!(stderr.matches("nothing to compact").count(), 2, "{stderr}");
     assert_eq!(server.requests().len(), 1, "only `/compactfoo` was a turn");
     assert_eq!(last_user_text(&messages_of(&server, 0)), "/compactfoo");
+}
+
+// ---------- the configuration file (ADR 0008) ----------
+
+/// A `--config` file supplies the model (so `--model` is not needed), and a `--model` on the
+/// command line overrides it. `RADIAN_CONFIG` is the fallback when `--config` is absent.
+#[tokio::test]
+async fn a_config_file_supplies_the_model_and_the_cli_overrides_it() {
+    let dir = scratch("config-model");
+    let config = dir.join("config.toml");
+    std::fs::write(
+        &config,
+        "schema_version = 1\n[model]\nmodel = \"config-model\"\n",
+    )
+    .unwrap();
+    let server = MockServer::start(vec![text_reply("A"), text_reply("B"), text_reply("C")]).await;
+    let sessions = dir.join("sessions");
+
+    // No `--model`: the config supplies it.
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--config",
+                config.to_str().unwrap(),
+                "--base-url",
+                &server.base_url,
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("[config]"),
+        "the startup line names the file: {stderr}"
+    );
+    assert_eq!(server.requests()[0].json()["model"], "config-model");
+
+    // `--model` wins over the file.
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--config",
+                config.to_str().unwrap(),
+                "--model",
+                "cli-model",
+                "--base-url",
+                &server.base_url,
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(server.requests()[1].json()["model"], "cli-model");
+
+    // `RADIAN_CONFIG` is the fallback.
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--base-url",
+                &server.base_url,
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "-p",
+                "hi",
+            ],
+            &[("RADIAN_CONFIG", config.to_str().unwrap())],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(server.requests()[2].json()["model"], "config-model");
+}
+
+/// A `schema_version` below the supported one is refused at startup, before any session file
+/// exists (ADR 0008 §5.3: no v0→v1 path, and the file is never rewritten).
+#[tokio::test]
+async fn a_lower_schema_version_refuses_to_start_without_creating_a_session() {
+    let dir = scratch("config-lower");
+    let config = dir.join("config.toml");
+    std::fs::write(&config, "schema_version = 0\n[model]\nmodel = \"m\"\n").unwrap();
+    let sessions = dir.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--config",
+                config.to_str().unwrap(),
+                "--base-url",
+                &server.base_url,
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("schema_version"), "{stderr}");
+    assert!(
+        jsonl_snapshot(&sessions).is_empty(),
+        "no session file may be created: {:?}",
+        dir_names(&sessions)
+    );
+    assert!(server.requests().is_empty(), "no request is sent");
+}
+
+/// A plaintext secret in the config is refused, and the error never echoes the value.
+#[tokio::test]
+async fn a_plaintext_secret_in_the_config_is_refused_without_echoing_it() {
+    let dir = scratch("config-secret");
+    let config = dir.join("config.toml");
+    std::fs::write(
+        &config,
+        "schema_version = 1\n[model]\nmodel = \"m\"\napi_key = \"sk-live-abcdef123456\"\n",
+    )
+    .unwrap();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--config",
+                config.to_str().unwrap(),
+                "--base-url",
+                &server.base_url,
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("api_key"), "{stderr}");
+    assert!(
+        !stderr.contains("sk-live"),
+        "the value must not be echoed: {stderr}"
+    );
 }

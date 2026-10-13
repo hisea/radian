@@ -7,12 +7,14 @@
 pub mod app;
 pub mod command;
 pub mod composer;
+pub mod keys;
 pub mod mention;
 pub mod picker;
 pub mod profile;
 pub mod render;
 pub mod signals;
 pub mod terminal;
+pub mod theme;
 
 pub use app::{App, ApprovalPrompt, Entry, EntryKind, Send, TurnState};
 pub use composer::Composer;

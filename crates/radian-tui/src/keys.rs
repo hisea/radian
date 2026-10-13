@@ -1,0 +1,468 @@
+//! The rebindable keymap (config key `tui.keybindings`).
+//!
+//! Actions are the names in the README's key table; their built-in keys are exactly today's
+//! behavior, so an empty `tui.keybindings` changes nothing (the existing pty tests are the
+//! proof). A listed action's keys **replace** its defaults. An unknown action or an
+//! unparsable key string is skipped with a warning; one key bound to two actions is a startup
+//! error (rather than guessing a priority).
+//!
+//! The approval and command-confirmation prompts (`y`/`a`/`n`/`Esc`) are deliberately **not**
+//! in this map: they cannot be rebound, because a misconfiguration there could approve a tool
+//! call the user meant to deny.
+
+use std::fmt;
+
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+/// One semantic action the UI can perform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Action {
+    Send,
+    Newline,
+    CursorLeft,
+    CursorRight,
+    WordLeft,
+    WordRight,
+    LineStart,
+    LineEnd,
+    HistoryPrev,
+    HistoryNext,
+    DeleteBefore,
+    DeleteUnder,
+    DeleteWord,
+    DeleteToLineStart,
+    DeleteToLineEnd,
+    ScrollPageUp,
+    ScrollPageDown,
+    ScrollLineUp,
+    ScrollLineDown,
+    ScrollTop,
+    ScrollBottom,
+    Escape,
+    Cancel,
+}
+
+impl Action {
+    /// The action's config/README name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Action::Send => "send",
+            Action::Newline => "newline",
+            Action::CursorLeft => "cursor_left",
+            Action::CursorRight => "cursor_right",
+            Action::WordLeft => "word_left",
+            Action::WordRight => "word_right",
+            Action::LineStart => "line_start",
+            Action::LineEnd => "line_end",
+            Action::HistoryPrev => "history_prev",
+            Action::HistoryNext => "history_next",
+            Action::DeleteBefore => "delete_before",
+            Action::DeleteUnder => "delete_under",
+            Action::DeleteWord => "delete_word",
+            Action::DeleteToLineStart => "delete_to_line_start",
+            Action::DeleteToLineEnd => "delete_to_line_end",
+            Action::ScrollPageUp => "scroll_page_up",
+            Action::ScrollPageDown => "scroll_page_down",
+            Action::ScrollLineUp => "scroll_line_up",
+            Action::ScrollLineDown => "scroll_line_down",
+            Action::ScrollTop => "scroll_top",
+            Action::ScrollBottom => "scroll_bottom",
+            Action::Escape => "escape",
+            Action::Cancel => "cancel",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        DEFAULT_BINDINGS
+            .iter()
+            .find(|(candidate, _)| *candidate == name)
+            .map(|(_, action)| *action)
+    }
+}
+
+/// The built-in bindings: exactly today's key behavior, action by action.
+const DEFAULT_BINDINGS: &[(&str, Action)] = &[
+    ("send", Action::Send),
+    ("newline", Action::Newline),
+    ("cursor_left", Action::CursorLeft),
+    ("cursor_right", Action::CursorRight),
+    ("word_left", Action::WordLeft),
+    ("word_right", Action::WordRight),
+    ("line_start", Action::LineStart),
+    ("line_end", Action::LineEnd),
+    ("history_prev", Action::HistoryPrev),
+    ("history_next", Action::HistoryNext),
+    ("delete_before", Action::DeleteBefore),
+    ("delete_under", Action::DeleteUnder),
+    ("delete_word", Action::DeleteWord),
+    ("delete_to_line_start", Action::DeleteToLineStart),
+    ("delete_to_line_end", Action::DeleteToLineEnd),
+    ("scroll_page_up", Action::ScrollPageUp),
+    ("scroll_page_down", Action::ScrollPageDown),
+    ("scroll_line_up", Action::ScrollLineUp),
+    ("scroll_line_down", Action::ScrollLineDown),
+    ("scroll_top", Action::ScrollTop),
+    ("scroll_bottom", Action::ScrollBottom),
+    ("escape", Action::Escape),
+    ("cancel", Action::Cancel),
+];
+
+/// The default key strings per action.
+const DEFAULT_KEYS: &[(&str, &[&str])] = &[
+    ("send", &["enter"]),
+    ("newline", &["ctrl-j", "alt-enter", "shift-enter"]),
+    ("cursor_left", &["left"]),
+    ("cursor_right", &["right"]),
+    ("word_left", &["ctrl-left", "alt-left"]),
+    ("word_right", &["ctrl-right", "alt-right"]),
+    ("line_start", &["home", "ctrl-a"]),
+    ("line_end", &["end", "ctrl-e"]),
+    ("history_prev", &["up"]),
+    ("history_next", &["down"]),
+    ("delete_before", &["backspace"]),
+    ("delete_under", &["delete"]),
+    ("delete_word", &["ctrl-w"]),
+    ("delete_to_line_start", &["ctrl-u"]),
+    ("delete_to_line_end", &["ctrl-k"]),
+    ("scroll_page_up", &["pageup"]),
+    ("scroll_page_down", &["pagedown"]),
+    ("scroll_line_up", &["shift-up"]),
+    ("scroll_line_down", &["shift-down"]),
+    ("scroll_top", &["ctrl-home"]),
+    ("scroll_bottom", &["ctrl-end"]),
+    ("escape", &["esc"]),
+    ("cancel", &["ctrl-c"]),
+];
+
+/// One key and its modifiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct KeyPress {
+    pub code: KeyCode,
+    pub modifiers: KeyModifiers,
+}
+
+impl KeyPress {
+    /// Parses `[ctrl-][alt-][shift-]key`, e.g. `enter`, `ctrl-j`, `alt-enter`, `shift-up`.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let mut modifiers = KeyModifiers::NONE;
+        let mut rest = text;
+        while let Some((head, tail)) = rest.split_once('-') {
+            match head.to_ascii_lowercase().as_str() {
+                "ctrl" | "control" => modifiers |= KeyModifiers::CONTROL,
+                "alt" | "meta" => modifiers |= KeyModifiers::ALT,
+                "shift" => modifiers |= KeyModifiers::SHIFT,
+                _ => break,
+            }
+            rest = tail;
+        }
+        Ok(KeyPress {
+            code: parse_code(rest)?,
+            modifiers,
+        })
+    }
+
+    /// Whether a real key event is this binding. A character compares case-insensitively, and
+    /// an uppercase character (which already encodes Shift) does not require the Shift flag.
+    pub fn matches(&self, key: &KeyEvent) -> bool {
+        if !codes_match(&self.code, &key.code) {
+            return false;
+        }
+        let mut modifiers =
+            key.modifiers & (KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT);
+        if matches!(key.code, KeyCode::Char(c) if c.is_uppercase()) {
+            modifiers &= !KeyModifiers::SHIFT;
+        }
+        self.modifiers == modifiers
+    }
+}
+
+impl fmt::Display for KeyPress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.modifiers.contains(KeyModifiers::CONTROL) {
+            f.write_str("ctrl-")?;
+        }
+        if self.modifiers.contains(KeyModifiers::ALT) {
+            f.write_str("alt-")?;
+        }
+        if self.modifiers.contains(KeyModifiers::SHIFT) {
+            f.write_str("shift-")?;
+        }
+        f.write_str(&code_name(&self.code))
+    }
+}
+
+/// The config spelling of a key code (the inverse of [`parse_code`]).
+fn code_name(code: &KeyCode) -> String {
+    match code {
+        KeyCode::Char(' ') => "space".to_owned(),
+        KeyCode::Char(c) => c.to_string(),
+        KeyCode::Enter => "enter".to_owned(),
+        KeyCode::Esc => "esc".to_owned(),
+        KeyCode::Tab => "tab".to_owned(),
+        KeyCode::BackTab => "backtab".to_owned(),
+        KeyCode::Backspace => "backspace".to_owned(),
+        KeyCode::Delete => "delete".to_owned(),
+        KeyCode::Insert => "insert".to_owned(),
+        KeyCode::Up => "up".to_owned(),
+        KeyCode::Down => "down".to_owned(),
+        KeyCode::Left => "left".to_owned(),
+        KeyCode::Right => "right".to_owned(),
+        KeyCode::Home => "home".to_owned(),
+        KeyCode::End => "end".to_owned(),
+        KeyCode::PageUp => "pageup".to_owned(),
+        KeyCode::PageDown => "pagedown".to_owned(),
+        other => format!("{other:?}"),
+    }
+}
+
+fn parse_code(name: &str) -> Result<KeyCode, String> {
+    let lower = name.to_ascii_lowercase();
+    let code = match lower.as_str() {
+        "enter" | "return" => KeyCode::Enter,
+        "esc" | "escape" => KeyCode::Esc,
+        "tab" => KeyCode::Tab,
+        "backtab" => KeyCode::BackTab,
+        "backspace" => KeyCode::Backspace,
+        "delete" | "del" => KeyCode::Delete,
+        "insert" | "ins" => KeyCode::Insert,
+        "up" => KeyCode::Up,
+        "down" => KeyCode::Down,
+        "left" => KeyCode::Left,
+        "right" => KeyCode::Right,
+        "home" => KeyCode::Home,
+        "end" => KeyCode::End,
+        "pageup" | "page-up" | "pgup" => KeyCode::PageUp,
+        "pagedown" | "page-down" | "pgdn" => KeyCode::PageDown,
+        "space" => KeyCode::Char(' '),
+        _ => {
+            let mut chars = name.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) => KeyCode::Char(c.to_ascii_lowercase()),
+                _ => return Err(format!("unknown key {name:?}")),
+            }
+        }
+    };
+    Ok(code)
+}
+
+fn codes_match(left: &KeyCode, right: &KeyCode) -> bool {
+    match (left, right) {
+        (KeyCode::Char(a), KeyCode::Char(b)) => a.eq_ignore_ascii_case(b),
+        _ => left == right,
+    }
+}
+
+/// Why a keymap was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeymapError {
+    /// One key is bound to two actions; the user must choose.
+    Conflict {
+        key: String,
+        first: String,
+        second: String,
+    },
+}
+
+impl fmt::Display for KeymapError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            KeymapError::Conflict { key, first, second } => write!(
+                f,
+                "tui.keybindings: `{key}` is bound to both `{first}` and `{second}`; pick one"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for KeymapError {}
+
+/// The action for each key.
+#[derive(Debug, Clone)]
+pub struct Keymap {
+    bindings: Vec<(KeyPress, Action)>,
+    /// Unknown actions and unparsable keys, for the startup line.
+    pub warnings: Vec<String>,
+}
+
+impl Default for Keymap {
+    fn default() -> Self {
+        Self::builtin()
+    }
+}
+
+impl Keymap {
+    /// The built-in map (today's behavior).
+    pub fn builtin() -> Self {
+        let mut bindings = Vec::new();
+        for (name, keys) in DEFAULT_KEYS {
+            let action = Action::from_name(name).expect("a built-in action name");
+            for key in *keys {
+                bindings.push((KeyPress::parse(key).expect("a built-in key"), action));
+            }
+        }
+        Self {
+            bindings,
+            warnings: Vec::new(),
+        }
+    }
+
+    /// Builds the map from `tui.keybindings`: each listed action's keys replace its defaults.
+    /// An unknown action or an unparsable key is skipped with a warning; a key bound to two
+    /// actions is a startup error.
+    pub fn from_config(bindings: &[(String, Vec<String>)]) -> Result<Self, KeymapError> {
+        let mut map = Self::builtin();
+        for (name, keys) in bindings {
+            let Some(action) = Action::from_name(name) else {
+                map.warnings
+                    .push(format!("tui.keybindings: unknown action {name:?} ignored"));
+                continue;
+            };
+            let mut parsed = Vec::new();
+            for key in keys {
+                match KeyPress::parse(key) {
+                    Ok(press) => parsed.push(press),
+                    Err(error) => map
+                        .warnings
+                        .push(format!("tui.keybindings.{name}: {error} ignored")),
+                }
+            }
+            map.bindings.retain(|(_, bound)| *bound != action);
+            for press in parsed {
+                map.bindings.push((press, action));
+            }
+        }
+        map.check_conflicts()?;
+        Ok(map)
+    }
+
+    /// The action a key event performs, if any.
+    pub fn action_for(&self, key: &KeyEvent) -> Option<Action> {
+        self.bindings
+            .iter()
+            .find(|(press, _)| press.matches(key))
+            .map(|(_, action)| *action)
+    }
+
+    fn check_conflicts(&self) -> Result<(), KeymapError> {
+        for (index, (press, action)) in self.bindings.iter().enumerate() {
+            for (other_press, other) in &self.bindings[index + 1..] {
+                if press == other_press && action != other {
+                    return Err(KeymapError::Conflict {
+                        key: press.to_string(),
+                        first: action.name().to_owned(),
+                        second: other.name().to_owned(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    #[test]
+    fn the_builtin_map_is_todays_behavior() {
+        let map = Keymap::builtin();
+        assert_eq!(
+            map.action_for(&event(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(Action::Send)
+        );
+        assert_eq!(
+            map.action_for(&event(KeyCode::Char('j'), KeyModifiers::CONTROL)),
+            Some(Action::Newline)
+        );
+        assert_eq!(
+            map.action_for(&event(KeyCode::Enter, KeyModifiers::SHIFT)),
+            Some(Action::Newline)
+        );
+        assert_eq!(
+            map.action_for(&event(KeyCode::Up, KeyModifiers::NONE)),
+            Some(Action::HistoryPrev)
+        );
+        assert_eq!(
+            map.action_for(&event(KeyCode::Up, KeyModifiers::SHIFT)),
+            Some(Action::ScrollLineUp)
+        );
+        assert_eq!(
+            map.action_for(&event(KeyCode::Char('a'), KeyModifiers::CONTROL)),
+            Some(Action::LineStart)
+        );
+        assert_eq!(
+            map.action_for(&event(KeyCode::Char('z'), KeyModifiers::NONE)),
+            None
+        );
+        assert!(map.warnings.is_empty());
+    }
+
+    #[test]
+    fn key_strings_round_trip() {
+        for text in [
+            "enter",
+            "ctrl-j",
+            "alt-enter",
+            "shift-up",
+            "ctrl-home",
+            "pageup",
+            "space",
+        ] {
+            let press = KeyPress::parse(text).unwrap();
+            assert_eq!(press.to_string(), text, "{text}");
+        }
+        assert!(KeyPress::parse("ctrl-unknown").is_err());
+        assert!(KeyPress::parse("").is_err());
+    }
+
+    #[test]
+    fn a_configured_action_replaces_its_default_keys() {
+        let map = Keymap::from_config(&[("send".into(), vec!["ctrl-s".into()])]).unwrap();
+        assert_eq!(
+            map.action_for(&event(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            Some(Action::Send)
+        );
+        assert_eq!(
+            map.action_for(&event(KeyCode::Enter, KeyModifiers::NONE)),
+            None,
+            "Enter no longer sends"
+        );
+    }
+
+    #[test]
+    fn a_second_action_on_the_same_key_is_a_startup_error() {
+        let error = Keymap::from_config(&[("send".into(), vec!["ctrl-j".into()])]).unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("ctrl-j"), "{text}");
+        assert!(text.contains("send") && text.contains("newline"), "{text}");
+    }
+
+    #[test]
+    fn unknown_actions_and_keys_are_warnings_not_errors() {
+        let map = Keymap::from_config(&[
+            ("future".into(), vec!["ctrl-x".into()]),
+            ("send".into(), vec!["ctrl-s".into(), "not-a-key".into()]),
+        ])
+        .unwrap();
+        assert_eq!(map.warnings.len(), 2, "{:?}", map.warnings);
+        assert!(map.warnings.iter().any(|w| w.contains("future")));
+        assert!(map.warnings.iter().any(|w| w.contains("not-a-key")));
+        // The valid key in the same list still took effect.
+        assert_eq!(
+            map.action_for(&event(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            Some(Action::Send)
+        );
+    }
+
+    #[test]
+    fn uppercase_characters_match_without_the_shift_flag() {
+        let press = KeyPress::parse("a").unwrap();
+        assert!(press.matches(&event(KeyCode::Char('a'), KeyModifiers::NONE)));
+        assert!(press.matches(&event(KeyCode::Char('A'), KeyModifiers::SHIFT)));
+        assert!(!press.matches(&event(KeyCode::Char('a'), KeyModifiers::CONTROL)));
+    }
+}
