@@ -216,6 +216,8 @@ async fn pty_end_to_end_conversation_and_clean_exit() {
             &server.base_url,
             "--session-dir",
             dir.path().to_str().unwrap(),
+            "--session-id",
+            "e2e",
         ],
         24,
         100,
@@ -263,8 +265,8 @@ async fn pty_end_to_end_conversation_and_clean_exit() {
         !raw_text.contains("-icanon"),
         "raw mode was not restored:\n{raw_text}"
     );
-    // The session file was written under the temp dir.
-    assert!(dir.path().join("session.jsonl").exists());
+    // The session file was written under the temp dir, named by the session id.
+    assert!(dir.path().join("e2e.jsonl").exists());
 }
 
 /// The panic hook restores the terminal before the panic message is printed.
@@ -362,6 +364,80 @@ fn pty_panic_path_does_not_orphan_a_child() {
         !group_alive(pid),
         "the child's process group {pid} still has members"
     );
+}
+
+/// `--resume` renders the stored history before the first frame. The session file is written
+/// with the same storage API the app uses, so the test also pins the on-disk convention.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_resume_renders_the_stored_history() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("resume");
+    let path = dir.path().join("resume-me.jsonl");
+    let journal = radian_session::SessionJournal::create(
+        &path,
+        "resume-me",
+        radian_session::SessionCreatedData::new("/tmp", json!({})),
+    )
+    .expect("create the session file");
+    use agent_core::TranscriptJournal;
+    journal
+        .append(agent_core::JournalRecord::Message {
+            index: 0,
+            message: agent_core::Message::user("OLD-USER-TURN"),
+        })
+        .await
+        .unwrap();
+    journal
+        .append(agent_core::JournalRecord::Message {
+            index: 1,
+            message: agent_core::Message::assistant("OLD-ASSISTANT-REPLY"),
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let server = MockServer::start(vec![text_reply("new reply")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--resume",
+            "resume-me",
+        ],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("OLD-USER-TURN", 10),
+        "the resumed history is not on screen:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("OLD-ASSISTANT-REPLY", 10),
+        "the assistant reply is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("resumed session resume-me", 10),
+        "the resume notice is missing:\n{}",
+        pty.screen()
+    );
+
+    // The resumed session keeps appending to the same file.
+    pty.send(b"continue\r");
+    assert!(
+        pty.wait_for_screen("new reply", 15),
+        "the resumed session did not run a turn:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
 }
 
 /// A bracketed paste arrives whole and multi-line in the input box.

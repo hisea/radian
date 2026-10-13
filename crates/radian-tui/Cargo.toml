@@ -25,7 +25,9 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "ti
 libc = "0.2"
 
 [dev-dependencies]
+agent-core = { path = "../agent-core" }
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible", features = ["testing"] }
+radian-session = { path = "../radian-session" }
 portable-pty = "0.9.0"
 ratatui = "0.30.2"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }

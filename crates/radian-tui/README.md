@@ -119,11 +119,35 @@ on read, ADR 0006 §3.2) and stays so.
 - `Shift-Enter` on terminals without the enhanced keyboard protocol.
 - Windows and Linux ptys; only macOS was exercised.
 - Large transcripts: this slice renders every entry each frame (no virtualization; Phase 5).
-- `--resume` and a session list are not implemented; a session is always new.
+
+## Sessions
+
+The session directory and id convention is **the same as `agent-cli`**, so a session written
+by one is resumable by the other:
+
+- `--session-dir DIR`, else `RADIAN_SESSION_DIR`, else the platform data directory
+  (`~/Library/Application Support/radian/sessions` on macOS,
+  `$XDG_DATA_HOME/radian/sessions` or `~/.local/share/radian/sessions` elsewhere). Never a
+  cache or temp path: a session is a durable record (ADR 0013 decision 4).
+- The session file is `<session-dir>/<session-id>.jsonl`; `--session-id VALUE` names it, and
+  a generated `time-pid` id is used when neither `--session-id` nor `--resume` is given.
+- `--resume ID` opens an existing session: its stored history is rendered into the transcript
+  before the first frame, and the session keeps appending to the same file. The model's
+  history comes from the journal (`radian-runtime` recovers it); the transcript view is the
+  same history.
+- `--list` prints this workspace's sessions (id, created, last activity, message count) and
+  exits without touching the terminal.
+
+`--resume` and `--session-id` are mutually exclusive, as are `--resume` and `--list`.
 
 ## Flags
 
 `--model`, `--base-url`, `--api-key-env` (default `OPENAI_API_KEY`), `--header NAME=VALUE`,
-`--session-dir`, `--system`. The key is read only from the named environment variable and is
-never printed. Tools are `NoTools` in this slice (a chat loop); wiring the coding tools is a
-later slice.
+`--system`, `--session-dir`, `--session-id`, `--resume`, `--list`, `--workspace DIR`. The key
+is read only from the named environment variable and is never printed.
+
+## Tools
+
+`--workspace DIR` mounts the built-in file and read-only git tools (`read`, `write`, `patch`,
+`list`, `git_status`, `git_diff`) rooted at that directory, behind the approval dialog. No
+`shell`: it needs the sandbox and permission-tier wiring, and follows in the next slice.

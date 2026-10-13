@@ -233,7 +233,7 @@ impl App {
             AgentEvent::ToolStarted { name, .. } => {
                 self.note = Some(format!("tool {name} running"));
             }
-            AgentEvent::TranscriptAppended { message, .. } => self.commit(message),
+            AgentEvent::TranscriptAppended { message, .. } => self.push_message(message),
             AgentEvent::RunFinished { status } => {
                 self.turn = match status {
                     RunStatus::Cancelled(_) => TurnState::Cancelled,
@@ -256,7 +256,9 @@ impl App {
         }
     }
 
-    fn commit(&mut self, message: &Message) {
+    /// Appends a committed message as transcript entries. Used for live commits and for the
+    /// history of a resumed session.
+    pub fn push_message(&mut self, message: &Message) {
         // The committed message is the truth; discard the partial live view of it.
         self.entries.retain(|entry| !entry.live);
         match message {
