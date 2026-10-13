@@ -68,7 +68,18 @@ creates or modifies a session file (`.jsonl`).
   from the JSONL, never a session file (ADR 0006 §10). `--export` reads the JSONL directly
   and does not touch the index.
 
-These are their own mode: `--export`/`--search`/`--list` conflict with `--prompt`,
+- **`--fork <parent>`** (ADR 0022): create a child session whose initial history is the
+  parent's **effective** history at a turn boundary (a committed compaction is in effect, an
+  uncommitted replacement is dropped, unpaired calls are repaired). `--at <seq>` picks a
+  boundary; omitted, the parent's last `TurnFinished` is used. `--session-id <child>` names
+  the child (generated otherwise). It needs no model and no key, and the child inherits the
+  parent's workspace and config snapshot. The child is written and fsynced **first**; the
+  parent then gains exactly one `SessionForked`, so it never records a child that does not
+  exist. A parent another process is writing is refused with exit 1, without waiting.
+  - A fork point must be a turn boundary: a mid-turn seq, a seq inside a replacement
+    segment, an unknown seq and a seq past the end are each refused with the reason.
+
+These are their own mode: `--export`/`--search`/`--list`/`--fork` conflict with `--prompt`,
 `--resume` and each other (clap rejects a combination with exit 2), and `--model` is only
 required for a conversation (`-p` or interactive).
 

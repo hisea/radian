@@ -43,6 +43,11 @@ Two more binaries exist but are not part of the product surface: `agent-extensio
   slash command (same commands), the agent's `memory_search` / `memory_get` / `memory_save` /
   `memory_revise` tools (writes always ask), and deterministic injection with the
   `MemoryInjected` audit event.
+- **Session fork (ADR 0022)** is implemented: `agent --fork <parent> [--at <seq>]
+  [--session-id <child>]` and the TUI `/fork`. The fork point is a parent turn boundary; the
+  child materializes the parent's effective history there (a committed compaction in effect, an
+  uncommitted replacement dropped), is written before the parent records it, and can resume or
+  fork again.
 - **Automatic compaction (ADR 0018)** is implemented: the proactive budget path, the
   provider-overflow fallback (compact to half and retry once), and a manual `/compact` in both
   hosts. `--no-auto-compact` turns off the proactive path only; the overflow fallback still
