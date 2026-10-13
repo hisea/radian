@@ -1,15 +1,16 @@
 //! Phase 7 findings: places where the code and ADR 0006 disagreed, and their regressions.
 //!
-//! The fuzz and crash tests found these. Two are still reproduced as `#[ignore]`d tests that
-//! assert what the ADR requires and currently **fail**; they are the reproduction, not a
-//! regression guard. Run them with `--ignored`:
+//! The fuzz and crash tests found these. One is still reproduced as an `#[ignore]`d test that
+//! asserts what the ADR requires and currently **fails**; it is the reproduction, not a
+//! regression guard. Run it with `--ignored`:
 //!
 //! ```sh
 //! cargo test -p radian-session --test findings -- --ignored
 //! ```
 //!
-//! The crash-mid-replacement finding (ADR 0005) is fixed and its test is a normal regression
-//! here; the replacement-segment tests live in `replace.rs`.
+//! The crash-mid-replacement (ADR 0005) and empty-line (ADR 0006 §3.2-3) findings are fixed
+//! and their tests are normal regressions here; the replacement-segment tests live in
+//! `replace.rs`.
 
 mod common;
 
@@ -61,13 +62,13 @@ fn a_marker_whose_call_id_never_appeared_should_be_refused() {
     );
 }
 
-/// Finding 2 (ADR 0006 §3.2-3): a line that fails to parse is corruption, and the append path
-/// must refuse too ("拒绝打开（或拒绝追加）"). `Session::open` refuses an interior empty line,
-/// but `SessionJournal::resume` skips empty lines while scanning and then appends after them,
-/// producing a file the reader will refuse forever.
+/// ADR 0006 §3.2-3: a line that fails to parse is corruption, and the append path must refuse
+/// it too ("拒绝打开（或拒绝追加）"). `Session::open` refused an interior empty line but
+/// `SessionJournal::resume` skipped empty lines while scanning and then appended after them,
+/// producing a file the reader would refuse forever. `scan_lines` now parses every
+/// LF-terminated line, empty ones included.
 #[test]
-#[ignore = "finding: ADR 0006 §3.2-3 requires refusing to append to a file with an unparseable line; resume ignores an empty line"]
-fn resume_should_refuse_an_interior_empty_line() {
+fn resume_refuses_an_interior_empty_line() {
     let dir = TempDir::new("finding-empty-line");
     let path = dir.file("s.jsonl");
     let journal =
@@ -82,16 +83,22 @@ fn resume_should_refuse_an_interior_empty_line() {
         file.write_all(b"\n").unwrap();
     }
 
-    // The reader already refuses it...
+    // The reader refuses it...
     assert!(
         Session::open(&path).is_err(),
         "the reader accepted an empty line"
     );
-    // ...so the append path must refuse it too, instead of appending after the corruption.
-    let resume = SessionJournal::resume(&path, SID);
+    // ...and so does the append path, naming the line.
+    let error = match SessionJournal::resume(&path, SID) {
+        Ok(_) => panic!("resume accepted a file whose line 2 is not JSON"),
+        Err(error) => error,
+    };
     assert!(
-        resume.is_err(),
-        "resume accepted a file whose line 2 is not JSON and would append after it"
+        matches!(
+            &error,
+            radian_session::WriteError::Policy(ReadError::Corrupt { line: 2, .. })
+        ),
+        "resume must refuse the unparseable line: {error:?}"
     );
 }
 
