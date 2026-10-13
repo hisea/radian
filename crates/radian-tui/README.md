@@ -505,11 +505,13 @@ refreshed at most once every 24 h (3 s timeout; a failure falls back to the cach
 `--offline-catalog` never goes out. With neither, `C` is **unknown**, there is no budget, and
 the startup notice says so.
 
-The effective input budget is **`B = min(I, C − R)`**, with **`R = max(16384, the request's max
-output)`** (ADR 0018). The startup notice names the source and every number
+The effective input budget is **`B = min(I, C − R)`**, with **`R = max(min(16384, ⌊C/4⌋), the
+request's max output)`** (ADR 0018: a quarter of the window, capped at 16384, raised
+by the output the request itself sends). The startup notice names the source and every number
 (`C 1000000, I 922000, output 384000, R 16384, B 922000 from models.dev (opencode/…, cached 3 h
-ago)`, `B 3616 from --context-window`, or a `no budget` line). `C ≤ R` is refused at startup:
-the window cannot hold the reservation.
+ago)`, `B 15000 from --context-window` for C = 20000, or a `no budget` line). `C ≤ R` is refused
+at startup: the window cannot hold the reservation (with the adaptive `R` it needs the request's
+own output to reach `C`).
 
 The status bar shows the projection `T` over `B` whenever a request is made, and highlights it
 when `T` is over `B`. Crossing `B` does **not** stop the turn (ADR 0018): the request is sent

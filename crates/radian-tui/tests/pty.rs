@@ -880,17 +880,17 @@ async fn pty_an_over_budget_request_is_still_sent() {
             dir.path().to_str().unwrap(),
             "--session-id",
             "budget-over",
-            // B = C - R = 17000 - 16384 = 616. The input is sent as one bracketed paste:
-            // a raw burst of 4 000 keys makes the app redraw once per key, which is O(n^2)
-            // and timed out on a slow Linux VM.
+            // ADR 0018: R = min(16384, C/4) = 250, so B = C - R = 750. The input is
+            // sent as one bracketed paste: a raw burst of 4 000 keys makes the app redraw once
+            // per key, which is O(n^2) and timed out on a slow Linux VM.
             "--context-window",
-            "17000",
+            "1000",
         ],
         30,
         110,
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
-    // ~1000 estimated tokens, over B = 616.
+    // ~1000 estimated tokens, over B = 750.
     pty.send(format!("\x1b[200~{}\x1b[201~\r", "x".repeat(4_000)).as_bytes());
     assert!(
         pty.wait_for_screen("OVER-BUDGET-REPLY", 20),
@@ -904,7 +904,7 @@ async fn pty_an_over_budget_request_is_still_sent() {
         "the projection is labelled as an estimate: {screen}"
     );
     assert!(
-        screen.contains("/ 616"),
+        screen.contains("/ 750"),
         "the status bar shows the projection over B: {screen}"
     );
     pty.quit();
@@ -2611,7 +2611,7 @@ async fn pty_the_startup_notice_names_the_window_source() {
         110,
     );
     assert!(
-        pty.wait_for_screen("B 3616 from --context-window", 10),
+        pty.wait_for_screen("B 15000 from --context-window", 10),
         "the startup notice does not name the explicit window and its B:\n{}",
         pty.screen()
     );

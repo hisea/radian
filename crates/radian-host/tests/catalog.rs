@@ -212,8 +212,10 @@ async fn an_explicit_window_wins_and_does_not_fetch() {
     );
     assert_eq!(server.requests().len(), 0);
 
-    // A window at or below the output reservation is an error, not a silent budget.
-    q.explicit = Some(4096);
+    // C <= R needs the request's own output to reach C (ADR 0018): an Anthropic
+    // request with max_tokens = 16384 against an 8192 window.
+    q.explicit = Some(8_192);
+    q.request_max_output = Some(16_384);
     let window = resolve(&q).await;
     assert_eq!(window.budget, None);
     assert!(window.error.is_some(), "C <= R must be an error");
