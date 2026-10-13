@@ -253,3 +253,13 @@ Base `8028d9e` · 一次性 worktree `/tmp/config-mut` · 独立 `CARGO_TARGET_D
 |---|---|---|---|
 | M6 | 冲突的按键绑定被接受（不做 conflict 检查） | `keys::tests::a_second_action_on_the_same_key_is_a_startup_error`、`config::a_keymap_conflict_is_a_startup_error` | ✅ |
 | M7 | `NO_COLOR` 被忽略 | `theme::tests::no_color_forces_mono`、`config::a_configured_theme_is_applied_and_no_color_forces_mono` | ✅ |
+
+## config 第二轮：Tab 补全改为 `complete` 动作
+
+Base `79f60cb` · 一次性 worktree `/tmp/config2-mut` · 独立 `CARGO_TARGET_DIR` ·
+`git checkout --` 还原、`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M25 | `Action::Complete` 变空操作 | `mention_tab`（3 passed / 7 failed） | ✅ |
+| M26 | `complete` 失去默认键（`DEFAULT_KEYS` 去掉 `("complete", &["tab"])`） | `mention_tab`（3 passed / 7 failed） | ✅ |

@@ -106,9 +106,8 @@ impl Pty {
         // overrides both through `envs`.
         let home = TempDir::new("home");
         cmd.env("HOME", home.path().as_os_str());
-        // `env_clear` above already drops `RADIAN_HOME`/`RADIAN_CONFIG`; pin the root too so
-        // the config can only ever come from this temp directory.
-        cmd.env("RADIAN_HOME", home.path());
+        // `cmd.env_clear()` above is what makes this hermetic: neither `RADIAN_HOME` nor
+        // `RADIAN_CONFIG` reaches the child, so a config can only come from this temp `HOME`.
         cmd.env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json");
         for (name, value) in envs {
             cmd.env(name, value);

@@ -233,3 +233,17 @@ Base `8028d9e` · 一次性 worktree `/tmp/config-mut` · 独立 `CARGO_TARGET_D
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
 | M1 | CLI 不再覆盖配置（`model.model` 反而优先） | `cli::a_config_file_supplies_the_model_and_the_cli_overrides_it` | ✅ |
+
+## config 第二轮：缺模型的判别力 + harness 不读真实配置
+
+Base `79f60cb` · 一次性 worktree `/tmp/config2-mut` · 独立 `CARGO_TARGET_DIR` ·
+`git checkout --` 还原、`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M10 | `model_name` 不再报错（`.ok_or_else(..)` → `.unwrap_or("mutant-default-model")`，即去掉 setup 的模型校验） | `cli::a_conversation_still_requires_a_model` | ✅ failed（stderr 变成 `no API key: …`，没有那句独有的 `no model: …`） |
+| M11 | `spawn_agent` 不再钉 `RADIAN_HOME`（去掉 `.env("RADIAN_HOME", …)`） | `cli::the_harness_never_reads_a_config_outside_its_temp_root` | ✅ failed（`HOME/.radian/config/config.toml` 被读到，启动被 v0 配置拒绝） |
+
+诚实补充：M10 里旧断言 `stderr.contains("--model")` 在当前 API key 文案下**也会**失败（那段文案
+只含 `--api-key-env`），所以这次加强与其说是补漏，不如说是把判据钉成那句独有文案；但它必须
+与“落到 API key 错误”区分开，这一点现在由整句断言保证。
