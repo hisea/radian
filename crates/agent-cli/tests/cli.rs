@@ -221,10 +221,36 @@ fn tool_result_content(server: &MockServer, n: usize) -> String {
         .unwrap()
 }
 
-fn scratch(name: &str) -> PathBuf {
+/// A per-test scratch directory under the system temp directory, removed on drop.
+///
+/// A **passing** test removes it, so these no longer pile up inside a sandbox's workspace
+/// `TMPDIR` (dogfooding D14). A **failing** test keeps it and prints its path, so the state
+/// that made it fail is still there to inspect.
+struct ScratchDir(PathBuf);
+
+impl std::ops::Deref for ScratchDir {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!("[scratch] kept for debugging: {}", self.0.display());
+            return;
+        }
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn scratch(name: &str) -> ScratchDir {
     let dir = std::env::temp_dir().join(format!("agent-cli-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    dir
+    ScratchDir(dir)
 }
 
 /// Polls `predicate` until it holds, bounded; a sleep here is only the poll interval, never
@@ -2513,7 +2539,7 @@ fn used_tool_reply(id: &str, name: &str, arguments: &str, input: u64) -> Reply {
     ])
 }
 
-fn budget_workspace(label: &str) -> (PathBuf, PathBuf) {
+fn budget_workspace(label: &str) -> (ScratchDir, PathBuf) {
     let dir = scratch(label);
     let ws = dir.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
@@ -4011,4 +4037,20 @@ async fn anthropic_provider_accepts_thinking_and_max_tokens() {
     let body = server.requests()[0].json();
     assert_eq!(body["max_tokens"], 4096, "{body}");
     assert_eq!(body["thinking"], json!({"type": "adaptive"}), "{body}");
+}
+
+/// D14: a scratch directory is removed when its guard drops, so a passing test leaves
+/// nothing behind under `TMPDIR`.
+#[test]
+fn scratch_directories_are_removed_when_the_guard_drops() {
+    let path = {
+        let dir = scratch("scratch-drop");
+        assert!(dir.exists(), "{}", dir.display());
+        dir.to_path_buf()
+    };
+    assert!(
+        !path.exists(),
+        "the scratch guard must remove {}",
+        path.display()
+    );
 }
