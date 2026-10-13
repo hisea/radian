@@ -226,11 +226,8 @@ def check_fixture(name, exp):
             for field in ("revision", "len"):
                 if not isinstance(data.get(field), int) or isinstance(data.get(field), bool):
                     raise Corruption(f"{name}: line {i}: TranscriptReplaced.{field} 不是整数")
-            if pending_len:
-                raise Corruption(
-                    f"{name}: line {i}: 上一个 TranscriptReplaced.len {pending_len[0]} "
-                    f"只跟了 {messages_since_replacement} 条 MessageAppended，又出现新的 TranscriptReplaced"
-                )
+            # 上一个替换段没写满又出现新 marker → 崩溃恢复后宿主重新替换，合法；
+            # 旧段按“已写入前缀”接受（ADR 0005）。
             pending_len = [] if data["len"] == 0 else [data["len"]]
             messages_since_replacement = 0
             index_next = 0
@@ -238,8 +235,8 @@ def check_fixture(name, exp):
             replacements.append((i, data["revision"], data["len"]))
         events.append(ev)
 
-    # 末尾替换段不完整（文件到此为止）→ ADR 0005 把已写入前缀当作可恢复状态，读取方接受。
-    # 替换段不完整而后面又出现新的 TranscriptReplaced 才是损坏，上面已经拒绝。
+    # 替换段不完整（文件到此为止，或被下一个 marker 取代）→ ADR 0005 把已写入前缀
+    # 当作可恢复状态，读取方接受，len 不导致拒绝。
 
     outcome = exp["outcome"]
     if outcome == "policy_reject":

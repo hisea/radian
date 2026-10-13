@@ -139,21 +139,27 @@ pub struct SessionEvent {
     pub data: EventData,
 }
 
-/// A replacement segment that was cut short at end of file: the marker declared `declared`
-/// messages, only `written` landed, and the file ends there. ADR 0005 makes the written
-/// prefix the recoverable state, so the read succeeds with that prefix and this records what
-/// happened.
+/// A replacement segment that did not reach its declared `len`: the marker declared `declared`
+/// messages and only `written` landed. It was cut short either by end of file (a crash) or by
+/// the next `TranscriptReplaced` (the host recovered the written prefix and replaced again).
+/// ADR 0005 makes the written prefix the recoverable state, so the read succeeds and this
+/// records what happened; `len` never causes a refusal.
 ///
 /// This is a **diagnostic**, not a `skipped` entry: `skipped` is the ADR 0006 §7b list of
 /// unknown non-critical events, and the index derives `skipped_count` from it. Overloading it
 /// would make a crash look like an unknown event and would force a fake event name.
+///
+/// A short segment that a later append happens to complete (`written` reaches `declared`
+/// because the host wrote a normal message) is indistinguishable from a complete replacement
+/// and is **not** reported: the file cannot tell a normal append from the replacement's own
+/// remaining messages, and `replay` does not care.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecoveredReplacement {
     /// The `revision` of the marker that was cut short.
     pub revision: u64,
     /// The marker's declared `len`.
     pub declared: u64,
-    /// How many replacement messages actually landed before the file ended.
+    /// How many replacement messages actually landed.
     pub written: u64,
 }
 
@@ -166,7 +172,7 @@ pub(crate) struct ScanSummary {
     pub(crate) committed_bytes: u64,
     pub(crate) event_count: u64,
     pub(crate) skipped: Vec<(u64, String)>,
-    pub(crate) recovered_replacement: Option<RecoveredReplacement>,
+    pub(crate) recovered_replacements: Vec<RecoveredReplacement>,
 }
 
 /// Streams a session file, applying the ADR 0006 §7 policy and the §3.2 torn-tail rule,
@@ -192,7 +198,7 @@ where
     let mut pending_len: Option<u64> = None;
     let mut pending_revision: u64 = 0;
     let mut messages_since: u64 = 0;
-    let mut recovered_replacement: Option<RecoveredReplacement> = None;
+    let mut recovered_replacements: Vec<RecoveredReplacement> = Vec::new();
     let mut schema_version: Option<u64> = None;
     let mut session_id = String::new();
     let mut skipped = Vec::new();
@@ -351,17 +357,16 @@ where
             }
             "TranscriptReplaced" => {
                 let d: ReplacedData = data_of(raw, lineno, path)?;
-                // A new marker while the previous segment is still short means the previous
-                // marker's `len` can never be satisfied and a new revision begins: corruption.
-                // (A short segment that is *not* followed by another replacement is the
-                // crash-recovery case handled at end of file below.)
-                if let Some(len) = pending_len {
-                    return Err(E::from(ReadError::BadReplacementLen {
-                        path: path.to_path_buf(),
-                        line: lineno,
-                        len,
-                        count: messages_since,
-                    }));
+                // A new marker while the previous segment is still short: the previous
+                // marker's `len` was not reached. That is the crash-recovery flow (the host
+                // recovered the written prefix and replaced again), so record the short
+                // segment and start the new one; `len` never refuses the file.
+                if let Some(declared) = pending_len {
+                    recovered_replacements.push(RecoveredReplacement {
+                        revision: pending_revision,
+                        declared,
+                        written: messages_since,
+                    });
                 }
                 // `len == 0` is a complete, empty replacement: nothing to wait for.
                 pending_len = (d.len != 0).then_some(d.len);
@@ -497,8 +502,8 @@ where
     if let Some(declared) = pending_len {
         // The replacement segment is short and the file ends here. ADR 0005 line 92: the
         // recoverable state is the new replacement's written prefix, so accept it and record
-        // the diagnostic instead of refusing the whole file.
-        recovered_replacement = Some(RecoveredReplacement {
+        // the diagnostic.
+        recovered_replacements.push(RecoveredReplacement {
             revision: pending_revision,
             declared,
             written: messages_since,
@@ -511,7 +516,7 @@ where
         committed_bytes,
         event_count,
         skipped,
-        recovered_replacement,
+        recovered_replacements,
     })
 }
 
@@ -525,7 +530,7 @@ pub struct Session {
     committed_bytes: u64,
     events: Vec<SessionEvent>,
     skipped: Vec<(u64, String)>,
-    recovered_replacement: Option<RecoveredReplacement>,
+    recovered_replacements: Vec<RecoveredReplacement>,
 }
 
 impl Session {
@@ -550,7 +555,7 @@ impl Session {
             committed_bytes: summary.committed_bytes,
             events,
             skipped: summary.skipped,
-            recovered_replacement: summary.recovered_replacement,
+            recovered_replacements: summary.recovered_replacements,
         })
     }
 
@@ -581,10 +586,11 @@ impl Session {
         &self.skipped
     }
 
-    /// The replacement segment that was cut short at end of file, if any (ADR 0005). `None`
-    /// when the file ends with a complete segment or no replacement at all.
-    pub fn recovered_replacement(&self) -> Option<RecoveredReplacement> {
-        self.recovered_replacement
+    /// Every replacement segment that did not reach its declared `len`, in file order: cut
+    /// short by end of file or by the next `TranscriptReplaced` (ADR 0005). Empty when every
+    /// segment was complete.
+    pub fn recovered_replacements(&self) -> &[RecoveredReplacement] {
+        &self.recovered_replacements
     }
 
     /// Maps the parsed events back to core records. This is the only place that knows the

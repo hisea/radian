@@ -71,16 +71,6 @@ pub enum ReadError {
         event: String,
         call_id: String,
     },
-    #[error(
-        "{path}: line {line}: the previous TranscriptReplaced.len {len} is not satisfied \
-         (only {count} message records follow it) and a new replacement begins"
-    )]
-    BadReplacementLen {
-        path: PathBuf,
-        line: u64,
-        len: u64,
-        count: u64,
-    },
     #[error("replaying the journal: {0}")]
     Replay(#[from] agent_core::ReplayError),
 }

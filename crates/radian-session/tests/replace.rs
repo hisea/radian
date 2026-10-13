@@ -60,9 +60,8 @@ fn a_normal_append_after_a_complete_replacement_is_not_counted_as_part_of_it() {
         vec![Message::user("replacement"), Message::user("normal append")]
     );
     assert!(session.skipped().is_empty());
-    assert_eq!(
-        session.recovered_replacement(),
-        None,
+    assert!(
+        session.recovered_replacements().is_empty(),
         "the segment is complete; nothing was cut short"
     );
 }
@@ -106,7 +105,7 @@ async fn replacements_and_the_appends_between_them_fold_to_the_last_revision() {
 
     let session = Session::open(&path).unwrap();
     assert!(session.skipped().is_empty());
-    assert_eq!(session.recovered_replacement(), None);
+    assert!(session.recovered_replacements().is_empty());
     assert_eq!(
         session.history().unwrap(),
         vec![
@@ -198,12 +197,12 @@ async fn resume_continues_after_a_short_replacement() {
     let before = Session::open(&path).unwrap();
     assert_eq!(before.history().unwrap(), vec![Message::user("prefix")]);
     assert_eq!(
-        before.recovered_replacement(),
-        Some(RecoveredReplacement {
+        before.recovered_replacements(),
+        &[RecoveredReplacement {
             revision: 1,
             declared: 2,
             written: 1,
-        })
+        }]
     );
 
     let journal = SessionJournal::resume(&path, SID).unwrap();
@@ -219,11 +218,94 @@ async fn resume_continues_after_a_short_replacement() {
     let after = Session::open(&path).unwrap();
     assert_eq!(after.history().unwrap(), vec![Message::user("prefix")]);
     assert_eq!(
-        after.recovered_replacement(),
-        Some(RecoveredReplacement {
+        after.recovered_replacements(),
+        &[RecoveredReplacement {
             revision: 1,
             declared: 2,
             written: 1,
+        }]
+    );
+}
+
+/// The crash-recovery flow the brief describes: a replacement crashes short, the host recovers
+/// the written prefix, replaces again, and continues. `resume` can append to that file and the
+/// short first segment is reported.
+#[tokio::test]
+async fn resume_continues_after_a_short_replacement_is_replaced_again() {
+    let dir = TempDir::new("replace-short-then-marker-resume");
+    let path = dir.file("s.jsonl");
+    let journal = SessionJournal::create(&path, SID, created()).unwrap();
+    journal
+        .append(JournalRecord::TranscriptReplaced {
+            revision: 1,
+            len: 2,
         })
+        .await
+        .unwrap();
+    journal
+        .append(JournalRecord::Message {
+            index: 0,
+            message: Message::user("prefix"),
+        })
+        .await
+        .unwrap();
+    // The host replaced again after recovering the one-message prefix.
+    journal
+        .append(JournalRecord::TranscriptReplaced {
+            revision: 2,
+            len: 1,
+        })
+        .await
+        .unwrap();
+    journal
+        .append(JournalRecord::Message {
+            index: 0,
+            message: Message::user("second"),
+        })
+        .await
+        .unwrap();
+    journal
+        .append(JournalRecord::Message {
+            index: 1,
+            message: Message::assistant("grown"),
+        })
+        .await
+        .unwrap();
+    let next = journal.next_seq();
+    drop(journal);
+
+    let before = Session::open(&path).unwrap();
+    assert_eq!(
+        before.history().unwrap(),
+        vec![Message::user("second"), Message::assistant("grown")]
+    );
+    assert_eq!(
+        before.recovered_replacements(),
+        &[RecoveredReplacement {
+            revision: 1,
+            declared: 2,
+            written: 1,
+        }]
+    );
+
+    let journal = SessionJournal::resume(&path, SID).unwrap();
+    assert_eq!(journal.next_seq(), next);
+    journal
+        .append(JournalRecord::Message {
+            index: 2,
+            message: Message::user("after resume"),
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let after = Session::open(&path).unwrap();
+    assert_eq!(
+        after.history().unwrap(),
+        vec![
+            Message::user("second"),
+            Message::assistant("grown"),
+            Message::user("after resume"),
+        ]
     );
 }

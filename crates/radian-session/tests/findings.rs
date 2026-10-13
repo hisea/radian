@@ -147,21 +147,22 @@ fn a_crash_mid_replacement_is_recovered_as_the_written_prefix() {
     let session = Session::open(&path).unwrap();
     assert_eq!(session.history().unwrap(), vec![Message::user("a")]);
     assert_eq!(
-        session.recovered_replacement(),
-        Some(RecoveredReplacement {
+        session.recovered_replacements(),
+        &[RecoveredReplacement {
             revision: 1,
             declared: 2,
             written: 1,
-        })
+        }]
     );
     // The half-written message was dropped, not counted.
     assert_eq!(session.events().len(), 3);
 }
 
-/// A short segment followed by another `TranscriptReplaced` is still corruption: the previous
-/// marker's `len` can never be satisfied and a new revision begins.
+/// A short segment followed by another `TranscriptReplaced` is the crash-recovery flow: the
+/// host recovered the written prefix and replaced again. The read must succeed, report the
+/// short segment, and fold to the last revision plus what follows it.
 #[test]
-fn a_short_replacement_followed_by_another_replacement_is_refused() {
+fn a_short_replacement_followed_by_another_replacement_reads_back() {
     let dir = TempDir::new("finding-short-then-marker");
     let path = dir.file("s.jsonl");
     let body = [
@@ -181,7 +182,7 @@ fn a_short_replacement_followed_by_another_replacement_is_refused() {
             2,
             "MessageAppended",
             true,
-            json!({"index": 0, "message": {"user": {"content": []}}}),
+            json!({"index": 0, "message": {"user": {"content": [{"text": {"text": "prefix"}}]}}}),
         ),
         envelope(
             3,
@@ -189,21 +190,33 @@ fn a_short_replacement_followed_by_another_replacement_is_refused() {
             true,
             json!({"revision": 2, "len": 1}),
         ),
+        envelope(
+            4,
+            "MessageAppended",
+            true,
+            json!({"index": 0, "message": {"user": {"content": [{"text": {"text": "second"}}]}}}),
+        ),
+        envelope(
+            5,
+            "MessageAppended",
+            true,
+            json!({"index": 1, "message": {"assistant": {"content": [{"text": {"text": "grown"}}]}}}),
+        ),
     ]
     .join("\n");
     std::fs::write(&path, format!("{body}\n")).unwrap();
 
-    let error = Session::open(&path).unwrap_err();
-    assert!(
-        matches!(
-            error,
-            ReadError::BadReplacementLen {
-                line: 4,
-                len: 2,
-                count: 1,
-                ..
-            }
-        ),
-        "expected the short segment to be named at the new marker: {error:?}"
+    let session = Session::open(&path).unwrap();
+    assert_eq!(
+        session.history().unwrap(),
+        vec![Message::user("second"), Message::assistant("grown")]
+    );
+    assert_eq!(
+        session.recovered_replacements(),
+        &[RecoveredReplacement {
+            revision: 1,
+            declared: 2,
+            written: 1,
+        }]
     );
 }
