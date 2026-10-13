@@ -66,10 +66,16 @@ impl<'a> Assembler<'a> {
             .map_err(|e| ModelError::Protocol(format!("unreadable stream chunk: {e}")))?;
         if let Some(error) = chunk.get("error").filter(|e| !e.is_null()) {
             let message = error["message"].as_str().or(error.as_str());
-            return Err(ModelError::Transport(format!(
+            let text = format!(
                 "the provider reported an error: {}",
                 message.unwrap_or("(no message)")
-            )));
+            );
+            // ADR 0018: a stream error carries no HTTP status, so only the provider's own code
+            // and message can identify an overflow here.
+            if crate::overflow::classify_stream_overflow(error) {
+                return Err(ModelError::ContextOverflow(text));
+            }
+            return Err(ModelError::Transport(text));
         }
         // Usage travels on the chunk, and a trailing chunk may carry only usage (no choices).
         // Capture it before the choice check; `null` means the server did not report usage.

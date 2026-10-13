@@ -916,7 +916,14 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     let secrets_for_errors = Arc::new(setup.secrets.clone());
     driver.set_runtime_events(Arc::new(move |event: &radian_session::RuntimeEvent| {
         if let radian_session::RuntimeEvent::TurnFailed { message, .. } = event {
-            eprintln!("agent: {}", redact(message, &secrets_for_errors));
+            let message = redact(message, &secrets_for_errors);
+            eprintln!("agent: {message}");
+            // ADR 0018's fallback: a recognizable context overflow gets one extra line, since
+            // the automatic compaction that would retry it is not implemented yet. The host
+            // only has the text, so the prefix is what identifies it.
+            if radian_host::is_context_overflow(&message) {
+                eprintln!("agent: {}", radian_host::CONTEXT_OVERFLOW_HELP);
+            }
         }
     }));
     let driver_ended = Arc::new(Notify::new());

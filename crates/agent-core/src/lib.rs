@@ -30,7 +30,8 @@ pub use message::{
     ContentPart, InputSource, Message, MessageId, MessageMeta, OpaqueJson, ToolCall, ToolResult,
 };
 pub use model::{
-    Model, ModelContext, ModelError, ModelRequest, ModelResponse, ModelUsage, StopReason,
+    CONTEXT_OVERFLOW_PREFIX, Model, ModelContext, ModelError, ModelRequest, ModelResponse,
+    ModelUsage, StopReason,
 };
 pub use outcome::{
     CancelReason, IncompleteReason, ResumeState, RunError, RunOutcome, RunStatus, SessionError,

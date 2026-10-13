@@ -673,6 +673,15 @@ fn ui_loop(
                     radian_tui::EntryKind::Notice,
                     format!("turn failed: {message}"),
                 ));
+                // ADR 0018's fallback: a recognizable context overflow gets one extra line,
+                // since the automatic compaction that would retry it is not implemented yet.
+                // The host only has the text, so the prefix is what identifies it.
+                if radian_host::is_context_overflow(&message) {
+                    app.entries.push(radian_tui::Entry::new(
+                        radian_tui::EntryKind::Notice,
+                        radian_host::CONTEXT_OVERFLOW_HELP.to_string(),
+                    ));
+                }
             }
         }
         // A tool call waiting for the human: show it. The answer goes back over the prompt's

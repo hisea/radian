@@ -71,12 +71,28 @@ pub struct ModelUsage {
     pub details: Option<OpaqueJson>,
 }
 
+/// The `Display` prefix of [`ModelError::ContextOverflow`]. A host that only receives the
+/// error as text (e.g. `RuntimeEvent::TurnFailed.message`, ADR 0017) recognizes the overflow
+/// case by this prefix; [`ModelError::ContextOverflow`]'s own `Display` is pinned to it by a
+/// test below, so the two cannot drift.
+pub const CONTEXT_OVERFLOW_PREFIX: &str = "model context overflow:";
+
 #[derive(Debug, thiserror::Error)]
 pub enum ModelError {
     #[error("model transport error: {0}")]
     Transport(String),
     #[error("model protocol error: {0}")]
     Protocol(String),
+    /// The provider refused the request because the input is over its context window.
+    ///
+    /// An adapter returns this **only** when it can recognize the provider's own overflow
+    /// error from the HTTP status and body (ADR 0018's "recognizable overflow" rule); it
+    /// carries the provider's text, masked. A provider error that merely mentions tokens or
+    /// limits is **not** one of these — guessing would misclassify a rate limit or a bad
+    /// request. Core and the runtime treat it as an ordinary model error today (ADR 0017: the
+    /// turn ends `failed`); the automatic-compaction retry is a later slice.
+    #[error("model context overflow: {0}")]
+    ContextOverflow(String),
 }
 
 pub struct ModelContext<'a> {
@@ -101,5 +117,28 @@ impl<T: Model> Model for Arc<T> {
         cx: ModelContext<'_>,
     ) -> impl Future<Output = Result<ModelResponse, ModelError>> + Send {
         (**self).complete(request, cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A host sees a failed turn as text (`RuntimeEvent::TurnFailed.message`), so the prefix
+    /// is the contract between `agent-core` and the host. Pin it here; a host uses
+    /// [`CONTEXT_OVERFLOW_PREFIX`].
+    #[test]
+    fn the_context_overflow_prefix_is_stable() {
+        let error = ModelError::ContextOverflow("HTTP 400: prompt is too long".into());
+        assert!(
+            error.to_string().starts_with(CONTEXT_OVERFLOW_PREFIX),
+            "{error}"
+        );
+        // A transport or protocol error must never be mistaken for an overflow.
+        assert!(
+            !ModelError::Transport("HTTP 400: bad request".into())
+                .to_string()
+                .starts_with(CONTEXT_OVERFLOW_PREFIX)
+        );
     }
 }

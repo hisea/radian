@@ -10,6 +10,7 @@ use reqwest::{Client, Url, redirect};
 use crate::config::{
     ConfigError, OpenAiCompatibleConfig, is_local_host, openai_host_is_default, redact_url,
 };
+use crate::overflow::classify_overflow;
 use crate::request::build_body;
 use crate::sse::SseParser;
 use crate::stream::{Assembler, Progress};
@@ -141,6 +142,12 @@ impl OpenAiCompatible {
         if !status.is_success() {
             let snippet = read_error_body(&mut response, self.config.idle_timeout).await;
             let mut message = format!("HTTP {status}: {snippet}");
+            // ADR 0018: a recognizable context-overflow error is its own kind, so the host can
+            // tell it apart from a generic bad request. The check is narrow: 400/413 plus the
+            // provider's own overflow code or an explicitly context-shaped message.
+            if classify_overflow(status.as_u16(), &snippet) {
+                return Err(ModelError::ContextOverflow(message));
+            }
             // J10: a 400 from a server that rejects the usage option deserves a way out.
             if status.as_u16() == 400 && self.include_usage {
                 message.push_str(
@@ -217,6 +224,8 @@ impl OpenAiCompatible {
         match error {
             ModelError::Transport(text) => ModelError::Transport(scrub(text)),
             ModelError::Protocol(text) => ModelError::Protocol(scrub(text)),
+            // ADR 0018: an overflow body may echo the key too, so it is masked like the rest.
+            ModelError::ContextOverflow(text) => ModelError::ContextOverflow(scrub(text)),
         }
     }
 }

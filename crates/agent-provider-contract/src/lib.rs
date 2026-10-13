@@ -166,6 +166,17 @@ pub trait ContractHarness<M: Model>: Sync {
     fn unreported_usage_fields(&self) -> &'static [UsageField] {
         &[]
     }
+
+    /// The provider's **real** "the input is over the context window" error, as a
+    /// [`Wire::Status`], or `None` when this provider has no recognizable one.
+    ///
+    /// `None` is a declaration, not a skip: [`check_context_overflow`] then still asserts that
+    /// a plain 400, a 429 "too many tokens" and a 500 naming `context_length_exceeded` are
+    /// **not** classified as overflows. A harness that declares `Some` must have that exact
+    /// wire become [`ModelError::ContextOverflow`]. The default is `None`.
+    fn context_overflow(&self) -> Option<Wire> {
+        None
+    }
 }
 
 /// A default request the checks send. One user turn, no tools.
@@ -666,6 +677,59 @@ pub async fn check_error_classification<M: Model, H: ContractHarness<M>>(h: &H) 
     );
 }
 
+/// ADR 0018's fallback: an adapter returns [`ModelError::ContextOverflow`] **only** for a
+/// provider error it can recognize as an over-window input. Two parts:
+///
+/// 1. **Every** provider, whatever it declares: a plain `400`, a `429` that merely says "too
+///    many tokens", and a `500` that names `context_length_exceeded` are ordinary errors,
+///    never an overflow. This part runs unconditionally, so a harness cannot opt out of it.
+/// 2. A harness that declares [`ContractHarness::context_overflow`] must have that exact wire
+///    classified as `ContextOverflow`, quoting the provider's body and leaking no secret.
+pub async fn check_context_overflow<M: Model, H: ContractHarness<M>>(h: &H) {
+    for (code, body) in [
+        (400u16, "bad request"),
+        (429, "too many tokens"),
+        (500, "context_length_exceeded"),
+    ] {
+        let model = h
+            .script(&[Wire::Status {
+                code,
+                body: body.into(),
+            }])
+            .await;
+        let error = complete(&model, request(), &NoopSink).await.unwrap_err();
+        assert!(
+            !matches!(error, ModelError::ContextOverflow(_)),
+            "HTTP {code} {body:?} must not be an overflow: {error}"
+        );
+    }
+
+    match h.context_overflow() {
+        Some(Wire::Status { code, body }) => {
+            let model = h
+                .script(&[Wire::Status {
+                    code,
+                    body: body.clone(),
+                }])
+                .await;
+            let error = complete(&model, request(), &NoopSink).await.unwrap_err();
+            let ModelError::ContextOverflow(text) = &error else {
+                panic!("the declared overflow wire must be ContextOverflow: {error}");
+            };
+            assert!(
+                text.contains(&body),
+                "the overflow error must quote the provider body: {text}"
+            );
+            assert!(
+                !text.contains(h.secret()),
+                "the overflow error must not leak the secret: {text}"
+            );
+        }
+        Some(other) => panic!("context_overflow must be a Wire::Status, got {other:?}"),
+        None => {}
+    }
+}
+
 /// Once `ModelContext.cancellation` fires, `complete` must return `Err` soon, never an
 /// incomplete `ModelResponse`.
 pub async fn check_cancellation<M: Model, H: ContractHarness<M>>(h: &H) {
@@ -728,11 +792,22 @@ mod tests {
     use super::*;
 
     /// A fake provider. Its only flaws are the ones the tests inject: a wrong
-    /// `ContentFiltered` mapping, and the `drop_usage` fields it fails to report.
+    /// `ContentFiltered` mapping, the `drop_usage` fields it fails to report, and an optional
+    /// error (`error`) so the overflow hatch can be exercised.
     struct FakeModel {
         stop_reason: StopReason,
         text: String,
         usage: Option<ModelUsage>,
+        error: Option<ModelError>,
+    }
+
+    /// `ModelError` is not `Clone`; the fake needs to hand out the same error on every call.
+    fn clone_error(error: &ModelError) -> ModelError {
+        match error {
+            ModelError::Transport(text) => ModelError::Transport(text.clone()),
+            ModelError::Protocol(text) => ModelError::Protocol(text.clone()),
+            ModelError::ContextOverflow(text) => ModelError::ContextOverflow(text.clone()),
+        }
     }
 
     impl Model for FakeModel {
@@ -741,6 +816,9 @@ mod tests {
             _request: ModelRequest,
             _cx: ModelContext<'_>,
         ) -> Result<ModelResponse, ModelError> {
+            if let Some(error) = &self.error {
+                return Err(clone_error(error));
+            }
             Ok(ModelResponse {
                 reasoning: Vec::new(),
                 content: if self.text.is_empty() {
@@ -762,6 +840,12 @@ mod tests {
         unreported_usage: &'static [UsageField],
         /// What the fake adapter actually leaves out when it builds a response.
         drop_usage: &'static [UsageField],
+        /// The provider's declared overflow wire (`None` = "no recognizable one").
+        overflow: Option<Wire>,
+        /// Whether the fake adapter wrongly classifies **every** 400/413 as an overflow.
+        misclassify_all_4xx: bool,
+        /// Whether the fake adapter fails to recognize the wire the harness declared.
+        forget_overflow: bool,
     }
 
     impl FakeHarness {
@@ -770,6 +854,9 @@ mod tests {
                 unsupported: &[],
                 unreported_usage: &[],
                 drop_usage: &[],
+                overflow: None,
+                misclassify_all_4xx: false,
+                forget_overflow: false,
             }
         }
     }
@@ -800,10 +887,30 @@ mod tests {
                 Some(Wire::Finish(reason)) => (expected_stop_reason(*reason), "x".into()),
                 _ => (StopReason::EndTurn, "x".into()),
             };
+            // A `Wire::Status` is an error, not a response; the declared overflow wire is the
+            // one the fake is willing to recognize.
+            let error = match wires.first() {
+                Some(Wire::Status { code, body }) => {
+                    let declared = !self.forget_overflow
+                        && matches!(
+                            &self.overflow,
+                            Some(Wire::Status { code: c, body: b }) if c == code && b == body
+                        );
+                    if declared || (self.misclassify_all_4xx && matches!(code, 400 | 413)) {
+                        Some(ModelError::ContextOverflow(format!("HTTP {code}: {body}")))
+                    } else if *code >= 500 || matches!(code, 408 | 429) {
+                        Some(ModelError::Transport(format!("HTTP {code}: {body}")))
+                    } else {
+                        Some(ModelError::Protocol(format!("HTTP {code}: {body}")))
+                    }
+                }
+                _ => None,
+            };
             FakeModel {
                 stop_reason,
                 text,
                 usage,
+                error,
             }
         }
 
@@ -813,6 +920,10 @@ mod tests {
 
         fn unreported_usage_fields(&self) -> &'static [UsageField] {
             self.unreported_usage
+        }
+
+        fn context_overflow(&self) -> Option<Wire> {
+            self.overflow.clone()
         }
     }
 
@@ -926,5 +1037,61 @@ mod tests {
             ..FakeHarness::new()
         };
         check_usage_shapes(&harness).await;
+    }
+
+    // ---------- the context-overflow hatch ----------
+
+    fn overflow_wire() -> Wire {
+        Wire::Status {
+            code: 400,
+            body: r#"{"error":{"message":"maximum context length is 100 tokens","code":"context_length_exceeded"}}"#
+                .into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_declared_context_overflow_is_classified() {
+        // The fake recognizes exactly the declared wire; the negatives are ordinary errors.
+        let harness = FakeHarness {
+            overflow: Some(overflow_wire()),
+            ..FakeHarness::new()
+        };
+        check_context_overflow(&harness).await;
+    }
+
+    #[tokio::test]
+    async fn no_declaration_skips_only_the_positive_check() {
+        // A provider with no recognizable overflow error passes: the negatives still ran.
+        let harness = FakeHarness::new();
+        assert!(harness.context_overflow().is_none());
+        check_context_overflow(&harness).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "must not be an overflow")]
+    async fn a_plain_400_is_never_an_overflow_even_without_a_declaration() {
+        // The fake classifies every 400/413 as an overflow. The negative checks run for every
+        // harness, declared or not, so this must fail.
+        let harness = FakeHarness {
+            misclassify_all_4xx: true,
+            ..FakeHarness::new()
+        };
+        check_context_overflow(&harness).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "must be ContextOverflow")]
+    async fn a_declared_overflow_that_is_not_classified_fails() {
+        // The harness declares a wire the fake does **not** recognize (a different body), so
+        // the positive check must fail rather than pass vacuously.
+        let harness = FakeHarness {
+            overflow: Some(Wire::Status {
+                code: 400,
+                body: "some other 400".into(),
+            }),
+            forget_overflow: true,
+            ..FakeHarness::new()
+        };
+        check_context_overflow(&harness).await;
     }
 }

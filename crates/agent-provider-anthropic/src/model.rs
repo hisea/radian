@@ -8,6 +8,7 @@ use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Url, redirect};
 
 use crate::config::{AnthropicConfig, ConfigError, is_local_host, redact_url};
+use crate::overflow::classify_overflow;
 use crate::request::build_body;
 use crate::sse::SseParser;
 use crate::stream::{Assembler, Progress};
@@ -136,6 +137,12 @@ impl Anthropic {
         if !status.is_success() {
             let snippet = read_error_body(&mut response, self.config.idle_timeout).await;
             let message = format!("HTTP {status}: {snippet}");
+            // ADR 0018: a recognizable context-overflow error is its own kind, so the host can
+            // tell it apart from a generic bad request. The check is narrow: 400 with
+            // `invalid_request_error` + "prompt is too long", or 413 `request_too_large`.
+            if classify_overflow(status.as_u16(), &snippet) {
+                return Err(ModelError::ContextOverflow(message));
+            }
             // Throttling and server trouble are the provider's; the rest is the request's.
             return Err(
                 if status.is_server_error() || matches!(status.as_u16(), 408 | 429) {
@@ -205,6 +212,8 @@ impl Anthropic {
         match error {
             ModelError::Transport(text) => ModelError::Transport(scrub(text)),
             ModelError::Protocol(text) => ModelError::Protocol(scrub(text)),
+            // ADR 0018: an overflow body may echo the key too, so it is masked like the rest.
+            ModelError::ContextOverflow(text) => ModelError::ContextOverflow(scrub(text)),
         }
     }
 }

@@ -130,13 +130,18 @@ impl<'a> Assembler<'a> {
         match event["type"].as_str().unwrap_or("") {
             "ping" => {}
             "error" => {
-                let message = event["error"]["message"]
-                    .as_str()
-                    .or_else(|| event["error"].as_str());
-                return Err(ModelError::Transport(format!(
+                let error = &event["error"];
+                let message = error["message"].as_str().or_else(|| error.as_str());
+                let text = format!(
                     "the provider reported an error: {}",
                     message.unwrap_or("(no message)")
-                )));
+                );
+                // ADR 0018: a stream error carries no HTTP status, so only the error `type`
+                // and message can identify an overflow here.
+                if crate::overflow::classify_stream_overflow(error) {
+                    return Err(ModelError::ContextOverflow(text));
+                }
+                return Err(ModelError::Transport(text));
             }
             "message_start" => {
                 let usage = &event["message"]["usage"];

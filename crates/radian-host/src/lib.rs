@@ -10,6 +10,7 @@
 mod catalog;
 mod describe;
 mod diagnostics;
+mod errors;
 mod headers;
 mod home;
 mod mcp;
@@ -28,6 +29,7 @@ pub use diagnostics::{
     CleanReport, MAX_TOTAL_BYTES, RETENTION, append, cache_dir, clean, clean_startup, clean_with,
     diagnostics_dir, is_diagnostic_file, now_millis, panic_log_name,
 };
+pub use errors::{CONTEXT_OVERFLOW_HELP, CONTEXT_OVERFLOW_PREFIX, is_context_overflow};
 pub use headers::{SESSION_PLACEHOLDER, parse_headers};
 pub use home::{
     RADIAN_HOME_ENV, cache_dir_for, catalog_cache, catalog_cache_for, config_dir, config_dir_for,
