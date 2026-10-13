@@ -258,3 +258,15 @@ Base `79f60cb` · 一次性 worktree `/tmp/config2-mut` · 独立 `CARGO_TARGET_
 诚实补充：M13 里旧断言 `stderr.contains("--model")` 在当前 API key 文案下**也会**失败（那段文案
 只含 `--api-key-env`），所以这次加强与其说是补漏，不如说是把判据钉成那句独有文案；但它必须
 与“落到 API key 错误”区分开，这一点现在由整句断言保证。
+
+## Phase 5：`agent config import-pi`
+
+Base `5aa84b6` · 一次性 worktree `/tmp/pimig-mut` · 独立 `CARGO_TARGET_DIR` ·
+每个变异 `git checkout -- .` 还原、`git status --short` 为空。宿主侧的同一批变异见
+`crates/radian-host/MUTATIONS.md` 的 M15–M21。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M15 | 存在 `auth.json` 时读取它 | `cli::config_import_pi_never_reads_auth_json` | ✅ |
+| M17 | 差异说明回显字面密钥值 | `cli::config_import_pi_drafts_a_valid_configuration_and_never_shows_a_literal_key` | ✅ |
+| M20 | 执行 `!command` | `cli::config_import_pi_lists_a_command_key_and_does_not_run_it` | ✅ |

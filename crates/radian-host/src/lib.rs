@@ -28,6 +28,7 @@ pub use catalog::{
     WindowCheck, WindowQuery, WindowSource, cache_path, host_of, input_budget,
     output_ceiling_warning, output_reservation, provider_for_host, resolve,
 };
+pub use config::migrate_pi::{PiDraft, PiMigrateError, import_pi, write_draft as write_pi_draft};
 pub use config::{
     CONFIG_FILE_NAME, CompactionConfig, Config, ConfigError, ModelConfig, PermissionsConfig,
     RADIAN_CONFIG_ENV, SUPPORTED_SCHEMA_VERSION, TuiConfig, load as load_config,

@@ -187,11 +187,12 @@ struct Cli {
     #[arg(long, value_name = "SEQ", requires = "fork")]
     at: Option<u64>,
 
-    /// Manage durable memory (ADR 0021): `agent memory --help`. Needs no `--model`, reads no
-    /// key, creates no session file and never touches the network. Memory is shared across
-    /// sessions and resolved per project (a git repository, shared by its worktrees).
+    /// A mode of its own: `agent memory …` (ADR 0021) or `agent config …` (ADR 0008). Neither
+    /// needs `--model`, reads a key, creates a session file or touches the network. Memory is
+    /// shared across sessions and resolved per project (a git repository, shared by its
+    /// worktrees).
     #[command(subcommand)]
-    memory: Option<Command>,
+    command: Option<Command>,
 
     /// Export format: `markdown` (the readable transcript) or `json` (the event document).
     #[arg(long, value_name = "FORMAT", value_enum, default_value_t = ExportFormat::Markdown, requires = "export")]
@@ -289,6 +290,15 @@ impl From<CommandError> for OutputError {
     }
 }
 
+impl From<radian_host::PiMigrateError> for OutputError {
+    fn from(error: radian_host::PiMigrateError) -> Self {
+        Self::Failed {
+            message: error.to_string(),
+            code: 1,
+        }
+    }
+}
+
 impl From<radian_host::StdoutError> for OutputError {
     fn from(error: radian_host::StdoutError) -> Self {
         match error {
@@ -363,10 +373,76 @@ enum Command {
         #[command(subcommand)]
         command: MemoryCommand,
     },
+    /// Configuration tools (ADR 0008): `agent config --help`.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+}
+
+/// The `agent config` grammar. `import-pi` is the only entry point in this version, and it is
+/// read-only unless `--write` is given.
+#[derive(clap::Subcommand, Debug)]
+enum ConfigCommand {
+    /// Draft a Radian configuration from a Pi agent directory: the draft goes to stdout and
+    /// the mapping report to stderr. Nothing is written without `--write`.
+    ImportPi {
+        /// The Pi agent directory to read (for example `~/.pi/agent`). There is no default:
+        /// the command never reads a directory you did not name.
+        #[arg(long, value_name = "DIR")]
+        from: PathBuf,
+        /// Write the draft to the Radian configuration path (the `--config`/`RADIAN_CONFIG`
+        /// file, or `~/.radian/config/config.toml`) instead of printing it. Refuses to
+        /// overwrite an existing file.
+        #[arg(long)]
+        write: bool,
+    },
 }
 
 fn run_memory(cli: &Cli, command: MemoryCommand) -> i32 {
     finish(memory_command(cli, command))
+}
+
+fn run_config(cli: &Cli, command: ConfigCommand) -> i32 {
+    finish(config_command(cli, command))
+}
+
+/// Runs one `agent config` subcommand. Deliberately before `setup`: no model, no key, no
+/// session file and no network. The Pi directory is only ever the one the user named.
+fn config_command(cli: &Cli, command: ConfigCommand) -> Result<(), OutputError> {
+    match command {
+        ConfigCommand::ImportPi { from, write } => {
+            let draft = radian_host::import_pi(&from)?;
+            // The report goes to stderr, so `agent config import-pi --from d > draft.toml`
+            // still shows what could not be mapped.
+            for note in &draft.notes {
+                eprintln!("[import-pi] {note}");
+            }
+            if !write {
+                radian_host::write_stdout(&draft.toml)?;
+                eprintln!(
+                    "[import-pi] nothing was written: this is a draft (pass --write to save it)"
+                );
+                return Ok(());
+            }
+            let env = std::env::var(radian_host::RADIAN_CONFIG_ENV).ok();
+            let home = radian_host::radian_home();
+            let path = radian_host::resolve_config_path(
+                cli.config.as_deref(),
+                env.as_deref(),
+                home.as_deref(),
+            )
+            .ok_or_else(|| OutputError::Failed {
+                message: "cannot resolve the Radian configuration path: pass --config, set \
+                          RADIAN_CONFIG, or set HOME"
+                    .into(),
+                code: 1,
+            })?;
+            radian_host::write_pi_draft(&path, &draft.toml)?;
+            eprintln!("[import-pi] wrote {}", path.display());
+            Ok(())
+        }
+    }
 }
 
 /// Runs one `agent memory` subcommand. Deliberately before `setup`: no model, no key, no
@@ -489,20 +565,21 @@ fn main() {
 }
 
 async fn run(mut cli: Cli) -> i32 {
-    // `agent memory` is its own mode: no model, no key, no session file, no network. It is
-    // handled before `setup`, like the session-management commands below.
-    if cli.memory.is_some() {
+    // `agent memory` and `agent config` are modes of their own: no model, no key, no session
+    // file, no network. They are handled before `setup`, like the session-management commands.
+    if cli.command.is_some() {
         if cli.list
             || cli.export.is_some()
             || cli.search.is_some()
             || cli.prompt.is_some()
             || cli.resume.is_some()
         {
-            eprintln!("agent: `memory` cannot be combined with a session command");
+            eprintln!("agent: a subcommand cannot be combined with a session command");
             return USAGE_ERROR;
         }
-        match cli.memory.take() {
+        match cli.command.take() {
             Some(Command::Memory { command }) => return run_memory(&cli, command),
+            Some(Command::Config { command }) => return run_config(&cli, command),
             None => unreachable!("checked just above"),
         }
     }

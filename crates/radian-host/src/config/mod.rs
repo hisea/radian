@@ -20,6 +20,8 @@
 //! No error message ever carries a value that could be a secret: the plaintext and heuristic
 //! errors name the key path and nothing else.
 
+pub mod migrate_pi;
+
 use std::fmt;
 use std::path::{Path, PathBuf};
 
