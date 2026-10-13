@@ -39,6 +39,11 @@ context window"). All three end the turn `failed` today (ADR 0017); the automati
 that would retry an overflow is a later slice. A host that only has the error text recognizes
 the last by `CONTEXT_OVERFLOW_PREFIX`.
 
+`compaction` (ADR 0018) is the I/O-free half of automatic compaction: `keep_target`,
+`units` (the atomic cut points), `plan`, `summary_request`, `check_summary` and
+`compacted_history`. It is pure and `async`-free; the turn loop that calls a summarizer,
+writes the journal and retries is the `compact-core` slice.
+
 Observations go out through `EventSink` (`AgentEvent`, `NoopSink`); `AgentEvent` is
 `#[non_exhaustive]`. Events never change control flow — hooks do.
 
@@ -82,6 +87,9 @@ so no host reimplements them.
 | The estimator never rounds down: ASCII bytes/4 rounded up, and at least one token per non-ASCII character | `ascii_code_estimates_at_least_bytes_over_four`, `chinese_text_estimates_at_least_one_token_per_character` | `tests/budget.rs` |
 | A turn that crosses `B` ends `Completed`, not stopped | `a_turn_over_the_budget_completes_normally` | `tests/budget.rs` |
 | A restored baseline projects the same as an uninterrupted run, and a prefix outside the transcript leaves the estimate alone | `a_restored_baseline_matches_an_uninterrupted_projection`, `a_prefix_outside_the_transcript_leaves_the_estimate_alone` | `tests/budget.rs` |
+| Compaction cuts only at atomic units (a user message, or an assistant with all of its results) and keeps an oversized last unit whole | `plan_cuts_only_at_a_unit_boundary`, `an_oversized_last_unit_is_still_kept_whole`, `an_assistant_and_all_its_results_are_one_unit` | `tests/compaction.rs` |
+| A summary request flattens text, cuts each tool result to 2000 characters and leaves reasoning out | `the_summary_request_serializes_text_and_truncates_tool_results`, `truncating_a_tool_result_never_splits_a_character` | `tests/compaction.rs` |
+| A compacted history is the summary (System source, `compaction_summary` origin) plus the kept suffix, and must pass `validate_history` | `compacted_history_refuses_an_invalid_kept_suffix`, `plan_and_compaction_are_valid_for_many_histories` | `tests/compaction.rs` |
 | A transcript replacement is journaled from index zero, emits one event, and keeps the session usable | `replacing_the_transcript_journals_from_zero_emits_one_event_and_continues` | `tests/replace.rs` |
 | An invalid replacement is rejected before the journal; a failed replacement keeps memory and requires recovery; unusable sessions reject without journaling | `invalid_replacements_are_rejected_before_the_journal`, `a_failed_replacement_marker_keeps_memory_and_requires_recovery`, `unusable_sessions_reject_replacement_without_journaling` | `tests/replace.rs` |
 | Markers from before a replacement never repair a reused call id | `markers_from_before_a_replacement_never_repair_a_reused_call_id` | `tests/replace.rs` |
@@ -90,15 +98,18 @@ so no host reimplements them.
 | A failed or dropped `close()` can be retried and still closes | `failed_close_can_be_retried`, `dropped_close_can_be_retried` | `tests/close.rs` |
 
 The mutation records for this crate are `MUTATIONS-R1.md` (reasoning, 10/10 caught),
-`MUTATIONS-0015.md` (budget guard) and `MUTATIONS-0007.md` (usage). A mutation that stays green
+`MUTATIONS-0015.md` (budget guard), `MUTATIONS-0007.md` (usage) and `MUTATIONS-0018.md`
+(compaction planning). A mutation that stays green
 is reported as a hole, not hidden: `MUTATIONS.md` in `radian-session` records one (no `fsync`)
 that no test in this environment can catch.
 
 ## Known limits and what is not verified
 
-- **No context compression.** ADR 0018 replaced ADR 0015's stop: the core computes the
-  projection against the input budget `B`, records it, and sends the request anyway; it changes
-  nothing in the transcript. `ContextBudget::input_budget_tokens` is a host-supplied number,
+- **No context compression in the turn loop (yet).** ADR 0018 replaced ADR 0015's stop: the
+  core computes the projection against the input budget `B`, records it, and sends the request
+  anyway; it changes nothing in the transcript. The **pure planning half** is in `compaction`
+  (`keep_target`/`units`/`plan`/`summary_request`/`check_summary`/`compacted_history`); the
+  loop that calls a summarizer and commits the result is the `compact-core` slice. `ContextBudget::input_budget_tokens` is a host-supplied number,
   because the core deliberately has no model→window table. The estimator is a ruler, not an
   audited count: the report says exactly which part is estimated.
 - **`HookContext` carries only `cancellation` and `model_calls`** — no run, turn or session
