@@ -3538,16 +3538,20 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
     drop(master);
 
     let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if child.try_wait().unwrap().is_some() {
-            break;
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
         }
         assert!(
             Instant::now() < deadline,
             "the app did not exit within 5 s of its terminal closing"
         );
         std::thread::sleep(Duration::from_millis(20));
-    }
+    };
+    assert!(
+        status.success(),
+        "the terminal-gone exit is the ordinary clean one (no signal, no error): {status:?}"
+    );
     let _ = child.kill();
     let _ = child.wait();
 }
