@@ -1,10 +1,11 @@
 //! The host-side pending-request queue (ADR 0023 U7).
 //!
-//! An approval (today) and a structured question (ADR 0024 Q1/Q4, later) are both "the model
-//! is waiting for the human". The queue keeps them in **arrival order**, each tagged with the
-//! session that asked, and hands the UI one request at a time. It is synchronous and
-//! thread-safe: the permission layer's `Approver` pushes from a tokio worker, the UI reads the
-//! head from its own thread.
+//! An approval and a structured question (ADR 0024 Q1/Q4) are both "the model is waiting for
+//! the human". The queue keeps them in **arrival order**, each tagged with the session that
+//! asked, and hands the UI one request at a time. It is synchronous and thread-safe: the
+//! permission layer's `Approver` and the tool's `Prompter` push from a tokio worker, the UI
+//! reads the head from its own thread. [`PendingRequest`]/[`PendingResponse`] are what let one
+//! queue hold both kinds.
 //!
 //! # Lifecycle
 //!
@@ -15,7 +16,7 @@
 //! | a request arrives | `push` appends it, returns the waiting end; the arrival order is the display order | the queue |
 //! | the user answers the head | `answer(id, resp)` completes that element and removes it | the UI |
 //! | the wait gives up (turn cancelled, UI abandoned it) | the receiver is dropped; `head`/`len` drop the element the next time they run, and `PendingAnswer::drop` wakes the UI immediately | the permission layer + the queue |
-//! | the session closes with requests pending | `abort_session` completes them all with the fail-closed denial and removes them | the host |
+//! | the session closes with requests pending | `abort_session` (approval-only queue) denies; `abort_session_all` (shared queue) denies approvals and gives questions `PromptError::Gone` | the host |
 //! | the UI exits / the host shuts down | the queue is dropped, so every remaining waiting end sees the sender dropped ("abandoned"), exactly as before | `Drop` |
 //! | a late answer (the wait is gone, or the element was aborted) | `answer` returns [`Answered::Late`] and changes nothing | the queue |
 //! | an answer for an id that was never issued | `answer` returns [`Answered::Unknown`] | the queue |

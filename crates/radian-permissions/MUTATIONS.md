@@ -26,3 +26,13 @@ Base `2d01d9b` · 一次性 worktree `/tmp/memsvcb-mut` · 独立 `CARGO_TARGET_
 | # | 变异 | 结果 | 抓住它的测试 |
 |---|---|---|---|
 | M9 | `memory_revise` 规则 `Ask` → `Allow` | ✅ 抓住 | `profile::tests::the_memory_tools_read_allowed_and_write_asked_in_every_tier` |
+
+## ADR 0024 Q6：`ask_user` 固定允许（2026-10-13）
+
+Base `4866944` · 一次性检出 `/tmp/ask-mut`（detached，跑完删除）· `cargo test -p radian-permissions`。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| A4 | `always_allowed()` 返回空（三档都不再固定允许 `ask_user`） | ✅ 抓住 | `profile::tests::ask_user_is_allowed_in_every_tier` |
+
+1/1 抓住。变异后 `ask_user` 落到默认的 `ask`，三档都断言失败。
