@@ -23,8 +23,7 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use agent_core::{
-    Agent, AgentConfig, AgentEvent, BudgetReport, ContextBudget, EventSink, InputSource, RunStatus,
-    TurnOptions, UsageSource,
+    Agent, AgentConfig, AgentEvent, ContextBudget, EventSink, InputSource, RunStatus, TurnOptions,
 };
 use agent_extensions::{McpServerConfig, McpToolProvider};
 use clap::Parser;
@@ -35,7 +34,7 @@ use radian_host::{
     validate_session_id,
 };
 use radian_permissions::{Approver, PermissionHooks};
-use radian_runtime::{BudgetRelax, CancelCause, Driver, DriverError, Inbox, InboxError};
+use radian_runtime::{CancelCause, Driver, DriverError, Inbox, InboxError};
 use radian_session::{
     EventData, ExportOptions, Index, Session, SessionCreatedData, SessionJournal, export_json,
     export_markdown,
@@ -47,17 +46,6 @@ use crate::tools::CliTools;
 
 /// Exit code for usage and configuration errors, matching clap's own usage failures.
 const USAGE_ERROR: i32 = 2;
-
-/// The exit code for "the context-budget guard stopped the turn in one-shot mode". Distinct
-/// from 1 (the turn failed), 2 (usage/setup) and 130 (forced exit) so a script can tell a
-/// budget stop from an error. One-shot mode never continues automatically.
-const CONTEXT_BUDGET_EXIT: i32 = 3;
-
-/// What the CLI sends when the user chooses to continue after a context-budget stop. The user
-/// chose to continue, and a user message is the only way to open a new turn (Core's
-/// `start_turn` requires one); it records that choice truthfully. The transcript itself is
-/// never edited (ADR 0015 C7).
-const CONTINUE_MESSAGE: &str = "continue";
 
 /// How many inputs may wait in the inbox. Bounded on purpose (ADR 0011 L4): a full queue
 /// refuses and hands the message back instead of dropping it.
@@ -232,9 +220,6 @@ struct Cli {
     #[arg(long, value_name = "PROVIDER")]
     catalog_provider: Option<String>,
 
-    /// Block when the projected request size reaches this percent of the window (default 80).
-    #[arg(long, value_name = "PERCENT", default_value_t = agent_core::DEFAULT_THRESHOLD_PERCENT)]
-    context_threshold: u8,
 }
 
 /// Why startup failed. The message must not contain the key.
@@ -432,13 +417,6 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     let mut secrets: Vec<String> = key.into_iter().collect();
     secrets.extend(headers.into_iter().map(|(_, value)| value));
     secrets.retain(|secret| !secret.is_empty());
-    // The context-budget guard exists only when a window is known (ADR 0015 C1). The
-    // threshold is validated only when there is a window; a threshold alone changes nothing.
-    if !(1..=100).contains(&cli.context_threshold) {
-        return Err(SetupError(
-            "--context-threshold must be between 1 and 100".into(),
-        ));
-    }
     if cli.context_window == Some(0) {
         return Err(SetupError(
             "--context-window must be at least 1 token".into(),
@@ -447,18 +425,28 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     // The window comes from `--context-window` or the models.dev catalog (ADR 0018). A fetch
     // failure is not a startup failure: the window is then unknown and the guard stays off.
     // This runs before the session file exists.
+    // ADR 0018: `R` comes from the request's own output setting; Anthropic sends
+    // `max_tokens`, OpenAI-compatible sends none.
+    let request_max_output = match provider {
+        Provider::Anthropic => Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
+        Provider::OpenAiCompatible => None,
+    };
     let window = radian_host::resolve(&radian_host::WindowQuery::production(
         cli.context_window,
         cli.catalog_provider.clone(),
         &catalog_base_url,
         model_name(cli)?,
+        request_max_output,
         cli.offline_catalog,
     ))
     .await;
-    let context_budget = window
-        .tokens
-        .filter(|tokens| *tokens > 0)
-        .map(|tokens| ContextBudget::new(tokens).with_threshold_percent(cli.context_threshold));
+    if let Some(error) = &window.error {
+        return Err(SetupError(format!("--context-window: {error}")));
+    }
+    if let Some(warning) = radian_host::output_ceiling_warning(request_max_output, window.output) {
+        eprintln!("{warning}");
+    }
+    let context_budget = window.budget.filter(|tokens| *tokens > 0).map(ContextBudget::new);
     Ok(Setup {
         model,
         provider,
@@ -815,18 +803,16 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     let (profile_line, sandbox_facts) = profile::describe(profile_arg, sandbox.as_ref());
     eprintln!("[profile] {profile_line}");
     eprintln!("[sandbox] {sandbox_facts}");
-    // The window and where it came from (ADR 0018), then the guard's threshold.
+    // The numbers, the effective input budget B, and where they came from (ADR 0018).
     match &setup.context_budget {
         Some(budget) => eprintln!(
-            "[budget] {}; threshold {}% ({} tokens). A provider-reported input is trusted as \
-             reported; only the growth since that report is estimated ({} ASCII bytes per token, \
-             at least 1 token per non-ASCII character)",
+            "[budget] {}; a provider-reported input is trusted as reported and only the growth \
+             after it is estimated ({} ASCII bytes per token, at least 1 token per non-ASCII \
+             character)",
             setup.window.describe(),
-            budget.threshold_percent,
-            budget.threshold_tokens(),
             budget.bytes_per_token
         ),
-        None => eprintln!("[budget] {} (ADR 0015)", setup.window.describe()),
+        None => eprintln!("[budget] {} (ADR 0018)", setup.window.describe()),
     }
 
     // The built-in tools exist only with `--workspace`. `shell` is present only when a
@@ -927,8 +913,6 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             eprintln!("agent: {}", redact(message, &secrets_for_errors));
         }
     }));
-    // The handle the interactive loop uses to say "continue once" (ADR 0015 C5).
-    let driver_relax = driver.budget_relax();
     let driver_ended = Arc::new(Notify::new());
     let ended = Arc::clone(&driver_ended);
     let task = tokio::spawn(async move {
@@ -940,7 +924,6 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     let mut run = Run {
         inbox,
         hooks: Arc::clone(&hooks),
-        relax: driver_relax,
         ui: Arc::clone(&ui),
         driver_ended,
         signals,
@@ -984,8 +967,6 @@ fn set_turn_source(hooks: &PermissionHooks, source: InputSource, reset: bool) {
 struct Run {
     inbox: Arc<Inbox>,
     hooks: Arc<PermissionHooks>,
-    /// The one-shot relax the interactive "continue" uses (ADR 0015 C5).
-    relax: BudgetRelax,
     ui: Arc<Ui>,
     driver_ended: Arc<Notify>,
     signals: mpsc::UnboundedReceiver<()>,
@@ -1044,81 +1025,11 @@ async fn one_shot(run: &mut Run, prompt: String) -> i32 {
     }
     match run.ui.last_status() {
         Some(RunStatus::Completed) => 0,
-        Some(RunStatus::ContextBudget(report)) => {
-            for line in budget_stop_lines(&report) {
-                eprintln!("{line}");
-            }
-            eprintln!(
-                "[budget] one-shot mode does not continue automatically; nothing was sent \
-                 (exit {CONTEXT_BUDGET_EXIT})"
-            );
-            CONTEXT_BUDGET_EXIT
-        }
         Some(status) => {
             eprintln!("agent: the turn ended as {status:?}");
             1
         }
         None => 1,
-    }
-}
-
-/// The context-budget stop, worded so its source is never hidden (ADR 0015 C1): a reported
-/// number says "reported", a partly estimated number shows the reported baseline and the
-/// estimated growth separately, and a pure estimate is marked `~` and "estimated". An
-/// estimate is never displayed as a precise report.
-fn budget_stop_lines(report: &BudgetReport) -> Vec<String> {
-    let usage = match report.source {
-        UsageSource::Reported => format!("context {} (reported)", report.projected_tokens),
-        UsageSource::ReportedPlusEstimate => format!(
-            "context {} (reported {} + estimated {})",
-            report.projected_tokens,
-            report.baseline_input_tokens.unwrap_or_default(),
-            report.estimated_growth_tokens.unwrap_or_default()
-        ),
-        UsageSource::Estimated => format!("context ~{} (estimated)", report.projected_tokens),
-    };
-    let threshold = report
-        .window_tokens
-        .saturating_mul(u64::from(report.threshold_percent))
-        / 100;
-    vec![
-        format!("[budget] the model request was not sent: {usage}"),
-        format!(
-            "[budget] window {} tokens, threshold {}% ({} tokens), request {} bytes",
-            report.window_tokens, report.threshold_percent, threshold, report.request_bytes
-        ),
-    ]
-}
-
-/// What the user chose after a budget stop.
-enum BudgetChoice {
-    Continue,
-    Stop,
-}
-
-/// Asks whether to continue. `fork` is deliberately not offered as an option: this slice does
-/// not implement it, and an option that does nothing would lie (it is named only as
-/// "not implemented").
-async fn ask_budget_continue(
-    lines: &LineHub,
-    signals: &mut mpsc::UnboundedReceiver<()>,
-    report: &BudgetReport,
-) -> BudgetChoice {
-    for line in budget_stop_lines(report) {
-        eprintln!("{line}");
-    }
-    eprint!(
-        "[budget] [c] continue (the next request is let through once), [n] stop \
-         (fork: not implemented) "
-    );
-    let _ = std::io::stderr().flush();
-    tokio::select! {
-        line = lines.next() => match line.as_deref() {
-            Some("c") | Some("C") | Some("continue") => BudgetChoice::Continue,
-            _ => BudgetChoice::Stop,
-        },
-        // A Ctrl-C at this prompt gives up rather than hanging.
-        _ = signals.recv() => BudgetChoice::Stop,
     }
 }
 
@@ -1145,31 +1056,7 @@ async fn interactive_loop(run: &mut Run, lines: &LineHub) -> i32 {
             Next::Leave => break,
             Next::Forced => return force_exit(&mut run.task).await,
             Next::DriverEnded => return report_task(&mut run.task, &run.secrets).await,
-            Next::Again => {
-                if let Some(RunStatus::ContextBudget(report)) = run.ui.last_status()
-                    && matches!(
-                        ask_budget_continue(lines, &mut run.signals, &report).await,
-                        BudgetChoice::Continue
-                    )
-                {
-                    // The user chose to continue: the next turn's first request is let
-                    // through once, and the guard is back from the request after it
-                    // (ADR 0015 C5). It is never a permanent switch.
-                    run.relax.relax_once();
-                    if let Err(error) = enqueue_input(
-                        &run.inbox,
-                        &run.hooks,
-                        CONTINUE_MESSAGE.to_owned(),
-                        TERMINAL_SOURCE,
-                        false,
-                    )
-                    .await
-                    {
-                        eprintln!("agent: {}", redact(&error.to_string(), &run.secrets));
-                    }
-                }
-                continue;
-            }
+            Next::Again => continue,
             Next::Line(line) => {
                 let line = line.trim();
                 if line.is_empty() {

@@ -454,6 +454,31 @@ async fn usage_errors_exit_two() {
     assert_eq!(code, 2);
 }
 
+/// ADR 0018 removed `--context-threshold`; passing it is a usage error (exit 2), never a
+/// silently ignored flag.
+#[tokio::test]
+async fn the_removed_context_threshold_flag_is_an_error() {
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                "http://127.0.0.1:9/v1",
+                "--context-threshold",
+                "80",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("--context-threshold"), "{stderr}");
+}
+
 #[tokio::test]
 async fn bad_mcp_config_exits_two_with_the_path() {
     let dir = scratch("config");
@@ -2530,7 +2555,7 @@ async fn shell_cannot_write_outside_the_workspace() {
     );
 }
 
-// ---------- context budget (ADR 0015) ----------
+// ---------- context budget (ADR 0018): a computed input budget, never a stop ----------
 
 /// A tool call reply that also reports provider usage for the request it answers.
 fn used_tool_reply(id: &str, name: &str, arguments: &str, input: u64) -> Reply {
@@ -2552,9 +2577,9 @@ fn budget_workspace(label: &str) -> (ScratchDir, PathBuf) {
     (dir, ws)
 }
 
-/// 1: without `--context-window` the guard is off, the startup says so, and no stop happens.
+/// 1: without `--context-window` no budget exists; the startup says so, and the turn runs.
 #[tokio::test]
-async fn without_a_window_the_guard_is_off_and_says_so() {
+async fn without_a_window_the_budget_is_off_and_says_so() {
     let (_dir, ws) = budget_workspace("budget-off");
     let server = MockServer::start(vec![
         used_tool_reply("c1", "write", r#"{"path":"f.txt","content":"x"}"#, 3300),
@@ -2582,77 +2607,27 @@ async fn without_a_window_the_guard_is_off_and_says_so() {
     .await;
 
     assert_eq!(code, 0, "{stderr}");
-    assert!(stderr.contains("context guard off"), "{stderr}");
-    assert!(stderr.contains("unknown: context guard off"), "{stderr}");
-    assert!(
-        !stderr.contains("the model request was not sent"),
-        "{stderr}"
-    );
-    // The turn ran to completion: the second request was sent.
+    assert!(stderr.contains("[budget] window unknown"), "{stderr}");
+    // No budget is invented: `B` is unknown, not a guess (ADR 0018).
+    assert!(stderr.contains("B ?"), "{stderr}");
+    assert!(stderr.contains("no budget"), "{stderr}");
+    // The turn ran to completion: both requests were sent.
     assert_eq!(server.requests().len(), 2, "{stderr}");
 }
 
-/// 2: a reported input near the threshold blocks the next request before it is sent.
+/// 2: over the input budget `B` the request is **still sent** and the turn completes
+/// (ADR 0018 replaced the stop). `B = C - R = 20000 - 16384 = 3616`, and the reported input
+/// (9000) is far over it.
 #[tokio::test]
-async fn a_reported_usage_near_the_threshold_stops_before_the_next_request() {
-    let (_dir, ws) = budget_workspace("budget-stop");
-    let server = MockServer::start(vec![used_tool_reply(
-        "c1",
-        "write",
-        r#"{"path":"f.txt","content":"x"}"#,
-        3300,
-    )])
+async fn an_over_budget_request_is_still_sent_and_the_turn_completes() {
+    let (_dir, ws) = budget_workspace("budget-over");
+    let server = MockServer::start(vec![
+        used_tool_reply("c1", "write", r#"{"path":"f.txt","content":"x"}"#, 9000),
+        text_reply("done"),
+    ])
     .await;
 
-    let mut child = Running::spawn(
-        &[
-            "--model",
-            "m",
-            "--base-url",
-            &server.base_url,
-            "--workspace",
-            ws.to_str().unwrap(),
-            "--yes",
-            "--context-window",
-            "4000",
-        ],
-        &[],
-    );
-    child.write("go\n").await;
-    child
-        .wait_for_stderr("the model request was not sent")
-        .await;
-    assert_eq!(
-        server.requests().len(),
-        1,
-        "the over-budget request must never reach the server"
-    );
-    child.write("n\n").await; // stop
-    child.write("/exit\n").await;
-    let (code, _, stderr) = child.finish().await;
-
-    assert_eq!(code, 0, "{stderr}");
-    assert!(
-        stderr.contains("window 4000 tokens, threshold 80%"),
-        "{stderr}"
-    );
-    assert_eq!(server.requests().len(), 1);
-}
-
-/// 3: the stop text names its source: reported + estimated shows both parts, a pure estimate
-/// is marked as one, and they are different strings.
-#[tokio::test]
-async fn the_stop_text_distinguishes_reported_from_estimated() {
-    // (a) a reported baseline plus estimated growth.
-    let (_dir, ws) = budget_workspace("budget-reported");
-    let server = MockServer::start(vec![used_tool_reply(
-        "c1",
-        "write",
-        r#"{"path":"f.txt","content":"x"}"#,
-        3300,
-    )])
-    .await;
-    let (code, _, reported) = feed_and_wait(
+    let (code, _, stderr) = feed_and_wait(
         spawn_agent(
             &[
                 "--model",
@@ -2661,36 +2636,6 @@ async fn the_stop_text_distinguishes_reported_from_estimated() {
                 &server.base_url,
                 "--workspace",
                 ws.to_str().unwrap(),
-                "--yes",
-                "--context-window",
-                "4000",
-                "-p",
-                "go",
-            ],
-            &[],
-        ),
-        "",
-    )
-    .await;
-    assert_eq!(code, 3, "{reported}");
-    assert!(
-        reported.contains("(reported 3300 + estimated "),
-        "the reported baseline and the estimated growth must be shown separately: {reported}"
-    );
-
-    // (b) nothing was reported: the whole projection is an estimate.
-    let (_dir2, ws2) = budget_workspace("budget-estimated");
-    std::fs::write(ws2.join("big.txt"), "x".repeat(64 * 1024)).unwrap();
-    let server = MockServer::start(vec![tool_reply("c1", "read", r#"{"path":"big.txt"}"#)]).await;
-    let (code, _, estimated) = feed_and_wait(
-        spawn_agent(
-            &[
-                "--model",
-                "m",
-                "--base-url",
-                &server.base_url,
-                "--workspace",
-                ws2.to_str().unwrap(),
                 "--yes",
                 "--context-window",
                 "20000",
@@ -2702,124 +2647,26 @@ async fn the_stop_text_distinguishes_reported_from_estimated() {
         "",
     )
     .await;
-    assert_eq!(code, 3, "{estimated}");
-    assert!(
-        estimated.contains("~") && estimated.contains("(estimated)"),
-        "a pure estimate must be marked as one: {estimated}"
-    );
-    assert!(
-        !estimated.contains("(reported"),
-        "an estimate must never be displayed as a report: {estimated}"
-    );
-    assert_ne!(reported, estimated);
-}
 
-/// 4: choosing continue lets the next request through once; the request after it is checked
-/// again (the guard is not switched off).
-#[tokio::test]
-async fn continue_relaxes_once_and_the_guard_comes_back() {
-    let (_dir, ws) = budget_workspace("budget-continue");
-    let server = MockServer::start(vec![
-        used_tool_reply("c1", "write", r#"{"path":"f.txt","content":"x"}"#, 3300),
-        used_tool_reply("c2", "write", r#"{"path":"g.txt","content":"y"}"#, 3300),
-    ])
-    .await;
-
-    let mut child = Running::spawn(
-        &[
-            "--model",
-            "m",
-            "--base-url",
-            &server.base_url,
-            "--workspace",
-            ws.to_str().unwrap(),
-            "--yes",
-            "--context-window",
-            "4000",
-        ],
-        &[],
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("B 3616 from --context-window"),
+        "{stderr}"
     );
-    child.write("go\n").await;
-    child.wait_for_stderr_count("[c] continue", 1).await;
-    assert_eq!(server.requests().len(), 1);
-    child.write("c\n").await;
-    // The relaxed request is sent; its tool result pushes the next one over the line again.
-    child.wait_for_stderr_count("[c] continue", 2).await;
     assert_eq!(
         server.requests().len(),
         2,
-        "the relaxed request was sent, and the one after it was blocked"
+        "an over-budget request must still be sent: {stderr}"
     );
-    child.write("n\n").await;
-    // A later turn is still guarded: the relax was for one request, not for the session.
-    child.write("hi\n").await;
-    child.wait_for_stderr_count("[c] continue", 3).await;
-    assert_eq!(
-        server.requests().len(),
-        2,
-        "a later turn must not be relaxed by an earlier continue"
-    );
-    child.write("n\n").await;
-    child.write("/exit\n").await;
-    let (code, _, stderr) = child.finish().await;
-
-    assert_eq!(code, 0, "{stderr}");
-    assert_eq!(server.requests().len(), 2, "{stderr}");
-    assert_eq!(stderr.matches("[c] continue").count(), 3, "{stderr}");
 }
 
-/// 5: choosing stop ends the turn; the session keeps accepting turns.
+/// 3: a context window that cannot hold the output reservation is a startup error, before the
+/// session file or any request (ADR 0018). `C <= R` is impossible, so it is refused, never
+/// silently clamped.
 #[tokio::test]
-async fn stopping_leaves_the_session_usable() {
-    let (_dir, ws) = budget_workspace("budget-stop-session");
-    let server = MockServer::start(vec![used_tool_reply(
-        "c1",
-        "write",
-        r#"{"path":"f.txt","content":"x"}"#,
-        3300,
-    )])
-    .await;
-
-    let mut child = Running::spawn(
-        &[
-            "--model",
-            "m",
-            "--base-url",
-            &server.base_url,
-            "--workspace",
-            ws.to_str().unwrap(),
-            "--yes",
-            "--context-window",
-            "4000",
-        ],
-        &[],
-    );
-    child.write("go\n").await;
-    child.wait_for_stderr_count("[c] continue", 1).await;
-    child.write("n\n").await; // give up this turn
-    // The prompt is back: another turn is accepted (and stops again, because the guard is
-    // still on).
-    child.write("hi\n").await;
-    child.wait_for_stderr_count("[c] continue", 2).await;
-    child.write("n\n").await;
-    child.write("/exit\n").await;
-    let (code, _, stderr) = child.finish().await;
-
-    assert_eq!(code, 0, "{stderr}");
-    assert_eq!(stderr.matches("[c] continue").count(), 2, "{stderr}");
-}
-
-/// 6: one-shot mode never continues by itself; it ends with its own exit code.
-#[tokio::test]
-async fn one_shot_stops_with_its_own_exit_code() {
-    let (_dir, ws) = budget_workspace("budget-oneshot");
-    let server = MockServer::start(vec![used_tool_reply(
-        "c1",
-        "write",
-        r#"{"path":"f.txt","content":"x"}"#,
-        3300,
-    )])
-    .await;
+async fn a_context_window_at_or_below_the_reservation_is_rejected() {
+    let (_dir, ws) = budget_workspace("budget-too-small");
+    let server = MockServer::start(vec![]).await;
 
     let (code, _, stderr) = feed_and_wait(
         spawn_agent(
@@ -2832,7 +2679,7 @@ async fn one_shot_stops_with_its_own_exit_code() {
                 ws.to_str().unwrap(),
                 "--yes",
                 "--context-window",
-                "4000",
+                "16384",
                 "-p",
                 "go",
             ],
@@ -2842,32 +2689,24 @@ async fn one_shot_stops_with_its_own_exit_code() {
     )
     .await;
 
-    assert_eq!(code, 3, "{stderr}");
+    assert_eq!(code, 2, "{stderr}");
     assert!(
-        stderr.contains("the model request was not sent"),
+        stderr.contains("not larger than the output reservation"),
         "{stderr}"
     );
-    assert!(
-        stderr.contains("does not continue automatically"),
-        "{stderr}"
-    );
-    assert_eq!(server.requests().len(), 1, "nothing was sent automatically");
+    assert!(server.requests().is_empty(), "{stderr}");
 }
 
-/// 7: the stop is durable (`TurnFinished` = `context_budget` plus `ContextBudgetReached`), and
-/// a resumed session still has the history.
-///
-/// Note what resume does *not* restore: the reported-input baseline is in-memory only
-/// (`AgentSession::budget_baseline`), so after `--resume` the projection is an estimate. That
-/// is why this run uses a wide window: the resumed request must go out so the recovered
-/// history is observable in it.
+/// 4: an over-budget turn records the normal outcome: no `context_budget`, and no
+/// `ContextBudgetReached` audit event is written (ADR 0018). The event type still exists for
+/// reading old journals.
 #[tokio::test]
-async fn the_stop_is_durable_and_a_resume_keeps_the_history() {
+async fn an_over_budget_turn_records_a_normal_outcome() {
     let sessions = fresh_session_dir();
     let (_dir, ws) = budget_workspace("budget-durable");
     let server = MockServer::start(vec![
-        used_tool_reply("c1", "write", r#"{"path":"f.txt","content":"x"}"#, 3300),
-        text_reply("after resume"),
+        used_tool_reply("c1", "write", r#"{"path":"f.txt","content":"x"}"#, 9000),
+        text_reply("done"),
     ])
     .await;
 
@@ -2882,7 +2721,7 @@ async fn the_stop_is_durable_and_a_resume_keeps_the_history() {
                 ws.to_str().unwrap(),
                 "--yes",
                 "--context-window",
-                "4000",
+                "20000",
                 "--session-id",
                 "s-budget",
                 "--session-dir",
@@ -2895,49 +2734,18 @@ async fn the_stop_is_durable_and_a_resume_keeps_the_history() {
         "",
     )
     .await;
-    assert_eq!(code, 3, "{stderr}");
-
-    let raw = std::fs::read_to_string(sessions.join("s-budget.jsonl")).unwrap();
-    assert!(raw.contains("\"context_budget\""), "{raw}");
-    assert!(raw.contains("ContextBudgetReached"), "{raw}");
-
-    // Resume: the recovered history is carried into the next request.
-    let mut child = Running::spawn(
-        &[
-            "--model",
-            "m",
-            "--base-url",
-            &server.base_url,
-            "--workspace",
-            ws.to_str().unwrap(),
-            "--yes",
-            "--context-window",
-            "100000",
-            "--resume",
-            "s-budget",
-            "--session-dir",
-            sessions.to_str().unwrap(),
-        ],
-        &[],
-    );
-    child.write("again\n").await;
-    wait_until("the resumed request", || server.requests().len() == 2).await;
-    child.write("/exit\n").await;
-    let (code, _, stderr) = child.finish().await;
     assert_eq!(code, 0, "{stderr}");
 
-    let resumed = messages_of(&server, 1);
-    assert_eq!(last_user_text(&resumed), "again");
-    let texts: Vec<&str> = resumed
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|m| m["content"].as_str().unwrap_or_default())
-        .collect();
+    let raw = std::fs::read_to_string(sessions.join("s-budget.jsonl")).unwrap();
     assert!(
-        texts.contains(&"go"),
-        "the resumed request lacks the old input: {resumed}"
+        !raw.contains("ContextBudgetReached"),
+        "no stop event may be written:\n{raw}"
     );
+    assert!(
+        !raw.contains("\"context_budget\""),
+        "the outcome must not be a budget stop:\n{raw}"
+    );
+    assert!(raw.contains("\"completed\""), "{raw}");
 }
 
 /// Like [`spawn_agent`], but uses a caller-owned session directory, so a test can assert
@@ -4397,7 +4205,8 @@ const CATALOG_JSON: &str = r#"{
   }
 }"#;
 
-/// The explicit window is named on startup and wins over the catalog.
+/// The explicit window is named on startup and wins over the catalog. ADR 0018 shows `C`, `I`,
+/// `output`, `R`, and the effective input budget `B` separately.
 #[tokio::test]
 async fn the_startup_line_names_an_explicit_window() {
     let server = MockServer::start(vec![text_reply("ok")]).await;
@@ -4409,7 +4218,7 @@ async fn the_startup_line_names_an_explicit_window() {
                 "--base-url",
                 &server.base_url,
                 "--context-window",
-                "5000",
+                "20000",
                 "--offline-catalog",
                 "-p",
                 "hi",
@@ -4421,12 +4230,13 @@ async fn the_startup_line_names_an_explicit_window() {
     .await;
     assert_eq!(code, 0, "{stderr}");
     assert!(
-        stderr.contains("window 5000 from --context-window"),
+        stderr.contains("B 3616 from --context-window"),
         "{stderr}"
     );
+    assert!(stderr.contains("R 16384"), "{stderr}");
 }
 
-/// With no window and an empty cache, the guard is off and says so.
+/// With no window and an empty cache, there is no budget and the startup says so.
 #[tokio::test]
 async fn the_startup_line_is_unknown_without_a_window() {
     let server = MockServer::start(vec![text_reply("ok")]).await;
@@ -4448,7 +4258,8 @@ async fn the_startup_line_is_unknown_without_a_window() {
     )
     .await;
     assert_eq!(code, 0, "{stderr}");
-    assert!(stderr.contains("unknown: context guard off"), "{stderr}");
+    assert!(stderr.contains("[budget] window unknown"), "{stderr}");
+    assert!(stderr.contains("no budget"), "{stderr}");
 }
 
 /// The catalog line names the provider/model and the numbers, and the numbers show separately.
@@ -4480,12 +4291,13 @@ async fn the_startup_line_names_the_catalog() {
     .await;
     assert_eq!(code, 0, "{stderr}");
     assert!(
-        stderr.contains("window 922000 from models.dev (opencode/deepseek-v4.1-flash"),
+        stderr.contains("B 922000 from models.dev (opencode/deepseek-v4.1-flash"),
         "{stderr}"
     );
-    assert!(stderr.contains("context 1000000"), "{stderr}");
-    assert!(stderr.contains("input 922000"), "{stderr}");
+    assert!(stderr.contains("C 1000000"), "{stderr}");
+    assert!(stderr.contains("I 922000"), "{stderr}");
     assert!(stderr.contains("output 384000"), "{stderr}");
+    assert!(stderr.contains("R 16384"), "{stderr}");
     assert_eq!(catalog.requests().len(), 1, "the catalog was fetched once");
 }
 
