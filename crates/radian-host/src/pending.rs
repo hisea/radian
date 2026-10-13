@@ -95,6 +95,11 @@ impl<Resp> Future for PendingAnswer<Resp> {
 
 impl<Resp> Drop for PendingAnswer<Resp> {
     fn drop(&mut self) {
+        // Close the receiver **before** waking the UI. Fields drop only after this body runs,
+        // so bumping first would let a woken UI call `head()` while `reply.is_closed()` is
+        // still false, keep showing the request, and get no further wake-up (ADR 0023 U2:
+        // change the state, then notify).
+        drop(self.rx.take());
         self.bump();
     }
 }
