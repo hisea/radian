@@ -92,7 +92,7 @@ async fn keys_answer_the_prompt() {
         assert_eq!(answer(&mut app, key(code), reply), "perm-1", "{code:?}");
         assert_eq!(answer_rx.await.unwrap(), expected, "{code:?}");
         assert!(
-            app.pending_approval.is_none(),
+            app.pending_approval().is_none(),
             "the prompt is cleared after an answer"
         );
     }
@@ -120,7 +120,7 @@ async fn a_finished_turn_abandons_a_prompt_that_was_never_answered() {
     let result = app.update(Input::Event(agent_core::AgentEvent::RunFinished {
         status: RunStatus::Cancelled(agent_core::CancelReason::Requested),
     }));
-    assert!(app.pending_approval.is_none());
+    assert!(app.pending_approval().is_none());
     assert_eq!(
         result.effects,
         vec![Effect::AbandonApproval {
@@ -147,7 +147,7 @@ async fn ctrl_c_while_a_prompt_is_up_cancels_instead_of_answering() {
     let result = app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
     assert_eq!(result.effects, vec![Effect::Cancel]);
     assert!(
-        app.pending_approval.is_some(),
+        app.pending_approval().is_some(),
         "Ctrl-C cancels the turn; the prompt is cleared when the turn ends"
     );
 }

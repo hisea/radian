@@ -64,9 +64,10 @@ pub struct ExportRequest {
 
 /// The host-level work a slash command asks for: neither touches the transcript, so the app
 /// records the request and the event loop runs it with the session directory and secrets.
+/// `/sessions` is no longer here: it opens the picker overlay ([`crate::app::Effect::
+/// OpenPicker`]) from the loop, because listing is I/O the loop owns (ADR 0023 U3/U4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionOutcome {
-    List(Option<String>),
     Export(ExportRequest),
     Fork,
 }

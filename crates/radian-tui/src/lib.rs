@@ -19,5 +19,7 @@ pub mod signals;
 pub mod terminal;
 pub mod theme;
 
-pub use app::{App, Effect, Entry, EntryKind, Input, MemoryResult, TurnState, UpdateResult};
+pub use app::{
+    App, Effect, Entry, EntryKind, Input, MemoryResult, PickerData, TurnState, UpdateResult,
+};
 pub use composer::Composer;

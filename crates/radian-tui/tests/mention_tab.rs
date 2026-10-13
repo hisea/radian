@@ -73,7 +73,7 @@ fn a_unique_file_candidate_completes_and_adds_a_space() {
     let mut app = app_with(dir.path(), "see @not");
     tab_complete(&mut app, dir.path());
     assert_eq!(app.input, "see @notes.txt ");
-    assert!(app.completion.is_none());
+    assert!(app.completion().is_none());
 }
 
 #[test]
@@ -83,7 +83,7 @@ fn a_unique_directory_candidate_keeps_the_trailing_slash() {
     let mut app = app_with(dir.path(), "@su");
     tab_complete(&mut app, dir.path());
     assert_eq!(app.input, "@sub/");
-    assert!(app.completion.is_none());
+    assert!(app.completion().is_none());
 }
 
 #[test]
@@ -94,13 +94,13 @@ fn several_candidates_complete_to_the_common_prefix_then_list() {
     let mut app = app_with(dir.path(), "@no");
     tab_complete(&mut app, dir.path());
     assert_eq!(app.input, "@notes.", "the common prefix is inserted");
-    assert!(app.completion.is_none(), "no list while the prefix grows");
+    assert!(app.completion().is_none(), "no list while the prefix grows");
 
     // A second Tab, already at the prefix, shows the list instead of changing the text.
     tab_complete(&mut app, dir.path());
     assert_eq!(app.input, "@notes.");
     assert_eq!(
-        app.completion.as_deref(),
+        app.completion(),
         Some(["notes.md".to_string(), "notes.txt".to_string()].as_slice())
     );
 }
@@ -113,9 +113,9 @@ fn esc_closes_the_list_without_clearing_the_input() {
     let mut app = app_with(dir.path(), "@no");
     tab_complete(&mut app, dir.path());
     tab_complete(&mut app, dir.path());
-    assert!(app.completion.is_some());
+    assert!(app.completion().is_some());
     app.on_key(key(KeyCode::Esc));
-    assert!(app.completion.is_none());
+    assert!(app.completion().is_none());
     assert_eq!(
         app.input, "@notes.",
         "Esc must not clear the input while the list is up"
@@ -129,19 +129,19 @@ fn tab_on_a_word_that_is_not_a_reference_does_nothing() {
     let mut app = app_with(dir.path(), "plain");
     tab_complete(&mut app, dir.path());
     assert_eq!(app.input, "plain");
-    assert!(app.completion.is_none());
+    assert!(app.completion().is_none());
 
     // An email is not a reference either.
     let mut app = app_with(dir.path(), "mail a@b.com");
     tab_complete(&mut app, dir.path());
     assert_eq!(app.input, "mail a@b.com");
-    assert!(app.completion.is_none());
+    assert!(app.completion().is_none());
 
     // A word that would match a file, but has no `@`, is still not a reference.
     let mut app = app_with(dir.path(), "notes");
     tab_complete(&mut app, dir.path());
     assert_eq!(app.input, "notes");
-    assert!(app.completion.is_none());
+    assert!(app.completion().is_none());
 }
 
 #[test]
@@ -150,7 +150,7 @@ fn no_candidate_leaves_the_text_alone() {
     let mut app = app_with(dir.path(), "@nothing");
     tab_complete(&mut app, dir.path());
     assert_eq!(app.input, "@nothing");
-    assert!(app.completion.is_none());
+    assert!(app.completion().is_none());
 }
 
 #[test]
@@ -187,9 +187,9 @@ fn typing_dismisses_the_list() {
     let mut app = app_with(dir.path(), "@no");
     tab_complete(&mut app, dir.path());
     tab_complete(&mut app, dir.path());
-    assert!(app.completion.is_some());
+    assert!(app.completion().is_some());
     app.on_key(key(KeyCode::Char('x')));
-    assert!(app.completion.is_none());
+    assert!(app.completion().is_none());
 }
 
 /// A key with an action of its own dismisses the stale list too (not just typing).
@@ -201,10 +201,10 @@ fn a_bound_key_dismisses_the_list_too() {
     let mut app = app_with(dir.path(), "@no");
     tab_complete(&mut app, dir.path());
     tab_complete(&mut app, dir.path());
-    assert!(app.completion.is_some());
+    assert!(app.completion().is_some());
     app.on_key(key(KeyCode::Up));
     assert!(
-        app.completion.is_none(),
+        app.completion().is_none(),
         "the list was computed for a word the key may have changed"
     );
 }
@@ -216,5 +216,5 @@ fn without_a_workspace_tab_does_nothing() {
     let result = app.on_key(tab());
     assert!(result.effects.is_empty(), "{:?}", result.effects);
     assert_eq!(app.input, "@no");
-    assert!(app.completion.is_none());
+    assert!(app.completion().is_none());
 }

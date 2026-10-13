@@ -206,7 +206,7 @@ fn a_confirmed_forget_waits_for_y_and_n_keeps_the_record() {
         ),
         "{effects:?}"
     );
-    assert!(app.pending_command.is_some(), "the command waits for y/n");
+    assert!(app.pending_command().is_some(), "the command waits for y/n");
     assert!(
         notices(&app).iter().any(|n| n.contains("[y/N]")),
         "{:?}",
@@ -216,7 +216,7 @@ fn a_confirmed_forget_waits_for_y_and_n_keeps_the_record() {
     // `n` cancels; the record is untouched and nothing is run.
     let cancel = app.on_key(key(KeyCode::Char('n')));
     assert!(cancel.effects.is_empty(), "{:?}", cancel.effects);
-    assert!(app.pending_command.is_none());
+    assert!(app.pending_command().is_none());
     assert_eq!(
         service
             .list(ScopeSelection::ProjectOnly, false)
@@ -244,7 +244,7 @@ fn a_confirmed_forget_waits_for_y_and_n_keeps_the_record() {
             app.update(input);
         }
     }
-    assert!(app.pending_command.is_none());
+    assert!(app.pending_command().is_none());
     assert!(
         notices(&app).iter().any(|n| n.contains("forgot")),
         "{:?}",
@@ -271,8 +271,8 @@ fn a_pending_confirmation_keeps_keys_out_of_the_input_box() {
         app.input.is_empty(),
         "a pending confirmation swallows typing"
     );
-    assert!(app.pending_command.is_some());
+    assert!(app.pending_command().is_some());
     app.on_key(key(KeyCode::Esc));
-    assert!(app.pending_command.is_none());
+    assert!(app.pending_command().is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }

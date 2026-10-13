@@ -3378,6 +3378,77 @@ async fn pty_sessions_and_export_commands() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
+/// `/sessions` opens the picker overlay while a turn is running; Esc closes it and the turn
+/// finishes normally (ADR 0023 U4). The reply is paced so the turn is still running when the
+/// picker is opened.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_sessions_opens_and_closes_during_a_running_turn() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("sessions-during-turn");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let Reply::Sse { pieces, .. } = Reply::sse(&[
+        chunk(json!({"role": "assistant", "content": "TURN-ONE-"}), None),
+        chunk(json!({"role": "assistant", "content": "TURN-TWO"}), None),
+        chunk(json!({}), Some("stop")),
+    ]) else {
+        unreachable!("Reply::sse builds an Sse reply")
+    };
+    let slow = Reply::Sse {
+        pieces,
+        pause: Duration::from_millis(1500),
+    };
+    let server = MockServer::start(vec![slow]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "during",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"start\r");
+    // The first paced chunk has arrived, so the turn is running.
+    assert!(
+        pty.wait_for_screen("TURN-ONE-", 10),
+        "the turn did not start:\n{}",
+        pty.screen()
+    );
+    // Open the picker while the turn runs: it opens unfocused, so the composer keeps the keys.
+    pty.send(b"/sessions\r");
+    assert!(
+        pty.wait_for_screen("filter:", 10),
+        "the picker did not open during the turn:\n{}",
+        pty.screen()
+    );
+    pty.send(&[0x1b]); // Esc closes the overlay
+    assert!(
+        pty.wait_until(5, |screen| !screen.contains("filter:")),
+        "Esc did not close the picker:\n{}",
+        pty.screen()
+    );
+    // The turn was not disturbed: its later chunk commits normally.
+    assert!(
+        pty.wait_for_screen("TURN-TWO", 15),
+        "the turn did not finish after the picker closed:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
 // ---------- the configuration file (ADR 0008) ----------
 
 /// A rebound `send` key sends, and `Enter` (rebound to newline in the same file) does not:

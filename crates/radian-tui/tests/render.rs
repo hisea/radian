@@ -231,7 +231,7 @@ fn a_user_file_attachment_is_folded_to_one_line() {
 fn the_completion_list_sits_above_the_input_and_truncates() {
     let mut app = App::new("m", "s");
     app.input = "@no".into();
-    app.completion = Some(vec!["notes.txt".into(), "notes.md".into()]);
+    app.completion_set(vec!["notes.txt".into(), "notes.md".into()]);
     let text = screen(&render(&mut app, 40, 12));
     assert!(text.contains("notes.txt"), "{text}");
     assert!(text.contains("notes.md"), "{text}");
@@ -247,7 +247,7 @@ fn the_completion_list_sits_above_the_input_and_truncates() {
 fn the_completion_list_truncates_on_a_narrow_terminal() {
     let mut app = App::new("m", "s");
     app.input = "@".into();
-    app.completion = Some(vec!["a-very-long-candidate-name.txt".into()]);
+    app.completion_set(vec!["a-very-long-candidate-name.txt".into()]);
     let text = screen(&render(&mut app, 12, 10));
     assert!(
         !text.contains("a-very-long-candidate-name.txt"),
@@ -261,14 +261,14 @@ fn the_completion_list_truncates_on_a_narrow_terminal() {
 #[test]
 fn completion_rows_truncates_to_the_width() {
     let mut app = App::new("m", "s");
-    app.completion = Some(vec!["a-very-long-name.txt".into()]);
+    app.completion_set(vec!["a-very-long-name.txt".into()]);
     assert_eq!(render::completion_rows(&app, 6), vec!["a-very".to_string()]);
 }
 
 #[test]
 fn the_completion_list_shows_ten_then_more() {
     let mut app = App::new("m", "s");
-    app.completion = Some((0..15).map(|i| format!("file{i:02}.txt")).collect());
+    app.completion_set((0..15).map(|i| format!("file{i:02}.txt")).collect());
     let text = screen(&render(&mut app, 40, 20));
     assert!(text.contains("file09.txt"), "{text}");
     assert!(!text.contains("file10.txt"), "{text}");

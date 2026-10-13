@@ -419,3 +419,18 @@ Base `9a62193` · 一次性 worktree `/tmp/s1b-mut` · 独立 `CARGO_TARGET_DIR`
   结构测试覆盖。这是"loom 不可用"下能做到的最好，不是等价替代。
 - **M40**：第一次只跑了 pty 套件，**没被抓住**（单轮会话里陈旧的缓冲不会被看见）；跑
   `--lib events` 后被单测抓住。记录在此，避免下次再误判。
+
+## ADR 0023 Step 1 ③：层栈（U4）
+
+Base `677ca35` · 在本任务工作树内逐条施加后从副本还原（`--no-fail-fast`）·
+`git status --short` 结束后干净。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| L1 | `cancel` 放到栈之后处理（先走层） | `layers::ctrl_c_cancels_while_an_approval_modal_is_open`、`approval::ctrl_c_while_a_prompt_is_up_cancels_instead_of_answering` | ✅ failed |
+| L2 | `push_overlay` 无视层级，直接压到栈顶 | `layers::an_overlay_pushed_while_a_modal_is_up_stays_below_it` | ✅ failed |
+| L3 | 审批/确认键改走 `Keymap`（不再硬编码） | `approval::keys_answer_the_prompt`、`config::the_approval_keys_cannot_be_taken_over_by_the_keymap`、`layers::the_approval_keys_survive_a_keymap_that_rebinds_y`、`layers::an_overlay_pushed_while_a_modal_is_up_stays_below_it` | ✅ failed |
+| L4 | 未消费的输入不往下传（`Pass` 变 `Swallow`） | `layers::the_find_overlay_passes_navigation_to_the_transcript`、`config::the_find_layer_is_rebindable` | ✅ failed |
+
+4/4 抓住。L1 的“放到栈之后”是：去掉栈前的 `cancel` 检查、放到 while 循环之后；审批 Modal 会先吞掉
+Ctrl-C，测试随即失败。L3 把模态的硬编码分派整段删掉，`y` 于是落到 `Keymap`/被吞，两条重绑测试失败。
