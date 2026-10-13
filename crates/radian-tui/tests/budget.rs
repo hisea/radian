@@ -1,21 +1,19 @@
-//! The context-budget stop: the wording of the three usage sources, and the keys that answer
-//! it. Pure `App` state plus the formatting functions, so it runs everywhere.
+//! The context-budget projection in the status bar (ADR 0015 wording, ADR 0018 `T / B`).
+//! Pure `App` state plus the formatting functions, so it runs everywhere.
 
-use agent_core::{BudgetReport, UsageSource};
+use agent_core::{AgentEvent, BudgetReport, UsageSource};
+use radian_tui::App;
 use radian_tui::app::{budget_status_text, budget_text};
-use radian_tui::{App, Send};
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 fn report(source: UsageSource) -> BudgetReport {
     BudgetReport {
         source,
         projected_tokens: 12340,
-        window_tokens: 16000,
-        threshold_percent: 80,
+        input_budget_tokens: 16000,
         request_bytes: 40000,
         baseline_input_tokens: match source {
             UsageSource::Estimated => None,
-            _ => Some(12000),
+            _ => Some(12_000),
         },
         estimated_growth_tokens: match source {
             UsageSource::Estimated => None,
@@ -23,10 +21,6 @@ fn report(source: UsageSource) -> BudgetReport {
             UsageSource::ReportedPlusEstimate => Some(340),
         },
     }
-}
-
-fn key(code: KeyCode) -> KeyEvent {
-    KeyEvent::new(code, KeyModifiers::NONE)
 }
 
 #[test]
@@ -56,51 +50,40 @@ fn the_three_usage_sources_read_differently() {
 }
 
 #[test]
-fn no_window_says_the_guard_is_off_and_claims_no_number() {
+fn the_status_bar_shows_the_projection_over_the_input_budget() {
+    // ADR 0018: `T / B`.
+    let text = budget_text(&report(UsageSource::ReportedPlusEstimate));
+    assert!(text.contains("/ 16000"), "the input budget must be shown: {text}");
+    assert!(text.contains("12340"), "{text}");
+}
+
+#[test]
+fn no_budget_says_off_and_claims_no_number() {
     let off = budget_status_text(None, Some(&report(UsageSource::Estimated)));
     assert!(off.contains("off"), "{off}");
     assert!(off.contains("no window"), "{off}");
     assert!(
         !off.chars().any(|c| c.is_ascii_digit()),
-        "the guard is off; no number may be shown: {off}"
+        "no budget is configured; no number may be shown: {off}"
     );
-    let on = budget_status_text(Some(16000), None);
-    assert!(on.contains("on") && on.contains("16000"), "{on}");
-}
-
-#[test]
-fn the_stop_keys_continue_or_dismiss_and_never_swallow_typing() {
-    let mut app = App::new("m", "s");
-    app.set_context_window(Some(16000));
-    app.budget_stop = Some(report(UsageSource::Estimated));
-
-    // `c` continues once and clears the prompt.
-    assert_eq!(
-        app.on_key(key(KeyCode::Char('c'))),
-        Some(Send::ContinueBudget)
-    );
-    assert!(app.budget_stop.is_none());
-
-    // Esc dismisses without sending anything.
-    app.budget_stop = Some(report(UsageSource::Estimated));
-    assert_eq!(app.on_key(key(KeyCode::Esc)), None);
-    assert!(app.budget_stop.is_none());
-
-    // A typed message is never swallowed by the prompt keys: with text in the box, `c` types.
-    app.budget_stop = Some(report(UsageSource::Estimated));
-    app.on_key(key(KeyCode::Char('h')));
-    assert_eq!(app.on_key(key(KeyCode::Char('c'))), None);
-    assert_eq!(app.input, "hc", "the key was swallowed by the prompt");
-    assert!(app.budget_stop.is_some(), "the stop is still up");
-}
-
-#[test]
-fn a_budget_stop_is_cleared_when_the_next_turn_starts() {
-    let mut app = App::new("m", "s");
-    app.budget_stop = Some(report(UsageSource::Estimated));
-    app.apply_event(&agent_core::AgentEvent::TurnStarted);
+    let configured = budget_status_text(Some(16_000), None);
     assert!(
-        app.budget_stop.is_none(),
-        "a new turn makes the stop prompt stale"
+        configured.contains("B 16000") && configured.contains("no request"),
+        "{configured}"
     );
+}
+
+#[test]
+fn a_request_started_event_sets_the_status_bar_report() {
+    let mut app = App::new("m", "s");
+    app.set_context_window(Some(16_000));
+    let report = report(UsageSource::ReportedPlusEstimate);
+    app.apply_event(&AgentEvent::ModelRequestStarted {
+        model_call: 1,
+        budget: Some(report.clone()),
+    });
+    assert_eq!(app.budget_report.as_ref(), Some(&report));
+    let text = budget_status_text(app.context_window, app.budget_report.as_ref());
+    assert!(text.contains("12340"), "{text}");
+    assert!(text.contains("/ 16000"), "{text}");
 }

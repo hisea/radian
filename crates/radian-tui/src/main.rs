@@ -341,15 +341,27 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
             .with_approval(approval);
 
     // The window comes from `--context-window` or the models.dev catalog (ADR 0018). A fetch
-    // failure is not a startup failure: the window is then unknown and the guard stays off.
-    // Still before the session file exists.
+    // failure is not a startup failure: the window is then unknown and the budget stays off.
+    // Still before the session file exists. `R` comes from the request's own output setting:
+    // Anthropic sends `max_tokens`, OpenAI-compatible sends none.
+    let request_max_output = match provider {
+        Provider::Anthropic => Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
+        Provider::OpenAiCompatible => None,
+    };
     let window = runtime.block_on(radian_host::resolve(&radian_host::WindowQuery::production(
         cli.context_window,
         cli.catalog_provider.clone(),
         &catalog_base_url,
         cli.model.clone(),
+        request_max_output,
         cli.offline_catalog,
     )));
+    if let Some(error) = &window.error {
+        return Err(format!("--context-window: {error}"));
+    }
+    if let Some(warning) = radian_host::output_ceiling_warning(request_max_output, window.output) {
+        eprintln!("{warning}");
+    }
 
     // Every startup check that can fail is done. Only now is the session file created; a
     // failure above leaves the session directory untouched (dogfooding D2).
@@ -389,7 +401,7 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
         system_prompt: cli.system.clone(),
         // No window known means the guard is off, never a guessed default (ADR 0015); the
         // window comes from the catalog or `--context-window` (ADR 0018).
-        context_budget: window.tokens.map(ContextBudget::new),
+        context_budget: window.budget.map(ContextBudget::new),
         ..AgentConfig::default()
     };
 
@@ -464,9 +476,6 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
 
     // The driver runs until the UI asks it to stop; dropping its `run()` future releases the
     // borrow so `shutdown()` can be called.
-    // The handle the UI uses for a context-budget "continue": it must be taken before the
-    // driver moves onto its task.
-    let relax_budget = driver.budget_relax();
     let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
     let panic_in_driver = cli.panic_in_driver;
     let driver_task = runtime.spawn(async move {
@@ -518,7 +527,7 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
         panic!("radian-tui: panic path test with a child in flight");
     }
     let mut app = App::new(cli.model.clone(), session_id.clone());
-    app.set_context_window(window.tokens);
+    app.set_context_window(window.budget);
     app.set_tier(tier.as_str());
     app.set_mcp(mcp_configured, mcp_open);
     for message in &history {
@@ -569,7 +578,6 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
         &inbox,
         &hooks,
         &driver_task,
-        &relax_budget,
     );
     guard.restore();
 
@@ -611,7 +619,6 @@ fn ui_loop(
     inbox: &Arc<Inbox>,
     hooks: &Arc<PermissionHooks>,
     driver_task: &tokio::task::JoinHandle<Result<(), radian_runtime::DriverError>>,
-    relax_budget: &radian_runtime::BudgetRelax,
 ) -> Result<(), String> {
     while !app.quit {
         // SIGTERM/SIGHUP: leave exactly like a quit, so the terminal is restored and the
@@ -645,7 +652,7 @@ fn ui_loop(
             match event::read().map_err(|e| e.to_string())? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     if let Some(send) = app.on_key(key) {
-                        dispatch(send, runtime, inbox, hooks, relax_budget)?;
+                        dispatch(send, runtime, inbox, hooks)?;
                     }
                 }
                 Event::Paste(text) => app.input.push_str(&text),
@@ -681,20 +688,8 @@ fn dispatch(
     runtime: &tokio::runtime::Runtime,
     inbox: &Arc<Inbox>,
     hooks: &Arc<PermissionHooks>,
-    relax_budget: &radian_runtime::BudgetRelax,
 ) -> Result<(), String> {
     match send {
-        // ADR 0015 C5's "continue": the next turn's first model request passes the guard once,
-        // and the guard applies again after it. The turn is opened with a message of the
-        // host's own ("continue"), which is what the user chose.
-        Send::ContinueBudget => {
-            relax_budget.relax_once();
-            hooks.set_turn_source(Some(InputSource::User));
-            runtime
-                .block_on(inbox.followup("continue", InputSource::User))
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-        }
         Send::Followup(text) => {
             // `HookContext` has no source field, so the host declares each turn's source
             // before it starts; an unset source is treated as non-human and denied.

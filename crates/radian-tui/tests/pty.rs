@@ -842,16 +842,15 @@ async fn pty_ctrl_c_while_waiting_for_approval_cancels_the_turn() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
-/// The context-budget stop: the request is not sent, the reason is shown honestly (estimated,
-/// since nothing was reported yet), and "continue" lets exactly one request through before the
-/// guard applies again (ADR 0015 C5).
+/// ADR 0018: over the input budget `B` the request is **still sent** and the turn completes;
+/// the status bar shows the projection over `B` and labels a local estimate honestly.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 // The test body blocks on the pty on purpose; the lock serializes the pty tests.
 #[allow(clippy::await_holding_lock)]
-async fn pty_a_budget_stop_sends_nothing_and_continue_relaxes_once() {
+async fn pty_an_over_budget_request_is_still_sent() {
     let _serial = pty_guard();
-    let dir = TempDir::new("budget");
-    let server = MockServer::start(vec![text_reply("BUDGET-REPLY")]).await;
+    let dir = TempDir::new("budget-over");
+    let server = MockServer::start(vec![text_reply("OVER-BUDGET-REPLY")]).await;
     let mut pty = Pty::spawn(
         &[
             "--model",
@@ -861,68 +860,32 @@ async fn pty_a_budget_stop_sends_nothing_and_continue_relaxes_once() {
             "--session-dir",
             dir.path().to_str().unwrap(),
             "--session-id",
-            "budget",
+            "budget-over",
+            // B = C - R = 20000 - 16384 = 3616.
             "--context-window",
-            "1",
+            "20000",
         ],
         30,
         110,
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
-    pty.send(b"hi\r");
+    // ~5000 estimated tokens, over B = 3616.
+    pty.send(format!("{}\r", "x".repeat(20_000)).as_bytes());
     assert!(
-        pty.wait_for_screen("stopped before the next request", 20),
-        "no budget stop:\n{}",
-        pty.screen()
-    );
-    assert!(
-        server.requests().is_empty(),
-        "the blocked request must not be sent"
-    );
-    let screen = pty.screen();
-    assert!(
-        screen.contains("(estimated)"),
-        "the stop must label the projection as estimated: {screen}"
-    );
-    assert!(
-        !screen.contains("(reported"),
-        "nothing was reported yet: {screen}"
-    );
-
-    // Continue once: that request goes out.
-    pty.send(b"c");
-    assert!(
-        pty.wait_for_screen("BUDGET-REPLY", 20),
-        "the relaxed request did not go out:\n{}",
+        pty.wait_for_screen("OVER-BUDGET-REPLY", 20),
+        "the over-budget request must still be sent:\n{}",
         pty.screen()
     );
     assert_eq!(server.requests().len(), 1);
-
-    // The guard applies again on the next turn: a second stop, and still one request.
-    pty.send(b"again\r");
-    let deadline = std::time::Instant::now() + Duration::from_secs(20);
-    loop {
-        if pty
-            .screen()
-            .matches("stopped before the next request")
-            .count()
-            >= 2
-        {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the guard did not resume:\n{}",
-            pty.screen()
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert_eq!(
-        server.requests().len(),
-        1,
-        "a later request was sent although the guard is back"
+    let screen = pty.screen();
+    assert!(
+        screen.contains("(estimated)"),
+        "the projection is labelled as an estimate: {screen}"
     );
-
+    assert!(
+        screen.contains("/ 3616"),
+        "the status bar shows the projection over B: {screen}"
+    );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
 }
@@ -951,8 +914,8 @@ async fn pty_without_a_window_the_status_bar_says_the_guard_is_off() {
         110,
     );
     assert!(
-        pty.wait_for_screen("context guard off", 10),
-        "the status bar does not say the guard is off:\n{}",
+        pty.wait_for_screen("context budget off", 10),
+        "the status bar does not say the budget is off:\n{}",
         pty.screen()
     );
     assert!(
@@ -2324,7 +2287,7 @@ async fn pty_the_startup_notice_names_the_window_source() {
             "--session-id",
             "catalog-window",
             "--context-window",
-            "5000",
+            "20000",
             "--profile",
             "full",
         ],
@@ -2332,8 +2295,8 @@ async fn pty_the_startup_notice_names_the_window_source() {
         110,
     );
     assert!(
-        pty.wait_for_screen("context: window 5000 from --context-window", 10),
-        "the startup notice does not name the explicit window:\n{}",
+        pty.wait_for_screen("B 3616 from --context-window", 10),
+        "the startup notice does not name the explicit window and its B:\n{}",
         pty.screen()
     );
     pty.quit();

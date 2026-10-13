@@ -285,9 +285,19 @@ fn status_segments(app: &App) -> Vec<Segment> {
         text: mcp_text(app.mcp_configured, app.mcp_open),
         style: Style::default().fg(Color::Cyan),
     });
+    // ADR 0018: over the input budget `B` the request is still sent, but the status bar
+    // warns (the existing warning colour).
+    let over_budget = app
+        .budget_report
+        .as_ref()
+        .is_some_and(|report| report.projected_tokens > report.input_budget_tokens);
     segments.push(Segment {
         text: budget_status_text(app.context_window, app.budget_report.as_ref()),
-        style: Style::default().fg(Color::Magenta),
+        style: Style::default().fg(if over_budget {
+            Color::Yellow
+        } else {
+            Color::Magenta
+        }),
     });
     segments.push(Segment {
         text: format!(

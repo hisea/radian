@@ -107,31 +107,27 @@ impl TurnState {
 /// an estimated growth, and a pure estimate must be distinguishable, and a mixed value must
 /// **not** be presented as a report.
 pub fn budget_text(report: &BudgetReport) -> String {
-    let window = format!(
-        " of {} at {}%",
-        report.window_tokens, report.threshold_percent
-    );
-    match report.source {
-        UsageSource::Reported => format!("context {}{window} (reported)", report.projected_tokens),
+    let usage = match report.source {
+        UsageSource::Reported => format!("{} (reported)", report.projected_tokens),
         UsageSource::ReportedPlusEstimate => format!(
-            "context {}{window} (reported {} + estimated {})",
+            "{} (reported {} + estimated {})",
             report.projected_tokens,
             report.baseline_input_tokens.unwrap_or(0),
             report.estimated_growth_tokens.unwrap_or(0)
         ),
-        UsageSource::Estimated => {
-            format!("context ~{}{window} (estimated)", report.projected_tokens)
-        }
-    }
+        UsageSource::Estimated => format!("~{} (estimated)", report.projected_tokens),
+    };
+    format!("context {usage} / {}", report.input_budget_tokens)
 }
 
-/// The status bar's budget segment. A configured window with no report yet says the guard is
-/// on; no window says it is off, and never invents a number (ADR 0015 C1's `Disabled` row).
-pub fn budget_status_text(window: Option<u64>, report: Option<&BudgetReport>) -> String {
-    match (window, report) {
-        (None, _) => "context guard off (no window configured)".to_string(),
+/// The status bar's budget segment (ADR 0018): the projection `T` over the input budget `B`.
+/// No window configured says it is off and never invents a number; a configured budget with no
+/// request yet names `B`.
+pub fn budget_status_text(input_budget: Option<u64>, report: Option<&BudgetReport>) -> String {
+    match (input_budget, report) {
+        (None, _) => "context budget off (no window configured)".to_string(),
         (Some(_), Some(report)) => budget_text(report),
-        (Some(window), None) => format!("context guard on ({window} tokens)"),
+        (Some(input_budget), None) => format!("context budget B {input_budget} (no request yet)"),
     }
 }
 
@@ -169,9 +165,6 @@ pub enum Send {
     Steer(String),
     /// Cancel the running turn.
     Cancel,
-    /// Continue once past a context-budget stop (ADR 0015 C5): the next turn's first request
-    /// is allowed through, then the guard applies again.
-    ContinueBudget,
     Quit,
 }
 
@@ -191,7 +184,7 @@ pub struct App {
     pub note: Option<String>,
     /// Set while a tool call waits for the human; keys answer it instead of typing.
     pub pending_approval: Option<ApprovalPrompt>,
-    /// The configured context window, if any; `None` means the guard is off.
+    /// The effective input budget `B`, if any; `None` means no budget is configured.
     pub context_window: Option<u64>,
     /// The most recent budget report, for the status bar.
     pub budget_report: Option<BudgetReport>,
@@ -205,9 +198,6 @@ pub struct App {
     /// reported (`None` until it opens). Plain numbers, so the app needs no MCP dependency.
     pub mcp_configured: usize,
     pub mcp_open: Option<(usize, usize)>,
-    /// A budget stop waiting for the user's choice. The keys work only while the input box is
-    /// empty, so ordinary typing is never swallowed.
-    pub budget_stop: Option<BudgetReport>,
     pub total_lines: usize,
     pub view_height: u16,
     pub max_scroll: usize,
@@ -233,16 +223,15 @@ impl App {
             usage_output: None,
             mcp_configured: 0,
             mcp_open: None,
-            budget_stop: None,
             total_lines: 0,
             view_height: 0,
             max_scroll: 0,
         }
     }
 
-    /// Records the configured context window (the guard is off when this is `None`).
-    pub fn set_context_window(&mut self, window: Option<u64>) {
-        self.context_window = window;
+    /// Records the effective input budget `B` (no budget is configured when this is `None`).
+    pub fn set_context_window(&mut self, input_budget: Option<u64>) {
+        self.context_window = input_budget;
     }
 
     /// Records the permission tier's display name, for the status bar.
@@ -327,21 +316,6 @@ impl App {
                 self.quit = true;
                 Some(Send::Quit)
             };
-        }
-        // A budget stop offers continue/dismiss, but only while the input box is empty: a
-        // typed message must never be swallowed by a prompt key.
-        if self.budget_stop.is_some() && self.input.is_empty() {
-            match key.code {
-                KeyCode::Char('c') | KeyCode::Char('C') => {
-                    self.budget_stop = None;
-                    return Some(Send::ContinueBudget);
-                }
-                KeyCode::Esc => {
-                    self.budget_stop = None;
-                    return None;
-                }
-                _ => {}
-            }
         }
         // While a prompt is up, keys answer it and never type into the input box.
         if self.pending_approval.is_some() {
@@ -437,10 +411,11 @@ impl App {
     /// (`TranscriptAppended`) replaces them, so a dropped delta can never leave a duplicate.
     pub fn apply_event(&mut self, event: &AgentEvent) {
         match event {
-            AgentEvent::TurnStarted | AgentEvent::ModelRequestStarted { .. } => {
+            AgentEvent::TurnStarted => self.turn = TurnState::Running,
+            // ADR 0018: the request carries its projection and budget `B`, for the status bar.
+            AgentEvent::ModelRequestStarted { budget, .. } => {
                 self.turn = TurnState::Running;
-                // A new turn started, so a stop that was waiting for a choice is stale.
-                self.budget_stop = None;
+                self.budget_report = budget.clone();
             }
             AgentEvent::ModelTextDelta { text } => self.append_live(EntryKind::Assistant, text),
             AgentEvent::ModelReasoningDelta { text } => {
@@ -466,20 +441,6 @@ impl App {
                 // already resolved the hook's `ask` as a denial. Dropping the prompt (and its
                 // reply channel) leaves nothing behind.
                 self.pending_approval = None;
-                // A context-budget stop is a turn outcome the host must act on (ADR 0015 C5):
-                // show the reason and the numbers, and offer continue/dismiss.
-                if let RunStatus::ContextBudget(report) = status {
-                    self.budget_report = Some(report.clone());
-                    self.budget_stop = Some(report.clone());
-                    self.entries.push(Entry::new(
-                        EntryKind::Notice,
-                        format!(
-                            "stopped before the next request: {} — press c to continue once, \
-                             Esc to dismiss",
-                            budget_text(report)
-                        ),
-                    ));
-                }
             }
             _ => {}
         }
