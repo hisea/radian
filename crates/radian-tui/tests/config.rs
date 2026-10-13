@@ -136,17 +136,17 @@ find_close = [\"ctrl-x\"]
     .unwrap();
     // `find` moves to Ctrl-S: Ctrl-F no longer opens the box.
     app.on_key(ctrl(KeyCode::Char('f')));
-    assert!(app.find.is_none(), "Ctrl-F is no longer `find`");
+    assert!(app.find_state().is_none(), "Ctrl-F is no longer `find`");
     app.on_key(ctrl(KeyCode::Char('s')));
-    assert!(app.find.is_some(), "Ctrl-S opened the box");
+    assert!(app.find_state().is_some(), "Ctrl-S opened the box");
     // `find_close` moves to Ctrl-X; Esc falls through to the transcript's `escape`, which
     // clears the draft (and does not close the box or quit).
     app.on_key(key(KeyCode::Esc));
-    assert!(app.find.is_some(), "Esc is no longer find_close");
+    assert!(app.find_state().is_some(), "Esc is no longer find_close");
     assert!(!app.quit, "Esc cleared the input instead of quitting");
     assert_eq!(app.input, "", "the draft was cleared");
     app.on_key(ctrl(KeyCode::Char('x')));
-    assert!(app.find.is_none(), "Ctrl-X closed the box");
+    assert!(app.find_state().is_none(), "Ctrl-X closed the box");
 }
 
 /// The `dark` theme is the pre-config palette; this is the screenshot assertion for a couple

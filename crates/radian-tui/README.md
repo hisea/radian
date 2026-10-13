@@ -19,12 +19,12 @@ App::update(input: Input) -> UpdateResult { dirty: bool, effects: Vec<Effect> }
 
 - **`Input`** is either an interaction intent (`Action`, from the keymap; `Char`, a typed
   character; `FindBackspace`; `Paste`; `Resize`; the hardcoded approval and confirmation
-  answers) or a host fact (an `AgentEvent`, a runtime event, an approval request, and the
-  result of an effect).
+  answers; `PickerKey`/`PickerClose`, one key for the picker overlay) or a host fact (an
+  `AgentEvent`, a runtime event, an approval request, and the result of an effect).
 - **`Effect`** is everything that needs the outside world: `SendFollowup`/`Steer`/`Cancel`/
   `Quit`, `AnswerApproval`/`AbandonApproval`, `ExpandMentions` (the `@` expansion reads
-  files), `CompleteMention` (reads a directory), `RunMemoryCommand`, `Compact`, and `Session`
-  (`/sessions`, `/export`, `/fork`).
+  files), `CompleteMention` (reads a directory), `RunMemoryCommand`, `Compact`, `Session`
+  (`/export`, `/fork`), and `OpenPicker` (reads the session index for `/sessions`).
 - The event loop in `main.rs` runs the effects and feeds their results back as inputs. A key
   press is resolved by `App::key_input` (the keymap plus the current layer) and `App::on_key`
   is the thin wrapper around it.
@@ -64,6 +64,29 @@ state, the real key protocol and the recovery paths.
 - **Idle is zero redraw**: the loop blocks in `recv`, and no display in this build changes with
   time, so nothing is drawn until an event arrives (`pty_an_idle_screen_is_not_redrawn`; the
   Step 0 baseline was ~19 frames/s, `docs/perf-baseline.md` §7b).
+
+### The layer stack (ADR 0023 U4)
+
+`App` holds a `Vec<Layer>`, bottom first. A layer's tier is its variant:
+
+| Tier | Layers | Rule |
+|---|---|---|
+| `Modal` | the approval prompt, the `/memory` confirmation (a structured question is the documented extension point) | must be answered; always above every overlay |
+| `Overlay` | the find box, the `@` completion list, the session picker | temporary; never above a modal |
+| `Surface` | the transcript and the message box | always at index 0 |
+
+`App::push_overlay` inserts below the highest modal, so an overlay pushed while a prompt is
+up cannot cover it; `push_modal` goes on top. `App::key_input` then resolves a key in a fixed
+order: (2) a modal's hardcoded `y`/`a`/`n`/`Esc` win over the keymap — even over a `cancel`
+rebound onto `y`; (1) the bound `cancel` action (Ctrl-C by default) runs before the stack;
+then the stack is walked top-down, the first layer that consumes the key winning and an
+unconsumed key falling toward the surface (`PageUp` still scrolls while the find box is open).
+The four former `Option` fields are gone (`tests/layers.rs`).
+
+The `--pick` startup screen and the `/sessions` overlay share one `picker::Picker`; the
+overlay opens **unfocused**, so the composer keeps the keys until the user navigates into it
+(`Up`/`Down` focus it), and typing dismisses it. Selecting does not switch sessions in place
+(ADR 0022): it shows the `--resume <id>` line.
 
 ## Providers
 
@@ -192,7 +215,7 @@ the rest is sent as an ordinary message.
 | `/help` | list the commands |
 | `/compact [note]` | summarize the history now and keep the recent part (ADR 0018) |
 | `/fork` | fork this session at its last turn boundary (ADR 0022); idle only, and it does not switch to the child |
-| `/sessions [query]` | list this workspace's recent sessions (20), or search their message text; each line carries a copyable `--resume <id>` |
+| `/sessions [query]` | open the session **picker overlay** for this workspace (the `--pick` screen); type to filter, `Tab` full-text search, Enter shows the copyable `--resume <id>` line |
 | `/export [md\|json] [path] [--force]` | export **this** session (default `md`, default `<workspace>/radian-<id>.<ext>`) |
 | `/memory <command> …` | the same durable-memory commands as `agent memory` (ADR 0021 D7): `list`, `search`, `show`, `add`, `edit`, `archive`, `restore`, `forget`, `purge`, `confirm`, `export`, `import`, `project` / `project new`, `relink`, `split`, `merge` |
 
@@ -206,9 +229,7 @@ the rest is sent as an ordinary message.
 - `/compact [note]` asks the runtime to summarize the history now (ADR 0018); the driver runs
   it between turns, so a running turn finishes first, and the result is a notice. Ctrl-C/Esc
   cancels an in-flight compaction without committing.
-- `/sessions` and `/export` are host work, not transcript changes: the event loop runs them
-  where the session directory, workspace and secrets are known. `/sessions` never switches
-  sessions in place — reopen with `--resume <id>` or `--pick`. `/export` uses the same
+- `/sessions` opens the session picker overlay (the same one `--pick` runs); the event loop loads the rows, because that reads the session directory. It never switches sessions in place — selecting shows `--resume <id>`, and the composer keeps typing until you navigate into the picker. `/export` uses the same
   `radian-host` renderer as `agent --export` (redacted, read-only JSONL), writes atomically,
   and refuses to overwrite without `--force`; a relative path is resolved against the
   workspace, an absolute one may point anywhere the user named.

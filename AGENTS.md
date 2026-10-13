@@ -68,6 +68,7 @@ Use this section when the owner asks you to hand work to pi in herdr. pi is a se
 - The files to read first, the background, and the steps.
 - The limits: do not change the public API of `agent-core` without saying why, no new dependencies without a reason, minimum Rust 1.88, follow the style around it.
 - The acceptance commands from the Verify section, and how many times to repeat flaky-prone tests.
+- The write-as-you-go rule: pi writes each finished piece to disk and commits it before it starts the next piece. It keeps a short progress note in the worktree (what is done, what is verified, what is next) and updates it after each step. A context compaction loses work that lives only in the conversation; it does not lose a file or a commit.
 - The test rule: each new test must fail when the feature is broken. pi runs the test against the broken code, and does a mutation check for each behavior it adds. The report names the test that caught each mutation.
 - The report: files changed, the design in a few lines, the command results, what pi is unsure about, and the commit id. pi must say when it is unsure, and must not guess.
 - The notice: when pi finishes or is blocked, it runs `herdr agent prompt <your pane> "<one line>"`. Use your own pane id from `$HERDR_PANE_ID`. The line has the status, the commit id, whether all the commands passed, and what you must decide.

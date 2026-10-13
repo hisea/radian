@@ -23,7 +23,7 @@ use radian_permissions::{
     runtime_event,
 };
 use radian_session::{Index, SessionJournal};
-use radian_tui::app::{App, Effect, Input as AppInput, MemoryResult};
+use radian_tui::app::{App, Effect, Input as AppInput, MemoryResult, PickerData};
 use radian_tui::events::{ApprovalPrompt, InputEvent, ProjectionSink, UiEvent};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -1191,6 +1191,10 @@ impl LoopContext<'_> {
                 self.send(AppInput::SessionDone(notices));
                 Ok(())
             }
+            Effect::OpenPicker { query } => {
+                self.send(load_picker(self.host, query));
+                Ok(())
+            }
         }
     }
 
@@ -1322,12 +1326,6 @@ fn handle_session_request(
     request: radian_tui::command::SessionOutcome,
 ) -> Vec<String> {
     match request {
-        radian_tui::command::SessionOutcome::List(query) => {
-            match session_lines(host, query.as_deref()) {
-                Ok(lines) => lines,
-                Err(message) => vec![message],
-            }
-        }
         radian_tui::command::SessionOutcome::Export(request) => {
             match export_current(host, &request) {
                 Ok(path) => vec![format!("exported to {path}")],
@@ -1359,52 +1357,23 @@ fn handle_session_request(
     }
 }
 
-/// The `/sessions` lines: the recent list or the full-text hits, at most 20, each with a
-/// copyable `--resume <id>`. A workspace with no sessions (or no matches) is one notice.
-fn session_lines(host: &SessionHost, query: Option<&str>) -> Result<Vec<String>, String> {
-    let Some(index) = radian_host::sessions::open_index(&host.dir)? else {
-        return Ok(vec!["no sessions for this workspace yet".to_owned()]);
-    };
-    let mut lines = Vec::new();
-    match query {
-        Some(query) => {
-            let hits = radian_host::sessions::search(&index, &host.workspace, query, 20)?;
-            if hits.is_empty() {
-                return Ok(vec![format!("no match for {query:?}")]);
-            }
-            for hit in hits {
-                let snippet = radian_tui::terminal::redact(&hit.snippet, &host.secrets);
-                lines.push(format!(
-                    "{}  {}  {}  --resume {}",
-                    hit.session_id,
-                    hit.last_ts.as_deref().unwrap_or("-"),
-                    snippet,
-                    hit.session_id
-                ));
-            }
-        }
-        None => {
-            let rows = radian_host::sessions::list(&index, &host.workspace)?;
-            if rows.is_empty() {
-                return Ok(vec!["no sessions for this workspace yet".to_owned()]);
-            }
-            for row in rows.into_iter().take(20) {
-                lines.push(format!(
-                    "{}  {}  {} messages  {}  --resume {}",
-                    row.session_id,
-                    row.last_ts.as_deref().unwrap_or("-"),
-                    row.message_count,
-                    row.summary,
-                    row.session_id
-                ));
-            }
-        }
+/// Loads the data the picker overlay shows: the workspace's session rows and its index. A
+/// missing session directory is one notice instead of an empty overlay (dogfooding D2 style).
+fn load_picker(host: &SessionHost, query: Option<String>) -> AppInput {
+    match radian_host::sessions::open_index(&host.dir) {
+        Ok(Some(index)) => match radian_host::sessions::list(&index, &host.workspace) {
+            Ok(rows) => AppInput::PickerOpened(PickerData {
+                rows,
+                index: Some(index),
+                workspace: host.workspace.clone(),
+                query,
+                secrets: host.secrets.clone(),
+            }),
+            Err(message) => AppInput::SessionDone(vec![message]),
+        },
+        Ok(None) => AppInput::SessionDone(vec!["no sessions for this workspace yet".to_owned()]),
+        Err(message) => AppInput::SessionDone(vec![message]),
     }
-    lines.push(
-        "this process does not switch sessions in place; reopen with `--resume <id>` or `--pick`"
-            .to_owned(),
-    );
-    Ok(lines)
 }
 
 /// `/export`: render the current session with the shared host layer, check overwrite, and
@@ -1537,7 +1506,7 @@ fn pick_session(
     if rows.is_empty() {
         return Ok(None);
     }
-    radian_tui::picker::run(&rows, index.as_ref(), workspace)
+    radian_tui::picker::run(rows, index, workspace)
         .map(Some)
         .map_err(|e| format!("picker: {e}"))
 }

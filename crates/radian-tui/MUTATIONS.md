@@ -435,3 +435,18 @@ Base `7b811b7` · 一次性检出 `/tmp/s1d-mut`（detached，跑完删除）· 
 4/4 抓住。S5/S6 是"投影写了"与"UI 被唤醒"两件事各自被破坏；S7 对应评审要求的"投影更新但 UI 不重画"
 变异（`App` 旧字段已删，编译即可证明状态栏不再读它们，所以改用这条）；S8 钉住能力拒绝是**一条
 Notice**而不是让循环失败。
+
+## ADR 0023 Step 1 ③：层栈（U4）
+
+Base `677ca35` · 在本任务工作树内逐条施加后从副本还原（`--no-fail-fast`）·
+`git status --short` 结束后干净。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| L1 | `cancel` 放到栈之后处理（先走层） | `layers::ctrl_c_cancels_while_an_approval_modal_is_open`、`approval::ctrl_c_while_a_prompt_is_up_cancels_instead_of_answering` | ✅ failed |
+| L2 | `push_overlay` 无视层级，直接压到栈顶 | `layers::an_overlay_pushed_while_a_modal_is_up_stays_below_it` | ✅ failed |
+| L3 | 审批/确认键改走 `Keymap`（不再硬编码） | `approval::keys_answer_the_prompt`、`config::the_approval_keys_cannot_be_taken_over_by_the_keymap`、`layers::the_approval_keys_survive_a_keymap_that_rebinds_y`、`layers::an_overlay_pushed_while_a_modal_is_up_stays_below_it` | ✅ failed |
+| L4 | 未消费的输入不往下传（`Pass` 变 `Swallow`） | `layers::the_find_overlay_passes_navigation_to_the_transcript`、`config::the_find_layer_is_rebindable` | ✅ failed |
+
+4/4 抓住。L1 的“放到栈之后”是：去掉栈前的 `cancel` 检查、放到 while 循环之后；审批 Modal 会先吞掉
+Ctrl-C，测试随即失败。L3 把模态的硬编码分派整段删掉，`y` 于是落到 `Keymap`/被吞，两条重绑测试失败。

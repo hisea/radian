@@ -24,6 +24,7 @@ use crate::composer::Composer;
 use crate::find::FindState;
 use crate::keys::{Action, Keymap};
 use crate::mention::{Completion, ExpandError, Expansion};
+use crate::picker::{Outcome as PickerOutcome, Picker};
 use crate::projection::{SessionProjection, StreamSnapshot};
 use crate::theme::{Theme, ThemeName};
 
@@ -104,6 +105,68 @@ impl PartialEq for WrapCache {
     }
 }
 
+/// The three tiers of the layer stack (ADR 0023 U4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tier {
+    /// Long-lived: the transcript and the message box. Always at the bottom of the stack.
+    Surface,
+    /// A temporary floating layer: the find box, the `@` completion list, the session picker.
+    /// Never above a [`Modal`].
+    Overlay,
+    /// A prompt that needs an explicit answer before it goes away: the approval prompt, the
+    /// `/memory` confirmation, and (extension point, not implemented) a structured question.
+    /// Always above every [`Overlay`].
+    Modal,
+}
+
+impl Tier {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Surface => "surface",
+            Self::Overlay => "overlay",
+            Self::Modal => "modal",
+        }
+    }
+}
+
+/// One layer of the stack. The variant *is* the tier, so an [`Overlay`] can never be a
+/// [`Modal`]; [`App::push_overlay`] additionally keeps an overlay below every modal.
+pub enum Layer {
+    Surface,
+    Overlay(Overlay),
+    Modal(Modal),
+}
+
+impl Layer {
+    pub fn tier(&self) -> Tier {
+        match self {
+            Self::Surface => Tier::Surface,
+            Self::Overlay(_) => Tier::Overlay,
+            Self::Modal(_) => Tier::Modal,
+        }
+    }
+}
+
+/// The state of one [`Tier::Overlay`] layer.
+pub enum Overlay {
+    /// The in-transcript search box (Phase 5).
+    Find(FindState),
+    /// The `@` completion candidate list.
+    Completion(Vec<String>),
+    /// The session picker (ADR 0023 U4): `--pick` at startup, `/sessions` in a session.
+    Picker(Picker),
+}
+
+/// The state of one [`Tier::Modal`] layer.
+pub enum Modal {
+    /// A tool call waiting for `y`/`a`/`n`.
+    Approval(ApprovalRequest),
+    /// A `/memory` write waiting for `y`/`n`.
+    ConfirmCommand(PendingCommand),
+    // A structured question (the `ask_user` request) is the documented extension point: it
+    // would be a third `Modal` variant with its own form keys, but this build does not have it.
+}
+
 /// The wording for a budget report. ADR 0015 C1: a reported number, a reported baseline plus
 /// an estimated growth, and a pure estimate must be distinguishable, and a mixed value must
 /// **not** be presented as a report.
@@ -163,7 +226,6 @@ pub fn mcp_text(configured: usize, open: Option<(usize, usize)>) -> String {
 /// [`Input::FindBackspace`] are the two editing intents that are deliberately **not** bindings
 /// (typing, and the find box's own backspace, which belongs to the box like the approval keys
 /// belong to the prompt). Everything else is a host fact or the result of an [`Effect`].
-#[derive(Debug)]
 pub enum Input {
     /// A semantic action, from the keymap or synthesized by the host.
     Action(Action),
@@ -201,6 +263,28 @@ pub enum Input {
     /// The session's facade refused a command (ADR 0023 U5): an undeclared capability. The UI
     /// shows a notice instead of failing the loop.
     CommandRefused(radian_host::CommandRefused),
+    /// One key for the session picker overlay (ADR 0023 U4). The picker owns its own parser,
+    /// so the key is forwarded rather than resolved here.
+    PickerKey(KeyEvent),
+    /// Close the session picker without choosing (`Esc` on an unfocused overlay).
+    PickerClose,
+    /// The session picker's data arrived (the result of [`Effect::OpenPicker`]).
+    PickerOpened(PickerData),
+}
+
+/// What the loop loaded for a picker overlay: the rows to show, the index for full-text
+/// search, and the workspace they belong to.
+///
+/// It holds a `radian_session::Index`, whose `Connection` is not `Debug`, so this type does
+/// not derive `Debug`.
+pub struct PickerData {
+    pub rows: Vec<radian_host::sessions::SessionRow>,
+    pub index: Option<radian_session::Index>,
+    pub workspace: String,
+    /// `/sessions <query>`: open in full-text search mode with this query.
+    pub query: Option<String>,
+    /// Values to redact from a search snippet (the host's secret list).
+    pub secrets: Vec<String>,
 }
 
 /// The result of [`Effect::RunMemoryCommand`]. The executor decides nothing: a command that
@@ -252,6 +336,9 @@ pub enum Effect {
     Compact { instructions: Option<String> },
     /// Run a `/sessions`, `/export` or `/fork` request.
     Session(command::SessionOutcome),
+    /// Load this workspace's sessions and open the picker overlay (`/sessions`). The result is
+    /// [`Input::PickerOpened`]; loading is I/O, so it is the loop's job (ADR 0023 U3).
+    OpenPicker { query: Option<String> },
 }
 
 /// Effects are compared by **meaning** in the tests. `MemoryCommand` (a clap enum) has no
@@ -295,6 +382,7 @@ impl PartialEq for Effect {
                 },
             ) => ac == bc && format!("{a:?}") == format!("{b:?}"),
             (Compact { instructions: a }, Compact { instructions: b }) => a == b,
+            (OpenPicker { query: a }, OpenPicker { query: b }) => a == b,
             (Session(a), Session(b)) => a == b,
             _ => false,
         }
@@ -384,11 +472,10 @@ pub struct App {
     pub projection: Arc<SessionProjection>,
     pub quit: bool,
     pub note: Option<String>,
-    /// Set while a tool call waits for the human; keys answer it instead of typing. The reply
-    /// channel lives in the event loop, which owns the handoff back to the permission layer.
-    pub pending_approval: Option<ApprovalRequest>,
-    /// Set while a `/memory` write waits for the user's `y`; keys answer it instead of typing.
-    pub pending_command: Option<PendingCommand>,
+    /// The layer stack (ADR 0023 U4): [`Layer::Surface`] at index 0, then overlays and modals
+    /// above it. Only [`App::push_overlay`]/[`App::push_modal`] and the matching removals
+    /// change it, so the tier rules hold by construction.
+    layers: Vec<Layer>,
     /// Whether this process has a memory root. `/memory` runs through the loop, which owns the
     /// service; without one the command is refused with the same notice as before.
     pub memory_enabled: bool,
@@ -404,12 +491,6 @@ pub struct App {
     /// The workspace root, so `Tab` can complete `@` file references. `None` until the host
     /// sets it; without it `Tab` does nothing.
     pub workspace: Option<PathBuf>,
-    /// The candidates from the last `Tab`, shown above the input box. `None` when no list is
-    /// up; any key other than `Tab` dismisses it.
-    pub completion: Option<Vec<String>>,
-    /// The open in-transcript search box (Phase 5), or `None`. While it is open the input box
-    /// is shown as `find: <query>` and typed keys edit the query instead of the message.
-    pub find: Option<FindState>,
     /// The transcript width the renderer last used, so a find recomputes on a resize.
     pub transcript_width: usize,
 }
@@ -429,8 +510,7 @@ impl App {
             projection: Arc::new(SessionProjection::new()),
             quit: false,
             note: None,
-            pending_approval: None,
-            pending_command: None,
+            layers: vec![Layer::Surface],
             memory_enabled: false,
             pending_expand: None,
             theme: Theme::default(),
@@ -439,8 +519,6 @@ impl App {
             view_height: 0,
             max_scroll: 0,
             workspace: None,
-            completion: None,
-            find: None,
             transcript_width: 80,
         }
     }
@@ -534,6 +612,123 @@ impl App {
         self.follow = true;
     }
 
+    // ---------- the layer stack (ADR 0023 U4) ----------
+
+    /// The layer stack, bottom ([`Layer::Surface`]) first. Read-only; use the `push_*` and
+    /// removal methods to change it.
+    pub fn layers(&self) -> &[Layer] {
+        &self.layers
+    }
+
+    /// Pushes an overlay. ADR 0023 U4: an overlay is never above **any** modal, so when modals
+    /// are up the overlay is inserted just below the lowest one (below the highest one would
+    /// put it above every modal under that). With no modal it goes on top.
+    pub fn push_overlay(&mut self, overlay: Overlay) {
+        match self
+            .layers
+            .iter()
+            .position(|layer| layer.tier() == Tier::Modal)
+        {
+            Some(index) => self.layers.insert(index, Layer::Overlay(overlay)),
+            None => self.layers.push(Layer::Overlay(overlay)),
+        }
+    }
+
+    /// Pushes a modal on top of the whole stack.
+    pub fn push_modal(&mut self, modal: Modal) {
+        self.layers.push(Layer::Modal(modal));
+    }
+
+    /// Removes the topmost overlay matching `pick`. Returns it, or `None` when absent.
+    fn remove_overlay(&mut self, mut pick: impl FnMut(&Overlay) -> bool) -> Option<Overlay> {
+        let index = self.layers.iter().rposition(|layer| match layer {
+            Layer::Overlay(overlay) => pick(overlay),
+            _ => false,
+        })?;
+        match self.layers.remove(index) {
+            Layer::Overlay(overlay) => Some(overlay),
+            _ => None,
+        }
+    }
+
+    /// Removes the topmost modal matching `pick`. Returns it, or `None` when absent.
+    fn remove_modal(&mut self, mut pick: impl FnMut(&Modal) -> bool) -> Option<Modal> {
+        let index = self.layers.iter().rposition(|layer| match layer {
+            Layer::Modal(modal) => pick(modal),
+            _ => false,
+        })?;
+        match self.layers.remove(index) {
+            Layer::Modal(modal) => Some(modal),
+            _ => None,
+        }
+    }
+
+    /// The topmost modal, if any. The input box is not editable while one is up.
+    pub fn top_modal(&self) -> Option<&Modal> {
+        self.layers.iter().rev().find_map(|layer| match layer {
+            Layer::Modal(modal) => Some(modal),
+            _ => None,
+        })
+    }
+
+    pub fn has_modal(&self) -> bool {
+        self.top_modal().is_some()
+    }
+
+    /// The approval prompt on screen, if any.
+    pub fn pending_approval(&self) -> Option<&ApprovalRequest> {
+        self.layers.iter().rev().find_map(|layer| match layer {
+            Layer::Modal(Modal::Approval(request)) => Some(request),
+            _ => None,
+        })
+    }
+
+    /// The `/memory` confirmation on screen, if any.
+    pub fn pending_command(&self) -> Option<&PendingCommand> {
+        self.layers.iter().rev().find_map(|layer| match layer {
+            Layer::Modal(Modal::ConfirmCommand(command)) => Some(command),
+            _ => None,
+        })
+    }
+
+    /// The `@` completion candidates, if the list is up.
+    pub fn completion(&self) -> Option<&[String]> {
+        self.layers.iter().rev().find_map(|layer| match layer {
+            Layer::Overlay(Overlay::Completion(candidates)) => Some(candidates.as_slice()),
+            _ => None,
+        })
+    }
+
+    fn completion_clear(&mut self) {
+        self.remove_overlay(|overlay| matches!(overlay, Overlay::Completion(_)));
+    }
+
+    pub fn completion_set(&mut self, candidates: Vec<String>) {
+        self.completion_clear();
+        if !candidates.is_empty() {
+            self.push_overlay(Overlay::Completion(candidates));
+        }
+    }
+
+    /// The session picker overlay, if it is up.
+    pub fn picker(&self) -> Option<&Picker> {
+        self.layers.iter().rev().find_map(|layer| match layer {
+            Layer::Overlay(Overlay::Picker(picker)) => Some(picker),
+            _ => None,
+        })
+    }
+
+    fn picker_mut(&mut self) -> Option<&mut Picker> {
+        self.layers.iter_mut().rev().find_map(|layer| match layer {
+            Layer::Overlay(Overlay::Picker(picker)) => Some(picker),
+            _ => None,
+        })
+    }
+
+    fn picker_close(&mut self) {
+        self.remove_overlay(|overlay| matches!(overlay, Overlay::Picker(_)));
+    }
+
     // ---------- in-transcript search (Phase 5) ----------
 
     /// Records the transcript width the renderer used. A width change re-wraps the transcript,
@@ -543,33 +738,44 @@ impl App {
             return;
         }
         self.transcript_width = width;
-        if self.find.is_some() {
+        if self.find_state().is_some() {
             self.find_recompute();
         }
     }
 
     /// The open find box, if any.
     pub fn find_state(&self) -> Option<&FindState> {
-        self.find.as_ref()
+        self.layers.iter().rev().find_map(|layer| match layer {
+            Layer::Overlay(Overlay::Find(find)) => Some(find),
+            _ => None,
+        })
     }
 
-    /// Opens the find box anchored at the current viewport top (`Ctrl-F`). Refused while an
-    /// approval or `/memory` confirmation prompt is up.
+    fn find_mut(&mut self) -> Option<&mut FindState> {
+        self.layers.iter_mut().rev().find_map(|layer| match layer {
+            Layer::Overlay(Overlay::Find(find)) => Some(find),
+            _ => None,
+        })
+    }
+
+    /// Opens the find box anchored at the current viewport top (`Ctrl-F`). Refused while a
+    /// modal prompt is up.
     pub fn find_open(&mut self) {
-        if !self.input_editable() || self.find.is_some() {
+        if self.has_modal() || self.find_state().is_some() {
             return;
         }
-        self.find = Some(FindState::open(self.scroll));
+        let anchored = self.scroll;
+        self.push_overlay(Overlay::Find(FindState::open(anchored)));
     }
 
     /// Closes the find box; the viewport stays where it is (`Esc`).
     pub fn find_close(&mut self) {
-        self.find = None;
+        self.remove_overlay(|overlay| matches!(overlay, Overlay::Find(_)));
     }
 
     /// The earlier match (`Enter`, or `Ctrl-F` again).
     pub fn find_prev(&mut self) {
-        if let Some(find) = self.find.as_mut() {
+        if let Some(find) = self.find_mut() {
             find.prev();
         }
         self.find_jump();
@@ -577,7 +783,7 @@ impl App {
 
     /// The later match (`Shift-Enter`, `Ctrl-G`).
     pub fn find_next(&mut self) {
-        if let Some(find) = self.find.as_mut() {
+        if let Some(find) = self.find_mut() {
             find.next();
         }
         self.find_jump();
@@ -585,21 +791,29 @@ impl App {
 
     fn find_recompute(&mut self) {
         let width = self.transcript_width;
-        if let Some(find) = self.find.as_mut() {
-            find.recompute(&self.entries, width);
+        // Split the borrow: the entries to match and the layer that holds the query are two
+        // different fields of `self`.
+        let App {
+            entries, layers, ..
+        } = self;
+        if let Some(find) = layers.iter_mut().rev().find_map(|layer| match layer {
+            Layer::Overlay(Overlay::Find(find)) => Some(find),
+            _ => None,
+        }) {
+            find.recompute(entries.as_slice(), width);
         }
         self.find_jump();
     }
 
     fn find_push(&mut self, c: char) {
-        if let Some(find) = self.find.as_mut() {
+        if let Some(find) = self.find_mut() {
             find.query.push(c);
         }
         self.find_recompute();
     }
 
     fn find_backspace(&mut self) {
-        if let Some(find) = self.find.as_mut() {
+        if let Some(find) = self.find_mut() {
             find.query.pop();
         }
         self.find_recompute();
@@ -608,7 +822,7 @@ impl App {
     /// Centers the current match in the viewport and stops following the bottom. A search that
     /// matches nothing leaves the viewport alone.
     fn find_jump(&mut self) {
-        let Some(line) = self.find.as_ref().and_then(FindState::current_line) else {
+        let Some(line) = self.find_state().and_then(FindState::current_line) else {
             return;
         };
         let height = usize::from(self.view_height.max(1));
@@ -621,7 +835,9 @@ impl App {
     /// drop would leave that call waiting forever.
     fn request_approval(&mut self, request: ApprovalRequest) -> UpdateResult {
         let mut effects = Vec::new();
-        if let Some(previous) = self.pending_approval.replace(request) {
+        if let Some(Modal::Approval(previous)) =
+            self.remove_modal(|modal| matches!(modal, Modal::Approval(_)))
+        {
             effects.push(Effect::AnswerApproval {
                 request_id: previous.request_id,
                 outcome: ApprovalOutcome::Deny {
@@ -629,6 +845,7 @@ impl App {
                 },
             });
         }
+        self.push_modal(Modal::Approval(request));
         UpdateResult {
             dirty: true,
             effects,
@@ -637,12 +854,12 @@ impl App {
 
     /// Answers the pending prompt and clears it. A no-op when nothing is pending.
     fn answer_approval(&mut self, outcome: ApprovalOutcome) -> UpdateResult {
-        match self.pending_approval.take() {
-            Some(request) => UpdateResult::quiet(Effect::AnswerApproval {
+        match self.remove_modal(|modal| matches!(modal, Modal::Approval(_))) {
+            Some(Modal::Approval(request)) => UpdateResult::quiet(Effect::AnswerApproval {
                 request_id: request.request_id,
                 outcome,
             }),
-            None => UpdateResult::none(),
+            _ => UpdateResult::none(),
         }
     }
 
@@ -654,8 +871,8 @@ impl App {
                 // The `@` completion list: any key other than `complete` dismisses it, because
                 // typing continues the word and the list would be stale. `escape` only closes
                 // the list and keeps the input, so it does not reach its own action here.
-                if self.completion.is_some() && action != Action::Complete {
-                    self.completion = None;
+                if self.completion().is_some() && action != Action::Complete {
+                    self.completion_clear();
                     if action == Action::Escape {
                         return UpdateResult::dirty();
                     }
@@ -663,8 +880,8 @@ impl App {
                 self.update_action(action)
             }
             Input::Char(c) => {
-                self.completion = None;
-                if self.find.is_some() {
+                self.completion_clear();
+                if self.find_state().is_some() {
                     self.find_push(c);
                 } else {
                     self.input.insert_char(c);
@@ -672,7 +889,7 @@ impl App {
                 UpdateResult::dirty()
             }
             Input::FindBackspace => {
-                self.completion = None;
+                self.completion_clear();
                 self.find_backspace();
                 UpdateResult::dirty()
             }
@@ -726,87 +943,187 @@ impl App {
                 ));
                 UpdateResult::dirty()
             }
+            Input::PickerKey(key) => self.picker_key(key),
+            Input::PickerClose => {
+                self.picker_close();
+                UpdateResult::dirty()
+            }
+            Input::PickerOpened(data) => self.picker_opened(data),
         }
     }
 
-    /// Resolves one key event to an [`Input`] through the keymap and the current layer. Pure.
+    /// Resolves one key event to an [`Input`] through the keymap and the layer stack
+    /// (ADR 0023 U4).
     ///
-    /// The layers, in order: the approval prompt's hardcoded keys, the `/memory`
-    /// confirmation's hardcoded keys, cancel, the `@` completion list, the find box's own
-    /// layer, the transcript layer, and finally "a plain character is text, never a binding".
-    fn key_input(&self, key: &KeyEvent) -> Option<Input> {
-        // While a prompt is up, its own keys answer it and never type into the input box.
-        // `y`/`a`/`n` and `Esc` are hardcoded **before** the keymap, so a `tui.keybindings`
-        // entry can never take them over (rebinding them could approve a call the user meant
-        // to deny). Cancel (Ctrl-C) still works; every other key is ignored.
-        if self.pending_approval.is_some() {
-            match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    return Some(Input::ApprovalAnswer(ApprovalOutcome::AllowOnce));
-                }
-                KeyCode::Char('a') | KeyCode::Char('A') => {
-                    return Some(Input::ApprovalAnswer(ApprovalOutcome::AllowForSession));
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    return Some(Input::ApprovalAnswer(ApprovalOutcome::Deny {
-                        reason: None,
-                    }));
-                }
-                _ => {}
-            }
-            if self.keymap.action_for(key) == Some(Action::Cancel) {
-                return Some(Input::Action(Action::Cancel));
-            }
-            return None;
+    /// Order: (2) a modal's hardcoded keys (`y`/`a`/`n`/`Esc`) win over the keymap, even over a
+    /// `cancel` rebound onto them; then (1) the bound `cancel` action runs before the stack; then
+    /// the stack is walked top-down, the first layer that consumes the key winning and an
+    /// unconsumed key falling toward the [`Layer::Surface`].
+    pub fn key_input(&mut self, key: &KeyEvent) -> Option<Input> {
+        // Invariant 2 (ADR 0023 U4): a modal's own keys are hardcoded, not read from the keymap.
+        if self.has_modal()
+            && let Some(input) = self.modal_hardcoded_key(key)
+        {
+            return Some(input);
         }
-        // A `/memory` write waiting for `y`: same hardcoded keys, same cancel exception.
-        if self.pending_command.is_some() {
-            match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    return Some(Input::ConfirmCommand(true));
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    return Some(Input::ConfirmCommand(false));
-                }
-                _ => {}
-            }
-            if self.keymap.action_for(key) == Some(Action::Cancel) {
-                return Some(Input::Action(Action::Cancel));
-            }
-            return None;
-        }
+        // Invariant 1 (ADR 0023 U4): the `cancel` action runs before the whole stack. Its
+        // default key is Ctrl-C; a rebind moves it, and it still wins over every overlay.
         let action = self.keymap.action_for(key);
         if action == Some(Action::Cancel) {
             return Some(Input::Action(Action::Cancel));
         }
-        // The find box is a layer over the transcript: while it is open its keys are looked up
-        // first, so `enter` is the earlier match there and the send key in the transcript.
-        // `ctrl-f` is both "open the box" and "earlier match"; `esc` closes it.
-        if self.find.is_some() {
-            if let Some(action) = self.keymap.find_action_for(key) {
-                return Some(Input::Action(action));
-            }
-            match key.code {
-                KeyCode::Backspace => return Some(Input::FindBackspace),
-                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    return Some(Input::Char(c));
+
+        /// What a layer did with one key.
+        enum Step {
+            /// The layer turned it into an input.
+            Input(Input),
+            /// The layer took the key and did nothing with it; it does not fall through.
+            Swallow,
+            /// The layer did not want the key; keep walking down.
+            Pass,
+            /// An unfocused picker: typing dismisses it; keep walking down.
+            DropPicker,
+        }
+
+        let mut index = self.layers.len();
+        while index > 0 {
+            index -= 1;
+            let step = match &self.layers[index] {
+                // Its hardcoded keys and `cancel` were handled above; every other key stops
+                // here rather than reaching the transcript.
+                Layer::Modal(_) => Step::Swallow,
+                Layer::Overlay(Overlay::Picker(picker)) => {
+                    if picker.is_focused() {
+                        Step::Input(Input::PickerKey(*key))
+                    } else {
+                        match key.code {
+                            // Navigation focuses the picker and moves the selection.
+                            KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
+                                Step::Input(Input::PickerKey(*key))
+                            }
+                            KeyCode::Esc => Step::Input(Input::PickerClose),
+                            // Typing dismisses the overlay and goes to the composer.
+                            _ => Step::DropPicker,
+                        }
+                    }
                 }
-                // PageUp/PageDown, Home/End and the arrows keep reaching the transcript
-                // layer, so the box does not trap navigation.
-                _ => {}
+                // The find box is a layer over the transcript: while it is open its keys are
+                // looked up first, so `enter` is the earlier match there and the send key in
+                // the transcript. `ctrl-f` is both "open the box" and "earlier match"; `esc`
+                // closes it.
+                Layer::Overlay(Overlay::Find(_)) => {
+                    if let Some(found) = self.keymap.find_action_for(key) {
+                        Step::Input(Input::Action(found))
+                    } else {
+                        match key.code {
+                            KeyCode::Backspace => Step::Input(Input::FindBackspace),
+                            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                Step::Input(Input::Char(c))
+                            }
+                            // PageUp/PageDown, Home/End and the arrows keep reaching the
+                            // transcript layer, so the box does not trap navigation.
+                            _ => Step::Pass,
+                        }
+                    }
+                }
+                Layer::Overlay(Overlay::Completion(_)) => Step::Pass,
+                Layer::Surface => {
+                    if let Some(found) = action {
+                        Step::Input(Input::Action(found))
+                    } else if let KeyCode::Char(c) = key.code
+                        && !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT)
+                    {
+                        Step::Input(Input::Char(c))
+                    } else {
+                        Step::Pass
+                    }
+                }
+            };
+            match step {
+                Step::Input(input) => return Some(input),
+                Step::Swallow => return None,
+                Step::Pass => continue,
+                Step::DropPicker => {
+                    self.layers.remove(index);
+                    continue;
+                }
             }
-        }
-        if let Some(action) = action {
-            return Some(Input::Action(action));
-        }
-        // Any other plain character is text, never a binding.
-        if let KeyCode::Char(c) = key.code
-            && !key.modifiers.contains(KeyModifiers::CONTROL)
-            && !key.modifiers.contains(KeyModifiers::ALT)
-        {
-            return Some(Input::Char(c));
         }
         None
+    }
+
+    /// The hardcoded key of the topmost modal, if `key` is one of them (ADR 0023 U4, invariant
+    /// 2). `None` means the modal does not own this key; the caller then checks `cancel` and the
+    /// stack.
+    fn modal_hardcoded_key(&self, key: &KeyEvent) -> Option<Input> {
+        match self.top_modal()? {
+            Modal::Approval(_) => match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    Some(Input::ApprovalAnswer(ApprovalOutcome::AllowOnce))
+                }
+                KeyCode::Char('a') | KeyCode::Char('A') => {
+                    Some(Input::ApprovalAnswer(ApprovalOutcome::AllowForSession))
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    Some(Input::ApprovalAnswer(ApprovalOutcome::Deny {
+                        reason: None,
+                    }))
+                }
+                _ => None,
+            },
+            Modal::ConfirmCommand(_) => match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => Some(Input::ConfirmCommand(true)),
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    Some(Input::ConfirmCommand(false))
+                }
+                _ => None,
+            },
+        }
+    }
+
+    /// Handles one key for the picker overlay. An in-session picker opens unfocused (the
+    /// composer keeps the keys); the first navigation focuses it. Selecting does not switch
+    /// sessions in place (ADR 0022/0023): it shows the `--resume <id>` line to copy.
+    fn picker_key(&mut self, key: KeyEvent) -> UpdateResult {
+        if let Some(picker) = self.picker_mut()
+            && !picker.is_focused()
+        {
+            picker.focus();
+        }
+        let outcome = self.picker_mut().and_then(|picker| picker.on_key(key));
+        match outcome {
+            None => UpdateResult::dirty(),
+            // In-session the picker's `Esc` closes the overlay, it does not quit the app.
+            Some(PickerOutcome::Quit) => {
+                self.picker_close();
+                UpdateResult::dirty()
+            }
+            Some(PickerOutcome::New) => {
+                self.push_notice(
+                    "a new session starts on the next launch (run `radian-tui` with no `--resume`)",
+                );
+                UpdateResult::dirty()
+            }
+            Some(PickerOutcome::Resume(id)) => {
+                self.push_notice(format!(
+                    "--resume {id} (this process does not switch sessions in place)"
+                ));
+                UpdateResult::dirty()
+            }
+        }
+    }
+
+    /// Pushes the picker overlay from the loop's loaded rows. An in-session overlay opens
+    /// unfocused, so it informs without stealing the composer (ADR 0023 U4).
+    fn picker_opened(&mut self, data: PickerData) -> UpdateResult {
+        let mut picker =
+            Picker::new(data.rows, data.index, data.workspace).with_secrets(data.secrets);
+        if let Some(query) = data.query {
+            picker = picker.with_search(query);
+        }
+        self.push_overlay(Overlay::Picker(picker));
+        UpdateResult::dirty()
     }
 
     /// The terminal's entry point: resolve the key, then [`App::update`]. A thin wrapper —
@@ -915,7 +1232,7 @@ impl App {
             // directory is the loop's job: this only asks for it.
             Action::Complete => {
                 if self.workspace.is_none() {
-                    self.completion = None;
+                    self.completion_clear();
                     return UpdateResult::dirty();
                 }
                 UpdateResult::quiet(Effect::CompleteMention {
@@ -927,7 +1244,7 @@ impl App {
             // `find` opens the box; a second `find` (Ctrl-F by default) is the earlier match,
             // which is exactly the historical behavior.
             Action::Find => {
-                if self.find.is_some() {
+                if self.find_state().is_some() {
                     self.find_prev();
                 } else {
                     self.find_open();
@@ -1018,7 +1335,9 @@ impl App {
     /// The hardcoded answer to a `/memory` confirmation: `y` runs the command (through the
     /// loop), `n`/`Esc` cancels it.
     fn confirm_command(&mut self, confirmed: bool) -> UpdateResult {
-        let Some(pending) = self.pending_command.take() else {
+        let Some(Modal::ConfirmCommand(pending)) =
+            self.remove_modal(|modal| matches!(modal, Modal::ConfirmCommand(_)))
+        else {
             return UpdateResult::none();
         };
         if !confirmed {
@@ -1096,7 +1415,7 @@ impl App {
             Some(completion) if !completion.candidates.is_empty() => {
                 self.apply_completion(completion);
             }
-            _ => self.completion = None,
+            _ => self.completion_clear(),
         }
         UpdateResult::dirty()
     }
@@ -1112,7 +1431,7 @@ impl App {
             MemoryResult::NeedsConfirmation { command, prompt } => {
                 self.entries
                     .push(Entry::new(EntryKind::Notice, format!("{prompt} [y/N]")));
-                self.pending_command = Some(PendingCommand { command, prompt });
+                self.push_modal(Modal::ConfirmCommand(PendingCommand { command, prompt }));
             }
             MemoryResult::Failed(message) => self.push_notice(message),
         }
@@ -1142,7 +1461,7 @@ impl App {
     /// True while the input box is editable: no approval or command prompt is up, so the
     /// cursor belongs in the input box and keys type into it.
     pub fn input_editable(&self) -> bool {
-        self.pending_approval.is_none() && self.pending_command.is_none()
+        !self.has_modal()
     }
 
     /// `Up` on the first input line: the previous history entry. Starts browsing by stashing
@@ -1212,7 +1531,9 @@ impl App {
                 UpdateResult::effect(Effect::Compact { instructions })
             }
             command::Outcome::Sessions(query) => {
-                UpdateResult::effect(Effect::Session(command::SessionOutcome::List(query)))
+                // `/sessions` opens the picker overlay (ADR 0023 U4): listing reads the session
+                // directory, so it is an effect the loop runs.
+                UpdateResult::effect(Effect::OpenPicker { query })
             }
             command::Outcome::Export(request) => {
                 UpdateResult::effect(Effect::Session(command::SessionOutcome::Export(request)))
@@ -1283,11 +1604,11 @@ impl App {
                 // already resolved the hook's `ask` as a denial. Clearing the prompt must also
                 // drop the reply channel — the loop owns it, so it is told to abandon the
                 // request (a dropped channel is what the permission layer sees as abandoned).
-                return match self.pending_approval.take() {
-                    Some(request) => vec![Effect::AbandonApproval {
+                return match self.remove_modal(|modal| matches!(modal, Modal::Approval(_))) {
+                    Some(Modal::Approval(request)) => vec![Effect::AbandonApproval {
                         request_id: request.request_id,
                     }],
-                    None => Vec::new(),
+                    _ => Vec::new(),
                 };
             }
             _ => {}
@@ -1400,17 +1721,17 @@ impl App {
                 format!("{candidate} ")
             };
             self.replace_range(completion.range, &insert);
-            self.completion = None;
+            self.completion_clear();
             return;
         }
         let chars: Vec<char> = self.input.text().chars().collect();
         let typed: String = chars[completion.range.clone()].iter().collect();
         if completion.common_prefix.chars().count() > typed.chars().count() {
             self.replace_range(completion.range, &completion.common_prefix);
-            self.completion = None;
+            self.completion_clear();
             return;
         }
-        self.completion = Some(completion.candidates);
+        self.completion_set(completion.candidates);
     }
 
     /// Replaces the char range `range` with `replacement`, leaving the cursor right after the

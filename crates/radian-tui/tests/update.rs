@@ -47,13 +47,13 @@ fn every_slash_command_produces_its_effect() {
     );
     assert_eq!(
         submit(&mut app, "/sessions"),
-        vec![Effect::Session(SessionOutcome::List(None))]
+        vec![Effect::OpenPicker { query: None }]
     );
     assert_eq!(
         submit(&mut app, "/sessions parser bug"),
-        vec![Effect::Session(SessionOutcome::List(Some(
-            "parser bug".into()
-        )))]
+        vec![Effect::OpenPicker {
+            query: Some("parser bug".into())
+        }]
     );
     assert_eq!(
         submit(&mut app, "/export json out.json --force"),

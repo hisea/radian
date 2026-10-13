@@ -13,7 +13,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use radian_permissions::ApprovalRequest;
 
 use crate::app::{
-    App, Entry, EntryKind, TurnState, WrapKey, budget_status_text, mcp_text, usage_text,
+    App, Entry, EntryKind, Modal, TurnState, WrapKey, budget_status_text, mcp_text, usage_text,
 };
 use crate::theme::Theme;
 
@@ -426,9 +426,11 @@ fn status_line(app: &App, width: usize) -> Line<'static> {
 /// operate on wrapped lines.
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
-    let middle = match &app.pending_approval {
-        Some(prompt) => approval_height(prompt, area.width as usize),
-        None => input_height(app, area.width as usize),
+    // ADR 0023 U4: the middle of the frame is drawn by the top modal (the approval box
+    // replaces the input box), then the find overlay, then the ordinary input box.
+    let middle = match app.top_modal() {
+        Some(Modal::Approval(prompt)) => approval_height(prompt, area.width as usize),
+        _ => input_height(app, area.width as usize),
     };
     // The `@` completion list sits just above the input box (and never over an approval
     // prompt). A zero-height chunk keeps the rest of the layout identical when there is none.
@@ -460,6 +462,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     };
     frame.render_widget(Paragraph::new(visible), chunks[0]);
 
+    // The picker overlay draws over the transcript; the input box and the status bar stay
+    // visible below it (ADR 0023 U4).
+    if let Some(picker) = app.picker() {
+        crate::picker::draw(frame, chunks[0], picker);
+    }
+
     if !completion.is_empty() {
         let style = theme.completion;
         let lines: Vec<Line> = completion
@@ -469,8 +477,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         frame.render_widget(Paragraph::new(lines), chunks[1]);
     }
 
-    match &app.pending_approval {
-        Some(prompt) => {
+    match app.top_modal() {
+        Some(Modal::Approval(prompt)) => {
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(app.theme.approval_border)
@@ -480,17 +488,19 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 .wrap(Wrap { trim: false });
             frame.render_widget(text, chunks[2]);
         }
-        None if app.find.is_some() => {
+        _ if app.find_state().is_some() => {
             // The find box replaces the input box's line; the input text itself is untouched
             // and comes back when the box closes.
-            let find = app.find.as_ref().expect("checked");
+            let find = app.find_state().expect("checked");
             let text = format!("find: {}", find.query);
             let paragraph = Paragraph::new(text)
                 .block(Block::default().borders(Borders::ALL).title(" find "))
                 .wrap(Wrap { trim: false });
             frame.render_widget(paragraph, chunks[2]);
         }
-        None => {
+        // The `/memory` confirmation and the ordinary state draw the input box, exactly as
+        // before (a confirmation only makes it non-editable).
+        _ => {
             let inner_width = chunks[2].width.saturating_sub(2).max(1) as usize;
             let visible = chunks[2].height.saturating_sub(2).max(1) as usize;
             let text = app.input.text();
@@ -539,10 +549,10 @@ pub const COMPLETION_MAX_LINES: usize = 10;
 /// terminal clips instead of wrapping. Empty when no list is up, or while an approval prompt
 /// is shown: the list never covers the prompt.
 pub fn completion_rows(app: &App, width: usize) -> Vec<String> {
-    if app.pending_approval.is_some() {
+    if app.has_modal() {
         return Vec::new();
     }
-    let Some(candidates) = &app.completion else {
+    let Some(candidates) = app.completion() else {
         return Vec::new();
     };
     let mut rows: Vec<String> = candidates
