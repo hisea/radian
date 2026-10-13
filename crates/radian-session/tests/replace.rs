@@ -60,6 +60,11 @@ fn a_normal_append_after_a_complete_replacement_is_not_counted_as_part_of_it() {
         vec![Message::user("replacement"), Message::user("normal append")]
     );
     assert!(session.skipped().is_empty());
+    assert_eq!(
+        session.recovered_replacement(),
+        None,
+        "the segment is complete; nothing was cut short"
+    );
 }
 
 /// A replacement, normal appends, a second replacement, normal appends: the segment resets at
@@ -101,6 +106,7 @@ async fn replacements_and_the_appends_between_them_fold_to_the_last_revision() {
 
     let session = Session::open(&path).unwrap();
     assert!(session.skipped().is_empty());
+    assert_eq!(session.recovered_replacement(), None);
     assert_eq!(
         session.history().unwrap(),
         vec![

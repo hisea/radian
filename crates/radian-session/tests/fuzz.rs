@@ -733,6 +733,11 @@ async fn the_fuzz_base_is_a_valid_v1_session() {
         "the base should have every event kind"
     );
     assert!(base.session.skipped().is_empty());
+    assert_eq!(
+        base.session.recovered_replacement(),
+        None,
+        "the base's replacement segment is complete"
+    );
     assert_eq!(base.session.session_id(), "fuzz-sid");
     // Every event kind the brief lists is present at least once.
     for name in [
