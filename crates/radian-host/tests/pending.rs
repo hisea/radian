@@ -83,9 +83,11 @@ async fn a_dropped_waiter_disappears_and_a_late_answer_is_late() {
 
     // The drop itself wakes the UI (the waiting end bumps the version).
     changed(&mut rx).await;
+    // The element is still queued (head/len have not run yet), but its receiver is gone: the
+    // answer is late, never a completed request.
+    assert_eq!(queue.answer(dropped_id, 9), Err(Answered::Late));
     assert_eq!(queue.len(), 1, "the abandoned request is gone");
     assert_eq!(queue.head().unwrap().request_id, kept_id);
-    assert_eq!(queue.answer(dropped_id, 9), Err(Answered::Late));
     assert!(queue.answer(kept_id, 20).is_ok());
     assert_eq!(kept.await.unwrap(), 20);
     assert_eq!(queue.answer(999, 0), Err(Answered::Unknown));
