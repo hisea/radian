@@ -15,6 +15,7 @@ use radian_permissions::ApprovalRequest;
 use crate::app::{
     App, Entry, EntryKind, Modal, TurnState, WrapKey, budget_status_text, mcp_text, usage_text,
 };
+use crate::question::QuestionForm;
 use crate::theme::Theme;
 
 /// Hard-wraps `text` to `width` display columns, breaking on spaces where possible and on
@@ -347,6 +348,14 @@ fn status_segments(app: &App) -> Vec<Segment> {
             style: app.theme.tier,
         });
     }
+    // ADR 0023 U7: how many requests are waiting. Shown only when there is one, so an idle
+    // status bar does not carry a constant `0 pending`.
+    if app.pending > 0 {
+        segments.push(Segment {
+            text: format!("{} pending", app.pending),
+            style: app.theme.turn_running,
+        });
+    }
     segments.push(Segment {
         text: usage_text(session.usage_input(), session.usage_output()),
         style: app.theme.usage,
@@ -430,6 +439,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // replaces the input box), then the find overlay, then the ordinary input box.
     let middle = match app.top_modal() {
         Some(Modal::Approval(prompt)) => approval_height(&prompt.request, area.width as usize),
+        Some(Modal::Question(form)) => question_height(form, area.width as usize),
         _ => input_height(app, area.width as usize),
     };
     // The `@` completion list sits just above the input box (and never over an approval
@@ -488,6 +498,22 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 .wrap(Wrap { trim: false });
             frame.render_widget(text, chunks[2]);
         }
+        Some(Modal::Question(form)) => {
+            // ADR 0024 Q7: the title names the source and the position; the box scrolls its
+            // option list rather than growing.
+            let position = match form.current {
+                Some(index) => format!("{}/{}", index + 1, form.len()),
+                None => "overview".to_string(),
+            };
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(app.theme.approval_border)
+                .title(format!(" question {position} from {} ", form.origin));
+            let inner = chunks[2].height.saturating_sub(2) as usize;
+            let width = chunks[2].width.saturating_sub(2) as usize;
+            let lines = question_lines(form, width, inner);
+            frame.render_widget(Paragraph::new(lines).block(block), chunks[2]);
+        }
         _ if app.find_state().is_some() => {
             // The find box replaces the input box's line; the input text itself is untouched
             // and comes back when the box closes.
@@ -539,6 +565,166 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Paragraph::new(status_line(app, chunks[3].width as usize)),
         chunks[3],
     );
+}
+
+/// The most rows a question form's box may take, border included (ADR 0024 Q7: a long option
+/// list scrolls instead of growing the box without bound).
+const MAX_QUESTION_ROWS: u16 = 18;
+
+/// The height the question form's box needs: its content, bounded.
+fn question_height(form: &QuestionForm, width: usize) -> u16 {
+    let rows = question_lines(form, width, usize::MAX).len();
+    (rows as u16 + 2).clamp(5, MAX_QUESTION_ROWS)
+}
+
+/// The question form's content lines, scrolled so the cursor stays visible (ADR 0024 Q7).
+///
+/// Pure: the layout is testable without a terminal. `max_rows` is the visible budget (the
+/// box's inner height); `usize::MAX` means "no clipping", which is how the height is measured.
+pub fn question_lines(form: &QuestionForm, width: usize, max_rows: usize) -> Vec<Line<'static>> {
+    let mut out: Vec<Line<'static>> = Vec::new();
+    match form.current_question() {
+        // The overview: one line per question, with the answer or `(not answered)`.
+        None => {
+            for (index, question) in form.questions.iter().enumerate() {
+                let answer = &form.answers[index];
+                let shown = if QuestionForm::is_answered(question, answer) {
+                    answer_text(question, answer)
+                } else {
+                    "(not answered)".to_string()
+                };
+                out.push(Line::from(clip_columns(
+                    &format!("{}. {} → {}", index + 1, question.prompt, shown),
+                    width,
+                )));
+            }
+        }
+        Some(question) => {
+            out.push(Line::from(clip_columns(&question.prompt, width)));
+            let answer = form
+                .current_answer()
+                .expect("a current question has an answer");
+            let rows = QuestionForm::row_count(question);
+            // The window over the option rows: the prompt and the hint are two rows.
+            let visible = max_rows.saturating_sub(3).max(1);
+            let first = if rows <= visible {
+                0
+            } else {
+                (answer.cursor + 1)
+                    .saturating_sub(visible)
+                    .min(rows.saturating_sub(visible))
+            };
+            let last = (first + visible).min(rows);
+            // A marker above, so a clipped list never looks complete.
+            if first > 0 {
+                out.push(Line::from(format!("  … {first} above")));
+            }
+            for row in first..last {
+                out.push(Line::from(clip_columns(
+                    &row_text(form, question, row),
+                    width,
+                )));
+            }
+            let hidden = rows.saturating_sub(last);
+            if hidden > 0 {
+                out.push(Line::from(format!("  … {hidden} more")));
+            }
+        }
+    }
+    if form.confirm_decline {
+        out.push(Line::from(clip_columns(
+            "press Esc again to decline this question (Enter keeps it)",
+            width,
+        )));
+    }
+    out.push(Line::from(clip_columns(
+        "Tab next · Space select · Enter next/submit · Esc decline",
+        width,
+    )));
+    if out.len() > max_rows && max_rows != usize::MAX {
+        out.truncate(max_rows);
+    }
+    out
+}
+
+/// One option row of the current question: the cursor, the mark and the label. The last row is
+/// the `Other` row when the question allows one.
+fn row_text(form: &QuestionForm, question: &radian_coding::Question, row: usize) -> String {
+    let answer = form
+        .current_answer()
+        .expect("a current question has an answer");
+    let cursor = if row == answer.cursor { ">" } else { " " };
+    match question.options.get(row) {
+        Some(option) => {
+            let mark = if answer.selected.contains(&option.id) {
+                match question.kind {
+                    radian_coding::QuestionKind::Multi => "[x]",
+                    _ => "(•)",
+                }
+            } else {
+                match question.kind {
+                    radian_coding::QuestionKind::Multi => "[ ]",
+                    _ => "( )",
+                }
+            };
+            let description = option
+                .description
+                .as_deref()
+                .map(|text| format!(" — {text}"))
+                .unwrap_or_default();
+            format!("{cursor} {mark} {}{description}", option.label)
+        }
+        // The `Other` row: its text is the composer's, which may be empty.
+        None => {
+            let mark = if answer.other { "(•)" } else { "( )" };
+            let text = answer.text.text();
+            format!("{cursor} {mark} Other: {text}")
+        }
+    }
+}
+
+/// One answer as readable text, using option labels.
+fn answer_text(question: &radian_coding::Question, answer: &crate::question::FormAnswer) -> String {
+    let mut parts: Vec<String> = answer
+        .selected
+        .iter()
+        .map(|id| {
+            question
+                .options
+                .iter()
+                .find(|option| &option.id == id)
+                .map(|option| option.label.clone())
+                .unwrap_or_else(|| id.clone())
+        })
+        .collect();
+    if !answer.text.is_empty() {
+        parts.push(answer.text.text());
+    }
+    if parts.is_empty() {
+        "(not answered)".to_string()
+    } else {
+        parts.join(", ")
+    }
+}
+
+/// Cuts `text` to `width` display columns, never splitting a wide character (ADR 0024 Q7: a
+/// narrow terminal clips instead of wrapping).
+fn clip_columns(text: &str, width: usize) -> String {
+    if width == 0 || UnicodeWidthStr::width(text) <= width {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let cell = ch.width().unwrap_or(0);
+        if used + cell + 1 > width {
+            break;
+        }
+        out.push(ch);
+        used += cell;
+    }
+    out.push('…');
+    out
 }
 
 /// The most candidate lines shown before a `+N more` line.

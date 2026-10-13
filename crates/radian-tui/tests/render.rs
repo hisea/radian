@@ -276,3 +276,126 @@ fn the_completion_list_shows_ten_then_more() {
     assert!(!text.contains("file10.txt"), "{text}");
     assert!(text.contains("+5 more"), "{text}");
 }
+
+// ---------- the question form (ADR 0024 Q7) ----------
+
+fn option(id: &str, label: &str) -> radian_coding::QuestionOption {
+    radian_coding::QuestionOption {
+        id: id.into(),
+        label: label.into(),
+        description: None,
+    }
+}
+
+fn form(questions: Vec<radian_coding::Question>) -> radian_tui::question::QuestionForm {
+    radian_tui::question::QuestionForm::new(7, "session".into(), questions)
+}
+
+fn text_of(lines: &[ratatui::text::Line<'static>]) -> String {
+    lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A long option list scrolls so the cursor stays visible, and the clipped rows are counted.
+#[test]
+fn a_long_option_list_scrolls_to_keep_the_cursor_visible() {
+    let options: Vec<_> = (0..12)
+        .map(|index| option(&format!("o{index}"), &format!("Option {index}")))
+        .collect();
+    let mut form = form(vec![radian_coding::Question {
+        id: "q".into(),
+        prompt: "Pick one".into(),
+        kind: radian_coding::QuestionKind::Single,
+        options,
+        allow_other: false,
+        required: true,
+    }]);
+    // Move the cursor to the last option, with only five visible rows.
+    form.answers[0].cursor = 11;
+    let shown = text_of(&render::question_lines(&form, 40, 5));
+    assert!(shown.contains("> ( ) Option 11"), "{shown}");
+    assert!(
+        shown.contains("above"),
+        "the clipped rows are counted: {shown}"
+    );
+    assert!(
+        !shown.contains("Option 0"),
+        "the top scrolled away: {shown}"
+    );
+}
+
+/// A narrow box clips its rows instead of wrapping them (ADR 0024 Q7).
+#[test]
+fn a_narrow_question_box_clips_instead_of_wrapping() {
+    let form = form(vec![radian_coding::Question {
+        id: "q".into(),
+        prompt: "a prompt that is far too long for the box".into(),
+        kind: radian_coding::QuestionKind::Single,
+        options: vec![option("a", "an option label that is also far too long")],
+        allow_other: false,
+        required: false,
+    }]);
+    let shown = text_of(&render::question_lines(&form, 20, 10));
+    for line in shown.lines() {
+        assert!(
+            line.chars().count() <= 20,
+            "a row must be clipped to the width: {line:?}"
+        );
+    }
+    assert!(shown.contains('…'), "the clip is marked: {shown}");
+}
+
+/// The overview lists every question with its answer, and says so when one is unanswered.
+#[test]
+fn the_overview_lists_each_question_and_its_answer() {
+    let mut form = form(vec![
+        radian_coding::Question {
+            id: "one".into(),
+            prompt: "Pick one".into(),
+            kind: radian_coding::QuestionKind::Single,
+            options: vec![option("a", "A")],
+            allow_other: false,
+            required: false,
+        },
+        radian_coding::Question {
+            id: "two".into(),
+            prompt: "Say something".into(),
+            kind: radian_coding::QuestionKind::Text,
+            options: Vec::new(),
+            allow_other: false,
+            required: false,
+        },
+    ]);
+    form.current = None;
+    form.answers[0].selected = vec!["a".into()];
+    let shown = text_of(&render::question_lines(&form, 60, 10));
+    assert!(shown.contains("1. Pick one → A"), "{shown}");
+    assert!(
+        shown.contains("2. Say something → (not answered)"),
+        "{shown}"
+    );
+}
+
+/// The decline confirmation is shown, so the first `Esc` never looks like it did nothing.
+#[test]
+fn the_decline_confirmation_is_shown() {
+    let mut form = form(vec![radian_coding::Question {
+        id: "one".into(),
+        prompt: "Pick one".into(),
+        kind: radian_coding::QuestionKind::Text,
+        options: Vec::new(),
+        allow_other: false,
+        required: false,
+    }]);
+    form.confirm_decline = true;
+    let shown = text_of(&render::question_lines(&form, 60, 10));
+    assert!(shown.contains("press Esc again to decline"), "{shown}");
+}

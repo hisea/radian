@@ -1064,6 +1064,24 @@ impl App {
         {
             return Some(input);
         }
+        // The question form is the one modal whose keys are rebindable (ADR 0024 Q7): its own
+        // actions come from the `form` layer, and everything else that can edit text goes to
+        // the focused field. A key the form does not want is swallowed, never passed down.
+        if matches!(self.top_modal(), Some(Modal::Question(_))) {
+            if let Some(action) = self.keymap.form_action_for(key) {
+                return Some(Input::Form(FormKey::Action(action)));
+            }
+            if let KeyCode::Char(c) = key.code
+                && !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+            {
+                return Some(Input::Form(FormKey::Char(c)));
+            }
+            if let Some(action) = self.keymap.action_for(key) {
+                return Some(Input::Form(FormKey::Action(action)));
+            }
+            return None;
+        }
         // Invariant 1 (ADR 0023 U4): the `cancel` action runs before the whole stack. Its
         // default key is Ctrl-C; a rebind moves it, and it still wins over every overlay.
         let action = self.keymap.action_for(key);
