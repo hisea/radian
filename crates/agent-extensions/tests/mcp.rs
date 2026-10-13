@@ -709,24 +709,28 @@ async fn progress_maps_to_tool_progress() {
     );
 }
 
-// `settleMs` holds the reply back until every notification has been routed, so on a
-// multi-thread runtime none may be lost; this excludes rmcp's best-effort delivery of tail
-// progress. The 10 ms spacing keeps notifications from overlapping in flight: rmcp routes each
-// on its own task, and a burst can arrive out of order, which the monotone filter drops by
-// design.
+// `settleMs` holds the reply back after the last notification, so on a multi-thread runtime
+// the notifications are normally all routed before the call settles. Normally, not always:
+// rmcp hands each notification to a spawned task but delivers the response on its main loop
+// (rmcp-3.5.1 `service.rs:1711` vs `:1727`), and the tasks have no order among themselves. On
+// a slow machine two of them can be routed out of order (the Linux VM, 2026-10-13: 15 of 40
+// runs saw `[1, 2, 3, 5]`), and the monotone filter then drops the older one **by design**.
+// So per run only the order is a guarantee: the values are strictly increasing and are values
+// the server sent. "Nothing before the tail is lost" is not something rmcp promises.
+//
+// What the test still holds is that progress is not being lost wholesale: across the runs, at
+// least one must see the full 1..=4 prefix. That is probabilistic, and stated as such: with
+// the VM's measured 15/40 gap rate, 20 runs that all gap is about 3e-9. A mutation that keeps
+// only the first notification, or drops every one, fails it.
 //
 // This does not reproduce the registration race (a notification that beats the call's route).
 // That window is a few microseconds: with the replay removed, 2880 calls under 16 CPU-hogging
 // threads lost nothing. The `ProgressRouter` unit tests cover the replay deterministically.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn settled_progress_is_not_lost() {
+async fn settled_progress_arrives_in_order() {
     let session = std::sync::Arc::new(open(vec![fixture("fx")]).await);
-    // rmcp hands each notification to a spawned task but delivers the response on its main
-    // loop (rmcp-3.5.1 `service.rs:1711` vs `:1727`), so the call can settle before its **last**
-    // notification is routed: tail loss is accepted by design, and under load more than one
-    // notification can still be on its task (measured: up to 2 of 5). What must hold is that
-    // nothing before the tail is lost: the values seen are exactly 1..=k, with no gap.
     let runs = 20;
+    let mut complete_prefix_runs = 0;
     for run in 0..runs {
         let events = Recorder::default();
         let out = call_at(
@@ -744,16 +748,30 @@ async fn settled_progress_is_not_lost() {
             .iter()
             .map(|(_, progress)| progress["progress"].as_f64().unwrap())
             .collect();
-        let expected: Vec<f64> = (1..=seen.len()).map(|i| i as f64).collect();
-        assert_eq!(seen, expected, "run {run}: a gap before the tail");
+        assert!(
+            seen.windows(2).all(|pair| pair[0] < pair[1]),
+            "run {run}: progress went backwards: {seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .all(|value| (1.0..=5.0).contains(value) && value.fract() == 0.0),
+            "run {run}: a value the server never sent: {seen:?}"
+        );
+        if seen.starts_with(&[1.0, 2.0, 3.0, 4.0]) {
+            complete_prefix_runs += 1;
+        }
     }
+    assert!(
+        complete_prefix_runs > 0,
+        "no run out of {runs} saw progress 1..=4: progress is being lost, not reordered"
+    );
 }
 
 // A server may send progress far faster than a call drains it. Each call keeps a bounded queue
 // and drops the oldest when it is full (the bound itself is a `ProgressQueue` unit test), so the
 // newest value must still arrive. `settleMs` is only a server-side delay, not an ordering
 // guarantee: rmcp may deliver the response before the last notifications are routed (see
-// `settled_progress_is_not_lost`), so the newest value seen must be within a few of the end.
+// `settled_progress_arrives_in_order`), so the newest value seen must be within a few of the end.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_progress_flood_still_delivers_the_latest_value() {
     let session = open(vec![fixture("fx")]).await;
@@ -910,16 +928,19 @@ async fn late_and_unknown_progress_tokens_are_ignored() {
 #[tokio::test]
 async fn progress_does_not_reset_the_call_deadline() {
     let mut config = fixture("fx");
-    config.call_timeout = Duration::from_millis(300);
+    // A 600 ms deadline with a notification every 50 ms: about a dozen arrive before it, so
+    // "some progress was seen" holds on a slow machine too (300 ms with 100 ms spacing saw none
+    // in 1 of 30 runs on the Linux VM, 2026-10-13). Forty at 50 ms would run 2 s if each one
+    // reset the deadline.
+    config.call_timeout = Duration::from_millis(600);
     let session = open(vec![config]).await;
     let events = Recorder::default();
     let start = Instant::now();
 
-    // Twenty notifications at 100 ms apiece would run 2 s if each one reset the deadline.
     let failure = call_at(
         &session,
         "fx__progress",
-        json!({"count": 20, "intervalMs": 100, "label": "x"}),
+        json!({"count": 40, "intervalMs": 50, "label": "x"}),
         0,
         &events,
         CancellationToken::new(),
@@ -930,7 +951,7 @@ async fn progress_does_not_reset_the_call_deadline() {
     assert_eq!(failure.code, "extension_timeout");
     assert!(!progress_events(&events).is_empty());
     assert!(
-        start.elapsed() < Duration::from_secs(1),
+        start.elapsed() < Duration::from_millis(1500),
         "deadline was pushed back by progress: {:?}",
         start.elapsed()
     );
