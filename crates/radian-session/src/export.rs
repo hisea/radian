@@ -245,6 +245,9 @@ fn event_data_value(
             }
             value
         }
+        EventData::TurnFailed { turn_id, message } => {
+            json!({"turn_id": turn_id, "message": message})
+        }
         EventData::ConfigChanged { revision, change } => {
             json!({"revision": revision, "change": change})
         }

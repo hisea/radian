@@ -48,6 +48,26 @@ pub enum DriverError {
     Replay(#[from] agent_core::ReplayError),
 }
 
+/// A host callback for the runtime events the driver writes, so a host can react to a
+/// `TurnFailed` (ADR 0017) without polling the journal. `agent_core::AgentEvent` is left
+/// unchanged: a new variant there would be a Core public-API change, and the failure is a
+/// runtime event, not a core one.
+///
+/// A closure `Fn(&RuntimeEvent)` implements this, so a host installs one with
+/// `driver.set_runtime_events(Arc::new(move |event| { ... }))`.
+pub trait RuntimeEvents: Send + Sync {
+    fn on_runtime_event(&self, event: &RuntimeEvent);
+}
+
+impl<F> RuntimeEvents for F
+where
+    F: Fn(&RuntimeEvent) + Send + Sync,
+{
+    fn on_runtime_event(&self, event: &RuntimeEvent) {
+        self(event);
+    }
+}
+
 /// What recovery learned from the session file before the session was opened.
 struct Recovery {
     history: Vec<Message>,
@@ -97,6 +117,9 @@ pub struct Driver<M: Model, P: ToolProvider, H: Hooks> {
     turn_timeout: Option<std::time::Duration>,
     /// The host's one-shot context-budget relax (ADR 0015 C5), consumed by the next turn.
     budget_relax: BudgetRelax,
+    /// A host listener for the runtime events this driver writes (ADR 0017). `None` keeps the
+    /// behavior a host that never installed one had before.
+    runtime_events: Option<Arc<dyn RuntimeEvents>>,
     next_turn: u64,
     next_config_revision: u64,
     closed: bool,
@@ -137,6 +160,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             options,
             turn_timeout: None,
             budget_relax: BudgetRelax::default(),
+            runtime_events: None,
             next_turn: recovery.next_turn,
             next_config_revision: recovery.next_config_revision,
             closed: false,
@@ -180,6 +204,13 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
     /// (ADR 0015 C5); the guard is back for the request after that.
     pub fn budget_relax(&self) -> BudgetRelax {
         self.budget_relax.clone()
+    }
+
+    /// Installs the host listener for the runtime events this driver writes (ADR 0017). The
+    /// driver calls it for `TurnFailed` so a host can show the error without reading the
+    /// journal. Set it before `run()`; the last one wins.
+    pub fn set_runtime_events(&mut self, sink: Arc<dyn RuntimeEvents>) {
+        self.runtime_events = Some(sink);
     }
 
     pub fn is_closed(&self) -> bool {
@@ -240,6 +271,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         let journal = Arc::clone(&self.journal);
         let inbox = Arc::clone(&self.inbox);
         let live: Arc<dyn EventSink> = Arc::clone(&self.live);
+        let runtime_events = self.runtime_events.clone();
         let mut options = self.options.clone();
         if let Some(timeout) = self.turn_timeout {
             options.deadline = Some(tokio::time::Instant::now() + timeout);
@@ -271,6 +303,8 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         drain_steering(&inbox, &journal, &steering, &turn_id, &mut claimed).await?;
 
         let cancel_generation = inbox.cancel_generation();
+        // ADR 0017: a model error ends **this turn**, not the session. Every other `RunError`
+        // (journal, poisoned, hook, session) is still fatal and propagates here.
         let outcome = loop {
             let mut step = Box::pin(run.step(&tap));
             let result = loop {
@@ -285,15 +319,45 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
                 }
             };
             admit_seen(&journal, &claimed, &mut admitted, &tap).await?;
-            match result? {
-                Step::Continue => {
+            match result {
+                Ok(Step::Continue) => {
                     drain_steering(&inbox, &journal, &steering, &turn_id, &mut claimed).await?;
                 }
-                Step::Finished(outcome) => break outcome,
+                Ok(Step::Finished(outcome)) => break Ok(outcome),
+                Err(error @ RunError::Model(_)) => break Err(error),
+                Err(error) => return Err(error.into()),
             }
         };
         drop(run);
         admit_seen(&journal, &claimed, &mut admitted, &tap).await?;
+
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(RunError::Model(error)) => {
+                // The adapter already masked its own key and header values; the host redacts
+                // the text against its own secret list before showing it.
+                let message = error.to_string();
+                let failed = RuntimeEvent::TurnFailed {
+                    turn_id: turn_id.clone(),
+                    message,
+                };
+                journal.append_runtime_event(failed.clone()).await?;
+                if let Some(sink) = &runtime_events {
+                    sink.on_runtime_event(&failed);
+                }
+                journal
+                    .append_runtime_event(RuntimeEvent::TurnFinished {
+                        turn_id,
+                        outcome: TurnOutcome::Failed,
+                        reason: None,
+                        stop_reason: None,
+                    })
+                    .await?;
+                // The driver keeps running: the next input opens a fresh turn.
+                return Ok(());
+            }
+            Err(_) => unreachable!("only model errors break the loop as Err"),
+        };
 
         // The budget stop's numbers, written beside the outcome so a reader can see why the
         // turn ended and whether the projection was reported or estimated (ADR 0015 C6).

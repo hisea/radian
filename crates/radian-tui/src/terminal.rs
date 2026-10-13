@@ -85,9 +85,9 @@ pub fn set_panic_log(path: PathBuf, secrets: Vec<String>) {
     }
 }
 
-/// The first line of a panic payload, with the values in `secrets` replaced. One line is
-/// what the normal screen gets; the full text goes to the log.
-fn redact(text: &str, secrets: &[String]) -> String {
+/// Replaces every value in `secrets` with `<redacted>`. Used for panic text and for the
+/// model error the driver reports (ADR 0017).
+pub fn redact(text: &str, secrets: &[String]) -> String {
     let mut out = text.to_owned();
     for secret in secrets {
         if !secret.is_empty() {

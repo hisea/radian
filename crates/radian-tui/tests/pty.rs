@@ -2126,3 +2126,53 @@ fn pty_anthropic_only_flags_are_refused_under_openai_compatible() {
         );
     }
 }
+
+/// ADR 0017: a model error ends the turn, not the session. The TUI shows the error as a
+/// transcript notice, returns to the input box, and the next line runs a new turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_model_error_is_shown_and_the_session_continues() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![
+        Reply::status(500, "provider is down"),
+        text_reply("SECOND-OK"),
+    ])
+    .await;
+    let dir = TempDir::new("model-error");
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "recover",
+        ],
+        24,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"first\r");
+    assert!(
+        pty.wait_for_screen("turn failed", 20),
+        "the failure is not shown:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("HTTP 500", 20),
+        "the HTTP status is not shown:\n{}",
+        pty.screen()
+    );
+    // Still usable: a second line opens a new turn that succeeds.
+    pty.send(b"second\r");
+    assert!(
+        pty.wait_for_screen("SECOND-OK", 20),
+        "the session did not continue:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+    assert_eq!(server.requests().len(), 2, "both turns reached the model");
+}

@@ -319,6 +319,7 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
     )?;
     // D4: panics after this point get a sidecar log next to the session. Set before the
     // terminal is entered; the hook reads it whenever a panic happens.
+    let secrets_for_errors = Arc::new(secrets.clone());
     radian_tui::terminal::set_panic_log(dir.join(format!("{session_id}.panic.log")), secrets);
     // The history of a resumed session is rendered before the first frame, so the transcript
     // shows it from the start. `Driver::open` recovers the same history from the journal for
@@ -388,6 +389,23 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
                 journal_path.display()
             )
         })?;
+
+    // ADR 0017: the driver reports a failed turn over a runtime-event channel. The UI shows
+    // the (host-redacted) message as a transcript notice and stays usable; the driver keeps
+    // running. `AgentEvent` is unchanged, so this is a separate channel.
+    let (runtime_tx, runtime_rx) = std::sync::mpsc::channel::<radian_session::RuntimeEvent>();
+    driver.set_runtime_events(Arc::new(move |event: &radian_session::RuntimeEvent| {
+        let redacted = match event {
+            radian_session::RuntimeEvent::TurnFailed { turn_id, message } => {
+                radian_session::RuntimeEvent::TurnFailed {
+                    turn_id: turn_id.clone(),
+                    message: radian_tui::terminal::redact(message, &secrets_for_errors),
+                }
+            }
+            other => other.clone(),
+        };
+        let _ = runtime_tx.send(redacted);
+    }));
 
     // The session is open now, so the MCP status is known: the servers and tools that actually
     // connected, not just what was configured.
@@ -489,6 +507,7 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
         &mut terminal,
         &mut app,
         &rx,
+        &runtime_rx,
         &approval_rx,
         runtime,
         &inbox,
@@ -530,6 +549,7 @@ fn ui_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App,
     rx: &Receiver<AgentEvent>,
+    runtime_events: &Receiver<radian_session::RuntimeEvent>,
     approvals: &Receiver<ApprovalPrompt>,
     runtime: &tokio::runtime::Runtime,
     inbox: &Arc<Inbox>,
@@ -578,6 +598,15 @@ fn ui_loop(
         }
         while let Ok(event) = rx.try_recv() {
             app.apply_event(&event);
+        }
+        // ADR 0017: a failed turn is shown in the transcript; the session stays open.
+        while let Ok(event) = runtime_events.try_recv() {
+            if let radian_session::RuntimeEvent::TurnFailed { message, .. } = event {
+                app.entries.push(radian_tui::Entry::new(
+                    radian_tui::EntryKind::Notice,
+                    format!("turn failed: {message}"),
+                ));
+            }
         }
         // A tool call waiting for the human: show it. The answer goes back over the prompt's
         // own channel when a key is pressed, so this loop never blocks on the decision.

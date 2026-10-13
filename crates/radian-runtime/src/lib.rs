@@ -12,5 +12,5 @@ mod driver;
 mod inbox;
 
 pub use config::{ConfigQueue, ConfigSlot};
-pub use driver::{BudgetRelax, Driver, DriverError};
+pub use driver::{BudgetRelax, Driver, DriverError, RuntimeEvents};
 pub use inbox::{CancelCause, Inbox, InboxEntry, InboxError, Lane};
