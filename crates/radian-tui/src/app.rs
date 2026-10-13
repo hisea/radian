@@ -249,13 +249,13 @@ impl App {
         self.tier = Some(tier.into());
     }
 
-    /// Records the MCP state: how many servers are configured, and what the opened session
-    /// reported (if it has opened).
     /// The host's memory service, for `/memory`. Set once at startup.
     pub fn set_memory(&mut self, memory: Option<MemoryService>) {
         self.memory = memory;
     }
 
+    /// Records the MCP state: how many servers are configured, and what the opened session
+    /// reported (if it has opened).
     pub fn set_mcp(&mut self, configured: usize, open: Option<(usize, usize)>) {
         self.mcp_configured = configured;
         self.mcp_open = open;
@@ -448,8 +448,6 @@ impl App {
         }
     }
 
-    /// Applies a live event. Deltas build `live` entries; the committed message
-    /// (`TranscriptAppended`) replaces them, so a dropped delta can never leave a duplicate.
     /// Runs one `/…` line: the notices become transcript entries, and a command that writes
     /// arms `pending_command` instead of running. The line is not sent anywhere.
     fn run_slash_command(&mut self, line: &str) {
@@ -492,6 +490,8 @@ impl App {
         self.entries.push(Entry::new(EntryKind::Notice, text));
     }
 
+    /// Applies a live event. Deltas build `live` entries; the committed message
+    /// (`TranscriptAppended`) replaces them, so a dropped delta can never leave a duplicate.
     pub fn apply_event(&mut self, event: &AgentEvent) {
         match event {
             AgentEvent::TurnStarted => self.turn = TurnState::Running,
