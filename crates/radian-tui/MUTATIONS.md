@@ -198,3 +198,21 @@ Base `0994b19` · 一次性 worktree `/tmp/composer-mut`（从 HEAD 建，做完
 | M6 | 草稿写到会话目录之外（`temp_dir`） | `pty_a_draft_is_written_on_exit_and_restored_by_resume` | ✅ |
 
 6/6 全抓。
+
+## mention：`@` 引用（Phase 4）
+
+Base `c2a668d` · 一次性检出 `/tmp/radian-mention-mut`（detached，独立 `target`，跑完删除）·
+`--no-fail-fast` · 每个变异 `git checkout --` 还原、`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M11 | 任何 `@` 都是候选（去掉“行首或空白之后”） | `mention::tests::only_an_at_at_a_line_start_or_after_whitespace_is_a_candidate` | ✅ failed |
+| M12 | 不检查 canonical 路径仍在工作区内（符号链接逃逸被展开） | `mention::tests::a_symlink_that_leaves_the_workspace_is_not_attached_and_warns` | ✅ failed |
+| M13 | 任何字节都当文本（二进制不再被拒） | `mention::tests::a_binary_file_makes_the_message_unsendable`、`a_utf8_file_with_a_nul_byte_is_binary` | ✅ failed ×2 |
+| M14 | 关掉单文件与合计上限 | `mention::tests::a_file_over_the_per_file_limit_makes_the_message_unsendable`、`the_total_limit_makes_the_message_unsendable` | ✅ failed ×2 |
+| M15 | `App::restore_input` 丢弃文本（失败时输入丢失） | `pty::pty_a_binary_attachment_is_not_sent_and_the_input_is_kept` | ✅ failed |
+| M16 | `display_text` 永不折叠 | `render::a_user_file_attachment_is_folded_to_one_line` | ✅ failed |
+| M17 | 去掉“同一文件只附一次”的去重 | `mention::tests::a_reference_to_an_existing_file_is_appended_once` | ✅ failed |
+| M18 | 不再总是跳过 `.git` / `.radian-sandbox` | `mention::tests::hidden_entries_need_a_leading_dot_and_git_is_always_skipped` | ✅ failed |
+
+8/8 全抓，无等价变异。M15 走 pty（发送路径），其余走纯函数单测。
