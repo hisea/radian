@@ -36,7 +36,7 @@ use radian_host::{
 };
 use radian_permissions::{Approver, PermissionHooks};
 use radian_runtime::{CancelCause, Driver, DriverError, Inbox, InboxError};
-use radian_session::{Index, SessionCreatedData, SessionJournal};
+use radian_session::{EventData, Index, Session, SessionCreatedData, SessionJournal};
 use tokio::sync::{Mutex, mpsc};
 
 use crate::approval::{AutoApprover, JournalAudit, TERMINAL_SOURCE, TerminalApprover};
@@ -65,7 +65,7 @@ struct Cli {
     /// do not read the key.
     #[arg(
         long,
-        required_unless_present_any = ["list", "export", "search"]
+        required_unless_present_any = ["list", "export", "search", "fork"]
     )]
     model: Option<String>,
 
@@ -165,6 +165,19 @@ struct Cli {
         conflicts_with_all = ["prompt", "resume", "list", "export"]
     )]
     search: Option<String>,
+
+    /// Fork a session (ADR 0022): create a new session whose initial history is the parent's
+    /// effective history at a turn boundary. Needs no model and reads no key.
+    #[arg(
+        long,
+        value_name = "SESSION_ID",
+        conflicts_with_all = ["prompt", "resume", "list", "export", "search"]
+    )]
+    fork: Option<String>,
+
+    /// The parent seq to fork at. Omitted, the parent's last turn boundary is used.
+    #[arg(long, value_name = "SEQ", requires = "fork")]
+    at: Option<u64>,
 
     /// Manage durable memory (ADR 0021): `agent memory --help`. Needs no `--model`, reads no
     /// key, creates no session file and never touches the network. Memory is shared across
@@ -438,6 +451,15 @@ async fn run(mut cli: Cli) -> i32 {
             Err(e) => {
                 eprintln!("agent: {}", e.0);
                 USAGE_ERROR
+            }
+        };
+    }
+    if let Some(parent_id) = &cli.fork {
+        return match fork_session(&cli, parent_id).await {
+            Ok(()) => 0,
+            Err((message, code)) => {
+                eprintln!("agent: {message}");
+                code
             }
         };
     }
@@ -787,6 +809,80 @@ fn search_sessions(cli: &Cli, query: &str) -> Result<(), SetupError> {
 }
 
 /// Like the provider's own rule: localhost, 127.0.0.1 and ::1 may go without a key.
+/// `--fork <parent>` (ADR 0022): create a child session from the parent's effective history
+/// at a turn boundary. No model, no key, no network. A parent another process is writing exits
+/// 1 rather than waiting; other failures are usage errors.
+async fn fork_session(cli: &Cli, parent_id: &str) -> Result<(), (String, i32)> {
+    let usage = |message: String| (message, USAGE_ERROR);
+    validate_session_id(parent_id).map_err(usage)?;
+    let dir = session_dir(cli).map_err(|e| (e.0, USAGE_ERROR))?;
+    let parent_path = dir.join(format!("{parent_id}.jsonl"));
+    if !parent_path.exists() {
+        return Err(usage(format!(
+            "no session {parent_id:?} in {}",
+            dir.display()
+        )));
+    }
+    let child_id = cli
+        .session_id
+        .clone()
+        .unwrap_or_else(radian_host::generate_session_id);
+    validate_session_id(&child_id).map_err(usage)?;
+    let child_path = dir.join(format!("{child_id}.jsonl"));
+    if child_path.exists() {
+        return Err(usage(format!(
+            "session {child_id:?} already exists; pass --session-id with a new id"
+        )));
+    }
+    let parent = Session::open(&parent_path)
+        .map_err(|e| usage(format!("cannot read session {parent_id:?}: {e}")))?;
+    // ADR 0022 §5: the child shares the parent's workspace and inherits its config snapshot.
+    let created = created_data(&parent);
+    let workspace = created
+        .and_then(|data| data["workspace"].as_str().map(str::to_owned))
+        .ok_or_else(|| usage(format!("session {parent_id:?} has no workspace")))?;
+    let config_snapshot = created
+        .and_then(|data| data.get("config_snapshot").cloned())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let request = radian_session::ForkRequest {
+        parent_path,
+        parent_id: parent_id.to_owned(),
+        seq: cli.at,
+        child_path,
+        child_id: child_id.clone(),
+        workspace,
+        config_snapshot,
+    };
+    match radian_session::fork(request).await {
+        Ok(outcome) => {
+            println!(
+                "forked {parent_id} at seq {} into {}",
+                outcome.seq, outcome.child_id
+            );
+            println!("continue it with `--resume {}`", outcome.child_id);
+            Ok(())
+        }
+        // The parent is being written by another process: say so and exit 1, do not wait.
+        Err(radian_session::ForkError::Parent {
+            source: radian_session::WriteError::Locked { .. },
+            ..
+        }) => Err((
+            format!("session {parent_id:?} is being written by another process; stop it first"),
+            1,
+        )),
+        Err(error) => Err(usage(error.to_string())),
+    }
+}
+
+/// The parsed `SessionCreated` data of a session, so a fork can inherit the parent's
+/// workspace and model-route reference.
+fn created_data(session: &Session) -> Option<&serde_json::Value> {
+    session.events().iter().find_map(|event| match &event.data {
+        EventData::Other(data) if event.event == "SessionCreated" => Some(data),
+        _ => None,
+    })
+}
+
 fn is_local_base_url(base_url: &str) -> bool {
     let Some((_, rest)) = base_url.split_once("://") else {
         return false;
