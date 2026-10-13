@@ -30,10 +30,11 @@ use radian_runtime::{CancelCause, Driver, Inbox};
 use radian_sandbox::Sandbox;
 use radian_session::{Index, SessionCreatedData, SessionJournal};
 use radian_tui::app::{App, Effect, Input as AppInput, MemoryResult};
-use radian_tui::projection::{SessionProjection, StreamKind};
+use radian_tui::events::{ApprovalPrompt, InputEvent, ProjectionSink, UiEvent};
+use radian_tui::projection::SessionProjection;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::crossterm::event::{self, Event, KeyEvent, KeyEventKind};
+use ratatui::crossterm::event::{self, Event, KeyEventKind};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -208,42 +209,6 @@ struct Cli {
 /// 2026-10-12, dogfooding finding D6).
 const TUI_DEFAULT_MAX_MODEL_CALLS: u32 = 1000;
 
-/// One event on the UI's single channel (ADR 0023 U2).
-///
-/// The channel carries three kinds of source with different promises: **facts and control**
-/// (never dropped — an unbounded `mpsc`, so a producer never blocks, ADR 0010 K3-1),
-/// **dirty notifications** (coalescible: at most one per session is in flight), **terminal
-/// input** (ordered, forwarded by the input thread), plus **process and host state** (signals,
-/// the driver's end). Nothing is polled any more: every source sends here.
-enum UiEvent {
-    /// A committed core event. Deltas never come this way: they accumulate in the projection
-    /// and wake the UI with [`UiEvent::Dirty`].
-    Agent(AgentEvent),
-    /// A runtime event (ADR 0017's turn failure).
-    Runtime(radian_session::RuntimeEvent),
-    /// A tool call waiting for the human.
-    Approval(ApprovalPrompt),
-    /// The result of an effect, as the input it becomes (ADR 0023 U3).
-    Command(AppInput),
-    /// The projection changed. At most one is in flight per session.
-    Dirty,
-    /// A terminal event.
-    Input(InputEvent),
-    /// The terminal went away (the pty master closed, the ssh session dropped).
-    TerminalGone,
-    /// A signal asked the app to stop.
-    Signal(i32),
-    /// The driver task ended.
-    DriverStopped,
-}
-
-/// A terminal event, forwarded by the input thread.
-enum InputEvent {
-    Key(KeyEvent),
-    Paste(String),
-    Resize { rows: u16, cols: u16 },
-}
-
 /// How many facts one loop turn processes before it draws. Bounded so a producer that keeps the
 /// channel busy cannot starve the frame (ADR 0023 U2's draw fairness): the fairness pty test
 /// floods 20 000 facts and still sees at least 100 frames. 64 keeps a turn's work near the
@@ -258,40 +223,6 @@ const MAX_EFFECT_ROUNDS: usize = 8;
 /// The input thread's poll interval: a wake-up granularity for the hang-up check, not a
 /// synchronization device.
 const INPUT_POLL: Duration = Duration::from_millis(50);
-
-/// Forwards core events to the UI thread (ADR 0023 U2). Deltas are **not** forwarded: they
-/// accumulate in the projection, and the UI is woken with one `Dirty` when it has not looked
-/// yet. `emit` stays short and non-blocking (ADR 0010 K3-1).
-struct ProjectionSink {
-    tx: Sender<UiEvent>,
-    projection: Arc<SessionProjection>,
-}
-
-impl ProjectionSink {
-    /// Appends a delta and wakes the UI when it has not been woken since it last looked.
-    fn stream(&self, kind: StreamKind, text: &str) {
-        if self.projection.push_delta(kind, text) {
-            let _ = self.tx.send(UiEvent::Dirty);
-        }
-    }
-}
-
-impl EventSink for ProjectionSink {
-    fn emit(&self, event: AgentEvent) {
-        match &event {
-            AgentEvent::ModelTextDelta { text } => {
-                return self.stream(StreamKind::Assistant, text);
-            }
-            AgentEvent::ModelReasoningDelta { text } => {
-                return self.stream(StreamKind::Reasoning, text);
-            }
-            // The committed message replaces the live view, so the stream buffer is done.
-            AgentEvent::TranscriptAppended { .. } => self.projection.clear_stream(),
-            _ => {}
-        }
-        let _ = self.tx.send(UiEvent::Agent(event));
-    }
-}
 
 fn main() -> ExitCode {
     radian_tui::terminal::install_panic_hook();
@@ -622,10 +553,8 @@ fn run(
     // The projection holds the streaming deltas; the sink forwards everything else as a fact
     // (ADR 0023 U2). One session in this build, so one projection.
     let projection = Arc::new(SessionProjection::new());
-    let live: Arc<dyn EventSink> = Arc::new(ProjectionSink {
-        tx: tx.clone(),
-        projection: Arc::clone(&projection),
-    });
+    let live: Arc<dyn EventSink> =
+        Arc::new(ProjectionSink::new(tx.clone(), Arc::clone(&projection)));
     let agent_config = AgentConfig {
         system_prompt: cli.system.clone(),
         // No window known means the budget is off, never a guessed default (ADR 0015); the
@@ -1125,18 +1054,6 @@ fn draw_frame(
     }
 }
 
-/// A tool call waiting for the human: the request the UI shows, and the channel the permission
-/// layer awaits. The **loop** owns the channel (ADR 0023 U3: `update` is pure), keyed by
-/// `request_id` so an answer or an abandon can find it.
-struct ApprovalPrompt {
-    request: ApprovalRequest,
-    reply: tokio::sync::oneshot::Sender<ApprovalOutcome>,
-}
-
-/// The input thread (ADR 0023 U2). It owns `read_input`'s hang-up protection: `poll(2)` for
-/// `POLLHUP` first, then crossterm's buffered events, and it never blocks in `event::read` on a
-/// tty that returns EOF. The thread is **abandoned** when the loop exits: the process is
-/// leaving, and the next poll finds the channel closed and returns.
 fn spawn_input_thread(tx: Sender<UiEvent>) {
     std::thread::spawn(move || {
         loop {
@@ -1215,11 +1132,10 @@ impl LoopContext<'_> {
                 // ADR 0023 U2: clear the flag **first**, then read the projection. An update
                 // that happens after this swap sets the flag again and sends another `Dirty`,
                 // so no wake-up is lost.
-                if !self.projection.take_dirty() {
-                    return false;
+                match self.projection.take_snapshot() {
+                    Some(snapshot) => app.update(AppInput::Stream(snapshot)),
+                    None => return false,
                 }
-                let snapshot = self.projection.snapshot();
-                app.update(AppInput::Stream(snapshot))
             }
             UiEvent::Signal(signal) => {
                 // Leave through the ordinary clean-exit path: the terminal is restored, the

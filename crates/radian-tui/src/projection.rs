@@ -98,6 +98,23 @@ impl SessionProjection {
         self.dirty.swap(false, Ordering::Acquire)
     }
 
+    /// Clears the dirty flag and reads the snapshot, **in that order** (ADR 0023 U2's wake-up
+    /// contract). `None` means another `Dirty` is already in flight, so the read can be
+    /// skipped. `after_clear` runs between the two steps: the ordering test uses it to write
+    /// from the producer exactly at the interleaving the order is about.
+    pub fn take_snapshot_with(&self, after_clear: impl FnOnce()) -> Option<StreamSnapshot> {
+        if !self.take_dirty() {
+            return None;
+        }
+        after_clear();
+        Some(self.snapshot())
+    }
+
+    /// [`Self::take_snapshot_with`] with no interleaving: what the event loop calls.
+    pub fn take_snapshot(&self) -> Option<StreamSnapshot> {
+        self.take_snapshot_with(|| {})
+    }
+
     /// The accumulated stream. Read after [`Self::take_dirty`].
     pub fn snapshot(&self) -> StreamSnapshot {
         let stream = self.stream.lock().expect("the stream lock");
@@ -155,6 +172,28 @@ mod tests {
         );
         assert_eq!(projection.snapshot().assistant, "ab");
         assert!(projection.take_dirty());
+    }
+
+    /// The order of the two steps is the whole point: a write that lands **after** the flag was
+    /// cleared must survive (the UI is woken again). Reversing them — read, then clear — loses
+    /// exactly this update.
+    #[test]
+    fn an_update_between_the_clear_and_the_read_is_not_lost() {
+        let projection = SessionProjection::new();
+        projection.push_delta(StreamKind::Assistant, "a");
+        let snapshot = projection.take_snapshot_with(|| {
+            // The producer writes here: the flag was just cleared, the buffer not yet read.
+            projection.push_delta(StreamKind::Assistant, "b");
+        });
+        assert_eq!(
+            snapshot.expect("the flag was set").assistant,
+            "ab",
+            "the read sees the update that landed between the steps"
+        );
+        assert!(
+            projection.take_dirty(),
+            "and that update is not lost: the UI is woken again"
+        );
     }
 
     #[test]
