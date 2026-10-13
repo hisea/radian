@@ -9,7 +9,7 @@ contract; this file is the practical summary.
 
 | Tool | Concurrency | What it does |
 |---|---|---|
-| `read` | `Shared` | Read a UTF-8 file, bounded by `max_bytes` (default 64 KiB, hard cap 1 MiB). Reports `total_bytes`/`truncated`; refuses non-UTF-8. |
+| `read` | `Shared` | Read a UTF-8 file, bounded by `max_bytes` (default 64 KiB, hard cap 1 MiB). `offset` (1-based first line) and `limit` (lines) read a large file in sections. Reports `start_line`/`end_line`/`line_truncated` and, when not finished, `next_offset`; refuses non-UTF-8. |
 | `write` | `Exclusive` | Create or overwrite a file with exact content (no newline added). Parent must exist. Never follows a symlink at the destination. |
 | `patch` | `Exclusive` | Replace exactly one occurrence of `old` with `new`. Zero or multiple matches refuse the edit and leave the file untouched (no fuzzy matching). |
 | `list` | `Shared` | List a directory, sorted, with kind and size; symlinks shown but not followed; capped by `max_entries`. |
@@ -23,6 +23,18 @@ edit's read-modify-write atomic with respect to the other tools and avoids two w
 racing on one file. The read-only tools are `Shared` so a batch of reads/diffs can overlap.
 `ask_user` is `Exclusive` (the default) so a session has at most one pending question: a batch
 with two calls asks them one after the other instead of opening two modals.
+
+`read` addresses **lines**: `offset` is the 1-based first line, `limit` caps the line count,
+and `max_bytes` still bounds the result. A byte cut that would land mid-line drops the whole
+incomplete line (the result's `next_offset` names it), so a caller can loop
+`offset = next_offset` and never see half a line; the one exception is a first line longer than
+the whole budget, whose UTF-8 prefix is returned with `line_truncated: true` and the next read
+continues at the following line. The body ends with a hint for a provider that only reads text
+(the adapters never send `structured` to the model): `[truncated: continue with offset=NNN]`,
+or `[line N truncated at max_bytes; continue with offset=N+1]` for that exception. Memory is
+bounded by about `max_bytes` plus one reader buffer, even for a file with a single enormous
+line. This is the fix for dogfood10 D25 (a 73 KB guide read 20 times): read the section you
+need, do **not** raise `max_bytes` to reach it.
 
 ## Limits (`Limits`, all overridable)
 

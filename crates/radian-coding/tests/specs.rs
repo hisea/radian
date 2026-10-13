@@ -48,6 +48,34 @@ async fn agent_core_accepts_the_built_in_tool_specs() {
     chat.close().await.unwrap();
 }
 
+/// D25: the `read` spec offers `offset`/`limit` so a large file can be read in sections, and
+/// its description says not to raise `max_bytes` to reach a later part.
+#[tokio::test]
+async fn the_read_spec_offers_offset_and_limit() {
+    let dir = TempDir::new("read-spec");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let coding = tools(&root);
+    let session = coding.open_session().await.unwrap();
+    let read = session
+        .tool_specs()
+        .iter()
+        .find(|spec| spec.name == "read")
+        .expect("the read spec");
+    let properties = &read.input_schema["properties"];
+    for field in ["path", "max_bytes", "offset", "limit"] {
+        assert!(properties.get(field).is_some(), "missing {field}");
+    }
+    assert_eq!(properties["offset"]["minimum"], 1);
+    assert_eq!(properties["limit"]["minimum"], 1);
+    assert!(read.description.contains("offset"), "{}", read.description);
+    assert!(
+        read.description.contains("do NOT raise max_bytes"),
+        "{}",
+        read.description
+    );
+}
+
 /// ADR 0024 Q1: with a prompter, `ask_user` is appended and its schema passes the same
 /// preflight (`ToolRegistry::new` compiles every `input_schema` and rejects duplicates).
 #[tokio::test]

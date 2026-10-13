@@ -77,7 +77,8 @@ pub(crate) fn spec(mode: SandboxMode) -> ToolSpec {
         description: format!(
             "Run a shell command with `/bin/sh -c`. {confinement} To look at a file or a \
              directory, prefer the `read` and `list` tools over `cat`, `sed -n` or `ls`: they \
-             report truncation and total size, and they use less of the context window. Use \
+             report truncation and total size, they use less of the context window, and `read` \
+             takes `offset`/`limit` to read a large file in sections. Use \
              `shell` to run programs (builds, tests, searches across many files). Each stream's \
              output is \
              capped: past the budget the start and the end are kept and the middle is \

@@ -176,7 +176,18 @@ async fn read_reports_truncation_and_the_total_size() {
     let output = call(&tools, "read", json!({"path": "f.txt", "max_bytes": 4}))
         .await
         .unwrap();
-    assert_eq!(text(&output), "0123");
+    // The body is the prefix plus the human-readable continuation hint: the model only sees
+    // the body (the adapters never send `structured`), so the hint must be in it.
+    let content = text(&output);
+    assert!(content.starts_with("0123"), "{content}");
+    assert!(
+        content.contains("[line 1 truncated at max_bytes; continue with offset=2]"),
+        "{content}"
+    );
+    assert!(
+        !content.contains("0123456789"),
+        "the prefix is not the whole line: {content}"
+    );
     let info = structured(&output);
     assert_eq!(info["bytes_read"], 4);
     assert_eq!(info["total_bytes"], 10);
@@ -195,7 +206,17 @@ async fn read_trims_an_incomplete_character_at_the_budget_edge() {
     let output = call(&tools, "read", json!({"path": "f.txt", "max_bytes": 1}))
         .await
         .unwrap();
-    assert_eq!(text(&output), "", "the incomplete character is dropped");
+    // The 1-byte budget cannot hold the character, so the prefix is empty and only the hint
+    // remains; the character itself is never split.
+    let content = text(&output);
+    assert!(
+        !content.contains('é'),
+        "the incomplete character is dropped: {content}"
+    );
+    assert!(
+        content.contains("[line 1 truncated at max_bytes; continue with offset=2]"),
+        "{content}"
+    );
 }
 
 #[tokio::test]
