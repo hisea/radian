@@ -39,7 +39,8 @@ pub const MIN_KEEP_TARGET: u64 = 2_048;
 /// does not fix one; this slice fixes 8192 tokens, deliberately not `B`).
 pub const DEFAULT_SUMMARY_MAX_TOKENS: u64 = 8_192;
 
-/// How many characters of one tool result reach the summarizer (ADR 0018).
+/// How many characters of one tool result (ADR 0018), and of one tool call's arguments,
+/// reach the summarizer.
 pub const TOOL_RESULT_LIMIT_CHARS: usize = 2_000;
 
 /// The fixed system prompt for a summary request (ADR 0018's structure). It asks for the
@@ -232,8 +233,8 @@ pub fn check_summary(text: &str, max_tokens: u64) -> Result<String, SummaryError
 ///
 /// The messages are flattened into **plain text** in one user message: the summarizer never
 /// sees the raw tool-call/result shapes, so it cannot produce a broken pairing. Each tool
-/// result is cut to [`TOOL_RESULT_LIMIT_CHARS`] characters (never mid-character) and the cut
-/// is stated. An assistant's `reasoning` is left out: it is provider-invisible and not part
+/// result, and each call's JSON arguments, is cut to [`TOOL_RESULT_LIMIT_CHARS`] characters
+/// (never mid-character) and the cut is stated. An assistant's `reasoning` is left out: it is provider-invisible and not part
 /// of the visible history (ADR 0014). `previous_summary` is the rolling summary of an earlier
 /// compaction; `instructions` is the optional `/compact` note. No tools are sent.
 pub fn summary_request(
@@ -312,10 +313,18 @@ fn summarize_text(messages: &[Message]) -> String {
                 out.push_str(&joined_text(content));
                 out.push('\n');
                 for call in tool_calls {
+                    // Arguments can be as large as a result (a whole file to write), so they
+                    // are cut by the same rule.
+                    let (arguments, truncated) =
+                        truncate_chars(&call.arguments.to_string(), TOOL_RESULT_LIMIT_CHARS);
                     out.push_str(&format!(
-                        "  called {} {} with {}\n",
-                        call.name, call.id, call.arguments
+                        "  called {} {} with {arguments}",
+                        call.name, call.id
                     ));
+                    if let Some(cut) = truncated {
+                        out.push_str(&format!(" … [truncated {cut} characters]"));
+                    }
+                    out.push('\n');
                 }
             }
             Message::Tool { result, .. } => {

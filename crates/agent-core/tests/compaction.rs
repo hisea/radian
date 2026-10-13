@@ -244,6 +244,30 @@ fn the_summary_request_serializes_text_and_truncates_tool_results() {
 }
 
 #[test]
+fn the_summary_request_truncates_tool_call_arguments_too() {
+    // A write-a-file call carries the whole file in its arguments.
+    let history = vec![
+        Message::Assistant {
+            content: Vec::new(),
+            reasoning: Vec::new(),
+            tool_calls: vec![ToolCall {
+                id: "w".into(),
+                name: "write".into(),
+                arguments: json!({ "content": "y".repeat(5_000) }),
+            }],
+            provider_payload: None,
+            interrupted: false,
+            meta: MessageMeta::default(),
+        },
+        tool_with_text("w", "ok"),
+    ];
+    let body = summary_request(None, &history, None).messages[0].text();
+    assert!(body.contains("called write w with"), "{body}");
+    assert!(body.contains("[truncated"), "{body}");
+    assert!(body.matches('y').count() < 2_000, "{body}");
+}
+
+#[test]
 fn truncating_a_tool_result_never_splits_a_character() {
     // 2500 Han characters: a byte-based cut at 2000 would split one.
     let long = "中".repeat(2_500);
