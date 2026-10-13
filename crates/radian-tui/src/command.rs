@@ -23,7 +23,8 @@ pub const HELP: &str = "\
                       forget, purge, confirm, export, import, project, relink, split, merge
 //…                   send a message that starts with `/`";
 
-/// A memory write waiting for the user's `y`.
+/// A memory command waiting for the user's confirmation. Only the destructive commands
+/// (`forget`, `purge`, `split`, `merge`) ask (ADR 0021 D7); the rest run immediately.
 #[derive(Debug)]
 pub struct PendingCommand {
     pub command: MemoryCommand,

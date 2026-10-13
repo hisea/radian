@@ -137,7 +137,11 @@ struct Cli {
     /// A stable session identifier for this process: used verbatim as the session file's
     /// name, and available to `--header` values as `{session_id}`. Generated once per
     /// process when omitted.
-    #[arg(long, value_name = "VALUE", conflicts_with = "resume")]
+    #[arg(
+        long,
+        value_name = "VALUE",
+        conflicts_with_all = ["resume", "list", "search"]
+    )]
     session_id: Option<String>,
 
     /// Resume an existing session by id.
@@ -250,6 +254,79 @@ struct Cli {
 /// Why startup failed. The message must not contain the key.
 pub(crate) struct SetupError(pub(crate) String);
 
+/// Why a "print and exit" command (`--list`, `--search`, `--export`, `agent memory`) stopped.
+///
+/// A closed stdout (`agent --list | head`) is a normal way to stop, not a failure (dogfooding
+/// D21); it is kept apart from a real error so it exits 0 with no message.
+pub(crate) enum OutputError {
+    /// A setup, usage or memory-command failure: the message is printed, this code returned.
+    Failed { message: String, code: i32 },
+    /// stdout's reader went away: stop silently with exit code 0.
+    BrokenPipe,
+    /// Another stdout write error: one stderr line, exit code 1.
+    Write(std::io::Error),
+}
+
+impl From<SetupError> for OutputError {
+    fn from(error: SetupError) -> Self {
+        Self::Failed {
+            message: error.0,
+            code: USAGE_ERROR,
+        }
+    }
+}
+
+impl From<CommandError> for OutputError {
+    fn from(error: CommandError) -> Self {
+        Self::Failed {
+            message: error.message,
+            code: error.code,
+        }
+    }
+}
+
+impl From<radian_host::StdoutError> for OutputError {
+    fn from(error: radian_host::StdoutError) -> Self {
+        match error {
+            radian_host::StdoutError::BrokenPipe => Self::BrokenPipe,
+            radian_host::StdoutError::Failed(error) => Self::Write(error),
+        }
+    }
+}
+
+impl OutputError {
+    /// The process exit code for this failure.
+    fn exit_code(&self) -> i32 {
+        match self {
+            OutputError::Failed { code, .. } => *code,
+            OutputError::BrokenPipe => 0,
+            OutputError::Write(_) => 1,
+        }
+    }
+
+    /// The line to print to stderr, if any. A broken pipe prints nothing.
+    fn message(&self) -> Option<String> {
+        match self {
+            OutputError::Failed { message, .. } => Some(format!("agent: {message}")),
+            OutputError::BrokenPipe => None,
+            OutputError::Write(error) => Some(format!("agent: cannot write to stdout: {error}")),
+        }
+    }
+}
+
+/// Prints an output command's failure (if any) and returns its exit code.
+fn finish(result: Result<(), OutputError>) -> i32 {
+    match result {
+        Ok(()) => 0,
+        Err(error) => {
+            if let Some(line) = error.message() {
+                eprintln!("{line}");
+            }
+            error.exit_code()
+        }
+    }
+}
+
 /// The `--model` value. Clap requires it unless `--list`, `--export` or `--search` is present,
 /// so a conversation always has one; this makes the failure explicit instead of a panic if
 /// that invariant ever changes.
@@ -279,19 +356,13 @@ enum Command {
 }
 
 fn run_memory(cli: &Cli, command: MemoryCommand) -> i32 {
-    match memory_command(cli, command) {
-        Ok(()) => 0,
-        Err(error) => {
-            eprintln!("agent: {}", error.message);
-            error.code
-        }
-    }
+    finish(memory_command(cli, command))
 }
 
 /// Runs one `agent memory` subcommand. Deliberately before `setup`: no model, no key, no
 /// session file, no network. The grammar and the execution live in
 /// `radian_host::memory::commands`, shared byte-for-byte with the TUI's `/memory`.
-fn memory_command(cli: &Cli, command: MemoryCommand) -> Result<(), CommandError> {
+fn memory_command(cli: &Cli, command: MemoryCommand) -> Result<(), OutputError> {
     let workspace = resolve_workspace(cli.workspace.as_deref().map(std::path::Path::new))
         .map_err(CommandError::usage)?;
     let root = radian_host::memory_dir()
@@ -312,7 +383,7 @@ fn memory_command(cli: &Cli, command: MemoryCommand) -> Result<(), CommandError>
     if let Some(note) = &output.note {
         eprintln!("{note}");
     }
-    print!("{}", output.text);
+    radian_host::write_stdout(&output.text)?;
     Ok(())
 }
 
@@ -426,33 +497,15 @@ async fn run(mut cli: Cli) -> i32 {
         }
     }
     if cli.list {
-        return match list_sessions(&cli) {
-            Ok(()) => 0,
-            Err(e) => {
-                eprintln!("agent: {}", e.0);
-                USAGE_ERROR
-            }
-        };
+        return finish(list_sessions(&cli));
     }
     // The session-management commands never touch the model or the network: they run before
     // `setup` (so no key is required) and never create a session file.
     if let Some(session_id) = &cli.export {
-        return match export_session(&cli, session_id) {
-            Ok(()) => 0,
-            Err(e) => {
-                eprintln!("agent: {}", e.0);
-                USAGE_ERROR
-            }
-        };
+        return finish(export_session(&cli, session_id));
     }
     if let Some(query) = &cli.search {
-        return match search_sessions(&cli, query) {
-            Ok(()) => 0,
-            Err(e) => {
-                eprintln!("agent: {}", e.0);
-                USAGE_ERROR
-            }
-        };
+        return finish(search_sessions(&cli, query));
     }
     if let Some(parent_id) = &cli.fork {
         return match fork_session(&cli, parent_id).await {
@@ -694,18 +747,18 @@ fn session_index(cli: &Cli) -> Result<Option<(Index, String)>, SetupError> {
 }
 
 /// `--list`: the sessions of this workspace, newest activity first.
-fn list_sessions(cli: &Cli) -> Result<(), SetupError> {
+fn list_sessions(cli: &Cli) -> Result<(), OutputError> {
     let Some((index, workspace)) = session_index(cli)? else {
         return Ok(()); // no sessions yet
     };
     for row in radian_host::sessions::list(&index, &workspace).map_err(SetupError)? {
-        println!(
+        radian_host::write_line(&format!(
             "{}\t{}\t{}\t{}",
             row.session_id,
             row.created_ts.as_deref().unwrap_or("-"),
             row.last_ts.as_deref().unwrap_or("-"),
             row.message_count
-        );
+        ))?;
     }
     Ok(())
 }
@@ -716,7 +769,7 @@ const SEARCH_LIMIT: usize = 200;
 /// `--export`: one session of the current workspace, Markdown or JSON. It reads the session
 /// file directly (no index), so a read-only command writes nothing into the session
 /// directory.
-fn export_session(cli: &Cli, session_id: &str) -> Result<(), SetupError> {
+fn export_session(cli: &Cli, session_id: &str) -> Result<(), OutputError> {
     let dir = session_dir(cli)?;
     let workspace = session_workspace(cli)?;
     let format = match cli.format {
@@ -739,12 +792,13 @@ fn export_session(cli: &Cli, session_id: &str) -> Result<(), SetupError> {
                 return Err(SetupError(format!(
                     "{} already exists; pass --force to overwrite it",
                     path.display()
-                )));
+                ))
+                .into());
             }
             std::fs::write(path, rendered)
                 .map_err(|e| SetupError(format!("cannot write {}: {e}", path.display())))?;
         }
-        None => print!("{rendered}"),
+        None => radian_host::write_stdout(&rendered)?,
     }
     Ok(())
 }
@@ -782,7 +836,7 @@ fn export_secrets(cli: &Cli) -> Vec<String> {
 /// `--search`: substring search over the current workspace's message text, using the same
 /// `Index::search` the `--list` cache is built on. The index lives beside the sessions in
 /// `index.db`; it is a disposable cache, never a session file (ADR 0006 §10).
-fn search_sessions(cli: &Cli, query: &str) -> Result<(), SetupError> {
+fn search_sessions(cli: &Cli, query: &str) -> Result<(), OutputError> {
     let Some((index, workspace)) = session_index(cli)? else {
         eprintln!("no match");
         return Ok(());
@@ -798,12 +852,12 @@ fn search_sessions(cli: &Cli, query: &str) -> Result<(), SetupError> {
         // The snippet is session content and can carry a model-echoed key or header value;
         // redact the known secrets exactly like `--export` (ADR 0013 decision 3).
         let snippet = redact(&hit.snippet, &secrets);
-        println!(
+        radian_host::write_line(&format!(
             "{}\t{}\t{}",
             hit.session_id,
             hit.last_ts.as_deref().unwrap_or("-"),
             snippet
-        );
+        ))?;
     }
     Ok(())
 }

@@ -426,7 +426,45 @@ pub fn execute(
             output.text = format!("relinked {} to {project_id}\n", service.identity_key());
         }
         MemoryCommand::Split { from, to, ids, .. } => {
-            let prompt = format!("move {} record(s) from {from} to {to}", ids.len());
+            // The prompt must name the records that actually exist: `ids` is what the user
+            // typed, and `split` would silently drop the ones it does not find. Read the
+            // `from` project first (no write) so the confirmation is a promise about what
+            // will move (ADR 0021 D7).
+            let present: Vec<String> = service
+                .store()
+                .records(&Scope::Project(ProjectId(from.clone())))
+                .map_err(|error| CommandError::failure(error.to_string()))?
+                .into_iter()
+                .map(|record| record.id.0)
+                .collect();
+            let found: Vec<&String> = ids.iter().filter(|id| present.contains(id)).collect();
+            let missing: Vec<&String> = ids.iter().filter(|id| !present.contains(id)).collect();
+            if found.is_empty() {
+                return Err(CommandError::failure(format!(
+                    "none of the {} record(s) exist in {from}: {}",
+                    ids.len(),
+                    missing
+                        .iter()
+                        .map(|id| id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+            let mut prompt = format!(
+                "move {} of {} record(s) from {from} to {to}",
+                found.len(),
+                ids.len()
+            );
+            if !missing.is_empty() {
+                prompt.push_str(&format!(
+                    " (not found: {})",
+                    missing
+                        .iter()
+                        .map(|id| id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
             match confirm(confirmed, prompt) {
                 Some(prompt) => output.needs_confirmation = Some(prompt),
                 None => {
@@ -716,6 +754,62 @@ mod tests {
                 .list(ScopeSelection::ProjectOnly, false)
                 .unwrap()
                 .is_empty()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `split`'s confirmation counts the records that actually exist in `from`, not the ids
+    /// the user typed (dogfooding D22), and names the ones that do not.
+    #[test]
+    fn the_split_prompt_counts_the_records_that_exist() {
+        let (dir, service) = service("split-prompt");
+        let project = service.create_project().unwrap();
+        let first = service
+            .add(WriteScope::Project, Kind::Fact, None, "one".into())
+            .unwrap();
+        let second = service
+            .add(WriteScope::Project, Kind::Fact, None, "two".into())
+            .unwrap();
+
+        let output = execute(
+            &service,
+            MemoryCommand::Split {
+                yes: false,
+                from: project.to_string(),
+                to: "other".into(),
+                ids: vec![
+                    first.id.to_string(),
+                    "missing".into(),
+                    second.id.to_string(),
+                ],
+            },
+            false,
+            false,
+        )
+        .unwrap();
+        let prompt = output
+            .needs_confirmation
+            .expect("an unconfirmed split asks");
+        assert!(prompt.contains("move 2 of 3 record(s)"), "{prompt}");
+        assert!(prompt.contains("not found: missing"), "{prompt}");
+
+        // No id exists: a failure (exit 1), not a confirmation.
+        let error = execute(
+            &service,
+            MemoryCommand::Split {
+                yes: false,
+                from: project.to_string(),
+                to: "other".into(),
+                ids: vec!["nope".into()],
+            },
+            false,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, 1, "{error:?}");
+        assert!(
+            error.message.contains("none of the 1 record(s) exist"),
+            "{error:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
