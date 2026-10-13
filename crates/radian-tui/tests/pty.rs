@@ -987,6 +987,10 @@ async fn pty_shell_approval_shows_the_command_and_the_truncation_marker() {
     let dir = TempDir::new("shell");
     let ws = dir.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
+    // The sessions directory is a sibling of the workspace, not its parent: the sandbox masks
+    // the sessions directory (ADR 0020), and bwrap's `--tmpfs` mask would hide a workspace
+    // nested inside it, so the shell could not even chdir in.
+    let sessions = dir.path().join("sessions");
     // ~200 KiB of output, well past the 64 KiB per-stream default: the marker must show.
     let command = "i=0; while [ $i -lt 20000 ]; do echo filler-$i; i=$((i+1)); done";
     let server = MockServer::start(vec![
@@ -1001,7 +1005,7 @@ async fn pty_shell_approval_shows_the_command_and_the_truncation_marker() {
             "--base-url",
             &server.base_url,
             "--session-dir",
-            dir.path().to_str().unwrap(),
+            sessions.to_str().unwrap(),
             "--session-id",
             "shell",
             "--workspace",
