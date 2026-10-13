@@ -127,6 +127,13 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         self.journal.session_id()
     }
 
+    /// The context budget's last computation for this session (ADR 0015 C1), for a status
+    /// bar: `Disabled` means no number is claimed (no window configured yet), otherwise the
+    /// report's `source` says provider-reported vs. estimated.
+    pub fn context_budget_status(&self) -> &agent_core::BudgetStatus {
+        self.session.context_budget_status()
+    }
+
     /// Sets a per-turn time limit. Each turn gets a deadline computed at its start, so this
     /// applies to every turn rather than only the first.
     pub fn set_turn_timeout(&mut self, timeout: Option<std::time::Duration>) {
@@ -242,6 +249,21 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         };
         drop(run);
         admit_seen(&journal, &claimed, &mut admitted, &tap).await?;
+
+        // The budget stop's numbers, written beside the outcome so a reader can see why the
+        // turn ended and whether the projection was reported or estimated (ADR 0015 C6).
+        if let RunStatus::ContextBudget(report) = &outcome.status {
+            journal
+                .append_runtime_event(RuntimeEvent::ContextBudgetReached {
+                    turn_id: turn_id.clone(),
+                    source: report.source,
+                    projected_tokens: report.projected_tokens,
+                    window_tokens: report.window_tokens,
+                    threshold_percent: report.threshold_percent,
+                    baseline_input_tokens: report.baseline_input_tokens,
+                })
+                .await?;
+        }
 
         let (outcome, reason, stop_reason) = wire_outcome(&outcome);
         journal

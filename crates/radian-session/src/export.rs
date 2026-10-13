@@ -229,6 +229,21 @@ fn event_data_value(
         EventData::ConfigChanged { revision, change } => {
             json!({"revision": revision, "change": change})
         }
+        EventData::ContextBudgetReached {
+            turn_id,
+            source,
+            projected_tokens,
+            window_tokens,
+            threshold_percent,
+            baseline_input_tokens,
+        } => json!({
+            "turn_id": turn_id,
+            "source": source,
+            "projected_tokens": projected_tokens,
+            "window_tokens": window_tokens,
+            "threshold_percent": threshold_percent,
+            "baseline_input_tokens": baseline_input_tokens,
+        }),
         EventData::PermissionResolved {
             request_id,
             call_id,

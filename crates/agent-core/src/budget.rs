@@ -6,6 +6,8 @@
 //! **reported**, **estimated**, and **unavailable** (no window configured → disabled). It
 //! never invents a number to fill a gap.
 
+use serde::{Deserialize, Serialize};
+
 use crate::model::ModelRequest;
 
 /// The host-supplied context window and policy. There is deliberately **no** model→window
@@ -56,7 +58,8 @@ impl ContextBudget {
 }
 
 /// Where the projection's baseline came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum UsageSource {
     /// The baseline is an earlier request's provider-reported `input` token count; the
     /// growth on top of it is estimated.

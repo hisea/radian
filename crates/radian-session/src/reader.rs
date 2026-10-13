@@ -9,7 +9,9 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
-use agent_core::{InputSource, JournalRecord, Message, MessageId, ModelUsage, ToolResult, recover};
+use agent_core::{
+    InputSource, JournalRecord, Message, MessageId, ModelUsage, ToolResult, UsageSource, recover,
+};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -23,7 +25,7 @@ pub(crate) const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 
 /// The v1 events known to a schema-v1 reader (ADR 0006 §4). Anything else is unknown and
 /// handled by the `critical` policy.
-pub(crate) const KNOWN_EVENTS: [&str; 16] = [
+pub(crate) const KNOWN_EVENTS: [&str; 17] = [
     "SessionCreated",
     "InboxEnqueued",
     "InputClaimed",
@@ -37,6 +39,7 @@ pub(crate) const KNOWN_EVENTS: [&str; 16] = [
     "ConfigChanged",
     "ContextCompacted",
     "Rewound",
+    "ContextBudgetReached",
     "PermissionResolved",
     "ModelUsageRecorded",
     "SessionForked",
@@ -95,6 +98,16 @@ pub enum EventData {
     ConfigChanged {
         revision: u64,
         change: Value,
+    },
+    /// A context-budget stop (ADR 0015 C6). Typed for an exact round trip; audit only,
+    /// never a transcript record.
+    ContextBudgetReached {
+        turn_id: String,
+        source: UsageSource,
+        projected_tokens: u64,
+        window_tokens: u64,
+        threshold_percent: u8,
+        baseline_input_tokens: Option<u64>,
     },
     /// One permission decision (ADR 0006 §5.9). Typed for an exact round trip; audit only,
     /// never a transcript record.
@@ -386,6 +399,17 @@ where
                     change: d.change,
                 }
             }
+            "ContextBudgetReached" => {
+                let d: ContextBudgetReachedData = data_of(raw, lineno, path)?;
+                EventData::ContextBudgetReached {
+                    turn_id: d.turn_id,
+                    source: d.source,
+                    projected_tokens: d.projected_tokens,
+                    window_tokens: d.window_tokens,
+                    threshold_percent: d.threshold_percent,
+                    baseline_input_tokens: d.baseline_input_tokens,
+                }
+            }
             _ => {
                 let value = data_value(raw, lineno, path).map_err(E::from)?;
                 EventData::Other(value)
@@ -530,6 +554,7 @@ impl Session {
                 | EventData::TurnStarted { .. }
                 | EventData::TurnFinished { .. }
                 | EventData::ConfigChanged { .. }
+                | EventData::ContextBudgetReached { .. }
                 | EventData::PermissionResolved { .. }
                 | EventData::Other(_) => None,
             })
@@ -639,6 +664,17 @@ struct TurnFinishedData {
 struct ConfigChangedData {
     revision: u64,
     change: Value,
+}
+
+#[derive(Deserialize)]
+struct ContextBudgetReachedData {
+    turn_id: String,
+    source: UsageSource,
+    projected_tokens: u64,
+    window_tokens: u64,
+    threshold_percent: u8,
+    #[serde(default)]
+    baseline_input_tokens: Option<u64>,
 }
 
 #[derive(Deserialize)]
