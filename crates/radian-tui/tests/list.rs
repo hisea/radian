@@ -112,3 +112,48 @@ async fn a_draft_file_is_not_listed_as_a_session() {
     );
     assert!(!out.contains("draft"), "no .draft row: {out}");
 }
+
+/// A stdout whose reader is already gone: the child's first write is `EPIPE`, deterministically
+/// (no dependence on the pipe buffer size). `SIGPIPE` stays ignored (Rust's default).
+#[cfg(unix)]
+fn closed_stdout() -> std::process::Stdio {
+    use std::os::unix::io::FromRawFd;
+    let mut fds = [0i32; 2];
+    // SAFETY: a fresh pipe; both fds are owned here.
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    // SAFETY: closing a fd we own.
+    unsafe { libc::close(fds[0]) };
+    // SAFETY: `fds[1]` is an owned write fd, moved into the child's stdout.
+    unsafe { std::process::Stdio::from_raw_fd(fds[1]) }
+}
+
+/// D21: `radian-tui --list | head -1` must not panic; a closed stdout is a normal stop.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_closed_stdout_is_not_a_panic() {
+    let dir = TempDir::new("list-sigpipe");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    write_session(dir.path(), "sigpipe", &ws).await;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_radian-tui"))
+        .args([
+            "--model",
+            "mock",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--list",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(closed_stdout())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn radian-tui --list");
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut stderr).unwrap();
+    let status = child.wait().expect("wait");
+    assert_eq!(status.code(), Some(0), "stderr: {stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}

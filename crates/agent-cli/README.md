@@ -69,8 +69,14 @@ creates or modifies a session file (`.jsonl`).
   and does not touch the index.
 
 These are their own mode: `--export`/`--search`/`--list` conflict with `--prompt`,
-`--resume` and each other (clap rejects a combination with exit 2), and `--model` is only
-required for a conversation (`-p` or interactive).
+`--resume` and each other, and `--list`/`--search` also conflict with `--session-id` (a
+listing does not use one); clap rejects a combination with exit 2. `--model` is only required
+for a conversation (`-p` or interactive).
+
+A closed stdout is not an error: `agent --list | head -1` (and the same for `--export`,
+`--search` and every `agent memory` subcommand) stops quietly with **exit 0** and prints
+nothing. The process's default `SIGPIPE` disposition is deliberately **not** restored: a write
+to an exited MCP child's pipe would then kill the whole agent with a signal.
 
 ## Memory (`agent memory …`)
 
