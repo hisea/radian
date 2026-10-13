@@ -222,6 +222,34 @@ anywhere (the ADR 0008 §4.2 heuristic) both fail startup, and the message names
 without echoing the value. `schema_version` is required; a newer one is read read-only with a
 warning, an older one is refused. See the root `README.md` for the example file.
 
+## Migrating a Pi configuration (`agent config import-pi`)
+
+`agent config import-pi --from <pi-agent-dir>` drafts a Radian configuration from a Pi agent
+directory (`~/.pi/agent` by default for Pi; `PI_CODING_AGENT_DIR` moves it). It is its own
+mode: **no `--model`, no key, no session file, no network**.
+
+```sh
+agent config import-pi --from ~/.pi/agent > /tmp/radian.toml   # a draft on stdout
+agent config import-pi --from ~/.pi/agent                      # review it, write nothing
+agent config import-pi --from ~/.pi/agent --write              # save it (refuses to overwrite)
+```
+
+- `--from` is **required** and has no default: the command never reads a directory you did not
+  name. A missing directory exits 1.
+- The **draft** goes to stdout; the **report** (what was mapped, what was skipped and why, what
+  you still have to do) goes to stderr. Nothing is written without `--write`.
+- `--write` writes to the file `--config`/`RADIAN_CONFIG` names, else
+  `~/.radian/config/config.toml`, atomically and owner-only (`0600`, directory `0700`), after
+  validating the draft with the same reader the host uses. **An existing file is refused**
+  (exit 1) — this version has no faithful write-back (ADR 0008 §5.4).
+- **Credentials are never migrated.** `auth.json` is never read (not even `stat`ed), so an
+  unreadable credential file cannot fail the run. A `$NAME`/`${NAME}` value becomes
+  `{ from = "env", name = "NAME" }`; a **literal** value is not copied — the draft references a
+  suggested variable and the report says so without ever showing the value; a `!command` value
+  is listed and **never executed**.
+- Radian does **not** promise compatibility with Pi's file format. See
+  [`docs/pi-migration.md`](../../docs/pi-migration.md) for the mapping table.
+
 ## Exit codes
 
 | Code | Meaning |

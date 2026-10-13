@@ -5702,3 +5702,274 @@ async fn fork_creates_a_child_and_refuses_a_locked_parent() {
     assert!(!sessions.join("child-2.jsonl").exists());
     drop(held);
 }
+
+// ---------- Pi configuration migration (Phase 5) ----------
+
+/// A Pi agent directory: an endpoint, a model, a `${OPENAI_API_KEY}` reference, one plain
+/// header, one interpolated header, a theme, a compaction preference and a keybinding. This
+/// is a fixture in a temporary directory — the real `~/.pi` is never read.
+fn write_pi_fixture(dir: &Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(
+        dir.join("settings.json"),
+        r#"{
+  "defaultProvider": "openai",
+  "defaultModel": "gpt-5",
+  "theme": "dark",
+  "compaction": { "enabled": false },
+  "defaultThinkingLevel": "high"
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("models.json"),
+        r#"{
+  "providers": {
+    "openai": {
+      "baseUrl": "https://api.openai.com/v1",
+      "api": "openai-responses",
+      "apiKey": "${OPENAI_API_KEY}",
+      "headers": { "x-tenant": "team", "x-trace": "Bearer ${TRACE_TOKEN}" },
+      "models": [{ "id": "gpt-5" }]
+    }
+  }
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("keybindings.json"),
+        r#"{ "tui.input.submit": "ctrl+s" }"#,
+    )
+    .unwrap();
+}
+
+/// Acceptance 1: a typical Pi directory drafts a configuration the Radian reader accepts, with
+/// the right values, and `api_key` is an environment reference. Acceptance 2 (first half): a
+/// literal `apiKey` becomes a suggested reference and its value is in neither stream.
+#[tokio::test]
+async fn config_import_pi_drafts_a_valid_configuration_and_never_shows_a_literal_key() {
+    let dir = scratch("import-pi");
+    let pi = dir.join("pi");
+    write_pi_fixture(&pi);
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &["config", "import-pi", "--from", pi.to_str().unwrap()],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let config = radian_host::parse_config(Path::new("/tmp/draft.toml"), &stdout)
+        .expect("the draft must be a valid Radian configuration");
+    assert_eq!(
+        config.model.base_url.as_deref(),
+        Some("https://api.openai.com/v1")
+    );
+    assert_eq!(config.model.model.as_deref(), Some("gpt-5"));
+    assert_eq!(config.model.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
+    assert_eq!(config.tui.theme.as_deref(), Some("dark"));
+    assert_eq!(config.compaction.auto, Some(false));
+    assert_eq!(
+        config.model.headers,
+        vec![("x-tenant".to_string(), "team".to_string())]
+    );
+    assert!(
+        config.skipped.is_empty(),
+        "only reader-implemented keys: {:?}",
+        config.skipped
+    );
+    // stdout is the draft alone; the report is on stderr.
+    assert!(!stdout.contains("[import-pi]"), "{stdout}");
+    assert!(stderr.contains("auth.json"), "{stderr}");
+    assert!(stderr.contains("x-trace"), "{stderr}");
+    assert!(stderr.contains("defaultThinkingLevel"), "{stderr}");
+    // Nothing was written.
+    assert!(!dir.join("config").join("config.toml").exists());
+
+    // A literal key: the draft references a suggested variable and the value is nowhere.
+    let literal = scratch("import-pi-literal");
+    let pi = literal.join("pi");
+    std::fs::create_dir_all(&pi).unwrap();
+    std::fs::write(
+        pi.join("settings.json"),
+        r#"{ "defaultProvider": "ollama" }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        pi.join("models.json"),
+        r#"{ "providers": { "ollama": {
+             "baseUrl": "http://localhost:11434/v1",
+             "api": "openai-completions",
+             "apiKey": "sk-live-abcdef1234567890",
+             "models": [{ "id": "qwen2.5-coder:7b" }] } } }"#,
+    )
+    .unwrap();
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &["config", "import-pi", "--from", pi.to_str().unwrap()],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let config = radian_host::parse_config(Path::new("/tmp/draft.toml"), &stdout).unwrap();
+    assert_eq!(config.model.api_key_env.as_deref(), Some("OLLAMA_API_KEY"));
+    assert!(!stdout.contains("sk-live"), "{stdout}");
+    assert!(!stderr.contains("sk-live"), "{stderr}");
+}
+
+/// Acceptance 2 (second half): a `!command` value is listed and **not executed**.
+#[tokio::test]
+async fn config_import_pi_lists_a_command_key_and_does_not_run_it() {
+    let dir = scratch("import-pi-command");
+    let pi = dir.join("pi");
+    std::fs::create_dir_all(&pi).unwrap();
+    let marker = dir.join("PWNED");
+    std::fs::write(pi.join("settings.json"), "{}").unwrap();
+    std::fs::write(
+        pi.join("models.json"),
+        format!(
+            r#"{{ "providers": {{ "acme": {{
+                 "baseUrl": "https://acme.example/v1",
+                 "api": "openai-completions",
+                 "apiKey": "!touch {}",
+                 "models": [{{ "id": "m" }}] }} }} }}"#,
+            marker.display()
+        ),
+    )
+    .unwrap();
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &["config", "import-pi", "--from", pi.to_str().unwrap()],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!marker.exists(), "the `!command` must not have run");
+    assert!(stderr.contains("!command"), "{stderr}");
+    assert!(!stdout.contains("api_key"), "no key was migrated: {stdout}");
+}
+
+/// Acceptance 3: `auth.json` is never read. A file that cannot be read at all (mode `0000`)
+/// must not make the migration fail, and its bytes must not appear anywhere.
+#[cfg(unix)]
+#[tokio::test]
+async fn config_import_pi_never_reads_auth_json() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = scratch("import-pi-auth");
+    let pi = dir.join("pi");
+    write_pi_fixture(&pi);
+    let auth = pi.join("auth.json");
+    std::fs::write(&auth, r#"{"openai":{"type":"api_key","key":"sk-SECRET"}}"#).unwrap();
+    std::fs::set_permissions(&auth, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &["config", "import-pi", "--from", pi.to_str().unwrap()],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stdout.contains("SECRET") && !stderr.contains("SECRET"));
+    assert!(stderr.contains("auth.json"), "{stderr}");
+    std::fs::set_permissions(&auth, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+/// Acceptance 4: `--write` creates the file owner-only and refuses to overwrite an existing
+/// one (ADR 0008 §5.4: this version has no faithful write-back).
+#[cfg(unix)]
+#[tokio::test]
+async fn config_import_pi_write_creates_the_file_and_refuses_to_overwrite() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = scratch("import-pi-write");
+    let pi = dir.join("pi");
+    write_pi_fixture(&pi);
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let home_arg = home.to_str().unwrap();
+    let pi_arg = pi.to_str().unwrap();
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent_bare(
+            &["config", "import-pi", "--from", pi_arg, "--write"],
+            &[("RADIAN_HOME", home_arg)],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let target = home.join("config").join("config.toml");
+    assert!(stderr.contains(&target.display().to_string()), "{stderr}");
+    let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "the file is owner-only");
+    let text = std::fs::read_to_string(&target).unwrap();
+    radian_host::parse_config(&target, &text).expect("the written file reads back");
+
+    let before = std::fs::read(&target).unwrap();
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent_bare(
+            &["config", "import-pi", "--from", pi_arg, "--write"],
+            &[("RADIAN_HOME", home_arg)],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("already exists"), "{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+    assert_eq!(std::fs::read(&target).unwrap(), before, "bytes unchanged");
+}
+
+/// Acceptance 5: `--from` is required (a clap usage error, exit 2) and a missing directory is
+/// a failure (exit 1), not a silent empty draft.
+#[tokio::test]
+async fn config_import_pi_requires_from_and_an_existing_directory() {
+    let (code, _, stderr) = feed_and_wait(spawn_agent(&["config", "import-pi"], &[]), "").await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("--from"), "{stderr}");
+
+    let dir = scratch("import-pi-missing");
+    let missing = dir.join("nope");
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &["config", "import-pi", "--from", missing.to_str().unwrap()],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("nope"), "{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+}
+
+/// Acceptance 6: a closed stdout is a normal stop (D21), not a panic.
+#[cfg(unix)]
+#[test]
+fn config_import_pi_survives_a_closed_stdout() {
+    let dir = scratch("import-pi-sigpipe");
+    let pi = dir.join("pi");
+    write_pi_fixture(&pi);
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let mut child = std::process::Command::new(agent_bin())
+        .args(["config", "import-pi", "--from", pi.to_str().unwrap()])
+        .env("RADIAN_HOME", home.as_os_str())
+        .env("HOME", home.as_os_str())
+        .stdin(Stdio::null())
+        .stdout(closed_stdout())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn agent");
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut stderr).unwrap();
+    let status = child.wait().expect("wait");
+    assert_eq!(status.code(), Some(0), "stderr {stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}
