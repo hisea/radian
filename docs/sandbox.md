@@ -200,3 +200,79 @@ auto-maintenance**（git 2.55 会跑；macOS 的 2.53 不跑），与本切片�
 3. **Linux 结果本轮评审未能独立重跑。**（**后续已补**：2026-10-12 评审者在 VM 上独立重跑，26/26，零差异；见文末“Linux 独立复核”节。） 驱动可以按文档交叉编译（得到静态链接的 aarch64 ELF），但评审时 VM 已不可达（`ssh: … No route to host`）。所以 Linux 的 26/26 目前**以本文作者提交的证据为准**（`tests/data/escape-linux.{txt,json}`），评审者核对了证据文件格式与"每条失败都带关沙箱对照"的列，但没有在 VM 上再跑一次。上一轮 Linux spike 的 26 条中的同类用例评审者是独立复现过的（见 `docs/spikes/linux-sandbox.md`）。
 4. **本切片在 owner 的 Mac 上装了 rustup target `aarch64-unknown-linux-musl`**（用于交叉编译 VM 上跑的驱动）。这是一次开发环境改动，不影响仓库，但值得知道。
 5. **`git add`/`git commit` 在 `workspace-write` 下失败是设计结果**（`.git` 只读覆盖，ADR 0012），不是兼容性缺陷。含义：在该档位下 agent 不能自己提交；提交是宿主或用户在沙箱外做的事——这与计划 Phase 6c "apply/merge/push 保持独立审批步骤" 一致。
+
+## Linux 复验（ADR 0016 之后，2026-10-13）
+
+**环境**：`ssh <user>@<host>`（第一条命令 `uname -s` = Linux）。Arch Linux ARM aarch64，
+内核 7.2.6-1-aarch64-ARCH，bwrap 0.12.0，git 2.55.0，Rust 1.88.0（`/tmp/radian-rust`，
+`CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0`）。`/tmp` 是
+3.9G tmpfs（构建期间很紧，见下）。源码从 worktree 打包同步到 `/tmp/radian-linux/src`，
+复用旧的 `target/`。只写 `/tmp` 下自建目录，未碰 `~/.ssh` 或任何凭据，未改系统文件。
+
+**1. 全工作区测试**：`cargo test --workspace --locked --no-fail-fast` → **777 passed, 0
+failed**（103 个测试二进制）。重点：`agent-cli/tests/cli.rs` **88**、`agent-extensions/tests/mcp.rs`
+**27**、`radian-coding/tests/shell.rs` **13**、`radian-sandbox` 10 + `escape_linux` 1、`radian-session/tests/privacy.rs`
+**6**、`radian-tui/tests/pty.rs` **35**。
+
+**2. clippy**：`cargo clippy --workspace --all-targets --locked -- -D warnings -A
+clippy::uninlined_format_args`。1.88 的 clippy 在 Linux 上报了一处 macOS 不报的问题：
+`radian-tui/tests/perf_startup.rs` 把 `&mut ws` 传给 `libc::openpty`，而 Linux/glibc 的 `winp`
+是 `*const winsize` → `clippy::unnecessary_mut_passed`。改为传裸指针
+（`std::ptr::addr_of_mut!(ws)`，两种签名都接受）。修复后 clippy **0 error**。提交 `d95813b`。
+
+**3. 逃逸矩阵**：`cargo test -p radian-sandbox` → 10 passed；`linux_escape_matrix` **34 cases, 0
+failed**，矩阵前后 `ps` 无 `bwrap`/`mcp_echo.py`/`sandbox-exec` 孤儿。关键行：
+`network_workspace connect_local_port / bind_local_port / connect_external` 全 `ok`；
+`network_safe connect_local_port` `denied`；`devices openpty` `ok`；
+`devices tiocsti_outside_terminal` `denied`。
+
+**4. shell 工具**：`cargo test -p radian-coding --test shell` → **13/13**；跑完无 `sleep 600`
+孤儿（`setsid` 后的进程组清理）。
+
+**5. 会话文件权限**（端到端，用编译出的 `agent`）：会话目录 `700`、`<id>.jsonl` `600`、
+`index.db` `600`；`radian-session/tests/privacy.rs` 另证 `-wal`/`-shm` `600`。
+
+**6. TUI pty 测试与真实 `~/.cache`**：`cargo test -p radian-tui --test pty` → **35/35**。但
+**发现一处测试污染**：pty 测试的 harness 继承运行者的真实 `HOME`，而 ADR 0013 决定 4 之后
+panic log 落在缓存目录，于是 4 个 panic log 写进了 VM 真实的
+`~/.cache/radian/diagnostics/`（`retry-…`、`driver-panic-…`、`18de05ec…`、`dup-…`）。修复：
+两个 pty harness（`tests/pty.rs`、`tests/perf_startup.rs`）给每个子进程一个临时
+`HOME`/`XDG_CACHE_HOME`（显式传 HOME 的测试仍然覆盖）。修复后重跑 35/35，真实
+`~/.cache/radian/diagnostics` 的 4 个文件与 mtime **一字不变**。提交 `d95813b`。
+
+**7. `agent-extensions` 进度测试 20 次（VM 上）**：直接跑测试二进制。6 个测试 0/20；
+`progress_does_not_reset_the_call_deadline` **1/30**（超时前没有任何进度事件到达，
+`!progress_events(&events).is_empty()` 失败）；`settled_progress_is_not_lost` **15/40**：
+
+```
+assertion `left == right` failed: run 16: a gap before the tail
+  left: [1.0, 2.0, 3.0, 5.0]
+ right: [1.0, 2.0, 3.0, 4.0]
+```
+
+根因与 `flake.md` 的调查一致：rmcp 把每条进度通知交给 `spawn_service_task`（rmcp-3.5.1
+`service.rs:1711`）而响应直接在主循环投递（`:1727`），所以调用可以在通知被路由前结算；慢 VM
+上 `intervalMs: 10` 不足以让通知互不重叠，**乱序**到达时 `ProgressMonotone` 会按设计丢掉较
+早的那条 → 出现"尾部之前有缺口"。这是**测试断言过强**（"尾部之前不丢"也不是 rmcp 保证的），
+不是产品丢数据。未改测试（属 flake 切片，需 定）。
+
+**8. 沙箱内跑测试（证明 D12/D13 在 Linux 上解决）**：用编译出的 `agent` 的 `shell` 工具
+（`--profile workspace-write --yes`）跑预编译好的测试二进制，`TMPDIR` 指到工作区内
+（沙箱只允许写工作区），模型用 `/tmp/radian-linux/sbx/mock.py`（Python mock）：
+
+```
+deps/cli-… --exact a_new_session_writes_a_valid_jsonl   → ok (EXIT=0)   # 起 mock server，bind 环回端口
+deps/pty-… --exact pty_end_to_end_conversation_and_clean_exit → ok (EXIT=0)  # mock + pty openpty
+```
+
+两者都在 `workspace-write` 沙箱里通过，启动行确认 `sandbox linux-bwrap`。**D12（环回 bind）
+与 D13（openpty）在 Linux 上已解决。**
+
+**为什么不是 `cargo test` 直接进沙箱**：沙箱内 `cargo test` 会用一套不同的 fingerprint 重建
+整个依赖图（慢 VM 上约 38 分钟），超过 shell 工具的 `max_shell_timeout`（600s，见
+`radian-coding/src/provider.rs`），且 3.9G tmpfs 会被 debug 版产物填满（第一次尝试即
+`No space left on device`）。所以改为在宿主上按同一组 profile 参数预编译，沙箱内**直接运行
+测试二进制**——测的还是同一段代码（mock server 的 bind 与 pty 的 openpty），且绕开了重建。
+
+**未验证**：`cargo test` 整体在沙箱内运行（上述原因）；`network_safe` 之外的细粒度网络；
+x86_64 与其它发行版。
