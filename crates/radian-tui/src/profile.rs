@@ -119,7 +119,7 @@ pub fn build_sandbox(
     let mut policy = SandboxPolicy::new(mode, workspace)
         .map_err(|error| format!("{}: {error}", unavailable(tier, mode)))?;
     // ADR 0020 decision 3: the actual sessions directory and the memory directory are not
-    // readable in the enforced tiers. `full` never reaches here.
+    // readable in the enforced tiers. `full` gets the list too, but its transparent backend ignores it.
     for path in deny_read {
         policy = policy.deny_read(path);
     }
