@@ -13,10 +13,9 @@ use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
 use agent_core::{AgentEvent, EventSink, RunStatus};
+use ratatui::crossterm::event::{Event, KeyEvent, KeyEventKind, MouseEventKind};
 
-use ratatui::crossterm::event::KeyEvent;
-
-use crate::app::Input as AppInput;
+use crate::app::{Input as AppInput, MouseScrollDirection};
 use crate::projection::{LastToolCall, SessionProjection, StreamKind, TurnState};
 
 /// One event on the UI's single channel (ADR 0023 U2).
@@ -46,7 +45,34 @@ pub enum UiEvent {
 pub enum InputEvent {
     Key(KeyEvent),
     Paste(String),
-    Resize { rows: u16, cols: u16 },
+    Resize {
+        rows: u16,
+        cols: u16,
+    },
+    /// A mouse-wheel notch. Only `ScrollUp`/`ScrollDown` map here; every other mouse event
+    /// (click, drag, move, focus) is dropped by [`input_event`].
+    MouseScroll(MouseScrollDirection),
+}
+
+/// Maps a crossterm terminal event to the UI's input vocabulary. `None` means the event is
+/// dropped: it never reaches the channel and never causes a frame. Terminal input is ordered,
+/// so this is the one place the raw event names are translated; it is pure, so the mapping (in
+/// particular "a click is not input") has a unit test.
+///
+/// The resize is special-cased by the caller, which coalesces a burst into the last one.
+pub fn input_event(event: Event) -> Option<InputEvent> {
+    match event {
+        Event::Key(key) if key.kind == KeyEventKind::Release => None,
+        Event::Key(key) => Some(InputEvent::Key(key)),
+        Event::Paste(text) => Some(InputEvent::Paste(text)),
+        Event::Resize(rows, cols) => Some(InputEvent::Resize { rows, cols }),
+        Event::Mouse(mouse) => match mouse.kind {
+            MouseEventKind::ScrollUp => Some(InputEvent::MouseScroll(MouseScrollDirection::Up)),
+            MouseEventKind::ScrollDown => Some(InputEvent::MouseScroll(MouseScrollDirection::Down)),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// Forwards core events to the UI thread (ADR 0023 U2). Deltas are **not** forwarded: they
@@ -130,6 +156,56 @@ impl EventSink for ProjectionSink {
 mod tests {
     use super::*;
     use crate::projection::StreamSnapshot;
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent};
+
+    fn mouse(kind: MouseEventKind) -> Event {
+        Event::Mouse(MouseEvent {
+            kind,
+            column: 3,
+            row: 4,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    /// The wheel maps to a scroll; every other mouse event is dropped before the channel, so
+    /// a pointer move can never cause a frame (ADR 0023 U2, plan B).
+    #[test]
+    fn only_a_wheel_notch_is_mouse_input() {
+        assert!(matches!(
+            input_event(mouse(MouseEventKind::ScrollUp)),
+            Some(InputEvent::MouseScroll(MouseScrollDirection::Up))
+        ));
+        assert!(matches!(
+            input_event(mouse(MouseEventKind::ScrollDown)),
+            Some(InputEvent::MouseScroll(MouseScrollDirection::Down))
+        ));
+        for dropped in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEventKind::Moved,
+            MouseEventKind::ScrollLeft,
+            MouseEventKind::ScrollRight,
+        ] {
+            assert!(input_event(mouse(dropped)).is_none(), "{dropped:?}");
+        }
+        // A key release is dropped too; a key press is not.
+        assert!(
+            input_event(Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Char('a'),
+                KeyModifiers::NONE,
+                KeyEventKind::Release,
+            )))
+            .is_none()
+        );
+        assert!(matches!(
+            input_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('a'),
+                KeyModifiers::NONE
+            ))),
+            Some(InputEvent::Key(_))
+        ));
+    }
 
     fn sink() -> (
         ProjectionSink,

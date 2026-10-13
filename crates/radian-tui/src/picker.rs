@@ -13,20 +13,13 @@
 //! - `Enter` resumes the selection, `n` starts a new session (empty filter only), `Esc`/`Ctrl-C`
 //!   quits.
 
-use std::io;
-use std::time::Duration;
-
 use radian_host::sessions::{self, SearchRow, SessionRow};
 use radian_session::Index;
-use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-
-use crate::terminal::TtyGuard;
 
 /// What the user chose.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,33 +214,6 @@ impl Picker {
         }
         None
     }
-}
-
-/// Runs the picker on the terminal until the user chooses (the `--pick` startup screen, before
-/// any session or `App` exists). The terminal is restored before returning, on every path (the
-/// guard's `Drop`).
-pub fn run(rows: Vec<SessionRow>, index: Option<Index>, workspace: &str) -> io::Result<Outcome> {
-    let mut picker = Picker::new(rows, index, workspace);
-    picker.focus();
-    let mut guard = TtyGuard::enter()?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    let outcome = loop {
-        terminal.draw(|frame| draw(frame, frame.area(), &picker))?;
-        if !event::poll(Duration::from_millis(200))? {
-            continue;
-        }
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        if key.kind == KeyEventKind::Release {
-            continue;
-        }
-        if let Some(outcome) = picker.on_key(key) {
-            break outcome;
-        }
-    };
-    guard.restore();
-    Ok(outcome)
 }
 
 /// Draws the picker into `area`. The startup screen passes the whole frame; the in-session

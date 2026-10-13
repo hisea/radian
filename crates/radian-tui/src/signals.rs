@@ -84,14 +84,22 @@ pub fn listen(
         }
 
         // The loop normally wakes from its event channel immediately. If it does not — it is
-        // stuck in a long frame or effect — the terminal may already be gone, so restoring it
-        // is pointless. Exit with the shell convention. Every journal append is already
-        // fsynced, so an exit mid-turn recovers by the ADR 0019 / ADR 0002 rules (a torn tail
-        // is truncated; an interrupted run leaves memory and journal consistent).
+        // stuck in a long frame or effect — three seconds pass and this task forces the exit.
+        // Restore the terminal first: it may still be alive and showing the alternate screen,
+        // and mouse reporting (on by default) would keep sending `ESC[<…M` into the user's
+        // shell, so a wheel or click would echo garbage. The restore is best-effort and
+        // non-blocking: the stuck loop may hold the output buffer full, and a failed write is
+        // ignored — an already-dead terminal (EIO) needs nothing. The main loop may still be
+        // writing, so bytes can interleave; each escape sequence is one short write and the
+        // process is leaving, so the mouse-off is delivered and a torn frame is cosmetic.
+        // Every journal append is already fsynced, so an exit mid-turn recovers by the ADR
+        // 0019 / ADR 0002 rules (a torn tail is truncated; an interrupted run leaves memory
+        // and journal consistent).
         if tokio::time::timeout(EXIT_WATCHDOG, exit_notify().notified())
             .await
             .is_err()
         {
+            crate::terminal::restore_terminal_nonblocking();
             std::process::exit(128 + signal);
         }
     });

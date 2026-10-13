@@ -183,6 +183,30 @@ pub enum Modal {
     Question(Box<QuestionForm>),
 }
 
+/// One mouse-wheel notch (ADR 0023 U2, plan B). The input thread maps crossterm's
+/// `MouseEventKind::ScrollUp`/`ScrollDown` to this; no other mouse event reaches the app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseScrollDirection {
+    Up,
+    Down,
+}
+
+/// How many transcript lines one wheel notch scrolls. A constant, not a magic number: the
+/// wheel is a coarse gesture (a notch is not a line), and this is the one place to tune it.
+pub const MOUSE_WHEEL_LINES: usize = 3;
+
+/// Which startup phase the app is in (ADR 0023 U4, plan B). `--pick` runs the event
+/// loop once **before** a session exists; the loop returns as soon as the picker resolves, and
+/// the caller then establishes the session and runs the loop again in the same terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Startup {
+    /// No session yet: only the picker overlay is live. No journal, driver or MCP connection
+    /// exists, and a `Quit` here creates nothing.
+    Picking,
+    /// The ordinary phase: a session is open.
+    Session,
+}
+
 /// The wording for a budget report. ADR 0015 C1: a reported number, a reported baseline plus
 /// an estimated growth, and a pure estimate must be distinguishable, and a mixed value must
 /// **not** be presented as a report.
@@ -513,6 +537,12 @@ pub struct App {
     pub workspace: Option<PathBuf>,
     /// The transcript width the renderer last used, so a find recomputes on a resize.
     pub transcript_width: usize,
+    /// The startup phase (ADR 0023 U4): [`Startup::Picking`] while the pre-session `--pick`
+    /// overlay is the whole point of the loop, [`Startup::Session`] otherwise.
+    pub startup: Startup,
+    /// Set when the picker resolves during [`Startup::Picking`]. The pre-session loop leaves
+    /// as soon as it is `Some`; the caller reads it with [`App::take_picker_outcome`].
+    picker_outcome: Option<PickerOutcome>,
 }
 
 impl App {
@@ -542,7 +572,35 @@ impl App {
             max_scroll: 0,
             workspace: None,
             transcript_width: 80,
+            startup: Startup::Session,
+            picker_outcome: None,
         }
+    }
+
+    /// Enters the pre-session `--pick` phase: the picker overlay is pushed **focused** (it is
+    /// the whole point of the phase) and [`Startup`] becomes [`Startup::Picking`].
+    pub fn start_picking(&mut self, mut picker: Picker) {
+        picker.focus();
+        self.startup = Startup::Picking;
+        self.push_overlay(Overlay::Picker(picker));
+    }
+
+    /// Leaves the pre-session phase: the picker overlay is removed and the app is a normal
+    /// session app again (the caller then opens the session).
+    pub fn finish_picking(&mut self) {
+        self.picker_close();
+        self.startup = Startup::Session;
+    }
+
+    /// Takes the pre-session picker's choice, if it has one.
+    pub fn take_picker_outcome(&mut self) -> Option<PickerOutcome> {
+        self.picker_outcome.take()
+    }
+
+    /// True once the pre-session picker has resolved, so the loop can leave. Always false in
+    /// [`Startup::Session`].
+    pub fn picking_resolved(&self) -> bool {
+        self.picker_outcome.is_some()
     }
 
     /// Records the effective input budget `B` (no budget is configured when this is `None`).
@@ -632,6 +690,42 @@ impl App {
     pub fn scroll_to_bottom(&mut self) {
         self.scroll = self.max_scroll;
         self.follow = true;
+    }
+
+    /// One mouse-wheel notch (ADR 0023 U2, plan B). It acts on the topmost **scrollable**
+    /// layer: a modal consumes it (the approval prompt does not scroll), a picker overlay moves
+    /// its selection, the `@` completion list consumes it (it has no scroll state of its own,
+    /// and the transcript behind it must not move), and otherwise the transcript scrolls. The
+    /// transcript path goes through the same [`Action::ScrollLineUp`]/[`Action::ScrollLineDown`]
+    /// code as the keys, `MOUSE_WHEEL_LINES` lines per notch.
+    pub fn mouse_scroll(&mut self, direction: MouseScrollDirection) -> UpdateResult {
+        if self.has_modal() {
+            return UpdateResult::none();
+        }
+        if self.picker().is_some() {
+            let key = match direction {
+                MouseScrollDirection::Up => KeyCode::Up,
+                MouseScrollDirection::Down => KeyCode::Down,
+            };
+            // A list selection is discrete: one notch moves it one row (the transcript below
+            // is the one that scrolls `MOUSE_WHEEL_LINES`).
+            return self.picker_key(KeyEvent::new(key, KeyModifiers::NONE));
+        }
+        if self.completion().is_some() {
+            return UpdateResult::none();
+        }
+        let action = match direction {
+            MouseScrollDirection::Up => Action::ScrollLineUp,
+            MouseScrollDirection::Down => Action::ScrollLineDown,
+        };
+        let mut dirty = false;
+        for _ in 0..MOUSE_WHEEL_LINES {
+            dirty |= self.update_action(action).dirty;
+        }
+        UpdateResult {
+            dirty,
+            effects: Vec::new(),
+        }
     }
 
     // ---------- the layer stack (ADR 0023 U4) ----------
@@ -1211,20 +1305,30 @@ impl App {
             picker.focus();
         }
         let outcome = self.picker_mut().and_then(|picker| picker.on_key(key));
-        match outcome {
-            None => UpdateResult::dirty(),
-            // In-session the picker's `Esc` closes the overlay, it does not quit the app.
-            Some(PickerOutcome::Quit) => {
-                self.picker_close();
-                UpdateResult::dirty()
+        let Some(outcome) = outcome else {
+            return UpdateResult::dirty();
+        };
+        self.picker_close();
+        if self.startup == Startup::Picking {
+            // The pre-session phase: hand the choice to the loop, which leaves and lets the
+            // caller open the session in the same terminal. `Quit` also sets `quit` so the
+            // loop leaves even if the caller does not read the outcome.
+            if outcome == PickerOutcome::Quit {
+                self.quit = true;
             }
-            Some(PickerOutcome::New) => {
+            self.picker_outcome = Some(outcome);
+            return UpdateResult::dirty();
+        }
+        match outcome {
+            // In-session the picker's `Esc` closes the overlay, it does not quit the app.
+            PickerOutcome::Quit => UpdateResult::dirty(),
+            PickerOutcome::New => {
                 self.push_notice(
                     "a new session starts on the next launch (run `radian-tui` with no `--resume`)",
                 );
                 UpdateResult::dirty()
             }
-            Some(PickerOutcome::Resume(id)) => {
+            PickerOutcome::Resume(id) => {
                 self.push_notice(format!(
                     "--resume {id} (this process does not switch sessions in place)"
                 ));

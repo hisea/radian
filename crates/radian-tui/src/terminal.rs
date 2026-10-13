@@ -4,6 +4,7 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ratatui::crossterm::cursor::{Hide, Show};
 use ratatui::crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
@@ -12,6 +13,109 @@ use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 
+/// Whether mouse reporting is on. A process-global rather than a [`TtyGuard`] field because
+/// the panic hook constructs a bare `TtyGuard` to restore the terminal and must know whether
+/// to send the `l` sequences (ADR 0023 U2).
+static MOUSE_REPORTING: AtomicBool = AtomicBool::new(false);
+
+/// Turns mouse reporting on (`\x1b[?1000h\x1b[?1006h`) or off (the `l` forms) on `out`.
+///
+/// Deliberately **not** crossterm's `EnableMouseCapture`: that also enables `?1002h`
+/// (button-motion) and `?1003h` (any-motion), so a pointer move would flood the input thread
+/// (crossterm 0.29.0 `event.rs:325-333`). We only need button + wheel presses (`?1000h`),
+/// SGR-encoded (`?1006h`) so the coordinates do not overflow past column 223.
+fn write_mouse(out: &mut impl Write, enabled: bool) -> io::Result<()> {
+    if enabled {
+        out.write_all(b"\x1b[?1000h\x1b[?1006h")?;
+    } else {
+        out.write_all(b"\x1b[?1006l\x1b[?1000l")?;
+    }
+    out.flush()
+}
+
+/// Undoes every terminal modification, writing to `out`: mouse reporting off (only when it
+/// was on), cursor shown, bracketed paste off, leave the alternate screen, cooked mode, and a
+/// trailing newline. Best-effort: every write failure is ignored, because the terminal may
+/// already be gone. **One** copy of the escape sequences, shared by the guard, the panic hook
+/// and the signal watchdog.
+fn restore_to(out: &mut impl Write) {
+    if MOUSE_REPORTING.swap(false, Ordering::SeqCst) {
+        let _ = write_mouse(out, false);
+    }
+    let _ = execute!(out, Show, DisableBracketedPaste, LeaveAlternateScreen);
+    let _ = out.flush();
+    let _ = disable_raw_mode();
+    let _ = out.write_all(b"\r\n");
+    let _ = out.flush();
+}
+
+/// Restores the terminal on the ordinary exit paths (the guard's `Drop`, the panic hook).
+pub fn restore_terminal() {
+    restore_to(&mut io::stdout());
+}
+
+/// The signal watchdog's restore: the main loop may be stuck mid-write with the terminal's
+/// output buffer full, and it may still hold Rust's stdout lock, so going through
+/// `io::stdout()` could block forever and the forced exit would never happen. Write the same
+/// [`restore_to`] sequences straight to fd 1, after making it non-blocking: no lock to wait
+/// on, and a failed or partial write is ignored. This is best-effort, the process is leaving.
+///
+/// `O_NONBLOCK` is a **status flag of the open file description**, which this process shares
+/// with the shell and every later program on the same terminal (a `dup` shares it; only a fresh
+/// `open` does not). Leaving it set would make their stdout writes fail with `EAGAIN`
+/// ("Resource temporarily unavailable") and truncate output. So the original flags are saved,
+/// `O_NONBLOCK` is set, the restore is written, and the original flags are put back before the
+/// caller exits. If `F_GETFL` fails, non-blocking is never set.
+pub fn restore_terminal_nonblocking() {
+    #[cfg(unix)]
+    {
+        // `libc::STDOUT_FILENO`, never `io::stdout()`: the latter can wait on the buffer lock
+        // the stuck main loop is holding.
+        let fd = libc::STDOUT_FILENO;
+        // SAFETY: `fd` is our own stdout and `fcntl` only reads/writes its flags.
+        let original = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if original >= 0 {
+            // SAFETY: same fd and flag-only mutation.
+            unsafe { libc::fcntl(fd, libc::F_SETFL, original | libc::O_NONBLOCK) };
+        }
+        restore_to(&mut RawFdWriter { fd });
+        if original >= 0 {
+            // Put the shared description back the way we found it. Best-effort too: a failure
+            // here must not stop the forced exit, but it must never be skipped.
+            // SAFETY: same fd and flag-only mutation.
+            unsafe { libc::fcntl(fd, libc::F_SETFL, original) };
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        restore_terminal();
+    }
+}
+
+/// A lock-free `Write` over a raw fd, so the signal watchdog's restore never waits on the
+/// stdout buffer lock a stuck frame may be holding.
+#[cfg(unix)]
+struct RawFdWriter {
+    fd: std::os::fd::RawFd,
+}
+
+#[cfg(unix)]
+impl Write for RawFdWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // SAFETY: `buf` is a valid slice and `self.fd` is our own stdout.
+        let written = unsafe { libc::write(self.fd, buf.as_ptr().cast(), buf.len()) };
+        if written < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(written as usize)
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Owns the terminal's modified state. `Drop` restores it, so a normal return, an error
 /// return and a panic unwind all restore; a `panic::set_hook` covers the process abort path.
 pub struct TtyGuard {
@@ -19,7 +123,10 @@ pub struct TtyGuard {
 }
 
 impl TtyGuard {
-    pub fn enter() -> io::Result<Self> {
+    /// Enters raw mode and the alternate screen. `mouse` says whether to also turn mouse
+    /// reporting on (`tui.mouse`, default on): `false` sends no mouse sequence at all, so the
+    /// terminal keeps its native selection/copy and behaves exactly as before.
+    pub fn enter(mouse: bool) -> io::Result<Self> {
         enable_raw_mode()?;
         let mut out = io::stdout();
         // If entering the alternate screen fails, put the terminal back before returning:
@@ -27,6 +134,16 @@ impl TtyGuard {
         if let Err(error) = execute!(out, EnterAlternateScreen, EnableBracketedPaste, Hide) {
             let _ = disable_raw_mode();
             return Err(error);
+        }
+        if mouse {
+            // Set the flag before the write: if the write fails partway, `restore` still
+            // sends the `l` forms, which are harmless when the `h` never took effect.
+            MOUSE_REPORTING.store(true, Ordering::SeqCst);
+            if let Err(error) = write_mouse(&mut out, true) {
+                let mut guard = Self { active: true };
+                guard.restore();
+                return Err(error);
+            }
         }
         Ok(Self { active: true })
     }
@@ -37,14 +154,7 @@ impl TtyGuard {
             return;
         }
         self.active = false;
-        let mut out = io::stdout();
-        let _ = execute!(out, Show, DisableBracketedPaste, LeaveAlternateScreen);
-        let _ = out.flush();
-        let _ = disable_raw_mode();
-        // The full-screen spike left no trailing newline, so zsh printed its "no newline"
-        // `%` marker. End our output with one after leaving the alternate screen.
-        let _ = out.write_all(b"\r\n");
-        let _ = out.flush();
+        restore_terminal();
     }
 }
 
@@ -184,8 +294,7 @@ pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(move |info| {
         let report = record_panic(info);
         if std::thread::current().name() == Some("main") {
-            let mut guard = TtyGuard { active: true };
-            guard.restore();
+            restore_terminal();
         }
         let _ = writeln!(io::stderr(), "{report}");
     }));

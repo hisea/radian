@@ -451,6 +451,56 @@ Base `677ca35` · 在本任务工作树内逐条施加后从副本还原（`--no
 4/4 抓住。L1 的“放到栈之后”是：去掉栈前的 `cancel` 检查、放到 while 循环之后；审批 Modal 会先吞掉
 Ctrl-C，测试随即失败。L3 把模态的硬编码分派整段删掉，`y` 于是落到 `Keymap`/被吞，两条重绑测试失败。
 
+## mouse（提交 1）：滚轮滚 transcript（ADR 0023 U2 方案 B）
+
+Base `0063dae` · 在本任务工作树内逐条施加后从副本还原（`--no-fail-fast`）· `git status --short`
+结束后干净。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M1 | 开成 crossterm 的 `EnableMouseCapture` 风格（多开 `?1002h`/`?1003h` any-motion） | `pty_a_mouse_move_is_dropped`、`pty_every_exit_path_releases_the_mouse`、`pty_wheel_scrolls_the_transcript_not_the_input_history`（都断言无 `?1002h`/`?1003h`） | ✅ failed |
+| M2 | panic 路径不关上报（`MOUSE_REPORTING` 在 hook 里先置 false） | `pty_every_exit_path_releases_the_mouse`（panic 分支） | ✅ failed |
+| M3 | 滚轮映射成 `Up`（`Action::HistoryPrev`） | `mouse::a_wheel_up_scrolls_and_keeps_the_input_box`、`mouse::a_wheel_down_scrolls_back`、`pty_wheel_scrolls_the_transcript_not_the_input_history` | ✅ failed |
+| M4 | `tui.mouse = false` 仍开上报（`enter` 忽略参数） | `pty_mouse_off_sends_no_reporting_sequence` | ✅ failed |
+
+4/4 抓住。
+
+## mouse（提交 2）：`--pick` 并入 `Overlay::Picker`
+
+Base `4cb83ee` · 在本任务工作树内逐条施加后从副本还原（`--no-fail-fast`）· `git status --short`
+结束后干净。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| P1 | `--pick` 选中后用生成的 id（忽略选中的 id），header 不再按选择展开 | `pty_pick_resumes_the_selected_id_and_enters_once`（header `x-s` 不是 `beta`）、`pty_pick_lists_filters_and_resumes_the_chosen_session`（没有 BETA-HISTORY） | ✅ failed |
+| P2 | `--pick` 选 Quit 后不早退，继续创建会话 | `pty_pick_starts_new_and_escape_leaves_no_session`（Esc 后会话目录多出文件） | ✅ failed |
+
+2/2 抓住。“整个过程只进一次 alternate screen”由 `pty_pick_resumes_the_selected_id_and_enters_once`
+统计 `?1049h == 1` 直接钉住。
+
+## mouse（提交 3）：信号兜底强退也恢复终端
+
+Base `1e3fec4` · 在本任务工作树内施加后从副本还原（`--no-fail-fast`）· `git status --short`
+结束后干净。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| W5 | 兜底分支 `exit` 前不做恢复（去掉 `restore_terminal_nonblocking()`） | `pty_the_signal_watchdog_releases_the_mouse`（输出里没有 `?1000l`/`?1006l`） | ✅ failed |
+
+1/1 抓住。该测试用新的 `--slow-draw` 接缝让主循环真的卡在 `draw_frame`（ADR 0023 U2 之后读取在输入
+线程，`--block-input` 不再卡住主循环），再发 SIGTERM，等 3 秒兜底退出。
+
+| W6 | 选择器阶段丢掉 `ui_loop` 返回的信号（`?;`），改走 Quit 分支 | `pty_a_signal_during_pick_exits_128_plus_signal`（退出码来自 `received()` 仍是 143，但**没有原因行**） | ✅ failed |
+
+2/2 抓住。W6 的测试同时断言退出码 143、原因行 `received SIGTERM`、`?1000l`/`?1006l` 与会话目录里没有新
+`.jsonl`。
+
+| W7 | 兜底写完不还原 fd 1 的 `O_NONBLOCK` | `pty_the_watchdog_restores_the_stdout_flags`（在子进程 stdout 的同一个打开文件描述上 `F_GETFL` 仍含 `O_NONBLOCK`） | ✅ failed |
+
+3/3 抓住。W7 的测试用 `spawn_direct_keeping_slave` 保留 pty slave 的一个 `dup`——`dup` 共享同一个打开
+文件描述，所以子进程在 fd 1 上设/还原的 `O_NONBLOCK` 标志在子进程退出后仍能在该描述上读到（新 `open`
+得到的是新描述，证明不了）。变异去掉还原那步后该断言失败，说明测试确实观测到标志。
+
 ## ADR 0023 Step 1 · PR ⑤（TUI 侧）与 ADR 0024 的 TUI 部分（2026-10-13）
 
 Base `6d22bf0` · 一次性检出 `/tmp/s1e-mut`（detached，跑完删除）· 独立 target ·

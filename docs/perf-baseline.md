@@ -476,3 +476,15 @@ PR ② 的零空闲重绘（ADR 0023 U2），不是本片；本片把状态栏�
 
 本片的每次 `Dirty` 通知（含只有 usage/budget/tier/MCP 这类非流式事实的更新）都会画一帧
 （`apply_dirty` 的单元测试钉住），所以零重绘只在"完全没有事件"时成立。
+
+## 鼠标滚轮（PR mouse，ADR 0023 U2 方案 B）
+
+`tui.mouse`（默认 on）让终端上报按键与滚轮（`CSI ?1000h` + SGR `CSI ?1006h`），滚轮不再被终端
+翻译成方向键。分类上它属于**终端输入**（ADR 0023 U2 的“保序”类）：一格滚轮是一次输入，会画一帧
+（滚动改变了内容，正是该画的）。**指针移动不产生帧**：`?1002h`/`?1003h`（any-motion）**不开**，
+crossterm 的 `MouseEventKind::Moved` 在 `events::input_event` 里被丢掉，根本进不了通道（单元测试
+`events::tests::only_a_wheel_notch_is_mouse_input`）。因此**空闲零重绘仍是 0**：没有滚轮、没有按键时，
+没有事件，也就不画。
+
+实测门檻沿用 `pty_an_idle_screen_is_not_redrawn` 与 `pty_a_mouse_move_is_dropped`：前者证明空闲 5 秒
+零帧，后者证明指针移动/点击不消耗输入（输入框的草稿不变、且输出里没有 `?1002h`/`?1003h`）。

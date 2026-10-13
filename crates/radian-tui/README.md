@@ -83,8 +83,12 @@ then the stack is walked top-down, the first layer that consumes the key winning
 unconsumed key falling toward the surface (`PageUp` still scrolls while the find box is open).
 The four former `Option` fields are gone (`tests/layers.rs`).
 
-The `--pick` startup screen and the `/sessions` overlay share one `picker::Picker`; the
-overlay opens **unfocused**, so the composer keeps the keys until the user navigates into it
+The `--pick` startup screen and the `/sessions` overlay share one `picker::Picker` and the
+**same** event loop, terminal and input thread: there is no separate picker loop. `--pick`
+runs a pre-session phase of that loop (only the picker overlay is live; no journal, driver or
+MCP connection exists), and the selected id resolves the session and `{session_id}` headers
+before the ordinary session phase takes over in the same terminal. The in-session overlay
+opens **unfocused**, so the composer keeps the keys until the user navigates into it
 (`Up`/`Down` focus it), and typing dismisses it. Selecting does not switch sessions in place
 (ADR 0022): it shows the `--resume <id>` line.
 
@@ -157,6 +161,7 @@ The file is read the same way as the CLI's (`--config`, `RADIAN_CONFIG`,
 schema_version = 1
 [tui]
 theme = "dark"                 # dark | light | mono
+mouse = true                   # the wheel scrolls the transcript (default true)
 
 [tui.keybindings]
 send = ["ctrl-s"]              # replaces the default `enter`
@@ -170,6 +175,14 @@ find_next = ["ctrl-g", "shift-enter"]
 - `theme`: `dark` is the original palette, `light` re-picks it for a light background, `mono`
   uses no color at all (bold/underline/dim only). A non-empty `NO_COLOR` environment variable
   forces `mono` (<https://no-color.org>). An unknown theme is ignored with a warning.
+- `mouse` (default `true`): the app enables button + wheel reporting (`CSI ?1000h`) with SGR
+  coordinates (`CSI ?1006h`), so a wheel notch scrolls the transcript instead of the terminal
+  translating it to arrow keys (dogfood p5: the wheel called the input history). Deliberately
+  **not** `?1002h`/`?1003h` (any-motion): a pointer move is not input and never causes a frame.
+  With `mouse = false` the app sends no mouse sequence at all and behaves exactly as before.
+  **Cost**: while reporting is on, a plain drag selects via the app rather than the emulator;
+  most terminals still select with Shift held, but that is the emulator's choice and is not
+  guaranteed here. Set `mouse = false` to keep native selection always.
 - `keybindings` maps an **action** to one or more key strings; a listed action's keys
   **replace** its defaults. Key strings are `[ctrl-][alt-][shift-]key` (`enter`, `ctrl-j`,
   `alt-enter`, `shift-up`, `pageup`, `space`, a single character, …). An unknown action or key
@@ -311,10 +324,17 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
 - **the budget status segment**: with a small `--context-window`, is the `T / B` projection
   and the reported-vs-estimated wording readable at your width, and does the over-budget
   highlight stand out without looking like an error?
-- **mouse selection/copy**: this app does **not** enable mouse capture, so selection is the
-  **terminal emulator's own** (drag to select, Cmd-C on macOS, or the emulator's copy key).
-  The caveat ADR 0009 notes applies: a selection that spans the input box and the transcript
-  follows the emulator's rules, not ours. Verify it selects what you expect.
+- **mouse selection/copy**: with the default `tui.mouse = true`, the app reports the wheel
+  (and buttons) with `?1000h ?1006h`, so a plain drag no longer selects in the emulator. Try
+  **Shift+drag** (most terminals) or set `mouse = false` in the config to restore the
+  emulator's own selection (drag, Cmd-C on macOS, or the emulator's copy key) — then the wheel
+  is back to the terminal's alternate-scroll translation and no longer scrolls the app.
+  Whichever way, verify that the selection and copy do what you expect.
+- **the mouse wheel**: with `tui.mouse = true` (default), type a draft in the message box and
+  scroll the wheel **up** — the transcript must move up by three lines per notch and the draft
+  must stay (dogfood p5 was the wheel replacing it with the input history). Scroll down: it
+  returns toward the bottom. Open the session picker (`/sessions`) and scroll: the selection
+  moves, not the transcript. Open the approval prompt and scroll: nothing moves.
 - **the MCP approval box**: with `--mcp-config`, an MCP tool call prompts like any other. Is
   the tool name (`server__tool`) and the argument preview clear at your width, and is it
   obvious the server runs outside the sandbox (the startup notice says so)?
@@ -531,11 +551,12 @@ by one is resumable by the other:
 - `--list` prints this workspace's sessions (id, created, last activity, message count) and
   exits without touching the terminal. A closed stdout (`radian-tui --list | head -1`) stops
   quietly with exit 0, never a panic (dogfooding D21).
-- `--pick` shows a full-screen picker of this workspace's sessions **before** the main UI:
-  `Up`/`Down` select, type to filter by id/summary, `Tab` (or `Ctrl-S`) toggles full-text
-  search, `Enter` resumes the selection, `n` starts a new session, `Esc`/`Ctrl-C` quits. It
-  never creates a session file. `--pick` conflicts with `--resume` and `--session-id`. With no
-  sessions it goes straight to a new session and says so.
+- `--pick` opens the session **picker overlay** (the same one `/sessions` uses) in the one
+event loop, before any session exists: `Up`/`Down` select, type to filter by id/summary,
+  `Tab` (or `Ctrl-S`) toggles full-text search, `Enter` resumes the selection, `n` starts a new
+  session, `Esc`/`Ctrl-C` quits. It never creates a session file, and the whole process enters
+  the alternate screen **once** (the picker and the session share it). `--pick` conflicts with
+  `--resume` and `--session-id`. With no sessions it goes straight to a new session and says so.
 
 `--resume`, `--session-id` and `--list` are mutually exclusive pairwise.
 
