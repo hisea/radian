@@ -112,6 +112,20 @@ EXPECT = {
         uncommitted=[],
         repair={},
     ),
+    "fork-parent.jsonl": dict(
+        outcome="accept",
+        events=6,
+        skips=[],
+        repair={},
+        forked=("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", 4),
+    ),
+    "fork-child.jsonl": dict(
+        outcome="accept",
+        events=3,
+        skips=[],
+        repair={},
+        parent=("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", 4),
+    ),
     "replace-resets-index.jsonl": dict(
         outcome="accept",
         events=11,
@@ -309,8 +323,29 @@ def check_fixture(name, exp):
                 raise Corruption(f"{name}: line {i}: 未知 critical 事件未被策略拒绝")
             skips.append((ev["seq"], ev["event"]))
             continue
-        if ev["event"] == "SessionCreated" and ev["seq"] != 0:
-            raise Corruption(f"{name}: line {i}: SessionCreated 不在 seq 0")
+        if ev["event"] == "SessionCreated":
+            if ev["seq"] != 0:
+                raise Corruption(f"{name}: line {i}: SessionCreated 不在 seq 0")
+            parent = ev["data"].get("parent")
+            if parent is not None:
+                if not isinstance(parent, dict):
+                    raise Corruption(f"{name}: line {i}: SessionCreated.parent 不是对象")
+                if not isinstance(parent.get("session_id"), str) or not parent["session_id"]:
+                    raise Corruption(f"{name}: line {i}: parent.session_id 必须是非空字符串")
+                # `seq` is ADR 0022's addition; the older reserved shape has no `seq`, which
+                # a forward reader still ignores. If it is present, it must be an integer.
+                if "seq" in parent and (
+                    not isinstance(parent["seq"], int) or isinstance(parent["seq"], bool)
+                ):
+                    raise Corruption(f"{name}: line {i}: parent.seq 不是整数")
+        if ev["event"] == "SessionForked":
+            data = ev["data"]
+            if not isinstance(data.get("child_session_id"), str) or not data["child_session_id"]:
+                raise Corruption(
+                    f"{name}: line {i}: SessionForked.child_session_id 必须是非空字符串"
+                )
+            if not isinstance(data.get("parent_seq"), int) or isinstance(data["parent_seq"], bool):
+                raise Corruption(f"{name}: line {i}: SessionForked.parent_seq 不是整数")
         if ev["event"] == "MessageAppended":
             msg = ev["data"].get("message")
             if not isinstance(msg, dict) or len(msg) != 1:
@@ -405,6 +440,16 @@ def check_fixture(name, exp):
         for field in exp["reserved"]:
             if field not in created:
                 raise Corruption(f"{name}: SessionCreated 缺预留字段 {field}")
+    if "parent" in exp:
+        created = next(e["data"] for e in events if e["event"] == "SessionCreated")
+        sid, seq = exp["parent"]
+        if created.get("parent") != {"session_id": sid, "seq": seq}:
+            raise Corruption(f"{name}: SessionCreated.parent {created.get('parent')!r} != 期望")
+    if "forked" in exp:
+        forked = next(e["data"] for e in events if e["event"] == "SessionForked")
+        sid, seq = exp["forked"]
+        if forked.get("child_session_id") != sid or forked.get("parent_seq") != seq:
+            raise Corruption(f"{name}: SessionForked {forked!r} != 期望")
     repair = simulate_repair(events)
     if repair != exp.get("repair", {}):
         raise Corruption(f"{name}: repair {repair} != 期望 {exp.get('repair', {})}")
