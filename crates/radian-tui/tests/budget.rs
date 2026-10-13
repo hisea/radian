@@ -53,7 +53,10 @@ fn the_three_usage_sources_read_differently() {
 fn the_status_bar_shows_the_projection_over_the_input_budget() {
     // ADR 0018: `T / B`.
     let text = budget_text(&report(UsageSource::ReportedPlusEstimate));
-    assert!(text.contains("/ 16000"), "the input budget must be shown: {text}");
+    assert!(
+        text.contains("/ 16000"),
+        "the input budget must be shown: {text}"
+    );
     assert!(text.contains("12340"), "{text}");
 }
 

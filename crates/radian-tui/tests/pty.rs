@@ -890,12 +890,12 @@ async fn pty_an_over_budget_request_is_still_sent() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
-/// Without `--context-window` the guard is off, and the status bar says so instead of showing
-/// a guessed number (ADR 0015 C1's `Disabled` row).
+/// Without `--context-window` the budget is off, and the status bar says so instead of
+/// showing a guessed number (ADR 0015 C1's `Disabled` row).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 // The test body blocks on the pty on purpose; the lock serializes the pty tests.
 #[allow(clippy::await_holding_lock)]
-async fn pty_without_a_window_the_status_bar_says_the_guard_is_off() {
+async fn pty_without_a_window_the_status_bar_says_the_budget_is_off() {
     let _serial = pty_guard();
     let dir = TempDir::new("budget-off");
     let server = MockServer::start(vec![text_reply("ok")]).await;

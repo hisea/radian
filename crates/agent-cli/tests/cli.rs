@@ -2649,10 +2649,7 @@ async fn an_over_budget_request_is_still_sent_and_the_turn_completes() {
     .await;
 
     assert_eq!(code, 0, "{stderr}");
-    assert!(
-        stderr.contains("B 3616 from --context-window"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("B 3616 from --context-window"), "{stderr}");
     assert_eq!(
         server.requests().len(),
         2,
@@ -4229,10 +4226,7 @@ async fn the_startup_line_names_an_explicit_window() {
     )
     .await;
     assert_eq!(code, 0, "{stderr}");
-    assert!(
-        stderr.contains("B 3616 from --context-window"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("B 3616 from --context-window"), "{stderr}");
     assert!(stderr.contains("R 16384"), "{stderr}");
 }
 

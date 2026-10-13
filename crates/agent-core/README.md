@@ -6,7 +6,7 @@ conversation (transcript + open tool session); `ActiveRun` is one user turn, dri
 `step()` or `run()`.
 
 It owns: the turn loop, the message/event/hook/steering types, the journal seam
-(`TranscriptJournal` + `replay`/`repair`/`recover`), and the context-budget guard.
+(`TranscriptJournal` + `replay`/`repair`/`recover`), and the context-budget projection.
 
 It does **not** own: files, JSONL, SQLite or any storage format (that is the journal
 implementation's job, e.g. `radian-session`); provider wire formats (the two adapters);
@@ -19,10 +19,10 @@ ADR 0015 only *stops* before an oversized request.
 | Public type | Role |
 |---|---|
 | `Agent<M, P, H>` | The injections. `Agent::new(model, tools)`, `with_hooks`, `with_config`, `config`. |
-| `AgentConfig` | `system_prompt`, `max_model_calls` (default `DEFAULT_MAX_MODEL_CALLS` = 32), `model_settings`, `context_budget: Option<ContextBudget>` (`None` disables the guard outright — no window is ever guessed). |
+| `AgentConfig` | `system_prompt`, `max_model_calls` (default `DEFAULT_MAX_MODEL_CALLS` = 32), `model_settings`, `context_budget: Option<ContextBudget>` (`None` disables the projection outright — no budget is ever guessed). |
 | `AgentSession` | `open_session` / `open_session_with_history` / `open_session_with_journal`. `start_turn`/`start_turn_with`, `run_turn`, `transcript`, `replace_transcript`, `history_for_resume`, `close`, `is_closed`, `is_poisoned`, `context_budget_status`, `restore_budget_baseline`. |
 | `ActiveRun<'_, M, P, H>` | `step`, `run`, `cancellation_handle`, `steering_handle`, `outcome`, `model_calls`, `transcript`. Borrows the session, so one session runs one turn at a time. |
-| `TurnOptions` | `deadline`, `steer_mode`, `max_parallel_tools` (default `DEFAULT_MAX_PARALLEL_TOOLS` = 4), `max_model_calls`, `tool_cancel_grace` (default `DEFAULT_TOOL_CANCEL_GRACE` = 5 s), `context_budget_relax`. |
+| `TurnOptions` | `deadline`, `steer_mode`, `max_parallel_tools` (default `DEFAULT_MAX_PARALLEL_TOOLS` = 4), `max_model_calls`, `tool_cancel_grace` (default `DEFAULT_TOOL_CANCEL_GRACE` = 5 s). |
 | `Step` / `RunOutcome` / `RunStatus` / `RunError` / `SessionError` / `ReplaceError` | Terminal states. `RunStatus` is `#[non_exhaustive]`. |
 
 Model, tools and hooks are traits, not types: `Model` (`ModelRequest` → `ModelResponse`, plus
@@ -70,10 +70,10 @@ so no host reimplements them.
 | `PauseTurn` continues the same turn with the same budget and keeps opaque blocks | `pause_turn_continues_with_same_budget_and_keeps_opaque_blocks` | `tests/turn.rs` |
 | A history with an unpaired tool call is refused at open time | `history_with_unpaired_tool_call_is_rejected` | `tests/turn.rs` |
 | Tool schemas with an external `$ref` fail instead of doing I/O | `schema_external_refs_are_disabled` | `tests/turn.rs` |
-| The guard blocks the next request *before* it is sent, and blocking does not change the transcript | `reported_usage_blocks_the_next_request_before_it_is_sent`, `blocking_does_not_change_the_transcript` | `tests/budget.rs` |
-| A projection says whether it is reported, reported+estimated, or estimated; no window configured means disabled | `without_reported_usage_the_estimate_is_labelled`, `no_window_configured_disables_the_guard` | `tests/budget.rs` |
+| Crossing the input budget `B` still sends the request and does not change the transcript | `reported_usage_over_the_budget_still_sends_the_request`, `over_the_budget_does_not_change_the_transcript` | `tests/budget.rs` |
+| A projection says whether it is reported, reported+estimated, or estimated; no budget configured means disabled | `without_reported_usage_the_estimate_is_labelled_and_the_request_still_goes`, `no_budget_configured_is_disabled` | `tests/budget.rs` |
 | The estimator never rounds down: ASCII bytes/4 rounded up, and at least one token per non-ASCII character | `ascii_code_estimates_at_least_bytes_over_four`, `chinese_text_estimates_at_least_one_token_per_character` | `tests/budget.rs` |
-| `context_budget_relax` lets exactly one request through, then the guard applies again | `relaxing_once_sends_that_request_and_restores_the_guard` | `tests/budget.rs` |
+| A turn that crosses `B` ends `Completed`, not stopped | `a_turn_over_the_budget_completes_normally` | `tests/budget.rs` |
 | A restored baseline projects the same as an uninterrupted run, and a prefix outside the transcript leaves the estimate alone | `a_restored_baseline_matches_an_uninterrupted_projection`, `a_prefix_outside_the_transcript_leaves_the_estimate_alone` | `tests/budget.rs` |
 | A transcript replacement is journaled from index zero, emits one event, and keeps the session usable | `replacing_the_transcript_journals_from_zero_emits_one_event_and_continues` | `tests/replace.rs` |
 | An invalid replacement is rejected before the journal; a failed replacement keeps memory and requires recovery; unusable sessions reject without journaling | `invalid_replacements_are_rejected_before_the_journal`, `a_failed_replacement_marker_keeps_memory_and_requires_recovery`, `unusable_sessions_reject_replacement_without_journaling` | `tests/replace.rs` |
@@ -89,10 +89,11 @@ that no test in this environment can catch.
 
 ## Known limits and what is not verified
 
-- **No context compression.** ADR 0015 stops before an oversized request and changes nothing in
-  the transcript; `ContextBudget::window_tokens` is a host-supplied number, because the core
-  deliberately has no model→window table. The estimator is a ruler, not an audited count: the
-  report says exactly which part is estimated.
+- **No context compression.** ADR 0018 replaced ADR 0015's stop: the core computes the
+  projection against the input budget `B`, records it, and sends the request anyway; it changes
+  nothing in the transcript. `ContextBudget::input_budget_tokens` is a host-supplied number,
+  because the core deliberately has no model→window table. The estimator is a ruler, not an
+  audited count: the report says exactly which part is estimated.
 - **`HookContext` carries only `cancellation` and `model_calls`** — no run, turn or session
   identity (ADR 0004's recorded gap). A shared `Hooks` instance serving several turns therefore
   cannot tell them apart; `radian-permissions` documents the workaround it needs.
@@ -116,4 +117,5 @@ that no test in this environment can catch.
 streaming prefix) · 0004 (hot config slots — records the missing run identity) · 0005 (host
 message identity and `replace_transcript`) · 0006 (session JSONL v1 — the format this crate's
 `JournalRecord` maps onto) · 0007 (usage) · 0010 (durable vs live events) · 0014 (reasoning
-content) · 0015 (context budget guard).
+content) · 0015 (context budget guard — superseded by 0018 for the stop) · 0018
+(computed input budget `B = min(I, C − R)`).

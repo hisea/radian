@@ -90,3 +90,16 @@ M10 是「恢复的投影必须与不中断一直跑相同」的反向证明：�
 
 「resume 不恢复基线」「恢复了错误的那次报告（first-wins）」「`BudgetRelax::take` 的 `swap` 改
 `load`」三条变异在 `radian-runtime` 的 budget 测试里被抓住，记录在那里。
+
+## ADR 0018 round：去掉阻断（`pi/guard`，2026-10-13）
+
+一次性 worktree `/tmp/radian-guard-mut`（`git worktree add --detach HEAD`，HEAD = `8825691`，
+**独立 `CARGO_TARGET_DIR`**，用完删除），测试一律 `--no-fail-fast`；每个变异恢复文件、
+`git status --short` 为空后才继续。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M11 | 超过 `B` 时改为结束这一轮（把 `Over` 分支换成 `return Ok(self.run.finish(RunStatus::Refused, events))`，即"仍然停"） | ✅ caught (rc 101) | `reported_usage_over_the_budget_still_sends_the_request`（模型只收到 1 次请求） |
+| M12 | `over_budget` 的 `>` 改成 `>=`（`T == B` 也算超） | ✅ caught (rc 101) | `the_boundary_is_strictly_above_the_budget` |
+
+M12 证明边界由测试钉住：`T == B` 必须在预算内，压缩只在严格超过 `B` 时才有理由触发。

@@ -47,7 +47,7 @@ fn the_status_bar_shows_the_tier_reported_usage_and_mcp_counts() {
     assert!(text.contains("usage 1200/340"), "{text}");
     assert!(text.contains("mcp 1/15"), "{text}");
     assert!(
-        text.contains("context guard off (no window configured)"),
+        text.contains("context budget off (no window configured)"),
         "the budget segment is still there when it fits: {text}"
     );
 }

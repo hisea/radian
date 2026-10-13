@@ -129,7 +129,7 @@ struct Cli {
 
     /// The model's context window in tokens (ADR 0015). Omitted, the models.dev catalog is
     /// consulted for `(provider, model)` (ADR 0018); an explicit value always wins. With
-    /// neither, the guard is off and the status bar says so.
+    /// neither, the budget is off and the status bar says so.
     #[arg(long, value_name = "TOKENS")]
     context_window: Option<u64>,
 
@@ -399,7 +399,7 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
     let live: Arc<dyn EventSink> = Arc::new(ChannelSink(tx));
     let agent_config = AgentConfig {
         system_prompt: cli.system.clone(),
-        // No window known means the guard is off, never a guessed default (ADR 0015); the
+        // No window known means the budget is off, never a guessed default (ADR 0015); the
         // window comes from the catalog or `--context-window` (ADR 0018).
         context_budget: window.budget.map(ContextBudget::new),
         ..AgentConfig::default()

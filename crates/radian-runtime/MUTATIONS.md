@@ -101,3 +101,15 @@ M5 同时证明"必须先在旧代码上失败"：去掉 requeue 就是旧代码
   `after_model_response`）都在本步 assistant 消息 commit **之前**跑，本批次没有未完成的调用。
   所以没有"补结果"的代码可变异；正确性由 `agent-core::hooks` 的两条测试与
   `hook_failure` 的端到端测试钉住（transcript 每个 tool_call 都有结果）。
+
+## ADR 0018：不再写 `ContextBudgetReached`（`pi/guard`）
+
+一次性 worktree `/tmp/radian-guard-mut`（HEAD = `8825691`，独立 target），`--no-fail-fast`；
+变异后 `git checkout --` 还原、`git status --short` 为空。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M8 | `run_turn` 在 `TurnFinished` 前重新写 `ContextBudgetReached` | ✅ caught (rc 101) | `an_over_budget_turn_completes_and_writes_no_context_budget_event`（`assert_no_context_budget_event` 发现事件） |
+
+历史值仍可读：`a_historical_budget_stop_still_reads_and_resumes` 手写一份旧格式会话
+（`TurnOutcome::ContextBudget` + `ContextBudgetReached`），`Session::open` 能读，`Driver` 能 resume。

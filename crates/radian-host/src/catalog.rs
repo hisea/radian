@@ -100,9 +100,9 @@ pub fn input_budget(
                 ));
             }
             let after_reservation = context - reservation;
-            Ok(Some(
-                input.map_or(after_reservation, |input| input.min(after_reservation)),
-            ))
+            Ok(Some(input.map_or(after_reservation, |input| {
+                input.min(after_reservation)
+            })))
         }
         (None, Some(input)) => Ok(Some(input)),
         (None, None) => Ok(None),
@@ -189,7 +189,7 @@ pub enum WindowSource {
         model: String,
         age: Option<Duration>,
     },
-    /// Nothing matched; the guard is off.
+    /// Nothing matched; the budget is off.
     Unknown,
 }
 
@@ -554,7 +554,10 @@ mod tests {
         // Both unknown: no budget.
         assert_eq!(input_budget(None, None, None), Ok(None));
         // I alone is a budget.
-        assert_eq!(input_budget(None, Some(70_000), Some(32_000)), Ok(Some(70_000)));
+        assert_eq!(
+            input_budget(None, Some(70_000), Some(32_000)),
+            Ok(Some(70_000))
+        );
         // R = max(16384, request).
         assert_eq!(output_reservation(None), 16_384);
         assert_eq!(output_reservation(Some(32_000)), 32_000);

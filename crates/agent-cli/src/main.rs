@@ -207,7 +207,7 @@ struct Cli {
 
     /// The model's context window in tokens. Omitted, the models.dev catalog is consulted
     /// for `(provider, model)` (ADR 0018); an explicit value always wins. With neither, the
-    /// guard is off and no window is guessed (ADR 0015).
+    /// budget is off and no number is guessed (ADR 0018).
     #[arg(long, value_name = "TOKENS")]
     context_window: Option<u64>,
 
@@ -219,7 +219,6 @@ struct Cli {
     /// `--base-url` hostname; e.g. `opencode.ai` → `opencode`).
     #[arg(long, value_name = "PROVIDER")]
     catalog_provider: Option<String>,
-
 }
 
 /// Why startup failed. The message must not contain the key.
@@ -446,7 +445,10 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     if let Some(warning) = radian_host::output_ceiling_warning(request_max_output, window.output) {
         eprintln!("{warning}");
     }
-    let context_budget = window.budget.filter(|tokens| *tokens > 0).map(ContextBudget::new);
+    let context_budget = window
+        .budget
+        .filter(|tokens| *tokens > 0)
+        .map(ContextBudget::new);
     Ok(Setup {
         model,
         provider,

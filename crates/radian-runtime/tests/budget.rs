@@ -254,7 +254,10 @@ async fn a_historical_budget_stop_still_reads_and_resumes() {
     let path = dir.file("s.jsonl");
     {
         let journal = SessionJournal::create(&path, "sid", created()).unwrap();
-        for (index, message) in [(0usize, Message::user("go")), (1, Message::assistant("stop"))] {
+        for (index, message) in [
+            (0usize, Message::user("go")),
+            (1, Message::assistant("stop")),
+        ] {
             journal
                 .append(JournalRecord::Message { index, message })
                 .await
@@ -290,10 +293,12 @@ async fn a_historical_budget_stop_still_reads_and_resumes() {
             ..
         }
     )));
-    assert!(session.events().iter().any(|event| matches!(
-        &event.data,
-        EventData::ContextBudgetReached { .. }
-    )));
+    assert!(
+        session
+            .events()
+            .iter()
+            .any(|event| matches!(&event.data, EventData::ContextBudgetReached { .. }))
+    );
 
     // And a driver still resumes it and runs a new turn.
     let model = Arc::new(ScriptedModel::new([text("after resume")]));
@@ -306,5 +311,9 @@ async fn a_historical_budget_stop_still_reads_and_resumes() {
     handle.abort();
     let _ = handle.await;
 
-    assert_eq!(model.requests().len(), 1, "the resumed turn must send a request");
+    assert_eq!(
+        model.requests().len(),
+        1,
+        "the resumed turn must send a request"
+    );
 }

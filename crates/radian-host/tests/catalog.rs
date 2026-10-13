@@ -159,7 +159,11 @@ async fn no_cache_and_a_failed_fetch_is_unknown() {
     assert_eq!(window.budget, None);
     assert_eq!(window.source, WindowSource::Unknown);
     assert!(window.error.is_none(), "unknown is not an error");
-    assert!(window.describe().contains("no budget"), "{}", window.describe());
+    assert!(
+        window.describe().contains("no budget"),
+        "{}",
+        window.describe()
+    );
     let _ = std::fs::remove_dir_all(&cache);
 }
 
@@ -201,7 +205,11 @@ async fn an_explicit_window_wins_and_does_not_fetch() {
     assert_eq!(window.budget, Some(83_616));
     assert_eq!(window.context, Some(100_000));
     assert_eq!(window.source, WindowSource::Explicit);
-    assert!(window.describe().contains("from --context-window"), "{}", window.describe());
+    assert!(
+        window.describe().contains("from --context-window"),
+        "{}",
+        window.describe()
+    );
     assert_eq!(server.requests().len(), 0);
 
     // A window at or below the output reservation is an error, not a silent budget.
@@ -245,7 +253,11 @@ async fn zero_context_is_unknown_and_a_corrupt_cache_is_ignored() {
 
     let window = resolve(&query(&cache, &server, "zero-context")).await;
     assert_eq!(window.budget, None, "context 0 is unknown");
-    assert!(window.describe().contains("window unknown"), "{}", window.describe());
+    assert!(
+        window.describe().contains("window unknown"),
+        "{}",
+        window.describe()
+    );
 
     // Corrupt the cache; the next resolve must fetch again and succeed.
     std::fs::write(cache_file(&cache), "{ not json").unwrap();

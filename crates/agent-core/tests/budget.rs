@@ -238,10 +238,7 @@ async fn under_the_budget_is_ok() {
 ///    final status is `Over`.
 #[tokio::test]
 async fn a_turn_over_the_budget_completes_normally() {
-    let model = ScriptedModel::new([
-        calls(vec![call("c1", "echo", big_args())]),
-        text("done"),
-    ]);
+    let model = ScriptedModel::new([calls(vec![call("c1", "echo", big_args())]), text("done")]);
     let tools = MemTools::new(vec![(spec("echo"), Behavior::Echo)]);
     let mut chat = with_budget(model.clone(), tools, ContextBudget::new(1000))
         .open_session()
@@ -263,10 +260,7 @@ async fn a_turn_over_the_budget_completes_normally() {
 ///    under the budget (there is no implicit compression).
 #[tokio::test]
 async fn over_the_budget_does_not_change_the_transcript() {
-    let model = ScriptedModel::new([
-        calls(vec![call("c1", "echo", big_args())]),
-        text("done"),
-    ]);
+    let model = ScriptedModel::new([calls(vec![call("c1", "echo", big_args())]), text("done")]);
     let tools = MemTools::new(vec![(spec("echo"), Behavior::Echo)]);
     let mut chat = with_budget(model.clone(), tools, ContextBudget::new(1000))
         .open_session()

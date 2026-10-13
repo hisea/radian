@@ -133,3 +133,14 @@ Base `f552250` · one-shot worktree `/tmp/small-mut` · `--no-fail-fast`；变�
 | # | 变异 | 结果 | 抓住它的测试 |
 |---|---|---|---|
 | M10 | `parse_tier` 去掉 `workspace-write` / `full-access` 两个别名分支 | ✅ failed | `profile::tests::tier_names_and_aliases_parse` |
+
+## ADR 0018：状态栏显示 `T / B`（`pi/guard`）
+
+一次性 worktree `/tmp/radian-guard-mut`（HEAD = `8825691`，独立 target），`--no-fail-fast`；
+变异后 `git checkout --` 还原。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M11 | `budget_text` 的分母写成投影 `T` 而不是 `B` | ✅ failed | `the_status_bar_shows_the_projection_over_the_input_budget`、`a_request_started_event_sets_the_status_bar_report` |
+
+「`c` 继续只放宽一次请求」的旧变异 M4 随 `BudgetRelax` 与继续提示一起删除（ADR 0018）。

@@ -88,9 +88,9 @@ stdout carries only the model's visible answer (so `-p` can be piped). Status, t
 and **reasoning** go to stderr; reasoning is prefixed `[reasoning]` and kept on its own
 lines, never mixed with the answer (ADR 0014).
 
-## Context budget (ADR 0015) and the model catalog (ADR 0018)
+## Context budget (ADR 0018) and the model catalog
 
-The window comes from one of three places, in order:
+The context window `C` comes from one of three places, in order:
 
 1. **`--context-window <TOKENS>`** — explicit, and always wins. It never fetches: only an
    already-existing cache is read for the `input`/`output` numbers, and with no cache just the
@@ -104,31 +104,23 @@ The window comes from one of three places, in order:
    and refreshed at most once every 24 h (3 s timeout; a failed fetch falls back to the
    cache). `--offline-catalog` never goes out; `--catalog-provider` overrides the hostname
    mapping.
-3. Neither: the window is **unknown**, the guard is off, and the startup says so. No window
-   is guessed (a model-name-to-window table would age and be mostly remembered numbers —
+3. Neither: `C` is **unknown**, there is no budget, and the startup says so. No number is
+   guessed (a model-name-to-window table would age and be mostly remembered numbers —
    ADR 0015 C1).
 
-The catalog reports `context` (C), `input` (I) and `output` separately. This build hands
-`min(I, C)` to the guard as the window (temporary: the compaction slice will use
-`B = min(I, C − R)`), and the startup line shows whichever of the three numbers exist.
+The catalog reports `context` (C), `input` (I) and `output` separately. The effective input
+budget is **`B = min(I, C − R)`**, where **`R = max(16384, the request's max output)`** is the
+reservation kept for the answer and the next round. A missing `I` falls back to `C − R`; a
+missing `C` leaves `B = I`. **`C ≤ R` is a startup error** (the window cannot hold the
+reservation), never a silently clamped number.
 
-- `--context-threshold <PERCENT>` (default 80) is the line at which the next request is not
-  sent.
-- The stop names its source. A provider-reported input is shown as `(reported N)`; a report
-  plus local growth shows both parts, `(reported B + estimated G)`; with no report at all the
-  number is `~N (estimated)`. An estimate is never presented as a precise report.
-- **Interactive**: after a stop the CLI offers `[c] continue` (the next request is let
-  through once; the request after it is checked again, so this is not a switch) or `[n] stop`
-  (the turn ends; the session keeps accepting turns). A Ctrl-C at this prompt also stops.
-  `fork` is **not implemented** in this build, and it is not offered as an option.
-- Continuing sends the user message `continue`: a user message is the only way to open a new
-  turn, and it records the choice truthfully. The transcript itself is never edited
-  (ADR 0015 C7).
-- **`-p` never continues on its own.** It prints the stop and exits 3 (see Exit codes), so a
-  script can tell a budget stop from a failure.
-- The reported-input baseline is in memory only. After `--resume` the projection is an
-  estimate (the transcript carries no provider report to restore), so a resumed session can
-  stop earlier or later than the one that wrote it.
+- The startup `[budget]` line shows `C`, `I`, `output`, `R` and `B`, and where they came from.
+  The catalog's `output` is only **checked** against the request's max output (a warning); it
+  does not change `R`.
+- Crossing `B` does **not** stop the turn: the projection is recorded and the request is sent
+  anyway (ADR 0018 replaced ADR 0015's stop). The provider's over-length error remains the only
+  thing that refuses an oversized request.
+- A provider-reported input is trusted as reported, and only the growth after it is estimated.
 
 ## Exit codes
 
@@ -137,7 +129,6 @@ The catalog reports `context` (C), `input` (I) and `output` separately. This bui
 | 0 | the turn completed |
 | 1 | the turn failed, or the driver ended with an error |
 | 2 | usage or setup error (including a failed sandbox probe) |
-| 3 | the context-budget guard stopped the turn in `-p` mode |
 | 130 | forced exit after a second Ctrl-C |
 
 ## Profiles, the sandbox, and permissions

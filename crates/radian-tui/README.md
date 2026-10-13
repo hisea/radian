@@ -83,7 +83,7 @@ The transcript owns its scrolling:
 | 10 | driver task panic: orderly exit, terminal restored, failure reported | `tests/pty.rs` |
 | 11 | a failed sandbox probe refuses instead of running unsandboxed | `tests/pty.rs` |
 | 12 | shell approval shows the whole command; a capped result keeps the truncation marker visible; a compound command always asks | `tests/pty.rs` |
-| 13 | budget stop sends nothing and shows the honest wording; continue relaxes one request; the guard resumes; no window says the guard is off | `tests/pty.rs`, `tests/budget.rs` |
+| 13 | an over-budget request is still sent and the turn completes; the status bar shows `T / B` and the honest wording; no window says the budget is off | `tests/pty.rs`, `tests/budget.rs` |
 | 14 | `--header` `{session_id}` expands for new and resumed sessions; `authorization` and a malformed header are refused without echoing the value | `tests/pty.rs` |
 | 15 | `--mcp-config` mounts the fixture; its tool runs through the approval dialog; the status bar shows the connected servers/tools; the startup notice names the MCP sandbox gap | `tests/pty.rs` |
 | 16 | the status bar shows the tier, reported usage (or `none`) and the MCP counts; a 60-column terminal drops the long segments and marks it | `tests/status.rs` |
@@ -108,9 +108,9 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
 - **the shell approval box with a long command**: a real command line is often longer than a
   file path. Does the `command:` line stay readable at your width, or does the wrapped preview
   become a wall of text? The pty test only asserts that the whole command is present.
-- **the budget stop notice**: when the context guard stops a turn, is the reason and the
-  reported-vs-estimated wording readable at your width, and is it clear which key continues and
-  which abandons?
+- **the budget status segment**: with a small `--context-window`, is the `T / B` projection
+  and the reported-vs-estimated wording readable at your width, and does the over-budget
+  highlight stand out without looking like an error?
 - **mouse selection/copy**: this app does **not** enable mouse capture, so selection is the
   **terminal emulator's own** (drag to select, Cmd-C on macOS, or the emulator's copy key).
   The caveat ADR 0009 notes applies: a selection that spans the input box and the transcript
@@ -404,36 +404,31 @@ from the `--base-url` hostname (`opencode.ai` → `opencode`, `api.anthropic.com
 `api.openai.com` → `openai`, `api.deepseek.com` → `deepseek`, ...). The catalog is a
 read-only GET with no key, header or user data, cached under the user cache directory and
 refreshed at most once every 24 h (3 s timeout; a failure falls back to the cache);
-`--offline-catalog` never goes out. With neither, the window is **unknown**, the guard is
-off, and the startup notice says so.
+`--offline-catalog` never goes out. With neither, `C` is **unknown**, there is no budget, and
+the startup notice says so.
 
-The startup notice names the source (`window 1000000 from models.dev (opencode/…, context
-1000000, input 922000, output 384000, cached 3 h ago)`, `window 5000 from --context-window`,
-or `unknown: context guard off`). The catalog reports `context`/`input`/`output` separately;
-this build hands `min(I, C)` to the guard (temporary: the compaction slice will use
-`B = min(I, C − R)`).
+The effective input budget is **`B = min(I, C − R)`**, with **`R = max(16384, the request's max
+output)`** (ADR 0018). The startup notice names the source and every number
+(`C 1000000, I 922000, output 384000, R 16384, B 922000 from models.dev (opencode/…, cached 3 h
+ago)`, `B 3616 from --context-window`, or a `no budget` line). `C ≤ R` is refused at startup:
+the window cannot hold the reservation.
 
-When a turn ends because the next request would cross the threshold, the transcript gets a
-notice and the status bar shows the numbers. The wording depends on where the number came
-from (ADR 0015 C1) — a report, a report plus an estimate, and a pure estimate are three
-different things:
+The status bar shows the projection `T` over `B` whenever a request is made, and highlights it
+when `T` is over `B`. Crossing `B` does **not** stop the turn (ADR 0018): the request is sent
+anyway, and the provider's over-length error is the only refusal. The wording depends on where
+the number came from (ADR 0015 C1) — a report, a report plus an estimate, and a pure estimate
+are three different things:
 
 | Source | Wording |
 |---|---|
-| reported | `context 12,340 of 16,000 at 80% (reported)` |
-| reported + estimate | `context 12,340 of 16,000 at 80% (reported 12,000 + estimated 340)` |
-| estimate | `context ~12,340 of 16,000 at 80% (estimated)` |
-| no window | `context guard off (no window configured)` — no number at all |
+| reported | `context 12,340 (reported) / 16,000` |
+| reported + estimate | `context 12,340 (reported 12,000 + estimated 340) / 16,000` |
+| estimate | `context ~12,340 (estimated) / 16,000` |
+| configured, no request yet | `context budget B 16,000 (no request yet)` |
+| no window | `context budget off (no window configured)` — no number at all |
 
 The mixed value is never shown as a plain report, and a projection that has no reported
 baseline is marked `~… (estimated)`.
-
-Keys, while the input box is empty (so typing is never swallowed):
-
-| Key | Action |
-|---|---|
-| `c` | continue once: the next turn's first request passes the guard, then the guard applies again |
-| Esc | dismiss the notice (the next message is a normal, guarded turn) |
 
 There is no fork option: an option that does nothing would be worse than its absence (Phase 5
 owns fork/rewind).
