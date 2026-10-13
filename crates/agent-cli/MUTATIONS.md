@@ -225,3 +225,11 @@ Base `dc307e6` · 一次性检出 `/tmp/covf-mut` · 独立 `CARGO_TARGET_DIR` �
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
 | M9 | `compact_request` 去掉“后跟空白或行尾”的检查（`/compactfoo` 当命令） | `cli::an_interactive_compact_is_a_command_and_compactfoo_is_a_message` | ✅ failed |
+
+## Phase 4：配置的优先级（ADR 0008）
+
+Base `8028d9e` · 一次性 worktree `/tmp/config-mut` · 独立 `CARGO_TARGET_DIR` · `git checkout --` 还原。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M1 | CLI 不再覆盖配置（`model.model` 反而优先） | `cli::a_config_file_supplies_the_model_and_the_cli_overrides_it` | ✅ |
