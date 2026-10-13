@@ -108,6 +108,7 @@ pub enum EventData {
         window_tokens: u64,
         threshold_percent: u8,
         baseline_input_tokens: Option<u64>,
+        estimated_growth_tokens: Option<u64>,
     },
     /// One permission decision (ADR 0006 §5.9). Typed for an exact round trip; audit only,
     /// never a transcript record.
@@ -408,6 +409,7 @@ where
                     window_tokens: d.window_tokens,
                     threshold_percent: d.threshold_percent,
                     baseline_input_tokens: d.baseline_input_tokens,
+                    estimated_growth_tokens: d.estimated_growth_tokens,
                 }
             }
             _ => {
@@ -675,6 +677,8 @@ struct ContextBudgetReachedData {
     threshold_percent: u8,
     #[serde(default)]
     baseline_input_tokens: Option<u64>,
+    #[serde(default)]
+    estimated_growth_tokens: Option<u64>,
 }
 
 #[derive(Deserialize)]

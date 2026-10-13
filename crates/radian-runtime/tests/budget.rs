@@ -104,6 +104,7 @@ async fn the_stop_is_journalled_and_read_back() {
                 window_tokens,
                 threshold_percent,
                 baseline_input_tokens,
+                estimated_growth_tokens,
                 ..
             } => Some((
                 *source,
@@ -111,11 +112,12 @@ async fn the_stop_is_journalled_and_read_back() {
                 *window_tokens,
                 *threshold_percent,
                 *baseline_input_tokens,
+                *estimated_growth_tokens,
             )),
             _ => None,
         })
         .expect("ContextBudgetReached is durable");
-    assert_eq!(reached.0, UsageSource::Reported);
+    assert_eq!(reached.0, UsageSource::ReportedPlusEstimate);
     assert!(
         reached.1 >= 800,
         "projection {} is past the 80% line",
@@ -124,6 +126,7 @@ async fn the_stop_is_journalled_and_read_back() {
     assert_eq!(reached.2, 1000);
     assert_eq!(reached.3, 80);
     assert_eq!(reached.4, Some(900));
+    assert!(reached.5.unwrap() > 0, "the growth is the estimated part");
     assert!(events.iter().any(|event| matches!(
         &event.data,
         EventData::TurnFinished {

@@ -542,13 +542,13 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
         // be sent. A provider-reported `input` from an earlier request in this session is
         // the baseline; without one the projection is a local estimate. No configured
         // window means the guard is off and claims nothing.
-        let request_bytes = if agent.config.context_budget.is_some() {
-            budget::request_bytes(&request)
+        let request_size = if agent.config.context_budget.is_some() {
+            Some(budget::request_size(&request))
         } else {
-            0
+            None
         };
-        if let Some(config) = agent.config.context_budget {
-            let report = budget::project(&config, self.run.session.budget_baseline, request_bytes);
+        if let Some((config, size)) = agent.config.context_budget.zip(request_size) {
+            let report = budget::project(&config, self.run.session.budget_baseline, size);
             if budget::exceeds(&config, &report) {
                 if self.run.context_budget_relax {
                     // The host chose Continue once: this request goes, then protect again.
@@ -608,10 +608,10 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
         });
         // Remember the provider's own `input` as the next projection's baseline (ADR 0015
         // C1). `None` means the provider did not report it; we never substitute zero.
-        if agent.config.context_budget.is_some()
+        if let Some(size) = request_size
             && let Some(input) = response.usage.as_ref().and_then(|usage| usage.input)
         {
-            self.run.session.budget_baseline = Some((input, request_bytes));
+            self.run.session.budget_baseline = Some((input, size));
         }
         match race(
             &interrupt,

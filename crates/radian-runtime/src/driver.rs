@@ -261,6 +261,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
                     window_tokens: report.window_tokens,
                     threshold_percent: report.threshold_percent,
                     baseline_input_tokens: report.baseline_input_tokens,
+                    estimated_growth_tokens: report.estimated_growth_tokens,
                 })
                 .await?;
         }

@@ -110,9 +110,10 @@ pub enum RuntimeEvent {
     /// not exposed yet (no producer in this phase).
     ConfigChanged { revision: u64, change: Value },
     /// The next model request was not sent because it would have reached the context budget
-    /// (ADR 0015 C6). Audit only: `critical = false`. `source` says whether the projection's
-    /// baseline was provider-reported or a local estimate, and the numbers stay as computed
-    /// so a reader can see exactly why the turn stopped.
+    /// (ADR 0015 C6). Audit only: `critical = false`. `source` says whether the projection is
+    /// a fact, a fact plus an estimate, or purely local; `baseline_input_tokens` and
+    /// `estimated_growth_tokens` split the projection so a reader is never shown a mixed
+    /// number as a precise report.
     ContextBudgetReached {
         turn_id: String,
         source: UsageSource,
@@ -120,6 +121,7 @@ pub enum RuntimeEvent {
         window_tokens: u64,
         threshold_percent: u8,
         baseline_input_tokens: Option<u64>,
+        estimated_growth_tokens: Option<u64>,
     },
     /// One permission decision (ADR 0006 §5.9). Audit only: `critical = false`, it does not
     /// take part in state reconstruction and is **not** replayed on resume.
@@ -233,6 +235,8 @@ pub(crate) struct ContextBudgetReachedData<'a> {
     pub threshold_percent: u8,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub baseline_input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_growth_tokens: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -327,6 +331,7 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
             window_tokens,
             threshold_percent,
             baseline_input_tokens,
+            estimated_growth_tokens,
         } => RuntimeData::ContextBudgetReached(ContextBudgetReachedData {
             turn_id,
             source: *source,
@@ -334,6 +339,7 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
             window_tokens: *window_tokens,
             threshold_percent: *threshold_percent,
             baseline_input_tokens: *baseline_input_tokens,
+            estimated_growth_tokens: *estimated_growth_tokens,
         }),
         RuntimeEvent::PermissionResolved {
             request_id,

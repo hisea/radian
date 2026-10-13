@@ -236,6 +236,7 @@ fn event_data_value(
             window_tokens,
             threshold_percent,
             baseline_input_tokens,
+            estimated_growth_tokens,
         } => json!({
             "turn_id": turn_id,
             "source": source,
@@ -243,6 +244,7 @@ fn event_data_value(
             "window_tokens": window_tokens,
             "threshold_percent": threshold_percent,
             "baseline_input_tokens": baseline_input_tokens,
+            "estimated_growth_tokens": estimated_growth_tokens,
         }),
         EventData::PermissionResolved {
             request_id,

@@ -79,11 +79,51 @@ async fn reported_usage_blocks_the_next_request_before_it_is_sent() {
         .unwrap();
 
     let report = block_report(&outcome.status);
-    assert_eq!(report.source, UsageSource::Reported);
+    // A reported baseline plus estimated growth is not a precise report, and is labelled so.
+    assert_eq!(report.source, UsageSource::ReportedPlusEstimate);
     assert_eq!(report.baseline_input_tokens, Some(900));
+    assert!(report.estimated_growth_tokens.unwrap() > 0);
+    assert_eq!(
+        report.projected_tokens,
+        900 + report.estimated_growth_tokens.unwrap()
+    );
     assert_eq!(report.window_tokens, 1000);
     // The second request was never sent: only the first call reached the model.
     assert_eq!(model.requests().len(), 1);
+}
+
+fn request_with(text: &str) -> ModelRequest {
+    ModelRequest {
+        system_prompt: None,
+        messages: vec![Message::user(text)],
+        tools: vec![],
+        settings: serde_json::Value::Null,
+    }
+}
+
+/// The estimator must not undercount non-ASCII text. Chinese is ~3 UTF-8 bytes per
+/// character and 1+ token per character, so the documented lower bound is **one token per
+/// non-ASCII character** (ADR 0015 C2). A bare `bytes/4` would give only 0.75. 3000 Han
+/// characters are 9000 bytes; `9000/4 = 2250`, well below the real count.
+#[test]
+fn chinese_text_estimates_at_least_one_token_per_character() {
+    let estimate = estimate_tokens(&request_with(&"中".repeat(3000)), 4);
+    assert!(
+        estimate >= 3000,
+        "Chinese must not be undercounted: {estimate} < 3000"
+    );
+    assert!(estimate > 9000 / 4, "a plain bytes/4 would have been 2250");
+}
+
+/// The documented ASCII bound: every `bytes_per_token` ASCII bytes counts as at least one
+/// token, rounded up (ADR 0015 C2).
+#[test]
+fn ascii_code_estimates_at_least_bytes_over_four() {
+    let code = "let answer = compute(41, 1);\n".repeat(200);
+    let ascii_bytes = code.len() as u64;
+    let estimate = estimate_tokens(&request_with(&code), 4);
+    let bound = ascii_bytes.div_ceil(4);
+    assert!(estimate >= bound, "{estimate} < {bound}");
 }
 
 /// 2. With no provider usage, the projection is a local estimate and the report says so.

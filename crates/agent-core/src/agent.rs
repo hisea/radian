@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::budget::{BudgetStatus, ContextBudget};
+use crate::budget::{BudgetStatus, ContextBudget, RequestSize};
 use crate::event::{AgentEvent, EventSink};
 use crate::hooks::Hooks;
 use crate::journal::{JournalError, JournalRecord, TranscriptJournal};
@@ -190,10 +190,10 @@ pub struct AgentSession<M: Model, P: ToolProvider, H: Hooks> {
     /// The recording journal this session was silently given, under `journal-selfcheck`.
     #[cfg(feature = "journal-selfcheck")]
     pub(crate) selfcheck: Option<Arc<crate::testing::RecordingJournal>>,
-    /// The last provider-reported `input` and the request bytes that produced it, per
-    /// session (ADR 0015 C1). It survives across turns, so a `Reported` projection has a
-    /// real baseline rather than restarting from an estimate each turn.
-    pub(crate) budget_baseline: Option<(u64, u64)>,
+    /// The last provider-reported `input` and the request size that produced it, per
+    /// session (ADR 0015 C1). It survives across turns, so a baseline projection has a
+    /// real fact rather than restarting from an estimate each turn.
+    pub(crate) budget_baseline: Option<(u64, RequestSize)>,
     /// The guard's last computation, host-visible through [`AgentSession::context_budget_status`].
     pub(crate) budget_status: BudgetStatus,
 }
