@@ -1,0 +1,19 @@
+[package]
+name = "radian-memory"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "ADR 0021 M1 memory storage: append-only JSONL logs, project registry, Markdown view"
+
+[dependencies]
+# Timestamps use the same `chrono` format as `radian-session` (already in the workspace lock).
+chrono = "0.4"
+# The single-writer lock and the fsync discipline mirror `radian-session`.
+fs2 = "0.4"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# The split lock-holding test checks the target log is locked.
+fs2 = "0.4"
