@@ -58,6 +58,27 @@ impl Drop for TtyGuard {
 /// (a panic on a spawned task writes into the alternate screen, where nobody will see it).
 static LAST_PANIC: Mutex<Option<String>> = Mutex::new(None);
 
+/// Whether the terminal cursor is currently shown. `enter` hides it, and the app shows it only
+/// while the input box is editable, so the cursor is never parked in the transcript or over an
+/// approval box.
+static CURSOR_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Shows or hides the terminal cursor, emitting the escape only on a change. The event loop
+/// calls this once per frame with [`crate::App::input_editable`].
+pub fn set_cursor_visible(visible: bool) {
+    use std::sync::atomic::Ordering;
+    if CURSOR_SHOWN.swap(visible, Ordering::SeqCst) == visible {
+        return;
+    }
+    let mut out = io::stdout();
+    let _ = if visible {
+        execute!(out, Show)
+    } else {
+        execute!(out, Hide)
+    };
+    let _ = out.flush();
+}
+
 /// Where a panic is also appended, and the values that must not appear there. Set once the
 /// session id and directory are known (dogfooding D4).
 static PANIC_LOG: Mutex<Option<PanicLog>> = Mutex::new(None);

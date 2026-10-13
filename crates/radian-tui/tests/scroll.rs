@@ -76,7 +76,7 @@ fn scrolling_back_to_the_bottom_resumes_following() {
     render(&mut app);
     assert!(!app.is_following());
 
-    app.on_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    app.on_key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL));
     render(&mut app);
     assert!(app.is_following());
     assert_eq!(app.scroll, app.max_scroll);

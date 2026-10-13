@@ -2607,3 +2607,153 @@ async fn pty_compact_shows_its_result_without_a_model_request() {
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
 }
+
+// ---------- the composer: editing, history, paste and drafts (ADR 0009 Phase 4) ----------
+
+/// The last `user` message's text of the `n`-th recorded request.
+fn last_user_text(server: &MockServer, n: usize) -> String {
+    let body = server.requests()[n].json();
+    body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|message| message["role"] == "user")
+        .and_then(|message| message["content"].as_str())
+        .unwrap_or_default()
+        .to_owned()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_editing_in_the_middle_sends_the_edited_text() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("composer-edit");
+    let server = MockServer::start(vec![text_reply("EDITED-OK")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "edit",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // "helo", move left twice (past `o` and `l`) and insert an `l`.
+    pty.send(b"helo");
+    pty.send(b"\x1b[D\x1b[D");
+    pty.send(b"l");
+    pty.send(b"\r");
+    assert!(pty.wait_for_screen("EDITED-OK", 20), "{}", pty.screen());
+    assert_eq!(last_user_text(&server, 0), "hello");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_multiline_history_and_paste_edit_at_the_cursor() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("composer-multiline");
+    let server = MockServer::start(vec![text_reply("MULTI-OK"), text_reply("PASTE-OK")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "multi",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // `one` Ctrl-J `two`, then Up to the end of the first line and append `!`.
+    pty.send(b"one");
+    pty.send(&[0x0a]); // Ctrl-J
+    pty.send(b"two");
+    pty.send(b"\x1b[A"); // Up: the end of `one`, keeping the column
+    pty.send(b"!");
+    pty.send(b"\r");
+    assert!(pty.wait_for_screen("MULTI-OK", 20), "{}", pty.screen());
+    assert_eq!(last_user_text(&server, 0), "one!\ntwo");
+
+    // Paste inserts at the cursor, not at the end.
+    pty.send(b"ac");
+    pty.send(b"\x1b[D"); // Left
+    pty.send(b"\x1b[200~b\x1b[201~");
+    pty.send(b"\r");
+    assert!(pty.wait_for_screen("PASTE-OK", 20), "{}", pty.screen());
+    assert_eq!(last_user_text(&server, 1), "abc");
+
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_draft_is_written_on_exit_and_restored_by_resume() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("composer-draft");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let draft = sessions.join("draft.draft");
+
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "draft",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"unsent draft");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+    assert_eq!(
+        std::fs::read_to_string(&draft).unwrap(),
+        "unsent draft",
+        "the draft is written on a clean exit"
+    );
+
+    // Resume the same session: the draft is restored into the input box and consumed.
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--resume",
+            "draft",
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("unsent draft", 10),
+        "the draft is not in the input box:\n{}",
+        pty.screen()
+    );
+    assert!(!draft.exists(), "a resume consumes the draft");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}

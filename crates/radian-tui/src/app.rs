@@ -9,6 +9,7 @@ use radian_permissions::{ApprovalOutcome, ApprovalRequest};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::command::{self, PendingCommand};
+use crate::composer::Composer;
 
 /// A tool call waiting for the human. `reply` is the channel the permission layer awaits; the
 /// answer is sent by the UI thread, so the waiting future never blocks it.
@@ -175,7 +176,15 @@ pub struct App {
     pub model_name: String,
     pub session_id: String,
     pub entries: Vec<Entry>,
-    pub input: String,
+    /// The input composer: text plus a cursor (ADR 0009 Phase 4).
+    pub input: Composer,
+    /// This session's submitted inputs, oldest first (sent messages and `/…` commands). Not
+    /// persisted; a resume rebuilds it from the journal's user messages.
+    pub history: Vec<String>,
+    /// `Some(i)` while browsing `history[i]`; `None` while editing the current line.
+    pub history_cursor: Option<usize>,
+    /// The line that was being edited when browsing started, restored by `Down` past the end.
+    pub history_stash: String,
     /// The first visible transcript line. `usize`: a long session passes 65,535 wrapped lines
     /// (dogfooding D9), and a `u16` silently wrapped there.
     pub scroll: usize,
@@ -220,7 +229,10 @@ impl App {
             model_name: model_name.into(),
             session_id: session_id.into(),
             entries: Vec::new(),
-            input: String::new(),
+            input: Composer::new(),
+            history: Vec::new(),
+            history_cursor: None,
+            history_stash: String::new(),
             scroll: 0,
             follow: true,
             turn: TurnState::Idle,
@@ -364,29 +376,50 @@ impl App {
             return None;
         }
         match key.code {
-            KeyCode::Char('c') if ctrl => {
-                if self.turn == TurnState::Running {
-                    Some(Send::Cancel)
-                } else {
-                    self.quit = true;
-                    Some(Send::Quit)
-                }
+            // --- input editing (ADR 0009 Phase 4) ---
+            // Ctrl-A / Ctrl-E: the start / end of the input line.
+            KeyCode::Char('a') if ctrl => {
+                self.input.line_start();
+                None
+            }
+            KeyCode::Char('e') if ctrl => {
+                self.input.line_end();
+                None
+            }
+            // Ctrl-K / Ctrl-U: kill to the end / start of the line.
+            KeyCode::Char('k') if ctrl => {
+                self.input.kill_to_line_end();
+                None
+            }
+            KeyCode::Char('u') if ctrl => {
+                self.input.kill_to_line_start();
+                None
+            }
+            // Ctrl-W: delete the previous word.
+            KeyCode::Char('w') if ctrl => {
+                self.input.delete_word();
+                None
             }
             // Newline: Ctrl-J and Alt-Enter work on every terminal; Shift-Enter needs the
             // enhanced keyboard protocol (see the README's manual-test list).
             KeyCode::Char('j') if ctrl => {
-                self.input.push('\n');
+                self.input.insert_char('\n');
                 None
             }
             KeyCode::Enter if shift || alt => {
-                self.input.push('\n');
+                self.input.insert_char('\n');
                 None
             }
             KeyCode::Enter => {
-                let text = std::mem::take(&mut self.input);
+                let text = std::mem::take(&mut self.input).text();
+                self.history_cursor = None;
+                self.history_stash.clear();
                 if text.trim().is_empty() {
                     return None;
                 }
+                // Every submitted line (messages and `//` escapes and `/…` commands) joins the
+                // session history; browsing edits never change it.
+                self.history.push(text.clone());
                 let trimmed = text.trim();
                 // `//x` is the escape: send it as the ordinary message `/x`.
                 if let Some(escaped) = trimmed.strip_prefix("//") {
@@ -408,12 +441,65 @@ impl App {
                     Some(Send::Followup(text))
                 }
             }
-            KeyCode::Char(c) if !ctrl => {
-                self.input.push(c);
+            // Horizontal movement; Ctrl/Alt makes it word-wise.
+            KeyCode::Left if ctrl || alt => {
+                self.input.word_left();
                 None
             }
-            KeyCode::Backspace => {
-                self.input.pop();
+            KeyCode::Right if ctrl || alt => {
+                self.input.word_right();
+                None
+            }
+            KeyCode::Left => {
+                self.input.left();
+                None
+            }
+            KeyCode::Right => {
+                self.input.right();
+                None
+            }
+            // Home / End are the input line's start / end; Ctrl-Home / Ctrl-End scroll the
+            // transcript to its top / bottom.
+            KeyCode::Home if ctrl => {
+                self.set_scroll(0);
+                None
+            }
+            KeyCode::End if ctrl => {
+                self.scroll_to_bottom();
+                None
+            }
+            KeyCode::Home => {
+                self.input.line_start();
+                None
+            }
+            KeyCode::End => {
+                self.input.line_end();
+                None
+            }
+            // Up / Down browse history from the first / last input line, and move inside a
+            // multi-line input otherwise. Shift-Up / Shift-Down scroll the transcript by one.
+            KeyCode::Up if shift => {
+                self.scroll_by(-1);
+                None
+            }
+            KeyCode::Down if shift => {
+                self.scroll_by(1);
+                None
+            }
+            KeyCode::Up => {
+                if self.input.is_first_line() {
+                    self.history_up();
+                } else {
+                    self.input.up();
+                }
+                None
+            }
+            KeyCode::Down => {
+                if self.input.is_last_line() {
+                    self.history_down();
+                } else {
+                    self.input.down();
+                }
                 None
             }
             KeyCode::PageUp => {
@@ -424,24 +510,28 @@ impl App {
                 self.scroll_by(self.view_height.max(1) as i32);
                 None
             }
-            KeyCode::Up => {
-                self.scroll_by(-1);
+            KeyCode::Delete => {
+                self.input.delete();
                 None
             }
-            KeyCode::Down => {
-                self.scroll_by(1);
+            KeyCode::Backspace => {
+                self.input.backspace();
                 None
             }
-            KeyCode::Home => {
-                self.set_scroll(0);
-                None
-            }
-            KeyCode::End => {
-                self.scroll_to_bottom();
+            KeyCode::Char(c) if !ctrl => {
+                self.input.insert_char(c);
                 None
             }
             KeyCode::Esc => {
-                if self.turn == TurnState::Running {
+                // A non-empty input is cleared first (kept in the history, so `Up` finds it);
+                // an empty one cancels a running turn or quits.
+                if !self.input.is_empty() {
+                    let text = std::mem::take(&mut self.input).text();
+                    self.history.push(text);
+                    self.history_cursor = None;
+                    self.history_stash.clear();
+                    None
+                } else if self.turn == TurnState::Running {
                     Some(Send::Cancel)
                 } else {
                     self.quit = true;
@@ -449,6 +539,59 @@ impl App {
                 }
             }
             _ => None,
+        }
+    }
+
+    /// True while the input box is editable: no approval or command prompt is up, so the
+    /// cursor belongs in the input box and keys type into it.
+    pub fn input_editable(&self) -> bool {
+        self.pending_approval.is_none() && self.pending_command.is_none()
+    }
+
+    /// `Up` on the first input line: the previous history entry. Starts browsing by stashing
+    /// the current line, so `Down` past the newest entry restores it. False with no history.
+    pub fn history_up(&mut self) -> bool {
+        if self.history.is_empty() {
+            return false;
+        }
+        let next = match self.history_cursor {
+            None => {
+                self.history_stash = self.input.text();
+                self.history.len() - 1
+            }
+            Some(0) => return false,
+            Some(i) => i - 1,
+        };
+        self.history_cursor = Some(next);
+        self.input.set_text(&self.history[next]);
+        true
+    }
+
+    /// `Down` on the last input line: the next history entry, or the stashed draft at the end.
+    pub fn history_down(&mut self) -> bool {
+        let Some(i) = self.history_cursor else {
+            return false;
+        };
+        if i + 1 < self.history.len() {
+            self.history_cursor = Some(i + 1);
+            self.input.set_text(&self.history[i + 1]);
+        } else {
+            self.history_cursor = None;
+            let stash = std::mem::take(&mut self.history_stash);
+            self.input.set_text(&stash);
+        }
+        true
+    }
+
+    /// Prefills the history from a resumed session's user messages (ADR 0006 §5.5: the
+    /// source rides on the message). Only what the user sent, in order.
+    pub fn prefill_history(&mut self, messages: &[Message]) {
+        for message in messages {
+            if let Message::User { content, meta } = message
+                && matches!(meta.source, None | Some(agent_core::InputSource::User))
+            {
+                self.history.push(text_of(content));
+            }
         }
     }
 

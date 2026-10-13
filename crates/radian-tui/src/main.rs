@@ -579,6 +579,16 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
     for message in &history {
         app.push_message(message);
     }
+    app.prefill_history(&history);
+    // A draft from a previous exit is restored once, when resuming the same session.
+    if cli.resume.is_some() {
+        let path = radian_tui::composer::draft_path(&dir, &session_id);
+        match radian_tui::composer::take_draft(&path) {
+            Ok(Some(text)) => app.input.set_text(&text),
+            Ok(None) => {}
+            Err(error) => eprintln!("[draft] cannot read {}: {error}", path.display()),
+        }
+    }
     app.entries.push(radian_tui::Entry::new(
         radian_tui::EntryKind::Notice,
         format!("profile: {startup}"),
@@ -631,6 +641,12 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
         &driver_task,
     );
     guard.restore();
+    // The draft is written on every clean exit (normal quit, Ctrl-C, SIGTERM/SIGHUP). A panic
+    // never reaches here, so the panic path does no file I/O.
+    let draft = radian_tui::composer::draft_path(&dir, &session_id);
+    if let Err(error) = radian_tui::composer::save_draft(&draft, &app.input.text()) {
+        eprintln!("[draft] cannot write {}: {error}", draft.display());
+    }
 
     let _ = stop_tx.send(());
     // The driver task is the session: if it died, the failure is the app's failure. A panic
@@ -709,7 +725,7 @@ fn ui_loop(
                         dispatch(send, runtime, inbox, hooks)?;
                     }
                 }
-                Event::Paste(text) => app.input.push_str(&text),
+                Event::Paste(text) => app.input.insert_str(&text),
                 _ => {}
             }
         }
@@ -774,6 +790,8 @@ fn ui_loop(
         terminal
             .draw(|frame| radian_tui::render::draw(frame, app))
             .map_err(|e| e.to_string())?;
+        // The cursor is visible only while the input box is editable.
+        radian_tui::terminal::set_cursor_visible(app.input_editable());
     }
     Ok(())
 }

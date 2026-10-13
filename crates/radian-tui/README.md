@@ -36,16 +36,37 @@ the provider and the model only.
  model │ idle/running/cancelled │ tier │ usage in/out │ mcp servers/tools │ context │ scroll N/M
 ```
 
+The input box is a real composer (cursor editing, multi-line, history). The transcript scrolls
+with PageUp/PageDown, Shift-Up/Shift-Down and Ctrl-Home/Ctrl-End; the bare arrow keys belong to
+the composer.
+
 | Key | Action |
 |---|---|
 | Enter | send. Idle → `Inbox::followup`; while a turn runs → `Inbox::steer` |
 | Ctrl-J (or Shift-Enter / Alt-Enter) | insert a newline in the input |
+| Left / Right | move the cursor one character |
+| Ctrl-Left / Ctrl-Right (or Alt-Left / Alt-Right) | move by one word |
+| Home / End (or Ctrl-A / Ctrl-E) | the input **line's** start / end |
+| Up / Down | on the first / last input line: the previous / next history entry (Down past the newest returns to the draft); otherwise move between the input's lines, keeping the column |
+| Backspace / Delete | delete before / under the cursor |
+| Ctrl-W | delete the previous word |
+| Ctrl-U / Ctrl-K | delete to the line's start / end |
+| PageUp / PageDown | scroll the transcript a page |
+| Shift-Up / Shift-Down | scroll the transcript one line |
+| Ctrl-Home / Ctrl-End | scroll the transcript to its top / bottom |
+| Esc | clear a non-empty input first (the line stays in the history, so `Up` finds it); with an empty input, cancel the running turn / quit |
 | Ctrl-C | cancel the running turn; when idle, quit |
-| Esc | same as Ctrl-C |
-| PageUp / PageDown / Up / Down | scroll the transcript; Home/End jump |
-| bracketed paste | the whole multi-line paste goes into the input box |
+| bracketed paste | inserts at the cursor, `\r\n` normalized to `\n`, and never sends |
 
 Shift-Enter needs a terminal with the enhanced keyboard protocol; Ctrl-J works everywhere.
+
+The history is this session's submitted lines (messages and `/…` commands). A resume rebuilds
+it from the journal's user messages. It is not persisted on its own.
+
+The **draft** is: on a clean exit (quit, Ctrl-C, SIGTERM/SIGHUP) a non-empty input is written to
+`<session-dir>/<session-id>.draft` (0600, atomic temp-file + rename); `--resume` restores it
+once and deletes the file. A panic writes nothing (the panic path does no file I/O). `--list`
+and the index only read `*.jsonl`, so a draft is never a session.
 
 ## Slash commands (`/`)
 
@@ -147,6 +168,14 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
 - **`/help` and a `/memory` write**: type `/help` (a notice, no model request), then
   `/memory forget <id>` — is the `[y/N]` prompt obvious and does `n` feel like a cancel? pty
   automation asserts the notices and the keys, not the readability.
+- **the composer's feel**: type a paragraph and edit in the middle — does Left/Right/Home/End
+  (Ctrl-A/Ctrl-E) land where you expect, does a word jump (Ctrl-Left) feel right, and do
+  Ctrl-W / Ctrl-U / Ctrl-K delete the amount you meant? Press Up/Down at the first/last line:
+  is the history/draft handoff obvious? Try a CJK line and an emoji: does the cursor stay on
+  the character you expect at your width? pty automation asserts the cursor cell, not the feel
+  (ADR 0009).
+- **the growing input box**: paste or type more than ten lines — does the box cap at ten rows
+  and scroll to the cursor, or does the transcript get squeezed uncomfortably?
 - **the status bar at your usual width**: is the tier / usage / mcp / context order readable,
   and does the truncation (`…`) drop what you would have dropped? The pty and `TestBackend`
   tests assert the text and the 60-column rule, not the feel.
@@ -156,7 +185,8 @@ Suggested 3-line manual pass (in a throwaway terminal, not your working one):
 ```sh
 cargo run -p radian-tui -- --model <model> --base-url <...> --session-dir /tmp/radian-tui-manual
 # 1. send a message; while it streams, PageUp and keep sending: the view must not jump back.
-# 2. End; a new reply should follow. Paste a 5-line block and check it lands in the box.
+# 2. Ctrl-End; a new reply should follow. Paste a 5-line block, edit it with the arrows, and
+#    press Ctrl-J then Up: the cursor should move between the input's lines, not the history.
 # 3. drag-select some transcript text and copy it; then Ctrl-C twice and confirm the prompt
 #    is clean (no `%`) and `stty -a` still shows `icanon`.
 ```

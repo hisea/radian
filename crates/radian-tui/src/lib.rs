@@ -6,9 +6,11 @@
 
 pub mod app;
 pub mod command;
+pub mod composer;
 pub mod profile;
 pub mod render;
 pub mod signals;
 pub mod terminal;
 
 pub use app::{App, ApprovalPrompt, Entry, EntryKind, Send, TurnState};
+pub use composer::Composer;
