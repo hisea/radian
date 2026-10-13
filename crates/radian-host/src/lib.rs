@@ -14,6 +14,7 @@ mod errors;
 mod headers;
 mod home;
 mod mcp;
+pub mod memory;
 mod model;
 mod session_id;
 mod tools;

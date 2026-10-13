@@ -60,6 +60,49 @@ built-in session has nothing to release, so it uses the trait's default `close`)
 | `load_mcp_config(path)` | The `--mcp-config` file into `McpServerConfig`s. Unknown fields are rejected (`deny_unknown_fields`), so a typo cannot silently drop a setting, and duplicate server ids fail **before any process starts** — the id prefixes every tool alias. |
 | `resolve_workspace(workspace)` | `None` means the current directory. The path must exist, be a directory, be **readable** (`read_dir`, which is what mounting tools there actually needs) and canonicalize. The messages never mention the sandbox or a `full-access` fallback, so a mistyped path fails as a workspace problem, before the sandbox probe and before any session file exists (dogfooding D1/D2). |
 
+## Memory (ADR 0021 D1/D2/D8)
+
+`radian_host::memory` is the host side of the memory system. It never reads `HOME` (the caller
+passes the root), never touches the network and never starts a process.
+
+`project_identity_key(workspace)` is pure Rust and returns the **git common dir** of the
+repository containing the workspace, so all worktrees of one repository share a `ProjectId`;
+outside a repository it returns the workspace's canonical path. A `.git` **directory** is the
+common dir itself; a `.git` **file** is resolved through its `gitdir:` pointer and then
+`<gitdir>/commondir` (falling back to the documented `<common>/worktrees/<name>` layout), and
+the result is canonicalized. A pointer that cannot be resolved falls back to the workspace.
+
+`MemoryService::open(workspace, root)` owns the `MemoryStore`, the `ProjectRegistry` and the
+workspace's project resolution. Its API is **synchronous** (the store is a single-writer JSONL
+log; every operation is short, and both hosts call it where blocking on an fsync is fine).
+`state()` returns `ProjectState::{Known, Unlinked { identity_key, candidates }}` and **never
+registers**. `create_project()` and `relink()` are the only two ways to link; a Project-scoped
+write on an unlinked workspace is an error that names the candidates, never a silent new
+project. Reads default to Project then Global (`ScopeSelection::Default`); writes default to
+Project (`WriteScope::Project`). Every user command is `Source::User`.
+
+`candidate_name` is the comparison behind "同名仓库": the identity key's final path component,
+except that a git common dir (`.git`) is named by its parent directory — the repository name —
+so a moved repository still matches its old project.
+
+| Guarantee | Test | Where |
+|---|---|---|
+| `.git` as a directory is the identity key | `a_directory_git_is_the_identity_key` | `src/memory/identity.rs` |
+| A subdirectory finds the repository above it | `a_subdirectory_finds_the_repository_above_it` | `src/memory/identity.rs` |
+| Outside a repository the canonical workspace is the key (and a symlink shares it) | `outside_a_repository_the_canonical_workspace_is_the_key` | `src/memory/identity.rs` |
+| A relative `gitdir:`/`commondir` is resolved | `a_relative_gitdir_and_commondir_are_resolved` | `src/memory/identity.rs` |
+| A missing `commondir` falls back to the layout | `a_missing_commondir_falls_back_to_the_layout` | `src/memory/identity.rs` |
+| A real worktree shares the main repository's key, and matches `git rev-parse --git-common-dir` | `a_worktree_and_its_main_repository_share_one_key`, `the_identity_matches_git_common_dir_when_git_is_available` | `src/memory/identity.rs` |
+| An unlinked workspace refuses a Project write and registers nothing | `an_unlinked_workspace_refuses_a_project_write_and_still_reads_global` | `src/memory/service.rs` |
+| A signed-off project write reads back and is `Source::User` | `a_project_write_reads_back_after_creating_the_project` | `src/memory/service.rs` |
+| A worktree resolves to the main repository's project | `a_worktree_resolves_to_the_main_repositories_project` | `src/memory/service.rs` |
+| Relinking after a move finds the old records | `relinking_after_a_move_finds_the_original_records` | `src/memory/service.rs` |
+| A Project record overrides a Global one with the same key | `a_project_record_overrides_a_global_one_with_the_same_key` | `src/memory/service.rs` |
+| User commands check the revision and keep `Source::User` | `user_commands_set_the_user_source_and_check_the_revision` | `src/memory/service.rs` |
+
+End to end through the CLI: `agent-cli/tests/cli.rs` (`memory_…`), including a real
+`git worktree` sharing a project.
+
 ## The startup description
 
 `describe(mode, sandbox, wording) -> (String, String)` returns the two startup lines: what was

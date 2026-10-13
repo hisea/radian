@@ -4504,3 +4504,425 @@ async fn workspace_shell_cannot_read_a_moved_sessions_directory() {
         "the sandbox read the session file: {result}"
     );
 }
+
+// ---------- `agent memory` (ADR 0021 D7/D8) ----------
+
+/// An isolated `agent memory` environment: a workspace, a `RADIAN_HOME`, and a sessions
+/// directory that must stay free of `.jsonl` files.
+struct MemoryEnv {
+    dir: ScratchDir,
+    ws: PathBuf,
+    home: PathBuf,
+    sessions: PathBuf,
+}
+
+impl MemoryEnv {
+    fn new(name: &str) -> Self {
+        let dir = scratch(name);
+        let ws = dir.join("ws");
+        let home = dir.join("radian");
+        let sessions = dir.join("sessions");
+        for path in [&ws, &home, &sessions] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        Self {
+            dir,
+            ws,
+            home,
+            sessions,
+        }
+    }
+
+    /// A second workspace under the same scratch (a moved repository, a worktree).
+    fn workspace(&self, name: &str) -> PathBuf {
+        let path = self.dir.join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    async fn run(&self, args: &[&str]) -> (i32, String, String) {
+        self.run_in(&self.ws, args).await
+    }
+
+    async fn run_in(&self, ws: &Path, args: &[&str]) -> (i32, String, String) {
+        self.run_with_input_in(ws, args, "").await
+    }
+
+    async fn run_with_input(&self, args: &[&str], input: &str) -> (i32, String, String) {
+        self.run_with_input_in(&self.ws, args, input).await
+    }
+
+    async fn run_with_input_in(
+        &self,
+        ws: &Path,
+        args: &[&str],
+        input: &str,
+    ) -> (i32, String, String) {
+        let mut full: Vec<String> = vec![
+            "--workspace".into(),
+            ws.to_string_lossy().into_owned(),
+            "memory".into(),
+        ];
+        full.extend(args.iter().map(|arg| (*arg).to_owned()));
+        let refs: Vec<&str> = full.iter().map(String::as_str).collect();
+        let envs = [
+            ("RADIAN_HOME", self.home.to_str().unwrap()),
+            ("RADIAN_SESSION_DIR", self.sessions.to_str().unwrap()),
+        ];
+        feed_and_wait(spawn_agent(&refs, &envs), input).await
+    }
+
+    /// The log of the only project in this home.
+    fn project_log(&self) -> PathBuf {
+        let projects = self.home.join("memory/projects");
+        let mut dirs: Vec<PathBuf> = std::fs::read_dir(&projects)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        dirs.sort();
+        assert_eq!(dirs.len(), 1, "expected one project, found {dirs:?}");
+        dirs[0].join("log.jsonl")
+    }
+}
+
+/// The id from a line like `added mem-… (revision 1)`.
+fn memory_id(line: &str) -> String {
+    line.split_whitespace()
+        .nth(1)
+        .unwrap_or_else(|| panic!("no id in {line:?}"))
+        .to_owned()
+}
+
+fn git_available() -> bool {
+    std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .expect("run git");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A memory command needs no `--model`, reads no key and creates no session file (ADR 0021
+/// D7). `--workspace` (a top-level flag, before `memory`) is enough.
+#[tokio::test]
+async fn memory_commands_do_not_need_a_model_or_create_a_session() {
+    let env = MemoryEnv::new("mem-no-model");
+    let (code, stdout, stderr) = env.run(&["project"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("identity:"), "{stdout}");
+    assert!(!stderr.contains("--model"), "{stderr}");
+    assert!(
+        jsonl_snapshot(&env.sessions).is_empty(),
+        "a memory command created a session file"
+    );
+}
+
+#[tokio::test]
+async fn memory_add_list_edit_confirm_export_import_show_round_trip() {
+    let env = MemoryEnv::new("mem-roundtrip");
+    let (code, _, stderr) = env.run(&["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+
+    let (code, stdout, stderr) = env
+        .run(&["add", "--key", "style", "tabs over spaces"])
+        .await;
+    assert_eq!(code, 0, "{stderr}");
+    let id = memory_id(&stdout);
+
+    let (code, stdout, stderr) = env.run(&["list"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains(&id), "{stdout}");
+    assert!(stdout.contains("style"), "{stdout}");
+    assert!(
+        stdout.contains("project:"),
+        "default write scope is Project: {stdout}"
+    );
+    assert!(
+        stdout.contains("confirmed"),
+        "a user record is confirmed: {stdout}"
+    );
+
+    let (code, stdout, _) = env.run(&["show", &id]).await;
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("source: user"),
+        "user commands write Source::User: {stdout}"
+    );
+
+    let (code, _, stderr) = env.run(&["edit", &id, "--revision", "1", "revised"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let (code, _, stderr) = env.run(&["confirm", &id, "--revision", "2"]).await;
+    assert_eq!(code, 0, "{stderr}");
+
+    let (code, exported, stderr) = env.run(&["export"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(exported.contains("revised"), "{exported}");
+    let edited = exported.replace("revised", "imported");
+    let (code, stdout, stderr) = env.run_with_input(&["import", "-"], &edited).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stdout.contains("revised 1"),
+        "the import became a revision: {stdout}"
+    );
+
+    let (code, stdout, _) = env.run(&["show", &id]).await;
+    assert_eq!(code, 0);
+    assert!(stdout.contains("imported"), "{stdout}");
+}
+
+#[tokio::test]
+async fn memory_edit_with_the_wrong_revision_exits_one_and_reports_the_current_one() {
+    let env = MemoryEnv::new("mem-conflict");
+    let (_, _, _) = env.run(&["project", "new"]).await;
+    let (_, stdout, _) = env.run(&["add", "v1"]).await;
+    let id = memory_id(&stdout);
+
+    let (code, _, stderr) = env.run(&["edit", &id, "--revision", "99", "v2"]).await;
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("is at revision 1"), "{stderr}");
+    let (_, stdout, _) = env.run(&["show", &id]).await;
+    assert!(stdout.contains("v1"), "{stdout}");
+    assert!(
+        !stdout.contains("v2"),
+        "a conflict writes nothing: {stdout}"
+    );
+}
+
+#[tokio::test]
+async fn memory_forget_needs_confirmation_off_a_terminal() {
+    let env = MemoryEnv::new("mem-forget");
+    let (_, _, _) = env.run(&["project", "new"]).await;
+    let (_, stdout, _) = env.run(&["add", "keep me"]).await;
+    let id = memory_id(&stdout);
+
+    let (code, _, stderr) = env.run(&["forget", &id]).await;
+    assert_eq!(code, 2, "non-tty without --yes refuses: {stderr}");
+    assert!(stderr.contains("--yes"), "{stderr}");
+    let (code, _, _) = env.run(&["show", &id]).await;
+    assert_eq!(code, 0, "the record is still there");
+
+    let (code, stdout, stderr) = env.run(&["forget", "--yes", &id]).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("forgot"), "{stdout}");
+    let (code, _, _) = env.run(&["show", &id]).await;
+    assert_eq!(code, 1, "the record is gone");
+}
+
+#[tokio::test]
+async fn memory_purge_removes_the_forgotten_content_from_the_log() {
+    let env = MemoryEnv::new("mem-purge");
+    let (_, _, _) = env.run(&["project", "new"]).await;
+    let (_, stdout, _) = env.run(&["add", "TOPSECRET-12345"]).await;
+    let id = memory_id(&stdout);
+    let (code, _, stderr) = env.run(&["forget", "--yes", &id]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let log = env.project_log();
+    let before = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        before.contains("TOPSECRET-12345"),
+        "forget keeps the bytes on disk: {before}"
+    );
+
+    let (code, stdout, stderr) = env.run(&["purge", "--yes"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("purged 1"), "{stdout}");
+    let after = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        !after.contains("TOPSECRET-12345"),
+        "purge removes the bytes: {after}"
+    );
+}
+
+#[tokio::test]
+async fn memory_json_output_is_parseable_and_has_stable_fields() {
+    let env = MemoryEnv::new("mem-json");
+    let (_, _, _) = env.run(&["project", "new"]).await;
+    let (_, _, _) = env.run(&["add", "json body"]).await;
+
+    let (code, stdout, stderr) = env.run(&["list", "--json"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let value: Value = serde_json::from_str(stdout.trim()).expect("list --json is JSON");
+    let record = &value.as_array().unwrap()[0];
+    for field in [
+        "id",
+        "scope",
+        "kind",
+        "content",
+        "source",
+        "verification",
+        "status",
+        "created_at",
+        "updated_at",
+        "revision",
+    ] {
+        assert!(record.get(field).is_some(), "missing {field}: {record}");
+    }
+    assert_eq!(record["kind"], "fact");
+    assert_eq!(record["content"], "json body");
+    assert_eq!(record["source"], "user");
+    assert_eq!(record["status"], "active");
+    assert!(
+        record["scope"]["project"].is_string(),
+        "project scope is a tagged value: {record}"
+    );
+
+    let (code, stdout, _) = env.run(&["project", "--json"]).await;
+    assert_eq!(code, 0);
+    let value: Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(value["state"], "linked");
+    assert!(value["project_id"].is_string());
+    assert!(value["identity_key"].is_string());
+}
+
+#[tokio::test]
+async fn memory_unlinked_workspace_refuses_project_writes_and_lists_global() {
+    let env = MemoryEnv::new("mem-unlinked");
+    let (code, _, stderr) = env.run(&["add", "--global", "a global note"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let (code, stdout, stderr) = env.run(&["list"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("a global note"), "{stdout}");
+
+    let (code, _, stderr) = env.run(&["add", "a project note"]).await;
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("not linked"), "{stderr}");
+    assert!(stderr.contains("--global"), "{stderr}");
+    assert!(stderr.contains("relink"), "{stderr}");
+    assert!(
+        !env.home.join("memory/projects").exists(),
+        "a refused Project write created a project directory"
+    );
+
+    let (code, _, _) = env.run(&["list", "--project"]).await;
+    assert_eq!(code, 1, "a Project-only read needs a project");
+}
+
+#[tokio::test]
+async fn memory_relink_after_a_move_finds_the_original_records() {
+    let env = MemoryEnv::new("mem-relink");
+    let first = env.workspace("here/radian");
+    let (code, _, stderr) = env.run_in(&first, &["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let (_, _, stderr) = env.run_in(&first, &["add", "kept"]).await;
+    assert_eq!(stderr, "");
+    let (_, project_out, _) = env.run_in(&first, &["project"]).await;
+    let project = project_out
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("state: linked to "))
+        .expect("a linked project")
+        .to_owned();
+
+    let second = env.workspace("moved/radian");
+    let (code, stdout, stderr) = env.run_in(&second, &["project"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("not linked"), "{stdout}");
+    assert!(
+        stdout.contains(&project),
+        "the candidate is listed: {stdout}"
+    );
+    let (code, _, _) = env.run_in(&second, &["add", "nope"]).await;
+    assert_eq!(code, 1);
+
+    let (code, _, stderr) = env.run_in(&second, &["relink", &project]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let (code, stdout, stderr) = env.run_in(&second, &["list"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("kept"), "{stdout}");
+}
+
+/// A real `git worktree` resolves to the main repository's project (ADR 0021 D2). Skipped
+/// without `git`, with the reason printed.
+#[tokio::test]
+async fn memory_project_is_shared_with_a_git_worktree() {
+    if !git_available() {
+        eprintln!("skipping: git is not on PATH");
+        return;
+    }
+    let env = MemoryEnv::new("mem-worktree");
+    let main = env.workspace("main");
+    git(&main, &["init", "-q"]);
+    git(&main, &["config", "user.email", "t@example.invalid"]);
+    git(&main, &["config", "user.name", "t"]);
+    std::fs::write(main.join("a.txt"), "hi\n").unwrap();
+    git(&main, &["add", "."]);
+    git(&main, &["commit", "-qm", "init"]);
+    let wt = env.workspace("wt");
+    std::fs::remove_dir(&wt).unwrap();
+    git(
+        &main,
+        &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "wtb"],
+    );
+
+    let (code, _, stderr) = env.run_in(&main, &["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let (_, _, _) = env.run_in(&main, &["add", "shared"]).await;
+    let (code, stdout, stderr) = env.run_in(&wt, &["list"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stdout.contains("shared"),
+        "a worktree shares the main repository's project: {stdout}"
+    );
+}
+
+async fn linked_project(env: &MemoryEnv, ws: &Path) -> String {
+    let (code, out, err) = env.run_in(ws, &["project"]).await;
+    assert_eq!(code, 0, "{err}");
+    out.lines()
+        .find_map(|line| line.trim().strip_prefix("state: linked to "))
+        .unwrap_or_else(|| panic!("not linked: {out}"))
+        .to_owned()
+}
+
+#[tokio::test]
+async fn memory_split_and_merge_move_records_between_projects() {
+    let env = MemoryEnv::new("mem-split");
+    let a = env.workspace("a");
+    let b = env.workspace("b");
+    let (code, _, stderr) = env.run_in(&a, &["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let (code, _, stderr) = env.run_in(&b, &["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let (_, out, _) = env.run_in(&a, &["add", "moved record"]).await;
+    let id = memory_id(&out);
+    let project_a = linked_project(&env, &a).await;
+    let project_b = linked_project(&env, &b).await;
+
+    // `split` needs confirmation: off a terminal, without --yes it refuses and moves nothing.
+    let (code, _, stderr) = env
+        .run_in(&a, &["split", &project_a, &project_b, &id])
+        .await;
+    assert_eq!(code, 2, "{stderr}");
+    let (_, out, _) = env.run_in(&b, &["list"]).await;
+    assert!(
+        !out.contains("moved record"),
+        "the refused split moved it: {out}"
+    );
+
+    let (code, out, stderr) = env
+        .run_in(&a, &["split", "--yes", &project_a, &project_b, &id])
+        .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(out.contains("moved"), "{out}");
+    let (_, out, _) = env.run_in(&b, &["list"]).await;
+    assert!(out.contains("moved record"), "the target has it: {out}");
+
+    // `merge` the same project back, exercising the second move command.
+    let (code, out, stderr) = env
+        .run_in(&b, &["merge", "--yes", &project_a, &project_b])
+        .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(out.contains("moved"), "{out}");
+    let (_, out, _) = env.run_in(&a, &["list"]).await;
+    assert!(out.contains("moved record"), "{out}");
+}

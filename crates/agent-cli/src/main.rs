@@ -11,7 +11,7 @@ mod profile;
 mod tools;
 
 use std::collections::HashMap;
-use std::io::{IsTerminal, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -28,10 +28,16 @@ use agent_core::{
 use agent_extensions::{McpServerConfig, McpToolProvider};
 use clap::Parser;
 use radian_coding::CodingTools;
+use radian_host::memory::{
+    MemoryService, MemoryServiceError, ProjectState, ScopeSelection, WriteScope,
+};
 use radian_host::{
     DEFAULT_MAX_TOKENS, HostModel, ModelArgs, Provider, SESSION_PLACEHOLDER, Thinking, build_model,
     check_provider_flags, generate_session_id, load_mcp_config, parse_headers, resolve_workspace,
     validate_session_id,
+};
+use radian_memory::{
+    ImportReport, Kind, MemoryId, MemoryRecord, MoveReport, ProjectId, Scope, SearchQuery,
 };
 use radian_permissions::{Approver, PermissionHooks};
 use radian_runtime::{CancelCause, Driver, DriverError, Inbox, InboxError};
@@ -55,7 +61,11 @@ const INBOX_CAPACITY: usize = 64;
 #[command(
     name = "agent",
     version,
-    about = "Chat with a model, with optional MCP tools"
+    about = "Chat with a model, with optional MCP tools",
+    // A subcommand (`agent memory …`) is a mode of its own, like `--list`: it must not need
+    // `--model`. `required_unless_present_any` cannot name a subcommand, so this attribute
+    // lifts the requirement whenever one is used.
+    subcommand_negates_reqs = true
 )]
 struct Cli {
     /// Model name sent to the API. Required to run a conversation (`-p` or interactive); the
@@ -164,6 +174,12 @@ struct Cli {
     )]
     search: Option<String>,
 
+    /// Manage durable memory (ADR 0021): `agent memory --help`. Needs no `--model`, reads no
+    /// key, creates no session file and never touches the network. Memory is shared across
+    /// sessions and resolved per project (a git repository, shared by its worktrees).
+    #[command(subcommand)]
+    memory: Option<Command>,
+
     /// Export format: `markdown` (the readable transcript) or `json` (the event document).
     #[arg(long, value_name = "FORMAT", value_enum, default_value_t = ExportFormat::Markdown, requires = "export")]
     format: ExportFormat,
@@ -240,6 +256,585 @@ enum ExportFormat {
     Json,
 }
 
+/// The top-level subcommands. `agent` also has flag-only modes (`--list`, `--export`,
+/// `--search`); those stay flags for compatibility. The subcommand name comes from the
+/// variant, not the field that stores it.
+#[derive(clap::Subcommand, Debug)]
+enum Command {
+    /// Manage durable memory (ADR 0021 D7).
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommand,
+    },
+}
+
+/// `agent memory <command>` (ADR 0021 D7): the user commands for durable memory. Every one is
+/// `Source::User`, and none of them needs a model, a key or a session file.
+#[derive(clap::Subcommand, Debug)]
+enum MemoryCommand {
+    /// List records (Active only unless --all). Project first, then Global.
+    List {
+        #[arg(long, conflicts_with = "project")]
+        global: bool,
+        #[arg(long, conflicts_with = "global")]
+        project: bool,
+        /// Include archived records.
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Search records by keyword (every word must match).
+    Search {
+        #[arg(long, conflicts_with = "project")]
+        global: bool,
+        #[arg(long, conflicts_with = "global")]
+        project: bool,
+        #[arg(long)]
+        json: bool,
+        #[arg(required = true, num_args = 1.., value_name = "WORD")]
+        words: Vec<String>,
+    },
+    /// Show one record by id.
+    Show {
+        #[arg(long, conflicts_with = "project")]
+        global: bool,
+        #[arg(long, conflicts_with = "global")]
+        project: bool,
+        #[arg(long)]
+        json: bool,
+        id: String,
+    },
+    /// Add a record (Project by default).
+    Add {
+        #[arg(long)]
+        global: bool,
+        #[arg(long, value_parser = parse_kind, default_value = "fact")]
+        kind: Kind,
+        #[arg(long)]
+        key: Option<String>,
+        /// The content, or `-` to read it from stdin.
+        content: String,
+    },
+    /// Change a record's content (needs the current revision).
+    Edit {
+        #[arg(long)]
+        global: bool,
+        #[arg(long, required = true)]
+        revision: u64,
+        id: String,
+        content: String,
+    },
+    /// Archive a record: still stored, no longer injected or searched by default.
+    Archive {
+        #[arg(long)]
+        global: bool,
+        #[arg(long, required = true)]
+        revision: u64,
+        id: String,
+    },
+    /// Restore an archived record.
+    Restore {
+        #[arg(long)]
+        global: bool,
+        #[arg(long, required = true)]
+        revision: u64,
+        id: String,
+    },
+    /// Forget a record: gone from every view and never resurrected by a rebuild (the bytes
+    /// remain until a purge).
+    Forget {
+        #[arg(long)]
+        global: bool,
+        #[arg(long)]
+        yes: bool,
+        id: String,
+    },
+    /// Physically rewrite the log, removing forgotten content (needs confirmation).
+    Purge {
+        #[arg(long, conflicts_with = "project")]
+        global: bool,
+        #[arg(long, conflicts_with = "global")]
+        project: bool,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Confirm a record (keeps its original source).
+    Confirm {
+        #[arg(long)]
+        global: bool,
+        #[arg(long, required = true)]
+        revision: u64,
+        id: String,
+    },
+    /// Print one scope as editable Markdown.
+    Export {
+        #[arg(long, conflicts_with = "project")]
+        global: bool,
+        #[arg(long, conflicts_with = "global")]
+        project: bool,
+    },
+    /// Import an edited Markdown export. `-` reads it from stdin.
+    Import {
+        #[arg(long, conflicts_with = "project")]
+        global: bool,
+        #[arg(long, conflicts_with = "global")]
+        project: bool,
+        source: String,
+    },
+    /// Show this workspace's identity key and project state, or `project new` to register it.
+    Project {
+        #[arg(long)]
+        json: bool,
+        #[command(subcommand)]
+        command: Option<ProjectCommand>,
+    },
+    /// Attach this workspace's identity key to an existing project.
+    Relink { project_id: String },
+    /// Move records between projects (needs confirmation).
+    Split {
+        #[arg(long)]
+        yes: bool,
+        from: String,
+        to: String,
+        #[arg(required = true, num_args = 1.., value_name = "ID")]
+        ids: Vec<String>,
+    },
+    /// Merge one project into another, reporting key conflicts (needs confirmation).
+    Merge {
+        #[arg(long)]
+        yes: bool,
+        into: String,
+        from: String,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum ProjectCommand {
+    /// Register a new project for this workspace's identity key.
+    New,
+}
+
+/// A `memory` command failure: one stderr line and an exit code (ADR 0021 D7: 2 for a usage
+/// or refusal error, 1 for a conflict or a missing record).
+struct MemoryCliError {
+    code: i32,
+    message: String,
+}
+
+impl MemoryCliError {
+    fn failure(message: impl Into<String>) -> Self {
+        Self {
+            code: 1,
+            message: message.into(),
+        }
+    }
+
+    fn usage(message: impl Into<String>) -> Self {
+        Self {
+            code: USAGE_ERROR,
+            message: message.into(),
+        }
+    }
+}
+
+impl From<MemoryServiceError> for MemoryCliError {
+    fn from(error: MemoryServiceError) -> Self {
+        MemoryCliError::failure(error.to_string())
+    }
+}
+
+/// The `--kind` grammar. A value this version does not know is a usage error, not a silently
+/// stored `Unknown` (the user typed it; the store's forward compatibility is for *other*
+/// writers, ADR 0021 D4).
+fn parse_kind(raw: &str) -> Result<Kind, String> {
+    match raw {
+        "preference" => Ok(Kind::Preference),
+        "decision" => Ok(Kind::Decision),
+        "fact" => Ok(Kind::Fact),
+        "lesson" => Ok(Kind::Lesson),
+        other => Err(format!(
+            "unknown kind {other:?}; expected preference|decision|fact|lesson"
+        )),
+    }
+}
+
+fn selection(global: bool, project: bool) -> ScopeSelection {
+    if global {
+        ScopeSelection::GlobalOnly
+    } else if project {
+        ScopeSelection::ProjectOnly
+    } else {
+        ScopeSelection::Default
+    }
+}
+
+fn write_scope(global: bool) -> WriteScope {
+    if global {
+        WriteScope::Global
+    } else {
+        WriteScope::Project
+    }
+}
+
+fn run_memory(cli: &Cli, command: MemoryCommand) -> i32 {
+    match memory_command(cli, command) {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("agent: {}", error.message);
+            error.code
+        }
+    }
+}
+
+/// Runs one `agent memory` subcommand. Deliberately before `setup`: no model, no key, no
+/// session file, no network.
+fn memory_command(cli: &Cli, command: MemoryCommand) -> Result<(), MemoryCliError> {
+    let workspace = resolve_workspace(cli.workspace.as_deref().map(std::path::Path::new))
+        .map_err(MemoryCliError::usage)?;
+    let root = radian_host::memory_dir()
+        .ok_or_else(|| MemoryCliError::usage("no RADIAN_HOME or HOME to place memory under"))?;
+    let service = MemoryService::open(&workspace, root);
+
+    match command {
+        MemoryCommand::List {
+            global,
+            project,
+            all,
+            json,
+        } => {
+            let records = service.list(selection(global, project), all)?;
+            if json {
+                print_json(&records)?;
+            } else {
+                for record in &records {
+                    print_list_row(record);
+                }
+            }
+        }
+        MemoryCommand::Search {
+            global,
+            project,
+            json,
+            words,
+        } => {
+            let query = SearchQuery {
+                text: Some(words.join(" ")),
+                key: None,
+                include_archived: false,
+            };
+            let records = service.search(selection(global, project), &query)?;
+            if json {
+                print_json(&records)?;
+            } else {
+                for record in &records {
+                    print_list_row(record);
+                }
+            }
+        }
+        MemoryCommand::Show {
+            global,
+            project,
+            json,
+            id,
+        } => {
+            let record = service.get(selection(global, project), &MemoryId(id))?;
+            if json {
+                print_json(&record)?;
+            } else {
+                print_record(&record);
+            }
+        }
+        MemoryCommand::Add {
+            global,
+            kind,
+            key,
+            content,
+        } => {
+            let content = read_content(&content)?;
+            let record = service.add(write_scope(global), kind, key, content)?;
+            println!("added {} (revision {})", record.id, record.revision);
+        }
+        MemoryCommand::Edit {
+            global,
+            revision,
+            id,
+            content,
+        } => {
+            let content = read_content(&content)?;
+            let record = service.edit(write_scope(global), &MemoryId(id), revision, content)?;
+            println!("revised {} (revision {})", record.id, record.revision);
+        }
+        MemoryCommand::Archive {
+            global,
+            revision,
+            id,
+        } => {
+            let record = service.archive(write_scope(global), &MemoryId(id), revision)?;
+            println!("archived {} (revision {})", record.id, record.revision);
+        }
+        MemoryCommand::Restore {
+            global,
+            revision,
+            id,
+        } => {
+            let record = service.restore(write_scope(global), &MemoryId(id), revision)?;
+            println!("restored {} (revision {})", record.id, record.revision);
+        }
+        MemoryCommand::Forget { global, yes, id } => {
+            confirm_or_refuse(&format!("forget {id}"), yes)?;
+            service.forget(write_scope(global), &MemoryId(id.clone()))?;
+            println!("forgot {id}");
+        }
+        MemoryCommand::Purge { global, yes, .. } => {
+            confirm_or_refuse(
+                "purge this scope: rewrite the log and remove forgotten content",
+                yes,
+            )?;
+            let removed = service.purge(write_scope(global))?;
+            println!("purged {removed} record(s)");
+        }
+        MemoryCommand::Confirm {
+            global,
+            revision,
+            id,
+        } => {
+            let record = service.confirm(write_scope(global), &MemoryId(id), revision)?;
+            println!("confirmed {} (revision {})", record.id, record.revision);
+        }
+        MemoryCommand::Export { global, .. } => {
+            print!("{}", service.export(write_scope(global))?);
+        }
+        MemoryCommand::Import { global, source, .. } => {
+            let text = read_import(&source)?;
+            let report = service.import(write_scope(global), &text)?;
+            print_import_report(&report);
+        }
+        MemoryCommand::Project { json, command } => match command {
+            Some(ProjectCommand::New) => {
+                let project = service.create_project()?;
+                println!("project {project} now owns {}", service.identity_key());
+            }
+            None => print_project(&service, json)?,
+        },
+        MemoryCommand::Relink { project_id } => {
+            service.relink(&ProjectId(project_id.clone()))?;
+            println!("relinked {} to {project_id}", service.identity_key());
+        }
+        MemoryCommand::Split { yes, from, to, ids } => {
+            confirm_or_refuse(
+                &format!("move {} record(s) from {from} to {to}", ids.len()),
+                yes,
+            )?;
+            let ids: Vec<MemoryId> = ids.into_iter().map(MemoryId).collect();
+            let report = service.split(&ProjectId(from), &ids, &ProjectId(to))?;
+            print_move_report(&report);
+        }
+        MemoryCommand::Merge { yes, into, from } => {
+            confirm_or_refuse(&format!("merge {from} into {into}"), yes)?;
+            let report = service.merge(&ProjectId(into), &ProjectId(from))?;
+            print_move_report(&report);
+        }
+    }
+    Ok(())
+}
+
+/// `-` reads the content from stdin. For `add`/`edit` the trailing newline a shell pipe adds
+/// is dropped; the rest of the text is kept verbatim.
+fn read_content(raw: &str) -> Result<String, MemoryCliError> {
+    if raw == "-" {
+        let mut text = String::new();
+        std::io::stdin()
+            .read_to_string(&mut text)
+            .map_err(|e| MemoryCliError::failure(format!("cannot read stdin: {e}")))?;
+        Ok(trim_trailing_newlines(text))
+    } else {
+        Ok(trim_trailing_newlines(raw.to_owned()))
+    }
+}
+
+/// `-` reads a whole Markdown document from stdin (no trimming: the parser needs the format).
+fn read_import(source: &str) -> Result<String, MemoryCliError> {
+    if source == "-" {
+        let mut text = String::new();
+        std::io::stdin()
+            .read_to_string(&mut text)
+            .map_err(|e| MemoryCliError::failure(format!("cannot read stdin: {e}")))?;
+        Ok(text)
+    } else {
+        std::fs::read_to_string(source)
+            .map_err(|e| MemoryCliError::failure(format!("cannot read {source}: {e}")))
+    }
+}
+
+fn trim_trailing_newlines(mut text: String) -> String {
+    while text.ends_with('\n') || text.ends_with('\r') {
+        text.pop();
+    }
+    text
+}
+
+/// The confirmation for `forget`/`purge`/`split`/`merge` (ADR 0021 D7). `--yes` skips it; a
+/// terminal asks; without a terminal and without `--yes` the command refuses (exit 2) and does
+/// nothing.
+fn confirm_or_refuse(message: &str, yes: bool) -> Result<(), MemoryCliError> {
+    if yes {
+        return Ok(());
+    }
+    if !std::io::stdin().is_terminal() {
+        return Err(MemoryCliError::usage(format!(
+            "{message}: refusing without a terminal; pass --yes to confirm"
+        )));
+    }
+    eprint!("{message} [y/N] ");
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(|e| MemoryCliError::failure(format!("cannot read the answer: {e}")))?;
+    if answer.trim().eq_ignore_ascii_case("y") || answer.trim().eq_ignore_ascii_case("yes") {
+        Ok(())
+    } else {
+        Err(MemoryCliError::failure("cancelled"))
+    }
+}
+
+fn print_json<T: serde::Serialize>(value: &T) -> Result<(), MemoryCliError> {
+    let text = serde_json::to_string(value)
+        .map_err(|e| MemoryCliError::failure(format!("cannot render JSON: {e}")))?;
+    println!("{text}");
+    Ok(())
+}
+
+fn scope_label(scope: &Scope) -> String {
+    match scope {
+        Scope::Global => "global".to_owned(),
+        Scope::Project(project) => format!("project:{project}"),
+    }
+}
+
+/// One record as a tab-separated row: id, revision, scope, kind, key, status, verification,
+/// one-line content. No header, like the session `--list`.
+fn print_list_row(record: &MemoryRecord) {
+    println!(
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        record.id,
+        record.revision,
+        scope_label(&record.scope),
+        record.kind.as_str(),
+        record.key.as_deref().unwrap_or("-"),
+        record.status.as_str(),
+        if record.verification.is_confirmed() {
+            "confirmed"
+        } else {
+            "unverified"
+        },
+        one_line(&record.content),
+    );
+}
+
+fn print_record(record: &MemoryRecord) {
+    println!("id: {}", record.id);
+    println!("scope: {}", scope_label(&record.scope));
+    println!("kind: {}", record.kind.as_str());
+    println!("key: {}", record.key.as_deref().unwrap_or("-"));
+    println!("source: {}", record.source.as_str());
+    println!(
+        "verification: {}",
+        if record.verification.is_confirmed() {
+            "confirmed"
+        } else {
+            "unverified"
+        }
+    );
+    println!("status: {}", record.status.as_str());
+    println!("created: {}", record.created_at);
+    println!("updated: {}", record.updated_at);
+    println!("revision: {}", record.revision);
+    println!("---");
+    println!("{}", record.content);
+}
+
+fn print_project(service: &MemoryService, json: bool) -> Result<(), MemoryCliError> {
+    let state = service.state()?;
+    if json {
+        let (label, project, candidates) = match &state {
+            ProjectState::Known(project) => ("linked", Some(project.as_str()), Vec::new()),
+            ProjectState::Unlinked {
+                identity_key: _,
+                candidates,
+            } => (
+                "unlinked",
+                None,
+                candidates.iter().map(ProjectId::as_str).collect(),
+            ),
+        };
+        print_json(&serde_json::json!({
+            "workspace": service.workspace().to_string_lossy(),
+            "identity_key": service.identity_key(),
+            "state": label,
+            "project_id": project,
+            "candidates": candidates,
+        }))?;
+        return Ok(());
+    }
+    println!("workspace: {}", service.workspace().display());
+    println!("identity: {}", service.identity_key());
+    match &state {
+        ProjectState::Known(project) => println!("state: linked to {project}"),
+        ProjectState::Unlinked { candidates, .. } => {
+            println!("state: not linked");
+            if candidates.is_empty() {
+                println!("candidates: (none)");
+            } else {
+                let list: Vec<String> = candidates.iter().map(ProjectId::to_string).collect();
+                println!("candidates: {}", list.join(" "));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_move_report(report: &MoveReport) {
+    for id in &report.moved {
+        println!("moved {id}");
+    }
+    for conflict in &report.conflicts {
+        println!(
+            "conflict: {} (key {:?}) is held in the target by {} at revision {}",
+            conflict.id, conflict.key, conflict.held_by, conflict.held_revision
+        );
+    }
+    for id in &report.missing {
+        println!("missing {id}");
+    }
+    if report.moved.is_empty() && report.conflicts.is_empty() && report.missing.is_empty() {
+        println!("nothing to do");
+    }
+}
+
+fn print_import_report(report: &ImportReport) {
+    println!(
+        "created {} revised {} conflicts {} rejections {}",
+        report.created.len(),
+        report.revised.len(),
+        report.conflicts.len(),
+        report.rejections.len(),
+    );
+    for conflict in &report.conflicts {
+        println!(
+            "conflict {}: expected revision {} but found {}",
+            conflict.id, conflict.expected, conflict.found
+        );
+    }
+    for rejection in &report.rejections {
+        println!(
+            "rejected {}: {} changed from {:?} to {:?}",
+            rejection.id, rejection.field, rejection.stored, rejection.imported
+        );
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -254,7 +849,24 @@ fn main() {
     std::process::exit(code);
 }
 
-async fn run(cli: Cli) -> i32 {
+async fn run(mut cli: Cli) -> i32 {
+    // `agent memory` is its own mode: no model, no key, no session file, no network. It is
+    // handled before `setup`, like the session-management commands below.
+    if cli.memory.is_some() {
+        if cli.list
+            || cli.export.is_some()
+            || cli.search.is_some()
+            || cli.prompt.is_some()
+            || cli.resume.is_some()
+        {
+            eprintln!("agent: `memory` cannot be combined with a session command");
+            return USAGE_ERROR;
+        }
+        match cli.memory.take() {
+            Some(Command::Memory { command }) => return run_memory(&cli, command),
+            None => unreachable!("checked just above"),
+        }
+    }
     if cli.list {
         return match list_sessions(&cli) {
             Ok(()) => 0,
