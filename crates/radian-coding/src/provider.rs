@@ -30,7 +30,10 @@ pub struct Limits {
     pub max_git_output_bytes: usize,
     /// How long a git invocation may run.
     pub git_timeout: Duration,
-    /// Combined stdout+stderr cap for one `shell` call.
+    /// `shell`'s output budget **per stream** when the model does not give one. Aligned with
+    /// `default_read_bytes`: one tool result should not be able to dominate the context.
+    pub default_shell_output_bytes: usize,
+    /// Hard cap on a model-supplied `shell` `max_output_bytes`, per stream.
     pub max_shell_output_bytes: usize,
     /// `shell`'s timeout when the model does not give one.
     pub default_shell_timeout: Duration,
@@ -49,10 +52,12 @@ impl Default for Limits {
             default_list_entries: 500,
             max_git_output_bytes: 1 << 20, // 1 MiB
             git_timeout: Duration::from_secs(10),
-            // 256 KiB combined is four times the default `read` budget: enough for a build
-            // or test log tail, small enough that it cannot dominate the model context. A
-            // truncated run can be repeated with a narrower command.
-            max_shell_output_bytes: 256 << 10,
+            // Per stream, and aligned with `read`'s default budget: 64 KiB is enough for the
+            // interesting part of a build or test log, and a truncated run can be repeated
+            // with a narrower command or a larger `max_output_bytes`.
+            default_shell_output_bytes: 64 << 10,
+            // The model may ask for more, up to `read`'s own hard cap.
+            max_shell_output_bytes: 1 << 20,
             default_shell_timeout: Duration::from_secs(60),
             max_shell_timeout: Duration::from_secs(600),
         }

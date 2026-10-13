@@ -24,7 +24,6 @@
 use std::io::Read;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -71,9 +70,12 @@ pub(crate) fn spec(mode: SandboxMode) -> ToolSpec {
     ToolSpec {
         name: "shell".into(),
         description: format!(
-            "Run a shell command with `/bin/sh -c`. {confinement} Output is capped and the \
-             process group is killed on timeout or cancellation. Use `cwd` (workspace-\
-             relative) to run somewhere other than the workspace root."
+            "Run a shell command with `/bin/sh -c`. {confinement} Each stream's output is \
+             capped: past the budget the start and the end are kept and the middle is \
+             replaced by a marker naming the discarded bytes (the end is always kept, \
+             because that is where a failing command's error is). The process group is \
+             killed on timeout or cancellation. Use `cwd` (workspace-relative) to run \
+             somewhere other than the workspace root."
         ),
         input_schema: json!({
             "type": "object",
@@ -93,6 +95,15 @@ pub(crate) fn spec(mode: SandboxMode) -> ToolSpec {
                     "description": "Workspace-relative directory to run in (default: the \
                                     workspace root). Absolute paths, `..` and symlinks out \
                                     of the workspace are refused."
+                },
+                "max_output_bytes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Output budget per stream (stdout and stderr each). Over \
+                                    that, the start and the end are kept and the middle is \
+                                    replaced by a marker; the end is always kept, because \
+                                    that is where a failing command's error is. Clamped to \
+                                    the configured maximum."
                 }
             },
             "required": ["command"],
@@ -108,6 +119,8 @@ struct ShellArgs {
     command: String,
     timeout_secs: Option<u64>,
     cwd: Option<String>,
+    /// Per-stream output budget; clamped to the hard cap.
+    max_output_bytes: Option<usize>,
 }
 
 pub(crate) async fn run(
@@ -135,8 +148,9 @@ pub(crate) async fn run(
         ));
     }
     let (timeout, clamped) = clamp_timeout(args.timeout_secs, limits);
+    let (output_cap, output_clamped) = clamp_output(args.max_output_bytes, limits);
 
-    let outcome = execute(sandbox, &cwd, &args.command, timeout, limits, cx).await?;
+    let outcome = execute(sandbox, &cwd, &args.command, timeout, output_cap, cx).await?;
     Ok(report(
         &args.command,
         root.root(),
@@ -144,6 +158,8 @@ pub(crate) async fn run(
         sandbox.mode(),
         timeout,
         clamped,
+        output_cap,
+        output_clamped,
         &outcome,
     ))
 }
@@ -159,12 +175,22 @@ fn clamp_timeout(requested: Option<u64>, limits: &Limits) -> (Duration, bool) {
     }
 }
 
+/// The per-stream output budget, mirroring `read`'s `max_bytes`: the model may ask for more,
+/// inside the hard cap; the default matches `read`'s default budget.
+fn clamp_output(requested: Option<usize>, limits: &Limits) -> (usize, bool) {
+    let max = limits.max_shell_output_bytes.max(1);
+    match requested {
+        Some(bytes) => (bytes.clamp(1, max), bytes > max),
+        None => (limits.default_shell_output_bytes.clamp(1, max), false),
+    }
+}
+
 async fn execute(
     sandbox: &Sandbox,
     cwd: &Path,
     command: &str,
     timeout: Duration,
-    limits: &Limits,
+    output_cap: usize,
     cx: &ToolContext<'_>,
 ) -> Result<Outcome, ToolFailure> {
     let mut process = sandbox
@@ -190,13 +216,12 @@ async fn execute(
     }
 
     let started = Instant::now();
-    let mut supervised =
-        Supervised::spawn(&mut process, limits.max_shell_output_bytes).map_err(|e| {
-            fail(
-                "shell_spawn_failed",
-                format!("could not start the command: {e}"),
-            )
-        })?;
+    let mut supervised = Supervised::spawn(&mut process, output_cap).map_err(|e| {
+        fail(
+            "shell_spawn_failed",
+            format!("could not start the command: {e}"),
+        )
+    })?;
 
     let mut timed_out = false;
     let mut cancelled = false;
@@ -227,8 +252,42 @@ async fn execute(
 
 #[derive(Default)]
 struct Capped {
-    bytes: Vec<u8>,
-    discarded: u64,
+    /// The first part of the stream, kept verbatim.
+    head: Vec<u8>,
+    /// The last part of the stream. A ring in spirit: it is trimmed as it grows, so memory
+    /// never depends on how much the command printed.
+    tail: Vec<u8>,
+    /// Every byte this stream produced, kept or not.
+    total: u64,
+}
+
+impl Capped {
+    /// Bytes that are in neither `head` nor `tail`.
+    fn discarded(&self) -> u64 {
+        self.total - (self.head.len() + self.tail.len()) as u64
+    }
+
+    fn is_truncated(&self) -> bool {
+        self.discarded() > 0
+    }
+
+    /// What the model sees: the head, a marker naming the discarded bytes, then the tail.
+    /// The tail is what a failing build's error message is almost always in, so it is kept
+    /// deliberately larger than the head.
+    fn render(&self) -> String {
+        if !self.is_truncated() {
+            let mut bytes = self.head.clone();
+            bytes.extend_from_slice(&self.tail);
+            return String::from_utf8_lossy(&bytes).into_owned();
+        }
+        let mut out = String::from_utf8_lossy(&self.head).into_owned();
+        out.push_str(&format!(
+            "\n[... {} bytes discarded; showing the start and the end ...]\n",
+            self.discarded()
+        ));
+        out.push_str(&String::from_utf8_lossy(&self.tail));
+        out
+    }
 }
 
 struct Outcome {
@@ -285,21 +344,15 @@ impl Supervised {
         let stdout = child.stdout.take().expect("stdout was piped");
         let stderr = child.stderr.take().expect("stderr was piped");
 
-        // stdout and stderr share one budget, so the combined output is bounded.
-        let budget = Arc::new(AtomicUsize::new(cap));
+        // Each stream gets its own budget: a flooding stdout must not squeeze out the one
+        // stderr line that explains the failure.
         let (out_tx, out_rx) = mpsc::channel();
         let (err_tx, err_rx) = mpsc::channel();
-        thread::spawn({
-            let budget = Arc::clone(&budget);
-            move || {
-                let _ = out_tx.send(read_capped(stdout, &budget));
-            }
+        thread::spawn(move || {
+            let _ = out_tx.send(read_capped(stdout, cap));
         });
-        thread::spawn({
-            let budget = Arc::clone(&budget);
-            move || {
-                let _ = err_tx.send(read_capped(stderr, &budget));
-            }
+        thread::spawn(move || {
+            let _ = err_tx.send(read_capped(stderr, cap));
         });
 
         let reaped = Arc::new(Mutex::new(false));
@@ -382,38 +435,42 @@ fn collect(rx: &mpsc::Receiver<Capped>) -> (Capped, bool) {
     }
 }
 
-/// Reads to EOF, keeping at most the shared budget and counting what was discarded. Reading
-/// continues past the cap so a chatty command cannot block on a full pipe.
-fn read_capped(mut reader: impl Read, budget: &AtomicUsize) -> Capped {
+/// Reads to EOF, keeping at most `cap` bytes per stream: the first quarter as the head and
+/// the last three quarters as the tail, with a count of what fell in between. Reading
+/// continues past the cap (and the tail is trimmed as it goes), so a chatty command neither
+/// blocks on a full pipe nor grows this process's memory with its output.
+fn read_capped(mut reader: impl Read, cap: usize) -> Capped {
+    let head_cap = cap / 4;
+    let tail_cap = cap - head_cap;
     let mut capped = Capped::default();
     let mut buf = [0u8; 8192];
     loop {
         match reader.read(&mut buf) {
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                let take = take_from_budget(budget, n);
-                capped.bytes.extend_from_slice(&buf[..take]);
-                capped.discarded += (n - take) as u64;
+                capped.total += n as u64;
+                let bytes = &buf[..n];
+                let head_take = head_cap.saturating_sub(capped.head.len()).min(n);
+                capped.head.extend_from_slice(&bytes[..head_take]);
+                let rest = &bytes[head_take..];
+                if rest.is_empty() {
+                    continue;
+                }
+                capped.tail.extend_from_slice(rest);
+                // Trim in whole-tail chunks: amortized O(1) per byte, and the buffer never
+                // exceeds twice the tail cap.
+                if tail_cap > 0 && capped.tail.len() > 2 * tail_cap {
+                    let drop = capped.tail.len() - tail_cap;
+                    capped.tail.drain(..drop);
+                }
             }
         }
     }
-    capped
-}
-
-fn take_from_budget(budget: &AtomicUsize, want: usize) -> usize {
-    let mut current = budget.load(Ordering::SeqCst);
-    loop {
-        let take = current.min(want);
-        match budget.compare_exchange_weak(
-            current,
-            current - take,
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-        ) {
-            Ok(_) => return take,
-            Err(observed) => current = observed,
-        }
+    if tail_cap > 0 && capped.tail.len() > tail_cap {
+        let drop = capped.tail.len() - tail_cap;
+        capped.tail.drain(..drop);
     }
+    capped
 }
 
 fn lock(mutex: &Mutex<bool>) -> MutexGuard<'_, bool> {
@@ -472,10 +529,12 @@ fn report(
     mode: SandboxMode,
     timeout: Duration,
     clamped: bool,
+    output_cap: usize,
+    output_clamped: bool,
     outcome: &Outcome,
 ) -> ToolOutput {
-    let stdout = String::from_utf8_lossy(&outcome.stdout.bytes).into_owned();
-    let stderr = String::from_utf8_lossy(&outcome.stderr.bytes).into_owned();
+    let stdout = outcome.stdout.render();
+    let stderr = outcome.stderr.render();
     let exit_code = outcome.status.and_then(|s| s.code());
     let signal = exit_code.is_none().then(|| status_signal(outcome.status));
 
@@ -504,16 +563,18 @@ fn report(
     if !stderr.is_empty() && !stderr.ends_with('\n') {
         text.push('\n');
     }
-    if outcome.stdout.discarded > 0 {
+    if outcome.stdout.is_truncated() {
         text.push_str(&format!(
-            "[stdout truncated: {} bytes discarded]\n",
-            outcome.stdout.discarded
+            "[stdout truncated: {} of {} bytes discarded]\n",
+            outcome.stdout.discarded(),
+            outcome.stdout.total
         ));
     }
-    if outcome.stderr.discarded > 0 {
+    if outcome.stderr.is_truncated() {
         text.push_str(&format!(
-            "[stderr truncated: {} bytes discarded]\n",
-            outcome.stderr.discarded
+            "[stderr truncated: {} of {} bytes discarded]\n",
+            outcome.stderr.discarded(),
+            outcome.stderr.total
         ));
     }
     if outcome.drain_incomplete {
@@ -523,6 +584,11 @@ fn report(
         text.push_str(&format!(
             "[timeout clamped to the configured maximum of {:?}]\n",
             timeout
+        ));
+    }
+    if output_clamped {
+        text.push_str(&format!(
+            "[output budget clamped to the configured maximum of {output_cap} bytes per stream]\n"
         ));
     }
 
@@ -545,10 +611,14 @@ fn report(
             "cancelled": outcome.cancelled,
             "timeout_secs": timeout.as_secs(),
             "timeout_clamped": clamped,
-            "stdout_bytes": outcome.stdout.bytes.len(),
-            "stderr_bytes": outcome.stderr.bytes.len(),
-            "stdout_truncated_bytes": outcome.stdout.discarded,
-            "stderr_truncated_bytes": outcome.stderr.discarded,
+            "output_bytes_per_stream": output_cap,
+            "output_clamped": output_clamped,
+            "stdout_bytes": outcome.stdout.head.len() + outcome.stdout.tail.len(),
+            "stderr_bytes": outcome.stderr.head.len() + outcome.stderr.tail.len(),
+            "stdout_total_bytes": outcome.stdout.total,
+            "stderr_total_bytes": outcome.stderr.total,
+            "stdout_truncated_bytes": outcome.stdout.discarded(),
+            "stderr_truncated_bytes": outcome.stderr.discarded(),
             "duration_ms": outcome.duration.as_millis() as u64,
         })),
     }
@@ -563,4 +633,61 @@ fn status_signal(status: Option<ExitStatus>) -> Option<i32> {
 #[cfg(not(unix))]
 fn status_signal(_status: Option<ExitStatus>) -> Option<i32> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A reader that yields `total` identical bytes without allocating them.
+    struct Repeating {
+        remaining: usize,
+    }
+
+    impl Read for Repeating {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = buf.len().min(self.remaining);
+            buf[..n].fill(b'x');
+            self.remaining -= n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn the_reader_keeps_a_bounded_head_and_tail() {
+        let total = 50 << 20; // 50 MiB
+        let cap = 64 << 10;
+        let capped = read_capped(Repeating { remaining: total }, cap);
+
+        assert_eq!(capped.total, total as u64);
+        assert_eq!(capped.head.len(), cap / 4);
+        assert_eq!(capped.tail.len(), cap - cap / 4);
+        assert_eq!(capped.discarded(), total as u64 - cap as u64);
+        // The retained bytes are bounded by the cap, not by the output size: this is the
+        // property that keeps a 50 MiB build log out of this process's memory.
+        assert!(capped.head.len() + capped.tail.len() <= cap);
+    }
+
+    #[test]
+    fn a_short_stream_is_kept_whole() {
+        let capped = read_capped(std::io::Cursor::new(b"hello".to_vec()), 64 << 10);
+        assert_eq!(capped.total, 5);
+        assert_eq!(capped.discarded(), 0);
+        assert!(!capped.is_truncated());
+        assert_eq!(capped.render(), "hello");
+    }
+
+    #[test]
+    fn the_last_bytes_survive_when_only_the_tail_fits() {
+        let data: Vec<u8> = (0..10_000u32).map(|i| b'a' + (i % 26) as u8).collect();
+        let capped = read_capped(std::io::Cursor::new(data.clone()), 40);
+
+        assert_eq!(capped.head.len(), 10);
+        assert_eq!(capped.tail.len(), 30);
+        assert_eq!(capped.tail.as_slice(), &data[data.len() - 30..]);
+        let rendered = capped.render();
+        assert!(rendered.contains("bytes discarded"), "{rendered}");
+        let expected_tail = String::from_utf8_lossy(&data[data.len() - 30..]).into_owned();
+        assert!(rendered.ends_with(&expected_tail), "{rendered}");
+    }
 }

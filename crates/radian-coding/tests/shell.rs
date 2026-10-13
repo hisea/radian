@@ -427,6 +427,7 @@ async fn output_over_the_cap_is_truncated_and_reported() {
     let tools = CodingTools::with_sandbox(&root, sandbox)
         .unwrap()
         .with_limits(Limits {
+            default_shell_output_bytes: 4096,
             max_shell_output_bytes: 4096,
             ..Limits::default()
         });
@@ -446,12 +447,160 @@ async fn output_over_the_cap_is_truncated_and_reported() {
         "the output must have been truncated: {structured}"
     );
     assert_eq!(structured["stdout_bytes"], json!(4096), "{structured}");
+    assert_eq!(
+        structured["stderr_truncated_bytes"],
+        json!(0),
+        "{structured}"
+    );
     let text = output_text(&output);
     assert!(
-        text.contains("truncated") && text.contains(&truncated.to_string()),
+        text.contains("bytes discarded") && text.contains(&truncated.to_string()),
         "the model must be told how much was discarded: {text}"
     );
     assert!(text.len() < 20_000, "the result must stay bounded");
+}
+
+#[tokio::test]
+async fn the_end_of_a_long_output_is_kept() {
+    // A failing build prints progress first and the error last. Keeping only the start would
+    // drop exactly the part the model needs.
+    let dir = TempDir::new("shell-tail");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root).with_limits(Limits {
+        default_shell_output_bytes: 4096,
+        max_shell_output_bytes: 4096,
+        ..Limits::default()
+    });
+
+    let output = call(
+        &tools,
+        "shell",
+        json!({
+            "command": "i=0; while [ $i -lt 20000 ]; do echo filler-$i; i=$((i+1)); done; \
+                        echo 'ERROR: the build failed at the very end'"
+        }),
+    )
+    .await
+    .unwrap();
+
+    let text = output_text(&output);
+    assert!(
+        text.contains("ERROR: the build failed at the very end"),
+        "the last line must survive truncation: {text}"
+    );
+    assert!(
+        text.contains("bytes discarded"),
+        "the middle must be marked as discarded: {text}"
+    );
+    assert!(
+        text.contains("filler-0"),
+        "the start is kept as well: {text}"
+    );
+}
+
+#[tokio::test]
+async fn each_stream_has_its_own_budget() {
+    // stdout floods; the single stderr line that explains the failure must survive. With one
+    // shared budget, stdout would consume it and the error would be dropped.
+    let dir = TempDir::new("shell-streams");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root).with_limits(Limits {
+        default_shell_output_bytes: 4096,
+        max_shell_output_bytes: 4096,
+        ..Limits::default()
+    });
+
+    let output = call(
+        &tools,
+        "shell",
+        json!({
+            "command": "i=0; while [ $i -lt 200000 ]; do echo flooding-$i; i=$((i+1)); done; \
+                        echo 'ERROR: stderr survives' 1>&2"
+        }),
+    )
+    .await
+    .unwrap();
+
+    let structured = structured(&output);
+    let text = output_text(&output);
+    assert!(
+        structured["stdout_truncated_bytes"].as_u64().unwrap() > 0,
+        "stdout must be truncated: {structured}"
+    );
+    assert_eq!(
+        structured["stderr_truncated_bytes"],
+        json!(0),
+        "stderr has its own budget and must not be truncated: {structured}"
+    );
+    assert!(
+        text.contains("ERROR: stderr survives"),
+        "the stderr line must survive: {text}"
+    );
+}
+
+/// Peak resident set size in bytes, for the memory test below.
+#[cfg(unix)]
+fn peak_rss_bytes() -> Option<u64> {
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+    if rc != 0 {
+        return None;
+    }
+    // `ru_maxrss` is bytes on macOS and kilobytes on Linux.
+    #[cfg(target_os = "macos")]
+    let scale = 1;
+    #[cfg(not(target_os = "macos"))]
+    let scale = 1024;
+    Some(usage.ru_maxrss as u64 * scale)
+}
+
+#[cfg(not(unix))]
+fn peak_rss_bytes() -> Option<u64> {
+    None
+}
+
+#[tokio::test]
+async fn memory_does_not_grow_with_the_output() {
+    // 50 MiB through a 64 KiB-per-stream budget. The deterministic proof that the reader
+    // retains only a head and a tail is the `read_capped` unit test; this checks the same
+    // property end to end through a real process.
+    let dir = TempDir::new("shell-mem");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+
+    let before = peak_rss_bytes();
+    let output = call(
+        &tools,
+        "shell",
+        json!({
+            "command": "yes aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+                        | head -c 52428800"
+        }),
+    )
+    .await
+    .unwrap();
+    let after = peak_rss_bytes();
+
+    let structured = structured(&output);
+    assert_eq!(
+        structured["stdout_total_bytes"],
+        json!(52_428_800),
+        "{structured}"
+    );
+    assert!(
+        output_text(&output).len() < 200_000,
+        "the returned text must stay bounded"
+    );
+    if let (Some(before), Some(after)) = (before, after) {
+        let growth = after.saturating_sub(before);
+        assert!(
+            growth < 16 << 20,
+            "peak RSS grew by {growth} bytes for a 50 MiB output"
+        );
+    }
 }
 
 // ---------- 7. environment ----------
