@@ -245,3 +245,17 @@ Base `81ea117` · 一次性检出 `/tmp/radian-tab-mut`（detached，独立 targ
 6/6 全抓。M22、M24 起初有漏：`plain`/`mail a@b` 本来就不匹配文件，而 `Paragraph` 自己会裁剪，
 所以屏幕测试抓不住——补了“无 `@` 但匹配文件”的用例与 `completion_rows` 的直接单测（`81ea117`）
 后才抓住，记录在此。
+
+## find：Phase 5 transcript 内搜索
+
+Base: `45947ad` · 一次性检出 `/tmp/find-mut`（detached，跑完删除）· `--no-fail-fast`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| N1 | 大小写敏感匹配（去掉 `to_lowercase`） | `find::matching_is_case_insensitive_and_per_line`（lib）、`find::ctrl_f_opens_and_typing_jumps_to_the_nearest_match_above`（app） | ✅ failed |
+| N2 | 匹配折叠前的文件内容（`display_lines` 用 `entry.text`） | `find::a_folded_attachment_is_matched_by_its_display_text`（lib） | ✅ failed |
+| N3 | 到头循环（`prev` 从第一个绕到最后一个） | `find::navigation_does_not_wrap_and_anchors_above`（lib）、`find::prev_walks_earlier_and_next_walks_later_without_wrapping`（app） | ✅ failed |
+| N4 | `Esc` 关闭时跳回底部 | `find::escape_closes_and_leaves_the_viewport_where_it_is`（app） | ✅ failed |
+| N5 | 跳转后仍 `follow` | `find::ctrl_f_opens_and_typing_jumps_to_the_nearest_match_above`（app） | ✅ failed |
+
+5/5 抓住。N1/N2/N3 各自有 lib 单测与 app 断言两层（我第一轮误用 `--test find` 跑 lib 单测名，过滤器匹配 0 个测试而假通过；改到 `--lib`/app 后抓住）。
