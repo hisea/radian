@@ -914,10 +914,8 @@ fn draw_frame(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App,
 ) -> Result<bool, String> {
-    if let Some(path) = FREEZE_DRAW.get() {
-        if path.exists() {
-            return Ok(true);
-        }
+    if FREEZE_DRAW.get().is_some_and(|path| path.exists()) {
+        return Ok(true);
     }
     match terminal.draw(|frame| radian_tui::render::draw(frame, app)) {
         Ok(_) => {
