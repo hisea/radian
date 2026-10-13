@@ -33,6 +33,8 @@ pub enum Reply {
     Streamed(Vec<String>, ModelResponse),
     /// Emits these text deltas, then fails.
     StreamFail(Vec<String>, String),
+    /// Fails with the provider's recognizable context-overflow error (ADR 0018 §兜底).
+    Overflow(String),
 }
 
 /// Returns scripted replies in order and records every request.
@@ -70,6 +72,7 @@ impl Model for ScriptedModel {
         match next {
             Some(Reply::Respond(r)) => Ok(r),
             Some(Reply::Fail(m)) => Err(ModelError::Transport(m)),
+            Some(Reply::Overflow(m)) => Err(ModelError::ContextOverflow(m)),
             Some(Reply::Hang) => {
                 cx.cancellation.cancelled().await;
                 Err(ModelError::Transport("cancelled".into()))
@@ -129,6 +132,11 @@ impl Model for ScriptedModel {
             None => Err(ModelError::Protocol("script exhausted".into())),
         }
     }
+}
+
+/// A provider-reported context overflow (ADR 0018 §兜底).
+pub fn overflow(message: &str) -> Reply {
+    Reply::Overflow(message.to_owned())
 }
 
 pub fn text(s: &str) -> Reply {

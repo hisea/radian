@@ -11,13 +11,14 @@ use crate::agent::{Agent, AgentSession};
 use crate::budget::{self, BudgetReport, BudgetStatus, ContextBudget, RequestSize};
 use crate::compaction;
 use crate::event::NoopSink;
-use crate::event::{AgentEvent, EventSink};
+use crate::event::{AgentEvent, CompactionTrigger, EventSink};
 use crate::hooks::{HookContext, HookError, HookPoint, Hooks, ToolDecision};
 use crate::journal::{JournalError, JournalRecord, TranscriptJournal};
 use crate::message::{ContentPart, Message, MessageMeta, ToolCall, ToolResult};
-use crate::model::{Model, ModelContext, ModelRequest, ModelResponse, StopReason};
+use crate::model::{Model, ModelContext, ModelError, ModelRequest, ModelResponse, StopReason};
 use crate::outcome::{
-    CancelReason, CompactionError, IncompleteReason, RunError, RunOutcome, RunStatus, Step,
+    CancelReason, CompactionError, CompactionFailure, CompactionOutcome, IncompleteReason,
+    RunError, RunOutcome, RunStatus, Step,
 };
 use crate::preflight::ToolRegistry;
 use crate::steering::{SteerMode, SteeringHandle};
@@ -124,8 +125,7 @@ enum CompactionDecision {
 }
 
 /// The borrows `maybe_compact` needs, bundled so the method keeps a small signature.
-struct CompactCx<'a, M: Model, P: ToolProvider, H: Hooks> {
-    agent: &'a Arc<Agent<M, P, H>>,
+struct CompactCx<'a> {
     interrupt: &'a Interrupt,
     hcx: &'a HookContext,
     budget: &'a ContextBudget,
@@ -195,6 +195,372 @@ impl Batch {
 
     fn is_complete(&self) -> bool {
         self.committed == self.calls.len()
+    }
+}
+
+/// The gain rule a compaction must satisfy (ADR 0018). The proactive budget path must reach
+/// `B`; the overflow fallback must reach half of its reference; a manual `/compact` only has
+/// to shrink the request.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Gain {
+    Budget { input_budget: u64 },
+    Half { reference: u64 },
+    Any,
+}
+
+/// What one compaction run produced.
+pub(crate) enum CompactionStep {
+    Applied {
+        revision: u64,
+        tokens_before: u64,
+        tokens_after: u64,
+        below_target: bool,
+        /// The message index the kept suffix starts at in the new history (`0` is the summary).
+        first_kept: usize,
+        size_after: RequestSize,
+    },
+    NothingToCompact,
+    Cancelled(CancelReason),
+}
+
+/// The inputs one compaction run needs. Bundled so the shared routine keeps a small signature.
+struct CompactionRun<'a> {
+    interrupt: &'a Interrupt,
+    /// The hook context for the post-compaction `before_model_call` re-run. `None` for a
+    /// manual `/compact`: it is measured without injection and must not write anything.
+    hcx: Option<&'a HookContext>,
+    request: &'a mut ModelRequest,
+    tokens_before: u64,
+    keep: u64,
+    gain: Gain,
+    trigger: CompactionTrigger,
+    instructions: Option<String>,
+    events: &'a dyn EventSink,
+}
+
+impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
+    /// A manual `/compact` (ADR 0018 §兜底、手动与关闭). The driver runs it between turns and
+    /// supplies the cancellation token; cancelling aborts it without committing. Unlike the
+    /// automatic paths it needs no configured budget and only requires `T_after < T_before`.
+    pub async fn compact_now(
+        &mut self,
+        instructions: Option<String>,
+        cancellation: &CancellationToken,
+        events: &dyn EventSink,
+    ) -> Result<CompactionOutcome, CompactionFailure> {
+        let interrupt = Interrupt {
+            token: cancellation.clone(),
+            deadline: None,
+        };
+        let keep = match self.agent.config.context_budget {
+            Some(config) => compaction::keep_target(config.input_budget_tokens),
+            None => compaction::MAX_KEEP_TARGET,
+        };
+        // `T_before`: the request as it stands now, deliberately without running the hook (a
+        // manual compaction must not write anything).
+        let mut request = ModelRequest {
+            system_prompt: self.agent.config.system_prompt.clone(),
+            messages: self.transcript.clone(),
+            tools: self.registry.specs().to_vec(),
+            settings: self.agent.config.model_settings.clone(),
+        };
+        let bytes_per_token = self
+            .agent
+            .config
+            .context_budget
+            .map(|config| config.bytes_per_token)
+            .unwrap_or(crate::budget::DEFAULT_BYTES_PER_TOKEN);
+        let tokens_before = budget::request_size(&request).tokens(bytes_per_token);
+        match self
+            .compact_transcript(CompactionRun {
+                interrupt: &interrupt,
+                hcx: None,
+                request: &mut request,
+                tokens_before,
+                keep,
+                gain: Gain::Any,
+                trigger: CompactionTrigger::Manual,
+                instructions,
+                events,
+            })
+            .await?
+        {
+            CompactionStep::Applied {
+                revision,
+                tokens_before,
+                tokens_after,
+                ..
+            } => Ok(CompactionOutcome::Compacted {
+                revision,
+                tokens_before,
+                tokens_after,
+            }),
+            CompactionStep::NothingToCompact => Ok(CompactionOutcome::NothingToCompact),
+            CompactionStep::Cancelled(_) => {
+                Err(CompactionFailure::Compaction(CompactionError::Cancelled))
+            }
+        }
+    }
+
+    /// The shared compaction routine (ADR 0018). Plans, summarizes (one controlled retry),
+    /// checks the gain rule, and commits through `replace_transcript`. The proactive budget
+    /// path, the provider-overflow fallback and a manual `/compact` all call it, so their
+    /// splitting, summary, commit and revision rules cannot diverge.
+    async fn compact_transcript(
+        &mut self,
+        run: CompactionRun<'_>,
+    ) -> Result<CompactionStep, CompactionFailure> {
+        let CompactionRun {
+            interrupt,
+            hcx,
+            request,
+            tokens_before,
+            keep,
+            gain,
+            trigger,
+            instructions,
+            events,
+        } = run;
+        let revision = self.transcript_revision + 1;
+        let source_revision = self.transcript_revision;
+        let source_len = self.transcript.len();
+
+        let plan =
+            match compaction::plan_with_keep(&self.transcript, keep, &compaction::message_tokens) {
+                Ok(plan) => plan,
+                Err(compaction::PlanError::NothingToCompact) => {
+                    events.emit(AgentEvent::CompactionSkipped {
+                        reason: "the history already fits the keep target".into(),
+                    });
+                    return Ok(CompactionStep::NothingToCompact);
+                }
+                Err(compaction::PlanError::InvalidHistory(error)) => {
+                    events.emit(AgentEvent::CompactionFailed {
+                        reason: error.to_string(),
+                    });
+                    return Err(CompactionFailure::Compaction(
+                        CompactionError::InvalidSummary(error.to_string()),
+                    ));
+                }
+            };
+
+        events.emit(AgentEvent::CompactionStarted {
+            revision,
+            tokens_before,
+            keep_target: keep,
+            trigger,
+        });
+
+        // The rolling summary: a compaction summary is always the first message of a
+        // compacted history, so it is read out and excluded from the new summary input.
+        let transcript = self.transcript.clone();
+        let previous_summary = transcript
+            .first()
+            .and_then(compaction::compaction_summary_text);
+        let to_summarize: Vec<Message> = if previous_summary.is_some() {
+            transcript[1..plan.first_kept].to_vec()
+        } else {
+            transcript[..plan.first_kept].to_vec()
+        };
+        let summary_max = compaction::DEFAULT_SUMMARY_MAX_TOKENS.min(keep);
+
+        let mut summary = None;
+        for attempt in 0..2 {
+            let summary_request = compaction::summary_request(
+                previous_summary.as_deref(),
+                &to_summarize,
+                instructions.as_deref(),
+            );
+            let noop = NoopSink;
+            let mcx = ModelContext {
+                cancellation: interrupt.token.child_token(),
+                events: &noop,
+            };
+            let response =
+                match race(interrupt, self.agent.model.complete(summary_request, mcx)).await {
+                    Raced::Interrupted(reason) => return Ok(CompactionStep::Cancelled(reason)),
+                    Raced::Done(Err(error)) => {
+                        events.emit(AgentEvent::CompactionFailed {
+                            reason: error.to_string(),
+                        });
+                        return Err(CompactionFailure::Compaction(CompactionError::Summary(
+                            error,
+                        )));
+                    }
+                    Raced::Done(Ok(response)) => response,
+                };
+            // ADR 0018 §计费: the real call is recorded immediately, commit or not, and it is
+            // deliberately not a `ModelUsage` (it must not move the budget baseline).
+            if let (Some(journal), Some(usage)) = (self.journal.as_ref(), response.usage.clone())
+                && let Err(error) = journal
+                    .append(JournalRecord::CompactionUsage {
+                        revision,
+                        model: compaction::COMPACTION_MODEL_CURRENT.to_owned(),
+                        usage,
+                    })
+                    .await
+            {
+                self.recovery_required = true;
+                return Err(CompactionFailure::Journal(error));
+            }
+            let text = text_of(&response.content);
+            match compaction::check_summary(&text, summary_max) {
+                Ok(checked) => {
+                    summary = Some(checked);
+                    break;
+                }
+                Err(_) if attempt == 0 => continue,
+                Err(error) => {
+                    events.emit(AgentEvent::CompactionFailed {
+                        reason: error.to_string(),
+                    });
+                    return Err(CompactionFailure::Compaction(
+                        CompactionError::InvalidSummary(error.to_string()),
+                    ));
+                }
+            }
+        }
+        let summary = summary.expect("the loop sets it or returns");
+
+        let new_history =
+            match compaction::compacted_history(&summary, &transcript[plan.first_kept..]) {
+                Ok(history) => history,
+                Err(error) => {
+                    events.emit(AgentEvent::CompactionFailed {
+                        reason: error.to_string(),
+                    });
+                    return Err(CompactionFailure::Compaction(
+                        CompactionError::InvalidSummary(error.to_string()),
+                    ));
+                }
+            };
+
+        // Rebuild the request for the compacted view and, for the automatic paths, re-run the
+        // hook (ADR 0018), so `T_after` describes exactly what would be sent.
+        request.system_prompt = self.agent.config.system_prompt.clone();
+        request.messages = new_history.clone();
+        request.tools = self.registry.specs().to_vec();
+        request.settings = self.agent.config.model_settings.clone();
+        if let Some(hcx) = hcx {
+            match race(interrupt, self.agent.hooks.before_model_call(hcx, request)).await {
+                Raced::Interrupted(reason) => return Ok(CompactionStep::Cancelled(reason)),
+                Raced::Done(Err(error)) => {
+                    events.emit(AgentEvent::CompactionFailed {
+                        reason: error.to_string(),
+                    });
+                    return Err(CompactionFailure::Hook {
+                        point: HookPoint::BeforeModelCall,
+                        error,
+                    });
+                }
+                Raced::Done(Ok(())) => {}
+            }
+        }
+        let size_after = budget::request_size(request);
+        let bytes_per_token = self
+            .agent
+            .config
+            .context_budget
+            .map(|config| config.bytes_per_token)
+            .unwrap_or(crate::budget::DEFAULT_BYTES_PER_TOKEN);
+        let tokens_after = size_after.tokens(bytes_per_token);
+        let enough = match gain {
+            Gain::Budget { input_budget } => {
+                tokens_after < tokens_before && tokens_after <= input_budget
+            }
+            Gain::Half { reference } => tokens_after.saturating_mul(2) <= reference,
+            Gain::Any => tokens_after < tokens_before,
+        };
+        if !enough {
+            let target = match gain {
+                Gain::Budget { input_budget } => input_budget,
+                Gain::Half { reference } => reference / 2,
+                Gain::Any => tokens_before,
+            };
+            events.emit(AgentEvent::CompactionFailed {
+                reason: format!(
+                    "not enough gain: {tokens_before} -> {tokens_after} tokens, target {target}"
+                ),
+            });
+            return Err(CompactionFailure::Compaction(
+                CompactionError::Insufficient {
+                    before: tokens_before,
+                    after: tokens_after,
+                    target,
+                },
+            ));
+        }
+        // `T_after <= B` but over the 75% target: commit and stop auto-compacting this turn.
+        let below_target = matches!(
+            gain,
+            Gain::Budget { input_budget }
+                if tokens_after.saturating_mul(4) > input_budget.saturating_mul(3)
+        );
+
+        // ADR 0018 §revision 与并发: the candidate only commits if the source view is still
+        // what it was planned from. This cannot happen with one writer, but is checked and
+        // tested as the ADR requires.
+        #[cfg(feature = "testing")]
+        if self.tamper_source_on_compaction {
+            self.tamper_source_on_compaction = false;
+            self.transcript_revision += 1;
+        }
+        if self.transcript_revision != source_revision || self.transcript.len() != source_len {
+            events.emit(AgentEvent::CompactionFailed {
+                reason: "the source view changed while the summary was made".into(),
+            });
+            return Err(CompactionFailure::Compaction(
+                CompactionError::SourceChanged,
+            ));
+        }
+
+        if let Some(journal) = self.journal.as_ref()
+            && let Err(error) = journal
+                .append(JournalRecord::ContextCompacted {
+                    revision,
+                    source_revision,
+                    source_len,
+                    summary: summary.clone(),
+                    first_kept: plan.first_kept,
+                    tokens_before,
+                    tokens_after,
+                    below_target,
+                    model: compaction::COMPACTION_MODEL_CURRENT.to_owned(),
+                })
+                .await
+        {
+            self.recovery_required = true;
+            return Err(CompactionFailure::Journal(error));
+        }
+
+        let first_kept = plan.first_kept;
+        if let Err(error) = self.replace_transcript(new_history, revision, events).await {
+            let failure = match error {
+                crate::agent::ReplaceError::Journal(error) => CompactionFailure::Journal(error),
+                other => CompactionFailure::Compaction(CompactionError::InvalidSummary(
+                    other.to_string(),
+                )),
+            };
+            events.emit(AgentEvent::CompactionFailed {
+                reason: failure.to_string(),
+            });
+            return Err(failure);
+        }
+
+        events.emit(AgentEvent::CompactionFinished {
+            revision,
+            tokens_before,
+            tokens_after,
+            below_target,
+        });
+        Ok(CompactionStep::Applied {
+            revision,
+            tokens_before,
+            tokens_after,
+            below_target,
+            first_kept,
+            size_after,
+        })
     }
 }
 
@@ -364,6 +730,19 @@ impl<'s, M: Model, P: ToolProvider, H: Hooks> ActiveRun<'s, M, P, H> {
                 .await?;
         }
         Ok(())
+    }
+
+    /// Records a committed compaction against this turn's bookkeeping (ADR 0018 §B):
+    /// `turn_start` tracks the first retained message of this turn in the new history (index 0
+    /// is the summary), and a below-target compaction stops further automatic compaction this
+    /// turn. Every compaction path calls this.
+    fn note_compaction(&mut self, below_target: bool, first_kept: usize) {
+        self.turn_start = if self.turn_start < first_kept {
+            1
+        } else {
+            self.turn_start - first_kept + 1
+        };
+        self.below_target_compaction |= below_target;
     }
 
     fn finish(&mut self, status: RunStatus, events: &dyn EventSink) -> Step {
@@ -604,7 +983,6 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
                 match self
                     .maybe_compact(
                         CompactCx {
-                            agent: &agent,
                             interrupt: &interrupt,
                             hcx: &hcx,
                             budget: &config,
@@ -637,40 +1015,126 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
             model_call: self.run.model_calls,
             budget: self.run.session.context_budget_status().report().cloned(),
         });
-        let tap = StreamTap {
-            host: events,
-            text: Mutex::new(String::new()),
-            reasoning: Mutex::new(String::new()),
-        };
-        let mcx = ModelContext {
-            cancellation: interrupt.token.child_token(),
-            events: &tap,
-        };
-        let response = match race(&interrupt, agent.model.complete(request, mcx)).await {
-            Raced::Interrupted(reason) => {
-                // The model future is gone; whatever it emitted is in the tap. Any non-empty
-                // prefix — visible text **or** reasoning — becomes an interrupted assistant
-                // message through the journal before the turn converges (F3/F5, revised F4:
-                // "empty" means both are empty). The append itself is never cancelled (D3)
-                // and runs no hooks: this is not a complete response.
-                let (text, reasoning) = tap.take();
-                if !text.is_empty() || !reasoning.is_empty() {
-                    let message = Message::Assistant {
-                        content: parts_of(text),
-                        reasoning: parts_of(reasoning),
-                        tool_calls: Vec::new(),
-                        provider_payload: None,
-                        interrupted: true,
-                        meta: MessageMeta::default(),
+        // ADR 0018 §兜底: a provider-reported context overflow compacts to half the reference
+        // and retries this request **once**. A model error commits no partial output (the tap
+        // below is discarded), so the fallback is safe. `overflow_retried` bounds it to one.
+        let mut overflow_retried = false;
+        let response = loop {
+            // `T_before`: the projection of the request about to be sent. The fallback needs
+            // it even with no configured budget — the window-unknown path is exactly this one.
+            let size = budget::request_size(&request);
+            let bytes_per_token = agent
+                .config
+                .context_budget
+                .map(|config| config.bytes_per_token)
+                .unwrap_or(crate::budget::DEFAULT_BYTES_PER_TOKEN);
+            let tokens_before = match (
+                agent.config.context_budget,
+                self.run.session.budget_baseline,
+            ) {
+                (Some(config), Some(baseline)) => {
+                    budget::project(&config, Some(baseline), size).projected_tokens
+                }
+                _ => size.tokens(bytes_per_token),
+            };
+
+            let tap = StreamTap {
+                host: events,
+                text: Mutex::new(String::new()),
+                reasoning: Mutex::new(String::new()),
+            };
+            let mcx = ModelContext {
+                cancellation: interrupt.token.child_token(),
+                events: &tap,
+            };
+            match race(&interrupt, agent.model.complete(request.clone(), mcx)).await {
+                Raced::Interrupted(reason) => {
+                    // The model future is gone; whatever it emitted is in the tap. Any
+                    // non-empty prefix — visible text **or** reasoning — becomes an
+                    // interrupted assistant message through the journal before the turn
+                    // converges (F3/F5, revised F4: "empty" means both are empty). The append
+                    // itself is never cancelled (D3) and runs no hooks.
+                    let (text, reasoning) = tap.take();
+                    if !text.is_empty() || !reasoning.is_empty() {
+                        let message = Message::Assistant {
+                            content: parts_of(text),
+                            reasoning: parts_of(reasoning),
+                            tool_calls: Vec::new(),
+                            provider_payload: None,
+                            interrupted: true,
+                            meta: MessageMeta::default(),
+                        };
+                        if let Err(e) = self.run.session.commit(message, events).await {
+                            return Err(self.run.fail_journal(e, events));
+                        }
+                    }
+                    return Ok(self.run.finish(RunStatus::Cancelled(reason), events));
+                }
+                Raced::Done(Err(error)) => {
+                    let ModelError::ContextOverflow(message) = &error else {
+                        // ADR 0017: any other model error fails the turn, no compaction.
+                        return Err(self.run.fail(RunError::Model(error), events));
                     };
-                    if let Err(e) = self.run.session.commit(message, events).await {
-                        return Err(self.run.fail_journal(e, events));
+                    if overflow_retried {
+                        let error = ModelError::ContextOverflow(format!(
+                            "{message} (compacted once and retried; still over the window)"
+                        ));
+                        return Err(self.run.fail(RunError::Model(error), events));
+                    }
+                    overflow_retried = true;
+                    // `--no-auto-compact` disables the proactive path only; the fallback
+                    // stays (ADR 0018 §关闭). The reference is `min(T_before, B)` when the
+                    // window is known, otherwise `T_before`.
+                    let reference = match agent.config.context_budget {
+                        Some(config) => tokens_before.min(config.input_budget_tokens),
+                        None => tokens_before,
+                    };
+                    let step = self
+                        .run
+                        .session
+                        .compact_transcript(CompactionRun {
+                            interrupt: &interrupt,
+                            hcx: Some(&hcx),
+                            request: &mut request,
+                            tokens_before,
+                            keep: compaction::MAX_KEEP_TARGET,
+                            gain: Gain::Half { reference },
+                            trigger: CompactionTrigger::Overflow,
+                            instructions: None,
+                            events,
+                        })
+                        .await;
+                    match step {
+                        Ok(CompactionStep::Applied {
+                            below_target,
+                            first_kept,
+                            ..
+                        }) => {
+                            self.run.note_compaction(below_target, first_kept);
+                            continue;
+                        }
+                        Ok(CompactionStep::NothingToCompact) => {
+                            let error = ModelError::ContextOverflow(format!(
+                                "{message} (nothing to compact)"
+                            ));
+                            return Err(self.run.fail(RunError::Model(error), events));
+                        }
+                        Ok(CompactionStep::Cancelled(reason)) => {
+                            return Ok(self.run.finish(RunStatus::Cancelled(reason), events));
+                        }
+                        Err(CompactionFailure::Journal(error)) => {
+                            return Err(self.run.fail_journal(error, events));
+                        }
+                        Err(CompactionFailure::Hook { point, error }) => {
+                            return Err(self.run.fail_hook(point, error, events));
+                        }
+                        Err(CompactionFailure::Compaction(error)) => {
+                            return Err(self.run.fail(RunError::Compaction(error), events));
+                        }
                     }
                 }
-                return Ok(self.run.finish(RunStatus::Cancelled(reason), events));
+                Raced::Done(Ok(response)) => break response,
             }
-            Raced::Done(Err(e)) => return Err(self.run.fail(RunError::Model(e), events)),
-            Raced::Done(Ok(response)) => response,
         };
         events.emit(AgentEvent::ModelResponseReceived {
             stop_reason: response.stop_reason.clone(),
@@ -754,243 +1218,61 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
         Ok(self.run.finish(status, events))
     }
 
-    /// Automatic compaction for the pending request (ADR 0018 §B). Called only when the
-    /// projection is over `B`, `auto_compact` is on, and this turn has not yet committed a
-    /// below-target compaction. It plans, summarizes, checks the gain, and commits through
-    /// `replace_transcript`, the only writer of the replacement segment.
+    /// The proactive compaction for the pending request (ADR 0018 §B): the projection is over
+    /// `B`, `auto_compact` is on, and no below-target compaction happened yet this turn. The
+    /// work is shared with the overflow fallback and a manual `/compact` through
+    /// [`AgentSession::compact_transcript`].
     async fn maybe_compact(
         &mut self,
-        cx: CompactCx<'_, M, P, H>,
+        cx: CompactCx<'_>,
         request: &mut ModelRequest,
         tokens_before: u64,
     ) -> Result<CompactionDecision, RunError> {
         let CompactCx {
-            agent,
             interrupt,
             hcx,
             budget,
             events,
         } = cx;
-        let revision = self.run.session.transcript_revision + 1;
-        let source_revision = self.run.session.transcript_revision;
-        let source_len = self.run.session.transcript.len();
-        let input_budget = budget.input_budget_tokens;
-
-        let plan = match compaction::plan(
-            &self.run.session.transcript,
-            input_budget,
-            &compaction::message_tokens,
-        ) {
-            Ok(plan) => plan,
-            Err(compaction::PlanError::NothingToCompact) => {
-                events.emit(AgentEvent::CompactionSkipped {
-                    reason: "the history already fits the keep target".into(),
-                });
-                return Ok(CompactionDecision::NotNeeded);
-            }
-            Err(compaction::PlanError::InvalidHistory(error)) => {
-                events.emit(AgentEvent::CompactionFailed {
-                    reason: error.to_string(),
-                });
-                return Err(RunError::Compaction(CompactionError::InvalidSummary(
-                    error.to_string(),
-                )));
-            }
-        };
-
-        events.emit(AgentEvent::CompactionStarted {
-            revision,
-            tokens_before,
-            keep_target: compaction::keep_target(input_budget),
-        });
-
-        // The rolling summary: a compaction summary is always the first message of a
-        // compacted history, so it is read out and excluded from the new summary input.
-        let transcript = self.run.session.transcript.clone();
-        let previous_summary = transcript
-            .first()
-            .and_then(compaction::compaction_summary_text);
-        let to_summarize: Vec<Message> = if previous_summary.is_some() {
-            transcript[1..plan.first_kept].to_vec()
-        } else {
-            transcript[..plan.first_kept].to_vec()
-        };
-        let summary_max =
-            compaction::DEFAULT_SUMMARY_MAX_TOKENS.min(compaction::keep_target(input_budget));
-
-        let mut summary = None;
-        for attempt in 0..2 {
-            let summary_request =
-                compaction::summary_request(previous_summary.as_deref(), &to_summarize, None);
-            let noop = NoopSink;
-            let mcx = ModelContext {
-                cancellation: interrupt.token.child_token(),
-                events: &noop,
-            };
-            let response = match race(interrupt, agent.model.complete(summary_request, mcx)).await {
-                Raced::Interrupted(reason) => return Ok(CompactionDecision::Cancelled(reason)),
-                Raced::Done(Err(error)) => {
-                    events.emit(AgentEvent::CompactionFailed {
-                        reason: error.to_string(),
-                    });
-                    return Err(RunError::Compaction(CompactionError::Summary(error)));
-                }
-                Raced::Done(Ok(response)) => response,
-            };
-            // ADR 0018 §计费: the real call is recorded immediately, commit or not, and it is
-            // deliberately not a `ModelUsage` (it must not move the budget baseline).
-            if let (Some(journal), Some(usage)) =
-                (self.run.session.journal.as_ref(), response.usage.clone())
-            {
-                journal
-                    .append(JournalRecord::CompactionUsage {
-                        revision,
-                        model: compaction::COMPACTION_MODEL_CURRENT.to_owned(),
-                        usage,
-                    })
-                    .await
-                    .map_err(RunError::Journal)?;
-            }
-            let text = text_of(&response.content);
-            match compaction::check_summary(&text, summary_max) {
-                Ok(checked) => {
-                    summary = Some(checked);
-                    break;
-                }
-                Err(_) if attempt == 0 => continue,
-                Err(error) => {
-                    events.emit(AgentEvent::CompactionFailed {
-                        reason: error.to_string(),
-                    });
-                    return Err(RunError::Compaction(CompactionError::InvalidSummary(
-                        error.to_string(),
-                    )));
-                }
-            }
-        }
-        let summary = summary.expect("the loop sets it or returns");
-
-        let new_history =
-            match compaction::compacted_history(&summary, &transcript[plan.first_kept..]) {
-                Ok(history) => history,
-                Err(error) => {
-                    events.emit(AgentEvent::CompactionFailed {
-                        reason: error.to_string(),
-                    });
-                    return Err(RunError::Compaction(CompactionError::InvalidSummary(
-                        error.to_string(),
-                    )));
-                }
-            };
-
-        // Rebuild the request for the compacted view and re-run the hook (ADR 0018), so the
-        // projection `T_after` describes exactly what would be sent.
-        request.system_prompt = agent.config.system_prompt.clone();
-        request.messages = new_history.clone();
-        request.tools = self.run.session.registry.specs().to_vec();
-        request.settings = agent.config.model_settings.clone();
-        match race(interrupt, agent.hooks.before_model_call(hcx, request)).await {
-            Raced::Interrupted(reason) => return Ok(CompactionDecision::Cancelled(reason)),
-            Raced::Done(Err(error)) => {
-                events.emit(AgentEvent::CompactionFailed {
-                    reason: error.to_string(),
-                });
-                return Err(RunError::Hook {
-                    point: HookPoint::BeforeModelCall,
-                    error,
-                });
-            }
-            Raced::Done(Ok(())) => {}
-        }
-        let size_after = budget::request_size(request);
-        // The compacted view was never reported by the provider, so `T_after` is always an
-        // estimate: the baseline describes the transcript that was just replaced.
-        let report_after = budget::project(budget, None, size_after);
-        let tokens_after = report_after.projected_tokens;
-        if tokens_after >= tokens_before || tokens_after > input_budget {
-            events.emit(AgentEvent::CompactionFailed {
-                reason: format!(
-                    "not enough gain: {tokens_before} -> {tokens_after} tokens, budget {input_budget}"
-                ),
-            });
-            return Err(RunError::Compaction(CompactionError::Insufficient {
-                before: tokens_before,
-                after: tokens_after,
-                budget: input_budget,
-            }));
-        }
-        // ADR 0018 §revision 与并发: the candidate only commits if the source view is still
-        // what it was planned from. This cannot happen with one writer, but is checked and
-        // tested as the ADR requires.
-        #[cfg(feature = "testing")]
-        if self.run.session.tamper_source_on_compaction {
-            self.run.session.tamper_source_on_compaction = false;
-            self.run.session.transcript_revision += 1;
-        }
-        if self.run.session.transcript_revision != source_revision
-            || self.run.session.transcript.len() != source_len
-        {
-            events.emit(AgentEvent::CompactionFailed {
-                reason: "the source view changed while the summary was made".into(),
-            });
-            return Err(RunError::Compaction(CompactionError::SourceChanged));
-        }
-        // `T_after <= B` but over the 75% target: commit and stop auto-compacting this turn.
-        let below_target = tokens_after.saturating_mul(4) > input_budget.saturating_mul(3);
-
-        if let Some(journal) = self.run.session.journal.as_ref() {
-            journal
-                .append(JournalRecord::ContextCompacted {
-                    revision,
-                    source_revision,
-                    source_len,
-                    summary: summary.clone(),
-                    first_kept: plan.first_kept,
-                    tokens_before,
-                    tokens_after,
-                    below_target,
-                    model: compaction::COMPACTION_MODEL_CURRENT.to_owned(),
-                })
-                .await
-                .map_err(RunError::Journal)?;
-        }
-
-        let first_kept = plan.first_kept;
-        if let Err(error) = self
+        let step = self
             .run
             .session
-            .replace_transcript(new_history, revision, events)
-            .await
-        {
-            let run_error = match error {
-                crate::agent::ReplaceError::Journal(error) => RunError::Journal(error),
-                other => RunError::Compaction(CompactionError::InvalidSummary(other.to_string())),
-            };
-            events.emit(AgentEvent::CompactionFailed {
-                reason: run_error.to_string(),
-            });
-            return Err(run_error);
+            .compact_transcript(CompactionRun {
+                interrupt,
+                hcx: Some(hcx),
+                request,
+                tokens_before,
+                keep: compaction::keep_target(budget.input_budget_tokens),
+                gain: Gain::Budget {
+                    input_budget: budget.input_budget_tokens,
+                },
+                trigger: CompactionTrigger::Budget,
+                instructions: None,
+                events,
+            })
+            .await;
+        match step {
+            Ok(CompactionStep::Applied {
+                below_target,
+                first_kept,
+                size_after,
+                ..
+            }) => {
+                self.run.note_compaction(below_target, first_kept);
+                let report = budget::project(budget, None, size_after);
+                Ok(CompactionDecision::Applied {
+                    size: size_after,
+                    report,
+                })
+            }
+            Ok(CompactionStep::NothingToCompact) => Ok(CompactionDecision::NotNeeded),
+            Ok(CompactionStep::Cancelled(reason)) => Ok(CompactionDecision::Cancelled(reason)),
+            Err(CompactionFailure::Journal(error)) => Err(self.run.fail_journal(error, events)),
+            Err(CompactionFailure::Hook { point, error }) => {
+                Err(self.run.fail_hook(point, error, events))
+            }
+            Err(CompactionFailure::Compaction(error)) => Err(RunError::Compaction(error)),
         }
-
-        // ADR 0018 §B: `turn_start` tracks the first retained message of this turn in the new
-        // history (index 0 is the summary). If the turn's beginning was summarized, the first
-        // retained message is the one right after the summary.
-        self.run.turn_start = if self.run.turn_start < first_kept {
-            1
-        } else {
-            self.run.turn_start - first_kept + 1
-        };
-        self.run.below_target_compaction |= below_target;
-        events.emit(AgentEvent::CompactionFinished {
-            revision,
-            tokens_before,
-            tokens_after,
-            below_target,
-        });
-        Ok(CompactionDecision::Applied {
-            size: size_after,
-            report: report_after,
-        })
     }
 
     async fn dispatch_tools(

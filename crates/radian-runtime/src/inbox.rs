@@ -11,6 +11,9 @@
 //! - [`Inbox::cancel`] — no lane: cancels in-flight model/tool work, is never queued, is
 //!   not subject to the capacity bound, and is idempotent.
 //!
+//! - [`Inbox::compact`] — no lane: a manual `/compact` control request (ADR 0018). It is not
+//!   a conversation input: nothing is enqueued and no transcript message is written.
+//!
 //! There is deliberately no generic splice/insert API (plan §3.3, ADR 0011 L1).
 //!
 //! # Bounded input (ADR 0011 L4, decision 1)
@@ -37,7 +40,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use agent_core::{InputSource, Message, MessageId};
+use agent_core::{CompactionOutcome, InputSource, Message, MessageId};
 use radian_session::{InboxLane, RuntimeEvent, SessionJournal};
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
@@ -161,6 +164,17 @@ pub struct Inbox {
     closed: AtomicBool,
     /// When present, `InboxEnqueued` is written before the input becomes visible.
     journal: Option<Arc<SessionJournal>>,
+    /// Control requests the driver runs between turns (ADR 0018: `/compact`). Not a lane.
+    control: Mutex<VecDeque<ControlRequest>>,
+}
+
+/// A control request the driver runs between turns (ADR 0018: a manual `/compact`). It is not
+/// a conversation input, so it writes no `InboxEnqueued` and no transcript message. `reply`
+/// carries the outcome back to the caller (a `String` failure keeps this crate decoupled from
+/// the core's error type).
+pub struct ControlRequest {
+    pub instructions: Option<String>,
+    pub reply: tokio::sync::oneshot::Sender<Result<CompactionOutcome, String>>,
 }
 
 // Carrying the rejected message in the error is the decision 1 (ADR 0011 L4): the
@@ -199,6 +213,7 @@ impl Inbox {
             last_cause: std::sync::Mutex::new(None),
             closed: AtomicBool::new(false),
             journal,
+            control: Mutex::new(VecDeque::new()),
         })
     }
 
@@ -298,6 +313,30 @@ impl Inbox {
             self.wake.notify_one();
         }
         Ok(id)
+    }
+
+    /// Requests a manual `/compact` (ADR 0018) and waits for its result. The driver runs it
+    /// between turns: with a turn in flight this waits for the turn to end. A `cancel`
+    /// (Ctrl-C/Esc) aborts it without committing.
+    pub async fn compact(&self, instructions: Option<String>) -> Result<CompactionOutcome, String> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err("the session is closed".into());
+        }
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        self.control.lock().await.push_back(ControlRequest {
+            instructions,
+            reply,
+        });
+        self.wake.notify_one();
+        match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("the driver stopped before the compaction ran".into()),
+        }
+    }
+
+    /// Removes the oldest control request, if any. Used by the driver between turns.
+    pub(crate) async fn claim_control(&self) -> Option<ControlRequest> {
+        self.control.lock().await.pop_front()
     }
 
     /// Cancels in-flight work. Never queued, never subject to capacity, idempotent: calling

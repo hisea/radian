@@ -2300,7 +2300,7 @@ async fn pty_a_context_overflow_is_shown_with_a_hint() {
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("automatic compaction could not keep the request", 20),
+        pty.wait_for_screen("compaction could not keep the request", 20),
         "the hint is not shown:\n{}",
         pty.screen()
     );
@@ -2493,6 +2493,42 @@ async fn pty_a_memory_command_does_not_interrupt_a_running_turn() {
     );
     assert_eq!(server.requests().len(), 1, "the command sent no request");
 
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0018: `/compact` runs without a model request and shows its result as a notice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_compact_shows_its_result_without_a_model_request() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("compact");
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "compact",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"/compact\r");
+    assert!(
+        pty.wait_for_screen("nothing to compact", 15),
+        "{}",
+        pty.screen()
+    );
+    assert!(
+        server.requests().is_empty(),
+        "a /compact must not reach the model"
+    );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
 }

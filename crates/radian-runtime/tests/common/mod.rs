@@ -112,6 +112,8 @@ pub struct ScriptedModel {
     pub seen: Mutex<Vec<(usize, Value, u64)>>,
     /// Call indexes that hang forever (for the deadline test).
     hang: Mutex<Vec<usize>>,
+    /// Call indexes that delay by N milliseconds (a slow model, so a turn stays in flight).
+    slow: Mutex<Vec<(usize, u64)>>,
 }
 
 impl ScriptedModel {
@@ -122,6 +124,7 @@ impl ScriptedModel {
             config: Mutex::new(None),
             seen: Mutex::new(Vec::new()),
             hang: Mutex::new(Vec::new()),
+            slow: Mutex::new(Vec::new()),
         })
     }
 
@@ -139,6 +142,12 @@ impl ScriptedModel {
     /// The `index`-th call hangs forever.
     pub fn hang_at(self: &Arc<Self>, index: usize) {
         self.hang.lock().unwrap().push(index);
+    }
+
+    /// The `index`-th call waits `ms` before returning. Used only to keep a turn in flight
+    /// while the test does something else; the assertion is never "how long it took".
+    pub fn slow_at(self: &Arc<Self>, index: usize, ms: u64) {
+        self.slow.lock().unwrap().push((index, ms));
     }
 
     pub fn requests(&self) -> Vec<ModelRequest> {
@@ -174,6 +183,16 @@ impl Model for ScriptedModel {
         }
         if self.hang.lock().unwrap().contains(&index) {
             return std::future::pending::<Result<ModelResponse, ModelError>>().await;
+        }
+        let slow_ms = self
+            .slow
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(i, _)| *i == index)
+            .map(|(_, ms)| *ms);
+        if let Some(ms) = slow_ms {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
         }
         self.script
             .lock()

@@ -24,9 +24,10 @@ pub use budget::{
 pub use compaction::{
     DEFAULT_SUMMARY_MAX_TOKENS, MAX_KEEP_TARGET, MIN_KEEP_TARGET, Plan, PlanError,
     SUMMARY_MESSAGE_PREFIX, SUMMARY_SYSTEM_PROMPT, SummaryError, TOOL_RESULT_LIMIT_CHARS,
-    check_summary, compacted_history, keep_target, message_tokens, plan, summary_request, units,
+    check_summary, compacted_history, keep_target, message_tokens, plan, plan_with_keep,
+    summary_request, units,
 };
-pub use event::{AgentEvent, EventSink, NoopSink};
+pub use event::{AgentEvent, CompactionTrigger, EventSink, NoopSink};
 pub use hooks::{HookContext, HookError, HookPoint, Hooks, ToolDecision};
 pub use journal::{
     JournalError, JournalRecord, ReplacementEnd, ReplayError, TranscriptFold, TranscriptJournal,
@@ -40,8 +41,8 @@ pub use model::{
     ModelUsage, StopReason,
 };
 pub use outcome::{
-    CancelReason, CompactionError, IncompleteReason, ResumeState, RunError, RunOutcome, RunStatus,
-    SessionError, Step,
+    CancelReason, CompactionError, CompactionFailure, CompactionOutcome, IncompleteReason,
+    ResumeState, RunError, RunOutcome, RunStatus, SessionError, Step,
 };
 pub mod budget;
 pub mod compaction;
