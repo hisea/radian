@@ -152,6 +152,8 @@ def check_fixture(name, exp):
     replacements = []
     pending_len = []
     messages_since_replacement = 0
+    # 当前 transcript revision 里 assistant 消息声明过的 call_id（ADR 0006 §7）。
+    declared_calls = set()
     for i, line in enumerate(lines, start=1):
         try:
             ev = json.loads(line)
@@ -186,11 +188,19 @@ def check_fixture(name, exp):
                     f"{name}: line {i}: MessageAppended.index {idx} != transcript 长度 {index_next}"
                 )
             index_next += 1
-            messages_since_replacement += 1
+            # 替换段只覆盖 marker 之后紧接着的 len 条消息；数满即结束，之后的
+            # MessageAppended 是正常追加（否则替换过再追加会让整个文件永远打不开）。
+            if pending_len:
+                messages_since_replacement += 1
+                if messages_since_replacement == pending_len[0]:
+                    pending_len = []
             msg = ev["data"].get("message")
             if not isinstance(msg, dict) or len(msg) != 1:
                 raise Corruption(f"{name}: line {i}: message 必须是单变体对象")
             body = next(iter(msg.values()))
+            if "assistant" in msg:
+                for call in msg["assistant"].get("tool_calls") or []:
+                    declared_calls.add(call.get("id"))
             meta = body.get("meta")
             if meta is not None:
                 if not isinstance(meta, dict):
@@ -204,28 +214,29 @@ def check_fixture(name, exp):
                     raise Corruption(
                         f"{name}: line {i}: meta.source {meta['source']!r} 不在 InputSource 集合"
                     )
+        if ev["event"] in ("ToolExecutionStarted", "ToolExecutionSettled"):
+            cid = ev["data"].get("call_id")
+            if cid not in declared_calls:
+                raise Corruption(
+                    f"{name}: line {i}: {ev['event']} 的 call_id {cid!r} "
+                    "未出现在更早的 assistant 消息中（ADR 0006 §7）"
+                )
         if ev["event"] == "TranscriptReplaced":
             data = ev["data"]
             for field in ("revision", "len"):
                 if not isinstance(data.get(field), int) or isinstance(data.get(field), bool):
                     raise Corruption(f"{name}: line {i}: TranscriptReplaced.{field} 不是整数")
-            if pending_len:
-                if messages_since_replacement != pending_len[0]:
-                    raise Corruption(
-                        f"{name}: line {i}: 上一个 TranscriptReplaced.len {pending_len[0]} "
-                        f"!= 其后的 MessageAppended 数 {messages_since_replacement}"
-                    )
-            pending_len = [data["len"]]
+            # 上一个替换段没写满又出现新 marker → 崩溃恢复后宿主重新替换，合法；
+            # 旧段按“已写入前缀”接受（ADR 0005）。
+            pending_len = [] if data["len"] == 0 else [data["len"]]
             messages_since_replacement = 0
             index_next = 0
+            declared_calls.clear()
             replacements.append((i, data["revision"], data["len"]))
         events.append(ev)
 
-    if pending_len and messages_since_replacement != pending_len[0]:
-        raise Corruption(
-            f"{name}: TranscriptReplaced.len {pending_len[0]} "
-            f"!= 其后的 MessageAppended 数 {messages_since_replacement}"
-        )
+    # 替换段不完整（文件到此为止，或被下一个 marker 取代）→ ADR 0005 把已写入前缀
+    # 当作可恢复状态，读取方接受，len 不导致拒绝。
 
     outcome = exp["outcome"]
     if outcome == "policy_reject":

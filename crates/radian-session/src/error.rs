@@ -62,10 +62,15 @@ pub enum ReadError {
         found: u64,
     },
     #[error(
-        "{path}: TranscriptReplaced.len {len} does not match the {count} message records \
-         that follow it"
+        "{path}: line {line}: {event} for call_id {call_id:?} does not appear in an earlier \
+         assistant message of the current transcript revision (ADR 0006 §7)"
     )]
-    BadReplacementLen { path: PathBuf, len: u64, count: u64 },
+    OrphanToolMarker {
+        path: PathBuf,
+        line: u64,
+        event: String,
+        call_id: String,
+    },
     #[error("replaying the journal: {0}")]
     Replay(#[from] agent_core::ReplayError),
 }

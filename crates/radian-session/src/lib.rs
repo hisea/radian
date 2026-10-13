@@ -33,7 +33,7 @@ pub use index::{
     Audit, Index, IndexError, IndexedEvent, RebuildWarning, Reconcile, SearchHit, SessionSummary,
     read_line_at,
 };
-pub use reader::{EventData, Session, SessionEvent};
+pub use reader::{EventData, RecoveredReplacement, Session, SessionEvent};
 pub use runtime::{
     InboxLane, PermissionApprover, PermissionDecision, RuntimeEvent, TurnOutcome, TurnReason,
 };

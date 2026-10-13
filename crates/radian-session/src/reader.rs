@@ -139,6 +139,30 @@ pub struct SessionEvent {
     pub data: EventData,
 }
 
+/// A replacement segment that did not reach its declared `len`: the marker declared `declared`
+/// messages and only `written` landed. It was cut short either by end of file (a crash) or by
+/// the next `TranscriptReplaced` (the host recovered the written prefix and replaced again).
+/// ADR 0005 makes the written prefix the recoverable state, so the read succeeds and this
+/// records what happened; `len` never causes a refusal.
+///
+/// This is a **diagnostic**, not a `skipped` entry: `skipped` is the ADR 0006 §7b list of
+/// unknown non-critical events, and the index derives `skipped_count` from it. Overloading it
+/// would make a crash look like an unknown event and would force a fake event name.
+///
+/// A short segment that a later append happens to complete (`written` reaches `declared`
+/// because the host wrote a normal message) is indistinguishable from a complete replacement
+/// and is **not** reported: the file cannot tell a normal append from the replacement's own
+/// remaining messages, and `replay` does not care.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecoveredReplacement {
+    /// The `revision` of the marker that was cut short.
+    pub revision: u64,
+    /// The marker's declared `len`.
+    pub declared: u64,
+    /// How many replacement messages actually landed.
+    pub written: u64,
+}
+
 /// What a full scan learned about the file. `committed_bytes` is the size of the committed
 /// prefix: everything after the last LF is a torn tail and is not counted (ADR 0006 §3.2).
 #[derive(Debug, Clone)]
@@ -148,6 +172,7 @@ pub(crate) struct ScanSummary {
     pub(crate) committed_bytes: u64,
     pub(crate) event_count: u64,
     pub(crate) skipped: Vec<(u64, String)>,
+    pub(crate) recovered_replacements: Vec<RecoveredReplacement>,
 }
 
 /// Streams a session file, applying the ADR 0006 §7 policy and the §3.2 torn-tail rule,
@@ -171,11 +196,17 @@ where
     let mut expect_seq: u64 = 0;
     let mut index_next: u64 = 0;
     let mut pending_len: Option<u64> = None;
+    let mut pending_revision: u64 = 0;
     let mut messages_since: u64 = 0;
+    let mut recovered_replacements: Vec<RecoveredReplacement> = Vec::new();
     let mut schema_version: Option<u64> = None;
     let mut session_id = String::new();
     let mut skipped = Vec::new();
     let mut event_count: u64 = 0;
+    // Every `call_id` an assistant message of the **current** transcript revision declared.
+    // A `TranscriptReplaced` starts a new revision, so the old revision's ids stop counting
+    // (ADR 0005; ADR 0006 §7 requires a marker's call_id to be declared earlier).
+    let mut declared_calls: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Byte offset where the current line starts, and the end of the last committed line.
     let mut line_offset: u64 = 0;
     let mut committed_bytes: u64 = 0;
@@ -303,7 +334,22 @@ where
                     }));
                 }
                 index_next += 1;
-                messages_since += 1;
+                if let Message::Assistant { tool_calls, .. } = &d.message {
+                    for call in tool_calls {
+                        declared_calls.insert(call.id.clone());
+                    }
+                }
+                // The replacement segment is exactly the `len` messages that follow its
+                // marker. Once they have all arrived the segment is closed and later
+                // `MessageAppended` records are normal transcript growth, not more of the
+                // replacement (ADR 0006 §5.11). Counting them forever made a session
+                // unreadable as soon as it was appended to after a replacement.
+                if let Some(len) = pending_len {
+                    messages_since += 1;
+                    if messages_since == len {
+                        pending_len = None;
+                    }
+                }
                 EventData::MessageAppended {
                     index: d.index,
                     message: d.message,
@@ -311,18 +357,24 @@ where
             }
             "TranscriptReplaced" => {
                 let d: ReplacedData = data_of(raw, lineno, path)?;
-                if let Some(len) = pending_len
-                    && messages_since != len
-                {
-                    return Err(E::from(ReadError::BadReplacementLen {
-                        path: path.to_path_buf(),
-                        len,
-                        count: messages_since,
-                    }));
+                // A new marker while the previous segment is still short: the previous
+                // marker's `len` was not reached. That is the crash-recovery flow (the host
+                // recovered the written prefix and replaced again), so record the short
+                // segment and start the new one; `len` never refuses the file.
+                if let Some(declared) = pending_len {
+                    recovered_replacements.push(RecoveredReplacement {
+                        revision: pending_revision,
+                        declared,
+                        written: messages_since,
+                    });
                 }
-                pending_len = Some(d.len);
+                // `len == 0` is a complete, empty replacement: nothing to wait for.
+                pending_len = (d.len != 0).then_some(d.len);
+                pending_revision = d.revision;
                 messages_since = 0;
                 index_next = 0;
+                // A new revision: the old revision's declared calls no longer count.
+                declared_calls.clear();
                 EventData::TranscriptReplaced {
                     revision: d.revision,
                     len: d.len,
@@ -330,6 +382,14 @@ where
             }
             "ToolExecutionStarted" => {
                 let d: StartedData = data_of(raw, lineno, path)?;
+                if !declared_calls.contains(&d.call_id) {
+                    return Err(E::from(ReadError::OrphanToolMarker {
+                        path: path.to_path_buf(),
+                        line: lineno,
+                        event: "ToolExecutionStarted".into(),
+                        call_id: d.call_id,
+                    }));
+                }
                 EventData::ToolExecutionStarted {
                     call_id: d.call_id,
                     name: d.name,
@@ -338,6 +398,14 @@ where
             }
             "ToolExecutionSettled" => {
                 let d: SettledData = data_of(raw, lineno, path)?;
+                if !declared_calls.contains(&d.call_id) {
+                    return Err(E::from(ReadError::OrphanToolMarker {
+                        path: path.to_path_buf(),
+                        line: lineno,
+                        event: "ToolExecutionSettled".into(),
+                        call_id: d.call_id,
+                    }));
+                }
                 EventData::ToolExecutionSettled {
                     call_id: d.call_id,
                     result: d.result,
@@ -431,14 +499,15 @@ where
         line_offset = committed_bytes;
     }
 
-    if let Some(len) = pending_len
-        && messages_since != len
-    {
-        return Err(E::from(ReadError::BadReplacementLen {
-            path: path.to_path_buf(),
-            len,
-            count: messages_since,
-        }));
+    if let Some(declared) = pending_len {
+        // The replacement segment is short and the file ends here. ADR 0005 line 92: the
+        // recoverable state is the new replacement's written prefix, so accept it and record
+        // the diagnostic.
+        recovered_replacements.push(RecoveredReplacement {
+            revision: pending_revision,
+            declared,
+            written: messages_since,
+        });
     }
 
     Ok(ScanSummary {
@@ -447,6 +516,7 @@ where
         committed_bytes,
         event_count,
         skipped,
+        recovered_replacements,
     })
 }
 
@@ -460,6 +530,7 @@ pub struct Session {
     committed_bytes: u64,
     events: Vec<SessionEvent>,
     skipped: Vec<(u64, String)>,
+    recovered_replacements: Vec<RecoveredReplacement>,
 }
 
 impl Session {
@@ -484,6 +555,7 @@ impl Session {
             committed_bytes: summary.committed_bytes,
             events,
             skipped: summary.skipped,
+            recovered_replacements: summary.recovered_replacements,
         })
     }
 
@@ -512,6 +584,13 @@ impl Session {
     /// `(seq, event)` of every unknown non-critical event that was skipped (ADR 0006 §7b).
     pub fn skipped(&self) -> &[(u64, String)] {
         &self.skipped
+    }
+
+    /// Every replacement segment that did not reach its declared `len`, in file order: cut
+    /// short by end of file or by the next `TranscriptReplaced` (ADR 0005). Empty when every
+    /// segment was complete.
+    pub fn recovered_replacements(&self) -> &[RecoveredReplacement] {
+        &self.recovered_replacements
     }
 
     /// Maps the parsed events back to core records. This is the only place that knows the

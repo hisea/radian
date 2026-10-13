@@ -189,6 +189,33 @@ async fn build_base(dir: &TempDir) -> Base {
         })
         .await
         .unwrap();
+    // Normal growth after a complete replacement: the segment ended at `len`, so these are
+    // ordinary appends, not more of the replacement. A reader that keeps counting them into
+    // the segment refuses this whole base (the bug this slice fixes).
+    journal
+        .append(JournalRecord::Message {
+            index: 1,
+            message: Message::assistant("grown one"),
+        })
+        .await
+        .unwrap();
+    journal
+        .append(JournalRecord::Message {
+            index: 2,
+            message: Message::user("grown two"),
+        })
+        .await
+        .unwrap();
+    journal
+        .append(JournalRecord::ModelUsage {
+            usage: ModelUsage {
+                input: Some(7),
+                output: Some(3),
+                ..Default::default()
+            },
+        })
+        .await
+        .unwrap();
     drop(journal); // release the writer lock before the read side opens the file
 
     let bytes = std::fs::read(&path).unwrap();
@@ -254,9 +281,10 @@ const KINDS: [Kind; 12] = [
 /// What the contract requires for a mutation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Expected {
-    /// Only committed bytes can be lost (truncation, a removed final LF). A successful read's
-    /// folded records are a prefix of the base; an error is legitimate when the surviving
-    /// prefix is internally inconsistent (a `TranscriptReplaced` whose messages were lost).
+    /// Only committed bytes can be lost (truncation, a removed final LF). The read **must**
+    /// succeed: dropping a torn tail is not a reason to refuse the file, and ADR 0005 makes a
+    /// replacement cut short at end of file recoverable. The folded records are a prefix of
+    /// the base.
     SuffixLoss,
     /// Envelope-only byte damage. A successful read keeps the base's records in order minus
     /// any event the damage turned into an unknown non-critical one, and every vanished event
@@ -317,6 +345,7 @@ impl Kind {
         let line_count = base.lines.len();
         let line = rng.below(line_count);
         let envelope_end = envelope_end(&base.lines[line]);
+        let next_seq = next_seq(base);
         match self {
             Kind::Truncate => Mutation::Truncate(rng.below(base.bytes.len() + 1)),
             Kind::RemoveTrailingLf => Mutation::RemoveTrailingLf,
@@ -347,15 +376,20 @@ impl Kind {
                 }
             }
             Kind::AppendUnknownNonCritical => Mutation::Append(
-                line_bytes(17, "FutureAuditRecorded", false, json!({"note": "future"}))
-                    .into_bytes(),
+                line_bytes(
+                    next_seq,
+                    "FutureAuditRecorded",
+                    false,
+                    json!({"note": "future"}),
+                )
+                .into_bytes(),
             ),
             Kind::AppendUnknownCritical => Mutation::Append(
-                line_bytes(17, "FutureStateRecorded", true, json!({})).into_bytes(),
+                line_bytes(next_seq, "FutureStateRecorded", true, json!({})).into_bytes(),
             ),
             Kind::AppendUnknownField => Mutation::Append(
                 line_bytes(
-                    17,
+                    next_seq,
                     "TurnFinished",
                     true,
                     json!({
@@ -368,7 +402,7 @@ impl Kind {
             ),
             Kind::AppendUnknownEnum => Mutation::Append(
                 line_bytes(
-                    17,
+                    next_seq,
                     "TurnFinished",
                     true,
                     json!({"turn_id": "t-2", "outcome": "future_outcome"}),
@@ -377,6 +411,14 @@ impl Kind {
             ),
         }
     }
+}
+
+/// The `seq` the next appended line must carry.
+fn next_seq(base: &Base) -> u64 {
+    base.session
+        .events()
+        .last()
+        .map_or(0, |event| event.seq + 1)
 }
 
 /// Where the envelope ends and `data` begins, so byte damage can be aimed at one or the
@@ -598,11 +640,13 @@ fn run_case(base: &Base, seed: u64, kind: Kind) {
                         base_records,
                         "a skipped append changed the transcript: {context}"
                     );
+                    let seq = next_seq(base);
                     assert!(
                         session
                             .skipped()
                             .iter()
-                            .any(|(seq, name)| *seq == 17 && name == "FutureAuditRecorded"),
+                            .any(|(skipped_seq, name)| *skipped_seq == seq
+                                && name == "FutureAuditRecorded"),
                         "the unknown event was not reported: {context}"
                     );
                 }
@@ -648,7 +692,10 @@ fn run_case(base: &Base, seed: u64, kind: Kind) {
             );
             match kind.expected() {
                 Expected::Refused => {}
-                Expected::SuffixLoss | Expected::EnvelopeEither | Expected::DataEither => {}
+                Expected::SuffixLoss => panic!(
+                    "losing a committed suffix (a torn tail) must still read: {context}: {error}"
+                ),
+                Expected::EnvelopeEither | Expected::DataEither => {}
                 Expected::SkippedAppend | Expected::KnownAppend => {
                     panic!("appended content must be readable: {context}: {error}")
                 }
@@ -686,6 +733,10 @@ async fn the_fuzz_base_is_a_valid_v1_session() {
         "the base should have every event kind"
     );
     assert!(base.session.skipped().is_empty());
+    assert!(
+        base.session.recovered_replacements().is_empty(),
+        "the base's replacement segment is complete"
+    );
     assert_eq!(base.session.session_id(), "fuzz-sid");
     // Every event kind the brief lists is present at least once.
     for name in [

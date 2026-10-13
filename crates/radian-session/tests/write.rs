@@ -202,6 +202,25 @@ async fn a_tool_result_settles_with_its_full_shape() {
     let dir = TempDir::new("settled");
     let path = dir.file("s.jsonl");
     let journal = SessionJournal::create(&path, "sid-t", created()).unwrap();
+    // A tool marker must belong to a call an earlier assistant message declared (ADR 0006 §7).
+    journal
+        .append(JournalRecord::Message {
+            index: 0,
+            message: Message::Assistant {
+                content: Vec::new(),
+                reasoning: Vec::new(),
+                tool_calls: vec![ToolCall {
+                    id: "c9".into(),
+                    name: "t".into(),
+                    arguments: json!({}),
+                }],
+                provider_payload: None,
+                interrupted: false,
+                meta: MessageMeta::default(),
+            },
+        })
+        .await
+        .unwrap();
     journal
         .append(JournalRecord::ToolExecutionSettled {
             call_id: "c9".into(),
@@ -210,7 +229,7 @@ async fn a_tool_result_settles_with_its_full_shape() {
         .await
         .unwrap();
     let session = Session::open(&path).unwrap();
-    match &session.events()[1].data {
+    match &session.events()[2].data {
         radian_session::EventData::ToolExecutionSettled { call_id, result } => {
             assert_eq!(call_id, "c9");
             assert_eq!(result.text(), "done");

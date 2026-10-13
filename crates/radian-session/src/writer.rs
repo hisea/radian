@@ -475,29 +475,31 @@ fn scan_lines(file: &mut File, path: &Path) -> Result<Scan, WriteError> {
             if buf[i] == b'\n' {
                 line.extend_from_slice(&buf[start..=i]);
                 let raw = &line[..line.len() - 1];
-                if !raw.is_empty() {
-                    lineno += 1;
-                    let envelope: ScanEnvelope =
-                        serde_json::from_slice(raw).map_err(|e| ReadError::Corrupt {
-                            path: path.to_path_buf(),
-                            line: lineno,
-                            column: e.column(),
-                            message: e.to_string(),
-                        })?;
-                    if lineno == 1 {
-                        version = envelope.schema_version;
-                        sid = Some(envelope.session_id.clone());
-                    } else if envelope.schema_version != version
-                        || envelope.session_id != sid.as_deref().unwrap_or_default()
-                    {
-                        return Err(WriteError::Policy(ReadError::Envelope {
-                            path: path.to_path_buf(),
-                            line: lineno,
-                            message: "schema_version or session_id changed mid-file".into(),
-                        }));
-                    }
-                    last_seq = Some(envelope.seq);
+                // Every LF-terminated line must parse, including an empty one. A line that
+                // fails to parse is corruption, and the append path must refuse it too
+                // (ADR 0006 §3.2-3). Skipping an empty line here let `resume` append after
+                // corruption and produce a file the reader then refuses forever.
+                lineno += 1;
+                let envelope: ScanEnvelope =
+                    serde_json::from_slice(raw).map_err(|e| ReadError::Corrupt {
+                        path: path.to_path_buf(),
+                        line: lineno,
+                        column: e.column(),
+                        message: e.to_string(),
+                    })?;
+                if lineno == 1 {
+                    version = envelope.schema_version;
+                    sid = Some(envelope.session_id.clone());
+                } else if envelope.schema_version != version
+                    || envelope.session_id != sid.as_deref().unwrap_or_default()
+                {
+                    return Err(WriteError::Policy(ReadError::Envelope {
+                        path: path.to_path_buf(),
+                        line: lineno,
+                        message: "schema_version or session_id changed mid-file".into(),
+                    }));
                 }
+                last_seq = Some(envelope.seq);
                 offset_after_last_lf = offset + i as u64 + 1;
                 line.clear();
                 start = i + 1;
