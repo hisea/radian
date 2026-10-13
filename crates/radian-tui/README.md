@@ -96,6 +96,26 @@ cargo run -p radian-tui -- --model <model> --base-url <...> --session-dir /tmp/r
 #    is clean (no `%`) and `stty -a` still shows `icanon`.
 ```
 
+### Owner hand test, 2026-10-12: passed
+
+The owner ran the slice A and slice B checks above in a real terminal on macOS, against the
+opencode Zen endpoint (`deepseek-v4.1-flash`) with `--approval always`. The terminal emulator
+was not recorded. **All items passed**:
+
+- streaming; reasoning readable apart from the answer; PageUp during a stream stays put;
+- the approval box (resolved path, allow once, allow for the session, no prompt after a
+  session grant); Ctrl-C cancels a running turn; resize; CJK; multi-line paste; mouse copy;
+- Ctrl-C twice exits with a clean prompt;
+- `--resume` shows the history, the model remembers it, and a session grant does **not**
+  carry over the resume (the box asks again).
+
+The owner has usability feedback on the UI that is not recorded yet; it comes later.
+
+Gap found while preparing the test: the TUI's `--header` takes a literal value and has no
+`{session_id}` placeholder, unlike `agent-cli`. For the opencode endpoint the test had to pass
+the same literal as the session id and the header. **Follow-up:** support the placeholder in
+the TUI, or share the header parsing with `agent-cli`.
+
 ## The panic path unwinds, with a bounded runtime shutdown (2026-10-12)
 
 Slice A's panic hook restored the terminal and then called `process::exit(101)`, which skips
@@ -140,8 +160,9 @@ crate; mark it `#[non_exhaustive]` the next time `radian-permissions` is touched
 
 ## Not verified
 
-- Real terminal emulators (Terminal.app, iTerm2, Alacritty, tmux, ssh): layout, frame timing
-  and glyph width are only checked against a `vt100` model.
+- Real terminal emulators beyond the owner's one macOS pass above (Terminal.app, iTerm2,
+  Alacritty, tmux, ssh): layout, frame timing and glyph width are otherwise only checked
+  against a `vt100` model.
 - Frame timing under load (the spike measured p95 ≪ 16 ms; this skeleton was not benchmarked).
 - `Shift-Enter` on terminals without the enhanced keyboard protocol.
 - Windows and Linux ptys; only macOS was exercised.
