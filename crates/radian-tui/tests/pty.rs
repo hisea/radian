@@ -61,9 +61,10 @@ struct Pty {
     parser: Parser,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     processed: usize,
-    /// A per-pty `HOME`: the diagnostics directory (ADR 0013) and any default session
-    /// directory resolve under it, so no test ever writes to the runner's real `HOME`.
-    _home: TempDir,
+    /// A private `HOME` for the app: its catalog cache lives here, never in the user's real
+    /// cache. Held only so the directory is removed when the pty is dropped.
+    #[allow(dead_code)]
+    home: TempDir,
 }
 
 impl Pty {
@@ -93,17 +94,19 @@ impl Pty {
         }
         // Keep the environment small and deterministic; the mock server needs no key.
         cmd.env_clear();
-        // A fresh HOME per pty keeps the tests hermetic: the diagnostics directory (ADR 0013)
-        // lands under it, not in the runner's real `~/.cache` (or `~/Library/Caches`).
-        let home = TempDir::new("pty-home");
-        for name in ["PATH", "TMPDIR", "LANG", "TERM"] {
+        for name in ["PATH", "HOME", "TMPDIR", "LANG", "TERM"] {
             if let Ok(value) = std::env::var(name) {
                 cmd.env(name, value);
             }
         }
         cmd.env("TERM", "xterm-256color");
-        cmd.env("HOME", home.path());
-        cmd.env("XDG_CACHE_HOME", home.path());
+        // Tests must not read the user's catalog cache or reach the real models.dev. A fresh
+        // `HOME` isolates the cache; the catalog URL points at a closed local port, so a
+        // lookup fails fast and the window is unknown. A test that wants the catalog
+        // overrides both through `envs`.
+        let home = TempDir::new("home");
+        cmd.env("HOME", home.path().as_os_str());
+        cmd.env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json");
         for (name, value) in envs {
             cmd.env(name, value);
         }
@@ -127,7 +130,7 @@ impl Pty {
             parser: Parser::new(rows, cols, 5000),
             child,
             processed: 0,
-            _home: home,
+            home,
         }
     }
 
@@ -323,15 +326,10 @@ async fn pty_end_to_end_conversation_and_clean_exit() {
     assert!(dir.path().join("e2e.jsonl").exists());
 }
 
-/// The diagnostics directory the app will use when `HOME`/`XDG_CACHE_HOME` are `home`
-/// (ADR 0013 decision 4). The platform rule matches the one `radian-host` resolves at runtime.
+/// The diagnostics directory the app will use when `HOME` is `home` (ADR 0020):
+/// `<home>/.radian/cache/diagnostics`.
 fn diagnostics_dir(home: &Path) -> PathBuf {
-    let platform = if cfg!(target_os = "macos") {
-        radian_host::Platform::MacOs
-    } else {
-        radian_host::Platform::Linux
-    };
-    radian_host::diagnostics_dir_for(platform, home, Some(home))
+    radian_host::diagnostics_dir_for(&home.join(".radian"))
 }
 
 /// The panic hook restores the terminal before the panic message is printed, and the panic log
@@ -354,7 +352,7 @@ fn pty_panic_path_restores_the_terminal() {
             sessions.to_str().unwrap(),
             "--panic-after-enter",
         ],
-        &[("HOME", home), ("XDG_CACHE_HOME", home)],
+        &[("HOME", home)],
         20,
         80,
     );
@@ -431,7 +429,7 @@ fn pty_an_unwritable_diagnostics_directory_is_only_a_notice() {
             "--panic-message",
             "boom",
         ],
-        &[("HOME", home), ("XDG_CACHE_HOME", home)],
+        &[("HOME", home)],
         20,
         100,
     );
@@ -1948,11 +1946,7 @@ fn pty_a_panic_writes_a_redacted_panic_log() {
             "--panic-message",
             &format!("boom {secret} and {key}"),
         ],
-        &[
-            ("OPENAI_API_KEY", key),
-            ("HOME", home),
-            ("XDG_CACHE_HOME", home),
-        ],
+        &[("OPENAI_API_KEY", key), ("HOME", home)],
         20,
         100,
     );
@@ -2308,4 +2302,39 @@ async fn pty_a_model_error_is_shown_and_the_session_continues() {
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
     assert_eq!(server.requests().len(), 2, "both turns reached the model");
+}
+
+/// ADR 0018: the startup notice names the window and where it came from. An explicit
+/// `--context-window` needs no catalog, so this is deterministic without a mock catalog.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_the_startup_notice_names_the_window_source() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("catalog-window");
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "catalog-window",
+            "--context-window",
+            "5000",
+            "--profile",
+            "full",
+        ],
+        24,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("context: window 5000 from --context-window", 10),
+        "the startup notice does not name the explicit window:\n{}",
+        pty.screen()
+    );
+    pty.quit();
 }

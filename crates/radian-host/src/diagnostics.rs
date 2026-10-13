@@ -1,7 +1,7 @@
-//! Where a host writes local diagnostics (ADR 0013 decision 4).
+//! Where a host writes local diagnostics (ADR 0013 decision 4; the path is ADR 0020).
 //!
-//! Diagnostics live in the **user cache** directory — `…/radian/diagnostics/` — not in the
-//! session directory: a cache may be cleaned by the system, while the session journal is the
+//! Diagnostics live under the cache — `~/.radian/cache/diagnostics/` — not in the session
+//! directory: a cache may be cleaned by the system, while the session journal is the
 //! authoritative record and must never be treated as disposable. The directory is kept
 //! owner-only, files older than [`RETENTION`] are removed, and the total is capped at
 //! [`MAX_TOTAL_BYTES`] by dropping the oldest files first. Cleanup runs at startup and again
@@ -22,53 +22,15 @@ pub const MAX_TOTAL_BYTES: u64 = 50 * 1024 * 1024;
 /// The suffix of the panic log, the only diagnostic file kind today.
 const PANIC_LOG_SUFFIX: &str = ".panic.log";
 
-/// Which platform's cache-directory rule to apply. The paths follow the conventions the
-/// session directory already uses (`agent-cli`/`radian-tui`'s `session_dir`), so no `dirs`-style
-/// dependency is needed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Platform {
-    /// `~/Library/Caches/radian/diagnostics`.
-    MacOs,
-    /// `$XDG_CACHE_HOME/radian/diagnostics`, or `~/.cache/radian/diagnostics`.
-    Linux,
+/// The cache root for this process (`~/.radian/cache`, ADR 0020), created 0700. `None` when
+/// neither `RADIAN_HOME` nor `HOME` is usable.
+pub fn cache_dir() -> Option<PathBuf> {
+    crate::home::cache_dir()
 }
 
-/// The diagnostics directory for `platform`, given the resolved `HOME` and `XDG_CACHE_HOME`.
-///
-/// Pure so both rules are testable on one machine. On Linux an `XDG_CACHE_HOME` that is not
-/// absolute is ignored (freedesktop 0.8: a relative value is invalid), exactly like
-/// `session_dir` ignores a relative data dir.
-pub fn diagnostics_dir_for(
-    platform: Platform,
-    home: &Path,
-    xdg_cache_home: Option<&Path>,
-) -> PathBuf {
-    match platform {
-        Platform::MacOs => home.join("Library/Caches/radian/diagnostics"),
-        Platform::Linux => {
-            let base = xdg_cache_home
-                .filter(|path| path.is_absolute())
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| home.join(".cache"));
-            base.join("radian/diagnostics")
-        }
-    }
-}
-
-/// The diagnostics directory for this process, or `None` when there is no `HOME`.
+/// The diagnostics directory for this process (`~/.radian/cache/diagnostics`), created 0700.
 pub fn diagnostics_dir() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)?;
-    let platform = if cfg!(target_os = "macos") {
-        Platform::MacOs
-    } else {
-        Platform::Linux
-    };
-    let xdg = std::env::var_os("XDG_CACHE_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
-    Some(diagnostics_dir_for(platform, &home, xdg.as_deref()))
+    crate::home::diagnostics_dir()
 }
 
 /// The file name for one session's panic log: `<session-id>-<unix-millis>.panic.log`. The
@@ -266,30 +228,6 @@ mod tests {
     fn mode(path: &Path) -> u32 {
         use std::os::unix::fs::PermissionsExt;
         std::fs::metadata(path).unwrap().permissions().mode() & 0o777
-    }
-
-    #[test]
-    fn the_two_path_rules_follow_the_platform_conventions() {
-        let home = Path::new("/home/u");
-        assert_eq!(
-            diagnostics_dir_for(Platform::MacOs, home, None),
-            PathBuf::from("/home/u/Library/Caches/radian/diagnostics")
-        );
-        // Linux: an absolute XDG_CACHE_HOME wins.
-        assert_eq!(
-            diagnostics_dir_for(Platform::Linux, home, Some(Path::new("/xdg/cache"))),
-            PathBuf::from("/xdg/cache/radian/diagnostics")
-        );
-        // Linux: unset falls back to ~/.cache.
-        assert_eq!(
-            diagnostics_dir_for(Platform::Linux, home, None),
-            PathBuf::from("/home/u/.cache/radian/diagnostics")
-        );
-        // Linux: a relative XDG_CACHE_HOME is invalid and ignored.
-        assert_eq!(
-            diagnostics_dir_for(Platform::Linux, home, Some(Path::new("relative/cache"))),
-            PathBuf::from("/home/u/.cache/radian/diagnostics")
-        );
     }
 
     #[test]

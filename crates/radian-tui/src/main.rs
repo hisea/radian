@@ -70,9 +70,8 @@ struct Cli {
     #[arg(long = "header", value_name = "NAME=VALUE")]
     header: Vec<String>,
 
-    /// Where session files live. Defaults to `RADIAN_SESSION_DIR`, then the platform's data
-    /// directory (`~/.local/share/radian/sessions`, or `Library/Application Support` on
-    /// macOS). The same convention as `agent-cli`.
+    /// Where session files live. Defaults to `RADIAN_SESSION_DIR`, then `~/.radian/sessions`
+    /// (`$RADIAN_HOME/sessions` when that is set, ADR 0020). The same rule as `agent-cli`.
     #[arg(long, value_name = "DIR")]
     session_dir: Option<PathBuf>,
 
@@ -128,10 +127,20 @@ struct Cli {
     #[arg(long = "allow-shell-command", value_name = "PREFIX")]
     allow_shell_command: Vec<String>,
 
-    /// The model's context window in tokens (ADR 0015). Omitted means the context-budget
-    /// guard is **off**: the app does not guess a window, and the status bar says so.
+    /// The model's context window in tokens (ADR 0015). Omitted, the models.dev catalog is
+    /// consulted for `(provider, model)` (ADR 0018); an explicit value always wins. With
+    /// neither, the guard is off and the status bar says so.
     #[arg(long, value_name = "TOKENS")]
     context_window: Option<u64>,
+
+    /// Never fetch the models.dev catalog; use only the local cache.
+    #[arg(long)]
+    offline_catalog: bool,
+
+    /// The models.dev provider id to look the model up under (default: derived from the
+    /// `--base-url` hostname; e.g. `opencode.ai` → `opencode`).
+    #[arg(long, value_name = "PROVIDER")]
+    catalog_provider: Option<String>,
 
     #[arg(long)]
     system: Option<String>,
@@ -237,6 +246,13 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
     // startup. A failure is one line, never a fault.
     radian_host::clean_startup();
     let dir = session_dir(&cli)?;
+    // ADR 0020 decision 5: never move a user's data; print a copy-pasteable command instead.
+    if cli.session_dir.is_none()
+        && std::env::var("RADIAN_SESSION_DIR").map_or(true, |dir| dir.is_empty())
+        && let Some(hint) = radian_host::legacy_sessions_hint()
+    {
+        eprintln!("{hint}");
+    }
     // The session id is resolved before the headers: a `{session_id}` in a header expands to
     // this process's id, and `--resume` uses the id being resumed. The parser is the same one
     // `agent-cli` uses, so `{session_id}`, name validation and the `authorization` refusal
@@ -274,6 +290,7 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
     // workspace is validated first, so a typo is a workspace error and never reaches the
     // sandbox probe (dogfooding D1). `radian-host` owns the rule so both hosts share it.
     let workspace_path = radian_host::resolve_workspace(cli.workspace.as_deref())?;
+    let catalog_base_url = base_url.clone();
     let model = build_model(ModelArgs {
         provider,
         base_url,
@@ -289,7 +306,15 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
     // here, never a fallback to an unsandboxed run (ADR 0012 decision 2). Still before
     // the session file exists, so a refusal leaves nothing behind (dogfooding D2).
     let tier = radian_tui::profile::parse_tier(&cli.profile)?;
-    let sandbox = radian_tui::profile::build_sandbox(tier, &workspace_path)?;
+    // ADR 0020 decision 3: the sandbox denies read on the **actual** sessions directory and
+    // the memory directory. Create them owner-only first so Linux's bwrap (which can only mask
+    // paths that exist) can hide them.
+    let _ = radian_host::ensure_private_dir(&dir);
+    let mut sandbox_deny_read = vec![dir.clone()];
+    if let Some(memory) = radian_host::memory_dir() {
+        sandbox_deny_read.push(memory);
+    }
+    let sandbox = radian_tui::profile::build_sandbox(tier, &workspace_path, &sandbox_deny_read)?;
     // The description is taken before the sandbox moves into the tools.
     let (startup, meaning) = radian_tui::profile::describe(tier, sandbox.as_ref());
     // The MCP config file is read and validated here: before any server process starts and
@@ -314,6 +339,17 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
     let profile =
         radian_tui::profile::build_profile(tier, &workspace_path, &cli.allow_shell_command)?
             .with_approval(approval);
+
+    // The window comes from `--context-window` or the models.dev catalog (ADR 0018). A fetch
+    // failure is not a startup failure: the window is then unknown and the guard stays off.
+    // Still before the session file exists.
+    let window = runtime.block_on(radian_host::resolve(&radian_host::WindowQuery::production(
+        cli.context_window,
+        cli.catalog_provider.clone(),
+        &catalog_base_url,
+        cli.model.clone(),
+        cli.offline_catalog,
+    )));
 
     // Every startup check that can fail is done. Only now is the session file created; a
     // failure above leaves the session directory untouched (dogfooding D2).
@@ -351,8 +387,9 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
     let live: Arc<dyn EventSink> = Arc::new(ChannelSink(tx));
     let agent_config = AgentConfig {
         system_prompt: cli.system.clone(),
-        // No window configured means the guard is off, never a guessed default (ADR 0015).
-        context_budget: cli.context_window.map(ContextBudget::new),
+        // No window known means the guard is off, never a guessed default (ADR 0015); the
+        // window comes from the catalog or `--context-window` (ADR 0018).
+        context_budget: window.tokens.map(ContextBudget::new),
         ..AgentConfig::default()
     };
 
@@ -481,7 +518,7 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
         panic!("radian-tui: panic path test with a child in flight");
     }
     let mut app = App::new(cli.model.clone(), session_id.clone());
-    app.set_context_window(cli.context_window);
+    app.set_context_window(window.tokens);
     app.set_tier(tier.as_str());
     app.set_mcp(mcp_configured, mcp_open);
     for message in &history {
@@ -495,6 +532,11 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, St
     app.entries.push(radian_tui::Entry::new(
         radian_tui::EntryKind::Notice,
         meaning,
+    ));
+    // ADR 0018: the window and exactly where it came from.
+    app.entries.push(radian_tui::Entry::new(
+        radian_tui::EntryKind::Notice,
+        format!("context: {}", window.describe()),
     ));
     if cli.yes {
         app.entries.push(radian_tui::Entry::new(
@@ -689,24 +731,10 @@ fn session_dir(cli: &Cli) -> Result<PathBuf, String> {
     {
         return Ok(PathBuf::from(dir));
     }
-    let home = std::env::var("HOME")
-        .map_err(|_| "no HOME to place sessions under; pass --session-dir".to_string())?;
-    if let Ok(xdg) = std::env::var("XDG_DATA_HOME")
-        && !xdg.is_empty()
-    {
-        return Ok(PathBuf::from(xdg).join("radian").join("sessions"));
-    }
-    if cfg!(target_os = "macos") {
-        Ok(PathBuf::from(home)
-            .join("Library/Application Support")
-            .join("radian")
-            .join("sessions"))
-    } else {
-        Ok(PathBuf::from(home)
-            .join(".local/share")
-            .join("radian")
-            .join("sessions"))
-    }
+    // ADR 0020: the default is `~/.radian/sessions` (or `$RADIAN_HOME/sessions`).
+    radian_host::sessions_dir().ok_or_else(|| {
+        "no RADIAN_HOME or HOME to place sessions under; pass --session-dir".to_string()
+    })
 }
 
 /// The workspace a session belongs to: `--workspace` when given, else the current directory,

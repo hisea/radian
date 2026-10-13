@@ -16,7 +16,7 @@ use std::path::Path;
 use radian_permissions::{
     Action, ApprovalPolicy, Preset, Profile, ResourceMatcher, Rule, ToolMatcher,
 };
-use radian_sandbox::{Sandbox, SandboxMode};
+use radian_sandbox::{Sandbox, SandboxMode, SandboxPolicy};
 
 use crate::SetupError;
 
@@ -117,6 +117,7 @@ pub(crate) fn build_profile(
 pub(crate) fn build_sandbox(
     profile: ProfileArg,
     workspace: &Path,
+    deny_read: &[std::path::PathBuf],
 ) -> Result<Option<Sandbox>, SetupError> {
     if profile == ProfileArg::Safe {
         return Ok(None);
@@ -125,7 +126,21 @@ pub(crate) fn build_sandbox(
     if probe_failure_injected() {
         return Err(SetupError(unavailable(profile, mode)));
     }
-    match Sandbox::new(mode, workspace) {
+    let mut policy = match SandboxPolicy::new(mode, workspace) {
+        Ok(policy) => policy,
+        Err(error) => {
+            return Err(SetupError(format!(
+                "{}: {error}",
+                unavailable(profile, mode)
+            )));
+        }
+    };
+    // ADR 0020 decision 3: the actual sessions directory and the memory directory are not
+    // readable in the enforced tiers. `full` gets the list too, but its transparent backend ignores it.
+    for path in deny_read {
+        policy = policy.deny_read(path);
+    }
+    match Sandbox::from_policy(policy) {
         Ok(sandbox) => Ok(Some(sandbox)),
         Err(error) => Err(SetupError(format!(
             "{}: {error}",

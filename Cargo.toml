@@ -7,7 +7,6 @@ members = [
     "crates/agent-provider-anthropic",
     "crates/agent-cli",
     "crates/radian-host",
-    "crates/radian-slots",
     "crates/agent-provider-contract",
     "crates/radian-session",
     "crates/radian-coding",

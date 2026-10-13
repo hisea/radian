@@ -56,3 +56,23 @@ sandbox `denied`、control `ok`。原因：bwrap 的 `--dev /dev` 在沙箱内�
 seatbelt 即使 `(allow file-ioctl)`（过滤或不过滤）也拒 `TIOCSTI`（实测，`/dev/tty` 可打开、ioctl
 返回 EPERM），所以 `tiocsti_outside_terminal` 通过但**不敏感于 setsid**。setsid 的变异由
 `radian-coding` 的进程组用例抓住（见该 crate 的 MUTATIONS）。
+
+## ADR 0020 `radian_home` 矩阵用例（2026-10-13）
+
+一次性 worktree `/tmp/home-mut`（从 `62cdcf3` 创建，用完删除），`--no-fail-fast`；变异后从副本还原。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M2 | harness 不把 `~/.radian/memory` 加进 `deny_read` | ✅ 抓住（39 cases, 1 failed） | `escape_macos` 的 `radian_home/memory_unreadable` |
+| M3 | harness 把 `~/.radian/config` 误加进 `deny_read` | ✅ 抓住（39 cases, 1 failed） | `escape_macos` 的 `radian_home/config_readable` |
+| M4 | 宿主在遮住前不先创建目录（去掉 `ensure_private_dir`） | ❌ **未抓住**，见下 | — |
+
+**M4 未被抓住，也不是可确定复现的缺陷。** `bwrap.rs` 在 **每次 `Sandbox::command()` 时**才遍历
+`policy.deny_read` 并跳过不存在的路径；而 shell 命令的 bwrap 参数是在 shell **执行时**才构造的，
+那时 `open_journal` 已经创建了会话目录（`memory/` 由 `radian_host::memory_dir()` 在宿主启动时创建）。
+所以即使去掉 `ensure_private_dir`，被读的路径在 bwrap 构造参数时已经存在，仍会被 `--tmpfs` 遮住。
+要确定复现"目录不存在时未先创建"需要一个在 bwrap 构造参数之后、子进程读之前创建该文件的并发写者，
+测试无法提供（沙箱内也不能在工作区外写）。**结论**：宿主仍然创建两个目录（`sessions/` 与
+`memory/`，0700），这是对"运行时自己不会创建 `memory/`"的必要保证；`memory_unreadable` 用例
+（M2）证明遮住确实生效。**未验证**：如果将来 `memory/` 由别处延迟创建，且在某个 shell 命令的
+bwrap 参数构造之前它仍不存在，那个窗口不会被遮住。

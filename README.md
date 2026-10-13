@@ -15,18 +15,17 @@ constrain the code are ADRs under `docs/adr/` (see the index at the end of this 
 
 | Crate | What it is | Detailed docs |
 |---|---|---|
-| `agent-core` | The runtime itself: turn loop (`Agent`/`AgentSession`/`ActiveRun`), messages, tools, hooks, steering, the journal seam, events, the context-budget guard. | `crates/agent-core/src/lib.rs`, ADR 0001–0007, 0010, 0014, 0015 |
-| `agent-extensions` | MCP stdio servers exposed as `agent-core` tools, under stable `server__tool` aliases. | `crates/agent-extensions/src/lib.rs` |
+| `agent-core` | The runtime itself: turn loop (`Agent`/`AgentSession`/`ActiveRun`), messages, tools, hooks, steering, the journal seam, events, the context-budget guard. | `crates/agent-core/README.md`, ADR 0001–0007, 0010, 0014, 0015 |
+| `agent-extensions` | MCP stdio servers exposed as `agent-core` tools, under stable `server__tool` aliases. | `crates/agent-extensions/README.md` |
 | `agent-provider-contract` | Adapter-neutral contract suite: the semantics every `Model` implementation must satisfy, independent of wire format. | `docs/provider-contract.md` |
-| `agent-provider-openai-compatible` | Model adapter for OpenAI-compatible Chat Completions (`/chat/completions`), streaming. | `docs/provider-contract.md`, `crates/agent-provider-openai-compatible/src/lib.rs` |
-| `agent-provider-anthropic` | Model adapter for the Anthropic Messages API (`/v1/messages`), streaming, API-key auth, extended thinking. | `docs/providers/anthropic-wire-notes.md`, `crates/agent-provider-anthropic/src/lib.rs` |
-| `radian-session` | Session JSONL v1 storage: the durable `TranscriptJournal` seam, the reader/replay path, the disposable SQLite index and the export renderers. | `crates/radian-session/src/lib.rs`, ADR 0006 |
+| `agent-provider-openai-compatible` | Model adapter for OpenAI-compatible Chat Completions (`/chat/completions`), streaming. | `crates/agent-provider-openai-compatible/README.md`, `docs/provider-contract.md` |
+| `agent-provider-anthropic` | Model adapter for the Anthropic Messages API (`/v1/messages`), streaming, API-key auth, extended thinking. | `crates/agent-provider-anthropic/README.md`, `docs/providers/anthropic-wire-notes.md` |
+| `radian-session` | Session JSONL v1 storage: the durable `TranscriptJournal` seam, the reader/replay path, the disposable SQLite index and the export renderers. | `crates/radian-session/README.md`, ADR 0006 |
 | `radian-runtime` | The layer above the turn loop: a durable, bounded inbox (`followup`/`steer`/`inject`/`cancel`) and the per-session driver. | `crates/radian-runtime/README.md`, ADR 0011 |
 | `radian-permissions` | The permission layer: `ApprovalPolicy` + `ToolRuleSet` as one `Hooks` implementation; decides allow / ask / deny. It does not enforce anything. | `crates/radian-permissions/README.md`, ADR 0012 |
 | `radian-sandbox` | OS sandbox backends (macOS `sandbox-exec`, Linux `bubblewrap`) that build a command under a policy and **refuse to run** without a proven backend. | `docs/sandbox.md`, ADR 0012, ADR 0016 |
 | `radian-coding` | Built-in coding tools — `read`, `write`, `patch`, `list`, `git_status`, `git_diff`, and `shell` only when the host supplies a sandbox — with workspace path confinement. | `crates/radian-coding/README.md` |
-| `radian-host` | Host plumbing shared by both binaries so they cannot drift: `--header` parsing, session ids, the `--mcp-config` file, model construction, the startup description, and the "built-in tools + MCP" provider. | `crates/radian-host/src/lib.rs` |
-| `radian-slots` | Prototype hot-configuration slots (`ModelSlot`/`PolicySlot`) and a per-session driver that applies config changes only at a turn boundary. **Not wired into the two hosts.** | `crates/radian-slots/src/lib.rs`, ADR 0004 |
+| `radian-host` | Host plumbing shared by both binaries so they cannot drift: `--header` parsing, session ids, the `--mcp-config` file, model construction, the startup description, and the "built-in tools + MCP" provider. | `crates/radian-host/README.md` |
 | `agent-cli` | The `agent` binary: a line-prompt chat client with optional built-in tools, MCP servers and session-management commands. | `crates/agent-cli/README.md` |
 | `radian-tui` | The `radian-tui` binary: a full-screen TUI (ADR 0009: full screen only, no inline mode) over `radian-runtime`. | `crates/radian-tui/README.md`, ADR 0009 |
 
@@ -57,9 +56,9 @@ Both hosts read the API key **only** from an environment variable — never from
 — and never print it. The default variable is `$OPENAI_API_KEY` for `openai-compatible` and
 `$ANTHROPIC_API_KEY` for `anthropic`; `--api-key-env` names a different one. A session is one
 `<session-dir>/<session-id>.jsonl` file; the session directory defaults to
-`--session-dir`, else `$RADIAN_SESSION_DIR`, else the platform data directory
-(`~/Library/Application Support/radian/sessions` on macOS, `$XDG_DATA_HOME/radian/sessions` or
-`~/.local/share/radian/sessions` elsewhere).
+`--session-dir`, else `$RADIAN_SESSION_DIR`, else `~/.radian/sessions` (`$RADIAN_HOME/sessions`
+when `RADIAN_HOME` is set, ADR 0020). The same `~/.radian/` root also holds `config/`,
+`cache/` and `memory/`; the sandbox denies read on `sessions/` and `memory/`.
 
 ### `agent` (line prompt)
 

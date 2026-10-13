@@ -133,6 +133,12 @@ fn spawn_agent(args: &[&str], envs: &[(&str, &str)]) -> Child {
         .args(args)
         .env_remove("OPENAI_API_KEY")
         .env("RADIAN_SESSION_DIR", fresh_session_dir())
+        // Tests must not read the user's catalog cache or reach the real models.dev. A fresh
+        // `HOME` isolates the cache; the catalog URL points at a closed local port, so a
+        // lookup fails fast and the window is unknown. A test that wants the catalog
+        // overrides both through `envs`.
+        .env("HOME", fresh_session_dir())
+        .env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json")
         .envs(envs.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -2577,7 +2583,7 @@ async fn without_a_window_the_guard_is_off_and_says_so() {
 
     assert_eq!(code, 0, "{stderr}");
     assert!(stderr.contains("context guard off"), "{stderr}");
-    assert!(stderr.contains("no --context-window"), "{stderr}");
+    assert!(stderr.contains("unknown: context guard off"), "{stderr}");
     assert!(
         !stderr.contains("the model request was not sent"),
         "{stderr}"
@@ -2941,6 +2947,9 @@ fn spawn_agent_in(session_dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> C
         .args(args)
         .env_remove("OPENAI_API_KEY")
         .env("RADIAN_SESSION_DIR", session_dir)
+        // Isolate the catalog cache and the network, like `spawn_agent` above.
+        .env("HOME", fresh_session_dir())
+        .env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json")
         .envs(envs.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -4374,4 +4383,295 @@ async fn one_shot_model_error_still_exits_one_and_shows_the_error() {
     assert_eq!(code, 1, "{stderr}");
     assert!(stderr.contains("HTTP 500"), "{stderr}");
     assert!(stdout.is_empty(), "stdout must stay model-only: {stdout}");
+}
+
+// ---------- model catalog: the startup window line (ADR 0018) ----------
+
+const CATALOG_JSON: &str = r#"{
+  "opencode": {
+    "id": "opencode",
+    "models": {
+      "deepseek-v4.1-flash": {"id": "deepseek-v4.1-flash",
+        "limit": {"context": 1000000, "input": 922000, "output": 384000}}
+    }
+  }
+}"#;
+
+/// The explicit window is named on startup and wins over the catalog.
+#[tokio::test]
+async fn the_startup_line_names_an_explicit_window() {
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--context-window",
+                "5000",
+                "--offline-catalog",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("window 5000 from --context-window"),
+        "{stderr}"
+    );
+}
+
+/// With no window and an empty cache, the guard is off and says so.
+#[tokio::test]
+async fn the_startup_line_is_unknown_without_a_window() {
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let home = scratch("no-window-home");
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--offline-catalog",
+                "-p",
+                "hi",
+            ],
+            &[("HOME", home.to_str().unwrap())],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("unknown: context guard off"), "{stderr}");
+}
+
+/// The catalog line names the provider/model and the numbers, and the numbers show separately.
+#[tokio::test]
+async fn the_startup_line_names_the_catalog() {
+    let provider = MockServer::start(vec![text_reply("ok")]).await;
+    let catalog = MockServer::start(vec![Reply::status(200, CATALOG_JSON)]).await;
+    let catalog_url = format!("{}/api.json", catalog.base_url);
+    let home = scratch("catalog-home");
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "deepseek-v4.1-flash",
+                "--base-url",
+                &provider.base_url,
+                "--catalog-provider",
+                "opencode",
+                "-p",
+                "hi",
+            ],
+            &[
+                ("HOME", home.to_str().unwrap()),
+                ("RADIAN_CATALOG_URL", catalog_url.as_str()),
+            ],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("window 922000 from models.dev (opencode/deepseek-v4.1-flash"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("context 1000000"), "{stderr}");
+    assert!(stderr.contains("input 922000"), "{stderr}");
+    assert!(stderr.contains("output 384000"), "{stderr}");
+    assert_eq!(catalog.requests().len(), 1, "the catalog was fetched once");
+}
+
+// ---------- ADR 0020: the `~/.radian/` layout ----------
+
+/// Like [`spawn_agent`], but without the default `RADIAN_SESSION_DIR`, so a test controls the
+/// session location (`RADIAN_HOME` / `RADIAN_SESSION_DIR` / `--session-dir`).
+fn spawn_agent_bare(args: &[&str], envs: &[(&str, &str)]) -> Child {
+    Command::new(agent_bin())
+        .args(args)
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("RADIAN_SESSION_DIR")
+        .env_remove("RADIAN_HOME")
+        .envs(envs.iter().copied())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn agent")
+}
+
+/// `RADIAN_HOME` moves the whole root; sessions land in `<RADIAN_HOME>/sessions`.
+#[tokio::test]
+async fn radian_home_places_sessions_under_the_radian_root() {
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let dir = scratch("radian-home");
+    let radian_home = dir.join("rh");
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent_bare(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--session-id",
+                "h1",
+                "-p",
+                "hi",
+            ],
+            &[("RADIAN_HOME", radian_home.to_str().unwrap())],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        radian_home.join("sessions/h1.jsonl").exists(),
+        "the session must be under <RADIAN_HOME>/sessions"
+    );
+}
+
+/// `RADIAN_SESSION_DIR` still wins over `RADIAN_HOME` for the sessions directory only.
+#[tokio::test]
+async fn radian_session_dir_overrides_radian_home() {
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let dir = scratch("session-dir-wins");
+    let radian_home = dir.join("rh");
+    let custom = dir.join("custom-sessions");
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent_bare(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--session-id",
+                "h1",
+                "-p",
+                "hi",
+            ],
+            &[
+                ("RADIAN_HOME", radian_home.to_str().unwrap()),
+                ("RADIAN_SESSION_DIR", custom.to_str().unwrap()),
+            ],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        custom.join("h1.jsonl").exists(),
+        "RADIAN_SESSION_DIR must win"
+    );
+    assert!(
+        !radian_home.join("sessions/h1.jsonl").exists(),
+        "the default must not be used when RADIAN_SESSION_DIR is set"
+    );
+}
+
+/// ADR 0020 acceptance: under `workspace`, the `shell` tool cannot read the sessions directory;
+/// the denial comes back to the model as a tool error and the turn continues.
+#[tokio::test]
+async fn workspace_shell_cannot_read_the_sessions_directory() {
+    let dir = scratch("shell-deny-sessions");
+    let radian_home = dir.join("rh");
+    let sessions = radian_home.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::write(sessions.join("x.jsonl"), "SECRET-SESSION-CONTENT\n").unwrap();
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    let command = format!("cat {}/x.jsonl", sessions.display());
+    let server = MockServer::start(vec![
+        tool_reply("c1", "shell", &json!({ "command": command }).to_string()),
+        text_reply("SAW-DENIED"),
+    ])
+    .await;
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent_bare(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--yes",
+                "--session-id",
+                "deny",
+                "-p",
+                "go",
+            ],
+            &[("RADIAN_HOME", radian_home.to_str().unwrap())],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("SAW-DENIED"), "{stdout}");
+    let result = tool_result_content(&server, 1);
+    assert!(
+        !result.contains("SECRET-SESSION-CONTENT"),
+        "the sandbox leaked the session file: {result}"
+    );
+    assert!(
+        result.contains("exit code:"),
+        "a shell result was expected: {result}"
+    );
+}
+
+/// ADR 0020 acceptance 2: a `--session-dir` that does not exist yet must still be denied. The
+/// host creates it 0700 **before** building the sandbox, because Linux's bwrap can only mask
+/// paths that already exist; without that, the session file (created after the sandbox) would
+/// be readable. This is the case that only fails on Linux if the create-before-deny is missing.
+#[tokio::test]
+async fn workspace_shell_cannot_read_a_moved_sessions_directory() {
+    let dir = scratch("shell-deny-moved");
+    let radian_home = dir.join("rh");
+    let custom = dir.join("custom-sessions"); // does not exist yet
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    let command = format!("cat {}/moved.jsonl", custom.display());
+    let server = MockServer::start(vec![
+        tool_reply("c1", "shell", &json!({ "command": command }).to_string()),
+        text_reply("SAW-DENIED"),
+    ])
+    .await;
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent_bare(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--yes",
+                "--session-dir",
+                custom.to_str().unwrap(),
+                "--session-id",
+                "moved",
+                "-p",
+                "go",
+            ],
+            &[("RADIAN_HOME", radian_home.to_str().unwrap())],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("SAW-DENIED"), "{stdout}");
+    let result = tool_result_content(&server, 1);
+    assert!(
+        !result.contains("SessionCreated"),
+        "the sandbox read the session file: {result}"
+    );
 }

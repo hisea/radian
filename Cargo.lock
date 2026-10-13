@@ -2148,8 +2148,10 @@ dependencies = [
  "radian-coding",
  "radian-sandbox",
  "radian-session",
+ "reqwest",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -2200,17 +2202,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
- "tokio",
-]
-
-[[package]]
-name = "radian-slots"
-version = "0.1.0"
-dependencies = [
- "agent-core",
- "futures-util",
- "serde",
- "serde_json",
  "tokio",
 ]
 

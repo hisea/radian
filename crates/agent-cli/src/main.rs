@@ -217,11 +217,20 @@ struct Cli {
     #[arg(long)]
     turn_timeout_secs: Option<u64>,
 
-    /// The model's context window in tokens. Omit to leave the context-budget guard disabled:
-    /// no window is guessed, because a model-name-to-window table ages and is mostly
-    /// remembered numbers (ADR 0015 C1).
+    /// The model's context window in tokens. Omitted, the models.dev catalog is consulted
+    /// for `(provider, model)` (ADR 0018); an explicit value always wins. With neither, the
+    /// guard is off and no window is guessed (ADR 0015).
     #[arg(long, value_name = "TOKENS")]
     context_window: Option<u64>,
+
+    /// Never fetch the models.dev catalog; use only the local cache.
+    #[arg(long)]
+    offline_catalog: bool,
+
+    /// The models.dev provider id to look the model up under (default: derived from the
+    /// `--base-url` hostname; e.g. `opencode.ai` → `opencode`).
+    #[arg(long, value_name = "PROVIDER")]
+    catalog_provider: Option<String>,
 
     /// Block when the projected request size reaches this percent of the window (default 80).
     #[arg(long, value_name = "PERCENT", default_value_t = agent_core::DEFAULT_THRESHOLD_PERCENT)]
@@ -298,6 +307,14 @@ async fn run(cli: Cli) -> i32 {
             return USAGE_ERROR;
         }
     };
+    // ADR 0020 decision 5: never move a user's data; print a copy-pasteable command instead.
+    // Only when the default location is in use (an explicit --session-dir opted out).
+    if cli.session_dir.is_none()
+        && std::env::var("RADIAN_SESSION_DIR").map_or(true, |dir| dir.is_empty())
+        && let Some(hint) = radian_host::legacy_sessions_hint()
+    {
+        eprintln!("{hint}");
+    }
     let redact_secrets = setup.secrets.clone();
     match chat(setup, cli).await {
         Ok(code) => code,
@@ -316,9 +333,11 @@ struct Setup {
     system_prompt: Option<String>,
     max_model_calls: Option<u32>,
     turn_timeout_secs: Option<u64>,
-    /// The context-budget guard, or `None` when no window was configured (the guard is then
+    /// The context-budget guard, or `None` when no window is known (the guard is then
     /// disabled, not given a guessed default).
     context_budget: Option<ContextBudget>,
+    /// The window and where it came from (ADR 0018), for the startup line.
+    window: radian_host::Window,
     /// The session id this process uses: the file name, and the `{session_id}` header value.
     session_id: String,
     /// The validated, canonical workspace (dogfooding D1). Resolved in `setup`, before any
@@ -390,6 +409,9 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         // reusable across processes.
         eprintln!("[session] {session_id} (pass --session-id to reuse it)");
     }
+    // The catalog matches on the hostname of the endpoint the model actually talks to, so
+    // the URL is captured before `build_model` consumes it (ADR 0018).
+    let catalog_base_url = base_url.clone();
     let model = build_model(ModelArgs {
         provider,
         base_url,
@@ -410,24 +432,33 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     let mut secrets: Vec<String> = key.into_iter().collect();
     secrets.extend(headers.into_iter().map(|(_, value)| value));
     secrets.retain(|secret| !secret.is_empty());
-    // The context-budget guard exists only when the host names a window (ADR 0015 C1). The
+    // The context-budget guard exists only when a window is known (ADR 0015 C1). The
     // threshold is validated only when there is a window; a threshold alone changes nothing.
     if !(1..=100).contains(&cli.context_threshold) {
         return Err(SetupError(
             "--context-threshold must be between 1 and 100".into(),
         ));
     }
-    let context_budget = match cli.context_window {
-        Some(0) => {
-            return Err(SetupError(
-                "--context-window must be at least 1 token".into(),
-            ));
-        }
-        Some(window) => {
-            Some(ContextBudget::new(window).with_threshold_percent(cli.context_threshold))
-        }
-        None => None,
-    };
+    if cli.context_window == Some(0) {
+        return Err(SetupError(
+            "--context-window must be at least 1 token".into(),
+        ));
+    }
+    // The window comes from `--context-window` or the models.dev catalog (ADR 0018). A fetch
+    // failure is not a startup failure: the window is then unknown and the guard stays off.
+    // This runs before the session file exists.
+    let window = radian_host::resolve(&radian_host::WindowQuery::production(
+        cli.context_window,
+        cli.catalog_provider.clone(),
+        &catalog_base_url,
+        model_name(cli)?,
+        cli.offline_catalog,
+    ))
+    .await;
+    let context_budget = window
+        .tokens
+        .filter(|tokens| *tokens > 0)
+        .map(|tokens| ContextBudget::new(tokens).with_threshold_percent(cli.context_threshold));
     Ok(Setup {
         model,
         provider,
@@ -436,6 +467,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         max_model_calls: cli.max_model_calls,
         turn_timeout_secs: cli.turn_timeout_secs,
         context_budget,
+        window,
         session_id,
         workspace,
         secrets,
@@ -445,11 +477,9 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
 /// Where session files live: `--session-dir`, then `RADIAN_SESSION_DIR`, then the user's
 /// data directory.
 ///
-/// Sessions are durable records, not a cache: ADR 0013 decision 4 says the journal is not
-/// subject to cache cleanup, so this is the platform's *data* directory —
-/// `$XDG_DATA_HOME/radian/sessions` (defaulting to `~/.local/share/radian/sessions`) on
-/// Linux, `~/Library/Application Support/radian/sessions` on macOS. Never a cache or temp
-/// path.
+/// Sessions are durable records, not a cache (ADR 0013 decision 4), and since ADR 0020 they
+/// live under `~/.radian/sessions` (`$RADIAN_HOME/sessions` when that is set) — the same
+/// root as the config and cache, but the sandbox denies read on this subdirectory.
 fn session_dir(cli: &Cli) -> Result<PathBuf, SetupError> {
     if let Some(dir) = &cli.session_dir {
         return Ok(PathBuf::from(dir));
@@ -459,24 +489,10 @@ fn session_dir(cli: &Cli) -> Result<PathBuf, SetupError> {
     {
         return Ok(PathBuf::from(dir));
     }
-    let home = std::env::var("HOME")
-        .map_err(|_| SetupError("no HOME to place sessions under; pass --session-dir".into()))?;
-    if let Ok(xdg) = std::env::var("XDG_DATA_HOME")
-        && !xdg.is_empty()
-    {
-        return Ok(PathBuf::from(xdg).join("radian").join("sessions"));
-    }
-    if cfg!(target_os = "macos") {
-        Ok(PathBuf::from(home)
-            .join("Library/Application Support")
-            .join("radian")
-            .join("sessions"))
-    } else {
-        Ok(PathBuf::from(home)
-            .join(".local/share")
-            .join("radian")
-            .join("sessions"))
-    }
+    // ADR 0020: the default is `~/.radian/sessions` (or `$RADIAN_HOME/sessions`).
+    radian_host::sessions_dir().ok_or_else(|| {
+        SetupError("no RADIAN_HOME or HOME to place sessions under; pass --session-dir".into())
+    })
 }
 
 /// The workspace a session belongs to: `--workspace` when given, else the current
@@ -786,24 +802,31 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     let workspace_path = setup.workspace.clone();
     let permission_profile =
         profile::build_profile(profile_arg, &workspace_path, &cli.allow_shell_command)?;
-    let sandbox = profile::build_sandbox(profile_arg, &workspace_path)?;
+    // ADR 0020 decision 3: the sandbox denies read on the **actual** sessions directory and
+    // the memory directory. Create them owner-only first so Linux's bwrap (which can only mask
+    // paths that exist) can hide them.
+    let sessions_for_deny = session_dir(&cli)?;
+    let _ = radian_host::ensure_private_dir(&sessions_for_deny);
+    let mut sandbox_deny_read = vec![sessions_for_deny];
+    if let Some(memory) = radian_host::memory_dir() {
+        sandbox_deny_read.push(memory);
+    }
+    let sandbox = profile::build_sandbox(profile_arg, &workspace_path, &sandbox_deny_read)?;
     let (profile_line, sandbox_facts) = profile::describe(profile_arg, sandbox.as_ref());
     eprintln!("[profile] {profile_line}");
     eprintln!("[sandbox] {sandbox_facts}");
+    // The window and where it came from (ADR 0018), then the guard's threshold.
     match &setup.context_budget {
         Some(budget) => eprintln!(
-            "[budget] context guard on: window {} tokens, threshold {}% ({} tokens). A \
-             provider-reported input is trusted as reported; only the growth since that report \
-             is estimated ({} ASCII bytes per token, at least 1 token per non-ASCII character)",
-            budget.window_tokens,
+            "[budget] {}; threshold {}% ({} tokens). A provider-reported input is trusted as \
+             reported; only the growth since that report is estimated ({} ASCII bytes per token, \
+             at least 1 token per non-ASCII character)",
+            setup.window.describe(),
             budget.threshold_percent,
             budget.threshold_tokens(),
             budget.bytes_per_token
         ),
-        None => eprintln!(
-            "[budget] context guard off: no --context-window was given, and no default window \
-             is guessed (ADR 0015)"
-        ),
+        None => eprintln!("[budget] {} (ADR 0015)", setup.window.describe()),
     }
 
     // The built-in tools exist only with `--workspace`. `shell` is present only when a
