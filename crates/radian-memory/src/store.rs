@@ -441,11 +441,18 @@ impl MemoryStore {
             match existing {
                 Some(record) => {
                     if let Some(field) = record.unknown_field() {
+                        // This version cannot interpret the stored value, so it must not
+                        // rewrite it. Only `kind` has a counterpart in the Markdown.
+                        let imported = if field == "kind" {
+                            item.kind.as_str().to_owned()
+                        } else {
+                            String::new()
+                        };
                         report.rejections.push(ImportRejection {
                             id: item.id,
                             field: field.to_owned(),
                             stored: format!("<unknown {field}>"),
-                            imported: record.kind.as_str().to_owned(),
+                            imported,
                         });
                         continue;
                     }
