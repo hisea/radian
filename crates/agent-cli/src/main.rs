@@ -503,6 +503,7 @@ fn memory_command(cli: &Cli, command: MemoryCommand) -> Result<(), MemoryCliErro
             all,
             json,
         } => {
+            note_unlinked(&service, global, project)?;
             let records = service.list(selection(global, project), all)?;
             if json {
                 print_json(&records)?;
@@ -518,6 +519,7 @@ fn memory_command(cli: &Cli, command: MemoryCommand) -> Result<(), MemoryCliErro
             json,
             words,
         } => {
+            note_unlinked(&service, global, project)?;
             let query = SearchQuery {
                 text: Some(words.join(" ")),
                 key: None,
@@ -697,6 +699,33 @@ fn confirm_or_refuse(message: &str, yes: bool) -> Result<(), MemoryCliError> {
     } else {
         Err(MemoryCliError::failure("cancelled"))
     }
+}
+
+/// A default-scope `list`/`search` on an unlinked workspace reads only Global; say so (with
+/// the candidates) on stderr instead of silently dropping the Project scope. An explicit
+/// `--global`/`--project` does not print this.
+fn note_unlinked(
+    service: &MemoryService,
+    global: bool,
+    project: bool,
+) -> Result<(), MemoryCliError> {
+    if global || project {
+        return Ok(());
+    }
+    if let ProjectState::Unlinked {
+        identity_key,
+        candidates,
+    } = service.state()?
+    {
+        eprintln!(
+            "[memory] {}",
+            MemoryServiceError::Unlinked {
+                identity_key,
+                candidates,
+            }
+        );
+    }
+    Ok(())
 }
 
 fn print_json<T: serde::Serialize>(value: &T) -> Result<(), MemoryCliError> {

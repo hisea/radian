@@ -4793,6 +4793,14 @@ async fn memory_unlinked_workspace_refuses_project_writes_and_lists_global() {
     let (code, stdout, stderr) = env.run(&["list"]).await;
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("a global note"), "{stdout}");
+    assert!(
+        stderr.contains("not linked"),
+        "a default-scope list says the workspace is unlinked: {stderr}"
+    );
+    assert!(
+        stderr.contains("no candidate projects"),
+        "no candidate projects yet: {stderr}"
+    );
 
     let (code, _, stderr) = env.run(&["add", "a project note"]).await;
     assert_eq!(code, 1, "{stderr}");
