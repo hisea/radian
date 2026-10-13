@@ -10,7 +10,6 @@ mod approval;
 mod profile;
 mod tools;
 
-use std::collections::HashMap;
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -37,10 +36,7 @@ use radian_host::{
 };
 use radian_permissions::{Approver, PermissionHooks};
 use radian_runtime::{CancelCause, Driver, DriverError, Inbox, InboxError};
-use radian_session::{
-    EventData, ExportOptions, Index, Session, SessionCreatedData, SessionJournal, export_json,
-    export_markdown,
-};
+use radian_session::{Index, SessionCreatedData, SessionJournal};
 use tokio::sync::{Mutex, mpsc};
 
 use crate::approval::{AutoApprover, JournalAudit, TERMINAL_SOURCE, TerminalApprover};
@@ -665,52 +661,28 @@ fn session_workspace(cli: &Cli) -> Result<String, SetupError> {
     )
 }
 
-/// Opens the workspace's session index and rebuilds it from the JSONL files. The index is a
-/// disposable cache (ADR 0006 §10): the `.jsonl` files are the authority, and nothing here
-/// writes one. `None` means the session directory does not exist yet.
-fn open_workspace_index(cli: &Cli) -> Result<Option<(PathBuf, Index, String)>, SetupError> {
+/// Opens the workspace's session index through the shared host layer (ADR 0006 §10: the
+/// `.jsonl` files are the authority, the index is a disposable cache). `None` means the
+/// session directory does not exist yet.
+fn session_index(cli: &Cli) -> Result<Option<(Index, String)>, SetupError> {
     let dir = session_dir(cli)?;
     let workspace = session_workspace(cli)?;
-    if !dir.exists() {
-        return Ok(None);
-    }
-    radian_session::warn_if_wide(&dir);
-    let mut index = Index::open(dir.join("index.db")).map_err(|e| {
-        SetupError(format!(
-            "cannot open the session index in {}: {e}",
-            dir.display()
-        ))
-    })?;
-    index
-        .rebuild_dir(&dir)
-        .map_err(|e| SetupError(format!("cannot rebuild the session index: {e}")))?;
-    Ok(Some((dir, index, workspace)))
+    let index = radian_host::sessions::open_index(&dir).map_err(SetupError)?;
+    Ok(index.map(|index| (index, workspace)))
 }
 
 /// `--list`: the sessions of this workspace, newest activity first.
 fn list_sessions(cli: &Cli) -> Result<(), SetupError> {
-    let Some((_dir, index, workspace)) = open_workspace_index(cli)? else {
+    let Some((index, workspace)) = session_index(cli)? else {
         return Ok(()); // no sessions yet
     };
-    let sessions = index
-        .list(Some(&workspace))
-        .map_err(|e| SetupError(format!("cannot list sessions: {e}")))?;
-    for session in sessions {
-        let messages = index
-            .indexed_events(&session.session_id)
-            .map(|events| {
-                events
-                    .iter()
-                    .filter(|event| event.event == "MessageAppended")
-                    .count()
-            })
-            .unwrap_or(0);
+    for row in radian_host::sessions::list(&index, &workspace).map_err(SetupError)? {
         println!(
             "{}\t{}\t{}\t{}",
-            session.session_id,
-            session.created_ts.as_deref().unwrap_or("-"),
-            session.last_ts.as_deref().unwrap_or("-"),
-            messages
+            row.session_id,
+            row.created_ts.as_deref().unwrap_or("-"),
+            row.last_ts.as_deref().unwrap_or("-"),
+            row.message_count
         );
     }
     Ok(())
@@ -723,40 +695,22 @@ const SEARCH_LIMIT: usize = 200;
 /// file directly (no index), so a read-only command writes nothing into the session
 /// directory.
 fn export_session(cli: &Cli, session_id: &str) -> Result<(), SetupError> {
-    // The id becomes a file name; validate it like every other entry point so `../x` or `a/b`
-    // cannot name a file outside the session directory. Without this, the workspace check
-    // below is the only guard, and a forged file that claims the current workspace passes it.
-    validate_session_id(session_id).map_err(SetupError)?;
     let dir = session_dir(cli)?;
     let workspace = session_workspace(cli)?;
-    let path = dir.join(format!("{session_id}.jsonl"));
-    if !path.exists() {
-        return Err(SetupError(format!(
-            "no session {session_id:?} in {}",
-            dir.display()
-        )));
-    }
-    let session = Session::open(&path)
-        .map_err(|e| SetupError(format!("cannot read session {session_id:?}: {e}")))?;
-    // The same workspace filter as `--list`: a session belongs to the workspace it was
-    // created in, and another workspace's id is refused by name rather than exported.
-    if session_workspace_of(&session).as_deref() != Some(workspace.as_str()) {
-        return Err(SetupError(format!(
-            "session {session_id:?} is not in this workspace; --export only exports the \
-             current workspace"
-        )));
-    }
-    let mut opts = ExportOptions::new()
-        .include_reasoning(cli.include_reasoning)
-        .include_provider_payload(cli.include_provider_payload);
-    for secret in export_secrets(cli) {
-        opts = opts.with_secret(secret);
-    }
-    let rendered = match cli.format {
-        ExportFormat::Markdown => export_markdown(&session, &opts),
-        ExportFormat::Json => export_json(&session, &opts),
-    }
-    .map_err(|e| SetupError(format!("cannot export session {session_id:?}: {e}")))?;
+    let format = match cli.format {
+        ExportFormat::Markdown => radian_host::Format::Markdown,
+        ExportFormat::Json => radian_host::Format::Json,
+    };
+    let settings = radian_host::ExportSettings {
+        include_reasoning: cli.include_reasoning,
+        include_provider_payload: cli.include_provider_payload,
+        secrets: export_secrets(cli),
+    };
+    // The shared host layer validates the id (`../x` cannot name a file), checks the workspace
+    // (another workspace's session is refused by name) and redacts; this CLI only decides
+    // where the bytes go.
+    let rendered = radian_host::sessions::export(&dir, &workspace, session_id, format, &settings)
+        .map_err(SetupError)?;
     match &cli.out {
         Some(path) => {
             if path.exists() && !cli.force {
@@ -771,18 +725,6 @@ fn export_session(cli: &Cli, session_id: &str) -> Result<(), SetupError> {
         None => print!("{rendered}"),
     }
     Ok(())
-}
-
-/// The workspace recorded in a session's `SessionCreated` event. `None` for a file the reader
-/// accepted but that has no `SessionCreated` (impossible for one this CLI wrote).
-fn session_workspace_of(session: &Session) -> Option<String> {
-    session.events().iter().find_map(|event| match &event.data {
-        EventData::Other(data) => data
-            .get("workspace")
-            .and_then(|workspace| workspace.as_str())
-            .map(str::to_owned),
-        _ => None,
-    })
 }
 
 /// The values that must never appear in an export: the key `setup` would read and every
@@ -819,47 +761,29 @@ fn export_secrets(cli: &Cli) -> Vec<String> {
 /// `Index::search` the `--list` cache is built on. The index lives beside the sessions in
 /// `index.db`; it is a disposable cache, never a session file (ADR 0006 §10).
 fn search_sessions(cli: &Cli, query: &str) -> Result<(), SetupError> {
-    let Some((_dir, index, workspace)) = open_workspace_index(cli)? else {
+    let Some((index, workspace)) = session_index(cli)? else {
         eprintln!("no match");
         return Ok(());
     };
-    let hits = index
-        .search(query, Some(&workspace), SEARCH_LIMIT)
-        .map_err(|e| SetupError(format!("cannot search: {e}")))?;
+    let hits = radian_host::sessions::search(&index, &workspace, query, SEARCH_LIMIT)
+        .map_err(SetupError)?;
     if hits.is_empty() {
         eprintln!("no match");
         return Ok(());
     }
-    // The hit's own timestamp is not part of `SearchHit`; the session's last activity is the
-    // same value `--list` shows and is enough to tell hits apart.
-    let times: HashMap<String, String> = index
-        .list(Some(&workspace))
-        .map_err(|e| SetupError(format!("cannot list sessions: {e}")))?
-        .into_iter()
-        .map(|session| {
-            (
-                session.session_id,
-                session.last_ts.unwrap_or_else(|| "-".into()),
-            )
-        })
-        .collect();
+    let secrets = export_secrets(cli);
     for hit in hits {
-        let time = times
-            .get(&hit.session_id)
-            .cloned()
-            .unwrap_or_else(|| "-".into());
         // The snippet is session content and can carry a model-echoed key or header value;
         // redact the known secrets exactly like `--export` (ADR 0013 decision 3).
-        let snippet = redact(&one_line(&hit.snippet), &export_secrets(cli));
-        println!("{}\t{}\t{}", hit.session_id, time, snippet);
+        let snippet = redact(&hit.snippet, &secrets);
+        println!(
+            "{}\t{}\t{}",
+            hit.session_id,
+            hit.last_ts.as_deref().unwrap_or("-"),
+            snippet
+        );
     }
     Ok(())
-}
-
-/// A hit snippet as one terminal line: every run of whitespace (including the newlines a
-/// multi-line message carries) becomes a single space.
-fn one_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Like the provider's own rule: localhost, 127.0.0.1 and ::1 may go without a key.
