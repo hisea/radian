@@ -50,6 +50,9 @@ fn serial() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+// The body awaits a journal append while holding the serial lock on purpose; the lock
+// serializes these tests and nothing else in this test's runtime needs it.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn a_torn_tail_is_truncated_before_appending() {
     let _serial = serial();
@@ -191,6 +194,9 @@ async fn child_crash_writer() {
     }
 }
 
+// The body awaits a journal append while holding the serial lock on purpose; the lock
+// serializes these tests and nothing else in this test's runtime needs it.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn a_second_writer_in_this_process_is_refused() {
     let _serial = serial();
