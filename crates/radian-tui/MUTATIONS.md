@@ -273,3 +273,17 @@ Base: `fcd0c26` · 一次性检出 `/tmp/fork-mut`（detached，跑完删除）�
 | F5 | 去掉 `/fork` 的 `TurnState::Running` 检查（运行中也允许） | `pty::pty_fork_refuses_while_a_turn_runs` | ✅ failed |
 
 1/1 抓住。
+
+## config 第三轮：`[config]` 必须在进备用屏之前打印
+
+Base `bb214e4` · 一次性 worktree `/tmp/config3-mut` · 独立 `CARGO_TARGET_DIR` ·
+`git checkout --` 还原、`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M27 | 把 `[config]` 行/警告的 `eprintln!` 移回 `TtyGuard::enter()` 之后（在备用屏里打印） | `pty_the_config_line_is_not_written_inside_the_alternate_screen`、`pty_fork_creates_a_resumable_child_when_idle` | ✅ failed（两屏都渲染成 `> hello]parent…`） |
+
+这个 bug 是 main 的 fork 测试抓出来的：mutation 证明**我自己的第一条回归测试漏了**它——
+没有 resumed history 时用户行不是第一行，陈旧的 `[config]` 单元落在启动 notice 上。改成
+`--resume` 一条历史（第一行就是用户行，和 fork 的情形一样）并同时断言字节顺序后，两个测试
+都能抓住。
