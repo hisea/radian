@@ -26,7 +26,6 @@ constrain the code are ADRs under `docs/adr/` (see the index at the end of this 
 | `radian-sandbox` | OS sandbox backends (macOS `sandbox-exec`, Linux `bubblewrap`) that build a command under a policy and **refuse to run** without a proven backend. | `docs/sandbox.md`, ADR 0012, ADR 0016 |
 | `radian-coding` | Built-in coding tools — `read`, `write`, `patch`, `list`, `git_status`, `git_diff`, and `shell` only when the host supplies a sandbox — with workspace path confinement. | `crates/radian-coding/README.md` |
 | `radian-host` | Host plumbing shared by both binaries so they cannot drift: `--header` parsing, session ids, the `--mcp-config` file, model construction, the startup description, and the "built-in tools + MCP" provider. | `crates/radian-host/README.md` |
-| `radian-slots` | Prototype hot-configuration slots (`ModelSlot`/`PolicySlot`) and a per-session driver that applies config changes only at a turn boundary. **Not wired into the two hosts.** | `crates/radian-slots/src/lib.rs`, ADR 0004 |
 | `agent-cli` | The `agent` binary: a line-prompt chat client with optional built-in tools, MCP servers and session-management commands. | `crates/agent-cli/README.md` |
 | `radian-tui` | The `radian-tui` binary: a full-screen TUI (ADR 0009: full screen only, no inline mode) over `radian-runtime`. | `crates/radian-tui/README.md`, ADR 0009 |
 
