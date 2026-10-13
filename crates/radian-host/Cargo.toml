@@ -15,6 +15,9 @@ agent-extensions = { path = "../agent-extensions" }
 agent-provider-anthropic = { path = "../agent-provider-anthropic" }
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible" }
 radian-coding = { path = "../radian-coding" }
+# `QueuedApprover` implements `radian_permissions::Approver` (ADR 0023 U7); the trait lives
+# with the approval layer.
+radian-permissions = { path = "../radian-permissions" }
 # The memory service (ADR 0021 D2/D8) sits on the storage layer.
 radian-memory = { path = "../radian-memory" }
 radian-sandbox = { path = "../radian-sandbox" }
@@ -25,6 +28,10 @@ radian-session = { path = "../radian-session" }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "system-proxy"] }
 serde.workspace = true
 serde_json.workspace = true
+# The pending-request queue (ADR 0023 U7) needs `oneshot`/`watch`, and `Approver::decide`
+# returns a `BoxFuture`.
+futures-util.workspace = true
+tokio = { workspace = true }
 # The read-only configuration file (ADR 0008) is TOML (its fixtures are TOML). Parsing only:
 # this slice never writes the file, so `toml_edit` is not needed.
 toml = "0.8"

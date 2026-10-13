@@ -18,6 +18,7 @@ mod mcp;
 pub mod memory;
 mod model;
 mod output;
+pub mod pending;
 mod session_id;
 pub mod sessions;
 mod tools;
@@ -28,6 +29,7 @@ pub use catalog::{
     WindowCheck, WindowQuery, WindowSource, cache_path, host_of, input_budget,
     output_ceiling_warning, output_reservation, provider_for_host, resolve,
 };
+pub use config::migrate_pi::{PiDraft, PiMigrateError, import_pi, write_draft as write_pi_draft};
 pub use config::{
     CONFIG_FILE_NAME, CompactionConfig, Config, ConfigError, ModelConfig, PermissionsConfig,
     RADIAN_CONFIG_ENV, SUPPORTED_SCHEMA_VERSION, TuiConfig, load as load_config,
@@ -52,6 +54,7 @@ pub use model::{
     check_provider_flags, redact_base_url,
 };
 pub use output::{StdoutError, write_line, write_stdout};
+pub use pending::{Abandoned, Answered, PendingAnswer, PendingQueue, PendingView, QueuedApprover};
 pub use session_id::{generate_session_id, validate_session_id};
 pub use sessions::{
     ExportSettings, Format, SEARCH_LIMIT, SUMMARY_MAX_CHARS, SearchRow, SessionRow,

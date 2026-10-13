@@ -187,3 +187,38 @@ Base `8028d9e` · 一次性 worktree `/tmp/config-mut`（从 HEAD 建，做完�
 
 4/4 抓住。（这些变异跑里 `bad_mcp_config_exits_two_with_the_path` 也出现在失败列表——它是并发 cargo
 运行的 watchdog 抖动，干净树上单跑 3 次都过，不是变异引起的。）
+
+## Phase 5：Pi 迁移（`config::migrate_pi`）
+
+Base `5aa84b6` · 一次性 worktree `/tmp/pimig-mut` · 独立 `CARGO_TARGET_DIR` ·
+每个变异 `git checkout -- .` 还原、`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M15 | 存在 `auth.json` 时读取它（只把 NotFound 当跳过） | `pi_migrate::auth_json_is_never_read`、`cli::config_import_pi_never_reads_auth_json` | ✅ |
+| M16 | 字面 `apiKey` 被复制进草稿（建议名直接用字面值） | `pi_migrate::a_literal_key_becomes_an_environment_reference_and_is_never_shown` | ✅ |
+| M17 | 差异说明回显字面值（note 里带上 `{text}`） | `pi_migrate::a_literal_key_becomes_an_environment_reference_and_is_never_shown`、`cli::config_import_pi_drafts_a_valid_configuration_and_never_shows_a_literal_key` | ✅ |
+| M18 | `--write` 覆盖已存在文件（去掉存在性检查） | `pi_migrate::the_write_is_owner_only_atomic_and_never_overwrites` | ✅ |
+| M19 | 写盘前不经读取器校验 | `pi_migrate::an_invalid_draft_is_never_written` | ✅ |
+| M20 | 执行 `!command`（`sh -c` 跑掉 `!` 后面的部分） | `pi_migrate::a_command_key_is_listed_and_never_executed`、`cli::config_import_pi_lists_a_command_key_and_does_not_run_it` | ✅ |
+| M21 | 去掉按键与 Radian 默认键的冲突检查 | `pi_migrate::a_keybinding_that_collides_with_a_radian_default_is_skipped`、`pi_migrate::the_typical_fixture_maps_the_endpoint_model_key_and_preferences` | ✅ |
+
+7/7 抓住。**诚实补充（M15）**：第一版变异写成 `let _ = std::fs::read_to_string(dir.join("auth.json"));`
+——**没被抓住**，因为它把权限错误吞掉了，行为上与「不读」不可区分。改成「文件存在就读、只有
+NotFound 才跳过」（真实实现会这么写）之后，`auth.json` 权限 0000 的 fixture 让 `import_pi` 直接
+失败，两个测试都抓住。也就是说「绝不读 auth.json」这条规则的可测形式就是 brief 建议的那种：
+不可读的凭据文件不得影响迁移。
+
+## s1q：待决请求队列（ADR 0023 U7）
+
+Base: `433cdce` · 一次性检出 `/tmp/s1q-mut`（detached，跑完删除）· `--no-fail-fast`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| P1 | 等待方放弃后元素仍留在队列（`retain_open` 不清） | `pending::a_dropped_waiter_disappears_and_a_late_answer_is_late`、`pending::a_cancelled_approval_leaves_no_element` | ✅ failed |
+| P2 | `abort_session` 波及其他 session（去掉 origin 判断） | `pending::abort_session_completes_only_that_session` | ✅ failed |
+| P3 | 迟到答复被当作成功（忽略 `send` 的 `Err`） | `pending::a_dropped_waiter_disappears_and_a_late_answer_is_late` | ✅ failed |
+| P4 | `push` 不通知 | `pending::answer_completes_the_waiter_and_notifies` | ✅ failed |
+| P5 | 顺序改为 LIFO（`push_front`） | `pending::two_sessions_keep_arrival_order_and_do_not_overwrite_each_other` | ✅ failed |
+
+5/5 抓住。P1/P3 起初漏过：原测试在 `answer` 前先调了 `len()`，把放弃的元素清掉，于是走了"id 不存在"的 Late 分支、也没覆盖 `len` 清理；改成先 `answer`（走 `send` 失败路径）、再加一个"drop 后不 answer 只 `len`"的元素后抓住。
