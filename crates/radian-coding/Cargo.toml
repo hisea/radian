@@ -7,6 +7,8 @@ description = "Built-in coding tools (read/write/patch/list + read-only git) wit
 
 [dependencies]
 agent-core = { path = "../agent-core" }
+# `shell` runs only through this crate's backends; it is never invoked without one.
+radian-sandbox = { path = "../radian-sandbox" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -14,4 +16,8 @@ tokio = { workspace = true, features = ["process"] }
 
 [target.'cfg(unix)'.dependencies]
 # `O_NOFOLLOW` for the write path: refuse to follow a symlink at the destination.
+libc = "0.2"
+
+[target.'cfg(unix)'.dev-dependencies]
+# The shell tests check that a killed process group has no members left.
 libc = "0.2"

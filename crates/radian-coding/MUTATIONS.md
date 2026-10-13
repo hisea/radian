@@ -44,3 +44,48 @@ would refresh and write `.git/index`).
 "workspace-relative only", so an absolute path that happens to point inside must be refused
 too. Without it, the absolute-path requirement had no test that distinguished it from the
 canonicalization check.
+
+## `shell` tool (Phase 3 sandbox slice)
+
+Base: `fd0388d` (re-run at the final tests commit) · one-shot worktree `/tmp/shell-mut` (created from HEAD, deleted after) ·
+each mutation run with `cargo test -p radian-coding --test shell <test> -- --exact
+--no-fail-fast`; files restored after each; `git status --short` empty at the end; no orphan
+processes left (`ps` check).
+
+| # | Requirement mutated | Mutation | Result |
+|---|---|---|---|
+| M1 | no sandbox ⇒ no shell, no naked run | the `None` execute arm runs `/bin/sh -c` directly instead of refusing | ✅ caught (`shell_is_absent_without_a_sandbox`) |
+| M2 | timeout/cancel kill the whole process group | `killpg(pid)` → `kill(pid)` (only the direct child) | ✅ caught (`a_timeout_kills_the_whole_process_group`; the background `sleep 600` survives) |
+| M3 | output cap | `take_from_budget` returns `want` and ignores the budget | ✅ caught (`output_over_the_cap_is_truncated_and_reported`) |
+| M4 | environment filtered in every mode | remove the `env_clear` + whitelist block for the transparent backend | ✅ caught (`the_host_environment_does_not_reach_the_shell`) |
+| M5 | `cwd` stays inside the workspace | `root.resolve_existing(dir)` → `root.root().join(dir)` (no canonicalize/containment) | ✅ caught (`cwd_escapes_are_refused`) |
+| M6 | `full-access` is never a default | `CodingTools::new` builds a transparent `FullAccess` sandbox internally | ✅ caught (`full_access_is_never_the_default`) |
+| M7 | a failing backend never downgrades | `Sandbox::from_backend` falls back to a transparent sandbox when `probe()` fails | ✅ caught (`an_unavailable_backend_never_yields_a_sandbox_or_a_shell`) |
+
+7/7 caught; no misses. M2 is the one that shows the "kill the direct child only" bug is a
+real hazard: with it the background `sleep 600` is still alive after the timeout.
+
+## `shell` output truncation (follow-up: head+tail, per stream)
+
+Base: `e0fd49a` · one-shot worktree `/tmp/shell-mut2` (created from HEAD, deleted after) ·
+each mutation run with `cargo test -p radian-coding --test shell <test> -- --exact
+--no-fail-fast`; files restored after each; `git status --short` empty at the end.
+
+The first seven mutations were re-run against the new reader (M3 now removes the caps
+entirely rather than the old shared budget), plus three for the new behaviour:
+
+| # | Requirement mutated | Mutation | Result |
+|---|---|---|---|
+| M1–M2, M4–M7 | as above | as above | ✅ caught (same tests) |
+| M3 | output cap | `head_cap = usize::MAX; tail_cap = 0` (keep everything) | ✅ caught (`output_over_the_cap_is_truncated_and_reported`) |
+| M8 | keep the tail | `tail_cap = 0` (head only) | ✅ caught (`the_end_of_a_long_output_is_kept`; the final `ERROR:` line is gone) |
+| M9 | per-stream budget | stderr is read with budget `0` — the observable consequence of one shared budget already spent by stdout | ✅ caught (`each_stream_has_its_own_budget`) |
+| M10 | render the tail | drop the tail from `Capped::render` (keep head + marker) | ✅ caught (`the_end_of_a_long_output_is_kept`) |
+
+10/10 caught; no misses. M9 is an equivalent mutation rather than a literal shared-budget
+rewrite: with one budget, a flooding stdout leaves stderr nothing, which is exactly what
+`read_capped(stderr, 0)` models, and the test asserts the stderr line survives.
+
+Memory is not asserted by a mutation but by a unit test (`the_reader_keeps_a_bounded_head_and_tail`,
+50 MiB through a 64 KiB cap) and an end-to-end one (`memory_does_not_grow_with_the_output`,
+50 MiB through a real process: peak RSS grew by ~688 KiB, measured with `getrusage`).

@@ -48,11 +48,12 @@ impl TempDir {
 impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.path);
-        // Also try to remove the shared parent: it succeeds only once the last test in
-        // this process has dropped its directory, which is exactly when it is empty.
-        if let Some(parent) = self.path.parent() {
-            let _ = std::fs::remove_dir(parent);
-        }
+        // The shared parent is deliberately left in place. Removing it while another test
+        // thread sits between `create_dir_all(parent)` and `create_dir_all(child)` makes that
+        // child creation fail with a spurious `AlreadyExists` (the parent vanished between
+        // `mkdir`'s EEXIST and the `is_dir()` check) or `InvalidInput`. That race is
+        // pre-existing and unrelated to any one test; the empty directory lives in the
+        // system temp dir, which the OS cleans up.
     }
 }
 

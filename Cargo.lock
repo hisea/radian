@@ -2123,6 +2123,7 @@ version = "0.1.0"
 dependencies = [
  "agent-core",
  "libc",
+ "radian-sandbox",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
