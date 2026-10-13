@@ -137,6 +137,13 @@ pub(crate) fn profile_text(policy: &SandboxPolicy) -> String {
     profile.push_str("(allow file-test-existence)\n");
     profile.push_str("(allow process-exec*)\n");
     profile.push_str("(allow process-fork)\n");
+    // Signals only within this sandbox instance: a sandboxed command may stop its own
+    // children and grandchildren (test suites, build tools and timeouts need this), but not a
+    // process outside the sandbox nor one in another instance of the same profile. Measured
+    // 2026-10-13 on macOS 27 with `sandbox-exec`: `(target children)` misses grandchildren;
+    // `(target pgrp)` and a bare `(allow signal)` reach a same-group process outside the
+    // sandbox, so neither may be used. The escape matrix's `signals` group holds this.
+    profile.push_str("(allow signal (target same-sandbox))\n");
     profile.push_str("(allow mach-lookup)\n");
     profile.push_str("(allow sysctl-read)\n");
     if policy.network {
@@ -220,6 +227,14 @@ mod tests {
             !profile.contains("(allow network*)"),
             "network is off by default"
         );
+    }
+
+    #[test]
+    fn signals_are_confined_to_the_same_sandbox() {
+        let profile = profile_text(&policy());
+        assert!(profile.contains("(allow signal (target same-sandbox))"));
+        // Any wider signal rule would let a sandboxed command signal the host.
+        assert_eq!(profile.matches("(allow signal").count(), 1);
     }
 
     #[test]

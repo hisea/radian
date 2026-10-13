@@ -36,7 +36,7 @@ macOS 版本漂移（spike 记录过 `process-fork*` 变 unbound）。探针在�
   `--bind`；git 元数据 `--ro-bind` 覆盖；敏感目录 `--tmpfs`（目录）或 `/dev/null`（文件）；
   `--clearenv` + 白名单；`HOME`/`TMPDIR` 在工作区内。
 
-## 逃逸清单（两平台各 26 例，全部带"关掉沙箱后成功"的对照）
+## 逃逸清单（两平台各 29 例，全部带"关掉沙箱后成功"的对照）
 
 `radian-sandbox` 的 `harness`（`testing` feature）跑同一套矩阵：每条"应当失败"的用例都在
 `WorkspaceWrite` 下跑一次、在 `FullAccess` 对照下跑同一命令。`Case::passed()` 要求
@@ -53,10 +53,19 @@ macOS 版本漂移（spike 记录过 `process-fork*` 变 unbound）。探针在�
 | git_readonly | 写 `.git/hooks`、`.git/config`、`.git/info`、`git config core.hooksPath`、`git add`、worktree 指针、共享 gitdir、经符号链接写共享 `.git` 全部被拒；`git status`/`git log` 可用 | 8 拒 + 2 可 | 8 拒 + 2 可 |
 | sensitive_read | 假 `~/.ssh/id_ed25519` 打开失败（只断言 exit，不读内容）；普通文件可读 | ✅ | ✅ |
 | mcp_stdio | 最小 stdio MCP（initialize / tools/list / tools/call echo）可用 | ✅ | ✅ |
+| signals | 给自己的子进程、孙进程发信号可以；给沙箱外同用户进程发信号被拒 | 2 可 + 1 拒 | 2 可 + 1 拒 |
 
 证据：`crates/radian-sandbox/tests/data/escape-macos.{txt,json}`、
 `escape-linux.{txt,json}`（后者在 VM 上生成后拉回）。每份证据含一次 `ps` 孤儿检查（两平台均为
 "no orphan processes"；矩阵运行结束后没有残留 `bwrap`/`mcp_echo.py`/`sandbox-exec`）。
+
+**信号（2026-10-13，dogfooding D8）**：原先 SBPL 没有任何 `signal` 规则，`(deny default)` 让沙箱内
+进程连自己的子进程都杀不掉（`cargo test` 里会 kill 子进程的测试因此 `EPERM`）。在 macOS 27 上用
+`sandbox-exec` 实测了五种写法（自己的子进程 / 孙进程 / 同 profile 的另一个沙箱实例 / 沙箱外同组进程）：
+`(target self)` 全拒；`(target children)` 拒孙进程；`(target pgrp)` 与不带过滤的 `(allow signal)`
+**能杀沙箱外同进程组的进程**，不可用；`(target same-sandbox)` 子孙可、另一实例拒、外部拒——采用它。
+Linux 的 bwrap 带 `--unshare-pid`，沙箱内看不到外部 pid，本来就满足（VM 上同一矩阵 29/29）。
+矩阵的 `signals` 组钉住这三条；去掉规则、换成 `children`、换成不带过滤的 `signal` 三个变异各被抓住。
 
 **Linux 与 macOS 的一个差异（已写进代码注释）**：bwrap 无法为**尚不存在**的敏感路径建挂载点
 （根是只读的），因此只 mask 已存在的 deny 路径；SBPL 可以给未来才会创建的路径写规则。默认 deny

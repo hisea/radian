@@ -179,6 +179,7 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
     rig.git_metadata(&sandbox, &control);
     rig.sensitive_read(&sandbox, &control);
     rig.mcp_stdio(&sandbox, &control);
+    rig.signals(&sandbox, &control);
 
     let orphans = orphan_report();
     let matrix = Matrix {
@@ -360,6 +361,60 @@ impl Rig {
             "nested_sh_inside_ok",
             Expect::MustSucceed,
             &format!("sh -c 'sh -c \"printf x > {}\"'", inside.display()),
+        );
+    }
+
+    /// A sandboxed command may signal what it started (children and grandchildren: test
+    /// suites and build tools kill their own helpers), never a process outside the sandbox.
+    fn signals(&mut self, sandbox: &Sandbox, control: &Sandbox) {
+        let g = "signals";
+        self.sh_case(
+            sandbox,
+            control,
+            g,
+            "signal_own_child_ok",
+            Expect::MustSucceed,
+            "sleep 5 & c=$!; kill -TERM $c",
+        );
+        // The grandchild's pid comes back through a FIFO in the workspace: `read` blocks until
+        // the middle shell has written it, so there is no polling. The scratch path has no
+        // quotes or spaces (it is under the test's own temp root), so it is used bare inside
+        // the inner `sh -c '...'`.
+        let fifo = self.ws.join("grandchild.fifo");
+        let f = fifo.display();
+        self.sh_case(
+            sandbox,
+            control,
+            g,
+            "signal_own_grandchild_ok",
+            Expect::MustSucceed,
+            &format!(
+                "rm -f {f}; mkfifo {f} || exit 2; sh -c 'sleep 5 & echo $! > {f}; wait' & m=$!; \
+                 read g < {f}; kill -TERM $g; r=$?; wait $m; rm -f {f}; exit $r"
+            ),
+        );
+        // A same-user process started by this test, outside any sandbox. One per run: the
+        // control is expected to kill its own.
+        let mut outside_runs = Vec::new();
+        for sb in [sandbox, control] {
+            let mut target = Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn an outside process");
+            let outcome = run_shell(sb, &format!("kill -TERM {}", target.id()));
+            let _ = target.kill();
+            let _ = target.wait();
+            outside_runs.push(outcome);
+        }
+        let ct = outside_runs.pop().unwrap();
+        let sb = outside_runs.pop().unwrap();
+        self.record(
+            g,
+            "signal_outside_process",
+            Expect::MustFail,
+            sb,
+            ct,
+            "a same-user process outside the sandbox, started by this test",
         );
     }
 
