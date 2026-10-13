@@ -123,3 +123,15 @@ Base: `0f5d5e2` · 一次性检出 `/tmp/ccore-mutB`（detached，跑完删除�
 | M9 | `reported_baseline` 不在 `TranscriptReplaced` 处重置（采用替换前的 usage 作基线） | `driver::tests::the_baseline_ignores_usage_before_a_replacement` | ✅ failed |
 
 1/1 抓住。
+
+## ccore-2：唤醒分支的死锁（ADR 0018 §A / ADR 0011）
+
+Base: `4d43e03` · 一次性检出 `/tmp/ccore-mutC`（detached，跑完删除）· `--no-fail-fast`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| D1 | 唤醒分支恢复 `drain_steering`（`InputClaimed` 在 step 暂停于替换段中途时等闸门） | `compaction_gate::a_steer_during_an_open_segment_does_not_deadlock_the_driver` | ✅ failed（watchdog `Elapsed`） |
+
+1/1 抓住。测试用 `SessionJournal::pause_next_segment_append()`（段内 commit 前停在 `Notify`）+
+`Driver::testing_wake_branch()` 确定性地进入唤醒分支：修复前 driver 在该分支写 `InputClaimed`
+时永久等待闸门，5 秒 watchdog 触发而不是挂住；修复后 step 继续、段提交、steer 在提交之后被 claim。
