@@ -120,6 +120,21 @@ pub fn expand(text: &str, workspace: &Path) -> Result<Expansion, ExpandError> {
                 if seen.contains(&path) {
                     continue;
                 }
+                // Check the size before reading: a huge file must not be read into memory on
+                // the UI thread just to be rejected.
+                if let Ok(meta) = std::fs::metadata(&path)
+                    && meta.len() > MAX_FILE_BYTES as u64
+                {
+                    rejections.push(Rejection {
+                        path: candidate,
+                        reason: format!(
+                            "{} bytes, over the {} KiB per-file limit",
+                            meta.len(),
+                            MAX_FILE_BYTES / 1024
+                        ),
+                    });
+                    continue;
+                }
                 let bytes = match std::fs::read(&path) {
                     Ok(bytes) => bytes,
                     Err(error) => {

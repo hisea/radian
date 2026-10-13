@@ -2677,6 +2677,13 @@ async fn pty_a_memory_command_does_not_interrupt_a_running_turn() {
     // Start a turn whose reply never completes; the status bar shows `running`.
     pty.send(b"start a long turn\r");
     assert!(pty.wait_for_screen("running", 10), "{}", pty.screen());
+    // `running` is shown at `TurnStarted`, before the request reaches the server; wait for
+    // the request itself (polling, like `wait_for_screen`) instead of asserting at once.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while server.requests().is_empty() && std::time::Instant::now() < deadline {
+        pty.pump();
+        std::thread::sleep(Duration::from_millis(20));
+    }
     assert_eq!(server.requests().len(), 1);
 
     pty.send(b"/memory list --global\r");
