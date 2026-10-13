@@ -30,7 +30,8 @@ use agent_provider_openai_compatible::{ApiKey, OpenAiCompatible, OpenAiCompatibl
 use clap::Parser;
 use radian_coding::CodingTools;
 use radian_host::{
-    SESSION_PLACEHOLDER, generate_session_id, load_mcp_config, parse_headers, validate_session_id,
+    SESSION_PLACEHOLDER, generate_session_id, load_mcp_config, parse_headers, resolve_workspace,
+    validate_session_id,
 };
 use radian_permissions::{Approver, PermissionHooks};
 use radian_runtime::{BudgetRelax, CancelCause, Driver, DriverError, Inbox, InboxError};
@@ -215,6 +216,10 @@ struct Setup {
     context_budget: Option<ContextBudget>,
     /// The session id this process uses: the file name, and the `{session_id}` header value.
     session_id: String,
+    /// The validated, canonical workspace (dogfooding D1). Resolved in `setup`, before any
+    /// session file exists, so a bad `--workspace` fails as a workspace error and never
+    /// reaches the sandbox probe or leaves a session behind (dogfooding D2).
+    workspace: PathBuf,
     /// The key and every custom header value: redacted from all error output, never printed
     /// and never written to the session file.
     secrets: Vec<String>,
@@ -251,6 +256,11 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         (None, None) => generate_session_id(),
     };
     validate_session_id(&session_id).map_err(SetupError)?;
+    // D1: the workspace is validated here, before the sandbox is built and before the session
+    // file is created, so a missing or unusable path is a workspace error (not a sandbox
+    // message) and leaves nothing behind (D2). `radian-host` owns the rule for both hosts.
+    let workspace = resolve_workspace(cli.workspace.as_deref().map(std::path::Path::new))
+        .map_err(SetupError)?;
     let uses_placeholder = cli
         .header
         .iter()
@@ -300,6 +310,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         turn_timeout_secs: cli.turn_timeout_secs,
         context_budget,
         session_id,
+        workspace,
         secrets,
     })
 }
@@ -343,22 +354,14 @@ fn session_dir(cli: &Cli) -> Result<PathBuf, SetupError> {
 
 /// The workspace a session belongs to: `--workspace` when given, else the current
 /// directory. `--list` filters by the same value, so a session is only listed in the
-/// workspace it was created in.
+/// workspace it was created in. The rule lives in `radian-host` so both hosts share it.
 fn session_workspace(cli: &Cli) -> Result<String, SetupError> {
-    Ok(permission_workspace(cli)?.to_string_lossy().into_owned())
-}
-
-/// The workspace the permission profile and the sandbox are built for: `--workspace` when
-/// given, else the current directory. Canonical, because SBPL `subpath` and bwrap binds match
-/// resolved paths.
-fn permission_workspace(cli: &Cli) -> Result<PathBuf, SetupError> {
-    let path = match &cli.workspace {
-        Some(path) => PathBuf::from(path),
-        None => std::env::current_dir()
-            .map_err(|e| SetupError(format!("cannot read the current directory: {e}")))?,
-    };
-    std::fs::canonicalize(&path)
-        .map_err(|e| SetupError(format!("workspace {}: {e}", path.display())))
+    Ok(
+        resolve_workspace(cli.workspace.as_deref().map(std::path::Path::new))
+            .map_err(SetupError)?
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 /// `--list`: the sessions of this workspace, newest activity first.
@@ -469,8 +472,6 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     // One-shot mode with no terminal on stdin has nobody to ask; interactive mode reads its
     // answers from the same line hub as the prompt loop.
     let can_ask = interactive || std::io::stdin().is_terminal();
-    let workspace = session_workspace(&cli)?;
-    let journal = open_journal(&cli, &setup.session_id, &workspace)?;
     let agent_config = AgentConfig {
         system_prompt: setup.system_prompt,
         context_budget: setup.context_budget,
@@ -479,8 +480,9 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
 
     // The profile and the sandbox: what may run, and what the OS enforces. `full-access` is
     // only reachable because the user named it; a failed probe is an error, never a fallback.
+    // All of this runs **before** the session file is created (dogfooding D2).
     let profile_arg = cli.profile.unwrap_or_else(profile::default_profile);
-    let workspace_path = permission_workspace(&cli)?;
+    let workspace_path = setup.workspace.clone();
     let permission_profile =
         profile::build_profile(profile_arg, &workspace_path, &cli.allow_shell_command)?;
     let sandbox = profile::build_sandbox(profile_arg, &workspace_path)?;
@@ -505,18 +507,23 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
 
     // The built-in tools exist only with `--workspace`. `shell` is present only when a
     // sandbox exists, which is exactly `workspace-write`/`full-access` with a workspace.
-    let coding = match &cli.workspace {
-        Some(path) => {
-            let tools = match sandbox {
-                Some(sandbox) => CodingTools::with_sandbox(path, sandbox)
-                    .map_err(|e| SetupError(format!("--workspace {path}: {e}")))?,
-                None => CodingTools::new(path)
-                    .map_err(|e| SetupError(format!("--workspace {path}: {e}")))?,
-            };
-            Some(tools)
-        }
-        None => None,
+    let coding = if cli.workspace.is_some() {
+        let tools = match sandbox {
+            Some(sandbox) => CodingTools::with_sandbox(&workspace_path, sandbox).map_err(|e| {
+                SetupError(format!("--workspace {}: {e}", workspace_path.display()))
+            })?,
+            None => CodingTools::new(&workspace_path).map_err(|e| {
+                SetupError(format!("--workspace {}: {e}", workspace_path.display()))
+            })?,
+        };
+        Some(tools)
+    } else {
+        None
     };
+
+    // Every startup check that can fail is done. Only now is the session file created; a
+    // failure above leaves the session directory untouched (dogfooding D2).
+    let journal = open_journal(&cli, &setup.session_id, &workspace_path.to_string_lossy())?;
     // The permission layer replaces the CLI's own approval hook: rules, "allow for this
     // session" grants, and the audit record. `--yes` swaps the approver for one that answers
     // "allow once" without asking; rules and the sandbox are untouched by it.
@@ -561,6 +568,8 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         deadline: None,
         ..TurnOptions::default()
     };
+    let session_path = journal.path().to_path_buf();
+    let session_id = setup.session_id.clone();
     let mut driver = Driver::open(
         &agent,
         journal,
@@ -569,7 +578,15 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         options,
     )
     .await
-    .map_err(|e| SetupError(format!("cannot open the session: {e}")))?;
+    .map_err(|e| {
+        // The MCP server **processes** start here. The session file already exists and its
+        // durable content is real, so it is kept; the error says how to continue it.
+        SetupError(format!(
+            "cannot open the session: {e}\n  the session file {} exists; after fixing the \
+             problem, continue it with `--resume {session_id}`",
+            session_path.display()
+        ))
+    })?;
     // A per-turn timeout: the driver computes a fresh deadline at each turn's start.
     driver.set_turn_timeout(setup.turn_timeout_secs.map(Duration::from_secs));
     // The handle the interactive loop uses to say "continue once" (ADR 0015 C5).

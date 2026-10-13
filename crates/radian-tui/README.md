@@ -183,6 +183,57 @@ Two changes fix that:
 not 101), the restored terminal (`?1049l`, `?2004l`, `?25h`, `icanon`) and that the failure is
 reported on the normal screen. Durable data was already safe and stays so.
 
+## Exit reasons and the panic log (2026-10-13, dogfooding D4)
+
+Whatever ended the app, the normal screen now says why, once, after the terminal is restored
+(the alternate screen is gone by then, so it is readable and stays in scrollback):
+
+| How it ends | Exit | Reason line (stderr, after restore) |
+|---|---|---|
+| clean quit (Ctrl-C twice / driver ends by request) | 0 | `session <id> saved; resume with `--resume <id>`` |
+| startup/config refusal (bad workspace, failed probe, bad MCP file, bad header, ...) | 1 | `radian-tui: <the error>` (terminal never entered) |
+| driver task ends with a `RunError` | 1 | `radian-tui: driver: <error>` |
+| driver task panics | 1 | `radian-tui: the driver task ended unexpectedly: <join error>: <redacted panic>` |
+| the app itself panics (`main` thread) | 101 | `radian-tui: the app panicked: <redacted panic>` |
+| `--list` | 0 | none: the listing is the output |
+
+Every line is a single `eprintln!` and therefore ends in `\n`; `TtyGuard::restore` also writes
+`\r\n` after leaving the alternate screen, so the shell never prints its "no newline" `%`.
+
+A panic is also appended to `<session-dir>/<id>.panic.log` (`radian_session::now_utc()`
+timestamp, thread name, panic text), with header values and the API key replaced by
+`<redacted>`. The log is set once the session exists and before the terminal is entered
+(`terminal::set_panic_log`); a panic before that has no log. The default Rust panic hook still
+prints its own message; the sidecar log is the copy that is guaranteed redacted. Tested by
+`pty_clean_exit_prints_one_reason_line` and `pty_a_panic_writes_a_redacted_panic_log`.
+
+## Startup order (2026-10-13, dogfooding D1/D2)
+
+Everything that can fail runs **before** the session file is created, so a failed start leaves
+the session directory untouched and the same `--session-id` can be retried:
+
+1. session directory and id resolution; id validation;
+2. `--header` parsing (values collected for panic-log redaction);
+3. workspace validation (`radian_host::resolve_workspace`: exists, is a directory, readable,
+   canonical) — a bad path is a **workspace** error, never a sandbox message and never a
+   `full-access` suggestion;
+4. model configuration (`--base-url`, key policy);
+5. tier parsing, permission rules, sandbox probe (a failed probe refuses, never downgrades,
+   ADR 0012 decision 2);
+6. `--mcp-config` file read and validation;
+7. built-in tool construction;
+8. **only now** `open_journal` creates (or resumes) the session file.
+
+MCP server **processes** still start when the tool session opens (step 8's `Driver::open`). If
+that fails the session file is kept — its durable content is real — and the error says how to
+continue it: `... the session file <path> exists; after fixing the problem, continue it with
+`--resume <id>``. The CLI behaves the same way. Tested by
+`a_missing_workspace_is_a_workspace_error_and_leaves_no_session`,
+`pty_a_missing_workspace_is_a_workspace_error_and_leaves_no_session`,
+`a_failed_probe_leaves_no_session_and_the_retry_creates_one`,
+`pty_a_failed_probe_leaves_no_session_and_the_retry_creates_one`,
+`a_bad_mcp_config_leaves_no_session`, `pty_a_bad_mcp_config_creates_no_session`.
+
 ## Not verified
 
 - Real terminal emulators beyond the owner's one macOS pass above (Terminal.app, iTerm2,

@@ -121,6 +121,11 @@ struct Cli {
     #[arg(long, hide = true)]
     panic_after_enter: bool,
 
+    /// Test hook: enter the terminal, then panic with this exact message. Used to prove the
+    /// panic log redacts header values and the key from the panic text.
+    #[arg(long, hide = true, value_name = "TEXT")]
+    panic_message: Option<String>,
+
     /// Test hook: start a `sleep` child in its own process group, write its pid to
     /// `<session-dir>/child.pid`, then panic. The pty test asserts the child is not orphaned.
     #[arg(long, hide = true, value_name = "SECS")]
@@ -167,21 +172,35 @@ fn main() -> ExitCode {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(cli, &runtime)));
     runtime.shutdown_timeout(Duration::from_secs(2));
     match result {
-        Ok(Ok(())) => ExitCode::SUCCESS,
+        Ok(Ok(reason)) => {
+            // A clean exit still says why, on the normal screen (dogfooding D4). `--list`
+            // prints its own output and passes `None`.
+            if let Some(reason) = reason {
+                eprintln!("radian-tui: {reason}");
+            }
+            ExitCode::SUCCESS
+        }
         Ok(Err(message)) => {
             eprintln!("radian-tui: {message}");
             ExitCode::from(1)
         }
-        Err(_) => ExitCode::from(101),
+        Err(_) => {
+            let mut message = "the app panicked".to_string();
+            if let Some(panic) = radian_tui::terminal::last_panic() {
+                message.push_str(": ");
+                message.push_str(&panic);
+            }
+            eprintln!("radian-tui: {message}");
+            ExitCode::from(101)
+        }
     }
 }
 
-fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
+fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<Option<String>, String> {
     if cli.list {
-        return list_sessions(&cli);
+        return list_sessions(&cli).map(|()| None);
     }
     let dir = session_dir(&cli)?;
-    let workspace = session_workspace(&cli)?;
     // The session id is resolved before the headers: a `{session_id}` in a header expands to
     // this process's id, and `--resume` uses the id being resumed. The parser is the same one
     // `agent-cli` uses, so `{session_id}`, name validation and the `authorization` refusal
@@ -192,8 +211,54 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
     };
     validate_session_id(&session_id)?;
     let headers = parse_headers(&cli.header, &session_id)?;
+    // Header values and the key must not reach the panic log (dogfooding D4).
+    let mut secrets: Vec<String> = headers.iter().map(|(_, value)| value.clone()).collect();
+    if let Ok(key) = std::env::var(&cli.api_key_env)
+        && !key.is_empty()
+    {
+        secrets.push(key);
+    }
+    // D1/D2: every check that can fail runs **before** the session file is created. The
+    // workspace is validated first, so a typo is a workspace error and never reaches the
+    // sandbox probe (dogfooding D1). `radian-host` owns the rule so both hosts share it.
+    let workspace_path = radian_host::resolve_workspace(cli.workspace.as_deref())?;
     let model = build_model(&cli, headers)?;
-    let journal = open_journal(&cli, &session_id, &dir, &workspace)?;
+    // The permission tier and the sandbox. For an enforced tier a probe failure is an error
+    // here, never a fallback to an unsandboxed run (ADR 0012 decision 2). Still before
+    // the session file exists, so a refusal leaves nothing behind (dogfooding D2).
+    let tier = radian_tui::profile::parse_tier(&cli.profile)?;
+    let sandbox = radian_tui::profile::build_sandbox(tier, &workspace_path)?;
+    // The description is taken before the sandbox moves into the tools.
+    let (startup, meaning) = radian_tui::profile::describe(tier, sandbox.as_ref());
+    // The MCP config file is read and validated here: before any server process starts and
+    // before a session file exists, so a bad file leaves nothing behind (dogfooding D2).
+    let servers = match &cli.mcp_config {
+        Some(path) => load_mcp_config(path)?,
+        None => Vec::new(),
+    };
+    let mcp = McpToolProvider::new(servers);
+    let mcp_configured = mcp.configured();
+    let coding = build_coding_tools(cli.workspace.as_deref(), sandbox)?;
+    let approval = match cli.approval.as_str() {
+        "on-ask" => radian_permissions::ApprovalPolicy::OnAsk,
+        "always" => radian_permissions::ApprovalPolicy::Always,
+        "never" => radian_permissions::ApprovalPolicy::Never,
+        other => {
+            return Err(format!(
+                "--approval {other:?} is not one of on-ask, always, never"
+            ));
+        }
+    };
+    let profile =
+        radian_tui::profile::build_profile(tier, &workspace_path, &cli.allow_shell_command)?
+            .with_approval(approval);
+
+    // Every startup check that can fail is done. Only now is the session file created; a
+    // failure above leaves the session directory untouched (dogfooding D2).
+    let journal = open_journal(&cli, &session_id, &dir, &workspace_path.to_string_lossy())?;
+    // D4: panics after this point get a sidecar log next to the session. Set before the
+    // terminal is entered; the hook reads it whenever a panic happens.
+    radian_tui::terminal::set_panic_log(dir.join(format!("{session_id}.panic.log")), secrets);
     // The history of a resumed session is rendered before the first frame, so the transcript
     // shows it from the start. `Driver::open` recovers the same history from the journal for
     // the model; this is only the view of it.
@@ -218,37 +283,7 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
     // Tools, permissions and approval. The permission layer decides allow/ask/deny; this
     // process is the host that answers `ask` through the UI, and writes every decision to the
     // session journal as a `PermissionResolved` (audit only, ADR 0006 §5.9).
-    let tier = radian_tui::profile::parse_tier(&cli.profile)?;
-    // The sandbox is built before the tools: for an enforced tier a probe failure is an error
-    // here, never a fallback to an unsandboxed run (ADR 0012 decision 2). `shell` only
-    // exists when a sandbox does.
-    let sandbox = radian_tui::profile::build_sandbox(tier, Path::new(&workspace))?;
-    // The description is taken before the sandbox moves into the tools.
-    let (startup, meaning) = radian_tui::profile::describe(tier, sandbox.as_ref());
-    // The MCP servers use the same config file format as `agent-cli`; `HostTools` mounts them
-    // beside the built-in tools and refuses a duplicate tool name rather than shadowing one.
-    let servers = match &cli.mcp_config {
-        Some(path) => load_mcp_config(path)?,
-        None => Vec::new(),
-    };
-    let mcp = McpToolProvider::new(servers);
-    let mcp_configured = mcp.configured();
-    let coding = build_coding_tools(cli.workspace.as_deref(), sandbox)?;
-    let tools = HostTools::new(coding, mcp.clone());
     let (approval_tx, approval_rx) = std::sync::mpsc::channel::<ApprovalPrompt>();
-    let approval = match cli.approval.as_str() {
-        "on-ask" => radian_permissions::ApprovalPolicy::OnAsk,
-        "always" => radian_permissions::ApprovalPolicy::Always,
-        "never" => radian_permissions::ApprovalPolicy::Never,
-        other => {
-            return Err(format!(
-                "--approval {other:?} is not one of on-ask, always, never"
-            ));
-        }
-    };
-    let profile =
-        radian_tui::profile::build_profile(tier, Path::new(&workspace), &cli.allow_shell_command)?
-            .with_approval(approval);
     // `--yes` swaps the approver for one that answers "allow once" without asking; rules,
     // the sandbox and the audit record are untouched by it (same as `agent --yes`).
     let approver: Arc<dyn Approver> = if cli.yes {
@@ -265,11 +300,15 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
         }),
     ));
     let agent = Arc::new(
-        Agent::new(model, tools)
+        Agent::new(model, HostTools::new(coding, mcp.clone()))
             .with_config(agent_config)
             .with_hooks(Arc::clone(&hooks)),
     );
 
+    // MCP server **processes** start here, when the tool session opens. The session file
+    // already exists, so the failure is reported with the way to continue it; the file is
+    // kept because its durable content is real and a later `--resume` can use it.
+    let journal_path = dir.join(format!("{session_id}.jsonl"));
     let mut driver = runtime
         .block_on(Driver::open(
             &agent,
@@ -281,7 +320,13 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
                 ..TurnOptions::default()
             },
         ))
-        .map_err(|e| format!("driver: {e}"))?;
+        .map_err(|e| {
+            format!(
+                "driver: {e}\n  the session file {} exists; after fixing the problem, \
+                 continue it with `--resume {session_id}`",
+                journal_path.display()
+            )
+        })?;
 
     // The session is open now, so the MCP status is known: the servers and tools that actually
     // connected, not just what was configured.
@@ -313,6 +358,9 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
         .map_err(|e| format!("terminal: {e}"))?;
     if cli.panic_after_enter {
         panic!("radian-tui: panic path test");
+    }
+    if let Some(message) = &cli.panic_message {
+        panic!("{message}");
     }
     if let Some(secs) = cli.panic_with_child {
         // Test hook: a child in its own process group is running when the panic happens.
@@ -400,12 +448,18 @@ fn run(cli: Cli, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
         Err(join_error) => {
             let mut message = format!("the driver task ended unexpectedly: {join_error}");
             if let Some(panic) = radian_tui::terminal::last_panic() {
-                message.push_str(&format!("\n  {panic}"));
+                // One line: the normal screen gets one reason line (dogfooding D4).
+                message.push_str(": ");
+                message.push_str(&panic);
             }
             return Err(message);
         }
     }
-    outcome
+    // A failure in the UI loop is the app's failure too; the terminal is already restored.
+    outcome?;
+    Ok(Some(format!(
+        "session {session_id} saved; resume with `--resume {session_id}`"
+    )))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -543,16 +597,13 @@ fn session_dir(cli: &Cli) -> Result<PathBuf, String> {
 }
 
 /// The workspace a session belongs to: `--workspace` when given, else the current directory,
-/// canonicalized. `--list` filters by the same value, so a session is only listed in the
-/// workspace it was created in.
+/// canonicalized and validated by the shared `radian-host` rule. `--list` filters by the same
+/// value, so a session is only listed in the workspace it was created in, and a bad
+/// `--workspace` fails as a workspace error (dogfooding D1).
 fn session_workspace(cli: &Cli) -> Result<String, String> {
-    let path = match &cli.workspace {
-        Some(path) => path.clone(),
-        None => std::env::current_dir()
-            .map_err(|e| format!("cannot read the current directory: {e}"))?,
-    };
-    let path = std::fs::canonicalize(&path).unwrap_or(path);
-    Ok(path.to_string_lossy().into_owned())
+    Ok(radian_host::resolve_workspace(cli.workspace.as_deref())?
+        .to_string_lossy()
+        .into_owned())
 }
 
 /// Opens (or resumes) the session file. The caller has already resolved `session_id`.

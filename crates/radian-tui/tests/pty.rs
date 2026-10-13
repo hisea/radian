@@ -521,7 +521,9 @@ async fn pty_approval_allow_once_runs_the_tool() {
             "always",
         ],
         30,
-        100,
+        // Wide enough that a long macOS temp path is not wrapped in the approval box;
+        // the resolved-path assertion below needs it on one line.
+        140,
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
     pty.send(b"please write\r");
@@ -1599,4 +1601,280 @@ async fn pty_max_model_calls_limits_the_turn() {
 
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// The session directory, created empty by the caller, must stay empty when startup fails.
+fn assert_session_dir_empty(dir: &Path) {
+    let names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names.is_empty(),
+        "a failed start left files behind: {names:?}"
+    );
+}
+
+/// Acceptance 1: a `--workspace` that does not exist fails as a **workspace** error, names
+/// the path, does not blame the sandbox, does not suggest `full-access`, and creates no
+/// session file (dogfooding D1/D2).
+#[test]
+fn pty_a_missing_workspace_is_a_workspace_error_and_leaves_no_session() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("missing-workspace");
+    let session_dir = dir.path().join("sessions");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let missing = dir.path().join("no-such-workspace");
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            session_dir.to_str().unwrap(),
+            "--session-id",
+            "missing-workspace",
+            "--workspace",
+            missing.to_str().unwrap(),
+        ],
+        20,
+        100,
+    );
+    assert!(
+        pty.wait_for_exit(15).is_some(),
+        "the app did not exit on a bad workspace"
+    );
+    assert_eq!(pty.app_exit_code(), Some(1));
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    assert!(raw.contains(missing.to_str().unwrap()), "{raw}");
+    assert!(raw.contains("workspace"), "{raw}");
+    assert!(
+        !raw.contains("sandbox backend"),
+        "a bad workspace must not blame the sandbox: {raw}"
+    );
+    assert!(
+        !raw.contains("full-access"),
+        "a bad workspace must not suggest full-access: {raw}"
+    );
+    assert!(
+        !raw.contains("\u{1b}[?1049h"),
+        "a refusal must not enter the alternate screen: {raw}"
+    );
+    assert_session_dir_empty(&session_dir);
+}
+
+/// Acceptance 2 and 4: a failed probe still refuses, leaves no session file, and the same
+/// `--session-id` with corrected parameters then creates the session (dogfooding D2).
+#[test]
+fn pty_a_failed_probe_leaves_no_session_and_the_retry_creates_one() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("probe-no-session");
+    let session_dir = dir.path().join("sessions");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            session_dir.to_str().unwrap(),
+            "--session-id",
+            "retry",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[("RADIAN_SANDBOX_PROBE_FAIL", "1")],
+        20,
+        100,
+    );
+    assert!(pty.wait_for_exit(15).is_some(), "the refusal did not exit");
+    assert_eq!(pty.app_exit_code(), Some(1));
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    assert!(
+        raw.contains("sandbox backend is unavailable") || raw.contains("failed its probe"),
+        "{raw}"
+    );
+    assert_session_dir_empty(&session_dir);
+
+    // The corrected retry, same id: the session is created. `--panic-after-enter` exits
+    // quickly and needs no server; the session is created before the terminal is entered.
+    let mut retry = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            session_dir.to_str().unwrap(),
+            "--session-id",
+            "retry",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--panic-after-enter",
+        ],
+        20,
+        100,
+    );
+    assert!(retry.wait_for_exit(15).is_some(), "the retry did not exit");
+    assert!(
+        session_dir.join("retry.jsonl").exists(),
+        "the corrected retry created the session"
+    );
+}
+
+/// Acceptance 3: a missing or malformed MCP config file fails before the session exists.
+#[test]
+fn pty_a_bad_mcp_config_creates_no_session() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("bad-mcp");
+    let session_dir = dir.path().join("sessions");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let bad = dir.path().join("bad.json");
+    std::fs::write(&bad, r#"{"servers": [], "bogus": 1}"#).unwrap();
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            session_dir.to_str().unwrap(),
+            "--session-id",
+            "bad-mcp",
+            "--workspace",
+            ws.to_str().unwrap(),
+            // full-access keeps this test independent of the platform's sandbox backend; the
+            // bad config is checked before any session file exists either way.
+            "--profile",
+            "full-access",
+            "--mcp-config",
+            bad.to_str().unwrap(),
+        ],
+        20,
+        100,
+    );
+    assert!(pty.wait_for_exit(15).is_some(), "the refusal did not exit");
+    assert_eq!(pty.app_exit_code(), Some(1));
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    assert!(raw.contains(bad.to_str().unwrap()), "{raw}");
+    assert!(
+        !raw.contains("\u{1b}[?1049h"),
+        "a bad MCP config must not enter the alternate screen: {raw}"
+    );
+    assert_session_dir_empty(&session_dir);
+}
+
+/// Acceptance 5: a clean exit prints one reason line on the normal screen, after the
+/// alternate screen is gone, and the line ends with a newline (dogfooding D4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// The test body blocks on the pty on purpose; the lock serializes the pty tests.
+#[allow(clippy::await_holding_lock)]
+async fn pty_clean_exit_prints_one_reason_line() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("exit-reason");
+    let server = MockServer::start(vec![text_reply("unused")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "exit-reason",
+        ],
+        24,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "clean exit");
+
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    let after = raw
+        .rsplit_once("\u{1b}[?1049l")
+        .map(|(_, rest)| rest.to_string())
+        .unwrap_or_default();
+    let reason = "session exit-reason saved; resume with `--resume exit-reason`";
+    let start = after
+        .find(reason)
+        .unwrap_or_else(|| panic!("no exit reason on the normal screen: {after}"));
+    let rest = &after[start..];
+    let end = rest
+        .find('\n')
+        .unwrap_or_else(|| panic!("the exit reason has no trailing newline: {rest}"));
+    assert!(
+        !rest[..end].contains("EXITED:"),
+        "the reason line must end before the shell continues: {rest}"
+    );
+}
+
+/// Acceptance 6: a panic writes `<id>.panic.log` with the time, thread and panic text, and
+/// redacts header values and the key even when the panic text mentions them (dogfooding D4).
+#[test]
+fn pty_a_panic_writes_a_redacted_panic_log() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("panic-log");
+    let secret = "SECRET-HEADER-VALUE-xyz";
+    let key = "SECRET-KEY-abc";
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "panic-log",
+            "--header",
+            &format!("X-Test={secret}"),
+            "--panic-message",
+            &format!("boom {secret} and {key}"),
+        ],
+        &[("OPENAI_API_KEY", key)],
+        20,
+        100,
+    );
+    assert!(pty.wait_for_exit(15).is_some(), "the app did not exit");
+    assert_eq!(pty.app_exit_code(), Some(101), "a panic exits 101");
+
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    let after = raw
+        .rsplit_once("\u{1b}[?1049l")
+        .map(|(_, rest)| rest.to_string())
+        .unwrap_or_default();
+    assert!(
+        after.contains("panicked"),
+        "the panic reason is on the normal screen: {after}"
+    );
+
+    let log_path = dir.path().join("panic-log.panic.log");
+    let log = std::fs::read_to_string(&log_path)
+        .unwrap_or_else(|e| panic!("no panic log at {}: {e}", log_path.display()));
+    assert!(log.contains("boom"), "the panic text is in the log: {log}");
+    assert!(log.contains("thread="), "the log names the thread: {log}");
+    assert!(
+        log.contains('<'),
+        "the log has a timestamp token before the thread: {log}"
+    );
+    assert!(
+        !log.contains(secret),
+        "the header value must be redacted from the log: {log}"
+    );
+    assert!(
+        !log.contains(key),
+        "the key must be redacted from the log: {log}"
+    );
+    assert!(
+        log.contains("<redacted>"),
+        "redaction marker missing: {log}"
+    );
 }

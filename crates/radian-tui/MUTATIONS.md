@@ -82,3 +82,20 @@ server cannot produce a built-in tool name, so the collision is not reachable en
 check stays as defence in depth and is tested directly through `merge_tool_specs`, which is
 public for exactly that reason. A silent override would be the dangerous failure, so the rule
 is held by a test rather than left implicit.
+
+## D1/D2/D4：启动顺序、退出原因、panic 日志（2026-10-13）
+
+一次性检出 `/tmp/dogfix-mut`（`git worktree add --detach HEAD`，HEAD = `fb6780b`），每个变异用
+`git checkout --` 恢复，`git status --short` 为空；`cargo test -p radian-tui --test pty --no-fail-fast
+<精确测试名>`。pty 测试连跑 3 次全绿（在未变异的 HEAD 上）。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M9 | 会话文件在检查之前创建（`open_journal` 提到 `resolve_workspace` 之前） | 抓住 (rc 101) | `pty_a_missing_workspace_is_a_workspace_error_and_leaves_no_session`（`left files behind: ["missing-workspace.jsonl"]`） |
+| M10 | 工作区错误仍用 sandbox 文案（`resolve_workspace` 的 metadata 错误改成 "sandbox backend is unavailable..."） | 抓住 | `pty_a_missing_workspace_is_a_workspace_error_and_leaves_no_session`（"must not blame the sandbox"） |
+| M11 | 正常退出不打印原因（`Ok(Ok(reason))` 分支不 `eprintln`） | 抓住 | `pty_clean_exit_prints_one_reason_line`（"no exit reason on the normal screen"） |
+| M12 | panic 不写日志（`record_panic` 去掉文件追加） | 抓住 | `pty_a_panic_writes_a_redacted_panic_log`（"no panic log at ..."） |
+| M13 | 日志不脱敏（日志行用 `full` 而不是 `redacted`） | 抓住 | `pty_a_panic_writes_a_redacted_panic_log`（断言日志不含 header 值/ key） |
+
+5/5 抓住，无漏网、无等价变异。M9 是「先建会话再检查」的实例；M10 是「工作区错误仍走 sandbox 文案」；
+M11 是「退出不打印原因」；M12 是「panic 不写日志」；M13 是「日志里带 header 值」。

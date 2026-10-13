@@ -417,7 +417,9 @@ impl Serialize for Render<'_> {
     }
 }
 
-fn now_utc() -> String {
+/// The current UTC time in the same format the JSONL envelope uses. Public so a host can
+/// stamp an adjacent sidecar file (e.g. the TUI's panic log) with the session's own clock.
+pub fn now_utc() -> String {
     chrono::Utc::now()
         .format("%Y-%m-%dT%H:%M:%S%.6fZ")
         .to_string()
