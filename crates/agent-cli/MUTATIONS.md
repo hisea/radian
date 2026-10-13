@@ -211,3 +211,9 @@ Base `5d80946` · 一次性 worktree `/tmp/memsvc-mut` · 独立 `CARGO_TARGET_D
 | M3 | 非 tty 下跳过确认（`if !stdin().is_terminal()` 改 `if false`） | ✅ 抓住 (rc=101) | `memory_forget_needs_confirmation_off_a_terminal`（期望退出 2，得到 1）与 `memory_split_and_merge_move_records_between_projects`（期望拒绝，结果没拒绝） |
 
 M3 只改一行条件；两个测试都断言「未确认时既不执行也不返回 0」，而不是只看 stderr。
+
+一次性 worktree `/tmp/memsvc-mut2`（base `09947cb`）· 独立 `CARGO_TARGET_DIR` · `git checkout --` 还原。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M8 | `note_unlinked` 永不输出（`if global || project` 改 `if true`） | ✅ 抓住 (rc=101) | `memory_unlinked_workspace_refuses_project_writes_and_lists_global`（默认作用域的 `list` 必须报未关联 + 候选） |
