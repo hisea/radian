@@ -1,15 +1,16 @@
-//! Replacement segments and the normal appends that follow them (ADR 0006 §5.11).
-//!
-//! `TranscriptReplaced.len` describes the `len` messages that immediately follow its marker.
-//! Once those have arrived the segment is closed, and every later `MessageAppended` is normal
-//! transcript growth (`index` continues from `len`). Counting the later appends into the
-//! segment made a session unreadable the moment it was appended to after a replacement.
+//! Replacement segments: the commit/abort markers and the commits and appends that follow
+//! them (ADR 0019). A `TranscriptReplaced` opens a pending segment; only a matching
+//! `TranscriptReplacementCommitted` replaces the history, a matching
+//! `TranscriptReplacementAborted` drops it, and a file ending inside it is uncommitted.
 
 mod common;
 
-use agent_core::{JournalRecord, Message, TranscriptJournal};
+use agent_core::{JournalRecord, Message, ReplacementEnd, TranscriptJournal};
 use common::{TempDir, created};
-use radian_session::{RecoveredReplacement, Session, SessionJournal};
+use radian_session::{
+    ExportOptions, Index, ReadError, Session, SessionJournal, UncommittedReplacement, export_json,
+    export_markdown,
+};
 
 const SID: &str = "replace-sid";
 
@@ -23,11 +24,15 @@ fn user(text: &str) -> serde_json::Value {
     serde_json::json!({"user": {"content": [{"text": {"text": text}}]}})
 }
 
-/// The reviewer's exact reproduction: marker `len=1`, one replacement message, then one normal
-/// append at `index=1`.
+fn write_lines(path: &std::path::Path, lines: &[String]) {
+    std::fs::write(path, format!("{}\n", lines.join("\n"))).unwrap();
+}
+
+/// A committed replacement followed by normal growth: the commit swaps the history in, and
+/// the later `MessageAppended` indexes continue from the committed `len`.
 #[test]
-fn a_normal_append_after_a_complete_replacement_is_not_counted_as_part_of_it() {
-    let dir = TempDir::new("replace-minimal");
+fn a_committed_replacement_then_normal_growth_folds_to_the_replacement() {
+    let dir = TempDir::new("replace-committed");
     let path = dir.file("s.jsonl");
     let body = [
         envelope(
@@ -47,30 +52,168 @@ fn a_normal_append_after_a_complete_replacement_is_not_counted_as_part_of_it() {
         ),
         envelope(
             3,
+            "TranscriptReplacementCommitted",
+            serde_json::json!({"revision": 1, "len": 1}),
+        ),
+        envelope(
+            4,
             "MessageAppended",
             serde_json::json!({"index": 1, "message": user("normal append")}),
         ),
-    ]
-    .join("\n");
-    std::fs::write(&path, format!("{body}\n")).unwrap();
+    ];
+    write_lines(&path, &body);
 
     let session = Session::open(&path).unwrap();
     assert_eq!(
         session.history().unwrap(),
         vec![Message::user("replacement"), Message::user("normal append")]
     );
-    assert!(session.skipped().is_empty());
-    assert!(
-        session.recovered_replacements().is_empty(),
-        "the segment is complete; nothing was cut short"
+    assert!(session.uncommitted_replacements().is_empty());
+}
+
+/// Without the commit the same file reads as the history before the replacement, and the
+/// later append is *not* part of the segment (ADR 0019 §2's index-adjacency example): the
+/// `Aborted` boundary is what makes the difference.
+#[test]
+fn an_aborted_replacement_drops_the_segment_and_the_next_append_is_normal() {
+    let dir = TempDir::new("replace-aborted");
+    let path = dir.file("s.jsonl");
+    let body = [
+        envelope(
+            0,
+            "SessionCreated",
+            serde_json::json!({"workspace": "/w", "config_snapshot": {}}),
+        ),
+        envelope(
+            1,
+            "MessageAppended",
+            serde_json::json!({"index": 0, "message": user("old zero")}),
+        ),
+        envelope(
+            2,
+            "MessageAppended",
+            serde_json::json!({"index": 1, "message": user("old one")}),
+        ),
+        // The replacement declared 4 but only wrote 2, then was aborted.
+        envelope(
+            3,
+            "TranscriptReplaced",
+            serde_json::json!({"revision": 7, "len": 4}),
+        ),
+        envelope(
+            4,
+            "MessageAppended",
+            serde_json::json!({"index": 0, "message": user("pending zero")}),
+        ),
+        envelope(
+            5,
+            "MessageAppended",
+            serde_json::json!({"index": 1, "message": user("pending one")}),
+        ),
+        envelope(
+            6,
+            "TranscriptReplacementAborted",
+            serde_json::json!({"revision": 7}),
+        ),
+        // Index 2 continues the **old** history (length 2), not the dropped segment.
+        envelope(
+            7,
+            "MessageAppended",
+            serde_json::json!({"index": 2, "message": user("normal two")}),
+        ),
+    ];
+    write_lines(&path, &body);
+
+    let session = Session::open(&path).unwrap();
+    assert_eq!(
+        session.history().unwrap(),
+        vec![
+            Message::user("old zero"),
+            Message::user("old one"),
+            Message::user("normal two"),
+        ]
+    );
+    assert_eq!(
+        session.uncommitted_replacements(),
+        &[UncommittedReplacement {
+            revision: 7,
+            declared_len: 4,
+            written: 2,
+            line: 4,
+            end: ReplacementEnd::Aborted,
+        }]
     );
 }
 
-/// A replacement, normal appends, a second replacement, normal appends: the segment resets at
-/// each marker and the history is the last revision plus what followed it.
+/// An abort, then a new replacement that commits: the abort only closes the first segment.
+#[test]
+fn an_aborted_replacement_can_be_followed_by_a_committed_one() {
+    let dir = TempDir::new("replace-abort-then-commit");
+    let path = dir.file("s.jsonl");
+    let body = [
+        envelope(
+            0,
+            "SessionCreated",
+            serde_json::json!({"workspace": "/w", "config_snapshot": {}}),
+        ),
+        envelope(
+            1,
+            "TranscriptReplaced",
+            serde_json::json!({"revision": 1, "len": 1}),
+        ),
+        envelope(
+            2,
+            "MessageAppended",
+            serde_json::json!({"index": 0, "message": user("first try")}),
+        ),
+        envelope(
+            3,
+            "TranscriptReplacementAborted",
+            serde_json::json!({"revision": 1}),
+        ),
+        envelope(
+            4,
+            "TranscriptReplaced",
+            serde_json::json!({"revision": 2, "len": 1}),
+        ),
+        envelope(
+            5,
+            "MessageAppended",
+            serde_json::json!({"index": 0, "message": user("second try")}),
+        ),
+        envelope(
+            6,
+            "TranscriptReplacementCommitted",
+            serde_json::json!({"revision": 2, "len": 1}),
+        ),
+    ];
+    write_lines(&path, &body);
+
+    let session = Session::open(&path).unwrap();
+    assert_eq!(
+        session.history().unwrap(),
+        vec![Message::user("second try")]
+    );
+    assert_eq!(
+        session.uncommitted_replacements(),
+        &[UncommittedReplacement {
+            revision: 1,
+            declared_len: 1,
+            written: 1,
+            line: 2,
+            end: ReplacementEnd::Aborted,
+        }]
+    );
+}
+
+// ---------- the writer's resume ----------
+
+/// A file ending inside a pending segment: `resume` writes `Aborted` first, and the next
+/// append continues the old history. ADR 0019 §2's index-adjacency example: old history 2,
+/// segment declared 4 and wrote 2, then index 2 arrives — the boundary keeps it normal.
 #[tokio::test]
-async fn replacements_and_the_appends_between_them_fold_to_the_last_revision() {
-    let dir = TempDir::new("replace-appends");
+async fn resume_aborts_a_pending_segment_and_the_next_append_is_normal() {
+    let dir = TempDir::new("replace-resume-abort");
     let path = dir.file("s.jsonl");
     let journal = SessionJournal::create(&path, SID, created()).unwrap();
     let append = async |index: usize, message: Message| {
@@ -79,48 +222,293 @@ async fn replacements_and_the_appends_between_them_fold_to_the_last_revision() {
             .await
             .unwrap();
     };
-    append(0, Message::user("old")).await;
+    append(0, Message::user("old zero")).await;
+    append(1, Message::user("old one")).await;
     journal
         .append(JournalRecord::TranscriptReplaced {
-            revision: 1,
-            len: 1,
+            revision: 7,
+            len: 4,
         })
         .await
         .unwrap();
-    append(0, Message::user("first replacement")).await;
-    // Normal growth after the replacement: the index continues from `len`.
-    append(1, Message::assistant("grown one")).await;
-    append(2, Message::user("grown two")).await;
+    append(0, Message::user("pending zero")).await;
+    append(1, Message::user("pending one")).await;
+    drop(journal);
+
+    // Read-only: the pending segment is diagnosed, the old history stands, and the file is
+    // byte-for-byte unchanged.
+    let before_bytes = std::fs::read(&path).unwrap();
+    let before = Session::open(&path).unwrap();
+    assert_eq!(
+        before.history().unwrap(),
+        vec![Message::user("old zero"), Message::user("old one")]
+    );
+    assert_eq!(before.uncommitted_replacements().len(), 1);
+    assert_eq!(std::fs::read(&path).unwrap(), before_bytes);
+
+    let journal = SessionJournal::resume(&path, SID).unwrap();
+    journal
+        .append(JournalRecord::Message {
+            index: 2,
+            message: Message::user("normal two"),
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let after = Session::open(&path).unwrap();
+    assert_eq!(
+        after.history().unwrap(),
+        vec![
+            Message::user("old zero"),
+            Message::user("old one"),
+            Message::user("normal two"),
+        ]
+    );
+    assert_eq!(after.uncommitted_replacements().len(), 1);
+}
+
+/// `resume` writes the abort once. A second `resume` sees the closed segment and adds
+/// nothing (ADR 0019 §7).
+#[tokio::test]
+async fn resume_does_not_repeat_the_abort() {
+    let dir = TempDir::new("replace-resume-idempotent");
+    let path = dir.file("s.jsonl");
+    let journal = SessionJournal::create(&path, SID, created()).unwrap();
     journal
         .append(JournalRecord::TranscriptReplaced {
-            revision: 2,
+            revision: 3,
             len: 2,
         })
         .await
         .unwrap();
-    append(0, Message::user("second replacement")).await;
-    append(1, Message::assistant("second reply")).await;
-    append(2, Message::user("tail")).await;
+    journal
+        .append(JournalRecord::Message {
+            index: 0,
+            message: Message::user("prefix"),
+        })
+        .await
+        .unwrap();
     drop(journal);
 
-    let session = Session::open(&path).unwrap();
-    assert!(session.skipped().is_empty());
-    assert!(session.recovered_replacements().is_empty());
+    let journal = SessionJournal::resume(&path, SID).unwrap();
+    drop(journal);
+    let after_first = std::fs::read_to_string(&path).unwrap();
+    let aborts = after_first
+        .matches("\"event\":\"TranscriptReplacementAborted\"")
+        .count();
+    assert_eq!(aborts, 1, "the first resume writes one abort");
+
+    let journal = SessionJournal::resume(&path, SID).unwrap();
+    drop(journal);
     assert_eq!(
-        session.history().unwrap(),
-        vec![
-            Message::user("second replacement"),
-            Message::assistant("second reply"),
-            Message::user("tail"),
-        ]
+        std::fs::read_to_string(&path).unwrap(),
+        after_first,
+        "a second resume must not write another abort"
     );
 }
 
-/// `resume` continues the sequence after a replacement and its appends, and the appended line
-/// reads back.
+/// A half-written `TranscriptReplacementAborted` is a torn tail: `resume` truncates it and
+/// writes a fresh, complete abort.
 #[tokio::test]
-async fn resume_continues_after_a_replacement_and_its_appends() {
-    let dir = TempDir::new("replace-resume");
+async fn a_torn_abort_is_truncated_and_rewritten() {
+    let dir = TempDir::new("replace-resume-torn-abort");
+    let path = dir.file("s.jsonl");
+    let journal = SessionJournal::create(&path, SID, created()).unwrap();
+    journal
+        .append(JournalRecord::TranscriptReplaced {
+            revision: 5,
+            len: 1,
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    // Append a valid-JSON abort prefix with no LF: a torn tail.
+    let torn = envelope(
+        2,
+        "TranscriptReplacementAborted",
+        serde_json::json!({"revision": 5}),
+    );
+    let torn = &torn[..torn.len() - 4];
+    let mut body = std::fs::read_to_string(&path).unwrap();
+    body.push_str(torn);
+    std::fs::write(&path, body).unwrap();
+
+    let journal = SessionJournal::resume(&path, SID).unwrap();
+    drop(journal);
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        text.ends_with("}\n"),
+        "the file must end on a complete line"
+    );
+    assert_eq!(
+        text.matches("\"event\":\"TranscriptReplacementAborted\"")
+            .count(),
+        1,
+        "exactly one complete abort line"
+    );
+    let session = Session::open(&path).unwrap();
+    assert_eq!(session.uncommitted_replacements().len(), 1);
+}
+
+// ---------- corruption (ADR 0019 §2) ----------
+
+fn assert_corrupt_at(path: &std::path::Path, line: u64) {
+    let error = Session::open(path).unwrap_err();
+    assert!(
+        matches!(&error, ReadError::Corrupt { line: found, .. } if *found == line),
+        "expected corruption at line {line}, got {error:?}"
+    );
+}
+
+/// A commit with no open replacement is corruption, not something a crash can produce.
+#[test]
+fn a_commit_without_a_replacement_is_corruption() {
+    let dir = TempDir::new("replace-commit-orphan");
+    let path = dir.file("s.jsonl");
+    write_lines(
+        &path,
+        &[
+            envelope(
+                0,
+                "SessionCreated",
+                serde_json::json!({"workspace": "/w", "config_snapshot": {}}),
+            ),
+            envelope(
+                1,
+                "TranscriptReplacementCommitted",
+                serde_json::json!({"revision": 1, "len": 0}),
+            ),
+        ],
+    );
+    assert_corrupt_at(&path, 2);
+}
+
+/// A commit whose `revision` or `len` does not match the open segment is corruption.
+#[test]
+fn a_mismatched_commit_is_corruption() {
+    let dir = TempDir::new("replace-commit-mismatch");
+    let path = dir.file("s.jsonl");
+    write_lines(
+        &path,
+        &[
+            envelope(
+                0,
+                "SessionCreated",
+                serde_json::json!({"workspace": "/w", "config_snapshot": {}}),
+            ),
+            envelope(
+                1,
+                "TranscriptReplaced",
+                serde_json::json!({"revision": 1, "len": 1}),
+            ),
+            envelope(
+                2,
+                "MessageAppended",
+                serde_json::json!({"index": 0, "message": user("a")}),
+            ),
+            envelope(
+                3,
+                "TranscriptReplacementCommitted",
+                serde_json::json!({"revision": 2, "len": 1}),
+            ),
+        ],
+    );
+    assert_corrupt_at(&path, 4);
+}
+
+/// A message beyond the declared `len` before the commit is corruption.
+#[test]
+fn a_message_beyond_the_declared_len_is_corruption() {
+    let dir = TempDir::new("replace-overflow");
+    let path = dir.file("s.jsonl");
+    write_lines(
+        &path,
+        &[
+            envelope(
+                0,
+                "SessionCreated",
+                serde_json::json!({"workspace": "/w", "config_snapshot": {}}),
+            ),
+            envelope(
+                1,
+                "TranscriptReplaced",
+                serde_json::json!({"revision": 1, "len": 1}),
+            ),
+            envelope(
+                2,
+                "MessageAppended",
+                serde_json::json!({"index": 0, "message": user("a")}),
+            ),
+            envelope(
+                3,
+                "MessageAppended",
+                serde_json::json!({"index": 1, "message": user("b")}),
+            ),
+        ],
+    );
+    assert_corrupt_at(&path, 4);
+}
+
+/// A mismatched abort is corruption too.
+#[test]
+fn a_mismatched_abort_is_corruption() {
+    let dir = TempDir::new("replace-abort-mismatch");
+    let path = dir.file("s.jsonl");
+    write_lines(
+        &path,
+        &[
+            envelope(
+                0,
+                "SessionCreated",
+                serde_json::json!({"workspace": "/w", "config_snapshot": {}}),
+            ),
+            envelope(
+                1,
+                "TranscriptReplaced",
+                serde_json::json!({"revision": 1, "len": 1}),
+            ),
+            envelope(
+                2,
+                "TranscriptReplacementAborted",
+                serde_json::json!({"revision": 9}),
+            ),
+        ],
+    );
+    assert_corrupt_at(&path, 3);
+}
+
+/// A normal runtime event inside a pending segment is corruption (ADR 0019 §2: only the
+/// segment's messages, its commit or its abort may follow).
+#[test]
+fn a_runtime_event_inside_a_pending_segment_is_corruption() {
+    let dir = TempDir::new("replace-runtime-inside");
+    let path = dir.file("s.jsonl");
+    write_lines(
+        &path,
+        &[
+            envelope(
+                0,
+                "SessionCreated",
+                serde_json::json!({"workspace": "/w", "config_snapshot": {}}),
+            ),
+            envelope(
+                1,
+                "TranscriptReplaced",
+                serde_json::json!({"revision": 1, "len": 1}),
+            ),
+            envelope(2, "TurnStarted", serde_json::json!({"turn_id": "t-1"})),
+        ],
+    );
+    assert_corrupt_at(&path, 3);
+}
+
+// ---------- a committed replacement through the writer, then a resume ----------
+
+#[tokio::test]
+async fn resume_continues_after_a_committed_replacement_and_its_appends() {
+    let dir = TempDir::new("replace-resume-committed");
     let path = dir.file("s.jsonl");
     let journal = SessionJournal::create(&path, SID, created()).unwrap();
     journal
@@ -138,17 +526,22 @@ async fn resume_continues_after_a_replacement_and_its_appends() {
         .await
         .unwrap();
     journal
+        .append(JournalRecord::TranscriptReplacementCommitted {
+            revision: 1,
+            len: 1,
+        })
+        .await
+        .unwrap();
+    journal
         .append(JournalRecord::Message {
             index: 1,
             message: Message::assistant("grown"),
         })
         .await
         .unwrap();
-    let next = journal.next_seq();
     drop(journal);
 
     let journal = SessionJournal::resume(&path, SID).unwrap();
-    assert_eq!(journal.next_seq(), next);
     journal
         .append(JournalRecord::Message {
             index: 2,
@@ -167,145 +560,95 @@ async fn resume_continues_after_a_replacement_and_its_appends() {
             Message::user("after resume"),
         ]
     );
+    assert!(session.uncommitted_replacements().is_empty());
 }
 
-/// A crash mid-replacement leaves a short segment at end of file. `resume` can continue
-/// appending (ADR 0005) and the file stays readable: a non-message append leaves the segment
-/// short, so the recovery diagnostic survives.
+/// Three committed replacements in a row fold to the last one.
 #[tokio::test]
-async fn resume_continues_after_a_short_replacement() {
-    let dir = TempDir::new("replace-short-resume");
+async fn three_committed_replacements_fold_to_the_last() {
+    let dir = TempDir::new("replace-three");
     let path = dir.file("s.jsonl");
     let journal = SessionJournal::create(&path, SID, created()).unwrap();
-    journal
-        .append(JournalRecord::TranscriptReplaced {
-            revision: 1,
-            len: 2,
-        })
-        .await
-        .unwrap();
-    journal
-        .append(JournalRecord::Message {
-            index: 0,
-            message: Message::user("prefix"),
-        })
-        .await
-        .unwrap();
-    let next = journal.next_seq();
+    for (revision, text) in [(1u64, "one"), (2, "two"), (3, "three")] {
+        journal
+            .append(JournalRecord::TranscriptReplaced { revision, len: 1 })
+            .await
+            .unwrap();
+        journal
+            .append(JournalRecord::Message {
+                index: 0,
+                message: Message::user(text),
+            })
+            .await
+            .unwrap();
+        journal
+            .append(JournalRecord::TranscriptReplacementCommitted { revision, len: 1 })
+            .await
+            .unwrap();
+    }
     drop(journal);
 
-    let before = Session::open(&path).unwrap();
-    assert_eq!(before.history().unwrap(), vec![Message::user("prefix")]);
-    assert_eq!(
-        before.recovered_replacements(),
-        &[RecoveredReplacement {
-            revision: 1,
-            declared: 2,
-            written: 1,
-        }]
-    );
-
-    let journal = SessionJournal::resume(&path, SID).unwrap();
-    assert_eq!(journal.next_seq(), next);
-    journal
-        .append(JournalRecord::ModelUsage {
-            usage: agent_core::ModelUsage::default(),
-        })
-        .await
-        .unwrap();
-    drop(journal);
-
-    let after = Session::open(&path).unwrap();
-    assert_eq!(after.history().unwrap(), vec![Message::user("prefix")]);
-    assert_eq!(
-        after.recovered_replacements(),
-        &[RecoveredReplacement {
-            revision: 1,
-            declared: 2,
-            written: 1,
-        }]
-    );
+    let session = Session::open(&path).unwrap();
+    assert_eq!(session.history().unwrap(), vec![Message::user("three")]);
+    assert!(session.uncommitted_replacements().is_empty());
 }
 
-/// The crash-recovery flow the brief describes: a replacement crashes short, the host recovers
-/// the written prefix, replaces again, and continues. `resume` can append to that file and the
-/// short first segment is reported.
-#[tokio::test]
-async fn resume_continues_after_a_short_replacement_is_replaced_again() {
-    let dir = TempDir::new("replace-short-then-marker-resume");
+/// A message inside an uncommitted segment is not in the current history, so the export and
+/// the search index treat it as absent (ADR 0019 实施要求).
+#[test]
+fn an_uncommitted_segment_is_absent_from_export_and_index() {
+    let dir = TempDir::new("replace-export-index");
     let path = dir.file("s.jsonl");
-    let journal = SessionJournal::create(&path, SID, created()).unwrap();
-    journal
-        .append(JournalRecord::TranscriptReplaced {
-            revision: 1,
-            len: 2,
-        })
-        .await
-        .unwrap();
-    journal
-        .append(JournalRecord::Message {
-            index: 0,
-            message: Message::user("prefix"),
-        })
-        .await
-        .unwrap();
-    // The host replaced again after recovering the one-message prefix.
-    journal
-        .append(JournalRecord::TranscriptReplaced {
-            revision: 2,
-            len: 1,
-        })
-        .await
-        .unwrap();
-    journal
-        .append(JournalRecord::Message {
-            index: 0,
-            message: Message::user("second"),
-        })
-        .await
-        .unwrap();
-    journal
-        .append(JournalRecord::Message {
-            index: 1,
-            message: Message::assistant("grown"),
-        })
-        .await
-        .unwrap();
-    let next = journal.next_seq();
-    drop(journal);
-
-    let before = Session::open(&path).unwrap();
-    assert_eq!(
-        before.history().unwrap(),
-        vec![Message::user("second"), Message::assistant("grown")]
+    write_lines(
+        &path,
+        &[
+            envelope(
+                0,
+                "SessionCreated",
+                serde_json::json!({"workspace": "/w", "config_snapshot": {}}),
+            ),
+            envelope(
+                1,
+                "MessageAppended",
+                serde_json::json!({"index": 0, "message": user("committed old")}),
+            ),
+            envelope(
+                2,
+                "TranscriptReplaced",
+                serde_json::json!({"revision": 1, "len": 2}),
+            ),
+            envelope(
+                3,
+                "MessageAppended",
+                serde_json::json!({"index": 0, "message": user("uncommitted pending")}),
+            ),
+        ],
     );
-    assert_eq!(
-        before.recovered_replacements(),
-        &[RecoveredReplacement {
-            revision: 1,
-            declared: 2,
-            written: 1,
-        }]
+    let session = Session::open(&path).unwrap();
+    let json = export_json(&session, &ExportOptions::new()).unwrap();
+    assert!(json.contains("committed old"), "{json}");
+    assert!(!json.contains("uncommitted pending"), "{json}");
+    let md = export_markdown(&session, &ExportOptions::new()).unwrap();
+    assert!(md.contains("committed old"), "{md}");
+    assert!(!md.contains("uncommitted pending"), "{md}");
+
+    let mut index = Index::open(dir.file("i.db")).unwrap();
+    index.rebuild(std::slice::from_ref(&path)).unwrap();
+    let rows = index.indexed_events(session.session_id()).unwrap();
+    assert!(
+        rows.iter()
+            .all(|row| row.text.as_deref() != Some("uncommitted pending")),
+        "{rows:?}"
     );
-
-    let journal = SessionJournal::resume(&path, SID).unwrap();
-    assert_eq!(journal.next_seq(), next);
-    journal
-        .append(JournalRecord::Message {
-            index: 2,
-            message: Message::user("after resume"),
-        })
-        .await
-        .unwrap();
-    drop(journal);
-
-    let after = Session::open(&path).unwrap();
-    assert_eq!(
-        after.history().unwrap(),
-        vec![
-            Message::user("second"),
-            Message::assistant("grown"),
-            Message::user("after resume"),
-        ]
+    assert!(
+        index
+            .search("uncommitted pending", None, 10)
+            .unwrap()
+            .is_empty(),
+        "the pending message must not be searchable"
+    );
+    assert!(
+        !index.search("committed old", None, 10).unwrap().is_empty(),
+        "the committed message stays searchable"
     );
 }

@@ -217,23 +217,34 @@ async fn the_fold_agrees_with_an_independent_line_scan() {
     for name in [
         "v1-minimal.jsonl",
         "replace-resets-index.jsonl",
+        "replace-committed.jsonl",
+        "replace-aborted-then-append.jsonl",
+        "replace-uncommitted-eof.jsonl",
         "crash-after-started.jsonl",
     ] {
         let session = Session::open(common::fixture(name)).unwrap();
-        // Independent scan: apply the same index-reset rule, but without the crate's fold.
-        let mut messages: Vec<Message> = Vec::new();
+        // Independent scan of ADR 0019 §2, written here without the crate's fold: a pending
+        // segment holds the old history; only a matching commit swaps it in; an abort or end
+        // of file drops it.
+        let mut history: Vec<Message> = Vec::new();
+        let mut pending: Option<Vec<Message>> = None;
         for event in session.events() {
             match &event.data {
                 EventData::MessageAppended { index, message } => {
-                    assert_eq!(*index, messages.len() as u64, "{name}: index continuity");
-                    messages.push(message.clone());
+                    let bucket = pending.as_mut().unwrap_or(&mut history);
+                    assert_eq!(*index, bucket.len() as u64, "{name}: index continuity");
+                    bucket.push(message.clone());
                 }
-                EventData::TranscriptReplaced { .. } => messages.clear(),
+                EventData::TranscriptReplaced { .. } => pending = Some(Vec::new()),
+                EventData::TranscriptReplacementCommitted { .. } => {
+                    history = pending.take().expect("commit with no pending segment");
+                }
+                EventData::TranscriptReplacementAborted { .. } => pending = None,
                 _ => {}
             }
         }
-        let mut expected = messages.clone();
-        expected.extend(agent_core::repair(&messages, &session.journal_records()));
+        let mut expected = history.clone();
+        expected.extend(agent_core::repair(&history, &session.journal_records()));
         assert_eq!(session.history().unwrap(), expected, "{name}");
 
         // The core accepts the folded history for a new session (it answers every call).

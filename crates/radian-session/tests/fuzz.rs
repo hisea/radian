@@ -189,9 +189,15 @@ async fn build_base(dir: &TempDir) -> Base {
         })
         .await
         .unwrap();
-    // Normal growth after a complete replacement: the segment ended at `len`, so these are
-    // ordinary appends, not more of the replacement. A reader that keeps counting them into
-    // the segment refuses this whole base (the bug this slice fixes).
+    journal
+        .append(JournalRecord::TranscriptReplacementCommitted {
+            revision: 1,
+            len: 1,
+        })
+        .await
+        .unwrap();
+    // Normal growth after a committed replacement: the segment committed, so these are
+    // ordinary appends whose index continues from `len` (ADR 0019).
     journal
         .append(JournalRecord::Message {
             index: 1,
@@ -734,8 +740,8 @@ async fn the_fuzz_base_is_a_valid_v1_session() {
     );
     assert!(base.session.skipped().is_empty());
     assert!(
-        base.session.recovered_replacements().is_empty(),
-        "the base's replacement segment is complete"
+        base.session.uncommitted_replacements().is_empty(),
+        "the base's replacement segment is committed"
     );
     assert_eq!(base.session.session_id(), "fuzz-sid");
     // Every event kind the brief lists is present at least once.
@@ -754,6 +760,7 @@ async fn the_fuzz_base_is_a_valid_v1_session() {
         "ContextBudgetReached",
         "PermissionResolved",
         "TranscriptReplaced",
+        "TranscriptReplacementCommitted",
     ] {
         assert!(
             base.session.events().iter().any(|e| e.event == name),
