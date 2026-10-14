@@ -446,3 +446,17 @@ Base `71a9d1c` · 一次性检出 `/tmp/models-mut`（detached，跑完删除）
 
 1/1 抓住。注意 `every_thinking_map_matches_supported_thinking_levels` 在变异下仍通过：
 它只断言"哪些级别非 null"，不断言线值；抓住值改动的是结构测试（两者互补，都保留）。
+
+## ADR 0031 片 A：信任记录与决策解析（2026-10-14）
+
+Base `9fef91d` · 一次性 worktree `/tmp/radian-trust-mut`，每条跑完 `git checkout -- .`，`git status --short`
+为空。命令 `cargo test -p radian-host --lib <测试名>`（基线 `trust` 13 passed）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| T-A1 | `resolve` 保留**最远**祖先（继续向上遍历、最后一条胜） | `the_nearest_ancestor_wins_and_a_child_false_overrides_a_parent_true` | ✅ |
+| T-A2 | `read_at` 对非 bool 值**跳过**（部分采纳）而不是整体拒绝 | `a_bad_file_is_rejected_whole_not_partly_adopted` | ✅ |
+| T-A3 | `canonical` 直接返回原路径（不解析符号链接） | `a_symlink_and_its_target_share_one_decision` | ✅ |
+| T-A4 | `write_at` 用 `new_mode = None`（新文件按 umask，不是 0600） | `the_record_round_trips_sorted_and_private`（mode 断言） | ✅ |
+
+4/4 抓住。
