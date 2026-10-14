@@ -4518,6 +4518,34 @@ fn frame_count(pty: &Pty) -> usize {
         .count()
 }
 
+/// [`frame_count`] after the pty output has gone quiet for `QUIET`.
+///
+/// `frame_count` counts the bytes the test's reader thread has **received**, and the app writes
+/// a frame's cursor-show (`[?25h`) *after* the frame text that `wait_for_screen` matches. Under
+/// load the reader can lag, so a bare `frame_count` right after `wait_for_screen` can read the
+/// startup frames as zero — and then a later read counts them as if the input under test had
+/// drawn them (`left: 2, right: 0`). Waiting for the output to stop changing makes the baseline
+/// a state, not a race. The wait is bounded; on timeout it returns the current count.
+fn settled_frame_count(pty: &mut Pty) -> usize {
+    const QUIET: std::time::Duration = std::time::Duration::from_millis(250);
+    const LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + LIMIT;
+    let mut seen = pty.raw().len();
+    let mut changed = std::time::Instant::now();
+    loop {
+        pty.pump();
+        let len = pty.raw().len();
+        if len != seen {
+            seen = len;
+            changed = std::time::Instant::now();
+        } else if changed.elapsed() >= QUIET || std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    frame_count(pty)
+}
+
 /// ADR 0023 U2's zero-redraw rule: an idle screen is not redrawn at all. Before the
 /// event-driven loop the app drew ~19 frames/s while nothing happened (`docs/perf-baseline.md`
 /// §7); now the frame count over an idle window must not move.
@@ -4545,7 +4573,7 @@ fn pty_an_idle_screen_is_not_redrawn() {
         "{}",
         pty.screen()
     );
-    let before = frame_count(&pty);
+    let before = settled_frame_count(&mut pty);
     assert!(before >= 1, "the first frame is drawn");
 
     let window = std::time::Instant::now();
@@ -7193,14 +7221,16 @@ fn pty_pointer_motion_alone_draws_no_frame() {
         "{}",
         pty.screen()
     );
-    let before = frame_count(&pty);
+    // The startup frames' cursor-show bytes are written after the text `wait_for_screen`
+    // matched; settle first, so the baseline cannot miss them and blame the motion under load.
+    let before = settled_frame_count(&mut pty);
 
     // A pointer wandering across the screen, buttons up, for a while.
     for step in 0..40u16 {
         pty.send(&sgr(35, 5 + step, 3 + step % 10, true));
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    let after = frame_count(&pty);
+    let after = settled_frame_count(&mut pty);
     pty.quit();
     assert_eq!(
         after, before,

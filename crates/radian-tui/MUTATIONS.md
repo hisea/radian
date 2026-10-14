@@ -731,3 +731,16 @@ Base `eeadb11` · 一次性检出 `/tmp/ui2b-mut`（detached，跑完删除）·
 | R1-1 | 恢复"任何非 Cancel/QuitDeadline 输入都解除"（去掉 `is_user_input`） | 后台事件不解除待退出 | `quit.rs::background_events_do_not_disarm_the_quit_window` FAILED |
 
 1/1 抓住。
+
+## pty 偶发测试：pointer-motion 的帧数基线（2026-10-14）
+
+Base `a1d1343` · 复现 harness：20 个 `yes > /dev/null`（记 pid，末尾只 kill 这些 pid）+ 4 个并发循环各
+跑 `pty_pointer_motion_alone_draws_no_frame` 12 次（每次一个全新 pty/进程）。
+
+| # | 变异 | 观察 | 结果 |
+|---|---|---|---|
+| HT1 | 去掉 `settled_frame_count`，退回 `let before = frame_count(&pty)`（基线不等输出安静） | 同一 harness 下 `assert_eq!(after, before)` 报 `left: 2, right: 0`：启动帧的 `[?25h` 在基线之后才被测试的 reader 线程读到，被误算成 pointer motion 画的帧 | ✅ 复现 |
+
+**修前 1/48，修后 0/48**（同一 harness）。另外 plain 顺序单跑 20 次（同样 20 个 `yes`）：修前 0/20、
+修后 0/20——偶发需要并发 TUI 争用才明显。结论：**测试的时序假设**，不是产品多画帧（产品
+`input_event` 把 `MouseEventKind::Moved` 映射为 `None`，见 `events.rs:83-118`）。
