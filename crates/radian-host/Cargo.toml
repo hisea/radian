@@ -42,6 +42,8 @@ toml = "0.8"
 toml_edit = "0.22"
 
 [dev-dependencies]
+# The parse-counting seam: the resume-perf B test asserts a resumed journal is parsed once.
+radian-session = { path = "../radian-session", features = ["testing"] }
 # The catalog tests use the adapter's local mock HTTP server, never the real network.
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible", features = ["testing"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

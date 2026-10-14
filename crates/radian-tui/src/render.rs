@@ -543,7 +543,7 @@ pub fn visible_lines(
         .iter_mut()
         .map(|entry| entry_line_count(entry, modes, width))
         .collect();
-    if std::env::var_os("RADIAN_TRACE_PHASES").is_some() {
+    if agent_core::trace::enabled() {
         eprintln!(
             "[trace] line-counts {} entries {} ms",
             counts.len(),

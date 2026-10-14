@@ -397,6 +397,9 @@ pub struct LocalSession {
     capabilities: Vec<SessionCapability>,
     facts: SessionFacts,
     config_snapshot: serde_json::Value,
+    /// The recovered transcript (resume-perf B): `open_session` already folded it, so the host
+    /// does not re-open the journal for its initial view.
+    pub history: Vec<Message>,
 }
 
 impl LocalSession {
@@ -674,12 +677,6 @@ impl SessionFacade for LocalSession {
 ///
 /// Async because opening the driver is (MCP servers start and the journal is recovered); a
 /// synchronous host calls it with `runtime.block_on`.
-fn os_mark(label: &str, t: std::time::Instant) {
-    if std::env::var_os("RADIAN_TRACE_PHASES").is_some() {
-        eprintln!("[trace] open/{label} {} ms", t.elapsed().as_millis());
-    }
-}
-
 pub async fn open_session(
     setup: SessionSetup,
     bindings: HostBindings,
@@ -747,22 +744,39 @@ pub async fn open_session(
         .as_ref()
         .map(|service| MemoryTools::new(service.clone()));
     let memory_notice = memory_notice(&memory, &injection_config);
-    os_mark("memory", t0);
+    agent_core::trace::took("open/memory", t0);
     let mcp = McpToolProvider::new(servers);
     let mcp_configured = mcp.configured();
 
     // The session file. Every check that can fail has already run in the host, so this is the
     // first thing that creates durable state.
     let journal_path = session_dir.join(format!("{}.jsonl", session_id.as_str()));
-    let journal = open_journal(
+    // resume-perf B: parse the journal **once**. The journal open, the driver's recovery and
+    // the host's initial view all reuse this one `Session`.
+    let t_parse = std::time::Instant::now();
+    let parsed = if resume && journal_path.exists() {
+        Some(
+            radian_session::Session::open(&journal_path).map_err(|error| {
+                SessionError::Message(format!(
+                    "cannot resume session {:?}: {error}",
+                    session_id.as_str()
+                ))
+            })?,
+        )
+    } else {
+        None
+    };
+    agent_core::trace::took("open/parse-once", t_parse);
+    let (journal, wrote_abort) = open_journal(
         &session_id,
         &session_dir,
         &workspace,
         resume,
         &config_snapshot,
         &journal_path,
+        parsed.as_ref(),
     )?;
-    os_mark("journal", t0);
+    agent_core::trace::took("open/journal", t0);
     let inbox = Inbox::durable(64, Arc::clone(&journal));
 
     let agent_config = AgentConfig {
@@ -804,7 +818,7 @@ pub async fn open_session(
         injection_config,
         memory_warning,
     ));
-    os_mark("hooks+skills", t0);
+    agent_core::trace::took("open/hooks+skills", t0);
     let mut tools = HostTools::new(coding, memory_tools, mcp.clone());
     let ask_registered = ask.is_some();
     if let Some(ask) = ask {
@@ -825,7 +839,12 @@ pub async fn open_session(
 
     // MCP server **processes** start here, when the tool session opens. The session file
     // already exists, so a failure names the way to continue it.
-    let mut driver = Driver::open_with_slot(
+    // A written abort changes the fold on disk, so the shared parse is stale: re-parse then.
+    let recovery_parse = match (&parsed, wrote_abort) {
+        (Some(parsed), false) => Some(parsed),
+        _ => None,
+    };
+    let mut driver = Driver::open_with_slot_parsed(
         &agent,
         Arc::clone(&journal),
         Arc::clone(&inbox),
@@ -833,6 +852,7 @@ pub async fn open_session(
         turn_options,
         config_slot.clone(),
         config_queue.clone(),
+        recovery_parse,
     )
     .await
     .map_err(|error| {
@@ -843,12 +863,15 @@ pub async fn open_session(
             session_id
         ))
     })?;
-    os_mark("driver-recover", t0);
+    agent_core::trace::took("open/driver-recover", t0);
     driver.set_turn_timeout(turn_timeout);
     driver.set_runtime_events(runtime_events);
     if let Some(budget_for) = budget_for.clone() {
         driver.set_budget_for(budget_for);
     }
+    // resume-perf B: the recovered transcript goes to the host, which would otherwise open and
+    // fold the same journal a second time for its initial view.
+    let recovered_history = driver.take_recovered_history().unwrap_or_default();
 
     // The config queue is owned by the driver; the facade only pushes to it, so clone the
     // handle before the driver moves into its task.
@@ -892,7 +915,7 @@ pub async fn open_session(
         let _ = done_tx.send(end);
     });
 
-    os_mark("driver-task", t0);
+    agent_core::trace::took("open/driver-task", t0);
     let facts = SessionFacts {
         profile_line,
         sandbox_facts,
@@ -927,6 +950,7 @@ pub async fn open_session(
         capabilities,
         facts,
         config_snapshot,
+        history: recovered_history,
     })
 }
 
@@ -953,7 +977,8 @@ fn open_journal(
     resume: bool,
     config_snapshot: &serde_json::Value,
     path: &Path,
-) -> Result<Arc<SessionJournal>, SessionError> {
+    parsed: Option<&radian_session::Session>,
+) -> Result<(Arc<SessionJournal>, bool), SessionError> {
     if resume {
         if !path.exists() {
             return Err(SessionError::Message(format!(
@@ -962,8 +987,17 @@ fn open_journal(
                 dir.display()
             )));
         }
-        return SessionJournal::resume(path, session_id.as_str())
-            .map(Arc::new)
+        // resume-perf B: a `Session` the host already parsed is reused instead of scanning and
+        // parsing the file again. The flag says whether an aborted replacement was written, so
+        // the caller knows the shared parse no longer reflects the file.
+        let resumed = match parsed {
+            Some(parsed) => SessionJournal::resume_parsed(path, session_id.as_str(), parsed),
+            None => {
+                SessionJournal::resume(path, session_id.as_str()).map(|journal| (journal, false))
+            }
+        };
+        return resumed
+            .map(|(journal, wrote_abort)| (Arc::new(journal), wrote_abort))
             .map_err(|error| {
                 SessionError::Message(format!(
                     "cannot resume session {:?}: {error}",
@@ -978,7 +1012,7 @@ fn open_journal(
     // URL that could carry credentials (ADR 0008 §4, ADR 0013).
     let created = SessionCreatedData::new(workspace.to_string_lossy(), config_snapshot.clone());
     match SessionJournal::create(path, session_id.as_str(), created) {
-        Ok(journal) => Ok(Arc::new(journal)),
+        Ok(journal) => Ok((Arc::new(journal), false)),
         Err(radian_session::WriteError::NotEmpty { .. }) => Err(SessionError::Message(format!(
             "session {:?} already exists in {}; continue it with `--resume {}`",
             session_id.as_str(),

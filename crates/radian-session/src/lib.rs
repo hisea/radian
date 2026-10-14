@@ -60,3 +60,30 @@ pub use writer::{ForkParent, SessionCreatedData, SessionJournal, WriteError, now
 /// production build cannot arm them (ADR 0019 §7's failed-abort-write path).
 #[cfg(feature = "testing")]
 pub use writer::{fail_next_aborted_write, fail_next_write};
+
+/// Test-only observability (feature `testing`): how many times the reader opened a session on
+/// this thread. `open_session` must parse a resumed journal **once** (resume-perf B); a test
+/// asserts the count instead of a wall clock.
+#[cfg(feature = "testing")]
+pub mod testing {
+    use std::cell::Cell;
+
+    thread_local! {
+        static OPENS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// Resets this thread's [`Session::open`](crate::Session::open) count.
+    pub fn reset_open_count() {
+        OPENS.with(|count| count.set(0));
+    }
+
+    /// How many times [`Session::open`](crate::Session::open) ran on this thread since the
+    /// last reset.
+    pub fn open_count() -> u64 {
+        OPENS.with(Cell::get)
+    }
+
+    pub(crate) fn note_open() {
+        OPENS.with(|count| count.set(count.get() + 1));
+    }
+}

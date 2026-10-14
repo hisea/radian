@@ -116,6 +116,9 @@ pub struct Driver<M: Model, P: ToolProvider, H: Hooks> {
     next_turn: u64,
     next_config_revision: u64,
     closed: bool,
+    /// The recovered transcript (the same fold `Session::history` produces). Handed to the
+    /// host so a resume does not re-open and re-fold the journal (resume-perf B). Taken once.
+    recovered_history: Option<Vec<Message>>,
     /// Computes `B` for a (provider, model) from the local catalog (ADR 0026 D7). The host
     /// sets it; without it a switch cannot move the budget.
     budget_for: Option<BudgetFor>,
@@ -152,7 +155,26 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         slot: Arc<ConfigSlot>,
         queue: Arc<ConfigQueue>,
     ) -> Result<Self, DriverError> {
-        let recovery = recover(&journal).await?;
+        Self::open_with_slot_parsed(agent, journal, inbox, live, options, slot, queue, None).await
+    }
+
+    /// [`Driver::open_with_slot`], reusing a `Session` the host already parsed (resume-perf
+    /// B). The recovery would otherwise open and parse the whole journal a second time.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_with_slot_parsed(
+        agent: &Arc<Agent<M, P, H>>,
+        journal: Arc<SessionJournal>,
+        inbox: Arc<Inbox>,
+        live: Arc<dyn EventSink>,
+        options: TurnOptions,
+        slot: Arc<ConfigSlot>,
+        queue: Arc<ConfigQueue>,
+        parsed: Option<&radian_session::Session>,
+    ) -> Result<Self, DriverError> {
+        let recovery = recover(&journal, parsed).await?;
+        // The recovered transcript is the host's resume view too (resume-perf B): keep one
+        // copy for it before the original moves into the agent session.
+        let recovered_history = recovery.history.clone();
         // Requeue before opening: the inputs are promises that must survive the restart.
         inbox.restore(recovery.requeue).await;
         let mut session = agent
@@ -184,6 +206,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             testing_wake_branch: Arc::new(tokio::sync::Notify::new()),
             next_turn: recovery.next_turn,
             next_config_revision: recovery.next_config_revision,
+            recovered_history: Some(recovered_history),
             budget_for: None,
             turn_budget: None,
             closed: false,
@@ -207,6 +230,11 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
     #[cfg(feature = "testing")]
     pub async fn test_apply_pending_config(&mut self) -> Result<(), DriverError> {
         self.apply_pending_config().await
+    }
+
+    /// Takes the recovered transcript (the resume view). `None` after the first call.
+    pub fn take_recovered_history(&mut self) -> Option<Vec<Message>> {
+        self.recovered_history.take()
     }
 
     pub fn set_budget_for(&mut self, resolver: BudgetFor) {
@@ -802,24 +830,27 @@ fn merge_change(state: &mut serde_json::Value, change: &serde_json::Value) {
     }
 }
 
-async fn recover(journal: &SessionJournal) -> Result<Recovery, DriverError> {
-    let trace = std::env::var_os("RADIAN_TRACE_PHASES").is_some();
+async fn recover(
+    journal: &SessionJournal,
+    parsed: Option<&radian_session::Session>,
+) -> Result<Recovery, DriverError> {
     let t0 = std::time::Instant::now();
-    let parsed = Session::open(journal.path())?;
+    let owned;
+    let parsed = match parsed {
+        Some(parsed) => parsed,
+        None => {
+            owned = Session::open(journal.path())?;
+            &owned
+        }
+    };
     let records = parsed.journal_records();
-    if trace {
-        eprintln!("[trace] recover/open {} ms", t0.elapsed().as_millis());
-    }
+    agent_core::trace::took("recover/open", t0);
     let t1 = std::time::Instant::now();
     let replayed = agent_core::replay(&records)?;
-    if trace {
-        eprintln!("[trace] recover/replay {} ms", t1.elapsed().as_millis());
-    }
+    agent_core::trace::took("recover/replay", t1);
     let t2 = std::time::Instant::now();
     let history = agent_core::recover(&records)?;
-    if trace {
-        eprintln!("[trace] recover/recover {} ms", t2.elapsed().as_millis());
-    }
+    agent_core::trace::took("recover/recover", t2);
     let t3 = std::time::Instant::now();
 
     // E9: the repaired tail must be durable before the session is opened with it.
@@ -832,9 +863,7 @@ async fn recover(journal: &SessionJournal) -> Result<Recovery, DriverError> {
             .await?;
     }
 
-    if trace {
-        eprintln!("[trace] recover/tail {} ms", t3.elapsed().as_millis());
-    }
+    agent_core::trace::took("recover/tail", t3);
     // The transcript is the authority on whether an input was admitted: the input is
     // committed at the **start** of a step, while `InputAdmitted` is written after the step
     // returns. A crash in between leaves the message in the transcript without the record —
@@ -917,7 +946,7 @@ async fn recover(journal: &SessionJournal) -> Result<Recovery, DriverError> {
         requeue,
         next_turn,
         next_config_revision,
-        budget_baseline: reported_baseline(&parsed),
+        budget_baseline: reported_baseline(parsed),
         transcript_revision: parsed.last_committed_revision(),
     })
 }
