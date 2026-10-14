@@ -50,7 +50,7 @@ impl ThemeName {
     }
 }
 
-/// The 28 roles a [`Theme`] styles today (ADR 0009, ADR 0023). The config keys are the
+/// The 29 roles a [`Theme`] styles today (ADR 0009, ADR 0023). The config keys are the
 /// snake_case names; `[tui.colors]` accepts them and (mapped) pi's role names alike.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -82,10 +82,11 @@ pub enum Role {
     ToolErrorBg,
     NoticeLabel,
     NoticeBody,
+    Text,
 }
 
 impl Role {
-    pub const ALL: [Role; 28] = [
+    pub const ALL: [Role; 29] = [
         Role::Reasoning,
         Role::Interrupted,
         Role::User,
@@ -114,6 +115,7 @@ impl Role {
         Role::ToolErrorBg,
         Role::NoticeLabel,
         Role::NoticeBody,
+        Role::Text,
     ];
 
     /// The `[tui.colors]` key for this role (ADR 0029 decision 5).
@@ -147,6 +149,7 @@ impl Role {
             Role::ToolErrorBg => "tool_error_bg",
             Role::NoticeLabel => "notice_label",
             Role::NoticeBody => "notice_body",
+            Role::Text => "text",
         }
     }
 
@@ -184,6 +187,7 @@ impl Role {
             Role::ToolErrorBg => &mut theme.tool_error_bg,
             Role::NoticeLabel => &mut theme.notice_label,
             Role::NoticeBody => &mut theme.notice_body,
+            Role::Text => &mut theme.text,
         }
     }
 }
@@ -226,6 +230,8 @@ pub struct Theme {
     pub tool_pending_bg: Style,
     pub tool_success_bg: Style,
     pub tool_error_bg: Style,
+    /// The main text level (pi's `text`): the assistant's answers and the user's words.
+    pub text: Style,
     /// A structured notice's label (`profile:`, `[memory]`) — pi's `accent` (ADR 0028 owner
     /// decision: 强调 = 名字、标签).
     pub notice_label: Style,
@@ -250,6 +256,68 @@ fn style(color: Option<Color>, modifiers: Modifier) -> Style {
     style
 }
 
+/// A built-in role's foreground from one of pi's own color specs (the owner's 2026-10-14
+/// decision: the built-ins take pi's OKHSL values through the ADR 0029 conversion). Without
+/// truecolor, RGB becomes the nearest 256-color entry, exactly like a theme file's color.
+fn spec(spec: &str, modifiers: Modifier, truecolor: bool) -> Style {
+    let color = crate::theme::color::parse_color_value(spec)
+        .and_then(|value| crate::theme::file::ratatui_color(value, truecolor))
+        .expect("a built-in color spec");
+    style(Some(color), modifiers)
+}
+
+/// A built-in background from a spec (`bg` only, like a theme file's background channel).
+fn spec_bg(spec: &str, modifiers: Modifier, truecolor: bool) -> Style {
+    let color = crate::theme::color::parse_color_value(spec)
+        .and_then(|value| crate::theme::file::ratatui_color(value, truecolor))
+        .expect("a built-in color spec");
+    Style::default().add_modifier(modifiers).bg(color)
+}
+
+/// pi's dark palette (`dist/modes/interactive/theme/dark.json`, read 2026-10-14). The three
+/// text levels are pi's brightness gradient — text 89%, muted 67%, dim 56% — and every
+/// semantic color sits at 67%, distinguished by hue, exactly as pi has it.
+mod pi_dark {
+    pub const TEXT: &str = "okhsl(234 3% 89%)";
+    pub const MUTED: &str = "okhsl(229 6% 67%)";
+    pub const DIM: &str = "okhsl(229 8% 56%)";
+    pub const VIOLET: &str = "okhsl(295 50% 67%)"; // accent
+    pub const BLUE: &str = "okhsl(232 54% 67%)";
+    pub const GREEN: &str = "okhsl(159 59% 67%)"; // success
+    pub const RED: &str = "okhsl(20 72% 67%)"; // error
+    pub const YELLOW: &str = "okhsl(83 88% 67%)"; // warning
+    pub const THINKING: &str = "okhsl(226 7% 65%)";
+    pub const BORDER_ACCENT: &str = "okhsl(295 53% 64%)";
+    pub const USER_BG: &str = "okhsl(233 41% 24%)";
+    pub const TOOL_PENDING_BG: &str = "okhsl(229 5% 24%)";
+    pub const TOOL_SUCCESS_BG: &str = "okhsl(158 46% 25%)";
+    pub const TOOL_ERROR_BG: &str = "okhsl(19 54% 25%)";
+    /// pi's `selectedBg` is the same as `userMessageBg`; Radian lifts it a step so a
+    /// selection over a user block stays visible (the owner's acceptance), a deliberate
+    /// deviation from pi's file.
+    pub const SELECTION_BG: &str = "okhsl(233 41% 34%)";
+}
+
+/// pi's light palette (`light.json`, same directory, read 2026-10-14).
+mod pi_light {
+    pub const TEXT: &str = "okhsl(225 5% 27%)";
+    pub const MUTED: &str = "okhsl(229 8% 47%)";
+    pub const DIM: &str = "okhsl(229 7% 59%)";
+    pub const VIOLET: &str = "okhsl(295 60% 46%)";
+    pub const BLUE: &str = "okhsl(231 68% 47%)";
+    pub const GREEN: &str = "okhsl(159 75% 46%)";
+    pub const RED: &str = "okhsl(20 91% 47%)";
+    pub const YELLOW: &str = "okhsl(83 99% 47%)";
+    pub const THINKING: &str = "okhsl(234 8% 55%)";
+    pub const BORDER_ACCENT: &str = "okhsl(295 59% 55%)";
+    pub const USER_BG: &str = "okhsl(235 19% 91%)";
+    pub const TOOL_PENDING_BG: &str = "okhsl(248 3% 91%)";
+    pub const TOOL_SUCCESS_BG: &str = "okhsl(156 21% 91%)";
+    pub const TOOL_ERROR_BG: &str = "okhsl(24 23% 91%)";
+    /// One step darker than the user band, same reason as dark's.
+    pub const SELECTION_BG: &str = "okhsl(235 19% 81%)";
+}
+
 impl Default for Theme {
     fn default() -> Self {
         Theme::dark()
@@ -257,93 +325,118 @@ impl Default for Theme {
 }
 
 impl Theme {
-    /// The original palette (pre-config). Do not change a color here without the
-    /// `TestBackend` screenshot test: `dark` must stay byte-identical.
+    /// pi's dark palette with truecolor. Kept as the default constructor.
     pub fn dark() -> Self {
-        Self {
-            name: ThemeName::Dark,
-            reserved: BTreeMap::new(),
-            reasoning: style(Some(Color::DarkGray), Modifier::ITALIC | Modifier::DIM),
-            interrupted: style(Some(Color::Yellow), Modifier::BOLD),
-            user: style(Some(Color::Cyan), Modifier::BOLD),
-            tool_call: style(Some(Color::Blue), Modifier::empty()),
-            tool_result: style(Some(Color::Green), Modifier::empty()),
-            tool_result_error: style(Some(Color::Red), Modifier::empty()),
-            // The owner's UI review (2026-10-13): `DarkGray` (ANSI 8) is too dark to read on a
-            // dark background. A notice is ordinary information, so it uses the terminal's
-            // **default foreground** (readable on any background); a hint steps down to `Gray`
-            // (ANSI 7, light on dark) but stays legible.
-            notice: style(None, Modifier::empty()),
-            turn_idle: style(Some(Color::Green), Modifier::empty()),
-            turn_running: style(Some(Color::Yellow), Modifier::empty()),
-            turn_cancelled: style(Some(Color::Red), Modifier::empty()),
-            model: style(Some(Color::Cyan), Modifier::empty()),
-            tier: style(Some(Color::Blue), Modifier::empty()),
-            usage: style(Some(Color::Green), Modifier::empty()),
-            mcp: style(Some(Color::Cyan), Modifier::empty()),
-            budget: style(Some(Color::Magenta), Modifier::empty()),
-            budget_over: style(Some(Color::Yellow), Modifier::empty()),
-            note: style(Some(Color::Yellow), Modifier::empty()),
-            truncation: style(Some(Color::DarkGray), Modifier::empty()),
-            approval_border: style(Some(Color::Yellow), Modifier::empty()),
-            hint: style(Some(Color::Gray), Modifier::empty()),
-            completion: style(Some(Color::DarkGray), Modifier::empty()),
-            find: style(Some(Color::Yellow), Modifier::empty()),
-            // A selection is a background band; the text keeps its own foreground. `DarkGray`
-            // (ANSI 8) reads as a quiet band on a dark background.
-            selection: Style::default().bg(Color::DarkGray),
-            // Tool cards by state (ADR 0028 R4): a quick band, not a shout. `Green`/`Blue`/
-            // `Red` are the ANSI 2/4/1 shades (not bright), and none collides with the
-            // selection's `DarkGray`, so a selection stays visible over a card.
-            tool_pending_bg: Style::default().bg(Color::Blue),
-            tool_success_bg: Style::default().bg(Color::Green),
-            tool_error_bg: Style::default().bg(Color::Red),
-            // A notice's label is the emphasis; its body stays the default foreground
-            // (ui-r1's readability fix), stepping up only the label.
-            notice_label: style(Some(Color::Cyan), Modifier::BOLD),
-            notice_body: style(None, Modifier::empty()),
+        Self::dark_palette(true)
+    }
+
+    /// pi's light palette with truecolor.
+    pub fn light() -> Self {
+        Self::light_palette(true)
+    }
+
+    /// The built-in palette for `name`, resolved for the terminal's color capability
+    /// (ADR 0029 decision 2: without truecolor, an RGB color becomes the nearest 256-color
+    /// entry, the same conversion a theme file's colors go through).
+    pub fn builtin(name: ThemeName, truecolor: bool) -> Self {
+        match name {
+            ThemeName::Dark => Self::dark_palette(truecolor),
+            ThemeName::Light => Self::light_palette(truecolor),
+            // `File` is only ever a placeholder before the file loads; mono is the safe
+            // colorless base.
+            ThemeName::Mono | ThemeName::File => Self::mono(),
         }
     }
 
-    /// The same roles re-picked for a light background: cyan/yellow are unreadable there, so
-    /// they become blue/red.
-    pub fn light() -> Self {
+    /// pi's palette, resolved for this terminal (ADR 0029 decision 2).
+    fn dark_palette(truecolor: bool) -> Self {
+        use pi_dark::*;
+        let text = spec(pi_dark::TEXT, Modifier::empty(), truecolor);
+        let muted = spec(pi_dark::MUTED, Modifier::empty(), truecolor);
+        let dim = spec(pi_dark::DIM, Modifier::empty(), truecolor);
+        Self {
+            name: ThemeName::Dark,
+            reserved: BTreeMap::new(),
+            // The three text levels: main = answers, user text and tool
+            // titles; secondary = tool output, notices and thinking; weak = hints,
+            // truncation, counters and completion descriptions.
+            text,
+            user: text.bg(spec_bg(pi_dark::USER_BG, Modifier::empty(), truecolor)
+                .bg
+                .expect("a bg")),
+            reasoning: spec(pi_dark::THINKING, Modifier::ITALIC, truecolor),
+            interrupted: spec(pi_dark::YELLOW, Modifier::BOLD, truecolor),
+            tool_call: text,
+            tool_result: muted,
+            tool_result_error: spec(pi_dark::RED, Modifier::empty(), truecolor),
+            notice: text,
+            notice_label: spec(pi_dark::VIOLET, Modifier::BOLD, truecolor),
+            notice_body: muted,
+            turn_idle: spec(pi_dark::GREEN, Modifier::empty(), truecolor),
+            turn_running: spec(pi_dark::YELLOW, Modifier::empty(), truecolor),
+            turn_cancelled: spec(pi_dark::RED, Modifier::empty(), truecolor),
+            model: spec(pi_dark::VIOLET, Modifier::empty(), truecolor),
+            tier: muted,
+            usage: muted,
+            mcp: spec(pi_dark::VIOLET, Modifier::empty(), truecolor),
+            budget: muted,
+            budget_over: spec(pi_dark::YELLOW, Modifier::empty(), truecolor),
+            note: spec(pi_dark::YELLOW, Modifier::empty(), truecolor),
+            truncation: dim,
+            approval_border: spec(pi_dark::BORDER_ACCENT, Modifier::empty(), truecolor),
+            hint: dim,
+            completion: dim,
+            find: spec(pi_dark::VIOLET, Modifier::empty(), truecolor),
+            selection: spec_bg(pi_dark::SELECTION_BG, Modifier::empty(), truecolor),
+            tool_pending_bg: spec_bg(pi_dark::TOOL_PENDING_BG, Modifier::empty(), truecolor),
+            tool_success_bg: spec_bg(pi_dark::TOOL_SUCCESS_BG, Modifier::empty(), truecolor),
+            tool_error_bg: spec_bg(pi_dark::TOOL_ERROR_BG, Modifier::empty(), truecolor),
+        }
+    }
+
+    /// pi's palette, resolved for this terminal (ADR 0029 decision 2).
+    fn light_palette(truecolor: bool) -> Self {
+        use pi_light::*;
+        let text = spec(pi_light::TEXT, Modifier::empty(), truecolor);
+        let muted = spec(pi_light::MUTED, Modifier::empty(), truecolor);
+        let dim = spec(pi_light::DIM, Modifier::empty(), truecolor);
         Self {
             name: ThemeName::Light,
             reserved: BTreeMap::new(),
-            reasoning: style(Some(Color::DarkGray), Modifier::ITALIC),
-            interrupted: style(Some(Color::Red), Modifier::BOLD),
-            user: style(Some(Color::Blue), Modifier::BOLD),
-            tool_call: style(Some(Color::Blue), Modifier::empty()),
-            tool_result: style(Some(Color::Green), Modifier::empty()),
-            tool_result_error: style(Some(Color::Red), Modifier::empty()),
-            // The owner's UI review (2026-10-13): `DarkGray` (ANSI 8) is too dark to read on a
-            // dark background. A notice is ordinary information, so it uses the terminal's
-            // **default foreground** (readable on any background); a hint steps down to `Gray`
-            // (ANSI 7, light on dark) but stays legible.
-            notice: style(None, Modifier::empty()),
-            turn_idle: style(Some(Color::Green), Modifier::empty()),
-            turn_running: style(Some(Color::Magenta), Modifier::empty()),
-            turn_cancelled: style(Some(Color::Red), Modifier::empty()),
-            model: style(Some(Color::Blue), Modifier::empty()),
-            tier: style(Some(Color::Magenta), Modifier::empty()),
-            usage: style(Some(Color::Green), Modifier::empty()),
-            mcp: style(Some(Color::Blue), Modifier::empty()),
-            budget: style(Some(Color::Magenta), Modifier::empty()),
-            budget_over: style(Some(Color::Red), Modifier::empty()),
-            note: style(Some(Color::Magenta), Modifier::empty()),
-            truncation: style(Some(Color::DarkGray), Modifier::empty()),
-            approval_border: style(Some(Color::Red), Modifier::empty()),
-            hint: style(Some(Color::DarkGray), Modifier::empty()),
-            completion: style(Some(Color::DarkGray), Modifier::empty()),
-            find: style(Some(Color::Magenta), Modifier::empty()),
-            // A quiet light band on a light background; the dark text stays readable.
-            selection: Style::default().bg(Color::Gray),
-            tool_pending_bg: Style::default().bg(Color::Blue),
-            tool_success_bg: Style::default().bg(Color::Green),
-            tool_error_bg: Style::default().bg(Color::Red),
-            notice_label: style(Some(Color::Blue), Modifier::BOLD),
-            notice_body: style(None, Modifier::empty()),
+            // The three text levels: main = answers, user text and tool
+            // titles; secondary = tool output, notices and thinking; weak = hints,
+            // truncation, counters and completion descriptions.
+            text,
+            user: text.bg(spec_bg(pi_light::USER_BG, Modifier::empty(), truecolor)
+                .bg
+                .expect("a bg")),
+            reasoning: spec(pi_light::THINKING, Modifier::ITALIC, truecolor),
+            interrupted: spec(pi_light::YELLOW, Modifier::BOLD, truecolor),
+            tool_call: text,
+            tool_result: muted,
+            tool_result_error: spec(pi_light::RED, Modifier::empty(), truecolor),
+            notice: text,
+            notice_label: spec(pi_light::VIOLET, Modifier::BOLD, truecolor),
+            notice_body: muted,
+            turn_idle: spec(pi_light::GREEN, Modifier::empty(), truecolor),
+            turn_running: spec(pi_light::YELLOW, Modifier::empty(), truecolor),
+            turn_cancelled: spec(pi_light::RED, Modifier::empty(), truecolor),
+            model: spec(pi_light::VIOLET, Modifier::empty(), truecolor),
+            tier: muted,
+            usage: muted,
+            mcp: spec(pi_light::VIOLET, Modifier::empty(), truecolor),
+            budget: muted,
+            budget_over: spec(pi_light::YELLOW, Modifier::empty(), truecolor),
+            note: spec(pi_light::YELLOW, Modifier::empty(), truecolor),
+            truncation: dim,
+            approval_border: spec(pi_light::BORDER_ACCENT, Modifier::empty(), truecolor),
+            hint: dim,
+            completion: dim,
+            find: spec(pi_light::VIOLET, Modifier::empty(), truecolor),
+            selection: spec_bg(pi_light::SELECTION_BG, Modifier::empty(), truecolor),
+            tool_pending_bg: spec_bg(pi_light::TOOL_PENDING_BG, Modifier::empty(), truecolor),
+            tool_success_bg: spec_bg(pi_light::TOOL_SUCCESS_BG, Modifier::empty(), truecolor),
+            tool_error_bg: spec_bg(pi_light::TOOL_ERROR_BG, Modifier::empty(), truecolor),
         }
     }
 
@@ -384,15 +477,12 @@ impl Theme {
             tool_error_bg: style(None, Modifier::BOLD | Modifier::UNDERLINED),
             notice_label: style(None, Modifier::BOLD),
             notice_body: style(None, Modifier::DIM),
+            text: style(None, Modifier::empty()),
         }
     }
 
     pub fn for_name(name: ThemeName) -> Self {
-        match name {
-            ThemeName::Dark | ThemeName::File => Theme::dark(),
-            ThemeName::Light => Theme::light(),
-            ThemeName::Mono => Theme::mono(),
-        }
+        Theme::builtin(name, true)
     }
 
     /// Resolves the configured theme name with the `NO_COLOR` override: any non-empty
@@ -414,7 +504,7 @@ impl Theme {
     }
 
     /// Every style this theme defines, for the "mono has no colors" test.
-    pub fn styles(&self) -> [Style; 28] {
+    pub fn styles(&self) -> [Style; 29] {
         [
             self.reasoning,
             self.interrupted,
@@ -444,6 +534,7 @@ impl Theme {
             self.tool_error_bg,
             self.notice_label,
             self.notice_body,
+            self.text,
         ]
     }
 }
@@ -460,40 +551,72 @@ mod tests {
         assert_eq!(ThemeName::parse("future"), None);
     }
 
+    /// The built-in dark palette is **pi's**, through the ADR 0029 OKHSL conversion (owner
+    /// decision 2026-10-14, replacing ADR 0029's "dark stays byte-identical"): the three text
+    /// levels are pi's brightness gradient (89% / 67% / 56%), pinned here by their RGB
+    /// values, and every semantic color sits at the 67% level.
     #[test]
-    fn dark_keeps_the_original_palette() {
+    fn the_dark_palette_is_pis_brightness_gradient() {
         let dark = Theme::dark();
-        assert_eq!(dark.reasoning.fg, Some(Color::DarkGray));
-        assert_eq!(dark.user.fg, Some(Color::Cyan));
-        assert_eq!(dark.tool_call.fg, Some(Color::Blue));
-        assert_eq!(dark.tool_result.fg, Some(Color::Green));
-        assert_eq!(dark.budget.fg, Some(Color::Magenta));
-        assert_eq!(dark.approval_border.fg, Some(Color::Yellow));
+        assert_eq!(dark.text.fg, Some(Color::Rgb(222, 224, 225)), "text 89%");
+        assert_eq!(
+            dark.tool_result.fg,
+            Some(Color::Rgb(157, 165, 169)),
+            "muted 67%"
+        );
+        assert_eq!(dark.hint.fg, Some(Color::Rgb(126, 136, 142)), "dim 56%");
+        // The main level is what answers and tool titles use; the secondary is the tool
+        // output; the weak level is hints, truncation and completion.
+        assert_eq!(dark.user.fg, dark.text.fg);
+        assert_eq!(dark.tool_call.fg, dark.text.fg);
+        assert_eq!(dark.notice.fg, dark.text.fg);
+        assert_eq!(dark.tool_result.fg, dark.notice_body.fg);
+        assert_eq!(dark.truncation.fg, dark.hint.fg);
+        assert_eq!(dark.completion.fg, dark.hint.fg);
+        // The thinking channel is pi's `thinkingText`, between the secondary and weak levels.
+        assert_eq!(dark.reasoning.fg, Some(Color::Rgb(150, 160, 164)));
         assert!(dark.reasoning.add_modifier.contains(Modifier::ITALIC));
+        // The semantic colors are pi's 67%-level hues: each role takes a named pi color,
+        // and none of them is a text level (they are told apart by hue, not brightness).
+        for (name, style, source) in [
+            ("turn_idle", dark.turn_idle, pi_dark::GREEN),
+            ("turn_running", dark.turn_running, pi_dark::YELLOW),
+            ("turn_cancelled", dark.turn_cancelled, pi_dark::RED),
+            ("model", dark.model, pi_dark::VIOLET),
+            ("mcp", dark.mcp, pi_dark::VIOLET),
+            ("find", dark.find, pi_dark::VIOLET),
+        ] {
+            assert_eq!(
+                style,
+                spec(source, Modifier::empty(), true),
+                "{name} takes {source}"
+            );
+            assert_ne!(style.fg, dark.text.fg, "{name} is not the main level");
+            assert_ne!(style.fg, dark.tool_result.fg, "{name} is not the secondary");
+        }
     }
 
-    /// The owner's UI review: a notice or a hint has to be readable on the background it is
-    /// for. `DarkGray` (ANSI 8) is too dark on the dark palette; on the light palette it is
-    /// dark text, which is fine, so only the dark one is pinned away from it.
+    /// The ui-r1 readability concern (`DarkGray` was too dark on a dark background) is now
+    /// satisfied structurally: pi's own levels are readable by construction, and the light
+    /// palette is darker text on a light background. Neither level is ANSI `DarkGray`.
     #[test]
-    fn dark_notices_and_hints_are_not_dark_gray() {
+    fn the_text_levels_are_readable_in_both_builtins() {
         let dark = Theme::dark();
+        assert_ne!(dark.notice.fg, Some(Color::DarkGray));
+        assert_eq!(dark.notice.fg, dark.text.fg, "a notice is main-level text");
         assert_eq!(
-            dark.notice.fg, None,
-            "a notice uses the terminal's default foreground"
+            dark.notice_body.fg, dark.tool_result.fg,
+            "its body secondary"
         );
-        assert_ne!(dark.hint.fg, Some(Color::DarkGray));
-        assert_eq!(dark.hint.fg, Some(Color::Gray));
-        // Reasoning stays deliberately weak — the owner asked for that explicitly.
-        assert_eq!(dark.reasoning.fg, Some(Color::DarkGray));
-
         let light = Theme::light();
-        assert_eq!(light.notice.fg, None, "readable on light too");
-        assert_eq!(
-            light.hint.fg,
-            Some(Color::DarkGray),
-            "dark text on a light background"
-        );
+        assert_ne!(light.hint.fg, Some(Color::DarkGray));
+        // Light text is darker than the dark palette's text (dark-on-light).
+        let (Some(Color::Rgb(dr, _, _)), Some(Color::Rgb(lr, _, _))) =
+            (dark.text.fg, light.text.fg)
+        else {
+            panic!("both palettes are RGB");
+        };
+        assert!(lr < dr, "the light palette's text is darker");
     }
 
     #[test]

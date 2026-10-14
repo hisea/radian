@@ -213,8 +213,8 @@ fn the_dark_theme_keeps_the_original_colors() {
         }
     }
     let style = user_marker.expect("the user marker");
-    assert_eq!(style.fg, Some(Color::Cyan));
-    assert!(style.add_modifier.contains(Modifier::BOLD));
+    // The built-in dark palette is pi's: the user marker takes the main text level.
+    assert_eq!(style.fg, Some(Color::Rgb(222, 224, 225)));
 }
 
 /// `mono` renders with no color at all.

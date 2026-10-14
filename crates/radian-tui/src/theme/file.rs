@@ -114,7 +114,7 @@ fn fg_source(role: Role) -> Option<&'static str> {
         Role::Note => Some("warning"),
         Role::Truncation => Some("dim"),
         Role::ApprovalBorder => Some("borderAccent"),
-        Role::Hint => Some("muted"),
+        Role::Hint => Some("dim"),
         Role::Completion => Some("dim"),
         Role::Find => Some("accent"),
         Role::Selection => None,
@@ -122,6 +122,9 @@ fn fg_source(role: Role) -> Option<&'static str> {
         // The notice's two halves take pi's two text levels (ADR 0028 decision).
         Role::NoticeLabel => Some("accent"),
         Role::NoticeBody => Some("muted"),
+        // The main text level itself (Pi's `text`): the mapping is used by the file themes;
+        // the built-ins take pi's values directly.
+        Role::Text => Some("text"),
     }
 }
 
@@ -188,8 +191,8 @@ pub fn load(
     let mut warnings = Vec::new();
     let built_in = theme.and_then(super::ThemeName::parse);
     let mut resolved = match (theme, built_in) {
-        (None, _) => Theme::resolve(None, false),
-        (Some(_), Some(name)) => Theme::resolve(Some(name), false),
+        (None, _) => Theme::builtin(ThemeName::Dark, truecolor),
+        (Some(_), Some(name)) => Theme::builtin(name, truecolor),
         (Some(name), None) => load_file(name, themes_dir, truecolor, &mut warnings),
     };
     apply_overrides(&mut resolved, overrides, truecolor, &mut warnings);
@@ -280,7 +283,7 @@ fn build(
             ThemeName::Dark
         }
     };
-    let base = Theme::for_name(appearance);
+    let base = Theme::builtin(appearance, truecolor);
     let empty = serde_json::Map::new();
     let vars = table
         .get("vars")
@@ -493,7 +496,7 @@ fn set_bg(style: &mut Style, color: ColorValue, truecolor: bool) {
 /// A theme color becomes a ratatui [`Color`]: `""` is the terminal's default, an index is an
 /// index, and RGB is emitted as-is on a truecolor terminal and otherwise approximated to the
 /// nearest 256-color entry (ADR 0029 decision 2).
-fn ratatui_color(value: ColorValue, truecolor: bool) -> Option<Color> {
+pub(crate) fn ratatui_color(value: ColorValue, truecolor: bool) -> Option<Color> {
     match value {
         ColorValue::Default => Some(Color::Reset),
         ColorValue::Indexed(index) => Some(Color::Indexed(index)),
@@ -964,8 +967,15 @@ mod tests {
     /// `selectedBg` (background only — a bare color there warns, it cannot set an fg).
     #[test]
     fn the_selection_role_is_settable_by_builtins_and_overrides() {
-        assert_eq!(Theme::dark().selection.bg, Some(Color::DarkGray));
-        assert_eq!(Theme::light().selection.bg, Some(Color::Gray));
+        // The built-in bands come from pi's `selectedBg` lifted a step, so a selection over
+        // a user block (pi makes both `blueBg`) stays visible.
+        assert_eq!(Theme::dark().selection.bg, Some(Color::Rgb(50, 84, 103)));
+        assert_eq!(Theme::light().selection.bg, Some(Color::Rgb(188, 204, 214)));
+        assert_ne!(
+            Theme::dark().selection.bg,
+            Theme::dark().user.bg,
+            "the selection must read over the user band"
+        );
         let mono = Theme::mono().selection;
         assert_eq!(mono.bg, None);
         assert!(

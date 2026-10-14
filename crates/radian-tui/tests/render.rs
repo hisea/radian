@@ -120,7 +120,7 @@ fn reasoning_and_assistant_text_are_visually_distinct() {
 
     let reasoning = style_of(&terminal, "THINKING-WORDS").expect("reasoning on screen");
     let answer = style_of(&terminal, "VISIBLE-ANSWER").expect("answer on screen");
-    assert_eq!(reasoning.fg, Some(Color::DarkGray));
+    assert_eq!(reasoning.fg, Some(Color::Rgb(150, 160, 164)));
     assert_ne!(
         reasoning, answer,
         "reasoning must not share the assistant text's style"
@@ -144,8 +144,12 @@ fn an_interrupted_prefix_is_marked() {
     let text = screen(&terminal);
     assert!(text.contains("half an ans"), "{text}");
     assert!(text.contains("[interrupted]"), "{text}");
-    let marker = style_of(&terminal, "[interrupted]").unwrap();
-    assert_eq!(marker.fg, Some(Color::Yellow));
+    let marker = style_of(&terminal, " [interrupted]").unwrap();
+    assert_eq!(
+        marker.fg,
+        Some(Color::Rgb(205, 154, 34)),
+        "pi's warning level"
+    );
 }
 
 #[test]
@@ -498,14 +502,14 @@ fn a_selection_draws_the_selection_role_on_its_cells() {
     let word = style_of(&terminal, "selection").expect("the selected word is on screen");
     assert_eq!(
         word.bg,
-        Some(Color::DarkGray),
+        Some(Color::Rgb(50, 84, 103)),
         "the dark theme's selection band"
     );
     let before = style_of(&terminal, "hello").expect("the unselected head of the line");
     assert_eq!(
         before.bg,
-        Some(Color::Reset),
-        "only the selection carries the band"
+        Some(Color::Rgb(33, 59, 73)),
+        "the user block's band, not the selection's"
     );
     assert_eq!(before.fg, word.fg, "the text keeps its own foreground");
 }
@@ -567,8 +571,8 @@ fn an_empty_selection_draws_nothing() {
     assert!(text.contains("hello selection"), "{text}");
     assert_eq!(
         style_of(&render(&mut app, 40, 6), "selection").map(|s| s.bg),
-        Some(Some(Color::Reset)),
-        "no band: the two anchors coincide"
+        Some(Some(Color::Rgb(33, 59, 73))),
+        "no selection band: the two anchors coincide, only the user band is there"
     );
 }
 
@@ -624,6 +628,55 @@ fn wrap_and_wrap_char_offsets_agree() {
             assert!(wrapped.end <= text.len(), "end out of bounds");
         }
     }
+}
+
+/// A fenced code block never wraps (ADR 0028 R9): a 200-column line on an 80-column screen
+/// is one line ending in an ellipsis, and the next source line is the next screen line.
+#[test]
+fn a_code_block_does_not_wrap_and_truncates_with_an_ellipsis() {
+    let mut app = App::new("m", "s");
+    let long = "x".repeat(200);
+    app.push_message(&Message::assistant(format!(
+        "before\n```rust\n{long}\nsecond\n```\nafter"
+    )));
+    let terminal = render(&mut app, 80, 12);
+    let buffer = terminal.backend().buffer();
+    // Find the long line's row: it starts with 79 'x' and ends with '…' on the same row.
+    let mut found = None;
+    for row in 0..12u16 {
+        let text: String = (0..80u16)
+            .map(|col| {
+                buffer
+                    .cell((col, row))
+                    .map(|c| c.symbol())
+                    .unwrap_or(" ")
+                    .to_string()
+            })
+            .collect();
+        if text.starts_with("xxxx") {
+            found = Some((row, text));
+            break;
+        }
+    }
+    let (row, text) = found.expect("the long code line is on screen");
+    assert_eq!(text.chars().filter(|&c| c == 'x').count(), 79, "{text:?}");
+    assert!(text.ends_with('…'), "the truncation marker: {text:?}");
+    // The next source line is its own row (no soft wrap pushed it down).
+    let next: String = (0..80u16)
+        .map(|col| {
+            buffer
+                .cell((col, row + 1))
+                .map(|c| c.symbol())
+                .unwrap_or(" ")
+                .to_string()
+        })
+        .collect();
+    assert!(
+        next.starts_with("second"),
+        "no wrap between code lines: {next:?}"
+    );
+    assert!(screen(&terminal).contains("before"), "the prose before it");
+    assert!(screen(&terminal).contains("after"), "the prose after it");
 }
 
 /// Thinking folds (ADR 0028 R3): collapsed is one placeholder line, Ctrl-T expands it to the
@@ -709,7 +762,11 @@ fn a_startup_line_colors_its_label_with_accent() {
     app.push_notice("profile: workspace · sandbox macos-seatbelt");
     let terminal = render(&mut app, 60, 6);
     let label = style_of(&terminal, "profile:").expect("the label is on screen");
-    assert_eq!(label.fg, Some(Color::Cyan));
+    assert_eq!(
+        label.fg,
+        Some(Color::Rgb(167, 152, 215)),
+        "accent = pi's violet"
+    );
     assert!(
         label.add_modifier.contains(ratatui::style::Modifier::BOLD),
         "the label is the emphasis"
@@ -717,8 +774,8 @@ fn a_startup_line_colors_its_label_with_accent() {
     let body = style_of(&terminal, "workspace").expect("the body is on screen");
     assert_eq!(
         body.fg,
-        Some(Color::Reset),
-        "dark keeps ui-r1's default foreground"
+        Some(Color::Rgb(157, 165, 169)),
+        "the body is pi's muted level"
     );
 }
 
@@ -750,9 +807,9 @@ fn a_user_block_paints_its_band_across_the_whole_block() {
 #[test]
 fn a_tool_card_paints_the_state_band() {
     for (result, expected) in [
-        (None, Color::Blue),
-        (Some(false), Color::Green),
-        (Some(true), Color::Red),
+        (None, Color::Rgb(52, 56, 58)),
+        (Some(false), Color::Rgb(37, 65, 49)),
+        (Some(true), Color::Rgb(91, 40, 42)),
     ] {
         let mut app = App::new("m", "s");
         let mut call = Entry::new(EntryKind::ToolCall, "shell({\"command\": \"ls\"})");
@@ -783,7 +840,7 @@ fn a_tool_card_paints_the_state_band() {
         for col in 0..40u16 {
             assert_eq!(
                 buffer.cell((col, row)).expect("on screen").bg,
-                Color::Red,
+                Color::Rgb(91, 40, 42),
                 "the error band covers row {row} col {col}"
             );
         }
