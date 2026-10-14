@@ -395,3 +395,17 @@ Base `c5a84f6` · 一次性 worktree `/tmp/radian-pi-skills-mut3`，每条跑完
 消息，journal 与模型看到的是同一份，没有"只给模型"的旁路；pty 测试直接断言 `skill.jsonl` 里有展开后的
 正文（`GREET-SKILL-BODY-MARKER`），把这层锁住。SL-M1（`/skill:` 不再展开走 `Outcome::Message`）会让
 检查请求正文与 journal 的断言同时失败。
+
+## skills 片 4：`[skills] extra_paths`（2026-10-14）
+
+Base `beef4d5` · 一次性 worktree `/tmp/radian-pi-skills-mut4`，每条跑完 `git checkout -- .`，最后
+`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| S4-M1 | `discover_with_extras` 先扫 extra_paths 再扫用户级（extra 抢同名） | `skills::tests::the_user_level_wins_a_conflict_with_an_extra_path`（另 1 条也挂） | ✅ |
+| S4-M2 | 配置里的 extra_path 不存在时静默跳过（不警告） | `skills::tests::a_missing_extra_path_is_one_warning` | ✅ |
+| S4-M3 | `resolve_extra_path` 不把相对路径拼到配置文件所在目录 | `config::tests::extra_paths_resolve_tilde_relative_and_absolute` | ✅ |
+
+3/3 抓住。（`~/.claude/skills` 只有列进 extra_paths 才读，由
+`an_unlisted_root_is_not_read_until_it_is_an_extra_path` 钉住。）
