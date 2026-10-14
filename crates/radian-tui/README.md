@@ -197,19 +197,28 @@ find_next = ["ctrl-g", "shift-enter"]
   falls back to `lines`.
 - `tips` / `banner`: whether the startup screen shows the one Tip line and the wordmark. Both
   default to on; `false` hides them.
-- `footer` (ADR 0027 C2, revision 1): the status area's rows. `preset` is `full` (the default:
-  the identity row `brand`, `host`, `model`, `reasoning`, `cwd`, `git_branch`, `session` and
-  the numbers row `tokens`, `speed`, `cost`, `context`, `elapsed`), `pi` (the earlier two rows)
-  or `classic` (today's one line, byte-for-byte). `separator` joins items (default `" │ "`), each
-  row may override it, and `glyphs` is `unicode` (default), `nerd` or `ascii`. Each
-  `[[tui.footer.rows]]` has a `left` and a `right` group; an item is a bare id or a table with
-  `item`, `icon`, `format`, `style` (a theme role name, or pi's `dim`/`muted`/`accent`/`warn`/
-  `error`/`ok`/`text`), `priority`, `thresholds = [{ at = 70, style = "warn" }, …]` and the
-  item's own parameters. An unknown item id, placeholder, style or parameter is shown raw
-  with one warning and never blocks startup. Narrow terminals drop the `right` group first,
-  then the `left` group from its end, lowest `priority` first. `host`, the model's price and
-  the auto-compaction switch are read once at startup; `git_branch`/`worktree` and the change
-  counts come from the background contributor, so the draw path never runs git.
+- `footer` (ADR 0027 C2, revision 3): the status area's rows. `preset` is `deck` (the default,
+  three rows: the opencode-go usage line — dropped when it has no data — then
+  `model`/`cwd`/`git_branch`/`worktree` with `context_bar`/`reasoning` on the right, then
+  `tokens`/`cost`/`context` on the right), `full` (revision 1's two rows), `pi` (the earlier two
+  rows) or `classic` (today's one line, byte-for-byte). `separator` joins items (default
+  `" │ "`, any string), each row may override it, and `separator_style` styles it (default the
+  `footer_separator` role, dim). `glyphs` is `unicode` (default), `nerd` or `ascii`.
+  `[tui.footer.items.<id>]` gives one item its `symbol`/`style`/`symbol_style`/`format`/
+  `disabled`; a bare id in a row takes it, an inline table wins. Each `[[tui.footer.rows]]` has
+  a `left` and a `right` group; an item is a bare id or a table with `item`, `icon`/`symbol`,
+  `format`, `style`, `symbol_style`, `priority`, `thresholds = [{ at = 70, style = "warn" }, …]`
+  and the item's own parameters. A `style` (or `[text](style)` inline) is a theme role
+  (`accent`, `muted`, `footer_separator`, pi's `dim`/`warn`/`error`/`ok`/`text`) or a
+  starship-style color (`red`, `bright_blue`, `#rrggbb`, a 0–255 number, with
+  `bold`/`italic`/`dimmed`); a role follows the theme, a fixed color does not. `format` may
+  color a span with `[text](style)`. An unknown item id, placeholder or parameter is shown raw
+  with one warning and never blocks startup; a bad color is a startup warning too. Narrow
+  terminals drop the `right` group first, then the `left` group from its end, lowest
+  `priority` first. Numbers are compact (`15M`, `2.6M`, `1962M`, `$14.510`, `41.3%`).
+  `host`, the model's price and the auto-compaction switch are read once at startup;
+  `git_branch`/`worktree` and the change counts come from the background contributor, so the
+  draw path never runs git.
 
 | item | placeholders | default |
 |---|---|---|
@@ -223,7 +232,7 @@ find_next = ["ctrl-g", "shift-enter"]
 | `session` | `{id}` | the session id |
 | `context` | `{bar}`, `{percent}`, `{used}`, `{budget}`, `{auto}` | `{used}/{budget}`; `{auto}` is `⟲` (`auto` under ascii) while auto-compaction is on |
 | `context_bar` | `{bar}`, `{percent}`, `{used}`, `{budget}`, `{auto}` | `{bar} {percent}%`, `width` 10, `fill` `━`, `empty` `─` |
-| `tokens` | `{in}`, `{out}`, `{cache}` | `↑{in} ↓{out} ⛁{cache}`; numbers are `19K`-style, `-` when a provider never reported one |
+| `tokens` | `{in}`, `{out}`, `{cache}` | `↑{in} ↓{out} R{cache}`; compact K/M, `-` when a provider never reported one |
 | `cost` | `{usd}` | `$` from the model's catalog price (per million tokens) and the session totals; hidden when the catalog has no price (never a fabricated number) |
 | `speed` | `{speed}` | `42.1 tok/s`, the last finished generation's reported output over its measured time |
 | `elapsed` | `{elapsed}` | `16.2s`, live while a generation runs, the last one when idle, empty after a resume |
@@ -233,6 +242,7 @@ find_next = ["ctrl-g", "shift-enter"]
 
 | `worktree` | `{worktree}` | 只在 git worktree 里显示（贡献者） |
 | `status` | `{status}` | `status.*` 贡献文本，`keys = ["…"]` 可过滤 |
+| `opencode-go.usage` | — | opencode-go 用量的**剩余**百分比与重置倒计时（ADR 0027 C4，贡献者；`tui.usage_period_secs` 0 关闭） |
 
 `worktree`/`status` 来自贡献者存储（ADR 0027 C3）：一个 `git` 贡献者每 5 s 在后台刷新
 `git_branch`/`worktree`（绘制路径从不跑 git），刷新失败保留旧值并画成暗色。`[tui.widgets]`
