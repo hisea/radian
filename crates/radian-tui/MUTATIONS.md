@@ -865,3 +865,16 @@ Base `e6c7013` · 一次性检出 `/tmp/footer-mut`（detached，跑完删除）
 | FS-4 | 未知条目 panic（而不是原样显示） | 未知条目原样显示 + 警告 | `footer.rs::unknown_items_placeholders_and_styles_warn_once_and_show_raw` FAILED |
 
 4/4 抓住。绘制路径不调用 git 由结构测试 `footer.rs::the_draw_path_does_not_call_git` 覆盖（无需变异）。
+
+## footer-s1b：无配置时的默认预设（2026-10-14）
+
+Base `c2e835f` · 一次性检出 `/tmp/footer-mut3`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+`cargo test -p radian-tui --test pty pty_the_shipped_default_footer_is_two_rows_without_a_config`，
+变异后 `git checkout --` 还原。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| FS-5 | `Footer::from_config` 的 `None => Preset::Pi` 改成 `None => Preset::Classic`（没有配置时默认不是 pi 两行） | 无配置时是 pi 的两行 | `pty.rs::pty_the_shipped_default_footer_is_two_rows_without_a_config` FAILED（第一行成了输入框的横线） |
+
+1/1 抓住。注意：`Preset` 的 `#[default]`（FS-1）走的是 `App::new` 的 `Footer::default()`，二进制实际
+默认由 `from_config` 的 `None` 分支决定，所以 FS-5 必须改那里才能打到 pty 路径。
