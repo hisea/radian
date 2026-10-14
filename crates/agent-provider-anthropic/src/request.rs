@@ -800,4 +800,28 @@ mod tests {
         assert_eq!(blocks[1]["type"], "text");
         assert_eq!(blocks[1]["text"], "answer");
     }
+
+    /// ADR 0026 D11 (review A1): the adapter's two settings are different requests —
+    /// `adaptive` is the provider's own budget, `enabled:<budget>` is a manual one.
+    #[test]
+    fn adaptive_and_enabled_are_different_bodies() {
+        let adaptive = {
+            let mut cfg = config();
+            cfg.thinking = Some(ThinkingConfig::Adaptive);
+            build_body(&request(vec![Message::user("hi")]), &cfg).unwrap()
+        };
+        let enabled = {
+            let mut cfg = config();
+            cfg.thinking = Some(ThinkingConfig::Enabled {
+                budget_tokens: 8192,
+            });
+            build_body(&request(vec![Message::user("hi")]), &cfg).unwrap()
+        };
+        assert_eq!(adaptive["thinking"], json!({"type": "adaptive"}));
+        assert_eq!(
+            enabled["thinking"],
+            json!({"type": "enabled", "budget_tokens": 8192})
+        );
+        assert_ne!(adaptive["thinking"], enabled["thinking"]);
+    }
 }

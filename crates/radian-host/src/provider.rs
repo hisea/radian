@@ -474,18 +474,23 @@ pub const DEEPSEEK_V41_FLASH_THINKING: ThinkingMap = &[
     ("max", Some("max")),
 ];
 
-/// The anthropic descriptor's provider-level map (ADR 0026 D11): the levels the adapter
-/// already knows. `off` sends no `thinking` key; every other level sends `adaptive`, the
-/// setting the Messages API accepts today. No per-level `enabled:<budget>` values are invented
-/// (AGENTS.md): a manual budget has no verified level mapping.
+/// The anthropic descriptor's provider-level map (ADR 0026 D11): every level gets a distinct
+/// wire value, so `/thinking low` and `/thinking max` are not the same request.
+///
+/// `off` sends no `thinking` key. `medium` — the default — uses `adaptive`, the provider's own
+/// budget choice, which is what the adapter already sent. The rest are `enabled:<budget>` with
+/// budgets that **fit the default `--max-tokens` (16384)**: the adapter refuses a budget that
+/// is not `>= 1024` and `< max_tokens`, so a smaller `--max-tokens` makes the higher levels a
+/// startup error (an existing rule, not this map's). These numbers are a proposal — the ADR
+/// names `enabled:<budget>` but gives no per-level budgets — and are marked for the owner.
 pub const ANTHROPIC_THINKING: ThinkingMap = &[
     ("off", Some("")),
-    ("minimal", Some("adaptive")),
-    ("low", Some("adaptive")),
+    ("minimal", Some("enabled:1024")),
+    ("low", Some("enabled:2048")),
     ("medium", Some("adaptive")),
-    ("high", Some("adaptive")),
-    ("xhigh", Some("adaptive")),
-    ("max", Some("adaptive")),
+    ("high", Some("enabled:4096")),
+    ("xhigh", Some("enabled:8192")),
+    ("max", Some("enabled:12288")),
 ];
 
 const fn go_openai(id: &'static str, name: &'static str) -> DescriptorModel {
@@ -1095,15 +1100,24 @@ pub fn supported_thinking_levels(descriptor_id: &str, model: &str) -> Vec<&'stat
 }
 
 /// Parses a level name. The legacy Anthropic spellings are accepted for one version and the
-/// caller warns: `adaptive` is the middle of the scale, and a manual `enabled:<budget>` has no
-/// level of its own (the budget now comes from the provider map), so it clamps like `high`.
-pub fn parse_thinking_level(raw: &str) -> Result<(&'static str, bool), String> {
+/// caller warns. Returns `(level, legacy_budget, legacy)`: `adaptive` is the middle of the
+/// scale, and a manual `enabled:<budget>` keeps the user's budget (ADR 0026 D11: the legacy
+/// form still sends what the user asked for) while clamping to the level it resembles.
+pub fn parse_thinking_level(raw: &str) -> Result<(&'static str, Option<u32>, bool), String> {
     if let Some(rank) = thinking_rank(raw) {
-        return Ok((THINKING_LEVELS[rank], false));
+        return Ok((THINKING_LEVELS[rank], None, false));
     }
     match raw {
-        "adaptive" => Ok(("medium", true)),
-        other if other.starts_with("enabled:") => Ok(("high", true)),
+        "adaptive" => Ok(("medium", None, true)),
+        other if other.starts_with("enabled:") => {
+            let budget = other
+                .trim_start_matches("enabled:")
+                .parse::<u32>()
+                .map_err(|_| {
+                    format!("--thinking {other:?} needs a u32 budget, e.g. enabled:8192")
+                })?;
+            Ok(("high", Some(budget), true))
+        }
         other => Err(format!(
             "--thinking {other:?} is not one of {} (or the legacy off|adaptive|enabled:<budget>)",
             THINKING_LEVELS.join("|")
@@ -1154,13 +1168,41 @@ mod thinking_tests {
         assert_eq!(clamp_thinking(map, "high"), None);
     }
 
-    /// The legacy Anthropic spellings parse with the warning flag.
+    /// The legacy Anthropic spellings parse with the warning flag, and a manual
+    /// `enabled:<budget>` keeps the user's budget (D11).
     #[test]
     fn the_legacy_spellings_still_parse() {
-        assert_eq!(parse_thinking_level("adaptive"), Ok(("medium", true)));
-        assert_eq!(parse_thinking_level("high"), Ok(("high", false)));
-        assert_eq!(parse_thinking_level("off"), Ok(("off", false)));
-        assert_eq!(parse_thinking_level("enabled:8192"), Ok(("high", true)));
+        assert_eq!(parse_thinking_level("adaptive"), Ok(("medium", None, true)));
+        assert_eq!(parse_thinking_level("high"), Ok(("high", None, false)));
+        assert_eq!(parse_thinking_level("off"), Ok(("off", None, false)));
+        assert_eq!(
+            parse_thinking_level("enabled:8192"),
+            Ok(("high", Some(8192), true))
+        );
+        assert!(parse_thinking_level("enabled:not-a-number").is_err());
         assert!(parse_thinking_level("yolo").is_err());
+    }
+
+    /// A1: the anthropic map gives every level a **distinct** wire value, so two levels are
+    /// never the same request, and the default (`medium`) is the provider's own `adaptive`.
+    #[test]
+    fn the_anthropic_levels_are_distinct() {
+        let wires: Vec<&str> = THINKING_LEVELS
+            .iter()
+            .filter_map(|level| supported_wire(ANTHROPIC_THINKING, level))
+            .collect();
+        let mut unique = wires.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(wires.len(), 7, "all seven levels are supported");
+        assert_eq!(unique.len(), 7, "every level has its own value: {wires:?}");
+        assert_eq!(
+            supported_wire(ANTHROPIC_THINKING, "medium"),
+            Some("adaptive")
+        );
+        assert_ne!(
+            supported_wire(ANTHROPIC_THINKING, "low"),
+            supported_wire(ANTHROPIC_THINKING, "max")
+        );
     }
 }

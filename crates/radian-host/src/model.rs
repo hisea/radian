@@ -204,6 +204,22 @@ pub fn resolve_thinking(
 ) -> (Thinking, Option<String>) {
     let map = crate::descriptor(descriptor_id)
         .and_then(|descriptor| crate::thinking_map_for(descriptor, model));
+    resolve_thinking_map(map, level, None, adapter)
+}
+
+/// The shared resolution: `legacy_budget` is a manual `enabled:<budget>` the user typed, which
+/// is sent as-is for Anthropic (ADR 0026 D11) instead of the level's own budget.
+fn resolve_thinking_map(
+    map: Option<crate::ThinkingMap>,
+    level: &str,
+    legacy_budget: Option<u32>,
+    adapter: Provider,
+) -> (Thinking, Option<String>) {
+    if let Some(budget_tokens) = legacy_budget
+        && adapter == Provider::Anthropic
+    {
+        return (Thinking::Enabled { budget_tokens }, None);
+    }
     match crate::clamp_thinking(map, level) {
         Some((_, wire)) if adapter == Provider::OpenAiCompatible => {
             (Thinking::Off, Some(wire.to_owned()))
@@ -236,16 +252,15 @@ pub fn resolve_thinking_ref(
     provider: &crate::ProviderRef,
     model: &str,
     level: &str,
+    legacy_budget: Option<u32>,
     adapter: Provider,
 ) -> (Thinking, Option<String>) {
-    let map = crate::thinking_map_for_ref(provider, model);
-    match crate::clamp_thinking(map, level) {
-        Some((_, wire)) if adapter == Provider::OpenAiCompatible => {
-            (Thinking::Off, Some(wire.to_owned()))
-        }
-        Some((_, wire)) => (thinking_from_wire(wire), None),
-        None => (Thinking::Off, None),
-    }
+    resolve_thinking_map(
+        crate::thinking_map_for_ref(provider, model),
+        level,
+        legacy_budget,
+        adapter,
+    )
 }
 
 /// Builds the provider adapter named by `args.provider`. The error is the same shape the
@@ -360,6 +375,8 @@ pub struct RouteContext {
     pub max_tokens: u32,
     /// The unified thinking level's **name** (ADR 0026 D11); clamped per route at build time.
     pub thinking: String,
+    /// A legacy `--thinking enabled:<budget>` the user typed: sent as-is for Anthropic (D11).
+    pub thinking_budget: Option<u32>,
 }
 
 impl RouteContext {
@@ -395,8 +412,13 @@ impl RouteContext {
         )?;
         // The thinking level is clamped against **this route's** map (ADR 0026 D11): the same
         // level can mean different wire values — or nothing — on different models.
-        let (thinking, reasoning_effort) =
-            resolve_thinking_ref(&provider_ref, model, &self.thinking, route.adapter());
+        let (thinking, reasoning_effort) = resolve_thinking_ref(
+            &provider_ref,
+            model,
+            &self.thinking,
+            self.thinking_budget,
+            route.adapter(),
+        );
         Ok(ModelArgs {
             provider: route.adapter(),
             base_url: route.base_url,

@@ -771,12 +771,13 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         .or_else(|| config.model.base_url.clone());
     // ADR 0026 D11: the unified levels, with the legacy Anthropic spellings accepted for one
     // version (a warning goes to stderr when one is used).
-    let (thinking, legacy_thinking) = match cli.thinking.as_deref() {
+    let (thinking, thinking_budget, legacy_thinking) = match cli.thinking.as_deref() {
         Some(raw) => {
-            let (level, legacy) = radian_host::parse_thinking_level(raw).map_err(SetupError)?;
-            (level.to_owned(), legacy)
+            let (level, budget, legacy) =
+                radian_host::parse_thinking_level(raw).map_err(SetupError)?;
+            (level.to_owned(), budget, legacy)
         }
-        None => (radian_host::DEFAULT_THINKING_LEVEL.to_owned(), false),
+        None => (radian_host::DEFAULT_THINKING_LEVEL.to_owned(), None, false),
     };
     if legacy_thinking {
         eprintln!(
@@ -873,8 +874,13 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     .map_err(SetupError)?;
     // The catalog matches on the hostname of the endpoint the model actually talks to (ADR 0018).
     let catalog_base_url = route.base_url.clone();
-    let (thinking_of, reasoning_effort) =
-        radian_host::resolve_thinking_ref(&provider_ref, &model_name, &thinking, route.adapter());
+    let (thinking_of, reasoning_effort) = radian_host::resolve_thinking_ref(
+        &provider_ref,
+        &model_name,
+        &thinking,
+        thinking_budget,
+        route.adapter(),
+    );
     let initial = build_model(ModelArgs {
         provider: route.adapter(),
         base_url: route.base_url.clone(),
@@ -902,6 +908,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
             include_usage: cli.include_usage,
             max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             thinking,
+            thinking_budget,
         },
     );
     let request_max_output = match provider {

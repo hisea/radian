@@ -3258,17 +3258,20 @@ async fn anthropic_reads_anthropic_api_key_env_by_default_and_never_leaks_it() {
     );
 }
 
-/// `--thinking adaptive` puts `{"type":"adaptive"}` in the request body; the unified `high`
-/// level and the legacy `enabled:<budget>` both clamp onto the provider map's `adaptive`
-/// (ADR 0026 D11: the budget now belongs to the provider map, which carries no per-level
-/// budgets in this slice — flagged in the report). The default level `medium` sends the same
-/// `adaptive`; `off` sends no `thinking` key, asserted in the messages test below.
+/// ADR 0026 D11 (review A1): every level has its own wire value on Anthropic — `adaptive` for
+/// the default `medium`, `enabled:<budget>` for the rest — and a legacy
+/// `--thinking enabled:<budget>` keeps the user's budget. `off` sends no `thinking` key,
+/// asserted in the messages test below.
 #[tokio::test]
 async fn anthropic_thinking_modes_are_sent_in_the_body() {
     for (mode, expected) in [
         ("adaptive", json!({"type": "adaptive"})),
-        ("high", json!({"type": "adaptive"})),
-        ("enabled:8192", json!({"type": "adaptive"})),
+        ("high", json!({"type": "enabled", "budget_tokens": 4096})),
+        ("max", json!({"type": "enabled", "budget_tokens": 12288})),
+        (
+            "enabled:8192",
+            json!({"type": "enabled", "budget_tokens": 8192}),
+        ),
     ] {
         let server = anth::MockServer::start(vec![anth_text_reply("ok")]).await;
         let (code, _, stderr) = feed_and_wait(
@@ -3384,10 +3387,8 @@ async fn the_default_provider_still_sends_an_openai_request() {
 /// `max_tokens` (16384 default) and one below 1024 are usage errors and leave no session file.
 #[tokio::test]
 async fn the_legacy_enabled_budget_is_accepted_and_clamped_like_high() {
-    // ADR 0026 D11: the old `enabled:<budget>` spelling is accepted for one version with a
-    // warning; the budget now belongs to the provider map, and this slice's anthropic map
-    // sends the level as `adaptive`. The out-of-range check only fires for a level that maps
-    // to `enabled:<budget>`, which no built-in map does.
+    // ADR 0026 D11 (review A1): the legacy `enabled:<budget>` is accepted for one version with
+    // a warning and the user's budget is sent **as-is** (not replaced by the level's budget).
     let server = anth::MockServer::start(vec![anth_text_reply("LEGACY-OK")]).await;
     let dir = fresh_session_dir();
     let (code, stdout, stderr) = feed_and_wait(
@@ -3418,7 +3419,11 @@ async fn the_legacy_enabled_budget_is_accepted_and_clamped_like_high() {
         "the legacy spelling warns: {stderr}"
     );
     let body = server.requests()[0].json();
-    assert_eq!(body["thinking"], json!({"type": "adaptive"}), "{body}");
+    assert_eq!(
+        body["thinking"],
+        json!({"type": "enabled", "budget_tokens": 8192}),
+        "{body}"
+    );
 }
 
 // ---------- session export and search (--export / --search) ----------

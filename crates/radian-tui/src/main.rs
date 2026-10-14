@@ -506,12 +506,12 @@ fn run(
     let provider = provider_ref.protocol_for(&model_name).adapter();
     // ADR 0026 D11: the unified levels, with the legacy Anthropic spellings accepted for one
     // version (a warning goes to stderr when one is used).
-    let (thinking, legacy_thinking) = match cli.thinking.as_deref() {
+    let (thinking, thinking_budget, legacy_thinking) = match cli.thinking.as_deref() {
         Some(raw) => {
-            let (level, legacy) = radian_host::parse_thinking_level(raw)?;
-            (level.to_owned(), legacy)
+            let (level, budget, legacy) = radian_host::parse_thinking_level(raw)?;
+            (level.to_owned(), budget, legacy)
         }
-        None => (radian_host::DEFAULT_THINKING_LEVEL.to_owned(), false),
+        None => (radian_host::DEFAULT_THINKING_LEVEL.to_owned(), None, false),
     };
     if legacy_thinking {
         eprintln!(
@@ -647,8 +647,13 @@ fn run(
     // D1/D2: every check that can fail runs **before** the session file is created. The
     // workspace is validated first, so a typo is a workspace error and never reaches the
     // sandbox probe (dogfooding D1). `radian-host` owns the rule so both hosts share it.
-    let (thinking_of, reasoning_effort) =
-        radian_host::resolve_thinking_ref(&provider_ref, &model_name, &thinking, route.adapter());
+    let (thinking_of, reasoning_effort) = radian_host::resolve_thinking_ref(
+        &provider_ref,
+        &model_name,
+        &thinking,
+        thinking_budget,
+        route.adapter(),
+    );
     let initial = build_model(ModelArgs {
         provider: route.adapter(),
         base_url: route.base_url.clone(),
@@ -675,6 +680,7 @@ fn run(
             include_usage: None,
             max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             thinking,
+            thinking_budget,
         },
     );
     // ADR 0026 D7: a switch recomputes `B` from the warm local catalog, never the network.

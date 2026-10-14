@@ -83,6 +83,7 @@ async fn open_with(
             include_usage: None,
             max_tokens: 1024,
             thinking: "medium".to_owned(),
+            thinking_budget: None,
         },
     );
     let profile = Profile::safe(&workspace).unwrap();
@@ -193,6 +194,7 @@ async fn a_local_session_accepts_a_declared_command() {
             include_usage: None,
             max_tokens: 1024,
             thinking: "medium".to_owned(),
+            thinking_budget: None,
         },
     );
     let profile = Profile::safe(&workspace).unwrap();
