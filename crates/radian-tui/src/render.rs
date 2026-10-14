@@ -305,6 +305,29 @@ fn entry_lines(
     lines
 }
 
+/// Splits a structured line into its label and the rest (ADR 0028's notice decision): a
+/// leading `[tag]` (up to 32 chars), or the short prefix before the first colon (up to 24
+/// chars, no colon inside). Everything else — including any colon further in — is the body.
+/// Nothing is special-cased per notice: one rule, one function.
+pub fn split_label(text: &str) -> Option<(&str, &str)> {
+    let start = text.len() - text.trim_start().len();
+    let trimmed = &text[start..];
+    if let Some(rest) = trimmed.strip_prefix('[')
+        && let Some(close) = rest.find(']')
+        && close <= 32
+    {
+        let end = start + 1 + close + 1;
+        return Some((&text[start..end], &text[end..]));
+    }
+    let colon = trimmed.find(':')?;
+    let label = &trimmed[..colon];
+    if label.is_empty() || label.chars().count() > 24 || label.contains('[') {
+        return None;
+    }
+    let end = start + colon + 1;
+    Some((&text[start..end], &text[end..]))
+}
+
 /// One laid-out [`BodyLine`] as styled spans. `first_text` puts the entry's marker prefix on
 /// the lead; a padding row renders as an empty line; a code line has no lead at all (it is
 /// full-width by design, ADR 0028 R9). A block with a band (ADR 0028 R4) is padded out to the
@@ -339,7 +362,7 @@ fn render_row(
     let placeholder = entry.kind == EntryKind::Reasoning && row.chars.is_empty();
     let body = if placeholder { theme.reasoning } else { style };
     let lead_width = UnicodeWidthStr::width(lead.as_str());
-    let mut spans = Vec::with_capacity(3);
+    let mut spans = Vec::with_capacity(4);
     let lead_style = match band {
         Some(band) => prefix_style.patch(band),
         None => prefix_style,
@@ -349,7 +372,24 @@ fn render_row(
         None => body,
     };
     spans.push(Span::styled(lead, lead_style));
-    spans.push(Span::styled(row.text.clone(), body_style));
+    // A structured notice line (`profile: …`, `[memory] …`) steps the label up with the
+    // accent role and keeps the body on pi's secondary level (ADR 0028, decision).
+    if entry.kind == EntryKind::Notice
+        && let Some((label, rest)) = split_label(&row.text)
+    {
+        let label_style = match band {
+            Some(band) => theme.notice_label.patch(band),
+            None => theme.notice_label,
+        };
+        let rest_style = match band {
+            Some(band) => theme.notice_body.patch(band),
+            None => theme.notice_body,
+        };
+        spans.push(Span::styled(label.to_owned(), label_style));
+        spans.push(Span::styled(rest.to_owned(), rest_style));
+    } else {
+        spans.push(Span::styled(row.text.clone(), body_style));
+    }
     if let Some(band) = band {
         // Pad to the full width so the band reaches the row's end (owner acceptance:
         // including the row's trailing whitespace).

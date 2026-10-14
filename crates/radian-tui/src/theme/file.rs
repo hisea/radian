@@ -119,6 +119,9 @@ fn fg_source(role: Role) -> Option<&'static str> {
         Role::Find => Some("accent"),
         Role::Selection => None,
         Role::ToolPendingBg | Role::ToolSuccessBg | Role::ToolErrorBg => None,
+        // The notice's two halves take pi's two text levels (ADR 0028 decision).
+        Role::NoticeLabel => Some("accent"),
+        Role::NoticeBody => Some("muted"),
     }
 }
 
@@ -944,6 +947,10 @@ mod tests {
         assert_eq!(theme.tool_pending_bg.bg, Some(Color::Rgb(0x16, 0x16, 0x1D)));
         assert_eq!(theme.tool_success_bg.bg, Some(Color::Rgb(0x2B, 0x33, 0x28)));
         assert_eq!(theme.tool_error_bg.bg, Some(Color::Rgb(0x43, 0x24, 0x2B)));
+        // The notice's two halves: the label takes `accent` (#957FB8), the body `muted`
+        // (`fg_dim` = #C8C093), per the owner's text-level decision.
+        assert_eq!(theme.notice_label.fg, Some(Color::Rgb(0x95, 0x7F, 0xB8)));
+        assert_eq!(theme.notice_body.fg, Some(Color::Rgb(0xC8, 0xC0, 0x93)));
         // Every pi role in the file is either mapped or kept; nothing was dropped.
         assert!(theme.reserved.contains_key("mdHeading"));
         assert!(theme.reserved.contains_key("syntaxKeyword"));

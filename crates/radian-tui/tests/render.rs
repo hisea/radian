@@ -623,6 +623,51 @@ fn wrap_and_wrap_char_offsets_agree() {
     }
 }
 
+/// `split_label`: a leading `[tag]`, or the short prefix before the first colon. Nothing is
+/// special-cased per notice — the startup lines and the runtime notices both go through it.
+#[test]
+fn the_structured_label_split_is_one_rule() {
+    use radian_tui::render::split_label;
+    assert_eq!(
+        split_label("profile: workspace · sandbox macos"),
+        Some(("profile:", " workspace · sandbox macos"))
+    );
+    assert_eq!(
+        split_label("[memory] no project linked"),
+        Some(("[memory]", " no project linked"))
+    );
+    assert_eq!(split_label("context: C ?"), Some(("context:", " C ?")));
+    // No label: a colon far in, an empty prefix, a `[` that never closes.
+    assert_eq!(split_label("just a sentence"), None);
+    assert_eq!(
+        split_label("a very long prefix that keeps going way past the cap: value"),
+        None
+    );
+    assert_eq!(split_label(": empty prefix"), None);
+    assert_eq!(split_label("[unclosed tag"), None);
+}
+
+/// A startup notice's label carries the accent role; its body stays on the secondary level,
+/// and the dark builtin keeps ui-r1's readable default foreground for the body.
+#[test]
+fn a_startup_line_colors_its_label_with_accent() {
+    let mut app = App::new("m", "s");
+    app.push_notice("profile: workspace · sandbox macos-seatbelt");
+    let terminal = render(&mut app, 60, 6);
+    let label = style_of(&terminal, "profile:").expect("the label is on screen");
+    assert_eq!(label.fg, Some(Color::Cyan));
+    assert!(
+        label.add_modifier.contains(ratatui::style::Modifier::BOLD),
+        "the label is the emphasis"
+    );
+    let body = style_of(&terminal, "workspace").expect("the body is on screen");
+    assert_eq!(
+        body.fg,
+        Some(Color::Reset),
+        "dark keeps ui-r1's default foreground"
+    );
+}
+
 /// The user block's band (ADR 0028 R4, owner acceptance): the `user` role's background covers
 /// the whole row — the marker, the text, the trailing whitespace — and the blank rows above
 /// and below it.

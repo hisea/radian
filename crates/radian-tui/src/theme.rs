@@ -50,7 +50,7 @@ impl ThemeName {
     }
 }
 
-/// The 26 roles a [`Theme`] styles today (ADR 0009, ADR 0023). The config keys are the
+/// The 28 roles a [`Theme`] styles today (ADR 0009, ADR 0023). The config keys are the
 /// snake_case names; `[tui.colors]` accepts them and (mapped) pi's role names alike.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -80,10 +80,12 @@ pub enum Role {
     ToolPendingBg,
     ToolSuccessBg,
     ToolErrorBg,
+    NoticeLabel,
+    NoticeBody,
 }
 
 impl Role {
-    pub const ALL: [Role; 26] = [
+    pub const ALL: [Role; 28] = [
         Role::Reasoning,
         Role::Interrupted,
         Role::User,
@@ -110,6 +112,8 @@ impl Role {
         Role::ToolPendingBg,
         Role::ToolSuccessBg,
         Role::ToolErrorBg,
+        Role::NoticeLabel,
+        Role::NoticeBody,
     ];
 
     /// The `[tui.colors]` key for this role (ADR 0029 decision 5).
@@ -141,6 +145,8 @@ impl Role {
             Role::ToolPendingBg => "tool_pending_bg",
             Role::ToolSuccessBg => "tool_success_bg",
             Role::ToolErrorBg => "tool_error_bg",
+            Role::NoticeLabel => "notice_label",
+            Role::NoticeBody => "notice_body",
         }
     }
 
@@ -176,6 +182,8 @@ impl Role {
             Role::ToolPendingBg => &mut theme.tool_pending_bg,
             Role::ToolSuccessBg => &mut theme.tool_success_bg,
             Role::ToolErrorBg => &mut theme.tool_error_bg,
+            Role::NoticeLabel => &mut theme.notice_label,
+            Role::NoticeBody => &mut theme.notice_body,
         }
     }
 }
@@ -218,6 +226,13 @@ pub struct Theme {
     pub tool_pending_bg: Style,
     pub tool_success_bg: Style,
     pub tool_error_bg: Style,
+    /// A structured notice's label (`profile:`, `[memory]`) — pi's `accent` (ADR 0028 owner
+    /// decision: 强调 = 名字、标签).
+    pub notice_label: Style,
+    /// The rest of a structured notice — pi's `muted` (次). In the built-in themes it stays
+    /// the terminal's default foreground, the ui-r1 readability fix; a theme file's `muted`
+    /// is what colors it there.
+    pub notice_body: Style,
     /// Pi roles no current Radian role consumes — the `md*`, `toolDiff*`, `syntax*` and
     /// `thinking*` families ADR 0027/0028 will wire, plus the panel roles (`scrollbar*`,
     /// `searchMatch*`, `customMessage*`, `toolPendingBg`, `toolSuccessBg`, `toolErrorBg`,
@@ -283,6 +298,10 @@ impl Theme {
             tool_pending_bg: Style::default().bg(Color::Blue),
             tool_success_bg: Style::default().bg(Color::Green),
             tool_error_bg: Style::default().bg(Color::Red),
+            // A notice's label is the emphasis; its body stays the default foreground
+            // (ui-r1's readability fix), stepping up only the label.
+            notice_label: style(Some(Color::Cyan), Modifier::BOLD),
+            notice_body: style(None, Modifier::empty()),
         }
     }
 
@@ -323,6 +342,8 @@ impl Theme {
             tool_pending_bg: Style::default().bg(Color::Blue),
             tool_success_bg: Style::default().bg(Color::Green),
             tool_error_bg: Style::default().bg(Color::Red),
+            notice_label: style(Some(Color::Blue), Modifier::BOLD),
+            notice_body: style(None, Modifier::empty()),
         }
     }
 
@@ -361,6 +382,8 @@ impl Theme {
             tool_pending_bg: style(None, Modifier::DIM),
             tool_success_bg: style(None, Modifier::empty()),
             tool_error_bg: style(None, Modifier::BOLD | Modifier::UNDERLINED),
+            notice_label: style(None, Modifier::BOLD),
+            notice_body: style(None, Modifier::DIM),
         }
     }
 
@@ -391,7 +414,7 @@ impl Theme {
     }
 
     /// Every style this theme defines, for the "mono has no colors" test.
-    pub fn styles(&self) -> [Style; 26] {
+    pub fn styles(&self) -> [Style; 28] {
         [
             self.reasoning,
             self.interrupted,
@@ -419,6 +442,8 @@ impl Theme {
             self.tool_pending_bg,
             self.tool_success_bg,
             self.tool_error_bg,
+            self.notice_label,
+            self.notice_body,
         ]
     }
 }

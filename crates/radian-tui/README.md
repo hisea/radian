@@ -214,6 +214,7 @@ Every pi role maps onto a Radian role (`[tui.colors]` accepts both name families
 | `user` | `userMessageText` (fg) + `userMessageBg` (bg) |
 | `selection` | `selectedBg` (bg only — the text keeps its own foreground under the band) |
 | `tool_pending_bg` / `tool_success_bg` / `tool_error_bg` | `toolPendingBg` / `toolSuccessBg` / `toolErrorBg` (the tool card's band by state) |
+| `notice_label` / `notice_body` | `accent` / `muted` (a structured notice's label and the rest) |
 | `reasoning` | `thinkingText` |
 | `tool_call` / `tool_result` / `tool_result_error` | `toolTitle` / `toolOutput` / `error` |
 | `notice` / `hint` / `completion` / `truncation` | `text` / `muted` / `dim` / `dim` |
