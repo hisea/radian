@@ -521,16 +521,18 @@ fn a_selection_over_a_tool_card_head_copies_its_text() {
     // The assistant message is empty, so it contributes no line (its blank line is stripped);
     // the container's gap line is line 0 and the card head is line 1. The marker is two cells
     // (ADR 0028 rule 2), so the head's first character sits at column 2.
-    let head = "shell: make test (exit 0)";
+    // The head carries the status glyph (rule 4): ✔ once the result is in.
+    let head = format!(
+        "{} shell: make test (exit 0)",
+        app.footer_glyphs().tool_status()[1]
+    );
     let end_col = 2 + head.chars().count() as u16 - 1;
     press(&mut app, 1, 2);
     drag(&mut app, 1, end_col);
     let result = release(&mut app, 1, end_col);
     assert_eq!(
         result.effects,
-        vec![Effect::Copy {
-            text: "shell: make test (exit 0)".into()
-        }],
+        vec![Effect::Copy { text: head.clone() }],
         "the whole head, character for character"
     );
 }

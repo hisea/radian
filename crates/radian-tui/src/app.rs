@@ -1951,6 +1951,19 @@ impl App {
         self.find_recompute();
     }
 
+    /// Moves a selection's anchors after an entry was inserted at `from` (the tool result that
+    /// belongs right after its call, rule 4): the anchors name entries by index, so an
+    /// insertion must carry them along or a selection would point at the wrong entry.
+    fn shift_anchors(&mut self, from: usize) {
+        if let Some(selection) = &mut self.selection {
+            for anchor in [&mut selection.anchor, &mut selection.head] {
+                if anchor.entry >= from {
+                    anchor.entry += 1;
+                }
+            }
+        }
+    }
+
     /// Drops every per-entry fold override (ADR 0028 R6): a global fold toggle moots them.
     fn clear_fold_overrides(&mut self) {
         for entry in self.entries.iter_mut() {
@@ -3710,9 +3723,13 @@ impl App {
                         call.arguments.clone(),
                     );
                     // The call-time head has no result text yet (a `git_diff` head is terse
-                    // until its diff arrives and the pairing refreshes it).
-                    let mut entry =
-                        Entry::new(EntryKind::ToolCall, crate::tools::head_text(&card, ""));
+                    // until its diff arrives and the pairing refreshes it). Its status glyph
+                    // is the running one (rule 4); the pairing swaps it for ✔/✘.
+                    let [running, _, _] = self.footer.glyphs().tool_status();
+                    let mut entry = Entry::new(
+                        EntryKind::ToolCall,
+                        format!("{running} {}", crate::tools::head_text(&card, "")),
+                    );
                     entry.tool = Some(Box::new(card));
                     self.entries.push(entry);
                 }
@@ -3739,7 +3756,10 @@ impl App {
                         // The header can only be final now (the `shell` exit code comes from
                         // the result), so the entry's text - what renders and copies - is
                         // regenerated from the same function the layout uses.
-                        entry.text = crate::tools::head_text(card, &result.text());
+                        let [_, ok, failed] = self.footer.glyphs().tool_status();
+                        let glyph = if result.is_error { failed } else { ok };
+                        entry.text =
+                            format!("{glyph} {}", crate::tools::head_text(card, &result.text()));
                         Some((card.name.clone(), card.arguments.clone()))
                     });
                 let (name, arguments) = paired.unwrap_or_default();
@@ -3752,7 +3772,26 @@ impl App {
                 let mut entry = Entry::new(EntryKind::ToolResult, display);
                 entry.is_error = result.is_error;
                 entry.tool = Some(Box::new(card));
-                self.entries.push(entry);
+                // Rule 4: the result sits right after **its own** call, so a batch reads
+                // call/result, call/result instead of every call then every result. The
+                // entries are the UI's own order; the journal keeps the message order, so a
+                // resume replay runs this same code and lands on the same order. A result
+                // whose call is gone (a torn transcript) is appended.
+                match self.entries.iter().position(|entry| {
+                    entry.kind == EntryKind::ToolCall
+                        && entry
+                            .tool
+                            .as_ref()
+                            .is_some_and(|call| call.call_id == result.call_id)
+                }) {
+                    Some(index) => {
+                        self.entries.insert(index + 1, entry);
+                        // The insertion shifts every later entry: a selection anchored to one
+                        // of them moves with it.
+                        self.shift_anchors(index + 1);
+                    }
+                    None => self.entries.push(entry),
+                }
             }
         }
     }

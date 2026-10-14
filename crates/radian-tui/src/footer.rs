@@ -38,6 +38,17 @@ impl Glyphs {
             _ => None,
         }
     }
+
+    /// The tool-call status glyphs (ADR 0028 rule 4): running, success, failure.
+    /// The unicode set is omp's (`⟳`/`✔`/`✘`); the other two sets exist because a terminal
+    /// without those code points needs something.
+    pub fn tool_status(self) -> [&'static str; 3] {
+        match self {
+            Self::Unicode => ["⟳", "✔", "✘"],
+            Self::Nerd => ["\u{f110}", "\u{f00c}", "\u{f00d}"],
+            Self::Ascii => ["*", "+", "x"],
+        }
+    }
 }
 
 /// Which footer the session shows.
