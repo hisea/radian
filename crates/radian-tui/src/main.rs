@@ -1,4 +1,4 @@
-//! The `radian-tui` binary: one real conversation through `radian-runtime`, rendered full
+//! The `radian` binary: one real conversation through `radian-runtime`, rendered full
 //! screen.
 //!
 //! Never run this in a shared terminal by hand without expecting it to take over: it enters
@@ -30,7 +30,7 @@ use ratatui::crossterm::event::{self, Event};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "radian-tui",
+    name = "radian",
     version,
     about = "Full-screen TUI for the radian agent runtime"
 )]
@@ -227,7 +227,7 @@ fn main() -> ExitCode {
     {
         Ok(runtime) => runtime,
         Err(e) => {
-            eprintln!("radian-tui: {e}");
+            eprintln!("radian: {e}");
             return ExitCode::from(1);
         }
     };
@@ -239,7 +239,7 @@ fn main() -> ExitCode {
     if let Err(e) = radian_tui::signals::listen(runtime.handle(), move |signal| {
         let _ = signal_tx.send(UiEvent::Signal(signal));
     }) {
-        eprintln!("radian-tui: cannot listen for SIGTERM/SIGHUP: {e}");
+        eprintln!("radian: cannot listen for SIGTERM/SIGHUP: {e}");
         return ExitCode::from(1);
     }
     // A panic must not unwind through a runtime *drop*: that drop can wait on a parked task
@@ -289,7 +289,7 @@ fn main() -> ExitCode {
 /// a failure to print the line is not a failure to exit.
 fn print_exit_line(message: &str) {
     use std::io::Write;
-    let _ = writeln!(std::io::stderr(), "radian-tui: {message}");
+    let _ = writeln!(std::io::stderr(), "radian: {message}");
 }
 
 fn run(
@@ -692,7 +692,7 @@ fn run(
     let before_driver: Option<Arc<dyn Fn() + Send + Sync>> = cli
         .panic_in_driver
         .then(|| Arc::new(panic_in_driver) as Arc<dyn Fn() + Send + Sync>);
-    let memory_warning = Arc::new(|message: &str| eprintln!("radian-tui: [memory] {message}"));
+    let memory_warning = Arc::new(|message: &str| eprintln!("radian: [memory] {message}"));
 
     // ADR 0023 U5: the one place a session is established; `agent-cli` calls the same function
     // with its own bindings. Every startup check that can fail has already run, so this is the
@@ -766,7 +766,7 @@ fn run(
         });
     }
     if cli.panic_after_enter {
-        panic!("radian-tui: panic path test");
+        panic!("radian: panic path test");
     }
     if let Some(message) = &cli.panic_message {
         panic!("{message}");
@@ -794,7 +794,7 @@ fn run(
             .map_err(|_| "the test child did not start".to_string())?;
         std::fs::write(dir.join("child.pid"), pid.to_string())
             .map_err(|e| format!("child.pid: {e}"))?;
-        panic!("radian-tui: panic path test with a child in flight");
+        panic!("radian: panic path test with a child in flight");
     }
     let memory_service = session.memory().cloned();
     // The history of a resumed session is rendered before the first frame, so the transcript
@@ -992,7 +992,7 @@ fn program_name() -> String {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| arg.to_string_lossy().into_owned())
         })
-        .unwrap_or_else(|| "radian-tui".to_string())
+        .unwrap_or_else(|| "radian".to_string())
 }
 
 /// One argument of the resume command, quoted when it would not survive a shell.
@@ -1040,7 +1040,7 @@ fn resume_command(program: &str, session_id: &str, cli: &Cli, workspace: &Path) 
 /// Set once in `run`; `read_input` writes it and parks.
 /// Test hook (`--panic-in-driver`): the driver task panics, so the exit path can be checked.
 fn panic_in_driver() {
-    panic!("radian-tui: driver task panic test");
+    panic!("radian: driver task panic test");
 }
 
 static BLOCK_INPUT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
@@ -1714,7 +1714,7 @@ fn handle_session_request(
             };
             match runtime.block_on(radian_session::fork_with_journal(request, &host.journal)) {
                 Ok(outcome) => vec![format!(
-                    "forked at seq {} into {}; open it with `radian-tui --resume {}`                      (this window keeps the parent)",
+                    "forked at seq {} into {}; open it with `radian --resume {}`                      (this window keeps the parent)",
                     outcome.seq, outcome.child_id, outcome.child_id
                 )],
                 Err(error) => vec![format!("fork failed: {error}")],
@@ -1894,7 +1894,7 @@ fn prepare_picker(
     )))
 }
 
-/// Why the TUI's `--list` stopped. A closed stdout (`radian-tui --list | head`) is a normal
+/// Why the TUI's `--list` stopped. A closed stdout (`radian --list | head`) is a normal
 /// stop, not a failure (dogfooding D21), so it is kept apart from a real error.
 enum ListError {
     /// A real failure: exit 1 with this message.
@@ -2011,11 +2011,11 @@ mod tests {
 
     #[test]
     fn the_default_model_call_limit_is_the_tui_one_not_the_cores() {
-        let cli = Cli::try_parse_from(["radian-tui", "--model", "m"]).unwrap();
+        let cli = Cli::try_parse_from(["radian", "--model", "m"]).unwrap();
         assert_eq!(cli.max_model_calls, TUI_DEFAULT_MAX_MODEL_CALLS);
         assert_eq!(TUI_DEFAULT_MAX_MODEL_CALLS, 1000);
         let cli =
-            Cli::try_parse_from(["radian-tui", "--model", "m", "--max-model-calls", "5"]).unwrap();
+            Cli::try_parse_from(["radian", "--model", "m", "--max-model-calls", "5"]).unwrap();
         assert_eq!(cli.max_model_calls, 5);
     }
 }

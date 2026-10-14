@@ -196,7 +196,7 @@ fn spawn_direct_keeping_slave(
     (child, master, keep_slave)
 }
 
-const BIN: &str = env!("CARGO_BIN_EXE_radian-tui");
+const BIN: &str = env!("CARGO_BIN_EXE_radian");
 
 /// The pty tests spawn real processes and mock servers; run them one at a time so the
 /// whole workspace staying busy cannot make one of them flake.
@@ -2343,7 +2343,7 @@ async fn pty_clean_exit_prints_one_reason_line() {
         .map(|(_, rest)| rest.to_string())
         .unwrap_or_default();
     // The owner's UI review: the line carries a paste-ready command, not just the flag.
-    let reason = "session exit-reason saved; resume: radian-tui --resume exit-reason";
+    let reason = "session exit-reason saved; resume: radian --resume exit-reason";
     let start = after
         .find(reason)
         .unwrap_or_else(|| panic!("no exit reason on the normal screen: {after}"));
@@ -5639,7 +5639,7 @@ async fn pty_the_exit_line_is_a_copyable_resume_command() {
         .lines()
         .find(|line| line.contains("resume:"))
         .unwrap_or_else(|| panic!("no resume command on the normal screen: {after}"));
-    assert!(line.contains("radian-tui --resume copyable"), "{line}");
+    assert!(line.contains("radian --resume copyable"), "{line}");
     assert!(line.contains("--session-dir"), "{line}");
     assert!(line.contains(sessions.to_str().unwrap()), "{line}");
     assert!(!line.contains("HEADER-VALUE"), "no header value: {line}");

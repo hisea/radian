@@ -6,7 +6,11 @@ rust-version.workspace = true
 description = "Full-screen TUI shell on radian-runtime (Phase 4 / A)"
 
 [[bin]]
-name = "radian-tui"
+name = "radian"
+path = "src/main.rs"
+
+[[bin]]
+name = "rad"
 path = "src/main.rs"
 
 [dependencies]

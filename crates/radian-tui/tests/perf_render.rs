@@ -407,7 +407,7 @@ fn max_rss_kib() -> u64 {
 // pty: the idle redraw loop and `--resume` startup, which `TestBackend` cannot see.
 // ---------------------------------------------------------------------------------------
 
-const BIN: &str = env!("CARGO_BIN_EXE_radian-tui");
+const BIN: &str = env!("CARGO_BIN_EXE_radian");
 const POLL: Duration = Duration::from_millis(1);
 /// ratatui's "show cursor" write; the app calls `set_cursor_position` every frame while the
 /// input box is editable, so it is a per-frame marker on the wire.
@@ -657,7 +657,7 @@ fn perf_idle_redraw() {
 
 /// A valid v1 session with `n` messages, using the shared long-session generator.
 ///
-/// `radian-tui --resume`: process start to the first frame, then `Ctrl-Home` to the top. The
+/// `radian --resume`: process start to the first frame, then `Ctrl-Home` to the top. The
 /// history is rendered before the run loop, so the first frame is the one that shows the
 /// bottom (the `resumed session …` notice). The top of the generated transcript is the first
 /// unit's tool call (`read({"path":"file.txt"})`), which is not on screen at the bottom.

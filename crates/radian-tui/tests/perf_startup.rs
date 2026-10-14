@@ -1,4 +1,4 @@
-//! Startup, `--resume`, first-token and tool-round-trip baseline for `radian-tui` (plan
+//! Startup, `--resume`, first-token and tool-round-trip baseline for `radian` (plan
 //! Phase 7), measured through a real pty against an in-process mock HTTP server, so the
 //! HTTP adapter and the render path are included but no real network is.
 //!
@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
 use serde_json::json;
 
-const BIN: &str = env!("CARGO_BIN_EXE_radian-tui");
+const BIN: &str = env!("CARGO_BIN_EXE_radian");
 const POLL: Duration = Duration::from_millis(1);
 
 struct TempDir(PathBuf);
