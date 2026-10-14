@@ -148,7 +148,7 @@ pub fn parse(source: &str, base: usize) -> Vec<MdBlock> {
             },
             Event::End(tag) => match tag {
                 TagEnd::Paragraph => finish_pieces(&mut stack),
-                TagEnd::Heading(level) => finish_pieces(&mut stack),
+                TagEnd::Heading(_) => finish_pieces(&mut stack),
                 TagEnd::List(_) => {
                     flush_open_pieces(&mut stack);
                     if let Some(Container::List { ordered, items }) = stack.pop() {
@@ -302,17 +302,17 @@ fn finish_pieces(stack: &mut Vec<Container>) {
     if !matches!(stack.last(), Some(Container::Pieces(..))) {
         return;
     }
-    match stack.pop() {
-        Some(Container::Pieces(pieces, actual)) => match actual {
-            PiecesKind::Cell => push_cell(stack, pieces),
-            PiecesKind::Heading(level) => push_block(stack, MdBlock::Heading { level, pieces }),
-            PiecesKind::Paragraph | PiecesKind::Code => {
-                if !pieces.is_empty() {
-                    push_block(stack, MdBlock::Paragraph(pieces));
-                }
+    let Some(Container::Pieces(pieces, actual)) = stack.pop() else {
+        return;
+    };
+    match actual {
+        PiecesKind::Cell => push_cell(stack, pieces),
+        PiecesKind::Heading(level) => push_block(stack, MdBlock::Heading { level, pieces }),
+        PiecesKind::Paragraph | PiecesKind::Code => {
+            if !pieces.is_empty() {
+                push_block(stack, MdBlock::Paragraph(pieces));
             }
-        },
-        _ => {}
+        }
     }
 }
 
