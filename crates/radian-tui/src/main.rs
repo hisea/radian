@@ -1738,6 +1738,19 @@ impl LoopContext<'_> {
                         })
                         .collect()
                     }
+                    // `/skill:`'s candidates: the discovered skill names, including the ones
+                    // with `disable-model-invocation: true` — that flag hides a skill from the
+                    // *model*, not from the user (ADR 0025 S3; pi registers every loaded skill
+                    // as a `skill:<name>` command).
+                    radian_tui::command::Fetch::SkillNames { .. } => self
+                        .session
+                        .skills()
+                        .iter()
+                        .map(|skill| radian_tui::command::Candidate {
+                            insert: skill.name.clone(),
+                            description: skill.description.clone(),
+                        })
+                        .collect(),
                     // `/logout`'s candidates: every stored credential (D3).
                     radian_tui::command::Fetch::LoggedInProviders { .. } => {
                         match radian_host::list_auth() {
@@ -1788,6 +1801,19 @@ impl LoopContext<'_> {
                     }
                 };
                 self.send(AppInput::MemoryCommandDone(result));
+                Ok(())
+            }
+            // `/skill:<name> [args]` (ADR 0025 S3): the host reads the body and folds it into
+            // the message; the app decides follow-up vs steer.
+            Effect::ExpandSkill { name, args, steer } => {
+                let result = self.session.expand_skill(&name, &args);
+                self.send(AppInput::SkillExpanded { result, steer });
+                Ok(())
+            }
+            // `/skills` (ADR 0025 S3): the discovered skills as notices.
+            Effect::ListSkills => {
+                let notices = skill_notices(self.session.skills());
+                self.send(AppInput::SessionDone(notices));
                 Ok(())
             }
             Effect::Compact { instructions } => {
@@ -2195,6 +2221,27 @@ fn ui_loop(
 /// The `/model` completion candidates (ADR 0026 D5): the logged-in providers before the
 /// slash, or one provider's models after it — the descriptor's built-in list plus the cached
 /// `/v1/models` list. Reads local files only; the background refresh (D0) writes that cache.
+/// The `/skills` notice lines (ADR 0025 S3): `name: description`, with a marker for the
+/// skills the model cannot auto-invoke (they are still user-invocable via `/skill:`). A
+/// description with a newline (a `|` literal block) is folded to one line for the notice.
+fn skill_notices(skills: &[radian_host::Skill]) -> Vec<String> {
+    if skills.is_empty() {
+        return vec!["no skills found under ~/.radian/skills".to_owned()];
+    }
+    skills
+        .iter()
+        .map(|skill| {
+            let description = skill.description.replace('\n', " ");
+            let marker = if skill.disable_model_invocation {
+                " (model-invocation off)"
+            } else {
+                ""
+            };
+            format!("{}: {description}{marker}", skill.name)
+        })
+        .collect()
+}
+
 fn model_route_candidates(
     provider: Option<&str>,
     config_providers: &std::collections::BTreeMap<String, radian_host::ProviderDecl>,

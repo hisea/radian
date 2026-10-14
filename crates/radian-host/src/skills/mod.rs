@@ -377,6 +377,33 @@ Skills are user-provided instructions, not permissions. Only their names and des
 listed here; read one's full body with the `skill` tool. Relative paths in a skill's body are \
 resolved from the skill's own directory.\n";
 
+/// The message text `/skill:<name> [args]` puts into the inbox (ADR 0025 S3): the body with the
+/// frontmatter stripped, wrapped in a `<skill name=… location=…>` block that names the skill's
+/// directory as the base for relative paths, and `args` appended verbatim (pi's
+/// `_expandSkillCommand`). Reads the file; the caller has already found `skill` in the
+/// discovered table.
+pub fn expand(skill: &Skill, args: &str) -> Result<String, String> {
+    let text = std::fs::read_to_string(&skill.path).map_err(|error| {
+        format!(
+            "skill `{}` cannot be read ({}): {error}",
+            skill.name,
+            skill.path.display()
+        )
+    })?;
+    let body = tools::strip_frontmatter(&text).unwrap_or(&text).trim();
+    let block = format!(
+        "<skill name=\"{}\" location=\"{}\">\nReferences are relative to {}.\n\n{body}\n</skill>",
+        skill.name,
+        skill.path.display(),
+        skill.dir.display()
+    );
+    Ok(if args.is_empty() {
+        block
+    } else {
+        format!("{block}\n\n{args}")
+    })
+}
+
 /// Counts a string the way `agent_core` does, without building a `ModelRequest` (the same
 /// helper as `memory/injection.rs`; ADR 0015 C2's conservative estimate).
 fn request_size_of(text: &str) -> RequestSize {
@@ -758,6 +785,27 @@ mod tests {
         assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
         assert_eq!(discovery.skills[0].name, "a");
         assert_eq!(discovery.skills[0].description, "Quoted description.");
+    }
+
+    /// ADR 0025 S3: `expand` reads the body, strips the frontmatter, names the base directory and
+    /// appends the args verbatim.
+    #[test]
+    fn expand_wraps_the_body_and_appends_the_args() {
+        let scratch = Scratch::new("expand");
+        scratch.skill(
+            "greet",
+            "---\nname: greet\ndescription: d\n---\nBody line.\n",
+        );
+        let skill = &discover(&scratch.skills_dir()).skills[0];
+        let expanded = expand(skill, "hello \"world\"").unwrap();
+        assert!(expanded.contains("<skill name=\"greet\""), "{expanded}");
+        assert!(expanded.contains("Body line."), "{expanded}");
+        assert!(!expanded.contains("description: d"), "{expanded}");
+        assert!(expanded.contains("hello \"world\""), "{expanded}");
+        assert!(expanded.ends_with("hello \"world\""), "{expanded}");
+        // No args: the block stands alone.
+        let bare = expand(skill, "").unwrap();
+        assert!(bare.ends_with("</skill>"), "{bare}");
     }
 
     /// The exact tuple shape `session.rs` builds — `((perm, memory), skills)` — puts the skills

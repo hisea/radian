@@ -387,6 +387,13 @@ pub enum Input {
     },
     /// A `/sessions`, `/export` or `/fork` finished: the notices to show.
     SessionDone(Vec<String>),
+    /// A `/skill:<name> [args]` expansion finished (ADR 0025 S3): the message text to send, or
+    /// a notice (an unknown skill or a file that can no longer be read). `steer` mirrors the
+    /// turn state when the command was submitted.
+    SkillExpanded {
+        result: Result<String, String>,
+        steer: bool,
+    },
     /// The session's facade refused a command (ADR 0023 U5): an undeclared capability. The UI
     /// shows a notice instead of failing the loop.
     CommandRefused(radian_host::CommandRefused),
@@ -537,6 +544,17 @@ pub enum Effect {
     /// facade, which flips the hooks' live policy, audits the switch and queues the durable
     /// `ConfigChanged` record for the next resume.
     SetApprovalPolicy { on: bool },
+    /// Expand `/skill:<name> [args]` (ADR 0025 S3): the host reads the body and the loop sends
+    /// the folded `<skill …>` text as one user message (`steer` picks steer vs follow-up). The
+    /// answer is [`Input::SkillExpanded`].
+    ExpandSkill {
+        name: String,
+        args: String,
+        steer: bool,
+    },
+    /// List the discovered skills (`/skills`, ADR 0025 S3) as notices. The answer is
+    /// [`Input::SessionDone`].
+    ListSkills,
     /// Write the transcript selection to the system clipboard (`tui.clipboard` picks the
     /// transport). The loop runs it and answers with [`Input::ClipboardDone`]: OSC 52 has no
     /// receipt, and `pbcopy` can fail — the loop owns both facts, `update` only owns the text.
@@ -615,6 +633,19 @@ impl PartialEq for Effect {
             ) => an == bn && ak == bk && ae == be,
             (Logout { provider: a }, Logout { provider: b }) => a == b,
             (Copy { text: a }, Copy { text: b }) => a == b,
+            (
+                ExpandSkill {
+                    name: an,
+                    args: aa,
+                    steer: as_,
+                },
+                ExpandSkill {
+                    name: bn,
+                    args: ba,
+                    steer: bs,
+                },
+            ) => an == bn && aa == ba && as_ == bs,
+            (ListSkills, ListSkills) => true,
             _ => false,
         }
     }
@@ -1801,6 +1832,7 @@ impl App {
                 }
                 UpdateResult::dirty()
             }
+            Input::SkillExpanded { result, steer } => self.skill_expanded(result, steer),
             Input::CommandRefused(refused) => {
                 self.push_notice(format!(
                     "the session refused `{}`: {}",
@@ -2418,6 +2450,26 @@ impl App {
         UpdateResult::none()
     }
 
+    /// A `/skill:<name>` expansion finished (ADR 0025 S3). On success the message is sent like
+    /// a typed one (steer when a turn was running); on failure the notice is shown and nothing
+    /// is sent — an unknown skill is not a message.
+    fn skill_expanded(&mut self, result: Result<String, String>, steer: bool) -> UpdateResult {
+        match result {
+            Ok(text) => {
+                let message = Message::user(text);
+                UpdateResult::effect(if steer {
+                    Effect::Steer(message)
+                } else {
+                    Effect::SendFollowup(message)
+                })
+            }
+            Err(error) => {
+                self.push_notice(error);
+                UpdateResult::dirty()
+            }
+        }
+    }
+
     /// The `@` expansion finished. On success the send effect is produced, with the notices the
     /// expansion reported; on failure the original text goes back into the input box, so
     /// nothing is sent and the user can fix the message.
@@ -2804,6 +2856,14 @@ impl App {
                 }
                 UpdateResult::effect(Effect::SetApprovalPolicy { on })
             }
+            // `/skill:` (ADR 0025 S3): the host reads the body and the expanded text becomes a
+            // user message. Whether it steers is decided here, like a typed send.
+            command::Outcome::Skill { name, args } => {
+                let steer = self.turn() == TurnState::Running;
+                UpdateResult::effect(Effect::ExpandSkill { name, args, steer })
+            }
+            // `/skills`: the host lists the discovered skills as notices.
+            command::Outcome::Skills => UpdateResult::effect(Effect::ListSkills),
             command::Outcome::Message => UpdateResult::none(),
         }
     }

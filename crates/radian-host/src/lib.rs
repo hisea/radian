@@ -99,7 +99,8 @@ pub use sessions::{
     ExportSettings, Format, SEARCH_LIMIT, SUMMARY_MAX_CHARS, SearchRow, SessionRow,
 };
 pub use skills::{
-    Discovery, SECTION_BUDGET_TOKENS, SKILL_FILE_NAME, Skill, SkillsHooks, discover, prompt_section,
+    Discovery, SECTION_BUDGET_TOKENS, SKILL_FILE_NAME, Skill, SkillsHooks, discover, expand,
+    prompt_section,
 };
 pub use tools::{HostSession, HostTools, merge_tool_specs};
 pub use workspace::resolve_workspace;

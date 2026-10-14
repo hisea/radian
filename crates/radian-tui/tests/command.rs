@@ -276,3 +276,73 @@ fn a_pending_confirmation_keeps_keys_out_of_the_input_box() {
     assert!(app.pending_command().is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// ADR 0025 S3: `/skill:<name>` becomes an expansion effect (the host reads the body), and its
+/// answer becomes one user message — or a steer while a turn runs. An error is a notice.
+#[test]
+fn a_skill_command_expands_through_the_host_then_sends() {
+    let (dir, mut app, service) = app_with_memory("skill");
+    assert_eq!(
+        submit(&mut app, &service, "/skill:greet hi there"),
+        vec![Effect::ExpandSkill {
+            name: "greet".into(),
+            args: "hi there".into(),
+            steer: false,
+        }]
+    );
+    // The loop answers with the host's expansion; the app sends it as one user message.
+    let expanded = "<skill name=\"greet\">body</skill>\n\nhi there";
+    let update = app.update(Input::SkillExpanded {
+        result: Ok(expanded.into()),
+        steer: false,
+    });
+    assert_eq!(
+        update.effects,
+        vec![Effect::SendFollowup(agent_core::Message::user(expanded))]
+    );
+
+    // While a turn runs the same command steers.
+    app.projection.set_turn(TurnState::Running);
+    assert_eq!(
+        submit(&mut app, &service, "/skill:greet"),
+        vec![Effect::ExpandSkill {
+            name: "greet".into(),
+            args: String::new(),
+            steer: true,
+        }]
+    );
+
+    // A failed expansion is a notice and sends nothing (`/skill:nope`).
+    let update = app.update(Input::SkillExpanded {
+        result: Err("no skill named `nope`".into()),
+        steer: true,
+    });
+    assert!(update.effects.is_empty(), "{:?}", update.effects);
+    assert!(
+        notices(&app)
+            .iter()
+            .any(|n| n.contains("no skill named `nope`")),
+        "{:?}",
+        notices(&app)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `/skills` is an effect too: the host owns discovery, and the answer is shown as notices.
+#[test]
+fn a_skills_command_lists_through_the_host() {
+    let (dir, mut app, service) = app_with_memory("skills");
+    assert_eq!(
+        submit(&mut app, &service, "/skills"),
+        vec![Effect::ListSkills]
+    );
+    app.update(Input::SessionDone(vec!["greet: Say hello.".into()]));
+    assert!(
+        notices(&app)
+            .iter()
+            .any(|n| n.contains("greet: Say hello.")),
+        "{:?}",
+        notices(&app)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

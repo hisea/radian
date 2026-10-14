@@ -36,7 +36,7 @@ use crate::pending::{
 };
 use crate::projection::{ProjectionRead, SessionProjection};
 use crate::skills::tools::SkillTools;
-use crate::skills::{self, SkillsHooks};
+use crate::skills::{self, Skill, SkillsHooks};
 use crate::tools::HostTools;
 
 /// A session's stable identifier: the session file's name and `SessionCreated.session_id`.
@@ -213,6 +213,14 @@ pub trait SessionFacade: Send + Sync {
     /// (`{"approval": …}`) the driver journals at the next turn boundary. Needs the same
     /// capability as answering: it belongs to the interactive approver.
     fn set_approval(&self, policy: ApprovalPolicy) -> Result<(), CommandRefused>;
+
+    /// The discovered skills, in discovery order (ADR 0025 S1). The UI lists them (`/skills`)
+    /// and completes their names (`/skill:`); the host owns the list because it owns discovery.
+    fn skills(&self) -> &[Skill];
+
+    /// Expands `/skill:<name> [args]` into the message ADR 0025 S3 sends to the inbox. `Err` is
+    /// a notice (an unknown skill or an unreadable file), never a turn failure.
+    fn expand_skill(&self, name: &str, args: &str) -> Result<String, String>;
 }
 
 /// How the driver task ended.
@@ -376,6 +384,10 @@ pub struct LocalSession {
     /// The pending approvals and questions (ADR 0023 U7).
     queue: Arc<SessionQueue>,
     memory: Option<MemoryService>,
+    /// The discovered skills (ADR 0025). The TUI reads this list for `/skills`, `/skill:`
+    /// completion and `/skill:<name>` expansion; the prompt hook and the `skill` tool share the
+    /// same `Arc`.
+    skills: Arc<Vec<Skill>>,
     runtime: tokio::runtime::Handle,
     driver: DriverTask,
     capabilities: Vec<SessionCapability>,
@@ -437,6 +449,26 @@ impl LocalSession {
 
     pub fn memory(&self) -> Option<&MemoryService> {
         self.memory.as_ref()
+    }
+
+    /// The discovered skills, in discovery order (ADR 0025 S1). The UI lists these (`/skills`),
+    /// completes them (`/skill:`) and expands them (`/skill:<name>`); reading one is a facade
+    /// method because the host owns the `SKILL.md` read.
+    pub fn skills(&self) -> &[Skill] {
+        &self.skills
+    }
+
+    /// Expands `/skill:<name> [args]` into the user message ADR 0025 S3 puts in the inbox (the
+    /// body with its frontmatter stripped, wrapped in a `<skill name=… location=…>` block, with
+    /// `args` appended). `Err` is a notice the UI shows instead of sending: an unknown skill or
+    /// a file that can no longer be read is not a turn failure.
+    pub fn expand_skill(&self, name: &str, args: &str) -> Result<String, String> {
+        let skill = self
+            .skills
+            .iter()
+            .find(|skill| skill.name == name)
+            .ok_or_else(|| format!("no skill named `{name}`: /skills lists the available ones"))?;
+        skills::expand(skill, args)
     }
 
     pub fn capabilities(&self) -> &[SessionCapability] {
@@ -552,6 +584,14 @@ impl SessionFacade for LocalSession {
         self.config_queue
             .push(serde_json::json!({ "approval": policy.as_str() }));
         Ok(())
+    }
+
+    fn skills(&self) -> &[Skill] {
+        &self.skills
+    }
+
+    fn expand_skill(&self, name: &str, args: &str) -> Result<String, String> {
+        LocalSession::expand_skill(self, name, args)
     }
 
     /// Re-validates the capability, then runs the command. The check is here as well as in the
@@ -860,6 +900,7 @@ pub async fn open_session(
         projection,
         queue,
         memory,
+        skills: shared_skills,
         runtime,
         driver: DriverTask {
             stop: Mutex::new(Some(stop_tx)),
