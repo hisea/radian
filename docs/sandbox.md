@@ -61,7 +61,7 @@ macOS 版本漂移（spike 记录过 `process-fork*` 变 unbound）。探针在�
 | normal_use | 工作区内写回读；工作区外只读 | ✅ | ✅ |
 | git_readonly | 写 `.git/hooks`、`.git/config`、`.git/info`、`git config core.hooksPath`、`git add`、worktree 指针、共享 gitdir、经符号链接写共享 `.git` 全部被拒；`git status`/`git log` 可用 | 8 拒 + 2 可 | 8 拒 + 2 可 |
 | sensitive_read | 假 `~/.ssh/id_ed25519` 打开失败（只断言 exit，不读内容）；普通文件可读 | ✅ | ✅ |
-| radian_home | ADR 0020：`~/.radian/sessions/<file>` 与 `~/.radian/memory/<file>` 读失败；`config/<file>` 与 `cache/<file>` 可读；`--session-dir` 指向的目录也读失败 | 3 拒 + 2 可 | 3 拒 + 2 可 |
+| radian_home | ADR 0020/0026：`~/.radian/sessions/<file>`、`~/.radian/memory/<file>` 与 `~/.radian/credentials/auth.json` 读失败；`config/<file>` 与 `cache/<file>` 可读；`--session-dir` 指向的目录也读失败 | 4 拒 + 2 可 | 4 拒 + 2 可 |
 | deny_inside_workspace | ADR 0020：会话目录在工作区**里面**（如 `--session-dir ./sessions`）允许构建；该子目录读失败，工作区其余部分可读可写 | 1 拒 + 2 可 | 1 拒 + 2 可 |
 | mcp_stdio | 最小 stdio MCP（initialize / tools/list / tools/call echo）可用 | ✅ | ✅ |
 | signals | 给自己的子进程、孙进程发信号可以；给沙箱外同用户进程发信号被拒 | 2 可 + 1 拒 | 2 可 + 1 拒 |
@@ -194,6 +194,11 @@ auto-maintenance**（git 2.55 会跑；macOS 的 2.53 不跑），与本切片�
 目录在工作区里面：该子目录拒读、工作区其余可读可写）；反方向（工作区在会话目录里面）由
 `Sandbox::from_policy` 在构建时拒绝，`crates/radian-sandbox/tests/backend.rs` 的单测覆盖。
 macOS 本机与 Linux VM 各自重跑 **42/42 PASS**，两份 evidence 已更新。
+
+**2026-10-13 补（ADR 0026 D4，凭据禁读）**：矩阵新增 `radian_home.credentials_unreadable` 1 条
+（`~/.radian/credentials/auth.json` 读失败；对照 FullAccess 可读）。macOS 本机重跑 **43/43 PASS**，
+`escape-macos.{txt,json}` 已更新。**Linux 未跑**（VM 暂停中）：`escape-linux.{txt,json}` 按现有格式补上
+该条，其 `note` 标为 `not run`；VM 恢复后需重跑核对。
 
 ## 未验证 / 已知边界
 

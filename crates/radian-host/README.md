@@ -206,6 +206,10 @@ End-to-end, through the binaries (this crate has no integration tests of its own
   resources and uses the trait's default `close`.
 - **`load_mcp_config` reads a JSON file and nothing else** — no TOML, no merge with another
   source, and unknown fields are an error rather than a warning.
+- **The credential store has no write lock (ADR 0026 D1).** `auth::upsert_api_key` and
+  `auth::remove` read-modify-write `~/.radian/credentials/auth.json` without a lock, so two
+  `/login` runs at once race: the later write wins and may drop the earlier provider's entry.
+  Accepted for the first release.
 - **Not verified here:** Windows, real provider endpoints, and the sandbox itself. The MCP
   processes this crate helps start are **not** sandboxed in this build (ADR 0012), and the
   startup notice that says so is pinned by the two host tests above.

@@ -265,3 +265,28 @@ Base `17fb385` · 一次性检出 `/tmp/s1e2-mut`（detached，跑完删除）·
 2/2 抓住。T1 就是审查发现的那条：没有 `--workspace` 时模型看不到 `ask_user`，而启动行仍说 `on`——
 变异后启动行与实际注册都由 `SessionFacts` 反映，测试的两条断言同时失败。T2 恢复成"进程退出时靠 drop
 得到 abandoned"的碰巧 fail-closed；带 watchdog 的测试在 2 s 内拿不到中止结果即失败。
+
+## ADR 0026 第 0 片（a）：auth.json、provider 描述符、目录字段、凭据禁读
+
+Base `deb583f` · 在本任务工作树内逐条施加后从副本还原（`--no-fail-fast`）· `git status --short`
+结束后干净。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| A26-1 | `upsert_api_key` 写回时重建空 map，丢掉其他条目 | `auth::tests::a_write_preserves_unknown_and_oauth_entries_and_is_atomic` | ✅ failed |
+| A26-2 | 放宽权限检查（`mode & 0o077 != 0` 短路成 false） | `auth::tests::a_wide_permission_file_is_refused_with_a_fix_command` | ✅ failed |
+| A26-3 | `!command` 被执行（去掉拒绝，改成 `/bin/sh -c` 跑它） | `auth::tests::a_command_key_is_refused_and_never_run`（标记文件被创建 / 返回值不是 None） | ✅ failed |
+| A26-4 | `ResolvedKey` 的 `Debug` 打印真实 key | `auth::tests::debug_never_prints_the_key` | ✅ failed |
+| A26-5 | 逃逸矩阵不把 `credentials` 加进禁读 | `escape_macos`（`radian_home.credentials_unreadable` 在沙箱里可读） | ✅ failed |
+
+5/5 抓住。A26-5 由 `crates/radian-sandbox` 的 macOS 矩阵跑（Linux VM 暂停中，未跑）。
+
+### auth-2：权限检查的参数化测试
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| A26-6 | 权限检查只看其他用户位（`0o077` → `0o007`），放行同组可读的 `0640` | `auth::tests::a_wide_permission_file_is_refused_with_a_fix_command`（`mode 0640 must be refused`） | ✅ failed |
+| A26-7 | 权限检查只看组位（`0o077` → `0o070`），放行其他人可读的 `0604` | 同上（`mode 0604 must be refused`） | ✅ failed |
+
+2/2 抓住。原测试只用 `0644`，所以 `0o007` 变异不被发现；改成参数化（0640/0660/0604/0644/0666/0607/0770
+拒；0600/0400 接受）后两条变异各自被对应的模式抓住。

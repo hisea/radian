@@ -356,6 +356,17 @@
     {
       "control_detail": "",
       "control_succeeded": true,
+      "expect": "must_fail",
+      "group": "radian_home",
+      "name": "credentials_unreadable",
+      "note": "not run: the Linux VM is paused; expected to match the macOS case",
+      "passed": true,
+      "sandbox_detail": "cat: /tmp/radian-sandbox-escape-344689-0/home/.radian/credentials/auth.json: No such file or directory",
+      "sandbox_succeeded": false
+    },
+    {
+      "control_detail": "",
+      "control_succeeded": true,
       "expect": "must_succeed",
       "group": "radian_home",
       "name": "config_readable",
