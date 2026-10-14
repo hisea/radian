@@ -278,6 +278,13 @@ pub struct BodyLine {
     pub warn: bool,
     /// A synthesized tool hint (no source characters: it neither copies nor matches).
     pub hint: bool,
+    /// A rendered Mermaid diagram line (ADR 0028 R8): per-piece text and role. `None` for
+    /// every other line; `text` still holds the concatenation, so search and the line count
+    /// agree with what is drawn.
+    pub diagram: Option<Vec<(String, DiagramRole)>>,
+    /// A weak one-line explanation (a Mermaid block that could not be drawn): the renderer
+    /// styles it with the theme's `truncation` (dim) role.
+    pub reason: bool,
 }
 
 impl BodyLine {
@@ -290,6 +297,8 @@ impl BodyLine {
             pad: false,
             warn: false,
             hint: false,
+            diagram: None,
+            reason: false,
         }
     }
 
@@ -302,8 +311,144 @@ impl BodyLine {
             pad: true,
             warn: false,
             hint: false,
+            diagram: None,
+            reason: false,
         }
     }
+
+    /// A diagram line: every cell maps to the block's start (the diagram has no source
+    /// offsets of its own), so selecting it selects the block — a copy yields the Mermaid
+    /// source, the content that actually exists in the text.
+    fn diagram(end: usize, offset: usize, spans: Vec<(String, DiagramRole)>) -> Self {
+        let text: String = spans.iter().map(|(piece, _)| piece.as_str()).collect();
+        let cells = UnicodeWidthStr::width(text.as_str());
+        Self {
+            chars: vec![offset; cells],
+            end,
+            text,
+            code: true,
+            pad: false,
+            warn: false,
+            hint: false,
+            diagram: Some(spans),
+            reason: false,
+        }
+    }
+
+    fn reason(end: usize, offset: usize, text: String) -> Self {
+        Self {
+            chars: vec![offset],
+            end,
+            text,
+            code: false,
+            pad: false,
+            warn: false,
+            hint: false,
+            diagram: None,
+            reason: true,
+        }
+    }
+}
+
+/// A diagram piece's semantic role (ADR 0028 R8): the vendor's `Node`/`Edge`/`Text`, mapped
+/// so `radian-tui` does not expose the dependency's type in its own API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagramRole {
+    Node,
+    Edge,
+    Text,
+}
+
+/// One Mermaid block's render result. `Failed` keeps the reason for the dim line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DiagramOutcome {
+    Rendered(Vec<Vec<(String, DiagramRole)>>),
+    Failed(String),
+}
+
+/// Renders `source` at `width` (ADR 0028 R8): a pure function of the two, so the cache key is
+/// exactly that pair. No partial diagram: `render_spans` either returns every line or an error.
+pub(crate) fn diagram_for(source: &str, width: usize) -> DiagramOutcome {
+    match codex_mermaid::render_spans(source, width) {
+        Ok(lines) => DiagramOutcome::Rendered(
+            lines
+                .into_iter()
+                .map(|line| {
+                    line.into_iter()
+                        .map(|span| {
+                            let role = match span.role {
+                                codex_mermaid::Role::Node => DiagramRole::Node,
+                                codex_mermaid::Role::Edge => DiagramRole::Edge,
+                                codex_mermaid::Role::Text => DiagramRole::Text,
+                            };
+                            (span.text, role)
+                        })
+                        .collect()
+                })
+                .collect(),
+        ),
+        Err(error) => DiagramOutcome::Failed(error.to_string()),
+    }
+}
+
+/// Whether a code block is a Mermaid diagram this renderer should draw: the info string is
+/// `mermaid` (ASCII case-insensitive — CommonMark keeps info strings case-sensitive, but
+/// every fence a model writes is lowercase; accepting any case is more forgiving and never
+/// changes a non-mermaid block), the block is closed, and `tui.display.mermaid` is on.
+fn is_mermaid(lang: &str, closed: bool, mermaid: bool) -> bool {
+    mermaid && closed && lang.eq_ignore_ascii_case("mermaid")
+}
+
+/// The outcome for one Mermaid block, from the entry's cache when the `(width, text_len)` key
+/// matches, else rendered fresh (the immutable paths — selection, search, the reference
+/// renderer — may not have run the mutable measure pass).
+fn diagram_outcome(entry: &Entry, index: usize, source: &str, width: usize) -> DiagramOutcome {
+    if let Some((cached_width, cached_len, outcomes)) = &entry.diagram_cache
+        && *cached_width == width
+        && *cached_len == entry.text.len()
+        && let Some(outcome) = outcomes.get(index)
+    {
+        return outcome.clone();
+    }
+    diagram_for(source, width)
+}
+
+/// A fenced code block's **body** (the fences are markup), joined by newlines — what a
+/// renderer (Mermaid) sees. Mirrors [`code_lines`]'s skipping.
+fn code_body(raw: &str, closed: bool) -> String {
+    let lines: Vec<&str> = raw.lines().collect();
+    let body = match (lines.first(), lines.last()) {
+        (Some(first), Some(last))
+            if fence_open(first.trim()).is_some()
+                && closed
+                && lines.len() > 1
+                && fence_run(last.trim()).is_some() =>
+        {
+            &lines[1..lines.len() - 1]
+        }
+        (Some(first), _) if fence_open(first.trim()).is_some() && lines.len() > 1 => &lines[1..],
+        _ => &lines[..],
+    };
+    body.join("\n")
+}
+
+/// The Mermaid block sources of an entry's parsed blocks, in order — the index a
+/// [`diagram_outcome`] lookup uses.
+fn mermaid_sources(blocks: &[Block], text: &str, mermaid: bool) -> Vec<String> {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            Block::Code {
+                start,
+                end,
+                closed,
+                lang,
+            } if is_mermaid(lang, *closed, mermaid) => {
+                Some(code_body(&text[*start..*end], *closed))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// How many display lines an entry's body lays out to (including padding rows; a `Hidden`
@@ -323,17 +468,36 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
             // pad + text + pad.
             crate::render::wrap_line_count(&text, body_width) + 2
         }
-        EntryKind::Assistant => parse_blocks_for(entry, mode)
-            .iter()
-            .map(|block| match block {
-                Block::Paragraph { start, end, .. } => {
-                    crate::render::wrap_line_count(&text[*start..*end], body_width)
-                }
-                Block::Code {
-                    start, end, closed, ..
-                } => code_line_count(&text[*start..*end], *closed),
-            })
-            .sum(),
+        EntryKind::Assistant => {
+            let mut diagram_index = 0;
+            parse_blocks_for(entry, mode)
+                .iter()
+                .map(|block| match block {
+                    Block::Paragraph { start, end, .. } => {
+                        crate::render::wrap_line_count(&text[*start..*end], body_width)
+                    }
+                    Block::Code {
+                        start,
+                        end,
+                        closed,
+                        lang,
+                    } => {
+                        let source = &text[*start..*end];
+                        if is_mermaid(lang, *closed, modes.mermaid) {
+                            let index = diagram_index;
+                            diagram_index += 1;
+                            match diagram_outcome(entry, index, &code_body(source, *closed), width)
+                            {
+                                DiagramOutcome::Rendered(lines) => lines.len(),
+                                DiagramOutcome::Failed(_) => 1 + code_line_count(source, *closed),
+                            }
+                        } else {
+                            code_line_count(source, *closed)
+                        }
+                    }
+                })
+                .sum()
+        }
         // One header line, never wrapped (the same rule the layout uses).
         EntryKind::ToolCall => 1,
         EntryKind::ToolResult => {
@@ -413,6 +577,28 @@ pub fn line_count_cached(entry: &mut Entry, modes: DisplayModes, width: usize) -
     {
         return lines;
     }
+    // Render this width's diagrams once and keep them: the key is `(width, text_len)`, so a
+    // resize re-renders (a `TooWide` failure can succeed on a wider terminal) and an append
+    // re-renders (a longer source is a different diagram).
+    if modes.mermaid && entry.kind == EntryKind::Assistant {
+        let blocks = blocks_for(entry, modes.reasoning);
+        let text = crate::render::display_text(entry);
+        let sources = mermaid_sources(&blocks, &text, modes.mermaid);
+        let fresh = entry
+            .diagram_cache
+            .as_ref()
+            .filter(|(cached_width, cached_len, _)| {
+                *cached_width == width && *cached_len == text_len
+            })
+            .is_none();
+        if fresh {
+            let outcomes = sources
+                .iter()
+                .map(|source| diagram_for(source, width))
+                .collect();
+            entry.diagram_cache = Some((width, text_len, outcomes));
+        }
+    }
     let lines = line_count(entry, modes, width);
     entry.layout_cache = Some((key, lines));
     lines
@@ -485,15 +671,43 @@ pub fn layout(entry: &Entry, blocks: &[Block], modes: DisplayModes, width: usize
         }
         (EntryKind::Assistant, _) => {
             let mut lines = Vec::new();
+            let mut diagram_index = 0;
             for block in blocks {
                 match block {
                     Block::Paragraph { start, end, .. } => {
                         lines.extend(prose_lines(&text[*start..*end], body_width));
                     }
                     Block::Code {
-                        start, end, closed, ..
+                        start,
+                        end,
+                        closed,
+                        lang,
                     } => {
-                        lines.extend(code_lines(&text[*start..*end], *start, *closed, width));
+                        let source = &text[*start..*end];
+                        if is_mermaid(lang, *closed, modes.mermaid) {
+                            let index = diagram_index;
+                            diagram_index += 1;
+                            match diagram_outcome(entry, index, &code_body(source, *closed), width)
+                            {
+                                DiagramOutcome::Rendered(rendered) => {
+                                    lines.extend(
+                                        rendered
+                                            .into_iter()
+                                            .map(|spans| BodyLine::diagram(*end, *start, spans)),
+                                    );
+                                }
+                                DiagramOutcome::Failed(reason) => {
+                                    lines.push(BodyLine::reason(
+                                        *start,
+                                        *start,
+                                        format!("mermaid: {reason}"),
+                                    ));
+                                    lines.extend(code_lines(source, *start, *closed, width));
+                                }
+                            }
+                        } else {
+                            lines.extend(code_lines(source, *start, *closed, width));
+                        }
                     }
                 }
             }
@@ -548,6 +762,8 @@ fn tool_line(text: &str, width: usize) -> Vec<BodyLine> {
         pad: false,
         warn: false,
         hint: false,
+        diagram: None,
+        reason: false,
     }]
 }
 
@@ -572,6 +788,8 @@ fn body_plan_lines(plan: &[tools::BodyLine], text: &str, body_width: usize) -> V
                 pad: false,
                 warn: false,
                 hint: true,
+                diagram: None,
+                reason: false,
             }),
         }
     }
@@ -724,15 +942,39 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
         }
         (EntryKind::Assistant, _) => {
             let mut lines = Vec::new();
+            let mut diagram_index = 0;
             for block in parse_blocks_for(entry, mode) {
                 match block {
                     Block::Paragraph { start, end, .. } => {
                         lines.extend(crate::render::wrap(&text[start..end], body_width));
                     }
                     Block::Code {
-                        start, end, closed, ..
+                        start,
+                        end,
+                        closed,
+                        lang,
                     } => {
-                        lines.extend(code_text_lines(&text[start..end], closed, width));
+                        let source = &text[start..end];
+                        if is_mermaid(&lang, closed, modes.mermaid) {
+                            let index = diagram_index;
+                            diagram_index += 1;
+                            match diagram_outcome(entry, index, &code_body(source, closed), width) {
+                                DiagramOutcome::Rendered(rendered) => {
+                                    lines.extend(rendered.into_iter().map(|spans| {
+                                        spans
+                                            .into_iter()
+                                            .map(|(piece, _)| piece)
+                                            .collect::<String>()
+                                    }));
+                                }
+                                DiagramOutcome::Failed(reason) => {
+                                    lines.push(format!("mermaid: {reason}"));
+                                    lines.extend(code_text_lines(source, closed, width));
+                                }
+                            }
+                        } else {
+                            lines.extend(code_text_lines(source, closed, width));
+                        }
                     }
                 }
             }
@@ -802,6 +1044,8 @@ fn code_lines(raw: &str, offset: usize, closed: bool, width: usize) -> Vec<BodyL
             pad: false,
             warn: false,
             hint: false,
+            diagram: None,
+            reason: false,
         });
     }
     if out.is_empty() {
@@ -814,6 +1058,8 @@ fn code_lines(raw: &str, offset: usize, closed: bool, width: usize) -> Vec<BodyL
             pad: false,
             warn: false,
             hint: false,
+            diagram: None,
+            reason: false,
         });
     }
     out
@@ -846,6 +1092,7 @@ mod tests {
             fold: ToolFold::Expanded,
             preview_lines: 5,
         },
+        mermaid: true,
     };
 
     /// The given reasoning mode with the tools expanded.

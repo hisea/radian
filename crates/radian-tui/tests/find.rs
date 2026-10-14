@@ -324,6 +324,7 @@ const EXPANDED: DisplayModes = DisplayModes {
         fold: radian_tui::tools::ToolFold::Expanded,
         preview_lines: 5,
     },
+    mermaid: true,
 };
 
 /// A folded tool body must not vanish from the search (ADR 0028 R4 / this slice): the match

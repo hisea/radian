@@ -284,6 +284,10 @@ pub struct TuiConfig {
     /// (default 5). `None` means the default; a non-positive or non-integer value is skipped
     /// with a warning.
     pub display_tool_preview_lines: Option<u64>,
+    /// `tui.display.mermaid` (ADR 0028 R8): draw a closed ```` ```mermaid ```` block as a
+    /// Unicode diagram. `None` means the default (`true`); an unknown value is ignored with a
+    /// warning.
+    pub display_mermaid: Option<bool>,
 }
 
 /// One parsed configuration file.
@@ -825,6 +829,9 @@ fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
                         ("tool_preview_lines", Value::Integer(lines)) if *lines > 0 => {
                             config.tui.display_tool_preview_lines = Some(*lines as u64);
                         }
+                        ("mermaid", Value::Boolean(on)) => {
+                            config.tui.display_mermaid = Some(*on);
+                        }
                         // A display preference: skip the key with a warning, never refuse the
                         // file. The TUI keeps its default.
                         _ => config.skipped.push(format!("tui.display.{key}")),
@@ -1125,6 +1132,16 @@ theme = "light"
         let config = parse_str("schema_version = 1\n[tui]\ninput_style = \"future\"\n").unwrap();
         assert_eq!(config.tui.input_style, None);
         assert!(config.skipped.contains(&"tui.input_style".to_string()));
+    }
+
+    /// `tui.display.mermaid` (ADR 0028 R8): a bool is carried; an unknown value is skipped.
+    #[test]
+    fn the_display_mermaid_flag_is_carried_and_a_non_bool_is_skipped() {
+        let config = parse_str("schema_version = 1\n[tui.display]\nmermaid = false\n").unwrap();
+        assert_eq!(config.tui.display_mermaid, Some(false));
+        let config = parse_str("schema_version = 1\n[tui.display]\nmermaid = \"yes\"\n").unwrap();
+        assert_eq!(config.tui.display_mermaid, None);
+        assert!(config.skipped.contains(&"tui.display.mermaid".to_string()));
     }
 
     /// `tui.display.reasoning` (ADR 0028 R3): the three modes are carried; an unknown one is

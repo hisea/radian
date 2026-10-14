@@ -167,6 +167,7 @@ mod tests {
             fold: ToolFold::Expanded,
             preview_lines: 5,
         },
+        mermaid: true,
     };
     use crate::app::{Entry, EntryKind};
 

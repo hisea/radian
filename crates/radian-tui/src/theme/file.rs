@@ -127,6 +127,10 @@ fn fg_source(role: Role) -> Option<&'static str> {
         // The notice's two halves take pi's two text levels (ADR 0028 decision).
         Role::NoticeLabel => Some("accent"),
         Role::NoticeBody => Some("muted"),
+        // A diagram's roles (ADR 0028 R8): node = accent, edge = dim, text = primary.
+        Role::MermaidNode => Some("accent"),
+        Role::MermaidEdge => Some("dim"),
+        Role::MermaidText => Some("text"),
         // The main text level itself (Pi's `text`): the mapping is used by the file themes;
         // the built-ins take pi's values directly.
         Role::Text => Some("text"),

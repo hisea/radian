@@ -366,10 +366,27 @@ impl Default for ToolDisplay {
 }
 
 /// Everything the layout cache key depends on besides the width and the text length.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// `mermaid` (ADR 0028 R8) is here rather than beside the layout call: a rendered diagram is
+/// part of what a laid-out line is, so toggling it must invalidate the same caches the folds
+/// do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DisplayModes {
     pub reasoning: ReasoningMode,
     pub tools: ToolDisplay,
+    pub mermaid: bool,
+}
+
+impl Default for DisplayModes {
+    fn default() -> Self {
+        // The config default (`tui.display.mermaid`) is on, so a default set of modes draws
+        // diagrams too.
+        Self {
+            reasoning: ReasoningMode::default(),
+            tools: ToolDisplay::default(),
+            mermaid: true,
+        }
+    }
 }
 
 #[cfg(test)]

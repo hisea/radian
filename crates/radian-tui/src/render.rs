@@ -415,6 +415,23 @@ fn render_row(
         };
         spans.push(Span::styled(label.to_owned(), label_style));
         spans.push(Span::styled(rest.to_owned(), rest_style));
+    } else if let Some(diagram) = &row.diagram {
+        // A rendered diagram (ADR 0028 R8): each piece takes its own role's style.
+        for (piece, role) in diagram {
+            let style = match role {
+                blocks::DiagramRole::Node => theme.mermaid_node,
+                blocks::DiagramRole::Edge => theme.mermaid_edge,
+                blocks::DiagramRole::Text => theme.mermaid_text,
+            };
+            let style = match band {
+                Some(band) => style.patch(band),
+                None => style,
+            };
+            spans.push(Span::styled(piece.clone(), style));
+        }
+    } else if row.reason {
+        // A weak one-line reason (`mermaid: …`, ADR 0028 R8): the dim/truncation role.
+        spans.push(Span::styled(row.text.clone(), theme.truncation));
     } else {
         spans.push(Span::styled(row.text.clone(), body_style));
     }

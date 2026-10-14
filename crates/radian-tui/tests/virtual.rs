@@ -22,6 +22,7 @@ const EXPANDED: DisplayModes = DisplayModes {
         fold: ToolFold::Expanded,
         preview_lines: 5,
     },
+    mermaid: true,
 };
 
 fn text(lines: &[Line<'static>]) -> Vec<String> {

@@ -911,3 +911,24 @@ context text and the scroll position are the first to go. The last segment is ne
 A tool call shows as `-> name({…args…})`, its result as `<- <text>` (red on an error), and
 the status line carries a `tool <name> running` note while it runs. The call, the wait for
 approval, execution and the result are therefore distinguishable states.
+
+## Mermaid blocks (ADR 0028 R8)
+
+A fenced code block whose info string is `mermaid` (ASCII case-insensitive) and which is
+**closed** is drawn as a Unicode diagram with the vendored `codex-mermaid` (R8), at the
+transcript body width. While the fence is open (streaming) the source shows; the diagram
+appears when the closing fence arrives. `tui.display.mermaid = false` (config) renders every
+code block as source.
+
+A diagram the vendor cannot render (unsupported syntax, its limits, or too narrow) keeps the
+**source** and puts one dim `mermaid: <reason>` line first — never a half diagram. Widening the
+terminal re-renders: the diagram cache is keyed by `(width, text_len)`, so a `TooWide` failure
+can succeed on a wider screen.
+
+The three diagram roles take their colors from the theme (ADR 0029): `mermaid_node` (pi's
+`accent`), `mermaid_edge` (pi's `dim`) and `mermaid_text` (pi's `text`). `mono` uses modifiers
+only; `[tui.colors]` overrides each like any other role.
+
+Selecting a diagram selects its block (the diagram has no source offsets of its own), so a copy
+yields the Mermaid **source** — the text that actually exists. Ctrl-F searches the diagram's
+rendered lines (node labels included) because `body_text_lines` returns what is drawn.

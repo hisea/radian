@@ -94,6 +94,10 @@ pub struct Entry {
     /// last measured at. The renderer keeps it so a frame only re-lays out entries that
     /// changed or are on screen.
     pub(crate) layout_cache: Option<((usize, usize, crate::tools::DisplayModes), usize)>,
+    /// Rendered Mermaid diagrams (ADR 0028 R8), keyed by `(width, text_len)`: the width is in
+    /// the key because `TooWide` can succeed on a wider terminal. Filled by the mutable
+    /// measure pass; the immutable layout paths render fresh on a miss.
+    pub(crate) diagram_cache: Option<(usize, usize, Vec<crate::blocks::DiagramOutcome>)>,
 }
 
 impl Entry {
@@ -108,6 +112,7 @@ impl Entry {
             tool: None,
             block_cache: None,
             layout_cache: None,
+            diagram_cache: None,
         }
     }
 }
@@ -919,6 +924,10 @@ pub struct App {
     /// How tool card bodies fold (ADR 0028 R4, `tui.display.tool_output` +
     /// `tool_preview_lines`). Also part of the layout cache keys.
     pub tool_display: crate::tools::ToolDisplay,
+    /// `tui.display.mermaid` (ADR 0028 R8), default true: draw a closed ```mermaid block as a
+    /// diagram. `false` renders every code block as source. Part of `DisplayModes`, so it is
+    /// in the layout cache key.
+    pub mermaid_enabled: bool,
 }
 
 impl App {
@@ -967,6 +976,7 @@ impl App {
             // ADR 0028 R3's default: thinking collapsed to one line.
             reasoning_mode: ReasoningMode::Collapsed,
             tool_display: crate::tools::ToolDisplay::default(),
+            mermaid_enabled: true,
         }
     }
 
@@ -1002,6 +1012,7 @@ impl App {
         crate::tools::DisplayModes {
             reasoning: self.reasoning_mode,
             tools: self.tool_display,
+            mermaid: self.mermaid_enabled,
         }
     }
 
@@ -1082,6 +1093,8 @@ impl App {
                 .map(|lines| lines as usize)
                 .unwrap_or(5),
         };
+        // `tui.display.mermaid` (ADR 0028 R8, default true).
+        self.mermaid_enabled = config.tui.display_mermaid.unwrap_or(true);
         // `tui.clipboard` (default OSC 52). An unknown spelling never reaches here (the host
         // config reader skips it with a warning); `pbcopy` off macOS does: warn once and fall
         // back, because the copy effect would have no program to run.
