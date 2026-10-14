@@ -323,15 +323,14 @@ fn build(
     // pi's documented optional-role fallbacks.
     let mut unknown: Vec<String> = Vec::new();
     for (pi_name, fallback) in PI_FALLBACKS {
-        if !resolved.contains_key(pi_name) {
-            if let Some(&fallback_color) = resolved.get(fallback) {
+        if !resolved.contains_key(pi_name)
+            && let Some(&fallback_color) = resolved.get(fallback) {
                 resolved.insert(pi_name, fallback_color);
             }
-        }
     }
     for (pi_name, &color) in &resolved {
         if targets_for_pi_name(pi_name).is_empty() {
-            if PI_ROLES.contains(&pi_name) {
+            if PI_ROLES.contains(pi_name) {
                 let mut style = Style::default();
                 apply_color(&mut style, Channel::Foreground, color, truecolor);
                 theme.reserved.insert((*pi_name).to_owned(), style);
@@ -603,7 +602,7 @@ impl VarResolver<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::{ColorValue, Rgb};
+    
 
     fn theme_json(vars: &str, colors: &str) -> String {
         format!("{{ \"name\": \"t\", \"vars\": {vars}, \"colors\": {colors} }}")
