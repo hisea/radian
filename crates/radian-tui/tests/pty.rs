@@ -68,7 +68,17 @@ impl Drop for KillOnDrop {
 /// inherits the master and the pty never sees EOF). `home` is a private HOME the caller keeps
 /// alive. Returns the child (killed on drop) and the master for reading/closing.
 fn spawn_direct(args: &[&str], home: &std::path::Path) -> (KillOnDrop, std::fs::File) {
-    let (child, master, _slave) = spawn_direct_keeping_slave(args, home);
+    spawn_direct_in(args, home, None)
+}
+
+/// [`spawn_direct`], with the child's working directory set: the default-workspace tests need a
+/// session started *from* a particular directory.
+fn spawn_direct_in(
+    args: &[&str],
+    home: &std::path::Path,
+    cwd: Option<&std::path::Path>,
+) -> (KillOnDrop, std::fs::File) {
+    let (child, master, _slave) = spawn_direct_keeping_slave(args, home, cwd);
     (child, master)
 }
 
@@ -78,6 +88,7 @@ fn spawn_direct(args: &[&str], home: &std::path::Path) -> (KillOnDrop, std::fs::
 fn spawn_direct_keeping_slave(
     args: &[&str],
     home: &std::path::Path,
+    cwd: Option<&std::path::Path>,
 ) -> (KillOnDrop, std::fs::File, std::os::fd::OwnedFd) {
     use std::os::fd::FromRawFd;
     let mut master_fd: libc::c_int = -1;
@@ -116,6 +127,9 @@ fn spawn_direct_keeping_slave(
     }
     cmd.env("TERM", "xterm-256color");
     cmd.env("HOME", home.as_os_str());
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
     cmd.env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json");
     let keep_slave = slave.try_clone().unwrap();
     cmd.stdin(std::process::Stdio::from(slave.try_clone().unwrap()));
@@ -2276,7 +2290,8 @@ async fn pty_clean_exit_prints_one_reason_line() {
         .rsplit_once("\u{1b}[?1049l")
         .map(|(_, rest)| rest.to_string())
         .unwrap_or_default();
-    let reason = "session exit-reason saved; resume with `--resume exit-reason`";
+    // The owner's UI review: the line carries a paste-ready command, not just the flag.
+    let reason = "session exit-reason saved; resume: radian-tui --resume exit-reason";
     let start = after
         .find(reason)
         .unwrap_or_else(|| panic!("no exit reason on the normal screen: {after}"));
@@ -4864,6 +4879,7 @@ async fn pty_the_watchdog_restores_the_stdout_flags() {
             "10000",
         ],
         home.path(),
+        None,
     );
     // Wait for the mouse-on sequence: the app has entered the terminal and is now sleeping in
     // `draw_frame`, so the signal below reaches the watchdog.
@@ -5219,8 +5235,358 @@ async fn pty_ask_user_is_registered_without_a_workspace() {
         body.contains("ask_user"),
         "the request's tool list must offer ask_user without --workspace: {body}"
     );
+    // The owner's UI review changed this: the current directory is the coding root now, so a
+    // session without `--workspace` does have the file tools.
     assert!(
-        !body.contains("\"name\":\"read\""),
-        "no coding tools exist without --workspace: {body}"
+        body.contains("\"name\":\"read\""),
+        "the current directory is the coding root: {body}"
     );
+}
+
+/// The slash command tree completes every level: typing `/mem` lists the
+/// commands, Tab completes the name, the next level's list appears, and Tab completes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_the_slash_completion_walks_the_command_tree() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("slash-completion");
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "slash",
+            "--offline-catalog",
+        ],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("type a message", 10),
+        "{}",
+        pty.screen()
+    );
+
+    pty.send(b"/mem");
+    assert!(
+        pty.wait_for_screen("/memory", 10),
+        "the command list did not appear:\n{}",
+        pty.screen()
+    );
+    pty.send(b"\t");
+    assert!(
+        pty.wait_for_screen("> /memory ", 10),
+        "Tab did not complete the command name:\n{}",
+        pty.screen()
+    );
+    // The next level's list is already up; a partial is fuzzy-matched and completed.
+    pty.send(b"fo");
+    assert!(
+        pty.wait_for_screen("forget", 10),
+        "the subcommand list did not appear:\n{}",
+        pty.screen()
+    );
+    pty.send(b"\t");
+    assert!(
+        pty.wait_for_screen("> /memory forget", 10),
+        "Tab did not complete the subcommand:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+// ---------- the default workspace ----------
+
+/// Without `--workspace` the current directory is the coding root, so the first request carries
+/// the file tools (before this, a session without `--workspace` had none).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_without_a_workspace_the_current_directory_is_the_coding_root() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("default-workspace");
+    let server = MockServer::start(vec![text_reply("OK")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "default-workspace",
+        ],
+        24,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"hi\r");
+    assert!(pty.wait_for_screen("OK", 15), "{}", pty.screen());
+    let requests = server.requests();
+    let tools: Vec<String> = requests[0].json()["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .map(|tool| {
+            tool["function"]["name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect();
+    assert!(tools.iter().any(|name| name == "read"), "{tools:?}");
+    assert!(tools.iter().any(|name| name == "write"), "{tools:?}");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// `$HOME` itself is never the coding root: the session uses `$HOME/tmp`, creates it `0700`, and
+/// says so on the startup line.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_session_started_from_home_uses_home_tmp() {
+    use std::os::unix::fs::PermissionsExt;
+    let _serial = pty_guard();
+    let home = TempDir::new("home-workspace");
+    let sessions = TempDir::new("home-workspace-sessions");
+    let (mut child, mut master) = spawn_direct_in(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            sessions.path().to_str().unwrap(),
+            "--session-id",
+            "home-workspace",
+            "--offline-catalog",
+        ],
+        home.path(),
+        Some(home.path()),
+    );
+    let needle = "workspace: ~/tmp (cwd is $HOME)";
+    // A screen model, because the renderer writes each word at its own cursor position.
+    let mut parser = vt100::Parser::new(24, 100, 0);
+    let mut buf = [0u8; 65536];
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !parser.screen().contents().contains(needle) {
+        if let Ok(n) = master.read(&mut buf) {
+            parser.process(&buf[..n]);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the startup line is missing:\n{}",
+            parser.screen().contents()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let tmp = home.path().join("tmp");
+    assert!(tmp.is_dir(), "$HOME/tmp is created");
+    let mode = std::fs::metadata(&tmp).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o700, "owner only");
+    drop(master);
+    let _ = child.0.kill();
+    let _ = child.0.wait();
+}
+
+/// The filesystem root is refused, with the way out named.
+#[cfg(unix)]
+#[test]
+fn pty_a_session_started_from_the_filesystem_root_is_refused() {
+    let _serial = pty_guard();
+    let home = TempDir::new("root-workspace-home");
+    let sessions = TempDir::new("root-workspace-sessions");
+    let (mut child, mut master) = spawn_direct_in(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            sessions.path().to_str().unwrap(),
+            "--session-id",
+            "root-workspace",
+            "--offline-catalog",
+        ],
+        home.path(),
+        Some(std::path::Path::new("/")),
+    );
+    let mut drained = Vec::new();
+    let mut buf = [0u8; 65536];
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            break status;
+        }
+        if let Ok(n) = master.read(&mut buf) {
+            drained.extend_from_slice(&buf[..n]);
+        }
+        assert!(Instant::now() < deadline, "the app did not exit");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(1), "a startup refusal");
+    let text = String::from_utf8_lossy(&drained);
+    assert!(text.contains("filesystem root"), "{text}");
+    assert!(text.contains("--workspace"), "{text}");
+}
+
+/// `--resume` without a value is the picker in "resume only" mode: it lists
+/// this workspace's sessions, offers no "new" entry, resumes the chosen one, and Esc leaves
+/// without creating a file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_resume_without_a_value_picks_a_session() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("resume-pick");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let workspace = std::fs::canonicalize(&ws)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    seed_session(&sessions, "alpha", &workspace, "ALPHA-HISTORY").await;
+    seed_session(&sessions, "beta", &workspace, "BETA-HISTORY").await;
+    let listing = |sessions: &std::path::Path| -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(sessions)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            // Session files only: the picker's index database is not a session.
+            .filter(|name| name.ends_with(".jsonl"))
+            .collect();
+        names.sort();
+        names
+    };
+    let before = listing(&sessions);
+
+    let server = MockServer::start(vec![text_reply("PICKED-REPLY")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--resume",
+        ],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("alpha", 10),
+        "the picker did not list the sessions:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("n new"),
+        "a resume-only picker must not offer a new session:\n{}",
+        pty.screen()
+    );
+    // Filter to beta (without it, Enter would resume the first row) and resume it.
+    pty.send(b"beta");
+    assert!(
+        pty.wait_until(5, |screen| !screen.contains("alpha")),
+        "the filter did not narrow the list:\n{}",
+        pty.screen()
+    );
+    pty.send(b"\r");
+    assert!(
+        pty.wait_for_screen("resumed session beta", 10),
+        "Enter did not resume the chosen session:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("BETA-HISTORY", 10),
+        "the resumed history is missing:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+
+    // Esc (Quit) leaves the pre-session phase without creating anything.
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--resume",
+            "--offline-catalog",
+        ],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("alpha", 10),
+        "the picker did not open again:\n{}",
+        pty.screen()
+    );
+    pty.send(&[0x1b]);
+    assert!(pty.wait_for_exit(10).is_some(), "Esc did not leave");
+    assert_eq!(pty.app_exit_code(), Some(0));
+    assert_eq!(listing(&sessions), before, "no session file was created");
+}
+
+/// The exit line is a command the user can paste: the program name, the id,
+/// and the flags that must be repeated — and never a key or a header value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_the_exit_line_is_a_copyable_resume_command() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("resume-command");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let server = MockServer::start(vec![text_reply("OK")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "copyable",
+            "--header",
+            "x-trace=HEADER-VALUE",
+            "--api-key-env",
+            "MY_KEY",
+        ],
+        24,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    let after = raw
+        .rsplit_once("\u{1b}[?1049l")
+        .map(|(_, rest)| rest.to_string())
+        .unwrap_or_default();
+    let line = after
+        .lines()
+        .find(|line| line.contains("resume:"))
+        .unwrap_or_else(|| panic!("no resume command on the normal screen: {after}"));
+    assert!(line.contains("radian-tui --resume copyable"), "{line}");
+    assert!(line.contains("--session-dir"), "{line}");
+    assert!(line.contains(sessions.to_str().unwrap()), "{line}");
+    assert!(!line.contains("HEADER-VALUE"), "no header value: {line}");
+    assert!(!line.contains("MY_KEY"), "no key: {line}");
+    assert!(!line.contains("--header"), "{line}");
+    assert!(!line.contains("--api-key-env"), "{line}");
 }

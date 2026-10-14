@@ -111,22 +111,23 @@ the provider and the model only.
 ## Layout and keys
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│ transcript: user >, assistant, ~ reasoning, -> tool, <- result│
-├──────────────────────────────────────────────────────────────┤
-│ message  (type here)                                          │
-└──────────────────────────────────────────────────────────────┘
+transcript: user >, assistant, ~ reasoning, -> tool, <- result
+──────────────────────────────────────────────────────────────
+> type here
+──────────────────────────────────────────────────────────────
  model │ idle/running/cancelled │ tier │ usage in/out │ mcp servers/tools │ context │ scroll N/M
 ```
 
-The input box is a real composer (cursor editing, multi-line, history). The transcript scrolls
-with PageUp/PageDown, Shift-Up/Shift-Down and Ctrl-Home/Ctrl-End; the bare arrow keys belong to
-the composer.
+The input area is a rule above and below with a `> ` prompt; a continuation
+line is indented two cells instead of repeating the prompt. `tui.input_style = "box"` restores
+the older bordered box. It is a real composer either way (cursor editing, multi-line, history).
+The transcript scrolls with PageUp/PageDown, Shift-Up/Shift-Down and Ctrl-Home/Ctrl-End; the
+bare arrow keys belong to the composer.
 
 | Key | Action |
 |---|---|
-| Enter | send. Idle → `Inbox::followup`; while a turn runs → `Inbox::steer` |
-| Tab | complete the `@` file reference at the cursor: one candidate is inserted (a directory keeps its trailing `/`, a file gets a space); several complete to their longest common prefix, and a second Tab already at that prefix shows the candidate list above the input box; any other word does nothing (the key is reserved) |
+| Enter | send. Idle → `Inbox::followup`; while a turn runs → `Inbox::steer`. **While a completion list is up it accepts the best candidate instead** (it completes, it never executes) |
+| Tab | complete what is at the cursor. On a `/…` line: the command tree (below). Otherwise the `@` file reference: one candidate is inserted (a directory keeps its trailing `/`, a file gets a space); several complete to their longest common prefix, and a second Tab already at that prefix shows the candidate list above the input box; any other word does nothing (the key is reserved) |
 | Ctrl-J (or Shift-Enter / Alt-Enter) | insert a newline in the input |
 | Left / Right | move the cursor one character |
 | Ctrl-Left / Ctrl-Right (or Alt-Left / Alt-Right) | move by one word |
@@ -161,6 +162,7 @@ The file is read the same way as the CLI's (`--config`, `RADIAN_CONFIG`,
 schema_version = 1
 [tui]
 theme = "dark"                 # dark | light | mono
+input_style = "lines"          # lines (default) | box
 mouse = true                   # the wheel scrolls the transcript (default true)
 
 [tui.keybindings]
@@ -172,6 +174,8 @@ find = ["ctrl-f"]              # open the in-transcript search box
 find_next = ["ctrl-g", "shift-enter"]
 ```
 
+- `input_style`: `lines` (the default: a rule above and below, `> ` on the first line) or `box`
+  (the bordered input box). An unknown value is ignored with a warning and falls back to `lines`.
 - `theme`: `dark` is the original palette, `light` re-picks it for a light background, `mono`
   uses no color at all (bold/underline/dim only). A non-empty `NO_COLOR` environment variable
   forces `mono` (<https://no-color.org>). An unknown theme is ignored with a warning.
@@ -222,6 +226,19 @@ once and deletes the file. A panic writes nothing (the panic path does no file I
 and the index only read `*.jsonl`, so a draft is never a session.
 
 ## Slash commands (`/`)
+
+A `/…` line is a command: it never reaches the model, the transcript or the journal. Typing `/`
+shows the command tree's candidates above the input area; **every level completes**, with one
+fuzzy match (a subsequence, prefix matches first): `/mem` → `/memory`, then `/memory fo` →
+`forget`. Tab or Enter accepts the best candidate (it completes the line, it never runs it) and
+Esc closes the list. `/mem fo` completes both levels at once.
+
+The levels are data (`command.rs`): the command names from their `/help` lines, `/memory`'s
+subcommands, the record ids of `show`/`edit`/`archive`/`restore`/`forget`/`confirm` (listed by
+the host — `update` never does I/O), `/export`'s `md|json` and `--force`, and free text for
+`/sessions` and `/compact`. A future `/model` (provider → model, ADR 0026) or `/login` is one
+more entry in the same tree.
+
 
 A submitted line whose first non-space character is `/` is a **command**: it never reaches the
 model, the transcript or the session journal. `//text` is the escape — one `/` is dropped and
@@ -324,6 +341,25 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
 - **the budget status segment**: with a small `--context-window`, is the `T / B` projection
   and the reported-vs-estimated wording readable at your width, and does the over-budget
   highlight stand out without looking like an error?
+- **the input area's two styles**: is `lines` (the default) comfortable, and is
+  the `> ` prompt clear when the input is multi-line? Try `input_style = "box"` and compare.
+- **notice and hint readability**: `/help`'s output and the placeholder must be
+  readable on your background. `dark` now uses the terminal's default foreground for notices and
+  `Gray` for hints; is that right on your terminal, and is the light palette's hint (dark gray on
+  light) readable?
+- **the slash completion's fuzzy order**: type `/` and a few letters — are the
+  candidates in the order you expect, and is the description column readable at your width? Is
+  the one-key-accepts-it rule (Tab/Enter) comfortable, or does Enter accepting a candidate
+  surprise you?
+- **the default workspace**: run `radian-tui` with no `--workspace` from a
+  project directory — the file tools must be there and the sandbox must confine them there. From
+  `$HOME` the startup line must say `workspace: ~/tmp (cwd is $HOME)`, and the filesystem root
+  must be refused.
+- **`--resume` without a value**: does the picker list only sessions (no `n`),
+  and does Esc leave with nothing created?
+- **the exit line**: after Ctrl-C twice (or a SIGTERM), is the printed
+  `resume: radian-tui --resume <id> …` command paste-ready in your shell, with the paths and
+  quoting right?
 - **mouse selection/copy**: with the default `tui.mouse = true`, the app reports the wheel
   (and buttons) with `?1000h ?1006h`, so a plain drag no longer selects in the emulator. Try
   **Shift+drag** (most terminals) or set `mouse = false` in the config to restore the

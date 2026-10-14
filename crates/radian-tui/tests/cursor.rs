@@ -18,10 +18,10 @@ fn the_cursor_cell_counts_display_width_not_chars() {
     app.input.set_text("你好");
     let terminal = render(&mut app, 20, 8);
     let cursor = terminal.backend().cursor_position();
-    // The box has a border, so the inner cursor starts at x = 1; two 2-cell characters put it
-    // at column 4.
-    assert_eq!(cursor.x, 5, "border + two 2-cell characters");
-    // The box is three rows tall at the bottom (a border, one text row, a border).
+    // The input area has a `> ` prompt, so the text starts at x = 2; two 2-cell characters put
+    // the cursor at column 4.
+    assert_eq!(cursor.x, 6, "prompt + two 2-cell characters");
+    // The area is three rows tall at the bottom (a rule, one text row, a rule).
     assert_eq!(cursor.y, 5);
 }
 
@@ -31,8 +31,8 @@ fn the_cursor_follows_soft_wrap() {
     app.input.set_text("abcdefghij");
     let terminal = render(&mut app, 10, 8);
     let cursor = terminal.backend().cursor_position();
-    // The 8-wide inner area wraps after `abcdefgh`; the cursor is on the next row at column 2.
-    assert_eq!(cursor.x, 3, "border + column 2");
+    // The 8-wide text area wraps after `abcdefgh`; the cursor is on the next row at column 2.
+    assert_eq!(cursor.x, 4, "prompt + column 2");
     assert_eq!(cursor.y, 5);
 }
 
@@ -42,7 +42,7 @@ fn a_multiline_input_grows_the_box_and_a_long_one_scrolls_to_the_cursor() {
     app.input.set_text("a\nb\nc");
     let terminal = render(&mut app, 20, 12);
     let cursor = terminal.backend().cursor_position();
-    // Three text rows + two borders = 5; the cursor is on the last text row.
+    // Three text rows + two rules = 5; the cursor is on the last text row.
     assert_eq!(cursor.y, 12 - 1 - 5 + 1 + 2);
 
     // More than ten rows: the box caps and follows the cursor instead of growing.
@@ -50,6 +50,6 @@ fn a_multiline_input_grows_the_box_and_a_long_one_scrolls_to_the_cursor() {
     app.input.set_text(&"x\n".repeat(20));
     let terminal = render(&mut app, 20, 30);
     let cursor = terminal.backend().cursor_position();
-    // The box is 12 tall (10 text rows + 2 borders), at the bottom of the screen.
+    // The area is 12 tall (10 text rows + 2 rules), at the bottom of the screen.
     assert_eq!(cursor.y, 30 - 1 - 12 + 1 + 9);
 }

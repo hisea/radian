@@ -399,3 +399,64 @@ fn the_decline_confirmation_is_shown() {
     let shown = text_of(&render::question_lines(&form, 60, 10));
     assert!(shown.contains("press Esc again to decline"), "{shown}");
 }
+
+/// The input area in the style of pi: a rule above and below, `> ` on the
+/// first line, and continuation lines indented by two cells instead of repeating the prompt.
+#[test]
+fn the_input_area_has_rules_and_a_prompt_instead_of_a_box() {
+    let mut app = App::new("m", "s");
+    app.input = "first\nsecond".into();
+    let text = screen(&render(&mut app, 20, 8));
+    assert!(!text.contains("message"), "the box title is gone:\n{text}");
+    let lines: Vec<&str> = text.lines().collect();
+    let rules: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.starts_with("────"))
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(rules.len(), 2, "a rule above and below:\n{text}");
+    // The two text rows sit between the rules, with the prompt on the first and the
+    // continuation indented by the same two cells.
+    assert_eq!(lines[rules[0] + 1].trim_end(), "> first", "{text}");
+    assert_eq!(lines[rules[0] + 2].trim_end(), "  second", "{text}");
+    assert_eq!(
+        rules[1],
+        rules[0] + 3,
+        "two text rows between them:\n{text}"
+    );
+    // No vertical border inside the input area (the status bar's `│` separators are elsewhere).
+    for line in &lines[rules[0]..=rules[1]] {
+        assert!(!line.contains('│'), "no vertical border:\n{text}");
+    }
+}
+
+/// The empty input shows the placeholder after the prompt.
+#[test]
+fn the_empty_input_shows_the_placeholder_after_the_prompt() {
+    let mut app = App::new("m", "s");
+    let text = screen(&render(&mut app, 80, 8));
+    assert!(
+        text.contains("> (type a message, Enter to send, Ctrl-J for a new line)"),
+        "{text}"
+    );
+}
+
+/// `tui.input_style = "box"` keeps the bordered input box (the pre-review shape).
+#[test]
+fn the_box_input_style_draws_the_bordered_box() {
+    let mut app = App::new("m", "s");
+    app.input = "first\nsecond".into();
+    app.input_style = radian_tui::render::InputStyle::Box;
+    let text = screen(&render(&mut app, 20, 8));
+    assert!(text.contains(" message "), "the box title is back:\n{text}");
+    assert!(
+        text.contains("│first"),
+        "the text starts after the border:\n{text}"
+    );
+    assert!(!text.contains("> first"), "{text}");
+    assert!(
+        text.contains("┌") && text.contains("└"),
+        "the box has corners, the lines style has none:\n{text}"
+    );
+}

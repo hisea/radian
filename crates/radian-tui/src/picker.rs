@@ -56,6 +56,9 @@ pub struct Picker {
     /// Whether the picker has the keyboard. An in-session overlay opens **unfocused** so the
     /// composer keeps the keys until the user navigates into it (ADR 0023 U4).
     focused: bool,
+    /// Whether this picker may start a new session: `--pick` may, `--resume` without a value may
+    /// not (it resumes or quits), so `n` and the empty-list "new" path are not offered.
+    allow_new: bool,
 }
 
 impl Picker {
@@ -70,7 +73,14 @@ impl Picker {
             hits: Vec::new(),
             secrets: Vec::new(),
             focused: false,
+            allow_new: true,
         }
+    }
+
+    /// Resume only: no `n`, and an empty list cannot become a new session.
+    pub fn without_new(mut self) -> Self {
+        self.allow_new = false;
+        self
     }
 
     /// Sets the values to redact from a search snippet (the in-session overlay passes the
@@ -159,7 +169,7 @@ impl Picker {
     pub fn on_enter(&self) -> Option<Outcome> {
         match self.selected_id() {
             Some(id) => Some(Outcome::Resume(id)),
-            None if self.rows.is_empty() => Some(Outcome::New),
+            None if self.rows.is_empty() && self.allow_new => Some(Outcome::New),
             // A filter that matched nothing: stay in the picker.
             None => None,
         }
@@ -202,7 +212,7 @@ impl Picker {
             }
             // `n` starts a new session only while the filter is empty; once the user is typing,
             // it is an ordinary filter character.
-            KeyCode::Char('n') if self.query.is_empty() && !self.search => {
+            KeyCode::Char('n') if self.allow_new && self.query.is_empty() && !self.search => {
                 return Some(Outcome::New);
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -273,7 +283,11 @@ pub fn draw(frame: &mut ratatui::Frame, area: Rect, picker: &Picker) {
     }
     if visible.is_empty() {
         let message = if picker.rows.is_empty() {
-            "no sessions yet — press n for a new one"
+            if picker.allow_new {
+                "no sessions yet — press n for a new one"
+            } else {
+                "no sessions for this workspace"
+            }
         } else if picker.search && picker.query.is_empty() {
             "type a query to search the message text"
         } else {
@@ -295,9 +309,10 @@ pub fn draw(frame: &mut ratatui::Frame, area: Rect, picker: &Picker) {
     let hint = picker
         .resume_hint()
         .unwrap_or_else(|| "no selection".to_string());
+    let new_hint = if picker.allow_new { " n new ·" } else { "" };
     frame.render_widget(
         Paragraph::new(format!(
-            "↑/↓ select · type to filter · Tab search · Enter resume · n new · Esc close   {hint}"
+            "↑/↓ select · type to filter · Tab search · Enter resume ·{new_hint} Esc close   {hint}"
         ))
         .style(Style::default().add_modifier(Modifier::DIM)),
         chunks[3],
@@ -326,6 +341,32 @@ mod tests {
         let mut picker = Picker::new(rows, None, "/w");
         picker.focus();
         picker
+    }
+
+    /// `--resume` without a value: resume only, so an empty list cannot become a new session
+    /// and `n` is an ordinary filter character.
+    #[test]
+    fn a_resume_only_picker_offers_no_new_session() {
+        let mut state = Picker::new(Vec::new(), None, "/w").without_new();
+        assert_eq!(state.on_enter(), None, "no new session from an empty list");
+        state.on_key(key(KeyCode::Char('n')));
+        assert_eq!(state.query, "n", "`n` filters instead");
+        assert_eq!(
+            state.on_key(key(KeyCode::Esc)),
+            Some(Outcome::Quit),
+            "Esc still leaves"
+        );
+
+        // The ordinary picker keeps both.
+        let state = picker(vec![row("alpha", "first")]);
+        assert_eq!(state.on_enter(), Some(Outcome::Resume("alpha".into())));
+        let mut empty = picker(Vec::new());
+        assert_eq!(empty.on_enter(), Some(Outcome::New));
+        assert_eq!(
+            empty.on_key(key(KeyCode::Char('n'))),
+            Some(Outcome::New),
+            "`n` starts a new session"
+        );
     }
 
     #[test]

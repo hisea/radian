@@ -19,3 +19,4 @@ profile = "ask"
 [tui]
 theme = "dark"
 mouse = false
+input_style = "lines"
