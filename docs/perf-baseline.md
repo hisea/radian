@@ -742,3 +742,20 @@ A 修掉 `push_message` 的 O(n²) 后，启动仍把同一份 JSONL 读 4 次�
 **不依赖墙钟的测试与变异**：`radian-session` 的 `testing` 特性给 `Session::open` 计数，
 `crates/radian-host/tests/session.rs` 的 `a_resume_parses_the_journal_once` 断言 resume 恰好解析
 一次。变异（`open_journal` 传 `None`，或驱动 `recovery_parse` 传 `None`）→ 计数变 2，测试失败。
+
+### 块布局（blocks2，ADR 0028 规则 1/2/5）
+
+容器自己拥有块间空行（规则 1）、两格标记列（规则 2）、折叠占位符的 `▸` 移到标记列（规则 5）。
+热路径（50k 条目的稳态帧）多出的是：每帧对相邻条目求一次 `block_gap`（两次 kind 比较，
+call/result 对再比一次 call id），以及窗口循环里的空行行。首版给 `gaps()` 每帧分配一个
+`Vec<usize>`（50k push），已改为不分配的求和 + 按下标取相邻条目。
+
+同机对比（release，`perf_render_frame_time` / `perf_render_resize`，共享机器 load 55–150）：
+
+| 指标（50k 条目 @120×40） | main `257c33d` | blocks2 |
+|---|---|---|
+| 稳态帧 p50 | 0.74–1.34 ms | 0.80–1.14 ms |
+| 全局重排后首帧（@80/@120 p50） | 60–64 ms | 50–66 ms |
+
+R7 的门槛（稳态 < 1 ms、重排后首帧 < 100 ms）两边都在同一带内：稳态在共享机器 load 高时
+会越过 1 ms（两边的 p50 都如此，不是本片引入），首帧 < 100 ms 两边都稳。结论：不退化。

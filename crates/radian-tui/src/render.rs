@@ -578,16 +578,21 @@ pub fn visible_lines(
     }
     // The container's blank lines are part of the transcript (ADR 0028 rule 1):
     // the total and the window include them, or the scroll position and the mapping would
-    // disagree with the drawing.
-    let gaps = blocks::gaps(entries);
-    let total: usize = counts.iter().sum::<usize>() + gaps.iter().sum::<usize>();
+    // disagree with the drawing. The sum is computed without allocating a per-entry vector
+    // (this is the 50k-entry frame path).
+    let mut total: usize = counts.iter().sum::<usize>();
+    for index in 1..entries.len() {
+        total += blocks::block_gap(entries.get(index - 1), &entries[index]);
+    }
     let mut out = Vec::with_capacity(height);
     let mut line = 0usize;
-    for (index, (entry, count)) in entries.iter_mut().zip(&counts).enumerate() {
+    for index in 0..entries.len() {
         if out.len() >= height {
             break;
         }
-        let gap = gaps[index];
+        let gap = blocks::block_gap(entries.get(index.wrapping_sub(1)), &entries[index]);
+        let count = counts[index];
+        let entry = &mut entries[index];
         let next = line + gap + count;
         if next > start {
             // The gap lines first, then the entry's own lines.
