@@ -197,29 +197,36 @@ find_next = ["ctrl-g", "shift-enter"]
   falls back to `lines`.
 - `tips` / `banner`: whether the startup screen shows the one Tip line and the wordmark. Both
   default to on; `false` hides them.
-- `footer` (ADR 0027 C2): the status area's rows. `preset` is `pi` (the default: two rows) or
-  `classic` (today's one line, byte-for-byte). `separator` joins items (default `" │ "`), each
+- `footer` (ADR 0027 C2, revision 1): the status area's rows. `preset` is `full` (the default:
+  the identity row `brand`, `host`, `model`, `reasoning`, `cwd`, `git_branch`, `session` and
+  the numbers row `tokens`, `speed`, `cost`, `context`, `elapsed`), `pi` (the earlier two rows)
+  or `classic` (today's one line, byte-for-byte). `separator` joins items (default `" │ "`), each
   row may override it, and `glyphs` is `unicode` (default), `nerd` or `ascii`. Each
   `[[tui.footer.rows]]` has a `left` and a `right` group; an item is a bare id or a table with
   `item`, `icon`, `format`, `style` (a theme role name, or pi's `dim`/`muted`/`accent`/`warn`/
   `error`/`ok`/`text`), `priority`, `thresholds = [{ at = 70, style = "warn" }, …]` and the
   item's own parameters. An unknown item id, placeholder, style or parameter is shown raw
   with one warning and never blocks startup. Narrow terminals drop the `right` group first,
-  then the `left` group from its end, lowest `priority` first. `cwd` and `git_branch` are read
-  once at startup; the draw path never runs git.
+  then the `left` group from its end, lowest `priority` first. `host`, the model's price and
+  the auto-compaction switch are read once at startup; `git_branch`/`worktree` and the change
+  counts come from the background contributor, so the draw path never runs git.
 
 | item | placeholders | default |
 |---|---|---|
+| `brand` | `{brand}` | `㎭` (the unit glyph; `rad` under `glyphs = ascii`) |
+| `host` | `{host}` | the machine's hostname, read once at startup |
 | `model` | `{display_name}`, `{id}`, `{provider}` | the model's display name (or id) |
 | `reasoning` | `{level}` | the thinking level, one theme role per level |
 | `tier` | `{tier}` | the permission tier |
-| `cwd` | `{path}`, `{path_home}`, `{basename}` | `{path_home}` (`$HOME` → `~`) |
-| `git_branch` | `{branch}`, `{dirty}` | the branch (read once at startup) |
+| `cwd` | `{path}`, `{path_home}`, `{basename}`, `{repo}`, `{worktree}` | `{path_home}` (`$HOME` → `~`); `{repo}` falls back to the directory name, `{worktree}` is the contributor's current worktree |
+| `git_branch` | `{branch}`, `{dirty}`, `{modified}`, `{untracked}` | `{branch}`; `{dirty}` is ` ?<total>` while the tree has changes (contributor) |
 | `session` | `{id}` | the session id |
-| `context` | `{bar}`, `{percent}`, `{used}`, `{budget}` | `{used}/{budget}` |
-| `context_bar` | `{bar}`, `{percent}`, `{used}`, `{budget}` | `{bar} {percent}%`, `width` 10, `fill` `━`, `empty` `─` |
-| `tokens` | `{in}`, `{out}`, `{cache}` | `↑{in} ↓{out}` |
-| `cost` | `{usd}` | empty: no cost is tracked yet (never a fabricated number) |
+| `context` | `{bar}`, `{percent}`, `{used}`, `{budget}`, `{auto}` | `{used}/{budget}`; `{auto}` is `⟲` (`auto` under ascii) while auto-compaction is on |
+| `context_bar` | `{bar}`, `{percent}`, `{used}`, `{budget}`, `{auto}` | `{bar} {percent}%`, `width` 10, `fill` `━`, `empty` `─` |
+| `tokens` | `{in}`, `{out}`, `{cache}` | `↑{in} ↓{out} ⛁{cache}`; numbers are `19K`-style, `-` when a provider never reported one |
+| `cost` | `{usd}` | `$` from the model's catalog price (per million tokens) and the session totals; hidden when the catalog has no price (never a fabricated number) |
+| `speed` | `{speed}` | `42.1 tok/s`, the last finished generation's reported output over its measured time |
+| `elapsed` | `{elapsed}` | `16.2s`, live while a generation runs, the last one when idle, empty after a resume |
 | `pending` | `{count}` | shown only when a request waits |
 | `mcp` | `{mcp}` | the configured/connected servers |
 | `scroll` | `{position}`, `{mode}` | `{position} {mode}` |
@@ -466,9 +473,11 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
 - **the budget status segment**: with a small `--context-window`, is the `T / B` projection
   and the reported-vs-estimated wording readable at your width, and does the over-budget
   highlight stand out without looking like an error?
-- **the footer** (ADR 0027 C2): the default is pi's two rows. Does the context bar read at
-  your width, do the reasoning colors tell the levels apart, and does a narrow terminal drop
-  the right group before the left? Try `tui.footer.preset = "classic"` and compare.
+- **the footer** (ADR 0027 C2, revision 1): the default is the `full` two rows (identity, then
+  numbers). Are the brand `㎭`, the hostname, the repo/worktree name and the change counts
+  right, and do the numbers row's `speed`/`cost`/`elapsed` read as expected? Does the context
+  share/`⟲` marker read at your width, and does a narrow terminal drop the low priorities
+  first? Try `tui.footer.preset = "pi"` and `"classic"` and compare.
 - **the `AUTO` status marker** (ADR 0026 D9): turn auto on with `/auto on` — does the reversed
   `AUTO` segment stand out as "this session behaves differently" in `dark`, `light` and `mono`,
   without reading as an error? pty automation asserts the text, not the prominence.
