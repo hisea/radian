@@ -621,9 +621,9 @@ async fn compact_now_scales_the_summary_ceiling_with_the_window() {
 
 /// ADR 0018: the verbatim user messages are part of `T_after`, so the fallback's
 /// half-gain threshold is higher than it was. This history is chosen to sit **inside** that
-/// band: without the verbatim `T_after` would be ~9000 (half of `T_before` would pass), and
-/// with it `T_after` is ~13000, so the fallback fails explicitly instead of sending a request
-/// that is still over the window.
+/// band: without the verbatim `T_after` would be ~9000 and half of `T_before` (21000) would
+/// pass, while with it `T_after` is ~11000, so the fallback fails explicitly instead of sending
+/// a request that is still over the window.
 #[tokio::test]
 async fn the_verbatim_raises_the_fallback_threshold() {
     let model = ScriptedModel::new([
