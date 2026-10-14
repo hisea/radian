@@ -23,6 +23,7 @@ mod mcp;
 pub mod memory;
 pub mod mermaid;
 mod model;
+pub mod opencode_go;
 mod output;
 pub mod pending;
 pub mod projection;
@@ -99,6 +100,11 @@ pub use model::{
     DEFAULT_MAX_TOKENS, HostModel, MIN_THINKING_BUDGET, ModelArgs, Provider, RouteContext,
     SwitchableModel, Thinking, build_model, check_provider_flags, redact_base_url,
     resolve_thinking, resolve_thinking_ref,
+};
+pub use opencode_go::{
+    DEFAULT_PERIOD as OPENCODE_GO_DEFAULT_PERIOD, MAX_PERIOD as OPENCODE_GO_MAX_PERIOD,
+    MIN_PERIOD as OPENCODE_GO_MIN_PERIOD, OpencodeGoUsage, USAGE_URL as OPENCODE_GO_USAGE_URL,
+    clamp_period as clamp_opencode_go_period,
 };
 pub use output::{StdoutError, write_line, write_stdout};
 pub use pending::{

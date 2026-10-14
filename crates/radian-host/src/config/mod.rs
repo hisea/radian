@@ -279,6 +279,9 @@ pub struct TuiConfig {
     /// `tui.banner`: whether the startup screen shows the wordmark. `None`
     /// means the default, on.
     pub banner: Option<bool>,
+    /// `tui.usage_period_secs`: the opencode-go usage refresh period (ADR 0027 C4). `None` means
+    /// the default (60 s); `0` disables the contributor; other values are clamped to 15–600 s.
+    pub usage_period_secs: Option<u64>,
     /// `tui.display.reasoning`: `"collapsed"` (the default), `"expanded"` or `"hidden"`
     /// (ADR 0028 R3). `None` means the default; an unknown value is ignored with a warning.
     pub display_reasoning: Option<String>,
@@ -920,6 +923,9 @@ fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
                 }
             }
             ("widgets", _) => config.skipped.push("tui.widgets".into()),
+            ("usage_period_secs", Value::Integer(seconds)) => {
+                config.tui.usage_period_secs = Some(*seconds as u64);
+            }
             ("display", Value::Table(display)) => {
                 for (key, value) in display {
                     match (key.as_str(), value) {
