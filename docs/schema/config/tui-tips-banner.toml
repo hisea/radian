@@ -1,0 +1,14 @@
+# ADR 0008: `tui.tips` and `tui.banner` are display preferences. Both
+# default to on; `false` hides the Tip line and the startup wordmark. An unknown value is a
+# skipped key with a warning, never a refusal (the `tui.*` rule).
+schema_version = 1
+
+[model]
+provider = "example"
+base_url = "https://example.com/v1"
+model = "m-1"
+
+[tui]
+tips = false
+banner = false
+input_style = "box"

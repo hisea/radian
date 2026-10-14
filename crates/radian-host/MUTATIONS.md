@@ -296,3 +296,16 @@ Base `deb583f` · 在本任务工作树内逐条施加后从副本还原（`--no
 变异 M23（静默忽略 `model.api_key`）、M24（漏掉 `x-opencode-session`）、M25（非通用描述符接受
 `--base-url`）改的是本 crate 的代码，但抓住它们的测试在 `agent-cli`；明细见
 `crates/agent-cli/MUTATIONS.md` 的 M22–M25。
+
+## ui-r2：`/theme` 写回与启动偏好（2026-10-14）
+
+Base `ba7568d` · 一次性检出 `/tmp/ui2-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+`cargo test -p radian-host`，变异后 `git checkout --` 还原，提交前 `git status --short` 为空。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| TW1 | 写回时丢掉注释（`doc.to_string()` 后过滤掉 `#` 行） | 除 `tui.theme` 外逐字节保留 | `theme_write::tests::write_theme_changes_only_the_theme_line` FAILED |
+| TW2 | 只读判定改成 `if false`（高版本也写） | 高 `schema_version` 不写 | `theme_write::tests::write_theme_refuses_a_read_only_config` FAILED |
+
+2/2 抓住。新增键 `tui.tips`/`tui.banner` 的解析测试在 `config`（`startup_pref_tests`）；
+fixture `docs/schema/config/tui-tips-banner.toml` 由 `check-config-fixtures.sh` 校验。

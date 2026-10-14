@@ -119,9 +119,18 @@ transcript: user >, assistant, ~ reasoning, -> tool, <- result
 ```
 
 The input area is a rule above and below with a `> ` prompt; a continuation
-line is indented two cells instead of repeating the prompt. `tui.input_style = "box"` restores
-the older bordered box. It is a real composer either way (cursor editing, multi-line, history).
-The transcript scrolls with PageUp/PageDown, Shift-Up/Shift-Down and Ctrl-Home/Ctrl-End; the
+line is indented two cells instead of repeating the prompt. `tui.input_style = "box"` is the
+owner's bordered shape (2026-10-14): **rounded** corners, the `❯` prompt, and the border in
+the theme's accent (`model`) color. It is a real composer either way (cursor editing,
+multi-line, history).
+
+The **startup screen** is the leading block of transcript entries: the
+wordmark (three rows; below its width it drops to one line, `㎭ radian <version>`, with the
+width measured by `unicode-width`), one collapsed information line, the safety lines in the
+`warning` kind that are never folded (a workspace boundary that was not your choice, every
+config-file warning), and one `Tip:` line. `Ctrl-P` (`toggle_startup`) folds and unfolds the
+information. `tui.banner = false` hides the wordmark, `tui.tips = false` the Tip. The
+transcript scrolls with PageUp/PageDown, Shift-Up/Shift-Down and Ctrl-Home/Ctrl-End; the
 bare arrow keys belong to the composer.
 
 | Key | Action |
@@ -141,6 +150,7 @@ bare arrow keys belong to the composer.
 | Ctrl-Home / Ctrl-End | scroll the transcript to its top / bottom |
 | Esc | (`escape` in the transcript, `find_close` in the find box) close the find box or the `@` candidate list if one is up; otherwise clear a non-empty input first (the line stays in the history, so `Up` finds it); with an empty input, cancel the running turn / quit |
 | Ctrl-C | cancel the running turn; idle with a non-empty input, clear it (into the history); idle with an empty input, arm "press Ctrl-C again to quit" for 2 s (any other key, or the window closing, disarms it; the status bar shows `Press Ctrl-C again to quit`) |
+| Ctrl-P (`toggle_startup`) | fold or unfold the startup information block |
 | Ctrl-F (`find` in the transcript, `find_prev` in the find box) | open the in-transcript search box (`find: <query>`, replacing the input line; the message draft is kept). Type to search the displayed transcript case-insensitively; a second Ctrl-F or Enter is the earlier match, Shift-Enter or Ctrl-G the later one (no wrap); the status bar shows `match i/N`; Esc closes the box where the viewport is |
 | bracketed paste | inserts at the cursor, `\r\n` normalized to `\n`, and never sends |
 
@@ -181,7 +191,10 @@ find_next = ["ctrl-g", "shift-enter"]
 ```
 
 - `input_style`: `lines` (the default: a rule above and below, `> ` on the first line) or `box`
-  (the bordered input box). An unknown value is ignored with a warning and falls back to `lines`.
+  (the owner's rounded box with the `❯` prompt). An unknown value is ignored with a warning and
+  falls back to `lines`.
+- `tips` / `banner`: whether the startup screen shows the one Tip line and the wordmark. Both
+  default to on; `false` hides them.
 - `theme`: `dark` is the original palette, `light` re-picks it for a light background, `mono`
   uses no color at all (bold/underline/dim only). A non-empty `NO_COLOR` environment variable
   forces `mono` (<https://no-color.org>). An unknown theme is ignored with a warning.

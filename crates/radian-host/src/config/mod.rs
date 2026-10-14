@@ -1013,3 +1013,26 @@ future_option = "alpha"
         );
     }
 }
+
+#[cfg(test)]
+mod startup_pref_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn parse_str(text: &str) -> Result<Config, ConfigError> {
+        parse(Path::new("/tmp/test/config.toml"), text)
+    }
+
+    /// ADR 0008: `tui.tips`/`tui.banner` are display booleans; a non-boolean is skipped with a
+    /// warning, never a refusal (the `tui.*` rule).
+    #[test]
+    fn tui_tips_and_banner_are_carried_and_non_booleans_are_skipped() {
+        let config = parse_str("schema_version = 1\n[tui]\ntips = false\nbanner = false\n").unwrap();
+        assert_eq!(config.tui.tips, Some(false));
+        assert_eq!(config.tui.banner, Some(false));
+
+        let config = parse_str("schema_version = 1\n[tui]\ntips = \"yes\"\n").unwrap();
+        assert_eq!(config.tui.tips, None);
+        assert!(config.skipped.contains(&"tui.tips".to_string()));
+    }
+}
