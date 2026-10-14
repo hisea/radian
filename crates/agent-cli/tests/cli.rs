@@ -675,6 +675,179 @@ async fn a_runtime_error_redacts_every_auth_key_not_only_the_route_key() {
     assert!(stderr.contains("<redacted>"), "{stderr}");
 }
 
+/// ADR 0031 T3: a non-interactive run with project resources is untrusted by default, prints
+/// the one-line way out, and writes nothing.
+#[tokio::test]
+async fn a_workspace_with_project_resources_is_untrusted_without_a_terminal() {
+    let dir = scratch("trust-default");
+    let home = dir.0.join("home");
+    let ws = dir.0.join("ws");
+    std::fs::create_dir_all(ws.join(".radian/skills/greet")).unwrap();
+    std::fs::write(
+        ws.join(".radian/skills/greet/SKILL.md"),
+        "---\nname: greet\n---\n",
+    )
+    .unwrap();
+    let sessions = dir.0.join("sessions");
+    let server = MockServer::start(vec![text_reply("TRUST-OK")]).await;
+    let (code, _stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "-p",
+                "hi",
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "--session-id",
+                "trust-default",
+            ],
+            &[("RADIAN_HOME", home.to_str().unwrap())],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0);
+    assert!(
+        stderr.contains("project resources not loaded (untrusted)"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("project resources: not loaded (untrusted: default)"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("--trust"), "{stderr}");
+    assert!(
+        !home.join("trust/trust.json").exists(),
+        "nothing is written"
+    );
+}
+
+/// ADR 0031 T3: `--trust`/`--no-trust` override for this process only and never write.
+#[tokio::test]
+async fn trust_flags_override_without_writing() {
+    let dir = scratch("trust-flags");
+    let home = dir.0.join("home");
+    let ws = dir.0.join("ws");
+    std::fs::create_dir_all(ws.join(".radian/skills/greet")).unwrap();
+    std::fs::write(
+        ws.join(".radian/skills/greet/SKILL.md"),
+        "---\nname: greet\n---\n",
+    )
+    .unwrap();
+    let sessions = dir.0.join("sessions");
+    // One reply per iteration: `-p` runs a turn each time.
+    let server = MockServer::start(vec![text_reply("OK"), text_reply("OK")]).await;
+    for (flag, expected) in [
+        (
+            "--trust",
+            "project resources: loaded (trusted: command line)",
+        ),
+        (
+            "--no-trust",
+            "project resources: not loaded (untrusted: command line)",
+        ),
+    ] {
+        let (code, _, stderr) = feed_and_wait(
+            spawn_agent(
+                &[
+                    "--model",
+                    "m",
+                    "--base-url",
+                    &server.base_url,
+                    "-p",
+                    "hi",
+                    flag,
+                    "--workspace",
+                    ws.to_str().unwrap(),
+                    "--session-dir",
+                    sessions.to_str().unwrap(),
+                    "--session-id",
+                    if flag == "--trust" {
+                        "trust-flag-a"
+                    } else {
+                        "trust-flag-b"
+                    },
+                ],
+                &[("RADIAN_HOME", home.to_str().unwrap())],
+            ),
+            "",
+        )
+        .await;
+        assert_eq!(code, 0, "{flag}: {stderr}");
+        assert!(stderr.contains(expected), "{flag}: {stderr}");
+        assert!(
+            !home.join("trust/trust.json").exists(),
+            "{flag} must not write trust.json"
+        );
+    }
+}
+
+/// ADR 0031 T3: piped stdin is **not** an interactive user. The trust question must not read
+/// its first line (which could be a message, or a stray `y`), so a piped run takes the
+/// untrusted default and sends the piped line as a message.
+#[tokio::test]
+async fn piped_stdin_is_never_read_as_the_trust_answer() {
+    let dir = scratch("trust-piped");
+    let home = dir.0.join("home");
+    let ws = dir.0.join("ws");
+    std::fs::create_dir_all(ws.join(".radian/skills/greet")).unwrap();
+    std::fs::write(
+        ws.join(".radian/skills/greet/SKILL.md"),
+        "---\nname: greet\n---\n",
+    )
+    .unwrap();
+    let sessions = dir.0.join("sessions");
+    let server = MockServer::start(vec![text_reply("PIPED-OK")]).await;
+    let (code, _stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "--session-id",
+                "trust-piped",
+            ],
+            &[("RADIAN_HOME", home.to_str().unwrap())],
+        ),
+        // A stray `y` would be a wrong "allow" if the question read it.
+        "hello from the pipe\n",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    // No question: piped stdin is not a terminal.
+    assert!(!stderr.contains("project resources found in"), "{stderr}");
+    assert!(
+        stderr.contains("project resources: not loaded (untrusted: default)"),
+        "{stderr}"
+    );
+    assert!(
+        !home.join("trust/trust.json").exists(),
+        "nothing is written"
+    );
+    // The piped line was sent as an ordinary message, not consumed by a trust answer.
+    let messages = server.requests()[0].json()["messages"].clone();
+    let user = messages
+        .as_array()
+        .expect("messages")
+        .iter()
+        .rev()
+        .find(|message| message["role"] == "user")
+        .and_then(|message| message["content"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    assert_eq!(user, "hello from the pipe");
+}
+
 #[tokio::test]
 async fn a_remote_base_url_without_a_key_fails_fast() {
     let start = Instant::now();

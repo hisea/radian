@@ -17,6 +17,7 @@ KNOWN_EVENTS = {
     "TurnFinished", "ConfigChanged", "ContextCompacted",
     "Rewound", "ContextBudgetReached", "PermissionResolved", "ApprovalPolicyChanged",
     "MemoryInjected", "ModelUsageRecorded", "CompactionUsageRecorded", "SessionForked",
+    "ProjectTrustChanged",
 }
 # ADR 0005/0006 §5.5：InputSource 的 snake_case 全集。
 SOURCES = {
@@ -71,6 +72,13 @@ EXPECT = {
         events=7,
         skips=[],
         approval_changed=(6, "auto"),
+        repair={},
+    ),
+    "project-trust-changed.jsonl": dict(
+        outcome="accept",
+        events=6,
+        skips=[],
+        trust_changed=(5, "/work/example", True),
         repair={},
     ),
     "replace-committed.jsonl": dict(
@@ -517,6 +525,20 @@ def check_fixture(name, exp):
         for e in events:
             if e["event"] == "ApprovalPolicyChanged" and e["critical"]:
                 raise Corruption(f"{name}: ApprovalPolicyChanged 必须是 critical:false")
+    if "trust_changed" in exp:
+        changed = [
+            (e["seq"], e["data"].get("path"), e["data"].get("decision"))
+            for e in events
+            if e["event"] == "ProjectTrustChanged"
+        ]
+        if changed != [tuple(exp["trust_changed"])]:
+            raise Corruption(
+                f"{name}: trust_changed {changed} != 期望 {[tuple(exp['trust_changed'])]}"
+            )
+        # ADR 0031 T2：信任审计是非 critical 事件。
+        for e in events:
+            if e["event"] == "ProjectTrustChanged" and e["critical"]:
+                raise Corruption(f"{name}: ProjectTrustChanged 必须是 critical:false")
     if outcome == "accept_drop_tail":
         return f"PASS {name}: 接受，丢弃 torn tail {len(tail)} 字节，replay {len(events)} 个事件"
     if outcome == "accept_with_skips":

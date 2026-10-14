@@ -199,6 +199,10 @@ pub enum RuntimeEvent {
         child_session_id: String,
         parent_seq: u64,
     },
+    /// A project-trust decision was written to `trust.json` (ADR 0031 T2/T6). Audit only:
+    /// `critical = false`, never replayed — the store is the state, this is the record that a
+    /// change happened. `path` is the canonical directory the decision is about.
+    ProjectTrustChanged { path: String, decision: bool },
 }
 
 impl RuntimeEvent {
@@ -217,6 +221,7 @@ impl RuntimeEvent {
             RuntimeEvent::ApprovalPolicyChanged { .. } => "ApprovalPolicyChanged",
             RuntimeEvent::MemoryInjected { .. } => "MemoryInjected",
             RuntimeEvent::SessionForked { .. } => "SessionForked",
+            RuntimeEvent::ProjectTrustChanged { .. } => "ProjectTrustChanged",
         }
     }
 
@@ -235,7 +240,8 @@ impl RuntimeEvent {
             | RuntimeEvent::PermissionResolved { .. }
             | RuntimeEvent::ApprovalPolicyChanged { .. }
             | RuntimeEvent::MemoryInjected { .. }
-            | RuntimeEvent::SessionForked { .. } => false,
+            | RuntimeEvent::SessionForked { .. }
+            | RuntimeEvent::ProjectTrustChanged { .. } => false,
         }
     }
 
@@ -254,6 +260,12 @@ impl RuntimeEvent {
             approver,
             reason,
         }
+    }
+
+    /// Builds a `ProjectTrustChanged` audit event (ADR 0031 T2): the host writes one when it
+    /// changes `trust.json`. Non-critical and never replayed.
+    pub fn trust_changed(path: String, decision: bool) -> Self {
+        RuntimeEvent::ProjectTrustChanged { path, decision }
     }
 }
 
@@ -345,6 +357,12 @@ pub(crate) struct MemoryInjectedData<'a> {
     pub records: &'a [MemoryInjectedRecord],
 }
 
+#[derive(Serialize)]
+pub(crate) struct ProjectTrustChangedData {
+    pub path: String,
+    pub decision: bool,
+}
+
 /// The `data` view of one runtime event. A manual enum (like the transcript writer's
 /// `Render`) keeps the field order of the ADR and avoids an externally tagged wrapper.
 pub(crate) enum RuntimeData<'a> {
@@ -360,6 +378,7 @@ pub(crate) enum RuntimeData<'a> {
     ApprovalPolicyChanged(ApprovalPolicyChangedData),
     MemoryInjected(MemoryInjectedData<'a>),
     SessionForked(SessionForkedData<'a>),
+    ProjectTrustChanged(ProjectTrustChangedData),
 }
 
 impl Serialize for RuntimeData<'_> {
@@ -377,6 +396,7 @@ impl Serialize for RuntimeData<'_> {
             RuntimeData::ApprovalPolicyChanged(d) => d.serialize(serializer),
             RuntimeData::MemoryInjected(d) => d.serialize(serializer),
             RuntimeData::SessionForked(d) => d.serialize(serializer),
+            RuntimeData::ProjectTrustChanged(d) => d.serialize(serializer),
         }
     }
 }
@@ -474,5 +494,11 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
             child_session_id,
             parent_seq: *parent_seq,
         }),
+        RuntimeEvent::ProjectTrustChanged { path, decision } => {
+            RuntimeData::ProjectTrustChanged(ProjectTrustChangedData {
+                path: path.clone(),
+                decision: *decision,
+            })
+        }
     }
 }
