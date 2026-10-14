@@ -429,9 +429,10 @@ fn run(
     // Nothing to resume is a refusal, not a new session: `--resume` without a value never
     // creates a file.
     if resume_only && startup_picker.is_none() {
-        return Err(format!(
+        return Err(
             "no sessions for this workspace to resume; run without --resume to start one"
-        ));
+                .to_string(),
+        );
     }
     let pick_notice = cli.pick && startup_picker.is_none();
 
