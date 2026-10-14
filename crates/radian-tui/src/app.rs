@@ -1779,7 +1779,6 @@ impl App {
     fn completion_clear(&mut self) {
         self.remove_overlay(|overlay| matches!(overlay, Overlay::Completion(_)));
         self.mention_completion = None;
-        self.completion_cursor = 0;
     }
 
     pub fn completion_set(&mut self, candidates: Vec<String>) {
