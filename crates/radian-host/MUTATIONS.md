@@ -328,3 +328,24 @@ Base `c120b0e` · 就地变异（改 `write` 的临时名），跑完从备份�
 | F2 | 临时名恢复成 `auth.json.tmp-<pid>`（无计数器/时间戳），并保留写前 `remove_file` | 同进程并发写不得互删临时文件 | `auth::tests::concurrent_writes_in_one_process_do_not_delete_each_other_s_temps` **5/5 次** FAILED，错误正是 `auth.json: No such file or directory (os error 2)`（另一个写者删掉了它正在写的临时文件） |
 
 1/1 抓住，且稳定复现（不是偶发）：Barrier 对齐 + 50 次写，5 次全失败。
+
+## skills 片 1+2：发现、提示节、`skill` 工具（ADR 0025）
+
+Base `4984e8b` · 在一次性 worktree（`/tmp/radian-pi-skills-mut`，detach）就地变异，每条跑完
+`git checkout -- .`，最后 `git status --short` 为空。命令：`cargo test -p radian-host --lib skills`
+（基线 20 passed）。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| SK-M2 | 去掉提示节的预算判断（不再 `break`、不数剩余） | 超预算按发现顺序截断并写 "N more skills not listed" | `skills::tests::over_budget_entries_are_dropped_in_order_with_a_remaining_count` FAILED |
+| SK-M3 | 同名冲突时不 `continue`，改成 `retain` 掉先发现的再推后发现的（后来者胜） | 保留先发现的（路径序在前）并警告 | `skills::tests::a_name_collision_keeps_the_first_and_warns` FAILED |
+| SK-M4 | `skill` 工具改成用名字拼路径（`root.join(name)/SKILL.md`），不走发现表 | 未知名字（含 `../a`）必须是 `unknown_skill` | `skills::tools::tests::an_unknown_name_is_a_tool_result_error` FAILED |
+
+3/3 抓住。
+
+**SK-M1（等价变异，不算洞）**：删掉 `discover` 里的 `candidates.sort()`。`walk` 每层都对子项排序，
+而 `Path` 的 `Ord` 是**分量序**，所以 `walk` 的输出已经就是“每层按名排序的深度优先”＝`Path` 序；
+删掉显式排序无可观察变化，现有顺序/确定性测试仍全绿。正因如此，代码里保留该行并写明它是契约
+（防止将来 `walk` 改动悄悄破坏顺序），而不是靠某条测试钉住一个等价变异。
+
+片 3（TUI `/skill:` / `/skills`）不在本片范围内，另行处理。
