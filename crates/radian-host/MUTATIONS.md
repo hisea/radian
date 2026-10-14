@@ -296,3 +296,19 @@ Base `deb583f` · 在本任务工作树内逐条施加后从副本还原（`--no
 变异 M23（静默忽略 `model.api_key`）、M24（漏掉 `x-opencode-session`）、M25（非通用描述符接受
 `--base-url`）改的是本 crate 的代码，但抓住它们的测试在 `agent-cli`；明细见
 `crates/agent-cli/MUTATIONS.md` 的 M22–M25。
+
+## ADR 0026 D9：启动解析与恢复（2026-10-13）
+
+Base `43ddbff` · 一次性检出 `/tmp/auto-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+单元变异跑 `cargo test -p radian-host --lib approval::tests::<test>`；facade 排队的变异跑
+`radian-tui` 的 pty 测试。变异后 `git checkout --` 还原。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| RH-A1 | 配置 auto 的守卫改成 `tier == Safe`（full 下配置的 auto 生效） | full 忽略配置 auto 并警告 | `approval::tests::config_auto_is_ignored_under_full_with_a_warning` FAILED |
+| RH-A2 | resume 守卫改成 `tier == Safe`（full 恢复了 auto） | full 不恢复 auto，提示 `/auto on` | `approval::tests::full_does_not_restore_auto_and_hints` FAILED；pty 层 `pty_resume_does_not_restore_auto_on_full_and_hints` 同样断言 |
+| RH-A3 | facade `set_approval` 去掉 `config_queue.push` | 每次开关写一条 ConfigChanged | pty `pty_auto_key_approves_once_and_enables_auto`（journal 断言）FAILED |
+
+3/3 抓住。CLI 优先与 workspace 恢复的正路径由
+`approval::tests::an_explicit_cli_choice_wins_and_backfills` /
+`resume_restores_the_journaled_state_over_the_config` 钉住。
