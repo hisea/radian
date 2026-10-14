@@ -681,3 +681,15 @@ Base `0b9785b` · 一次性 worktree `/tmp/radian-pi-mut-m1`，跑完删除。
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
 | M1a | 只认命令行带 id 的 `--resume`（`resumed_route` 读 `cli.resume` 而非解析后的 `resume`） | `pty_a_picked_resume_uses_the_journals_model` | ✅ |
+
+## ui2-review1 U1：Ctrl-C 待退出只由用户输入解除（2026-10-14）
+
+Base `eeadb11` · 一次性检出 `/tmp/ui2b-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+`cargo test -p radian-tui --test quit <test>`，变异后 `git checkout --` 还原，提交前
+`git status --short` 为空。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| R1-1 | 恢复"任何非 Cancel/QuitDeadline 输入都解除"（去掉 `is_user_input`） | 后台事件不解除待退出 | `quit.rs::background_events_do_not_disarm_the_quit_window` FAILED |
+
+1/1 抓住。
