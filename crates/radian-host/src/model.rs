@@ -224,7 +224,9 @@ fn thinking_from_wire(wire: &str) -> Thinking {
             .strip_prefix("enabled:")
             .and_then(|budget| budget.parse::<u32>().ok())
             .map(|budget_tokens| Thinking::Enabled { budget_tokens })
-            .unwrap_or(Thinking::Adaptive),
+            // A wire value the Anthropic adapter does not know sends **nothing**: inventing a
+            // setting for a map that never named it would violate D11's rule.
+            .unwrap_or(Thinking::Off),
     }
 }
 
@@ -464,5 +466,54 @@ impl Model for SwitchableModel {
         // this call's model (D5).
         let model = self.current().map_err(ModelError::Protocol)?;
         model.complete(request, cx).await
+    }
+}
+
+#[cfg(test)]
+mod thinking_resolution_tests {
+    use super::*;
+
+    /// ADR 0026 D11: a model with no map anywhere gets **no** parameter — neither an
+    /// Anthropic `thinking` setting nor an OpenAI-compatible `reasoning_effort`. This is the
+    /// guard for the "no invented wire values" rule.
+    #[test]
+    fn a_mapless_model_resolves_to_nothing() {
+        let (thinking, effort) = resolve_thinking(
+            "opencode-go",
+            "gpt-5-nano",
+            "high",
+            Provider::OpenAiCompatible,
+        );
+        assert_eq!(thinking, Thinking::Off);
+        assert_eq!(effort, None);
+        let (thinking, effort) =
+            resolve_thinking("opencode-go", "gpt-5-nano", "high", Provider::Anthropic);
+        assert_eq!(thinking, Thinking::Off);
+        assert_eq!(effort, None);
+    }
+
+    /// The verified deepseek map resolves a level into the OpenAI-side wire value, and an
+    /// Anthropic route from the same level into its own setting.
+    #[test]
+    fn a_mapped_model_resolves_per_adapter() {
+        let (_, effort) = resolve_thinking(
+            "opencode-go",
+            "deepseek-v4.1-flash",
+            "medium",
+            Provider::OpenAiCompatible,
+        );
+        assert_eq!(effort.as_deref(), Some("high"), "the clamp goes up");
+        let (thinking, effort) = resolve_thinking(
+            "opencode-go",
+            "deepseek-v4.1-flash",
+            "medium",
+            Provider::Anthropic,
+        );
+        assert_eq!(effort, None);
+        assert_eq!(
+            thinking,
+            Thinking::Off,
+            "a wire value the anthropic adapter does not know sends nothing"
+        );
     }
 }
