@@ -15,6 +15,33 @@ pub enum ApprovalPolicy {
     Never,
     /// Ask on every call a rule does not deny, overriding `allow`.
     Always,
+    /// Auto-approve (ADR 0026 D9): an `ask` becomes `allow`. `deny` rules still deny and
+    /// the sandbox still applies; only the question is removed. The same behavior `--yes`
+    /// selects.
+    Auto,
+}
+
+impl ApprovalPolicy {
+    /// The `--approval` / `[permissions] approval` name (ADR 0012, ADR 0026 D9).
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "on-ask" => Some(Self::OnAsk),
+            "never" => Some(Self::Never),
+            "always" => Some(Self::Always),
+            "auto" => Some(Self::Auto),
+            _ => None,
+        }
+    }
+
+    /// The name [`ApprovalPolicy::parse`] accepts.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OnAsk => "on-ask",
+            Self::Never => "never",
+            Self::Always => "always",
+            Self::Auto => "auto",
+        }
+    }
 }
 
 /// The named combinations the runtime selects between. `Preset` is the product concept; the

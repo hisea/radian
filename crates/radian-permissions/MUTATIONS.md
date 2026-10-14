@@ -36,3 +36,16 @@ Base `4866944` · 一次性检出 `/tmp/ask-mut`（detached，跑完删除）· 
 | A4 | `always_allowed()` 返回空（三档都不再固定允许 `ask_user`） | ✅ 抓住 | `profile::tests::ask_user_is_allowed_in_every_tier` |
 
 1/1 抓住。变异后 `ask_user` 落到默认的 `ask`，三档都断言失败。
+
+## ADR 0026 D9：`Auto` 策略与会话内开关（2026-10-13）
+
+Base `43ddbff` · 一次性检出 `/tmp/auto-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+`cargo test -p radian-permissions --test hooks <test>`，变异后 `git checkout --` 还原。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| PM-A1 | `apply_policy` 的 auto 臂改成 `(Auto, _) => Allow`（deny 也放行） | deny 规则在 auto 下照样拒绝 | `hooks.rs::auto_still_honors_deny_rules` FAILED |
+| PM-A2 | `set_approval` 去掉 `audit.record_policy_change` | 每次开关写一条审计 | `hooks.rs::set_approval_switches_in_place_and_audits_each_switch` FAILED |
+
+2/2 抓住。owner 的更正把"自动批准键不经确认直接开启"这条变异换成"`Y` 开启了 auto"，
+那条变异改的是 `radian-tui` 的键位映射，记录在 `crates/radian-tui/MUTATIONS.md`（TM-A1）。

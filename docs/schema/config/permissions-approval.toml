@@ -1,0 +1,13 @@
+# ADR 0026 D9: `[permissions] approval` carries the approval policy by name. Under the
+# `full` tier an `approval = "auto"` here is ignored with a startup warning; `--approval`
+# and `--yes` on the command line always win.
+schema_version = 1
+
+[model]
+provider = "example"
+base_url = "https://example.com/v1"
+model = "m-1"
+
+[permissions]
+profile = "workspace"
+approval = "auto"

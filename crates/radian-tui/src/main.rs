@@ -17,10 +17,7 @@ use radian_host::{
     DEFAULT_MAX_TOKENS, ModelArgs, Provider, Thinking, build_model, check_provider_flags,
     load_mcp_config, parse_headers, validate_session_id,
 };
-use radian_permissions::{
-    ApprovalError, ApprovalOutcome, ApprovalRequest, Approver, AuditSink, PermissionResolved,
-    runtime_event,
-};
+use radian_permissions::{AuditSink, PermissionResolved, runtime_event};
 use radian_session::{Index, SessionJournal};
 use radian_tui::app::{AUTO_SCROLL_TICK, App, Effect, Input as AppInput, MemoryResult, PickerData};
 use radian_tui::clip::{ClipboardMode, osc52};
@@ -112,9 +109,11 @@ struct Cli {
     profile: Option<String>,
 
     /// How `ask` is resolved (ADR 0012's ApprovalPolicy): `on-ask` asks when a rule says so,
-    /// `always` asks for every call a rule does not deny, `never` turns `ask` into a denial.
-    #[arg(long, value_name = "POLICY", default_value = "on-ask")]
-    approval: String,
+    /// `always` asks for every call a rule does not deny, `never` turns `ask` into a denial,
+    /// `auto` answers every `ask` with "allow" (ADR 0026 D9). Omit to fall back to the
+    /// config's `[permissions] approval`, then the session's journaled state, then `on-ask`.
+    #[arg(long, value_name = "POLICY")]
+    approval: Option<String>,
 
     /// Approve every tool call without asking, like `agent --yes`. Not "allow everything":
     /// `deny` rules still deny and the sandbox still applies; only the question is removed.
@@ -627,19 +626,37 @@ fn run(
         Some(path) => load_mcp_config(path)?,
         None => Vec::new(),
     };
-    let approval = match cli.approval.as_str() {
-        "on-ask" => radian_permissions::ApprovalPolicy::OnAsk,
-        "always" => radian_permissions::ApprovalPolicy::Always,
-        "never" => radian_permissions::ApprovalPolicy::Never,
-        other => {
-            return Err(format!(
-                "--approval {other:?} is not one of on-ask, always, never"
-            ));
-        }
-    };
+    // ADR 0026 D9: `--approval` and `--yes` (its shorthand) are the command line's choice.
+    // When they are silent, the config's `[permissions] approval` and the journal's last
+    // in-session switch decide; `radian_host::resolve_startup` owns that precedence, the
+    // `full`-tier rules and the backfill record.
+    let cli_approval =
+        match &cli.approval {
+            Some(name) => Some(radian_permissions::ApprovalPolicy::parse(name).ok_or_else(
+                || format!("--approval {name:?} is not one of on-ask, always, never, auto"),
+            )?),
+            None => cli.yes.then_some(radian_permissions::ApprovalPolicy::Auto),
+        };
+    let config_approval = config
+        .permissions
+        .approval
+        .as_deref()
+        .and_then(radian_permissions::ApprovalPolicy::parse);
+    let journal_path = dir.join(format!("{session_id}.jsonl"));
+    let restored_approval = resume
+        .is_some()
+        .then(|| radian_host::restored_approval(&journal_path))
+        .flatten();
+    let startup_approval = radian_host::resolve_startup(
+        cli_approval,
+        config_approval,
+        restored_approval,
+        tier.preset(),
+        resume.is_some(),
+    );
     let profile =
         radian_tui::profile::build_profile(tier, &workspace_path, &cli.allow_shell_command)?
-            .with_approval(approval);
+            .with_approval(startup_approval.policy);
 
     // D4: panics after this point get a log in the diagnostics directory (ADR 0013 decision
     // 4), not next to the session: the session is the authoritative record and must not be
@@ -661,14 +678,9 @@ fn run(
     let live: Arc<dyn EventSink> =
         Arc::new(ProjectionSink::new(tx.clone(), Arc::clone(&projection)));
     // ADR 0023 U7: approvals go through the session's pending queue, so the UI shows one
-    // arrival order and never supersedes a request. `--yes` answers "allow once" without
-    // asking, so it bypasses the queue; rules, the sandbox and the audit record are untouched
-    // by it (same as `agent --yes`).
-    let approvals = if cli.yes {
-        radian_host::ApprovalRouting::Direct(Arc::new(AutoApprover) as Arc<dyn Approver>)
-    } else {
-        radian_host::ApprovalRouting::Queued
-    };
+    // arrival order and never supersedes a request. An `auto` policy (ADR 0026 D9) answers
+    // an `ask` before any approver is consulted, so nothing reaches the queue under it.
+    let approvals = radian_host::ApprovalRouting::Queued;
     // The audit sink needs the journal, which `open_session` creates; the binding is a factory
     // for that reason.
     let audit: Arc<dyn Fn(Arc<SessionJournal>) -> Arc<dyn AuditSink> + Send + Sync> = {
@@ -754,6 +766,18 @@ fn run(
             },
         ))
         .map_err(|error| error.to_string())?;
+    // ADR 0026 D9: an explicit command-line choice is recorded, so a resume restores it. The
+    // driver journals the change at the next turn boundary, revision after the journal's.
+    // The hooks already carry the policy (the profile above), so this is the record only —
+    // no audit line: nothing switched inside the session.
+    if let Some(policy) = startup_approval.backfill {
+        session
+            .config_queue()
+            .push(serde_json::json!({ "approval": policy.as_str() }));
+    }
+    // The status bar mirrors the live policy from the first frame; the switch below is the
+    // only other writer.
+    app.set_auto(startup_approval.policy == radian_permissions::ApprovalPolicy::Auto);
     // A plain run enters the terminal only now: every fallible check above, and the session
     // itself, have already run. (`--pick` entered it before the picker and keeps it here.)
     let (mut guard, mut terminal) = match startup_terminal {
@@ -901,10 +925,18 @@ fn run(
         radian_tui::EntryKind::Notice,
         session.facts().ask_user_line(),
     ));
-    if cli.yes {
+    // ADR 0026 D9: the startup line names the auto policy whichever way it was chosen, and
+    // the warnings say when a config value was ignored or a restore refused.
+    if startup_approval.policy == radian_permissions::ApprovalPolicy::Auto {
         app.entries.push(radian_tui::Entry::new(
             radian_tui::EntryKind::Notice,
-            "--yes: tool calls are approved without asking; deny rules and the sandbox still apply",
+            "auto: tool calls are approved without asking; deny rules and the sandbox still apply",
+        ));
+    }
+    for warning in &startup_approval.warnings {
+        app.entries.push(radian_tui::Entry::new(
+            radian_tui::EntryKind::Notice,
+            warning.clone(),
         ));
     }
     if pick_notice {
@@ -1451,6 +1483,22 @@ impl LoopContext<'_> {
             Effect::Steer(text) => self.command(radian_host::SessionCommand::Steer(text)),
             Effect::Cancel => self.command(radian_host::SessionCommand::Cancel),
             Effect::Quit => Ok(()),
+            // ADR 0026 D9: the in-session switch. The facade applies it to the hooks (which
+            // audit it) and queues the durable `ConfigChanged` for the next turn boundary.
+            Effect::SetApprovalPolicy { on } => self
+                .session
+                .set_approval(if on {
+                    radian_permissions::ApprovalPolicy::Auto
+                } else {
+                    radian_permissions::ApprovalPolicy::OnAsk
+                })
+                .map_err(|refused| {
+                    format!(
+                        "cannot switch auto: {} ({})",
+                        refused.reason,
+                        refused.capability.as_deref().unwrap_or("capability")
+                    )
+                }),
             Effect::AnswerRequest {
                 request_id,
                 response,
@@ -2093,22 +2141,10 @@ fn list_sessions(cli: &Cli) -> Result<(), ListError> {
     Ok(())
 }
 
-/// The `--yes` approver: answers "allow once" without asking. Every decision still goes
-/// through the rules first and is still written to the audit record.
-struct AutoApprover;
-
-impl Approver for AutoApprover {
-    fn decide(
-        &self,
-        _request: ApprovalRequest,
-    ) -> futures_util::future::BoxFuture<'_, Result<ApprovalOutcome, ApprovalError>> {
-        Box::pin(async { Ok(ApprovalOutcome::AllowOnce) })
-    }
-}
-
 /// Writes every decision to the session journal as a `PermissionResolved` (ADR 0006 §5.9).
 /// The append is spawned: `AuditSink::record` is synchronous and runs inside the hook, so it
 /// must not block. The record is audit only (`critical = false`) and is never replayed.
+/// A policy switch (ADR 0026 D9) is journaled the same way, as `ApprovalPolicyChanged`.
 struct JournalAudit {
     journal: Arc<SessionJournal>,
     runtime: tokio::runtime::Handle,
@@ -2117,6 +2153,14 @@ struct JournalAudit {
 impl AuditSink for JournalAudit {
     fn record(&self, event: &PermissionResolved) {
         let event = runtime_event(event);
+        let journal = Arc::clone(&self.journal);
+        self.runtime.spawn(async move {
+            let _ = journal.append_runtime_event(event).await;
+        });
+    }
+
+    fn record_policy_change(&self, policy: radian_permissions::ApprovalPolicy) {
+        let event = radian_permissions::policy_change_event(policy);
         let journal = Arc::clone(&self.journal);
         self.runtime.spawn(async move {
             let _ = journal.append_runtime_event(event).await;

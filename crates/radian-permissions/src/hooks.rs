@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use agent_core::{HookContext, HookError, Hooks, InputSource, ToolCall, ToolDecision};
 
@@ -20,6 +20,10 @@ type GrantKey = (String, String);
 /// which must not leak between sessions (ADR 0004 / 0006 §5.9).
 pub struct PermissionHooks {
     profile: Profile,
+    /// The live approval policy. Seeded from `profile.approval`; [`PermissionHooks::
+    /// set_approval`] switches it in place (ADR 0026 D9's in-session `auto`), so the
+    /// profile's copy is only the starting value.
+    approval: RwLock<ApprovalPolicy>,
     approver: Option<Arc<dyn Approver>>,
     audit: Arc<dyn AuditSink>,
     /// "Allow for this session", consulted on every call (ADR 0004: real-time state).
@@ -36,8 +40,10 @@ impl PermissionHooks {
         approver: Option<Arc<dyn Approver>>,
         audit: Arc<dyn AuditSink>,
     ) -> Self {
+        let approval = profile.approval;
         Self {
             profile,
+            approval: RwLock::new(approval),
             approver,
             audit,
             grants: Mutex::new(HashSet::new()),
@@ -48,6 +54,20 @@ impl PermissionHooks {
 
     pub fn profile(&self) -> &Profile {
         &self.profile
+    }
+
+    /// The approval policy `apply_policy` currently applies.
+    pub fn approval(&self) -> ApprovalPolicy {
+        *self.approval.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Switches the session's approval policy in place (ADR 0026 D9's in-session `auto`).
+    /// The rules, the grants and the sandbox are untouched; only how an `ask` resolves
+    /// changes, from the very next call. Writes one audit record per call: the switch is
+    /// itself a permission fact the journal must show.
+    pub fn set_approval(&self, approval: ApprovalPolicy) {
+        *self.approval.write().unwrap_or_else(|e| e.into_inner()) = approval;
+        self.audit.record_policy_change(approval);
     }
 
     /// The host sets the source of the turn it is about to start. Until Core exposes the
@@ -237,8 +257,11 @@ impl PermissionHooks {
     }
 
     fn apply_policy(&self, action: Action) -> Action {
-        match (self.profile.approval, action) {
+        match (self.approval(), action) {
             (ApprovalPolicy::Never, Action::Ask) => Action::Deny,
+            // ADR 0026 D9: auto answers every `ask` with "allow". Deny rules and the
+            // sandbox are untouched; only the question is removed.
+            (ApprovalPolicy::Auto, Action::Ask) => Action::Allow,
             (ApprovalPolicy::Always, Action::Allow) => Action::Ask,
             (_, other) => other,
         }
@@ -314,4 +337,18 @@ pub fn runtime_event(event: &PermissionResolved) -> radian_session::RuntimeEvent
         },
         event.reason.clone(),
     )
+}
+
+/// A convenience so a host can journal a policy switch (ADR 0026 D9) as the
+/// `ApprovalPolicyChanged` audit event.
+pub fn policy_change_event(policy: crate::profile::ApprovalPolicy) -> radian_session::RuntimeEvent {
+    use radian_session::{ApprovalPolicyValue, RuntimeEvent};
+    RuntimeEvent::ApprovalPolicyChanged {
+        policy: match policy {
+            crate::profile::ApprovalPolicy::OnAsk => ApprovalPolicyValue::OnAsk,
+            crate::profile::ApprovalPolicy::Never => ApprovalPolicyValue::Never,
+            crate::profile::ApprovalPolicy::Always => ApprovalPolicyValue::Always,
+            crate::profile::ApprovalPolicy::Auto => ApprovalPolicyValue::Auto,
+        },
+    }
 }

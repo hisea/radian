@@ -86,10 +86,8 @@ const PI_ROLES: &[&str] = &[
     "bashMode",
 ];
 
-/// The pi role feeding each Radian role's **foreground** (ADR 0029 decision 3; the mapping
-/// is also documented in `crates/radian-tui/README.md`). Roles not listed here keep the
-/// built-in foreground unless `[tui.colors]` overrides them.
-/// The pi role feeding a Radian role's **foreground**. `None` for the roles pi styles by
+/// The pi role feeding a Radian role's **foreground** (ADR 0029 decision 3; the mapping is
+/// also documented in `crates/radian-tui/README.md`). `None` for the roles pi styles by
 /// background only — [`Role::Selection`] keeps whatever foreground the text under it has,
 /// and a theme file must not force one on it (the renderer patches the selection over the
 /// text's own style).
@@ -118,6 +116,8 @@ fn fg_source(role: Role) -> Option<&'static str> {
         Role::Completion => Some("dim"),
         Role::Find => Some("accent"),
         Role::Selection => None,
+        // pi has no auto role; the warning role is the closest "this needs attention" color.
+        Role::Auto => Some("warning"),
     }
 }
 
