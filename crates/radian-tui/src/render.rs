@@ -255,11 +255,7 @@ pub(crate) fn display_text(entry: &Entry) -> Cow<'_, str> {
 /// content. Padding rows (a user block's blank rows) come through as empty lines: they occupy
 /// transcript lines and occupy space in the geometry, they just never match a query.
 pub fn display_lines(entry: &Entry, mode: ReasoningMode, width: usize) -> Vec<String> {
-    let blocks = blocks::parse_blocks_for(entry, mode);
-    blocks::layout(entry, &blocks, mode, width)
-        .into_iter()
-        .map(|line| line.text)
-        .collect()
+    blocks::body_text_lines(entry, mode, width)
 }
 
 /// One entry's styled lines (ADR 0028 R1: the block layout, styled). An interrupted

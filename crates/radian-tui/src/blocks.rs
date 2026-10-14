@@ -483,6 +483,87 @@ fn placeholder(entry: &Entry) -> String {
     }
 }
 
+/// One code source line's rendered text: tab-expanded (4) and truncated to `width` with `…`
+/// (ADR 0028 R9). Shared by the body-line layout (which also maps offsets) and the text-only
+/// path the search uses, so the two can never show different text.
+fn code_line_text(line: &str, width: usize) -> String {
+    let mut text = String::new();
+    let mut used = 0usize;
+    let limit = width.saturating_sub(1);
+    for ch in line.chars() {
+        let mut expanded = [0; 4];
+        let expanded: &str = if ch == '\t' {
+            "    "
+        } else {
+            ch.encode_utf8(&mut expanded)
+        };
+        let w = UnicodeWidthStr::width(expanded);
+        if width > 0 && used + w > limit {
+            text.push('…');
+            return text;
+        }
+        text.push_str(expanded);
+        used += w;
+    }
+    text
+}
+
+/// The text of a fenced code block's display lines (fences are markup). Mirrors [`code_lines`].
+fn code_text_lines(raw: &str, closed: bool, width: usize) -> Vec<String> {
+    let lines: Vec<&str> = raw.lines().collect();
+    let body = match (lines.first(), lines.last()) {
+        (Some(first), Some(last))
+            if fence_open(first.trim()).is_some()
+                && closed
+                && lines.len() > 1
+                && fence_run(last.trim()).is_some() =>
+        {
+            &lines[1..lines.len() - 1]
+        }
+        (Some(first), _) if fence_open(first.trim()).is_some() && lines.len() > 1 => &lines[1..],
+        _ => &lines[..],
+    };
+    let mut out: Vec<String> = body.iter().map(|line| code_line_text(line, width)).collect();
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
+/// The entry's **text** lines only (no per-char offsets): what the search matches against and
+/// what the renderer shows. Cheaper than [`layout`] because it never builds the selection
+/// mapping, and it takes the same branch structure so the two cannot disagree.
+pub fn body_text_lines(entry: &Entry, mode: ReasoningMode, width: usize) -> Vec<String> {
+    let prefix = crate::render::marker_prefix(entry.kind).width();
+    let body_width = width.saturating_sub(prefix).max(1);
+    let text = crate::render::display_text(entry);
+    match (entry.kind, mode) {
+        (EntryKind::Reasoning, ReasoningMode::Hidden) => Vec::new(),
+        (EntryKind::Reasoning, ReasoningMode::Collapsed) => vec![placeholder(entry)],
+        (EntryKind::User, _) => {
+            let mut lines = vec![String::new()];
+            lines.extend(crate::render::wrap(&text, body_width));
+            lines.push(String::new());
+            lines
+        }
+        (EntryKind::Assistant, _) => {
+            let mut lines = Vec::new();
+            for block in parse_blocks_for(entry, mode) {
+                match block {
+                    Block::Paragraph { start, end, .. } => {
+                        lines.extend(crate::render::wrap(&text[start..end], body_width));
+                    }
+                    Block::Code { start, end, closed, .. } => {
+                        lines.extend(code_text_lines(&text[start..end], closed, width));
+                    }
+                }
+            }
+            lines
+        }
+        _ => crate::render::wrap(&text, body_width),
+    }
+}
+
 /// Lays one fenced code block out (ADR 0028 R9): the fence lines themselves are markup and
 /// do not show; each source line is one display line, tab-expanded (4 spaces), truncated to
 /// `width` with `…`. The `chars` cover the kept characters only — what is cut cannot be
@@ -511,7 +592,6 @@ fn code_lines(raw: &str, offset: usize, closed: bool, width: usize) -> Vec<BodyL
         // Byte offset of the line's first char within the display text.
         let offset = line.as_ptr() as usize - base + offset;
         let mut chars = Vec::new();
-        let mut text = String::new();
         let mut used = 0usize;
         let mut cut = false;
         let limit = width.saturating_sub(1);
@@ -530,11 +610,10 @@ fn code_lines(raw: &str, offset: usize, closed: bool, width: usize) -> Vec<BodyL
             for _ in 0..expanded.chars().count() {
                 chars.push(offset + idx);
             }
-            text.push_str(expanded);
             used += w;
         }
+        let text = code_line_text(line, width);
         if cut {
-            text.push('…');
             // The ellipsis is decoration; map it to the last kept char.
             if let Some(&last) = chars.last() {
                 chars.push(last);
