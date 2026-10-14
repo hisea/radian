@@ -33,15 +33,31 @@ mod termios {
     }
 
     impl EchoGuard {
-        /// Opens `/dev/tty`, turns the echo off, and blocks the terminating signals. The
-        /// caller must call [`Self::unblock_signals`] (the pending Ctrl-C is what ends the
-        /// process afterwards, as the user asked).
+        /// Opens the terminal (`/dev/tty`; when there is no controlling terminal but stdin is
+        /// a terminal — a pty test, an ssh pipe setup — stdin itself), turns the echo off,
+        /// and blocks the terminating signals. The caller must call
+        /// [`Self::unblock_signals`] (the pending Ctrl-C is what ends the process afterwards,
+        /// as the user asked).
         pub fn new() -> Result<Self, String> {
-            let tty = std::fs::OpenOptions::new()
+            use std::os::fd::AsRawFd;
+            let tty = match std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
                 .open("/dev/tty")
-                .map_err(|error| format!("cannot open /dev/tty: {error}"))?;
+            {
+                Ok(tty) => tty,
+                Err(_) if unsafe { libc::isatty(0) } == 1 => {
+                    // SAFETY: fd 0 stays owned by the process; this dup is a fresh fd the
+                    // guard owns.
+                    let dup = unsafe { libc::dup(0) };
+                    if dup < 0 {
+                        return Err("no terminal for the key prompt".to_owned());
+                    }
+                    // SAFETY: dup is a fresh owned fd.
+                    unsafe { std::os::fd::FromRawFd::from_raw_fd(dup) }
+                }
+                Err(error) => return Err(format!("cannot open /dev/tty: {error}")),
+            };
             let fd = tty.as_raw_fd();
             let mut saved = unsafe { std::mem::zeroed::<libc::termios>() };
             if unsafe { libc::tcgetattr(fd, &mut saved) } != 0 {
@@ -150,15 +166,29 @@ fn read_hidden(prompt: &str) -> Result<String, String> {
     Ok(line)
 }
 
-/// Reads one visible line (the name, the URL — echo stays on).
+/// Reads one visible line (the name, the URL — echo stays on). The same terminal choice as
+/// the hidden read: `/dev/tty`, or stdin when it is a terminal.
 #[cfg(unix)]
 fn read_line(prompt: &str) -> Result<String, String> {
     use std::io::BufRead;
-    let mut tty = std::fs::OpenOptions::new()
+    let tty = match std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open("/dev/tty")
-        .map_err(|error| format!("cannot open /dev/tty: {error}"))?;
+    {
+        Ok(tty) => tty,
+        Err(_) if unsafe { libc::isatty(0) } == 1 => {
+            // SAFETY: fd 0 stays owned by the process; this dup is a fresh fd.
+            let dup = unsafe { libc::dup(0) };
+            if dup < 0 {
+                return Err("no terminal for the prompt".to_owned());
+            }
+            // SAFETY: dup is a fresh owned fd.
+            unsafe { std::os::fd::FromRawFd::from_raw_fd(dup) }
+        }
+        Err(error) => return Err(format!("cannot open /dev/tty: {error}")),
+    };
+    let mut tty = tty;
     write!(tty, "{prompt}").map_err(|error| format!("cannot write the prompt: {error}"))?;
     tty.flush().map_err(|error| format!("cannot write the prompt: {error}"))?;
     let mut line = String::new();
@@ -187,7 +217,16 @@ pub async fn run_login(provider: Option<String>) -> i32 {
         );
     }
     let (name, kind, base_url) = match provider.as_deref() {
-        Some(id) if id != radian_host::CUSTOM_LOGIN => match radian_host::descriptor(id) {
+        // `custom` skips the list and goes straight to the custom flow (D10), like the
+        // TUI's `/login custom`.
+        Some(id) if id == radian_host::CUSTOM_LOGIN => {
+            let (name, kind, base_url) = match ask_custom_steps() {
+                Ok(steps) => steps,
+                Err(code) => return code,
+            };
+            (name, kind, base_url)
+        }
+        Some(id) => match radian_host::descriptor(id) {
             Some(descriptor) => {
                 println!("logging in to {} ({id})", descriptor.display_name);
                 (
@@ -226,34 +265,10 @@ pub async fn run_login(provider: Option<String>) -> i32 {
                 _ => answer.trim().to_owned(),
             };
             if picked == radian_host::CUSTOM_LOGIN {
-                let name = match read_line("provider name (its auth.json entry): ") {
-                    Ok(name) => name.trim().to_owned(),
-                    Err(error) => return aborted(error),
-                };
-                if let Some(reason) = radian_host::provider::name_error(&name) {
-                    return aborted(reason);
+                match ask_custom_steps() {
+                    Ok(steps) => steps,
+                    Err(code) => return code,
                 }
-                println!("  1. openai-compatible   2. anthropic");
-                let kind = match read_line("protocol [1]: ") {
-                    Ok(answer) => match answer.trim() {
-                        "" | "1" => "openai-compatible".to_owned(),
-                        "2" => "anthropic".to_owned(),
-                        other => {
-                            return aborted(format!(
-                                "unknown protocol {other:?} (openai-compatible or anthropic)"
-                            ));
-                        }
-                    },
-                    Err(error) => return aborted(error),
-                };
-                let base_url = match read_line("base URL: ") {
-                    Ok(url) => url.trim().to_owned(),
-                    Err(error) => return aborted(error),
-                };
-                if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
-                    return aborted("the base URL must start with http:// or https://".to_owned());
-                }
-                (name, kind, base_url)
             } else {
                 match radian_host::descriptor(&picked) {
                     Some(descriptor) => (
@@ -334,6 +349,40 @@ pub async fn run_login(provider: Option<String>) -> i32 {
         },
         Err(error) => aborted(format!("could not save the key: {error}")),
     }
+}
+
+/// The custom provider's questions (D10): the name — its `auth.json` slot — the protocol,
+/// the endpoint. Echo stays on for all three.
+#[cfg(unix)]
+fn ask_custom_steps() -> Result<(String, String, String), i32> {
+    let name = match read_line("provider name (its auth.json entry): ") {
+        Ok(name) => name.trim().to_owned(),
+        Err(error) => return Err(aborted(error)),
+    };
+    if let Some(reason) = radian_host::provider::name_error(&name) {
+        return Err(aborted(reason));
+    }
+    println!("  1. openai-compatible   2. anthropic");
+    let kind = match read_line("protocol [1]: ") {
+        Ok(answer) => match answer.trim() {
+            "" | "1" => "openai-compatible".to_owned(),
+            "2" => "anthropic".to_owned(),
+            other => {
+                return Err(aborted(format!(
+                    "unknown protocol {other:?} (openai-compatible or anthropic)"
+                )));
+            }
+        },
+        Err(error) => return Err(aborted(error)),
+    };
+    let base_url = match read_line("base URL: ") {
+        Ok(url) => url.trim().to_owned(),
+        Err(error) => return Err(aborted(error)),
+    };
+    if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
+        return Err(aborted("the base URL must start with http:// or https://".to_owned()));
+    }
+    Ok((name, kind, base_url))
 }
 
 /// `agent logout <provider>`: confirm, then remove **only** that entry (D3).

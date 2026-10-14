@@ -1537,7 +1537,10 @@ impl LoopContext<'_> {
                 let result = radian_host::AuthStore::open()
                     .and_then(|mut store| store.remove(&provider))
                     .map_err(|error| error.to_string());
-                self.send(AppInput::LogoutDone(result));
+                self.send(AppInput::LogoutDone {
+                    provider,
+                    result,
+                });
                 Ok(())
             }
         }

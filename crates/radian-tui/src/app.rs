@@ -368,8 +368,12 @@ pub enum Input {
     },
     /// The hardcoded answer to a `/logout` confirmation (`true` = remove).
     ConfirmLogout(bool),
-    /// A `/logout` removal finished: the notice to show.
-    LogoutDone(Result<(), String>),
+    /// A `/logout` removal finished: the provider and the outcome. The notice names the
+    /// provider (the removal is otherwise silent, D3's confirmation being the record).
+    LogoutDone {
+        provider: String,
+        result: Result<(), String>,
+    },
 }
 
 /// What the loop loaded for a picker overlay: the rows to show, the index for full-text
@@ -1423,9 +1427,14 @@ impl App {
                     UpdateResult::dirty()
                 }
             }
-            Input::LogoutDone(result) => {
-                if let Err(error) = result {
-                    self.push_notice(format!("could not remove: {error}"));
+            Input::LogoutDone { provider, result } => {
+                match result {
+                    Ok(()) => self.push_notice(format!(
+                        "removed the stored credential for `{provider}`"
+                    )),
+                    Err(error) => self.push_notice(format!(
+                        "could not remove `{provider}`: {error}"
+                    )),
                 }
                 UpdateResult::dirty()
             }
@@ -2078,6 +2087,13 @@ impl App {
             return UpdateResult::none();
         }
         let candidates = command::rank(candidates, fetch.partial());
+        // The `Ready` levels' rule holds here too: the one candidate that is already exactly
+        // what was typed is not a completion to accept — arming it would make Enter accept
+        // (inserting the same word) instead of submitting the finished line.
+        if candidates.len() == 1 && candidates[0].insert == fetch.partial() {
+            self.completion_clear();
+            return UpdateResult::dirty();
+        }
         self.set_slash(completion.range, candidates);
         UpdateResult::dirty()
     }

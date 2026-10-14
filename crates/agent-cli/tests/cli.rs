@@ -6325,3 +6325,263 @@ fn spawn_agent_raw(args: &[&str], envs: &[(String, String)]) -> Child {
         .spawn()
         .expect("spawn agent")
 }
+
+// ---------- agent login / agent logout (ADR 0026 D3) ----------
+
+/// `agent login` refuses without a terminal: a key pasted into a pipe would be visible, so
+/// the message points at `auth.json` instead (D3). Exit code 2 (usage-shaped).
+#[tokio::test]
+async fn login_without_a_terminal_refuses_and_points_at_auth_json() {
+    let output = tokio::process::Command::new(agent_bin())
+        .args(["login", "openai"])
+        .env("HOME", fresh_session_dir())
+        .env("RADIAN_HOME", fresh_session_dir())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .expect("spawn agent login");
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("login needs a terminal"), "{stderr}");
+    assert!(stderr.contains("auth.json"), "{stderr}");
+    // The refusal must not echo the provider's default endpoint or any placeholder.
+    assert!(!stderr.contains("sk-"), "{stderr}");
+}
+
+/// A minimal pty: the child runs `sh -c '"$@"; echo EXITED:$?; stty -a'`, so the same pty
+/// reports the exit code and the terminal state **after** the app left (the echo-restore
+/// invariant is only observable there). Raw bytes accumulate; the reader drains them.
+struct PtyChild {
+    child: tokio::process::Child,
+    master: std::fs::File,
+}
+
+impl PtyChild {
+    fn spawn(args: &[&str], home: &Path) -> Self {
+        let mut master_fd: libc::c_int = -1;
+        let mut slave_fd: libc::c_int = -1;
+        // SAFETY: openpty writes the two fds; the name and termios pointers may be null.
+        let rc = unsafe {
+            libc::openpty(
+                &mut master_fd,
+                &mut slave_fd,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, 0, "openpty failed");
+        // One dup per stdio slot: each raw fd is owned by exactly one `Stdio`, and the
+        // `Command` closes both after spawn (the child's exec copies keep the slave open
+        // until it exits, which is what gives the master its EOF).
+        let stdout_fd = unsafe { libc::dup(slave_fd) };
+        assert!(stdout_fd >= 0, "dup failed");
+        let mut cmd = tokio::process::Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg(r#""$@"; echo "EXITED:$?"; stty -a"#)
+            .arg("sh")
+            .args(args)
+            .env("HOME", home)
+            .env("RADIAN_HOME", home)
+            .env("RADIAN_SESSION_DIR", fresh_session_dir())
+            .env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json")
+            .env_remove("RADIAN_CONFIG")
+            .stdin(unsafe {
+                // SAFETY: slave_fd is a fresh owned fd, moved into the Command.
+                use std::os::fd::FromRawFd;
+                std::process::Stdio::from_raw_fd(slave_fd)
+            })
+            .stdout(unsafe {
+                // SAFETY: stdout_fd is a fresh owned fd, moved into the Command.
+                use std::os::fd::FromRawFd;
+                std::process::Stdio::from_raw_fd(stdout_fd)
+            })
+            .stderr(std::process::Stdio::piped());
+        let child = cmd.spawn().expect("spawn in pty");
+        // Non-blocking master, so `drain` never blocks (the first frame is bigger than the
+        // pty buffer, and the app would otherwise block in its draw).
+        // SAFETY: master_fd is a fresh fd; F_SETFL is async-signal-safe.
+        unsafe { libc::fcntl(master_fd, libc::F_SETFL, libc::O_NONBLOCK) };
+        // SAFETY: master_fd is a fresh fd.
+        let master: std::fs::File =
+            unsafe { std::os::fd::FromRawFd::from_raw_fd(master_fd) };
+        Self { child, master }
+    }
+
+    /// Drains whatever is pending.
+    fn drain(&mut self, buf: &mut Vec<u8>) {
+        use std::io::Read;
+        let mut chunk = [0u8; 8192];
+        if let Ok(n) = self.master.read(&mut chunk) {
+            buf.extend_from_slice(&chunk[..n]);
+        }
+    }
+
+    async fn wait_for(&mut self, buf: &mut Vec<u8>, needle: &str, secs: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        loop {
+            self.drain(buf);
+            if String::from_utf8_lossy(buf).contains(needle) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    fn write(&self, bytes: &[u8]) {
+        use std::io::Write;
+        let mut master = &self.master;
+        let _ = master.write_all(bytes);
+        let _ = master.flush();
+    }
+}
+
+impl Drop for PtyChild {
+    fn drop(&mut self) {
+        let _ = self.child.start_kill();
+    }
+}
+
+/// `stty -a` shows the echo state as tokens (`echo`, `-echo`, `echoke`, …): check the tokens,
+/// not substrings (`-echok` contains `-echo`).
+fn assert_stty_has_echo(stty: &str) {
+    let tokens: Vec<&str> = stty.split(|c: char| c.is_whitespace() || c == ';').collect();
+    assert!(
+        tokens.contains(&"icanon"),
+        "canonical mode must be restored: {stty}"
+    );
+    assert!(
+        tokens.contains(&"echo"),
+        "echo must be restored (and `-echo` absent): {stty}"
+    );
+    assert!(!tokens.contains(&"-echo"), "echo is still off: {stty}");
+}
+
+/// The full `agent login custom` flow on a real pty: the key is **never** in the pty stream
+/// (echo off), the verification runs against a local server, `auth.json` gains the entry
+/// (with the endpoint in `env`, D10), and after the app exits the terminal's echo is **on**
+/// again — the restore held on the normal exit path.
+#[tokio::test]
+async fn pty_agent_login_custom_hides_the_key_and_restores_echo() {
+    use std::io::Write as _;
+    // The verification endpoint: a one-shot 200 per connection.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut stream = stream;
+            let mut buf = [0u8; 8192];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+            );
+        }
+    });
+
+    let home = fresh_session_dir();
+    let credentials = home.join("credentials");
+    std::fs::create_dir_all(&credentials).unwrap();
+    let mut pty = PtyChild::spawn(
+        &[
+            agent_bin(),
+            "login",
+            "custom",
+        ],
+        &home,
+    );
+    let mut seen = Vec::new();
+    const KEY: &str = "sk-CLI-HIDDEN-99";
+    assert!(
+        pty.wait_for(&mut seen, "provider name", 10).await,
+        "{}",
+        String::from_utf8_lossy(&seen)
+    );
+    pty.write(b"corp\r");
+    assert!(pty.wait_for(&mut seen, "protocol", 10).await);
+    pty.write(b"1\r");
+    assert!(pty.wait_for(&mut seen, "base URL", 10).await);
+    pty.write(format!("http://{addr}\r").as_bytes());
+    assert!(pty.wait_for(&mut seen, "API key", 10).await);
+    pty.write(format!("{KEY}\r").as_bytes());
+    assert!(
+        pty.wait_for(&mut seen, "saved the key for `corp`", 10).await,
+        "{}",
+        String::from_utf8_lossy(&seen)
+    );
+    assert!(
+        pty.wait_for(&mut seen, "EXITED:0", 10).await,
+        "{}",
+        String::from_utf8_lossy(&seen)
+    );
+
+    // The key never crossed the wire in a visible form.
+    assert!(
+        !String::from_utf8_lossy(&seen).contains(KEY),
+        "the key leaked: {}",
+        String::from_utf8_lossy(&seen)
+    );
+    // The record is right, next to nothing else, 0600.
+    let saved: Value =
+        serde_json::from_str(&std::fs::read_to_string(home.join("credentials/auth.json")).unwrap())
+            .unwrap();
+    assert_eq!(saved["corp"]["key"], KEY);
+    assert_eq!(
+        saved["corp"]["env"]["RADIAN_BASE_URL"],
+        format!("http://{addr}")
+    );
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        std::fs::metadata(home.join("credentials/auth.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    // Echo restored after the exit: stty -a must show `echo` enabled.
+    assert!(
+        pty.wait_for(&mut seen, "EXITED", 5).await,
+        "no stty output"
+    );
+    let tail = String::from_utf8_lossy(&seen);
+    let stty = tail.split("EXITED:0").nth(1).unwrap_or("");
+    assert_stty_has_echo(stty);
+}
+
+/// Ctrl-C **during the hidden key prompt** ends the process (130) and still restores the
+/// echo — the invariant the brief calls out by name.
+#[tokio::test]
+async fn pty_agent_login_ctrl_c_during_the_key_prompt_restores_echo() {
+    let home = fresh_session_dir();
+    std::fs::create_dir_all(home.join("credentials")).unwrap();
+    let mut pty = PtyChild::spawn(&[agent_bin(), "login", "anthropic"], &home);
+    let mut seen = Vec::new();
+    assert!(
+        pty.wait_for(&mut seen, "API key", 10).await,
+        "{}",
+        String::from_utf8_lossy(&seen)
+    );
+    pty.write(b"sk-partial");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    pty.write(&[0x03]); // Ctrl-C inside the echo-off window
+    assert!(
+        pty.wait_for(&mut seen, "EXITED:130", 10).await,
+        "Ctrl-C did not end the login: {}",
+        String::from_utf8_lossy(&seen)
+    );
+    // The terminal is back to cooked mode: echo on, canonical on. `stty -a` opens with
+    // "speed …".
+    assert!(
+        pty.wait_for(&mut seen, "speed ", 5).await,
+        "no stty output: {}",
+        String::from_utf8_lossy(&seen)
+    );
+    let tail = String::from_utf8_lossy(&seen);
+    let stty = tail.split("EXITED:130").nth(1).unwrap_or("");
+    assert_stty_has_echo(stty);
+}
