@@ -185,9 +185,10 @@ fn load(path: &Path) -> Result<(Skill, Vec<String>), String> {
 }
 
 /// The subset of YAML frontmatter Radian needs: top-level `key: value` scalars, with quoted
-/// scalars, empty values and block-list items tolerated. Unknown keys are ignored (a Claude
-/// Code skill's private fields must not spam warnings). No YAML dependency: three scalar keys
-/// do not justify one (report the choice).
+/// scalars, empty values and block-list items tolerated. Blank lines and `#` comments are not
+/// keys (S1: before this, one blank line made the whole skill fail to load). Unknown keys are
+/// ignored (a Claude Code skill's private fields must not spam warnings). No YAML dependency:
+/// the keys we read are a few scalars (report the choice).
 fn parse_frontmatter(text: &str) -> Result<BTreeMap<String, String>, String> {
     let mut lines = text.lines();
     let Some(first) = lines.next() else {
@@ -203,8 +204,13 @@ fn parse_frontmatter(text: &str) -> Result<BTreeMap<String, String>, String> {
             closed = true;
             break;
         }
+        let trimmed = line.trim();
+        // S1: a blank line or a `#` comment is not a `key: value` pair.
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
         // A block-list item (`- value`) belongs to the previous key; its values are not needed.
-        if line.trim_start().starts_with("- ") || line.trim() == "-" {
+        if trimmed.starts_with("- ") || trimmed == "-" {
             continue;
         }
         let Some((key, value)) = line.split_once(':') else {
@@ -588,6 +594,25 @@ mod tests {
         let section = prompt_section(&skills, header_only, 4);
         assert!(!section.contains("- one:"), "{section}");
         assert!(section.contains("3 more skills not listed"), "{section}");
+    }
+
+    /// S1: a blank line or a `#` comment in the frontmatter is not a `key: value` pair. Before
+    /// this, one blank line made the whole skill fail to load (real Claude Code skills have
+    /// both).
+    #[test]
+    fn blank_lines_and_comments_do_not_reject_a_skill() {
+        let scratch = Scratch::new("blank-lines");
+        scratch.skill(
+            "a",
+            "---\nname: a\n# a comment\n\ndescription: Has a blank line and a comment.\n\n---\nBody.\n",
+        );
+        let discovery = discover(&scratch.skills_dir());
+        assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
+        assert_eq!(discovery.skills.len(), 1);
+        assert_eq!(
+            discovery.skills[0].description,
+            "Has a blank line and a comment."
+        );
     }
 
     #[test]
