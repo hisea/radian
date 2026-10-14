@@ -21,7 +21,10 @@
 //! * writes are atomic (temp file + rename), `0600`, in a `0700` directory;
 //! * **concurrent writes are not locked**: two `/login` runs read-modify-write without a lock,
 //!   so the later write wins and may drop the earlier provider's entry. Accepted for the first
-//!   release (a lock is a later slice if it is needed);
+//!   release (a lock is a later slice if it is needed). Each write uses its own uniquely named
+//!   temp file (`tmp-<pid>-<counter>-<nanos>`), so concurrent writers in one process no longer
+//!   **delete each other's** temp file — the last-writer-wins rule stays, but the loser is not
+//!   left with an I/O error;
 //! * the key is never printed: [`ResolvedKey`]'s `Debug` redacts it (ADR 0013).
 
 use std::collections::BTreeMap;
@@ -318,13 +321,32 @@ impl AuthStore {
                 message: error.to_string(),
             },
         )?;
-        let tmp = self
+        // A unique temp name per write: pid + a process-local counter + nanoseconds. Two
+        // concurrent writes in one process therefore never share a temp file (the old
+        // `tmp-<pid>` scheme let the later `remove_file` delete the earlier writer's file).
+        // No randomness dependency: the counter alone is unique within the process, the
+        // timestamp disambiguates leftovers across restarts.
+        static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
+        let tmp = self.path.with_extension(format!(
+            "tmp-{}-{seq}-{nanos}",
+            std::process::id()
+        ));
+        // Clean up a leftover under the **old exact** name (`auth.json.tmp-<pid>`): it can only
+        // be a crashed write from an older Radian, because this scheme never generates that
+        // name, so it can never be a concurrent writer's in-flight file.
+        let legacy = self
             .path
             .with_extension(format!("tmp-{}", std::process::id()));
-        // Remove a leftover from a crashed write, then create the temp file **exclusively**:
-        // `mode(0o600)` only applies to a fresh inode, so reusing an existing file would keep
-        // its old (possibly wide) mode.
-        let _ = std::fs::remove_file(&tmp);
+        if legacy != tmp {
+            let _ = std::fs::remove_file(&legacy);
+        }
+        // `create_new` still guards the (now unique) name: `mode(0o600)` only applies to a
+        // fresh inode, so a reused file would keep its old (possibly wide) mode.
         {
             let mut options = std::fs::OpenOptions::new();
             options.write(true).create_new(true);
@@ -646,6 +668,66 @@ mod tests {
 
     /// A leftover temp file must not loosen the new file's mode: the writer removes it and
     /// creates exclusively, so `mode(0o600)` applies to a fresh inode.
+    /// Two threads writing **different providers** 50 times each, barrier-synchronised: every
+    /// write succeeds (no `NotFound` from a temp file another writer removed), the final file
+    /// is valid JSON with mode `0600`, and no temp file is left behind. The last-writer-wins
+    /// rule itself is accepted (module docs); what this pins is that the writes never destroy
+    /// each other's temp file.
+    #[test]
+    fn concurrent_writes_in_one_process_do_not_delete_each_other_s_temps() {
+        use std::sync::{Arc, Barrier};
+        let scratch = Scratch::new("concurrent");
+        let path = scratch.path();
+        let barrier = Arc::new(Barrier::new(2));
+        let mut handles = Vec::new();
+        for thread in 0..2u32 {
+            let path = path.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let mut store = AuthStore::open_at(path).expect("open");
+                barrier.wait();
+                for n in 0..50u32 {
+                    let provider = format!("p{thread}-{n}");
+                    store
+                        .upsert_api_key(&provider, "sk-test", &BTreeMap::new())
+                        .unwrap_or_else(|error| {
+                            panic!("write {provider} failed: {error}");
+                        });
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("no writer panicked");
+        }
+
+        // The final file is valid JSON (a torn rename would not parse) …
+        let text = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+        assert!(value.as_object().is_some_and(|map| !map.is_empty()));
+        // … mode 0600 …
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{mode:04o}");
+        }
+        // … and no temp file stayed behind (neither this scheme's unique names nor the old
+        // exact-name leftover).
+        let dir = path.parent().unwrap();
+        let leftovers: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("auth.json.tmp-"))
+            })
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(leftovers.is_empty(), "temp leftovers: {leftovers:?}");
+    }
+
     #[test]
     fn a_leftover_temp_file_does_not_loosen_the_permissions() {
         let scratch = Scratch::new("tmp-leftover");

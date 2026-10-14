@@ -318,3 +318,13 @@ Base `43ddbff` · 一次性检出 `/tmp/auto-mut`（detached，跑完删除）·
 3/3 抓住。CLI 优先与 workspace 恢复的正路径由
 `approval::tests::an_explicit_cli_choice_wins_and_backfills` /
 `resume_restores_the_journaled_state_over_the_config` 钉住。
+
+## review-fixes 片：`auth.json` 临时文件名冲突（P2）
+
+Base `c120b0e` · 就地变异（改 `write` 的临时名），跑完从备份还原、`git status --short` 为空。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| F2 | 临时名恢复成 `auth.json.tmp-<pid>`（无计数器/时间戳），并保留写前 `remove_file` | 同进程并发写不得互删临时文件 | `auth::tests::concurrent_writes_in_one_process_do_not_delete_each_other_s_temps` **5/5 次** FAILED，错误正是 `auth.json: No such file or directory (os error 2)`（另一个写者删掉了它正在写的临时文件） |
+
+1/1 抓住，且稳定复现（不是偶发）：Barrier 对齐 + 50 次写，5 次全失败。
