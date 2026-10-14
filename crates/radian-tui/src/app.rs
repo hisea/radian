@@ -279,6 +279,55 @@ pub enum Modal {
     /// A `/logout` confirmation: the provider whose stored credential would be removed.
     /// `y` removes, `n`/`Esc` keeps — hardcoded, like the `/memory` confirmation.
     ConfirmLogout(String),
+    /// The startup project-trust prompt (ADR 0031 T3). A small list whose keys are hardcoded
+    /// like the approval's: a startup decision must not depend on the keymap. Boxed, like the
+    /// other payload modals.
+    Trust(Box<TrustWizard>),
+}
+
+/// The startup trust modal's state (ADR 0031 T3): the workspace and the highlighted option.
+/// The default highlight is "do not trust this directory", so Enter is the
+/// fail-safe answer.
+pub struct TrustWizard {
+    pub workspace: PathBuf,
+    pub cursor: usize,
+    pub choices: Vec<radian_host::trust::Choice>,
+}
+
+impl TrustWizard {
+    pub fn new(workspace: PathBuf) -> Self {
+        let choices: Vec<radian_host::trust::Choice> = radian_host::trust::Choice::ALL
+            .into_iter()
+            // "Trust parent" needs a parent to name.
+            .filter(|choice| {
+                *choice != radian_host::trust::Choice::TrustParent || workspace.parent().is_some()
+            })
+            .collect();
+        let cursor = choices
+            .iter()
+            .position(|choice| *choice == radian_host::trust::Choice::UntrustHere)
+            .unwrap_or(0);
+        Self {
+            workspace,
+            cursor,
+            choices,
+        }
+    }
+
+    pub fn selected(&self) -> radian_host::trust::Choice {
+        self.choices[self.cursor]
+    }
+
+    pub fn move_cursor(&mut self, delta: i32) {
+        let len = self.choices.len() as i32;
+        self.cursor = (self.cursor as i32 + delta).rem_euclid(len) as usize;
+    }
+
+    pub fn label(&self, choice: radian_host::trust::Choice) -> String {
+        choice
+            .label(&self.workspace)
+            .unwrap_or_else(|| "Trust the parent directory".to_owned())
+    }
 }
 
 /// How far one approval-scroll key moves the box's body (approval-fit). Hardcoded like the
@@ -340,6 +389,8 @@ fn is_user_input(input: &Input) -> bool {
         | Input::PickerClose
         | Input::LoginKey(_)
         | Input::ConfirmLogout(_)
+        | Input::TrustMove(_)
+        | Input::TrustChosen(_)
         | Input::MouseDown { .. }
         | Input::MouseDrag { .. }
         | Input::MouseUp { .. } => true,
@@ -358,6 +409,7 @@ fn is_user_input(input: &Input) -> bool {
         | Input::ModelChecked { .. }
         | Input::SwitchCompacted { .. }
         | Input::SessionDone(_)
+        | Input::TrustResolved(_)
         | Input::CommandRefused(_)
         | Input::PickerOpened(_)
         | Input::LoginVerified { .. }
@@ -588,6 +640,12 @@ pub enum Input {
         provider: String,
         result: Result<(), String>,
     },
+    /// The startup trust modal's cursor moved (ADR 0031 T3).
+    TrustMove(i32),
+    /// The startup trust modal chose an option; the loop writes `trust.json` and journals.
+    TrustChosen(radian_host::trust::Choice),
+    /// The trust choice was applied: the session's new state, for the startup notice.
+    TrustResolved(radian_host::trust::Setup),
     /// The left button went down at a screen cell: the press that may start a transcript
     /// selection (and that clears the previous one). Only arrives when mouse reporting is on.
     MouseDown { row: u16, col: u16 },
@@ -732,6 +790,10 @@ pub enum Effect {
     /// config file. Both are I/O, so the loop runs them and answers with
     /// [`Input::ThemeReady`].
     Theme { name: String },
+    /// Apply a startup trust choice (ADR 0031 T3): the loop writes `trust.json` through the
+    /// facade and journals one `ProjectTrustChanged` per write. The answer is
+    /// [`Input::TrustResolved`].
+    SetTrust { choice: radian_host::trust::Choice },
 }
 
 /// Effects are compared by **meaning** in the tests. `MemoryCommand` (a clap enum) has no
@@ -806,6 +868,7 @@ impl PartialEq for Effect {
             ) => an == bn && ak == bk && ae == be,
             (Logout { provider: a }, Logout { provider: b }) => a == b,
             (Copy { text: a }, Copy { text: b }) => a == b,
+            (SetTrust { choice: a }, SetTrust { choice: b }) => a == b,
             (
                 ExpandSkill {
                     name: an,
@@ -1565,6 +1628,12 @@ impl App {
         self.layers.push(Layer::Modal(modal));
     }
 
+    /// Pushes the startup trust modal (ADR 0031 T3). Called once, after the terminal is
+    /// entered, when the workspace has project resources and no saved decision.
+    pub fn push_trust_modal(&mut self, workspace: PathBuf) {
+        self.push_modal(Modal::Trust(Box::new(TrustWizard::new(workspace))));
+    }
+
     /// Removes the topmost overlay matching `pick`. Returns it, or `None` when absent.
     fn remove_overlay(&mut self, mut pick: impl FnMut(&Overlay) -> bool) -> Option<Overlay> {
         let index = self.layers.iter().rposition(|layer| match layer {
@@ -2193,6 +2262,25 @@ impl App {
                 }
                 UpdateResult::dirty()
             }
+            Input::TrustMove(delta) => {
+                if let Some(Modal::Trust(wizard)) =
+                    self.layers.iter_mut().rev().find_map(|layer| match layer {
+                        Layer::Modal(modal) => Some(modal),
+                        _ => None,
+                    })
+                {
+                    wizard.move_cursor(delta);
+                }
+                UpdateResult::dirty()
+            }
+            Input::TrustChosen(choice) => {
+                self.remove_modal(|modal| matches!(modal, Modal::Trust(_)));
+                UpdateResult::effect(Effect::SetTrust { choice })
+            }
+            Input::TrustResolved(setup) => {
+                self.push_notice(radian_host::trust::status_line(&setup));
+                UpdateResult::dirty()
+            }
             Input::SkillExpanded { result, steer } => self.skill_expanded(result, steer),
             Input::CommandRefused(refused) => {
                 self.push_notice(format!(
@@ -2461,6 +2549,15 @@ impl App {
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                     Some(Input::ConfirmLogout(false))
                 }
+                _ => None,
+            },
+            // The startup trust prompt's keys are hardcoded (ADR 0031 T3): a startup decision
+            // must not depend on the keymap, and Enter takes the fail-safe default.
+            Modal::Trust(wizard) => match key.code {
+                KeyCode::Up => Some(Input::TrustMove(-1)),
+                KeyCode::Down => Some(Input::TrustMove(1)),
+                KeyCode::Enter => Some(Input::TrustChosen(wizard.selected())),
+                KeyCode::Esc => Some(Input::TrustChosen(radian_host::trust::Choice::UntrustHere)),
                 _ => None,
             },
             // The `/login` wizard's keys are hardcoded too: a login prompt is sensitive, and

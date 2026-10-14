@@ -29,7 +29,7 @@ pub(crate) const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 
 /// The v1 events known to a schema-v1 reader (ADR 0006 §4). Anything else is unknown and
 /// handled by the `critical` policy.
-pub(crate) const KNOWN_EVENTS: [&str; 23] = [
+pub(crate) const KNOWN_EVENTS: [&str; 24] = [
     "SessionCreated",
     "InboxEnqueued",
     "InputClaimed",
@@ -53,6 +53,7 @@ pub(crate) const KNOWN_EVENTS: [&str; 23] = [
     "MemoryInjected",
     "ModelUsageRecorded",
     "SessionForked",
+    "ProjectTrustChanged",
 ];
 
 /// The parsed body of one known event. Events this slice does not interpret (for example
@@ -172,6 +173,12 @@ pub enum EventData {
     /// trip; audit only, never a transcript record. Ids, revisions and scopes only.
     MemoryInjected {
         records: Vec<MemoryInjectedRecord>,
+    },
+    /// A project-trust decision was written (ADR 0031 T2). Typed for an exact round trip;
+    /// audit only, never a transcript record.
+    ProjectTrustChanged {
+        path: String,
+        decision: bool,
     },
     /// A known event this crate does not interpret (`SessionCreated`) or an unknown
     /// non-critical event.
@@ -622,6 +629,13 @@ impl LineScanner {
                 let d: MemoryInjectedData = data_of(raw, self.lineno, path)?;
                 EventData::MemoryInjected { records: d.records }
             }
+            "ProjectTrustChanged" => {
+                let d: ProjectTrustChangedData = data_of(raw, self.lineno, path)?;
+                EventData::ProjectTrustChanged {
+                    path: d.path,
+                    decision: d.decision,
+                }
+            }
             "InboxEnqueued" => {
                 let d: InboxEnqueuedData = data_of(raw, self.lineno, path)?;
                 EventData::InboxEnqueued {
@@ -935,6 +949,7 @@ fn record_from_event(event: &SessionEvent) -> Option<JournalRecord> {
         | EventData::PermissionResolved { .. }
         | EventData::ApprovalPolicyChanged { .. }
         | EventData::MemoryInjected { .. }
+        | EventData::ProjectTrustChanged { .. }
         | EventData::Other(_) => None,
     }
 }
@@ -1107,6 +1122,12 @@ struct ApprovalPolicyChangedData {
 #[derive(Deserialize)]
 struct MemoryInjectedData {
     records: Vec<MemoryInjectedRecord>,
+}
+
+#[derive(Deserialize)]
+struct ProjectTrustChangedData {
+    path: String,
+    decision: bool,
 }
 
 /// Feeds one record to the shared replacement state machine, mapping a rejection to the

@@ -257,6 +257,15 @@ struct Cli {
     /// unchanged (ADR 0018).
     #[arg(long)]
     no_auto_compact: bool,
+
+    /// Trust this workspace's project resources for **this process only** (never written to
+    /// `trust.json`; ADR 0031 T3).
+    #[arg(long, conflicts_with = "no_trust")]
+    trust: bool,
+
+    /// Do not trust this workspace's project resources for this process only (ADR 0031 T3).
+    #[arg(long)]
+    no_trust: bool,
 }
 
 /// Why startup failed. The message must not contain the key.
@@ -531,6 +540,44 @@ fn read_import(source: &str) -> Result<String, CommandError> {
         std::fs::read_to_string(source)
             .map_err(|e| CommandError::failure(format!("cannot read {source}: {e}")))
     }
+}
+
+/// The startup trust question (ADR 0031 T3), the same one-line terminal shape as the
+/// approval: a numbered list, Enter takes the default (do not trust this directory). An
+/// unreadable or unrecognized answer is the default, never a trust.
+async fn trust_prompt(
+    lines: &LineHub,
+    workspace: &std::path::Path,
+) -> Option<radian_host::trust::Choice> {
+    use radian_host::trust::Choice;
+    eprintln!(
+        "project resources found in {}: trust them?",
+        workspace.display()
+    );
+    for (index, choice) in Choice::ALL.iter().enumerate() {
+        let label = choice
+            .label(workspace)
+            .unwrap_or_else(|| "Trust the parent directory".to_owned());
+        let marker = if *choice == Choice::UntrustHere {
+            " (default)"
+        } else {
+            ""
+        };
+        eprintln!("  [{}] {label}{marker}", index + 1);
+    }
+    eprint!("choice [4]: ");
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+    // The same line hub the approval prompt uses: one reader owns stdin.
+    let answer = lines.next().await.unwrap_or_default();
+    let answer = answer.trim();
+    let choice = match answer {
+        "1" => Choice::TrustHere,
+        "2" => Choice::TrustParent,
+        "3" => Choice::TrustSession,
+        "5" => Choice::UntrustSession,
+        _ => Choice::UntrustHere,
+    };
+    Some(choice)
 }
 
 /// The confirmation for `forget`/`purge`/`split`/`merge` (ADR 0021 D7). A terminal asks;
@@ -1337,6 +1384,41 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         })
     };
 
+    // ADR 0031 T3: resolve project trust before the session exists. `--trust`/`--no-trust`
+    // override for this process only; a saved decision (or the non-interactive default) needs
+    // no question. The persistent write + audit happen after `open_session` (they need the
+    // journal), so the choice is kept.
+    // The line mode (no `-p`) is the interactive host, the same rule `can_ask` uses: it reads
+    // stdin whether or not it is a terminal. `-p` is the one-shot non-interactive mode.
+    let trust_interactive = cli.prompt.is_none();
+    let cli_trust = if cli.trust {
+        Some(radian_host::trust::Decision::Trust)
+    } else if cli.no_trust {
+        Some(radian_host::trust::Decision::Untrust)
+    } else {
+        None
+    };
+    let (mut trust_setup, trust_warning) =
+        radian_host::trust::load_for(&workspace_path, cli_trust, trust_interactive);
+    if let Some(warning) = &trust_warning {
+        eprintln!("[trust] {warning}");
+    }
+    let mut trust_choice = None;
+    if trust_setup.needs_ask {
+        if let Some(choice) = trust_prompt(&lines, &workspace_path).await {
+            trust_setup.resolved =
+                radian_host::trust::resolved_for(choice, &workspace_path).map_err(SetupError)?;
+            trust_setup.needs_ask = false;
+            trust_choice = Some(choice);
+        }
+    } else if trust_setup.resolved.source == radian_host::trust::Source::Default
+        && radian_host::trust::has_project_resources(&workspace_path)
+    {
+        // The non-interactive default (ADR 0031 T3): untrusted, with the one-line way out.
+        eprintln!("{}", radian_host::trust::untrusted_notice(&workspace_path));
+    }
+    eprintln!("{}", radian_host::trust::status_line(&trust_setup));
+
     // ADR 0023 U5: the one place a session is established; `radian-tui` calls the same function
     // with its own bindings.
     let resume_session = cli.resume.is_some();
@@ -1359,6 +1441,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             profile: permission_profile,
             memory_root,
             skills_extra_paths: setup.skills_extra_paths,
+            trust: trust_setup,
             resume: cli.resume.is_some(),
             config_snapshot: serde_json::json!({
                 "provider": setup.provider.as_str(),
@@ -1391,6 +1474,13 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     .await
     .map_err(|error| SetupError(error.to_string()))?;
     let session = Arc::new(session);
+
+    // ADR 0031 T3: persist the choice now that the journal exists, so the write audits once.
+    if let Some(choice) = trust_choice
+        && let Err(error) = session.record_trust_async(choice).await
+    {
+        eprintln!("agent: cannot write trust.json: {error}");
+    }
 
     // ADR 0026 D8: an explicit `--model`/`--provider` wins over the resumed change, and the
     // override is recorded so the journal stays the authority for the next resume.

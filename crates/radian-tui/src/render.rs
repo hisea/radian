@@ -1127,6 +1127,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(Modal::Login(_)) => LOGIN_HEIGHT,
         // The `/logout` confirmation is a two-line box like the `/memory` one.
         Some(Modal::ConfirmLogout(_)) => 4,
+        // The trust prompt lists up to five options plus a header and a key line.
+        Some(Modal::Trust(wizard)) => wizard.choices.len() as u16 + 3,
         _ => input_height(app, area.width as usize),
     };
     // The `@` completion list sits just above the input box (and never over an approval
@@ -1284,6 +1286,35 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 .title(" /login ");
             frame.render_widget(&block, chunks[2]);
             let inner = block.inner(chunks[2]);
+            frame.render_widget(Paragraph::new(lines), inner);
+        }
+        Some(Modal::Trust(wizard)) => {
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(app.theme.approval_border)
+                .title(" project trust ");
+            frame.render_widget(&block, chunks[2]);
+            let inner = block.inner(chunks[2]);
+            let mut lines = vec![Line::from(format!(
+                "project resources found in {}",
+                wizard.workspace.display()
+            ))];
+            for (index, choice) in wizard.choices.iter().enumerate() {
+                let marker = if index == wizard.cursor { "> " } else { "  " };
+                let style = if index == wizard.cursor {
+                    app.theme.approval_border
+                } else {
+                    Style::default()
+                };
+                lines.push(Line::from(Span::styled(
+                    format!("{marker}{}", wizard.label(*choice)),
+                    style,
+                )));
+            }
+            lines.push(Line::from(Span::styled(
+                "Up/Down choose   Enter select   Esc = do not trust",
+                app.theme.hint,
+            )));
             frame.render_widget(Paragraph::new(lines), inner);
         }
         Some(Modal::ConfirmLogout(provider)) => {

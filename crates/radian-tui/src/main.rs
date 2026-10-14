@@ -153,6 +153,15 @@ struct Cli {
     #[arg(long)]
     no_auto_compact: bool,
 
+    /// Trust this workspace's project resources for **this process only** (never written to
+    /// `trust.json`; ADR 0031 T3).
+    #[arg(long, conflicts_with = "no_trust")]
+    trust: bool,
+
+    /// Do not trust this workspace's project resources for this process only (ADR 0031 T3).
+    #[arg(long)]
+    no_trust: bool,
+
     #[arg(long)]
     system: Option<String>,
 
@@ -863,6 +872,24 @@ fn run(
         .then(|| Arc::new(panic_in_driver) as Arc<dyn Fn() + Send + Sync>);
     let memory_warning = Arc::new(|message: &str| eprintln!("radian: [memory] {message}"));
 
+    // ADR 0031 T3: resolve project trust before the session exists. The TUI is interactive, so
+    // a workspace with resources and no decision asks through a startup modal (pushed after
+    // the terminal is entered); the persistent write + audit happen then, once the journal
+    // exists. `--trust`/`--no-trust` override for this process only.
+    let cli_trust = if cli.trust {
+        Some(radian_host::trust::Decision::Trust)
+    } else if cli.no_trust {
+        Some(radian_host::trust::Decision::Untrust)
+    } else {
+        None
+    };
+    let (trust_setup, trust_warning) =
+        radian_host::trust::load_for(&workspace_path, cli_trust, true);
+    if let Some(warning) = &trust_warning {
+        eprintln!("[trust] {warning}");
+    }
+    eprintln!("{}", radian_host::trust::status_line(&trust_setup));
+
     // ADR 0023 U5: the one place a session is established; `agent-cli` calls the same function
     // with its own bindings. Every startup check that can fail has already run, so this is the
     // first thing that creates durable state.
@@ -892,6 +919,7 @@ fn run(
                     config.source.as_deref().and_then(std::path::Path::parent),
                     radian_host::user_home().as_deref(),
                 ),
+                trust: trust_setup,
                 resume: resume.is_some(),
                 config_snapshot: serde_json::json!({
                     "provider": provider.as_str(),
@@ -1182,6 +1210,8 @@ fn run(
         startup_lines.push("no sessions for this workspace yet; starting a new one".to_string());
     }
     startup_lines.push(session_line);
+    // ADR 0031 T3: the trust state, in the startup block (same style as `ask_user: off`).
+    startup_lines.push(radian_host::trust::status_line(&session.trust()));
     // The safety lines are never folded away: a workspace boundary that
     // was not the user's choice, and every config-file warning/ignored key. The config
     // warnings are also printed before the alternate screen, where a crash can still show
@@ -1223,6 +1253,12 @@ fn run(
         tip,
         expanded: false,
     });
+    // ADR 0031 T3: ask once, after the terminal is up and the startup screen is built, when
+    // the workspace has project resources and no saved decision. Until it is answered the
+    // session is untrusted (nothing project-provided is loaded).
+    if session.trust().needs_ask {
+        app.push_trust_modal(session.trust().workspace.clone());
+    }
 
     // ADR 0008 revision: `/theme` writes to the file this process read, or to the path it
     // would read when there is no file yet (the write creates it).
@@ -2052,6 +2088,21 @@ impl LoopContext<'_> {
             Effect::ListSkills => {
                 let notices = radian_host::notices(self.session.skills());
                 self.send(AppInput::SessionDone(notices));
+                Ok(())
+            }
+            // ADR 0031 T3: apply the startup trust choice through the facade (it writes
+            // `trust.json` and journals `ProjectTrustChanged`), then show the new state.
+            Effect::SetTrust { choice } => {
+                match self.session.record_trust(choice) {
+                    Ok(setup) => self.send(AppInput::TrustResolved(setup)),
+                    Err(error) => {
+                        self.send(AppInput::CommandRefused(radian_host::CommandRefused {
+                            command: "trust".to_owned(),
+                            reason: error,
+                            capability: None,
+                        }))
+                    }
+                }
                 Ok(())
             }
             Effect::Compact { instructions } => {

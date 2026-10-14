@@ -388,6 +388,9 @@ fn event_data_value(
             "reason": reason,
         }),
         EventData::MemoryInjected { records } => json!({"records": records}),
+        EventData::ProjectTrustChanged { path, decision } => {
+            json!({"path": path, "decision": decision})
+        }
         EventData::Other(value) => value.clone(),
     };
     Ok(value)

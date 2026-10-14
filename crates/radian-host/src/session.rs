@@ -38,6 +38,7 @@ use crate::projection::{ProjectionRead, SessionProjection};
 use crate::skills::tools::SkillTools;
 use crate::skills::{self, Skill, SkillsHooks};
 use crate::tools::HostTools;
+use crate::trust;
 
 /// A session's stable identifier: the session file's name and `SessionCreated.session_id`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -221,6 +222,14 @@ pub trait SessionFacade: Send + Sync {
     /// Expands `/skill:<name> [args]` into the message ADR 0025 S3 sends to the inbox. `Err` is
     /// a notice (an unknown skill or an unreadable file), never a turn failure.
     fn expand_skill(&self, name: &str, args: &str) -> Result<String, String>;
+
+    /// The project-trust state (ADR 0031 T3): what the session starts with, and the source the
+    /// startup line shows.
+    fn trust(&self) -> trust::Setup;
+
+    /// Applies a startup trust choice (ADR 0031 T3): writes `trust.json` for the persistent
+    /// choices and journals `ProjectTrustChanged`, or changes only this session's state.
+    fn record_trust(&self, choice: trust::Choice) -> Result<trust::Setup, String>;
 }
 
 /// How the driver task ended.
@@ -288,6 +297,10 @@ pub struct SessionSetup {
     /// host (`~` and paths relative to the config file). The user-level `~/.radian/skills` is
     /// discovered first, so it wins a name conflict.
     pub skills_extra_paths: Vec<PathBuf>,
+    /// The project-trust state this session starts with (ADR 0031 T3). The host resolves it
+    /// before `open_session`; `needs_ask` means an interactive host must ask before the first
+    /// turn, and the session is untrusted until it answers.
+    pub trust: trust::Setup,
     /// `true` to resume an existing session file, `false` to create one.
     pub resume: bool,
     /// The `SessionCreated` snapshot (a route reference: never a key or a header value).
@@ -392,6 +405,9 @@ pub struct LocalSession {
     /// completion and `/skill:<name>` expansion; the prompt hook and the `skill` tool share the
     /// same `Arc`.
     skills: Arc<Vec<Skill>>,
+    /// The project-trust state (ADR 0031 T3). Interior mutability: the startup prompt resolves
+    /// it after `open_session` and the startup line reads it.
+    trust: Mutex<trust::Setup>,
     runtime: tokio::runtime::Handle,
     driver: DriverTask,
     capabilities: Vec<SessionCapability>,
@@ -473,6 +489,70 @@ impl LocalSession {
             .find(|skill| skill.name == name)
             .ok_or_else(|| format!("no skill named `{name}`: /skills lists the available ones"))?;
         skills::expand(skill, args)
+    }
+
+    /// The project-trust state this session starts with (ADR 0031 T3). A snapshot: the startup
+    /// line and the prompt read it, and `record_trust` replaces it.
+    pub fn trust(&self) -> trust::Setup {
+        self.trust.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Applies a startup trust choice (ADR 0031 T3): the persistent choices write `trust.json`
+    /// through `trust::apply` and journal one `ProjectTrustChanged` per write (non-critical);
+    /// the session-only ones change nothing on disk. Returns the new state for the startup line.
+    pub fn record_trust(&self, choice: trust::Choice) -> Result<trust::Setup, String> {
+        let (setup, changes) = self.apply_trust(choice)?;
+        // The audit journals through the session's own writer, like the permission audit
+        // (best effort: the choice already happened). The TUI continues running, so the
+        // spawned append completes; a host that exits right after uses
+        // `record_trust_async` and awaits it.
+        for change in changes {
+            let event = trust_event(&change);
+            let journal = Arc::clone(&self.journal);
+            self.runtime.spawn(async move {
+                let _ = journal.append_runtime_event(event).await;
+            });
+        }
+        Ok(setup)
+    }
+
+    /// [`record_trust`] with the audit awaited, for a host that may exit immediately after
+    /// (the line mode). Returns the new setup.
+    pub async fn record_trust_async(&self, choice: trust::Choice) -> Result<trust::Setup, String> {
+        let (setup, changes) = self.apply_trust(choice)?;
+        for change in changes {
+            let _ = self
+                .journal
+                .append_runtime_event(trust_event(&change))
+                .await;
+        }
+        Ok(setup)
+    }
+
+    /// Applies the choice (writing `trust.json` and collecting the audit records), then
+    /// updates the stored setup. Shared by the sync and async entry points.
+    fn apply_trust(
+        &self,
+        choice: trust::Choice,
+    ) -> Result<(trust::Setup, Vec<trust::ProjectTrustChanged>), String> {
+        let workspace = self
+            .trust
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .workspace
+            .clone();
+        let changes = std::sync::Mutex::new(Vec::new());
+        let audit = |change: &trust::ProjectTrustChanged| {
+            changes.lock().unwrap().push(change.clone());
+        };
+        let resolved = trust::apply(choice, &workspace, &audit)?;
+        let setup = {
+            let mut setup = self.trust.lock().unwrap_or_else(|e| e.into_inner());
+            setup.resolved = resolved;
+            setup.needs_ask = false;
+            setup.clone()
+        };
+        Ok((setup, changes.into_inner().unwrap()))
     }
 
     pub fn capabilities(&self) -> &[SessionCapability] {
@@ -598,6 +678,14 @@ impl SessionFacade for LocalSession {
         LocalSession::expand_skill(self, name, args)
     }
 
+    fn trust(&self) -> trust::Setup {
+        LocalSession::trust(self)
+    }
+
+    fn record_trust(&self, choice: trust::Choice) -> Result<trust::Setup, String> {
+        LocalSession::record_trust(self, choice)
+    }
+
     /// Re-validates the capability, then runs the command. The check is here as well as in the
     /// UI: a facade whose list the UI ignored still refuses.
     fn command(&self, command: SessionCommand) -> Result<(), CommandRefused> {
@@ -712,6 +800,7 @@ pub async fn open_session(
         profile,
         memory_root,
         skills_extra_paths,
+        trust,
         resume,
         config_snapshot,
         turn_options,
@@ -918,6 +1007,7 @@ pub async fn open_session(
         queue,
         memory,
         skills: shared_skills,
+        trust: Mutex::new(trust),
         runtime,
         driver: DriverTask {
             stop: Mutex::new(Some(stop_tx)),
@@ -942,6 +1032,14 @@ pub fn session_hooks(
     skills: Arc<SkillsHooks>,
 ) -> impl Hooks {
     ((permissions, memory), skills)
+}
+
+/// The durable audit event for one trust write (ADR 0031 T2).
+fn trust_event(change: &trust::ProjectTrustChanged) -> radian_session::RuntimeEvent {
+    radian_session::RuntimeEvent::trust_changed(
+        change.path.to_string_lossy().into_owned(),
+        change.decision.as_bool(),
+    )
 }
 
 /// Creates or resumes the session file. The caller has already validated everything that can

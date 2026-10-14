@@ -675,6 +675,163 @@ async fn a_runtime_error_redacts_every_auth_key_not_only_the_route_key() {
     assert!(stderr.contains("<redacted>"), "{stderr}");
 }
 
+/// ADR 0031 T3: a non-interactive run with project resources is untrusted by default, prints
+/// the one-line way out, and writes nothing.
+#[tokio::test]
+async fn a_workspace_with_project_resources_is_untrusted_without_a_terminal() {
+    let dir = scratch("trust-default");
+    let home = dir.0.join("home");
+    let ws = dir.0.join("ws");
+    std::fs::create_dir_all(ws.join(".radian/skills/greet")).unwrap();
+    std::fs::write(
+        ws.join(".radian/skills/greet/SKILL.md"),
+        "---\nname: greet\n---\n",
+    )
+    .unwrap();
+    let sessions = dir.0.join("sessions");
+    let server = MockServer::start(vec![text_reply("TRUST-OK")]).await;
+    let (code, _stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "-p",
+                "hi",
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "--session-id",
+                "trust-default",
+            ],
+            &[("RADIAN_HOME", home.to_str().unwrap())],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0);
+    assert!(
+        stderr.contains("project resources not loaded (untrusted)"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("--trust"), "{stderr}");
+    assert!(
+        !home.join("trust/trust.json").exists(),
+        "nothing is written"
+    );
+}
+
+/// ADR 0031 T3: `--trust`/`--no-trust` override for this process only and never write.
+#[tokio::test]
+async fn trust_flags_override_without_writing() {
+    let dir = scratch("trust-flags");
+    let home = dir.0.join("home");
+    let ws = dir.0.join("ws");
+    std::fs::create_dir_all(ws.join(".radian/skills/greet")).unwrap();
+    std::fs::write(
+        ws.join(".radian/skills/greet/SKILL.md"),
+        "---\nname: greet\n---\n",
+    )
+    .unwrap();
+    let sessions = dir.0.join("sessions");
+    // One reply per iteration: `-p` runs a turn each time.
+    let server = MockServer::start(vec![text_reply("OK"), text_reply("OK")]).await;
+    for (flag, expected) in [
+        (
+            "--trust",
+            "project resources: loaded (trusted: command line)",
+        ),
+        (
+            "--no-trust",
+            "project resources: not loaded (untrusted: command line)",
+        ),
+    ] {
+        let (code, _, stderr) = feed_and_wait(
+            spawn_agent(
+                &[
+                    "--model",
+                    "m",
+                    "--base-url",
+                    &server.base_url,
+                    "-p",
+                    "hi",
+                    flag,
+                    "--workspace",
+                    ws.to_str().unwrap(),
+                    "--session-dir",
+                    sessions.to_str().unwrap(),
+                    "--session-id",
+                    if flag == "--trust" {
+                        "trust-flag-a"
+                    } else {
+                        "trust-flag-b"
+                    },
+                ],
+                &[("RADIAN_HOME", home.to_str().unwrap())],
+            ),
+            "",
+        )
+        .await;
+        assert_eq!(code, 0, "{flag}: {stderr}");
+        assert!(stderr.contains(expected), "{flag}: {stderr}");
+        assert!(
+            !home.join("trust/trust.json").exists(),
+            "{flag} must not write trust.json"
+        );
+    }
+}
+
+/// ADR 0031 T3: the interactive prompt persists the choice and journals one
+/// `ProjectTrustChanged`.
+#[tokio::test]
+async fn the_interactive_trust_prompt_persists_the_choice() {
+    let dir = scratch("trust-interactive");
+    let home = dir.0.join("home");
+    let ws = dir.0.join("ws");
+    std::fs::create_dir_all(ws.join(".radian/skills/greet")).unwrap();
+    std::fs::write(
+        ws.join(".radian/skills/greet/SKILL.md"),
+        "---\nname: greet\n---\n",
+    )
+    .unwrap();
+    let sessions = dir.0.join("sessions");
+    let server = MockServer::start(vec![text_reply("OK")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "--session-id",
+                "trust-int",
+            ],
+            &[("RADIAN_HOME", home.to_str().unwrap())],
+        ),
+        // The first line answers the trust prompt (1 = trust this directory); the closed
+        // stdin then ends the interactive loop.
+        "1\n",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("project resources found in"), "{stderr}");
+    let canonical = std::fs::canonicalize(&ws).unwrap();
+    let trust = std::fs::read_to_string(home.join("trust/trust.json")).unwrap();
+    assert!(
+        trust.contains(&canonical.to_string_lossy().to_string()),
+        "{trust}"
+    );
+    assert!(trust.contains("true"), "{trust}");
+    let journal = std::fs::read_to_string(sessions.join("trust-int.jsonl")).unwrap();
+    assert!(journal.contains("ProjectTrustChanged"), "{journal}");
+}
+
 #[tokio::test]
 async fn a_remote_base_url_without_a_key_fails_fast() {
     let start = Instant::now();
