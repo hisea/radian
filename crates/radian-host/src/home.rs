@@ -47,6 +47,9 @@ pub fn sessions_dir_for(root: &Path) -> PathBuf {
 pub fn memory_dir_for(root: &Path) -> PathBuf {
     root.join("memory")
 }
+pub fn credentials_dir_for(root: &Path) -> PathBuf {
+    root.join("credentials")
+}
 pub fn diagnostics_dir_for(root: &Path) -> PathBuf {
     cache_dir_for(root).join("diagnostics")
 }
@@ -79,6 +82,12 @@ pub fn sessions_dir() -> Option<PathBuf> {
 /// The memory directory for this process, created 0700. **Sandbox-denied** (ADR 0020).
 pub fn memory_dir() -> Option<PathBuf> {
     Some(private(memory_dir_for(&radian_home()?)))
+}
+
+/// The credentials directory for this process, created 0700. **Sandbox-denied** (ADR 0026
+/// D4): it holds `auth.json`, which the sandbox must not read.
+pub fn credentials_dir() -> Option<PathBuf> {
+    Some(private(credentials_dir_for(&radian_home()?)))
 }
 
 /// The diagnostics directory for this process, created 0700. Sandbox-readable (ADR 0020).
@@ -194,6 +203,10 @@ mod tests {
         assert_eq!(
             memory_dir_for(root),
             PathBuf::from("/home/u/.radian/memory")
+        );
+        assert_eq!(
+            credentials_dir_for(root),
+            PathBuf::from("/home/u/.radian/credentials")
         );
         assert_eq!(
             diagnostics_dir_for(root),

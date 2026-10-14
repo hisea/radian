@@ -7,6 +7,7 @@
 //! of a host that is the same whether the user is at a line prompt or a full-screen UI. The
 //! two binaries still decide their own flags, startup text and error wording.
 
+pub mod auth;
 mod catalog;
 pub mod config;
 mod describe;
@@ -26,6 +27,11 @@ pub mod sessions;
 mod tools;
 mod workspace;
 
+pub use auth::{
+    AUTH_FILE_NAME, AuthEntry, AuthError, AuthStore, RADIAN_BASE_URL, ResolvedKey, auth_path,
+    list as list_auth, remove as remove_auth, resolve_key, resolve_note,
+    upsert_api_key as upsert_auth_api_key,
+};
 pub use catalog::{
     CACHE_TTL, CATALOG_URL, Catalog, FETCH_TIMEOUT, ModelLimit, OUTPUT_RESERVATION_CAP, Window,
     WindowCheck, WindowQuery, WindowSource, cache_path, host_of, input_budget,
@@ -46,9 +52,9 @@ pub use errors::{CONTEXT_OVERFLOW_HELP, CONTEXT_OVERFLOW_PREFIX, is_context_over
 pub use headers::{SESSION_PLACEHOLDER, parse_headers};
 pub use home::{
     RADIAN_HOME_ENV, cache_dir_for, catalog_cache, catalog_cache_for, config_dir, config_dir_for,
-    diagnostics_dir_for, ensure_private_dir, legacy_sessions_dirs_for, legacy_sessions_hint,
-    legacy_sessions_hint_for, memory_dir, memory_dir_for, radian_home, radian_home_for,
-    sessions_dir, sessions_dir_for,
+    credentials_dir, credentials_dir_for, diagnostics_dir_for, ensure_private_dir,
+    legacy_sessions_dirs_for, legacy_sessions_hint, legacy_sessions_hint_for, memory_dir,
+    memory_dir_for, radian_home, radian_home_for, sessions_dir, sessions_dir_for,
 };
 pub use mcp::load_mcp_config;
 pub use model::{
