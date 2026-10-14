@@ -737,7 +737,10 @@ pub fn line_count_cached(entry: &mut Entry, modes: DisplayModes, width: usize) -
             .max(1);
         fill_md_cache(entry, &blocks, body_width);
         if modes.highlight {
-            fill_syntax_cache(entry, &blocks, body_width);
+            // The **code** lines lay out at the full width (they carry no marker prefix), the
+            // same width `syntax_lines_cached` looks the cache up with; using `body_width` here
+            // would key the cache differently from every lookup and never hit.
+            fill_syntax_cache(entry, &blocks, width);
         }
     }
     let lines = line_count(entry, modes, width);
