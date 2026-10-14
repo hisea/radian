@@ -944,3 +944,39 @@ fn the_brand_is_the_unicode_glyph_by_default() {
     let terminal = render(&mut app, 40, 12);
     assert!(row(&terminal, 11).contains('㎭'), "{}", row(&terminal, 11));
 }
+
+/// ADR 0027's sample: the deck's third row, whole, is
+/// `↑15M ↓2.6M R1962M $14.510 41.3%/1.0M` (compact tokens, a 3-decimal cost, the context
+/// share with one decimal and the window in `M`).
+#[test]
+fn the_deck_numbers_row_matches_the_sample() {
+    let mut app = App::new("mock", "s");
+    app.projection.add_usage(&agent_core::ModelUsage {
+        input: Some(15_000_000),
+        output: Some(2_600_000),
+        cache_read: Some(1_962_000_000),
+        ..Default::default()
+    });
+    app.projection.set_context_window(Some(1_000_000));
+    app.projection.set_request_started(Some(BudgetReport {
+        source: UsageSource::Estimated,
+        projected_tokens: 413_000,
+        input_budget_tokens: 1_000_000,
+        request_bytes: 0,
+        baseline_input_tokens: None,
+        estimated_growth_tokens: None,
+    }));
+    // 15M input at 967_333 micro-dollars per million = 14_509_995 micros = $14.510.
+    app.set_model_price(Some(radian_host::ModelPrice {
+        input: 967_333,
+        output: 0,
+        cache_read: None,
+        cache_write: None,
+    }));
+    let terminal = render(&mut app, 100, 12);
+    // The numbers row is right-aligned; the content itself is the sample.
+    assert_eq!(
+        row(&terminal, 11).trim(),
+        "↑15M ↓2.6M R1962M $14.510 41.3%/1.0M"
+    );
+}

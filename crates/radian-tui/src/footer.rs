@@ -327,6 +327,12 @@ fn preset_rows(preset: Preset) -> Vec<Row> {
         format: Some(format.to_string()),
         ..item(id)
     };
+    // A preset row with no symbol at all (revision 3's numbers row has none).
+    let no_symbol = |id: &str, format: &str| Item {
+        icon: Some(String::new()),
+        format: Some(format.to_string()),
+        ..item(id)
+    };
     let row = |left: Vec<Item>, right: Vec<Item>| Row {
         left,
         right,
@@ -348,15 +354,19 @@ fn preset_rows(preset: Preset) -> Vec<Row> {
                 ],
                 vec![item("context_bar"), item("reasoning")],
             ),
-            // Row 3: the numbers, right-aligned (revision 3's sample).
-            row(
-                Vec::new(),
-                vec![
-                    with_format("tokens", "↑{in} ↓{out} R{cache}"),
-                    item("cost"),
-                    with_format("context", "{percent}%/{budget}"),
-                ],
-            ),
+            // Row 3: the numbers, right-aligned, single spaces (revision 3's sample
+            // `↑15M ↓2.6M R1962M $14.510 41.3%/1.0M`).
+            Row {
+                separator: " ".to_string(),
+                ..row(
+                    Vec::new(),
+                    vec![
+                        with_format("tokens", "↑{in} ↓{out} R{cache}"),
+                        item("cost"),
+                        no_symbol("context", "{percent}%/{budget}"),
+                    ],
+                )
+            },
         ],
         Preset::Full => vec![
             Row {
@@ -1154,7 +1164,8 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
                 (Some(used), Some(budget)) if budget > 0 => used as f64 / budget as f64,
                 _ => 0.0,
             };
-            let percent = (fraction * 100.0).round() as u64;
+            // One decimal (ADR 0027): `41.3%`.
+            let percent = format!("{:.1}", fraction * 100.0);
             let bar = if id == "context_bar" {
                 render_bar(item, fraction)
             } else {
@@ -1175,7 +1186,7 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
                 values: vec![
                     ("bar", bar),
                     ("auto", auto),
-                    ("percent", percent.to_string()),
+                    ("percent", percent.clone()),
                     (
                         "used",
                         used.map_or_else(|| "-".to_string(), crate::timing::format_tokens),
@@ -1190,7 +1201,7 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
                 } else {
                     "{used}/{budget}"
                 },
-                numeric: report.map(|_| percent),
+                numeric: report.map(|_| (fraction * 100.0).round() as u64),
             })
         }
         "tokens" => Some(ItemData {
