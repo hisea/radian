@@ -974,3 +974,13 @@ Base `d483ec9` · 一次性 worktree `/tmp/radian-mut-s2c`（`git worktree add -
 | FS2C-B | 去掉 `GIT_OPTIONAL_LOCKS=0` 环境变量 | `the_background_git_disables_optional_locks` | ✅ |
 
 2/2 抓住。两个都断言，是因为新 git 认参数、旧 git 只认环境变量：只留一个就是给旧版本留洞。
+
+## trust-Esc：Esc 不得信任（2026-10-14）
+
+Base `f1993bb` · 一次性 worktree `/tmp/radian-esc-mut`，跑完 `git checkout -- .`，`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| ESC-M1 | 启动信任 modal 的 Esc 映射从 `UntrustHere` 改成 `TrustHere` | `update::tests::escaping_the_trust_modal_does_not_trust` | ✅ |
+
+1/1 抓住。
