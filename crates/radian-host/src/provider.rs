@@ -64,6 +64,10 @@ pub struct ProviderDescriptor {
     pub display_name: &'static str,
     pub default_base_url: &'static str,
     pub login: LoginMethod,
+    /// The protocol a model uses when the built-in list does not name it. Uniform for
+    /// `anthropic`/`openai`/`openai-compatible`; `opencode-go` defaults to openai-compatible
+    /// (its Anthropic models are all listed).
+    pub default_protocol: Protocol,
     /// The built-in model list (the full list is later merged with the cache and `/v1/models`,
     /// ADR 0026 D0).
     pub models: &'static [DescriptorModel],
@@ -85,9 +89,11 @@ impl ProviderDescriptor {
         self.models.iter().find(|entry| entry.id == model)
     }
 
-    /// The protocol `model` uses, when the descriptor knows it.
-    pub fn protocol_for(&self, model: &str) -> Option<Protocol> {
-        self.model(model).map(|entry| entry.protocol)
+    /// The protocol `model` uses: the built-in entry's protocol, or the descriptor's default
+    /// for a model the list does not name (always known, never `None`).
+    pub fn protocol_for(&self, model: &str) -> Protocol {
+        self.model(model)
+            .map_or(self.default_protocol, |entry| entry.protocol)
     }
 }
 
@@ -206,6 +212,7 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
         display_name: "OpenCode Go",
         default_base_url: OPENCODE_GO_BASE,
         login: LoginMethod::ApiKey { extra_fields: &[] },
+        default_protocol: Protocol::OpenAiCompatible,
         models: OPENCODE_GO_MODELS,
         headers: opencode_go_headers,
     },
@@ -214,6 +221,7 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
         display_name: "Anthropic",
         default_base_url: "https://api.anthropic.com",
         login: LoginMethod::ApiKey { extra_fields: &[] },
+        default_protocol: Protocol::Anthropic,
         models: ANTHROPIC_MODELS,
         headers: no_headers,
     },
@@ -222,6 +230,7 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
         display_name: "OpenAI",
         default_base_url: "https://api.openai.com/v1",
         login: LoginMethod::ApiKey { extra_fields: &[] },
+        default_protocol: Protocol::OpenAiCompatible,
         models: OPENAI_MODELS,
         headers: no_headers,
     },
@@ -234,6 +243,7 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
             // entry's `env` (ADR 0026 D1/D3).
             extra_fields: &[crate::auth::RADIAN_BASE_URL, "id"],
         },
+        default_protocol: Protocol::OpenAiCompatible,
         // The user supplies the model id; there is no built-in list.
         models: &[],
         headers: no_headers,
@@ -248,6 +258,92 @@ pub fn descriptor(id: &str) -> Option<&'static ProviderDescriptor> {
 /// The built-in descriptors.
 pub fn descriptors() -> &'static [ProviderDescriptor] {
     DESCRIPTORS
+}
+
+/// The generic descriptor's id, the only one `--base-url`/`--header` apply to (ADR 0026 D0).
+pub const GENERIC_ID: &str = "openai-compatible";
+
+/// A resolved route: which adapter, base URL and headers to use for one model (ADR 0026 D0).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Route {
+    pub descriptor_id: &'static str,
+    pub model: String,
+    pub protocol: Protocol,
+    pub base_url: String,
+    /// The headers for every request, `{session_id}` already expanded.
+    pub headers: Vec<(String, String)>,
+}
+
+impl Route {
+    pub fn adapter(&self) -> Provider {
+        self.protocol.adapter()
+    }
+}
+
+/// Resolves a descriptor id, a model, the generic base URL/headers and the credential entry's
+/// base URL into a [`Route`] (ADR 0026 D0).
+///
+/// `base_url_override` is `--base-url` or config `model.base_url`, `auth_base_url` is the
+/// resolved `RADIAN_BASE_URL` from the `auth.json` entry's `env`, and `header_args` are the
+/// `--header`/config headers. The last two are refused for a non-generic descriptor, because
+/// only the generic provider lets the user choose the endpoint.
+pub fn resolve_route(
+    descriptor_id: &str,
+    model: &str,
+    base_url_override: Option<&str>,
+    auth_base_url: Option<&str>,
+    header_args: &[(String, String)],
+    session_id: &str,
+) -> Result<Route, String> {
+    let descriptor = descriptor(descriptor_id).ok_or_else(|| {
+        format!(
+            "unknown provider {descriptor_id:?}: choose one of {}",
+            descriptors()
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+    let generic = descriptor.id == GENERIC_ID;
+    if !generic && base_url_override.is_some() {
+        return Err(format!(
+            "--base-url (or model.base_url) only applies to --provider {GENERIC_ID}; \
+             {descriptor_id} uses {}",
+            descriptor.default_base_url
+        ));
+    }
+    if !generic && !header_args.is_empty() {
+        return Err(format!(
+            "--header (or model.headers) only applies to --provider {GENERIC_ID}; {descriptor_id} \
+             sets its own request headers"
+        ));
+    }
+    let base_url = if generic {
+        // `--base-url`/config wins, then the credential entry's base URL, then the descriptor.
+        base_url_override
+            .map(str::to_owned)
+            .or_else(|| auth_base_url.map(str::to_owned))
+            .unwrap_or_else(|| descriptor.default_base_url.to_owned())
+    } else {
+        // A per-model base URL when the descriptor lists one, else the descriptor default.
+        descriptor
+            .model(model)
+            .map(|entry| entry.base_url.to_owned())
+            .unwrap_or_else(|| descriptor.default_base_url.to_owned())
+    };
+    let mut headers = descriptor.request_headers(session_id);
+    if generic {
+        // The descriptor has no headers of its own, so the user's are all of them.
+        headers.extend(header_args.iter().cloned());
+    }
+    Ok(Route {
+        descriptor_id: descriptor.id,
+        model: model.to_owned(),
+        protocol: descriptor.protocol_for(model),
+        base_url,
+        headers,
+    })
 }
 
 #[cfg(test)]
@@ -301,18 +397,13 @@ mod tests {
         let go = descriptor("opencode-go").unwrap();
         assert_eq!(
             go.protocol_for("deepseek-v4.1-flash"),
-            Some(Protocol::OpenAiCompatible)
+            Protocol::OpenAiCompatible
         );
-        assert_eq!(
-            go.protocol_for("claude-haiku-5-5"),
-            Some(Protocol::Anthropic)
-        );
-        assert_eq!(go.protocol_for("qwen3.7-plus"), Some(Protocol::Anthropic));
-        assert_eq!(
-            go.protocol_for("mimo-v2.6-pro"),
-            Some(Protocol::OpenAiCompatible)
-        );
-        assert_eq!(go.protocol_for("not-a-model"), None);
+        assert_eq!(go.protocol_for("claude-haiku-5-5"), Protocol::Anthropic);
+        assert_eq!(go.protocol_for("qwen3.7-plus"), Protocol::Anthropic);
+        assert_eq!(go.protocol_for("mimo-v2.6-pro"), Protocol::OpenAiCompatible);
+        // A model the list does not name uses the descriptor default (openai-compatible).
+        assert_eq!(go.protocol_for("not-a-model"), Protocol::OpenAiCompatible);
         // The Anthropic models point at the `/zen/go` base, the others at `/zen/go/v1`.
         assert_eq!(
             go.model("claude-haiku-5-5").unwrap().base_url,
@@ -325,6 +416,88 @@ mod tests {
         // The Anthropic protocol maps to the Anthropic adapter.
         assert_eq!(Protocol::Anthropic.adapter_name(), "anthropic");
         assert_eq!(Protocol::Anthropic.adapter(), Provider::Anthropic);
+    }
+
+    #[test]
+    fn a_route_picks_the_adapter_base_url_and_headers() {
+        // opencode-go: an openai-compatible model on /zen/go/v1, with the session and client
+        // headers.
+        let route =
+            resolve_route("opencode-go", "deepseek-v4.1-flash", None, None, &[], "s1").unwrap();
+        assert_eq!(route.protocol, Protocol::OpenAiCompatible);
+        assert_eq!(route.base_url, "https://opencode.ai/zen/go/v1");
+        assert_eq!(
+            route.headers,
+            vec![
+                ("x-opencode-session".to_owned(), "s1".to_owned()),
+                ("x-opencode-client".to_owned(), "radian".to_owned())
+            ]
+        );
+        // Its Anthropic model goes to /zen/go with the Anthropic adapter.
+        let anthropic =
+            resolve_route("opencode-go", "claude-haiku-5-5", None, None, &[], "s1").unwrap();
+        assert_eq!(anthropic.protocol, Protocol::Anthropic);
+        assert_eq!(anthropic.base_url, "https://opencode.ai/zen/go");
+        // A model the list does not name uses the descriptor default.
+        let unknown_model =
+            resolve_route("opencode-go", "future-model", None, None, &[], "s1").unwrap();
+        assert_eq!(unknown_model.protocol, Protocol::OpenAiCompatible);
+    }
+
+    #[test]
+    fn only_the_generic_descriptor_accepts_a_base_url_or_headers() {
+        let headers = vec![("x-custom".to_owned(), "1".to_owned())];
+        // A non-generic descriptor refuses both.
+        assert!(
+            resolve_route("opencode-go", "m", Some("https://x"), None, &[], "s")
+                .unwrap_err()
+                .contains("--base-url")
+        );
+        assert!(
+            resolve_route("anthropic", "m", None, None, &headers, "s")
+                .unwrap_err()
+                .contains("--header")
+        );
+        // The generic one accepts both, and the user's header is added.
+        let route = resolve_route(
+            GENERIC_ID,
+            "m",
+            Some("https://example.com/v1"),
+            None,
+            &headers,
+            "s",
+        )
+        .unwrap();
+        assert_eq!(route.base_url, "https://example.com/v1");
+        assert_eq!(route.protocol, Protocol::OpenAiCompatible);
+        assert!(
+            route
+                .headers
+                .contains(&("x-custom".to_owned(), "1".to_owned()))
+        );
+    }
+
+    #[test]
+    fn the_generic_base_url_precedence_is_override_then_auth_then_default() {
+        let with_override = resolve_route(
+            GENERIC_ID,
+            "m",
+            Some("https://cli"),
+            Some("https://auth"),
+            &[],
+            "s",
+        )
+        .unwrap();
+        assert_eq!(with_override.base_url, "https://cli");
+        let with_auth =
+            resolve_route(GENERIC_ID, "m", None, Some("https://auth"), &[], "s").unwrap();
+        assert_eq!(with_auth.base_url, "https://auth");
+        let default = resolve_route(GENERIC_ID, "m", None, None, &[], "s").unwrap();
+        assert_eq!(default.base_url, "https://api.openai.com/v1");
+        // An unknown descriptor is refused with the list.
+        let error = resolve_route("nope", "m", None, None, &[], "s").unwrap_err();
+        assert!(error.contains("unknown provider"), "{error}");
+        assert!(error.contains("opencode-go"), "{error}");
     }
 
     #[test]
