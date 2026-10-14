@@ -12,6 +12,8 @@
 | `schema-version-lower.toml` | `schema_version = 0`（低于 v1，无 v0→v1 注册迁移路径）。 | **拒绝**；**绝不静默改写用户文件**；迁移只能由显式入口发起。 | §5.3 |
 | `tui-theme-colors.toml` | ADR 0029:`tui.theme` 为主题文件名(内建之外的名字指向 `~/.radian/themes/<name>.json`),`[tui.colors]` 逐角色覆盖(颜色、色号、表三种写法,含 pi 角色名)。 | **接受**,0 拒绝;读者原样携带,由 TUI 解析;无明文密钥样字符串。 | §2 / ADR 0029 |
 | `tui-tips-banner.toml` | ADR 0008：`tui.tips`/`tui.banner`（布尔，默认都开）关闭启动画面的 Tip 行与字标。 | **接受**，0 拒绝；无明文密钥样字符串。 | §2 |
+| `providers.toml` | ADR 0026 D10:`[providers.<名字>]` 具名 provider(`kind` + `base_url`),`model.provider = "<名字>"` 选用。 | **接受**，0 拒绝；名字非法/与内建重名是另一个拒绝场景（读取器报 `providers.<name>` 错误）。 | §2 / ADR 0026 D10 |
+| `permissions-approval.toml` | ADR 0026 D9:`[permissions] approval = "auto"`(四个已知名字之一)。`full` 档位下这个值被忽略并警告;命令行 `--approval`/`--yes` 永远优先。 | **接受**,0 拒绝;无明文密钥样字符串。 | §2 / ADR 0026 D9 |
 | `api-key-removed.toml` | `model.api_key` 是**合法**的 `SecretRef`（`{ from = "env", name = "EXAMPLE_TOKEN" }`）。 | **拒绝**（ADR 0026 D2）；提示改用 `~/.radian/credentials/auth.json`，不静默忽略。 | §4.2 / ADR 0026 D2 |
 | `plaintext-secret.toml` | `api_key` 是明文串 `sk-live-…`。 | **拒绝打开**；报错点名键名/路径（敏感键被赋裸字符串，或明显的密钥样字符串出现在配置里）。 | §4.2 |
 | `heuristic-secret.toml` | 明文串出现在**非敏感键**（`tui.status_template` = `sk-heuristic-…`）。 | **拒绝打开**；启发式前缀扫到即拒——再次证明"出现在任何位置"不是只查敏感键。 | §4.2 |

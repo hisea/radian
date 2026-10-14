@@ -22,12 +22,14 @@ use radian_permissions::{ApprovalOutcome, ApprovalRequest};
 use radian_session::RuntimeEvent;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::blocks::{Block, ReasoningMode};
 use crate::clip::ClipboardMode;
 use crate::clip::MAX_CLIPBOARD_BYTES;
 use crate::command::{self, PendingCommand};
 use crate::composer::Composer;
 use crate::find::FindState;
 use crate::keys::{Action, Keymap};
+use crate::login::{LoginKey, LoginOutcome, LoginWizard};
 use crate::mention::{Completion, ExpandError, Expansion};
 use crate::picker::{Outcome as PickerOutcome, Picker};
 use crate::projection::{SessionProjection, StreamSnapshot};
@@ -53,8 +55,12 @@ pub enum EntryKind {
     ToolCall,
     ToolResult,
     Notice,
-    /// The startup screen's wordmark and collapsed/expanded information.
-    /// Rendered with the primary text color; it is the first entry in a session.
+    /// The startup screen's wordmark (; ADR 0027 §标志: the primary text
+    /// color). It is the first entry in a session.
+    Banner,
+    /// The startup information's collapsed/expanded lines. Their `label: value` first lines
+    /// use the same accent label / secondary body levels as a notice (`split_label`, ADR
+    /// 0028 / ADR 0029).
     Startup,
     /// A startup safety line (an unavailable sandbox, an unsandboxed MCP, an unknown
     /// window, a memory/config warning): it is **never** folded away, and it uses the
@@ -74,9 +80,16 @@ pub struct Entry {
     /// The committed assistant message was an interrupted prefix (ADR 0003).
     pub interrupted: bool,
     pub is_error: bool,
-    /// How many lines this entry wrapped to, for the width and text it was last measured at.
-    /// The renderer keeps it so a frame only re-wraps entries that changed or are on screen.
-    pub(crate) wrap_cache: WrapCache,
+    /// A tool call's outcome, once its result has arrived: `None` while it is running,
+    /// `Some(is_error)` after. The card's background follows it (ADR 0028 R4's states).
+    pub result: Option<bool>,
+    /// The parsed blocks (ADR 0028 R1), keyed by text length and the reasoning mode. Only
+    /// filled for assistant prose (the only kind with fence grammar today).
+    pub(crate) block_cache: Option<((usize, ReasoningMode), Vec<Block>)>,
+    /// How many lines this entry laid out to, for the width, text length and mode it was
+    /// last measured at. The renderer keeps it so a frame only re-lays out entries that
+    /// changed or are on screen.
+    pub(crate) layout_cache: Option<((usize, usize, ReasoningMode), usize)>,
 }
 
 impl Entry {
@@ -87,40 +100,10 @@ impl Entry {
             live: false,
             interrupted: false,
             is_error: false,
-            wrap_cache: WrapCache::default(),
+            result: None,
+            block_cache: None,
+            layout_cache: None,
         }
-    }
-}
-
-/// A measured line count, keyed by what it depends on: the width, the text length (entry text
-/// only ever grows while live, and a committed entry is a new `Entry`), and the interrupted
-/// marker. A cache, not state: two entries that differ only here are equal.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct WrapCache(Option<WrapKey>);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct WrapKey {
-    pub width: usize,
-    pub text_len: usize,
-    pub interrupted: bool,
-    pub lines: usize,
-}
-
-impl WrapCache {
-    pub(crate) fn get(&self, width: usize, text_len: usize, interrupted: bool) -> Option<usize> {
-        self.0
-            .filter(|k| k.width == width && k.text_len == text_len && k.interrupted == interrupted)
-            .map(|k| k.lines)
-    }
-
-    pub(crate) fn set(&mut self, key: WrapKey) {
-        self.0 = Some(key);
-    }
-}
-
-impl PartialEq for WrapCache {
-    fn eq(&self, _: &Self) -> bool {
-        true
     }
 }
 
@@ -207,6 +190,13 @@ pub enum Modal {
     /// the one modal whose input goes through the keymap. Boxed: the form is much larger than
     /// the other variants, and a `Modal` sits in every `Layer`.
     Question(Box<QuestionForm>),
+    /// The `/login` wizard (ADR 0026 D3). Its keys are hardcoded (a login prompt is
+    /// sensitive, like the approval), and the key field is never echoed. Boxed, like the
+    /// question.
+    Login(Box<LoginWizard>),
+    /// A `/logout` confirmation: the provider whose stored credential would be removed.
+    /// `y` removes, `n`/`Esc` keeps — hardcoded, like the `/memory` confirmation.
+    ConfirmLogout(String),
 }
 
 /// How far one approval-scroll key moves the box's body (approval-fit). Hardcoded like the
@@ -366,6 +356,10 @@ pub enum Input {
     Resize { rows: u16, cols: u16 },
     /// The hardcoded answer to the approval prompt on screen (`y`/`a`/`n`/`Esc`).
     ApprovalAnswer(ApprovalOutcome),
+    /// The approval box's auto key `!` (ADR 0026 D9, a constant in `render.rs`): approve the
+    /// pending request once **and** turn auto on for the rest of the session. Hardcoded like
+    /// the answers (ADR 0023 U4, invariant 2).
+    ApprovalAuto,
     /// A scroll of the approval box's body (`↑`/`↓`/PgUp/PgDn). Hardcoded like the answers:
     /// scrolling must never depend on the keymap, and it must never collide with an answer key.
     ApprovalScroll(ApprovalScroll),
@@ -397,6 +391,29 @@ pub enum Input {
     MemoryCommandDone(MemoryResult),
     /// A manual `/compact` finished (the result of [`Effect::Compact`]).
     CompactDone(Result<CompactionOutcome, String>),
+    /// A `/thinking` level was clamped against the current model's map (D11): `applied` is the
+    /// level that will be used (`None` when the model supports no level at all) and
+    /// `supported` the levels the completion offered.
+    ThinkingChecked {
+        requested: String,
+        applied: Option<String>,
+        supported: Vec<String>,
+    },
+    /// A `/model` target was vetted by the loop (ADR 0026 D5/D7). `tokens` is the current
+    /// context estimate `T` (`None` = unknown, so it cannot exceed anything), `budget` the
+    /// new model's `B'` (`None` = unknown, so no comparison is possible).
+    ModelChecked {
+        provider: String,
+        model: String,
+        tokens: Option<u64>,
+        budget: Option<u64>,
+    },
+    /// The compaction before a switch finished (D7). Success queues the switch.
+    SwitchCompacted {
+        provider: String,
+        model: String,
+        result: Result<CompactionOutcome, String>,
+    },
     /// A `/sessions`, `/export` or `/fork` finished: the notices to show.
     SessionDone(Vec<String>),
     /// The session's facade refused a command (ADR 0023 U5): an undeclared capability. The UI
@@ -409,6 +426,28 @@ pub enum Input {
     PickerClose,
     /// The session picker's data arrived (the result of [`Effect::OpenPicker`]).
     PickerOpened(PickerData),
+    /// One key inside the `/login` wizard (ADR 0026 D3). Hardcoded keys, like the approval.
+    LoginKey(LoginKey),
+    /// The `/login` verification request finished (D3). `name` is the provider the wizard is
+    /// logging in (the answer is ignored unless the wizard is still waiting on it).
+    LoginVerified {
+        name: String,
+        result: Result<(), String>,
+    },
+    /// The `auth.json` write of a `/login` finished: the wizard closes either way. The
+    /// success notice names the provider and the way to switch to it (D3).
+    LoginSaved {
+        name: String,
+        result: Result<(), String>,
+    },
+    /// The hardcoded answer to a `/logout` confirmation (`true` = remove).
+    ConfirmLogout(bool),
+    /// A `/logout` removal finished: the provider and the outcome. The notice names the
+    /// provider (the removal is otherwise silent, D3's confirmation being the record).
+    LogoutDone {
+        provider: String,
+        result: Result<(), String>,
+    },
     /// The left button went down at a screen cell: the press that may start a transcript
     /// selection (and that clears the previous one). Only arrives when mouse reporting is on.
     MouseDown { row: u16, col: u16 },
@@ -490,11 +529,50 @@ pub enum Effect {
     },
     /// Run a manual `/compact` on the runtime, between turns.
     Compact { instructions: Option<String> },
+    /// A `/model` target to vet: the loop resolves the credential and the new model's budget
+    /// (ADR 0026 D5/D7) and reports back as `Input::ModelChecked`.
+    ModelSwitch { provider: String, model: String },
+    /// Compact the context to make room for a switch (D7): the loop runs the same compaction
+    /// path as `/compact`, targeting the **new** model's budget.
+    CompactForSwitch {
+        provider: String,
+        model: String,
+        budget: u64,
+    },
+    /// Queue a model route for the next turn boundary (D5). The change is a route only.
+    QueueModel { provider: String, model: String },
+    /// A `/thinking` level to clamp against the current route's map (ADR 0026 D11); the loop
+    /// reports back as `Input::ThinkingChecked`.
+    SetThinking { level: String },
+    /// Queue a thinking level for the next turn boundary (D11): a level name only.
+    QueueThinking { level: String },
     /// Run a `/sessions`, `/export` or `/fork` request.
     Session(command::SessionOutcome),
     /// Load this workspace's sessions and open the picker overlay (`/sessions`). The result is
     /// [`Input::PickerOpened`]; loading is I/O, so it is the loop's job (ADR 0023 U3).
     OpenPicker { query: Option<String> },
+    /// Run the `/login` verification request (ADR 0026 D3): one `GET <base>/models`. The
+    /// answer is [`Input::LoginVerified`].
+    LoginVerify {
+        name: String,
+        protocol: &'static str,
+        base_url: String,
+        key: String,
+    },
+    /// Write the `/login` entry into `credentials/auth.json` (D3; only auth.json is written).
+    /// The answer is [`Input::LoginSaved`].
+    LoginSave {
+        name: String,
+        key: String,
+        env: Vec<(String, String)>,
+    },
+    /// Remove one stored credential (`/logout`, after the confirmation). The answer is
+    /// [`Input::LogoutDone`].
+    Logout { provider: String },
+    /// Switch the session's auto-approval (ADR 0026 D9). The loop applies it through the
+    /// facade, which flips the hooks' live policy, audits the switch and queues the durable
+    /// `ConfigChanged` record for the next resume.
+    SetApprovalPolicy { on: bool },
     /// Write the transcript selection to the system clipboard (`tui.clipboard` picks the
     /// transport). The loop runs it and answers with [`Input::ClipboardDone`]: OSC 52 has no
     /// receipt, and `pbcopy` can fail — the loop owns both facts, `update` only owns the text.
@@ -513,6 +591,7 @@ impl PartialEq for Effect {
         match (self, other) {
             (SendFollowup(a), SendFollowup(b)) | (Steer(a), Steer(b)) => a == b,
             (Cancel, Cancel) | (Quit, Quit) => true,
+            (SetApprovalPolicy { on: a }, SetApprovalPolicy { on: b }) => a == b,
             (
                 AnswerRequest {
                     request_id: a,
@@ -548,6 +627,33 @@ impl PartialEq for Effect {
             (FetchCompletions(a), FetchCompletions(b)) => a == b,
             (OpenPicker { query: a }, OpenPicker { query: b }) => a == b,
             (Session(a), Session(b)) => a == b,
+            (
+                LoginVerify {
+                    name: an,
+                    protocol: ap,
+                    base_url: ab,
+                    key: ak,
+                },
+                LoginVerify {
+                    name: bn,
+                    protocol: bp,
+                    base_url: bb,
+                    key: bk,
+                },
+            ) => an == bn && ap == bp && ab == bb && ak == bk,
+            (
+                LoginSave {
+                    name: an,
+                    key: ak,
+                    env: ae,
+                },
+                LoginSave {
+                    name: bn,
+                    key: bk,
+                    env: be,
+                },
+            ) => an == bn && ak == bk && ae == be,
+            (Logout { provider: a }, Logout { provider: b }) => a == b,
             (Copy { text: a }, Copy { text: b }) => a == b,
             (Theme { name: a }, Theme { name: b }) => a == b,
             _ => false,
@@ -658,6 +764,11 @@ pub struct App {
     /// deadline a second Ctrl-C must beat. `None` means not armed. Pure state; the wall clock
     /// arrives on [`Input::Cancel`], so `update` never reads the clock.
     pub quit_pending: Option<Instant>,
+    /// The in-session auto-approval state (ADR 0026 D9). The status bar shows `AUTO` while
+    /// it is on; the approval box's `!` key and `/auto` switch it. The live policy itself
+    /// is the hooks' — the loop applies it through [`Effect::SetApprovalPolicy`] — this is
+    /// the UI's mirror, so `update` stays pure.
+    pub auto: bool,
     /// The last request the UI answered: the queue's head stays that request for a moment, and
     /// re-showing it would flash a form the user just submitted.
     last_answered: Option<u64>,
@@ -677,6 +788,10 @@ pub struct App {
     /// The host fetch the current completion waits for: a result is applied only when it
     /// answers *this* fetch, so a stale answer cannot land on a newer line.
     pending_fetch: Option<command::Fetch>,
+    /// The queued switch, shown as `next: <provider/model>` until the driver applies it.
+    pub next_model: Option<String>,
+    /// The queued thinking level (D11), cleared when the driver applies it.
+    pub next_thinking: Option<String>,
     /// The color theme (config `tui.theme`, `NO_COLOR`).
     pub theme: Theme,
     /// The key bindings (config `tui.keybindings`), defaulting to the pre-config key table.
@@ -711,6 +826,9 @@ pub struct App {
     mouse_enabled: bool,
     /// How a copy reaches the system clipboard (config `tui.clipboard`, default OSC 52).
     pub clipboard: ClipboardMode,
+    /// How the reasoning channel displays (ADR 0028 R3, `tui.display.reasoning`). Part of
+    /// the block/layout cache keys: toggling re-lays the reasoning entries out.
+    pub reasoning_mode: ReasoningMode,
 }
 
 impl App {
@@ -732,12 +850,15 @@ impl App {
             startup_screen: None,
             startup_len: 0,
             quit_pending: None,
+            auto: false,
             last_answered: None,
             layers: vec![Layer::Surface],
             memory_enabled: false,
             pending_expand: None,
             slash_completion: None,
             pending_fetch: None,
+            next_model: None,
+            next_thinking: None,
             theme: Theme::default(),
             keymap: Keymap::default(),
             input_style: InputStyle::default(),
@@ -753,6 +874,8 @@ impl App {
             last_click: None,
             mouse_enabled: true,
             clipboard: ClipboardMode::Osc52,
+            // ADR 0028 R3's default: thinking collapsed to one line.
+            reasoning_mode: ReasoningMode::Collapsed,
         }
     }
 
@@ -801,6 +924,12 @@ impl App {
         self.memory_enabled = enabled;
     }
 
+    /// The session's in-session auto state (ADR 0026 D9), set at startup from the resolved
+    /// policy and afterwards only by the switch itself.
+    pub fn set_auto(&mut self, auto: bool) {
+        self.auto = auto;
+    }
+
     /// Applies the wired `tui.*` configuration. A bad keymap (a key bound to two actions) is
     /// an error the host turns into a startup refusal; unknown actions/keys are warnings.
     pub fn apply_config(
@@ -830,6 +959,14 @@ impl App {
             .input_style
             .as_deref()
             .and_then(InputStyle::parse)
+            .unwrap_or_default();
+        // `tui.display.reasoning` (ADR 0028 R3, default collapsed). An unknown spelling
+        // never reaches here (the host reader skips it with a warning).
+        self.reasoning_mode = config
+            .tui
+            .display_reasoning
+            .as_deref()
+            .and_then(ReasoningMode::parse)
             .unwrap_or_default();
         // `tui.clipboard` (default OSC 52). An unknown spelling never reaches here (the host
         // config reader skips it with a warning); `pbcopy` off macOS does: warn once and fall
@@ -972,6 +1109,7 @@ impl App {
         let press_line = self.scroll + row as usize;
         let Some(hit) = select::locate_hit(
             &self.entries,
+            self.reasoning_mode,
             self.transcript_width,
             press_line,
             col as usize,
@@ -986,6 +1124,7 @@ impl App {
         let (anchor, anchor_on_char) = match count {
             2 => match select::run_at(
                 &self.entries,
+                self.reasoning_mode,
                 self.transcript_width,
                 press_line,
                 col as usize,
@@ -1156,6 +1295,7 @@ impl App {
         let head_line = self.scroll + row as usize;
         let Some(hit) = select::locate_hit(
             &self.entries,
+            self.reasoning_mode,
             self.transcript_width,
             head_line,
             col as usize,
@@ -1239,6 +1379,22 @@ impl App {
     pub fn approval_modal_mut(&mut self) -> Option<&mut PendingApproval> {
         self.layers.iter_mut().rev().find_map(|layer| match layer {
             Layer::Modal(Modal::Approval(prompt)) => Some(&mut **prompt),
+            _ => None,
+        })
+    }
+
+    /// The topmost `/login` wizard, mutably, so `update` can step it.
+    pub fn login_modal_mut(&mut self) -> Option<&mut LoginWizard> {
+        self.layers.iter_mut().rev().find_map(|layer| match layer {
+            Layer::Modal(Modal::Login(wizard)) => Some(&mut **wizard),
+            _ => None,
+        })
+    }
+
+    /// The `/logout` confirmation on screen, if any.
+    pub fn pending_logout(&self) -> Option<&str> {
+        self.layers.iter().rev().find_map(|layer| match layer {
+            Layer::Modal(Modal::ConfirmLogout(provider)) => Some(provider.as_str()),
             _ => None,
         })
     }
@@ -1357,7 +1513,7 @@ impl App {
         let mut block: Vec<Entry> = startup
             .banner_for_width(self.transcript_width)
             .into_iter()
-            .map(|line| Entry::new(EntryKind::Startup, line))
+            .map(|line| Entry::new(EntryKind::Banner, line))
             .collect();
         if startup.expanded {
             block.push(Entry::new(
@@ -1435,6 +1591,7 @@ impl App {
         let width = self.transcript_width;
         // Split the borrow: the entries to match and the layer that holds the query are two
         // different fields of `self`.
+        let mode = self.reasoning_mode;
         let App {
             entries, layers, ..
         } = self;
@@ -1442,7 +1599,7 @@ impl App {
             Layer::Overlay(Overlay::Find(find)) => Some(find),
             _ => None,
         }) {
-            find.recompute(entries.as_slice(), width);
+            find.recompute(entries.as_slice(), mode, width);
         }
         self.find_jump();
     }
@@ -1556,6 +1713,34 @@ impl App {
                 })
             }
             _ => UpdateResult::none(),
+        }
+    }
+
+    /// The approval box's `!` key (ADR 0026 D9): approve the pending request once **and**
+    /// turn auto on for the rest of the session, in one press, no confirmation (owner's
+    /// correction 2026-10-13: `!` had no meaning before, so it cannot be mistyped into one).
+    /// The effects run in order: the answer first, then the switch. The switch stands even
+    /// with nothing pending — it is the same switch `/auto on` makes.
+    fn approval_auto_key(&mut self) -> UpdateResult {
+        let mut effects = Vec::new();
+        if let Some(Modal::Approval(prompt)) =
+            self.remove_modal(|modal| matches!(modal, Modal::Approval(_)))
+        {
+            self.last_answered = Some(prompt.request_id);
+            effects.push(Effect::AnswerRequest {
+                request_id: prompt.request_id,
+                response: PendingResponse::Approval(ApprovalOutcome::AllowOnce),
+            });
+        }
+        self.auto = true;
+        self.push_notice(
+            "auto: tool calls are approved without asking for the rest of this session; \
+             deny rules and the sandbox still apply",
+        );
+        effects.push(Effect::SetApprovalPolicy { on: true });
+        UpdateResult {
+            dirty: true,
+            effects,
         }
     }
 
@@ -1674,13 +1859,22 @@ impl App {
                 self.find_backspace();
                 UpdateResult::dirty()
             }
-            // A bracketed paste is text for the message box, exactly as before.
+            // A bracketed paste is text for the message box — unless the `/login` wizard is
+            // up: its fields take the paste (masked like typing, D3), and the message box is
+            // frozen while a modal is up anyway.
             Input::Paste(text) => {
+                if matches!(self.top_modal(), Some(Modal::Login(_))) {
+                    let outcome = self
+                        .login_modal_mut()
+                        .map(|wizard| wizard.on_key(LoginKey::Paste(text)));
+                    return self.login_outcome(outcome.unwrap_or(LoginOutcome::Stay));
+                }
                 self.input.insert_str(&text);
                 UpdateResult::dirty()
             }
             Input::Resize { .. } => UpdateResult::dirty(),
             Input::ApprovalAnswer(outcome) => self.answer_approval(outcome),
+            Input::ApprovalAuto => self.approval_auto_key(),
             Input::ApprovalScroll(direction) => self.approval_scroll(direction),
             Input::ConfirmCommand(confirmed) => self.confirm_command(confirmed),
             Input::Stream(stream) => {
@@ -1716,6 +1910,22 @@ impl App {
             }
             Input::MemoryCommandDone(result) => self.memory_command_done(result),
             Input::CompactDone(result) => self.compact_done(result),
+            Input::ThinkingChecked {
+                requested,
+                applied,
+                supported,
+            } => self.thinking_checked(requested, applied, supported),
+            Input::ModelChecked {
+                provider,
+                model,
+                tokens,
+                budget,
+            } => self.model_checked(provider, model, tokens, budget),
+            Input::SwitchCompacted {
+                provider,
+                model,
+                result,
+            } => self.switch_compacted(provider, model, result),
             Input::SessionDone(notices) => {
                 for notice in notices {
                     self.push_notice(notice);
@@ -1735,6 +1945,68 @@ impl App {
                 UpdateResult::dirty()
             }
             Input::PickerOpened(data) => self.picker_opened(data),
+            // The `/login` wizard's keys, its verification result, and the save/removal
+            // results (ADR 0026 D3).
+            Input::LoginKey(key) => {
+                let outcome = self
+                    .login_modal_mut()
+                    .map(|wizard| wizard.on_key(key))
+                    .unwrap_or(LoginOutcome::Stay);
+                self.login_outcome(outcome)
+            }
+            Input::LoginVerified { name: _, result } => {
+                // Only a wizard still waiting consumes the answer (D3).
+                let waiting = matches!(
+                    self.top_modal(),
+                    Some(Modal::Login(wizard))
+                        if matches!(wizard.step, crate::login::LoginStep::Verifying)
+                );
+                if !waiting {
+                    return UpdateResult::none();
+                }
+                let outcome = self
+                    .login_modal_mut()
+                    .and_then(|wizard| wizard.verified(&result))
+                    .unwrap_or(LoginOutcome::Stay);
+                self.login_outcome(outcome)
+            }
+            Input::LoginSaved { name, result } => {
+                self.remove_modal(|modal| matches!(modal, Modal::Login(_)));
+                match result {
+                    Ok(()) => {
+                        // D3's required "what next" line: how to actually use the provider.
+                        self.push_notice(format!(
+                            "saved the key for `{name}` in credentials/auth.json; switch to it \
+                             with /model {name}/<model> (or set model.provider)"
+                        ));
+                    }
+                    Err(error) => self.push_notice(format!("could not save the key: {error}")),
+                }
+                UpdateResult::dirty()
+            }
+            Input::ConfirmLogout(confirmed) => {
+                let Some(provider) = self.pending_logout().map(str::to_owned) else {
+                    return UpdateResult::none();
+                };
+                self.remove_modal(|modal| matches!(modal, Modal::ConfirmLogout(_)));
+                if confirmed {
+                    UpdateResult::effect(Effect::Logout { provider })
+                } else {
+                    self.push_notice(format!("kept `{provider}`"));
+                    UpdateResult::dirty()
+                }
+            }
+            Input::LogoutDone { provider, result } => {
+                match result {
+                    Ok(()) => {
+                        self.push_notice(format!("removed the stored credential for `{provider}`"))
+                    }
+                    Err(error) => {
+                        self.push_notice(format!("could not remove `{provider}`: {error}"))
+                    }
+                }
+                UpdateResult::dirty()
+            }
             Input::MouseDown { row, col } => self.mouse_down(row, col),
             Input::MouseDrag { row, col } => self.mouse_drag(row, col),
             Input::MouseUp { row, col } => self.mouse_up(row, col),
@@ -1885,6 +2157,12 @@ impl App {
     fn modal_hardcoded_key(&self, key: &KeyEvent) -> Option<Input> {
         match self.top_modal()? {
             Modal::Approval(_) => match key.code {
+                // The auto key `!` (ADR 0026 D9, the constant in `render.rs`): approve this
+                // request once and turn auto on for the session. It must not take a scroll
+                // key, and it is un-rebindable like every answer key (ADR 0023 U4).
+                KeyCode::Char('!') => Some(Input::ApprovalAuto),
+                // `Y` is `y` (allow once); it never switches auto on (correction
+                // 2026-10-13: a Caps-Lock `y` must not silently enable auto).
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     Some(Input::ApprovalAnswer(ApprovalOutcome::AllowOnce))
                 }
@@ -1897,8 +2175,8 @@ impl App {
                     }))
                 }
                 // The body's scroll keys (approval-fit). They are not answer keys, so they
-                // cannot be confused with one, and the answers stay un-rebindable. ADR 0026 D9
-                // will add `[Y] auto for this session`; it must not take a scroll key.
+                // cannot be confused with one, and the answers stay un-rebindable. The auto
+                // key `!` (ADR 0026 D9) shares this property: it is no scroll key either.
                 KeyCode::Up => Some(Input::ApprovalScroll(ApprovalScroll::LineUp)),
                 KeyCode::Down => Some(Input::ApprovalScroll(ApprovalScroll::LineDown)),
                 KeyCode::PageUp => Some(Input::ApprovalScroll(ApprovalScroll::PageUp)),
@@ -1913,6 +2191,30 @@ impl App {
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                     Some(Input::ConfirmCommand(false))
                 }
+                _ => None,
+            },
+            // The `/logout` confirmation is hardcoded like the `/memory` one (ADR 0023 U4).
+            Modal::ConfirmLogout(_) => match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => Some(Input::ConfirmLogout(true)),
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    Some(Input::ConfirmLogout(false))
+                }
+                _ => None,
+            },
+            // The `/login` wizard's keys are hardcoded too: a login prompt is sensitive, and
+            // the key field must behave identically whoever rebinds what (ADR 0026 D3).
+            Modal::Login(_) => match key.code {
+                KeyCode::Char(c)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    Some(Input::LoginKey(LoginKey::Char(c)))
+                }
+                KeyCode::Backspace => Some(Input::LoginKey(LoginKey::Backspace)),
+                KeyCode::Enter => Some(Input::LoginKey(LoginKey::Enter)),
+                KeyCode::Esc => Some(Input::LoginKey(LoginKey::Esc)),
+                KeyCode::Up => Some(Input::LoginKey(LoginKey::Up)),
+                KeyCode::Down => Some(Input::LoginKey(LoginKey::Down)),
                 _ => None,
             },
         }
@@ -2164,6 +2466,12 @@ impl App {
                 self.find_close();
                 UpdateResult::dirty()
             }
+            // ADR 0028 R3: Ctrl-T folds or unfolds the thinking blocks. The mode is part of
+            // the block/layout cache keys, so the next frame re-lays them out.
+            Action::ToggleReasoning => {
+                self.reasoning_mode = self.reasoning_mode.toggled();
+                UpdateResult::dirty()
+            }
             Action::DeleteWord => {
                 self.input.delete_word();
                 UpdateResult::dirty()
@@ -2252,6 +2560,19 @@ impl App {
         else {
             return UpdateResult::none();
         };
+        // A `/model` confirm (D7): y compacts first, n cancels the switch. The modal's y/n are
+        // hardcoded (ADR 0023 U4), exactly like the approval's.
+        if let Some((provider, model, budget)) = pending.switch {
+            if !confirmed {
+                self.push_notice("cancelled; the model is unchanged");
+                return UpdateResult::dirty();
+            }
+            return UpdateResult::effect(Effect::CompactForSwitch {
+                provider,
+                model,
+                budget,
+            });
+        }
         if !confirmed {
             self.push_notice("cancelled");
             return UpdateResult::dirty();
@@ -2264,6 +2585,11 @@ impl App {
 
     /// ADR 0017: a failed turn is shown in the transcript; the session stays open.
     fn apply_runtime_event(&mut self, event: &RuntimeEvent) -> UpdateResult {
+        if matches!(event, RuntimeEvent::ConfigChanged { .. }) {
+            // The driver applied the queued change: the status bar's `next:` promise is done.
+            self.next_model = None;
+            self.next_thinking = None;
+        }
         if let RuntimeEvent::TurnFailed { message, .. } = event {
             self.entries.push(Entry::new(
                 EntryKind::Notice,
@@ -2377,6 +2703,14 @@ impl App {
 
     /// Shows the `/…` candidates: the overlay rows, and the state Tab/Enter accepts from.
     fn set_slash(&mut self, range: std::ops::Range<usize>, candidates: Vec<command::Candidate>) {
+        if candidates.is_empty() {
+            // Nothing to offer at this level: an empty list must not stay "open", or the next
+            // Enter would be swallowed accepting a candidate that does not exist (and the
+            // line could never be submitted).
+            self.slash_completion = None;
+            self.completion_clear();
+            return;
+        }
         let width = candidates
             .iter()
             .map(|candidate| candidate.insert.chars().count())
@@ -2429,6 +2763,13 @@ impl App {
             return UpdateResult::none();
         }
         let candidates = command::rank(candidates, fetch.partial());
+        // The `Ready` levels' rule holds here too: the one candidate that is already exactly
+        // what was typed is not a completion to accept — arming it would make Enter accept
+        // (inserting the same word) instead of submitting the finished line.
+        if candidates.len() == 1 && candidates[0].insert == fetch.partial() {
+            self.completion_clear();
+            return UpdateResult::dirty();
+        }
         self.set_slash(completion.range, candidates);
         UpdateResult::dirty()
     }
@@ -2444,7 +2785,11 @@ impl App {
             MemoryResult::NeedsConfirmation { command, prompt } => {
                 self.entries
                     .push(Entry::new(EntryKind::Notice, format!("{prompt} [y/N]")));
-                self.push_modal(Modal::ConfirmCommand(PendingCommand { command, prompt }));
+                self.push_modal(Modal::ConfirmCommand(PendingCommand {
+                    command,
+                    prompt,
+                    switch: None,
+                }));
             }
             MemoryResult::Failed(message) => self.push_notice(message),
         }
@@ -2524,6 +2869,35 @@ impl App {
         }
     }
 
+    /// Applies the wizard's outcome: stay, or hand the loop an effect / close. The "what
+    /// next" line on success is the loop's (it knows the save succeeded).
+    fn login_outcome(&mut self, outcome: LoginOutcome) -> UpdateResult {
+        match outcome {
+            LoginOutcome::Stay => {}
+            LoginOutcome::Cancel => {
+                self.remove_modal(|modal| matches!(modal, Modal::Login(_)));
+                self.push_notice("login cancelled; nothing was saved");
+            }
+            LoginOutcome::Verify {
+                name,
+                protocol,
+                base_url,
+                key,
+            } => {
+                return UpdateResult::effect(Effect::LoginVerify {
+                    name,
+                    protocol,
+                    base_url,
+                    key,
+                });
+            }
+            LoginOutcome::Save { name, key, env } => {
+                return UpdateResult::effect(Effect::LoginSave { name, key, env });
+            }
+        }
+        UpdateResult::dirty()
+    }
+
     /// Runs one `/…` line. Parsing is pure; everything that touches the world becomes an
     /// effect, and its result comes back as another [`Input`]. The line is not sent anywhere.
     fn run_slash_command(&mut self, line: &str) -> UpdateResult {
@@ -2567,7 +2941,156 @@ impl App {
                 // back to the config file; the notice says which of those happened.
                 UpdateResult::effect(Effect::Theme { name })
             }
+            command::Outcome::Thinking(level) => {
+                UpdateResult::effect(Effect::SetThinking { level })
+            }
+            command::Outcome::Model(switch) => UpdateResult::effect(Effect::ModelSwitch {
+                provider: switch.provider,
+                model: switch.model,
+            }),
+            // `/login`: the wizard is app state (pure); its network and file work are effects
+            // the loop runs (ADR 0023 U3). An explicit `/login <id>` skips the choice step.
+            command::Outcome::Login(provider) => {
+                let step = match provider {
+                    None => crate::login::LoginStep::ChooseProvider { cursor: 0 },
+                    Some(id) if id.starts_with("no-such-provider:") => {
+                        let name = id.trim_start_matches("no-such-provider:").to_owned();
+                        self.push_notice(format!(
+                            "unknown provider {name:?}: /login takes a built-in provider or \
+                             `custom`"
+                        ));
+                        return UpdateResult::dirty();
+                    }
+                    Some(id) => {
+                        // for_provider builds the matching first step (D3).
+                        self.push_modal(Modal::Login(Box::new(LoginWizard::for_provider(&id))));
+                        return UpdateResult::dirty();
+                    }
+                };
+                self.push_modal(Modal::Login(Box::new(LoginWizard::new(step))));
+                UpdateResult::dirty()
+            }
+            // `/logout <provider>`: confirm first (`y`/`n`), then remove (D3).
+            command::Outcome::Logout(provider) => {
+                if provider.is_empty() {
+                    self.push_notice("usage: /logout <provider>");
+                    return UpdateResult::dirty();
+                }
+                if let Some(extra) = provider.strip_prefix("__extra__") {
+                    self.push_notice(format!(
+                        "unexpected extra name {extra:?}; usage: /logout <provider>"
+                    ));
+                    return UpdateResult::dirty();
+                }
+                self.push_modal(Modal::ConfirmLogout(provider));
+                UpdateResult::dirty()
+            }
+            command::Outcome::AutoToggle(on) => {
+                // ADR 0026 D9: the in-session switch. `/auto on` needs no confirmation (it is
+                // typed, not one keypress), and a no-op switch is still recorded — the audit
+                // line says who switched, so the journal keeps every command.
+                self.auto = on;
+                if on {
+                    self.push_notice(
+                        "auto: tool calls are approved without asking for the rest of this \
+                         session; deny rules and the sandbox still apply",
+                    );
+                } else {
+                    self.push_notice("auto off: tool asks prompt again");
+                }
+                UpdateResult::effect(Effect::SetApprovalPolicy { on })
+            }
             command::Outcome::Message => UpdateResult::none(),
+        }
+    }
+
+    /// The `/model` decision (ADR 0026 D5/D7). The loop has already refused a provider without
+    /// a credential; here the app decides between queueing directly and asking first.
+    fn model_checked(
+        &mut self,
+        provider: String,
+        model: String,
+        tokens: Option<u64>,
+        budget: Option<u64>,
+    ) -> UpdateResult {
+        match (tokens, budget) {
+            (Some(t), Some(b)) if t > b => {
+                // D7: the switch does not fit, so compaction comes first — with the user's yes.
+                let prompt = format!(
+                    "switching to {provider}/{model} needs a compact first: about {t} tokens, \
+                     over the new model's budget {b}. compact and switch? [y] compact and switch \
+                     [n] cancel"
+                );
+                // The payload's `command` is unused on this path: `confirm_command` routes
+                // on `switch` first, so `y` can never run a memory command. `Purge` is the
+                // one variant a refusal can never reach.
+                let command = radian_host::memory::commands::MemoryCommand::List {
+                    global: false,
+                    project: false,
+                    all: false,
+                    json: false,
+                };
+                self.push_modal(Modal::ConfirmCommand(PendingCommand {
+                    command,
+                    prompt,
+                    switch: Some((provider, model, b)),
+                }));
+                UpdateResult::dirty()
+            }
+            _ => self.queue_model(provider, model),
+        }
+    }
+
+    /// Queues the route (D5) and says what happens next. The cache warning is the accepted
+    /// cost of a switch (ADR 0026 已接受的代价).
+    fn queue_model(&mut self, provider: String, model: String) -> UpdateResult {
+        self.next_model = Some(format!("{provider}/{model}"));
+        self.push_notice(format!(
+            "next turn: {provider}/{model}; the first turn after a switch will not hit the cache"
+        ));
+        UpdateResult::effect(Effect::QueueModel { provider, model })
+    }
+
+    /// The clamped `/thinking` (D11): queue it, and say so when the clamp moved the level.
+    fn thinking_checked(
+        &mut self,
+        requested: String,
+        applied: Option<String>,
+        supported: Vec<String>,
+    ) -> UpdateResult {
+        let Some(applied) = applied else {
+            self.push_notice("this model supports no thinking level; nothing changed");
+            return UpdateResult::dirty();
+        };
+        if applied != requested {
+            self.push_notice(format!(
+                "{requested} → {applied} (this model supports {})",
+                supported.join("/")
+            ));
+        }
+        self.next_thinking = Some(applied.clone());
+        self.push_notice(format!("next turn: thinking {applied}"));
+        UpdateResult::effect(Effect::QueueThinking { level: applied })
+    }
+
+    /// The pre-switch compaction finished (D7): only success queues the switch.
+    fn switch_compacted(
+        &mut self,
+        provider: String,
+        model: String,
+        result: Result<CompactionOutcome, String>,
+    ) -> UpdateResult {
+        match result {
+            Ok(_) => {
+                self.push_notice(format!("compacted; switching to {provider}/{model}"));
+                self.queue_model(provider, model)
+            }
+            Err(error) => {
+                self.push_notice(format!(
+                    "the switch was not queued: the compaction failed ({error})"
+                ));
+                UpdateResult::dirty()
+            }
         }
     }
 
@@ -2686,6 +3209,16 @@ impl App {
                 }
             }
             Message::Tool { result, .. } => {
+                // The card's head entry learns its outcome from the result that just
+                // arrived: the last tool call still marked running is the one it answers.
+                if let Some(call) = self
+                    .entries
+                    .iter_mut()
+                    .rev()
+                    .find(|entry| entry.kind == EntryKind::ToolCall && entry.result.is_none())
+                {
+                    call.result = Some(result.is_error);
+                }
                 let mut entry = Entry::new(EntryKind::ToolResult, result.text());
                 entry.is_error = result.is_error;
                 self.entries.push(entry);

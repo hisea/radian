@@ -141,12 +141,20 @@ fn fg_of(app: &mut App, width: u16, height: u16, needle: &str) -> Option<ratatui
 }
 
 /// `/theme` applies immediately: the same cell renders with the new theme's color (owner
-/// 2026-10-14). `dark`'s model segment is cyan, `light`'s is blue.
+/// 2026-10-14). ADR 0029 re-picked the built-in palettes, so the assertion is
+/// "the light theme's own model color", not a hard-coded ANSI name.
 #[test]
 fn applying_a_theme_changes_the_rendered_colors() {
     let mut app = App::new("mock", "s");
     let dark = fg_of(&mut app, 120, 12, "mock").expect("the model segment");
-    assert_eq!(dark, ratatui::style::Color::Cyan, "dark's model color");
+    assert_eq!(
+        dark,
+        radian_tui::theme::Theme::dark()
+            .model
+            .fg
+            .expect("dark model fg"),
+        "dark's model color"
+    );
 
     let result = app.update(radian_tui::app::Input::ThemeReady {
         theme: Some(Box::new(radian_tui::theme::Theme::light())),
@@ -154,7 +162,14 @@ fn applying_a_theme_changes_the_rendered_colors() {
     });
     assert!(result.dirty);
     let light = fg_of(&mut app, 120, 12, "mock").expect("the model segment");
-    assert_eq!(light, ratatui::style::Color::Blue, "light's model color");
+    assert_eq!(
+        light,
+        radian_tui::theme::Theme::light()
+            .model
+            .fg
+            .expect("light model fg"),
+        "light's model color"
+    );
     assert_ne!(dark, light, "the switch must change the rendered color");
     assert!(
         app.entries

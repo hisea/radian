@@ -198,6 +198,13 @@ find_next = ["ctrl-g", "shift-enter"]
 - `theme`: `dark` is the original palette, `light` re-picks it for a light background, `mono`
   uses no color at all (bold/underline/dim only). A non-empty `NO_COLOR` environment variable
   forces `mono` (<https://no-color.org>). An unknown theme is ignored with a warning.
+  (the bordered input box). An unknown value is ignored with a warning and falls back to `lines`.
+- `theme`: `dark` and `light` are **pi's own palettes**, read
+  through the same ADR 0029 conversion a theme file uses: the three text levels are pi's
+  brightness gradient (dark: `text` 89%, `muted` 67%, `dim` 56%), and every semantic color
+  sits at the 67% level, told apart by hue. `mono` uses no color at all (bold/underline/dim
+  only). A non-empty `NO_COLOR` environment variable forces `mono`
+  (<https://no-color.org>). An unknown theme is ignored with a warning.
 #### Theme files (ADR 0029): any pi theme works as-is
 
 `tui.theme` accepts any name. The built-ins (`dark`, `light`, `mono`) resolve first; any other
@@ -226,14 +233,20 @@ Every pi role maps onto a Radian role (`[tui.colors]` accepts both name families
 |---|---|
 | `user` | `userMessageText` (fg) + `userMessageBg` (bg) |
 | `selection` | `selectedBg` (bg only — the text keeps its own foreground under the band) |
+| `tool_pending_bg` / `tool_success_bg` / `tool_error_bg` | `toolPendingBg` / `toolSuccessBg` / `toolErrorBg` (the tool card's band by state) |
+| `notice_label` / `notice_body` | `accent` / `muted` (a structured notice's label and the rest) |
 | `reasoning` | `thinkingText` |
-| `tool_call` / `tool_result` / `tool_result_error` | `toolTitle` / `toolOutput` / `error` |
-| `notice` / `hint` / `completion` / `truncation` | `text` / `muted` / `dim` / `dim` |
+| `tool_call` / `tool_result` / `tool_result_error` | `toolTitle` (= `text`) / `toolOutput` (= `muted`) / `error` |
+| `text` | `text` (the main level: answers, user words, tool titles) |
+| `notice` | `text` (the notice line itself) |
+| `hint` / `completion` / `truncation` | `dim` (the weak level) |
 | `turn_idle` / `turn_running` / `turn_cancelled` | `success` / `warning` / `error` |
 | `interrupted` / `note` / `budget_over` | `warning` |
 | `model` / `mcp` / `find` | `accent` |
+| `auto` | `warning` (pi has no auto role; the status bar's `AUTO` marker is reversed) |
 | `tier` / `usage` / `budget` | `muted` |
 | `approval_border` | `borderAccent` |
+| `auto`（状态栏的 `AUTO` 标记，ADR 0026 D9） | `warning` |
 
 The pi roles nothing renders yet — the `md*`, `toolDiff*`, `syntax*` and `thinking*` families
 and the panel roles (`scrollbar*`, `searchMatch*`, `customMessage*`, `toolPendingBg`,
@@ -269,9 +282,11 @@ decision 3), so ADR 0027/0028 can wire them without re-reading the file.
   `escape`, `cancel`, `complete`, `find`, `find_prev`, `find_next`, `find_close`,
   `form_next`, `form_prev`, `form_up`, `form_down`, `form_select`, `form_submit`,
   `form_decline`. The defaults are exactly the table above, so an empty config changes nothing.
-- **The approval and command-confirmation prompts are not rebindable.** `y`/`a`/`n` and `Esc`
-  are handled before the keymap, so a bad keybinding cannot approve a tool call the user meant
-  to deny; `cancel` still works while a prompt is up.
+- **The approval and command-confirmation prompts are not rebindable.** `y`/`a`/`n`, `!` and
+  `Esc` are handled before the keymap, so a bad keybinding cannot approve a tool call the user
+  meant to deny; `cancel` still works while a prompt is up. `!` (ADR 0026 D9) approves the
+  pending request and turns auto on for the session; `Y` stays `y` (allow once) and never
+  switches auto on.
 - There are three **contexts**, and a binding only conflicts with another binding of its own
   context. The find box (`find_prev`, `find_next`, `find_close`) is a layer over the
   transcript: while it is open its keys are looked up first, so `enter` is `find_prev` there
@@ -392,6 +407,7 @@ The transcript owns its scrolling:
 | 18 | an `@path` reference attaches the file to the request and the transcript folds it to `[file: P, N lines]`; a binary attachment is not sent and the input is kept | `tests/pty.rs`, `tests/render.rs`, `src/mention.rs` |
 | 19 | `--pick` lists this workspace's sessions, filters, full-text searches, resumes the choice (the next request carries its history), `n` starts new, `Esc` exits 0 with no session file; `/sessions` lists a copyable `--resume`; `/export` writes and refuses to overwrite without `--force` | `tests/pty.rs`, `tests/sessions.rs` (host) |
 | 20 | Ctrl-C: idle with text, the first press clears it into the history (not a quit); idle and empty, the first press only shows `Press Ctrl-C again to quit` and a second inside 2 s quits with the exit line; a key in between, or the window closing, disarms | `tests/quit.rs`, `tests/pty.rs` |
+| 20 | auto (ADR 0026 D9): `!` approves once and enables auto (the next ask never prompts, `AUTO` on the status bar); `Y` stays allow-once; `/auto on\|off`, `/yolo` alias; switch audited + `ConfigChanged` journaled; resume restores on `workspace`, not on `full` (with the hint); config `auto` honored on `workspace`, ignored with a warning on `full` | `tests/auto.rs`, `tests/pty.rs` |
 | — | Enter=followup idle / steer running; Ctrl-C cancel-then-quit | `tests/input.rs` |
 
 ## Must be hand-tested in a real terminal
@@ -415,6 +431,9 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
 - **the budget status segment**: with a small `--context-window`, is the `T / B` projection
   and the reported-vs-estimated wording readable at your width, and does the over-budget
   highlight stand out without looking like an error?
+- **the `AUTO` status marker** (ADR 0026 D9): turn auto on with `/auto on` — does the reversed
+  `AUTO` segment stand out as "this session behaves differently" in `dark`, `light` and `mono`,
+  without reading as an error? pty automation asserts the text, not the prominence.
 - **the input area's two styles**: is `lines` (the default) comfortable, and is
   the `> ` prompt clear when the input is multi-line? Try `input_style = "box"` and compare.
 - **notice and hint readability**: `/help`'s output and the placeholder must be

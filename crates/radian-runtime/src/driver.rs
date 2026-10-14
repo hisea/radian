@@ -19,16 +19,20 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use agent_core::{
-    Agent, AgentEvent, AgentSession, CancelReason, CancellationToken, CompactionFailure, EventSink,
-    Hooks, IncompleteReason, JournalError, JournalRecord, Message, MessageId, Model, RunError,
-    RunOutcome, RunStatus, SessionError, SteeringHandle, Step, ToolProvider, TranscriptJournal,
-    TurnOptions,
+    Agent, AgentEvent, AgentSession, CancelReason, CancellationToken, CompactionFailure,
+    ContextBudget, EventSink, Hooks, IncompleteReason, JournalError, JournalRecord, Message,
+    MessageId, Model, RunError, RunOutcome, RunStatus, SessionError, SteeringHandle, Step,
+    ToolProvider, TranscriptJournal, TurnOptions,
 };
 use radian_session::{
     EventData, InboxLane, ReadError, RuntimeEvent, Session, SessionJournal, TurnOutcome, TurnReason,
 };
 
-use crate::config::{ConfigQueue, ConfigSlot};
+use crate::config::{ConfigQueue, ConfigSlot, ModelRoute};
+
+/// Computes `B` for a (provider, model) from the warm local catalog (ADR 0026 D7). The host
+/// supplies it; it must not touch the network.
+pub type BudgetFor = Arc<dyn Fn(&str, &str) -> Option<u64> + Send + Sync>;
 use crate::inbox::{ControlRequest, Inbox, InboxEntry, Lane};
 
 /// Why the driver could not continue.
@@ -83,6 +87,11 @@ struct Recovery {
     /// The revision of the last committed replacement (ADR 0018), 0 when the file has none,
     /// so the next automatic compaction uses a strictly larger revision.
     transcript_revision: u64,
+    /// Every `ConfigChanged` change merged in revision order (ADR 0026 D8/D11), and the last
+    /// revision seen. Merging **all** of them — not "the last of each kind" — is what keeps a
+    /// thinking change, a model change and an `approval` change (pi/auto) from erasing each
+    /// other on resume; a future key needs no new arm here.
+    config_state: Option<(serde_json::Value, u64)>,
 }
 
 /// The per-session driver.
@@ -107,6 +116,12 @@ pub struct Driver<M: Model, P: ToolProvider, H: Hooks> {
     next_turn: u64,
     next_config_revision: u64,
     closed: bool,
+    /// Computes `B` for a (provider, model) from the local catalog (ADR 0026 D7). The host
+    /// sets it; without it a switch cannot move the budget.
+    budget_for: Option<BudgetFor>,
+    /// The budget the next turn runs under: set when a model change is applied, `None` keeps
+    /// the configured one.
+    turn_budget: Option<ContextBudget>,
 }
 
 impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
@@ -118,6 +133,24 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         inbox: Arc<Inbox>,
         live: Arc<dyn EventSink>,
         options: TurnOptions,
+    ) -> Result<Self, DriverError> {
+        let slot = ConfigSlot::new(serde_json::Value::Null);
+        let queue = ConfigQueue::new();
+        Self::open_with_slot(agent, journal, inbox, live, options, slot, queue).await
+    }
+
+    /// Like [`Driver::open`], with the host's own slot **and queue**: the switchable model
+    /// reads the slot instance the driver writes, and `/model` pushes into the queue the
+    /// driver drains at the turn boundary (ADR 0026 D5).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_with_slot(
+        agent: &Arc<Agent<M, P, H>>,
+        journal: Arc<SessionJournal>,
+        inbox: Arc<Inbox>,
+        live: Arc<dyn EventSink>,
+        options: TurnOptions,
+        slot: Arc<ConfigSlot>,
+        queue: Arc<ConfigQueue>,
     ) -> Result<Self, DriverError> {
         let recovery = recover(&journal).await?;
         // Requeue before opening: the inputs are promises that must survive the restart.
@@ -137,13 +170,13 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         // ADR 0018 §B: the next compaction's revision must be strictly larger than the last
         // committed one, so it is restored from the file too.
         session.restore_transcript_revision(recovery.transcript_revision);
-        Ok(Self {
+        let mut driver = Self {
             inbox,
             session,
             journal,
             live,
-            slot: ConfigSlot::new(serde_json::Value::Null),
-            queue: ConfigQueue::new(),
+            slot,
+            queue,
             options,
             turn_timeout: None,
             runtime_events: None,
@@ -151,12 +184,48 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             testing_wake_branch: Arc::new(tokio::sync::Notify::new()),
             next_turn: recovery.next_turn,
             next_config_revision: recovery.next_config_revision,
+            budget_for: None,
+            turn_budget: None,
             closed: false,
-        })
+        };
+        // D8: resume restores the last recorded change (the model and its budget) before the
+        // first turn, so the switchable model and the guard start where the journal left off.
+        if let Some((state, revision)) = recovery.config_state {
+            driver.apply_change(state, revision);
+        }
+        Ok(driver)
     }
 
     pub fn inbox(&self) -> &Arc<Inbox> {
         &self.inbox
+    }
+
+    /// Sets the resolver that recomputes `B` for a switched model (ADR 0026 D7). The host
+    /// supplies it; it must not touch the network (the startup fetch warmed the cache).
+    /// Runs the turn-boundary apply now (`testing` only): the D7 assertion needs the budget a
+    /// real boundary would compute without spawning the run loop.
+    #[cfg(feature = "testing")]
+    pub async fn test_apply_pending_config(&mut self) -> Result<(), DriverError> {
+        self.apply_pending_config().await
+    }
+
+    pub fn set_budget_for(&mut self, resolver: BudgetFor) {
+        self.budget_for = Some(resolver);
+        // Recompute at once for the route already in the slot (review M2): on a resume the
+        // replay happens before the host can set the resolver, so without this the restored
+        // model would keep `B = None` until the next switch.
+        if let Some(route) = ModelRoute::from_value(&self.slot.value())
+            && let Some(resolver) = &self.budget_for
+        {
+            self.turn_budget = resolver(&route.provider, &route.model).map(ContextBudget::new);
+        }
+    }
+
+    /// The budget the next turn runs under (`testing` only): the D7 assertion reads it instead
+    /// of reaching into a running turn.
+    #[cfg(feature = "testing")]
+    pub fn test_turn_budget(&self) -> Option<ContextBudget> {
+        self.turn_budget
     }
 
     /// The applied configuration. A model adapter reads this; the driver writes it only at
@@ -221,6 +290,18 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
     /// the servers' process groups — that is the supported use of an abort.
     pub async fn run(&mut self) -> Result<(), DriverError> {
         let result = self.run_loop().await;
+        // A change queued during the final turn (ADR 0026 D9's approval switch is the case:
+        // it is made mid-turn, and the host may stop right after) has no next turn boundary
+        // to land on. Journal it before the session closes, so a resume still restores it.
+        // A queued change that the journal cannot take is a real failure only when nothing
+        // else already failed; the original result wins otherwise.
+        let result = match self.apply_pending_config().await {
+            Ok(()) => result,
+            Err(error) => Err(match result {
+                Ok(()) => error,
+                Err(original) => original,
+            }),
+        };
         let closed = self.session.close().await;
         match (result, closed) {
             (Err(error), _) => Err(error),
@@ -266,6 +347,9 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         let live: Arc<dyn EventSink> = Arc::clone(&self.live);
         let runtime_events = self.runtime_events.clone();
         let mut options = self.options.clone();
+        // ADR 0026 D7: a `/model` switch moves the budget with the model. `None` keeps the
+        // configured budget, so a session that never switches behaves exactly as before.
+        options.context_budget = self.turn_budget;
         if let Some(timeout) = self.turn_timeout {
             options.deadline = Some(tokio::time::Instant::now() + timeout);
         }
@@ -409,7 +493,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         let token = CancellationToken::new();
         let live = Arc::clone(&self.live);
         let session = &mut self.session;
-        let compact = session.compact_now(request.instructions, &token, &*live);
+        let compact = session.compact_now(request.instructions, &token, &*live, request.budget);
         tokio::pin!(compact);
         let result = loop {
             tokio::select! {
@@ -443,15 +527,35 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         for change in self.queue.drain() {
             let revision = self.next_config_revision;
             self.next_config_revision += 1;
-            self.journal
-                .append_runtime_event(RuntimeEvent::ConfigChanged {
-                    revision,
-                    change: change.clone(),
-                })
-                .await?;
-            self.slot.apply(change, revision);
+            let event = RuntimeEvent::ConfigChanged {
+                revision,
+                change: change.clone(),
+            };
+            self.journal.append_runtime_event(event.clone()).await?;
+            // The host hears the applied change like any other runtime event: the UI's
+            // `next:` marker (D5) is spent exactly when the change is durable.
+            if let Some(sink) = &self.runtime_events {
+                sink.on_runtime_event(&event);
+            }
+            self.apply_change(change, revision);
         }
         Ok(())
+    }
+
+    /// Applies one change to the slot, and for a model change recomputes the budget the next
+    /// turn runs under (ADR 0026 D7). Also used by resume replay (D8).
+    fn apply_change(&mut self, change: serde_json::Value, revision: u64) {
+        // A change **merges** into the slot's object (D11): a `{"thinking": …}` change must
+        // survive the next model change and the reverse — the switchable model reads the
+        // whole current state. A non-object change replaces.
+        let mut merged = self.slot.value();
+        merge_change(&mut merged, &change);
+        self.slot.apply(merged, revision);
+        if let Some(route) = ModelRoute::from_value(&change)
+            && let Some(resolver) = &self.budget_for
+        {
+            self.turn_budget = resolver(&route.provider, &route.model).map(ContextBudget::new);
+        }
     }
 }
 
@@ -683,6 +787,21 @@ fn lane_of(lane: InboxLane) -> Lane {
 ///    durable, inputs that were enqueued but never claimed before the restart;
 /// 3. unpaired tool calls go through the core's `repair` (ADR 0002), and the repaired
 ///    messages are written back before the session is reopened (ADR 0002 E9).
+///
+/// Merges one `ConfigChanged` change into a config state (ADR 0026 D8/D11): object keys are
+/// inserted, anything else replaces. One function for the live path and the resume replay, so
+/// the two cannot drift (review M3).
+fn merge_change(state: &mut serde_json::Value, change: &serde_json::Value) {
+    match (state.as_object_mut(), change.as_object()) {
+        (Some(state), Some(partial)) => {
+            for (key, value) in partial {
+                state.insert(key.clone(), value.clone());
+            }
+        }
+        _ => *state = change.clone(),
+    }
+}
+
 async fn recover(journal: &SessionJournal) -> Result<Recovery, DriverError> {
     let parsed = Session::open(journal.path())?;
     let records = parsed.journal_records();
@@ -717,6 +836,9 @@ async fn recover(journal: &SessionJournal) -> Result<Recovery, DriverError> {
     let mut next_turn = 1u64;
     // ADR 0006 §5.7: the session-local config revision starts at 1.
     let mut next_config_revision = 1u64;
+    // D8 + D11 (review M3): merge every change in revision order, exactly like `apply_change`,
+    // so no change of any kind can erase another.
+    let mut config_state: Option<(serde_json::Value, u64)> = None;
     for event in parsed.events() {
         match &event.data {
             EventData::InboxEnqueued {
@@ -732,8 +854,11 @@ async fn recover(journal: &SessionJournal) -> Result<Recovery, DriverError> {
             EventData::TurnStarted { turn_id } | EventData::TurnFinished { turn_id, .. } => {
                 next_turn = next_turn.max(turn_number(turn_id) + 1);
             }
-            EventData::ConfigChanged { revision, .. } => {
+            EventData::ConfigChanged { revision, change } => {
                 next_config_revision = next_config_revision.max(revision + 1);
+                let merged = config_state.get_or_insert_with(|| (serde_json::json!({}), 0));
+                merge_change(&mut merged.0, change);
+                merged.1 = *revision;
             }
             _ => {}
         }
@@ -770,6 +895,7 @@ async fn recover(journal: &SessionJournal) -> Result<Recovery, DriverError> {
         }
     }
     Ok(Recovery {
+        config_state,
         history,
         requeue,
         next_turn,

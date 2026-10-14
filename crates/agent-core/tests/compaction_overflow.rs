@@ -340,6 +340,7 @@ async fn compact_now_commits_and_passes_the_instructions() {
             Some("focus on the parser".into()),
             &CancellationToken::new(),
             &recorder,
+            None,
         )
         .await
         .unwrap();
@@ -388,7 +389,7 @@ async fn compact_now_on_a_small_history_is_nothing_to_compact() {
         .unwrap();
     let recorder = Recorder::default();
     let outcome = session
-        .compact_now(None, &CancellationToken::new(), &recorder)
+        .compact_now(None, &CancellationToken::new(), &recorder, None)
         .await
         .unwrap();
     assert_eq!(outcome, CompactionOutcome::NothingToCompact);
@@ -414,7 +415,7 @@ async fn compact_now_only_requires_a_smaller_request() {
         .unwrap();
     let recorder = Recorder::default();
     let outcome = session
-        .compact_now(None, &CancellationToken::new(), &recorder)
+        .compact_now(None, &CancellationToken::new(), &recorder, None)
         .await
         .unwrap();
     let CompactionOutcome::Compacted {
@@ -443,7 +444,7 @@ async fn a_cancelled_compact_now_commits_nothing() {
     let token = CancellationToken::new();
     token.cancel();
     let error = session
-        .compact_now(None, &token, &recorder)
+        .compact_now(None, &token, &recorder, None)
         .await
         .unwrap_err();
     assert!(
@@ -488,7 +489,7 @@ async fn compact_now_shortens_an_overlong_summary() {
     let recorder = Recorder::default();
 
     let outcome = session
-        .compact_now(None, &CancellationToken::new(), &recorder)
+        .compact_now(None, &CancellationToken::new(), &recorder, None)
         .await
         .unwrap();
     assert!(
@@ -589,7 +590,7 @@ async fn compact_now_scales_the_summary_ceiling_with_the_window() {
         .unwrap();
     let recorder = Recorder::default();
     session
-        .compact_now(None, &CancellationToken::new(), &recorder)
+        .compact_now(None, &CancellationToken::new(), &recorder, None)
         .await
         .unwrap();
     let prompt = model.requests()[0]
@@ -608,7 +609,7 @@ async fn compact_now_scales_the_summary_ceiling_with_the_window() {
         .unwrap();
     let recorder = Recorder::default();
     session
-        .compact_now(None, &CancellationToken::new(), &recorder)
+        .compact_now(None, &CancellationToken::new(), &recorder, None)
         .await
         .unwrap();
     let prompt = model.requests()[0]
@@ -658,5 +659,32 @@ async fn the_verbatim_raises_the_fallback_threshold() {
     assert!(
         !kinds.iter().any(|kind| kind.starts_with("compacted")),
         "no candidate was written: {kinds:?}"
+    );
+}
+
+/// ADR 0026 D7: `compact_now` with a budget targets **that** budget, not the configured one —
+/// this is how the `/model` confirm compaction reaches the new model's B'. With no configured
+/// budget the pre-D7 code used the unlimited keep target and had nothing to do on this
+/// history; the given budget must drive it to compact anyway.
+#[tokio::test]
+async fn compact_now_honours_the_budget_it_is_given() {
+    let model = ScriptedModel::new([summary_reply("a short summary", 50)]);
+    let agent = overflow_agent(model, None, false);
+    let mut session = agent
+        .open_session_with_journal(big_prefix_history(), Arc::new(RecordingJournal::new()))
+        .await
+        .unwrap();
+    let outcome = session
+        .compact_now(
+            None,
+            &CancellationToken::new(),
+            &Recorder::default(),
+            Some(ContextBudget::new(500)),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, CompactionOutcome::Compacted { .. }),
+        "the given budget drives the compaction: {outcome:?}"
     );
 }

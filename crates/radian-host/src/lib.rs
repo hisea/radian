@@ -7,6 +7,7 @@
 //! of a host that is the same whether the user is at a line prompt or a full-screen UI. The
 //! two binaries still decide their own flags, startup text and error wording.
 
+pub mod approval;
 pub mod auth;
 mod catalog;
 pub mod config;
@@ -15,6 +16,7 @@ mod diagnostics;
 mod errors;
 mod headers;
 mod home;
+pub mod login;
 mod mcp;
 pub mod memory;
 mod model;
@@ -28,6 +30,7 @@ pub mod sessions;
 mod tools;
 mod workspace;
 
+pub use approval::{StartupApproval, resolve_startup, restored_approval};
 pub use auth::{
     AUTH_FILE_NAME, AuthEntry, AuthError, AuthStore, RADIAN_BASE_URL, ResolvedKey, auth_path,
     list as list_auth, remove as remove_auth, resolve_key, resolve_note,
@@ -35,8 +38,10 @@ pub use auth::{
 };
 pub use catalog::{
     CACHE_TTL, CATALOG_URL, Catalog, FETCH_TIMEOUT, ModelEntry, ModelLimit, OUTPUT_RESERVATION_CAP,
-    ProviderInfo, Window, WindowCheck, WindowQuery, WindowSource, cache_path, host_of,
-    input_budget, output_ceiling_warning, output_reservation, provider_for_host, resolve,
+    ProviderInfo, ProviderModels, Window, WindowCheck, WindowQuery, WindowSource, cache_path,
+    fetch_provider_models, host_of, input_budget, output_ceiling_warning, output_reservation,
+    provider_for_host, provider_models_cache, provider_models_stale, read_provider_models, resolve,
+    resolve_offline, write_provider_models,
 };
 pub use config::migrate_pi::{PiDraft, PiMigrateError, import_pi, write_draft as write_pi_draft};
 pub use config::theme_write::{ThemeWriteError, write_theme};
@@ -62,8 +67,9 @@ pub use home::{
 };
 pub use mcp::load_mcp_config;
 pub use model::{
-    DEFAULT_MAX_TOKENS, HostModel, MIN_THINKING_BUDGET, ModelArgs, Provider, Thinking, build_model,
-    check_provider_flags, redact_base_url,
+    DEFAULT_MAX_TOKENS, HostModel, MIN_THINKING_BUDGET, ModelArgs, Provider, RouteContext,
+    SwitchableModel, Thinking, build_model, check_provider_flags, redact_base_url,
+    resolve_thinking, resolve_thinking_ref,
 };
 pub use output::{StdoutError, write_line, write_stdout};
 pub use pending::{
@@ -74,13 +80,18 @@ pub use projection::{
     LastToolCall, ProjectionRead, SessionProjection, StreamKind, StreamSnapshot, TurnState,
 };
 pub use provider::{
-    DESCRIPTORS, DescriptorModel, GENERIC_ID, LoginMethod, Protocol, ProviderDescriptor, Route,
-    descriptor, descriptors, resolve_route,
+    CUSTOM_LOGIN, DEFAULT_THINKING_LEVEL, DESCRIPTORS, DescriptorModel, GENERIC_ID, LoginMethod,
+    NamedProvider, NamedSource, Protocol, ProviderDecl, ProviderDescriptor, ProviderRef,
+    RADIAN_KIND, Route, THINKING_LEVELS, ThinkingMap, clamp_thinking, descriptor, descriptors,
+    login_choices, name_error, parse_thinking_level, resolve_provider, resolve_route,
+    resolve_route_for, supported_thinking_levels, supported_thinking_levels_ref, supported_wire,
+    thinking_map_for, thinking_map_for_ref, thinking_rank, valid_name,
 };
+pub use radian_runtime::ModelRoute;
 pub use session::{
     ApprovalRouting, CommandRefused, DriverEnd, HostBindings, LocalSession, SessionCapability,
     SessionCommand, SessionError, SessionFacade, SessionFacts, SessionId, SessionQueue,
-    SessionSetup, open_session,
+    SessionSetup, open_session, resumed_model_route,
 };
 pub use session_id::{generate_session_id, validate_session_id};
 pub use sessions::{

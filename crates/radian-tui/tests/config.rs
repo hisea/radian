@@ -8,7 +8,7 @@ use radian_tui::{render, theme};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::style::{Color, Modifier};
+use ratatui::style::Color;
 
 fn config(text: &str) -> radian_host::config::Config {
     radian_host::config::parse(std::path::Path::new("/tmp/config.toml"), text).unwrap()
@@ -213,8 +213,8 @@ fn the_dark_theme_keeps_the_original_colors() {
         }
     }
     let style = user_marker.expect("the user marker");
-    assert_eq!(style.fg, Some(Color::Cyan));
-    assert!(style.add_modifier.contains(Modifier::BOLD));
+    // The built-in dark palette is pi's: the user marker takes the main text level.
+    assert_eq!(style.fg, Some(Color::Rgb(222, 224, 225)));
 }
 
 /// `mono` renders with no color at all.

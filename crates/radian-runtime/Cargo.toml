@@ -26,4 +26,6 @@ journal-selfcheck = ["agent-core/journal-selfcheck"]
 # AGENTS.md Verify list) runs them too; production builds stay unarmed.
 radian-runtime = { path = ".", features = ["testing"] }
 agent-provider-anthropic = { path = "../agent-provider-anthropic", features = ["testing"] }
+# The e2e resume/compaction test drives both real adapters (tests/e2e_resume_compaction.rs).
+agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible", features = ["testing"] }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "test-util"] }

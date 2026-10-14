@@ -309,3 +309,53 @@ Base `ba7568d` · 一次性检出 `/tmp/ui2-mut`（detached，跑完删除）· 
 
 2/2 抓住。新增键 `tui.tips`/`tui.banner` 的解析测试在 `config`（`startup_pref_tests`）；
 fixture `docs/schema/config/tui-tips-banner.toml` 由 `check-config-fixtures.sh` 校验。
+## ADR 0026 D11：统一思考级别（2026-10-14，重做）
+
+Base `442f55a` · 变异只在一次性 worktree 里做（`git worktree add --detach /tmp/radian-pi-mut-N <commit>`），
+跑完 `git worktree remove --force`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| T1 | 夹取改为先向下取（交换两段循环） | `provider::thinking_tests::the_clamp_prefers_the_nearest_supported_level_above` | ✅ |
+| T2 | 补全列出不支持的级别（filter 恒真） | `provider::thinking_tests::the_completion_lists_only_supported_levels_in_rank_order` | ✅ |
+| T3 | 没有映射表时仍发参数（`resolve_thinking` 的 `None` 分支返回 `Adaptive`） | `model::thinking_resolution_tests::a_mapless_model_resolves_to_nothing` | ✅ |
+
+## ADR 0026 第 1 片(`/login`、具名 provider)交叉引用
+
+变异 L3（查 key 仍用通用描述符的槽位）、L4（同名时 auth.json 压过配置）、L5（验证请求的
+报错带出 key）、L6（`/logout` 清空整个 auth.json）改的是本 crate 的 `provider.rs`/`login.rs`/
+`auth.rs`，抓住它们的测试分别在 `agent-cli`（具名 provider 验收）、`radian-host`（`login::tests`）
+与 `radian-tui`（logout pty）；明细见 `crates/agent-cli/MUTATIONS.md` 的 L1–L7。
+## ADR 0026 D9：启动解析与恢复（2026-10-13）
+
+Base `43ddbff` · 一次性检出 `/tmp/auto-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+单元变异跑 `cargo test -p radian-host --lib approval::tests::<test>`；facade 排队的变异跑
+`radian-tui` 的 pty 测试。变异后 `git checkout --` 还原。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| RH-A1 | 配置 auto 的守卫改成 `tier == Safe`（full 下配置的 auto 生效） | full 忽略配置 auto 并警告 | `approval::tests::config_auto_is_ignored_under_full_with_a_warning` FAILED |
+| RH-A2 | resume 守卫改成 `tier == Safe`（full 恢复了 auto） | full 不恢复 auto，提示 `/auto on` | `approval::tests::full_does_not_restore_auto_and_hints` FAILED；pty 层 `pty_resume_does_not_restore_auto_on_full_and_hints` 同样断言 |
+| RH-A3 | facade `set_approval` 去掉 `config_queue.push` | 每次开关写一条 ConfigChanged | pty `pty_auto_key_approves_once_and_enables_auto`（journal 断言）FAILED |
+
+3/3 抓住。CLI 优先与 workspace 恢复的正路径由
+`approval::tests::an_explicit_cli_choice_wins_and_backfills` /
+`resume_restores_the_journaled_state_over_the_config` 钉住。
+
+## ADR 0026 D11 审查 A1：Anthropic 七档不同线上值（2026-10-14）
+
+Base `0b9785b` · 一次性 worktree `/tmp/radian-pi-mut-a1`，跑完删除。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| A1a | 映射表全部改回 `adaptive`（六档同值） | `provider::thinking_tests::the_anthropic_levels_are_distinct` | ✅ |
+
+## review-fixes 片：`auth.json` 临时文件名冲突（P2）
+
+Base `c120b0e` · 就地变异（改 `write` 的临时名），跑完从备份还原、`git status --short` 为空。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| F2 | 临时名恢复成 `auth.json.tmp-<pid>`（无计数器/时间戳），并保留写前 `remove_file` | 同进程并发写不得互删临时文件 | `auth::tests::concurrent_writes_in_one_process_do_not_delete_each_other_s_temps` **5/5 次** FAILED，错误正是 `auth.json: No such file or directory (os error 2)`（另一个写者删掉了它正在写的临时文件） |
+
+1/1 抓住，且稳定复现（不是偶发）：Barrier 对齐 + 50 次写，5 次全失败。

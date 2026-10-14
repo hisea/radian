@@ -147,3 +147,16 @@ Base `4538c14` · 在本任务工作树内逐条施加后从副本还原（`--no
 | R6 | 读取阶段改回 `read_until` 整行读入内存 | `read::tests::the_read_phase_never_reads_more_than_the_budget_plus_a_buffer`（计数 reader 看到读了 64 MiB） | ✅ failed |
 
 2/2 抓住。R6 的计数 reader 用有限的 64 MiB `repeat`（不是无限，否则变异会挂而不是失败），断言读取阶段从源拉取的字节 ≤ `budget + BufReader 缓冲区`；跳过阶段只扫换行、常数内存，不受这条约束。
+
+## review-fixes 片：`read` 首行截断时吞掉非法 UTF-8（P1）
+
+Base `c120b0e` · 就地变异（改 `utf8_prefix`），跑完从备份还原、`git status --short` 为空。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| F1 | `utf8_prefix` 恢复成"一律 `valid_up_to()`"（不区分 `error_len()`） | 预算内的确定非法字节必须拒绝，而不是悄悄截成"看着正常"的文本 | `read::tests::an_over_long_first_line_with_an_invalid_byte_is_refused` FAILED（行首 `0xFF` 那半也 FAILED） |
+
+1/1 抓住。合法的"预算切在多字节字符中间"由
+`an_over_long_first_line_cut_mid_character_keeps_a_valid_prefix` 钉住（变异 F1 下该用例仍过,
+因为它本来就走前缀分支）；"非法字节在预算之外不失败"由
+`an_invalid_byte_beyond_the_budget_does_not_fail_the_read` 钉住。

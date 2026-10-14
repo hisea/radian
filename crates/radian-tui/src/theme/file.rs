@@ -10,8 +10,8 @@
 //! - **Coverage** (decision 3): pi styles its own UI roles; Radian maps them onto its 23
 //!   [`Role`]s. The mapping is in [`fg_source`]/[`bg_source`] and pinned by tests. The pi
 //!   roles nothing consumes yet (the `md*`, `toolDiff*`, `syntax*`, `thinking*` families and
-//!   the panel roles) are parsed into [`Theme::reserved`] so their values survive until
-//!   ADR 0027/0028 wire them.
+//!   the remaining panel roles) are parsed into [`Theme::reserved`] so their values survive
+//!   until ADR 0027/0028 wire them.
 //!
 //! Warnings are strings for the startup line; each problem is reported once.
 
@@ -86,13 +86,18 @@ const PI_ROLES: &[&str] = &[
     "bashMode",
 ];
 
-/// The pi role feeding each Radian role's **foreground** (ADR 0029 decision 3; the mapping
-/// is also documented in `crates/radian-tui/README.md`). Roles not listed here keep the
-/// built-in foreground unless `[tui.colors]` overrides them.
-/// The pi role feeding a Radian role's **foreground**. `None` for the roles pi styles by
+/// The pi role feeding a Radian role's **foreground** (ADR 0029 decision 3; the mapping is
+/// also documented in `crates/radian-tui/README.md`). `None` for the roles pi styles by
 /// background only — [`Role::Selection`] keeps whatever foreground the text under it has,
 /// and a theme file must not force one on it (the renderer patches the selection over the
 /// text's own style).
+/// The pi role feeding a Radian role's foreground — exposed so `theme.rs`'s mapping test can
+/// pin it without re-implementing the table.
+#[cfg(test)]
+pub(crate) fn fg_source_for_test(role: Role) -> Option<&'static str> {
+    fg_source(role)
+}
+
 fn fg_source(role: Role) -> Option<&'static str> {
     match role {
         Role::Reasoning => Some("thinkingText"),
@@ -114,19 +119,32 @@ fn fg_source(role: Role) -> Option<&'static str> {
         Role::Note => Some("warning"),
         Role::Truncation => Some("dim"),
         Role::ApprovalBorder => Some("borderAccent"),
-        Role::Hint => Some("muted"),
+        Role::Hint => Some("dim"),
         Role::Completion => Some("dim"),
         Role::Find => Some("accent"),
         Role::Selection => None,
+        Role::ToolPendingBg | Role::ToolSuccessBg | Role::ToolErrorBg => None,
+        // The notice's two halves take pi's two text levels (ADR 0028 decision).
+        Role::NoticeLabel => Some("accent"),
+        Role::NoticeBody => Some("muted"),
+        // The main text level itself (Pi's `text`): the mapping is used by the file themes;
+        // the built-ins take pi's values directly.
+        Role::Text => Some("text"),
+        // pi has no auto role; the warning role is the closest "this needs attention" color.
+        Role::Auto => Some("warning"),
     }
 }
 
-/// The pi role feeding a Radian role's **background**. The user line (`userMessageBg`) and
-/// the transcript selection (`selectedBg`), ADR 0029 decision 3.
+/// The pi role feeding a Radian role's **background**: the user line (`userMessageBg`), the
+/// transcript selection (`selectedBg`), and the tool cards by state (`toolPendingBg` /
+/// `toolSuccessBg` / `toolErrorBg`, ADR 0029 decision 3 + ADR 0028 R4).
 fn bg_source(role: Role) -> Option<&'static str> {
     match role {
         Role::User => Some("userMessageBg"),
         Role::Selection => Some("selectedBg"),
+        Role::ToolPendingBg => Some("toolPendingBg"),
+        Role::ToolSuccessBg => Some("toolSuccessBg"),
+        Role::ToolErrorBg => Some("toolErrorBg"),
         _ => None,
     }
 }
@@ -180,8 +198,8 @@ pub fn load(
     let mut warnings = Vec::new();
     let built_in = theme.and_then(super::ThemeName::parse);
     let mut resolved = match (theme, built_in) {
-        (None, _) => Theme::resolve(None, false),
-        (Some(_), Some(name)) => Theme::resolve(Some(name), false),
+        (None, _) => Theme::builtin(ThemeName::Dark, truecolor),
+        (Some(_), Some(name)) => Theme::builtin(name, truecolor),
         (Some(name), None) => load_file(name, themes_dir, truecolor, &mut warnings),
     };
     apply_overrides(&mut resolved, overrides, truecolor, &mut warnings);
@@ -272,7 +290,7 @@ fn build(
             ThemeName::Dark
         }
     };
-    let base = Theme::for_name(appearance);
+    let base = Theme::builtin(appearance, truecolor);
     let empty = serde_json::Map::new();
     let vars = table
         .get("vars")
@@ -485,7 +503,7 @@ fn set_bg(style: &mut Style, color: ColorValue, truecolor: bool) {
 /// A theme color becomes a ratatui [`Color`]: `""` is the terminal's default, an index is an
 /// index, and RGB is emitted as-is on a truecolor terminal and otherwise approximated to the
 /// nearest 256-color entry (ADR 0029 decision 2).
-fn ratatui_color(value: ColorValue, truecolor: bool) -> Option<Color> {
+pub(crate) fn ratatui_color(value: ColorValue, truecolor: bool) -> Option<Color> {
     match value {
         ColorValue::Default => Some(Color::Reset),
         ColorValue::Indexed(index) => Some(Color::Indexed(index)),
@@ -932,6 +950,17 @@ mod tests {
         // `#363646`, background only (the text keeps its own foreground under it).
         assert_eq!(theme.selection.bg, Some(Color::Rgb(0x36, 0x36, 0x46)));
         assert_eq!(theme.selection.fg, None);
+        // The block backgrounds (ADR 0028 R4): `userMessageBg: "bg_m2"` → `#181820`,
+        // `toolPendingBg: "bg_m3"` → `#16161D`, `toolSuccessBg: "diff_add_bg"` → `#2B3328`,
+        // `toolErrorBg: "diff_del_bg"` → `#43242B`.
+        assert_eq!(theme.user.bg, Some(Color::Rgb(0x18, 0x18, 0x20)));
+        assert_eq!(theme.tool_pending_bg.bg, Some(Color::Rgb(0x16, 0x16, 0x1D)));
+        assert_eq!(theme.tool_success_bg.bg, Some(Color::Rgb(0x2B, 0x33, 0x28)));
+        assert_eq!(theme.tool_error_bg.bg, Some(Color::Rgb(0x43, 0x24, 0x2B)));
+        // The notice's two halves: the label takes `accent` (#957FB8), the body `muted`
+        // (`fg_dim` = #C8C093), per the owner's text-level decision.
+        assert_eq!(theme.notice_label.fg, Some(Color::Rgb(0x95, 0x7F, 0xB8)));
+        assert_eq!(theme.notice_body.fg, Some(Color::Rgb(0xC8, 0xC0, 0x93)));
         // Every pi role in the file is either mapped or kept; nothing was dropped.
         assert!(theme.reserved.contains_key("mdHeading"));
         assert!(theme.reserved.contains_key("syntaxKeyword"));
@@ -945,8 +974,15 @@ mod tests {
     /// `selectedBg` (background only — a bare color there warns, it cannot set an fg).
     #[test]
     fn the_selection_role_is_settable_by_builtins_and_overrides() {
-        assert_eq!(Theme::dark().selection.bg, Some(Color::DarkGray));
-        assert_eq!(Theme::light().selection.bg, Some(Color::Gray));
+        // The built-in bands come from pi's `selectedBg` lifted a step, so a selection over
+        // a user block (pi makes both `blueBg`) stays visible.
+        assert_eq!(Theme::dark().selection.bg, Some(Color::Rgb(50, 84, 103)));
+        assert_eq!(Theme::light().selection.bg, Some(Color::Rgb(188, 204, 214)));
+        assert_ne!(
+            Theme::dark().selection.bg,
+            Theme::dark().user.bg,
+            "the selection must read over the user band"
+        );
         let mono = Theme::mono().selection;
         assert_eq!(mono.bg, None);
         assert!(
@@ -984,6 +1020,28 @@ mod tests {
         assert_eq!(theme.selection.bg, Some(Color::Rgb(0x21, 0x22, 0x23)));
         assert_eq!(theme.selection.fg, None);
 
+        // A tool background by its Radian name and by pi's name.
+        let (theme, warnings) = load(
+            None,
+            false,
+            true,
+            None,
+            &overrides(
+                "schema_version = 1\n[tui.colors]\ntool_success_bg = { bg = \"#0a0b0c\" }\n",
+            ),
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(theme.tool_success_bg.bg, Some(Color::Rgb(10, 11, 12)));
+        let (theme, warnings) = load(
+            None,
+            false,
+            true,
+            None,
+            &overrides("schema_version = 1\n[tui.colors]\ntoolErrorBg = { bg = \"#0d0e0f\" }\n"),
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(theme.tool_error_bg.bg, Some(Color::Rgb(13, 14, 15)));
+
         // A bare color names a foreground, which `selectedBg` does not carry: warned, and
         // the selection's foreground stays unset.
         let (theme, warnings) = load(
@@ -1000,6 +1058,48 @@ mod tests {
                 .any(|w| w.contains("tui.colors.selectedBg") && w.contains("background")),
             "{warnings:?}"
         );
+    }
+
+    /// The 17 community themes in `tests/data/themes/` (16 from
+    /// `@firstpick/pi-themes-bundle@0.1.7` plus kanagawa-wave) all load **without a single
+    /// warning**, and the three text levels each resolve (their `text` is `""` — the
+    /// terminal's default color — which is legal). A warning here means either our mapping is
+    /// wrong or the file is; the fixtures are never edited to silence one.
+    #[test]
+    fn the_community_theme_fixtures_all_load_without_warnings() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/themes");
+        let mut files: Vec<_> = std::fs::read_dir(&dir)
+            .expect("the fixtures directory")
+            .filter_map(|entry| {
+                let path = entry.ok()?.path();
+                (path.extension()? == "json").then_some(path)
+            })
+            .collect();
+        files.sort();
+        assert_eq!(files.len(), 17, "16 bundled themes + kanagawa-wave");
+        for path in files {
+            let name = path
+                .file_stem()
+                .expect("a name")
+                .to_string_lossy()
+                .into_owned();
+            let text = std::fs::read_to_string(&path).expect("readable");
+            let (theme, warnings) = load(Some(&name), false, true, Some(&dir), &[]);
+            assert_eq!(warnings, Vec::<String>::new(), "{name} produced warnings");
+            assert_eq!(theme.name, ThemeName::File, "{name} loaded as a file theme");
+            // The three levels exist (a level may legitimately be the terminal default).
+            for (level, style) in [
+                ("text", theme.text),
+                ("muted", theme.tool_result),
+                ("dim", theme.hint),
+            ] {
+                assert!(
+                    style.fg.is_some(),
+                    "{name}: the {level} level resolved to nothing"
+                );
+            }
+            let _ = text;
+        }
     }
 
     /// pi's reserved name and path-like names never touch the filesystem.

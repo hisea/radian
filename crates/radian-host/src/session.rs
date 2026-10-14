@@ -20,14 +20,16 @@ use std::time::Duration;
 use agent_core::{Agent, AgentConfig, ContextBudget, EventSink, Message, TurnOptions};
 use agent_extensions::{McpServerConfig, McpToolProvider};
 use radian_coding::CodingTools;
-use radian_permissions::{Approver, AuditSink, PermissionHooks, Preset, Profile};
-use radian_runtime::{CancelCause, Driver, Inbox, RuntimeEvents};
+use radian_permissions::{ApprovalPolicy, Approver, AuditSink, PermissionHooks, Preset, Profile};
+use radian_runtime::{
+    BudgetFor, CancelCause, ConfigQueue, ConfigSlot, Driver, Inbox, RuntimeEvents,
+};
 use radian_sandbox::Sandbox;
 use radian_session::{SessionCreatedData, SessionJournal};
 
 use crate::describe::{Wording, describe};
 use crate::memory::{InjectionConfig, MemoryHooks, MemoryService, MemoryTools, ProjectState};
-use crate::model::HostModel;
+use crate::model::SwitchableModel;
 use crate::pending::{
     Answered, PendingQueue, PendingRequest, PendingResponse, QueuedApprover, QueuedPrompter,
 };
@@ -181,6 +183,33 @@ pub trait SessionFacade: Send + Sync {
         instructions: Option<String>,
         on_done: Box<dyn FnOnce(Result<agent_core::CompactionOutcome, String>) + Send>,
     );
+
+    /// Like [`SessionFacade::compact`], with the budget the compaction targets (ADR 0026 D7):
+    /// the `/model` confirm compaction aims at the **new** model's `B'`.
+    fn compact_with_budget(
+        &self,
+        instructions: Option<String>,
+        budget_tokens: Option<u64>,
+        on_done: Box<dyn FnOnce(Result<agent_core::CompactionOutcome, String>) + Send>,
+    );
+
+    /// Queues a configuration change for the next turn boundary (ADR 0026 D5). A route never
+    /// carries a key or a header value.
+    fn queue_config(&self, change: serde_json::Value);
+
+    /// The model route in force (ADR 0026 D8): the resumed `ConfigChanged` if the session has
+    /// one, else the startup route from the snapshot.
+    fn model_route(&self) -> Option<(String, String)>;
+
+    /// `B` for a switched route, from the local catalog only (ADR 0026 D7). `None` when the
+    /// window is unknown — the app then queues without a comparison.
+    fn budget_for_route(&self, provider: &str, model: &str) -> Option<u64>;
+
+    /// Switch the session's approval policy in place (ADR 0026 D9's in-session `auto`).
+    /// The hooks audit the switch and the facade queues the durable `ConfigChanged` record
+    /// (`{"approval": …}`) the driver journals at the next turn boundary. Needs the same
+    /// capability as answering: it belongs to the interactive approver.
+    fn set_approval(&self, policy: ApprovalPolicy) -> Result<(), CommandRefused>;
 }
 
 /// How the driver task ended.
@@ -224,7 +253,14 @@ pub struct SessionSetup {
     pub workspace: PathBuf,
     /// The `--workspace` flag: the built-in coding tools exist only when it was given.
     pub coding_root: Option<PathBuf>,
-    pub model: HostModel,
+    /// The switchable model (ADR 0026 D5): the startup model wrapped in the route cache.
+    pub model: SwitchableModel,
+    /// The slot the model reads and the driver writes (one instance, shared).
+    pub config_slot: Arc<ConfigSlot>,
+    /// The queue `/model` pushes into and the driver drains at the turn boundary (D5).
+    pub config_queue: Arc<ConfigQueue>,
+    /// Computes `B` for a switched model from the local catalog (ADR 0026 D7).
+    pub budget_for: Option<BudgetFor>,
     pub servers: Vec<McpServerConfig>,
     pub system_prompt: Option<String>,
     pub context_budget: Option<ContextBudget>,
@@ -321,6 +357,13 @@ impl SessionFacts {
 /// approval routing (the injected approver), and serves the UI.
 pub struct LocalSession {
     id: SessionId,
+    /// The config change queue shared with the driver (`/model`, ADR 0026 D5; the in-session
+    /// approval switch, D9). The driver journals a queued change before the next turn.
+    config_queue: Arc<ConfigQueue>,
+    /// The slot the model reads and the driver writes (the resume replay lands here, D8).
+    config_slot: Arc<ConfigSlot>,
+    /// The budget resolver (`B` from the warm catalog), shared with the driver (D7).
+    budget_for: Option<BudgetFor>,
     workspace: PathBuf,
     journal_path: PathBuf,
     journal: Arc<SessionJournal>,
@@ -350,6 +393,12 @@ impl LocalSession {
         &self.journal_path
     }
 
+    /// Queues a configuration change for the **next** turn boundary (ADR 0004 path B,
+    /// ADR 0026 D5). `/model` pushes a route; a route never carries a key or a header value.
+    pub fn queue_config(&self, change: serde_json::Value) {
+        self.config_queue.push(change);
+    }
+
     /// The journal, for host work that reads the session file (`/export`, `/sessions`).
     pub fn journal(&self) -> &Arc<SessionJournal> {
         &self.journal
@@ -359,10 +408,17 @@ impl LocalSession {
         &self.projection
     }
 
-    /// The pending-request queue (ADR 0023 U7): the UI reads the head and the count, and
-    /// subscribes to changes.
+    /// The pending approvals and questions (ADR 0023 U7): approvals and questions share it,
+    /// so the UI shows one arrival order.
     pub fn queue(&self) -> &Arc<SessionQueue> {
         &self.queue
+    }
+
+    /// The turn-boundary config changes (ADR 0004 path B). A host pushes its own startup
+    /// backfill here (ADR 0026 D9: an explicit `--approval` is recorded); the driver
+    /// journals the change before the next turn.
+    pub fn config_queue(&self) -> &Arc<ConfigQueue> {
+        &self.config_queue
     }
 
     /// The inbox, for a host whose loop is not the TUI's: the CLI's line loop enqueues with a
@@ -445,6 +501,20 @@ impl SessionFacade for LocalSession {
         &self.queue
     }
 
+    fn queue_config(&self, change: serde_json::Value) {
+        self.config_queue.push(change);
+    }
+
+    fn model_route(&self) -> Option<(String, String)> {
+        radian_runtime::ModelRoute::from_value(&self.config_slot.value())
+            .or_else(|| radian_runtime::ModelRoute::from_value(&self.config_snapshot))
+            .map(|route| (route.provider, route.model))
+    }
+
+    fn budget_for_route(&self, provider: &str, model: &str) -> Option<u64> {
+        (self.budget_for.as_ref())?(provider, model)
+    }
+
     fn answer(&self, request_id: u64, response: PendingResponse) -> Result<(), CommandRefused> {
         if !self
             .capabilities
@@ -459,6 +529,26 @@ impl SessionFacade for LocalSession {
         match self.queue.answer(request_id, response) {
             Ok(()) | Err(Answered::Late) | Err(Answered::Unknown) => Ok(()),
         }
+    }
+
+    fn set_approval(&self, policy: ApprovalPolicy) -> Result<(), CommandRefused> {
+        if !self
+            .capabilities
+            .contains(&SessionCapability::AnswerRequest)
+        {
+            return Err(CommandRefused {
+                command: "set-approval".into(),
+                capability: Some(SessionCapability::AnswerRequest.as_str().to_string()),
+                reason: "this session does not declare the `answer` capability".into(),
+            });
+        }
+        // The live switch first (the very next call obeys it), then the durable record: a
+        // `ConfigChanged` the driver journals at the next turn boundary (ADR 0004 path B)
+        // and a resume replays (ADR 0026 D9). One record per switch.
+        self.hooks.set_approval(policy);
+        self.config_queue
+            .push(serde_json::json!({ "approval": policy.as_str() }));
+        Ok(())
     }
 
     /// Re-validates the capability, then runs the command. The check is here as well as in the
@@ -500,6 +590,15 @@ impl SessionFacade for LocalSession {
         instructions: Option<String>,
         on_done: Box<dyn FnOnce(Result<agent_core::CompactionOutcome, String>) + Send>,
     ) {
+        self.compact_with_budget(instructions, None, on_done)
+    }
+
+    fn compact_with_budget(
+        &self,
+        instructions: Option<String>,
+        budget_tokens: Option<u64>,
+        on_done: Box<dyn FnOnce(Result<agent_core::CompactionOutcome, String>) + Send>,
+    ) {
         if !self.capabilities.contains(&SessionCapability::SendMessage) {
             on_done(Err(
                 "this session does not declare the `send` capability".into()
@@ -511,7 +610,12 @@ impl SessionFacade for LocalSession {
         self.runtime.spawn({
             let inbox = Arc::clone(&self.inbox);
             async move {
-                let result = inbox.compact(instructions).await;
+                let result = inbox
+                    .compact_with(
+                        instructions,
+                        budget_tokens.map(agent_core::ContextBudget::new),
+                    )
+                    .await;
                 on_done(result);
             }
         });
@@ -559,6 +663,9 @@ pub async fn open_session(
         turn_timeout,
         wording,
         capabilities,
+        config_slot,
+        config_queue,
+        budget_for,
     } = setup;
 
     // The pending queue (ADR 0023 U7): approvals and questions share it. It exists before the
@@ -639,12 +746,14 @@ pub async fn open_session(
 
     // MCP server **processes** start here, when the tool session opens. The session file
     // already exists, so a failure names the way to continue it.
-    let mut driver = Driver::open(
+    let mut driver = Driver::open_with_slot(
         &agent,
         Arc::clone(&journal),
         Arc::clone(&inbox),
         events,
         turn_options,
+        config_slot.clone(),
+        config_queue.clone(),
     )
     .await
     .map_err(|error| {
@@ -657,6 +766,13 @@ pub async fn open_session(
     })?;
     driver.set_turn_timeout(turn_timeout);
     driver.set_runtime_events(runtime_events);
+    if let Some(budget_for) = budget_for.clone() {
+        driver.set_budget_for(budget_for);
+    }
+
+    // The config queue is owned by the driver; the facade only pushes to it, so clone the
+    // handle before the driver moves into its task.
+    let config_queue = Arc::clone(driver.config_queue());
 
     // The session is open, so the MCP status is known: what actually connected.
     let mcp_open = mcp.status().map(|status| (status.servers, status.tools));
@@ -709,6 +825,9 @@ pub async fn open_session(
     };
     Ok(LocalSession {
         id: session_id,
+        config_queue,
+        config_slot,
+        budget_for,
         workspace,
         journal_path,
         journal,
@@ -812,4 +931,27 @@ fn memory_notice(memory: &Option<MemoryService>, config: &InjectionConfig) -> St
         },
         None => "[memory] disabled (no RADIAN_HOME or HOME)".to_owned(),
     }
+}
+
+/// The model route a **resume** would restore (ADR 0026 D8): the journal's last model
+/// `ConfigChanged`. `None` when the file has none — the caller then falls back to the config
+/// and, failing that, requires `--model`. Reads the session file line by line; it is the one
+/// source of truth, and this runs before anything durable is created.
+pub fn resumed_model_route(
+    session_dir: &Path,
+    session_id: &str,
+) -> Option<radian_runtime::ModelRoute> {
+    let text = std::fs::read_to_string(session_dir.join(format!("{session_id}.jsonl"))).ok()?;
+    let mut route = None;
+    for line in text.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if value["event"] == "ConfigChanged"
+            && let Some(found) = radian_runtime::ModelRoute::from_value(&value["data"]["change"])
+        {
+            route = Some(found);
+        }
+    }
+    route
 }

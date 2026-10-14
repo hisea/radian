@@ -400,3 +400,42 @@ fn a_large_host_meta_does_not_change_the_request_estimate() {
     // The compaction ruler is the same estimator, so it agrees.
     assert_eq!(message_tokens(&with_meta), message_tokens(&plain));
 }
+
+/// ADR 0026 D7: `TurnOptions.context_budget` overrides the configured budget for one turn, and
+/// omitting it leaves the configured budget in force (the pre-D7 behaviour).
+#[tokio::test]
+async fn the_turn_budget_overrides_the_configured_one() {
+    // The config says 100_000; the first turn runs under an override of 800, so the reported
+    // usage (900) is over *that*. The second turn passes no override and is back under.
+    let model = ScriptedModel::new([
+        calls_with_usage(vec![call("c1", "echo", json!({"a": 1}))], 900),
+        text_with_usage("first turn done", 900),
+        text_with_usage("second turn done", 900),
+    ]);
+    let tools = MemTools::new(vec![(spec("echo"), Behavior::Echo)]);
+    let mut chat = with_budget(model.clone(), tools, ContextBudget::new(100_000))
+        .open_session()
+        .await
+        .unwrap();
+
+    let options = TurnOptions {
+        context_budget: Some(ContextBudget::new(800)),
+        ..TurnOptions::default()
+    };
+    chat.run_turn("go", options, &NoopSink).await.unwrap();
+    let report = over_report(chat.context_budget_status());
+    assert!(
+        report.projected_tokens >= 800,
+        "the override is in force: {report:?}"
+    );
+
+    // Without the override the configured budget applies: 900 < 100_000 is not over.
+    chat.run_turn("again", TurnOptions::default(), &NoopSink)
+        .await
+        .unwrap();
+    assert!(
+        !matches!(chat.context_budget_status(), BudgetStatus::Over(_)),
+        "no override: the configured budget applies: {:?}",
+        chat.context_budget_status()
+    );
+}

@@ -5,12 +5,14 @@
 //! [`terminal::TtyGuard`] owns the terminal's modified state.
 
 pub mod app;
+pub mod blocks;
 pub mod clip;
 pub mod command;
 pub mod composer;
 pub mod events;
 pub mod find;
 pub mod keys;
+pub mod login;
 pub mod mention;
 pub mod picker;
 pub mod profile;

@@ -137,3 +137,12 @@ message identity and `replace_transcript`) · 0006 (session JSONL v1 — the for
 `JournalRecord` maps onto) · 0007 (usage) · 0010 (durable vs live events) · 0014 (reasoning
 content) · 0015 (context budget guard — superseded by 0018 for the stop) · 0018
 (computed input budget `B = min(I, C − R)`).
+
+## ADR 0026 D7: per-turn context budget (2026-10-13)
+
+`TurnOptions.context_budget: Option<ContextBudget>` overrides
+`AgentConfig.context_budget` for one turn, and `AgentSession::compact_now` takes the same
+override. This is an additive public-API change. Reason: a `/model` switch (ADR 0026 D5)
+must move the context budget `B` with the model, and `AgentConfig` is frozen at `Agent`
+construction — the driver has no other way to hand the next turn the new `B`. A `None`
+override keeps the configured budget, so no existing caller changes behaviour.

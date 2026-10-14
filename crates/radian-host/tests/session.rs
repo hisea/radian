@@ -59,6 +59,7 @@ async fn open_with(
     let scratch = Scratch::new(label);
     let workspace = scratch.0.join("ws");
     std::fs::create_dir_all(&workspace).unwrap();
+    let config_slot = radian_runtime::ConfigSlot::new(serde_json::Value::Null);
     let model = build_model(radian_host::ModelArgs {
         provider: radian_host::Provider::OpenAiCompatible,
         base_url: "http://127.0.0.1:1/v1".into(),
@@ -68,8 +69,23 @@ async fn open_with(
         include_usage: None,
         max_tokens: 1024,
         thinking: radian_host::Thinking::Off,
+        reasoning_effort: None,
     })
     .unwrap();
+    let model = radian_host::SwitchableModel::new(
+        model,
+        radian_host::ModelRoute::new("openai-compatible", "mock"),
+        config_slot.clone(),
+        radian_host::RouteContext {
+            providers: std::collections::BTreeMap::new(),
+            session_id: label.to_owned(),
+            user_headers: Vec::new(),
+            include_usage: None,
+            max_tokens: 1024,
+            thinking: "medium".to_owned(),
+            thinking_budget: None,
+        },
+    );
     let profile = Profile::safe(&workspace).unwrap();
     let session = open_session(
         SessionSetup {
@@ -78,6 +94,9 @@ async fn open_with(
             workspace: workspace.clone(),
             coding_root: None,
             model,
+            config_slot: config_slot.clone(),
+            config_queue: radian_runtime::ConfigQueue::new(),
+            budget_for: None,
             servers: Vec::new(),
             system_prompt: None,
             context_budget: None,
@@ -151,6 +170,7 @@ async fn a_local_session_accepts_a_declared_command() {
     let scratch = Scratch::new("accept");
     let workspace = scratch.0.join("ws");
     std::fs::create_dir_all(&workspace).unwrap();
+    let config_slot = radian_runtime::ConfigSlot::new(serde_json::Value::Null);
     let model = build_model(radian_host::ModelArgs {
         provider: radian_host::Provider::OpenAiCompatible,
         base_url: "http://127.0.0.1:1/v1".into(),
@@ -160,8 +180,23 @@ async fn a_local_session_accepts_a_declared_command() {
         include_usage: None,
         max_tokens: 1024,
         thinking: radian_host::Thinking::Off,
+        reasoning_effort: None,
     })
     .unwrap();
+    let model = radian_host::SwitchableModel::new(
+        model,
+        radian_host::ModelRoute::new("openai-compatible", "mock"),
+        config_slot.clone(),
+        radian_host::RouteContext {
+            providers: std::collections::BTreeMap::new(),
+            session_id: "can-send".to_owned(),
+            user_headers: Vec::new(),
+            include_usage: None,
+            max_tokens: 1024,
+            thinking: "medium".to_owned(),
+            thinking_budget: None,
+        },
+    );
     let profile = Profile::safe(&workspace).unwrap();
     let session = open_session(
         SessionSetup {
@@ -170,6 +205,9 @@ async fn a_local_session_accepts_a_declared_command() {
             workspace,
             coding_root: None,
             model,
+            config_slot: config_slot.clone(),
+            config_queue: radian_runtime::ConfigQueue::new(),
+            budget_for: None,
             servers: Vec::new(),
             system_prompt: None,
             context_budget: None,

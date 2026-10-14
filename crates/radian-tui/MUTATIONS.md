@@ -576,6 +576,27 @@ Base `d76df67` · 就地变异，每个变异 `git checkout -- crates/radian-tui
 "通过"是**假通过**；改成 `return 14` 后才真正抓住。这与上一节 U3/U4 的教训相同：patch 必须
 `assert old in s`，并且要确认它真的改变了行为。
 
+## Slice: `/login` / `/logout`(ADR 0026 D3/D10)
+
+Base `d3b5163` · 一次性 worktree `/tmp/login-mut` · 每个变异 `git checkout -- .` 还原后跑对应
+测试,`git status --short` 为空。编号 L1–L7(与 agent-cli 的 MUTATIONS.md 同一张表)。
+
+| # | 变异 | 抓住它的测试 |
+|---|---|---|
+| L1 | 向导把 key 明文渲染(`wizard.key.clone()` 代替掩码) | `pty.rs::pty_login_custom_walk_saves_without_showing_the_key`(等 15 个掩码列出现的状态门 + 屏幕无明文;**诚实补充**:第一版测试只用 `pump()` 后的单次断言,逐字符 diff 渲染让明文连不成子串,变异"通过"是假通过;加状态门后才真正抓住) |
+/`logout` 的确认与删除由 L6 覆盖(见 agent-cli 表)。
+## ADR 0026 D9：`!` 自动批准键与 `/auto`（2026-10-13，owner 更正：键是 `!`，`Y` 保持 `y`）
+
+Base `43ddbff` · 一次性检出 `/tmp/auto-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+`cargo test -p radian-tui --test auto <test>`，变异后 `git checkout --` 还原。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| TM-A1 | `Y` 映射到 `Input::ApprovalAuto`（代替保持 `y`） | `Y` 永远只是 allow once，不开 auto | `auto.rs::y_stays_allow_once_and_never_enables_auto` FAILED |
+
+1/1 抓住。`!` 本身的流程由 `auto.rs::the_auto_key_approves_this_request_and_turns_auto_on`
+与 pty 层 `pty_auto_key_approves_once_and_enables_auto` 钉住；`/auto on|off` 与别名、用法
+报错各有纯测试，未再单独变异（同一条代码路径 `Outcome::AutoToggle` 被 4 个用例共享）。
 ## Slice: transcript selection and copy (mouse drag, OSC 52)
 
 Base `c8e1a35→`（本片 HEAD）· 一次性 worktree `/tmp/tui-mut-select`（`git worktree add` 自本片
@@ -624,3 +645,39 @@ Base `ba7568d` · 一次性检出 `/tmp/ui2-mut`（detached，跑完删除）· 
 
 8/8 抓住。`/theme` 的两条变异（丢掉注释、高版本照样写）改的是 `radian-host`，记录在
 `crates/radian-host/MUTATIONS.md`（TW1/TW2）。
+## Slice: ADR 0028 第 1 片（块模型、按块背景、thinking 折叠、代码块不折行）
+
+Base `82b07de` · 一次性 worktree `/tmp/blocks-mut`（`git worktree add` 自本片 HEAD，结束后删除）·
+每个变异 `python3` 补丁（带 `assert`，no-op 会显式报 PATCH FAILED）、跑对应测试后 `git checkout -- .`
+还原、`git status --short` 为空。
+
+| # | 需求 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| B1 | 用户块整行铺背景（含行尾与上下空行） | 去掉行尾填充 span，空行不铺 | `a_user_block_paints_its_band_across_the_whole_block` | ✅ |
+| B2 | 工具卡片按状态铺背景 | `card_band` 对 ToolCall/ToolResult 一律返回 pending | `a_tool_card_paints_the_state_band` | ✅ |
+| B3 | thinking 折叠成一行 | `layout`/`cheap_count` 不再处理 `Collapsed` | `thinking_folds_to_one_line_and_ctrl_t_expands_it` | ✅ |
+| B4 | 代码块不折行、超宽截断带 … | `layout`/`line_count` 的 Code 分支改成按正文折行 | `a_code_block_does_not_wrap_and_truncates_with_an_ellipsis` | ✅ |
+| B5 | 折叠状态进缓存键 | `layout_cache` 的键去掉 `ReasoningMode` | `folding_changes_the_transcript_line_count` | ✅ |
+
+5/5 抓住。**过程记录（B5 的第一轮）**：第一版跑的 `thinking_folds_…` 只看屏幕文本——可见条目每帧
+重新 `layout`（不走计数缓存），所以缓存键漏掉 mode 时屏幕内容仍然正确，是**假通过**。加
+`folding_changes_the_transcript_line_count`（断言 `app.total_lines` 随折叠变化）后才真正抓住。
+**B4 的第一轮**是 patch 文本与源码格式不符（`cargo fmt` 后换行），脚本的 `assert` 直接报
+PATCH FAILED 并跳过——没有当成"抓住"。
+
+### 审查第 1 轮的两条补充（blocks-r1，提交 `9afa1ff`）
+
+| # | 需求 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| C1 | 只对 notice 的第一行切标签（N1） | 去掉 `first_text` 条件，每行都切 | `a_wrapped_notice_continuation_is_not_a_label` | ✅ |
+| C2 | 恰好等宽的代码行不算截断（N2） | 恢复"总按 `width-1` 判断"（`if total <= width` 恒假） | `a_code_line_that_fits_exactly_is_not_truncated` | ✅ |
+
+2/2 抓住。**过程记录**：C2 第一轮跑的是 `cargo test --lib blocks a_code_line_that_fits` —— 两个位置参数，cargo 只把第一个当过滤器，于是"没抓住"是假象；改成单个过滤器 `--lib a_code_line_that_fits` 后立刻抓住。F0（fmt）在本轮之前的一次提交里已修好，本 HEAD 上 `cargo fmt --all -- --check` 通过。
+
+## ADR 0026 D8 审查 M1：picker 先于模型解析（2026-10-14）
+
+Base `0b9785b` · 一次性 worktree `/tmp/radian-pi-mut-m1`，跑完删除。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M1a | 只认命令行带 id 的 `--resume`（`resumed_route` 读 `cli.resume` 而非解析后的 `resume`） | `pty_a_picked_resume_uses_the_journals_model` | ✅ |

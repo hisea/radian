@@ -37,6 +37,11 @@ pub struct PermissionResolved {
 /// `PermissionResolved` is written (ADR 0012 P6).
 pub trait AuditSink: Send + Sync {
     fn record(&self, event: &PermissionResolved);
+
+    /// The approval policy was switched in place (ADR 0026 D9's in-session `auto`).
+    /// Written by [`crate::PermissionHooks::set_approval`]; the host journals it as an
+    /// `ApprovalPolicyChanged` audit event.
+    fn record_policy_change(&self, policy: crate::profile::ApprovalPolicy);
 }
 
 /// Discards decisions.
@@ -45,20 +50,33 @@ pub struct NoopAudit;
 
 impl AuditSink for NoopAudit {
     fn record(&self, _event: &PermissionResolved) {}
+    fn record_policy_change(&self, _policy: crate::profile::ApprovalPolicy) {}
 }
 
 /// Keeps decisions in memory; for tests and for hosts that batch them.
 #[derive(Debug, Default)]
-pub struct RecordingAudit(Mutex<Vec<PermissionResolved>>);
+pub struct RecordingAudit(
+    Mutex<Vec<PermissionResolved>>,
+    Mutex<Vec<crate::profile::ApprovalPolicy>>,
+);
 
 impl RecordingAudit {
     pub fn events(&self) -> Vec<PermissionResolved> {
         self.0.lock().unwrap().clone()
+    }
+
+    /// The policy switches recorded so far, in order.
+    pub fn policy_changes(&self) -> Vec<crate::profile::ApprovalPolicy> {
+        self.1.lock().unwrap().clone()
     }
 }
 
 impl AuditSink for RecordingAudit {
     fn record(&self, event: &PermissionResolved) {
         self.0.lock().unwrap().push(event.clone());
+    }
+
+    fn record_policy_change(&self, policy: crate::profile::ApprovalPolicy) {
+        self.1.lock().unwrap().push(policy);
     }
 }

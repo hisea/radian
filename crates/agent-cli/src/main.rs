@@ -7,6 +7,8 @@
 //! from everything it writes to disk.
 
 mod approval;
+/// `agent login` / `agent logout` (ADR 0026 D3).
+mod login;
 mod profile;
 mod tools;
 
@@ -26,16 +28,16 @@ use clap::Parser;
 use radian_host::memory::MemoryService;
 use radian_host::memory::commands::{self, CommandError, MemoryCommand};
 use radian_host::{
-    DEFAULT_MAX_TOKENS, HostModel, ModelArgs, Provider, SESSION_PLACEHOLDER, Thinking, build_model,
-    check_provider_flags, generate_session_id, load_mcp_config, parse_headers, resolve_workspace,
-    validate_session_id,
+    DEFAULT_MAX_TOKENS, ModelArgs, Provider, SESSION_PLACEHOLDER, SessionFacade, Thinking,
+    build_model, check_provider_flags, generate_session_id, load_mcp_config, parse_headers,
+    resolve_workspace, validate_session_id,
 };
 use radian_permissions::{Approver, AuditSink, PermissionHooks};
 use radian_runtime::{CancelCause, Inbox, InboxError};
 use radian_session::{EventData, Index, Session};
 use tokio::sync::{Mutex, mpsc};
 
-use crate::approval::{AutoApprover, JournalAudit, TERMINAL_SOURCE, TerminalApprover};
+use crate::approval::{JournalAudit, TERMINAL_SOURCE, TerminalApprover};
 
 /// Exit code for usage and configuration errors, matching clap's own usage failures.
 const USAGE_ERROR: i32 = 2;
@@ -115,6 +117,18 @@ struct Cli {
     /// (`git status; rm -x`) still asks. There is no allow rule for shell by default.
     #[arg(long = "allow-shell-command", value_name = "PREFIX")]
     allow_shell_command: Vec<String>,
+
+    /// How `ask` is resolved (ADR 0012, ADR 0026 D9): `on-ask` asks when a rule says so,
+    /// `always` asks for every call a rule does not deny, `never` turns `ask` into a denial,
+    /// `auto` answers every `ask` with "allow" — deny rules still deny and the sandbox
+    /// still applies; only the question is removed. Omit to fall back to the config's
+    /// `[permissions] approval`, then `on-ask`.
+    #[arg(long, value_name = "POLICY")]
+    approval: Option<String>,
+
+    /// Approve every tool call without asking: shorthand for `--approval auto` (ADR 0026 D9).
+    #[arg(long)]
+    yes: bool,
 
     /// One-shot mode: run this prompt, then exit.
     #[arg(short, long, conflicts_with = "list")]
@@ -211,9 +225,9 @@ struct Cli {
     #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
     include_usage: Option<bool>,
 
-    /// Approve every tool call without asking.
-    #[arg(long)]
-    yes: bool,
+    /// Allow a simple shell command prefix without asking (repeatable), e.g.
+    /// `--allow-shell-command "git status"`. Only a simple command matches; a composite
+    /// (`git status; rm -x`) still asks. There is no allow rule for shell by default.
 
     /// Override the per-turn model call limit.
     #[arg(long)]
@@ -329,21 +343,6 @@ fn finish(result: Result<(), OutputError>) -> i32 {
     }
 }
 
-/// The `--model` value. Clap requires it unless `--list`, `--export` or `--search` is present,
-/// so a conversation always has one; this makes the failure explicit instead of a panic if
-/// that invariant ever changes.
-fn model_name<'a>(
-    cli: &'a Cli,
-    config: &'a radian_host::config::Config,
-) -> Result<&'a str, SetupError> {
-    cli.model
-        .as_deref()
-        .or(config.model.model.as_deref())
-        .ok_or_else(|| {
-            SetupError("no model: pass --model, or set model.model in the config file".into())
-        })
-}
-
 /// The `--format` value for `--export`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 enum ExportFormat {
@@ -365,6 +364,22 @@ enum Command {
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
+    },
+    /// Store an API key for a provider in ~/.radian/credentials/auth.json (ADR 0026 D3).
+    /// The key is not echoed; a verification request (`GET <base>/models`) runs first.
+    #[command(
+        after_help = "Without a terminal the command refuses; edit                            credentials/auth.json directly instead."
+    )]
+    Login {
+        /// A built-in provider id (`opencode-go`, `anthropic`, `openai`,
+        /// `openai-compatible`), or `custom` to name a new endpoint (name, protocol, base
+        /// URL, key). Omitted: a numbered list is shown.
+        provider: Option<String>,
+    },
+    /// Remove a stored credential (asks first; every other entry is untouched).
+    Logout {
+        /// The provider id the key is stored under (`agent login` printed it).
+        provider: String,
     },
 }
 
@@ -568,6 +583,10 @@ async fn run(mut cli: Cli) -> i32 {
         match cli.command.take() {
             Some(Command::Memory { command }) => return run_memory(&cli, command),
             Some(Command::Config { command }) => return run_config(&cli, command),
+            // D3: the credential commands are modes of their own — no model, no session
+            // file; `agent login` talks to the named endpoint once (the verification).
+            Some(Command::Login { provider }) => return login::run_login(provider).await,
+            Some(Command::Logout { provider }) => return login::run_logout(provider).await,
             None => unreachable!("checked just above"),
         }
     }
@@ -617,7 +636,12 @@ async fn run(mut cli: Cli) -> i32 {
 }
 
 struct Setup {
-    model: HostModel,
+    model: radian_host::SwitchableModel,
+    /// The descriptor id the run started with (the switch vocabulary, ADR 0026 D5).
+    provider_id: String,
+    config_slot: std::sync::Arc<radian_runtime::ConfigSlot>,
+    config_queue: std::sync::Arc<radian_runtime::ConfigQueue>,
+    budget_for: radian_runtime::BudgetFor,
     /// The provider actually chosen, for the session's config snapshot.
     provider: Provider,
     servers: Vec<McpServerConfig>,
@@ -644,6 +668,8 @@ struct Setup {
     model_name: String,
     /// The resolved permission profile (CLI flag, config, or the default).
     profile: profile::ProfileArg,
+    /// The resolved approval policy and its startup record (ADR 0026 D9).
+    approval: radian_host::StartupApproval,
     /// The config file actually read, for the `[config]` startup line.
     config_path: Option<PathBuf>,
     /// Known-but-unwired and unknown config keys, named (never their values) at startup.
@@ -663,7 +689,26 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
             radian_host::SUPPORTED_SCHEMA_VERSION
         );
     }
-    let model_name = model_name(cli, &config)?.to_owned();
+    // ADR 0026 D8: on a resume the journal's last model change outranks the config file (the
+    // command line still outranks both, which `model_name` already enforces by being tried
+    // first).
+    let resumed_route = match cli.resume.as_ref() {
+        Some(id) => match session_dir(cli) {
+            Ok(dir) => radian_host::resumed_model_route(&dir, id),
+            Err(_) => None,
+        },
+        None => None,
+    };
+    let model_name = match cli.model.as_deref() {
+        Some(model) => model.to_owned(),
+        None => resumed_route
+            .as_ref()
+            .map(|route| route.model.clone())
+            .or_else(|| config.model.model.clone())
+            .ok_or_else(|| {
+                SetupError("no model: pass --model, or set model.model in the config file".into())
+            })?,
+    };
     let profile = match cli.profile {
         Some(profile) => profile,
         None => match config.permissions.profile.as_deref() {
@@ -671,6 +716,25 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
             None => profile::default_profile(),
         },
     };
+    // ADR 0026 D9: `--approval`/`--yes` are the command line's choice; the config and the
+    // journal's last in-session switch fill in when it is silent. `full` ignores a config
+    // `auto` (with a warning) and never restores one. The TUI runs the same resolution in
+    // its own startup; `radian_host::resolve_startup` owns the precedence for both.
+    let cli_approval = match &cli.approval {
+        Some(name) => Some(
+            radian_permissions::ApprovalPolicy::parse(name).ok_or_else(|| {
+                SetupError(format!(
+                    "--approval {name:?} is not one of on-ask, always, never, auto"
+                ))
+            })?,
+        ),
+        None => cli.yes.then_some(radian_permissions::ApprovalPolicy::Auto),
+    };
+    let config_approval = config
+        .permissions
+        .approval
+        .as_deref()
+        .and_then(radian_permissions::ApprovalPolicy::parse);
     let system_prompt = match (&cli.system, &cli.system_file) {
         (Some(text), _) => Some(text.clone()),
         (None, Some(path)) => Some(
@@ -679,56 +743,71 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         ),
         _ => None,
     };
-    // ADR 0026 D0: `--provider`/config `model.provider` names a descriptor. The generic
-    // `openai-compatible` descriptor is the default (the pre-D0 behaviour); the model is
-    // never defaulted.
-    let provider_id = cli
+    // ADR 0026 D0/D10: `--provider`/config `model.provider` names a provider — a built-in
+    // descriptor or a named one (`[providers.<name>]`, or the auth.json entry's `env`). The
+    // key is looked up under the **name** (D10), so every custom endpoint has its own slot.
+    // ADR 0026 D8: the command line outranks the resumed journal, which outranks the config.
+    let provider_name = cli
         .provider
         .clone()
+        .or_else(|| resumed_route.as_ref().map(|route| route.provider.clone()))
         .or_else(|| config.model.provider.clone())
         .unwrap_or_else(|| radian_host::GENERIC_ID.to_owned());
-    let descriptor = radian_host::descriptor(&provider_id).ok_or_else(|| {
-        SetupError(format!(
-            "unknown provider {provider_id:?}: choose one of {}",
-            radian_host::descriptors()
-                .iter()
-                .map(|entry| entry.id)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))
-    })?;
-    let provider = descriptor.protocol_for(&model_name).adapter();
+    let auth_store = radian_host::AuthStore::open().map_err(|e| SetupError(e.to_string()))?;
+    let (provider_ref, provider_warning) = radian_host::resolve_provider(
+        &provider_name,
+        &config.providers,
+        auth_store.entry_env(&provider_name).as_ref(),
+    )
+    .map_err(SetupError)?;
+    if let Some(warning) = &provider_warning {
+        eprintln!("[provider] {warning}");
+    }
+    let key_id = provider_ref.key_id().to_owned();
+    let provider = provider_ref.protocol_for(&model_name).adapter();
     let base_url_override = cli
         .base_url
         .clone()
         .or_else(|| config.model.base_url.clone());
-    let thinking = match cli.thinking.as_deref() {
-        Some(value) => value.parse::<Thinking>().map_err(SetupError)?,
-        None => Thinking::Off,
+    // ADR 0026 D11: the unified levels, with the legacy Anthropic spellings accepted for one
+    // version (a warning goes to stderr when one is used).
+    let (thinking, thinking_budget, legacy_thinking) = match cli.thinking.as_deref() {
+        Some(raw) => {
+            let (level, budget, legacy) =
+                radian_host::parse_thinking_level(raw).map_err(SetupError)?;
+            (level.to_owned(), budget, legacy)
+        }
+        None => (radian_host::DEFAULT_THINKING_LEVEL.to_owned(), None, false),
     };
-    // `--thinking` and `--max-tokens` are Anthropic-only; under openai-compatible they would
-    // be ignored, so this is a usage error before the session file exists (dogfooding D15).
-    check_provider_flags(provider, thinking, cli.max_tokens).map_err(SetupError)?;
+    if legacy_thinking {
+        eprintln!(
+            "[thinking] the legacy `--thinking {}` spelling is deprecated; use one of {}",
+            cli.thinking.as_deref().unwrap_or_default(),
+            radian_host::THINKING_LEVELS.join("|")
+        );
+    }
+    // `--max-tokens` is Anthropic-only; under openai-compatible it would be ignored, so this is
+    // a usage error before the session file exists (dogfooding D15). `--thinking` left this
+    // check in D11: the unified levels ride both wire protocols.
+    check_provider_flags(provider, Thinking::Off, cli.max_tokens).map_err(SetupError)?;
     // The endpoint this run would talk to, before the session id (for the local-endpoint check).
-    let probe_base_url = descriptor
-        .model(&model_name)
-        .map(|entry| entry.base_url.to_owned())
-        .or_else(|| base_url_override.clone())
-        .unwrap_or_else(|| descriptor.default_base_url.to_owned());
+    let probe_base_url = if provider_ref.takes_base_url_override() {
+        base_url_override.clone()
+    } else {
+        None
+    }
+    .unwrap_or_else(|| provider_ref.base_url_for(&model_name, None));
     // ADR 0026 D2: the key comes only from `auth.json`. A missing entry is a refusal unless the
-    // endpoint is local (a local server needs no key), with the JSON to add.
-    let credential =
-        radian_host::auth::resolve_key(&provider_id).map_err(|e| SetupError(e.to_string()))?;
+    // endpoint is local (a local server needs no key).
+    let credential = radian_host::resolve_key(&key_id).map_err(|e| SetupError(e.to_string()))?;
     if credential.is_none() && !is_local_base_url(&probe_base_url) {
-        let message = match radian_host::auth::resolve_note(&provider_id)
+        let message = match radian_host::resolve_note(&key_id)
             .map_err(|e| SetupError(e.to_string()))?
         {
             Some(note) => note,
             None => format!(
-                "no credential for `{provider_id}`: add an entry to \
-                     ~/.radian/credentials/auth.json, e.g.\n  {{\"{provider_id}\": {{\"type\": \
-                     \"api_key\", \"key\": \"$MY_KEY\"}}}}\n(or use `/login {provider_id}` in the next \
-                     release); refusing to continue because {} is not a local address",
+                "no credential for `{key_id}`: run `agent login {key_id}` (or `/login {key_id}` \
+                 in the TUI); refusing to continue because {} is not a local address",
                 radian_host::redact_base_url(&probe_base_url)
             ),
         };
@@ -742,6 +821,22 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         (None, None) => generate_session_id(),
     };
     validate_session_id(&session_id).map_err(SetupError)?;
+    // ADR 0026 D9: the journal's last in-session switch restores auto on `safe`/`workspace`
+    // when the command line was silent. The precedence is `resolve_startup`'s, shared with
+    // the TUI.
+    let journal_path = session_dir(cli)?.join(format!("{session_id}.jsonl"));
+    let restored_approval = cli
+        .resume
+        .is_some()
+        .then(|| radian_host::restored_approval(&journal_path))
+        .flatten();
+    let startup_approval = radian_host::resolve_startup(
+        cli_approval,
+        config_approval,
+        restored_approval,
+        profile.preset(),
+        cli.resume.is_some(),
+    );
     // D1: the workspace is validated here, before the sandbox is built and before the session
     // file is created, so a missing or unusable path is a workspace error (not a sandbox
     // message) and leaves nothing behind (D2). `radian-host` owns the rule for both hosts.
@@ -764,10 +859,9 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         // reusable across processes.
         eprintln!("[session] {session_id} (pass --session-id to reuse it)");
     }
-    // ADR 0026 D0: the descriptor decides the adapter, base URL and headers. `resolve_route`
-    // refuses `--base-url`/`--header` for a non-generic descriptor.
-    let route = radian_host::resolve_route(
-        &provider_id,
+    // ADR 0026 D0/D10: the provider decides the adapter, base URL and headers.
+    let route = radian_host::resolve_route_for(
+        &provider_ref,
         &model_name,
         base_url_override.as_deref(),
         credential
@@ -780,7 +874,14 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     .map_err(SetupError)?;
     // The catalog matches on the hostname of the endpoint the model actually talks to (ADR 0018).
     let catalog_base_url = route.base_url.clone();
-    let model = build_model(ModelArgs {
+    let (thinking_of, reasoning_effort) = radian_host::resolve_thinking_ref(
+        &provider_ref,
+        &model_name,
+        &thinking,
+        thinking_budget,
+        route.adapter(),
+    );
+    let initial = build_model(ModelArgs {
         provider: route.adapter(),
         base_url: route.base_url.clone(),
         model: model_name.clone(),
@@ -788,9 +889,48 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         headers: route.headers.clone(),
         include_usage: cli.include_usage,
         max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-        thinking,
+        thinking: thinking_of,
+        reasoning_effort,
     })
     .map_err(SetupError)?;
+    // ADR 0026 D5: switchable, like the TUI. The CLI has no `/model`, but the journal can
+    // still carry a change the TUI wrote, so resume restores the right model (D8).
+    let config_slot = radian_runtime::ConfigSlot::new(serde_json::Value::Null);
+    let config_queue = radian_runtime::ConfigQueue::new();
+    let model = radian_host::SwitchableModel::new(
+        initial,
+        radian_host::ModelRoute::new(&provider_name, &model_name),
+        config_slot.clone(),
+        radian_host::RouteContext {
+            providers: config.providers.clone(),
+            session_id: session_id.clone(),
+            user_headers: headers.clone(),
+            include_usage: cli.include_usage,
+            max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+            thinking,
+            thinking_budget,
+        },
+    );
+    let request_max_output = match provider {
+        Provider::Anthropic => Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
+        Provider::OpenAiCompatible => None,
+    };
+    let window_query = radian_host::WindowQuery::production(
+        cli.context_window.or(config.model.context_window),
+        (provider_name != radian_host::GENERIC_ID).then(|| provider_name.clone()),
+        catalog_base_url.clone(),
+        model_name.clone(),
+        request_max_output,
+        true,
+    );
+    let budget_for = std::sync::Arc::new(move |provider: &str, switch_model: &str| {
+        radian_host::resolve_offline(&radian_host::WindowQuery {
+            catalog_provider: Some(provider.to_owned()),
+            model: switch_model.to_owned(),
+            ..window_query.clone()
+        })
+        .budget
+    }) as radian_runtime::BudgetFor;
     let servers = match &cli.mcp_config {
         Some(path) => load_mcp_config(path).map_err(SetupError)?,
         None => Vec::new(),
@@ -815,10 +955,6 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     // This runs before the session file exists.
     // ADR 0018: `R` comes from the request's own output setting; Anthropic sends
     // `max_tokens`, OpenAI-compatible sends none.
-    let request_max_output = match provider {
-        Provider::Anthropic => Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
-        Provider::OpenAiCompatible => None,
-    };
     let window = radian_host::resolve(&radian_host::WindowQuery::production(
         context_window,
         cli.catalog_provider.clone(),
@@ -844,6 +980,10 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         .map(ContextBudget::new);
     Ok(Setup {
         model,
+        provider_id: provider_name.clone(),
+        config_slot,
+        config_queue,
+        budget_for,
         provider,
         servers,
         system_prompt,
@@ -858,6 +998,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         secrets,
         model_name,
         profile,
+        approval: startup_approval,
         config_path: config.source.clone(),
         config_skipped: config.skipped.clone(),
     })
@@ -1133,7 +1274,8 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     let profile_arg = setup.profile;
     let workspace_path = setup.workspace.clone();
     let permission_profile =
-        profile::build_profile(profile_arg, &workspace_path, &cli.allow_shell_command)?;
+        profile::build_profile(profile_arg, &workspace_path, &cli.allow_shell_command)?
+            .with_approval(setup.approval.policy);
     // ADR 0020 decision 3: the sandbox denies read on the **actual** sessions directory and
     // the memory directory. Create them owner-only first so Linux's bwrap (which can only mask
     // paths that exist) can hide them.
@@ -1154,17 +1296,14 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     }
     let sandbox = profile::build_sandbox(profile_arg, &workspace_path, &sandbox_deny_read)?;
 
-    // The approver and the audit sink. `--yes` swaps the approver for one that answers "allow
-    // once" without asking; rules and the sandbox are untouched by it. The audit sink is a
-    // channel whose drain task is spawned once the session (and its journal) exists.
-    let approver: Arc<dyn Approver> = if cli.yes {
-        Arc::new(AutoApprover)
-    } else {
-        Arc::new(TerminalApprover {
-            lines: lines.clone(),
-            can_ask,
-        })
-    };
+    // The approver and the audit sink. An `auto` policy (ADR 0026 D9, from `--yes`/`--approval
+    // auto`/config/resume) answers every `ask` before any approver is consulted, so the
+    // terminal approver only runs for a genuine `on-ask` session. The audit sink is a channel
+    // whose drain task is spawned once the session (and its journal) exists.
+    let approver: Arc<dyn Approver> = Arc::new(TerminalApprover {
+        lines: lines.clone(),
+        can_ask,
+    });
     let (audit_tx, mut audit_rx) = mpsc::unbounded_channel();
     let audit: Arc<
         dyn Fn(Arc<radian_session::SessionJournal>) -> Arc<dyn AuditSink> + Send + Sync,
@@ -1192,6 +1331,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
 
     // ADR 0023 U5: the one place a session is established; `radian-tui` calls the same function
     // with its own bindings.
+    let resume_session = cli.resume.is_some();
     let session = radian_host::open_session(
         radian_host::SessionSetup {
             session_id: radian_host::SessionId::new(setup.session_id.clone()),
@@ -1199,6 +1339,9 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             workspace: workspace_path.clone(),
             coding_root: cli.workspace.clone().map(std::path::PathBuf::from),
             model: setup.model,
+            config_slot: setup.config_slot,
+            config_queue: setup.config_queue,
+            budget_for: Some(setup.budget_for),
             servers: setup.servers,
             system_prompt: setup.system_prompt.clone(),
             context_budget: setup.context_budget,
@@ -1240,6 +1383,35 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     .map_err(|error| SetupError(error.to_string()))?;
     let session = Arc::new(session);
 
+    // ADR 0026 D8: an explicit `--model`/`--provider` wins over the resumed change, and the
+    // override is recorded so the journal stays the authority for the next resume.
+    if resume_session && let Some((recorded_provider, recorded_model)) = session.model_route() {
+        let model_differs = cli.model.as_deref().is_some_and(|m| m != recorded_model);
+        let provider_differs = cli
+            .provider
+            .as_deref()
+            .is_some_and(|p| p != recorded_provider);
+        if model_differs || provider_differs {
+            eprintln!(
+                "[model] resume recorded {recorded_provider}/{recorded_model}; using the \
+                 command line's {}/{}",
+                setup.provider_id, setup.model_name
+            );
+            session.queue_config(
+                radian_host::ModelRoute::new(&setup.provider_id, &setup.model_name).to_value(),
+            );
+        }
+    }
+    // ADR 0026 D9: an explicit command-line choice is recorded, so a resume restores it. The
+    // hooks already carry the policy (the profile above), so this is the record only — no
+    // audit line: nothing switched inside the session. The driver journals it at the next
+    // turn boundary.
+    if let Some(policy) = setup.approval.backfill {
+        session
+            .config_queue()
+            .push(serde_json::json!({ "approval": policy.as_str() }));
+    }
+
     // The audit drain task: every decision goes into the channel and is appended here. It is
     // flushed by dropping the senders and awaiting the task before the process exits.
     let audit_journal = Arc::clone(session.journal());
@@ -1253,6 +1425,17 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     // the session; the wording is the host's (ADR 0012 decision 4).
     eprintln!("[profile] {}", session.facts().profile_line);
     eprintln!("[sandbox] {}", session.facts().sandbox_facts);
+    // ADR 0026 D9: the startup line names the auto policy whichever way it was chosen, and
+    // the warnings say when a config value was ignored or a restore refused.
+    if setup.approval.policy == radian_permissions::ApprovalPolicy::Auto {
+        eprintln!(
+            "[approval] auto: tool calls are approved without asking; deny rules and the \
+             sandbox still apply"
+        );
+    }
+    for warning in &setup.approval.warnings {
+        eprintln!("[approval] {warning}");
+    }
     // ADR 0008: which file was read and what was ignored (never a value).
     match &setup.config_path {
         Some(path) => eprintln!("[config] {}", path.display()),

@@ -237,3 +237,54 @@ fn the_tip_is_stable_per_session() {
         assert!(TIPS.contains(&first), "{first:?} is in the table");
     }
 }
+
+/// Renders and returns the foreground of the first cell of `needle` and of the cell
+/// immediately after it (0-based column scan).
+fn fg_pair(app: &mut App, needle: &str) -> (ratatui::style::Color, ratatui::style::Color) {
+    let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
+    terminal
+        .draw(|frame| radian_tui::render::draw(frame, app))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let area = *buffer.area();
+    for y in area.top()..area.bottom() {
+        let mut row = String::new();
+        for x in area.left()..area.right() {
+            row.push_str(buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
+        }
+        if let Some(col) = row.find(needle) {
+            let label = buffer.cell((col as u16, y)).map(|c| c.fg).unwrap();
+            let body = buffer
+                .cell(((col + needle.len()) as u16 + 1, y))
+                .map(|c| c.fg)
+                .unwrap();
+            return (label, body);
+        }
+    }
+    panic!("{needle:?} is not on screen");
+}
+
+/// The startup information's `label: value` lines follow blocks' `split_label` rule (ADR 0028,
+/// / ADR 0029): the label is the accent role (`notice_label`) and
+/// the value the secondary level (`notice_body`) — the same split a notice gets.
+#[test]
+fn startup_labels_use_the_notice_label_and_body_levels() {
+    let mut app = with_startup();
+    // Expand: the full lines carry the `label: value` pairs.
+    app.on_key(ctrl('p'));
+    let (label_fg, body_fg) = fg_pair(&mut app, "profile:");
+    assert_eq!(
+        label_fg,
+        app.theme.notice_label.fg.expect("notice_label fg"),
+        "the label is the accent role"
+    );
+    assert_eq!(
+        body_fg,
+        app.theme.notice_body.fg.expect("notice_body fg"),
+        "the value is the secondary level"
+    );
+    assert_ne!(
+        label_fg, body_fg,
+        "the label and the value are distinguishable"
+    );
+}

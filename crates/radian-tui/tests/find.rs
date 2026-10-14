@@ -2,6 +2,7 @@
 
 use radian_permissions::ApprovalRequest;
 use radian_tui::app::{App, Entry, EntryKind, Input};
+use radian_tui::blocks::ReasoningMode;
 use radian_tui::render;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -39,7 +40,7 @@ fn fill(app: &mut App, needle_entries: &[usize]) {
 fn entry_line(app: &App, entry: usize) -> usize {
     app.entries[..entry]
         .iter()
-        .map(|e| render::display_lines(e, WIDTH).len())
+        .map(|e| render::display_lines(e, ReasoningMode::Expanded, WIDTH).len())
         .sum()
 }
 
@@ -210,10 +211,24 @@ fn backspace_edits_the_query_and_recomputes() {
     );
 }
 
-/// The performance assertion (decision 6): one search over 50,000 entries is well under the
-/// debug bound. `--release` is faster still; the debug bound is deliberately loose.
+/// Correctness on a 50,000-entry transcript: the search finds the one match and reports it.
+/// **No wall clock here** — timing is the ignored benchmark below (the repo's rule: every
+/// timing assertion lives in an `#[ignore]`d benchmark, `perf_render.rs` and
+/// `docs/perf-baseline.md` §7 explain why an absolute bound is load-sensitive).
 #[test]
-fn a_search_over_fifty_thousand_entries_is_fast() {
+fn a_search_over_fifty_thousand_entries_finds_the_needle() {
+    let mut app = fifty_thousand_entries();
+    app.on_key(ctrl('f'));
+    for c in "needle".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    let find = app.find_state().unwrap();
+    assert_eq!(find.matches.len(), 1);
+    assert_eq!(find.status().as_deref(), Some("match 1/1"));
+}
+
+/// A 50k transcript with the needle at entry 40,000.
+fn fifty_thousand_entries() -> App {
     let mut app = App::new("m", "s");
     for i in 0..50_000 {
         let text = if i == 40_000 {
@@ -224,13 +239,50 @@ fn a_search_over_fifty_thousand_entries_is_fast() {
         app.entries.push(Entry::new(EntryKind::Notice, text));
     }
     render(&mut app);
-    let started = std::time::Instant::now();
-    app.on_key(ctrl('f'));
-    for c in "needle".chars() {
-        app.on_key(key(KeyCode::Char(c)));
+    app
+}
+
+/// The performance benchmark (decision 6): one search over 50,000 entries is well under the
+/// debug bound. **`#[ignore]`d**, like every timing assertion in this repo: the debug numbers
+/// are load-sensitive (observed 2.59 s under load average 200+), so it is run deliberately
+/// with `--ignored` (`docs/perf-baseline.md` §7). It also prints the 5k calibration, so a
+/// pathological regression is visible in the ratio as well as the absolute bound.
+#[test]
+#[ignore = "wall-clock benchmark, not an assertion in the default run; --ignored --nocapture"]
+fn a_search_over_fifty_thousand_entries_is_fast() {
+    fn app_with(entries: usize, needle_at: usize) -> App {
+        let mut app = App::new("m", "s");
+        for i in 0..entries {
+            let text = if i == needle_at {
+                "the one needle".to_string()
+            } else {
+                format!("filler line {i}")
+            };
+            app.entries.push(Entry::new(EntryKind::Notice, text));
+        }
+        render(&mut app);
+        app
     }
-    let elapsed = started.elapsed();
+    fn timed_search(app: &mut App) -> std::time::Duration {
+        let started = std::time::Instant::now();
+        app.on_key(ctrl('f'));
+        for c in "needle".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        started.elapsed()
+    }
+
+    let mut calibration = app_with(5_000, 4_000);
+    let baseline = timed_search(&mut calibration);
+    assert_eq!(calibration.find_state().unwrap().matches.len(), 1);
+
+    let mut app = fifty_thousand_entries();
+    let elapsed = timed_search(&mut app);
     assert_eq!(app.find_state().unwrap().matches.len(), 1);
+    eprintln!(
+        "find: 5k {baseline:?}, 50k {elapsed:?} (ratio {:.1}x)",
+        elapsed.as_secs_f64() / baseline.as_secs_f64()
+    );
     assert!(
         elapsed < std::time::Duration::from_secs(2),
         "50k entries took {elapsed:?}, over the 2 s debug bound"

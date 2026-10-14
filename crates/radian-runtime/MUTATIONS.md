@@ -143,3 +143,37 @@ Base `dc307e6` · 一次性检出 `/tmp/covf-mut` · 独立 `CARGO_TARGET_DIR` �
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
 | M6 | 手动 `/compact` 把说明 `commit` 进 transcript（runtime 侧看到 `MessageAppended`） | `compact_control::compact_between_turns_commits_and_enqueues_nothing` | ✅ failed |
+
+## ADR 0026 D11 + 审查 M3：resume 合并全部 ConfigChanged（2026-10-14）
+
+Base `442f55a` · 一次性 worktree `/tmp/radian-pi-mut-4`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| C1 | 恢复时按"种类"各留最后一条（thinking 被 approval 挤掉） | `driver::resume_merges_every_config_change_not_one_per_kind` | ✅ |
+
+## ADR 0026 D9：收尾排空（2026-10-13）
+
+Base `43ddbff` · 一次性检出 `/tmp/auto-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+变异后 `git checkout --` 还原。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| RR-A1 | `run()` 去掉收尾的 `apply_pending_config`（最后一回合中排队的变化随退出丢失） | 退出前排空队列，resume 能恢复 | pty `pty_auto_key_approves_once_and_enables_auto`（journal 断言）FAILED |
+
+1/1 抓住。回合边界上的正常排空由本 crate 既有测试覆盖；这里钉住的是"开关发生在最后一
+回合中、宿主随即退出"的那一条路径。
+
+## 端到端 journal → resume → 压缩 → provider 请求（e2e-resume 片）
+
+Base `a858ba6` · 一次性 worktree `/tmp/e2e-mut`（`git worktree add` 自本片 HEAD，跑完删除）·
+每个变异 `git checkout -- .` 还原、`git status --short` 为空。变异脚本带 `assert old in s`。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| E1 | `TranscriptFold::commit` 不安装已提交的替换（`self.history = pending.messages` 改成丢弃） | resume 必须恢复替换后的 transcript，而不是压缩前的全量历史 | `e2e_resume_compaction::*_resume_after_compaction_sends_the_summary_and_the_originals` FAILED（"the summary is sent"，两个适配器都失败） |
+| E2 | `compacted_history` 写入 origin 时丢掉 `user_messages`（正文仍渲染） | 原话必须在 `origin` 里，读回（第二次压缩）不靠正文解析 | 同上 FAILED（"the first user's words survive the second compaction"，两个适配器） |
+| E3 | `Driver::open` 不 `restore_transcript_revision`（resume 后 revision 从 0 起） | 滚动压缩的 revision 必须严格递增 | 同上 FAILED（`Compacted { revision: 1 }` 而非 `revision: 2`，两个适配器） |
+
+3/3 抓住，无等价变异。E1/E3 的代码在 `agent-core`/`radian-runtime` 的产品路径上；由本片新增的
+`e2e_resume_compaction` 专门抓住。
