@@ -118,10 +118,25 @@ fn ctrl_j_inserts_a_newline_and_enter_sends_the_whole_text() {
 
 #[test]
 fn shift_enter_inserts_a_newline() {
+    // The terminal only reports Enter+SHIFT when the keyboard-enhancement flags are on (the
+    // kitty protocol; see `terminal.rs`); this is the app-level half: a shifted Enter is a
+    // newline and **never** a send.
     let mut app = App::new("m", "s");
-    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+    let result = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+    assert!(result.effects.is_empty(), "Shift+Enter must not send");
     app.on_key(key(KeyCode::Char('x')));
     assert_eq!(app.input, "\nx");
+    // A plain Enter still sends, and Ctrl-J still inserts a newline (the fallback on a
+    // terminal that cannot report Shift+Enter).
+    let plain = press(&mut app, key(KeyCode::Enter));
+    assert!(
+        matches!(plain.as_slice(), [Effect::ExpandMentions { .. }]),
+        "{plain:?}"
+    );
+    let mut app = App::new("m", "s");
+    let ctrl_j = app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+    assert!(ctrl_j.effects.is_empty(), "Ctrl-J must not send");
+    assert_eq!(app.input, "\n");
 }
 
 #[test]
