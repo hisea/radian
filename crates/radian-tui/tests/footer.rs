@@ -93,8 +93,8 @@ fn with_glyphs(name: &str) -> TuiFooterConfig {
     }
 }
 
-/// The default is the two-row `full` layout (ADR 0027): the identity row, then the
-/// numbers row.
+/// The default is the `deck` layout (ADR 0027): the usage row (dropped with no
+/// data), the identity row, then the numbers row.
 #[test]
 fn the_default_footer_is_two_rows() {
     let mut app = App::new("mock", "s");
@@ -121,7 +121,7 @@ fn the_default_footer_is_two_rows() {
         second.contains('↑'),
         "the tokens row is the second: {second:?}"
     );
-    assert_eq!(app.footer.preset(), Preset::Full);
+    assert_eq!(app.footer.preset(), Preset::Deck);
 }
 
 /// `preset = classic` is the pre-ADR one-line status bar: one row, the classic segments.
@@ -575,7 +575,7 @@ fn the_cost_item_uses_the_model_price() {
         cache_write: None,
     }));
     let terminal = render(&mut app, 80, 12);
-    assert_eq!(row(&terminal, 11).trim_end(), "$4.50");
+    assert_eq!(row(&terminal, 11).trim_end(), "$4.500");
 }
 
 /// The `tokens` item shows the cache-read total (ADR 0027), and `-` when the

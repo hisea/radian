@@ -43,8 +43,11 @@ impl Glyphs {
 /// Which footer the session shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Preset {
-    /// The default (ADR 0027): two rows, the identity row and the numbers row.
+    /// The default (ADR 0027): three rows — the opencode-go usage widget (absent
+    /// without data), the identity row, and the numbers row.
     #[default]
+    Deck,
+    /// The revision-1 two-row preset: the identity row and the numbers row.
     Full,
     /// The earlier two-row preset: model/cwd/branch/context bar/reasoning, then tokens/cost.
     Pi,
@@ -55,6 +58,7 @@ pub enum Preset {
 impl Preset {
     pub fn parse(name: &str) -> Option<Self> {
         match name {
+            "deck" => Some(Self::Deck),
             "full" => Some(Self::Full),
             "pi" => Some(Self::Pi),
             "classic" => Some(Self::Classic),
@@ -80,11 +84,24 @@ struct Item {
 }
 
 /// One configured row.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Row {
     left: Vec<Item>,
     right: Vec<Item>,
     separator: String,
+    /// The separator's style (ADR 0027): the `footer_separator` role by default.
+    separator_style: Role,
+}
+
+impl Default for Row {
+    fn default() -> Self {
+        Self {
+            left: Vec::new(),
+            right: Vec::new(),
+            separator: String::new(),
+            separator_style: Role::FooterSeparator,
+        }
+    }
 }
 
 /// The session's footer.
@@ -101,12 +118,12 @@ impl Footer {
     pub fn from_config(config: &TuiFooterConfig) -> (Self, Vec<String>) {
         let mut warnings = Vec::new();
         let preset = match config.preset.as_deref() {
-            None => Preset::Full,
+            None => Preset::Deck,
             Some(name) => Preset::parse(name).unwrap_or_else(|| {
                 warnings.push(format!(
-                    "tui.footer.preset = {name:?} is not one of full|pi|classic; using full"
+                    "tui.footer.preset = {name:?} is not one of deck|full|pi|classic; using deck"
                 ));
-                Preset::Full
+                Preset::Deck
             }),
         };
         let glyphs = match config.glyphs.as_deref() {
@@ -136,6 +153,7 @@ impl Footer {
                     .map(|item| resolve_item(item, &mut warnings))
                     .collect(),
                 separator: row.separator.clone().unwrap_or_else(|| separator.clone()),
+                separator_style: Role::FooterSeparator,
             });
         }
         (
@@ -165,7 +183,12 @@ impl Footer {
         } else {
             Cow::Borrowed(&self.rows)
         };
-        rows.iter().map(|row| render_row(app, row, width)).collect()
+        // A row with no data renders empty (the deck's usage row, revision 3): drop it so it
+        // never leaves a blank line.
+        rows.iter()
+            .map(|row| render_row(app, row, width))
+            .filter(|line| !line.spans.is_empty())
+            .collect()
     }
 }
 
@@ -186,7 +209,37 @@ fn preset_rows(preset: Preset) -> Vec<Row> {
         format: Some(format.to_string()),
         ..item(id)
     };
+    let row = |left: Vec<Item>, right: Vec<Item>| Row {
+        left,
+        right,
+        separator: " │ ".to_string(),
+        separator_style: Role::FooterSeparator,
+    };
     match preset {
+        Preset::Deck => vec![
+            // Row 1: the opencode-go usage widget (ADR 0027 C4). With no data every item is
+            // empty and `lines` drops the whole row, so it never leaves a blank line.
+            row(vec![item("opencode-go.usage")], Vec::new()),
+            // Row 2: identity, with the context bar and reasoning on the right.
+            row(
+                vec![
+                    item("model"),
+                    with_format("cwd", "{repo}"),
+                    with_format("git_branch", "{branch}{dirty}"),
+                    item("worktree"),
+                ],
+                vec![item("context_bar"), item("reasoning")],
+            ),
+            // Row 3: the numbers, right-aligned (revision 3's sample).
+            row(
+                Vec::new(),
+                vec![
+                    with_format("tokens", "↑{in} ↓{out} R{cache}"),
+                    item("cost"),
+                    with_format("context", "{percent}%/{budget}"),
+                ],
+            ),
+        ],
         Preset::Full => vec![
             Row {
                 // The identity row (ADR 0027).
@@ -201,6 +254,7 @@ fn preset_rows(preset: Preset) -> Vec<Row> {
                 ],
                 right: Vec::new(),
                 separator: " │ ".to_string(),
+                separator_style: Role::FooterSeparator,
             },
             Row {
                 // The numbers row: tokens (in/out/cache), speed, cost, context (share/window
@@ -214,6 +268,7 @@ fn preset_rows(preset: Preset) -> Vec<Row> {
                 ],
                 right: Vec::new(),
                 separator: " │ ".to_string(),
+                separator_style: Role::FooterSeparator,
             },
         ],
         Preset::Pi => vec![
@@ -226,11 +281,13 @@ fn preset_rows(preset: Preset) -> Vec<Row> {
                 ],
                 right: vec![item("reasoning")],
                 separator: " │ ".to_string(),
+                separator_style: Role::FooterSeparator,
             },
             Row {
                 left: vec![item("tokens"), item("cost")],
                 right: Vec::new(),
                 separator: " │ ".to_string(),
+                separator_style: Role::FooterSeparator,
             },
         ],
         Preset::Classic => Vec::new(),
@@ -440,6 +497,7 @@ fn render_row(app: &App, row: &Row, width: usize) -> Line<'static> {
         .filter_map(|item| render_item(app, item))
         .collect();
     let separator = row.separator.as_str();
+    let separator_style = role_style(app, row.separator_style);
 
     // Narrow terminals drop the right group first, then the left group from its end; the
     // lowest priority goes first (ties: the rightmost of its group).
@@ -456,8 +514,8 @@ fn render_row(app: &App, row: &Row, width: usize) -> Line<'static> {
         break;
     }
 
-    let left_text = join_group(&left, separator);
-    let right_text = join_group(&right, separator);
+    let left_text = join_group(&left, separator, separator_style);
+    let right_text = join_group(&right, separator, separator_style);
     let mut spans: Vec<Span> = left_text
         .iter()
         .map(|(text, style)| Span::styled(text.clone(), *style))
@@ -501,11 +559,11 @@ fn group_width(pieces: &[Piece], separator: &str) -> usize {
 }
 
 /// One group as (text, style) pairs, its items joined by `separator`.
-fn join_group(pieces: &[Piece], separator: &str) -> Vec<(String, Style)> {
+fn join_group(pieces: &[Piece], separator: &str, separator_style: Style) -> Vec<(String, Style)> {
     let mut out = Vec::new();
     for (i, piece) in pieces.iter().enumerate() {
         if i > 0 {
-            out.push((separator.to_string(), Style::default()));
+            out.push((separator.to_string(), separator_style));
         }
         out.push((piece.text.clone(), piece.style));
     }
@@ -853,11 +911,11 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
                     ("percent", percent.to_string()),
                     (
                         "used",
-                        used.map_or_else(|| "-".to_string(), |used| used.to_string()),
+                        used.map_or_else(|| "-".to_string(), crate::timing::format_tokens),
                     ),
                     (
                         "budget",
-                        budget.map_or_else(|| "-".to_string(), |budget| budget.to_string()),
+                        budget.map_or_else(|| "-".to_string(), crate::timing::format_tokens),
                     ),
                 ],
                 default_format: if id == "context_bar" {

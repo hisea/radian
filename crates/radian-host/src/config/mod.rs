@@ -322,8 +322,14 @@ pub struct TuiFooterConfig {
     pub preset: Option<String>,
     /// `separator`: the glyph(s) between items; a row may override it.
     pub separator: Option<String>,
+    /// `separator_style`: the separator's style — a theme role or a color (ADR 0027 revision
+    /// 3). The TUI parses it; the default is the `footer_separator` role.
+    pub separator_style: Option<String>,
     /// `glyphs`: `"unicode"` (the default), `"nerd"` or `"ascii"`. The TUI validates it.
     pub glyphs: Option<String>,
+    /// `[tui.footer.items.<id>]`: per-field defaults for one item, applied when a row names the
+    /// item by bare id (ADR 0027). A row's inline table wins over this.
+    pub items: std::collections::BTreeMap<String, TuiFooterItemConfig>,
     pub rows: Vec<TuiFooterRowConfig>,
 }
 
@@ -342,6 +348,10 @@ pub struct TuiFooterRowConfig {
 pub struct TuiFooterItemConfig {
     pub id: String,
     pub icon: Option<String>,
+    /// `symbol_style`: the icon's own style, when it differs from the text's.
+    pub symbol_style: Option<String>,
+    /// `disabled = true` hides the item everywhere it is named (ADR 0027).
+    pub disabled: bool,
     pub format: Option<String>,
     pub style: Option<String>,
     /// The item's priority for narrow-terminal truncation (higher survives longer).
@@ -992,7 +1002,19 @@ fn parse_footer(table: &toml::map::Map<String, Value>, config: &mut Config) -> R
         match (key.as_str(), value) {
             ("preset", Value::String(preset)) => footer.preset = Some(preset.clone()),
             ("separator", Value::String(separator)) => footer.separator = Some(separator.clone()),
+            ("separator_style", Value::String(style)) => {
+                footer.separator_style = Some(style.clone())
+            }
             ("glyphs", Value::String(glyphs)) => footer.glyphs = Some(glyphs.clone()),
+            ("items", Value::Table(items)) => {
+                for (id, value) in items {
+                    let Value::Table(table) = value else {
+                        return Err(format!("tui.footer.items.{id}"));
+                    };
+                    let item = parse_footer_item_table(table, id)?;
+                    footer.items.insert(id.clone(), item);
+                }
+            }
             ("rows", Value::Array(rows)) => {
                 for row in rows {
                     let Some(row) = row.as_table() else {
@@ -1031,54 +1053,78 @@ fn parse_footer_row(table: &toml::map::Map<String, Value>) -> Result<TuiFooterRo
 
 /// One item: a bare id string, or a table with `item` plus options. Anything else is skipped.
 fn parse_footer_item(value: &Value) -> Result<TuiFooterItemConfig, String> {
-    let mut item = TuiFooterItemConfig::default();
     match value {
-        Value::String(id) => {
-            item.id = id.clone();
-            return Ok(item);
-        }
+        Value::String(id) => Ok(TuiFooterItemConfig {
+            id: id.clone(),
+            ..Default::default()
+        }),
         Value::Table(table) => {
-            for (key, value) in table {
-                match (key.as_str(), value) {
-                    ("item", Value::String(id)) => item.id = id.clone(),
-                    ("icon", Value::String(icon)) => item.icon = Some(icon.clone()),
-                    ("format", Value::String(format)) => item.format = Some(format.clone()),
-                    ("style", Value::String(style)) => item.style = Some(style.clone()),
-                    ("priority", Value::Integer(priority)) => item.priority = Some(*priority),
-                    ("thresholds", Value::Array(thresholds)) => {
-                        for threshold in thresholds {
-                            let Some(threshold) = threshold.as_table() else {
-                                return Err("tui.footer.rows.thresholds".into());
-                            };
-                            let at = threshold.get("at").and_then(Value::as_integer);
-                            let style = threshold.get("style").and_then(Value::as_str);
-                            match (at, style) {
-                                (Some(at), Some(style)) => {
-                                    item.thresholds.push((at, style.to_owned()));
-                                }
-                                _ => return Err("tui.footer.rows.thresholds".into()),
-                            }
+            let id = table
+                .get("item")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            if id.is_empty() {
+                return Err("tui.footer.rows.item".into());
+            }
+            parse_footer_item_table(table, &id)
+        }
+        _ => Err("tui.footer.rows.item".into()),
+    }
+}
+
+/// The options of one item table. `id` is known already: from the `item` key in a row, or from
+/// the key of a `[tui.footer.items.<id>]` table. `icon` and `symbol` are the same field
+/// (ADR 0027 C2 used `icon`, revision 3 calls it `symbol`); a known option with the wrong type
+/// is skipped, not a refusal.
+fn parse_footer_item_table(
+    table: &toml::map::Map<String, Value>,
+    id: &str,
+) -> Result<TuiFooterItemConfig, String> {
+    let mut item = TuiFooterItemConfig {
+        id: id.to_owned(),
+        ..Default::default()
+    };
+    for (key, value) in table {
+        match (key.as_str(), value) {
+            ("item", Value::String(_)) => {}
+            ("icon" | "symbol", Value::String(symbol)) => item.icon = Some(symbol.clone()),
+            ("symbol_style", Value::String(style)) => item.symbol_style = Some(style.clone()),
+            ("format", Value::String(format)) => item.format = Some(format.clone()),
+            ("style", Value::String(style)) => item.style = Some(style.clone()),
+            ("disabled", Value::Boolean(disabled)) => item.disabled = *disabled,
+            ("priority", Value::Integer(priority)) => item.priority = Some(*priority),
+            ("thresholds", Value::Array(thresholds)) => {
+                for threshold in thresholds {
+                    let Some(threshold) = threshold.as_table() else {
+                        return Err("tui.footer.rows.thresholds".into());
+                    };
+                    let at = threshold.get("at").and_then(Value::as_integer);
+                    let style = threshold.get("style").and_then(Value::as_str);
+                    match (at, style) {
+                        (Some(at), Some(style)) => {
+                            item.thresholds.push((at, style.to_owned()));
                         }
-                    }
-                    // A known option with the wrong type is skipped, not a refusal.
-                    ("item" | "icon" | "format" | "style" | "priority", _) => {
-                        return Err("tui.footer.rows.item".into());
-                    }
-                    // Everything else is the item's own parameter, kept as text.
-                    (param, value) => {
-                        if let Some(text) = value_to_text(value) {
-                            item.params.push((param.to_owned(), text));
-                        } else {
-                            return Err(format!("tui.footer.rows.{param}"));
-                        }
+                        _ => return Err("tui.footer.rows.thresholds".into()),
                     }
                 }
             }
+            (
+                "item" | "icon" | "symbol" | "symbol_style" | "format" | "style" | "disabled"
+                | "priority",
+                _,
+            ) => {
+                return Err("tui.footer.rows.item".into());
+            }
+            // Everything else is the item's own parameter, kept as text.
+            (param, value) => {
+                if let Some(text) = value_to_text(value) {
+                    item.params.push((param.to_owned(), text));
+                } else {
+                    return Err(format!("tui.footer.rows.{param}"));
+                }
+            }
         }
-        _ => return Err("tui.footer.rows.item".into()),
-    }
-    if item.id.is_empty() {
-        return Err("tui.footer.rows.item".into());
     }
     Ok(item)
 }
