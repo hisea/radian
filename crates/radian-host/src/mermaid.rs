@@ -196,7 +196,10 @@ mod tests {
             CancellationToken, ContentPart, NoopSink, ToolCall, ToolContext, ToolProvider,
             ToolSession,
         };
-        let session = MermaidCheckTools::new().open_session().await.expect("a session");
+        let session = MermaidCheckTools::new()
+            .open_session()
+            .await
+            .expect("a session");
         // 16 nodes, each a 40-cell label (the label cap), in a chain: the natural width is
         // well over MAX_WIDTH, so at 500 it is `too_wide` and at a million it would render.
         let label = "x".repeat(40);

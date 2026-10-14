@@ -1812,7 +1812,8 @@ fn spawn_input_thread(tx: Sender<UiEvent>) {
                     // A resize burst coalesces to the last one; everything else goes through
                     // the one pure event map (which drops clicks, drags and moves).
                     let event = match event {
-                        Event::Resize(rows, cols) => coalesce_resize(rows, cols),
+                        // crossterm's order is `(cols, rows)`; `coalesce_resize` takes rows first.
+                        Event::Resize(cols, rows) => coalesce_resize(rows, cols),
                         other => match radian_tui::events::input_event(other) {
                             Some(event) => event,
                             None => continue,
@@ -1833,7 +1834,7 @@ fn spawn_input_thread(tx: Sender<UiEvent>) {
 /// handled on the next turn (it stays in crossterm's buffer).
 fn coalesce_resize(rows: u16, cols: u16) -> InputEvent {
     let (mut rows, mut cols) = (rows, cols);
-    while let Input::Event(Event::Resize(next_rows, next_cols)) = read_input(Duration::ZERO) {
+    while let Input::Event(Event::Resize(next_cols, next_rows)) = read_input(Duration::ZERO) {
         rows = next_rows;
         cols = next_cols;
     }
