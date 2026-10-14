@@ -11,10 +11,17 @@
 //!
 //! * a missing file is an empty store;
 //! * a file wider than `0600` is **refused**, never chmodded;
-//! * `key` is a literal or a whole-value `$NAME` / `${NAME}` reference;
+//! * `key` is a template: `$NAME` / `${NAME}` **anywhere** in the string, `$$` for a literal
+//!   `$`, `$!` for a literal `!` (pi's `resolveConfigValue`, verified
+//!   `@earendil-works/pi-coding-agent/dist/core/resolve-config-value.js:21-64`, read
+//!   2026-10-13); the entry's `env` object is the first lookup source, then the process
+//!   environment;
 //! * a `key` starting with `!` is a command and is **refused without being run** (it would
 //!   execute outside the sandbox);
 //! * writes are atomic (temp file + rename), `0600`, in a `0700` directory;
+//! * **concurrent writes are not locked**: two `/login` runs read-modify-write without a lock,
+//!   so the later write wins and may drop the earlier provider's entry. Accepted for the first
+//!   release (a lock is a later slice if it is needed);
 //! * the key is never printed: [`ResolvedKey`]'s `Debug` redacts it (ADR 0013).
 
 use std::collections::BTreeMap;
@@ -172,15 +179,18 @@ impl AuthStore {
             // A command: refused, and deliberately never run (ADR 0026 D1).
             return Ok(None);
         }
-        let key = resolve_value(provider_id, key)?;
+        // The entry's `env` object is the first lookup source, then the process environment
+        // (pi: `resolveConfigValue(key, credential.env)`). Its values are copied **raw**: pi
+        // does not interpolate them (only the key is resolved).
         let mut env = BTreeMap::new();
         if let Some(values) = entry.get("env").and_then(Value::as_object) {
             for (name, value) in values {
                 if let Some(value) = value.as_str() {
-                    env.insert(name.clone(), resolve_value(provider_id, value)?);
+                    env.insert(name.clone(), value.to_owned());
                 }
             }
         }
+        let key = resolve_template(provider_id, key, &env)?;
         Ok(Some(ResolvedKey {
             provider_id: provider_id.to_owned(),
             key,
@@ -291,9 +301,13 @@ impl AuthStore {
         let tmp = self
             .path
             .with_extension(format!("tmp-{}", std::process::id()));
+        // Remove a leftover from a crashed write, then create the temp file **exclusively**:
+        // `mode(0o600)` only applies to a fresh inode, so reusing an existing file would keep
+        // its old (possibly wide) mode.
+        let _ = std::fs::remove_file(&tmp);
         {
             let mut options = std::fs::OpenOptions::new();
-            options.write(true).create(true).truncate(true);
+            options.write(true).create_new(true);
             #[cfg(unix)]
             {
                 use std::os::unix::fs::OpenOptionsExt;
@@ -376,21 +390,81 @@ fn check_permissions(path: &Path) -> Result<(), AuthError> {
     Ok(())
 }
 
-/// Resolves a whole-value `$NAME` / `${NAME}` reference, or returns the literal. A bare `$`
-/// (or `$` followed by a non-name) is a literal, not a broken reference.
-fn resolve_value(provider_id: &str, value: &str) -> Result<String, AuthError> {
-    let Some(rest) = value.strip_prefix('$') else {
-        return Ok(value.to_owned());
-    };
-    let name = match rest.strip_prefix('{') {
-        Some(inner) => match inner.strip_suffix('}') {
-            Some(name) => name,
-            None => return Ok(value.to_owned()),
-        },
-        None => rest,
-    };
-    if name.is_empty() || !name.bytes().all(is_env_name_byte) {
-        return Ok(value.to_owned());
+/// Resolves pi's config-value template: `$NAME` / `${NAME}` **anywhere** in the string, with
+/// `$$` for a literal `$` and `$!` for a literal `!`. Verified against pi's
+/// `resolveConfigValue` (`@earendil-works/pi-coding-agent/dist/core/resolve-config-value.js:21-64`,
+/// read 2026-10-13): it scans the whole string and builds literal + env parts, so
+/// `prefix-$VAR` and `${A}${B}` both interpolate. A `$` that does not start a valid name is a
+/// literal. A reference looks in the entry's `env` object first, then the process environment;
+/// a missing variable is an error.
+fn resolve_template(
+    provider_id: &str,
+    value: &str,
+    env: &BTreeMap<String, String>,
+) -> Result<String, AuthError> {
+    let chars: Vec<char> = value.chars().collect();
+    let mut out = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] != '$' {
+            out.push(chars[index]);
+            index += 1;
+            continue;
+        }
+        match chars.get(index + 1) {
+            // `$$` and `$!` escape a literal.
+            Some('$') => {
+                out.push('$');
+                index += 2;
+            }
+            Some('!') => {
+                out.push('!');
+                index += 2;
+            }
+            Some('{') => {
+                if let Some(offset) = chars[index + 2..].iter().position(|&c| c == '}') {
+                    let end = index + 2 + offset;
+                    let name: String = chars[index + 2..end].iter().collect();
+                    if is_env_name(&name) {
+                        out.push_str(&lookup_env(provider_id, &name, env)?);
+                    } else {
+                        // Not a valid name: the whole `${…}` is a literal.
+                        out.extend(&chars[index..=end]);
+                    }
+                    index = end + 1;
+                } else {
+                    out.push('$');
+                    index += 1;
+                }
+            }
+            Some(&next) if is_env_start(next) => {
+                let mut end = index + 1;
+                while end < chars.len() && is_env_continue(chars[end]) {
+                    end += 1;
+                }
+                let name: String = chars[index + 1..end].iter().collect();
+                out.push_str(&lookup_env(provider_id, &name, env)?);
+                index = end;
+            }
+            _ => {
+                out.push('$');
+                index += 1;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The value of `$name`: the entry's `env` object first (an empty value falls through, like
+/// pi's `env?.[name] || process.env[name]`), then the process environment. A missing variable
+/// is an error.
+fn lookup_env(
+    provider_id: &str,
+    name: &str,
+    env: &BTreeMap<String, String>,
+) -> Result<String, AuthError> {
+    if let Some(value) = env.get(name).filter(|value| !value.is_empty()) {
+        return Ok(value.clone());
     }
     std::env::var(name).map_err(|_| AuthError::MissingEnv {
         provider_id: provider_id.to_owned(),
@@ -398,8 +472,20 @@ fn resolve_value(provider_id: &str, value: &str) -> Result<String, AuthError> {
     })
 }
 
-fn is_env_name_byte(byte: u8) -> bool {
-    byte == b'_' || byte.is_ascii_alphanumeric()
+fn is_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if is_env_start(first) => chars.all(is_env_continue),
+        _ => false,
+    }
+}
+
+fn is_env_start(c: char) -> bool {
+    c == '_' || c.is_ascii_alphabetic()
+}
+
+fn is_env_continue(c: char) -> bool {
+    c == '_' || c.is_ascii_alphanumeric()
 }
 
 #[cfg(test)]
@@ -503,6 +589,9 @@ mod tests {
         );
     }
 
+    /// Parameterized over the group/other bits: every mode with a group or other bit is
+    /// refused, and only owner-only modes are accepted. This catches a check that only looks
+    /// at `0o007` (a group-readable `0640` would slip through).
     #[test]
     fn a_wide_permission_file_is_refused_with_a_fix_command() {
         let scratch = Scratch::new("wide");
@@ -510,16 +599,62 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(scratch.path(), std::fs::Permissions::from_mode(0o644))
-                .unwrap();
-            let error = match scratch.open() {
-                Err(error) => error,
-                Ok(_) => panic!("a wide file must be refused"),
-            };
-            let text = error.to_string();
-            assert!(text.contains("chmod 600"), "{text}");
-            assert!(matches!(error, AuthError::WidePermissions { .. }));
+            for mode in [0o640, 0o660, 0o604, 0o644, 0o666, 0o607, 0o770] {
+                std::fs::set_permissions(scratch.path(), std::fs::Permissions::from_mode(mode))
+                    .unwrap();
+                let error = match scratch.open() {
+                    Err(error) => error,
+                    Ok(_) => panic!("mode {mode:04o} must be refused"),
+                };
+                let text = error.to_string();
+                assert!(text.contains("chmod 600"), "{mode:04o}: {text}");
+                assert!(
+                    matches!(error, AuthError::WidePermissions { .. }),
+                    "{mode:04o}: {error}"
+                );
+            }
+            for mode in [0o600, 0o400] {
+                std::fs::set_permissions(scratch.path(), std::fs::Permissions::from_mode(mode))
+                    .unwrap();
+                let store = scratch
+                    .open()
+                    .unwrap_or_else(|error| panic!("mode {mode:04o} must be accepted: {error}"));
+                assert_eq!(store.resolve_key("p").unwrap().unwrap().key, "k");
+            }
         }
+    }
+
+    /// A leftover temp file must not loosen the new file's mode: the writer removes it and
+    /// creates exclusively, so `mode(0o600)` applies to a fresh inode.
+    #[test]
+    fn a_leftover_temp_file_does_not_loosen_the_permissions() {
+        let scratch = Scratch::new("tmp-leftover");
+        let tmp = scratch
+            .path()
+            .with_extension(format!("tmp-{}", std::process::id()));
+        std::fs::create_dir_all(tmp.parent().unwrap()).unwrap();
+        std::fs::write(&tmp, "leftover").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let mut store = scratch.open().unwrap();
+        store.upsert_api_key("p", "k", &BTreeMap::new()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(scratch.path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "{mode:04o}");
+        }
+        assert!(
+            !tmp.exists(),
+            "the leftover temp file is replaced by the rename"
+        );
     }
 
     #[test]
@@ -563,6 +698,47 @@ mod tests {
         unsafe { std::env::set_var("RADIAN_AUTH_TEST_KEY", "braced") };
         assert_eq!(store.resolve_key("p").unwrap().unwrap().key, "braced");
         unsafe { std::env::remove_var("RADIAN_AUTH_TEST_KEY") };
+    }
+
+    /// pi's `resolveConfigValue` interpolates anywhere in the string (verified
+    /// `resolve-config-value.js:21-64`), so `prefix-$VAR` and `${A}${B}` resolve; `$$` and `$!`
+    /// escape; `${not a name}` is a literal.
+    #[test]
+    fn a_template_interpolates_in_the_middle_and_escapes() {
+        let scratch = Scratch::new("template");
+        write_auth(
+            &scratch,
+            r#"{
+                "p": {"type": "api_key", "key": "prefix-$RADIAN_AUTH_TEST_A-suffix"},
+                "q": {"type": "api_key", "key": "${RADIAN_AUTH_TEST_A}${B}", "env": {"B": "bee"}},
+                "r": {"type": "api_key", "key": "$$literal-$!bang"},
+                "t": {"type": "api_key", "key": "${not a name}"},
+                "u": {"type": "api_key", "key": "$RADIAN_AUTH_UNSET_VAR"}
+            }"#,
+        );
+        let store = scratch.open().unwrap();
+        // SAFETY: single-threaded test process state; restored below.
+        unsafe { std::env::set_var("RADIAN_AUTH_TEST_A", "aye") };
+        assert_eq!(
+            store.resolve_key("p").unwrap().unwrap().key,
+            "prefix-aye-suffix"
+        );
+        // `${A}${B}`: A from the process env, B from the entry's own `env` object.
+        assert_eq!(store.resolve_key("q").unwrap().unwrap().key, "ayebee");
+        // `$$` and `$!` are literals; no lookup happens.
+        assert_eq!(
+            store.resolve_key("r").unwrap().unwrap().key,
+            "$literal-!bang"
+        );
+        // `${not a name}` is not a valid name, so the whole reference is a literal.
+        assert_eq!(
+            store.resolve_key("t").unwrap().unwrap().key,
+            "${not a name}"
+        );
+        unsafe { std::env::remove_var("RADIAN_AUTH_TEST_A") };
+        // A missing variable fails.
+        let error = store.resolve_key("u").unwrap_err();
+        assert!(matches!(error, AuthError::MissingEnv { .. }), "{error}");
     }
 
     #[test]
