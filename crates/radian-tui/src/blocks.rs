@@ -261,9 +261,11 @@ fn fence_closes(trimmed: &str, marker: char) -> bool {
 /// text, `end` the gap after the line); `text` is what the body span renders.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BodyLine {
-    /// Byte offsets of the chars on this line, in order. A **padding row** (a user block's
-    /// breathing room) has none: it maps to a gap and copies nothing.
-    pub chars: Vec<usize>,
+    /// The source byte offset of each char on this line, in order (`None` when the renderer
+    /// synthesized the char — a bullet, a heading's `##`, a link's `(url)`, an indent). A
+    /// synthesized cell still occupies its display columns but has no source text: it never
+    /// copies and never anchors a selection. A **padding row** has none at all.
+    pub chars: Vec<Option<usize>>,
     pub end: usize,
     /// What renders. Code lines are tab-expanded and truncated to the width with `…` (the
     /// full line still copies: `chars` only covers the kept prefix, and `end` reaches the
@@ -330,7 +332,7 @@ pub enum MdStyle {
 }
 
 impl BodyLine {
-    fn prose(chars: Vec<usize>, end: usize, text: String) -> Self {
+    fn prose(chars: Vec<Option<usize>>, end: usize, text: String) -> Self {
         Self {
             chars,
             end,
@@ -367,9 +369,9 @@ impl BodyLine {
     /// source, the content that actually exists in the text.
     fn diagram(end: usize, offset: usize, spans: Vec<(String, DiagramRole)>) -> Self {
         let text: String = spans.iter().map(|(piece, _)| piece.as_str()).collect();
-        let cells = UnicodeWidthStr::width(text.as_str());
+        let cells = text.chars().count();
         Self {
-            chars: vec![offset; cells],
+            chars: vec![Some(offset); cells],
             end,
             text,
             code: true,
@@ -384,7 +386,7 @@ impl BodyLine {
     }
 
     /// A Markdown line: its pieces, and the `chars` mapping derived from their offsets.
-    fn md(chars: Vec<usize>, end: usize, pieces: Vec<MdPiece>) -> Self {
+    fn md(chars: Vec<Option<usize>>, end: usize, pieces: Vec<MdPiece>) -> Self {
         let text: String = pieces.iter().map(|piece| piece.text.as_str()).collect();
         Self {
             chars,
@@ -403,7 +405,7 @@ impl BodyLine {
 
     fn reason(end: usize, offset: usize, text: String) -> Self {
         Self {
-            chars: vec![offset],
+            chars: vec![Some(offset)],
             end,
             text,
             code: false,
@@ -951,6 +953,7 @@ fn tool_line(text: &str, width: usize) -> Vec<BodyLine> {
     if cut && let Some(&last) = chars.last() {
         chars.push(last);
     }
+    let chars: Vec<Option<usize>> = chars.into_iter().map(Some).collect();
     vec![BodyLine {
         chars,
         end: text.len(),
@@ -1005,9 +1008,13 @@ fn prose_lines(text: &str, width: usize) -> Vec<BodyLine> {
             let crate::render::WrappedLine { chars, end } = line;
             let body = chars
                 .iter()
-                .map(|&i| text[i..].chars().next().expect("a char boundary"))
+                .map(|&i| {
+                    text.get(i..)
+                        .and_then(|rest| rest.chars().next())
+                        .unwrap_or(' ')
+                })
                 .collect();
-            BodyLine::prose(chars, end, body)
+            BodyLine::prose(chars.into_iter().map(Some).collect(), end, body)
         })
         .collect()
 }
@@ -1261,7 +1268,8 @@ fn code_lines(
         // Byte offset of the line's first char within the display text.
         let offset = line.as_ptr() as usize - base + offset;
         let (plain, kept, cut) = code_line_layout(line, width);
-        let mut chars: Vec<usize> = kept.into_iter().map(|idx| offset + idx).collect();
+        let mut chars: Vec<Option<usize>> =
+            kept.into_iter().map(|idx| Some(offset + idx)).collect();
         if cut {
             // The ellipsis is decoration; map it to the last kept char.
             if let Some(&last) = chars.last() {
@@ -1489,7 +1497,7 @@ fn md_blocks(
                                     // Drop the line's leading pad: the marker replaces it.
                                     .skip(1),
                             );
-                            let chars = md_chars(&pieces, base);
+                            let chars = md_chars(&pieces);
                             out.push(BodyLine::md(chars, line.end, pieces));
                             first = false;
                         } else {
@@ -1498,7 +1506,7 @@ fn md_blocks(
                     }
                     if first {
                         out.push(BodyLine::md(
-                            vec![base],
+                            vec![None],
                             base,
                             vec![MdPiece {
                                 text: marker,
@@ -1538,12 +1546,12 @@ fn md_blocks(
                                 ..piece
                             }),
                     );
-                    let chars = md_chars(&pieces, base);
+                    let chars = md_chars(&pieces);
                     out.push(BodyLine::md(chars, line.end, pieces));
                 }
             }
             MdBlock::Rule => out.push(BodyLine::md(
-                vec![base],
+                vec![None],
                 base,
                 vec![MdPiece {
                     text: "─".repeat(width.clamp(1, 40)),
@@ -1575,17 +1583,16 @@ fn md_pieces(pieces: &[crate::markdown::Piece], plain: MdStyle) -> Vec<MdPiece> 
         .collect()
 }
 
-/// The `chars` mapping for a piece list: each cell maps to its piece's offset (or `fallback`
-/// for synthesized text).
-fn md_chars(pieces: &[MdPiece], fallback: usize) -> Vec<usize> {
+/// The `chars` mapping for a piece list: a cell from the source maps to its byte offset; a
+/// synthesized cell (an indent, a bullet, a heading's `##`, a link's `(url)`) maps to `None`.
+fn md_chars(pieces: &[MdPiece]) -> Vec<Option<usize>> {
     let mut out = Vec::new();
     for piece in pieces {
-        let start = piece.offset.unwrap_or(fallback);
         for (index, ch) in piece.text.char_indices() {
             if ch == '\n' {
                 continue;
             }
-            out.push(start + index);
+            out.push(piece.offset.map(|offset| offset + index));
         }
     }
     out
@@ -1642,7 +1649,7 @@ fn md_wrap(pieces: Vec<MdPiece>, width: usize, indent: usize) -> Vec<BodyLine> {
             offset: None,
         }];
         all.extend(pieces);
-        let chars = md_chars(&all, 0);
+        let chars = md_chars(&all);
         // `end` is the gap after the line's last source char, so the selection mapping lands
         // between lines the way the prose wrap's does.
         let end = row
@@ -1751,7 +1758,7 @@ fn md_table(
             style: MdStyle::TableBorder,
             offset: None,
         });
-        BodyLine::md(vec![base; indent + 1], base, pieces)
+        BodyLine::md(vec![None; indent + 1], base, pieces)
     };
     let mut out = vec![border_line(border("┌", "┬", "┐"))];
     let row_cells: Vec<Vec<&[crate::markdown::Piece]>> = std::iter::once(head)
@@ -1798,7 +1805,7 @@ fn md_table(
                     offset: None,
                 });
             }
-            out.push(BodyLine::md(vec![base; indent + 1], base, pieces));
+            out.push(BodyLine::md(vec![None; indent + 1], base, pieces));
         }
         if row_index == 0 {
             out.push(border_line(border("├", "┼", "┤")));
@@ -1818,63 +1825,68 @@ fn md_table_fallback(
     indent: usize,
 ) -> Vec<BodyLine> {
     let mut text = String::new();
-    let mut offsets: Vec<usize> = Vec::new();
-    let push = |text: &mut String, offsets: &mut Vec<usize>, cell: &[crate::markdown::Piece]| {
-        for piece in cell {
-            let start = piece.offset.unwrap_or(base);
-            for (index, ch) in piece.text.char_indices() {
-                text.push(ch);
-                offsets.push(start + index);
+    let mut offsets: Vec<Option<usize>> = Vec::new();
+    let push =
+        |text: &mut String, offsets: &mut Vec<Option<usize>>, cell: &[crate::markdown::Piece]| {
+            for piece in cell {
+                for (index, ch) in piece.text.char_indices() {
+                    text.push(ch);
+                    offsets.push(piece.offset.map(|start| start + index));
+                }
             }
-        }
-    };
+        };
     let mut first = true;
     for row in std::iter::once(head).chain(rows.iter().map(Vec::as_slice)) {
         if !first {
             text.push('\n');
-            offsets.push(base);
+            offsets.push(None);
         }
         first = false;
         text.push_str("| ");
-        offsets.extend([base, base]);
+        offsets.extend([None, None]);
         for (column, cell) in row.iter().enumerate() {
             if column > 0 {
                 text.push_str(" | ");
-                offsets.extend([base, base, base]);
+                offsets.extend([None, None, None]);
             }
             push(&mut text, &mut offsets, cell);
         }
         text.push_str(" |");
-        offsets.extend([base, base]);
+        offsets.extend([None, None]);
     }
     // Wrap, keeping each cell's offset.
     let mut out = Vec::new();
     let mut row_text = String::new();
-    let mut row_offsets: Vec<usize> = Vec::new();
-    let flush = |row_text: &mut String, row_offsets: &mut Vec<usize>, out: &mut Vec<BodyLine>| {
-        if row_text.is_empty() {
-            return;
-        }
-        let mut pieces = vec![MdPiece {
-            text: " ".repeat(indent),
-            style: MdStyle::Plain,
-            offset: None,
-        }];
-        for (index, ch) in row_text.char_indices() {
-            pieces.push(MdPiece {
-                text: ch.to_string(),
+    let mut row_offsets: Vec<Option<usize>> = Vec::new();
+    let flush =
+        |row_text: &mut String, row_offsets: &mut Vec<Option<usize>>, out: &mut Vec<BodyLine>| {
+            if row_text.is_empty() {
+                return;
+            }
+            let mut pieces = vec![MdPiece {
+                text: " ".repeat(indent),
                 style: MdStyle::Plain,
-                offset: row_offsets.get(index).copied(),
-            });
-        }
-        out.push(BodyLine::md(
-            row_offsets.clone(),
-            row_offsets.last().copied().unwrap_or(base) + 1,
-            pieces,
-        ));
-        row_text.clear();
-        row_offsets.clear();
-    };
+                offset: None,
+            }];
+            for (index, ch) in row_text.char_indices() {
+                pieces.push(MdPiece {
+                    text: ch.to_string(),
+                    style: MdStyle::Plain,
+                    offset: row_offsets.get(index).copied().flatten(),
+                });
+            }
+            out.push(BodyLine::md(
+                row_offsets.clone(),
+                row_offsets
+                    .last()
+                    .copied()
+                    .and_then(|offset| offset)
+                    .map_or(base + 1, |offset| offset + 1),
+                pieces,
+            ));
+            row_text.clear();
+            row_offsets.clear();
+        };
     let limit = width.saturating_sub(indent).max(1);
     let mut used = 0usize;
     for (index, ch) in text.char_indices() {
@@ -1890,7 +1902,7 @@ fn md_table_fallback(
         }
         used += w;
         row_text.push(ch);
-        row_offsets.push(offsets.get(index).copied().unwrap_or(base));
+        row_offsets.push(offsets.get(index).copied().flatten());
     }
     flush(&mut row_text, &mut row_offsets, &mut out);
     out
@@ -2052,7 +2064,14 @@ mod tests {
         let base = entry.text.find('a').expect("the line is in the text");
         assert_eq!(
             lines[0].chars,
-            vec![base, base + 1, base + 1, base + 1, base + 1, base + 2]
+            vec![
+                Some(base),
+                Some(base + 1),
+                Some(base + 1),
+                Some(base + 1),
+                Some(base + 1),
+                Some(base + 2)
+            ]
         );
     }
 
