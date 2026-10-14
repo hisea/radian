@@ -565,7 +565,7 @@ throwaway terminal, not your working one.
    reasoning; press `Ctrl-T`; then call a tool with long output and press `Ctrl-O` three times.
    *Expect*: `Ctrl-T` toggles reasoning between collapsed and expanded (default collapsed;
    `tui.display.reasoning` sets the start); `Ctrl-O` cycles tool output
-   `collapsed → expanded → errors` (default `errors`); the truncated body shows the `[N more
+   `errors → expanded → collapsed → errors` (default `errors`; `crates/radian-tui/src/app.rs`, `ToggleToolOutput`); the truncated body shows the `[N more
    lines]` marker rather than silently cutting. *Fail*: record the fold state after each press
    and the config value.
 7. **Mermaid** (ADR 0028 R8; merge `5628737`). *Steps*: ask for a small ` ```mermaid `
