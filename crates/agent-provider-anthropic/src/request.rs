@@ -690,4 +690,114 @@ mod tests {
             json!([{"type": "text", "text": "visible"}])
         );
     }
+
+    // ---------- cross-provider history (ADR 0026 D6) ----------
+
+    /// An assistant turn written by the **other** adapter (an OpenAI-compatible run) must map
+    /// cleanly: its `reasoning` is ignored (D6, research §1), its tool ids pass verbatim
+    /// (Anthropic only requires `^[a-zA-Z0-9_-]+$`), and its `provider_payload` — which the
+    /// OpenAI-compatible adapter never writes — is treated like any other payload.
+    #[test]
+    fn an_openai_written_history_maps_to_a_messages_request() {
+        let tool_call = ToolCall {
+            id: "call_1".into(),
+            name: "echo".into(),
+            arguments: json!({"hello": "mcp"}),
+        };
+        let history = vec![
+            Message::user("run the tool"),
+            Message::Assistant {
+                content: vec![ContentPart::text("calling it")],
+                reasoning: vec![ContentPart::text(
+                    "chain of thought from the other provider",
+                )],
+                tool_calls: vec![tool_call],
+                provider_payload: None,
+                interrupted: false,
+                meta: MessageMeta::default(),
+            },
+            Message::Tool {
+                result: ToolResult {
+                    call_id: "call_1".into(),
+                    content: vec![ContentPart::text("ok")],
+                    structured: None,
+                    is_error: false,
+                    error_code: None,
+                },
+                meta: MessageMeta::default(),
+            },
+            Message::user("thanks"),
+        ];
+        let body = build_body(&request(history), &config()).unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        // user, assistant, user(tool result), user — the tool result becomes a user turn.
+        assert_eq!(messages.len(), 4);
+        let assistant = &messages[1];
+        assert_eq!(assistant["role"], "assistant");
+        // No `thinking` block: the other adapter's reasoning is not echoed, and there was no
+        // payload to preserve.
+        let blocks = assistant["content"].as_array().unwrap();
+        assert!(
+            blocks.iter().all(|block| block["type"] != "thinking"),
+            "no thinking blocks from a foreign turn: {blocks:?}"
+        );
+        // The tool id passes verbatim.
+        assert_eq!(blocks[1]["type"], "tool_use");
+        assert_eq!(blocks[1]["id"], "call_1");
+        assert_eq!(body["model"], "claude-test");
+        // The foreign `reasoning` is nowhere in the body (D6 research §1).
+        assert!(!body.to_string().contains("chain of thought"));
+    }
+
+    /// A non-array `provider_payload` from a foreign turn is a protocol error, not a silent
+    /// drop — dropping a real `thinking` block would make the provider reject the request
+    /// (D6: pin today's behavior; a change to "drop and log" is the owner's call).
+    #[test]
+    fn a_non_array_payload_is_a_protocol_error() {
+        let history = vec![
+            Message::user("hi"),
+            Message::Assistant {
+                content: vec![ContentPart::text("answer")],
+                reasoning: Vec::new(),
+                tool_calls: Vec::new(),
+                provider_payload: Some(OpaqueJson::parse(r#"{"type":"thinking"}"#).unwrap()),
+                interrupted: false,
+                meta: MessageMeta::default(),
+            },
+        ];
+        let error = build_body(&request(history), &config()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("provider_payload must be a JSON array"),
+            "{error}"
+        );
+    }
+
+    /// And the reverse direction: a history this adapter wrote (an assistant turn with a
+    /// preserved `thinking` payload) keeps the block when the request is rebuilt.
+    #[test]
+    fn a_thinking_payload_is_echoed_before_the_text() {
+        let payload =
+            OpaqueJson::parse(r#"[{"type":"thinking","thinking":"why","signature":"sig"}]"#)
+                .unwrap();
+        let history = vec![
+            Message::user("hi"),
+            Message::Assistant {
+                content: vec![ContentPart::text("answer")],
+                reasoning: Vec::new(),
+                tool_calls: Vec::new(),
+                provider_payload: Some(payload),
+                interrupted: false,
+                meta: MessageMeta::default(),
+            },
+            Message::user("go on"),
+        ];
+        let body = build_body(&request(history), &config()).unwrap();
+        let blocks = body["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "thinking");
+        assert_eq!(blocks[0]["thinking"], "why");
+        assert_eq!(blocks[1]["type"], "text");
+        assert_eq!(blocks[1]["text"], "answer");
+    }
 }

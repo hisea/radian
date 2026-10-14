@@ -502,4 +502,53 @@ mod tests {
         req.settings = json!([1, 2]);
         assert!(build_body(&req, &cfg, false).is_err());
     }
+    // ---------- cross-provider history (ADR 0026 D6) ----------
+
+    /// A history written by the **other** adapter (an Anthropic run) must map cleanly: its
+    /// `reasoning` is not read (D6, research §1), its preserved `thinking` payload is not
+    /// read either (this adapter never writes one and must not invent one), and the tool ids
+    /// pass verbatim.
+    #[test]
+    fn an_anthropic_written_history_maps_to_a_chat_request() {
+        let tool_call = ToolCall {
+            id: "toolu_01".into(),
+            name: "echo".into(),
+            arguments: json!({"hello": "mcp"}),
+        };
+        let history = vec![
+            Message::user("run the tool"),
+            Message::Assistant {
+                content: vec![ContentPart::text("calling it")],
+                reasoning: vec![ContentPart::text("chain of thought from anthropic")],
+                tool_calls: vec![tool_call],
+                provider_payload: Some(
+                    OpaqueJson::parse(r#"[{"type":"thinking","thinking":"why"}]"#).unwrap(),
+                ),
+                interrupted: false,
+                meta: MessageMeta::default(),
+            },
+            Message::Tool {
+                result: ToolResult {
+                    call_id: "toolu_01".into(),
+                    content: vec![ContentPart::text("ok")],
+                    structured: None,
+                    is_error: false,
+                    error_code: None,
+                },
+                meta: MessageMeta::default(),
+            },
+            Message::user("thanks"),
+        ];
+        let body = build_body(&request(history), &config(), false).unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 4, "{messages:?}");
+        let assistant = &messages[1];
+        assert_eq!(assistant["role"], "assistant");
+        assert_eq!(assistant["tool_calls"][0]["id"], "toolu_01");
+        // Neither the foreign reasoning nor its payload reaches the wire.
+        let body_text = body.to_string();
+        assert!(!body_text.contains("chain of thought"));
+        assert!(!body_text.contains("thinking"));
+        assert_eq!(body["model"], "test-model");
+    }
 }
