@@ -40,7 +40,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use agent_core::{CompactionOutcome, InputSource, Message, MessageId};
+use agent_core::{CompactionOutcome, ContextBudget, InputSource, Message, MessageId};
 use radian_session::{InboxLane, RuntimeEvent, SessionJournal};
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
@@ -174,6 +174,9 @@ pub struct Inbox {
 /// the core's error type).
 pub struct ControlRequest {
     pub instructions: Option<String>,
+    /// The budget this compaction targets (ADR 0026 D7): a `/model` confirm compaction must
+    /// reach the **new** model's B', which the configured budget knows nothing about.
+    pub budget: Option<ContextBudget>,
     pub reply: tokio::sync::oneshot::Sender<Result<CompactionOutcome, String>>,
 }
 
@@ -319,12 +322,22 @@ impl Inbox {
     /// between turns: with a turn in flight this waits for the turn to end. A `cancel`
     /// (Ctrl-C/Esc) aborts it without committing.
     pub async fn compact(&self, instructions: Option<String>) -> Result<CompactionOutcome, String> {
+        self.compact_with(instructions, None).await
+    }
+
+    /// Like [`Inbox::compact`], with the budget the compaction targets (ADR 0026 D7).
+    pub async fn compact_with(
+        &self,
+        instructions: Option<String>,
+        budget: Option<ContextBudget>,
+    ) -> Result<CompactionOutcome, String> {
         if self.closed.load(Ordering::SeqCst) {
             return Err("the session is closed".into());
         }
         let (reply, rx) = tokio::sync::oneshot::channel();
         self.control.lock().await.push_back(ControlRequest {
             instructions,
+            budget,
             reply,
         });
         self.wake.notify_one();

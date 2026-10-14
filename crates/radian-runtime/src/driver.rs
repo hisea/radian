@@ -409,7 +409,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         let token = CancellationToken::new();
         let live = Arc::clone(&self.live);
         let session = &mut self.session;
-        let compact = session.compact_now(request.instructions, &token, &*live);
+        let compact = session.compact_now(request.instructions, &token, &*live, request.budget);
         tokio::pin!(compact);
         let result = loop {
             tokio::select! {
