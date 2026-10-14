@@ -459,6 +459,42 @@ impl Hooks for SkillsHooks {
     }
 }
 
+/// The `/skill:` completion candidates (ADR 0025 S3, ruling 7): every discovered skill as
+/// `(name, description)`. `disable-model-invocation: true` skills **are** included — the flag
+/// hides a skill from the *model* (the prompt and the `skill` tool), not from the user, who can
+/// still invoke it with `/skill:<name>` (pi registers every loaded skill as a `skill:<name>`
+/// command). A description with newlines (a `|` literal block) is folded to one line.
+pub fn completion_candidates(skills: &[Skill]) -> Vec<(String, String)> {
+    skills
+        .iter()
+        .map(|skill| (skill.name.clone(), fold(&skill.description)))
+        .collect()
+}
+
+/// The `/skills` notice lines: `name: description`, with a marker for the skills the model
+/// cannot auto-invoke (they are still user-invocable via `/skill:`).
+pub fn notices(skills: &[Skill]) -> Vec<String> {
+    if skills.is_empty() {
+        return vec!["no skills found under ~/.radian/skills".to_owned()];
+    }
+    skills
+        .iter()
+        .map(|skill| {
+            let marker = if skill.disable_model_invocation {
+                " (model-invocation off)"
+            } else {
+                ""
+            };
+            format!("{}: {}{marker}", skill.name, fold(&skill.description))
+        })
+        .collect()
+}
+
+/// One line: a `|` literal-block description can contain newlines.
+fn fold(description: &str) -> String {
+    description.replace('\n', " ")
+}
+
 /// A shared, immutable skill list (`Arc` so the hook and the tool share one discovery).
 pub type SharedSkills = Arc<Vec<Skill>>;
 
@@ -785,6 +821,47 @@ mod tests {
         assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
         assert_eq!(discovery.skills[0].name, "a");
         assert_eq!(discovery.skills[0].description, "Quoted description.");
+    }
+
+    /// ADR 0025 S3 / ruling 7: the `/skill:` completion candidates and the `/skills` notices
+    /// include `disable-model-invocation: true` skills — the flag hides them from the model, not
+    /// from the user (pi registers every loaded skill as a `skill:<name>` command).
+    #[test]
+    fn completion_and_notices_include_model_invocation_disabled_skills() {
+        let skills = vec![
+            Skill {
+                name: "greet".into(),
+                description: "Say hello.".into(),
+                path: PathBuf::from("/s/greet/SKILL.md"),
+                dir: PathBuf::from("/s/greet"),
+                disable_model_invocation: false,
+            },
+            Skill {
+                name: "secret".into(),
+                description: "Only the user.".into(),
+                path: PathBuf::from("/s/secret/SKILL.md"),
+                dir: PathBuf::from("/s/secret"),
+                disable_model_invocation: true,
+            },
+        ];
+        let candidates = completion_candidates(&skills);
+        assert_eq!(
+            candidates,
+            vec![
+                ("greet".to_owned(), "Say hello.".to_owned()),
+                ("secret".to_owned(), "Only the user.".to_owned()),
+            ]
+        );
+        let lines = notices(&skills);
+        assert_eq!(
+            lines,
+            vec![
+                "greet: Say hello.",
+                "secret: Only the user. (model-invocation off)"
+            ]
+        );
+        // No skills at all: one line says so.
+        assert_eq!(notices(&[]), vec!["no skills found under ~/.radian/skills"]);
     }
 
     /// ADR 0025 S3: `expand` reads the body, strips the frontmatter, names the base directory and

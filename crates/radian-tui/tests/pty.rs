@@ -687,6 +687,12 @@ async fn pty_skill_commands_expand_list_notice_and_escape() {
     assert!(system.contains("greet"), "{system}");
     assert!(!system.contains("secret"), "{system}");
 
+    // The journal records what the model saw (ADR 0025 S3): the expanded body, not the command.
+    // The expansion is the message itself, so there is no path where the model sees one text and
+    // the journal another; this pins that.
+    let journal = std::fs::read_to_string(dir.path().join("skill.jsonl")).unwrap();
+    assert!(journal.contains("GREET-SKILL-BODY-MARKER"), "{journal}");
+
     // `/skills` lists both the visible and the model-invocation-disabled skill.
     pty.send("/skills\r".as_bytes());
     assert!(
