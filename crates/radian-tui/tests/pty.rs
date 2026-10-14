@@ -7551,7 +7551,10 @@ async fn pty_slash_theme_switches_and_writes_the_config() {
 #[allow(clippy::await_holding_lock)]
 async fn pty_a_login_key_is_redacted_from_an_export_in_the_same_session() {
     let _serial = pty_guard();
-    const KEY: &str = "sk-PTY-LATE-SECRET-7";
+    // Deliberately not `sk-`-prefixed and not after `Bearer`: the export's heuristic
+    // redaction would catch such a token on its own, and this test is about the *known*
+    // secret list (the mid-session `/login`), not the heuristic.
+    const KEY: &str = "late-secret-PTY-7";
     let verify = login_verify_server("200 OK");
     let dir = TempDir::new("login-redact");
     let server = MockServer::start(vec![text_reply("DONE")]).await;

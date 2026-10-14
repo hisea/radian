@@ -796,3 +796,16 @@ Base `fdfc2cb` · 一次性检出 `/tmp/flaky-mut`（detached，跑完删除）�
 
 `--exit-trace`（4e607ef）保留为测试诊断：不传时不打开文件、不输出；`exit_trace_once` 在 `OnceLock`
 未设置时直接返回，连原子操作都不做。
+
+## small-fixes：`/login` 脱敏列表刷新（2026-10-14）
+
+Base `a90ed5c` · 一次性检出 `/tmp/small-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+`cargo test -p radian-tui --test pty pty_a_login_key_is_redacted_from_an_export_in_the_same_session`。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| S1 | `Effect::LoginSave` 成功后不刷新脱敏列表（去掉 `refresh_secrets`） | 会话中 `/login` 的新 key 在 export 里被遮 | 测试 FAILED（"the export did not redact the mid-session key"） |
+
+1/1 抓住。注意第一版测试 key 用了 `sk-` 前缀，被 export 的**启发式**脱敏（`sk-`/`Bearer`，见
+`radian-session/src/export.rs`）遮住，变异因此假通过；换成不带 `sk-` 的 `late-secret-PTY-7` 后，
+测试只依赖已知 secret 列表，变异被抓住。sleep 变异没有——这是行为测试，不是时序测试。
