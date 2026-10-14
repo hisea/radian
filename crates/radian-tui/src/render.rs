@@ -18,42 +18,102 @@ use crate::app::{
 use crate::question::QuestionForm;
 use crate::theme::Theme;
 
-/// Hard-wraps `text` to `width` display columns, breaking on spaces where possible and on
-/// character boundaries otherwise (CJK has no spaces). Newlines start a new line.
-pub fn wrap(text: &str, width: usize) -> Vec<String> {
+/// One wrapped line as [`wrap_char_offsets`] sees it: the chars on the line (as byte offsets
+/// into the wrapped text, each on a char boundary) and the **gap** just after the line.
+///
+/// `end` is where a click past the line's last cell lands: the offset just after the last
+/// char, or, for an empty line, the offset of its terminating `\n` (or the text length for
+/// the final paragraph). Because `wrap` collapses space runs, `end` is not necessarily where
+/// the next line's first char sits; that in-between whitespace is exactly what a selection
+/// across the break copies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WrappedLine {
+    pub chars: Vec<usize>,
+    pub end: usize,
+}
+
+/// The same wrap [`wrap`] performs, but reporting *where each rendered char came from*: per
+/// line, the byte offsets (into `text`) of the chars on it, in order, plus the line's end gap
+/// (see [`WrappedLine`]). One algorithm, two views: `wrap` is derived from this, so a cell →
+/// offset mapping through [`crate::select`] can never drift from what is rendered.
+pub fn wrap_char_offsets(text: &str, width: usize) -> Vec<WrappedLine> {
     let width = width.max(1);
-    let mut out = Vec::new();
-    for paragraph in text.split('\n') {
-        let mut line = String::new();
-        let mut line_width = 0usize;
-        let mut pending_space = false;
-        for ch in paragraph.chars() {
-            if ch == ' ' {
-                pending_space = !line.is_empty();
-                continue;
-            }
-            let ch_width = ch.width().unwrap_or(0);
-            let extra = usize::from(pending_space);
-            if line_width + extra + ch_width > width && line_width > 0 {
-                out.push(std::mem::take(&mut line));
-                line_width = 0;
-                pending_space = false;
-            }
-            if pending_space {
-                line.push(' ');
-                line_width += 1;
-                pending_space = false;
-            }
-            line.push(ch);
-            line_width += ch_width;
+    let mut out: Vec<WrappedLine> = Vec::new();
+    // The byte offsets of the chars on the line being built, the line's display width, and
+    // the end gap so far (just after the last pushed char). The gap starts at 0 and is
+    // corrected to the `\n`'s offset for an empty line, and to `text.len()` for an empty
+    // final paragraph, when the line is finished.
+    let mut chars: Vec<usize> = Vec::new();
+    let mut line_width = 0usize;
+    let mut end = 0usize;
+    // One buffered space (its byte offset), flushed only when a following char stays on the
+    // line — so space runs collapse and trail them away (the `wrap` semantics, unchanged).
+    let mut pending_space: Option<usize> = None;
+    for (idx, ch) in text.char_indices() {
+        if ch == '\n' {
+            let empty = chars.is_empty();
+            out.push(WrappedLine {
+                chars: std::mem::take(&mut chars),
+                end: if empty { idx } else { end },
+            });
+            line_width = 0;
+            end = idx + 1;
+            pending_space = None;
+            continue;
         }
-        out.push(line);
+        if ch == ' ' {
+            // A space only joins a line that already has a char on it; leading spaces and
+            // repeats collapse away.
+            if !chars.is_empty() {
+                pending_space = Some(idx);
+            }
+            continue;
+        }
+        let ch_width = ch.width().unwrap_or(0);
+        let extra = usize::from(pending_space.is_some());
+        if line_width + extra + ch_width > width && line_width > 0 {
+            out.push(WrappedLine {
+                chars: std::mem::take(&mut chars),
+                end,
+            });
+            line_width = 0;
+            pending_space = None;
+        }
+        if let Some(space) = pending_space.take() {
+            chars.push(space);
+            line_width += 1;
+        }
+        chars.push(idx);
+        line_width += ch_width;
+        end = idx + ch.len_utf8();
     }
+    out.push(WrappedLine {
+        chars,
+        end: if end == 0 { text.len() } else { end },
+    });
     out
 }
 
-/// The visible marker for an entry kind (the transcript's `> `, `~ `, …).
-fn marker_prefix(kind: EntryKind) -> &'static str {
+/// Hard-wraps `text` to `width` display columns, breaking on spaces where possible and on
+/// character boundaries otherwise (CJK has no spaces). Newlines start a new line.
+///
+/// Derived from [`wrap_char_offsets`], so selection mapping and rendering agree by
+/// construction.
+pub fn wrap(text: &str, width: usize) -> Vec<String> {
+    wrap_char_offsets(text, width)
+        .into_iter()
+        .map(|line| {
+            line.chars
+                .into_iter()
+                .map(|idx| text[idx..].chars().next().expect("a char boundary"))
+                .collect()
+        })
+        .collect()
+}
+
+/// The visible marker for an entry kind (the transcript's `> `, `~ `, …). Also the cell
+/// offset the selection mapping ([`crate::select`]) subtracts to get a body column.
+pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
     match kind {
         EntryKind::User => "> ",
         EntryKind::Assistant => "  ",
@@ -95,8 +155,9 @@ fn body_style(entry: &Entry, theme: &Theme) -> Style {
 
 /// The text a frame shows for `entry`. A user message's `@` attachments are folded to one
 /// `[file: P, N lines]` line each; every other entry shows its text unchanged. Display only:
-/// the message (and the journal) keep the full text.
-fn display_text(entry: &Entry) -> Cow<'_, str> {
+/// the message (and the journal) keep the full text. Also what a selection maps offsets into
+/// ([`crate::select`]): the shown text is the copied text.
+pub(crate) fn display_text(entry: &Entry) -> Cow<'_, str> {
     match entry.kind {
         EntryKind::User => crate::mention::fold_files(&entry.text),
         _ => Cow::Borrowed(&entry.text),

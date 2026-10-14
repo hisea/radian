@@ -16,6 +16,7 @@ pub mod profile;
 pub mod projection;
 pub mod question;
 pub mod render;
+pub mod select;
 pub mod signals;
 pub mod terminal;
 pub mod theme;
@@ -26,3 +27,4 @@ pub use app::{
     TurnState, UpdateResult,
 };
 pub use composer::Composer;
+pub use select::{Anchor, Selection};
