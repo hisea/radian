@@ -214,6 +214,13 @@ pub enum RuntimeEvent {
         exit_code: Option<i32>,
         cancelled: bool,
     },
+    /// The host-side `git_commit` tool committed (ADR 0030 R10). Audit only: `critical =
+    /// false`. The new commit id, the branch it landed on, and how many files it changed.
+    GitCommitted {
+        commit: String,
+        branch: String,
+        files: usize,
+    },
 }
 
 impl RuntimeEvent {
@@ -234,6 +241,7 @@ impl RuntimeEvent {
             RuntimeEvent::SessionForked { .. } => "SessionForked",
             RuntimeEvent::ProjectTrustChanged { .. } => "ProjectTrustChanged",
             RuntimeEvent::UserBash { .. } => "UserBash",
+            RuntimeEvent::GitCommitted { .. } => "GitCommitted",
         }
     }
 
@@ -254,7 +262,8 @@ impl RuntimeEvent {
             | RuntimeEvent::MemoryInjected { .. }
             | RuntimeEvent::SessionForked { .. }
             | RuntimeEvent::ProjectTrustChanged { .. }
-            | RuntimeEvent::UserBash { .. } => false,
+            | RuntimeEvent::UserBash { .. }
+            | RuntimeEvent::GitCommitted { .. } => false,
         }
     }
 
@@ -384,6 +393,13 @@ pub(crate) struct UserBashData<'a> {
     pub cancelled: bool,
 }
 
+#[derive(Serialize)]
+pub(crate) struct GitCommittedData<'a> {
+    pub commit: &'a str,
+    pub branch: &'a str,
+    pub files: usize,
+}
+
 /// The `data` view of one runtime event. A manual enum (like the transcript writer's
 /// `Render`) keeps the field order of the ADR and avoids an externally tagged wrapper.
 pub(crate) enum RuntimeData<'a> {
@@ -401,6 +417,7 @@ pub(crate) enum RuntimeData<'a> {
     SessionForked(SessionForkedData<'a>),
     ProjectTrustChanged(ProjectTrustChangedData),
     UserBash(UserBashData<'a>),
+    GitCommitted(GitCommittedData<'a>),
 }
 
 impl Serialize for RuntimeData<'_> {
@@ -420,6 +437,7 @@ impl Serialize for RuntimeData<'_> {
             RuntimeData::SessionForked(d) => d.serialize(serializer),
             RuntimeData::ProjectTrustChanged(d) => d.serialize(serializer),
             RuntimeData::UserBash(d) => d.serialize(serializer),
+            RuntimeData::GitCommitted(d) => d.serialize(serializer),
         }
     }
 }
@@ -533,6 +551,15 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
             exclude_from_context: *exclude_from_context,
             exit_code: *exit_code,
             cancelled: *cancelled,
+        }),
+        RuntimeEvent::GitCommitted {
+            commit,
+            branch,
+            files,
+        } => RuntimeData::GitCommitted(GitCommittedData {
+            commit,
+            branch,
+            files: *files,
         }),
     }
 }

@@ -29,7 +29,7 @@ pub(crate) const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 
 /// The v1 events known to a schema-v1 reader (ADR 0006 §4). Anything else is unknown and
 /// handled by the `critical` policy.
-pub(crate) const KNOWN_EVENTS: [&str; 25] = [
+pub(crate) const KNOWN_EVENTS: [&str; 26] = [
     "SessionCreated",
     "InboxEnqueued",
     "InputClaimed",
@@ -55,6 +55,7 @@ pub(crate) const KNOWN_EVENTS: [&str; 25] = [
     "SessionForked",
     "ProjectTrustChanged",
     "UserBash",
+    "GitCommitted",
 ];
 
 /// The parsed body of one known event. Events this slice does not interpret (for example
@@ -188,6 +189,13 @@ pub enum EventData {
         exclude_from_context: bool,
         exit_code: Option<i32>,
         cancelled: bool,
+    },
+    /// The host-side `git_commit` tool committed (ADR 0030 R10). Typed for an exact round trip;
+    /// audit only, never a transcript record.
+    GitCommitted {
+        commit: String,
+        branch: String,
+        files: usize,
     },
     /// A known event this crate does not interpret (`SessionCreated`) or an unknown
     /// non-critical event.
@@ -657,6 +665,14 @@ impl LineScanner {
                     cancelled: d.cancelled,
                 }
             }
+            "GitCommitted" => {
+                let d: GitCommittedData = data_of(raw, self.lineno, path)?;
+                EventData::GitCommitted {
+                    commit: d.commit,
+                    branch: d.branch,
+                    files: d.files,
+                }
+            }
             "InboxEnqueued" => {
                 let d: InboxEnqueuedData = data_of(raw, self.lineno, path)?;
                 EventData::InboxEnqueued {
@@ -985,6 +1001,7 @@ fn record_from_event(event: &SessionEvent) -> Option<JournalRecord> {
         | EventData::MemoryInjected { .. }
         | EventData::ProjectTrustChanged { .. }
         | EventData::UserBash { .. }
+        | EventData::GitCommitted { .. }
         | EventData::Other(_) => None,
     }
 }
@@ -1171,6 +1188,13 @@ struct UserBashData {
     exclude_from_context: bool,
     exit_code: Option<i32>,
     cancelled: bool,
+}
+
+#[derive(Deserialize)]
+struct GitCommittedData {
+    commit: String,
+    branch: String,
+    files: usize,
 }
 
 /// Feeds one record to the shared replacement state machine, mapping a rejection to the
