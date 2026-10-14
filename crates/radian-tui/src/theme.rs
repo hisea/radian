@@ -195,10 +195,13 @@ pub enum Role {
     SyntaxType,
     SyntaxOperator,
     SyntaxPunctuation,
+    /// The footer's separator between items (ADR 0027): weaker than the item text,
+    /// so it reads as structure. Configurable through `[tui.footer] separator_style`.
+    FooterSeparator,
 }
 
 impl Role {
-    pub const ALL: [Role; 61] = [
+    pub const ALL: [Role; 62] = [
         Role::Reasoning,
         Role::ReasoningOff,
         Role::ReasoningMinimal,
@@ -260,6 +263,7 @@ impl Role {
         Role::SyntaxType,
         Role::SyntaxOperator,
         Role::SyntaxPunctuation,
+        Role::FooterSeparator,
     ];
 
     /// The `[tui.colors]` key for this role (ADR 0029 decision 5).
@@ -326,6 +330,7 @@ impl Role {
             Role::SyntaxType => "syntax_type",
             Role::SyntaxOperator => "syntax_operator",
             Role::SyntaxPunctuation => "syntax_punctuation",
+            Role::FooterSeparator => "footer_separator",
         }
     }
 
@@ -398,6 +403,7 @@ impl Role {
             Role::SyntaxType => &mut theme.syntax_type,
             Role::SyntaxOperator => &mut theme.syntax_operator,
             Role::SyntaxPunctuation => &mut theme.syntax_punctuation,
+            Role::FooterSeparator => &mut theme.footer_separator,
         }
     }
 }
@@ -437,6 +443,8 @@ pub struct Theme {
     pub truncation: Style,
     pub approval_border: Style,
     pub hint: Style,
+    /// The footer's item separator (ADR 0027).
+    pub footer_separator: Style,
     /// The `@` file-reference completion list (Phase 4).
     pub completion: Style,
     /// The find match position in the status bar (Phase 5).
@@ -672,6 +680,7 @@ impl Theme {
             syntax_type: spec(pi::VIOLET, Modifier::empty(), truecolor),
             syntax_operator: muted,
             syntax_punctuation: muted,
+            footer_separator: dim,
             turn_idle: spec(pi::GREEN, Modifier::empty(), truecolor),
             turn_running: spec(pi::YELLOW, Modifier::empty(), truecolor),
             turn_cancelled: spec(pi::RED, Modifier::empty(), truecolor),
@@ -758,6 +767,7 @@ impl Theme {
             syntax_type: spec(pi::VIOLET, Modifier::empty(), truecolor),
             syntax_operator: muted,
             syntax_punctuation: muted,
+            footer_separator: dim,
             turn_idle: spec(pi::GREEN, Modifier::empty(), truecolor),
             turn_running: spec(pi::YELLOW, Modifier::empty(), truecolor),
             turn_cancelled: spec(pi::RED, Modifier::empty(), truecolor),
@@ -866,6 +876,7 @@ impl Theme {
             syntax_type: style(None, Modifier::empty()),
             syntax_operator: style(None, Modifier::empty()),
             syntax_punctuation: style(None, Modifier::empty()),
+            footer_separator: style(None, Modifier::DIM),
         }
     }
 

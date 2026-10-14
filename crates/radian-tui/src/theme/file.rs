@@ -158,6 +158,8 @@ fn fg_source(role: Role) -> Option<&'static str> {
         Role::SyntaxType => Some("syntaxType"),
         Role::SyntaxOperator => Some("syntaxOperator"),
         Role::SyntaxPunctuation => Some("syntaxPunctuation"),
+        // ADR 0027: the separator is weaker than the item text.
+        Role::FooterSeparator => Some("dim"),
         // The main text level itself (Pi's `text`): the mapping is used by the file themes;
         // the built-ins take pi's values directly.
         Role::Text => Some("text"),
