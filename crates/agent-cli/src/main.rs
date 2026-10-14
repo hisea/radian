@@ -569,15 +569,20 @@ async fn trust_prompt(
     let _ = std::io::Write::flush(&mut std::io::stderr());
     // The same line hub the approval prompt uses: one reader owns stdin.
     let answer = lines.next().await.unwrap_or_default();
-    let answer = answer.trim();
-    let choice = match answer {
+    Some(trust_choice_from_answer(answer.trim()))
+}
+
+/// The answer to the trust question, as a choice. Anything unrecognized (including an empty
+/// line) is the fail-safe default, never a trust.
+fn trust_choice_from_answer(answer: &str) -> radian_host::trust::Choice {
+    use radian_host::trust::Choice;
+    match answer.trim() {
         "1" => Choice::TrustHere,
         "2" => Choice::TrustParent,
         "3" => Choice::TrustSession,
         "5" => Choice::UntrustSession,
         _ => Choice::UntrustHere,
-    };
-    Some(choice)
+    }
 }
 
 /// The confirmation for `forget`/`purge`/`split`/`merge` (ADR 0021 D7). A terminal asks;
@@ -1388,9 +1393,12 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     // override for this process only; a saved decision (or the non-interactive default) needs
     // no question. The persistent write + audit happen after `open_session` (they need the
     // journal), so the choice is kept.
-    // The line mode (no `-p`) is the interactive host, the same rule `can_ask` uses: it reads
-    // stdin whether or not it is a terminal. `-p` is the one-shot non-interactive mode.
-    let trust_interactive = cli.prompt.is_none();
+    // The trust question requires a real terminal. Piped stdin is **not** an interactive user:
+    // its first line could be a message (or even a stray `y`) and must never be read as the
+    // answer to a trust question. `-p` and piped input are both non-interactive here, so they
+    // take the untrusted default and the one-line hint. (The other CLI prompts keep their
+    // existing `can_ask` rule; only trust is this strict.)
+    let trust_interactive = cli.prompt.is_none() && std::io::stdin().is_terminal();
     let cli_trust = if cli.trust {
         Some(radian_host::trust::Decision::Trust)
     } else if cli.no_trust {
@@ -2147,6 +2155,29 @@ impl EventSink for Ui {
                 self.finished.notify_one();
             }
             _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ADR 0031 T3: only the five numbered answers are choices; anything else (an empty line,
+    /// `4`, a stray `y`) is the fail-safe default.
+    #[test]
+    fn the_trust_answer_defaults_to_untrust() {
+        use radian_host::trust::Choice;
+        assert_eq!(trust_choice_from_answer("1"), Choice::TrustHere);
+        assert_eq!(trust_choice_from_answer(" 2 "), Choice::TrustParent);
+        assert_eq!(trust_choice_from_answer("3"), Choice::TrustSession);
+        assert_eq!(trust_choice_from_answer("5"), Choice::UntrustSession);
+        for other in ["", "4", "y", "yes", "99", "trust"] {
+            assert_eq!(
+                trust_choice_from_answer(other),
+                Choice::UntrustHere,
+                "{other:?}"
+            );
         }
     }
 }

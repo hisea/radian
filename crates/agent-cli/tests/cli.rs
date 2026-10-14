@@ -787,11 +787,12 @@ async fn trust_flags_override_without_writing() {
     }
 }
 
-/// ADR 0031 T3: the interactive prompt persists the choice and journals one
-/// `ProjectTrustChanged`.
+/// ADR 0031 T3: piped stdin is **not** an interactive user. The trust question must not read
+/// its first line (which could be a message, or a stray `y`), so a piped run takes the
+/// untrusted default and sends the piped line as a message.
 #[tokio::test]
-async fn the_interactive_trust_prompt_persists_the_choice() {
-    let dir = scratch("trust-interactive");
+async fn piped_stdin_is_never_read_as_the_trust_answer() {
+    let dir = scratch("trust-piped");
     let home = dir.0.join("home");
     let ws = dir.0.join("ws");
     std::fs::create_dir_all(ws.join(".radian/skills/greet")).unwrap();
@@ -801,8 +802,8 @@ async fn the_interactive_trust_prompt_persists_the_choice() {
     )
     .unwrap();
     let sessions = dir.0.join("sessions");
-    let server = MockServer::start(vec![text_reply("OK")]).await;
-    let (code, _, stderr) = feed_and_wait(
+    let server = MockServer::start(vec![text_reply("PIPED-OK")]).await;
+    let (code, _stdout, stderr) = feed_and_wait(
         spawn_agent(
             &[
                 "--model",
@@ -814,26 +815,37 @@ async fn the_interactive_trust_prompt_persists_the_choice() {
                 "--session-dir",
                 sessions.to_str().unwrap(),
                 "--session-id",
-                "trust-int",
+                "trust-piped",
             ],
             &[("RADIAN_HOME", home.to_str().unwrap())],
         ),
-        // The first line answers the trust prompt (1 = trust this directory); the closed
-        // stdin then ends the interactive loop.
-        "1\n",
+        // A stray `y` would be a wrong "allow" if the question read it.
+        "hello from the pipe\n",
     )
     .await;
     assert_eq!(code, 0, "{stderr}");
-    assert!(stderr.contains("project resources found in"), "{stderr}");
-    let canonical = std::fs::canonicalize(&ws).unwrap();
-    let trust = std::fs::read_to_string(home.join("trust/trust.json")).unwrap();
+    // No question: piped stdin is not a terminal.
+    assert!(!stderr.contains("project resources found in"), "{stderr}");
     assert!(
-        trust.contains(&canonical.to_string_lossy().to_string()),
-        "{trust}"
+        stderr.contains("project resources: not loaded (untrusted: default)"),
+        "{stderr}"
     );
-    assert!(trust.contains("true"), "{trust}");
-    let journal = std::fs::read_to_string(sessions.join("trust-int.jsonl")).unwrap();
-    assert!(journal.contains("ProjectTrustChanged"), "{journal}");
+    assert!(
+        !home.join("trust/trust.json").exists(),
+        "nothing is written"
+    );
+    // The piped line was sent as an ordinary message, not consumed by a trust answer.
+    let messages = server.requests()[0].json()["messages"].clone();
+    let user = messages
+        .as_array()
+        .expect("messages")
+        .iter()
+        .rev()
+        .find(|message| message["role"] == "user")
+        .and_then(|message| message["content"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    assert_eq!(user, "hello from the pipe");
 }
 
 #[tokio::test]
