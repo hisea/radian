@@ -237,6 +237,9 @@ fn an_overlay_never_lands_between_two_modals() {
             request_id: 1,
             origin: "session".into(),
             request: request(),
+            scroll: 0,
+            total_rows: 0,
+            visible_rows: 0,
         },
     )));
     app.push_modal(Modal::Approval(Box::new(
@@ -244,6 +247,9 @@ fn an_overlay_never_lands_between_two_modals() {
             request_id: 2,
             origin: "session".into(),
             request: request(),
+            scroll: 0,
+            total_rows: 0,
+            visible_rows: 0,
         },
     )));
     app.push_overlay(Overlay::Find(FindState::open(0)));
