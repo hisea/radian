@@ -420,3 +420,32 @@ fn every_displayed_source_char_is_at_its_offset() {
         }
     }
 }
+
+/// ADR 0028 R5: only Assistant text goes through Markdown. A user message is plain text, so
+/// `**bold**`, a `# heading` line and an inline `` `code` `` span show **literally** - the
+/// asterisks, the hash and the backticks all stay - and the text keeps the user role's color,
+/// not a `md*` role's.
+#[test]
+fn a_user_message_shows_markup_literally() {
+    let mut app = App::new("m", "s");
+    app.entries.push(radian_tui::app::Entry::new(
+        EntryKind::User,
+        "**bold**\n# heading\n`code`\n",
+    ));
+    let terminal = render(&mut app, 60, 12);
+    let text = screen(&terminal);
+    assert!(text.contains("**bold**"), "the asterisks stay: {text}");
+    assert!(text.contains("# heading"), "the hash stays: {text}");
+    assert!(text.contains("`code`"), "the backticks stay: {text}");
+    assert!(!text.contains("•"), "no list bullet: {text}");
+    // The user role: the message carries the user background band (the marker carries the
+    // user foreground), not a `md*` role.
+    let bold = style_of(&terminal, "**bold**").expect("the bold line");
+    assert_eq!(bold.bg, app.theme.user.bg, "the user band: {bold:?}");
+    let marker = style_of(&terminal, "> ").expect("the user marker");
+    assert_eq!(marker.fg, app.theme.user.fg, "the user role: {marker:?}");
+    assert_ne!(
+        bold.bg, app.theme.md_code.bg,
+        "not the Markdown code role: {bold:?}"
+    );
+}
