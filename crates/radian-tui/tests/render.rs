@@ -1394,8 +1394,10 @@ fn collapsed_and_errors_differ_for_a_successful_card() {
         let _ = render(&mut app, 60, 30);
         counts.push(app.total_lines);
     }
-    // The assistant's (empty) line + the card head + the body: 20 lines expanded, 5 preview
-    // lines + 1 hint under `errors`, a single `[20 lines]` hint under `collapsed`.
+    // The empty assistant entry contributes nothing (its blank line is stripped, rule 1) and
+    // the container's gap before the card is one line: the card head (1) + the body (20) = 22
+    // expanded, 1 + 5 preview + 1 hint = 8 under `errors`, 1 + a single `[20 lines]` hint = 3
+    // under `collapsed`.
     assert_eq!(counts, vec![22, 8, 3], "expanded / errors / collapsed");
     // A failure: the same count in all three, and the body really visible.
     for fold in [ToolFold::Expanded, ToolFold::Errors, ToolFold::Collapsed] {
@@ -1561,7 +1563,8 @@ fn folding_changes_the_transcript_line_count() {
         collapsed + 2,
         "three thinking lines become one placeholder"
     );
-    assert_eq!(collapsed, 2, "the placeholder plus the answer");
+    // The placeholder, the container's gap line, the answer (ADR 0028 rule 1).
+    assert_eq!(collapsed, 3, "placeholder + gap + answer");
 }
 
 /// `tui.display.reasoning = "hidden"` removes the reasoning lines entirely.
