@@ -688,6 +688,23 @@ async fn a_local_base_url_needs_no_key_and_sends_no_authorization() {
     assert_eq!(server.requests()[0].header("authorization"), None);
 }
 
+/// ADR 0026 D2: `--api-key-env` is removed, so passing it is a usage error (the key comes only
+/// from `auth.json`). This is the mutation guard for re-adding the flag.
+#[tokio::test]
+async fn the_removed_api_key_env_flag_is_a_usage_error() {
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &["--model", "m", "--api-key-env", "SOME_KEY", "-p", "hi"],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("--api-key-env"), "{stderr}");
+    assert!(stderr.contains("unexpected argument"), "{stderr}");
+}
+
 /// ADR 0026 D0: `--base-url`/`--header` only apply to the generic descriptor; a non-generic
 /// descriptor sets its own endpoint and headers, so passing them is a usage error.
 #[tokio::test]
@@ -787,6 +804,8 @@ async fn a_config_with_model_api_key_is_refused() {
     )
     .await;
     assert_eq!(code, 2, "{stderr}");
+    // The error is the config refusal, not the later no-credential error: it names the key.
+    assert!(stderr.contains("model.api_key"), "{stderr}");
     assert!(stderr.contains("auth.json"), "{stderr}");
     assert!(stderr.contains("/login"), "{stderr}");
 }
