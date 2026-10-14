@@ -684,9 +684,8 @@ impl App {
             last_click: None,
             mouse_enabled: true,
             clipboard: ClipboardMode::Osc52,
-            // ADR 0028 R3's default is collapsed; this slice ships expanded and the config
-            // + toggle land with the folding work itself.
-            reasoning_mode: ReasoningMode::Expanded,
+            // ADR 0028 R3's default: thinking collapsed to one line.
+            reasoning_mode: ReasoningMode::Collapsed,
         }
     }
 
@@ -764,6 +763,14 @@ impl App {
             .input_style
             .as_deref()
             .and_then(InputStyle::parse)
+            .unwrap_or_default();
+        // `tui.display.reasoning` (ADR 0028 R3, default collapsed). An unknown spelling
+        // never reaches here (the host reader skips it with a warning).
+        self.reasoning_mode = config
+            .tui
+            .display_reasoning
+            .as_deref()
+            .and_then(ReasoningMode::parse)
             .unwrap_or_default();
         // `tui.clipboard` (default OSC 52). An unknown spelling never reaches here (the host
         // config reader skips it with a warning); `pbcopy` off macOS does: warn once and fall
@@ -1965,6 +1972,12 @@ impl App {
             }
             Action::FindClose => {
                 self.find_close();
+                UpdateResult::dirty()
+            }
+            // ADR 0028 R3: Ctrl-T folds or unfolds the thinking blocks. The mode is part of
+            // the block/layout cache keys, so the next frame re-lays them out.
+            Action::ToggleReasoning => {
+                self.reasoning_mode = self.reasoning_mode.toggled();
                 UpdateResult::dirty()
             }
             Action::DeleteWord => {
