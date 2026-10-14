@@ -337,3 +337,11 @@ Base `0b9785b` · 一次性 worktree `/tmp/radian-pi-mut-a1`，跑完删除。
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
 | A1a | 映射表全部改回 `adaptive`（六档同值） | `provider::thinking_tests::the_anthropic_levels_are_distinct` | ✅ |
+
+## ADR 0026 D11 审查 B1：档位预算夹到 max_tokens（2026-10-14）
+
+Base `b46f506` · 一次性 worktree `/tmp/radian-pi-mut-b1`，跑完删除。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| B1a | 去掉档位预算夹取（`Enabled` 原样发出） | `agent-cli::a_level_budget_clamps_to_max_tokens` | ✅ |
