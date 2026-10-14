@@ -11,3 +11,14 @@ license and attribution, as that license requires.
   [openai/codex](https://github.com/openai/codex) `codex-rs/mermaid` at commit
   `2f05c0a71f59fb2f05800846351f3e9926c3e52b`, Apache-2.0, Copyright 2025
   OpenAI. See that directory's `NOTICE` and `RADIAN-CHANGES.md`.
+
+- `third_party/syntaxes`: vendored from
+  [sharkdp/bat](https://github.com/sharkdp/bat) `assets/syntaxes/02_Extra` at
+  commit `d9559c69f541873f8c47ac8ad81d985f4441edf6`. `TOML.sublime-syntax` is
+  MIT, Copyright (c) 2021 Jason Williams. `TypeScript.sublime-syntax` and
+  `TypsecriptReact.sublime-syntax` are dual-attributed: bat's own MIT OR
+  Apache-2.0 (`bat.LICENSE-MIT` / `bat.LICENSE-APACHE`) for bat's YAML conversion,
+  and Apache-2.0 from
+  [Microsoft/TypeScript-Sublime-Plugin](https://github.com/Microsoft/TypeScript-Sublime-Plugin)
+  for the grammar they are converted from (`TypeScript.LICENSE`). See that
+  directory's `RADIAN-CHANGES.md` and the `*.LICENSE*` files.

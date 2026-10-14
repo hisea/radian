@@ -23,6 +23,7 @@ const EXPANDED: DisplayModes = DisplayModes {
         preview_lines: 5,
     },
     mermaid: true,
+    highlight: true,
 };
 
 fn text(lines: &[Line<'static>]) -> Vec<String> {

@@ -174,6 +174,7 @@ mod tests {
             preview_lines: 5,
         },
         mermaid: true,
+        highlight: true,
     };
     use crate::app::{Entry, EntryKind};
 

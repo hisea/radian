@@ -69,6 +69,19 @@ fn skills_extra_paths_are_carried_raw() {
     );
 }
 
+/// `tui-display.toml` (ADR 0028 R2/R3/R4/R8): the display preferences are carried, including
+/// `highlight` (R2) and `mermaid` (R8).
+#[test]
+fn tui_display_preferences_are_carried() {
+    let (path, text) = fixture("tui-display.toml");
+    let config = config::parse(&path, &text).unwrap();
+    assert_eq!(config.tui.display_reasoning.as_deref(), Some("collapsed"));
+    assert_eq!(config.tui.display_tool_output.as_deref(), Some("errors"));
+    assert_eq!(config.tui.display_tool_preview_lines, Some(8));
+    assert_eq!(config.tui.display_mermaid, Some(true));
+    assert_eq!(config.tui.display_highlight, Some(false));
+}
+
 /// `v1-unknown-fields.toml` is accepted *and* the unknown fields are reported (ignored, not
 /// lost — the reader never writes, so §5.4's write-back rule cannot be violated).
 #[test]
