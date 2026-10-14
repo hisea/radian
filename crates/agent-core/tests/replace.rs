@@ -415,6 +415,47 @@ fn an_aborted_segment_recovers_the_old_history_and_the_next_append_is_normal() {
     assert_eq!(replay(&records).unwrap(), expected);
 }
 
+/// An abort and an open segment at end of file fold to the **same** history and the same
+/// declared calls: the abort only records the segment in `uncommitted`, it never touches the
+/// history. The host relies on this (a resume that writes the abort may reuse the parse taken
+/// before it), so this test makes the assumption explicit: if the abort ever starts changing
+/// the fold, it fails here first.
+#[test]
+fn an_aborted_segment_and_one_at_end_of_file_fold_identically() {
+    let fold = |abort: bool| {
+        let mut fold = TranscriptFold::new();
+        fold.push(&JournalRecord::Message {
+            index: 0,
+            message: Message::user("old"),
+        })
+        .unwrap();
+        fold.push(&JournalRecord::TranscriptReplaced {
+            revision: 5,
+            len: 2,
+        })
+        .unwrap();
+        fold.push(&JournalRecord::Message {
+            index: 0,
+            message: assistant_call("pending-call"),
+        })
+        .unwrap();
+        if abort {
+            fold.push(&JournalRecord::TranscriptReplacementAborted { revision: 5 })
+                .unwrap();
+        }
+        fold.finish()
+    };
+    let aborted = fold(true);
+    let at_end_of_file = fold(false);
+    assert_eq!(aborted.history(), at_end_of_file.history());
+    assert_eq!(aborted.history(), &[Message::user("old")]);
+    assert_eq!(
+        aborted.is_call_declared("pending-call"),
+        at_end_of_file.is_call_declared("pending-call")
+    );
+    assert!(!aborted.is_call_declared("pending-call"));
+}
+
 #[test]
 fn a_committed_segment_recovers_the_new_history() {
     let records = vec![

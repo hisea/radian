@@ -942,7 +942,14 @@ pub async fn open_session(
 
     // MCP server **processes** start here, when the tool session opens. The session file
     // already exists, so a failure names the way to continue it.
-    // A written abort changes the fold on disk, so the shared parse is stale: re-parse then.
+    // A written abort changes the file on disk, so the shared parse is stale: re-parse then.
+    //
+    // Today an abort does not change the **fold**: an uncommitted segment at end of file and an
+    // aborted one both drop the segment and leave the history and the declared calls alone
+    // (`agent_core::TranscriptFold`; `an_aborted_segment_and_one_at_end_of_file_fold_identically`
+    // pins that). So this re-parse is a no-op for the recovered transcript and no test can tell
+    // it apart from reusing the parse. It is kept deliberately: the parse is the host's view of
+    // the file, and if the abort ever gains an effect on the fold, the driver must see it.
     let recovery_parse = match (&parsed, wrote_abort) {
         (Some(parsed), false) => Some(parsed),
         _ => None,
