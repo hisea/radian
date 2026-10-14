@@ -350,6 +350,52 @@ fn theme_level(typed: &[&str], partial: &str) -> Level {
     }
 }
 
+/// The thinking level the footer's `reasoning` item shows (ADR 0026 D11): the requested level
+/// clamped to what this route supports, so a model that does not support `medium` shows the
+/// level that actually takes effect (`high`) instead of the configured value.
+pub fn effective_thinking_level(
+    provider: &radian_host::ProviderRef,
+    model: &str,
+    requested: &str,
+    max_tokens: u32,
+) -> String {
+    radian_host::clamp_thinking_with(
+        radian_host::thinking_map_for_ref(provider, model),
+        requested,
+        Some(max_tokens),
+    )
+    .map(|(level, _)| level.to_owned())
+    .unwrap_or_else(|| requested.to_owned())
+}
+
+/// `/thinking`'s completion rows (ADR 0026 D11): only the levels the route supports, each with
+/// the wire value it sends (`enabled:4096` for Anthropic, `high` for openai-compatible), and
+/// the applied level marked with `● current`.
+pub fn thinking_candidates(
+    provider: &radian_host::ProviderRef,
+    model: &str,
+    max_tokens: u32,
+    current: &str,
+) -> Vec<Candidate> {
+    let map = radian_host::thinking_map_for_ref(provider, model);
+    radian_host::supported_thinking_levels_ref_with(provider, model, Some(max_tokens))
+        .into_iter()
+        .map(|level| {
+            let wire = radian_host::clamp_thinking_with(map, level, Some(max_tokens))
+                .map(|(_, wire)| wire)
+                .unwrap_or("off");
+            Candidate {
+                insert: level.to_owned(),
+                description: if level == current {
+                    format!("● current · sends {wire}")
+                } else {
+                    format!("sends {wire}")
+                },
+            }
+        })
+        .collect()
+}
+
 /// The `/theme` completion candidates: the built-ins plus the `*.json` files in `themes_dir`
 /// (ADR 0029). Sorting makes the list stable; the app ranks it against the partial word.
 pub fn theme_candidates(themes_dir: Option<&std::path::Path>) -> Vec<Candidate> {

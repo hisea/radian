@@ -1049,6 +1049,12 @@ pub struct App {
     /// first. `None` when the line is not a slash command or the level has nothing to offer.
     /// (The overlay's *rows* live in the layer stack, next to the `@` list's.)
     pub slash_completion: Option<SlashCompletion>,
+    /// The `@` completion the menu is showing (its range and raw candidates), so the highlighted
+    /// row can be accepted. `None` unless the `@` list is up.
+    pub mention_completion: Option<(std::ops::Range<usize>, Vec<String>)>,
+    /// The highlighted row of the completion menu (slash or `@`). Reset to the first row
+    /// whenever the menu is (re)built, so typing keeps the highlight on the best match.
+    pub completion_cursor: usize,
     /// The host fetch the current completion waits for: a result is applied only when it
     /// answers *this* fetch, so a stale answer cannot land on a newer line.
     pending_fetch: Option<command::Fetch>,
@@ -1148,6 +1154,8 @@ impl App {
             memory_enabled: false,
             pending_expand: None,
             slash_completion: None,
+            mention_completion: None,
+            completion_cursor: 0,
             pending_fetch: None,
             next_model: None,
             next_thinking: None,
@@ -1770,13 +1778,73 @@ impl App {
 
     fn completion_clear(&mut self) {
         self.remove_overlay(|overlay| matches!(overlay, Overlay::Completion(_)));
+        self.mention_completion = None;
+        self.completion_cursor = 0;
     }
 
     pub fn completion_set(&mut self, candidates: Vec<String>) {
         self.completion_clear();
         if !candidates.is_empty() {
+            // A fresh menu highlights its first (best-ranked) row.
+            self.completion_cursor = 0;
             self.push_overlay(Overlay::Completion(candidates));
         }
+    }
+
+    /// Whether a completion menu is on screen (the slash list or the `@` list).
+    pub fn menu_open(&self) -> bool {
+        self.slash_completion.is_some() || self.completion().is_some()
+    }
+
+    /// Closes the menu and keeps the input as it is.
+    fn menu_close(&mut self) {
+        self.completion_clear();
+        self.slash_completion = None;
+    }
+
+    /// The number of rows in the open menu.
+    fn menu_len(&self) -> usize {
+        if let Some(slash) = &self.slash_completion {
+            return slash.candidates.len();
+        }
+        self.completion().map(<[String]>::len).unwrap_or(0)
+    }
+
+    /// Moves the menu highlight, wrapping.
+    fn move_menu(&mut self, delta: i32) {
+        let len = self.menu_len();
+        if len == 0 {
+            return;
+        }
+        self.completion_cursor =
+            (self.completion_cursor as i32 + delta).rem_euclid(len as i32) as usize;
+    }
+
+    /// Accepts the highlighted row: Tab and Enter do the same, and Enter never sends.
+    fn accept_menu_candidate(&mut self) -> UpdateResult {
+        if self.slash_completion.is_some() {
+            return self.accept_slash_candidate();
+        }
+        self.accept_mention_candidate()
+    }
+
+    /// Accepts the highlighted `@` candidate (a path), completing the reference.
+    fn accept_mention_candidate(&mut self) -> UpdateResult {
+        let Some((range, candidates)) = self.mention_completion.take() else {
+            return UpdateResult::none();
+        };
+        let Some(candidate) = candidates.get(self.completion_cursor) else {
+            return UpdateResult::none();
+        };
+        // A directory keeps its trailing `/`; a file gets a trailing space (mention.rs's rule).
+        let insert = if candidate.ends_with('/') {
+            candidate.clone()
+        } else {
+            format!("{candidate} ")
+        };
+        self.replace_range(range, &insert);
+        self.menu_close();
+        UpdateResult::dirty()
     }
 
     /// The session picker overlay, if it is up.
@@ -2204,21 +2272,28 @@ impl App {
                 UpdateResult::dirty()
             }
             Input::Action(action) => {
-                // The `/…` list is accepted by `complete` (Tab) and by `send` (Enter — the
-                // owner's rule: Enter picks the candidate, it never executes). Every other
-                // action dismisses both lists; the `@` list is dismissed by everything but
-                // `complete`. `escape` only closes the list and keeps the input, so it does not
-                // reach its own action here.
-                let accepts_slash = self.slash_completion.is_some()
-                    && matches!(action, Action::Complete | Action::Send);
-                if !accepts_slash
-                    && (self.completion().is_some() || self.slash_completion.is_some())
-                    && action != Action::Complete
-                {
-                    self.completion_clear();
-                    self.slash_completion = None;
-                    if action == Action::Escape {
-                        return UpdateResult::dirty();
+                // A completion menu is a selectable list: while it is up,
+                // Up/Down (and Ctrl-N) move the highlight and wrap, Enter and Tab accept the
+                // highlighted row (Enter never sends), and Esc closes the menu keeping the
+                // input. Every other action dismisses the menu and proceeds as usual.
+                if self.menu_open() {
+                    match action {
+                        Action::HistoryPrev => {
+                            self.move_menu(-1);
+                            return UpdateResult::dirty();
+                        }
+                        Action::HistoryNext | Action::MenuNext => {
+                            self.move_menu(1);
+                            return UpdateResult::dirty();
+                        }
+                        Action::Escape => {
+                            self.menu_close();
+                            return UpdateResult::dirty();
+                        }
+                        Action::Complete | Action::Send => {
+                            return self.accept_menu_candidate();
+                        }
+                        _ => self.menu_close(),
                     }
                 }
                 self.update_action(action)
@@ -2953,6 +3028,8 @@ impl App {
             Action::Cancel => self.cancel_or_quit_at(Instant::now()),
             // `Ctrl-P` folds the startup information.
             Action::ToggleStartup => self.toggle_startup(),
+            // Inert without a menu; `update` intercepts it while one is open.
+            Action::MenuNext => UpdateResult::none(),
         }
     }
 
@@ -3171,7 +3248,10 @@ impl App {
         let Some(pending) = self.slash_completion.take() else {
             return UpdateResult::none();
         };
-        let Some(candidate) = pending.candidates.first() else {
+        // The highlighted row (the first by default); the cursor is clamped because the list
+        // can shrink between a key and its handling.
+        let index = self.completion_cursor.min(pending.candidates.len() - 1);
+        let Some(candidate) = pending.candidates.get(index) else {
             return UpdateResult::none();
         };
         // A trailing space, so the next level can be typed (or completed) right away.
@@ -3888,7 +3968,11 @@ impl App {
             self.completion_clear();
             return;
         }
+        // The menu is up: keep the raw candidates so the highlighted row can be accepted.
+        // `completion_set` clears the previous menu (including this field), so it is set after.
+        let raw = completion.candidates.clone();
         self.completion_set(completion.candidates);
+        self.mention_completion = Some((completion.range, raw));
     }
 
     /// Replaces the char range `range` with `replacement`, leaving the cursor right after the
