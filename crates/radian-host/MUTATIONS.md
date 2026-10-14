@@ -376,3 +376,22 @@ Base `4984e8b` · 在一次性 worktree（`/tmp/radian-pi-skills-mut`，detach�
 （防止将来 `walk` 改动悄悄破坏顺序），而不是靠某条测试钉住一个等价变异。
 
 片 3（TUI `/skill:` / `/skills`）不在本片范围内，另行处理。
+
+## skills 审查第 1 轮 S2/S4/S5 + 片 3（2026-10-14）
+
+Base `c5a84f6` · 一次性 worktree `/tmp/radian-pi-skills-mut3`，每条跑完 `git checkout -- .`，最后
+`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| S2-M1 | 缩进行重新当顶层键处理（去掉 `if indented` 分支，`line.trim_start()`） | `skills::tests::an_indented_nested_name_does_not_override_the_top_level_name`（另 4 条也挂） | ✅ |
+| S4-M1 | `skills::tools` 查表去掉 `!disable_model_invocation` | `skills::tools::tests::a_model_invocation_disabled_skill_is_unknown_to_the_tool` | ✅ |
+| S5-M1 | `session_hooks` 里对调 `memory` 与 `skills` | `tests/skills_order.rs::the_production_hook_chain_puts_memory_before_skills` | ✅ |
+| SL-M2 | `completion_candidates` 过滤掉 `disable_model_invocation` 的 skill | `skills::tests::completion_and_notices_include_model_invocation_disabled_skills` | ✅ |
+
+4/4 抓住。片 1+2 的 SK-M1..M4 见上一节。
+
+**关于"展开不进 journal 而只给模型"**：本实现里 `/skill:` 展开成的文本**就是**送进 inbox 的那条
+消息，journal 与模型看到的是同一份，没有"只给模型"的旁路；pty 测试直接断言 `skill.jsonl` 里有展开后的
+正文（`GREET-SKILL-BODY-MARKER`），把这层锁住。SL-M1（`/skill:` 不再展开走 `Outcome::Message`）会让
+检查请求正文与 journal 的断言同时失败。

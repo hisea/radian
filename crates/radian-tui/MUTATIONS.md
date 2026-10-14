@@ -663,3 +663,13 @@ Base `0b9785b` · 一次性 worktree `/tmp/radian-pi-mut-m1`，跑完删除。
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
 | M1a | 只认命令行带 id 的 `--resume`（`resumed_route` 读 `cli.resume` 而非解析后的 `resume`） | `pty_a_picked_resume_uses_the_journals_model` | ✅ |
+
+## skills 片 3：`/skill:` 展开（2026-10-14）
+
+Base `c5a84f6` · 与 `radian-host` 同一一次性 worktree `/tmp/radian-pi-skills-mut3`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SL-M1 | `/skill:<name>` 解析成 `Outcome::Message`（不展开，当普通消息发） | `pty_skill_commands_expand_list_notice_and_escape`（请求正文没正文/args，journal 断言也挂） | ✅ |
+
+1/1 抓住。
