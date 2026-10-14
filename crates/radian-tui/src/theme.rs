@@ -1,9 +1,17 @@
-//! The TUI color theme (ADR 0009; config key `tui.theme`).
+//! The TUI color theme (ADR 0009; config key `tui.theme`; ADR 0029 for theme files).
 //!
 //! Every color in the UI comes from one [`Theme`]; `render.rs` never names a `Color` itself.
 //! `dark` is the original palette (the `TestBackend` screenshot test pins it), `light` is the
 //! same roles re-picked for a light background, and `mono` uses no color at all — only bold,
 //! underline and dim. The `NO_COLOR` convention (<https://no-color.org>) forces `mono`.
+
+mod color;
+
+pub use color::{
+    ColorValue, Rgb, approximate_256, parse_color_value, truecolor_env, truecolor_for,
+};
+
+use std::collections::BTreeMap;
 
 use ratatui::style::{Color, Modifier, Style};
 
