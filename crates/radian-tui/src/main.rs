@@ -633,7 +633,7 @@ fn run(
             ..window_query.clone()
         })
         .budget
-    }) as std::sync::Arc<dyn Fn(&str, &str) -> Option<u64> + Send + Sync>;
+    }) as radian_runtime::BudgetFor;
     // The permission tier and the sandbox. For an enforced tier a probe failure is an error
     // here, never a fallback to an unsandboxed run (ADR 0012 decision 2). Still before
     // the session file exists, so a refusal leaves nothing behind (dogfooding D2).

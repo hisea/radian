@@ -26,7 +26,7 @@ use clap::Parser;
 use radian_host::memory::MemoryService;
 use radian_host::memory::commands::{self, CommandError, MemoryCommand};
 use radian_host::{
-    DEFAULT_MAX_TOKENS, HostModel, ModelArgs, Provider, SESSION_PLACEHOLDER, Thinking, build_model,
+    DEFAULT_MAX_TOKENS, ModelArgs, Provider, SESSION_PLACEHOLDER, Thinking, build_model,
     check_provider_flags, generate_session_id, load_mcp_config, parse_headers, resolve_workspace,
     validate_session_id,
 };
@@ -619,7 +619,7 @@ async fn run(mut cli: Cli) -> i32 {
 struct Setup {
     model: radian_host::SwitchableModel,
     config_slot: std::sync::Arc<radian_runtime::ConfigSlot>,
-    budget_for: std::sync::Arc<dyn Fn(&str, &str) -> Option<u64> + Send + Sync>,
+    budget_for: radian_runtime::BudgetFor,
     /// The provider actually chosen, for the session's config snapshot.
     provider: Provider,
     servers: Vec<McpServerConfig>,
@@ -827,7 +827,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
             ..window_query.clone()
         })
         .budget
-    }) as std::sync::Arc<dyn Fn(&str, &str) -> Option<u64> + Send + Sync>;
+    }) as radian_runtime::BudgetFor;
     let servers = match &cli.mcp_config {
         Some(path) => load_mcp_config(path).map_err(SetupError)?,
         None => Vec::new(),

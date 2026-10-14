@@ -418,8 +418,10 @@ async fn the_turn_budget_overrides_the_configured_one() {
         .await
         .unwrap();
 
-    let mut options = TurnOptions::default();
-    options.context_budget = Some(ContextBudget::new(800));
+    let options = TurnOptions {
+        context_budget: Some(ContextBudget::new(800)),
+        ..TurnOptions::default()
+    };
     chat.run_turn("go", options, &NoopSink).await.unwrap();
     let report = over_report(chat.context_budget_status());
     assert!(

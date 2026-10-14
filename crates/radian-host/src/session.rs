@@ -21,7 +21,7 @@ use agent_core::{Agent, AgentConfig, ContextBudget, EventSink, Message, TurnOpti
 use agent_extensions::{McpServerConfig, McpToolProvider};
 use radian_coding::CodingTools;
 use radian_permissions::{Approver, AuditSink, PermissionHooks, Preset, Profile};
-use radian_runtime::ConfigSlot;
+use radian_runtime::{BudgetFor, ConfigSlot};
 use radian_runtime::{CancelCause, Driver, Inbox, RuntimeEvents};
 use radian_sandbox::Sandbox;
 use radian_session::{SessionCreatedData, SessionJournal};
@@ -230,7 +230,7 @@ pub struct SessionSetup {
     /// The slot the model reads and the driver writes (one instance, shared).
     pub config_slot: Arc<ConfigSlot>,
     /// Computes `B` for a switched model from the local catalog (ADR 0026 D7).
-    pub budget_for: Option<Arc<dyn Fn(&str, &str) -> Option<u64> + Send + Sync>>,
+    pub budget_for: Option<BudgetFor>,
     pub servers: Vec<McpServerConfig>,
     pub system_prompt: Option<String>,
     pub context_budget: Option<ContextBudget>,
