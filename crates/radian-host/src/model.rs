@@ -201,30 +201,49 @@ pub fn resolve_thinking(
     model: &str,
     level: &str,
     adapter: Provider,
+    max_tokens: Option<u32>,
 ) -> (Thinking, Option<String>) {
     let map = crate::descriptor(descriptor_id)
         .and_then(|descriptor| crate::thinking_map_for(descriptor, model));
-    resolve_thinking_map(map, level, None, adapter)
+    resolve_thinking_map(map, level, None, adapter, max_tokens)
 }
 
 /// The shared resolution: `legacy_budget` is a manual `enabled:<budget>` the user typed, which
-/// is sent as-is for Anthropic (ADR 0026 D11) instead of the level's own budget.
+/// is sent as-is for Anthropic (ADR 0026 D11) instead of the level's own budget — an
+/// over-limit manual budget stays a usage error, never a clamp (review B1).
+///
+/// A **level's** own budget is clamped to `[MIN_THINKING_BUDGET, max_tokens - 1]` (B1): the
+/// number is Radian's choice, not the user's, so a small `--max-tokens` must not fail the
+/// turn. `max_tokens <= MIN_THINKING_BUDGET` makes every `enabled` level unfitting, and the
+/// clamp walks past it.
 fn resolve_thinking_map(
     map: Option<crate::ThinkingMap>,
     level: &str,
     legacy_budget: Option<u32>,
     adapter: Provider,
+    max_tokens: Option<u32>,
 ) -> (Thinking, Option<String>) {
     if let Some(budget_tokens) = legacy_budget
         && adapter == Provider::Anthropic
     {
         return (Thinking::Enabled { budget_tokens }, None);
     }
-    match crate::clamp_thinking(map, level) {
+    match crate::clamp_thinking_with(map, level, max_tokens) {
         Some((_, wire)) if adapter == Provider::OpenAiCompatible => {
             (Thinking::Off, Some(wire.to_owned()))
         }
-        Some((_, wire)) => (thinking_from_wire(wire), None),
+        Some((_, wire)) => {
+            let thinking = thinking_from_wire(wire);
+            // Clamp the level's own budget to what the request can hold (B1). `level_fits`
+            // already refused a level that cannot fit at all, so this only trims.
+            let thinking = match (thinking, max_tokens, crate::wire_budget(wire)) {
+                (Thinking::Enabled { budget_tokens }, Some(max), Some(_)) => Thinking::Enabled {
+                    budget_tokens: budget_tokens.min(max.saturating_sub(1)),
+                },
+                (thinking, _, _) => thinking,
+            };
+            (thinking, None)
+        }
         None => (Thinking::Off, None),
     }
 }
@@ -254,12 +273,14 @@ pub fn resolve_thinking_ref(
     level: &str,
     legacy_budget: Option<u32>,
     adapter: Provider,
+    max_tokens: Option<u32>,
 ) -> (Thinking, Option<String>) {
     resolve_thinking_map(
         crate::thinking_map_for_ref(provider, model),
         level,
         legacy_budget,
         adapter,
+        max_tokens,
     )
 }
 
@@ -418,6 +439,7 @@ impl RouteContext {
             &self.thinking,
             self.thinking_budget,
             route.adapter(),
+            Some(self.max_tokens),
         );
         Ok(ModelArgs {
             provider: route.adapter(),
@@ -533,11 +555,17 @@ mod thinking_resolution_tests {
             "gpt-5-nano",
             "high",
             Provider::OpenAiCompatible,
+            None,
         );
         assert_eq!(thinking, Thinking::Off);
         assert_eq!(effort, None);
-        let (thinking, effort) =
-            resolve_thinking("opencode-go", "gpt-5-nano", "high", Provider::Anthropic);
+        let (thinking, effort) = resolve_thinking(
+            "opencode-go",
+            "gpt-5-nano",
+            "high",
+            Provider::Anthropic,
+            None,
+        );
         assert_eq!(thinking, Thinking::Off);
         assert_eq!(effort, None);
     }
@@ -551,6 +579,7 @@ mod thinking_resolution_tests {
             "deepseek-v4.1-flash",
             "medium",
             Provider::OpenAiCompatible,
+            None,
         );
         assert_eq!(effort.as_deref(), Some("high"), "the clamp goes up");
         let (thinking, effort) = resolve_thinking(
@@ -558,12 +587,106 @@ mod thinking_resolution_tests {
             "deepseek-v4.1-flash",
             "medium",
             Provider::Anthropic,
+            None,
         );
         assert_eq!(effort, None);
         assert_eq!(
             thinking,
             Thinking::Off,
             "a wire value the anthropic adapter does not know sends nothing"
+        );
+    }
+}
+
+#[cfg(test)]
+mod thinking_clamp_tests {
+    use super::*;
+
+    /// Review B1: a **level's** own budget is clamped to the request's `max_tokens - 1`
+    /// instead of failing the model build.
+    #[test]
+    fn a_level_budget_is_clamped_to_max_tokens() {
+        let (thinking, _) = resolve_thinking(
+            "anthropic",
+            "claude-test",
+            "max",
+            Provider::Anthropic,
+            Some(4096),
+        );
+        assert_eq!(
+            thinking,
+            Thinking::Enabled {
+                budget_tokens: 4095
+            }
+        );
+    }
+
+    /// With `max_tokens <= 1024` no `enabled` level fits, so the clamp walks past them: the
+    /// request carries no `enabled` setting.
+    #[test]
+    fn no_enabled_level_fits_when_max_tokens_is_tiny() {
+        for level in ["minimal", "low", "high", "xhigh", "max"] {
+            let (thinking, _) = resolve_thinking(
+                "anthropic",
+                "claude-test",
+                level,
+                Provider::Anthropic,
+                Some(1024),
+            );
+            assert_ne!(
+                thinking,
+                Thinking::Enabled {
+                    budget_tokens: 1024
+                },
+                "{level} must not send an enabled budget"
+            );
+            assert!(
+                !matches!(thinking, Thinking::Enabled { .. }),
+                "{level} must not send enabled: {thinking:?}"
+            );
+        }
+        // `adaptive` (medium) and `off` still fit: they have no budget.
+        let (thinking, _) = resolve_thinking(
+            "anthropic",
+            "claude-test",
+            "medium",
+            Provider::Anthropic,
+            Some(1024),
+        );
+        assert_eq!(thinking, Thinking::Adaptive);
+    }
+
+    /// The user's explicit legacy budget is **not** clamped: it stays a usage error (B1.3).
+    #[test]
+    fn a_legacy_budget_is_not_clamped() {
+        let (thinking, _) = resolve_thinking_map(
+            Some(crate::provider::ANTHROPIC_THINKING),
+            "high",
+            Some(999_999),
+            Provider::Anthropic,
+            Some(4096),
+        );
+        assert_eq!(
+            thinking,
+            Thinking::Enabled {
+                budget_tokens: 999_999
+            }
+        );
+    }
+
+    /// The completion hides a level only when no budget can fit at all (B1.2): with room to
+    /// clamp, every level stays selectable.
+    #[test]
+    fn the_completion_hides_levels_that_cannot_fit() {
+        assert_eq!(
+            crate::supported_thinking_levels_with("anthropic", "claude-test", Some(4096)),
+            vec!["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+            "every budget clamps into 4096"
+        );
+        assert_eq!(
+            crate::supported_thinking_levels_with("anthropic", "claude-test", Some(1024)),
+            vec!["off", "medium"],
+            "only the budget-less levels fit"
         );
     }
 }
