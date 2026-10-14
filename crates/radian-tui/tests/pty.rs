@@ -393,6 +393,20 @@ impl Pty {
     }
 
     /// Ctrl-C cancels a running turn and quits when idle, so press it until the app exits.
+    /// Expands the startup information block (Ctrl-P). the block is folded
+    /// by default, so a test that asserts one of the full startup lines expands it first. A
+    /// lost keypress is retried; the wait after each send means a successful toggle is never
+    /// pressed twice.
+    fn expand_startup(&mut self) {
+        for _ in 0..3 {
+            self.send(&[0x10]); // ctrl-p
+            if self.wait_for_screen("▼ startup information", 1) {
+                return;
+            }
+        }
+        panic!("the startup block did not expand:\n{}", self.screen());
+    }
+
     fn quit(&mut self) {
         // The first idle Ctrl-C arms the 2 s quit window and the second inside it quits
         //, so a quit is a **pair** of presses; a running turn needs a
@@ -865,6 +879,7 @@ async fn pty_resume_renders_the_stored_history() {
         "the assistant reply is missing:\n{}",
         pty.screen()
     );
+    pty.expand_startup();
     assert!(
         pty.wait_for_screen("resumed session resume-me", 10),
         "the resume notice is missing:\n{}",
@@ -1845,6 +1860,8 @@ async fn pty_the_workspace_write_notice_names_the_mcp_sandbox_gap() {
         110,
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // The sandbox facts line is one of the folded startup lines.
+    pty.expand_startup();
     // The notice wraps across lines; collapse whitespace before matching the sentence.
     let notice = pty
         .screen()
@@ -1903,6 +1920,7 @@ async fn pty_yes_runs_an_ask_without_a_prompt_and_still_audits_it() {
         110,
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.expand_startup();
     assert!(
         pty.screen()
             .contains("--yes: tool calls are approved without asking"),
@@ -2897,6 +2915,7 @@ async fn pty_the_startup_notice_names_the_window_source() {
         24,
         110,
     );
+    pty.expand_startup();
     assert!(
         pty.wait_for_screen("B 15000 from --context-window", 10),
         "the startup notice does not name the explicit window and its B:\n{}",
@@ -2933,6 +2952,8 @@ async fn pty_the_memory_notice_names_the_project_state_and_the_budget() {
         110,
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // The memory notice is one of the folded startup lines.
+    pty.expand_startup();
     let notice = pty
         .screen()
         .split_whitespace()
@@ -3369,6 +3390,7 @@ async fn pty_pick_lists_filters_and_resumes_the_chosen_session() {
         pty.screen()
     );
     pty.send(b"\r");
+    pty.expand_startup();
     assert!(
         pty.wait_for_screen("resumed session beta", 10),
         "Enter did not resume the filtered row:\n{}",
@@ -3472,6 +3494,7 @@ async fn pty_pick_starts_new_and_escape_leaves_no_session() {
     );
     assert!(pty.wait_for_screen("alpha", 10), "{}", pty.screen());
     pty.send(b"n");
+    pty.expand_startup();
     assert!(
         pty.wait_for_screen("new session", 10),
         "`n` did not start a new session:\n{}",
@@ -3506,6 +3529,7 @@ async fn pty_pick_without_sessions_starts_a_new_one() {
         24,
         100,
     );
+    pty.expand_startup();
     assert!(
         pty.wait_for_screen("no sessions for this workspace yet", 10),
         "the no-session notice is missing:\n{}",
@@ -4835,14 +4859,17 @@ async fn pty_pick_resumes_the_selected_id_and_enters_once() {
         pty.screen()
     );
     pty.send(b"\r");
+    // Wait for the resumed session to open (the picker's phase ends first), then expand the
+    // startup block so the resumed-session line is on screen.
+    assert!(
+        pty.wait_for_screen("BETA-HISTORY", 10),
+        "the resumed history is not on screen:\n{}",
+        pty.screen()
+    );
+    pty.expand_startup();
     assert!(
         pty.wait_for_screen("resumed session beta", 10),
         "the picker did not resume the selection:\n{}",
-        pty.screen()
-    );
-    assert!(
-        pty.wait_for_screen("BETA-HISTORY", 5),
-        "the resumed history is not on screen:\n{}",
         pty.screen()
     );
     pty.send(b"go\r");
@@ -5135,6 +5162,7 @@ async fn pty_ask_user_answers_three_questions_and_the_turn_continues() {
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
     // ADR 0024 Q5: this host has an interactive user, so the startup line says so.
+    pty.expand_startup();
     assert!(
         pty.wait_for_screen("ask_user: on", 10),
         "the startup line must say ask_user is on: {}",
@@ -5431,6 +5459,7 @@ async fn pty_approval_never_still_registers_ask_user() {
         110,
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.expand_startup();
     assert!(
         pty.wait_for_screen("ask_user: on", 10),
         "`--approval never` must not turn ask_user off: {}",
@@ -5462,6 +5491,7 @@ async fn pty_ask_user_is_registered_without_a_workspace() {
         110,
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.expand_startup();
     assert!(
         pty.wait_for_screen("ask_user: on", 10),
         "the startup line must say ask_user is on: {}",
@@ -5745,6 +5775,7 @@ async fn pty_resume_without_a_value_picks_a_session() {
         pty.screen()
     );
     pty.send(b"\r");
+    pty.expand_startup();
     assert!(
         pty.wait_for_screen("resumed session beta", 10),
         "Enter did not resume the chosen session:\n{}",

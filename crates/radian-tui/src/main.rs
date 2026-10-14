@@ -863,70 +863,112 @@ fn run(
             Err(error) => eprintln!("[draft] cannot read {}: {error}", path.display()),
         }
     }
-    app.entries.push(radian_tui::Entry::new(
-        radian_tui::EntryKind::Notice,
-        format!("profile: {}", session.facts().profile_line),
-    ));
-    // ADR 0012 decision 4: the meaning line must not claim credential isolation.
-    app.entries.push(radian_tui::Entry::new(
-        radian_tui::EntryKind::Notice,
-        session.facts().sandbox_facts.clone(),
-    ));
-    // ADR 0018: the window and exactly where it came from.
-    app.entries.push(radian_tui::Entry::new(
-        radian_tui::EntryKind::Notice,
-        format!("context: {}", window.describe()),
-    ));
-    // Owner UI review: say so when the default workspace was adjusted, so the session's
-    // boundary is never a surprise.
+    // the startup information is one collapsible block (wordmark, one
+    // information line, the safety lines that never fold, one Tip) instead of a wall of
+    // notices. The full lines are what the notices used to be; the summary keeps each field
+    // to a word or two.
+    let home = std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let workspace_line = workspace_root.note.as_ref().map(|note| {
+        format!(
+            "workspace: {} ({note})",
+            radian_tui::workspace::display_coding_root(&workspace_root, home.as_deref())
+        )
+    });
+    let context_line = format!("context: {}", window.describe());
+    let session_line = match &resume {
+        Some(id) => format!(
+            "resumed session {id} ({} messages) · Enter sends · Ctrl-C cancels a turn · \
+             Ctrl-C again quits",
+            history.len()
+        ),
+        None => format!(
+            "new session {session_id} · Enter sends · Ctrl-C cancels a turn · Ctrl-C again quits"
+        ),
+    };
+    let sandbox_facts = session.facts().sandbox_facts.clone();
+    let sandbox_word = ["seatbelt", "bwrap"]
+        .into_iter()
+        .find(|name| sandbox_facts.contains(name))
+        .unwrap_or("none");
+    let budget = window
+        .budget
+        .map_or_else(|| "unknown".to_string(), |b| b.to_string());
+    let mut summary = format!(
+        "{} · {sandbox_word} · context {budget} · memory {} · ask_user {}",
+        tier.as_str(),
+        if session.facts().memory_enabled {
+            "on"
+        } else {
+            "off"
+        },
+        if session.facts().ask_user {
+            "on"
+        } else {
+            "off"
+        },
+    );
     if let Some(note) = &workspace_root.note {
-        let home = std::env::var_os("HOME")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from);
-        app.entries.push(radian_tui::Entry::new(
-            radian_tui::EntryKind::Notice,
-            format!(
-                "workspace: {} ({note})",
-                radian_tui::workspace::display_coding_root(&workspace_root, home.as_deref())
-            ),
-        ));
+        summary.push_str(" · ");
+        summary.push_str(note);
     }
-    // ADR 0021 D2/D6: the project state and the injection budget.
-    app.entries.push(radian_tui::Entry::new(
-        radian_tui::EntryKind::Notice,
-        session.facts().memory_notice.clone(),
-    ));
-    // ADR 0024 Q5: this host has an interactive user, so `ask_user` is registered.
-    app.entries.push(radian_tui::Entry::new(
-        radian_tui::EntryKind::Notice,
-        session.facts().ask_user_line(),
-    ));
+    let mut startup_lines = vec![
+        format!("profile: {}", session.facts().profile_line),
+        sandbox_facts,
+        context_line,
+    ];
+    if let Some(line) = &workspace_line {
+        startup_lines.push(line.clone());
+    }
+    startup_lines.push(session.facts().memory_notice.clone());
+    startup_lines.push(session.facts().ask_user_line());
     if cli.yes {
-        app.entries.push(radian_tui::Entry::new(
-            radian_tui::EntryKind::Notice,
-            "--yes: tool calls are approved without asking; deny rules and the sandbox still apply",
-        ));
+        startup_lines.push(
+            "--yes: tool calls are approved without asking; deny rules and the sandbox still \
+             apply"
+                .to_string(),
+        );
     }
     if pick_notice {
-        app.entries.push(radian_tui::Entry::new(
-            radian_tui::EntryKind::Notice,
-            "no sessions for this workspace yet; starting a new one",
-        ));
+        startup_lines.push("no sessions for this workspace yet; starting a new one".to_string());
     }
-    app.entries.push(radian_tui::Entry::new(
-        radian_tui::EntryKind::Notice,
-        match &resume {
-            Some(id) => format!(
-                "resumed session {id} ({} messages) · Enter sends · Ctrl-C cancels a turn · \
-                 Ctrl-C again quits",
-                history.len()
-            ),
-            None => format!(
-                "new session {session_id} · Enter sends · Ctrl-C cancels a turn · Ctrl-C again \
-                 quits"
-            ),
-        },
-    ));
+    startup_lines.push(session_line);
+    // The safety lines are never folded away: a workspace boundary that
+    // was not the user's choice, and every config-file warning/ignored key. The config
+    // warnings are also printed before the alternate screen, where a crash can still show
+    // them.
+    let mut safety = Vec::new();
+    if let Some(line) = &workspace_line {
+        safety.push(line.clone());
+    }
+    for warning in &config_warnings {
+        safety.push(format!("config: {warning}"));
+    }
+    let banner = if config.tui.banner.unwrap_or(true) {
+        let path = radian_tui::workspace::display_coding_root(&workspace_root, home.as_deref());
+        radian_tui::startup::banner_rows(env!("CARGO_PKG_VERSION"), &model_name, &path)
+    } else {
+        Vec::new()
+    };
+    let tip = config
+        .tui
+        .tips
+        .unwrap_or(true)
+        .then(|| radian_tui::startup::tip_for(&session_id).to_string());
+    app.set_startup(radian_tui::startup::StartupScreen {
+        banner,
+        banner_narrow: format!(
+            "{} radian {}",
+            radian_tui::startup::RAD_MARK,
+            env!("CARGO_PKG_VERSION")
+        ),
+        summary,
+        lines: startup_lines,
+        safety,
+        tip,
+        expanded: false,
+    });
 
     // ADR 0008 revision: `/theme` writes to the file this process read, or to the path it
     // would read when there is no file yet (the write creates it).

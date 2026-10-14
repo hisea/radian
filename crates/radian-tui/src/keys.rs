@@ -40,6 +40,8 @@ pub enum Action {
     ScrollBottom,
     Escape,
     Cancel,
+    /// Fold or unfold the startup information. Default `Ctrl-P`.
+    ToggleStartup,
     /// Complete the `@` file reference at the cursor (Phase 4).
     Complete,
     /// Open the in-transcript search box (Phase 5); when the box is already open, the earlier
@@ -109,6 +111,7 @@ impl Action {
             Action::ScrollBottom => "scroll_bottom",
             Action::Escape => "escape",
             Action::Cancel => "cancel",
+            Action::ToggleStartup => "toggle_startup",
             Action::Complete => "complete",
             Action::Find => "find",
             Action::FindPrev => "find_prev",
@@ -172,6 +175,7 @@ const DEFAULT_BINDINGS: &[(&str, Action)] = &[
     ("scroll_bottom", Action::ScrollBottom),
     ("escape", Action::Escape),
     ("cancel", Action::Cancel),
+    ("toggle_startup", Action::ToggleStartup),
     ("complete", Action::Complete),
     ("find", Action::Find),
     ("find_prev", Action::FindPrev),
@@ -211,6 +215,7 @@ const DEFAULT_KEYS: &[(&str, &[&str])] = &[
     ("scroll_bottom", &["ctrl-end"]),
     ("escape", &["esc"]),
     ("cancel", &["ctrl-c"]),
+    ("toggle_startup", &["ctrl-p"]),
     ("complete", &["tab"]),
     ("find", &["ctrl-f"]),
 ];

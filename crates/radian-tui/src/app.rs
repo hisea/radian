@@ -34,6 +34,7 @@ use crate::projection::{SessionProjection, StreamSnapshot};
 use crate::question::{FormKey, FormOutcome, QuestionForm};
 use crate::render::InputStyle;
 use crate::select::{self, Anchor, Selection};
+use crate::startup::StartupScreen;
 use crate::theme::Theme;
 
 // ADR 0023 U5: the turn state is a **session fact**, so it lives in the projection
@@ -52,6 +53,16 @@ pub enum EntryKind {
     ToolCall,
     ToolResult,
     Notice,
+    /// The startup screen's wordmark and collapsed/expanded information.
+    /// Rendered with the primary text color; it is the first entry in a session.
+    Startup,
+    /// A startup safety line (an unavailable sandbox, an unsandboxed MCP, an unknown
+    /// window, a memory/config warning): it is **never** folded away, and it uses the
+    /// warning color.
+    Warning,
+    /// The one-line `Tip: …` under the startup block. Its `Tip:` prefix is dim, the body
+    /// muted.
+    Tip,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -637,6 +648,12 @@ pub struct App {
     pub note: Option<String>,
     /// How many requests the queue holds (ADR 0023 U7), for the status bar.
     pub pending: usize,
+    /// The startup screen: the leading block of entries (wordmark,
+    /// collapsed information, safety lines, Tip). `None` before the host sets it.
+    pub startup_screen: Option<StartupScreen>,
+    /// How many leading entries are the startup block, so a toggle replaces exactly it and
+    /// leaves the history alone.
+    startup_len: usize,
     /// When the first idle Ctrl-C armed "press again to quit": the
     /// deadline a second Ctrl-C must beat. `None` means not armed. Pure state; the wall clock
     /// arrives on [`Input::Cancel`], so `update` never reads the clock.
@@ -712,6 +729,8 @@ impl App {
             quit: false,
             note: None,
             pending: 0,
+            startup_screen: None,
+            startup_len: 0,
             quit_pending: None,
             last_answered: None,
             layers: vec![Layer::Surface],
@@ -1299,9 +1318,71 @@ impl App {
             return;
         }
         self.transcript_width = width;
+        // The wordmark drops to its one-line fallback below a width; rebuilding is cheap and
+        // only happens when the width actually changed.
+        if self.startup_screen.is_some() {
+            self.rebuild_startup_entries();
+        }
         if self.find_state().is_some() {
             self.find_recompute();
         }
+    }
+
+    /// Sets the startup screen and builds its leading entry block.
+    pub fn set_startup(&mut self, startup: StartupScreen) {
+        self.startup_screen = Some(startup);
+        self.rebuild_startup_entries();
+    }
+
+    /// `Ctrl-P` (the `toggle_startup` action): fold or unfold the startup information.
+    pub fn toggle_startup(&mut self) -> UpdateResult {
+        let Some(startup) = self.startup_screen.as_mut() else {
+            return UpdateResult::none();
+        };
+        startup.expanded = !startup.expanded;
+        self.rebuild_startup_entries();
+        UpdateResult::dirty()
+    }
+
+    /// The leading startup block, rebuilt from [`StartupScreen`]: the wordmark (the wide form
+    /// when it fits the current width), the collapsed line or the full lines, the safety
+    /// lines (always shown), and the Tip.
+    fn rebuild_startup_entries(&mut self) {
+        let Some(startup) = self.startup_screen.clone() else {
+            self.entries
+                .drain(0..self.startup_len.min(self.entries.len()));
+            self.startup_len = 0;
+            return;
+        };
+        let mut block: Vec<Entry> = startup
+            .banner_for_width(self.transcript_width)
+            .into_iter()
+            .map(|line| Entry::new(EntryKind::Startup, line))
+            .collect();
+        if startup.expanded {
+            block.push(Entry::new(
+                EntryKind::Startup,
+                "▼ startup information (Ctrl-P to fold)",
+            ));
+            for line in &startup.lines {
+                block.push(Entry::new(EntryKind::Startup, line.clone()));
+            }
+        } else {
+            block.push(Entry::new(
+                EntryKind::Startup,
+                format!("▶ {}   (Ctrl-P to expand)", startup.summary),
+            ));
+        }
+        for line in &startup.safety {
+            block.push(Entry::new(EntryKind::Warning, line.clone()));
+        }
+        if let Some(tip) = &startup.tip {
+            block.push(Entry::new(EntryKind::Tip, tip.clone()));
+        }
+        let block_len = block.len();
+        let replace = self.startup_len.min(self.entries.len());
+        self.entries.splice(0..replace, block);
+        self.startup_len = block_len;
     }
 
     /// The open find box, if any.
@@ -2142,6 +2223,8 @@ impl App {
             | Action::FormSubmit
             | Action::FormDecline => self.form_key(FormKey::Action(action)),
             Action::Cancel => self.cancel_or_quit_at(Instant::now()),
+            // `Ctrl-P` folds the startup information.
+            Action::ToggleStartup => self.toggle_startup(),
         }
     }
 

@@ -231,6 +231,12 @@ pub struct TuiConfig {
     /// `"osc52"` (the default), `"pbcopy"` (macOS only; elsewhere a warning and OSC 52) or
     /// `"off"`. `None` means the default; an unknown value is ignored with a warning.
     pub clipboard: Option<String>,
+    /// `tui.tips`: whether the startup screen shows one Tip line. `None`
+    /// means the default, on.
+    pub tips: Option<bool>,
+    /// `tui.banner`: whether the startup screen shows the wordmark. `None`
+    /// means the default, on.
+    pub banner: Option<bool>,
 }
 
 /// One parsed configuration file.
@@ -594,6 +600,11 @@ fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
             // A non-boolean mouse is a display preference: ignore it (and say so), never
             // refuse the file.
             ("mouse", _) => config.skipped.push("tui.mouse".into()),
+            ("tips", Value::Boolean(tips)) => config.tui.tips = Some(*tips),
+            // A non-boolean tips flag is the same kind of display preference.
+            ("tips", _) => config.skipped.push("tui.tips".into()),
+            ("banner", Value::Boolean(banner)) => config.tui.banner = Some(*banner),
+            ("banner", _) => config.skipped.push("tui.banner".into()),
             (other, _) => config.skipped.push(format!("tui.{other}")),
         }
     }
