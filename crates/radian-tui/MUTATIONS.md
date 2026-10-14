@@ -906,3 +906,23 @@ Base `d7f663d` · 一次性 worktree `/tmp/radian-hl2-mut`，每条跑完 `git c
 
 3/3 抓住。**过程记录**：H1-M2 第一轮写成了从 `syntax_lines_cached` 传常量 `0`，键不随真实宽度变化，
 测试当然抓不住——改成把真实 `width` 一路传下去后抓住（变异要真的改变行为，不能只改签名）。
+
+## footer-s2：贡献者机制、git 后台刷新、worktree/status 与 [tui.widgets]（ADR 0027 C3，2026-10-16）
+
+Base `f699306` · 一次性 worktree `/tmp/radian-mut-s2`（`git worktree add --detach`），每条跑完
+`git checkout -- .`，`git status --short` 为空。命令 `cargo test -p radian-host …` /
+`cargo test -p radian-tui --test footer …`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| FS2-A | 刷新失败时用空值覆盖（`write(item, vec![])` 换掉 `mark_stale(item)`） | `a_failure_keeps_the_value_marks_it_stale_and_notices_once` | ✅ |
+| FS2-B | 值没变也发脏通知（`write` 去掉"值相同就返回 `false`"的早退） | `a_refresh_writes_the_store_and_an_unchanged_value_is_not_dirty` | ✅ |
+| FS2-C | 绘制路径里调 git（在 `footer::lines` 加 `std::process::Command::new("git")`） | `the_draw_path_does_not_call_git`（结构测试，正对照钉住调用在 `contrib.rs`） | ✅ |
+| FS2-D | 连续失败每次都发 notice（`failures == 1` 换成 `>= 1`） | `a_failure_keeps_the_value_marks_it_stale_and_notices_once` | ✅ |
+| FS2-E | 每个仓库都当成 worktree（`dir != common` 换成恒真） | `the_git_contributor_detects_a_worktree`（主检出必须是 `None`） | ✅ |
+| FS2-F | untracked 计入 modified（去掉 `??` 分支） | `the_git_contributor_publishes_the_change_counts` | ✅ |
+
+6/6 抓住。**过程记录**：FS2-C 第一轮把改动插到 `pub fn lines(` 签名处，编译不过（不是"测试抓住"，
+是红），改成插进函数体后由结构测试抓住。FS2-A 的第一次断言（变 stale 也是重绘）依赖脏标志被消费，
+说明 `write`/`mark_stale` 的返回值只表达"值是否变化"，脏标志单独由 `take_dirty` 消费——这正是
+ADR 0023 U2 的协议，不改。
