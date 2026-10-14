@@ -549,6 +549,14 @@ fn status_segments(app: &App) -> Vec<Segment> {
             style: app.theme.find,
         });
     }
+    // The first idle Ctrl-C armed "press again to quit": the hint sits
+    // high, right after the turn state, because it is a mode the user just entered.
+    if app.quit_pending.is_some() {
+        segments.push(Segment {
+            text: "Press Ctrl-C again to quit".to_string(),
+            style: app.theme.note,
+        });
+    }
     if let Some(tier) = session.tier() {
         segments.push(Segment {
             text: tier.to_owned(),

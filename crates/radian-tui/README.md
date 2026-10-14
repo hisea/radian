@@ -140,7 +140,7 @@ bare arrow keys belong to the composer.
 | Shift-Up / Shift-Down | scroll the transcript one line |
 | Ctrl-Home / Ctrl-End | scroll the transcript to its top / bottom |
 | Esc | (`escape` in the transcript, `find_close` in the find box) close the find box or the `@` candidate list if one is up; otherwise clear a non-empty input first (the line stays in the history, so `Up` finds it); with an empty input, cancel the running turn / quit |
-| Ctrl-C | cancel the running turn; when idle, quit |
+| Ctrl-C | cancel the running turn; idle with a non-empty input, clear it (into the history); idle with an empty input, arm "press Ctrl-C again to quit" for 2 s (any other key, or the window closing, disarms it; the status bar shows `Press Ctrl-C again to quit`) |
 | Ctrl-F (`find` in the transcript, `find_prev` in the find box) | open the in-transcript search box (`find: <query>`, replacing the input line; the message draft is kept). Type to search the displayed transcript case-insensitively; a second Ctrl-F or Enter is the earlier match, Shift-Enter or Ctrl-G the later one (no wrap); the status bar shows `match i/N`; Esc closes the box where the viewport is |
 | bracketed paste | inserts at the cursor, `\r\n` normalized to `\n`, and never sends |
 
@@ -277,9 +277,11 @@ decision 3), so ADR 0027/0028 can wire them without re-reading the file.
 The history is this session's submitted lines (messages and `/…` commands). A resume rebuilds
 it from the journal's user messages. It is not persisted on its own.
 
-The **draft** is: on a clean exit (quit, Ctrl-C, SIGTERM/SIGHUP) a non-empty input is written to
+The **draft** is: on a clean exit (Esc/quit, SIGTERM/SIGHUP) a non-empty input is written to
 `<session-dir>/<session-id>.draft` (0600, atomic temp-file + rename); `--resume` restores it
-once and deletes the file. A panic writes nothing (the panic path does no file I/O). `--list`
+once and deletes the file. An idle Ctrl-C with a non-empty input clears it first (owner
+2026-10-14, see the key table), so a Ctrl-C exit saves the *cleared* input; a signal exit
+saves what was typed. A panic writes nothing (the panic path does no file I/O). `--list`
 and the index only read `*.jsonl`, so a draft is never a session.
 
 ## Slash commands (`/`)
@@ -375,6 +377,7 @@ The transcript owns its scrolling:
 | 17 | `--version` prints `<program> <CARGO_PKG_VERSION>` and exits 0 without entering the terminal | `tests/version.rs` |
 | 18 | an `@path` reference attaches the file to the request and the transcript folds it to `[file: P, N lines]`; a binary attachment is not sent and the input is kept | `tests/pty.rs`, `tests/render.rs`, `src/mention.rs` |
 | 19 | `--pick` lists this workspace's sessions, filters, full-text searches, resumes the choice (the next request carries its history), `n` starts new, `Esc` exits 0 with no session file; `/sessions` lists a copyable `--resume`; `/export` writes and refuses to overwrite without `--force` | `tests/pty.rs`, `tests/sessions.rs` (host) |
+| 20 | Ctrl-C: idle with text, the first press clears it into the history (not a quit); idle and empty, the first press only shows `Press Ctrl-C again to quit` and a second inside 2 s quits with the exit line; a key in between, or the window closing, disarms | `tests/quit.rs`, `tests/pty.rs` |
 | — | Enter=followup idle / steer running; Ctrl-C cancel-then-quit | `tests/input.rs` |
 
 ## Must be hand-tested in a real terminal

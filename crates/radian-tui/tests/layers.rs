@@ -154,7 +154,15 @@ fn the_default_stack_routes_like_the_old_hand_written_order() {
     let mut app = App::new("m", "s");
     assert!(app.on_key(key(KeyCode::Char('x'))).dirty);
     assert_eq!(app.input.text(), "x");
-    // Ctrl-C quits when idle.
+    // Ctrl-C clears a non-empty input first, then, pressed again on the
+    // empty input, arms and quits.
+    assert!(app.on_key(ctrl(KeyCode::Char('c'))).effects.is_empty());
+    assert!(!app.quit);
+    assert!(app.input.is_empty());
+    assert!(
+        app.on_key(ctrl(KeyCode::Char('c'))).effects.is_empty(),
+        "the first empty press only arms"
+    );
     assert_eq!(
         app.on_key(ctrl(KeyCode::Char('c'))).effects,
         vec![Effect::Quit]

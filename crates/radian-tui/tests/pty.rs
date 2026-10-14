@@ -394,7 +394,11 @@ impl Pty {
 
     /// Ctrl-C cancels a running turn and quits when idle, so press it until the app exits.
     fn quit(&mut self) {
+        // The first idle Ctrl-C arms the 2 s quit window and the second inside it quits
+        //, so a quit is a **pair** of presses; a running turn needs a
+        // cancel first, which the retries cover (the next pair then arms and quits).
         for _ in 0..4 {
+            self.send(&[0x03]);
             self.send(&[0x03]);
             if self.wait_for_exit(3).is_some() {
                 return;
@@ -3209,8 +3213,25 @@ async fn pty_a_draft_is_written_on_exit_and_restored_by_resume() {
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
     pty.send(b"unsent draft");
-    pty.quit();
-    assert_eq!(pty.app_exit_code(), Some(0));
+    // Wait for the whole line to render before signalling: the input thread delivers bytes
+    // and the app redraws them, and a signal must not race the last characters.
+    assert!(
+        pty.wait_for_screen("unsent draft", 10),
+        "the draft is not in the input box:\n{}",
+        pty.screen()
+    );
+    // Exit by signal, not Ctrl-C: an idle Ctrl-C clears a non-empty input first (owner
+    // 2026-10-14), which would discard the draft. A signal exit takes the same exit path
+    // (the draft is written, the resume line printed) without clearing the input.
+    let pid = app_pid(&pty);
+    let status = std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(&pid)
+        .status()
+        .unwrap();
+    assert!(status.success(), "kill -TERM {pid}");
+    assert!(pty.wait_for_exit(15).is_some(), "the app did not exit");
+    assert_eq!(pty.app_exit_code(), Some(143), "128 + SIGTERM");
     assert_eq!(
         std::fs::read_to_string(&draft).unwrap(),
         "unsent draft",
@@ -6073,4 +6094,113 @@ fn pty_quit_closes_button_motion_reporting() {
         raw.contains("\u{1b}[?1006l\u{1b}[?1002l\u{1b}[?1000l"),
         "the restore must close 1006, 1002 and 1000 together: {raw:?}"
     );
+}
+
+// ---------- Ctrl-C: clear first, then press twice to quit ----------
+
+/// Idle and empty, Ctrl-C asks twice: the first press only shows the hint and never exits;
+/// the second inside the window exits 0 with the copyable resume line.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_ctrl_c_twice_quits_and_one_press_only_hints() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("ctrl-c-quit");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let server = MockServer::start(vec![]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "ctrl-c-quit",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+
+    pty.send(&[0x03]);
+    assert!(
+        pty.wait_for_screen("Press Ctrl-C again to quit", 10),
+        "the first press must show the hint:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.app_exit_code().is_none(),
+        "a single Ctrl-C must not quit:\n{}",
+        pty.screen()
+    );
+
+    pty.send(&[0x03]);
+    assert!(
+        pty.wait_for_exit(5).is_some(),
+        "the second press must quit:\n{}",
+        pty.screen()
+    );
+    assert_eq!(pty.app_exit_code(), Some(0));
+
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    let after = raw
+        .rsplit_once("\u{1b}[?1049l")
+        .map(|(_, rest)| rest.to_string())
+        .unwrap_or_default();
+    assert!(
+        after
+            .lines()
+            .any(|line| line.contains("resume: radian --resume ctrl-c-quit")),
+        "the exit line is missing: {after}"
+    );
+}
+
+/// Idle with text, one Ctrl-C clears the input (it does not quit) and the cleared line is
+/// back through `Up`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_ctrl_c_clears_a_draft_before_quitting() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("ctrl-c-clear");
+    let server = MockServer::start(vec![]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "ctrl-c-clear",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"a draft");
+    assert!(pty.wait_for_screen("a draft", 10), "{}", pty.screen());
+    pty.send(&[0x03]);
+    // The input line is empty again and the app is still running (no quit).
+    assert!(
+        pty.app_exit_code().is_none(),
+        "clearing must not quit:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.wait_for_screen("Press Ctrl-C again to quit", 2),
+        "clearing must not arm the quit window:\n{}",
+        pty.screen()
+    );
+    // `Up` recalls the cleared line from the history.
+    pty.send(&[0x1b, b'[', b'A']);
+    assert!(
+        pty.wait_for_screen("a draft", 10),
+        "the cleared line is in the history:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
 }

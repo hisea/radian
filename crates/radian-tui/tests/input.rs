@@ -125,7 +125,7 @@ fn shift_enter_inserts_a_newline() {
 }
 
 #[test]
-fn ctrl_c_cancels_a_running_turn_and_quits_when_idle() {
+fn ctrl_c_cancels_a_running_turn_and_quits_when_idle_after_a_second_press() {
     let mut app = App::new("m", "s");
     app.projection.set_turn(TurnState::Running);
     assert_eq!(
@@ -137,7 +137,17 @@ fn ctrl_c_cancels_a_running_turn_and_quits_when_idle() {
     );
     assert!(!app.quit);
 
+    // Idle and empty, the first press only arms the 2 s quit window;
+    // the second inside it quits.
     app.projection.set_turn(TurnState::Idle);
+    assert!(
+        press(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+        )
+        .is_empty()
+    );
+    assert!(!app.quit, "the first press only arms");
     assert_eq!(
         press(
             &mut app,

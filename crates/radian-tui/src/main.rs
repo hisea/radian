@@ -1692,14 +1692,35 @@ fn ui_loop(
         // display would take the timeout branch at this line. The one exception is a live
         // selection drag held at the transcript's top or bottom edge: the auto-scroll is
         // time-driven, so the loop takes a bounded timeout **only while the drag is live**,
-        // and goes straight back to blocking `recv` when it ends.
-        let first = if app.is_selecting() {
-            match rx.recv_timeout(AUTO_SCROLL_TICK) {
+        // and goes straight back to blocking `recv` when it ends. The armed Ctrl-C quit
+        // window is the other time-driven display (ADR 0023 U2): while it is armed the loop
+        // wakes at its deadline to drop the hint.
+        let quit_remaining = app
+            .quit_pending
+            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()));
+        let first = if app.is_selecting() || quit_remaining.is_some() {
+            // The nearer of the two deadlines; `AUTO_SCROLL_TICK` is the drag's own tick.
+            let timeout = match (app.is_selecting(), quit_remaining) {
+                (true, Some(quit)) => quit.min(AUTO_SCROLL_TICK),
+                (true, None) => AUTO_SCROLL_TICK,
+                (false, Some(quit)) => quit.max(std::time::Duration::ZERO),
+                (false, None) => unreachable!("the branch requires selection or a quit window"),
+            };
+            match rx.recv_timeout(timeout) {
                 Ok(event) => Some(event),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    // The pointer is held at an edge: scroll one line and re-draw. A tick
-                    // that scrolls nothing (already at the end) draws nothing.
-                    if app.mouse_autoscroll() && !draw_frame(terminal, app)? {
+                    // The quit window closed: disarm and redraw, so the hint disappears. A
+                    // drag at an edge (or both) still ticks its scroll on the same wake.
+                    if app
+                        .quit_pending
+                        .is_some_and(|d| std::time::Instant::now() >= d)
+                        && app.update(AppInput::QuitDeadline).dirty
+                        && !draw_frame(terminal, app)?
+                    {
+                        app.quit = true;
+                        break;
+                    }
+                    if app.is_selecting() && app.mouse_autoscroll() && !draw_frame(terminal, app)? {
                         app.quit = true;
                         break;
                     }

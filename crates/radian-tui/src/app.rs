@@ -12,6 +12,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use agent_core::{AgentEvent, BudgetReport, CompactionOutcome, ContentPart, Message, UsageSource};
 use radian_coding::PromptError;
@@ -229,6 +230,11 @@ pub const AUTO_SCROLL_TICK: std::time::Duration = std::time::Duration::from_mill
 /// is idle between clicks, so there is nothing else to measure with.
 pub const DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// How long the first idle Ctrl-C arms "press again to quit" (ADR 0023 U4, owner
+/// 2026-10-14). A second Ctrl-C inside the window quits; the window closing, or any other
+/// key, disarms it and the hint disappears.
+pub const QUIT_WINDOW: Duration = Duration::from_secs(2);
+
 /// The last press, for double/triple-click detection: where and when, and how many presses
 /// in a row landed on the same cell inside the window (1, 2 or 3; capped at 3).
 #[derive(Debug, Clone, Copy)]
@@ -331,6 +337,14 @@ pub fn mcp_text(configured: usize, open: Option<(usize, usize)>) -> String {
 pub enum Input {
     /// A semantic action, from the keymap or synthesized by the host.
     Action(Action),
+    /// The `cancel` action (Ctrl-C by default) with the wall clock it was read at. The only
+    /// action whose meaning depends on time: idle with an empty input, the first press arms
+    /// "press again to quit" and a second inside [`QUIT_WINDOW`] quits. `update` stays pure;
+    /// the loop (or a test) stamps the time.
+    Cancel { now: Instant },
+    /// The armed quit window closed: disarm and redraw, so the hint goes away. Sent by the
+    /// loop on its `recv_timeout` (ADR 0023 U2: a time-driven display takes the timeout).
+    QuitDeadline,
     /// A printable character typed into the focused text field.
     Char(char),
     /// The find box's backspace (not keymap-driven).
@@ -611,6 +625,10 @@ pub struct App {
     pub note: Option<String>,
     /// How many requests the queue holds (ADR 0023 U7), for the status bar.
     pub pending: usize,
+    /// When the first idle Ctrl-C armed "press again to quit": the
+    /// deadline a second Ctrl-C must beat. `None` means not armed. Pure state; the wall clock
+    /// arrives on [`Input::Cancel`], so `update` never reads the clock.
+    pub quit_pending: Option<Instant>,
     /// The last request the UI answered: the queue's head stays that request for a moment, and
     /// re-showing it would flash a form the user just submitted.
     last_answered: Option<u64>,
@@ -682,6 +700,7 @@ impl App {
             quit: false,
             note: None,
             pending: 0,
+            quit_pending: None,
             last_answered: None,
             layers: vec![Layer::Surface],
             memory_enabled: false,
@@ -1512,7 +1531,22 @@ impl App {
     }
 
     fn update_inner(&mut self, input: Input) -> UpdateResult {
-        match input {
+        // A pending quit is disarmed by anything except the confirming Ctrl-C (or the
+        // deadline input itself): any other key means the user is still working.
+        let disarmed = self.quit_pending.is_some()
+            && !matches!(input, Input::Cancel { .. } | Input::QuitDeadline);
+        if disarmed {
+            self.quit_pending = None;
+        }
+        let mut result = match input {
+            // The two clock-aware inputs the loop (or a test) sends.
+            Input::Cancel { now } => self.cancel_or_quit_at(now),
+            Input::QuitDeadline => {
+                // The armed window closed: clear it here (the disarm rule below excludes this
+                // input, because this *is* the disarming event).
+                self.quit_pending = None;
+                UpdateResult::dirty()
+            }
             Input::Action(action) => {
                 // The `/…` list is accepted by `complete` (Tab) and by `send` (Enter — the
                 // owner's rule: Enter picks the candidate, it never executes). Every other
@@ -1617,7 +1651,11 @@ impl App {
                 self.note = Some(notice);
                 UpdateResult::dirty()
             }
+        };
+        if disarmed {
+            result.dirty = true;
         }
+        result
     }
 
     /// Resolves one key event to an [`Input`] through the keymap and the layer stack
@@ -1835,7 +1873,16 @@ impl App {
     /// The terminal's entry point: resolve the key, then [`App::update`]. A thin wrapper —
     /// everything that changes state lives in `update`.
     pub fn on_key(&mut self, key: KeyEvent) -> UpdateResult {
+        self.on_key_at(key, Instant::now())
+    }
+
+    /// Like [`App::on_key`], with the wall clock supplied: only the Ctrl-C quit window
+    /// depends on it, so production passes the real clock and a test injects its own.
+    pub fn on_key_at(&mut self, key: KeyEvent, now: Instant) -> UpdateResult {
         match self.key_input(&key) {
+            // The cancel action (`Ctrl-C` by default) carries its timestamp: idle with an
+            // empty input it arms the quit window instead of quitting at once.
+            Some(Input::Action(Action::Cancel)) => self.update(Input::Cancel { now }),
             Some(input) => self.update(input),
             None => UpdateResult::none(),
         }
@@ -1847,13 +1894,49 @@ impl App {
         self.projection.read().turn()
     }
 
-    /// Cancels a running turn, or quits when idle.
-    fn cancel_or_quit(&mut self) -> UpdateResult {
+    /// `Esc`'s escalation (unchanged, ): cancel a running turn, otherwise
+    /// quit at once. Ctrl-C ([`Input::Cancel`]) is the one that asks twice.
+    fn cancel_or_quit_now(&mut self) -> UpdateResult {
         if self.turn() == TurnState::Running {
+            self.quit_pending = None;
             UpdateResult::quiet(Effect::Cancel)
         } else {
             self.quit = true;
             UpdateResult::quiet(Effect::Quit)
+        }
+    }
+
+    /// Ctrl-C (the `cancel` action), the one action whose meaning depends on the clock
+    ///:
+    /// - a turn is running: cancel it (unchanged);
+    /// - idle, the input has text: clear it into the history (the same clearing `Esc` does,
+    ///   so `Up` finds it);
+    /// - idle, the input is empty: the first press arms [`QUIT_WINDOW`]; a second press
+    ///   inside the window quits; a press after it re-arms.
+    fn cancel_or_quit_at(&mut self, now: Instant) -> UpdateResult {
+        if self.turn() == TurnState::Running {
+            self.quit_pending = None;
+            return UpdateResult::quiet(Effect::Cancel);
+        }
+        if !self.input.is_empty() {
+            let text = std::mem::take(&mut self.input).text();
+            self.history.push(text);
+            self.history_cursor = None;
+            self.history_stash.clear();
+            self.quit_pending = None;
+            return UpdateResult::dirty();
+        }
+        match self.quit_pending.take() {
+            Some(deadline) if now <= deadline => {
+                self.quit = true;
+                UpdateResult::quiet(Effect::Quit)
+            }
+            // The first press, or a second one after the window closed (re-arm, do not
+            // double-fire): arm the deadline and redraw the hint.
+            _ => {
+                self.quit_pending = Some(now + QUIT_WINDOW);
+                UpdateResult::dirty()
+            }
         }
     }
 
@@ -2025,7 +2108,7 @@ impl App {
                     self.history_stash.clear();
                     UpdateResult::dirty()
                 } else {
-                    self.cancel_or_quit()
+                    self.cancel_or_quit_now()
                 }
             }
             // The form actions normally arrive as `Input::Form`; a main-layer binding to one
@@ -2037,7 +2120,7 @@ impl App {
             | Action::FormSelect
             | Action::FormSubmit
             | Action::FormDecline => self.form_key(FormKey::Action(action)),
-            Action::Cancel => self.cancel_or_quit(),
+            Action::Cancel => self.cancel_or_quit_at(Instant::now()),
         }
     }
 

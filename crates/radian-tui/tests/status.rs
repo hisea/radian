@@ -100,3 +100,21 @@ fn a_narrow_status_bar_keeps_the_key_segments_and_does_not_wrap() {
     // The status line is still one row; the frame has the requested height.
     assert_eq!(text.lines().count(), 12, "{text}");
 }
+
+/// The first idle Ctrl-C arms the quit window; the status bar says so until it is disarmed
+///.
+#[test]
+fn the_status_bar_shows_the_ctrl_c_quit_hint_while_armed() {
+    use std::time::Instant;
+    let mut app = App::new("mock", "s");
+    app.quit_pending = Some(Instant::now() + radian_tui::app::QUIT_WINDOW);
+    let text = screen(&mut app, 120, 12);
+    assert!(
+        text.contains("Press Ctrl-C again to quit"),
+        "the hint must be visible: {text}"
+    );
+
+    app.quit_pending = None;
+    let text = screen(&mut app, 120, 12);
+    assert!(!text.contains("Press Ctrl-C again to quit"), "{text}");
+}
