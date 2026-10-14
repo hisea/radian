@@ -87,8 +87,10 @@ struct Recovery {
     /// The revision of the last committed replacement (ADR 0018), 0 when the file has none,
     /// so the next automatic compaction uses a strictly larger revision.
     transcript_revision: u64,
-    /// The last `ConfigChanged` (D8): resume restores it, and the revision it was applied at.
-    last_change: Option<(serde_json::Value, u64)>,
+    /// The last model change and the last thinking change (D8, D11): resume restores both,
+    /// merged, so neither kind erases the other.
+    last_model_change: Option<(serde_json::Value, u64)>,
+    last_thinking_change: Option<(serde_json::Value, u64)>,
 }
 
 /// The per-session driver.
@@ -187,7 +189,10 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         };
         // D8: resume restores the last recorded change (the model and its budget) before the
         // first turn, so the switchable model and the guard start where the journal left off.
-        if let Some((change, revision)) = recovery.last_change {
+        if let Some((change, revision)) = recovery.last_model_change {
+            driver.apply_change(change, revision);
+        }
+        if let Some((change, revision)) = recovery.last_thinking_change {
             driver.apply_change(change, revision);
         }
         Ok(driver)
@@ -201,6 +206,23 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
     /// supplies it; it must not touch the network (the startup fetch warmed the cache).
     pub fn set_budget_for(&mut self, resolver: BudgetFor) {
         self.budget_for = Some(resolver);
+    }
+
+    /// The budget the next turn runs under (`testing` only): the D7 assertion reads it instead
+    /// of reaching into a running turn.
+    #[cfg(feature = "testing")]
+    pub fn test_turn_budget(&self) -> Option<ContextBudget> {
+        self.turn_budget
+    }
+
+    /// Re-runs the budget recomputation for the slot's current route (`testing` only): the
+    /// resume path applies the replayed changes before the host sets the resolver, so the D7
+    /// assertion re-runs it.
+    #[cfg(feature = "testing")]
+    pub fn test_replay_budget(&mut self) {
+        let revision = self.next_config_revision;
+        let change = self.slot.value();
+        self.apply_change(change, revision);
     }
 
     /// The applied configuration. A model adapter reads this; the driver writes it only at
@@ -504,7 +526,18 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
     /// Applies one change to the slot, and for a model change recomputes the budget the next
     /// turn runs under (ADR 0026 D7). Also used by resume replay (D8).
     fn apply_change(&mut self, change: serde_json::Value, revision: u64) {
-        self.slot.apply(change.clone(), revision);
+        // A change **merges** into the slot's object (D11): a `{"thinking": …}` change must
+        // survive the next model change and the reverse — the switchable model reads the
+        // whole current state. A non-object change replaces.
+        let mut merged = self.slot.value();
+        if let (Some(state), Some(partial)) = (merged.as_object_mut(), change.as_object()) {
+            for (key, value) in partial {
+                state.insert(key.clone(), value.clone());
+            }
+        } else {
+            merged = change.clone();
+        }
+        self.slot.apply(merged, revision);
         if let Some(route) = ModelRoute::from_value(&change)
             && let Some(resolver) = &self.budget_for
         {
@@ -775,7 +808,9 @@ async fn recover(journal: &SessionJournal) -> Result<Recovery, DriverError> {
     let mut next_turn = 1u64;
     // ADR 0006 §5.7: the session-local config revision starts at 1.
     let mut next_config_revision = 1u64;
-    let mut last_change: Option<(serde_json::Value, u64)> = None;
+    // D8 + D11: the last change of each kind, so neither erases the other on resume.
+    let mut last_model_change: Option<(serde_json::Value, u64)> = None;
+    let mut last_thinking_change: Option<(serde_json::Value, u64)> = None;
     for event in parsed.events() {
         match &event.data {
             EventData::InboxEnqueued {
@@ -793,8 +828,12 @@ async fn recover(journal: &SessionJournal) -> Result<Recovery, DriverError> {
             }
             EventData::ConfigChanged { revision, change } => {
                 next_config_revision = next_config_revision.max(revision + 1);
-                // D8: resume restores the **last** recorded model (and thinking) change.
-                last_change = Some((change.clone(), *revision));
+                // D8 + D11: resume restores the **last** change of each kind.
+                if ModelRoute::from_value(change).is_some() {
+                    last_model_change = Some((change.clone(), *revision));
+                } else {
+                    last_thinking_change = Some((change.clone(), *revision));
+                }
             }
             _ => {}
         }
@@ -831,7 +870,8 @@ async fn recover(journal: &SessionJournal) -> Result<Recovery, DriverError> {
         }
     }
     Ok(Recovery {
-        last_change,
+        last_model_change,
+        last_thinking_change,
         history,
         requeue,
         next_turn,
