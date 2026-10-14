@@ -534,7 +534,7 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
                 .iter()
                 .map(|block| match block {
                     Block::Paragraph { start, end, .. } => {
-                        md_line_count(&text[*start..*end], *start, body_width)
+                        md_line_count_cached(entry, *start, *end, body_width, &text)
                     }
                     Block::Code {
                         start,
@@ -659,6 +659,17 @@ pub fn line_count_cached(entry: &mut Entry, modes: DisplayModes, width: usize) -
             entry.diagram_cache = Some((width, text_len, outcomes));
         }
     }
+    // The Markdown paragraph lines do not depend on the folds, so cache them by
+    // `(width, text_len)`: a global fold toggle re-counts the entries but does not re-parse
+    // them (the R7 toggle gate).
+    if entry.kind == EntryKind::Assistant {
+        let blocks = blocks_for(entry, modes.reasoning);
+        // The same body width `layout`/`line_count` look up with, or the cache never hits.
+        let body_width = width
+            .saturating_sub(crate::render::marker_prefix(entry.kind).width())
+            .max(1);
+        fill_md_cache(entry, &blocks, body_width);
+    }
     let lines = line_count(entry, modes, width);
     entry.layout_cache = Some((key, lines));
     lines
@@ -735,7 +746,7 @@ pub fn layout(entry: &Entry, blocks: &[Block], modes: DisplayModes, width: usize
             for block in blocks {
                 match block {
                     Block::Paragraph { start, end, .. } => {
-                        lines.extend(md_lines(&text[*start..*end], *start, body_width));
+                        lines.extend(md_lines_cached(entry, *start, *end, body_width, &text));
                     }
                     Block::Code {
                         start,
@@ -1009,7 +1020,7 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
                 match block {
                     Block::Paragraph { start, end, .. } => {
                         lines.extend(
-                            md_lines(&text[start..end], start, body_width)
+                            md_lines_cached(entry, start, end, body_width, &text)
                                 .into_iter()
                                 .map(|line| line.text),
                         );
@@ -1178,11 +1189,66 @@ pub(crate) fn md_lines(source: &str, base: usize, width: usize) -> Vec<BodyLine>
     out
 }
 
-/// The Markdown line count (the virtualized measure path lays the lines out too: a Markdown
-/// paragraph's row count depends on its inline pieces, and building them is the only exact
-/// way — the perf budget is checked by `perf_render`).
-pub(crate) fn md_line_count(source: &str, base: usize, width: usize) -> usize {
-    md_lines(source, base, width).len()
+/// The Markdown lines of the paragraph at `[start, end)`: the entry's `(width, text_len)`
+/// cache when it holds them, else rendered fresh (the immutable paths may not have run the
+/// mutable measure pass). The layout does not depend on the folds, so a fold toggle reuses
+/// the cache and stays inside the R7 gate.
+fn md_lines_cached(
+    entry: &Entry,
+    start: usize,
+    end: usize,
+    width: usize,
+    text: &str,
+) -> Vec<BodyLine> {
+    if let Some((cached_width, cached_len, paragraphs)) = &entry.md_cache
+        && *cached_width == width
+        && *cached_len == entry.text.len()
+        && let Some((_, lines)) = paragraphs.iter().find(|(at, _)| *at == start)
+    {
+        return lines.clone();
+    }
+    md_lines(&text[start..end], start, width)
+}
+
+/// The Markdown line count of the paragraph at `[start, end)` without cloning the cached
+/// lines (the per-frame measure path).
+fn md_line_count_cached(
+    entry: &Entry,
+    start: usize,
+    end: usize,
+    width: usize,
+    text: &str,
+) -> usize {
+    if let Some((cached_width, cached_len, paragraphs)) = &entry.md_cache
+        && *cached_width == width
+        && *cached_len == entry.text.len()
+        && let Some((_, lines)) = paragraphs.iter().find(|(at, _)| *at == start)
+    {
+        return lines.len();
+    }
+    md_lines(&text[start..end], start, width).len()
+}
+
+/// Builds the entry's Markdown paragraph-line cache for `width` (the mutable measure pass),
+/// so the following `layout`/`line_count` reuse it.
+fn fill_md_cache(entry: &mut Entry, blocks: &[Block], width: usize) {
+    let text_len = entry.text.len();
+    let fresh = entry
+        .md_cache
+        .as_ref()
+        .filter(|(cached_width, cached_len, _)| *cached_width == width && *cached_len == text_len)
+        .is_none();
+    if !fresh {
+        return;
+    }
+    let text = crate::render::display_text(entry);
+    let mut paragraphs = Vec::new();
+    for block in blocks {
+        if let Block::Paragraph { start, end, .. } = block {
+            paragraphs.push((*start, md_lines(&text[*start..*end], *start, width)));
+        }
+    }
+    entry.md_cache = Some((width, text_len, paragraphs));
 }
 
 /// Appends the laid-out lines of `blocks`, indented by `indent` columns.

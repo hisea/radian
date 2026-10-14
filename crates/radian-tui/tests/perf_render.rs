@@ -90,6 +90,35 @@ fn entries(n: usize) -> Vec<Entry> {
     out
 }
 
+/// One Markdown-heavy Assistant body (ADR 0028 R2): a heading, a paragraph with inline
+/// styles and a link, a nested list, a table and a code block. Generated, not stored, so the
+/// corpus stays a function.
+fn markdown_body(i: usize) -> String {
+    format!(
+        "## Section {i}\n\nA paragraph with **bold**, *italic*, `code` and a \
+         [link](https://example.com/{i}) plus enough words to wrap at the viewport width.\n\n\
+         - first item for {i}\n- second item\n  - nested item\n\n\
+         | column a | column b |\n| --- | --- |\n| value {i} | other value |\n\n\
+         ```rust\nlet value_{i} = {i};\n```\n\n> a quoted line about {i}\n"
+    )
+}
+
+/// A Markdown-heavy corpus: 6 of 10 entries are Assistant Markdown, the rest keep the mix
+/// realistic (user questions, reasoning, tool results).
+fn markdown_entries(n: usize) -> Vec<Entry> {
+    (0..n)
+        .map(|i| match i % 10 {
+            0..=5 => Entry::new(EntryKind::Assistant, markdown_body(i)),
+            6..=7 => Entry::new(EntryKind::User, format!("question {i}: what changed?")),
+            8 => Entry::new(EntryKind::Reasoning, format!("considering option {i} ...")),
+            _ => Entry::new(
+                EntryKind::ToolResult,
+                format!("ok: processed {i}\nsome ordinary output line"),
+            ),
+        })
+        .collect()
+}
+
 fn new_app(n: usize) -> App {
     let mut app = App::new("mock", "perf");
     app.entries = entries(n);
@@ -362,6 +391,32 @@ fn perf_render_reasoning_toggle() {
             ms(first),
             ms(back),
             ms(steady)
+        );
+    }
+}
+
+/// ADR 0028 R7 with a Markdown-heavy corpus: the steady frame stays under 1 ms at 50k and the
+/// first frame after a global toggle (Ctrl-T collapsing the reasoning) stays under 100 ms.
+#[test]
+#[ignore = "measurement, not an assertion; run with --ignored --nocapture"]
+fn perf_render_markdown() {
+    use radian_tui::blocks::ReasoningMode;
+    for n in [1_000usize, 10_000, 50_000] {
+        let mut terminal = test_terminal();
+        let mut app = App::new("mock", "perf");
+        app.entries = markdown_entries(n);
+        let (p50, p95, _max) = measure_draws(&mut app, &mut terminal, 30);
+        // The global toggle re-lays every entry out: the first frame after it.
+        app.reasoning_mode = ReasoningMode::Expanded;
+        let to_expanded = draw_once(&mut terminal, &mut app);
+        app.reasoning_mode = ReasoningMode::Collapsed;
+        let to_collapsed = draw_once(&mut terminal, &mut app);
+        println!(
+            "markdown {n:>6}: steady p50 {:>7.2} ms p95 {:>7.2} ms | to expanded {:>8.2} ms | to collapsed {:>8.2} ms",
+            ms(p50),
+            ms(p95),
+            ms(to_expanded),
+            ms(to_collapsed)
         );
     }
 }

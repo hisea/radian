@@ -98,6 +98,11 @@ pub struct Entry {
     /// the key because `TooWide` can succeed on a wider terminal. Filled by the mutable
     /// measure pass; the immutable layout paths render fresh on a miss.
     pub(crate) diagram_cache: Option<(usize, usize, Vec<crate::blocks::DiagramOutcome>)>,
+    /// The entry's laid-out Markdown paragraph lines (ADR 0028 R2), keyed by `(width,
+    /// text_len)` and indexed by the paragraph block's start. The layout does not depend on
+    /// the reasoning/tool folds, so a global fold toggle reuses it instead of re-parsing
+    /// every Assistant entry (the R7 toggle gate).
+    pub(crate) md_cache: Option<MdCache>,
 }
 
 impl Entry {
@@ -113,6 +118,7 @@ impl Entry {
             block_cache: None,
             layout_cache: None,
             diagram_cache: None,
+            md_cache: None,
         }
     }
 }
@@ -168,6 +174,10 @@ pub enum Overlay {
     /// The session picker (ADR 0023 U4): `--pick` at startup, `/sessions` in a session.
     Picker(Picker),
 }
+
+/// The Markdown layout cache: `(width, text_len, paragraphs)`, where each paragraph is
+/// `(block start, lines)`. A type alias keeps the `Option` readable in `Entry`.
+pub(crate) type MdCache = (usize, usize, Vec<(usize, Vec<crate::blocks::BodyLine>)>);
 
 /// One approval as the UI shows it: the queue's id (ADR 0023 U7), the session that asked and
 /// the request itself. The queue id is what the answer names, not the permission layer's own
