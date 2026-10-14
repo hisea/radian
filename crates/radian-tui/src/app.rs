@@ -1429,12 +1429,12 @@ impl App {
             }
             Input::LogoutDone { provider, result } => {
                 match result {
-                    Ok(()) => self.push_notice(format!(
-                        "removed the stored credential for `{provider}`"
-                    )),
-                    Err(error) => self.push_notice(format!(
-                        "could not remove `{provider}`: {error}"
-                    )),
+                    Ok(()) => {
+                        self.push_notice(format!("removed the stored credential for `{provider}`"))
+                    }
+                    Err(error) => {
+                        self.push_notice(format!("could not remove `{provider}`: {error}"))
+                    }
                 }
                 UpdateResult::dirty()
             }

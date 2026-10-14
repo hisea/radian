@@ -6405,8 +6405,7 @@ impl PtyChild {
         // SAFETY: master_fd is a fresh fd; F_SETFL is async-signal-safe.
         unsafe { libc::fcntl(master_fd, libc::F_SETFL, libc::O_NONBLOCK) };
         // SAFETY: master_fd is a fresh fd.
-        let master: std::fs::File =
-            unsafe { std::os::fd::FromRawFd::from_raw_fd(master_fd) };
+        let master: std::fs::File = unsafe { std::os::fd::FromRawFd::from_raw_fd(master_fd) };
         Self { child, master }
     }
 
@@ -6450,7 +6449,9 @@ impl Drop for PtyChild {
 /// `stty -a` shows the echo state as tokens (`echo`, `-echo`, `echoke`, …): check the tokens,
 /// not substrings (`-echok` contains `-echo`).
 fn assert_stty_has_echo(stty: &str) {
-    let tokens: Vec<&str> = stty.split(|c: char| c.is_whitespace() || c == ';').collect();
+    let tokens: Vec<&str> = stty
+        .split(|c: char| c.is_whitespace() || c == ';')
+        .collect();
     assert!(
         tokens.contains(&"icanon"),
         "canonical mode must be restored: {stty}"
@@ -6477,23 +6478,15 @@ async fn pty_agent_login_custom_hides_the_key_and_restores_echo() {
             let mut stream = stream;
             let mut buf = [0u8; 8192];
             let _ = std::io::Read::read(&mut stream, &mut buf);
-            let _ = stream.write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
-            );
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
         }
     });
 
     let home = fresh_session_dir();
     let credentials = home.join("credentials");
     std::fs::create_dir_all(&credentials).unwrap();
-    let mut pty = PtyChild::spawn(
-        &[
-            agent_bin(),
-            "login",
-            "custom",
-        ],
-        &home,
-    );
+    let mut pty = PtyChild::spawn(&[agent_bin(), "login", "custom"], &home);
     let mut seen = Vec::new();
     const KEY: &str = "sk-CLI-HIDDEN-99";
     assert!(
@@ -6509,7 +6502,8 @@ async fn pty_agent_login_custom_hides_the_key_and_restores_echo() {
     assert!(pty.wait_for(&mut seen, "API key", 10).await);
     pty.write(format!("{KEY}\r").as_bytes());
     assert!(
-        pty.wait_for(&mut seen, "saved the key for `corp`", 10).await,
+        pty.wait_for(&mut seen, "saved the key for `corp`", 10)
+            .await,
         "{}",
         String::from_utf8_lossy(&seen)
     );
@@ -6544,10 +6538,7 @@ async fn pty_agent_login_custom_hides_the_key_and_restores_echo() {
         0o600
     );
     // Echo restored after the exit: stty -a must show `echo` enabled.
-    assert!(
-        pty.wait_for(&mut seen, "EXITED", 5).await,
-        "no stty output"
-    );
+    assert!(pty.wait_for(&mut seen, "EXITED", 5).await, "no stty output");
     let tail = String::from_utf8_lossy(&seen);
     let stty = tail.split("EXITED:0").nth(1).unwrap_or("");
     assert_stty_has_echo(stty);

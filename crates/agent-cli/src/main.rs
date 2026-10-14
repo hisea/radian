@@ -370,7 +370,9 @@ enum Command {
     },
     /// Store an API key for a provider in ~/.radian/credentials/auth.json (ADR 0026 D3).
     /// The key is not echoed; a verification request (`GET <base>/models`) runs first.
-    #[command(after_help = "Without a terminal the command refuses; edit                            credentials/auth.json directly instead.")]
+    #[command(
+        after_help = "Without a terminal the command refuses; edit                            credentials/auth.json directly instead."
+    )]
     Login {
         /// A built-in provider id (`opencode-go`, `anthropic`, `openai`,
         /// `openai-compatible`), or `custom` to name a new endpoint (name, protocol, base

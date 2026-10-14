@@ -190,7 +190,8 @@ fn read_line(prompt: &str) -> Result<String, String> {
     };
     let mut tty = tty;
     write!(tty, "{prompt}").map_err(|error| format!("cannot write the prompt: {error}"))?;
-    tty.flush().map_err(|error| format!("cannot write the prompt: {error}"))?;
+    tty.flush()
+        .map_err(|error| format!("cannot write the prompt: {error}"))?;
     let mut line = String::new();
     std::io::BufReader::new(tty)
         .read_line(&mut line)
@@ -259,9 +260,7 @@ pub async fn run_login(provider: Option<String>) -> i32 {
                 Err(error) => return aborted(error),
             };
             let picked = match answer.trim().parse::<usize>() {
-                Ok(index) if (1..=choices.len()).contains(&index) => {
-                    choices[index - 1].0.clone()
-                }
+                Ok(index) if (1..=choices.len()).contains(&index) => choices[index - 1].0.clone(),
                 _ => answer.trim().to_owned(),
             };
             if picked == radian_host::CUSTOM_LOGIN {
@@ -305,8 +304,8 @@ pub async fn run_login(provider: Option<String>) -> i32 {
     }
 
     // The verification request (D3): one GET <base>/models before anything is saved.
-    let protocol = radian_host::Protocol::from_kind(&kind)
-        .unwrap_or(radian_host::Protocol::OpenAiCompatible);
+    let protocol =
+        radian_host::Protocol::from_kind(&kind).unwrap_or(radian_host::Protocol::OpenAiCompatible);
     print!("verifying against {base_url} … ");
     let _ = std::io::stdout().flush();
     match radian_host::login::verify(protocol, &base_url, &key).await {
@@ -380,7 +379,9 @@ fn ask_custom_steps() -> Result<(String, String, String), i32> {
         Err(error) => return Err(aborted(error)),
     };
     if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
-        return Err(aborted("the base URL must start with http:// or https://".to_owned()));
+        return Err(aborted(
+            "the base URL must start with http:// or https://".to_owned(),
+        ));
     }
     Ok((name, kind, base_url))
 }
@@ -398,7 +399,11 @@ pub async fn run_logout(provider: String) -> i32 {
         Ok(store) => store,
         Err(error) => return aborted(format!("could not open auth.json: {error}")),
     };
-    let stored: Vec<_> = store.list().into_iter().map(|entry| entry.provider_id).collect();
+    let stored: Vec<_> = store
+        .list()
+        .into_iter()
+        .map(|entry| entry.provider_id)
+        .collect();
     if !stored.contains(&provider) {
         return aborted(format!(
             "`{provider}` has no stored credential; stored: {}",
@@ -409,8 +414,9 @@ pub async fn run_logout(provider: String) -> i32 {
             }
         ));
     }
-    let answer = match read_line(&format!("remove the stored credential for `{provider}`? [y/N] "))
-    {
+    let answer = match read_line(&format!(
+        "remove the stored credential for `{provider}`? [y/N] "
+    )) {
         Ok(answer) => answer.trim().to_ascii_lowercase(),
         Err(error) => return aborted(error),
     };
@@ -432,13 +438,10 @@ pub async fn run_logout(provider: String) -> i32 {
 
 /// The built-in default endpoint of `name`, or `None` when it is not built in.
 fn default_base_url_of(name: &str) -> Option<String> {
-    radian_host::descriptor(name)
-        .map(|descriptor| descriptor.default_base_url.to_owned())
+    radian_host::descriptor(name).map(|descriptor| descriptor.default_base_url.to_owned())
 }
 
 /// Whether `name` is a custom provider (D10), i.e. not a built-in descriptor id.
 fn is_custom(name: &str) -> bool {
     radian_host::descriptor(name).is_none()
 }
-
-

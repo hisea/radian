@@ -5972,7 +5972,23 @@ async fn pty_login_custom_walk_saves_without_showing_the_key() {
     assert!(pty.wait_for_screen("base URL", 5), "{}", pty.screen());
     pty.send(format!("{verify}\r").as_bytes());
     assert!(pty.wait_for_screen("API key", 5), "{}", pty.screen());
-    pty.send(format!("{KEY}\r").as_bytes());
+    // Type the key **without submitting** and look at the screen: the field must be masked
+    // mid-typing, not only after the wizard closes (a plaintext echo is exactly what D3
+    // forbids — this is where a `key.clone()` render or an echo-on terminal would show).
+    for c in KEY.chars() {
+        pty.send(&[c as u8]);
+    }
+    pty.pump();
+    assert!(
+        !pty.screen().contains(KEY),
+        "the key echoed onto the screen while typing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.screen().contains('*'),
+        "the masked field should show *s"
+    );
+    pty.send(b"\r");
     assert!(
         pty.wait_for_screen("saved the key for `corp`", 10),
         "{}",
@@ -6079,10 +6095,7 @@ async fn pty_login_failed_verification_can_save_and_logout_removes_only_one() {
 
     let saved: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&auth_path).unwrap()).unwrap();
-    assert!(
-        saved.get("corp").is_none(),
-        "corp was removed: {saved}"
-    );
+    assert!(saved.get("corp").is_none(), "corp was removed: {saved}");
     assert_eq!(saved["existing"]["type"], "api_key", "the sibling survives");
     assert_eq!(auth_json_mode(&auth_path), 0o600);
     pty.quit();
@@ -6120,7 +6133,11 @@ async fn pty_logout_with_n_keeps_the_entry() {
         pty.screen()
     );
     pty.send(b"n");
-    assert!(pty.wait_for_screen("kept `existing`", 5), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("kept `existing`", 5),
+        "{}",
+        pty.screen()
+    );
     let saved: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&auth_path).unwrap()).unwrap();
     assert_eq!(saved["existing"]["type"], "api_key", "kept means kept");

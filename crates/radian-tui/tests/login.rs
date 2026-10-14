@@ -62,9 +62,7 @@ fn login_opens_the_wizard_and_a_builtin_skips_to_the_key() {
     let mut app = App::new("m", "s");
     assert!(submit(&mut app, "/login corp").is_empty());
     assert!(
-        notices(&app)
-            .iter()
-            .any(|n| n.contains("unknown provider")),
+        notices(&app).iter().any(|n| n.contains("unknown provider")),
         "{:?}",
         notices(&app)
     );
@@ -84,7 +82,10 @@ fn the_custom_walk_ends_in_verify_then_save() {
         app.update(Input::LoginKey(LoginKey::Char(c)));
     }
     app.update(Input::LoginKey(LoginKey::Enter));
-    assert!(top_login(&app).error.is_some(), "a reserved name is refused");
+    assert!(
+        top_login(&app).error.is_some(),
+        "a reserved name is refused"
+    );
     for _ in 0.."openai-compatible".len() {
         app.update(Input::LoginKey(LoginKey::Backspace));
     }
@@ -150,23 +151,28 @@ fn the_custom_walk_ends_in_verify_then_save() {
                     radian_host::RADIAN_BASE_URL.to_owned(),
                     "http://127.0.0.1:9/v1".to_owned()
                 ),
-                (radian_host::RADIAN_KIND.to_owned(), "openai-compatible".to_owned()),
+                (
+                    radian_host::RADIAN_KIND.to_owned(),
+                    "openai-compatible".to_owned()
+                ),
             ],
         }]
     );
 
     // The save result closes the wizard and says what to do next (D3).
-    assert!(app
-        .update(Input::LoginSaved {
+    assert!(
+        app.update(Input::LoginSaved {
             name: "corp".to_owned(),
             result: Ok(()),
         })
         .effects
-        .is_empty());
+        .is_empty()
+    );
     assert!(app.top_modal().is_none());
     assert!(
-        notices(&app).iter().any(|n| n.contains("saved the key for `corp`")
-            && n.contains("/model corp/")),
+        notices(&app)
+            .iter()
+            .any(|n| n.contains("saved the key for `corp`") && n.contains("/model corp/")),
         "{:?}",
         notices(&app)
     );
@@ -189,13 +195,14 @@ fn a_failed_verification_can_still_be_saved() {
     assert!(matches!(effects.first(), Some(Effect::LoginVerify { .. })));
 
     // The failure: the wizard stays up and asks; no key left the app.
-    assert!(app
-        .update(Input::LoginVerified {
+    assert!(
+        app.update(Input::LoginVerified {
             name: "openai".to_owned(),
             result: Err("https://api.openai.com/v1/models rejected the key (HTTP 401)".to_owned()),
         })
         .effects
-        .is_empty());
+        .is_empty()
+    );
     assert!(matches!(
         top_login(&app).step,
         LoginStep::VerifyFailed { .. }
@@ -223,13 +230,14 @@ fn esc_cancels_and_a_late_answer_is_dropped() {
 
     // No wizard waiting: a late `LoginVerified` is a no-op.
     let mut app = App::new("m", "s");
-    assert!(app
-        .update(Input::LoginVerified {
+    assert!(
+        app.update(Input::LoginVerified {
             name: "x".to_owned(),
             result: Ok(()),
         })
         .effects
-        .is_empty());
+        .is_empty()
+    );
     assert!(app.top_modal().is_none());
 }
 
@@ -296,10 +304,7 @@ fn logout_completion_needs_the_host() {
         panic!("logout is in the tree");
     };
     match level(&[], "") {
-        Level::Needs(fetch) => assert!(matches!(
-            fetch,
-            command::Fetch::LoggedInProviders { .. }
-        )),
+        Level::Needs(fetch) => assert!(matches!(fetch, command::Fetch::LoggedInProviders { .. })),
         other => panic!("expected Needs, got {other:?}"),
     }
 }
