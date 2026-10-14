@@ -73,8 +73,10 @@ pub use projection::{
     LastToolCall, ProjectionRead, SessionProjection, StreamKind, StreamSnapshot, TurnState,
 };
 pub use provider::{
-    DESCRIPTORS, DescriptorModel, GENERIC_ID, LoginMethod, Protocol, ProviderDescriptor, Route,
-    descriptor, descriptors, resolve_route,
+    DEFAULT_THINKING_LEVEL, DESCRIPTORS, DescriptorModel, GENERIC_ID, LoginMethod, Protocol,
+    ProviderDescriptor, Route, THINKING_LEVELS, ThinkingMap, clamp_thinking, descriptor,
+    descriptors, parse_thinking_level, resolve_route, supported_thinking_levels, supported_wire,
+    thinking_map_for, thinking_rank,
 };
 pub use radian_runtime::ModelRoute;
 pub use session::{
