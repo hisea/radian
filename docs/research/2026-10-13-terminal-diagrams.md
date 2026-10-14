@@ -158,21 +158,183 @@
 
 ---
 
+## 3. codex（`openai/codex`，Rust；`main` @ 2026-10-13）
+
+来源：`git clone --filter=blob:none --sparse`（访问日期 2026-10-13）到 `/tmp/codex`，只取
+`codex-rs/{tui,mermaid,core}`。
+
+### 3.1 生成：**没有引导**（与 pi 相同，与 omp 不同）
+
+`grep -rn -i mermaid codex-rs/core` 只命中 `config.schema.json`（设置项），**核心提示与工具描述里
+没有 mermaid**。
+
+### 3.2 显示：**自己写的 Rust 渲染器 `codex-mermaid`**（仓内 crate）
+
+- crate：`codex-rs/mermaid/`，包名 `codex-mermaid`（`Cargo.toml`），`license.workspace = true`
+  （仓库根 `LICENSE` = Apache-2.0；`codex-rs/mermaid/Cargo.toml` 里唯一依赖是 `unicode-width`）。
+  `README.md` 原文："Standalone, bounded Mermaid text renderer. It uses the existing
+  `unicode-width` dependency; **no Mermaid runtime or new external production dependency is
+  needed**."
+- `src/lib.rs:1-12` 原文："Bounded, terminal-native Mermaid diagram **prototype**. … Graph edges own
+  separate lanes and endpoint positions. Crossings never join routes. Unsupported syntax and
+  outputs exceeding the caller's width return errors, leaving source fallback to the caller.
+  **This crate performs no I/O and does not depend on a Mermaid implementation.**"
+- API：`render(source, max_width) -> Result<String, RenderError>`（`lib.rs:55`）与
+  `render_spans(...) -> Result<Vec<Vec<Span>>, RenderError>`（`Span { text, role }`，
+  `Role = Node | Edge | Text`，`output.rs`）；`RenderError = Unsupported | Limit | TooWide`
+  （`lib.rs:28-35`，Display 文案见 `:37-45`）。**永不返回部分结果**（`lib.rs:50-53`："no partial
+  result is returned"；`README.md`："Callers should retain source on any error; the library never
+  returns a partial diagram."）。
+- 上限（`lib.rs:20-24`）：`MAX_SOURCE = 16 KiB`、`MAX_NODES = 16`、`MAX_EDGES = 24`、
+  `MAX_LABEL = 40`、`MAX_CELLS = 64 * 1024`。**比 grok-mermaid 严得多**（后者 128 节点 / 512 边）。
+- 支持子集（`README.md` 表格）：`flowchart`/`graph`（TD/TB 默认、BT、LR、RL；矩形/菱形/体育场节点；
+  实线 `-->`/`---`/`<-->`、虚线 `-.->`/`-.-`/`<-.->`；管道标签与中缀标签；`&` 扇出扇入）、
+  `sequenceDiagram`（隐式参与者、`participant`/`actor`、别名、`->`/`->>`/`-->`/`-->>`/`-x`/`--x`、
+  自消息、`Note over A[,B]`、嵌套 `loop`/`alt`/`opt`/`critical`/`break`、每个 `alt` 一个 `else`）、
+  `stateDiagram-v2`/`stateDiagram`、`classDiagram`、`erDiagram`。**明确是子集不是兼容**：
+  compound state、flowchart `subgraph`、其它形状、sequence 的 activation/parallel、styling、
+  front matter、directive、HTML、转义、组合/零宽字符、非可加宽度的连字**都报错**（`README.md`）。
+  标识符是 ASCII 字母开头的字母/数字/下划线；文本支持普通 Unicode 与 CJK。
+- 画法（`README.md`）：节点按声明/首次引用顺序、按请求方向；每条边独占 lane；交叉用 `╪` 且**不**
+  合流；菱形用 `◇`；体育场用圆角；水平布局为每个端点留文字槽（可能很宽，放不下就 `TooWide`）；
+  class 链接用 `◁`/`△`（继承/实现）、`◆`（组合）、`◇`（聚合）；ER 基数写作 `1`/`0..1`/`1..many`/
+  `0..many`；sequence 用 `▶`/`◀`，生命线交叉 `┼`，控制片段有嵌套框；state 用 `● initial`/`◎ final`。
+
+### 3.3 TUI 里的接线与**退化**（`codex-rs/tui/src/markdown_render/mermaid.rs`）
+
+文件头注释原文："Bounded, theme-aware Mermaid previews for **completed** Markdown fences. Source
+remains owned by the transcript. Unsupported syntax, resource limits, and terminal overflow retain
+the original code block **with a reason**; diagrams **never emit terminal control sequences**.
+Callers only render completed fences when Mermaid rendering is enabled."
+
+- 只渲染**已闭合**的 fence：`has_closing_fence(input, range, content_end)`（`:19-38`）——CommonMark
+  在 EOF 也会发 End 事件，所以还要看真正的闭合栅栏在不在。
+- `render(source, width: Option<usize>, theme)`（`:40-88`）：`width` 默认 **120**；
+  `codex_mermaid::render_spans(source, width)`；出错时先给**一行 dim 提示**（按 `RenderError` 三选一，
+  `:47-55`），再把**原始源码按 mermaid 语法高亮**接在后面（`:56-58`）；成功时把 `Role` 映射到
+  **从 syntect 主题派生**的样式（`foreground_style_for_scopes_with_theme(theme, ["entity.name.type",
+  "support.type", "variable"])`，取不到才退回 `cyan`；`Edge` 取 `["comment"]`，取不到退回 `dim`）
+  （`:61-85`）——**颜色只来自主题**（与 ADR 0029 同向）。
+- 设置：`config.schema.json:6173-6177` 的 `mermaid`，**boolean，默认 `true`**，说明 "Render Mermaid
+  code blocks as diagrams."，属于 `:4982-4988` 的「rich content rendering」组（`lists`/`math`/
+  `mermaid`/`tables`，默认都 `true`，说明 "Rich content rendering. Independent of animations and
+  visual effects."）。
+
+### 3.4 流式（`codex-rs/tui/src/streaming/controller.rs:22-26`）
+
+原文："Transformable fences stay mutable while their containing top-level block is last. …
+**For Mermaid, the closing fence replaces source with a diagram, and resizing can replace a diagram
+that no longer fits with its source.** Once another block starts, the diagram enters scrollback so
+later prose does not grow the tail."
+
+即：**流式期间不画半成品图**，闭合栅栏到达时才把源码换成图；终端变窄可以把图换回源码；
+下一个块开始后图进入 scrollback（不再重排）。测试 `streaming/mermaid_tests.rs`
+（`mermaid_stream_closes_resizes_and_preserves_raw_source`）逐块断言
+`render.lines == render::render_source(&source, Some(80), …)` —— 渲染是
+**源码 + 宽度 + 模式的纯函数**（与 ADR 0023「绘制不做 I/O」同向）。
+
+### 3.5 另有一条**浏览器**路径（与 mermaid 无关）
+
+`codex-rs/tui/src/inline_visualization.rs:1` 原文 "Terminal fallback for assistant-authored inline
+visualization directives"：模型写 `::codex-inline-vis{…}` 指令，`viewer::materialize_document` 把
+`assets/inline_visualization/visualize.html` + `visualize.css` 落成文档再看（细节**未核实**）。
+另外 `codex-rs/tui/src/terminal_probe.rs:1-13` 说明它**会**在启动/恢复时做「短、尽力而为」的终端
+应答探测（自己给 deadline，取不到就 `None` 退回保守默认）——即 codex 存在「问终端」的做法，
+但 **mermaid 渲染本身不依赖它**（只用文本 + 主题）。
+
+---
+
+## 4. opencode（`anomalyco/opencode`（原 `sst/opencode`，`sst/opencode` 现在 301 到它），MIT，`dev` 分支 @ 2026-10-13）
+
+来源：`git clone --filter=blob:none --sparse`（访问日期 2026-10-13）到 `/tmp/oc`（只取
+`packages/{merman,tui,session-ui}`）+ 对 `packages/core` 里几个 prompt 文件的 raw 抓取。
+
+### 4.1 生成：base prompt 里**没有**引导；但有一个可选插件技能教模型画图
+
+`packages/core/src/plugin/system-prompt/{anthropic,gpt,gpt-astra,kimi,meta,trinity}.txt` +
+`packages/core/src/session/runner/prompt/system.txt` + `packages/core/src/session/prompt.ts`
+（8910 B）+ `packages/core/src/session/system-prompt.ts`，`grep -i "mermaid|diagram|flowchart|ascii"`
+**无命中** ✓（与 pi / codex 一致）。
+
+但仓里有一个**插件技能** `packages/plugins/figma/skills/figma-generate-diagram/SKILL.md`，
+frontmatter 原文："MANDATORY prerequisite — load this skill BEFORE every `generate_diagram` tool
+call. … Trigger whenever the user asks to create, generate, draw, render, sketch, or build a
+diagram — flowchart, architecture diagram, sequence diagram, ERD or entity-relationship diagram,
+state diagram or state machine, gantt chart, or timeline. Also trigger when the user mentions
+Mermaid syntax …"；正文："`generate_diagram` takes Mermaid.js syntax and produces an editable
+FigJam diagram."；同目录 `references/` 有 7 份分类型指引（architecture/erd/flowchart/gantt/
+sequence/state/workflow）✓。→ 这是**插件**层面的生成引导，而且渲染目标是 **FigJam（画布/浏览器）**，
+不是终端 ✓。
+
+### 4.2 显示：**两条完全不同的路径**
+
+#### (a) TUI（终端）：自家包 `@opencode/merman`
+
+- `packages/merman/package.json`：name `@opencode/merman`，version **2.0.28**，license 字段缺省
+  （仓库 `LICENSE` = MIT ✓）；依赖 `@opencode/plugin`、**`@opentui/core`**、`entities@7.0.1`、
+  `string-width` ✓。
+- 挂载：`packages/tui/src/plugin/builtins.ts:13,25` `import Merman from "@opencode/merman/plugin"`
+  且把它放进 `builtins` 列表（与 `Latex` 并列）✓。
+- 注册方式（`packages/merman/src/plugin.ts`，15 行）：
+  `Plugin.define({ id: "opencode.merman", setup(context) { context.markdown.registerCodeBlockRenderer("mermaid", createMermaidCodeBlockRenderer(context.renderer, () => ({ colors: resolveOpenCodeDiagramPalette(context.theme, context.themeMode) }))) } })`
+  —— **按语言注册代码块渲染器** ✓，颜色从**主题 + themeMode** 派生 ✓。
+- 支持的家族（`packages/merman/src/`）：`flowchart`、`gantt`、`gitgraph`、`sequence`、`state`、
+  `timeline` ✓（**没有 class / er** ✓）。每个家族都是 `parser.ts` / `drawing.ts` /
+  `render-grid.ts` / `style.ts` 四件套（解析 → 网格绘制 → 样式 → 输出 StyledText）✓。
+- 纯本地：用 `@opentui/core` 的 `TextRenderable` / `StyledText` / `parseColor` 直接画进 TUI ✓，
+  无浏览器、无 WASM、无网络（是否起子进程**未核实**）。
+- 宽度：`markdown.ts:52-56` `layoutMaxWidth` 默认 **120**，`:281` 实际用
+  `Math.min(configuredMaxWidth, ctx.width)` ✓；选项注释原文："**Fold responsive horizontal diagrams
+  that exceed this width.** Defaults to 120 columns." ✓。
+- 主题（`palette.ts:1-25`）：`createOpenCodeDiagramPalette` 从 `text`/`subdued`/`info`/`success`/
+  `warning`/`background`/`accent.{soft,clear}` 这些**主题 token** 派生（用 `blendColor` 算
+  secondary/muted）✓ —— **颜色只来自主题**（与 ADR 0029 同向）。
+
+#### (b) Web / session-ui（浏览器）：真的 mermaid.js → SVG
+
+`packages/session-ui/src/components/markdown-mermaid.ts`：`await import("mermaid")`（**懒加载**
+真正的 mermaid npm 包 ✓），`mermaid.initialize({ startOnLoad: false, securityLevel: "strict",
+ theme: 按 document 亮/暗, flowchart: { htmlLabels: false } })`，先
+`mermaid.parse(source, { suppressErrors: true })`（失败返回 `undefined` = 回退源码 ✓），成功返回
+**SVG**（`mermaid.render(...).svg`）✓。→ **浏览器里是 SVG，终端里是字符画**。
+
+### 4.3 流式：**四个对象里最激进的**（流式就画，并「粘住」上一次成功的图）
+
+`packages/merman/src/markdown.ts:269-320`：渲染器闭包里有一个
+`lastGood: Map<blockId, PreparedDiagram>`，键是 `context.defaultRender()?.id`（注释原文：
+"OpenTUI's default block ID is the stable identity available for this fence across streaming
+updates" ✓）。逻辑：
+
+1. `MermaidSyntaxError` 时，**先看这个块上一次成功的图**，kind 相同就直接继续显示它 ✓（粘住旧图）；
+2. 否则若错误行 ≤ 2，或错误行之后全是空行 → 返回 `undefined`（回退到普通代码块）✓；
+3. 否则用**截断到错误行之前**的源码重试（`lines.slice(0, error.lineNumber - 1)`）✓，仍失败 →
+   `undefined` ✓。
+4. `DiagramCanvasSizeError` → `undefined` ✓；其它错误 rethrow ✓。
+
+### 4.4 失败与退化汇总
+
+TUI：`undefined` → 交回普通代码块；web：`undefined` → 交回源码；错误分
+`MermaidSyntaxError`（带 `lineNumber`，所以能做「截到错误行前重试」）与 `DiagramCanvasSizeError`
+（画布尺寸超限）✓。
+
+---
+
 ## 进度与下一步（本片未完成的部分）
 
 已核实：**pi（生成/显示/流式/失败/库）**、**omp（同上 + 与 pi 的差异）**、
-**`grok-mermaid` 的能力与上限**。
+**`grok-mermaid` 的能力与上限**、**codex（生成/显示/流式/退化 + 它自带的 Rust 渲染器
+`codex-mermaid`）**、**opencode（生成/显示/流式/退化 + TUI 的 `@opencode/merman` 与 web 的
+mermaid.js/SVG 两条路径）**。四个对象的「生成/显示/流式/失败」四问都已回答 ✓。
 
 **未做（下一步按顺序）**：
 
-1. **codex**（`openai/codex`，Rust `codex-rs/tui`）：查它的 Markdown 渲染对 mermaid/图表有没有处理；
-   生成侧查系统提示是否提 mermaid。**未核实**。
-2. **opencode**（`sst/opencode`）：同上。**未核实**。
-3. **Rust 侧的现成库**（把 mermaid 至少 flowchart + sequence 渲染成终端字符画）：
-   - 候选需要查：`mermaid-rs`（是否存在/状态）、`mermaid-ascii` 的 Rust 移植、`d2`/`graphviz` 的
-     Rust 绑定（`graphviz-rust`）、`layout-rs`（Rust 的 graphviz 移植）、以及 `termgraph`/`textplots`
-     这类"图表"库（后者是数据图不是结构图，只能作为旁证）。每条要写：名字、许可、维护状态、
-     支持的图类型、是否纯本地、**访问日期**。**未核实**。
+1. **Rust 侧的现成库**（把 mermaid 至少 flowchart + sequence 渲染成终端字符画）：
+   - 已找到仓内实现 **`codex-mermaid`**（见 §3；Apache-2.0，只依赖 `unicode-width`，无 I/O，
+     但**未发布到 crates.io 的核实**还没做，且上限很紧：16 节点 / 24 边）。
+   - 还要查：crates.io 上有没有独立的 mermaid/图渲染 crate（如 `mermaid-rs`、`mermaid-ascii`
+     的 Rust 移植）、`layout-rs`（Rust 的 graphviz 移植）、`graphviz-rust`、`d2` 的 Rust 绑定，
+     以及 `termgraph`/`textplots` 这类「数据图」库（只能作旁证）。每条要写：名字、许可、
+     维护状态、支持的图类型、是否纯本地、**访问日期**。**未核实**。
 4. **最后一节：给 Radian 的 2–4 个选项**（依赖 / 体积与复杂度 / 流式怎么办 / 80 列效果 /
    pty 可测性），并按 ADR 0023（绘制不做 I/O、不做终端应答探测）、ADR 0028 R1（块模型与缓存）、
    ADR 0029（主题是唯一颜色来源）标注冲突点，最后写推荐与理由。**未写**。
