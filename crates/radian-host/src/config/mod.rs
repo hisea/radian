@@ -97,6 +97,13 @@ pub enum ConfigError {
     ApiKeyRemoved {
         path: PathBuf,
     },
+    /// A `[providers.<name>]` entry that can never be used (ADR 0026 D10): the name is not a
+    /// valid provider name, or it shadows a built-in id. Refused, never guessed around.
+    InvalidProviderName {
+        path: PathBuf,
+        name: String,
+        reason: String,
+    },
 }
 
 impl fmt::Display for ConfigError {
@@ -157,6 +164,9 @@ impl fmt::Display for ConfigError {
                  `/login` command (next slice)",
                 path.display()
             ),
+            ConfigError::InvalidProviderName { path, name, reason } => {
+                write!(f, "{}: providers.{name}: {reason}", path.display())
+            }
         }
     }
 }
@@ -242,6 +252,9 @@ pub struct Config {
     pub permissions: PermissionsConfig,
     pub compaction: CompactionConfig,
     pub tui: TuiConfig,
+    /// `[providers.<name>]`: named custom services (ADR 0026 D10). Carried raw; the hosts
+    /// resolve them through `radian_host::provider::resolve_provider`.
+    pub providers: std::collections::BTreeMap<String, crate::provider::ProviderDecl>,
     /// Known-but-unwired and unknown keys, as dotted paths, for the startup line. Never a
     /// value.
     pub skipped: Vec<String>,
@@ -331,6 +344,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
             "permissions" => parse_permissions(value, path, read_only, &mut config)?,
             "compaction" => parse_compaction(value, path, &mut config)?,
             "tui" => parse_tui(value, path, &mut config)?,
+            "providers" => parse_providers(value, path, &mut config)?,
             // Known by the ADR, not wired in this slice: the hosts take MCP servers from
             // `--mcp-config`. Ignored, and named on the startup line.
             "mcp" => config.skipped.push("mcp".into()),
@@ -340,6 +354,70 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
     config.skipped.sort();
     config.skipped.dedup();
     Ok(config)
+}
+
+/// `[providers.<name>]`: named custom services (ADR 0026 D10). `kind` must be one of the two
+/// wire protocols, `base_url` a non-empty string; the name must be valid and must not shadow
+/// a built-in id — a bad name is refused, never warned around (the hosts would silently
+/// resolve the built-in instead).
+fn parse_providers(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
+    let Some(table) = value.as_table() else {
+        return Err(wrong_type(path, "providers", "a table"));
+    };
+    for (name, value) in table {
+        let Some(spec) = value.as_table() else {
+            return Err(wrong_type(path, &format!("providers.{name}"), "a table"));
+        };
+        if let Some(reason) = crate::provider::name_error(name) {
+            return Err(ConfigError::InvalidProviderName {
+                path: path.to_path_buf(),
+                name: name.clone(),
+                reason,
+            });
+        }
+        let mut decl = crate::provider::ProviderDecl {
+            kind: String::new(),
+            base_url: String::new(),
+        };
+        for (field, value) in spec {
+            match (field.as_str(), value) {
+                ("kind", Value::String(kind))
+                    if matches!(kind.as_str(), "openai-compatible" | "anthropic") =>
+                {
+                    decl.kind = kind.clone();
+                }
+                // D10: only the two wire protocols exist in this build; anything else is a
+                // structural error, not a display preference to skip.
+                ("kind", _) => {
+                    return Err(wrong_type(
+                        path,
+                        &format!("providers.{name}.kind"),
+                        "one of openai-compatible|anthropic",
+                    ));
+                }
+                ("base_url", Value::String(base_url)) if !base_url.is_empty() => {
+                    decl.base_url = base_url.clone();
+                }
+                ("base_url", Value::String(_)) => {
+                    return Err(ConfigError::InvalidProviderName {
+                        path: path.to_path_buf(),
+                        name: name.clone(),
+                        reason: "base_url must not be empty".into(),
+                    });
+                }
+                ("base_url", _) => {
+                    return Err(wrong_type(
+                        path,
+                        &format!("providers.{name}.base_url"),
+                        "a string",
+                    ));
+                }
+                (other, _) => config.skipped.push(format!("providers.{name}.{other}")),
+            }
+        }
+        config.providers.insert(name.clone(), decl);
+    }
+    Ok(())
 }
 
 fn parse_model(
@@ -941,6 +1019,82 @@ theme = "light"
         // A non-table `tui.colors` is a wrong type (structural), like `tui.keybindings`.
         let error = parse_str("schema_version = 1\n[tui]\ncolors = 3\n").unwrap_err();
         assert!(matches!(error, ConfigError::WrongType { .. }), "{error}");
+    }
+
+    /// ADR 0026 D10: `[providers.<name>]` is carried into `Config.providers`; a bad or
+    /// shadowing name refuses the file (fail-closed, like `permissions.profile`).
+    #[test]
+    fn named_providers_are_carried_and_bad_names_refused() {
+        let config = parse_str(concat!(
+            "schema_version = 1\n",
+            "[providers.corp]\n",
+            "kind = \"openai-compatible\"\n",
+            "base_url = \"https://llm.example.com/v1\"\n",
+            "[providers.relay]\n",
+            "kind = \"anthropic\"\n",
+            "base_url = \"https://relay.example\"\n",
+        ))
+        .unwrap();
+        assert_eq!(config.providers.len(), 2);
+        assert_eq!(config.providers["corp"].kind, "openai-compatible");
+        assert_eq!(config.providers["relay"].base_url, "https://relay.example");
+        assert!(config.skipped.is_empty(), "{:?}", config.skipped);
+
+        // A name shadowing a built-in refuses the file, naming the rule.
+        let error = parse_str(concat!(
+            "schema_version = 1\n",
+            "[providers.anthropic]\n",
+            "kind = \"anthropic\"\n",
+            "base_url = \"https://x\"\n",
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(error, ConfigError::InvalidProviderName { .. }),
+            "{error}"
+        );
+        let text = error.to_string();
+        assert!(text.contains("providers.anthropic"), "{text}");
+        assert!(text.contains("built-in"), "{text}");
+
+        // An invalid name too.
+        let error = parse_str(concat!(
+            "schema_version = 1\n",
+            "[providers.\"has space\"]\n",
+            "kind = \"openai-compatible\"\n",
+            "base_url = \"https://x\"\n",
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(error, ConfigError::InvalidProviderName { .. }),
+            "{error}"
+        );
+
+        // `openai-compatible` is reserved.
+        let error = parse_str(concat!(
+            "schema_version = 1\n",
+            "[providers.openai-compatible]\n",
+            "kind = \"openai-compatible\"\n",
+            "base_url = \"https://x\"\n",
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(error, ConfigError::InvalidProviderName { .. }),
+            "{error}"
+        );
+
+        // An unknown kind is refused (never guessed at the host).
+        let error = parse_str(concat!(
+            "schema_version = 1\n",
+            "[providers.ok-name]\n",
+            "kind = \"grpc\"\n",
+            "base_url = \"https://x\"\n",
+        ))
+        .unwrap_err();
+        assert!(matches!(error, ConfigError::WrongType { .. }), "{error}");
+        assert!(
+            error.to_string().contains("openai-compatible|anthropic"),
+            "{error}"
+        );
     }
 
     #[test]

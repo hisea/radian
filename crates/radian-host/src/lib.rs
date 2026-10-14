@@ -15,6 +15,7 @@ mod diagnostics;
 mod errors;
 mod headers;
 mod home;
+pub mod login;
 mod mcp;
 pub mod memory;
 mod model;
@@ -72,8 +73,9 @@ pub use projection::{
     LastToolCall, ProjectionRead, SessionProjection, StreamKind, StreamSnapshot, TurnState,
 };
 pub use provider::{
-    DESCRIPTORS, DescriptorModel, GENERIC_ID, LoginMethod, Protocol, ProviderDescriptor, Route,
-    descriptor, descriptors, resolve_route,
+    DESCRIPTORS, DescriptorModel, GENERIC_ID, LoginMethod, NamedProvider, NamedSource, Protocol,
+    ProviderDecl, ProviderDescriptor, ProviderRef, Route, descriptor, descriptors, name_error,
+    resolve_provider, resolve_route, resolve_route_for, valid_name,
 };
 pub use session::{
     ApprovalRouting, CommandRefused, DriverEnd, HostBindings, LocalSession, SessionCapability,

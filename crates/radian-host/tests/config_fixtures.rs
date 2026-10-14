@@ -32,6 +32,7 @@ fn the_reader_matches_the_reference_checker() {
     let cases = [
         ("minimal.toml", "accept"),
         ("tui-theme-colors.toml", "accept"),
+        ("providers.toml", "accept"),
         ("v1-unknown-fields.toml", "accept"),
         ("schema-version-newer.toml", "readonly"),
         ("schema-version-lower.toml", "reject"),
@@ -54,6 +55,23 @@ fn the_unknown_fields_are_ignored_but_reported() {
     assert!(config.skipped.contains(&"future_top_level".to_string()));
     assert!(config.skipped.contains(&"model.future_option".to_string()));
     assert!(config.skipped.contains(&"tui.theme".to_string()));
+}
+
+/// The `providers.toml` fixture (ADR 0026 D10) carries named providers; the names are the
+/// `auth.json` key slots, so `--provider corp` and `/model corp/…` resolve them.
+#[test]
+fn the_providers_fixture_carries_named_providers() {
+    let (path, text) = fixture("providers.toml");
+    let config = config::parse(&path, &text).unwrap();
+    assert_eq!(config.model.provider.as_deref(), Some("corp"));
+    assert_eq!(config.providers.len(), 2);
+    assert_eq!(config.providers["corp"].kind, "openai-compatible");
+    assert_eq!(
+        config.providers["corp"].base_url,
+        "https://llm.example.com/v1"
+    );
+    assert_eq!(config.providers["relay"].kind, "anthropic");
+    assert!(config.skipped.is_empty(), "{:?}", config.skipped);
 }
 
 /// The `tui-theme-colors.toml` fixture (ADR 0029) carries a theme-file name and raw
