@@ -13,6 +13,7 @@ pub mod events;
 pub mod find;
 pub mod keys;
 pub mod login;
+pub mod markdown;
 pub mod mention;
 pub mod picker;
 pub mod profile;
