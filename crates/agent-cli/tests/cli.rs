@@ -3426,6 +3426,107 @@ async fn the_legacy_enabled_budget_is_accepted_and_clamped_like_high() {
     );
 }
 
+/// Review B1: a **level's** budget is clamped to `--max-tokens - 1` instead of failing the
+/// build, and the completion hides the levels only when no budget can fit at all. The user's
+/// explicit legacy budget is not clamped.
+#[tokio::test]
+async fn a_level_budget_clamps_to_max_tokens() {
+    // `--max-tokens 4096` + `--thinking max` (12288 in the map) -> 4095 on the wire.
+    let server = anth::MockServer::start(vec![anth_text_reply("CLAMPED")]).await;
+    let dir = fresh_session_dir();
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent_in(
+            &dir,
+            &[
+                "--model",
+                "claude",
+                "--provider",
+                "anthropic",
+                "--max-tokens",
+                "4096",
+                "--thinking",
+                "max",
+                "-p",
+                "hi",
+            ],
+            &[
+                ("ANTHROPIC_API_KEY", "sk-ant-clamp"),
+                ("RADIAN_BASE_URL", &server.base_url),
+            ],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("CLAMPED"), "{stdout}");
+    let body = server.requests()[0].json();
+    assert_eq!(
+        body["thinking"],
+        json!({"type": "enabled", "budget_tokens": 4095}),
+        "{body}"
+    );
+
+    // `--max-tokens 1024` leaves no room for any budget: an `enabled` level clamps to a
+    // budget-less one, so the request has no `enabled` setting.
+    let server = anth::MockServer::start(vec![anth_text_reply("NO-ROOM")]).await;
+    let dir = fresh_session_dir();
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent_in(
+            &dir,
+            &[
+                "--model",
+                "claude",
+                "--provider",
+                "anthropic",
+                "--max-tokens",
+                "1024",
+                "--thinking",
+                "high",
+                "-p",
+                "hi",
+            ],
+            &[
+                ("ANTHROPIC_API_KEY", "sk-ant-floor"),
+                ("RADIAN_BASE_URL", &server.base_url),
+            ],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("NO-ROOM"), "{stdout}");
+    let body = server.requests()[0].json();
+    assert!(
+        !body["thinking"].to_string().contains("enabled"),
+        "no enabled budget fits 1024: {body}"
+    );
+
+    // The user's explicit legacy budget is **not** clamped: over-limit stays a usage error.
+    let dir = fresh_session_dir();
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent_in(
+            &dir,
+            &[
+                "--model",
+                "claude",
+                "--provider",
+                "anthropic",
+                "--max-tokens",
+                "4096",
+                "--thinking",
+                "enabled:99999",
+                "-p",
+                "hi",
+            ],
+            &[("ANTHROPIC_API_KEY", "sk-ant-legacy")],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("out of range"), "{stderr}");
+}
+
 // ---------- session export and search (--export / --search) ----------
 
 /// Writes a minimal, valid v1 session file by hand: one user message and one assistant

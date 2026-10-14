@@ -347,3 +347,11 @@ Base `c120b0e` · 就地变异（改 `write` 的临时名），跑完从备份�
 | F2 | 临时名恢复成 `auth.json.tmp-<pid>`（无计数器/时间戳），并保留写前 `remove_file` | 同进程并发写不得互删临时文件 | `auth::tests::concurrent_writes_in_one_process_do_not_delete_each_other_s_temps` **5/5 次** FAILED，错误正是 `auth.json: No such file or directory (os error 2)`（另一个写者删掉了它正在写的临时文件） |
 
 1/1 抓住，且稳定复现（不是偶发）：Barrier 对齐 + 50 次写，5 次全失败。
+
+## ADR 0026 D11 审查 B1：档位预算夹到 max_tokens（2026-10-14）
+
+Base `b46f506` · 一次性 worktree `/tmp/radian-pi-mut-b1`，跑完删除。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| B1a | 去掉档位预算夹取（`Enabled` 原样发出） | `agent-cli::a_level_budget_clamps_to_max_tokens` | ✅ |

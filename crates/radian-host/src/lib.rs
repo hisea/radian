@@ -80,10 +80,12 @@ pub use projection::{
 pub use provider::{
     CUSTOM_LOGIN, DEFAULT_THINKING_LEVEL, DESCRIPTORS, DescriptorModel, GENERIC_ID, LoginMethod,
     NamedProvider, NamedSource, Protocol, ProviderDecl, ProviderDescriptor, ProviderRef,
-    RADIAN_KIND, Route, THINKING_LEVELS, ThinkingMap, clamp_thinking, descriptor, descriptors,
-    login_choices, name_error, parse_thinking_level, resolve_provider, resolve_route,
-    resolve_route_for, supported_thinking_levels, supported_thinking_levels_ref, supported_wire,
-    thinking_map_for, thinking_map_for_ref, thinking_rank, valid_name,
+    RADIAN_KIND, Route, THINKING_LEVELS, ThinkingMap, clamp_thinking, clamp_thinking_with,
+    descriptor, descriptors, level_fits, login_choices, name_error, parse_thinking_level,
+    resolve_provider, resolve_route, resolve_route_for, supported_thinking_levels,
+    supported_thinking_levels_ref, supported_thinking_levels_ref_with,
+    supported_thinking_levels_with, supported_wire, thinking_map_for, thinking_map_for_ref,
+    thinking_rank, valid_name, wire_budget,
 };
 pub use radian_runtime::ModelRoute;
 pub use session::{

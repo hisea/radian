@@ -1022,18 +1022,55 @@ pub fn clamp_thinking(
     map: Option<ThinkingMap>,
     requested: &str,
 ) -> Option<(&'static str, &'static str)> {
+    clamp_thinking_with(map, requested, None)
+}
+
+/// The budget a wire value asks for, when it is `enabled:<budget>`.
+pub fn wire_budget(wire: &str) -> Option<u32> {
+    wire.strip_prefix("enabled:")?.parse().ok()
+}
+
+/// Whether a level's wire value fits the request's `max_tokens` (review B1). A budget the
+/// **level** chose must satisfy the adapter's range (`1024 <= budget < max_tokens`); `None`
+/// means "no cap". `adaptive` and "send nothing" always fit.
+pub fn level_fits(wire: &str, max_tokens: Option<u32>) -> bool {
+    let Some(budget) = wire_budget(wire) else {
+        return true;
+    };
+    // A budget the level chose is **clamped** to `max_tokens - 1` (review B1), so it fits as
+    // long as there is any room at all. Only `max_tokens <= MIN_THINKING_BUDGET` leaves no
+    // valid budget, and then the level is unsupported.
+    let _ = budget;
+    match max_tokens {
+        Some(max) => max > crate::MIN_THINKING_BUDGET,
+        None => true,
+    }
+}
+
+/// [`clamp_thinking`] with the request's `max_tokens`: a level whose **own** budget does not
+/// fit is treated as unsupported, so the clamp walks past it (review B1). The budget itself is
+/// clamped later, when the wire value is turned into the adapter's setting.
+pub fn clamp_thinking_with(
+    map: Option<ThinkingMap>,
+    requested: &str,
+    max_tokens: Option<u32>,
+) -> Option<(&'static str, &'static str)> {
     let map = map?;
     let rank = thinking_rank(requested)
         .unwrap_or_else(|| thinking_rank(DEFAULT_THINKING_LEVEL).expect("the default is a level"));
     // Up first: the nearest supported level at or above the request.
     for level in &THINKING_LEVELS[rank..] {
-        if let Some(wire) = supported_wire(map, level) {
+        if let Some(wire) = supported_wire(map, level)
+            && level_fits(wire, max_tokens)
+        {
             return Some((level, wire));
         }
     }
     // Nothing above: the nearest supported level below.
     for level in THINKING_LEVELS[..rank].iter().rev() {
-        if let Some(wire) = supported_wire(map, level) {
+        if let Some(wire) = supported_wire(map, level)
+            && level_fits(wire, max_tokens)
+        {
             return Some((level, wire));
         }
     }
@@ -1074,12 +1111,23 @@ pub fn thinking_map_for_ref(provider: &ProviderRef, model: &str) -> Option<Think
 
 /// The levels a [`ProviderRef`]'s model supports, in rank order (ADR 0026 D11).
 pub fn supported_thinking_levels_ref(provider: &ProviderRef, model: &str) -> Vec<&'static str> {
+    supported_thinking_levels_ref_with(provider, model, None)
+}
+
+/// [`supported_thinking_levels_ref`] with the request's `max_tokens`: a level whose budget
+/// does not fit is not offered (review B1), so the completion never lists a level the switch
+/// would have to walk past.
+pub fn supported_thinking_levels_ref_with(
+    provider: &ProviderRef,
+    model: &str,
+    max_tokens: Option<u32>,
+) -> Vec<&'static str> {
     let Some(map) = thinking_map_for_ref(provider, model) else {
         return Vec::new();
     };
     THINKING_LEVELS
         .iter()
-        .filter(|level| supported_wire(map, level).is_some())
+        .filter(|level| supported_wire(map, level).is_some_and(|wire| level_fits(wire, max_tokens)))
         .copied()
         .collect()
 }
@@ -1087,6 +1135,15 @@ pub fn supported_thinking_levels_ref(provider: &ProviderRef, model: &str) -> Vec
 /// The levels a model supports, in rank order — `/thinking`'s completion (ADR 0026 D11). Empty
 /// when the model has no map: no parameter is ever sent, so nothing is offered.
 pub fn supported_thinking_levels(descriptor_id: &str, model: &str) -> Vec<&'static str> {
+    supported_thinking_levels_with(descriptor_id, model, None)
+}
+
+/// [`supported_thinking_levels`] with the request's `max_tokens` (review B1).
+pub fn supported_thinking_levels_with(
+    descriptor_id: &str,
+    model: &str,
+    max_tokens: Option<u32>,
+) -> Vec<&'static str> {
     let Some(map) =
         crate::descriptor(descriptor_id).and_then(|descriptor| thinking_map_for(descriptor, model))
     else {
@@ -1094,7 +1151,7 @@ pub fn supported_thinking_levels(descriptor_id: &str, model: &str) -> Vec<&'stat
     };
     THINKING_LEVELS
         .iter()
-        .filter(|level| supported_wire(map, level).is_some())
+        .filter(|level| supported_wire(map, level).is_some_and(|wire| level_fits(wire, max_tokens)))
         .copied()
         .collect()
 }

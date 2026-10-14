@@ -880,6 +880,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         &thinking,
         thinking_budget,
         route.adapter(),
+        Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
     );
     let initial = build_model(ModelArgs {
         provider: route.adapter(),

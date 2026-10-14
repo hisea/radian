@@ -423,6 +423,7 @@ fn run(
                 cli.model.clone().unwrap_or_default(),
             ),
             &config.providers,
+            cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         )?;
         if let Some(signal) = signal {
             // A signal during the pre-session phase leaves exactly like the session phase —
@@ -653,6 +654,7 @@ fn run(
         &thinking,
         thinking_budget,
         route.adapter(),
+        Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
     );
     let initial = build_model(ModelArgs {
         provider: route.adapter(),
@@ -1159,6 +1161,7 @@ fn run(
         },
         (provider_name.clone(), model_name.clone()),
         &config.providers,
+        cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
     );
     // Tell a pending signal task that the loop left on its own, so it does not force-exit.
     radian_tui::signals::confirm_exit();
@@ -1569,6 +1572,9 @@ struct LoopContext<'a> {
     /// The config's `[providers.<name>]` declarations (ADR 0026 D10), for `/model`'s provider
     /// completion.
     config_providers: std::collections::BTreeMap<String, radian_host::ProviderDecl>,
+    /// The request's `--max-tokens`: a level whose budget cannot fit is not offered and is
+    /// clamped past (review B1).
+    thinking_max_tokens: u32,
     workspace: &'a Path,
     runtime: &'a tokio::runtime::Runtime,
     /// The UI's one handle on the session (ADR 0023 U5): commands go through it, and it
@@ -1720,13 +1726,17 @@ impl LoopContext<'_> {
                             .session
                             .model_route()
                             .unwrap_or_else(|| self.startup_route.clone());
-                        radian_host::supported_thinking_levels(&route_provider, &route_model)
-                            .into_iter()
-                            .map(|level| radian_tui::command::Candidate {
-                                insert: level.to_owned(),
-                                description: "thinking level".to_owned(),
-                            })
-                            .collect()
+                        radian_host::supported_thinking_levels_ref_with(
+                            &provider_ref_for(&route_provider, &self.config_providers),
+                            &route_model,
+                            Some(self.thinking_max_tokens),
+                        )
+                        .into_iter()
+                        .map(|level| radian_tui::command::Candidate {
+                            insert: level.to_owned(),
+                            description: "thinking level".to_owned(),
+                        })
+                        .collect()
                     }
                     // `/logout`'s candidates: every stored credential (D3).
                     radian_tui::command::Fetch::LoggedInProviders { .. } => {
@@ -1860,15 +1870,19 @@ impl LoopContext<'_> {
                     .session
                     .model_route()
                     .unwrap_or_else(|| self.startup_route.clone());
-                let supported: Vec<String> =
-                    radian_host::supported_thinking_levels(&route_provider, &route_model)
-                        .into_iter()
-                        .map(str::to_owned)
-                        .collect();
-                let map = radian_host::descriptor(&route_provider)
-                    .and_then(|descriptor| radian_host::thinking_map_for(descriptor, &route_model));
+                let provider_ref = provider_ref_for(&route_provider, &self.config_providers);
+                let supported: Vec<String> = radian_host::supported_thinking_levels_ref_with(
+                    &provider_ref,
+                    &route_model,
+                    Some(self.thinking_max_tokens),
+                )
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+                let map = radian_host::thinking_map_for_ref(&provider_ref, &route_model);
                 let applied =
-                    radian_host::clamp_thinking(map, &level).map(|(level, _)| level.to_string());
+                    radian_host::clamp_thinking_with(map, &level, Some(self.thinking_max_tokens))
+                        .map(|(level, _)| level.to_string());
                 self.send(AppInput::ThinkingChecked {
                     requested: level,
                     applied,
@@ -2056,6 +2070,7 @@ fn ui_loop(
     phase: Phase<'_>,
     startup_route: (String, String),
     config_providers: &std::collections::BTreeMap<String, radian_host::ProviderDecl>,
+    thinking_max_tokens: u32,
 ) -> Result<Option<i32>, String> {
     let mut picking_signal: Option<i32> = None;
     let mut ctx = match phase {
@@ -2069,6 +2084,7 @@ fn ui_loop(
         } => Some(LoopContext {
             startup_route: startup_route.clone(),
             config_providers: config_providers.clone(),
+            thinking_max_tokens,
             workspace,
             runtime,
             session,
@@ -2256,6 +2272,25 @@ fn model_route_candidates(
         }
     }
     candidates
+}
+
+/// The [`ProviderRef`] a `/thinking` clamp/completion resolves against: the route's provider
+/// name through the config's declarations and the auth entry's env (ADR 0026 D10). A name that
+/// does not resolve falls back to the generic descriptor, whose map sends nothing.
+fn provider_ref_for(
+    name: &str,
+    config_providers: &std::collections::BTreeMap<String, radian_host::ProviderDecl>,
+) -> radian_host::ProviderRef {
+    let auth_env = radian_host::AuthStore::open()
+        .ok()
+        .and_then(|store| store.entry_env(name));
+    radian_host::resolve_provider(name, config_providers, auth_env.as_ref())
+        .map(|(provider, _warning)| provider)
+        .unwrap_or_else(|_| {
+            radian_host::ProviderRef::BuiltIn(
+                radian_host::descriptor(radian_host::GENERIC_ID).expect("the generic descriptor"),
+            )
+        })
 }
 
 fn memory_record_candidates(
