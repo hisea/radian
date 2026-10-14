@@ -1675,6 +1675,35 @@ mod tests {
         Entry::new(EntryKind::Assistant, text)
     }
 
+    /// A streaming append re-parses only the trailing open block: the closed prefix is copied
+    /// from `prev` verbatim (ADR 0028 R1). A sentinel in `prev` proves it, because a re-parse
+    /// would replace it with the real block.
+    #[test]
+    fn a_streaming_append_reuses_the_closed_blocks() {
+        let text = "# Title\n\nfirst paragraph\n\n```\ncode\n```\n";
+        let first = parse_blocks(text).remove(0);
+        let sentinel = Block::Code {
+            start: first.start(),
+            end: first.end(),
+            closed: true,
+            lang: "SENTINEL".to_owned(),
+        };
+        let appended = format!("{text}second paragraph\n");
+        let parsed = parse_blocks_incremental(&appended, Some(std::slice::from_ref(&sentinel)));
+        assert_eq!(
+            parsed.first(),
+            Some(&sentinel),
+            "the closed prefix must be reused, not re-parsed: {parsed:?}"
+        );
+        assert!(
+            parsed.len() > 1,
+            "the appended text is parsed fresh: {parsed:?}"
+        );
+        // And a fresh parse (no `prev`) does not keep the sentinel.
+        let fresh = parse_blocks_incremental(&appended, None);
+        assert_ne!(fresh.first(), Some(&sentinel));
+    }
+
     #[test]
     fn fences_split_paragraphs_and_carry_the_language() {
         let blocks = parse_blocks("prose one\n\n```rust\nlet x = 1;\n```\nprose two");
