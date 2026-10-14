@@ -202,8 +202,9 @@ pub async fn run(tools: &GitCommitTools, call: &ToolCall) -> Result<ToolOutput, 
     })
 }
 
-/// The blocking part: branch checks, the path boundary, `git add` and `git commit`.
-fn commit(
+/// The blocking part: branch checks, the path boundary, `git add` and `git commit`. Public so
+/// the integration tests exercise the exact code the tool runs.
+pub fn commit(
     workspace: &Path,
     message: &str,
     paths: &[String],
