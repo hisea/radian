@@ -460,3 +460,18 @@ Base `9fef91d` · 一次性 worktree `/tmp/radian-trust-mut`，每条跑完 `git
 | T-A4 | `write_at` 用 `new_mode = None`（新文件按 umask，不是 0600） | `the_record_round_trips_sorted_and_private`（mode 断言） | ✅ |
 
 4/4 抓住。
+
+## ADR 0031 片 B：启动期提问、覆盖、审计（2026-10-14）
+
+Base `b2c9c1c` · 一次性 worktree `/tmp/radian-trustb-mut`，每条跑完 `git checkout -- .`，`git status --short`
+为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| T-B1 | 启动 modal 的默认高亮改成 `TrustHere`（回车即信任） | pty `pty_trust_modal_asks_and_enter_untrusts` | ✅ |
+| T-B2 | `trust::load_for` 在命令行覆盖时也 `set_at` 写盘 | cli `trust_flags_override_without_writing` | ✅ |
+| T-B3 | 非交互且无决策时把 decision 改成 `Trust` | cli `a_workspace_with_project_resources_is_untrusted_without_a_terminal`（含 status line 断言） | ✅ |
+| T-B4 | `needs_ask` 去掉"来源是 Default"条件（有保存决定也问） | pty `pty_trust_override_and_saved_decision_skip_the_modal` | ✅ |
+
+4/4 抓住。**过程记录**：T-B3 第一轮没抓住——当时 CLI 只在 `source == Default` 时打那一行，所以"默认但
+decision=Trust"的变异仍打印解法；把条件改成 `!decision && source == Default` 并补 status line 断言后抓住。
