@@ -86,11 +86,14 @@ impl ToolSession for SkillSession {
             }
         };
         // The lookup is the whole safety story: only a discovered skill can be read, and its
-        // path was fixed at discovery time.
+        // path was fixed at discovery time. A skill with `disable-model-invocation: true` is
+        // not readable through this tool at all (ADR 0025 S4): it is meant for the user's
+        // explicit `/skill:<name>`, so the tool answers with the same `unknown_skill` error as
+        // a name that does not exist and does not reveal that it does.
         let skill = self
             .skills
             .iter()
-            .find(|skill| skill.name == name)
+            .find(|skill| skill.name == name && !skill.disable_model_invocation)
             .ok_or_else(|| {
                 ToolFailure::new("unknown_skill", format!("there is no skill named `{name}`"))
             })?;
@@ -297,6 +300,21 @@ mod tests {
         // A traversal-looking name is just an unknown name: the path is never built from it.
         let error = run(&session, &call("../a", None)).await.unwrap_err();
         assert_eq!(error.code, "unknown_skill");
+    }
+
+    /// S4: `disable-model-invocation: true` hides a skill from the model. The tool must answer
+    /// exactly like an unknown name (same code, same text) rather than reading the body.
+    #[tokio::test]
+    async fn a_model_invocation_disabled_skill_is_unknown_to_the_tool() {
+        let scratch = Scratch::new("disabled");
+        scratch.write(
+            "secret",
+            "---\nname: secret\ndescription: d\ndisable-model-invocation: true\n---\nSecret body.\n",
+        );
+        let session = scratch.session().await;
+        let error = run(&session, &call("secret", None)).await.unwrap_err();
+        assert_eq!(error.code, "unknown_skill");
+        assert_eq!(error.message, "there is no skill named `secret`");
     }
 
     #[tokio::test]

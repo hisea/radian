@@ -847,6 +847,11 @@ fn run(
                 tier: tier.preset(),
                 profile,
                 memory_root,
+                skills_extra_paths: radian_host::config::resolve_extra_paths(
+                    &config.skills.extra_paths,
+                    config.source.as_deref().and_then(std::path::Path::parent),
+                    radian_host::user_home().as_deref(),
+                ),
                 resume: resume.is_some(),
                 config_snapshot: serde_json::json!({
                     "provider": provider.as_str(),
@@ -1807,6 +1812,19 @@ impl LoopContext<'_> {
                         })
                         .collect()
                     }
+                    // `/skill:`'s candidates: the discovered skill names, including the ones
+                    // with `disable-model-invocation: true` — that flag hides a skill from the
+                    // *model*, not from the user (ADR 0025 S3; pi registers every loaded skill
+                    // as a `skill:<name>` command).
+                    radian_tui::command::Fetch::SkillNames { .. } => {
+                        radian_host::completion_candidates(self.session.skills())
+                            .into_iter()
+                            .map(|(name, description)| radian_tui::command::Candidate {
+                                insert: name,
+                                description,
+                            })
+                            .collect()
+                    }
                     // `/logout`'s candidates: every stored credential (D3).
                     radian_tui::command::Fetch::LoggedInProviders { .. } => {
                         match radian_host::list_auth() {
@@ -1857,6 +1875,19 @@ impl LoopContext<'_> {
                     }
                 };
                 self.send(AppInput::MemoryCommandDone(result));
+                Ok(())
+            }
+            // `/skill:<name> [args]` (ADR 0025 S3): the host reads the body and folds it into
+            // the message; the app decides follow-up vs steer.
+            Effect::ExpandSkill { name, args, steer } => {
+                let result = self.session.expand_skill(&name, &args);
+                self.send(AppInput::SkillExpanded { result, steer });
+                Ok(())
+            }
+            // `/skills` (ADR 0025 S3): the discovered skills as notices.
+            Effect::ListSkills => {
+                let notices = radian_host::notices(self.session.skills());
+                self.send(AppInput::SessionDone(notices));
                 Ok(())
             }
             Effect::Compact { instructions } => {

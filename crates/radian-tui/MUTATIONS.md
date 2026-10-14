@@ -698,3 +698,12 @@ Base `4208170` · 一次性 worktree `/tmp/tools-mut`（`git worktree add` 自�
 两行，本来就短于预览行数，折与不折看起来一样；(b) 我改测试时 `.replace` 没命中（没加 `assert`），
 改动根本没落盘。修好后：正文 20 行、屏幕够高，变异立刻抓住；同时发现**实现本身也不对**——原来的
 `collapsed` 会把错误正文折起来（ADR 说"错误一律展开"），已一并修正（提交 `0e5315a`）。
+## skills 片 3：`/skill:` 展开（2026-10-14）
+
+Base `c5a84f6` · 与 `radian-host` 同一一次性 worktree `/tmp/radian-pi-skills-mut3`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SL-M1 | `/skill:<name>` 解析成 `Outcome::Message`（不展开，当普通消息发） | `pty_skill_commands_expand_list_notice_and_escape`（请求正文没正文/args，journal 断言也挂） | ✅ |
+
+1/1 抓住。

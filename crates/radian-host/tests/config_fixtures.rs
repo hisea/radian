@@ -33,6 +33,7 @@ fn the_reader_matches_the_reference_checker() {
         ("minimal.toml", "accept"),
         ("tui-theme-colors.toml", "accept"),
         ("providers.toml", "accept"),
+        ("skills-extra-paths.toml", "accept"),
         ("v1-unknown-fields.toml", "accept"),
         ("schema-version-newer.toml", "readonly"),
         ("schema-version-lower.toml", "reject"),
@@ -44,6 +45,28 @@ fn the_reader_matches_the_reference_checker() {
     for (name, expected) in cases {
         assert_eq!(outcome(name), expected, "{name}");
     }
+}
+
+/// `skills-extra-paths.toml` (ADR 0025 slice 4): the reader keeps the strings verbatim; the
+/// host resolves them (`~`, relative to the config file). The reader must not touch the
+/// filesystem.
+#[test]
+fn skills_extra_paths_are_carried_raw() {
+    let (path, text) = fixture("skills-extra-paths.toml");
+    let config = config::parse(&path, &text).unwrap();
+    assert_eq!(
+        config.skills.extra_paths,
+        vec![
+            "~/.claude/skills".to_owned(),
+            "./team-skills".to_owned(),
+            "/opt/shared/skills".to_owned(),
+        ]
+    );
+    assert!(
+        !config.skipped.iter().any(|key| key.starts_with("skills")),
+        "{:?}",
+        config.skipped
+    );
 }
 
 /// `v1-unknown-fields.toml` is accepted *and* the unknown fields are reported (ignored, not

@@ -64,7 +64,7 @@ pub use home::{
     credentials_dir, credentials_dir_for, diagnostics_dir_for, ensure_private_dir,
     legacy_sessions_dirs_for, legacy_sessions_hint, legacy_sessions_hint_for, memory_dir,
     memory_dir_for, radian_home, radian_home_for, sessions_dir, sessions_dir_for, skills_dir,
-    skills_dir_for, themes_dir, themes_dir_for,
+    skills_dir_for, themes_dir, themes_dir_for, user_home,
 };
 pub use mcp::load_mcp_config;
 pub use model::{
@@ -91,6 +91,7 @@ pub use provider::{
     thinking_rank, valid_name, wire_budget,
 };
 pub use radian_runtime::ModelRoute;
+pub use session::session_hooks;
 pub use session::{
     ApprovalRouting, CommandRefused, DriverEnd, HostBindings, LocalSession, SessionCapability,
     SessionCommand, SessionError, SessionFacade, SessionFacts, SessionId, SessionQueue,
@@ -101,7 +102,8 @@ pub use sessions::{
     ExportSettings, Format, SEARCH_LIMIT, SUMMARY_MAX_CHARS, SearchRow, SessionRow,
 };
 pub use skills::{
-    Discovery, SECTION_BUDGET_TOKENS, SKILL_FILE_NAME, Skill, SkillsHooks, discover, prompt_section,
+    Discovery, SECTION_BUDGET_TOKENS, SKILL_FILE_NAME, Skill, SkillsHooks, completion_candidates,
+    discover, discover_with_extras, expand, notices, prompt_section,
 };
 pub use tools::{HostSession, HostTools, merge_tool_specs};
 pub use workspace::resolve_workspace;

@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agent_core::{Agent, AgentConfig, ContextBudget, EventSink, Message, TurnOptions};
+use agent_core::{Agent, AgentConfig, ContextBudget, EventSink, Hooks, Message, TurnOptions};
 use agent_extensions::{McpServerConfig, McpToolProvider};
 use radian_coding::CodingTools;
 use radian_permissions::{ApprovalPolicy, Approver, AuditSink, PermissionHooks, Preset, Profile};
@@ -36,7 +36,7 @@ use crate::pending::{
 };
 use crate::projection::{ProjectionRead, SessionProjection};
 use crate::skills::tools::SkillTools;
-use crate::skills::{self, SkillsHooks};
+use crate::skills::{self, Skill, SkillsHooks};
 use crate::tools::HostTools;
 
 /// A session's stable identifier: the session file's name and `SessionCreated.session_id`.
@@ -213,6 +213,14 @@ pub trait SessionFacade: Send + Sync {
     /// (`{"approval": …}`) the driver journals at the next turn boundary. Needs the same
     /// capability as answering: it belongs to the interactive approver.
     fn set_approval(&self, policy: ApprovalPolicy) -> Result<(), CommandRefused>;
+
+    /// The discovered skills, in discovery order (ADR 0025 S1). The UI lists them (`/skills`)
+    /// and completes their names (`/skill:`); the host owns the list because it owns discovery.
+    fn skills(&self) -> &[Skill];
+
+    /// Expands `/skill:<name> [args]` into the message ADR 0025 S3 sends to the inbox. `Err` is
+    /// a notice (an unknown skill or an unreadable file), never a turn failure.
+    fn expand_skill(&self, name: &str, args: &str) -> Result<String, String>;
 }
 
 /// How the driver task ended.
@@ -276,6 +284,10 @@ pub struct SessionSetup {
     pub profile: Profile,
     /// The memory root, or `None` when neither `RADIAN_HOME` nor `HOME` is set.
     pub memory_root: Option<PathBuf>,
+    /// Extra skill roots from `[skills] extra_paths` (ADR 0025 slice 4), already resolved by the
+    /// host (`~` and paths relative to the config file). The user-level `~/.radian/skills` is
+    /// discovered first, so it wins a name conflict.
+    pub skills_extra_paths: Vec<PathBuf>,
     /// `true` to resume an existing session file, `false` to create one.
     pub resume: bool,
     /// The `SessionCreated` snapshot (a route reference: never a key or a header value).
@@ -376,6 +388,10 @@ pub struct LocalSession {
     /// The pending approvals and questions (ADR 0023 U7).
     queue: Arc<SessionQueue>,
     memory: Option<MemoryService>,
+    /// The discovered skills (ADR 0025). The TUI reads this list for `/skills`, `/skill:`
+    /// completion and `/skill:<name>` expansion; the prompt hook and the `skill` tool share the
+    /// same `Arc`.
+    skills: Arc<Vec<Skill>>,
     runtime: tokio::runtime::Handle,
     driver: DriverTask,
     capabilities: Vec<SessionCapability>,
@@ -437,6 +453,26 @@ impl LocalSession {
 
     pub fn memory(&self) -> Option<&MemoryService> {
         self.memory.as_ref()
+    }
+
+    /// The discovered skills, in discovery order (ADR 0025 S1). The UI lists these (`/skills`),
+    /// completes them (`/skill:`) and expands them (`/skill:<name>`); reading one is a facade
+    /// method because the host owns the `SKILL.md` read.
+    pub fn skills(&self) -> &[Skill] {
+        &self.skills
+    }
+
+    /// Expands `/skill:<name> [args]` into the user message ADR 0025 S3 puts in the inbox (the
+    /// body with its frontmatter stripped, wrapped in a `<skill name=… location=…>` block, with
+    /// `args` appended). `Err` is a notice the UI shows instead of sending: an unknown skill or
+    /// a file that can no longer be read is not a turn failure.
+    pub fn expand_skill(&self, name: &str, args: &str) -> Result<String, String> {
+        let skill = self
+            .skills
+            .iter()
+            .find(|skill| skill.name == name)
+            .ok_or_else(|| format!("no skill named `{name}`: /skills lists the available ones"))?;
+        skills::expand(skill, args)
     }
 
     pub fn capabilities(&self) -> &[SessionCapability] {
@@ -554,6 +590,14 @@ impl SessionFacade for LocalSession {
         Ok(())
     }
 
+    fn skills(&self) -> &[Skill] {
+        &self.skills
+    }
+
+    fn expand_skill(&self, name: &str, args: &str) -> Result<String, String> {
+        LocalSession::expand_skill(self, name, args)
+    }
+
     /// Re-validates the capability, then runs the command. The check is here as well as in the
     /// UI: a facade whose list the UI ignored still refuses.
     fn command(&self, command: SessionCommand) -> Result<(), CommandRefused> {
@@ -660,6 +704,7 @@ pub async fn open_session(
         tier,
         profile,
         memory_root,
+        skills_extra_paths,
         resume,
         config_snapshot,
         turn_options,
@@ -733,15 +778,14 @@ pub async fn open_session(
     // Skills (ADR 0025 S1): discovery is best effort — a bad skill warns and is skipped. The
     // section is appended after the memory section, so the tuple below is ((perm, memory),
     // skills) and the prompt order is basic prompt, memory, skills (ADR 0025 S6).
-    let skills = match skills_dir() {
-        Some(dir) => {
-            let discovery = skills::discover(&dir);
-            for warning in &discovery.warnings {
-                memory_warning(warning);
-            }
-            discovery.skills
+    let skills = {
+        // The user level first, then `[skills] extra_paths` (ADR 0025 slice 4): the first
+        // discovery of a name wins, so `~/.radian/skills` beats an extra root.
+        let discovery = skills::discover_with_extras(skills_dir().as_deref(), &skills_extra_paths);
+        for warning in &discovery.warnings {
+            memory_warning(warning);
         }
-        None => Vec::new(),
+        discovery.skills
     };
     let shared_skills = Arc::new(skills);
     let skills_hooks = Arc::new(SkillsHooks::new(&shared_skills));
@@ -762,8 +806,9 @@ pub async fn open_session(
     let agent = Arc::new(
         Agent::new(model, tools)
             .with_config(agent_config)
-            .with_hooks((
-                (Arc::clone(&hooks), Arc::clone(&memory_hooks)),
+            .with_hooks(session_hooks(
+                Arc::clone(&hooks),
+                Arc::clone(&memory_hooks),
                 Arc::clone(&skills_hooks),
             )),
     );
@@ -860,6 +905,7 @@ pub async fn open_session(
         projection,
         queue,
         memory,
+        skills: shared_skills,
         runtime,
         driver: DriverTask {
             stop: Mutex::new(Some(stop_tx)),
@@ -870,6 +916,20 @@ pub async fn open_session(
         facts,
         config_snapshot,
     })
+}
+
+/// The agent's hook chain (ADR 0025 S6): the permission rules run first, then the memory section
+/// is appended, then the skills section. The order is a promise — the sections must be
+/// deterministic and memory must precede skills — so it lives in this one function, which
+/// `open_session` calls; `tests/skills_order.rs` builds the three real hooks and asserts the
+/// order on the composed chain. Swapping `memory` and `skills` here is the mutation that test
+/// catches.
+pub fn session_hooks(
+    permissions: Arc<PermissionHooks>,
+    memory: Arc<MemoryHooks>,
+    skills: Arc<SkillsHooks>,
+) -> impl Hooks {
+    ((permissions, memory), skills)
 }
 
 /// Creates or resumes the session file. The caller has already validated everything that can
