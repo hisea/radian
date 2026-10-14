@@ -340,6 +340,12 @@ fn a_shell_approval_shows_the_command_once() {
         "the command is displayed twice: {text}"
     );
     assert!(text.contains("cwd"), "the remaining args are kept: {text}");
+    // The keys are not body content: a mutation that pushes them back into the wrapped body
+    // is how they scrolled out of view in the first place.
+    assert!(
+        !text.contains("[y] allow once"),
+        "the key line must stay out of the body: {text}"
+    );
     // And the full text still carries the keys, on their own line.
     let full = render::approval_text(&shell_request("echo once"));
     assert_eq!(
