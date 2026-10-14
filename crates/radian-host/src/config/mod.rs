@@ -1027,7 +1027,8 @@ mod startup_pref_tests {
     /// warning, never a refusal (the `tui.*` rule).
     #[test]
     fn tui_tips_and_banner_are_carried_and_non_booleans_are_skipped() {
-        let config = parse_str("schema_version = 1\n[tui]\ntips = false\nbanner = false\n").unwrap();
+        let config =
+            parse_str("schema_version = 1\n[tui]\ntips = false\nbanner = false\n").unwrap();
         assert_eq!(config.tui.tips, Some(false));
         assert_eq!(config.tui.banner, Some(false));
 
