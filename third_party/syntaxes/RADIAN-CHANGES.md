@@ -21,6 +21,8 @@ directory is modified by Radian.
 | `TOML.sublime-syntax` | `assets/syntaxes/02_Extra/TOML/TOML.sublime-syntax` | `TOML.LICENSE` |
 | `TypeScript.LICENSE` | `assets/syntaxes/02_Extra/TypeScript/LICENSE` | — |
 | `TOML.LICENSE` | `assets/syntaxes/02_Extra/TOML/LICENSE` | — |
+| `bat.LICENSE-MIT` | `LICENSE-MIT` | bat's own MIT |
+| `bat.LICENSE-APACHE` | `LICENSE-APACHE` | bat's own Apache-2.0 |
 
 ## Licenses (verified at vendoring time)
 
@@ -35,11 +37,15 @@ directory is modified by Radian.
   `assets/acknowledgements.bin` lists `syntaxes/02_Extra/TypeScript/LICENSE`
   (Apache-2.0) as the attribution for the `TypeScript/` directory.
   **The two `.sublime-syntax` files carry no license header themselves**, and the
-  upstream Microsoft plugin ships `.tmLanguage` (plist), not these YAML files, so
-  the YAML copies are bat's; they are attributed to the same Apache-2.0 upstream
-  directory. If a stricter reading is wanted, the YAML files' provenance should
-  be re-verified against bat (this is the one item in this directory whose
-  per-file license is inferred rather than read from the file).
+  upstream Microsoft plugin ships `.tmLanguage` (plist), not these YAML files. The
+  YAML form is bat's (the format conversion), so these two files are **dual-
+  attributed**: bat's own `LICENSE-MIT` / `LICENSE-APACHE` (MIT OR Apache-2.0, at
+  the user's option) for bat's conversion, **and** the upstream Microsoft
+  `TypeScript-Sublime-Plugin` Apache-2.0 for the grammar they are converted from
+  (`TypeScript.LICENSE`). Both licenses are shipped here. This is the one item in
+  this directory whose per-file license is attributed from the directory's
+  upstream rather than read from the file itself; the owner accepted that
+  attribution on 2026-10-14.
 
 ## Not copied
 
