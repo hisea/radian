@@ -1,0 +1,284 @@
+//! The transcript selection as pure `App::update` state (ADR 0023 U3): press/drag/release
+//! produce the copy effect, a click clears, a press outside the transcript or on a modal
+//! starts nothing, `tui.mouse = false` removes the whole feature, and the drag's auto-scroll
+//! is one tick of app state.
+
+use agent_core::Message;
+use radian_permissions::ApprovalRequest;
+use radian_tui::app::{App, Effect, Input, UpdateResult, AUTO_SCROLL_TICK};
+use radian_tui::clip::MAX_CLIPBOARD_BYTES;
+use radian_host::{PendingRequest, PendingView};
+use serde_json::json;
+
+fn approval() -> PendingView<PendingRequest> {
+    PendingView {
+        request_id: 1,
+        origin: "session".into(),
+        request: PendingRequest::Approval(ApprovalRequest::new(
+            "perm-1",
+            "call-1",
+            "write",
+            "/ws/out.txt",
+            "/ws/out.txt",
+            json!({}),
+            None,
+        )),
+    }
+}
+
+/// A transcript with three single-line entries at width 30: lines 0/1/2 are the entries.
+fn app() -> App {
+    let mut app = App::new("m", "s");
+    app.push_message(&Message::user("hello there"));
+    app.push_message(&Message::assistant("aaaa bbbb cccc dddd"));
+    app.push_message(&Message::user("second message"));
+    app.set_viewport(3, 3);
+    app.set_transcript_width(30);
+    app
+}
+
+fn press(app: &mut App, row: u16, col: u16) -> UpdateResult {
+    app.update(Input::MouseDown { row, col })
+}
+
+fn drag(app: &mut App, row: u16, col: u16) -> UpdateResult {
+    app.update(Input::MouseDrag { row, col })
+}
+
+fn release(app: &mut App, row: u16, col: u16) -> UpdateResult {
+    app.update(Input::MouseUp { row, col })
+}
+
+#[test]
+fn press_drag_release_produces_the_copy_effect() {
+    let mut app = app();
+    // Lines 0..2 are the entries (width 30 wraps nothing). Selecting from line 0's first
+    // char through line 1's end copies both entries, joined by one newline.
+    assert!(!press(&mut app, 0, 2).dirty, "a press that starts nothing draws nothing");
+    let drag = drag(&mut app, 1, 25);
+    assert!(drag.dirty);
+    assert!(app.selection.is_some(), "the drag is live");
+    let release = release(&mut app, 1, 25);
+    assert!(release.dirty);
+    assert_eq!(
+        release.effects,
+        vec![Effect::Copy {
+            text: "hello there\naaaa bbbb cccc dddd".into()
+        }],
+        "one newline between entries"
+    );
+    // The selection stays visible until the next press.
+    assert!(app.selection.is_some());
+}
+
+#[test]
+fn a_copy_across_a_soft_wrap_inserts_no_newline() {
+    // Width 12 → the assistant's body wraps "aaaa bbbb cccc dddd" into "aaaa bbbb" /
+    // "cccc dddd" (lines 1 and 2). Selecting line 1 through line 2 copies the one-line text.
+    let mut app = app();
+    app.set_transcript_width(12);
+    // Width 12: "hello there" wraps to "hello" / "there" (lines 0-1), the assistant to
+    // "aaaa bbbb" / "cccc dddd" (lines 2-3). Selecting lines 2-3 copies the one-line text.
+    press(&mut app, 2, 2);
+    drag(&mut app, 3, 200);
+    let release = release(&mut app, 3, 200);
+    assert_eq!(
+        release.effects,
+        vec![Effect::Copy {
+            text: "aaaa bbbb cccc dddd".into()
+        }],
+        "no newline at the wrap"
+    );
+}
+
+#[test]
+fn a_backwards_drag_normalizes_to_the_same_copy() {
+    let mut app = app();
+    press(&mut app, 1, 25);
+    drag(&mut app, 0, 2);
+    let release = release(&mut app, 0, 2);
+    assert_eq!(
+        release.effects,
+        vec![Effect::Copy {
+            text: "hello there\naaaa bbbb cccc dddd".into()
+        }]
+    );
+}
+
+#[test]
+fn a_click_clears_the_selection() {
+    let mut app = app();
+    press(&mut app, 0, 2);
+    drag(&mut app, 1, 25);
+    assert!(app.selection.is_some());
+    // A second press clears immediately...
+    assert!(press(&mut app, 0, 2).dirty);
+    assert!(app.selection.is_none());
+    // ...and its release (the click) copies nothing.
+    let release = release(&mut app, 0, 2);
+    assert!(release.effects.is_empty());
+    assert!(app.selection.is_none());
+}
+
+#[test]
+fn a_press_outside_the_transcript_never_starts_one() {
+    let mut app = app();
+    // Rows 6.. are the input box and the status bar (viewport height 6).
+    assert!(!press(&mut app, 6, 0).dirty);
+    assert!(app.selection.is_none());
+    drag(&mut app, 7, 3);
+    release(&mut app, 7, 3);
+    assert!(app.selection.is_none(), "no gesture, no selection");
+}
+
+#[test]
+fn a_press_on_a_modal_never_starts_one() {
+    let mut app = app();
+    app.update(Input::Pending(Some(Box::new(approval())), 1));
+    // With the approval modal up the transcript viewport shrinks: the modal's own rows are
+    // outside it, so a press there starts nothing. (Rows inside the transcript still do.)
+    app.set_viewport(2, 6);
+    assert!(!press(&mut app, 4, 5).dirty);
+    assert!(app.selection.is_none());
+}
+
+#[test]
+fn a_press_on_the_picker_overlay_never_starts_one() {
+    let mut app = app();
+    let rows = vec![radian_host::sessions::SessionRow {
+        session_id: "alpha".into(),
+        created_ts: None,
+        last_ts: None,
+        message_count: 1,
+        summary: "first".into(),
+    }];
+    app.push_overlay(radian_tui::app::Overlay::Picker(radian_tui::picker::Picker::new(
+        rows,
+        None,
+        "/w",
+    )));
+    assert!(!press(&mut app, 0, 0).dirty);
+    assert!(app.selection.is_none());
+}
+
+#[test]
+fn with_mouse_off_the_whole_feature_is_gone() {
+    let mut config = radian_host::config::Config::default();
+    config.tui.mouse = Some(false);
+    let mut app = app();
+    app.apply_config(&config, false).unwrap();
+    assert!(app.clipboard == radian_tui::ClipboardMode::Osc52, "unrelated config still applies");
+    // Even a stray mouse event (which `tui.mouse = false` prevents upstream) does nothing.
+    press(&mut app, 0, 2);
+    drag(&mut app, 1, 7);
+    let release = release(&mut app, 1, 7);
+    assert!(app.selection.is_none());
+    assert!(release.effects.is_empty());
+}
+
+#[test]
+fn clipboard_config_selects_the_transport_and_pbcopy_falls_back_off_macos() {
+    let mut app = app();
+    let mut config = radian_host::config::Config::default();
+    config.tui.clipboard = Some("off".into());
+    app.apply_config(&config, false).unwrap();
+    assert_eq!(app.clipboard, radian_tui::ClipboardMode::Off);
+    // A release still ends the gesture — it just copies nothing.
+    press(&mut app, 0, 2);
+    drag(&mut app, 1, 7);
+    let release = release(&mut app, 1, 7);
+    assert!(release.effects.is_empty(), "`off` produces no copy effect");
+
+    let mut config = radian_host::config::Config::default();
+    config.tui.clipboard = Some("pbcopy".into());
+    let warnings = app.apply_config(&config, false).unwrap();
+    if cfg!(target_os = "macos") {
+        assert_eq!(app.clipboard, radian_tui::ClipboardMode::PbCopy);
+        assert!(warnings.is_empty(), "{warnings:?}");
+    } else {
+        assert_eq!(app.clipboard, radian_tui::ClipboardMode::Osc52);
+        assert!(warnings.iter().any(|w| w.contains("pbcopy")), "{warnings:?}");
+    }
+}
+
+#[test]
+fn an_oversized_selection_is_refused_with_the_reason() {
+    let mut app = app();
+    // One entry of a char-run over the cap: it wraps mid-run (the wrap breaks anywhere), so
+    // the drag lands at a row **past the transcript**, which clamps to the last entry's end.
+    app.entries.clear();
+    app.push_message(&Message::assistant("z".repeat(MAX_CLIPBOARD_BYTES + 1)));
+    app.set_transcript_width(30);
+    let (total, _) = radian_tui::render::visible_lines(&mut app.entries, 30, 0, 0, &app.theme);
+    app.set_viewport(1, total);
+    app.scroll = 0;
+    app.follow = false;
+    press(&mut app, 0, 2);
+    drag(&mut app, u16::MAX, 79);
+    let release = release(&mut app, u16::MAX, 79);
+    assert!(release.effects.is_empty(), "nothing is copied");
+    assert!(app.selection.is_none(), "the refused selection is dropped");
+    let notice = app.entries.last().expect("the reason is a notice");
+    assert!(notice.text.contains("too large"), "{:?}", notice.text);
+    assert!(notice.text.contains(&MAX_CLIPBOARD_BYTES.to_string()), "{:?}", notice.text);
+}
+
+#[test]
+fn the_clipboard_result_is_an_honest_status_note() {
+    let mut app = app();
+    app.update(Input::ClipboardDone("copied 12 chars (via OSC 52)".into()));
+    assert_eq!(app.note.as_deref(), Some("copied 12 chars (via OSC 52)"));
+}
+
+#[test]
+fn the_drag_autoscrolls_at_the_edges_one_tick_at_a_time() {
+    // A transcript much taller than the viewport, pinned to the bottom.
+    let mut app = App::new("m", "s");
+    for index in 0..40 {
+        app.push_message(&Message::user(format!("line {index}")));
+    }
+    app.set_viewport(5, 40);
+    app.scroll_to_bottom();
+    app.set_transcript_width(80);
+    // A drag whose pointer sits on the bottom edge (row 5 = past the viewport of 5 rows).
+    // The view starts 10 lines above the bottom, so there is room to scroll down.
+    app.scroll_by(-10);
+    press(&mut app, 4, 0);
+    drag(&mut app, 4, 0);
+    assert!(!app.mouse_autoscroll(), "the pointer is not at an edge yet");
+    drag(&mut app, 5, 0);
+    assert!(app.is_selecting());
+    assert!(app.mouse_autoscroll(), "held past the bottom, the view moves");
+    assert_eq!(app.scroll, app.max_scroll - 9, "one line per tick");
+    // Held at the top edge it scrolls back up.
+    drag(&mut app, 0, 0);
+    let mut ticks = 0;
+    while app.scroll > 0 {
+        assert!(app.mouse_autoscroll(), "held at the top, the view keeps moving");
+        ticks += 1;
+        assert!(ticks < 100, "the ticks converge");
+    }
+    assert!(!app.mouse_autoscroll(), "at the very top nothing moves");
+    // The head followed the pointer: the selection extends over the scrolled content.
+    assert!(app.selection.is_some());
+    let release = release(&mut app, 0, 0);
+    assert!(
+        matches!(release.effects.as_slice(), [Effect::Copy { text }] if !text.is_empty()),
+        "the auto-scrolled selection still copies"
+    );
+    assert!(!app.is_selecting(), "the gesture ended");
+}
+
+#[test]
+fn auto_scroll_only_ticks_while_a_drag_is_live() {
+    let mut app = app();
+    assert!(!app.mouse_autoscroll());
+    app.update(Input::Pending(Some(Box::new(approval())), 1));
+    assert!(!app.mouse_autoscroll(), "no drag, no tick — the loop stays in blocking recv");
+}
+
+#[test]
+fn the_tick_constant_is_bounded() {
+    // 50 ms: ~20 lines/s, and only while a drag is live.
+    assert_eq!(AUTO_SCROLL_TICK.as_millis(), 50);
+}

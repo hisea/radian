@@ -5,6 +5,7 @@
 //! [`terminal::TtyGuard`] owns the terminal's modified state.
 
 pub mod app;
+pub mod clip;
 pub mod command;
 pub mod composer;
 pub mod events;
@@ -27,4 +28,5 @@ pub use app::{
     TurnState, UpdateResult,
 };
 pub use composer::Composer;
+pub use clip::{ClipboardMode, MAX_CLIPBOARD_BYTES};
 pub use select::{Anchor, Selection};
