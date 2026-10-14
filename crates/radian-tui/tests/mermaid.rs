@@ -166,13 +166,31 @@ fn a_width_change_recounts_and_redraws() {
         let laid_out = blocks::layout(entry, &blocks, ReasoningMode::Expanded, width, true).len();
         assert_eq!(count, laid_out, "width {width}: count == laid out");
     }
-    // Wide: the diagram renders (box drawing); narrow: it falls back to the source.
+    // Wide: the diagram renders (box drawing).
     let wide = screen(&render(&mut app, 80, 12));
     assert!(wide.contains('┌'), "wide draws the diagram:\n{wide}");
+    // The **immutable** layout path (selection, search, the reference renderer) reads the
+    // cache; it must not reuse the 80-column diagram at 16 (the width is in the key). This
+    // runs before any 16-column mutable pass, so the cache still holds the wide render.
+    let laid_out_16 = blocks::layout(&app.entries[0], &blocks, ReasoningMode::Expanded, 16, true);
+    assert!(
+        laid_out_16.iter().any(|line| line.reason),
+        "a 16-column layout after an 80-column render is the fallback"
+    );
     let narrow = screen(&render(&mut app, 16, 12));
     assert!(
         narrow.contains("mermaid:"),
         "narrow names the reason:\n{narrow}"
     );
     assert!(!narrow.contains('┌'), "narrow draws no diagram:\n{narrow}");
+    // The **cached** count follows the width too: after the 80-column render filled the
+    // diagram cache, the 16-column count must be the narrow layout's, or virtualization
+    // would count rows the renderer does not draw.
+    let entry = &mut app.entries[0];
+    let cached_16 = blocks::line_count_cached(entry, ReasoningMode::Expanded, 16, true);
+    let laid_out_16 = blocks::layout(entry, &blocks, ReasoningMode::Expanded, 16, true).len();
+    assert_eq!(
+        cached_16, laid_out_16,
+        "the cached count must be re-measured at the new width"
+    );
 }

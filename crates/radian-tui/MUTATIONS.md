@@ -663,3 +663,19 @@ Base `0b9785b` · 一次性 worktree `/tmp/radian-pi-mut-m1`，跑完删除。
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
 | M1a | 只认命令行带 id 的 `--resume`（`resumed_route` 读 `cli.resume` 而非解析后的 `resume`） | `pty_a_picked_resume_uses_the_journals_model` | ✅ |
+
+## ADR 0028 R8：Mermaid 图（2026-10-14）
+
+Base `a13dd6a` · 变异只在一次性 worktree 里做（`git worktree add --detach /tmp/radian-pi-mut-mmN <commit>`），
+跑完 `git worktree remove --force`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M1 | 渲染失败时留空（不显示源码与原因行） | `mermaid::a_diagram_that_does_not_fit_keeps_the_source_and_names_the_reason` | ✅ |
+| M2 | 图缓存键不含宽度（`diagram_outcome` 的查找忽略宽度） | `mermaid::a_width_change_recounts_and_redraws`（80 渲染后立即用不可变 `layout(16)` 断言回退） | ✅ |
+| M3 | 未闭合的代码块也渲染（`is_mermaid` 忽略 `closed`） | `mermaid::an_unclosed_block_shows_the_source` | ✅ |
+| M4 | `line_count` 不计图的行数（用源码行数代替） | `mermaid::a_width_change_recounts_and_redraws`（count == laid out） | ✅ |
+
+诚实补充：M2 的第一版变异放在 `line_count_cached` 的新鲜度检查上，测试**没抓住**——那个检查与
+`diagram_outcome` 的查找宽度检查冗余，只去掉它时两条路径仍会重渲；改成变异查找（并让测试在 80
+渲染后立刻用不可变 `layout(16)` 断言）后抓住。
