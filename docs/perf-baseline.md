@@ -657,3 +657,29 @@ mermaid 后）**上同样超时，而且连 warm-up（1000 条）都超时。用
 
 **结论**：Markdown 没有让 resume 首帧变慢（50k 反而更快，10k/1k 在噪声内），远低于 1.5× 的
 修修门槛，所以不做懒测量/尺寸上限。两个绝对值都由"resume 时首次测量全部条目"主导，与本片无关。
+
+## Resume 首帧：`push_message` 的 O(n²)（resume-perf A）
+
+`--resume` 到首帧的耗时分段（`RADIAN_TRACE_PHASES=1` 的环境变量仪表；方法见下）。50k 条消息：
+
+| 段 | main `914d549` | 本片 `b55cab2` |
+|---|---|---|
+| `open/journal`（`SessionJournal::resume` 扫文件） | ~1.3 s | ~1.3 s |
+| `recover`（解析 + replay + recover） | ~1.1 s | ~1.1 s |
+| `open_session` 其余 | ~0.8 s | ~0.8 s |
+| `history-read`（host 再开一次 `Session::open` + `history()`） | ~1.3 s | ~1.3 s |
+| **`entries-built`（`App::push_message` 循环）** | **8.8–12.5 s** | **~0.10 s** |
+| `line-counts`（首帧给全部 66672 条目算行数） | 1.8–3.8 s | 1.8–3.8 s |
+| 首帧合计（`perf_tui_resume` p50） | 18 187 ms | 7 272–9 483 ms |
+
+**原因**：`push_message` 每条消息都执行 `self.entries.retain(|e| !e.live)`，对已 6.6 万条的
+transcript 全扫一次 → O(n²)。**修法**：`App` 维护 `live_count`（`set_live` 新建 live 条目时 +1，
+`push_message` 丢弃后清零），只有 `live_count > 0` 才扫。live 条目**不一定在尾部**（压缩提示可能排在
+它后面），所以用计数而不是尾部扫描。**目标与结果**：50k 首帧 ≤ 7 s；同机（负载很高，load ~400，
+绝对值偏悲观）对照 main：1k 84 → 79–147 ms（噪声内）、10k 2 065 → 1 348–1 512 ms、
+50k 18 187 → 7 272–9 483 ms。`entries-built` 从 8.8–12.5 s 回到 ~0.1 s。
+
+**不依赖墙钟的测试与变异**（`crates/radian-tui/src/app.rs` 的单元测试）：`LIVE_SCANS` 统计
+`push_message` 走过的条目数。`push_message_does_not_walk_the_transcript_without_a_live_entry`：
+无 live 条目时该计数不增长。变异（恢复无条件 `retain`）→ 该测试失败。另两条覆盖「有 live 条目时
+会扫」和「live 条目不在尾部时仍被丢弃、其后的 notice 保留」。
