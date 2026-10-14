@@ -658,10 +658,14 @@ async fn a_remote_base_url_without_a_key_fails_fast() {
     .await;
 
     assert_eq!(code, 2);
-    // ADR 0026 D2: the message names the file, shows the JSON to add and points at `/login`.
-    assert!(stderr.contains("credentials/auth.json"), "{stderr}");
-    assert!(stderr.contains("\"type\": \"api_key\""), "{stderr}");
+    // ADR 0026 D2/D3: the message names the fix — `agent login <provider>` (which writes
+    // `credentials/auth.json`) — and names the redacted endpoint.
+    assert!(stderr.contains("agent login openai-compatible"), "{stderr}");
     assert!(stderr.contains("/login"), "{stderr}");
+    assert!(stderr.contains("https://api.example.com/v1"), "{stderr}");
+    // The message must not suggest a placeholder key value or embed a JSON template with a
+    // key slot any more: `/login` asks for the key without echoing it.
+    assert!(!stderr.contains("MY_KEY"), "{stderr}");
     // No network round trip was attempted.
     assert!(
         start.elapsed() < Duration::from_secs(2),
@@ -6178,4 +6182,146 @@ async fn the_startup_line_says_ask_user_is_off() {
         "agent must not advertise ask_user: {}",
         requests[0].body
     );
+}
+
+// ---------- named providers (ADR 0026 D10) ----------
+
+/// Writes an `auth.json` whose entries are **named providers**: each name carries its own
+/// key and its own endpoint in `env` (ADR 0026 D10).
+fn write_named_auth_json(root: &Path, entries: &[(&str, &str, &str)]) {
+    let dir = root.join("credentials");
+    std::fs::create_dir_all(&dir).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut map = serde_json::Map::new();
+    for (name, key, base_url) in entries {
+        map.insert(
+            (*name).to_string(),
+            serde_json::json!({
+                "type": "api_key",
+                "key": key,
+                "env": { "RADIAN_BASE_URL": base_url, "RADIAN_KIND": "openai-compatible" }
+            }),
+        );
+    }
+    let path = dir.join("auth.json");
+    std::fs::write(&path, serde_json::to_string(&map).unwrap()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+/// Two custom endpoints, two keys: each named provider starts against its own mock server and
+/// sends **its own** key (D10's whole point — the slots are no longer shared). And when the
+/// config also declares the same name, the config wins with a one-line warning.
+#[tokio::test]
+async fn named_providers_keep_separate_keys_and_config_wins_over_auth() {
+    // Two replies each: the third sub-test reuses the mocks (the config-wins run).
+    let corp = MockServer::start(vec![text_reply("CORP"), text_reply("CORP")]).await;
+    let relay = MockServer::start(vec![text_reply("RELAY"), text_reply("RELAY")]).await;
+    let home = fresh_session_dir();
+    write_named_auth_json(
+        &home,
+        &[
+            ("corp", "sk-corp-111", &corp.base_url),
+            ("relay", "sk-relay-222", &relay.base_url),
+        ],
+    );
+    let envs = |extra: &[(&str, &str)]| {
+        let mut all: Vec<(String, String)> = vec![
+            ("RADIAN_HOME".into(), home.to_string_lossy().into_owned()),
+            (
+                "RADIAN_SESSION_DIR".into(),
+                fresh_session_dir().to_string_lossy().into_owned(),
+            ),
+            (
+                "HOME".into(),
+                fresh_session_dir().to_string_lossy().into_owned(),
+            ),
+            (
+                "RADIAN_CATALOG_URL".into(),
+                "http://127.0.0.1:1/api.json".to_string(),
+            ),
+        ];
+        all.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+        all
+    };
+
+    // `corp` talks to its own endpoint with its own key.
+    let child = spawn_agent_raw(
+        &["--provider", "corp", "--model", "m-1", "-p", "hi"],
+        &envs(&[]),
+    );
+    let (code, stdout, stderr) = feed_and_wait(child, "").await;
+    assert_eq!(code, 0, "{stdout}\n{stderr}");
+    assert_eq!(stdout, "CORP\n");
+    let requests = corp.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some("Bearer sk-corp-111"),
+        "corp must send its own key"
+    );
+    assert_eq!(relay.requests().len(), 0, "relay is untouched");
+
+    // `relay` likewise, and `corp` still sees exactly one request.
+    let child = spawn_agent_raw(
+        &["--provider", "relay", "--model", "m-1", "-p", "hi"],
+        &envs(&[]),
+    );
+    let (code, stdout, stderr) = feed_and_wait(child, "").await;
+    assert_eq!(code, 0, "{stdout}\n{stderr}");
+    assert_eq!(stdout, "RELAY\n");
+    let requests = relay.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some("Bearer sk-relay-222"),
+        "relay must send its own key"
+    );
+    assert_eq!(corp.requests().len(), 1, "relay ran, corp did not");
+
+    // The config's `[providers.corp]` wins over the auth.json entry of the same name, with a
+    // warning naming the conflict (D10). The config points `corp` at the *relay* mock.
+    let config_dir = home.join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config = config_dir.join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "schema_version = 1\n[model]\nprovider = \"corp\"\nmodel = \"m-1\"\n\
+             [providers.corp]\nkind = \"openai-compatible\"\nbase_url = \"{}\"\n",
+            relay.base_url
+        ),
+    )
+    .unwrap();
+    let child = spawn_agent_raw(&["--model", "m-1", "-p", "hi"], &envs(&[]));
+    let (code, stdout, stderr) = feed_and_wait(child, "").await;
+    assert_eq!(code, 0, "{stdout}\n{stderr}");
+    assert_eq!(stdout, "RELAY\n", "the config's base_url won");
+    assert!(
+        stderr.contains("[provider]"),
+        "the conflict must warn once: {stderr}"
+    );
+    assert!(stderr.contains("corp"), "{stderr}");
+}
+
+/// A `spawn_agent` that takes the environment verbatim (the helper above derives it from key
+/// env vars; named providers carry their own in `auth.json`).
+fn spawn_agent_raw(args: &[&str], envs: &[(String, String)]) -> Child {
+    Command::new(agent_bin())
+        .args(args)
+        .env_remove("OPENAI_API_KEY")
+        .envs(envs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn agent")
 }

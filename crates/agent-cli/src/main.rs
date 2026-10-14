@@ -679,25 +679,26 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         ),
         _ => None,
     };
-    // ADR 0026 D0: `--provider`/config `model.provider` names a descriptor. The generic
-    // `openai-compatible` descriptor is the default (the pre-D0 behaviour); the model is
-    // never defaulted.
-    let provider_id = cli
+    // ADR 0026 D0/D10: `--provider`/config `model.provider` names a provider — a built-in
+    // descriptor or a named one (`[providers.<name>]`, or the auth.json entry's `env`). The
+    // key is looked up under the **name** (D10), so every custom endpoint has its own slot.
+    let provider_name = cli
         .provider
         .clone()
         .or_else(|| config.model.provider.clone())
         .unwrap_or_else(|| radian_host::GENERIC_ID.to_owned());
-    let descriptor = radian_host::descriptor(&provider_id).ok_or_else(|| {
-        SetupError(format!(
-            "unknown provider {provider_id:?}: choose one of {}",
-            radian_host::descriptors()
-                .iter()
-                .map(|entry| entry.id)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))
-    })?;
-    let provider = descriptor.protocol_for(&model_name).adapter();
+    let auth_store = radian_host::AuthStore::open().map_err(|e| SetupError(e.to_string()))?;
+    let (provider_ref, provider_warning) = radian_host::resolve_provider(
+        &provider_name,
+        &config.providers,
+        auth_store.entry_env(&provider_name).as_ref(),
+    )
+    .map_err(SetupError)?;
+    if let Some(warning) = &provider_warning {
+        eprintln!("[provider] {warning}");
+    }
+    let key_id = provider_ref.key_id().to_owned();
+    let provider = provider_ref.protocol_for(&model_name).adapter();
     let base_url_override = cli
         .base_url
         .clone()
@@ -710,25 +711,24 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     // be ignored, so this is a usage error before the session file exists (dogfooding D15).
     check_provider_flags(provider, thinking, cli.max_tokens).map_err(SetupError)?;
     // The endpoint this run would talk to, before the session id (for the local-endpoint check).
-    let probe_base_url = descriptor
-        .model(&model_name)
-        .map(|entry| entry.base_url.to_owned())
-        .or_else(|| base_url_override.clone())
-        .unwrap_or_else(|| descriptor.default_base_url.to_owned());
+    let probe_base_url = if provider_ref.takes_base_url_override() {
+        base_url_override.clone()
+    } else {
+        None
+    }
+    .unwrap_or_else(|| provider_ref.base_url_for(&model_name, None));
     // ADR 0026 D2: the key comes only from `auth.json`. A missing entry is a refusal unless the
-    // endpoint is local (a local server needs no key), with the JSON to add.
+    // endpoint is local (a local server needs no key).
     let credential =
-        radian_host::auth::resolve_key(&provider_id).map_err(|e| SetupError(e.to_string()))?;
+        radian_host::resolve_key(&key_id).map_err(|e| SetupError(e.to_string()))?;
     if credential.is_none() && !is_local_base_url(&probe_base_url) {
-        let message = match radian_host::auth::resolve_note(&provider_id)
+        let message = match radian_host::resolve_note(&key_id)
             .map_err(|e| SetupError(e.to_string()))?
         {
             Some(note) => note,
             None => format!(
-                "no credential for `{provider_id}`: add an entry to \
-                     ~/.radian/credentials/auth.json, e.g.\n  {{\"{provider_id}\": {{\"type\": \
-                     \"api_key\", \"key\": \"$MY_KEY\"}}}}\n(or use `/login {provider_id}` in the next \
-                     release); refusing to continue because {} is not a local address",
+                "no credential for `{key_id}`: run `agent login {key_id}` (or `/login {key_id}` \
+                 in the TUI); refusing to continue because {} is not a local address",
                 radian_host::redact_base_url(&probe_base_url)
             ),
         };
@@ -764,10 +764,9 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         // reusable across processes.
         eprintln!("[session] {session_id} (pass --session-id to reuse it)");
     }
-    // ADR 0026 D0: the descriptor decides the adapter, base URL and headers. `resolve_route`
-    // refuses `--base-url`/`--header` for a non-generic descriptor.
-    let route = radian_host::resolve_route(
-        &provider_id,
+    // ADR 0026 D0/D10: the provider decides the adapter, base URL and headers.
+    let route = radian_host::resolve_route_for(
+        &provider_ref,
         &model_name,
         base_url_override.as_deref(),
         credential
