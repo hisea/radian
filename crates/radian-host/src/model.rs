@@ -389,7 +389,7 @@ pub struct SwitchableModel {
     slot: Arc<ConfigSlot>,
     initial_route: ModelRoute,
     ctx: RouteContext,
-    cache: std::sync::Mutex<HashMap<ModelRoute, Arc<HostModel>>>,
+    cache: std::sync::Mutex<HashMap<String, Arc<HostModel>>>,
 }
 
 impl SwitchableModel {
@@ -400,8 +400,10 @@ impl SwitchableModel {
         slot: Arc<ConfigSlot>,
         ctx: RouteContext,
     ) -> Self {
-        let cache =
-            std::sync::Mutex::new(HashMap::from([(initial_route.clone(), Arc::new(initial))]));
+        let cache = std::sync::Mutex::new(HashMap::from([(
+            Self::cache_key(&initial_route, &ctx.thinking),
+            Arc::new(initial),
+        )]));
         Self {
             slot,
             initial_route,
@@ -410,22 +412,44 @@ impl SwitchableModel {
         }
     }
 
+    /// The cache key: the route **and** the thinking level in force (ADR 0026 D11) — a
+    /// `/thinking` change must rebuild the model even though the route is unchanged.
+    fn cache_key(route: &ModelRoute, thinking: &str) -> String {
+        format!("{}/{model}#{thinking}", route.provider, model = route.model)
+    }
+
     /// The route in force right now: the slot's model change, else the startup route.
     pub fn current_route(&self) -> ModelRoute {
         ModelRoute::from_value(&self.slot.value()).unwrap_or_else(|| self.initial_route.clone())
     }
 
-    /// The model for the current route, built and cached on first use. The `Arc` comes out of
-    /// the lock, so the lock is never held across the request.
+    /// The thinking level in force: the slot's `thinking` change (D11), else the startup one.
+    pub fn current_thinking(&self) -> String {
+        self.slot
+            .value()
+            .get("thinking")
+            .and_then(|level| level.as_str())
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.ctx.thinking.clone())
+    }
+
+    /// The model for the current route and thinking, built and cached on first use. The `Arc`
+    /// comes out of the lock, so the lock is never held across the request.
     fn current(&self) -> Result<Arc<HostModel>, String> {
         let route = self.current_route();
+        let thinking = self.current_thinking();
+        let key = Self::cache_key(&route, &thinking);
         let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(model) = cache.get(&route) {
+        if let Some(model) = cache.get(&key) {
             return Ok(model.clone());
         }
-        let args = self.ctx.args_for(&route.provider, &route.model)?;
+        let ctx = RouteContext {
+            thinking: thinking.clone(),
+            ..self.ctx.clone()
+        };
+        let args = ctx.args_for(&route.provider, &route.model)?;
         let model = build_model(args).map(Arc::new)?;
-        cache.insert(route, model.clone());
+        cache.insert(key, model.clone());
         Ok(model)
     }
 }

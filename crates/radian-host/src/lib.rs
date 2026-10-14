@@ -63,6 +63,7 @@ pub use mcp::load_mcp_config;
 pub use model::{
     DEFAULT_MAX_TOKENS, HostModel, MIN_THINKING_BUDGET, ModelArgs, Provider, RouteContext,
     SwitchableModel, Thinking, build_model, check_provider_flags, redact_base_url,
+    resolve_thinking,
 };
 pub use output::{StdoutError, write_line, write_stdout};
 pub use pending::{
