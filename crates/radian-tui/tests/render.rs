@@ -5,8 +5,10 @@ use agent_core::{AgentEvent, ContentPart, Message, ToolCall, ToolResult};
 use radian_coding::QuestionKind;
 use radian_host::{PendingRequest, PendingView};
 use radian_tui::app::{App, Entry, EntryKind};
+use radian_tui::blocks::ReasoningMode;
 use radian_tui::projection::StreamKind;
 use radian_tui::render;
+use radian_tui::tools::DisplayModes;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::style::Color;
@@ -475,25 +477,18 @@ fn the_box_input_style_draws_the_bordered_box() {
 /// own foreground (the patch only adds the background).
 #[test]
 fn a_selection_draws_the_selection_role_on_its_cells() {
-    use radian_tui::blocks::ReasoningMode;
     use radian_tui::select::{Selection, locate};
     let mut app = App::new("m", "s");
     app.push_message(&Message::user("hello selection"));
     app.set_transcript_width(40);
-    let (total, _) = radian_tui::render::visible_lines(
-        &mut app.entries,
-        ReasoningMode::Expanded,
-        40,
-        0,
-        0,
-        &app.theme,
-    );
+    let (total, _) =
+        radian_tui::render::visible_lines(&mut app.entries, EXPANDED, 40, 0, 0, &app.theme);
     app.set_viewport(u16::try_from(total).unwrap(), total);
     // Select "selection" on the block's text line (a user block is pad / text / pad): body
     // columns 6..15 → screen columns 8..17.
     let selection = Selection {
-        anchor: locate(&app.entries, ReasoningMode::Expanded, 40, 1, 8).expect("anchor"),
-        head: locate(&app.entries, ReasoningMode::Expanded, 40, 1, 17).expect("head"),
+        anchor: locate(&app.entries, EXPANDED, 40, 1, 8).expect("anchor"),
+        head: locate(&app.entries, EXPANDED, 40, 1, 17).expect("head"),
     };
     app.selection = Some(selection);
     let terminal = render(&mut app, 40, 6);
@@ -517,24 +512,17 @@ fn a_selection_draws_the_selection_role_on_its_cells() {
 /// The `mono` theme's selection is reverse video, never a color (`NO_COLOR` and `mono`).
 #[test]
 fn the_mono_selection_is_reversed_not_colored() {
-    use radian_tui::blocks::ReasoningMode;
     use radian_tui::select::{Selection, locate};
     let mut app = App::new("m", "s");
     app.theme = radian_tui::theme::Theme::mono();
     app.push_message(&Message::user("hello selection"));
     app.set_transcript_width(40);
-    let (total, _) = radian_tui::render::visible_lines(
-        &mut app.entries,
-        ReasoningMode::Expanded,
-        40,
-        0,
-        0,
-        &app.theme,
-    );
+    let (total, _) =
+        radian_tui::render::visible_lines(&mut app.entries, EXPANDED, 40, 0, 0, &app.theme);
     app.set_viewport(u16::try_from(total).unwrap(), total);
     app.selection = Some(Selection {
-        anchor: locate(&app.entries, ReasoningMode::Expanded, 40, 1, 8).expect("anchor"),
-        head: locate(&app.entries, ReasoningMode::Expanded, 40, 1, 17).expect("head"),
+        anchor: locate(&app.entries, EXPANDED, 40, 1, 8).expect("anchor"),
+        head: locate(&app.entries, EXPANDED, 40, 1, 17).expect("head"),
     });
     let terminal = render(&mut app, 40, 6);
     let word = style_of(&terminal, "selection").expect("on screen");
@@ -548,21 +536,14 @@ fn the_mono_selection_is_reversed_not_colored() {
 /// A single click's empty selection draws nothing anywhere.
 #[test]
 fn an_empty_selection_draws_nothing() {
-    use radian_tui::blocks::ReasoningMode;
     use radian_tui::select::{Selection, locate};
     let mut app = App::new("m", "s");
     app.push_message(&Message::user("hello selection"));
     app.set_transcript_width(40);
-    let (total, _) = radian_tui::render::visible_lines(
-        &mut app.entries,
-        ReasoningMode::Expanded,
-        40,
-        0,
-        0,
-        &app.theme,
-    );
+    let (total, _) =
+        radian_tui::render::visible_lines(&mut app.entries, EXPANDED, 40, 0, 0, &app.theme);
     app.set_viewport(u16::try_from(total).unwrap(), total);
-    let at = locate(&app.entries, ReasoningMode::Expanded, 40, 1, 8).expect("anchor");
+    let at = locate(&app.entries, EXPANDED, 40, 1, 8).expect("anchor");
     app.selection = Some(Selection {
         anchor: at,
         head: at,
@@ -923,6 +904,17 @@ fn the_login_wizard_uses_the_text_hierarchy() {
         "the selected row is the emphasis"
     );
 }
+
+/// The display modes most tests lay out with: both folds expanded, so a test's geometry does
+/// not depend on the fold defaults.
+#[allow(dead_code)]
+const EXPANDED: DisplayModes = DisplayModes {
+    reasoning: ReasoningMode::Expanded,
+    tools: radian_tui::tools::ToolDisplay {
+        fold: radian_tui::tools::ToolFold::Expanded,
+        preview_lines: 5,
+    },
+};
 
 /// The question form's key line stays visible when the option list fills the box (same bug the
 /// approval box had: the hint used to be the content's last line, and the clip cut it).

@@ -1,0 +1,14 @@
+# ADR 0028 R3/R4:`[tui.display]` 是展示偏好。`reasoning` = collapsed(默认)|expanded|hidden;
+# `tool_output` = collapsed|expanded|errors(默认);`tool_preview_lines` 是折叠时正文的预览行数(默认 5)。
+# 未知值/未知键是启动警告,不是拒绝(展示偏好从不拒绝文件)。
+schema_version = 1
+
+[model]
+provider = "openai-compatible"
+base_url = "https://example.com/v1"
+model = "m-1"
+
+[tui.display]
+reasoning = "collapsed"
+tool_output = "errors"
+tool_preview_lines = 8

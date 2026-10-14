@@ -9,6 +9,7 @@ use radian_permissions::ApprovalRequest;
 use radian_tui::app::{AUTO_SCROLL_TICK, App, Effect, Input, UpdateResult};
 use radian_tui::blocks::ReasoningMode;
 use radian_tui::clip::MAX_CLIPBOARD_BYTES;
+use radian_tui::tools::DisplayModes;
 use serde_json::json;
 
 fn approval() -> PendingView<PendingRequest> {
@@ -199,6 +200,17 @@ fn with_mouse_off_the_whole_feature_is_gone() {
     assert!(release.effects.is_empty());
 }
 
+/// The display modes most tests lay out with: both folds expanded, so a test's geometry does
+/// not depend on the fold defaults.
+#[allow(dead_code)]
+const EXPANDED: DisplayModes = DisplayModes {
+    reasoning: ReasoningMode::Expanded,
+    tools: radian_tui::tools::ToolDisplay {
+        fold: radian_tui::tools::ToolFold::Expanded,
+        preview_lines: 5,
+    },
+};
+
 #[test]
 fn clipboard_config_selects_the_transport_and_pbcopy_falls_back_off_macos() {
     let mut app = app();
@@ -235,14 +247,8 @@ fn an_oversized_selection_is_refused_with_the_reason() {
     app.entries.clear();
     app.push_message(&Message::assistant("z".repeat(MAX_CLIPBOARD_BYTES + 1)));
     app.set_transcript_width(30);
-    let (total, _) = radian_tui::render::visible_lines(
-        &mut app.entries,
-        ReasoningMode::Expanded,
-        30,
-        0,
-        0,
-        &app.theme,
-    );
+    let (total, _) =
+        radian_tui::render::visible_lines(&mut app.entries, EXPANDED, 30, 0, 0, &app.theme);
     app.set_viewport(1, total);
     app.scroll = 0;
     app.follow = false;

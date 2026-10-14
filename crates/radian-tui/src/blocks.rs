@@ -14,6 +14,7 @@
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{Entry, EntryKind};
+use crate::tools::{self, DisplayModes};
 
 /// How the reasoning channel displays (ADR 0028 R3). The fold state is part of the block and
 /// layout cache keys: toggling it re-lays the affected entries out.
@@ -272,6 +273,11 @@ pub struct BodyLine {
     pub code: bool,
     /// This line is a padding row around a user block.
     pub pad: bool,
+    /// A tool body line from a "warning" channel (stderr, per the tool's own section
+    /// markers): the renderer styles it with the warning role.
+    pub warn: bool,
+    /// A synthesized tool hint (no source characters: it neither copies nor matches).
+    pub hint: bool,
 }
 
 impl BodyLine {
@@ -282,6 +288,8 @@ impl BodyLine {
             text,
             code: false,
             pad: false,
+            warn: false,
+            hint: false,
         }
     }
 
@@ -292,6 +300,8 @@ impl BodyLine {
             text: String::new(),
             code: false,
             pad: true,
+            warn: false,
+            hint: false,
         }
     }
 }
@@ -300,7 +310,8 @@ impl BodyLine {
 /// reasoning entry contributes zero). **Counts only**: no line is materialized, so the frame
 /// that measures every entry (the first one, or the first after a resize) does not allocate
 /// per entry — the virtualization budget (ADR 0028 R7) depends on this.
-pub fn line_count(entry: &Entry, mode: ReasoningMode, width: usize) -> usize {
+pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
+    let mode = modes.reasoning;
     if let Some(count) = cheap_count(entry, mode) {
         return count;
     }
@@ -323,7 +334,48 @@ pub fn line_count(entry: &Entry, mode: ReasoningMode, width: usize) -> usize {
                 } => code_line_count(&text[*start..*end], *closed),
             })
             .sum(),
+        // One header line, never wrapped (the same rule the layout uses).
+        EntryKind::ToolCall => 1,
+        EntryKind::ToolResult => {
+            let card = entry.tool.as_deref();
+            let plan = tool_plan(card, &text, entry.is_error, modes);
+            plan.iter()
+                .map(|line| match line {
+                    tools::BodyLine::Text { source, .. } => {
+                        crate::render::wrap_line_count(&text[source.clone()], body_width)
+                    }
+                    tools::BodyLine::Hint(_) => 1,
+                })
+                .sum()
+        }
         _ => crate::render::wrap_line_count(&text, body_width),
+    }
+}
+
+/// The tool body plan a layout would use (shared by the count-only and the laying-out paths,
+/// so they cannot disagree).
+fn tool_plan(
+    card: Option<&tools::ToolCard>,
+    text: &str,
+    is_error: bool,
+    modes: DisplayModes,
+) -> Vec<tools::BodyLine> {
+    match card {
+        Some(card) => tools::body_plan(
+            card,
+            text,
+            is_error,
+            modes.tools.fold,
+            modes.tools.preview_lines,
+        ),
+        // No card data: the raw text, always expanded (a renderer copes with "no card").
+        None => tools::body_plan(
+            &tools::ToolCard::new("", "", serde_json::Value::Null),
+            text,
+            is_error,
+            tools::ToolFold::Expanded,
+            0,
+        ),
     }
 }
 
@@ -350,9 +402,9 @@ fn code_line_count(raw: &str, closed: bool) -> usize {
 }
 
 /// The cached count (the renderer's per-frame path for **every** entry, on screen or not).
-pub fn line_count_cached(entry: &mut Entry, mode: ReasoningMode, width: usize) -> usize {
+pub fn line_count_cached(entry: &mut Entry, modes: DisplayModes, width: usize) -> usize {
     let text_len = entry.text.len();
-    let key = (width, text_len, mode);
+    let key = (width, text_len, modes);
     if let Some(lines) = entry
         .layout_cache
         .as_ref()
@@ -361,7 +413,7 @@ pub fn line_count_cached(entry: &mut Entry, mode: ReasoningMode, width: usize) -
     {
         return lines;
     }
-    let lines = line_count(entry, mode, width);
+    let lines = line_count(entry, modes, width);
     entry.layout_cache = Some((key, lines));
     lines
 }
@@ -414,7 +466,8 @@ pub(crate) fn parse_blocks_for(entry: &Entry, mode: ReasoningMode) -> Vec<Block>
 
 /// Lays the entry's body out at `width`. The renderer's spans and the selection's cell →
 /// offset mapping both read these lines.
-pub fn layout(entry: &Entry, blocks: &[Block], mode: ReasoningMode, width: usize) -> Vec<BodyLine> {
+pub fn layout(entry: &Entry, blocks: &[Block], modes: DisplayModes, width: usize) -> Vec<BodyLine> {
+    let mode = modes.reasoning;
     let prefix = crate::render::marker_prefix(entry.kind).width();
     let body_width = width.saturating_sub(prefix).max(1);
     let text = crate::render::display_text(entry);
@@ -446,8 +499,83 @@ pub fn layout(entry: &Entry, blocks: &[Block], mode: ReasoningMode, width: usize
             }
             lines
         }
+        (EntryKind::ToolCall, _) => {
+            // One header line, laid out like a code line: never wrapped, truncated with `…`
+            // when it does not fit. The entry's text **is** this header (set at push time
+            // from the same function), so the characters map back and copy correctly.
+            tool_line(&text, width)
+        }
+        (EntryKind::ToolResult, _) => {
+            let card = entry.tool.as_deref();
+            let plan = match card {
+                Some(card) => tools::body_plan(
+                    card,
+                    &text,
+                    entry.is_error,
+                    modes.tools.fold,
+                    modes.tools.preview_lines,
+                ),
+                // No card data (an older entry, or a shape the TUI did not model): the raw
+                // text, always expanded — a renderer must cope with "no card".
+                None => tools::body_plan(
+                    &tools::ToolCard::new("", "", serde_json::Value::Null),
+                    &text,
+                    entry.is_error,
+                    tools::ToolFold::Expanded,
+                    0,
+                ),
+            };
+            body_plan_lines(&plan, &text, body_width)
+        }
         _ => prose_lines(&text, body_width),
     }
+}
+
+/// One tool header line: the same fit rule as a code line (a line exactly `width` wide shows
+/// in full; anything wider is cut and gets `…`), with the characters mapped to the entry's
+/// text so selection and copy work on it.
+fn tool_line(text: &str, width: usize) -> Vec<BodyLine> {
+    let (rendered, kept, cut) = crate::blocks::code_line_layout(text, width);
+    let mut chars: Vec<usize> = kept;
+    if cut && let Some(&last) = chars.last() {
+        chars.push(last);
+    }
+    vec![BodyLine {
+        chars,
+        end: text.len(),
+        text: rendered,
+        code: false,
+        pad: false,
+        warn: false,
+        hint: false,
+    }]
+}
+
+/// Turns a tool body plan into laid-out lines: a text line wraps like prose at the body width
+/// (its characters keep their source offsets), a hint is one synthesized line.
+fn body_plan_lines(plan: &[tools::BodyLine], text: &str, body_width: usize) -> Vec<BodyLine> {
+    let mut out = Vec::new();
+    for line in plan {
+        match line {
+            tools::BodyLine::Text { source, warn } => {
+                let slice = text.get(source.clone()).unwrap_or("");
+                for mut laid in prose_lines(slice, body_width) {
+                    laid.warn = *warn;
+                    out.push(laid);
+                }
+            }
+            tools::BodyLine::Hint(hint) => out.push(BodyLine {
+                chars: Vec::new(),
+                end: 0,
+                text: hint.clone(),
+                code: false,
+                pad: false,
+                warn: false,
+                hint: true,
+            }),
+        }
+    }
+    out
 }
 
 /// Wraps prose into body lines (the [`crate::render::wrap_char_offsets`] view).
@@ -580,7 +708,8 @@ fn code_text_lines(raw: &str, closed: bool, width: usize) -> Vec<String> {
 /// The entry's **text** lines only (no per-char offsets): what the search matches against and
 /// what the renderer shows. Cheaper than [`layout`] because it never builds the selection
 /// mapping, and it takes the same branch structure so the two cannot disagree.
-pub fn body_text_lines(entry: &Entry, mode: ReasoningMode, width: usize) -> Vec<String> {
+pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<String> {
+    let mode = modes.reasoning;
     let prefix = crate::render::marker_prefix(entry.kind).width();
     let body_width = width.saturating_sub(prefix).max(1);
     let text = crate::render::display_text(entry);
@@ -608,6 +737,22 @@ pub fn body_text_lines(entry: &Entry, mode: ReasoningMode, width: usize) -> Vec<
                 }
             }
             lines
+        }
+        (EntryKind::ToolCall, _) => {
+            vec![code_line_layout(&text, width).0]
+        }
+        (EntryKind::ToolResult, _) => {
+            let plan = tool_plan(entry.tool.as_deref(), &text, entry.is_error, modes);
+            let mut out = Vec::new();
+            for line in &plan {
+                match line {
+                    tools::BodyLine::Text { source, .. } => {
+                        out.extend(crate::render::wrap(&text[source.clone()], body_width));
+                    }
+                    tools::BodyLine::Hint(hint) => out.push(hint.clone()),
+                }
+            }
+            out
         }
         _ => crate::render::wrap(&text, body_width),
     }
@@ -655,6 +800,8 @@ fn code_lines(raw: &str, offset: usize, closed: bool, width: usize) -> Vec<BodyL
             text,
             code: true,
             pad: false,
+            warn: false,
+            hint: false,
         });
     }
     if out.is_empty() {
@@ -665,6 +812,8 @@ fn code_lines(raw: &str, offset: usize, closed: bool, width: usize) -> Vec<BodyL
             text: String::new(),
             code: true,
             pad: false,
+            warn: false,
+            hint: false,
         });
     }
     out
@@ -688,6 +837,24 @@ fn fence_run(trimmed: &str) -> Option<char> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::{ToolDisplay, ToolFold};
+
+    /// Both folds expanded: a geometry test that does not want the fold defaults.
+    const EXPANDED: DisplayModes = DisplayModes {
+        reasoning: ReasoningMode::Expanded,
+        tools: ToolDisplay {
+            fold: ToolFold::Expanded,
+            preview_lines: 5,
+        },
+    };
+
+    /// The given reasoning mode with the tools expanded.
+    fn modes_with(reasoning: ReasoningMode) -> DisplayModes {
+        DisplayModes {
+            reasoning,
+            ..EXPANDED
+        }
+    }
 
     fn assistant(text: &str) -> Entry {
         Entry::new(EntryKind::Assistant, text)
@@ -765,7 +932,7 @@ mod tests {
     fn a_code_line_never_wraps_and_truncates_with_an_ellipsis() {
         let entry = assistant("```\nshort\nabc def gh ijk\n```");
         let blocks = parse_blocks(&entry.text);
-        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 10);
+        let lines = layout(&entry, &blocks, EXPANDED, 10);
         // Fence lines are markup: body = "short" / "abc def gh ijk" → two lines.
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].text, "short");
@@ -781,7 +948,7 @@ mod tests {
     fn tabs_expand_to_four_spaces_and_map_to_the_tab_offset() {
         let entry = assistant("```\na\tb\n```");
         let blocks = parse_blocks(&entry.text);
-        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 20);
+        let lines = layout(&entry, &blocks, EXPANDED, 20);
         assert_eq!(lines[0].text, "a    b");
         let base = entry.text.find('a').expect("the line is in the text");
         assert_eq!(
@@ -795,13 +962,13 @@ mod tests {
         // Exactly the width: it fits, so no ellipsis (the `…` costs a column).
         let entry = assistant(&format!("```\n{}\n```", "x".repeat(20)));
         let blocks = parse_blocks(&entry.text);
-        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 20);
+        let lines = layout(&entry, &blocks, EXPANDED, 20);
         assert_eq!(lines[0].text, "x".repeat(20));
         assert!(!lines[0].text.contains('…'));
         // One over: it does not fit; keep width-1 and mark the cut.
         let entry = assistant(&format!("```\n{}\n```", "x".repeat(21)));
         let blocks = parse_blocks(&entry.text);
-        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 20);
+        let lines = layout(&entry, &blocks, EXPANDED, 20);
         assert_eq!(lines[0].text, format!("{}…", "x".repeat(19)));
         // The mapping still reaches the source line's end either way (the offset is into the
         // entry text, which starts with the "```\n" fence line).
@@ -813,14 +980,14 @@ mod tests {
         // 6 columns at width 6: as-is.
         let entry = assistant("```\n日本語\n```");
         let blocks = parse_blocks(&entry.text);
-        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 6);
+        let lines = layout(&entry, &blocks, EXPANDED, 6);
         assert_eq!(lines[0].text, "日本語");
         // 6 columns at width 5: keep 4 columns (2 wide chars) and the ellipsis.
-        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 5);
+        let lines = layout(&entry, &blocks, EXPANDED, 5);
         assert_eq!(lines[0].text, "日本…");
         assert_eq!(lines[0].chars.len(), lines[0].text.chars().count());
         // 6 columns at width 7: as-is.
-        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 7);
+        let lines = layout(&entry, &blocks, EXPANDED, 7);
         assert_eq!(lines[0].text, "日本語");
     }
 
@@ -829,14 +996,14 @@ mod tests {
         let entry = assistant("```\n日本語テキスト\n```");
         let blocks = parse_blocks(&entry.text);
         // Width 7: 日(2)本(2)語(2) = 6, テ would exceed → cut after 語.
-        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 7);
+        let lines = layout(&entry, &blocks, EXPANDED, 7);
         assert_eq!(lines[0].text, "日本語…");
     }
 
     #[test]
     fn a_user_block_gets_padding_rows_and_they_map_to_gaps() {
         let entry = Entry::new(EntryKind::User, "hello");
-        let lines = layout(&entry, &[], ReasoningMode::Expanded, 30);
+        let lines = layout(&entry, &[], EXPANDED, 30);
         assert_eq!(lines.len(), 3);
         assert!(lines[0].pad && lines[2].pad);
         assert!(lines[0].chars.is_empty());
@@ -849,11 +1016,14 @@ mod tests {
     fn reasoning_modes_change_the_line_count() {
         let mut entry = Entry::new(EntryKind::Reasoning, "one\ntwo\nthree");
         entry.live = true;
-        assert_eq!(line_count(&entry, ReasoningMode::Collapsed, 40), 1);
-        assert_eq!(line_count(&entry, ReasoningMode::Hidden, 40), 0);
-        assert_eq!(line_count(&entry, ReasoningMode::Expanded, 40), 3);
+        assert_eq!(
+            line_count(&entry, modes_with(ReasoningMode::Collapsed), 40),
+            1
+        );
+        assert_eq!(line_count(&entry, modes_with(ReasoningMode::Hidden), 40), 0);
+        assert_eq!(line_count(&entry, EXPANDED, 40), 3);
         // The collapsed placeholder carries the spinner while streaming.
-        let lines = layout(&entry, &[], ReasoningMode::Collapsed, 40);
+        let lines = layout(&entry, &[], modes_with(ReasoningMode::Collapsed), 40);
         assert!(lines[0].text.contains("▸ thinking (3 lines)"));
         assert!(
             lines[0]
@@ -863,7 +1033,7 @@ mod tests {
                 .is_some_and(|c| SPINNER.contains(&c))
         );
         entry.live = false;
-        let lines = layout(&entry, &[], ReasoningMode::Collapsed, 40);
+        let lines = layout(&entry, &[], modes_with(ReasoningMode::Collapsed), 40);
         assert_eq!(lines[0].text, "▸ thinking (3 lines)");
     }
 }

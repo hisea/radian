@@ -4,6 +4,7 @@ use radian_permissions::ApprovalRequest;
 use radian_tui::app::{App, Entry, EntryKind, Input};
 use radian_tui::blocks::ReasoningMode;
 use radian_tui::render;
+use radian_tui::tools::DisplayModes;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -40,7 +41,7 @@ fn fill(app: &mut App, needle_entries: &[usize]) {
 fn entry_line(app: &App, entry: usize) -> usize {
     app.entries[..entry]
         .iter()
-        .map(|e| render::display_lines(e, ReasoningMode::Expanded, WIDTH).len())
+        .map(|e| render::display_lines(e, EXPANDED, WIDTH).len())
         .sum()
 }
 
@@ -313,3 +314,14 @@ fn the_matching_substring_is_reversed_in_the_rendered_line() {
             .all(|span| !span.style.add_modifier.contains(Modifier::REVERSED))
     );
 }
+
+/// The display modes most tests lay out with: both folds expanded, so a test's geometry does
+/// not depend on the fold defaults.
+#[allow(dead_code)]
+const EXPANDED: DisplayModes = DisplayModes {
+    reasoning: ReasoningMode::Expanded,
+    tools: radian_tui::tools::ToolDisplay {
+        fold: radian_tui::tools::ToolFold::Expanded,
+        preview_lines: 5,
+    },
+};

@@ -23,6 +23,7 @@ pub mod select;
 pub mod signals;
 pub mod terminal;
 pub mod theme;
+pub mod tools;
 pub mod workspace;
 
 pub use app::{

@@ -15,10 +15,11 @@ use radian_permissions::ApprovalRequest;
 use crate::app::{
     App, Entry, EntryKind, Modal, TurnState, budget_status_text, mcp_text, usage_text,
 };
-use crate::blocks::{self, BodyLine, ReasoningMode};
+use crate::blocks::{self, BodyLine};
 use crate::login::LoginWizard;
 use crate::question::QuestionForm;
 use crate::theme::Theme;
+use crate::tools::DisplayModes;
 
 /// One wrapped line as [`wrap_char_offsets`] sees it: the chars on the line (as byte offsets
 /// into the wrapped text, each on a char boundary) and the **gap** just after the line.
@@ -254,22 +255,22 @@ pub(crate) fn display_text(entry: &Entry) -> Cow<'_, str> {
 /// attachment is shown and searched as its `[file: path, N lines]` line, never as the hidden
 /// content. Padding rows (a user block's blank rows) come through as empty lines: they occupy
 /// transcript lines and occupy space in the geometry, they just never match a query.
-pub fn display_lines(entry: &Entry, mode: ReasoningMode, width: usize) -> Vec<String> {
-    blocks::body_text_lines(entry, mode, width)
+pub fn display_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<String> {
+    blocks::body_text_lines(entry, modes, width)
 }
 
 /// One entry's styled lines (ADR 0028 R1: the block layout, styled). An interrupted
 /// assistant entry gets an explicit marker on its last line.
 fn entry_lines(
     entry: &Entry,
-    mode: ReasoningMode,
+    modes: DisplayModes,
     width: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     let (prefix, prefix_style) = marker(entry.kind, theme);
     let band = card_band(entry, theme);
-    let blocks = blocks::parse_blocks_for(entry, mode);
-    let body = blocks::layout(entry, &blocks, mode, width);
+    let blocks = blocks::parse_blocks_for(entry, modes.reasoning);
+    let body = blocks::layout(entry, &blocks, modes, width);
     let style = body_style(entry, theme);
     let text_rows: Vec<usize> = body
         .iter()
@@ -411,8 +412,8 @@ fn render_row(
 
 /// How many lines `entry` lays out to at `width`, from its cache when the entry has not
 /// changed since it was last measured.
-fn entry_line_count(entry: &mut Entry, mode: ReasoningMode, width: usize) -> usize {
-    blocks::line_count_cached(entry, mode, width)
+fn entry_line_count(entry: &mut Entry, modes: DisplayModes, width: usize) -> usize {
+    blocks::line_count_cached(entry, modes, width)
 }
 
 /// Lays the whole transcript out into styled lines. The frame does not use this (it lays out
@@ -420,13 +421,13 @@ fn entry_line_count(entry: &mut Entry, mode: ReasoningMode, width: usize) -> usi
 /// is tested against.
 pub fn transcript_lines(
     entries: &[Entry],
-    mode: ReasoningMode,
+    modes: DisplayModes,
     width: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     entries
         .iter()
-        .flat_map(|entry| entry_lines(entry, mode, width, theme))
+        .flat_map(|entry| entry_lines(entry, modes, width, theme))
         .collect()
 }
 
@@ -436,7 +437,7 @@ pub fn transcript_lines(
 /// instead of re-laying out every entry.
 pub fn visible_lines(
     entries: &mut [Entry],
-    mode: ReasoningMode,
+    modes: DisplayModes,
     width: usize,
     start: usize,
     height: usize,
@@ -444,7 +445,7 @@ pub fn visible_lines(
 ) -> (usize, Vec<Line<'static>>) {
     let counts: Vec<usize> = entries
         .iter_mut()
-        .map(|entry| entry_line_count(entry, mode, width))
+        .map(|entry| entry_line_count(entry, modes, width))
         .collect();
     let total: usize = counts.iter().sum();
     let mut out = Vec::with_capacity(height);
@@ -456,8 +457,8 @@ pub fn visible_lines(
         let next = line + count;
         if next > start {
             let skip = start.saturating_sub(line);
-            let blocks = blocks::blocks_for(entry, mode);
-            let body = blocks::layout(entry, &blocks, mode, width);
+            let blocks = blocks::blocks_for(entry, modes.reasoning);
+            let body = blocks::layout(entry, &blocks, modes, width);
             let prefix = marker_prefix(entry.kind);
             let prefix_style = marker(entry.kind, theme).1;
             let style = body_style(entry, theme);
@@ -1020,16 +1021,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let theme = app.theme.clone();
     // The find matcher wraps at the same width; a resize recomputes it (once, not per frame).
     app.set_transcript_width(width);
-    let (total, _) = visible_lines(&mut app.entries, app.reasoning_mode, width, 0, 0, &theme);
+    let modes = app.display_modes();
+    let (total, _) = visible_lines(&mut app.entries, modes, width, 0, 0, &theme);
     app.set_viewport(chunks[0].height, total);
-    let (_, visible) = visible_lines(
-        &mut app.entries,
-        app.reasoning_mode,
-        width,
-        app.scroll,
-        height,
-        &theme,
-    );
+    let (_, visible) = visible_lines(&mut app.entries, modes, width, app.scroll, height, &theme);
     let visible = match app.find_state() {
         Some(find) => visible
             .into_iter()
@@ -1044,7 +1039,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(selection) => {
             let ranges = crate::select::highlight_rows(
                 &app.entries,
-                app.reasoning_mode,
+                modes,
                 width,
                 app.scroll,
                 visible.len(),

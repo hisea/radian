@@ -53,6 +53,8 @@ pub enum Action {
     FindClose,
     /// Collapse or expand the reasoning blocks (ADR 0028 R3, pi's Ctrl-T).
     ToggleReasoning,
+    /// Collapse or expand the tool card bodies (ADR 0028 R4, pi's Ctrl-O).
+    ToggleToolOutput,
     /// The question form (ADR 0024 Q7): the next question, or the overview from the last one.
     FormNext,
     /// The previous question.
@@ -117,6 +119,7 @@ impl Action {
             Action::FindNext => "find_next",
             Action::FindClose => "find_close",
             Action::ToggleReasoning => "toggle_reasoning",
+            Action::ToggleToolOutput => "toggle_tool_output",
             Action::FormNext => "form_next",
             Action::FormPrev => "form_prev",
             Action::FormUp => "form_up",
@@ -188,6 +191,7 @@ const DEFAULT_BINDINGS: &[(&str, Action)] = &[
     ("form_submit", Action::FormSubmit),
     ("form_decline", Action::FormDecline),
     ("toggle_reasoning", Action::ToggleReasoning),
+    ("toggle_tool_output", Action::ToggleToolOutput),
 ];
 
 /// The default key strings per action.
@@ -218,6 +222,7 @@ const DEFAULT_KEYS: &[(&str, &[&str])] = &[
     ("complete", &["tab"]),
     ("find", &["ctrl-f"]),
     ("toggle_reasoning", &["ctrl-t"]),
+    ("toggle_tool_output", &["ctrl-o"]),
 ];
 
 /// The find box's default keys. These are looked up before the transcript layer while the box

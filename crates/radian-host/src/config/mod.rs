@@ -259,6 +259,13 @@ pub struct TuiConfig {
     /// `tui.display.reasoning`: `"collapsed"` (the default), `"expanded"` or `"hidden"`
     /// (ADR 0028 R3). `None` means the default; an unknown value is ignored with a warning.
     pub display_reasoning: Option<String>,
+    /// `tui.display.tool_output`: `"collapsed"`, `"expanded"` or `"errors"` (the default,
+    /// ADR 0028 R4). `None` means the default; an unknown value is ignored with a warning.
+    pub display_tool_output: Option<String>,
+    /// `tui.display.tool_preview_lines`: how many body lines a collapsed tool card shows
+    /// (default 5). `None` means the default; a non-positive or non-integer value is skipped
+    /// with a warning.
+    pub display_tool_preview_lines: Option<u64>,
 }
 
 /// One parsed configuration file.
@@ -697,6 +704,14 @@ fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
                             if matches!(mode.as_str(), "collapsed" | "expanded" | "hidden") =>
                         {
                             config.tui.display_reasoning = Some(mode.clone());
+                        }
+                        ("tool_output", Value::String(mode))
+                            if matches!(mode.as_str(), "collapsed" | "expanded" | "errors") =>
+                        {
+                            config.tui.display_tool_output = Some(mode.clone());
+                        }
+                        ("tool_preview_lines", Value::Integer(lines)) if *lines > 0 => {
+                            config.tui.display_tool_preview_lines = Some(*lines as u64);
                         }
                         // A display preference: skip the key with a warning, never refuse the
                         // file. The TUI keeps its default.

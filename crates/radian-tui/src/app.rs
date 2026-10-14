@@ -67,13 +67,17 @@ pub struct Entry {
     /// A tool call's outcome, once its result has arrived: `None` while it is running,
     /// `Some(is_error)` after. The card's background follows it (ADR 0028 R4's states).
     pub result: Option<bool>,
+    /// The card's data (ADR 0028 R4): the tool name, the argument JSON, the structured result
+    /// and (no producer yet) the duration. `None` for every non-tool entry, and for a tool
+    /// entry whose message carried nothing to model.
+    pub tool: Option<Box<crate::tools::ToolCard>>,
     /// The parsed blocks (ADR 0028 R1), keyed by text length and the reasoning mode. Only
     /// filled for assistant prose (the only kind with fence grammar today).
     pub(crate) block_cache: Option<((usize, ReasoningMode), Vec<Block>)>,
     /// How many lines this entry laid out to, for the width, text length and mode it was
     /// last measured at. The renderer keeps it so a frame only re-lays out entries that
     /// changed or are on screen.
-    pub(crate) layout_cache: Option<((usize, usize, ReasoningMode), usize)>,
+    pub(crate) layout_cache: Option<((usize, usize, crate::tools::DisplayModes), usize)>,
 }
 
 impl Entry {
@@ -85,6 +89,7 @@ impl Entry {
             interrupted: false,
             is_error: false,
             result: None,
+            tool: None,
             block_cache: None,
             layout_cache: None,
         }
@@ -778,6 +783,9 @@ pub struct App {
     /// How the reasoning channel displays (ADR 0028 R3, `tui.display.reasoning`). Part of
     /// the block/layout cache keys: toggling re-lays the reasoning entries out.
     pub reasoning_mode: ReasoningMode,
+    /// How tool card bodies fold (ADR 0028 R4, `tui.display.tool_output` +
+    /// `tool_preview_lines`). Also part of the layout cache keys.
+    pub tool_display: crate::tools::ToolDisplay,
 }
 
 impl App {
@@ -822,6 +830,7 @@ impl App {
             clipboard: ClipboardMode::Osc52,
             // ADR 0028 R3's default: thinking collapsed to one line.
             reasoning_mode: ReasoningMode::Collapsed,
+            tool_display: crate::tools::ToolDisplay::default(),
         }
     }
 
@@ -849,6 +858,15 @@ impl App {
     /// [`Startup::Session`].
     pub fn picking_resolved(&self) -> bool {
         self.picker_outcome.is_some()
+    }
+
+    /// The display modes a frame lays the transcript out with (ADR 0028 R1/R3/R4): the
+    /// reasoning fold and the tool fold together are the layout cache key.
+    pub fn display_modes(&self) -> crate::tools::DisplayModes {
+        crate::tools::DisplayModes {
+            reasoning: self.reasoning_mode,
+            tools: self.tool_display,
+        }
     }
 
     /// Records the effective input budget `B` (no budget is configured when this is `None`).
@@ -906,14 +924,28 @@ impl App {
             .as_deref()
             .and_then(InputStyle::parse)
             .unwrap_or_default();
-        // `tui.display.reasoning` (ADR 0028 R3, default collapsed). An unknown spelling
-        // never reaches here (the host reader skips it with a warning).
+        // `tui.display.reasoning` (ADR 0028 R3, default collapsed) and
+        // `tui.display.tool_output` + `tool_preview_lines` (R4, default errors / 5). An
+        // unknown spelling never reaches here (the host reader skips it with a warning).
         self.reasoning_mode = config
             .tui
             .display_reasoning
             .as_deref()
             .and_then(ReasoningMode::parse)
             .unwrap_or_default();
+        self.tool_display = crate::tools::ToolDisplay {
+            fold: config
+                .tui
+                .display_tool_output
+                .as_deref()
+                .and_then(crate::tools::ToolFold::parse)
+                .unwrap_or_default(),
+            preview_lines: config
+                .tui
+                .display_tool_preview_lines
+                .map(|lines| lines as usize)
+                .unwrap_or(5),
+        };
         // `tui.clipboard` (default OSC 52). An unknown spelling never reaches here (the host
         // config reader skips it with a warning); `pbcopy` off macOS does: warn once and fall
         // back, because the copy effect would have no program to run.
@@ -1055,7 +1087,7 @@ impl App {
         let press_line = self.scroll + row as usize;
         let Some(hit) = select::locate_hit(
             &self.entries,
-            self.reasoning_mode,
+            self.display_modes(),
             self.transcript_width,
             press_line,
             col as usize,
@@ -1070,7 +1102,7 @@ impl App {
         let (anchor, anchor_on_char) = match count {
             2 => match select::run_at(
                 &self.entries,
-                self.reasoning_mode,
+                self.display_modes(),
                 self.transcript_width,
                 press_line,
                 col as usize,
@@ -1241,7 +1273,7 @@ impl App {
         let head_line = self.scroll + row as usize;
         let Some(hit) = select::locate_hit(
             &self.entries,
-            self.reasoning_mode,
+            self.display_modes(),
             self.transcript_width,
             head_line,
             col as usize,
@@ -1475,7 +1507,7 @@ impl App {
         let width = self.transcript_width;
         // Split the borrow: the entries to match and the layer that holds the query are two
         // different fields of `self`.
-        let mode = self.reasoning_mode;
+        let modes = self.display_modes();
         let App {
             entries, layers, ..
         } = self;
@@ -1483,7 +1515,7 @@ impl App {
             Layer::Overlay(Overlay::Find(find)) => Some(find),
             _ => None,
         }) {
-            find.recompute(entries.as_slice(), mode, width);
+            find.recompute(entries.as_slice(), modes, width);
         }
         self.find_jump();
     }
@@ -2283,6 +2315,16 @@ impl App {
                 self.reasoning_mode = self.reasoning_mode.toggled();
                 UpdateResult::dirty()
             }
+            // ADR 0028 R4: Ctrl-O steps the tool bodies through errors -> expanded ->
+            // collapsed -> errors, pi's three modes in one key.
+            Action::ToggleToolOutput => {
+                self.tool_display.fold = match self.tool_display.fold {
+                    crate::tools::ToolFold::Errors => crate::tools::ToolFold::Expanded,
+                    crate::tools::ToolFold::Expanded => crate::tools::ToolFold::Collapsed,
+                    crate::tools::ToolFold::Collapsed => crate::tools::ToolFold::Errors,
+                };
+                UpdateResult::dirty()
+            }
             Action::DeleteWord => {
                 self.input.delete_word();
                 UpdateResult::dirty()
@@ -3003,28 +3045,47 @@ impl App {
                 let mut entry = Entry::new(EntryKind::Assistant, text_of(content));
                 entry.interrupted = *interrupted;
                 self.entries.push(entry);
-                if !tool_calls.is_empty() {
-                    let calls = tool_calls
-                        .iter()
-                        .map(|call| format!("{}({})", call.name, call.arguments))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    self.entries.push(Entry::new(EntryKind::ToolCall, calls));
+                // One card per call (ADR 0028 R4): each carries its own name and arguments,
+                // and its text is the same header the renderer will show, so the head stays
+                // selectable and copyable character for character.
+                for call in tool_calls {
+                    let card = crate::tools::ToolCard::new(
+                        call.id.clone(),
+                        call.name.clone(),
+                        call.arguments.clone(),
+                    );
+                    let mut entry = Entry::new(EntryKind::ToolCall, crate::tools::head_text(&card));
+                    entry.tool = Some(Box::new(card));
+                    self.entries.push(entry);
                 }
             }
             Message::Tool { result, .. } => {
-                // The card's head entry learns its outcome from the result that just
-                // arrived: the last tool call still marked running is the one it answers.
-                if let Some(call) = self
+                // The result pairs with its call **by id** (the same key the live and the
+                // resume paths carry), so a batch of calls pairs correctly whatever order
+                // their results arrive in.
+                let paired = self
                     .entries
                     .iter_mut()
                     .rev()
-                    .find(|entry| entry.kind == EntryKind::ToolCall && entry.result.is_none())
-                {
-                    call.result = Some(result.is_error);
-                }
+                    .find(|entry| {
+                        entry.kind == EntryKind::ToolCall
+                            && entry
+                                .tool
+                                .as_ref()
+                                .is_some_and(|card| card.call_id == result.call_id)
+                    })
+                    .and_then(|entry| {
+                        entry.result = Some(result.is_error);
+                        let card = entry.tool.as_mut()?;
+                        card.structured = result.structured.clone();
+                        Some((card.name.clone(), card.arguments.clone()))
+                    });
+                let (name, arguments) = paired.unwrap_or_default();
                 let mut entry = Entry::new(EntryKind::ToolResult, result.text());
                 entry.is_error = result.is_error;
+                let mut card = crate::tools::ToolCard::new(result.call_id.clone(), name, arguments);
+                card.structured = result.structured.clone();
+                entry.tool = Some(Box::new(card));
                 self.entries.push(entry);
             }
         }
