@@ -764,25 +764,26 @@ pub fn select_user_messages(
     let mut kept: Vec<String> = Vec::new();
     let mut used = 0u64;
     // From the newest backwards: the newest is always placed, truncated into `U` when it alone
-    // is larger.
+    // is larger. The walk **stops** at the first message that does not fit, so what is kept is
+    // the contiguous newest run and everything older is omitted (ADR 0018, owner
+    // 2026-10-13) — never a newer message plus an older short one with a gap between them.
     for (index, text) in texts[1..].iter().enumerate().rev() {
         let tokens = text_tokens(text);
         let entry = if tokens > u {
-            // Only the newest can reach here first; an older one that alone exceeds `U` is
-            // omitted like any other that does not fit.
+            // Only the newest may exceed `U`; it is truncated into `U`.
             if index + 1 == texts.len() - 1 {
                 truncate_text(text, u).unwrap_or_else(|| text.clone())
             } else {
-                omitted += 1;
-                continue;
+                omitted += index + 1;
+                break;
             }
         } else {
             text.clone()
         };
         let entry_tokens = text_tokens(&entry);
         if used + entry_tokens > u {
-            omitted += 1;
-            continue;
+            omitted += index + 1;
+            break;
         }
         used += entry_tokens;
         kept.push(entry);

@@ -868,3 +868,32 @@ fn the_omission_count_accumulates() {
     let second = select_user_messages(&first, &more, budget);
     assert_eq!(marker_count(&second), Some(5), "{:?}", texts(&second));
 }
+
+/// ADR 0018: the kept messages after the first are the
+/// **contiguous** newest run. A short message older than one that did not fit is not kept just
+/// because it would have fit.
+#[test]
+fn the_selection_is_the_contiguous_newest_run() {
+    use agent_core::select_user_messages;
+
+    let budget = Some(4_000);
+    let short = |index: usize| user_sourced(&format!("short {index}"), Some(InputSource::User));
+    let messages = vec![
+        short(0), // the first: always kept
+        short(1), // older than the long one, and short enough to fit
+        user_sourced(&"x".repeat(2_000), Some(InputSource::User)),
+        short(2),
+        short(3), // the newest
+    ];
+    let kept = select_user_messages(&[], &messages, budget);
+    assert_eq!(
+        texts(&kept),
+        [
+            "short 0",
+            "[2 earlier user messages omitted]",
+            "short 2",
+            "short 3"
+        ],
+        "the long one and everything older are omitted"
+    );
+}
