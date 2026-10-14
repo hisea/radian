@@ -263,18 +263,10 @@ pub fn commit(
     }
 
     // `--no-verify` skips pre-commit/commit-msg; `core.hooksPath=/dev/null` is belt and
-    // braces (a hook could still be found by another path).
-    run_git(
-        workspace,
-        &[
-            "-c",
-            "core.hooksPath=/dev/null",
-            "commit",
-            "--no-verify",
-            "-m",
-            message,
-        ],
-    )?;
+    // braces (a hook could still be found by another path). Both are mandatory.
+    let args = commit_args(message);
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_git(workspace, &borrowed)?;
 
     let commit = git(workspace, &["rev-parse", "HEAD"])?;
     let changed = git(
@@ -310,6 +302,19 @@ fn git(workspace: &Path, args: &[&str]) -> Result<String, ToolFailure> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+/// The exact `git commit` arguments. `--no-verify` and `core.hooksPath=/dev/null` are both
+/// mandatory (ADR 0030): removing either would let a workspace hook run in the host.
+fn commit_args(message: &str) -> Vec<String> {
+    vec![
+        "-c".into(),
+        "core.hooksPath=/dev/null".into(),
+        "commit".into(),
+        "--no-verify".into(),
+        "-m".into(),
+        message.into(),
+    ]
+}
+
 /// Runs `git` for its side effect.
 fn run_git(workspace: &Path, args: &[&str]) -> Result<(), ToolFailure> {
     git(workspace, args).map(|_| ())
@@ -318,6 +323,21 @@ fn run_git(workspace: &Path, args: &[&str]) -> Result<(), ToolFailure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR 0030: both guards are on every commit, so a project hook (in the writable
+    /// worktree) can never run in the host.
+    #[test]
+    fn the_commit_command_never_runs_a_hook() {
+        let args = commit_args("message");
+        assert!(
+            args.iter().any(|arg| arg == "--no-verify"),
+            "the commit must skip hooks: {args:?}"
+        );
+        assert!(
+            args.iter().any(|arg| arg == "core.hooksPath=/dev/null"),
+            "the commit must point hooks away: {args:?}"
+        );
+    }
 
     #[test]
     fn the_spec_takes_a_message_and_optional_paths() {
