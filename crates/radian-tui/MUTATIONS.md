@@ -590,7 +590,13 @@ HEAD，结束后删除）· 每个变异改完跑对应测试、`git checkout --
 | SC4 | Modal 上按下不开始选择 | 去掉 `mouse_down` 的 `has_modal` 门 | `a_press_on_a_modal_never_starts_one` |
 | SC5 | `update` 不直接写 stdout | 在 `mouse_up` 里直接 `io::stdout().write_all(osc52(..))` | `purity::app_rs_is_pure`（本片把 `io::stdout`/`io::stderr` 加进禁止表） |
 
-5/5 抓住。**过程记录（SC4 的两轮）**：第一版测试在 `set_viewport(2, 6)` 后按 (4, 5)——
+5/5 抓住。**审查补漏（SC6，merge main 之后）**：owner 审查发现 base64 表尾两个字符（索引
+62/63 的 `+`/`/`）没有任何向量覆盖——把表换成 URL-safe 的 `-_` 全部测试仍绿。补 `osc52("~~~")`
+→ `fn5+`（`~` = 六个 1，索引 62）与 `osc52("???")` → `Pz8/`（`?` = 六个 1，索引 63）后，同一
+变异在 `clip::tests::osc52_encodes_base64_with_the_clipboard_selection` 被抓住（实测输出
+`fn5-` ≠ 期望 `fn5+`）。
+
+**过程记录（SC4 的两轮）**：第一版测试在 `set_viewport(2, 6)` 后按 (4, 5)——
 视口已缩到 2 行，按下去本来就在 transcript 之外，变异等于没被实验；第二版按 (1, 5)（视口内）
 仍没抓住，因为 follow 把 scroll 钉在底部，press/drag 都钳到同一条「末尾之后的缝隙」，选区为空。
 最终 `scroll = 0; follow = false` 后变异才被抓住。教训：测「某个门存在」必须让门后路径真的产生
