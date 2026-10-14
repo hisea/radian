@@ -775,6 +775,7 @@ fn lane_of(lane: InboxLane) -> Lane {
 ///    durable, inputs that were enqueued but never claimed before the restart;
 /// 3. unpaired tool calls go through the core's `repair` (ADR 0002), and the repaired
 ///    messages are written back before the session is reopened (ADR 0002 E9).
+///
 /// Merges one `ConfigChanged` change into a config state (ADR 0026 D8/D11): object keys are
 /// inserted, anything else replaces. One function for the live path and the resume replay, so
 /// the two cannot drift (review M3).
