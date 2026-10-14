@@ -803,7 +803,13 @@ fn the_tool_fold_changes_the_line_count_and_ctrl_o_walks_it() {
     app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
     assert_eq!(app.tool_display.fold, ToolFold::Collapsed);
     let _ = render(&mut app, 60, 30);
-    assert_eq!(app.total_lines, folded, "collapsed again: the same count");
+    // `collapsed` keeps the header only: the five preview lines `errors` showed are gone
+    // (ADR 0028 R4's interpretation - the reviewer's T2).
+    assert_eq!(
+        app.total_lines,
+        folded - 5,
+        "collapsed shows the header only"
+    );
     app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
     assert_eq!(app.tool_display.fold, ToolFold::Errors);
 }
