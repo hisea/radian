@@ -44,6 +44,11 @@ use crate::theme::Theme;
 // path keeps working.
 pub use radian_host::projection::TurnState;
 
+/// The layout cache's key (ADR 0028 R1/R6): the width, the entry's text length, the display
+/// modes and the per-entry fold override. The override is part of it, so a search hit's
+/// expansion invalidates the count.
+pub(crate) type LayoutKey = (usize, usize, crate::tools::DisplayModes, Option<bool>);
+
 /// A compaction summary's display data (ADR 0028 R5). The `summary` and the verbatim user
 /// words come from the message's `origin` (ADR 0018) through Core's own readers;
 /// the revision and the token counts are **live only** — the journaled message does not carry
@@ -148,10 +153,7 @@ pub struct Entry {
     /// How many lines this entry laid out to, for the width, text length and mode it was
     /// last measured at. The renderer keeps it so a frame only re-lays out entries that
     /// changed or are on screen.
-    pub(crate) layout_cache: Option<(
-        (usize, usize, crate::tools::DisplayModes, Option<bool>),
-        usize,
-    )>,
+    pub(crate) layout_cache: Option<(LayoutKey, usize)>,
     /// Rendered Mermaid diagrams (ADR 0028 R8), keyed by `(width, text_len)`: the width is in
     /// the key because `TooWide` can succeed on a wider terminal. Filled by the mutable
     /// measure pass; the immutable layout paths render fresh on a miss.
@@ -1809,12 +1811,55 @@ impl App {
         self.find_recompute();
     }
 
-    /// Centers the current match in the viewport and stops following the bottom. A search that
-    /// matches nothing leaves the viewport alone.
+    /// Drops every per-entry fold override (ADR 0028 R6): a global fold toggle moots them.
+    fn clear_fold_overrides(&mut self) {
+        for entry in self.entries.iter_mut() {
+            entry.fold_override = None;
+        }
+    }
+
+    /// Centers the current match in the viewport and stops following the bottom. A search
+    /// that matches nothing leaves the viewport alone.
+    ///
+    /// ADR 0028 R6: when the match is in a **folded** entry, exactly that entry opens (a
+    /// per-entry override), the others stay folded, and the status bar says so. The override
+    /// stays until the next global fold toggle: collapsing the hit the moment the box closes
+    /// would take the text the user just searched for away again.
     fn find_jump(&mut self) {
-        let Some(line) = self.find_state().and_then(FindState::current_line) else {
+        let Some((entry, line)) = self
+            .find_state()
+            .and_then(FindState::current)
+            .map(|m| (m.entry, m.line))
+        else {
             return;
         };
+        if entry >= self.entries.len() {
+            return;
+        }
+        let modes = self.display_modes();
+        // Does this entry's display hide content? (Its count can coincide with the expanded
+        // one and still hide the text - a one-line thinking channel does exactly that.)
+        let folded = crate::blocks::is_folded(&self.entries[entry], modes);
+        if folded {
+            // Exactly one override at a time.
+            let was_overridden = self.entries.iter().any(|e| e.fold_override == Some(true));
+            for other in self.entries.iter_mut() {
+                other.fold_override = None;
+            }
+            self.entries[entry].fold_override = Some(true);
+            self.note = Some("expanded 1 folded entry for the match".to_string());
+            let _ = was_overridden;
+        }
+        // The display line of the match: the expanded line index only maps onto the display
+        // when the entries above it are laid out folded, so walk the display counts (the
+        // entry itself is measured with its override, so its own lines line up).
+        let modes = self.display_modes();
+        let width = self.transcript_width;
+        let mut display_line = 0usize;
+        for item in self.entries[..entry].iter_mut() {
+            display_line += crate::blocks::line_count_cached(item, modes, width);
+        }
+        let line = display_line + line;
         let height = usize::from(self.view_height.max(1));
         self.scroll = crate::find::centered_scroll(line, height, self.max_scroll);
         self.follow = false;
@@ -2666,6 +2711,8 @@ impl App {
             // the block/layout cache keys, so the next frame re-lays them out.
             Action::ToggleReasoning => {
                 self.reasoning_mode = self.reasoning_mode.toggled();
+                // A global fold toggle drops the per-entry search overrides (ADR 0028 R6).
+                self.clear_fold_overrides();
                 UpdateResult::dirty()
             }
             // ADR 0028 R4: Ctrl-O steps the tool bodies through errors -> expanded ->
@@ -2676,6 +2723,7 @@ impl App {
                     crate::tools::ToolFold::Expanded => crate::tools::ToolFold::Collapsed,
                     crate::tools::ToolFold::Collapsed => crate::tools::ToolFold::Errors,
                 };
+                self.clear_fold_overrides();
                 UpdateResult::dirty()
             }
             Action::DeleteWord => {

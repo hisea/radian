@@ -451,6 +451,58 @@ fn mermaid_sources(blocks: &[Block], text: &str, mermaid: bool) -> Vec<String> {
         .collect()
 }
 
+/// The display modes the search matches with (ADR 0028 R6): **everything expanded**, so a
+/// folded thinking block, tool body or compaction summary is still found. The jump maps the
+/// expanded line onto the display after opening the one entry that matched.
+pub fn search_modes(modes: DisplayModes) -> DisplayModes {
+    DisplayModes {
+        reasoning: ReasoningMode::Expanded,
+        tools: crate::tools::ToolDisplay {
+            fold: crate::tools::ToolFold::Expanded,
+            preview_lines: modes.tools.preview_lines,
+        },
+        // A diagram is drawn (or not) the same way while searching: its lines are what the
+        // search matches.
+        mermaid: modes.mermaid,
+    }
+}
+
+/// Whether this entry's display **hides content** the search's expanded geometry shows
+/// (ADR 0028 R6 decides the per-entry override from this): a folded thinking channel, a folded
+/// tool body that really cuts lines, or a folded compaction summary. A body that fits its
+/// preview hides nothing and needs no override.
+pub fn is_folded(entry: &Entry, modes: DisplayModes) -> bool {
+    match entry.kind {
+        EntryKind::Reasoning => !expanded(entry, modes.reasoning == ReasoningMode::Expanded),
+        EntryKind::Compaction => !expanded(entry, modes.tools.fold == tools::ToolFold::Expanded),
+        EntryKind::ToolResult => {
+            if expanded(entry, modes.tools.fold == tools::ToolFold::Expanded) {
+                return false;
+            }
+            let Some(card) = entry.tool.as_deref() else {
+                return false;
+            };
+            let text = crate::render::display_text(entry);
+            let full = tools::body_plan(
+                card,
+                &text,
+                entry.is_error,
+                tools::ToolFold::Expanded,
+                modes.tools.preview_lines,
+            );
+            let shown = tools::body_plan(
+                card,
+                &text,
+                entry.is_error,
+                modes.tools.fold,
+                modes.tools.preview_lines,
+            );
+            shown.len() < full.len()
+        }
+        _ => false,
+    }
+}
+
 /// Whether a foldable entry shows its content: the global fold says so, or a per-entry
 /// override (ADR 0028 R6: a search hit opens exactly one entry).
 pub fn expanded(entry: &Entry, global: bool) -> bool {
