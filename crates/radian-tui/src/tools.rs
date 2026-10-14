@@ -546,17 +546,19 @@ fn list_head(card: &ToolCard, _text: &str) -> String {
 
 /// `ask_user`: how many questions the call asked (ADR 0024 Q3).
 fn ask_head(card: &ToolCard, _text: &str) -> String {
+    // The call's own `questions` array is the request and is there at call time; the result's
+    // `answers` is the reply.
     let questions = card
-        .structured
-        .as_ref()
-        .and_then(|value| value.get("answers"))
+        .arguments
+        .get("questions")
         .and_then(Value::as_array)
-        .map(|answers| answers.len())
+        .map(|questions| questions.len())
         .or_else(|| {
-            card.arguments
-                .get("questions")
+            card.structured
+                .as_ref()
+                .and_then(|value| value.get("answers"))
                 .and_then(Value::as_array)
-                .map(|questions| questions.len())
+                .map(|answers| answers.len())
         });
     match questions {
         Some(1) => "ask_user: 1 question".to_string(),

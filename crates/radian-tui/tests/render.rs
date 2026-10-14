@@ -814,6 +814,196 @@ fn the_tool_fold_changes_the_line_count_and_ctrl_o_walks_it() {
     assert_eq!(app.tool_display.fold, ToolFold::Errors);
 }
 
+/// The `git_diff` body colors the four line kinds with the theme's own roles (ADR 0028 R4 +
+/// ADR 0029): added, removed, context and the hunk/file-header structure.
+#[test]
+fn a_git_diff_body_colors_its_line_kinds() {
+    let mut app = App::new("m", "s");
+    app.push_message(&assistant_with(
+        "",
+        "",
+        false,
+        vec![ToolCall {
+            id: "c1".into(),
+            name: "git_diff".into(),
+            arguments: serde_json::json!({}),
+        }],
+    ));
+    let diff = "diff --git a/x.rs b/x.rs\nindex 1..2 100644\n--- a/x.rs\n+++ b/x.rs\n@@ -1,2 +1,2 @@\n context\n-old line\n+new line";
+    app.push_message(&Message::Tool {
+        result: ToolResult {
+            call_id: "c1".into(),
+            content: vec![ContentPart::text(diff)],
+            structured: None,
+            is_error: false,
+            error_code: None,
+        },
+        meta: Default::default(),
+    });
+    // Expanded, so the whole diff shows.
+    app.tool_display.fold = radian_tui::tools::ToolFold::Expanded;
+    let terminal = render(&mut app, 70, 20);
+    let theme = app.theme;
+    let style = |needle: &str| style_of(&terminal, needle).expect(needle);
+    assert_eq!(style("+new line").fg, theme.diff_added.fg, "added");
+    assert_eq!(style("-old line").fg, theme.diff_removed.fg, "removed");
+    assert_eq!(style(" context").fg, theme.diff_context.fg, "context");
+    assert_eq!(style("@@").fg, theme.diff_hunk.fg, "@@ is structure");
+    assert_eq!(
+        style("diff --git").fg,
+        theme.diff_hunk.fg,
+        "the file header is structure"
+    );
+    // The head's counts come from the same text.
+    let text = screen(&terminal);
+    assert!(text.contains("git_diff: 1 files +1/-1"), "{text}");
+}
+
+/// A `patch` card shows the replacement: the head's +N/-M and the `-old`/`+new` body, whose
+/// lines carry the diff roles. The body **is** the entry's text, so it copies as shown.
+#[test]
+fn a_patch_card_shows_the_replacement_with_diff_roles() {
+    let mut app = App::new("m", "s");
+    app.push_message(&assistant_with(
+        "",
+        "",
+        false,
+        vec![ToolCall {
+            id: "c1".into(),
+            name: "patch".into(),
+            arguments: serde_json::json!({
+                "path": "src/main.rs",
+                "old": "let a = 1;\nlet b = 2;",
+                "new": "let a = 3;",
+            }),
+        }],
+    ));
+    app.push_message(&Message::Tool {
+        result: ToolResult {
+            call_id: "c1".into(),
+            content: vec![ContentPart::text("replaced 1 occurrence in src/main.rs")],
+            structured: Some(serde_json::json!({"path": "src/main.rs", "replaced": 1})),
+            is_error: false,
+            error_code: None,
+        },
+        meta: Default::default(),
+    });
+    app.tool_display.fold = radian_tui::tools::ToolFold::Expanded;
+    let terminal = render(&mut app, 70, 20);
+    let text = screen(&terminal);
+    assert!(text.contains("patch: src/main.rs +1/-2"), "{text}");
+    let theme = app.theme;
+    assert_eq!(
+        style_of(&terminal, "-let a = 1;").expect("removed").fg,
+        theme.diff_removed.fg
+    );
+    assert_eq!(
+        style_of(&terminal, "+let a = 3;").expect("added").fg,
+        theme.diff_added.fg
+    );
+    assert!(
+        style_of(&terminal, "replaced").is_none(),
+        "the result text is replaced by the diff: {text}"
+    );
+}
+
+/// A `write` card: the head counts, the body is the content (no `+` markers), and a CJK path
+/// renders.
+#[test]
+fn a_write_card_shows_the_content_without_markers() {
+    // A CJK path and content: the byte count is UTF-8 bytes, the line count is lines.
+    let mut app = App::new("m", "s");
+    app.push_message(&assistant_with(
+        "",
+        "",
+        false,
+        vec![ToolCall {
+            id: "c1".into(),
+            name: "write".into(),
+            arguments: serde_json::json!({"path": "笔记.md", "content": "第一行\n第二行"}),
+        }],
+    ));
+    app.push_message(&Message::Tool {
+        result: ToolResult {
+            call_id: "c1".into(),
+            content: vec![ContentPart::text("wrote 19 bytes to 笔记.md")],
+            structured: Some(serde_json::json!({"path": "笔记.md", "bytes_written": 19})),
+            is_error: false,
+            error_code: None,
+        },
+        meta: Default::default(),
+    });
+    app.tool_display.fold = radian_tui::tools::ToolFold::Expanded;
+    let terminal = render(&mut app, 70, 20);
+    let text = screen(&terminal);
+    // Wide characters make the screen model insert a blank cell after each; compare without
+    // spaces so the assertion is about the text, not the terminal's cell model.
+    let squeezed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(squeezed.contains("write:笔记.md(19bytes,2lines)"), "{text}");
+    assert!(squeezed.contains("第一行"), "{text}");
+    assert!(squeezed.contains("第二行"), "{text}");
+    let body = style_of(&terminal, "第").expect("the content");
+    assert_eq!(
+        body.fg, app.theme.tool_result.fg,
+        "no diff role for a write body"
+    );
+}
+
+/// The list-like and memory renderers' heads.
+#[test]
+fn the_list_and_memory_cards_have_their_own_heads() {
+    for (name, arguments, structured, expected) in [
+        (
+            "git_status",
+            serde_json::json!({}),
+            serde_json::json!({"entries": 2}),
+            "git_status: 2 entries",
+        ),
+        (
+            "list",
+            serde_json::json!({"path": "src"}),
+            serde_json::json!({"path": "src", "entries": 3, "total_entries": 3}),
+            "list: src (3 entries)",
+        ),
+        (
+            "ask_user",
+            serde_json::json!({"questions": [{"id": "q1"}, {"id": "q2"}]}),
+            serde_json::json!({"request_id": "r", "answers": []}),
+            "ask_user: 2 questions",
+        ),
+        (
+            "memory_get",
+            serde_json::json!({"id": "mem-7"}),
+            serde_json::json!({}),
+            "memory_get: mem-7",
+        ),
+    ] {
+        let mut app = App::new("m", "s");
+        app.push_message(&assistant_with(
+            "",
+            "",
+            false,
+            vec![ToolCall {
+                id: "c1".into(),
+                name: name.into(),
+                arguments,
+            }],
+        ));
+        app.push_message(&Message::Tool {
+            result: ToolResult {
+                call_id: "c1".into(),
+                content: vec![ContentPart::text("body line")],
+                structured: Some(structured),
+                is_error: false,
+                error_code: None,
+            },
+            meta: Default::default(),
+        });
+        let text = screen(&render(&mut app, 70, 12));
+        assert!(text.contains(expected), "{name}: {text}");
+    }
+}
+
 /// A batch of calls pairs each result with **its own** call by id: results arriving in
 /// reverse order (one success, one failure) still land on the right cards. Covered on the live
 /// commit path and on the resume replay path.
