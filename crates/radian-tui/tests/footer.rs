@@ -198,21 +198,15 @@ fn the_context_bar_takes_width_fill_and_empty() {
     );
 }
 
-/// A narrow terminal drops the right group first, then the left group from its end; a higher
-/// `priority` survives longer.
+/// A narrow terminal drops the right group first, then the left group from its end; a lower
+/// `priority` drops first.
 #[test]
 fn truncation_drops_the_right_group_then_the_left_and_priority_wins() {
-    // Right group = reasoning, left group = model + a low-priority cwd.
+    // Group order: left = model, right = reasoning. One item must go at a middling width; the
+    // right group goes, never the left.
     let config = TuiFooterConfig {
         rows: vec![TuiFooterRowConfig {
-            left: vec![
-                item("model"),
-                TuiFooterItemConfig {
-                    id: "cwd".to_string(),
-                    priority: Some(1),
-                    ..Default::default()
-                },
-            ],
+            left: vec![item("model")],
             right: vec![item("reasoning")],
             ..Default::default()
         }],
@@ -220,24 +214,51 @@ fn truncation_drops_the_right_group_then_the_left_and_priority_wins() {
     };
     let mut app = App::new("long-model-name", "s");
     app.apply_footer(&config);
-    app.set_footer_facts(
-        Some(std::path::PathBuf::from("/a/very/long/workspace/path/name")),
-        None,
-        None,
-        Some("high".to_string()),
-    );
-    // Wide: everything fits.
+    app.set_footer_facts(None, None, None, Some("high".to_string()));
     let wide = render(&mut app, 120, 12);
     let wide_text = row(&wide, 11);
     assert!(
-        wide_text.contains("long-model-name") && wide_text.contains("◐"),
+        wide_text.contains("long-model-name") && wide_text.contains('◐'),
         "{wide_text:?}"
     );
-    // Narrower: the cwd (priority 1) goes before the model or the right group.
-    let narrow = render(&mut app, 40, 12);
-    let narrow_text = row(&narrow, 11);
-    assert!(narrow_text.contains("long-model-name"), "{narrow_text:?}");
-    assert!(!narrow_text.contains("very/long"), "{narrow_text:?}");
+    let mid = render(&mut app, 20, 12);
+    let mid_text = row(&mid, 11);
+    assert!(
+        mid_text.contains("long-model-name"),
+        "the left group stays: {mid_text:?}"
+    );
+    assert!(
+        !mid_text.contains('◐'),
+        "the right group drops first: {mid_text:?}"
+    );
+
+    // Priority: within the left group, the lower priority drops first (the model here).
+    let config = TuiFooterConfig {
+        rows: vec![TuiFooterRowConfig {
+            left: vec![
+                TuiFooterItemConfig {
+                    id: "model".to_string(),
+                    priority: Some(1),
+                    ..Default::default()
+                },
+                TuiFooterItemConfig {
+                    id: "session".to_string(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let mut app = App::new("long-model-name", "s");
+    app.apply_footer(&config);
+    let terminal = render(&mut app, 14, 12);
+    let text = row(&terminal, 11);
+    assert!(
+        !text.contains("long-model-name"),
+        "the low-priority item drops: {text:?}"
+    );
+    assert!(text.contains('s'), "the session item stays: {text:?}");
 }
 
 /// An unknown item id, placeholder or style is shown raw with one warning (never a refusal).
