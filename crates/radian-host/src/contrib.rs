@@ -260,6 +260,15 @@ pub struct GitContributor {
     dir: PathBuf,
 }
 
+/// One blocking git read (ADR 0027 C3 and revision 1). Each field is `None` when git has no
+/// answer (not a repository, or the command failed); the refresh then publishes nothing for it.
+struct GitFacts {
+    branch: Option<String>,
+    worktree: Option<String>,
+    changes: Option<(usize, usize)>,
+    repo: Option<String>,
+}
+
 impl GitContributor {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self { dir: dir.into() }
@@ -299,15 +308,9 @@ impl GitContributor {
         (!text.is_empty()).then(|| text.to_owned())
     }
 
-    /// The values for `git_branch`, `worktree` and the change counts, as blocking work.
-    fn read(
-        &self,
-    ) -> (
-        Option<String>,
-        Option<String>,
-        Option<(usize, usize)>,
-        Option<String>,
-    ) {
+    /// The values for `git_branch`, `worktree`, the change counts and the repo name, as
+    /// blocking work.
+    fn read(&self) -> GitFacts {
         let branch = self.git(&["rev-parse", "--abbrev-ref", "HEAD"]);
         let branch = branch.filter(|name| name != "HEAD");
         // A linked worktree has a `--git-dir` different from the `--git-common-dir`; its name
@@ -354,7 +357,12 @@ impl GitContributor {
             }
             (modified, untracked)
         });
-        (branch, worktree, changes, repo)
+        GitFacts {
+            branch,
+            worktree,
+            changes,
+            repo,
+        }
     }
 }
 
@@ -382,10 +390,14 @@ impl StatusContributor for GitContributor {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Contribution>, String>> + Send + '_>> {
         Box::pin(async move {
             let dir = self.dir.clone();
-            let (branch, worktree, changes, repo) =
-                tokio::task::spawn_blocking(move || GitContributor::new(dir).read())
-                    .await
-                    .map_err(|error| format!("the git refresh task failed: {error}"))?;
+            let GitFacts {
+                branch,
+                worktree,
+                changes,
+                repo,
+            } = tokio::task::spawn_blocking(move || GitContributor::new(dir).read())
+                .await
+                .map_err(|error| format!("the git refresh task failed: {error}"))?;
             // Not a repository: no value. An item with no value is not written at all, so the
             // footer hides it and an empty value never counts as a change.
             let mut contributions = Vec::new();
