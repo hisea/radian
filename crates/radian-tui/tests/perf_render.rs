@@ -772,7 +772,7 @@ fn dbg_resume_trace() {
             "=== n={n} first-frame {:.0} ms ===",
             first.as_secs_f64() * 1000.0
         );
-        for line in text.split(|c| c == '\n' || c == '\r') {
+        for line in text.split(['\n', '\r']) {
             if let Some(at) = line.find("[trace]") {
                 println!("{}", &line[at..]);
             }

@@ -3611,9 +3611,9 @@ pub fn text_of(parts: &[ContentPart]) -> String {
         .join("")
 }
 
-/// Test-only: how many entries `push_message` has walked to drop live ones. A unit test
-/// asserts it does not grow when no live entry exists, which is the property the O(n^2) fix
-/// rests on (it is not wall-clock based). Thread-local so parallel tests do not interfere.
+// Test-only: how many entries `push_message` has walked to drop live ones. A unit test
+// asserts it does not grow when no live entry exists, which is the property the O(n^2) fix
+// rests on (it is not wall-clock based). Thread-local so parallel tests do not interfere.
 #[cfg(test)]
 thread_local! {
     pub(crate) static LIVE_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
