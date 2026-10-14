@@ -345,7 +345,10 @@ mod tests {
             panic!("poison the lock");
         })
         .join();
-        assert!(secrets.is_poisoned(), "the lock must be poisoned for the test");
+        assert!(
+            secrets.is_poisoned(),
+            "the lock must be poisoned for the test"
+        );
 
         // The redaction read path: snapshot the list, then redact with it.
         let list = shared_secrets(&secrets);
@@ -376,6 +379,9 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             list.push("added-after-poison".to_string());
         }
-        assert_eq!(shared_secrets(&secrets), vec!["added-after-poison".to_string()]);
+        assert_eq!(
+            shared_secrets(&secrets),
+            vec!["added-after-poison".to_string()]
+        );
     }
 }

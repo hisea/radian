@@ -809,3 +809,15 @@ Base `a90ed5c` · 一次性检出 `/tmp/small-mut`（detached，跑完删除）�
 1/1 抓住。注意第一版测试 key 用了 `sk-` 前缀，被 export 的**启发式**脱敏（`sk-`/`Bearer`，见
 `radian-session/src/export.rs`）遮住，变异因此假通过；换成不带 `sk-` 的 `late-secret-PTY-7` 后，
 测试只依赖已知 secret 列表，变异被抓住。sleep 变异没有——这是行为测试，不是时序测试。
+
+## small-fixes-2：脱敏列表的锁中毒不放开（2026-10-14）
+
+Base `0d1dde1` · 一次性检出 `/tmp/small2-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+`cargo test -p radian-tui --lib terminal::`，变异后 `git checkout --` 还原。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| S2 | `shared_secrets` 恢复 `.read().map(..).unwrap_or_default()`（中毒即空列表） | 锁中毒时仍取出内容、仍脱敏 | `terminal::tests::a_poisoned_shared_secrets_list_still_redacts` FAILED（`left: []`，`right: ["late-secret-PTY-7"]`） |
+
+1/1 抓住。读侧四处（`record_panic`、运行期错误路径、picker、export）都走 `shared_secrets`；写侧
+`refresh_secrets` 用 `into_inner` 追加，第二个测试覆盖中毒后的追加。
