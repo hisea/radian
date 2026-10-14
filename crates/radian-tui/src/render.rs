@@ -72,7 +72,13 @@ pub fn wrap_char_offsets(text: &str, width: usize) -> Vec<WrappedLine> {
             }
             continue;
         }
-        let ch_width = ch.width().unwrap_or(0);
+        // A tab occupies four columns (ADR 0028 R9's rule, one rule for every text the
+        // transcript wraps); it is not a space, so it never collapses.
+        let ch_width = if ch == '\t' {
+            4
+        } else {
+            ch.width().unwrap_or(0)
+        };
         let extra = usize::from(pending_space.is_some());
         if line_width + extra + ch_width > width && line_width > 0 {
             out.push(WrappedLine {
@@ -116,7 +122,11 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
                 pending_space = !line.is_empty();
                 continue;
             }
-            let ch_width = ch.width().unwrap_or(0);
+            let ch_width = if ch == '\t' {
+                4
+            } else {
+                ch.width().unwrap_or(0)
+            };
             let extra = usize::from(pending_space);
             if line_width + extra + ch_width > width && line_width > 0 {
                 out.push(std::mem::take(&mut line));
@@ -153,7 +163,11 @@ pub fn wrap_line_count(text: &str, width: usize) -> usize {
                 pending_space = any;
                 continue;
             }
-            let ch_width = ch.width().unwrap_or(0);
+            let ch_width = if ch == '\t' {
+                4
+            } else {
+                ch.width().unwrap_or(0)
+            };
             let extra = usize::from(pending_space);
             if line_width + extra + ch_width > width && line_width > 0 {
                 lines += 1;

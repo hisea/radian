@@ -238,7 +238,7 @@ pub fn renderer_for(name: &str) -> ToolRender {
         },
         "list" => ToolRender {
             head: list_head,
-            body: plain_body,
+            body: list_body,
         },
         "ask_user" => ToolRender {
             head: ask_head,
@@ -581,6 +581,109 @@ fn plain_body(_card: &ToolCard, text: &str) -> (Vec<BodyLine>, Option<String>) {
     (text_body_lines(text, |_| LineRole::Normal), None)
 }
 
+/// `list`'s body: the aligned table [`result_display_text`] built for the entry, one line per
+/// entry. (The table **is** the entry's text, so a copy yields the table as shown; the raw
+/// `kind\tsize\tname` text stays in the journal.)
+fn list_body(_card: &ToolCard, text: &str) -> (Vec<BodyLine>, Option<String>) {
+    (text_body_lines(text, |_| LineRole::Normal), None)
+}
+
+/// The `list` result as an aligned table: a short kind marker, the size right-aligned in a
+/// human-readable unit, the name left-aligned, and the directories first. The tool's own text
+/// is `kind\tsize\tname` per line (`radian-coding`'s `list.rs`); a line that does not have
+/// that shape is passed through unchanged, so an unexpected output still shows something.
+fn list_table(tool_text: &str) -> String {
+    struct Row {
+        kind: &'static str,
+        size: u64,
+        name: String,
+    }
+    let marker = |kind: &str| match kind {
+        "dir" => "d",
+        "file" => "f",
+        "symlink" => "l",
+        _ => "-",
+    };
+    let mut rows: Vec<Row> = Vec::new();
+    let mut passthrough: Vec<String> = Vec::new();
+    for line in tool_text.lines() {
+        let mut fields = line.splitn(3, '\t');
+        let (Some(kind), Some(size), Some(name)) = (fields.next(), fields.next(), fields.next())
+        else {
+            if !line.trim().is_empty() {
+                passthrough.push(line.to_owned());
+            }
+            continue;
+        };
+        let Ok(size) = size.trim().parse::<u64>() else {
+            passthrough.push(line.to_owned());
+            continue;
+        };
+        let kind: &'static str = match kind.trim() {
+            "dir" => "dir",
+            "file" => "file",
+            "symlink" => "symlink",
+            _ => "other",
+        };
+        rows.push(Row {
+            kind,
+            size,
+            name: name.to_owned(),
+        });
+    }
+    // Directories first, then by name (the tool sorts by name; the table re-sorts by kind).
+    rows.sort_by(|a, b| {
+        let rank = |kind: &str| match kind {
+            "dir" => 0,
+            "file" => 1,
+            "symlink" => 2,
+            _ => 3,
+        };
+        rank(a.kind)
+            .cmp(&rank(b.kind))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    let size_width = rows
+        .iter()
+        .map(|row| human_size(row.size).chars().count())
+        .max()
+        .unwrap_or(1);
+    let mut out = String::new();
+    for row in &rows {
+        out.push_str(&format!(
+            "{} {:>size_width$}  {}\n",
+            marker(row.kind),
+            human_size(row.size),
+            row.name
+        ));
+    }
+    for line in passthrough {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    if out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+/// A byte count as a short human-readable size: `0 B`, `512 B`, `1.7K`, `2.4M`.
+fn human_size(bytes: u64) -> String {
+    const UNITS: [(u64, &str); 3] = [(1024 * 1024 * 1024, "G"), (1024 * 1024, "M"), (1024, "K")];
+    for (scale, suffix) in UNITS {
+        if bytes >= scale {
+            let value = bytes as f64 / scale as f64;
+            // One decimal below 10, none above (1.7K, 24K).
+            return if value < 10.0 {
+                format!("{value:.1}{suffix}")
+            } else {
+                format!("{value:.0}{suffix}")
+            };
+        }
+    }
+    format!("{bytes} B")
+}
+
 /// The text a tool **result** entry displays: the tool's own text, except for `patch` (whose
 /// card shows the replacement as a diff - the result text is only "replaced 1 occurrence")
 /// and `write` (whose card shows the content it wrote). Synthesizing the display text here
@@ -590,6 +693,9 @@ pub fn result_display_text(card: &ToolCard, tool_text: &str) -> String {
     match card.name.as_str() {
         "patch" => patch_diff_text(card).unwrap_or_else(|| tool_text.to_owned()),
         "write" => string_field(&card.arguments, "content").unwrap_or_else(|| tool_text.to_owned()),
+        // `list` shows an aligned table instead of its tab-separated raw text (owner hand
+        // test: the tabs rendered as nothing, so `dir512crates` ran together).
+        "list" => list_table(tool_text),
         _ => tool_text.to_owned(),
     }
 }
@@ -979,6 +1085,67 @@ mod tests {
         // Every other tool keeps its own result text.
         let read = card("read", json!({"path": "a"}));
         assert_eq!(result_display_text(&read, "the file"), "the file");
+    }
+
+    #[test]
+    fn a_list_result_becomes_an_aligned_table_with_directories_first() {
+        let text = "file\t512\tb.md\ndir\t4096\tsrc\nfile\t1693\tCargo.toml\nsymlink\t0\tlatest\n";
+        let table = list_table(text);
+        let lines: Vec<&str> = table.lines().collect();
+        assert_eq!(lines.len(), 4, "{table}");
+        // Directories first, then files by name, then the symlink.
+        assert!(
+            lines[0].starts_with("d ") && lines[0].ends_with("src"),
+            "{table}"
+        );
+        assert!(lines[1].ends_with("Cargo.toml"), "{table}");
+        assert!(lines[2].ends_with("b.md"), "{table}");
+        assert!(
+            lines[3].starts_with("l ") && lines[3].ends_with("latest"),
+            "{table}"
+        );
+        // The size column is right-aligned and human-readable.
+        assert!(lines[0].contains("4.0K"), "{table}");
+        assert!(lines[1].contains("1.7K"), "{table}");
+        assert!(lines[2].contains("512 B"), "{table}");
+        assert!(lines[3].contains("0 B"), "{table}");
+        // The size field is right-aligned, so the NAME column is what lines up.
+        let name_columns: Vec<usize> = lines
+            .iter()
+            .map(|line| {
+                line.find(|c: char| c.is_alphabetic() && !c.is_ascii_digit())
+                    .unwrap_or(0)
+            })
+            .collect();
+        assert!(
+            name_columns.windows(2).all(|pair| pair[0] == pair[1]),
+            "the names align: {table} {name_columns:?}"
+        );
+        // No tab survives.
+        assert!(!table.contains('\t'), "{table}");
+    }
+
+    #[test]
+    fn a_list_line_without_the_tool_shape_passes_through() {
+        let table = list_table("dir\t4096\tsrc\nnot a list line\n");
+        assert!(table.contains("not a list line"), "{table}");
+        assert!(table.starts_with("d "), "{table}");
+    }
+
+    #[test]
+    fn a_tool_body_expands_its_tabs_for_display_and_copies_the_source() {
+        use crate::blocks;
+        use crate::tools::ToolCard;
+        let card = ToolCard::new("c1", "generic_tool", json!({}));
+        let text = "a\tb\n";
+        let lines = blocks::body_text_lines_for_test(&card, text, 40);
+        assert_eq!(lines[0], "a    b", "the tab is four spaces wide");
+        // The mapping still points at the source: the four cells are one tab, so a selection
+        // over the line copies the original tab (ADR 0028 R9's rule for code, applied to a
+        // tool body).
+        let laid = blocks::layout_for_test(&card, text, 40);
+        let (start, end) = (laid[0].chars.first().copied().expect("a char"), laid[0].end);
+        assert_eq!(&text[start..end], "a\tb", "the copy keeps the source tab");
     }
 
     #[test]

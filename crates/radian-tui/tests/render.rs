@@ -607,6 +607,10 @@ fn wrap_and_wrap_char_offsets_agree() {
         ("a b c d e f", 1),
         ("日本 テキスト edge", 3),
         ("combining a\u{301}b", 2),
+        // A tab is four columns (ADR 0028 R9) in every view of the wrap.
+        ("a\tb", 4),
+        ("a\tb", 5),
+        ("x\ty\tz", 6),
     ];
     for (text, width) in corpus {
         let lines = radian_tui::render::wrap(text, width);
@@ -962,6 +966,51 @@ fn a_write_card_shows_the_content_without_markers() {
         body.fg, app.theme.tool_result.fg,
         "no diff role for a write body"
     );
+}
+
+/// A `list` card shows an aligned table, not the tool's tab-separated text (owner hand test:
+/// `dir512crates` ran together because a tab occupies no column).
+#[test]
+fn a_list_card_shows_an_aligned_table() {
+    let mut app = App::new("m", "s");
+    app.push_message(&assistant_with(
+        "",
+        "",
+        false,
+        vec![ToolCall {
+            id: "c1".into(),
+            name: "list".into(),
+            arguments: serde_json::json!({"path": "src"}),
+        }],
+    ));
+    app.push_message(&Message::Tool {
+        result: ToolResult {
+            call_id: "c1".into(),
+            content: vec![ContentPart::text(
+                "file\t512\tb.md\ndir\t4096\tsrc\nfile\t1693\tCargo.toml\n",
+            )],
+            structured: Some(serde_json::json!({
+                "path": "src", "entries": 3, "total_entries": 3, "truncated": false
+            })),
+            is_error: false,
+            error_code: None,
+        },
+        meta: Default::default(),
+    });
+    app.tool_display.fold = radian_tui::tools::ToolFold::Expanded;
+    let text = screen(&render(&mut app, 70, 14));
+    assert!(text.contains("list: src (3 entries)"), "{text}");
+    assert!(text.contains("d ") && text.contains("src"), "{text}");
+    assert!(text.contains("4.0K"), "a human-readable size: {text}");
+    assert!(
+        !text.contains("dir\t4096"),
+        "no raw tab-separated text: {text}"
+    );
+    assert!(!text.contains('\t'), "no tab reaches the screen: {text}");
+    // Directories first.
+    let dir_row = text.find("d ").expect("a dir row");
+    let file_row = text.find("f ").expect("a file row");
+    assert!(dir_row < file_row, "the directory sorts first: {text}");
 }
 
 /// The list-like and memory renderers' heads.
@@ -1722,6 +1771,8 @@ fn the_line_count_matches_the_wrap() {
         ("word\n", 5),
         ("combining a\u{301}b", 2),
         ("a b c d e f", 1),
+        ("a\tb", 4),
+        ("x\ty\tz", 6),
     ];
     for (text, width) in corpus {
         assert_eq!(
