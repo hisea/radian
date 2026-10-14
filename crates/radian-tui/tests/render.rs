@@ -2,6 +2,8 @@
 //! an interrupted prefix is marked, and tool calls are shown.
 
 use agent_core::{AgentEvent, ContentPart, Message, ToolCall, ToolResult};
+use radian_coding::QuestionKind;
+use radian_host::{PendingRequest, PendingView};
 use radian_tui::app::{App, Entry, EntryKind};
 use radian_tui::projection::StreamKind;
 use radian_tui::render;
@@ -594,4 +596,39 @@ fn wrap_and_wrap_char_offsets_agree() {
             assert!(wrapped.end <= text.len(), "end out of bounds");
         }
     }
+}
+
+/// The question form's key line stays visible when the option list fills the box (same bug the
+/// approval box had: the hint used to be the content's last line, and the clip cut it).
+#[test]
+fn the_question_keys_stay_visible_with_a_long_option_list() {
+    let options: Vec<_> = (0..20)
+        .map(|index| option(&format!("o{index}"), &format!("Option {index}")))
+        .collect();
+    let mut app = App::new("m", "s");
+    app.update(radian_tui::app::Input::Pending(
+        Some(Box::new(PendingView {
+            request_id: 7,
+            origin: "session".into(),
+            request: PendingRequest::Question(radian_coding::QuestionRequest {
+                questions: vec![radian_coding::Question {
+                    id: "q".into(),
+                    prompt: "Pick one".into(),
+                    kind: QuestionKind::Single,
+                    options,
+                    allow_other: false,
+                    required: true,
+                }],
+            }),
+        })),
+        1,
+    ));
+    let text = screen(&render(&mut app, 60, 18));
+    assert!(
+        text.contains("Tab next"),
+        "the keys must be on screen:\n{text}"
+    );
+    assert!(text.contains("Esc decline"), "{text}");
+    // The box is on screen with its scrolled list.
+    assert!(text.contains("question 1/1"), "{text}");
 }

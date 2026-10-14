@@ -69,6 +69,47 @@ impl Drop for KillOnDrop {
     }
 }
 
+/// Writes `credentials/auth.json` (0600) under `root` for the key env vars in `envs` (ADR
+/// 0026 D2: the key comes only from `auth.json`). `ANTHROPIC_API_KEY` maps to the `anthropic`
+/// descriptor; `OPENAI_API_KEY` and any other `*KEY` name to the default `openai-compatible`.
+fn write_auth_json(root: &Path, envs: &[(&str, &str)]) {
+    let base_url = envs
+        .iter()
+        .find(|(name, _)| *name == "RADIAN_BASE_URL")
+        .map(|(_, value)| *value);
+    let mut entries = serde_json::Map::new();
+    for (name, value) in envs {
+        let provider = if *name == "ANTHROPIC_API_KEY" {
+            "anthropic"
+        } else if name.ends_with("KEY") {
+            "openai-compatible"
+        } else {
+            continue;
+        };
+        let mut entry = serde_json::json!({"type": "api_key", "key": value});
+        if let Some(url) = base_url {
+            entry["env"] = serde_json::json!({ "RADIAN_BASE_URL": url });
+        }
+        entries.insert(provider.to_string(), entry);
+    }
+    if entries.is_empty() {
+        return;
+    }
+    let dir = root.join("credentials");
+    std::fs::create_dir_all(&dir).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let path = dir.join("auth.json");
+    std::fs::write(&path, serde_json::to_string(&entries).unwrap()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
 /// Spawns the binary directly on a plain pty: **no controlling terminal** (so closing the
 /// master is a pure EOF, no SIGHUP) and `FD_CLOEXEC` on the master (without it the child
 /// inherits the master and the pty never sees EOF). `home` is a private HOME the caller keeps
@@ -155,7 +196,7 @@ fn spawn_direct_keeping_slave(
     (child, master, keep_slave)
 }
 
-const BIN: &str = env!("CARGO_BIN_EXE_radian-tui");
+const BIN: &str = env!("CARGO_BIN_EXE_radian");
 
 /// The pty tests spawn real processes and mock servers; run them one at a time so the
 /// whole workspace staying busy cannot make one of them flake.
@@ -189,6 +230,28 @@ impl Pty {
 
     /// Like [`Pty::spawn`], with extra environment for the app (e.g. the sandbox probe seam).
     fn spawn_with_env(args: &[&str], envs: &[(&str, &str)], rows: u16, cols: u16) -> Self {
+        Self::spawn_full(args, envs, None, rows, cols)
+    }
+
+    /// Like [`Pty::spawn_with_env`], and writes `config` to `<RADIAN_HOME>/config/config.toml`
+    /// so the app can start with no arguments (ADR 0026 slice 0b).
+    fn spawn_with_config(
+        args: &[&str],
+        envs: &[(&str, &str)],
+        config: &str,
+        rows: u16,
+        cols: u16,
+    ) -> Self {
+        Self::spawn_full(args, envs, Some(config), rows, cols)
+    }
+
+    fn spawn_full(
+        args: &[&str],
+        envs: &[(&str, &str)],
+        config: Option<&str>,
+        rows: u16,
+        cols: u16,
+    ) -> Self {
         let pair = portable_pty::native_pty_system()
             .openpty(PtySize {
                 rows,
@@ -219,6 +282,24 @@ impl Pty {
         // overrides both through `envs`.
         let home = TempDir::new("home");
         cmd.env("HOME", home.path().as_os_str());
+        // The credential file lives under the same root the app will use: `RADIAN_HOME` if
+        // the test set one, else the `HOME` it set, else the fresh `HOME` above.
+        let auth_root = envs
+            .iter()
+            .find(|(name, _)| *name == "RADIAN_HOME")
+            .map(|(_, value)| PathBuf::from(value))
+            .or_else(|| {
+                envs.iter()
+                    .find(|(name, _)| *name == "HOME")
+                    .map(|(_, value)| PathBuf::from(value).join(".radian"))
+            })
+            .unwrap_or_else(|| home.path().join(".radian"));
+        write_auth_json(&auth_root, envs);
+        if let Some(config) = config {
+            let dir = auth_root.join("config");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("config.toml"), config).unwrap();
+        }
         // `cmd.env_clear()` above is what makes this hermetic: neither `RADIAN_HOME` nor
         // `RADIAN_CONFIG` reaches the child, so a config can only come from this temp `HOME`.
         cmd.env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json");
@@ -493,6 +574,37 @@ async fn pty_end_to_end_conversation_and_clean_exit() {
     assert!(dir.path().join("e2e.jsonl").exists());
 }
 
+/// ADR 0026 slice 0b acceptance: with `model.provider` and `model.model` in the config and a
+/// matching `auth.json` entry, `radian` starts with **no arguments** from the project directory.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_launches_with_no_arguments_from_the_config_and_auth_json() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("NO-ARGS-REPLY-OK")]).await;
+    let config = format!(
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
+         base_url = \"{}\"\n",
+        server.base_url
+    );
+    let mut pty =
+        Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-no-args")], &config, 24, 100);
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"hello\r");
+    assert!(
+        pty.wait_for_screen("NO-ARGS-REPLY-OK", 20),
+        "the reply is not on screen:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1, "one request expected");
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some("Bearer sk-no-args")
+    );
+}
+
 /// The diagnostics directory the app will use when `HOME` is `home` (ADR 0020):
 /// `<home>/.radian/cache/diagnostics`.
 fn diagnostics_dir(home: &Path) -> PathBuf {
@@ -519,7 +631,7 @@ fn pty_panic_path_restores_the_terminal() {
             sessions.to_str().unwrap(),
             "--panic-after-enter",
         ],
-        &[("HOME", home)],
+        &[("HOME", home), ("OPENAI_API_KEY", "sk-panic-secret")],
         20,
         80,
     );
@@ -560,6 +672,16 @@ fn pty_panic_path_restores_the_terminal() {
             .find(|path| path.to_string_lossy().ends_with(".panic.log"))
             .expect("a panic log was written");
         assert_eq!(mode(&log), 0o600, "the panic log must be 0600");
+        // ADR 0013: the resolved key is redacted everywhere, including the panic log.
+        assert!(
+            !raw_text.contains("sk-panic-secret"),
+            "the key reached the terminal: {raw_text}"
+        );
+        let log_text = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            !log_text.contains("sk-panic-secret"),
+            "the key reached the panic log: {log_text}"
+        );
         // Nothing was written next to the session.
         let beside = std::fs::read_dir(&sessions)
             .unwrap()
@@ -2296,7 +2418,7 @@ async fn pty_clean_exit_prints_one_reason_line() {
         .map(|(_, rest)| rest.to_string())
         .unwrap_or_default();
     // The owner's UI review: the line carries a paste-ready command, not just the flag.
-    let reason = "session exit-reason saved; resume: radian-tui --resume exit-reason";
+    let reason = "session exit-reason saved; resume: radian --resume exit-reason";
     let start = after
         .find(reason)
         .unwrap_or_else(|| panic!("no exit reason on the normal screen: {after}"));
@@ -2501,16 +2623,15 @@ async fn pty_anthropic_provider_sends_a_messages_request_and_renders_the_reply()
             "claude",
             "--provider",
             "anthropic",
-            "--base-url",
-            &server.base_url,
-            "--api-key-env",
-            "ANTHROPIC_API_KEY",
             "--session-dir",
             dir.path().to_str().unwrap(),
             "--session-id",
             "anthro",
         ],
-        &[("ANTHROPIC_API_KEY", "sk-ant-tui-key")],
+        &[
+            ("ANTHROPIC_API_KEY", "sk-ant-tui-key"),
+            ("RADIAN_BASE_URL", &server.base_url),
+        ],
         24,
         100,
     );
@@ -2536,6 +2657,12 @@ async fn pty_anthropic_provider_sends_a_messages_request_and_renders_the_reply()
     assert!(
         !session.contains("sk-ant-tui-key"),
         "the key reached the session file"
+    );
+    // ADR 0013: the key never reaches the terminal (startup line, errors, redraws).
+    let raw_text = String::from_utf8_lossy(&pty.raw()).to_string();
+    assert!(
+        !raw_text.contains("sk-ant-tui-key"),
+        "the key reached the terminal"
     );
 }
 
@@ -5152,11 +5279,12 @@ async fn pty_two_approvals_are_shown_in_order() {
     pty.send(b"y");
     // The transcript shows the second tool call's arguments early, and the box's resolved
     // `path:` line wraps at this width (the temp directory's name grows with the test index), so
-    // neither `b.txt` nor `path: …` identifies the prompt. The box's *pretty-printed* arguments
-    // do: `"path": "b.txt"` (with the space) is the box's form, while the transcript's tool-call
-    // line has the compact one.
-    let second = "\"path\": \"b.txt\"";
-    let first = "\"path\": \"a.txt\"";
+    // neither `b.txt` nor `path: …` identifies the prompt. A box-only marker is needed: the box
+    // no longer repeats the path in `args` (approval-fit dedups it), so the *pretty-printed*
+    // `content` field (with the space) marks the box, while the transcript's tool-call line has
+    // the compact form.
+    let second = "\"content\": \"two\"";
+    let first = "\"content\": \"one\"";
     assert!(
         pty.wait_until(20, |screen| screen.contains("approve tool call?")
             && screen.contains(second)),
@@ -5174,6 +5302,81 @@ async fn pty_two_approvals_are_shown_in_order() {
         "the turn must continue after both approvals: {}",
         pty.screen()
     );
+}
+
+/// A long command's approval still shows `[y] allow once` (the keys are the box's own last
+/// row), and answering `y` runs the whole command (approval-fit, owner acceptance).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_long_command_keeps_the_approval_keys_visible() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("approval-fit");
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    // Sixty filler lines put the body far past what any box can show; the last line is the one
+    // that must run.
+    let mut command = String::new();
+    for index in 0..60 {
+        command.push_str(&format!("true # filler-{index}\n"));
+    }
+    command.push_str("echo APPROVAL-FIT-RAN");
+    let arguments = json!({"command": command}).to_string();
+    let server = MockServer::start(vec![
+        tool_reply("c1", "shell", &arguments),
+        text_reply("DONE"),
+    ])
+    .await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "approval-fit",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--approval",
+            "always",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"go\r");
+    assert!(
+        pty.wait_for_screen("approve tool call?", 20),
+        "no approval prompt: {}",
+        pty.screen()
+    );
+    let screen = pty.screen();
+    assert!(
+        screen.contains("[y] allow once") && screen.contains("[n] deny"),
+        "the key line is not fully on screen: {screen}"
+    );
+    assert!(
+        screen.contains("lines 1–"),
+        "a body this long must show the window indicator: {screen}"
+    );
+    // Scrolling the body keeps the keys on screen.
+    pty.send(b"\x1b[B"); // Down
+    assert!(
+        pty.wait_until(10, |screen| screen.contains("lines 2–")
+            && screen.contains("[y] allow once")),
+        "the box must scroll with the keys visible: {}",
+        pty.screen()
+    );
+    pty.send(b"y");
+    assert!(
+        pty.wait_for_screen("APPROVAL-FIT-RAN", 20),
+        "y must run the command: {}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
 }
 
 /// ADR 0024 Q5: `--approval never` only affects approvals. The user is still there, so the
@@ -5584,8 +5787,6 @@ async fn pty_the_exit_line_is_a_copyable_resume_command() {
             "copyable",
             "--header",
             "x-trace=HEADER-VALUE",
-            "--api-key-env",
-            "MY_KEY",
         ],
         24,
         100,
@@ -5603,13 +5804,92 @@ async fn pty_the_exit_line_is_a_copyable_resume_command() {
         .lines()
         .find(|line| line.contains("resume:"))
         .unwrap_or_else(|| panic!("no resume command on the normal screen: {after}"));
-    assert!(line.contains("radian-tui --resume copyable"), "{line}");
+    assert!(line.contains("radian --resume copyable"), "{line}");
     assert!(line.contains("--session-dir"), "{line}");
     assert!(line.contains(sessions.to_str().unwrap()), "{line}");
     assert!(!line.contains("HEADER-VALUE"), "no header value: {line}");
     assert!(!line.contains("MY_KEY"), "no key: {line}");
     assert!(!line.contains("--header"), "{line}");
-    assert!(!line.contains("--api-key-env"), "{line}");
+    assert!(!line.contains("credentials"), "{line}");
+}
+
+// ---------- theme files (ADR 0029) ----------
+
+/// A pi theme file under `RADIAN_HOME/themes/` colors the real screen: the transcript's user
+/// line renders with the fixture's `userMessageText` RGB (via `userMessageText → var fg`).
+/// `COLORTERM=truecolor` makes the app emit RGB, which the vt100 model reports per cell.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_theme_file_colors_the_user_line() {
+    let _serial = pty_guard();
+    let home = TempDir::new("theme-home");
+    // `RADIAN_HOME` root with the theme file and a config selecting it by name.
+    let themes = home.path().join("themes");
+    std::fs::create_dir_all(&themes).unwrap();
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/data/themes/kanagawa-wave.json"
+    );
+    std::fs::copy(fixture, themes.join("kanagawa-wave.json")).unwrap();
+    let config = home.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "schema_version = 1\n[tui]\ntheme = \"kanagawa-wave\"\n",
+    )
+    .unwrap();
+
+    let server = MockServer::start(vec![text_reply("REPLY-DONE")]).await;
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--config",
+            config.to_str().unwrap(),
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            home.path().join("sessions").to_str().unwrap(),
+            "--session-id",
+            "theme",
+        ],
+        &[
+            ("RADIAN_HOME", home.path().to_str().unwrap()),
+            ("COLORTERM", "truecolor"),
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"COLOR-PROBE\r");
+    assert!(pty.wait_for_screen("REPLY-DONE", 15), "{}", pty.screen());
+
+    // The user entry's `> ` marker carries the theme's `user` style (the body text is the
+    // terminal default by design), so check the marker cell: three columns before the probe.
+    // The kanagawa fixture's `userMessageText` is `vars.fg = #DCD7BA`.
+    let expected = vt100::Color::Rgb(0xDC, 0xD7, 0xBA);
+    let screen = pty.parser.screen();
+    let mut matched = 0;
+    for (row, text) in screen.rows(0, 110).enumerate() {
+        for col in text.match_indices("COLOR-PROBE").map(|(i, _)| i) {
+            // The input line echoes the probe without a marker; only the transcript entry
+            // has "> " before it.
+            let Some(marker_col) = (col as u16).checked_sub(2) else {
+                continue;
+            };
+            if let Some(cell) = screen.cell(row as u16, marker_col) {
+                assert_eq!(cell.contents(), ">", "expected the user marker");
+                assert_eq!(
+                    cell.fgcolor(),
+                    expected,
+                    "the user marker must carry the theme color"
+                );
+                matched += 1;
+            }
+        }
+    }
+    assert!(matched > 0, "the probe was not found on screen");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
 }
 
 // --- transcript selection and copy (mouse drag, OSC 52) ---

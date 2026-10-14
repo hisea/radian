@@ -161,10 +161,15 @@ The file is read the same way as the CLI's (`--config`, `RADIAN_CONFIG`,
 ```toml
 schema_version = 1
 [tui]
-theme = "dark"                 # dark | light | mono
+theme = "dark"                 # a built-in name, or a theme file name (see below)
 input_style = "lines"          # lines (default) | box
 mouse = true                   # wheel + transcript selection (default true)
 clipboard = "osc52"            # osc52 (default) | pbcopy (macOS) | off
+
+[tui.colors]                   # per-role color overrides (ADR 0029 decision 5)
+user = "#0af"                  # a bare color: the foreground only
+notice = { fg = "oklch(62% 0.1 200)", bold = true }
+mdHeading = 203                # pi role names work too (kept, not drawn, until ADR 0028)
 
 [tui.keybindings]
 send = ["ctrl-s"]              # replaces the default `enter`
@@ -180,6 +185,47 @@ find_next = ["ctrl-g", "shift-enter"]
 - `theme`: `dark` is the original palette, `light` re-picks it for a light background, `mono`
   uses no color at all (bold/underline/dim only). A non-empty `NO_COLOR` environment variable
   forces `mono` (<https://no-color.org>). An unknown theme is ignored with a warning.
+#### Theme files (ADR 0029): any pi theme works as-is
+
+`tui.theme` accepts any name. The built-ins (`dark`, `light`, `mono`) resolve first; any other
+name is read from `~/.radian/themes/<name>.json` — and that file is **pi's theme JSON, read
+as-is**. Copy a pi theme over and it just works:
+
+```sh
+mkdir -p ~/.radian/themes && cp ~/.pi/agent/themes/kanagawa-wave.json ~/.radian/themes/
+```
+
+(set `theme = "kanagawa-wave"` in the config; the file's `name` field should match.) Colors
+come in six forms, all supported: `#rgb`/`#rrggbb`, `oklch(L C H)`, `okhsl(H S L)`, a 0–255
+palette index, a `vars` reference (chains allowed), and `""` (the terminal default). With
+truecolor (`COLORTERM` is `truecolor` or `24bit`) colors render as RGB; otherwise each is
+approximated to the nearest 256-color entry, with the same algorithm pi uses.
+
+Radian is more forgiving than pi on purpose (ADR 0029 decision 4): a missing variable, a
+circular reference or an unknown role only makes the *affected roles* fall back to the
+built-in palette (chosen by the file's `appearance`, `dark` by default), each problem warning
+once on the startup line; a broken file falls back as a whole. Nothing blocks startup. pi's
+reserved `system` theme (OSC terminal probing) is deliberately not implemented.
+
+Every pi role maps onto a Radian role (`[tui.colors]` accepts both name families):
+
+| Radian role | pi role(s) it takes |
+|---|---|
+| `user` | `userMessageText` (fg) + `userMessageBg` (bg) |
+| `selection` | `selectedBg` (bg only — the text keeps its own foreground under the band) |
+| `reasoning` | `thinkingText` |
+| `tool_call` / `tool_result` / `tool_result_error` | `toolTitle` / `toolOutput` / `error` |
+| `notice` / `hint` / `completion` / `truncation` | `text` / `muted` / `dim` / `dim` |
+| `turn_idle` / `turn_running` / `turn_cancelled` | `success` / `warning` / `error` |
+| `interrupted` / `note` / `budget_over` | `warning` |
+| `model` / `mcp` / `find` | `accent` |
+| `tier` / `usage` / `budget` | `muted` |
+| `approval_border` | `borderAccent` |
+
+The pi roles nothing renders yet — the `md*`, `toolDiff*`, `syntax*` and `thinking*` families
+and the panel roles (`scrollbar*`, `searchMatch*`, `customMessage*`, `toolPendingBg`,
+`toolSuccessBg`, `toolErrorBg`, `bashMode`) — are parsed and kept on the theme (ADR 0029
+decision 3), so ADR 0027/0028 can wire them without re-reading the file.
 - `mouse` (default `true`): the app enables button + wheel reporting (`CSI ?1000h`), button
   motion (`CSI ?1002h`, the transcript drag) and SGR coordinates (`CSI ?1006h`), so a wheel
   notch scrolls the transcript instead of the terminal translating it to arrow keys (dogfood
@@ -281,7 +327,7 @@ the rest is sent as an ordinary message.
 - `/fork` (ADR 0022) creates a child session from this session's effective history at its
   last turn boundary, through the writer this process already holds (no second lock). It is
   refused while a turn is running, and it does **not** switch this window: the notice names
-  the child and how to open it (`radian-tui --resume <child>`).
+  the child and how to open it (`radian --resume <child>`).
 - An unknown command is an error notice, never a message to the model.
 - The grammar and the execution are `radian_host::memory::commands`, shared byte-for-byte with
   the CLI; the TUI only adds the framework and the notices.
@@ -362,14 +408,14 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   candidates in the order you expect, and is the description column readable at your width? Is
   the one-key-accepts-it rule (Tab/Enter) comfortable, or does Enter accepting a candidate
   surprise you?
-- **the default workspace**: run `radian-tui` with no `--workspace` from a
+- **the default workspace**: run `radian` with no `--workspace` from a
   project directory — the file tools must be there and the sandbox must confine them there. From
   `$HOME` the startup line must say `workspace: ~/tmp (cwd is $HOME)`, and the filesystem root
   must be refused.
 - **`--resume` without a value**: does the picker list only sessions (no `n`),
   and does Esc leave with nothing created?
 - **the exit line**: after Ctrl-C twice (or a SIGTERM), is the printed
-  `resume: radian-tui --resume <id> …` command paste-ready in your shell, with the paths and
+  `resume: radian --resume <id> …` command paste-ready in your shell, with the paths and
   quoting right?
 - **mouse selection/copy**: with the default `tui.mouse = true`, the app reports the wheel,
   buttons and button motion (`?1000h ?1002h ?1006h`) and owns the transcript selection
@@ -518,10 +564,10 @@ Whatever ended the app, the normal screen now says why, once, after the terminal
 | How it ends | Exit | Reason line (stderr, after restore) |
 |---|---|---|
 | clean quit (Ctrl-C twice / driver ends by request) | 0 | `session <id> saved; resume with `--resume <id>`` |
-| startup/config refusal (bad workspace, failed probe, bad MCP file, bad header, ...) | 1 | `radian-tui: <the error>` (terminal never entered) |
-| driver task ends with a `RunError` | 1 | `radian-tui: driver: <error>` |
-| driver task panics | 1 | `radian-tui: the driver task ended unexpectedly: <join error>: <redacted panic>` |
-| the app itself panics (`main` thread) | 101 | `radian-tui: the app panicked: <redacted panic> (panic log: <path>)` |
+| startup/config refusal (bad workspace, failed probe, bad MCP file, bad header, ...) | 1 | `radian: <the error>` (terminal never entered) |
+| driver task ends with a `RunError` | 1 | `radian: driver: <error>` |
+| driver task panics | 1 | `radian: the driver task ended unexpectedly: <join error>: <redacted panic>` |
+| the app itself panics (`main` thread) | 101 | `radian: the app panicked: <redacted panic> (panic log: <path>)` |
 | `--list` | 0 | none: the listing is the output |
 | `--pick` quit (Esc/Ctrl-C) | 0 | none: the picker created nothing |
 
@@ -599,7 +645,7 @@ by one is resumable by the other:
   history comes from the journal (`radian-runtime` recovers it); the transcript view is the
   same history.
 - `--list` prints this workspace's sessions (id, created, last activity, message count) and
-  exits without touching the terminal. A closed stdout (`radian-tui --list | head -1`) stops
+  exits without touching the terminal. A closed stdout (`radian --list | head -1`) stops
   quietly with exit 0, never a panic (dogfooding D21).
 - `--pick` opens the session **picker overlay** (the same one `/sessions` uses) in the one
 event loop, before any session exists: `Up`/`Down` select, type to filter by id/summary,
@@ -621,7 +667,7 @@ are accepted aliases but not listed),
 `--context-window TOKENS`, `--offline-catalog`, `--catalog-provider PROVIDER`. The key is
 read only from the named environment variable and is never printed.
 
-`--version` prints `radian-tui <version>` and exits 0 before anything else runs: no
+`--version` prints `radian <version>` and exits 0 before anything else runs: no
 `--model` is needed, no key is read, no session file is created, and the terminal is never
 entered. The version is the package's own (`CARGO_PKG_VERSION` in `Cargo.toml`), never a
 literal in the source.
@@ -715,7 +761,7 @@ anything else. The status bar counts the queue (`N pending`) while it is not emp
 goes through the session facade (`answer`), which re-validates the `AnswerRequest` capability,
 so a facade without it refuses with a notice rather than resolving a request.
 
-`radian-tui` always registers `ask_user` (ADR 0024 Q5); `agent` never does and its startup line
+`radian` always registers `ask_user` (ADR 0024 Q5); `agent` never does and its startup line
 says `ask_user: off (no interactive user)`. The tool is fixed `allow` in every tier (ADR 0024
 Q6): it writes nothing and runs nothing, and the answer is data, not a permission.
 

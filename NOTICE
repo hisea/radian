@@ -1,0 +1,13 @@
+Radian
+Copyright 2026 The Radian Authors
+
+Radian is licensed under either of the MIT license (LICENSE-MIT) or the Apache
+License, Version 2.0 (LICENSE-APACHE), at your option.
+
+Third-party code included in this repository is listed below with its own
+license and attribution, as that license requires.
+
+- `third_party/codex-mermaid`: vendored from
+  [openai/codex](https://github.com/openai/codex) `codex-rs/mermaid` at commit
+  `2f05c0a71f59fb2f05800846351f3e9926c3e52b`, Apache-2.0, Copyright 2025
+  OpenAI. See that directory's `NOTICE` and `RADIAN-CHANGES.md`.

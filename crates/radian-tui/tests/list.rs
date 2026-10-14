@@ -52,7 +52,7 @@ async fn write_session(dir: &std::path::Path, id: &str, workspace: &std::path::P
 }
 
 fn run_list(dir: &std::path::Path, workspace: &std::path::Path) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_radian-tui"))
+    let output = Command::new(env!("CARGO_BIN_EXE_radian"))
         .args([
             "--model",
             "mock",
@@ -127,7 +127,7 @@ fn closed_stdout() -> std::process::Stdio {
     unsafe { std::process::Stdio::from_raw_fd(fds[1]) }
 }
 
-/// D21: `radian-tui --list | head -1` must not panic; a closed stdout is a normal stop.
+/// D21: `radian --list | head -1` must not panic; a closed stdout is a normal stop.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_closed_stdout_is_not_a_panic() {
@@ -136,7 +136,7 @@ async fn a_closed_stdout_is_not_a_panic() {
     std::fs::create_dir_all(&ws).unwrap();
     write_session(dir.path(), "sigpipe", &ws).await;
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_radian-tui"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_radian"))
         .args([
             "--model",
             "mock",
@@ -150,7 +150,7 @@ async fn a_closed_stdout_is_not_a_panic() {
         .stdout(closed_stdout())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .expect("spawn radian-tui --list");
+        .expect("spawn radian --list");
     let mut stderr = String::new();
     std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut stderr).unwrap();
     let status = child.wait().expect("wait");

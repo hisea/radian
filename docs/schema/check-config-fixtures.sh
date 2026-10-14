@@ -24,6 +24,8 @@ EXPECT = {
     ),
     "schema-version-newer.toml": dict(outcome="readonly_or_refuse", version=99),
     "schema-version-lower.toml": dict(outcome="migration_required", version=0),
+    "tui-theme-colors.toml": dict(outcome="accept"),
+    "api-key-removed.toml": dict(outcome="reject"),
     "plaintext-secret.toml": dict(outcome="reject"),
     "heuristic-secret.toml": dict(outcome="reject"),
     "plaintext-plain.toml": dict(outcome="reject"),
@@ -82,6 +84,12 @@ def check_secret_refs(doc):
     walk(doc, "")
 
 
+def check_api_key_removed(doc):
+    """ADR 0026 D2：`model.api_key` 一律拒绝，提示改用 auth.json（不静默忽略）。"""
+    if "api_key" in doc.get("model", {}):
+        raise ConfigError("model.api_key 不再读取；key 只从 ~/.radian/credentials/auth.json 来")
+
+
 def check_fixture(name, exp):
     with open(f"config/{name}", "rb") as fh:
         try:
@@ -106,6 +114,7 @@ def check_fixture(name, exp):
         try:
             check_no_plaintext(doc)
             check_secret_refs(doc)
+            check_api_key_removed(doc)
         except ConfigError as e:
             return f"PASS {name}: 拒绝（{e}）"
         raise ConfigError(f"{name}: 期望拒绝打开，但没有检测到明文密钥/非法 SecretRef")
@@ -121,8 +130,7 @@ def check_fixture(name, exp):
     for table, key in exp.get("unknown_nested", ()):
         if key not in doc.get(table, {}):
             raise ConfigError(f"{name}: 期望含未知嵌套字段 {table}.{key}")
-    if not isinstance(doc.get("model", {}).get("api_key"), dict):
-        raise ConfigError(f"{name}: 期望 model.api_key 是 SecretRef")
+    check_api_key_removed(doc)
     return f"PASS {name}: 接受（schema v{SUPPORTED}，0 拒绝，仅说明“解释时忽略 + 写回必须保真”）"
 
 

@@ -42,8 +42,8 @@ p95 取排序后的第 95 百分位（小样本下即接近最大值，故 p95 �
 | 场景 | debug 中位 / p95 | release 中位 / p95 | n |
 |---|---|---|---|
 | `radian-tui` 启动到输入框 | 97.0 / 104.4 ms | 98.4 / 150.3 ms | 10 |
-| `radian-tui --resume` 1k 条 | 109.2 / 113.4 ms | 89.7 / 96.2 ms | 5 |
-| `radian-tui --resume` 10k 条 | 529.9 / 561.8 ms | 161.0 / 170.8 ms | 5 |
+| `radian --resume` 1k 条 | 109.2 / 113.4 ms | 89.7 / 96.2 ms | 5 |
+| `radian --resume` 10k 条 | 529.9 / 561.8 ms | 161.0 / 170.8 ms | 5 |
 | `agent` 启动到提示符 | 32.3 / 39.2 ms | 54.9 / 80.4 ms | 10 |
 | `agent --resume` 1k 条 | 38.5 / 51.7 ms | 41.5 / 76.6 ms | 5 |
 | `agent --resume` 10k 条 | 171.2 / 196.5 ms | 54.4 / 59.7 ms | 5 |
@@ -144,8 +144,8 @@ release 构建。
 | `agent --resume` | 1 000 条 | 14.6 MB |
 | `agent --resume` | 10 000 条 | 34.6 MB |
 | `radian-tui` | 全新 | 11.5 MB |
-| `radian-tui --resume` | 1 000 条 | 14.1 MB |
-| `radian-tui --resume` | 10 000 条 | 38.1 MB |
+| `radian --resume` | 1 000 条 | 14.1 MB |
+| `radian --resume` | 10 000 条 | 38.1 MB |
 
 约 **2.3–2.7 KB/条消息**（10k 比空会话多 ~23–27 MB）。10k 条已占用 ~35–38 MB，尚属温和；
 按线性外推，100k 条会到 ~250 MB 量级——**未实测**（未测）。
@@ -270,7 +270,7 @@ mock 拒绝 >16 MiB 的请求体，50k+ 的 resume 超限，所以用裸 socket 
 
 ### 未完成 / 未测（暂停时）
 
-- **`radian-tui --resume` 到第一帧、以及首帧后 `Ctrl-Home` 滚动到顶的耗时**：未测（本片暂停
+- **`radian --resume` 到第一帧、以及首帧后 `Ctrl-Home` 滚动到顶的耗时**：未测（本片暂停
   在这里）。计划复用 `perf_startup.rs` 的 `libc::openpty` harness，`--freeze-draw` 无关；第一帧的
   判据是最后一条消息的标记，滚动判据是第一条消息的标记。
 - 真实 provider 的首 token（本测量只在第一个请求发出即停）；`--resume` 的磁盘冷缓存；
@@ -362,7 +362,7 @@ cargo test --release -p radian-tui --test perf_render -- --ignored --nocapture -
 （`ru_maxrss` 是进程高水位，所以本测量 re-exec 测试二进制、只跑这一个测试，否则会读到同一进程里
 更早测试的峰值。）
 
-### `radian-tui --resume` 到第一帧，与首帧后 `Ctrl-Home`
+### `radian --resume` 到第一帧，与首帧后 `Ctrl-Home`
 
 用 `pi/longsess` 的合成长会话生成器（`crates/radian-session/tests/common/long_session.rs`，经
 `#[path]` 共用），1k/10k/50k 条消息、无压缩。`--resume` 的历史在循环之前渲染，所以底部

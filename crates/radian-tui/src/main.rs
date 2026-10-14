@@ -1,4 +1,4 @@
-//! The `radian-tui` binary: one real conversation through `radian-runtime`, rendered full
+//! The `radian` binary: one real conversation through `radian-runtime`, rendered full
 //! screen.
 //!
 //! Never run this in a shared terminal by hand without expecting it to take over: it enters
@@ -31,7 +31,7 @@ use ratatui::crossterm::event::{self, Event};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "radian-tui",
+    name = "radian",
     version,
     about = "Full-screen TUI for the radian agent runtime"
 )]
@@ -49,11 +49,6 @@ struct Cli {
     /// `/v1/messages` for anthropic). Defaults to the provider's public endpoint.
     #[arg(long, value_name = "URL")]
     base_url: Option<String>,
-
-    /// Environment variable holding the API key. Never read from anywhere else, never
-    /// printed. Defaults to `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`.
-    #[arg(long, value_name = "VAR")]
-    api_key_env: Option<String>,
 
     /// The configuration file (ADR 0008). Overrides `RADIAN_CONFIG` and
     /// `~/.radian/config/config.toml`. Read-only: this slice never writes it.
@@ -233,7 +228,7 @@ fn main() -> ExitCode {
     {
         Ok(runtime) => runtime,
         Err(e) => {
-            eprintln!("radian-tui: {e}");
+            eprintln!("radian: {e}");
             return ExitCode::from(1);
         }
     };
@@ -245,7 +240,7 @@ fn main() -> ExitCode {
     if let Err(e) = radian_tui::signals::listen(runtime.handle(), move |signal| {
         let _ = signal_tx.send(UiEvent::Signal(signal));
     }) {
-        eprintln!("radian-tui: cannot listen for SIGTERM/SIGHUP: {e}");
+        eprintln!("radian: cannot listen for SIGTERM/SIGHUP: {e}");
         return ExitCode::from(1);
     }
     // A panic must not unwind through a runtime *drop*: that drop can wait on a parked task
@@ -295,7 +290,7 @@ fn main() -> ExitCode {
 /// a failure to print the line is not a failure to exit.
 fn print_exit_line(message: &str) {
     use std::io::Write;
-    let _ = writeln!(std::io::stderr(), "radian-tui: {message}");
+    let _ = writeln!(std::io::stderr(), "radian: {message}");
 }
 
 fn run(
@@ -348,21 +343,25 @@ fn run(
         .clone()
         .or_else(|| config.permissions.profile.clone())
         .unwrap_or_else(|| "workspace".to_string());
-    let provider_name = cli
+    // ADR 0026 D0: `--provider`/config `model.provider` names a descriptor. The generic
+    // `openai-compatible` descriptor is the default (the pre-D0 behaviour); the model is
+    // never defaulted.
+    let provider_id = cli
         .provider
         .clone()
-        .or_else(|| config.model.provider.clone());
-    let provider = Provider::from_name(provider_name.as_deref().unwrap_or("openai-compatible"))?;
-    let base_url = cli
-        .base_url
-        .clone()
-        .or_else(|| config.model.base_url.clone())
-        .unwrap_or_else(|| provider.default_base_url().to_owned());
-    let api_key_env = cli
-        .api_key_env
-        .clone()
-        .or_else(|| config.model.api_key_env.clone())
-        .unwrap_or_else(|| provider.default_api_key_env().to_owned());
+        .or_else(|| config.model.provider.clone())
+        .unwrap_or_else(|| radian_host::GENERIC_ID.to_owned());
+    let descriptor = radian_host::descriptor(&provider_id).ok_or_else(|| {
+        format!(
+            "unknown provider {provider_id:?}: choose one of {}",
+            radian_host::descriptors()
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+    let provider = descriptor.protocol_for(&model_name).adapter();
     let thinking = match cli.thinking.as_deref() {
         Some(value) => value.parse::<Thinking>()?,
         None => Thinking::Off,
@@ -370,6 +369,41 @@ fn run(
     // `--thinking` and `--max-tokens` are Anthropic-only; under openai-compatible they would
     // be ignored, so this is an error before the session file exists (dogfooding D15).
     check_provider_flags(provider, thinking, cli.max_tokens)?;
+    // The generic descriptor's endpoint; a non-generic descriptor refuses it (`resolve_route`).
+    let base_url_override = cli
+        .base_url
+        .clone()
+        .or_else(|| config.model.base_url.clone());
+    // The endpoint this run would talk to, before the session id: used only to allow a local
+    // server to run without a key (a loopback mock needs no credential).
+    let probe_base_url = descriptor
+        .model(&model_name)
+        .map(|entry| entry.base_url.to_owned())
+        .or_else(|| base_url_override.clone())
+        .unwrap_or_else(|| descriptor.default_base_url.to_owned());
+    // ADR 0026 D2: the key comes only from `auth.json`. A missing entry is a clear refusal with
+    // the JSON to add (the `/login` command arrives in the next slice), unless the endpoint is
+    // local.
+    let credential = match radian_host::auth::resolve_key(&provider_id)
+        .map_err(|e| e.to_string())?
+    {
+        Some(credential) => Some(credential),
+        None if is_local_base_url(&probe_base_url) => None,
+        None => {
+            return Err(
+                match radian_host::auth::resolve_note(&provider_id).map_err(|e| e.to_string())? {
+                    Some(note) => note,
+                    None => format!(
+                        "no credential for `{provider_id}`: add an entry to \
+                         ~/.radian/credentials/auth.json, e.g.\n  {{\"{provider_id}\": {{\"type\": \
+                         \"api_key\", \"key\": \"$MY_KEY\"}}}}\n(or use `/login {provider_id}` in the next \
+                         release); refusing to continue because {} is not a local address",
+                        radian_host::redact_base_url(&probe_base_url)
+                    ),
+                },
+            );
+        }
+    };
     // The config's headers come first, so a `--header` of the same name wins.
     let mut header_args: Vec<String> = config
         .model
@@ -380,7 +414,13 @@ fn run(
     header_args.extend(cli.header.iter().cloned());
     let workspace_root = coding_root(&cli)?;
     let workspace_path = radian_host::resolve_workspace(Some(&workspace_root.path))?;
-    let catalog_base_url = base_url.clone();
+    // The window's base URL: the descriptor's per-model URL, then the generic override, then
+    // the descriptor default.
+    let catalog_base_url = descriptor
+        .model(&model_name)
+        .map(|entry| entry.base_url.to_owned())
+        .or_else(|| base_url_override.clone())
+        .unwrap_or_else(|| descriptor.default_base_url.to_owned());
     // The window comes from `--context-window` or the models.dev catalog (ADR 0018). A fetch
     // failure is not a startup failure: the window is then unknown and the budget stays off.
     // Still before the session file exists. `R` comes from the request's own output setting:
@@ -391,7 +431,11 @@ fn run(
     };
     let window = runtime.block_on(radian_host::resolve(&radian_host::WindowQuery::production(
         cli.context_window.or(config.model.context_window),
-        cli.catalog_provider.clone(),
+        cli.catalog_provider.clone().or_else(|| {
+            // `opencode-go`/`anthropic`/`openai` are catalog providers; the generic one is not,
+            // so its provider is derived from the base URL hostname.
+            (descriptor.id != radian_host::GENERIC_ID).then(|| descriptor.id.to_string())
+        }),
         &catalog_base_url,
         model_name.clone(),
         request_max_output,
@@ -521,22 +565,37 @@ fn run(
     };
     validate_session_id(&session_id)?;
     app.session_id = session_id.clone();
-    let headers = parse_headers(&header_args, &session_id)?;
+    let user_headers = parse_headers(&header_args, &session_id)?;
     // Header values and the key must not reach the panic log (dogfooding D4).
-    let mut secrets: Vec<String> = headers.iter().map(|(_, value)| value.clone()).collect();
-    let key = std::env::var(&api_key_env).ok().filter(|k| !k.is_empty());
-    if let Some(key) = &key {
-        secrets.push(key.clone());
+    let mut secrets: Vec<String> = user_headers
+        .iter()
+        .map(|(_, value)| value.clone())
+        .collect();
+    if let Some(credential) = &credential {
+        secrets.push(credential.key.clone());
     }
+    // ADR 0026 D0: the descriptor decides the adapter, base URL and headers. `resolve_route`
+    // refuses `--base-url`/`--header` for a non-generic descriptor.
+    let route = radian_host::resolve_route(
+        &provider_id,
+        &model_name,
+        base_url_override.as_deref(),
+        credential
+            .as_ref()
+            .and_then(|credential| credential.env.get(radian_host::RADIAN_BASE_URL))
+            .map(String::as_str),
+        &user_headers,
+        &session_id,
+    )?;
     // D1/D2: every check that can fail runs **before** the session file is created. The
     // workspace is validated first, so a typo is a workspace error and never reaches the
     // sandbox probe (dogfooding D1). `radian-host` owns the rule so both hosts share it.
     let model = build_model(ModelArgs {
-        provider,
-        base_url,
+        provider: route.adapter(),
+        base_url: route.base_url.clone(),
         model: model_name.clone(),
-        api_key: key,
-        headers,
+        api_key: credential.as_ref().map(|credential| credential.key.clone()),
+        headers: route.headers.clone(),
         // The TUI has no `--include-usage` flag; the adapter's default policy applies.
         include_usage: None,
         max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
@@ -646,7 +705,7 @@ fn run(
     let before_driver: Option<Arc<dyn Fn() + Send + Sync>> = cli
         .panic_in_driver
         .then(|| Arc::new(panic_in_driver) as Arc<dyn Fn() + Send + Sync>);
-    let memory_warning = Arc::new(|message: &str| eprintln!("radian-tui: [memory] {message}"));
+    let memory_warning = Arc::new(|message: &str| eprintln!("radian: [memory] {message}"));
 
     // ADR 0023 U5: the one place a session is established; `agent-cli` calls the same function
     // with its own bindings. Every startup check that can fail has already run, so this is the
@@ -720,7 +779,7 @@ fn run(
         });
     }
     if cli.panic_after_enter {
-        panic!("radian-tui: panic path test");
+        panic!("radian: panic path test");
     }
     if let Some(message) = &cli.panic_message {
         panic!("{message}");
@@ -748,7 +807,7 @@ fn run(
             .map_err(|_| "the test child did not start".to_string())?;
         std::fs::write(dir.join("child.pid"), pid.to_string())
             .map_err(|e| format!("child.pid: {e}"))?;
-        panic!("radian-tui: panic path test with a child in flight");
+        panic!("radian: panic path test with a child in flight");
     }
     let memory_service = session.memory().cloned();
     // The history of a resumed session is rendered before the first frame, so the transcript
@@ -935,6 +994,24 @@ fn run(
     }))
 }
 
+/// Whether `base_url` points at this machine (loopback), where a server needs no credential.
+fn is_local_base_url(base_url: &str) -> bool {
+    let Some((_, rest)) = base_url.split_once("://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority.strip_prefix('[').map_or_else(
+        || {
+            authority
+                .rsplit_once(':')
+                .filter(|(_, port)| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
+                .map_or(authority, |(host, _)| host)
+        },
+        |bracketed| bracketed.split(']').next().unwrap_or_default(),
+    );
+    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
+}
+
 /// The program name for the resume command: `argv[0]`'s file name, so the line is copyable
 /// whatever the binary is called (a `cargo run`, an absolute path, a symlink).
 fn program_name() -> String {
@@ -946,7 +1023,7 @@ fn program_name() -> String {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| arg.to_string_lossy().into_owned())
         })
-        .unwrap_or_else(|| "radian-tui".to_string())
+        .unwrap_or_else(|| "radian".to_string())
 }
 
 /// One argument of the resume command, quoted when it would not survive a shell.
@@ -994,7 +1071,7 @@ fn resume_command(program: &str, session_id: &str, cli: &Cli, workspace: &Path) 
 /// Set once in `run`; `read_input` writes it and parks.
 /// Test hook (`--panic-in-driver`): the driver task panics, so the exit path can be checked.
 fn panic_in_driver() {
-    panic!("radian-tui: driver task panic test");
+    panic!("radian: driver task panic test");
 }
 
 static BLOCK_INPUT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
@@ -1774,7 +1851,7 @@ fn handle_session_request(
             };
             match runtime.block_on(radian_session::fork_with_journal(request, &host.journal)) {
                 Ok(outcome) => vec![format!(
-                    "forked at seq {} into {}; open it with `radian-tui --resume {}`                      (this window keeps the parent)",
+                    "forked at seq {} into {}; open it with `radian --resume {}`                      (this window keeps the parent)",
                     outcome.seq, outcome.child_id, outcome.child_id
                 )],
                 Err(error) => vec![format!("fork failed: {error}")],
@@ -1954,7 +2031,7 @@ fn prepare_picker(
     )))
 }
 
-/// Why the TUI's `--list` stopped. A closed stdout (`radian-tui --list | head`) is a normal
+/// Why the TUI's `--list` stopped. A closed stdout (`radian --list | head`) is a normal
 /// stop, not a failure (dogfooding D21), so it is kept apart from a real error.
 enum ListError {
     /// A real failure: exit 1 with this message.
@@ -2071,11 +2148,11 @@ mod tests {
 
     #[test]
     fn the_default_model_call_limit_is_the_tui_one_not_the_cores() {
-        let cli = Cli::try_parse_from(["radian-tui", "--model", "m"]).unwrap();
+        let cli = Cli::try_parse_from(["radian", "--model", "m"]).unwrap();
         assert_eq!(cli.max_model_calls, TUI_DEFAULT_MAX_MODEL_CALLS);
         assert_eq!(TUI_DEFAULT_MAX_MODEL_CALLS, 1000);
         let cli =
-            Cli::try_parse_from(["radian-tui", "--model", "m", "--max-model-calls", "5"]).unwrap();
+            Cli::try_parse_from(["radian", "--model", "m", "--max-model-calls", "5"]).unwrap();
         assert_eq!(cli.max_model_calls, 5);
     }
 }

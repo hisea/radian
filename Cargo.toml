@@ -15,11 +15,13 @@ members = [
     "crates/radian-tui",
     "crates/radian-permissions",
     "crates/radian-memory",
+    "third_party/codex-mermaid",
 ]
 
 [workspace.package]
 edition = "2024"
 rust-version = "1.88"
+license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 futures-util = { version = "0.3", default-features = false, features = ["std"] }

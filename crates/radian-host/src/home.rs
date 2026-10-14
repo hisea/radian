@@ -1,4 +1,5 @@
-//! The `~/.radian/` layout (ADR 0020): one root for config, cache, sessions and memory.
+//! The `~/.radian/` layout (ADR 0020): one root for config, cache, sessions, memory and
+//! themes (ADR 0029 decision 1).
 //!
 //! `RADIAN_HOME` overrides the whole root (tests, special deployments); otherwise it is
 //! `$HOME/.radian`. There are no platform-specific branches any more (no `Library/...`, no
@@ -50,6 +51,9 @@ pub fn memory_dir_for(root: &Path) -> PathBuf {
 pub fn credentials_dir_for(root: &Path) -> PathBuf {
     root.join("credentials")
 }
+pub fn themes_dir_for(root: &Path) -> PathBuf {
+    root.join("themes")
+}
 pub fn diagnostics_dir_for(root: &Path) -> PathBuf {
     cache_dir_for(root).join("diagnostics")
 }
@@ -88,6 +92,12 @@ pub fn memory_dir() -> Option<PathBuf> {
 /// D4): it holds `auth.json`, which the sandbox must not read.
 pub fn credentials_dir() -> Option<PathBuf> {
     Some(private(credentials_dir_for(&radian_home()?)))
+}
+
+/// The themes directory for this process, created 0700. Sandbox-readable (ADR 0020): theme
+/// files are user UI data, like the config (ADR 0029 decision 1: `~/.radian/themes/<name>.json`).
+pub fn themes_dir() -> Option<PathBuf> {
+    Some(private(themes_dir_for(&radian_home()?)))
 }
 
 /// The diagnostics directory for this process, created 0700. Sandbox-readable (ADR 0020).
@@ -207,6 +217,10 @@ mod tests {
         assert_eq!(
             credentials_dir_for(root),
             PathBuf::from("/home/u/.radian/credentials")
+        );
+        assert_eq!(
+            themes_dir_for(root),
+            PathBuf::from("/home/u/.radian/themes")
         );
         assert_eq!(
             diagnostics_dir_for(root),

@@ -270,3 +270,15 @@ Base `5aa84b6` · 一次性 worktree `/tmp/pimig-mut` · 独立 `CARGO_TARGET_DI
 | M15 | 存在 `auth.json` 时读取它 | `cli::config_import_pi_never_reads_auth_json` | ✅ |
 | M17 | 差异说明回显字面密钥值 | `cli::config_import_pi_drafts_a_valid_configuration_and_never_shows_a_literal_key` | ✅ |
 | M20 | 执行 `!command` | `cli::config_import_pi_lists_a_command_key_and_does_not_run_it` | ✅ |
+
+## ADR 0026 第 0 片（b）：描述符与 `auth.json`
+
+Base `23149f4` · 就地变异，每个变异 `git checkout -- <file>` 还原、`git status --short` 只留本切片的新测试。
+变异 2–4 改的是 `crates/radian-host`，但抓住它们的测试在 `agent-cli`，所以记在这里。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M22 | `--api-key-env` 重新被接受（在 `Cli` 里加回该字段） | `cli::the_removed_api_key_env_flag_is_a_usage_error` | ✅ failed（clap 不再报 `unexpected argument`） |
+| M23 | 配置里的 `model.api_key` 被静默忽略（`("api_key", _) => {}`） | `radian-host::config::tests::model_api_key_is_refused_with_an_auth_json_pointer`、`cli::a_config_with_model_api_key_is_refused` | ✅ failed（错误变成「没有凭据」，不再点名 `model.api_key`） |
+| M24 | `opencode-go` 漏掉 `x-opencode-session` | `cli::opencode_go_sends_the_session_header_byte_for_byte` | ✅ failed（请求头为 `None`） |
+| M25 | 非通用描述符接受 `--base-url`（把检查短路） | `cli::a_non_generic_descriptor_refuses_base_url_and_header` | ✅ failed（退出码 0） |
