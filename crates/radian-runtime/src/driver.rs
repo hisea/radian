@@ -211,6 +211,14 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
 
     pub fn set_budget_for(&mut self, resolver: BudgetFor) {
         self.budget_for = Some(resolver);
+        // Recompute at once for the route already in the slot (review M2): on a resume the
+        // replay happens before the host can set the resolver, so without this the restored
+        // model would keep `B = None` until the next switch.
+        if let Some(route) = ModelRoute::from_value(&self.slot.value())
+            && let Some(resolver) = &self.budget_for
+        {
+            self.turn_budget = resolver(&route.provider, &route.model).map(ContextBudget::new);
+        }
     }
 
     /// The budget the next turn runs under (`testing` only): the D7 assertion reads it instead
@@ -218,16 +226,6 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
     #[cfg(feature = "testing")]
     pub fn test_turn_budget(&self) -> Option<ContextBudget> {
         self.turn_budget
-    }
-
-    /// Re-runs the budget recomputation for the slot's current route (`testing` only): the
-    /// resume path applies the replayed changes before the host sets the resolver, so the D7
-    /// assertion re-runs it.
-    #[cfg(feature = "testing")]
-    pub fn test_replay_budget(&mut self) {
-        let revision = self.next_config_revision;
-        let change = self.slot.value();
-        self.apply_change(change, revision);
     }
 
     /// The applied configuration. A model adapter reads this; the driver writes it only at

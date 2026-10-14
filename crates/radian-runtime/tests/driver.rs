@@ -509,3 +509,50 @@ async fn resume_merges_every_config_change_not_one_per_kind() {
     assert_eq!(value["model"]["model"], "claude", "{value}");
     assert_eq!(value["approval"], "auto", "{value}");
 }
+
+/// ADR 0026 D7 + review M2: on a resume the host sets the budget resolver **after** the driver
+/// replayed the journal's model change; `set_budget_for` must therefore recompute for the
+/// restored route at once, not wait for the next switch.
+#[tokio::test]
+async fn the_resumed_model_gets_its_budget_when_the_resolver_arrives() {
+    let model = ScriptedModel::new([text("one"), text("two")]);
+    let tools = MemTools::new();
+    let (mut driver, env) = open_env("resume-budget", Arc::clone(&model), tools.clone()).await;
+    let queue = Arc::clone(driver.config_queue());
+    let handle = tokio::spawn(async move { driver.run().await });
+    queue.push(radian_runtime::ModelRoute::new("anthropic", "claude").to_value());
+    env.inbox.followup("a", InputSource::User).await.unwrap();
+    env.recorder.wait_finished().await;
+    handle.abort();
+    let _ = handle.await;
+
+    let path = env.path.clone();
+    let copy =
+        std::env::temp_dir().join(format!("radian-resume-budget-{}.jsonl", std::process::id()));
+    std::fs::copy(&path, &copy).unwrap();
+    drop(env);
+
+    let journal = Arc::new(SessionJournal::resume(&copy, "sid").unwrap());
+    let inbox = Inbox::durable(16, Arc::clone(&journal));
+    let agent = Arc::new(Agent::new(Arc::clone(&model), tools));
+    let mut driver2 = Driver::open(
+        &agent,
+        Arc::clone(&journal),
+        Arc::clone(&inbox),
+        Arc::new(Recorder::default()) as Arc<dyn agent_core::EventSink>,
+        TurnOptions::default(),
+    )
+    .await
+    .unwrap();
+    std::fs::remove_file(&copy).ok();
+    // The replay put the model in the slot; the resolver arrives now (the host's order).
+    assert_eq!(driver2.test_turn_budget(), None, "no resolver yet");
+    driver2.set_budget_for(Arc::new(|provider, model| {
+        (provider == "anthropic" && model == "claude").then_some(4321)
+    }));
+    assert_eq!(
+        driver2.test_turn_budget(),
+        Some(agent_core::ContextBudget::new(4321)),
+        "the restored route gets its budget when the resolver arrives"
+    );
+}
