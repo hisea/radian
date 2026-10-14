@@ -112,6 +112,12 @@ mod tests {
         assert_eq!(osc52("foob"), "\x1b]52;c;Zm9vYg==\x07");
         assert_eq!(osc52("foobai"), "\x1b]52;c;Zm9vYmFp\x07");
         assert_eq!(osc52(""), "\x1b]52;c;\x07");
+        // The last two table characters (`+`/`/`, indices 62/63) have no other vector: `~`
+        // ends in six ones (index 62), `?` is six ones (index 63). Without these, swapping
+        // the table to its URL-safe variant (`-_`) — or any transposition of the tail —
+        // stays green.
+        assert_eq!(osc52("~~~"), "\x1b]52;c;fn5+\x07");
+        assert_eq!(osc52("???"), "\x1b]52;c;Pz8/\x07");
         // Multi-byte UTF-8 goes through as bytes and survives a round trip by hand.
         let seq = osc52("日");
         assert_eq!(seq, "\x1b]52;c;5pel\x07");
