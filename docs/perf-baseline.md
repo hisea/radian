@@ -600,7 +600,9 @@ thinking 和工具结果。命令与 §7 同。
 < 100 ms（24–28 ms）。关键在于 Assistant 的 Markdown **段落行**按 `(width, text_len)` 缓存
 （`Entry.md_cache`）：折叠切换会重数每个条目，但不重新解析 Markdown，所以首帧与块模型同一量级。
 
-**已知回归（未解决）**：`perf_tui_resume`（真实二进制 `--resume` 5 万条消息到首帧，`long_session`
-语料）在本片后**超时**（测试等 120 s）。`perf_render_resize` 的 50k 混合语料首帧仍约 53 ms，
-所以这不是每帧路径的问题，而是 `--resume` 时**首次**测量每个条目都要解析 Markdown 的累积成本。
-留作下一片：要么首帧只测量可见条目（懒测量），要么给 Markdown 解析加尺寸上限。
+**`perf_tui_resume` 的失败与本片无关（已核实）**：它在**本片之前的 main（`5628737`，合并
+mermaid 后）**上同样超时，而且连 warm-up（1000 条）都超时。用同样的 pty 探针（20 s 后看原始
+输出）在两边都看到：应用**正常渲染**（transcript 在底部、状态栏正常），但 `resumed session …`
+这行属于 **startup 屏**，它排在 transcript 顶部；resume 时视图 `follow` 到底部，所以它在首帧
+**滚出屏幕**，测试等的那个字符串永远不出现。也就是说这是 startup 屏在 resume 长历史下的可见性
+问题（或测试该换一个判据），不是 Markdown 的性能回归。本片没有改它。

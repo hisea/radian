@@ -187,3 +187,81 @@ fn line_count_matches_the_layout() {
         assert_eq!(count, laid_out, "width {width}");
     }
 }
+
+/// Locate the cell of the `n`-th character of the **displayed** body (across the wrapped
+/// lines), as `(line, column)`.
+fn cell_of(lines: &[radian_tui::blocks::BodyLine], n: usize) -> Option<(usize, usize)> {
+    let mut seen = 0usize;
+    for (line_index, line) in lines.iter().enumerate() {
+        let cells = line.chars.len();
+        if n < seen + cells {
+            return Some((line_index, n - seen));
+        }
+        seen += cells;
+    }
+    None
+}
+
+/// The property (review R2): the selection mapping points at the **source** characters. Every
+/// display cell that came from the source (`md` piece with an offset) locates to exactly that
+/// source offset, at every block kind and width; a synthesized cell (a bullet, a link's
+/// ` (url)`) locates to its block's start and is skipped here.
+#[test]
+fn every_cell_maps_to_its_source_offset() {
+    let bodies = [
+        "alpha beta gamma delta epsilon\n",
+        "A **bold** *italic* `code` [link](https://x) tail\n",
+        "first paragraph\n\nsecond paragraph\n",
+        "- item one\n- item two\n\n> quoted\n",
+        "| a | b |\n| --- | --- |\n| 1 | 2 |\n",
+        "# Heading\n\nbody text\n",
+    ];
+    for body in bodies {
+        for width in [80usize, 30, 16] {
+            let mut app = App::new("m", "s");
+            assistant(&mut app, body);
+            let modes = modes(ReasoningMode::Expanded);
+            let blocks = blocks::parse_blocks(body);
+            let lines = blocks::layout(&app.entries[0], &blocks, modes, width);
+            let cells: usize = lines.iter().map(|line| line.chars.len()).sum();
+            for cell in 0..cells {
+                let (line_index, column) = cell_of(&lines, cell).expect("a cell");
+                // `layout` is body-relative; `locate` takes screen columns (the assistant
+                // prefix is two cells).
+                let anchor = select::locate(&app.entries, modes, width, line_index, column + 2)
+                    .expect("an anchor");
+                assert_eq!(
+                    anchor.offset, lines[line_index].chars[column],
+                    "body {body:?} width {width} cell {cell}: the anchor must be the cell's \
+                     source offset"
+                );
+            }
+        }
+    }
+}
+
+/// The soft-wrap case, spelled out: selecting across the break copies the source's space.
+#[test]
+fn a_selection_across_a_soft_wrap_keeps_the_source_space() {
+    let body = "alpha beta gamma delta epsilon\n";
+    let mut app = App::new("m", "s");
+    assistant(&mut app, body);
+    app.set_transcript_width(20);
+    let modes = modes(ReasoningMode::Expanded);
+    let blocks = blocks::parse_blocks(body);
+    let lines = blocks::layout(&app.entries[0], &blocks, modes, 20);
+    assert!(lines.len() > 1, "the paragraph wraps: {lines:?}");
+    // From 'b' in "beta" to 'g' in "gamma" (display positions 6..11).
+    let (sl, sc) = cell_of(&lines, 6).expect("start cell");
+    let (el, ec) = cell_of(&lines, 11).expect("end cell");
+    let anchor = select::locate(&app.entries, modes, 20, sl, sc + 2).expect("anchor");
+    // The head is the cell after 'g': the copy then covers `beta gamma`.
+    let head = select::locate(&app.entries, modes, 20, el, ec + 1 + 2).expect("head");
+    assert_eq!(anchor.offset, 6, "'b' is byte 6 in the source");
+    assert_eq!(head.offset, 12, "the 'a' after 'g' is byte 12");
+    let copied = select::logical_text(&app.entries, &select::Selection { anchor, head });
+    assert_eq!(
+        copied, "beta g",
+        "the source's space survives the soft wrap"
+    );
+}
