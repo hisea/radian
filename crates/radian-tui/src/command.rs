@@ -774,7 +774,7 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
     if line.starts_with('!') {
         let (exclude_from_context, rest) = match line.strip_prefix("!!") {
             Some(rest) => (true, rest),
-            None => (false, &line[1..]),
+            None => (false, line.strip_prefix('!').unwrap_or(line)),
         };
         let command = rest.trim();
         if command.is_empty() {

@@ -8019,7 +8019,6 @@ fn short_workspace(label: &str) -> std::path::PathBuf {
 async fn pty_bang_runs_and_enters_the_context() {
     let _serial = pty_guard();
     let server = MockServer::start(vec![text_reply("AFTER-BANG")]).await;
-    let dir = TempDir::new("bang-session");
     let config = format!(
         "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
          base_url = \"{}\"\n",
@@ -8072,7 +8071,6 @@ async fn pty_bang_runs_and_enters_the_context() {
 async fn pty_bangbang_stays_out_of_the_context() {
     let _serial = pty_guard();
     let server = MockServer::start(vec![text_reply("AFTER-BANGBANG")]).await;
-    let dir = TempDir::new("bangbang-session");
     let config = format!(
         "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
          base_url = \"{}\"\n",
@@ -8116,7 +8114,6 @@ async fn pty_bangbang_stays_out_of_the_context() {
 async fn pty_bang_is_confined_to_the_workspace() {
     let _serial = pty_guard();
     let server = MockServer::start(vec![text_reply("never")]).await;
-    let dir = TempDir::new("bang-sandbox");
     let escape = format!("/tmp/radian-bang-escape-{}", std::process::id());
     let _ = std::fs::remove_file(&escape);
     let config = format!(
@@ -8193,7 +8190,6 @@ async fn pty_bang_is_audited_in_the_journal() {
 async fn pty_bang_is_single_and_escapable() {
     let _serial = pty_guard();
     let server = MockServer::start(vec![text_reply("never")]).await;
-    let dir = TempDir::new("bang-cancel");
     let config = format!(
         "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
          base_url = \"{}\"\n",
