@@ -1053,6 +1053,48 @@ mod tests {
         );
     }
 
+    /// The 17 community themes in `tests/data/themes/` (16 from
+    /// `@firstpick/pi-themes-bundle@0.1.7` plus kanagawa-wave) all load **without a single
+    /// warning**, and the three text levels each resolve (their `text` is `""` — the
+    /// terminal's default color — which is legal). A warning here means either our mapping is
+    /// wrong or the file is; the fixtures are never edited to silence one.
+    #[test]
+    fn the_community_theme_fixtures_all_load_without_warnings() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/themes");
+        let mut files: Vec<_> = std::fs::read_dir(&dir)
+            .expect("the fixtures directory")
+            .filter_map(|entry| {
+                let path = entry.ok()?.path();
+                (path.extension()? == "json").then_some(path)
+            })
+            .collect();
+        files.sort();
+        assert_eq!(files.len(), 17, "16 bundled themes + kanagawa-wave");
+        for path in files {
+            let name = path.file_stem().expect("a name").to_string_lossy().into_owned();
+            let text = std::fs::read_to_string(&path).expect("readable");
+            let (theme, warnings) = load(Some(&name), false, true, Some(&dir), &[]);
+            assert_eq!(
+                warnings,
+                Vec::<String>::new(),
+                "{name} produced warnings"
+            );
+            assert_eq!(theme.name, ThemeName::File, "{name} loaded as a file theme");
+            // The three levels exist (a level may legitimately be the terminal default).
+            for (level, style) in [
+                ("text", theme.text),
+                ("muted", theme.tool_result),
+                ("dim", theme.hint),
+            ] {
+                assert!(
+                    style.fg.is_some(),
+                    "{name}: the {level} level resolved to nothing"
+                );
+            }
+            let _ = text;
+        }
+    }
+
     /// pi's reserved name and path-like names never touch the filesystem.
     #[test]
     fn unusable_names_fall_back_without_touching_the_filesystem() {
