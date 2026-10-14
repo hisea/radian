@@ -13,8 +13,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use radian_permissions::ApprovalRequest;
 
 use crate::app::{
-    App, Entry, EntryKind, Modal, TurnState, WrapKey, budget_status_text, mcp_text, usage_text,
+    App, Entry, EntryKind, Modal, TurnState, budget_status_text, mcp_text, usage_text,
 };
+use crate::blocks::{self, BodyLine, ReasoningMode};
 use crate::login::LoginWizard;
 use crate::question::QuestionForm;
 use crate::theme::Theme;
@@ -134,6 +135,42 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
     out
 }
 
+/// How many lines [`wrap`] would produce, without building any of them. The virtualization
+/// budget (ADR 0028 R7) measures every entry on the first frame and after a resize; this is
+/// that path, so it must not allocate.
+pub fn wrap_line_count(text: &str, width: usize) -> usize {
+    let width = width.max(1);
+    let mut lines = 0usize;
+    for paragraph in text.split('\n') {
+        let mut line_width = 0usize;
+        let mut pending_space = false;
+        let mut any = false;
+        for ch in paragraph.chars() {
+            if ch == ' ' {
+                // A space only joins a line that already has content (`wrap`'s
+                // `!line.is_empty()`): leading spaces are dropped.
+                pending_space = any;
+                continue;
+            }
+            let ch_width = ch.width().unwrap_or(0);
+            let extra = usize::from(pending_space);
+            if line_width + extra + ch_width > width && line_width > 0 {
+                lines += 1;
+                line_width = 0;
+                pending_space = false;
+            }
+            if pending_space {
+                line_width += 1;
+                pending_space = false;
+            }
+            line_width += ch_width;
+            any = true;
+        }
+        lines += 1;
+    }
+    lines
+}
+
 /// The visible marker for an entry kind (the transcript's `> `, `~ `, …). Also the cell
 /// offset the selection mapping ([`crate::select`]) subtracts to get a body column.
 pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
@@ -176,6 +213,30 @@ fn body_style(entry: &Entry, theme: &Theme) -> Style {
     }
 }
 
+/// The background band an entry's block paints across the transcript (ADR 0028 R4 + owner
+/// acceptance): a user message uses the `user` role's background, a tool card the state's
+/// (`tool_pending_bg` / `tool_success_bg` / `tool_error_bg`). `None` means no band — the
+/// built-in themes without a user background, and every other kind.
+fn card_band(entry: &Entry, theme: &Theme) -> Option<Style> {
+    let role = match entry.kind {
+        EntryKind::User => theme.user,
+        EntryKind::ToolCall => match entry.result {
+            None => theme.tool_pending_bg,
+            Some(false) => theme.tool_success_bg,
+            Some(true) => theme.tool_error_bg,
+        },
+        EntryKind::ToolResult if entry.is_error => theme.tool_error_bg,
+        EntryKind::ToolResult => theme.tool_success_bg,
+        _ => return None,
+    };
+    // Background and modifiers only: the text under the band keeps its own foreground.
+    let mut band = Style::default().add_modifier(role.add_modifier);
+    if let Some(bg) = role.bg {
+        band = band.bg(bg);
+    }
+    (band.bg.is_some() || !band.add_modifier.is_empty()).then_some(band)
+}
+
 /// The text a frame shows for `entry`. A user message's `@` attachments are folded to one
 /// `[file: P, N lines]` line each; every other entry shows its text unchanged. Display only:
 /// the message (and the journal) keep the full text. Also what a selection maps offsets into
@@ -187,72 +248,195 @@ pub(crate) fn display_text(entry: &Entry) -> Cow<'_, str> {
     }
 }
 
-/// The wrapped display lines of `entry`'s body (the prefix and the interrupted marker are not
-/// included), at `width`. The renderer wraps exactly these, and [`crate::find`] matches
-/// against exactly these, so a folded `@` attachment is shown and searched as its
-/// `[file: path, N lines]` line, never as the hidden content.
-pub fn display_lines(entry: &Entry, width: usize) -> Vec<String> {
-    let prefix = marker_prefix(entry.kind);
-    let body_width = width.saturating_sub(prefix.width()).max(1);
-    wrap(&display_text(entry), body_width)
+/// The display text lines of `entry`'s body (the prefix and the interrupted marker are not
+/// included), at `width` — the block model's layout, flattened to strings. The renderer
+/// renders exactly these, and [`crate::find`] matches against exactly these, so a folded `@`
+/// attachment is shown and searched as its `[file: path, N lines]` line, never as the hidden
+/// content. Padding rows (a user block's blank rows) come through as empty lines: they occupy
+/// transcript lines and occupy space in the geometry, they just never match a query.
+pub fn display_lines(entry: &Entry, mode: ReasoningMode, width: usize) -> Vec<String> {
+    blocks::body_text_lines(entry, mode, width)
 }
 
-/// One entry's styled lines. An interrupted assistant entry gets an explicit marker on its
-/// last line.
-fn entry_lines(entry: &Entry, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+/// One entry's styled lines (ADR 0028 R1: the block layout, styled). An interrupted
+/// assistant entry gets an explicit marker on its last line.
+fn entry_lines(
+    entry: &Entry,
+    mode: ReasoningMode,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     let (prefix, prefix_style) = marker(entry.kind, theme);
-    let wrapped = display_lines(entry, width);
+    let band = card_band(entry, theme);
+    let blocks = blocks::parse_blocks_for(entry, mode);
+    let body = blocks::layout(entry, &blocks, mode, width);
     let style = body_style(entry, theme);
-    let last = wrapped.len().saturating_sub(1);
-    let mut lines = Vec::with_capacity(wrapped.len());
-    for (i, row) in wrapped.into_iter().enumerate() {
-        let lead = if i == 0 {
-            prefix.to_string()
-        } else {
-            " ".repeat(prefix.width())
-        };
-        let mut spans = vec![Span::styled(lead, prefix_style), Span::styled(row, style)];
-        if entry.interrupted && i == last {
-            spans.push(Span::styled(" [interrupted]", theme.interrupted));
+    let text_rows: Vec<usize> = body
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| !line.pad)
+        .map(|(i, _)| i)
+        .collect();
+    let first_text = text_rows.first().copied();
+    let last = text_rows.last().copied();
+    let mut lines = Vec::with_capacity(body.len());
+    for (i, row) in body.into_iter().enumerate() {
+        let mut line = render_row(
+            entry,
+            &row,
+            prefix,
+            prefix_style,
+            style,
+            theme,
+            Some(i) == first_text,
+            band,
+            width,
+        );
+        if Some(i) == last && entry.interrupted {
+            line.spans
+                .push(Span::styled(" [interrupted]", theme.interrupted));
         }
-        lines.push(Line::from(spans));
+        lines.push(line);
     }
     lines
 }
 
-/// How many lines `entry` wraps to at `width`, from its cache when the entry has not changed
-/// since it was last measured.
-fn entry_line_count(entry: &mut Entry, width: usize) -> usize {
-    let text_len = entry.text.len();
-    if let Some(lines) = entry.wrap_cache.get(width, text_len, entry.interrupted) {
-        return lines;
+/// Splits a structured line into its label and the rest (ADR 0028's notice decision): a
+/// leading `[tag]` (up to 32 chars), or the short prefix before the first colon (up to 24
+/// chars, no colon inside). Everything else — including any colon further in — is the body.
+/// Nothing is special-cased per notice: one rule, one function.
+pub fn split_label(text: &str) -> Option<(&str, &str)> {
+    let start = text.len() - text.trim_start().len();
+    let trimmed = &text[start..];
+    if let Some(rest) = trimmed.strip_prefix('[')
+        && let Some(close) = rest.find(']')
+        && close <= 32
+    {
+        let end = start + 1 + close + 1;
+        return Some((&text[start..end], &text[end..]));
     }
-    let lines = display_lines(entry, width).len();
-    entry.wrap_cache.set(WrapKey {
-        width,
-        text_len,
-        interrupted: entry.interrupted,
-        lines,
-    });
-    lines
+    let colon = trimmed.find(':')?;
+    let label = &trimmed[..colon];
+    if label.is_empty() || label.chars().count() > 24 || label.contains('[') {
+        return None;
+    }
+    let end = start + colon + 1;
+    Some((&text[start..end], &text[end..]))
 }
 
-/// Wraps the whole transcript into styled lines. The frame does not use this (it wraps only
-/// the visible entries, see [`visible_lines`]); it is the reference the virtualized path is
-/// tested against.
-pub fn transcript_lines(entries: &[Entry], width: usize, theme: &Theme) -> Vec<Line<'static>> {
+/// One laid-out [`BodyLine`] as styled spans. `first_text` puts the entry's marker prefix on
+/// the lead; a padding row renders as an empty line; a code line has no lead at all (it is
+/// full-width by design, ADR 0028 R9). A block with a band (ADR 0028 R4) is padded out to the
+/// full transcript width, so the band covers the row's trailing cells too.
+#[allow(clippy::too_many_arguments)]
+fn render_row(
+    entry: &Entry,
+    row: &BodyLine,
+    prefix: &str,
+    prefix_style: Style,
+    style: Style,
+    theme: &Theme,
+    first_text: bool,
+    band: Option<Style>,
+    width: usize,
+) -> Line<'static> {
+    if row.pad {
+        return match band {
+            // The blank rows of a banded block carry the band too.
+            Some(band) => Line::from(Span::styled(" ".repeat(width), band)),
+            None => Line::from(vec![Span::raw(String::new())]),
+        };
+    }
+    let lead = if row.code {
+        String::new()
+    } else if first_text {
+        prefix.to_string()
+    } else {
+        " ".repeat(prefix.width())
+    };
+    // The collapsed reasoning placeholder is one synthetic line: the reasoning role, not the
+    // body style.
+    let placeholder = entry.kind == EntryKind::Reasoning && row.chars.is_empty();
+    // A notice's content is the secondary level (the owner's assignment: its value is 次,
+    // only its label is 强调); the marker's own role stays `notice`.
+    let body = if placeholder {
+        theme.reasoning
+    } else if entry.kind == EntryKind::Notice {
+        theme.notice_body
+    } else {
+        style
+    };
+    let lead_width = UnicodeWidthStr::width(lead.as_str());
+    let mut spans = Vec::with_capacity(4);
+    let lead_style = match band {
+        Some(band) => prefix_style.patch(band),
+        None => prefix_style,
+    };
+    let body_style = match band {
+        Some(band) => body.patch(band),
+        None => body,
+    };
+    spans.push(Span::styled(lead, lead_style));
+    // A structured notice's **first** line (`profile: …`, `[memory] …`) steps the label up
+    // with the accent role and keeps the body on pi's secondary level (ADR 0028, owner
+    // decision). Only the first: a wrapped continuation that happens to contain a colon
+    // (`https://…`, `12:30`, a `path:line`) is prose, not a label.
+    if first_text
+        && entry.kind == EntryKind::Notice
+        && let Some((label, rest)) = split_label(&row.text)
+    {
+        let label_style = match band {
+            Some(band) => theme.notice_label.patch(band),
+            None => theme.notice_label,
+        };
+        let rest_style = match band {
+            Some(band) => theme.notice_body.patch(band),
+            None => theme.notice_body,
+        };
+        spans.push(Span::styled(label.to_owned(), label_style));
+        spans.push(Span::styled(rest.to_owned(), rest_style));
+    } else {
+        spans.push(Span::styled(row.text.clone(), body_style));
+    }
+    if let Some(band) = band {
+        // Pad to the full width so the band reaches the row's end (owner acceptance:
+        // including the row's trailing whitespace).
+        let used = lead_width + UnicodeWidthStr::width(row.text.as_str());
+        if used < width {
+            spans.push(Span::styled(" ".repeat(width - used), band));
+        }
+    }
+    Line::from(spans)
+}
+
+/// How many lines `entry` lays out to at `width`, from its cache when the entry has not
+/// changed since it was last measured.
+fn entry_line_count(entry: &mut Entry, mode: ReasoningMode, width: usize) -> usize {
+    blocks::line_count_cached(entry, mode, width)
+}
+
+/// Lays the whole transcript out into styled lines. The frame does not use this (it lays out
+/// only the visible entries, see [`visible_lines`]); it is the reference the virtualized path
+/// is tested against.
+pub fn transcript_lines(
+    entries: &[Entry],
+    mode: ReasoningMode,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     entries
         .iter()
-        .flat_map(|entry| entry_lines(entry, width, theme))
+        .flat_map(|entry| entry_lines(entry, mode, width, theme))
         .collect()
 }
 
-/// The transcript's total line count and the `height` lines starting at line `start`,
-/// wrapping only the entries that overlap that window (dogfooding D9). Every other entry
+/// The transcript's total line count and the `height` lines starting at line `start`, laying
+/// out only the entries that overlap that window (dogfooding D9). Every other entry
 /// contributes its cached line count, so a long session costs an integer sum per frame
-/// instead of re-wrapping every entry.
+/// instead of re-laying out every entry.
 pub fn visible_lines(
     entries: &mut [Entry],
+    mode: ReasoningMode,
     width: usize,
     start: usize,
     height: usize,
@@ -260,23 +444,55 @@ pub fn visible_lines(
 ) -> (usize, Vec<Line<'static>>) {
     let counts: Vec<usize> = entries
         .iter_mut()
-        .map(|entry| entry_line_count(entry, width))
+        .map(|entry| entry_line_count(entry, mode, width))
         .collect();
     let total: usize = counts.iter().sum();
     let mut out = Vec::with_capacity(height);
     let mut line = 0usize;
-    for (entry, count) in entries.iter().zip(&counts) {
+    for (entry, count) in entries.iter_mut().zip(&counts) {
         if out.len() >= height {
             break;
         }
         let next = line + count;
         if next > start {
             let skip = start.saturating_sub(line);
+            let blocks = blocks::blocks_for(entry, mode);
+            let body = blocks::layout(entry, &blocks, mode, width);
+            let prefix = marker_prefix(entry.kind);
+            let prefix_style = marker(entry.kind, theme).1;
+            let style = body_style(entry, theme);
+            let band = card_band(entry, theme);
+            let text_rows: Vec<usize> = body
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| !line.pad)
+                .map(|(i, _)| i)
+                .collect();
+            let first_text = text_rows.first().copied();
+            let last = text_rows.last().copied();
             out.extend(
-                entry_lines(entry, width, theme)
-                    .into_iter()
+                body.into_iter()
+                    .enumerate()
                     .skip(skip)
-                    .take(height - out.len()),
+                    .take(height - out.len())
+                    .map(|(i, row)| {
+                        let mut line = render_row(
+                            entry,
+                            &row,
+                            prefix,
+                            prefix_style,
+                            style,
+                            theme,
+                            Some(i) == first_text,
+                            band,
+                            width,
+                        );
+                        if Some(i) == last && entry.interrupted {
+                            line.spans
+                                .push(Span::styled(" [interrupted]", theme.interrupted));
+                        }
+                        line
+                    }),
             );
         }
         line = next;
@@ -321,80 +537,104 @@ const INPUT_HINT: &str = "(type a message, Enter to send, Ctrl-J for a new line)
 /// The `/login` box's height (rows in `login_lines`, plus the two border rows).
 const LOGIN_HEIGHT: u16 = 8;
 
-/// The wizard's lines. **The key is never among them** (D3): a filled field renders one `*`
+/// The wizard's lines, styled with the app theme's levels (ADR 0028): the prompt is main
+/// text, the selected choice is the emphasis (accent), the rest is secondary, and the
+/// key hints are weak. **The key is never among them** (D3): a filled field renders one `*`
 /// per character, an empty one its hint.
-fn login_lines(wizard: &LoginWizard, width: usize) -> Vec<Line<'static>> {
+fn login_lines(wizard: &LoginWizard, theme: &Theme, width: usize) -> Vec<Line<'static>> {
     use crate::login::LoginStep;
-    let error_style = app_theme_error();
     let _ = width;
+    let prompt = |text: &str| Line::from(Span::styled(text.to_owned(), theme.text));
+    let value = |text: String| Line::from(Span::styled(text, theme.text));
+    let hint = |text: &'static str| Span::styled(text.to_owned(), theme.hint);
     let mut lines: Vec<Line> = Vec::new();
     match &wizard.step {
         LoginStep::ChooseProvider { cursor } => {
-            lines.push(Line::from("choose a provider (↑/↓, Enter):"));
+            lines.push(Line::from(vec![
+                Span::styled("choose a provider ".to_owned(), theme.text),
+                hint("(↑/↓, Enter)"),
+                Span::styled(":".to_owned(), theme.text),
+            ]));
             for (index, (id, description)) in LoginWizard::choices().into_iter().enumerate() {
                 let marker = if index == *cursor { "> " } else { "   " };
                 let style = if index == *cursor {
-                    crate::theme::Theme::default().user
+                    theme.notice_label
                 } else {
-                    crate::theme::Theme::default().hint
+                    theme.notice_body
                 };
-                lines.push(Line::from(Span::styled(
-                    format!(" {marker} {id:<20} {description}"),
-                    style,
-                )));
+                lines.push(Line::from(vec![
+                    Span::styled(format!(" {marker} "), style),
+                    Span::styled(format!("{id:<20}"), style),
+                    Span::styled(description, theme.hint),
+                ]));
             }
         }
         LoginStep::CustomName => {
-            lines.push(Line::from("provider name (also its auth.json entry):"));
-            lines.push(Line::from(format!(" {}", wizard.name)));
+            lines.push(prompt("provider name (also its auth.json entry):"));
+            lines.push(value(format!(" {}", wizard.name)));
         }
         LoginStep::CustomProtocol { cursor } => {
-            lines.push(Line::from("wire protocol (↑/↓, Enter):"));
+            lines.push(Line::from(vec![
+                Span::styled("wire protocol ".to_owned(), theme.text),
+                hint("(↑/↓, Enter)"),
+                Span::styled(":".to_owned(), theme.text),
+            ]));
             for (index, kind) in crate::login::PROTOCOLS.iter().enumerate() {
                 let marker = if index == *cursor { "> " } else { "   " };
-                lines.push(Line::from(format!(" {marker} {kind}")));
+                let style = if index == *cursor {
+                    theme.notice_label
+                } else {
+                    theme.notice_body
+                };
+                lines.push(Line::from(Span::styled(format!(" {marker} {kind}"), style)));
             }
         }
         LoginStep::CustomBaseUrl => {
-            lines.push(Line::from("base URL:"));
-            lines.push(Line::from(format!(" {}", wizard.base_url)));
+            lines.push(prompt("base URL:"));
+            lines.push(value(format!(" {}", wizard.base_url)));
         }
         LoginStep::KeyInput => {
-            lines.push(Line::from("API key (hidden; paste works too):"));
+            lines.push(prompt("API key (hidden; paste works too):"));
             let masked = crate::login::LoginWizard::masked(&wizard.key);
-            lines.push(Line::from(if masked.is_empty() {
+            lines.push(value(if masked.is_empty() {
                 String::new()
             } else {
                 masked
             }));
         }
         LoginStep::Verifying => {
-            lines.push(Line::from(format!(
-                "verifying {} … (Esc cancels)",
-                wizard.provider_name()
+            lines.push(Line::from(Span::styled(
+                format!("verifying {} … ", wizard.provider_name()),
+                theme.text,
             )));
+            lines
+                .last_mut()
+                .expect("just pushed")
+                .spans
+                .push(hint("(Esc cancels)"));
         }
         LoginStep::VerifyFailed { reason } => {
             lines.push(Line::from(Span::styled(
                 format!("verification failed: {reason}"),
-                error_style,
+                theme.turn_cancelled,
             )));
-            lines.push(Line::from(
-                "save anyway? [y] save   [n/Esc] cancel".to_owned(),
-            ));
+            lines.push(Line::from(vec![
+                Span::styled("save anyway? ".to_owned(), theme.text),
+                Span::styled("[y] save   ".to_owned(), theme.hint),
+                Span::styled("[n/Esc] cancel".to_owned(), theme.hint),
+            ]));
         }
     }
     if let Some(error) = &wizard.error {
-        lines.push(Line::from(Span::styled(error.clone(), error_style)));
+        lines.push(Line::from(Span::styled(
+            error.clone(),
+            theme.turn_cancelled,
+        )));
     }
     lines
 }
 
 /// The error style for wizard problems (a note-colored line; no new theme role).
-fn app_theme_error() -> ratatui::style::Style {
-    crate::theme::Theme::default().note
-}
-
 fn input_height(app: &App, width: usize) -> u16 {
     let inner = width.saturating_sub(INPUT_PROMPT.len()).max(1);
     let rows = crate::composer::rows(&app.input.text(), inner).len();
@@ -780,9 +1020,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let theme = app.theme.clone();
     // The find matcher wraps at the same width; a resize recomputes it (once, not per frame).
     app.set_transcript_width(width);
-    let (total, _) = visible_lines(&mut app.entries, width, 0, 0, &theme);
+    let (total, _) = visible_lines(&mut app.entries, app.reasoning_mode, width, 0, 0, &theme);
     app.set_viewport(chunks[0].height, total);
-    let (_, visible) = visible_lines(&mut app.entries, width, app.scroll, height, &theme);
+    let (_, visible) = visible_lines(
+        &mut app.entries,
+        app.reasoning_mode,
+        width,
+        app.scroll,
+        height,
+        &theme,
+    );
     let visible = match app.find_state() {
         Some(find) => visible
             .into_iter()
@@ -797,6 +1044,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(selection) => {
             let ranges = crate::select::highlight_rows(
                 &app.entries,
+                app.reasoning_mode,
                 width,
                 app.scroll,
                 visible.len(),
@@ -909,7 +1157,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             );
         }
         Some(Modal::Login(wizard)) => {
-            let lines = login_lines(wizard, chunks[2].width as usize);
+            let lines = login_lines(wizard, &app.theme, chunks[2].width as usize);
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(app.theme.approval_border)

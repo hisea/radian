@@ -9,6 +9,7 @@
 //! search). `prev` walks to earlier matches, `next` back toward later ones, and neither wraps.
 
 use crate::app::Entry;
+use crate::blocks::ReasoningMode;
 use crate::render::display_lines;
 
 /// One matching wrapped display line.
@@ -51,8 +52,8 @@ impl FindState {
     }
 
     /// Recomputes the matches and the current match after the query or the width changed.
-    pub fn recompute(&mut self, entries: &[Entry], width: usize) {
-        let (matches, starts) = compute(entries, width, &self.query);
+    pub fn recompute(&mut self, entries: &[Entry], mode: ReasoningMode, width: usize) {
+        let (matches, starts) = compute(entries, mode, width, &self.query);
         self.matches = matches;
         self.starts = starts;
         self.width = width;
@@ -119,14 +120,19 @@ impl FindState {
 /// Every wrapped display line of `entries` at `width` that contains `query`
 /// (case-insensitive), plus the absolute start line of each entry. One pass, one wrap per
 /// entry; an empty query matches nothing (but the starts are still filled for the viewport).
-pub fn compute(entries: &[Entry], width: usize, query: &str) -> (Vec<MatchLine>, Vec<usize>) {
+pub fn compute(
+    entries: &[Entry],
+    mode: ReasoningMode,
+    width: usize,
+    query: &str,
+) -> (Vec<MatchLine>, Vec<usize>) {
     let needle = query.to_lowercase();
     let mut matches = Vec::new();
     let mut starts = Vec::with_capacity(entries.len());
     let mut line = 0usize;
     for (entry, item) in entries.iter().enumerate() {
         starts.push(line);
-        let lines = display_lines(item, width);
+        let lines = display_lines(item, mode, width);
         if !needle.is_empty() {
             for (index, text) in lines.iter().enumerate() {
                 if text.to_lowercase().contains(&needle) {
@@ -161,24 +167,26 @@ mod tests {
             entry(EntryKind::Assistant, "nothing here"),
             entry(EntryKind::Notice, "say hello\nand HELLO again"),
         ];
-        let (matches, starts) = compute(&entries, 80, "hello");
+        let (matches, starts) = compute(&entries, ReasoningMode::Expanded, 80, "hello");
+        // The user entry's block has a padding row above and below (ADR 0028 R1): its text
+        // line is line 1 of its three, and every later entry's start shifts by it.
         assert_eq!(
             matches,
             vec![
-                MatchLine { entry: 0, line: 0 },
+                MatchLine { entry: 0, line: 1 },
                 MatchLine { entry: 2, line: 0 },
                 MatchLine { entry: 2, line: 1 },
             ]
         );
-        assert_eq!(starts, vec![0, 1, 2]);
-        // The second entry's two lines start at 2 and 3.
-        assert_eq!(starts[2], 2);
+        assert_eq!(starts, vec![0, 3, 4]);
+        // The third entry's two lines start at 4 and 5.
+        assert_eq!(starts[2], 4);
     }
 
     #[test]
     fn an_empty_query_matches_nothing() {
         let entries = vec![entry(EntryKind::User, "hello")];
-        let (matches, starts) = compute(&entries, 80, "");
+        let (matches, starts) = compute(&entries, ReasoningMode::Expanded, 80, "");
         assert!(matches.is_empty());
         assert_eq!(starts, vec![0]);
     }
@@ -188,12 +196,24 @@ mod tests {
         let text = "<file path=\"big.rs\">\nSECRET-INSIDE\n</file>\nplease review";
         let entries = vec![entry(EntryKind::User, text)];
         // The folded display text has `[file: big.rs, 2 lines]`, not the hidden content.
-        assert!(compute(&entries, 80, "review").0.len() == 1);
         assert!(
-            compute(&entries, 80, "SECRET-INSIDE").0.is_empty(),
+            compute(&entries, ReasoningMode::Expanded, 80, "review")
+                .0
+                .len()
+                == 1
+        );
+        assert!(
+            compute(&entries, ReasoningMode::Expanded, 80, "SECRET-INSIDE")
+                .0
+                .is_empty(),
             "the folded file content must not be searched"
         );
-        assert_eq!(compute(&entries, 80, "big.rs").0.len(), 1);
+        assert_eq!(
+            compute(&entries, ReasoningMode::Expanded, 80, "big.rs")
+                .0
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -205,7 +225,7 @@ mod tests {
         ];
         let mut state = FindState::open(100); // anchor below everything
         state.query = "hit".into();
-        state.recompute(&entries, 80);
+        state.recompute(&entries, ReasoningMode::Expanded, 80);
         assert_eq!(state.matches.len(), 2);
         // Nearest above the anchor is the last match.
         assert_eq!(state.cursor, Some(1));
