@@ -303,7 +303,9 @@ impl Role {
         Role::ALL.into_iter().find(|role| role.as_str() == name)
     }
 
-    fn style_mut(self, theme: &mut Theme) -> &mut Style {
+    /// This role's style on a theme. `pub(crate)`: the footer renders its items through
+    /// the same table the renderer uses, so a role has no second source.
+    pub(crate) fn style_mut(self, theme: &mut Theme) -> &mut Style {
         match self {
             Role::Reasoning => &mut theme.reasoning,
             Role::ReasoningOff => &mut theme.reasoning_off,

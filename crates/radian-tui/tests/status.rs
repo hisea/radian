@@ -6,6 +6,15 @@ use radian_tui::App;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
+/// Puts a test on the pre-ADR one-line status bar (`preset = classic`; ADR 0027 C2). These
+/// tests assert the classic composition; the new default is the two-row `pi` footer.
+fn classic_footer(app: &mut App) {
+    app.apply_footer(&radian_host::config::TuiFooterConfig {
+        preset: Some("classic".to_string()),
+        ..Default::default()
+    });
+}
+
 fn screen(app: &mut App, width: u16, height: u16) -> String {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal
@@ -36,6 +45,7 @@ fn record_usage(app: &App, input: Option<u64>, output: Option<u64>) {
 #[test]
 fn the_status_bar_shows_the_tier_reported_usage_and_mcp_counts() {
     let mut app = App::new("mock", "s");
+    classic_footer(&mut app);
     app.set_tier("workspace");
     app.set_mcp(1, Some((1, 15)));
     record_usage(&app, Some(1200), Some(340));
@@ -53,6 +63,7 @@ fn the_status_bar_shows_the_tier_reported_usage_and_mcp_counts() {
 #[test]
 fn a_session_without_reports_says_none_and_never_invents_a_zero() {
     let mut app = App::new("mock", "s");
+    classic_footer(&mut app);
     app.set_tier("safe");
     app.set_mcp(0, None);
     // One response with no usage at all, then one that reports only input. A response without
@@ -71,6 +82,7 @@ fn a_session_without_reports_says_none_and_never_invents_a_zero() {
     );
 
     let mut fresh = App::new("mock", "s");
+    classic_footer(&mut fresh);
     let text = screen(&mut fresh, 140, 12);
     assert!(text.contains("usage none"), "{text}");
     assert!(!text.contains("usage 0"), "{text}");
@@ -80,6 +92,7 @@ fn a_session_without_reports_says_none_and_never_invents_a_zero() {
 #[test]
 fn a_narrow_status_bar_keeps_the_key_segments_and_does_not_wrap() {
     let mut app = App::new("mock", "s");
+    classic_footer(&mut app);
     app.set_tier("workspace");
     app.set_mcp(1, Some((1, 15)));
     record_usage(&app, Some(1200), Some(340));

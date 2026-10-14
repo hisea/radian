@@ -297,10 +297,17 @@ impl Pty {
             })
             .unwrap_or_else(|| home.path().join(".radian"));
         write_auth_json(&auth_root, envs);
-        if let Some(config) = config {
+        {
             let dir = auth_root.join("config");
             std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("config.toml"), config).unwrap();
+            // The footer's default is the two-row `pi` layout (ADR 0027 C2). The suite's
+            // existing assertions were written for the pre-ADR one-line status bar, so a test
+            // that does not bring its own config gets `preset = "classic"`; the new footer
+            // tests either pass their own config or assert the pi layout explicitly.
+            let text = config.map(str::to_owned).unwrap_or_else(|| {
+                "schema_version = 1\n[tui.footer]\npreset = \"classic\"\n".to_string()
+            });
+            std::fs::write(dir.join("config.toml"), text).unwrap();
         }
         // `cmd.env_clear()` above is what makes this hermetic: neither `RADIAN_HOME` nor
         // `RADIAN_CONFIG` reaches the child, so a config can only come from this temp `HOME`.
@@ -1439,9 +1446,19 @@ async fn pty_an_over_budget_request_is_still_sent() {
 async fn pty_without_a_window_the_status_bar_says_the_budget_is_off() {
     let _serial = pty_guard();
     let dir = TempDir::new("budget-off");
+    // The assertion is about the pre-ADR one-line status bar (ADR 0027 C2 moved the context
+    // text into the itemized footer), so this runs the `classic` preset.
+    let config = dir.path().join("classic.toml");
+    std::fs::write(
+        &config,
+        "schema_version = 1\n[tui.footer]\npreset = \"classic\"\n",
+    )
+    .unwrap();
     let server = MockServer::start(vec![text_reply("ok")]).await;
     let mut pty = Pty::spawn(
         &[
+            "--config",
+            config.to_str().unwrap(),
             "--model",
             "mock",
             "--base-url",
@@ -7610,6 +7627,44 @@ async fn pty_a_login_key_is_redacted_from_an_export_in_the_same_session() {
         !text.contains(KEY),
         "the mid-session key leaked into the export: {text}"
     );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// The default footer is pi's two rows (ADR 0027 C2): the model on the first, the tokens on
+/// the second. The pty harness otherwise starts tests on `preset = classic`, so this test
+/// passes the `pi` preset explicitly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_the_pi_footer_is_two_rows() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("footer-pi");
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn_with_config(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "footer-pi",
+        ],
+        &[],
+        "schema_version = 1\n[tui.footer]\npreset = \"pi\"\n",
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // The model item is on the footer's first row; the tokens item on the second. The screen
+    // text is one string, so both must be present, and the tokens glyph marks the second row.
+    assert!(
+        pty.wait_for_screen("↑-", 10),
+        "the tokens row is missing:\n{}",
+        pty.screen()
+    );
+    assert!(pty.screen().contains("mock"), "{}", pty.screen());
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
 }
