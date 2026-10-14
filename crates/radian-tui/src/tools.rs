@@ -128,12 +128,13 @@ pub fn body_plan(
     preview_lines: usize,
 ) -> Vec<BodyLine> {
     let (lines, collapsed_hint) = renderer_for(&card.name).body(card, text);
-    let expanded = match fold {
-        ToolFold::Expanded => true,
-        // An error is never hidden (ADR 0028 R4).
-        ToolFold::Errors => is_error,
-        ToolFold::Collapsed => false,
-    };
+    // An error is never hidden, in any mode (ADR 0028 R4).
+    let expanded = is_error
+        || match fold {
+            ToolFold::Expanded => true,
+            ToolFold::Errors => false,
+            ToolFold::Collapsed => false,
+        };
     if expanded {
         return lines;
     }
@@ -459,9 +460,11 @@ mod tests {
             &collapsed[1],
             BodyLine::Text { source, .. } if source == &(text.find("five").unwrap()..text.find("five").unwrap() + 4)
         ));
-        // errors: folded unless the call failed.
+        // errors: folded unless the call failed; a failure never folds, in any mode.
         assert_eq!(body_plan(&card, text, false, ToolFold::Errors, 3).len(), 4);
         assert_eq!(body_plan(&card, text, true, ToolFold::Errors, 3).len(), 7);
+        assert_eq!(body_plan(&card, text, false, ToolFold::Collapsed, 3).len(), 4);
+        assert_eq!(body_plan(&card, text, true, ToolFold::Collapsed, 3).len(), 7);
         // A body that already fits the preview is left whole.
         assert_eq!(
             body_plan(&card, "a\nb", false, ToolFold::Collapsed, 5).len(),
