@@ -3,8 +3,7 @@
 日期：2026-10-13 · 分支 `pi/research-diagrams` · 状态：**进行中**（结论文档，不改产品代码）。
 
 结论会写回 ADR 0028 R8。每条附出处（`文件:行号`，或 URL + 访问日期 + 原文短引用）；查不到的写
-「未核实」。**本文档目前只完成了 pi、omp 与库调查的一部分；codex / opencode 与 Rust 库调查、
-给 Radian 的选项见文末「进度与下一步」。**
+「未核实」。**本文档不再有“未完成的四问”；未核实项集中在 §6 末尾。**
 
 ---
 
@@ -319,7 +318,128 @@ TUI：`undefined` → 交回普通代码块；web：`undefined` → 交回源码
 
 ---
 
-## 进度与下一步（本片未完成的部分）
+## 5. 现成库（crates.io / npm；访问日期 **2026-10-13**）
+
+查询方式：`crates.io` API（`/api/v1/crates/<name>` 与 `?q=` 搜索）、npm 已装包的 `package.json`、
+GitHub raw / trees API。**星数、审计、issue 情况未核实**。
+
+### 5.1 已确认可用的（能把 mermaid 变成终端文本）
+
+| 库 | 版本 | 许可 | MSRV | 下载/最近更新 | 说明 |
+|---|---|---|---|---|---|
+| **`mermaid-text`** | 0.57.4 | **MIT** | **1.92**（0.11.x 声明 **1.85**） | 74,685 / 2026-07-21 | “Render Mermaid diagrams as Unicode box-drawing text — **no browser, no image protocols, pure Rust**”。18 个家族（flowchart/graph、sequence、state、class、er、gantt、gitGraph、journey、mindmap、pie、quadrant、requirement、sankey、xychart、block、packet、timeline、architecture）；`render(src)` / `render_with_width(src, Some(80))` / `render_ascii`；输出是**纯 `String`、无 ANSI**；依赖只 `unicode-width`+`ascii-dag`+`chrono`；`#![forbid(unsafe_code)]`。限制（README）：点线交叉会变实线、RL/BT 子图不反转、深层嵌套 direction 覆盖、**窄列里长标签会重叠** |
+| **`merman` + `merman-ascii`** | 0.9.0 | MIT OR Apache-2.0 | **1.95** | 130,625 / 26,829 · 2026-10-12 | “Parity-focused, **headless** Rust implementation of Mermaid for parsing, layout, and rendering” + “**Terminal-friendly ASCII and Unicode renderer for Mermaid typed models**”。最贴近需求（解析与渲染分层，typed model → 文本），但 MSRV 1.95 且是否给出 span/颜色 **未核实** |
+| **`figurehead`** | 0.4.3 | MIT | 未声明 | 751 / 2025-12-30 | “A Rust library to convert **Mermaid.js diagram markup into ASCII diagrams**”。下载量小、半年未更新 |
+| **`selkie-rs`** | 0.3.0 | MIT | 未声明 | 10,808 / 2026-02-07 | “A Rust implementation of the mermaid diagramming parser and renderer” |
+| **`ascii-dag`** | 0.11.0 | MIT OR Apache-2.0 | 未核实 | 107,885 / 2026-09-06 | “**Zero-dependency** graph layout engine that renders to text: DAGs and cyclic graphs, clusters, four flow directions, **colors**”。**不认 mermaid 源码**，只画它自己的图模型（mermaid-text 就用了它）；适合作为“自己写渲染器”的布局底座 |
+| **`orthodag`** | 0.1.1 | MIT OR Apache-2.0 | **1.96** | 109 / 2026-09-24 | “Draw a directed graph as Unicode box-drawing text”（极新、极小） |
+
+### 5.2 不能直接用（记录以免重复调研）
+
+- **`flowmaid`** 0.27.0：GPL-3.0-or-later ⚠️（且是 “Mermaid-**like**” 自有引擎）→ 许可上不适合 Radian。
+- **`mermaid-rs-renderer`** 0.3.1（171,942 下载）：23 种图、features `cli`/`png` → 目标是 **SVG/PNG 图像**，不是终端文本。
+- **`mermaid-svg`** / `mermaid-little` / `simple-mermaid` / `mdbook-mermaid` / `merman-rustdoc` / `ast-to-mermaid` / `mermaid-builder`：SVG、rustdoc/mdbook 集成或**生成** mermaid，不是终端渲染。
+- **`graphviz-rust`** 0.9.9（232 万下载）：crates.io 上 license 字段写 **non-standard**（需核对 ⚠️ 未核实）；`layout-rs` 0.1.3（2025-04 后未更新）是 graphviz 的 Rust 移植，都需 **DOT** 而不是 mermaid。
+- **`termgraph`**（2023 停更）/ **`textplots`** / **`asciigraph`** / **`rasciigraph`**：**数据图**（柱/线），不是结构图（架构/流程/时序）。
+- **`mermaid-fixer`** 1.0.2（MIT）：自动修 Markdown 里的 mermaid 语法错 —— 对**生成侧**有用（见 §6 选项 D 的可选部分）。
+- **`termaid`**（Python）：`mermaid-text` 的 README 把它列为 prior art（“direction-bit canvas, barycenter heuristic constants, subgraph border padding” 都借鉴自它）→ 不可嵌入 Rust，但值得读。
+
+### 5.3 四个对象用的是什么（汇总）
+
+| | 渲染方式 | 库 | 语言/许可 | 网络/子进程 |
+|---|---|---|---|---|
+| pi | 终端字符画 | `grok-mermaid` 0.2.3 | TS / Apache-2.0 | 无 |
+| omp | 终端字符画 | vendored `beautiful-mermaid` 的 ASCII 管线 | TS / MIT（© Craft Docs） | 无（宽度用 `Bun.stringWidth`） |
+| codex | 终端字符画 | 自家 `codex-mermaid`（仓内） | **Rust** / Apache-2.0 | 无（"performs no I/O"） |
+| opencode | 终端字符画（TUI）/ SVG（web） | 自家 `@opencode/merman` / 真 `mermaid` npm | TS / MIT | 无 / 浏览器里跑 mermaid.js |
+
+---
+
+## 6. 给 Radian 的选项
+
+前提（来自现有 ADR）：**ADR 0023** —— 绘制时不做 I/O、不做依赖终端应答的检测；**ADR 0028 R1** ——
+条目→块→行，按条目缓存，流式只重解析正在写入的条目的最后一个块；**R2** —— 代码块带语言做语法
+高亮；**ADR 0029** —— 主题是唯一颜色来源。
+
+### 选项 A：不画（保持现状：mermaid 当普通代码块）
+
+- 依赖：无。复杂度：零。
+- 流式：无影响（R1 已处理）。80 列：源码换行。
+- pty：现有测试已覆盖。
+- 代价：R8 的答案就是 “off”，用户看不到图。**诚实且完全合规的默认值**。
+
+### 选项 B：自己写一个**有界子集**渲染器（照 codex 的做法）
+
+- 依赖：`unicode-width`（± `ascii-dag` 做布局）。复杂度：**高**（parser + 分层布局 + 边路由 +
+  框线绘制；codex 那份 `codex-rs/mermaid` 源码只 172 KB，已是五个家族、上限 16 节点/24 边）。
+- 流式：**只画已闭合的 fence**（codex 的 `has_closing_fence`），闭合前显示源码 → 与 R1 的
+  “settled 前缀冻结、只重算尾部块”天然一致；不会像 omp 那样“图重排了已沉降的行”（omp 只能整段
+  不沉降）。
+- 80 列：`TooWide` → **保留源码 + 一行 dim 理由**（codex 的三种理由文案）。
+- pty：**最好**。渲染是 `(source, width, theme)` 的**纯函数**（codex 的
+  `render_source` 就是这种签名，测试逐块断言相等）→ 快照测试 + pty 测试都好写。
+- ADR：完全合规 —— 无 I/O、无终端探测、颜色只来自主题（且自家 `Role::{Node,Edge,Text}`
+  正好给 ADR 0029 一个映射点）、结果可直接进 R1 的块缓存。
+
+### 选项 C：用现成 Rust crate（`mermaid-text` / `merman-ascii` / `figurehead`）
+
+- 依赖：一个 crate + 它的依赖。复杂度：**低**（`render_with_width(src, Some(width))`）。
+- **硬约束：MSRV**。Radian 是 **1.88**；`mermaid-text` 0.56+ 声明 **1.92**、`merman`/`merman-ascii`
+  声明 **1.95**、`orthodag` 声明 **1.96** → **都不能用**，除非降到 `mermaid-text` **0.11.x**（声明
+  1.85）或选 `figurehead`/`selkie-rs`（未声明 MSRV，需实测）。**0.11.x 的功能集比 0.57 小得多**
+  （上面那张特性表是 master 的），具体支持到哪些家族 **未核实**。
+- 颜色：这些库输出**纯文本、无 ANSI、也没有 span/role** → 只能整体上色或不上色；
+  想要“节点一个色、边另一个色”必须改用给出角色的库（`merman-ascii` 是否给 **未核实**）。
+  这一点直接决定 ADR 0029 能不能完整落地。
+- 流式：同样**只画闭合的 fence**（crate 对半成品返回 `Err` → 显示源码）。
+- 80 列：`render_with_width` 会压缩间距；但 README 自述“**很长的标签在很窄的列里可能重叠**”。
+- pty：可测（纯函数），但要跟 crate 的发布节奏走。
+
+### 选项 D：外部程序（`mmdc` / `d2` / `termaid`）
+
+- 依赖：运行时要装一个程序（可能不存在）。复杂度：中。
+- **与 ADR 0023 的冲突**：只能在**块闭合时**由 host 起子进程（当成一个 `Effect`），结果缓存在块里；
+  绘制时不 I/O ✓。但引入了“子进程 / 沙箱 / 可用性”三个新问题，而且返回前只能显示源码。
+- 80 列：看工具是否支持 `--width`。pty：要“装了才测”，CI 上易碎。
+- 结论：不作为首选；若要做，也必须**默认关**。
+
+### 推荐
+
+**推荐 B（自写有界子集渲染器，先做 flowchart + sequence，照 codex 的形状）：**
+
+1. **MSRV 安全**（只依赖 `unicode-width`，与 codex 同）；
+2. **与 ADR 0023/0029 零冲突**：纯函数、无 I/O、无终端探测、角色→主题映射；
+3. **与 R1 完美契合**：只画闭合的 fence，缓存键 `(source, width, theme)`，封闭块不重算；
+4. **pty 可测**：快照 + 现有 pty 套件都能直接断言屏幕文本；
+5. 不会把“图重排了已沉降的行”这种问题引进来（omp 为此刻意关掉了整段沉降）。
+
+如果只想要最小代价，**退而求其次选 C 的 `mermaid-text` 0.11.x**（MSRV 1.85）——但要接受
+“**没有颜色角色**”和“升级即撞 MSRV”两条代价；这两条在写 ADR 0028 R8 时要显式写清。
+
+**流式建议（四家对比后的结论）**：跟 **codex**（只画闭合 fence），不跟 pi/omp/opencode 的实时渲染。
+理由：Radian 的 R1 已经把“尾部块可变、已沉降前缀冻结”定下来了，实时重排图会直接破坏这条性质；
+codex 还把“变窄了就把图换回源码”写成了显式行为，正好是 80 列下的安全退化。
+
+**80 列下的行为**：`TooWide` → 显示源码 + 一行 dim 理由（不静默、不截断成乱码）；
+以后若想要 omp 那种“换个方向重排”，那是第二阶段的事。
+
+### 本节的未核实项（写 ADR 时需标出）
+
+- `merman`/`merman-ascii` 是否给出 span/role（决定颜色能不能分元素）、以及有没有低 MSRV 的旧版本。
+- `mermaid-text` 0.11.x 实际支持哪些家族、以及它的 MSRV 1.85 声明是否真实。
+- `figurehead`/`selkie-rs` 的 MSRV、维护状态、输出质量（下载量小）。
+- `graphviz-rust` 的许可（crates.io 写 non-standard）。
+- 各家 crate 的依赖树（只看了 `mermaid-text` 的 `Cargo.toml`）。
+
+---
+
+## 进度与下一步
+
+**四个对象的四问（生成/显示/流式/失败与退化）已全部回答并附出处** ✓；**库调研已做** ✓；
+**给 Radian 的选项与推荐已写** ✓（§6）。
+
+剩余可选的补充（不影响回填 ADR 0028 R8）：上面 §6 末尾的未核实项；以及如果 owner 想选 C，
+需要实际在 1.88 上编译 `mermaid-text 0.11.x` / `figurehead` 验证一次。
 
 已核实：**pi（生成/显示/流式/失败/库）**、**omp（同上 + 与 pi 的差异）**、
 **`grok-mermaid` 的能力与上限**、**codex（生成/显示/流式/退化 + 它自带的 Rust 渲染器
