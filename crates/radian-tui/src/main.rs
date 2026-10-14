@@ -83,9 +83,10 @@ struct Cli {
     #[arg(long, value_name = "VALUE", conflicts_with = "resume")]
     session_id: Option<String>,
 
-    /// Resume an existing session by id, rendering its history into the transcript.
-    #[arg(long, value_name = "SESSION_ID", conflicts_with = "list")]
-    resume: Option<String>,
+    /// Resume an existing session by id, rendering its history into the transcript. Without a
+    /// value it shows the session picker (resuming only: no "new" entry).
+    #[arg(long, value_name = "SESSION_ID", num_args = 0..=1, conflicts_with = "list")]
+    resume: Option<Option<String>>,
 
     /// List this workspace's sessions and exit.
     #[arg(long)]
@@ -297,7 +298,7 @@ fn print_exit_line(message: &str) {
 }
 
 fn run(
-    mut cli: Cli,
+    cli: Cli,
     runtime: &tokio::runtime::Runtime,
     rx: Receiver<UiEvent>,
     tx: Sender<UiEvent>,
@@ -376,7 +377,8 @@ fn run(
         .map(|(name, value)| format!("{name}={value}"))
         .collect();
     header_args.extend(cli.header.iter().cloned());
-    let workspace_path = radian_host::resolve_workspace(cli.workspace.as_deref())?;
+    let workspace_root = coding_root(&cli)?;
+    let workspace_path = radian_host::resolve_workspace(Some(&workspace_root.path))?;
     let catalog_base_url = base_url.clone();
     // The window comes from `--context-window` or the models.dev catalog (ADR 0018). A fetch
     // failure is not a startup failure: the window is then unknown and the budget stays off.
@@ -405,21 +407,44 @@ fn run(
         eprintln!("{warning}");
     }
 
-    // `--pick`: load the picker's rows **before** the terminal is entered. `open_index` can
-    // warn about a wide session directory, and that warning must be on the normal screen.
-    // The picker owns its data; the phase itself runs after the terminal (ADR 0023 U4).
-    let startup_picker = if cli.pick {
+    // `--resume` with no value: the picker in "resume only" mode.
+    let resume_only = matches!(cli.resume, Some(None));
+    let mut resume = cli.resume.clone().flatten();
+    // `--pick` (and `--resume` without a value): load the picker's rows **before** the terminal
+    // is entered. `open_index` can warn about a wide session directory, and that warning must be
+    // on the normal screen. The picker owns its data; the phase itself runs after the terminal
+    // (ADR 0023 U4).
+    let startup_picker = if cli.pick || resume_only {
         let workspace = workspace_path.to_string_lossy().into_owned();
-        prepare_picker(&dir, &workspace)?
+        prepare_picker(&dir, &workspace)?.map(|picker| {
+            if resume_only {
+                picker.without_new()
+            } else {
+                picker
+            }
+        })
     } else {
         None
     };
+    // Nothing to resume is a refusal, not a new session: `--resume` without a value never
+    // creates a file.
+    if resume_only && startup_picker.is_none() {
+        return Err(
+            "no sessions for this workspace to resume; run without --resume to start one"
+                .to_string(),
+        );
+    }
     let pick_notice = cli.pick && startup_picker.is_none();
 
     // ADR 0020 decision 3 / ADR 0013: create the session directory owner-only, or warn once
     // if it already exists and is group/world-readable. Done **before** the alternate screen
     // is entered: a raw `eprintln!` inside it writes cells the renderer's diff then skips.
     let _ = radian_host::ensure_private_dir(&dir);
+    // The privacy warning about a world-readable session directory is a startup diagnostic:
+    // printed here, on the normal screen. (Inside the alternate screen it would corrupt the
+    // display, and `/sessions` used to print it from there; `warn_if_wide` is once per path,
+    // so this is the only place it appears.)
+    radian_session::warn_if_wide(&dir);
     // ADR 0008: the `[config]` line and its warnings are startup diagnostics and belong on
     // the normal screen, **before** the alternate screen is entered. Printed inside it, a
     // stray `eprintln!` writes cells the renderer's diff then skips (both buffers see a
@@ -473,7 +498,7 @@ fn run(
         }
         app.finish_picking();
         match app.take_picker_outcome() {
-            Some(radian_tui::picker::Outcome::Resume(id)) => cli.resume = Some(id),
+            Some(radian_tui::picker::Outcome::Resume(id)) => resume = Some(id),
             Some(radian_tui::picker::Outcome::New) => {}
             // `Quit`, Ctrl-C, or the terminal going away before any session: nothing was
             // created, so leave through the ordinary clean-exit path.
@@ -489,7 +514,7 @@ fn run(
     // this process's id, and `--resume` uses the id being resumed. The parser is the same one
     // `agent-cli` uses, so `{session_id}`, name validation and the `authorization` refusal
     // behave identically in both hosts.
-    let session_id = match (&cli.resume, &cli.session_id) {
+    let session_id = match (&resume, &cli.session_id) {
         (Some(id), _) | (None, Some(id)) => id.clone(),
         (None, None) => radian_host::generate_session_id(),
     };
@@ -631,7 +656,9 @@ fn run(
                 session_id: radian_host::SessionId::new(session_id.clone()),
                 session_dir: dir.clone(),
                 workspace: workspace_path.clone(),
-                coding_root: cli.workspace.clone(),
+                // The tools are mounted by default now: the workspace is the current directory
+                // (or `$HOME/tmp`), not only an explicit `--workspace`.
+                coding_root: Some(workspace_path.clone()),
                 model,
                 servers,
                 system_prompt: cli.system.clone(),
@@ -641,7 +668,7 @@ fn run(
                 tier: tier.preset(),
                 profile,
                 memory_root,
-                resume: cli.resume.is_some(),
+                resume: resume.is_some(),
                 config_snapshot: serde_json::json!({
                     "provider": provider.as_str(),
                     "model": cli.model,
@@ -726,7 +753,7 @@ fn run(
     // The history of a resumed session is rendered before the first frame, so the transcript
     // shows it from the start. `Driver::open` recovers the same history from the journal for
     // the model; this is only the view of it.
-    let history = if cli.resume.is_some() {
+    let history = if resume.is_some() {
         radian_session::Session::open(session.journal_path())
             .and_then(|history| history.history())
             .map_err(|e| format!("cannot read session {session_id:?}: {e}"))?
@@ -768,7 +795,7 @@ fn run(
     }
     app.prefill_history(&history);
     // A draft from a previous exit is restored once, when resuming the same session.
-    if cli.resume.is_some() {
+    if resume.is_some() {
         let path = radian_tui::composer::draft_path(&dir, &session_id);
         match radian_tui::composer::take_draft(&path) {
             Ok(Some(text)) => app.input.set_text(&text),
@@ -790,6 +817,20 @@ fn run(
         radian_tui::EntryKind::Notice,
         format!("context: {}", window.describe()),
     ));
+    // Owner UI review: say so when the default workspace was adjusted, so the session's
+    // boundary is never a surprise.
+    if let Some(note) = &workspace_root.note {
+        let home = std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        app.entries.push(radian_tui::Entry::new(
+            radian_tui::EntryKind::Notice,
+            format!(
+                "workspace: {} ({note})",
+                radian_tui::workspace::display_coding_root(&workspace_root, home.as_deref())
+            ),
+        ));
+    }
     // ADR 0021 D2/D6: the project state and the injection budget.
     app.entries.push(radian_tui::Entry::new(
         radian_tui::EntryKind::Notice,
@@ -814,7 +855,7 @@ fn run(
     }
     app.entries.push(radian_tui::Entry::new(
         radian_tui::EntryKind::Notice,
-        match &cli.resume {
+        match &resume {
             Some(id) => format!(
                 "resumed session {id} ({} messages) · Enter sends · Ctrl-C cancels a turn · \
                  Ctrl-C again quits",
@@ -883,11 +924,69 @@ fn run(
     }
     // A failure in the UI loop is the app's failure too; the terminal is already restored.
     let signal = outcome?;
-    let saved = format!("session {session_id} saved; resume with `--resume {session_id}`");
+    let saved = format!(
+        "session {session_id} saved; {}",
+        resume_command(&program_name(), &session_id, &cli, &workspace_path)
+    );
     Ok(Some(match signal {
         Some(signal) => format!("received {}; {saved}", radian_tui::signals::name(signal)),
         None => saved,
     }))
+}
+
+/// The program name for the resume command: `argv[0]`'s file name, so the line is copyable
+/// whatever the binary is called (a `cargo run`, an absolute path, a symlink).
+fn program_name() -> String {
+    std::env::args_os()
+        .next()
+        .map(|arg| {
+            Path::new(&arg)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| arg.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "radian-tui".to_string())
+}
+
+/// One argument of the resume command, quoted when it would not survive a shell.
+fn shell_arg(value: &str) -> String {
+    if value
+        .chars()
+        .any(|c| c.is_whitespace() || c == '\'' || c == '"' || c == '\\')
+    {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    } else {
+        value.to_string()
+    }
+}
+
+/// The command a clean exit prints: the program, `--resume <id>`, and only the flags this run
+/// was given that must be repeated. A key or a header value is **never** in
+/// it — the key comes from the environment and the headers from the config file.
+fn resume_command(program: &str, session_id: &str, cli: &Cli, workspace: &Path) -> String {
+    let mut parts = vec![
+        program.to_owned(),
+        "--resume".to_owned(),
+        session_id.to_owned(),
+    ];
+    if let Some(dir) = &cli.session_dir {
+        parts.push("--session-dir".to_owned());
+        parts.push(shell_arg(&dir.display().to_string()));
+    }
+    // Only when the workspace is not the current directory: the default is the cwd, so the
+    // command works from wherever the user runs it.
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| std::fs::canonicalize(cwd).ok());
+    if cli.workspace.is_some() || cwd.as_deref() != Some(workspace) {
+        parts.push("--workspace".to_owned());
+        parts.push(shell_arg(&workspace.display().to_string()));
+    }
+    if let Some(config) = &cli.config {
+        parts.push("--config".to_owned());
+        parts.push(shell_arg(&config.display().to_string()));
+    }
+    format!("resume: {}", parts.join(" "))
 }
 
 /// Test hook (`--block-input`): a path whose creation marks "the read is now blocked forever".
@@ -1245,6 +1344,17 @@ impl LoopContext<'_> {
                 self.send(AppInput::CompletionReady(result));
                 Ok(())
             }
+            Effect::FetchCompletions(fetch) => {
+                // A level that needs the host: list the candidates here (I/O) and send them back as
+                // `Input::CompletionsReady` (ADR 0023 U3: `update` never does I/O).
+                let candidates = match &fetch {
+                    radian_tui::command::Fetch::MemoryRecords { command, .. } => {
+                        memory_record_candidates(self.memory, command)
+                    }
+                };
+                self.send(AppInput::CompletionsReady { fetch, candidates });
+                Ok(())
+            }
             Effect::RunMemoryCommand { command, confirmed } => {
                 let result = match self.memory {
                     Some(service) => {
@@ -1478,6 +1588,41 @@ fn ui_loop(
     Ok(ctx.and_then(|ctx| ctx.signal).or(picking_signal))
 }
 
+/// The record ids a `/memory` command can act on, as completion candidates. A read failure is
+/// an empty list, never a turn failure (ADR 0021 invariant 2).
+fn memory_record_candidates(
+    memory: &Option<MemoryService>,
+    _command: &str,
+) -> Vec<radian_tui::command::Candidate> {
+    let Some(service) = memory else {
+        return Vec::new();
+    };
+    let Ok(records) = service.list(radian_host::memory::ScopeSelection::Default, false) else {
+        return Vec::new();
+    };
+    records
+        .into_iter()
+        .map(|record| radian_tui::command::Candidate {
+            insert: record.id.as_str().to_owned(),
+            description: format!(
+                "{} {}",
+                record.kind.as_str(),
+                record_snippet(&record.content)
+            ),
+        })
+        .collect()
+}
+
+/// One line of a record's content, cut for a single completion row.
+fn record_snippet(content: &str) -> String {
+    let first = content.lines().next().unwrap_or_default();
+    let mut text: String = first.chars().take(40).collect();
+    if first.chars().count() > 40 {
+        text.push('…');
+    }
+    text
+}
+
 /// The host facts `/sessions` and `/export` need: where sessions live, which workspace this
 /// process belongs to, the current session id and the values to redact.
 struct SessionHost {
@@ -1659,9 +1804,26 @@ fn session_dir(cli: &Cli) -> Result<PathBuf, String> {
 /// value, so a session is only listed in the workspace it was created in, and a bad
 /// `--workspace` fails as a workspace error (dogfooding D1).
 fn session_workspace(cli: &Cli) -> Result<String, String> {
-    Ok(radian_host::resolve_workspace(cli.workspace.as_deref())?
-        .to_string_lossy()
-        .into_owned())
+    Ok(resolve_workspace(cli)?.to_string_lossy().into_owned())
+}
+
+/// The coding root: `--workspace` as given, else the current directory, with the TUI's two
+/// exceptions — `$HOME` becomes `$HOME/tmp` and the filesystem root
+/// is refused. The CLI (`agent`) does **not** do this: it is the unattended entry point and gets
+/// no write access by default.
+fn coding_root(cli: &Cli) -> Result<radian_tui::workspace::CodingRoot, String> {
+    let cwd = std::env::current_dir()
+        .map_err(|error| format!("cannot read the current directory: {error}"))?;
+    let home = std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    radian_tui::workspace::resolve_coding_root(cli.workspace.as_deref(), &cwd, home.as_deref())
+}
+
+/// The canonical, validated workspace path (the shared `radian-host` rule).
+fn resolve_workspace(cli: &Cli) -> Result<PathBuf, String> {
+    let root = coding_root(cli)?;
+    radian_host::resolve_workspace(Some(&root.path))
 }
 
 /// `--list`: this workspace's sessions, newest activity first. Same columns as `agent-cli`.

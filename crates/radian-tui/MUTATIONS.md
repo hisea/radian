@@ -519,3 +519,26 @@ Base `6d22bf0` · 一次性检出 `/tmp/s1e-mut`（detached，跑完删除）· 
 7/7 抓住。S1 是评审点名要恢复的旧行为：变异后 UI 会为旧请求发一条 Deny 效果，测试断言
 "移动队首不产生效果"随即失败。S3 是"等待方放弃后 Modal 仍显示"：变异让 `head == None` 时不清
 Modal，三条队列驱动测试失败。S7 说明 session 关闭的 fail-closed 语义没有被队列改造稀释。
+
+## owner UI 验收第一轮（ui-r1，六条）
+
+Base `613312c` · 一次性 worktree `/tmp/ui-r1-mut` · 独立 `CARGO_TARGET_DIR` ·
+每个变异 `git checkout -- .` 还原、`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| U1 | dark 的 `notice`/`hint` 仍是 `DarkGray` | `theme::tests::dark_notices_and_hints_are_not_dark_gray` | ✅ |
+| U2 | `input_style = "box"` 被当成 `"lines"` | `config::the_input_style_is_applied_and_an_unknown_value_falls_back_to_lines` | ✅ |
+| U3 | 模糊匹配退化成前缀匹配（`/cmp` 不出 `/compact`） | `command::tests::fuzzy_matching_is_a_subsequence_with_prefixes_first` | ✅ |
+| U4 | 第二层不补全（`/memory` 的子命令层返回 Free） | `command::tests::the_tree_completes_every_level`、`update::the_slash_completion_walks_the_command_tree` | ✅ |
+| U5 | cwd == `$HOME` 时不做替换（仍用 `$HOME`） | `workspace::tests::home_becomes_home_tmp_and_is_created_owner_only`、`a_symlinked_home_still_matches` | ✅ |
+| U6 | `--resume` 不带值时直接新建会话 | `pty_resume_without_a_value_picks_a_session` | ✅ |
+| U7 | 退出行漏掉 `--session-dir` | `pty_the_exit_line_is_a_copyable_resume_command` | ✅ |
+| U8 | 去掉 `warn_if_wide` 的每路径一次去重（`radian-session`） | `pty_sessions_opens_and_closes_during_a_running_turn`（全量套件里） | ✅ |
+| U9 | Enter 不选中候选（走发送路径） | `update::the_slash_completion_walks_the_command_tree` | ✅ |
+
+9/9 抓住。**诚实补充（U3/U4 的第一轮）**：第一次的两个 patch 没有断言替换成功，实际是 no-op
+（U3 的字符串在 `cargo fmt` 后换行了；U4 的 patch 让 match 不再穷尽、编译失败）——两次都"通过"了，
+是假通过。加上 `assert old in s` 并按实际文本重做后，两个都抓住。**U8** 是本次修的 bug 的变异
+（`/sessions` 在备用屏里打印 `[privacy]` 警告 → 渲染 diff 跳过那些 cell → picker 的标题/filter 行被糊掉）；
+它只在**全量套件**里稳定复现（单跑 10 次全过），所以那次变异跑的是整个 pty 套件。
