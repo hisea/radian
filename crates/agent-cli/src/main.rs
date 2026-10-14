@@ -26,9 +26,9 @@ use clap::Parser;
 use radian_host::memory::MemoryService;
 use radian_host::memory::commands::{self, CommandError, MemoryCommand};
 use radian_host::{
-    DEFAULT_MAX_TOKENS, ModelArgs, Provider, SESSION_PLACEHOLDER, Thinking, build_model,
-    check_provider_flags, generate_session_id, load_mcp_config, parse_headers, resolve_workspace,
-    validate_session_id,
+    DEFAULT_MAX_TOKENS, ModelArgs, Provider, SESSION_PLACEHOLDER, SessionFacade, Thinking,
+    build_model, check_provider_flags, generate_session_id, load_mcp_config, parse_headers,
+    resolve_workspace, validate_session_id,
 };
 use radian_permissions::{Approver, AuditSink, PermissionHooks};
 use radian_runtime::{CancelCause, Inbox, InboxError};
@@ -618,7 +618,10 @@ async fn run(mut cli: Cli) -> i32 {
 
 struct Setup {
     model: radian_host::SwitchableModel,
+    /// The descriptor id the run started with (the switch vocabulary, ADR 0026 D5).
+    provider_id: String,
     config_slot: std::sync::Arc<radian_runtime::ConfigSlot>,
+    config_queue: std::sync::Arc<radian_runtime::ConfigQueue>,
     budget_for: radian_runtime::BudgetFor,
     /// The provider actually chosen, for the session's config snapshot.
     provider: Provider,
@@ -796,6 +799,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     // ADR 0026 D5: switchable, like the TUI. The CLI has no `/model`, but the journal can
     // still carry a change the TUI wrote, so resume restores the right model (D8).
     let config_slot = radian_runtime::ConfigSlot::new(serde_json::Value::Null);
+    let config_queue = radian_runtime::ConfigQueue::new();
     let model = radian_host::SwitchableModel::new(
         initial,
         radian_host::ModelRoute::new(&provider_id, &model_name),
@@ -877,7 +881,9 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         .map(ContextBudget::new);
     Ok(Setup {
         model,
+        provider_id: provider_id.clone(),
         config_slot,
+        config_queue,
         budget_for,
         provider,
         servers,
@@ -1227,6 +1233,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
 
     // ADR 0023 U5: the one place a session is established; `radian-tui` calls the same function
     // with its own bindings.
+    let resume_session = cli.resume.is_some();
     let session = radian_host::open_session(
         radian_host::SessionSetup {
             session_id: radian_host::SessionId::new(setup.session_id.clone()),
@@ -1235,6 +1242,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             coding_root: cli.workspace.clone().map(std::path::PathBuf::from),
             model: setup.model,
             config_slot: setup.config_slot,
+            config_queue: setup.config_queue,
             budget_for: Some(setup.budget_for),
             servers: setup.servers,
             system_prompt: setup.system_prompt.clone(),
@@ -1276,6 +1284,26 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     .await
     .map_err(|error| SetupError(error.to_string()))?;
     let session = Arc::new(session);
+
+    // ADR 0026 D8: an explicit `--model`/`--provider` wins over the resumed change, and the
+    // override is recorded so the journal stays the authority for the next resume.
+    if resume_session && let Some((recorded_provider, recorded_model)) = session.model_route() {
+        let model_differs = cli.model.as_deref().is_some_and(|m| m != recorded_model);
+        let provider_differs = cli
+            .provider
+            .as_deref()
+            .is_some_and(|p| p != recorded_provider);
+        if model_differs || provider_differs {
+            eprintln!(
+                "[model] resume recorded {recorded_provider}/{recorded_model}; using the \
+                 command line's {}/{}",
+                setup.provider_id, setup.model_name
+            );
+            session.queue_config(
+                radian_host::ModelRoute::new(&setup.provider_id, &setup.model_name).to_value(),
+            );
+        }
+    }
 
     // The audit drain task: every decision goes into the channel and is appended here. It is
     // flushed by dropping the senders and awaiting the task before the process exits.

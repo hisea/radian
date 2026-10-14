@@ -132,11 +132,14 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         options: TurnOptions,
     ) -> Result<Self, DriverError> {
         let slot = ConfigSlot::new(serde_json::Value::Null);
-        Self::open_with_slot(agent, journal, inbox, live, options, slot).await
+        let queue = ConfigQueue::new();
+        Self::open_with_slot(agent, journal, inbox, live, options, slot, queue).await
     }
 
-    /// Like [`Driver::open`], with the host's own slot: the switchable model reads the same
-    /// instance the driver writes (ADR 0026 D5).
+    /// Like [`Driver::open`], with the host's own slot **and queue**: the switchable model
+    /// reads the slot instance the driver writes, and `/model` pushes into the queue the
+    /// driver drains at the turn boundary (ADR 0026 D5).
+    #[allow(clippy::too_many_arguments)]
     pub async fn open_with_slot(
         agent: &Arc<Agent<M, P, H>>,
         journal: Arc<SessionJournal>,
@@ -144,6 +147,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         live: Arc<dyn EventSink>,
         options: TurnOptions,
         slot: Arc<ConfigSlot>,
+        queue: Arc<ConfigQueue>,
     ) -> Result<Self, DriverError> {
         let recovery = recover(&journal).await?;
         // Requeue before opening: the inputs are promises that must survive the restart.
@@ -169,7 +173,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             journal,
             live,
             slot,
-            queue: ConfigQueue::new(),
+            queue,
             options,
             turn_timeout: None,
             runtime_events: None,

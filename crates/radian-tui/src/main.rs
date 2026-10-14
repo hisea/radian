@@ -14,8 +14,8 @@ use agent_core::{AgentEvent, ContextBudget, EventSink, TurnOptions};
 use clap::Parser;
 use radian_host::memory::MemoryService;
 use radian_host::{
-    DEFAULT_MAX_TOKENS, ModelArgs, Provider, Thinking, build_model, check_provider_flags,
-    load_mcp_config, parse_headers, validate_session_id,
+    DEFAULT_MAX_TOKENS, ModelArgs, Provider, SessionFacade, Thinking, build_model,
+    check_provider_flags, load_mcp_config, parse_headers, validate_session_id,
 };
 use radian_permissions::{
     ApprovalError, ApprovalOutcome, ApprovalRequest, Approver, AuditSink, PermissionResolved,
@@ -747,6 +747,7 @@ fn run(
         .block_on(radian_host::open_session(
             radian_host::SessionSetup {
                 config_slot: std::sync::Arc::clone(&config_slot),
+                config_queue: radian_runtime::ConfigQueue::new(),
                 budget_for: Some(budget_for),
                 session_id: radian_host::SessionId::new(session_id.clone()),
                 session_dir: dir.clone(),
@@ -789,6 +790,25 @@ fn run(
             },
         ))
         .map_err(|error| error.to_string())?;
+    // ADR 0026 D8: an explicit `--model`/`--provider` wins over the resumed change, and the
+    // override is recorded so the journal stays the authority for the next resume.
+    if cli.resume.is_some()
+        && let Some((recorded_provider, recorded_model)) = session.model_route()
+    {
+        let model_differs = cli.model.as_deref().is_some_and(|m| m != recorded_model);
+        let provider_differs = cli
+            .provider
+            .as_deref()
+            .is_some_and(|p| p != recorded_provider);
+        if model_differs || provider_differs {
+            eprintln!(
+                "radian: resume recorded {recorded_provider}/{recorded_model}; using the command \
+                 line's {provider_id}/{model_name}"
+            );
+            session
+                .queue_config(radian_host::ModelRoute::new(&provider_id, &model_name).to_value());
+        }
+    }
     // A plain run enters the terminal only now: every fallible check above, and the session
     // itself, have already run. (`--pick` entered it before the picker and keeps it here.)
     let (mut guard, mut terminal) = match startup_terminal {
@@ -1464,6 +1484,9 @@ impl LoopContext<'_> {
                     radian_tui::command::Fetch::MemoryRecords { command, .. } => {
                         memory_record_candidates(self.memory, command)
                     }
+                    radian_tui::command::Fetch::ModelRoute { provider, .. } => {
+                        model_route_candidates(provider.as_deref())
+                    }
                 };
                 self.send(AppInput::CompletionsReady { fetch, candidates });
                 Ok(())
@@ -1504,6 +1527,73 @@ impl LoopContext<'_> {
                         let _ = tx.send(UiEvent::Command(AppInput::CompactDone(result)));
                     }),
                 );
+                Ok(())
+            }
+            Effect::ModelSwitch { provider, model } => {
+                // D6: the target needs a credential. `resolve_key` reads `auth.json` (file I/O,
+                // fine in the loop): without one the switch dies here with the `/login` hint.
+                let checked = match radian_host::auth::resolve_key(&provider) {
+                    Ok(Some(_)) => {
+                        // D7: `B'` from the warm catalog, `T` from the projection's last report.
+                        let budget = self.session.budget_for_route(&provider, &model);
+                        let tokens = self
+                            .session
+                            .projection()
+                            .budget()
+                            .map(|report| report.projected_tokens);
+                        AppInput::ModelChecked {
+                            provider,
+                            model,
+                            tokens,
+                            budget,
+                        }
+                    }
+                    Ok(None) => {
+                        self.send(AppInput::CommandRefused(radian_host::CommandRefused {
+                            command: format!("/model {provider}/{model}"),
+                            reason: format!(
+                                "no credential for `{provider}`: run /login {provider}"
+                            ),
+                            capability: None,
+                        }));
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        self.send(AppInput::CommandRefused(radian_host::CommandRefused {
+                            command: format!("/model {provider}/{model}"),
+                            reason: error.to_string(),
+                            capability: None,
+                        }));
+                        return Ok(());
+                    }
+                };
+                self.send(checked);
+                Ok(())
+            }
+            Effect::CompactForSwitch {
+                provider,
+                model,
+                budget,
+            } => {
+                // D7: the same compaction path as `/compact`, targeting the new model's B'.
+                let tx = self.tx.clone();
+                self.session.compact_with_budget(
+                    None,
+                    Some(budget),
+                    Box::new(move |result| {
+                        let _ = tx.send(UiEvent::Command(AppInput::SwitchCompacted {
+                            provider,
+                            model,
+                            result,
+                        }));
+                    }),
+                );
+                Ok(())
+            }
+            Effect::QueueModel { provider, model } => {
+                // D5: the route is the whole change — no key, no header values.
+                self.session
+                    .queue_config(radian_host::ModelRoute::new(provider, model).to_value());
                 Ok(())
             }
             Effect::Session(request) => {
@@ -1703,6 +1793,41 @@ fn ui_loop(
 
 /// The record ids a `/memory` command can act on, as completion candidates. A read failure is
 /// an empty list, never a turn failure (ADR 0021 invariant 2).
+/// The `/model` completion candidates (ADR 0026 D5): the logged-in providers before the
+/// slash, or one provider's models after it — the descriptor's built-in list plus the
+/// models.dev catalog. Reads local files only; the background `/v1/models` refresh (D0)
+/// writes the cache this reads.
+fn model_route_candidates(provider: Option<&str>) -> Vec<radian_tui::command::Candidate> {
+    let Some(provider) = provider else {
+        return match radian_host::auth::list() {
+            Ok(entries) => entries
+                .into_iter()
+                .filter(|entry| entry.usable)
+                .map(|entry| radian_tui::command::Candidate {
+                    insert: format!("{}/", entry.provider_id),
+                    description: format!("switch to {}", entry.provider_id),
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+    };
+    radian_host::descriptor(provider)
+        .map(|descriptor| {
+            descriptor
+                .models
+                .iter()
+                .map(|model| radian_tui::command::Candidate {
+                    insert: format!("{provider}/{}", model.id),
+                    description: model.name.to_owned(),
+                })
+                .collect()
+        })
+        .unwrap_or_else(|| {
+            // A named provider with no built-in list: free text, nothing to offer.
+            Vec::new()
+        })
+}
+
 fn memory_record_candidates(
     memory: &Option<MemoryService>,
     _command: &str,

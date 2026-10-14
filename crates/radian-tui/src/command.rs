@@ -16,6 +16,8 @@ pub const HELP: &str = "\
 /compact [note]       summarize the history now and keep the recent part (ADR 0018)
 /sessions [query]     list this workspace's recent sessions, or search their text
 /fork                 fork this session at its last turn boundary (ADR 0022)
+/model <provider>/<model>
+                      switch the model at the next turn boundary (ADR 0026 D5)
 /export [md|json] [path] [--force]
                       export this session (default md, default <workspace>/radian-<id>.<ext>)
 /memory <command>     durable memory: list, search, show, add, edit, archive, restore,
@@ -30,6 +32,9 @@ pub const HELP: &str = "\
 pub struct PendingCommand {
     pub command: MemoryCommand,
     pub prompt: String,
+    /// A `/model` switch waiting behind this confirm (ADR 0026 D7): `y` compacts to this
+    /// budget and then queues the route; `n` cancels. `None` for a `/memory` confirm.
+    pub switch: Option<(String, String, u64)>,
 }
 
 /// What one submitted `/…` line meant. Parsing only: running the command is the loop's job
@@ -50,6 +55,9 @@ pub enum Outcome {
     Export(ExportRequest),
     /// `/fork`: the host forks the current (idle) session at its last turn boundary.
     Fork,
+    /// `/model <provider>/<model>` (ADR 0026 D5): the loop resolves the credential and the
+    /// new budget, then the app decides direct queue or confirm-first (D7).
+    Model(ModelSwitch),
     /// Not a command after all (an empty token list); the caller sends the line.
     Message,
 }
@@ -70,13 +78,19 @@ pub struct Candidate {
 pub enum Fetch {
     /// `/memory <command> <partial>`: the record ids that command can act on.
     MemoryRecords { command: String, partial: String },
+    /// `/model <provider>/<model>`: the logged-in providers before the slash, the models of
+    /// one provider after it (ADR 0026 D5).
+    ModelRoute {
+        provider: Option<String>,
+        partial: String,
+    },
 }
 
 impl Fetch {
     /// The partial word the fetched candidates should be ranked against.
     pub fn partial(&self) -> &str {
         match self {
-            Fetch::MemoryRecords { partial, .. } => partial,
+            Fetch::MemoryRecords { partial, .. } | Fetch::ModelRoute { partial, .. } => partial,
         }
     }
 }
@@ -130,6 +144,11 @@ pub fn tree() -> &'static [Command] {
             name: "fork",
             description: "fork this session at its last turn boundary (ADR 0022)",
             levels: &[],
+        },
+        Command {
+            name: "model",
+            description: "switch the model at the next turn boundary (ADR 0026 D5)",
+            levels: &[model_route_level],
         },
         Command {
             name: "export",
@@ -482,6 +501,54 @@ pub enum SessionOutcome {
     Fork,
 }
 
+/// One `/model` target: the provider id (a descriptor, or `auth.json`'s named provider) and
+/// the model id. Nothing else travels with it (ADR 0026 D5: no key, no header values).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelSwitch {
+    pub provider: String,
+    pub model: String,
+}
+
+/// Splits `/model`'s argument: `provider/model` in one word, or `provider model` in two.
+/// Returns `None` (with a usage notice) when either half is missing.
+pub fn model_switch(args: &[String]) -> Result<ModelSwitch, String> {
+    let joined = args.join(" ");
+    let joined = joined.trim();
+    if let Some((provider, model)) = joined.split_once('/') {
+        return Ok(ModelSwitch {
+            provider: provider.trim().to_owned(),
+            model: model.trim().to_owned(),
+        });
+    }
+    match (args.first(), args.get(1)) {
+        (Some(provider), Some(model)) => Ok(ModelSwitch {
+            provider: provider.clone(),
+            model: model.clone(),
+        }),
+        _ => Err("usage: /model <provider>/<model>".to_owned()),
+    }
+}
+
+/// `/model`'s one argument level completes both halves of `<provider>/<model>`: the provider
+/// before the slash, the model after it (ADR 0026 D5). The candidates need the host's
+/// credential store and the model lists, so the level is `Needs` and the loop resolves it.
+fn model_route_level(typed: &[&str], partial: &str) -> Level {
+    let typed = typed.last().copied().unwrap_or_default();
+    let word = if partial.is_empty() { typed } else { partial };
+    let (provider, model_partial) = match word.split_once('/') {
+        Some((provider, model)) => (Some(provider.to_owned()), model.to_owned()),
+        None => (None, String::new()),
+    };
+    Level::Needs(Fetch::ModelRoute {
+        provider,
+        partial: if model_partial.is_empty() {
+            word.to_owned()
+        } else {
+            model_partial
+        },
+    })
+}
+
 /// Interprets a trimmed line that starts with `/`. `memory_enabled` says whether this process
 /// has a memory root; without one `/memory` is refused with a notice. Pure: it never runs a
 /// command (ADR 0023 U3).
@@ -497,6 +564,10 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         Some("/sessions") => Outcome::Sessions(sessions_query(&tokens[1..])),
         Some("/export") => export_request(&tokens[1..]),
         Some("/fork") => Outcome::Fork,
+        Some("/model") => match model_switch(&tokens[1..]) {
+            Ok(switch) => Outcome::Model(switch),
+            Err(usage) => Outcome::Notices(vec![usage]),
+        },
         Some(other) => Outcome::Notices(vec![format!("unknown command {other}; /help lists them")]),
         None => Outcome::Message,
     }
