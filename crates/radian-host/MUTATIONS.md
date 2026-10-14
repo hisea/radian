@@ -329,3 +329,11 @@ Base `43ddbff` · 一次性检出 `/tmp/auto-mut`（detached，跑完删除）·
 3/3 抓住。CLI 优先与 workspace 恢复的正路径由
 `approval::tests::an_explicit_cli_choice_wins_and_backfills` /
 `resume_restores_the_journaled_state_over_the_config` 钉住。
+
+## ADR 0026 D11 审查 A1：Anthropic 七档不同线上值（2026-10-14）
+
+Base `0b9785b` · 一次性 worktree `/tmp/radian-pi-mut-a1`，跑完删除。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| A1a | 映射表全部改回 `adaptive`（六档同值） | `provider::thinking_tests::the_anthropic_levels_are_distinct` | ✅ |
