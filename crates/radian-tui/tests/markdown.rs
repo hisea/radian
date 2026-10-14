@@ -321,8 +321,9 @@ fn a_find_jump_lands_on_the_markdown_paragraph_under_a_folded_entry() {
     // The jump scrolled the paragraph into view: a jump that kept the expanded line would put
     // it twenty lines down, off a twelve-row screen.
     let terminal = render(&mut app, width as u16, 12);
+    // The whole paragraph, not just "bold": the find box renders the query "bold" too.
     assert!(
-        screen(&terminal).contains("bold"),
+        screen(&terminal).contains("A bold paragraph here"),
         "the paragraph is on screen after the jump:\n{}",
         screen(&terminal)
     );
