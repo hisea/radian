@@ -17,8 +17,9 @@
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::Entry;
-use crate::blocks::{self, ReasoningMode};
+use crate::blocks::{self};
 use crate::render::{display_text, marker_prefix};
+use crate::tools::DisplayModes;
 
 /// One end of a selection: entry `entry`'s display text at byte offset `offset` (always on a
 /// char boundary: it comes from `char_indices` or `text.len()`).
@@ -73,30 +74,30 @@ impl Selection {
 /// there is no entry at all.
 pub fn locate(
     entries: &[Entry],
-    mode: ReasoningMode,
+    modes: DisplayModes,
     width: usize,
     line: usize,
     col: usize,
 ) -> Option<Anchor> {
-    locate_hit(entries, mode, width, line, col).map(|hit| hit.anchor)
+    locate_hit(entries, modes, width, line, col).map(|hit| hit.anchor)
 }
 
 /// [`locate`], plus whether the pointer sits on a char's cell ([`Hit`]).
 pub fn locate_hit(
     entries: &[Entry],
-    mode: ReasoningMode,
+    modes: DisplayModes,
     width: usize,
     line: usize,
     col: usize,
 ) -> Option<Hit> {
     let mut remaining = line;
     for (index, entry) in entries.iter().enumerate() {
-        let count = body_lines(entry, mode, width).len();
+        let count = body_lines(entry, modes, width).len();
         if remaining >= count {
             remaining -= count;
             continue;
         }
-        return Some(locate_in_entry(entry, mode, width, remaining, col, index));
+        return Some(locate_in_entry(entry, modes, width, remaining, col, index));
     }
     // Past the last entry: the end of the last one (or `None` with no transcript) — a gap.
     let last = entries.len().checked_sub(1)?;
@@ -116,14 +117,14 @@ pub fn locate_hit(
 /// through it, as a drag to the margin does).
 fn locate_in_entry(
     entry: &Entry,
-    mode: ReasoningMode,
+    modes: DisplayModes,
     width: usize,
     local_line: usize,
     col: usize,
     index: usize,
 ) -> Hit {
     let text = display_text(entry);
-    let lines = body_lines(entry, mode, width);
+    let lines = body_lines(entry, modes, width);
     let line = &lines[local_line.min(lines.len() - 1)];
     let prefix = marker_prefix(entry.kind).width();
     let body_col = col.saturating_sub(prefix);
@@ -156,9 +157,9 @@ fn locate_in_entry(
 
 /// The entry's laid-out body lines — the one geometry the selection mapping uses (the same
 /// [`crate::blocks::BodyLine`]s the renderer renders).
-fn body_lines(entry: &Entry, mode: ReasoningMode, width: usize) -> Vec<crate::blocks::BodyLine> {
-    let blocks = blocks::parse_blocks_for(entry, mode);
-    blocks::layout(entry, &blocks, mode, width)
+fn body_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<crate::blocks::BodyLine> {
+    let blocks = blocks::parse_blocks_for(entry, modes.reasoning);
+    blocks::layout(entry, &blocks, modes, width)
 }
 
 /// The byte length of the char at `anchor`'s offset in its entry's display text; `None` at
@@ -182,12 +183,12 @@ pub fn entry_display_len(entries: &[Entry], index: usize) -> usize {
 /// expands from the char the gap maps to, exactly like a drag from there would.
 pub fn run_at(
     entries: &[Entry],
-    mode: ReasoningMode,
+    modes: DisplayModes,
     width: usize,
     line: usize,
     col: usize,
 ) -> Option<(Anchor, Anchor)> {
-    let hit = locate_hit(entries, mode, width, line, col)?;
+    let hit = locate_hit(entries, modes, width, line, col)?;
     let anchor = hit.anchor;
     let text = display_text(entries.get(anchor.entry)?);
     if anchor.offset >= text.len() {
@@ -277,7 +278,7 @@ pub fn logical_text(entries: &[Entry], selection: &Selection) -> String {
 /// windowing mirrors [`crate::render::visible_lines`], so the rows line up with the frame.
 pub fn highlight_rows(
     entries: &[Entry],
-    mode: ReasoningMode,
+    modes: DisplayModes,
     width: usize,
     scroll: usize,
     height: usize,
@@ -290,7 +291,7 @@ pub fn highlight_rows(
         if out.len() >= height {
             break;
         }
-        let count = body_lines(entry, mode, width).len();
+        let count = body_lines(entry, modes, width).len();
         let next = line + count;
         if next > scroll {
             let first = scroll.saturating_sub(line);
@@ -301,7 +302,7 @@ pub fn highlight_rows(
                 out.push(if index < start.entry || index > end.entry {
                     Vec::new()
                 } else {
-                    row_ranges(entry, mode, width, local, index, start, end)
+                    row_ranges(entry, modes, width, local, index, start, end)
                 });
             }
         }
@@ -315,7 +316,7 @@ pub fn highlight_rows(
 /// between two cells of the same run) join their neighbour's range.
 fn row_ranges(
     entry: &Entry,
-    mode: ReasoningMode,
+    modes: DisplayModes,
     width: usize,
     local: usize,
     index: usize,
@@ -324,7 +325,7 @@ fn row_ranges(
 ) -> Vec<(usize, usize)> {
     let text = display_text(entry);
     let prefix = marker_prefix(entry.kind).width();
-    let lines = body_lines(entry, mode, width);
+    let lines = body_lines(entry, modes, width);
     let Some(line) = lines.get(local) else {
         return Vec::new();
     };
@@ -353,6 +354,17 @@ fn row_ranges(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blocks::ReasoningMode;
+    use crate::tools::{ToolDisplay, ToolFold};
+
+    /// Both folds expanded, so a test's geometry does not depend on the fold defaults.
+    const EXPANDED: DisplayModes = DisplayModes {
+        reasoning: ReasoningMode::Expanded,
+        tools: ToolDisplay {
+            fold: ToolFold::Expanded,
+            preview_lines: 5,
+        },
+    };
     use crate::app::{Entry, EntryKind};
     use agent_core::{ContentPart, Message, MessageMeta};
 
@@ -367,15 +379,15 @@ mod tests {
         // Body width 12: one line. The assistant prefix is two cells, so column 4 is the
         // body's column 2, the third char.
         let width = 14;
-        let start = locate(&entries, ReasoningMode::Expanded, width, 0, 4).expect("inside");
+        let start = locate(&entries, EXPANDED, width, 0, 4).expect("inside");
         assert_eq!(start.offset, 2);
         // Width 7 → body 5: "hello" / "world". Line 1 col 0 is 'w' (byte 6): the soft wrap
         // inserted no char.
         let width = 7;
-        let w = locate(&entries, ReasoningMode::Expanded, width, 1, 0).expect("second line");
+        let w = locate(&entries, EXPANDED, width, 1, 0).expect("second line");
         assert_eq!(w.offset, 6);
         // Clicking past the end of line 0 lands in the gap before the space run.
-        let eol = locate(&entries, ReasoningMode::Expanded, width, 0, 20).expect("clamped");
+        let eol = locate(&entries, EXPANDED, width, 0, 20).expect("clamped");
         assert_eq!(eol.offset, 5, "the gap after 'hello'");
     }
 
@@ -383,13 +395,12 @@ mod tests {
     fn a_wide_char_selects_from_either_of_its_two_cells() {
         let entries = [entry("日本語")];
         let width = 10; // body 8
-        let first_cell =
-            locate(&entries, ReasoningMode::Expanded, width, 0, 2).expect("body col 0");
+        let first_cell = locate(&entries, EXPANDED, width, 0, 2).expect("body col 0");
         assert_eq!(first_cell.offset, 0);
-        let second_cell = locate(&entries, ReasoningMode::Expanded, width, 0, 3)
-            .expect("body col 1: 日's right half");
+        let second_cell =
+            locate(&entries, EXPANDED, width, 0, 3).expect("body col 1: 日's right half");
         assert_eq!(second_cell.offset, 0, "both cells select 日");
-        let next = locate(&entries, ReasoningMode::Expanded, width, 0, 4).expect("body col 2: 本");
+        let next = locate(&entries, EXPANDED, width, 0, 4).expect("body col 2: 本");
         assert_eq!(next.offset, 3, "本 starts at byte 3");
     }
 
@@ -398,9 +409,9 @@ mod tests {
         let entries = [entry("a\n\nb")];
         let width = 10;
         // Lines: "a", "", "b". The empty line's gap is the second '\n' (byte 2).
-        let empty = locate(&entries, ReasoningMode::Expanded, width, 1, 4).expect("the empty line");
+        let empty = locate(&entries, EXPANDED, width, 1, 4).expect("the empty line");
         assert_eq!(empty.offset, 2);
-        let b = locate(&entries, ReasoningMode::Expanded, width, 2, 0).expect("'b'");
+        let b = locate(&entries, EXPANDED, width, 2, 0).expect("'b'");
         assert_eq!(b.offset, 3);
     }
 
@@ -410,31 +421,31 @@ mod tests {
         let width = 20;
         // The user prefix "> " is two cells: column 0 and 1 both land on the first char.
         assert_eq!(
-            locate(&entries, ReasoningMode::Expanded, width, 0, 0)
+            locate(&entries, EXPANDED, width, 0, 0)
                 .expect("prefix")
                 .offset,
             0
         );
         assert_eq!(
-            locate(&entries, ReasoningMode::Expanded, width, 0, 1)
+            locate(&entries, EXPANDED, width, 0, 1)
                 .expect("prefix")
                 .offset,
             0
         );
         assert_eq!(
-            locate(&entries, ReasoningMode::Expanded, width, 0, 2)
+            locate(&entries, EXPANDED, width, 0, 2)
                 .expect("body")
                 .offset,
             0
         );
         // Far below and right of everything: the end of the last entry.
         assert_eq!(
-            locate(&entries, ReasoningMode::Expanded, width, 50, 200)
+            locate(&entries, EXPANDED, width, 50, 200)
                 .expect("clamped")
                 .offset,
             "user text".len()
         );
-        assert_eq!(locate(&[], ReasoningMode::Expanded, width, 0, 0), None);
+        assert_eq!(locate(&[], EXPANDED, width, 0, 0), None);
     }
 
     #[test]
@@ -444,16 +455,16 @@ mod tests {
         // after "first line", and selecting everything copies the one-line text unchanged.
         let entries = [entry("first line second line")];
         let sel = Selection {
-            anchor: locate(&entries, ReasoningMode::Expanded, width, 0, 2).expect("line 0 start"),
-            head: locate(&entries, ReasoningMode::Expanded, width, 1, 200).expect("line 1 end"),
+            anchor: locate(&entries, EXPANDED, width, 0, 2).expect("line 0 start"),
+            head: locate(&entries, EXPANDED, width, 1, 200).expect("line 1 end"),
         };
         assert_eq!(logical_text(&entries, &sel), "first line second line");
         // The text's own newline survives: the same width gives "first line" / "second line"
         // for the two-paragraph text.
         let entries = [entry("first line\nsecond line")];
         let sel = Selection {
-            anchor: locate(&entries, ReasoningMode::Expanded, width, 0, 2).expect("line 0"),
-            head: locate(&entries, ReasoningMode::Expanded, width, 1, 200).expect("line 1"),
+            anchor: locate(&entries, EXPANDED, width, 0, 2).expect("line 0"),
+            head: locate(&entries, EXPANDED, width, 1, 200).expect("line 1"),
         };
         assert_eq!(logical_text(&entries, &sel), "first line\nsecond line");
         // Halfway across a soft wrap: width 12 → body 10 gives "first line" / "second" /
@@ -461,8 +472,8 @@ mod tests {
         // nothing.
         let entries = [entry("first line second line")];
         let sel = Selection {
-            anchor: locate(&entries, ReasoningMode::Expanded, 12, 1, 2).expect("line 1"),
-            head: locate(&entries, ReasoningMode::Expanded, 12, 2, 200).expect("line 2"),
+            anchor: locate(&entries, EXPANDED, 12, 1, 2).expect("line 1"),
+            head: locate(&entries, EXPANDED, 12, 2, 200).expect("line 2"),
         };
         assert_eq!(logical_text(&entries, &sel), "second line");
     }
@@ -473,15 +484,15 @@ mod tests {
         // A user block is pad / text / pad, so the text line is 1 and the assistant's line
         // is 3.
         let sel = Selection {
-            anchor: locate(&entries, ReasoningMode::Expanded, 20, 1, 2).expect("user start"),
-            head: locate(&entries, ReasoningMode::Expanded, 20, 3, 200).expect("assistant end"),
+            anchor: locate(&entries, EXPANDED, 20, 1, 2).expect("user start"),
+            head: locate(&entries, EXPANDED, 20, 3, 200).expect("assistant end"),
         };
         assert_eq!(logical_text(&entries, &sel), "asked\nanswered");
         // A one-entry slice skips the other entirely: the user prefix is two cells, so
         // columns 2..5 (body 0..3) are "ask".
         let sel = Selection {
-            anchor: locate(&entries, ReasoningMode::Expanded, 20, 1, 2).expect("user"),
-            head: locate(&entries, ReasoningMode::Expanded, 20, 1, 5).expect("user"),
+            anchor: locate(&entries, EXPANDED, 20, 1, 2).expect("user"),
+            head: locate(&entries, EXPANDED, 20, 1, 5).expect("user"),
         };
         assert_eq!(logical_text(&entries, &sel), "ask");
         assert_eq!(
@@ -513,8 +524,8 @@ mod tests {
         // One user entry: "look at this\n\n[file: notes.txt, 3 lines]" — the fold plus its
         // padding rows. Line 1 is the text, line 3 the fold; selecting both copies them.
         let sel = Selection {
-            anchor: locate(entries, ReasoningMode::Expanded, 40, 1, 2).expect("start"),
-            head: locate(entries, ReasoningMode::Expanded, 40, 3, 200).expect("end"),
+            anchor: locate(entries, EXPANDED, 40, 1, 2).expect("start"),
+            head: locate(entries, EXPANDED, 40, 3, 200).expect("end"),
         };
         let copied = logical_text(entries, &sel);
         assert!(copied.contains("look at this"), "{copied:?}");
@@ -529,20 +540,17 @@ mod tests {
         // Columns 2..8: the assistant prefix is two cells, so the body columns 0..6 —
         // "hello w" — report as screen columns 2..8.
         let sel = Selection {
-            anchor: locate(&entries, ReasoningMode::Expanded, width, 0, 2).expect("col 2"),
-            head: locate(&entries, ReasoningMode::Expanded, width, 0, 8).expect("col 8"),
+            anchor: locate(&entries, EXPANDED, width, 0, 2).expect("col 2"),
+            head: locate(&entries, EXPANDED, width, 0, 8).expect("col 8"),
         };
-        let rows = highlight_rows(&entries, ReasoningMode::Expanded, width, 0, 1, &sel);
+        let rows = highlight_rows(&entries, EXPANDED, width, 0, 1, &sel);
         assert_eq!(rows, vec![vec![(2, 8)]]);
         // Backwards selection normalizes to the same cells.
         let rev = Selection {
             anchor: sel.head,
             head: sel.anchor,
         };
-        assert_eq!(
-            highlight_rows(&entries, ReasoningMode::Expanded, width, 0, 1, &rev),
-            rows
-        );
+        assert_eq!(highlight_rows(&entries, EXPANDED, width, 0, 1, &rev), rows);
     }
 
     #[test]
@@ -553,16 +561,16 @@ mod tests {
         // From 'b' (line 0 col 7 → byte 5) through the second 'c' (line 1 col 4 → byte 12):
         // selected are "bbbb c".
         let sel = Selection {
-            anchor: locate(&entries, ReasoningMode::Expanded, width, 0, 7).expect("'b'"),
-            head: locate(&entries, ReasoningMode::Expanded, width, 1, 4).expect("'c'"),
+            anchor: locate(&entries, EXPANDED, width, 0, 7).expect("'b'"),
+            head: locate(&entries, EXPANDED, width, 1, 4).expect("'c'"),
         };
-        let rows = highlight_rows(&entries, ReasoningMode::Expanded, width, 0, 2, &sel);
+        let rows = highlight_rows(&entries, EXPANDED, width, 0, 2, &sel);
         assert_eq!(rows, vec![vec![(7, 11)], vec![(2, 4)]]);
         // A window scrolled past the selection reports no rows at all.
-        assert!(highlight_rows(&entries, ReasoningMode::Expanded, width, 2, 3, &sel).is_empty());
+        assert!(highlight_rows(&entries, EXPANDED, width, 2, 3, &sel).is_empty());
         // And the row above it is simply not highlighted.
         assert_eq!(
-            highlight_rows(&entries, ReasoningMode::Expanded, width, 1, 1, &sel),
+            highlight_rows(&entries, EXPANDED, width, 1, 1, &sel),
             vec![vec![(2, 4)]]
         );
     }
@@ -573,14 +581,14 @@ mod tests {
         let entries = [entry("aaaa bbbb cccc")];
         // Wide: one line, columns 2..10 → bytes 0..8 ("aaaa bbb").
         let wide = Selection {
-            anchor: locate(&entries, ReasoningMode::Expanded, 30, 0, 2).expect("wide"),
-            head: locate(&entries, ReasoningMode::Expanded, 30, 0, 10).expect("wide"),
+            anchor: locate(&entries, EXPANDED, 30, 0, 2).expect("wide"),
+            head: locate(&entries, EXPANDED, 30, 0, 10).expect("wide"),
         };
         // Narrow: body width 6 → "aaaa b" / "bbb c" / "cccc"; the same bytes are line 0 from
         // column 2 through line 1's column 4.
         let narrow = Selection {
-            anchor: locate(&entries, ReasoningMode::Expanded, 8, 0, 2).expect("narrow, same text"),
-            head: locate(&entries, ReasoningMode::Expanded, 8, 1, 4).expect("narrow, same text"),
+            anchor: locate(&entries, EXPANDED, 8, 0, 2).expect("narrow, same text"),
+            head: locate(&entries, EXPANDED, 8, 1, 4).expect("narrow, same text"),
         };
         assert_eq!(
             logical_text(&entries, &narrow),

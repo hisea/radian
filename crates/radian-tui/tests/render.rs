@@ -5,8 +5,10 @@ use agent_core::{AgentEvent, ContentPart, Message, ToolCall, ToolResult};
 use radian_coding::QuestionKind;
 use radian_host::{PendingRequest, PendingView};
 use radian_tui::app::{App, Entry, EntryKind};
+use radian_tui::blocks::ReasoningMode;
 use radian_tui::projection::StreamKind;
 use radian_tui::render;
+use radian_tui::tools::DisplayModes;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::style::Color;
@@ -480,25 +482,18 @@ fn the_box_input_style_draws_the_rounded_box_with_the_prompt() {
 /// own foreground (the patch only adds the background).
 #[test]
 fn a_selection_draws_the_selection_role_on_its_cells() {
-    use radian_tui::blocks::ReasoningMode;
     use radian_tui::select::{Selection, locate};
     let mut app = App::new("m", "s");
     app.push_message(&Message::user("hello selection"));
     app.set_transcript_width(40);
-    let (total, _) = radian_tui::render::visible_lines(
-        &mut app.entries,
-        ReasoningMode::Expanded,
-        40,
-        0,
-        0,
-        &app.theme,
-    );
+    let (total, _) =
+        radian_tui::render::visible_lines(&mut app.entries, EXPANDED, 40, 0, 0, &app.theme);
     app.set_viewport(u16::try_from(total).unwrap(), total);
     // Select "selection" on the block's text line (a user block is pad / text / pad): body
     // columns 6..15 → screen columns 8..17.
     let selection = Selection {
-        anchor: locate(&app.entries, ReasoningMode::Expanded, 40, 1, 8).expect("anchor"),
-        head: locate(&app.entries, ReasoningMode::Expanded, 40, 1, 17).expect("head"),
+        anchor: locate(&app.entries, EXPANDED, 40, 1, 8).expect("anchor"),
+        head: locate(&app.entries, EXPANDED, 40, 1, 17).expect("head"),
     };
     app.selection = Some(selection);
     let terminal = render(&mut app, 40, 6);
@@ -522,24 +517,17 @@ fn a_selection_draws_the_selection_role_on_its_cells() {
 /// The `mono` theme's selection is reverse video, never a color (`NO_COLOR` and `mono`).
 #[test]
 fn the_mono_selection_is_reversed_not_colored() {
-    use radian_tui::blocks::ReasoningMode;
     use radian_tui::select::{Selection, locate};
     let mut app = App::new("m", "s");
     app.theme = radian_tui::theme::Theme::mono();
     app.push_message(&Message::user("hello selection"));
     app.set_transcript_width(40);
-    let (total, _) = radian_tui::render::visible_lines(
-        &mut app.entries,
-        ReasoningMode::Expanded,
-        40,
-        0,
-        0,
-        &app.theme,
-    );
+    let (total, _) =
+        radian_tui::render::visible_lines(&mut app.entries, EXPANDED, 40, 0, 0, &app.theme);
     app.set_viewport(u16::try_from(total).unwrap(), total);
     app.selection = Some(Selection {
-        anchor: locate(&app.entries, ReasoningMode::Expanded, 40, 1, 8).expect("anchor"),
-        head: locate(&app.entries, ReasoningMode::Expanded, 40, 1, 17).expect("head"),
+        anchor: locate(&app.entries, EXPANDED, 40, 1, 8).expect("anchor"),
+        head: locate(&app.entries, EXPANDED, 40, 1, 17).expect("head"),
     });
     let terminal = render(&mut app, 40, 6);
     let word = style_of(&terminal, "selection").expect("on screen");
@@ -553,21 +541,14 @@ fn the_mono_selection_is_reversed_not_colored() {
 /// A single click's empty selection draws nothing anywhere.
 #[test]
 fn an_empty_selection_draws_nothing() {
-    use radian_tui::blocks::ReasoningMode;
     use radian_tui::select::{Selection, locate};
     let mut app = App::new("m", "s");
     app.push_message(&Message::user("hello selection"));
     app.set_transcript_width(40);
-    let (total, _) = radian_tui::render::visible_lines(
-        &mut app.entries,
-        ReasoningMode::Expanded,
-        40,
-        0,
-        0,
-        &app.theme,
-    );
+    let (total, _) =
+        radian_tui::render::visible_lines(&mut app.entries, EXPANDED, 40, 0, 0, &app.theme);
     app.set_viewport(u16::try_from(total).unwrap(), total);
-    let at = locate(&app.entries, ReasoningMode::Expanded, 40, 1, 8).expect("anchor");
+    let at = locate(&app.entries, EXPANDED, 40, 1, 8).expect("anchor");
     app.selection = Some(Selection {
         anchor: at,
         head: at,
@@ -711,6 +692,216 @@ fn a_wrapped_notice_continuation_is_not_a_label() {
     let terminal = render(&mut app, 27, 10);
     let label = style_of(&terminal, "profile:").expect("the label");
     assert_eq!(label.fg, app.theme.notice_label.fg);
+}
+
+/// Tool cards (ADR 0028 R4): the live commit path and the resume replay path are the same
+/// `push_message`, so both produce the same header for the same call.
+#[test]
+fn a_tool_card_head_is_the_same_on_the_live_and_resume_paths() {
+    fn call() -> Message {
+        Message::Assistant {
+            content: vec![],
+            reasoning: vec![],
+            tool_calls: vec![ToolCall {
+                id: "c1".into(),
+                name: "shell".into(),
+                arguments: serde_json::json!({"command": "make test"}),
+            }],
+            provider_payload: None,
+            interrupted: false,
+            meta: Default::default(),
+        }
+    }
+    fn result() -> Message {
+        Message::Tool {
+            result: ToolResult {
+                call_id: "c1".into(),
+                content: vec![ContentPart::text("ok")],
+                structured: Some(serde_json::json!({"command": "make test", "exit_code": 0})),
+                is_error: false,
+                error_code: None,
+            },
+            meta: Default::default(),
+        }
+    }
+
+    // live: committed messages arrive as events.
+    let mut live = App::new("m", "s");
+    live.apply_event(&AgentEvent::TranscriptAppended {
+        index: 0,
+        message: call(),
+    });
+    live.apply_event(&AgentEvent::TranscriptAppended {
+        index: 1,
+        message: result(),
+    });
+    // resume: the journal's messages are replayed through `push_message`.
+    let mut resumed = App::new("m", "s");
+    resumed.push_message(&call());
+    resumed.push_message(&result());
+
+    let live_text = screen(&render(&mut live, 60, 12));
+    let resume_text = screen(&render(&mut resumed, 60, 12));
+    assert!(
+        live_text.contains("shell: make test (exit 0)"),
+        "{live_text}"
+    );
+    assert_eq!(live_text, resume_text, "live and resume render identically");
+}
+
+/// The tool fold (ADR 0028 R4): the three modes change the transcript's line count, Ctrl-O
+/// steps through them, and the count is never stale (the fold is a layout cache key).
+#[test]
+fn the_tool_fold_changes_the_line_count_and_ctrl_o_walks_it() {
+    use radian_tui::tools::ToolFold;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut app = App::new("m", "s");
+    app.apply_event(&AgentEvent::TranscriptAppended {
+        index: 0,
+        message: Message::Assistant {
+            content: vec![],
+            reasoning: vec![],
+            tool_calls: vec![ToolCall {
+                id: "c1".into(),
+                name: "generic_tool".into(),
+                arguments: serde_json::json!({}),
+            }],
+            provider_payload: None,
+            interrupted: false,
+            meta: Default::default(),
+        },
+    });
+    let body: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+    app.apply_event(&AgentEvent::TranscriptAppended {
+        index: 1,
+        message: Message::Tool {
+            result: ToolResult {
+                call_id: "c1".into(),
+                content: vec![ContentPart::text(body)],
+                structured: None,
+                is_error: false,
+                error_code: None,
+            },
+            meta: Default::default(),
+        },
+    });
+    // errors (the default): a success folds to the preview + one hint.
+    assert_eq!(app.tool_display.fold, ToolFold::Errors);
+    let _ = render(&mut app, 60, 30);
+    let folded = app.total_lines;
+    assert!(folded < 10, "folded: {folded} lines");
+    // Ctrl-O: errors -> expanded -> collapsed -> errors.
+    app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    assert_eq!(app.tool_display.fold, ToolFold::Expanded);
+    let _ = render(&mut app, 60, 30);
+    let expanded = app.total_lines;
+    assert_eq!(
+        expanded,
+        folded + 14,
+        "20 lines instead of 5 preview + hint"
+    );
+    app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    assert_eq!(app.tool_display.fold, ToolFold::Collapsed);
+    let _ = render(&mut app, 60, 30);
+    assert_eq!(app.total_lines, folded, "collapsed again: the same count");
+    app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    assert_eq!(app.tool_display.fold, ToolFold::Errors);
+}
+
+/// A failed call's body is never hidden (ADR 0028 R4), whatever the fold mode.
+#[test]
+fn an_error_card_stays_expanded_under_collapsed() {
+    use radian_tui::tools::ToolFold;
+    let mut app = App::new("m", "s");
+    app.tool_display.fold = ToolFold::Collapsed;
+    app.apply_event(&AgentEvent::TranscriptAppended {
+        index: 0,
+        message: Message::Assistant {
+            content: vec![],
+            reasoning: vec![],
+            tool_calls: vec![ToolCall {
+                id: "c1".into(),
+                name: "generic_tool".into(),
+                arguments: serde_json::json!({}),
+            }],
+            provider_payload: None,
+            interrupted: false,
+            meta: Default::default(),
+        },
+    });
+    app.apply_event(&AgentEvent::TranscriptAppended {
+        index: 1,
+        message: Message::Tool {
+            result: ToolResult {
+                call_id: "c1".into(),
+                // Longer than the preview, so a wrong fold would really hide it.
+                content: vec![ContentPart::text(
+                    (1..=20).map(|i| format!("boom {i}\n")).collect::<String>(),
+                )],
+                structured: None,
+                is_error: true,
+                error_code: None,
+            },
+            meta: Default::default(),
+        },
+    });
+    // Tall enough that the whole transcript is on screen (the view follows the bottom).
+    let text = screen(&render(&mut app, 60, 40));
+    // The distinctive lines at both ends: a fold would show only the last preview lines.
+    assert!(
+        text.contains("boom 1\n") || text.contains("boom 1 "),
+        "the first line: {text}"
+    );
+    assert!(text.contains("boom 20"), "the last line: {text}");
+    assert!(!text.contains("more lines"), "nothing folded: {text}");
+}
+
+/// The `shell` renderer's body marks the stderr section with the warning role (the tool's
+/// text separates the streams; the structured value has byte counts only).
+#[test]
+fn a_shell_body_marks_stderr_with_the_warning_role() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut app = App::new("m", "s");
+    app.apply_event(&AgentEvent::TranscriptAppended {
+        index: 0,
+        message: Message::Assistant {
+            content: vec![],
+            reasoning: vec![],
+            tool_calls: vec![ToolCall {
+                id: "c1".into(),
+                name: "shell".into(),
+                arguments: serde_json::json!({"command": "run"}),
+            }],
+            provider_payload: None,
+            interrupted: false,
+            meta: Default::default(),
+        },
+    });
+    app.apply_event(&AgentEvent::TranscriptAppended {
+        index: 1,
+        message: Message::Tool {
+            result: ToolResult {
+                call_id: "c1".into(),
+                content: vec![ContentPart::text(
+                    "$ run\nexit code: 1\n--- stdout ---\nhello\n--- stderr ---\nBOOM",
+                )],
+                structured: Some(serde_json::json!({"command": "run", "exit_code": 1})),
+                is_error: false,
+                error_code: None,
+            },
+            meta: Default::default(),
+        },
+    });
+    // Ctrl-O to expanded, so the whole body shows.
+    app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    let terminal = render(&mut app, 60, 14);
+    let text = screen(&terminal);
+    assert!(text.contains("BOOM"), "{text}");
+    let warn = style_of(&terminal, "BOOM").expect("the stderr line");
+    assert_eq!(
+        warn.fg, app.theme.note.fg,
+        "stderr renders on the warning level"
+    );
 }
 
 /// Thinking folds (ADR 0028 R3): collapsed is one placeholder line, Ctrl-T expands it to the
@@ -928,6 +1119,17 @@ fn the_login_wizard_uses_the_text_hierarchy() {
         "the selected row is the emphasis"
     );
 }
+
+/// The display modes most tests lay out with: both folds expanded, so a test's geometry does
+/// not depend on the fold defaults.
+#[allow(dead_code)]
+const EXPANDED: DisplayModes = DisplayModes {
+    reasoning: ReasoningMode::Expanded,
+    tools: radian_tui::tools::ToolDisplay {
+        fold: radian_tui::tools::ToolFold::Expanded,
+        preview_lines: 5,
+    },
+};
 
 /// The question form's key line stays visible when the option list fills the box (same bug the
 /// approval box had: the hint used to be the content's last line, and the clip cut it).

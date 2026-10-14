@@ -5,7 +5,6 @@
 
 use agent_core::AgentEvent;
 use radian_tui::app::App;
-use radian_tui::blocks::ReasoningMode;
 use radian_tui::render::{self, transcript_lines, visible_lines};
 use radian_tui::theme::Theme;
 use radian_tui::{Entry, EntryKind};
@@ -13,7 +12,17 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::text::Line;
 
-const EXPANDED: ReasoningMode = ReasoningMode::Expanded;
+use radian_tui::blocks::ReasoningMode;
+use radian_tui::tools::{DisplayModes, ToolDisplay, ToolFold};
+
+/// Both folds expanded, so a test's geometry does not depend on the fold defaults.
+const EXPANDED: DisplayModes = DisplayModes {
+    reasoning: ReasoningMode::Expanded,
+    tools: ToolDisplay {
+        fold: ToolFold::Expanded,
+        preview_lines: 5,
+    },
+};
 
 fn text(lines: &[Line<'static>]) -> Vec<String> {
     lines

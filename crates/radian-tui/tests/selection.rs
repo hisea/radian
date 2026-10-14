@@ -9,6 +9,7 @@ use radian_permissions::ApprovalRequest;
 use radian_tui::app::{AUTO_SCROLL_TICK, App, Effect, Input, UpdateResult};
 use radian_tui::blocks::ReasoningMode;
 use radian_tui::clip::MAX_CLIPBOARD_BYTES;
+use radian_tui::tools::DisplayModes;
 use serde_json::json;
 
 fn approval() -> PendingView<PendingRequest> {
@@ -199,6 +200,17 @@ fn with_mouse_off_the_whole_feature_is_gone() {
     assert!(release.effects.is_empty());
 }
 
+/// The display modes most tests lay out with: both folds expanded, so a test's geometry does
+/// not depend on the fold defaults.
+#[allow(dead_code)]
+const EXPANDED: DisplayModes = DisplayModes {
+    reasoning: ReasoningMode::Expanded,
+    tools: radian_tui::tools::ToolDisplay {
+        fold: radian_tui::tools::ToolFold::Expanded,
+        preview_lines: 5,
+    },
+};
+
 #[test]
 fn clipboard_config_selects_the_transport_and_pbcopy_falls_back_off_macos() {
     let mut app = app();
@@ -235,14 +247,8 @@ fn an_oversized_selection_is_refused_with_the_reason() {
     app.entries.clear();
     app.push_message(&Message::assistant("z".repeat(MAX_CLIPBOARD_BYTES + 1)));
     app.set_transcript_width(30);
-    let (total, _) = radian_tui::render::visible_lines(
-        &mut app.entries,
-        ReasoningMode::Expanded,
-        30,
-        0,
-        0,
-        &app.theme,
-    );
+    let (total, _) =
+        radian_tui::render::visible_lines(&mut app.entries, EXPANDED, 30, 0, 0, &app.theme);
     app.set_viewport(1, total);
     app.scroll = 0;
     app.follow = false;
@@ -478,6 +484,49 @@ fn a_selection_across_a_banded_user_block_copies_the_text() {
         vec![Effect::Copy {
             text: "hello there\naaaa bbbb cccc dddd".into()
         }]
+    );
+}
+
+#[test]
+fn a_selection_over_a_tool_card_head_copies_its_text() {
+    use agent_core::{ContentPart, Message, ToolCall, ToolResult};
+    let mut app = app();
+    app.entries.clear();
+    app.push_message(&Message::Assistant {
+        content: vec![],
+        reasoning: vec![],
+        tool_calls: vec![ToolCall {
+            id: "c1".into(),
+            name: "shell".into(),
+            arguments: serde_json::json!({"command": "make test"}),
+        }],
+        provider_payload: None,
+        interrupted: false,
+        meta: Default::default(),
+    });
+    app.push_message(&Message::Tool {
+        result: ToolResult {
+            call_id: "c1".into(),
+            content: vec![ContentPart::text("ok")],
+            structured: Some(serde_json::json!({"command": "make test", "exit_code": 0})),
+            is_error: false,
+            error_code: None,
+        },
+        meta: Default::default(),
+    });
+    app.set_viewport(6, 6);
+    app.set_transcript_width(60);
+    // Line 0 is the assistant message's (empty) line, line 1 the card head; the `-> ` marker
+    // is three cells, so the head's first character sits at column 3.
+    press(&mut app, 1, 3);
+    drag(&mut app, 1, 28);
+    let result = release(&mut app, 1, 28);
+    assert_eq!(
+        result.effects,
+        vec![Effect::Copy {
+            text: "shell: make test (exit 0)".into()
+        }],
+        "the whole head, character for character"
     );
 }
 

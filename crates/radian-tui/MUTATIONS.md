@@ -681,3 +681,20 @@ Base `0b9785b` · 一次性 worktree `/tmp/radian-pi-mut-m1`，跑完删除。
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
 | M1a | 只认命令行带 id 的 `--resume`（`resumed_route` 读 `cli.resume` 而非解析后的 `resume`） | `pty_a_picked_resume_uses_the_journals_model` | ✅ |
+
+## Slice: ADR 0028 第 2 片 a（工具卡片数据、渲染器注册表、Ctrl-O）
+
+Base `4208170` · 一次性 worktree `/tmp/tools-mut`（`git worktree add` 自本片 HEAD，结束后删除）·
+每个变异 `python3` 补丁（带 `assert`）、跑对应测试后 `git checkout -- .` 还原。
+
+| # | 需求 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| T1 | 折叠模式进布局缓存键 | 键去掉 `DisplayModes`（只留 reasoning） | `the_tool_fold_changes_the_line_count_and_ctrl_o_walks_it` | ✅ |
+| T2 | 错误卡片在任何模式下都展开 | 去掉 `is_error` 的强制展开（collapsed 下也折） | `an_error_card_stays_expanded_under_collapsed` | ✅ |
+| T3 | live/resume 都填工具名 | push 时工具名填空 | `a_tool_card_head_is_the_same_on_the_live_and_resume_paths` | ✅ |
+| T4 | 注册表找不到时回退通用渲染器 | 未知工具 `panic!` | `tools::tests::the_registry_falls_back_to_generic_for_an_unknown_tool`、`the_fold_modes_decide_the_body` | ✅ |
+
+4/4 抓住。**过程记录（T2 的两轮）**：第一轮"没抓住"有两个原因，都是测试太弱——(a) 错误正文只有
+两行，本来就短于预览行数，折与不折看起来一样；(b) 我改测试时 `.replace` 没命中（没加 `assert`），
+改动根本没落盘。修好后：正文 20 行、屏幕够高，变异立刻抓住；同时发现**实现本身也不对**——原来的
+`collapsed` 会把错误正文折起来（ADR 说"错误一律展开"），已一并修正（提交 `0e5315a`）。

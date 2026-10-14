@@ -4,6 +4,7 @@ use radian_permissions::ApprovalRequest;
 use radian_tui::app::{App, Entry, EntryKind, Input};
 use radian_tui::blocks::ReasoningMode;
 use radian_tui::render;
+use radian_tui::tools::DisplayModes;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -40,7 +41,7 @@ fn fill(app: &mut App, needle_entries: &[usize]) {
 fn entry_line(app: &App, entry: usize) -> usize {
     app.entries[..entry]
         .iter()
-        .map(|e| render::display_lines(e, ReasoningMode::Expanded, WIDTH).len())
+        .map(|e| render::display_lines(e, EXPANDED, WIDTH).len())
         .sum()
 }
 
@@ -312,4 +313,65 @@ fn the_matching_substring_is_reversed_in_the_rendered_line() {
             .iter()
             .all(|span| !span.style.add_modifier.contains(Modifier::REVERSED))
     );
+}
+
+/// The display modes most tests lay out with: both folds expanded, so a test's geometry does
+/// not depend on the fold defaults.
+#[allow(dead_code)]
+const EXPANDED: DisplayModes = DisplayModes {
+    reasoning: ReasoningMode::Expanded,
+    tools: radian_tui::tools::ToolDisplay {
+        fold: radian_tui::tools::ToolFold::Expanded,
+        preview_lines: 5,
+    },
+};
+
+/// A folded tool body must not vanish from the search (ADR 0028 R4 / this slice): the match
+/// geometry is the expanded form, whatever `tui.display.tool_output` says. (Slice 4 will
+/// auto-expand on a hit; this slice only keeps the content findable.)
+#[test]
+fn a_folded_tool_body_is_still_found() {
+    use agent_core::{ContentPart, Message, ToolCall, ToolResult};
+    use radian_tui::tools::ToolFold;
+    let mut app = App::new("m", "s");
+    app.tool_display.fold = ToolFold::Collapsed;
+    let body: String = (1..=20)
+        .map(|i| format!("line {i}\n"))
+        .chain(std::iter::once("the need1e marker\n".to_string()))
+        .collect();
+    app.push_message(&Message::Assistant {
+        content: vec![],
+        reasoning: vec![],
+        tool_calls: vec![ToolCall {
+            id: "c1".into(),
+            name: "generic_tool".into(),
+            arguments: json!({}),
+        }],
+        provider_payload: None,
+        interrupted: false,
+        meta: Default::default(),
+    });
+    app.push_message(&Message::Tool {
+        result: ToolResult {
+            call_id: "c1".into(),
+            content: vec![ContentPart::text(body)],
+            structured: None,
+            is_error: false,
+            error_code: None,
+        },
+        meta: Default::default(),
+    });
+    // The displayed body is folded to the preview: the marker is not among the laid-out
+    // lines (`display_lines` is the display geometry the renderer uses).
+    let shown = radian_tui::render::display_lines(&app.entries[1], app.display_modes(), 80);
+    assert!(
+        !shown.iter().any(|line| line.contains("need1e")),
+        "folded out of the display: {shown:?}"
+    );
+    // ...and the search still finds it.
+    app.on_key(ctrl('f'));
+    for c in "need1e".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    assert_eq!(app.find_state().unwrap().matches.len(), 1);
 }
