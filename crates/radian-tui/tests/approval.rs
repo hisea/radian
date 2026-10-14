@@ -188,3 +188,251 @@ fn the_approval_box_is_rendered_over_the_input() {
         "the input box is replaced by the prompt: {screen}"
     );
 }
+
+// ---------- the box fits: keys always visible, long bodies scroll (approval-fit) ----------
+
+/// A shell call whose command is `lines` lines long: the case the owner hit (a multi-line
+/// python heredoc in a curl pipe pushed the key line out of the box).
+fn shell_request(command: &str) -> ApprovalRequest {
+    ApprovalRequest::new(
+        "perm-2",
+        "call-2",
+        "shell",
+        command,
+        command,
+        json!({"command": command, "cwd": "/ws"}),
+        None,
+    )
+}
+
+fn long_command(lines: usize) -> String {
+    (0..lines)
+        .map(|index| format!("echo line-{index}\n"))
+        .collect()
+}
+
+fn draw(app: &mut App, width: u16, height: u16) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal.draw(|frame| render::draw(frame, app)).unwrap();
+    terminal.backend().to_string()
+}
+
+fn shell_app(lines: usize) -> App {
+    let mut app = App::new("mock", "s");
+    app.update(Input::Pending(
+        Some(Box::new(PendingView {
+            request_id: 9,
+            origin: "session".into(),
+            request: PendingRequest::Approval(shell_request(&long_command(lines))),
+        })),
+        1,
+    ));
+    app
+}
+
+/// A 60-line command still shows the key line: it is the box's own last row, not the body's.
+#[test]
+fn a_sixty_line_command_keeps_the_key_line_visible() {
+    let mut app = shell_app(60);
+    let screen = draw(&mut app, 80, 24);
+    assert!(screen.contains("allow once"), "{screen}");
+    assert!(screen.contains("always this session"), "{screen}");
+    assert!(screen.contains("deny"), "{screen}");
+    // The body starts at the top, so the command's first line is on screen too.
+    assert!(screen.contains("echo line-0"), "{screen}");
+}
+
+/// The window indicator names the visible rows, and `↓` moves the first visible line.
+#[test]
+fn the_window_indicator_moves_with_down() {
+    let mut app = shell_app(60);
+    let width = 80u16;
+    let total = render::wrap(
+        &render::approval_body(&shell_request(&long_command(60))),
+        78,
+    )
+    .len();
+    let screen = draw(&mut app, width, 24);
+    // `approval_cap(24, 0)` is 14 rows, so the body shows 14 - 3 = 11 of them.
+    assert!(
+        screen.contains(&format!("lines 1–11 of {total}")),
+        "{screen}"
+    );
+    assert!(screen.contains("tool: shell"), "{screen}");
+
+    app.on_key(key(KeyCode::Down));
+    let screen = draw(&mut app, width, 24);
+    assert!(
+        screen.contains(&format!("lines 2–12 of {total}")),
+        "the first visible line moved: {screen}"
+    );
+    assert!(
+        !screen.contains("tool: shell"),
+        "the body's first row scrolled away: {screen}"
+    );
+    // The keys are still the box's last row.
+    assert!(screen.contains("allow once"), "{screen}");
+}
+
+/// PgUp/PgDn move a page (the visible height), and the window clamps at both ends.
+#[test]
+fn page_keys_move_a_page_and_clamp() {
+    let mut app = shell_app(60);
+    draw(&mut app, 80, 24);
+    app.on_key(key(KeyCode::PageDown));
+    let screen = draw(&mut app, 80, 24);
+    let total = render::wrap(
+        &render::approval_body(&shell_request(&long_command(60))),
+        78,
+    )
+    .len();
+    assert!(
+        screen.contains(&format!("lines 12–22 of {total}")),
+        "a page is the visible height: {screen}"
+    );
+    // Far past the end clamps to the last window.
+    for _ in 0..10 {
+        app.on_key(key(KeyCode::PageDown));
+    }
+    let screen = draw(&mut app, 80, 24);
+    assert!(
+        screen.contains(&format!("lines {}–{total} of {total}", total - 10)),
+        "the last window is complete: {screen}"
+    );
+    // And back up one page from the end.
+    app.on_key(key(KeyCode::PageUp));
+    let screen = draw(&mut app, 80, 24);
+    assert!(
+        screen.contains(&format!("lines {}–{} of {total}", total - 21, total - 11)),
+        "a page back from the end: {screen}"
+    );
+}
+
+/// A short body shows no window indicator: there is nothing to scroll.
+#[test]
+fn a_short_body_has_no_window_indicator() {
+    let mut app = App::new("mock", "s");
+    prompt(&mut app);
+    let screen = draw(&mut app, 80, 24);
+    assert!(!screen.contains("lines 1–"), "{screen}");
+    assert!(screen.contains("allow once"), "{screen}");
+}
+
+/// The height is bounded by ~60% of the terminal, so a tall box cannot eat the screen.
+#[test]
+fn the_box_height_is_capped_at_sixty_percent_of_the_terminal() {
+    assert_eq!(render::approval_cap(24, 0), 14);
+    assert_eq!(render::approval_cap(60, 0), 36);
+    // A short terminal keeps three transcript rows when it can, and never goes below the floor.
+    assert_eq!(render::approval_cap(10, 0), 6);
+    assert_eq!(render::approval_cap(9, 0), 5);
+    // The `@` completion list above the box counts against the transcript's three rows.
+    assert_eq!(render::approval_cap(24, 4), 14);
+}
+
+/// The shell approval shows the command once: `args` no longer repeats it, but keeps the rest.
+#[test]
+fn a_shell_approval_shows_the_command_once() {
+    let text = render::approval_body(&shell_request("echo once"));
+    assert_eq!(
+        text.matches("echo once").count(),
+        1,
+        "the command is displayed twice: {text}"
+    );
+    assert!(text.contains("cwd"), "the remaining args are kept: {text}");
+    // And the full text still carries the keys, on their own line.
+    let full = render::approval_text(&shell_request("echo once"));
+    assert_eq!(
+        full.lines().last(),
+        Some(render::APPROVAL_KEYS),
+        "the key line is the text's own last line: {full}"
+    );
+}
+
+/// A path tool whose only argument is the path shows no `args` line at all.
+#[test]
+fn args_are_omitted_when_the_resource_is_the_only_field() {
+    let request = ApprovalRequest::new(
+        "p",
+        "c",
+        "write",
+        "/ws/a.txt",
+        "/ws/a.txt",
+        json!({"path": "/ws/a.txt"}),
+        None,
+    );
+    let text = render::approval_body(&request);
+    assert!(!text.contains("args"), "{text}");
+    assert!(text.contains("path: /ws/a.txt"), "{text}");
+}
+
+/// The 400-byte cap applies to the args that are left after the dedup, not to the command.
+#[test]
+fn the_args_cap_applies_after_the_dedup() {
+    let content = "x".repeat(2000);
+    let request = ApprovalRequest::new(
+        "p",
+        "c",
+        "write",
+        "/ws/a.txt",
+        "/ws/a.txt",
+        json!({"path": "/ws/a.txt", "content": content}),
+        None,
+    );
+    let text = render::approval_body(&request);
+    assert!(text.contains("more bytes"), "{text}");
+    assert!(
+        text.len() < 1000,
+        "the args are still capped: {}",
+        text.len()
+    );
+    // The command itself is never truncated.
+    let long = "echo ".to_string() + &"y".repeat(2000);
+    let shell = shell_request(&long);
+    let text = render::approval_body(&shell);
+    assert!(
+        text.contains(&"y".repeat(2000)),
+        "the command must not be truncated: {}",
+        text.len()
+    );
+}
+
+/// A new pending request starts at the top of its body: the scroll belongs to the modal.
+#[test]
+fn a_new_pending_request_resets_the_scroll() {
+    let mut app = shell_app(60);
+    draw(&mut app, 80, 24);
+    for _ in 0..3 {
+        app.on_key(key(KeyCode::Down));
+    }
+    let second = PendingView {
+        request_id: 10,
+        origin: "session".into(),
+        request: PendingRequest::Approval(shell_request(&long_command(60))),
+    };
+    app.update(Input::Pending(Some(Box::new(second)), 1));
+    let screen = draw(&mut app, 80, 24);
+    let total = render::wrap(
+        &render::approval_body(&shell_request(&long_command(60))),
+        78,
+    )
+    .len();
+    assert!(
+        screen.contains(&format!("lines 1–11 of {total}")),
+        "the next question starts at the top: {screen}"
+    );
+    assert!(screen.contains("tool: shell"), "{screen}");
+}
+
+/// The scroll keys do not reach the composer: nothing is typed while scrolling the box.
+#[test]
+fn scroll_keys_do_not_type_into_the_composer() {
+    let mut app = shell_app(60);
+    app.on_key(key(KeyCode::Down));
+    app.on_key(key(KeyCode::PageDown));
+    assert!(app.input.is_empty(), "{:?}", app.input);
+    assert!(
+        app.pending_approval().is_some(),
+        "scrolling is not an answer"
+    );
+}

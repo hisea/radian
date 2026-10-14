@@ -5295,6 +5295,81 @@ async fn pty_two_approvals_are_shown_in_order() {
     );
 }
 
+/// A long command's approval still shows `[y] allow once` (the keys are the box's own last
+/// row), and answering `y` runs the whole command (approval-fit, owner acceptance).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_long_command_keeps_the_approval_keys_visible() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("approval-fit");
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    // Sixty filler lines put the body far past what any box can show; the last line is the one
+    // that must run.
+    let mut command = String::new();
+    for index in 0..60 {
+        command.push_str(&format!("true # filler-{index}\n"));
+    }
+    command.push_str("echo APPROVAL-FIT-RAN");
+    let arguments = json!({"command": command}).to_string();
+    let server = MockServer::start(vec![
+        tool_reply("c1", "shell", &arguments),
+        text_reply("DONE"),
+    ])
+    .await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "approval-fit",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--approval",
+            "always",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"go\r");
+    assert!(
+        pty.wait_for_screen("approve tool call?", 20),
+        "no approval prompt: {}",
+        pty.screen()
+    );
+    let screen = pty.screen();
+    assert!(
+        screen.contains("[y] allow once") && screen.contains("[n] deny"),
+        "the key line is not fully on screen: {screen}"
+    );
+    assert!(
+        screen.contains("lines 1–"),
+        "a body this long must show the window indicator: {screen}"
+    );
+    // Scrolling the body keeps the keys on screen.
+    pty.send(b"\x1b[B"); // Down
+    assert!(
+        pty.wait_until(10, |screen| screen.contains("lines 2–")
+            && screen.contains("[y] allow once")),
+        "the box must scroll with the keys visible: {}",
+        pty.screen()
+    );
+    pty.send(b"y");
+    assert!(
+        pty.wait_for_screen("APPROVAL-FIT-RAN", 20),
+        "y must run the command: {}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
+}
+
 /// ADR 0024 Q5: `--approval never` only affects approvals. The user is still there, so the
 /// TUI still registers `ask_user`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
