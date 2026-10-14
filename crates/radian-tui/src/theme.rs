@@ -65,6 +65,8 @@ pub struct Theme {
     pub completion: Style,
     /// The find match position in the status bar (Phase 5).
     pub find: Style,
+    /// A transcript selection (mouse drag). pi's role map: `selectedBg`.
+    pub selection: Style,
 }
 
 fn style(color: Option<Color>, modifiers: Modifier) -> Style {
@@ -113,6 +115,9 @@ impl Theme {
             hint: style(Some(Color::Gray), Modifier::empty()),
             completion: style(Some(Color::DarkGray), Modifier::empty()),
             find: style(Some(Color::Yellow), Modifier::empty()),
+            // A selection is a background band; the text keeps its own foreground. `DarkGray`
+            // (ANSI 8) reads as a quiet band on a dark background.
+            selection: Style::default().bg(Color::DarkGray),
         }
     }
 
@@ -147,6 +152,8 @@ impl Theme {
             hint: style(Some(Color::DarkGray), Modifier::empty()),
             completion: style(Some(Color::DarkGray), Modifier::empty()),
             find: style(Some(Color::Magenta), Modifier::empty()),
+            // A quiet light band on a light background; the dark text stays readable.
+            selection: Style::default().bg(Color::Gray),
         }
     }
 
@@ -176,6 +183,9 @@ impl Theme {
             hint: style(None, Modifier::DIM),
             completion: style(None, Modifier::DIM),
             find: style(None, Modifier::BOLD),
+            // No color at all: a selection is the reversed video, as the terminal itself
+            // would draw it.
+            selection: style(None, Modifier::REVERSED),
         }
     }
 
@@ -206,7 +216,7 @@ impl Theme {
     }
 
     /// Every style this theme defines, for the "mono has no colors" test.
-    pub fn styles(&self) -> [Style; 22] {
+    pub fn styles(&self) -> [Style; 23] {
         [
             self.reasoning,
             self.interrupted,
@@ -230,6 +240,7 @@ impl Theme {
             self.hint,
             self.completion,
             self.find,
+            self.selection,
         ]
     }
 }

@@ -393,6 +393,43 @@ pub fn highlight(line: Line<'static>, query: &str) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Styles the selected display-column `ranges` of one rendered line with the theme's
+/// `selection` role (the text keeps its foreground; `mono` reverses). Columns are whole-line
+/// coordinates — the `> ` prefix's cells included — and a wide char is selected when either
+/// of its two cells is. A span is split only where the selection boundary falls inside it;
+/// runs never cross spans, so each piece keeps its own base style.
+fn apply_selection(line: Line<'static>, ranges: &[(usize, usize)], selection: Style) -> Line<'static> {
+    let mut out: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + ranges.len());
+    let mut col = 0usize;
+    let mut run: Option<(String, bool)> = None;
+    let flush = |out: &mut Vec<Span<'static>>, run: &mut Option<(String, bool)>, base: Style| {
+        if let Some((text, run_selected)) = run.take() {
+            let styled = if run_selected { base.patch(selection) } else { base };
+            out.push(Span::styled(text, styled));
+        }
+    };
+    for span in line.spans {
+        let base = span.style;
+        flush(&mut out, &mut run, base);
+        for ch in span.content.into_owned().chars() {
+            let w = ch.width().unwrap_or(0);
+            let selected = ranges
+                .iter()
+                .any(|&(start, end)| col < end && col + w.max(1) > start);
+            match &mut run {
+                Some((text, run_selected)) if *run_selected == selected => text.push(ch),
+                _ => {
+                    flush(&mut out, &mut run, base);
+                    run = Some((ch.to_string(), selected));
+                }
+            }
+            col += w;
+        }
+    }
+    flush(&mut out, &mut run, Style::default());
+    Line::from(out)
+}
+
 /// One status-bar segment: its text and its style.
 struct Segment {
     text: String,
@@ -560,6 +597,32 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             .into_iter()
             .map(|line| highlight(line, &find.query))
             .collect(),
+        None => visible,
+    };
+    // A live transcript selection: the visible rows' selected display columns, styled with
+    // the theme's `selection` role. `highlight_rows` derives from the same wrap the lines
+    // above were rendered from, so the band lands exactly on the copied text.
+    let visible = match app.selection.filter(|sel| !sel.is_empty()) {
+        Some(selection) => {
+            let ranges = crate::select::highlight_rows(
+                &app.entries,
+                width,
+                app.scroll,
+                visible.len(),
+                &selection,
+            );
+            visible
+                .into_iter()
+                .zip(ranges)
+                .map(|(line, ranges)| {
+                    if ranges.is_empty() {
+                        line
+                    } else {
+                        apply_selection(line, &ranges, theme.selection)
+                    }
+                })
+                .collect()
+        }
         None => visible,
     };
     frame.render_widget(Paragraph::new(visible), chunks[0]);
