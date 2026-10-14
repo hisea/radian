@@ -44,6 +44,57 @@ use crate::theme::Theme;
 // path keeps working.
 pub use radian_host::projection::TurnState;
 
+/// The layout cache's key (ADR 0028 R1/R6): the width, the entry's text length, the display
+/// modes and the per-entry fold override. The override is part of it, so a search hit's
+/// expansion invalidates the count.
+pub(crate) type LayoutKey = (usize, usize, crate::tools::DisplayModes, Option<bool>);
+
+/// A compaction summary's display data (ADR 0028 R5). The `summary` and the verbatim user
+/// words come from the message's `origin` (ADR 0018) through Core's own readers;
+/// the revision and the token counts are **live only** — the journaled message does not carry
+/// them, so a resume replay shows `── context compacted ──` without inventing numbers.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CompactionInfo {
+    pub summary: String,
+    pub user_messages: Vec<String>,
+    pub revision: Option<u64>,
+    pub tokens_before: Option<u64>,
+    pub tokens_after: Option<u64>,
+}
+
+impl CompactionInfo {
+    /// The text the entry shows when expanded: the model's summary, then the user's words
+    /// (ADR 0018), each as its own paragraph. This **is** the entry's text, so it
+    /// is what the selection copies and the search matches.
+    pub fn display_text(&self) -> String {
+        let mut out = self.summary.trim().to_owned();
+        for message in &self.user_messages {
+            if !out.is_empty() {
+                out.push_str("\n\n");
+            }
+            out.push_str(message.trim());
+        }
+        out
+    }
+
+    /// The folded one-liner, omitting whatever is not known: `── context compacted (rev 3,
+    /// 12000 → 4000) ──`, `── context compacted (rev 3) ──` or `── context compacted ──`.
+    pub fn line(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(revision) = self.revision {
+            parts.push(format!("rev {revision}"));
+        }
+        if let (Some(before), Some(after)) = (self.tokens_before, self.tokens_after) {
+            parts.push(format!("{before} → {after}"));
+        }
+        if parts.is_empty() {
+            "── context compacted ──".to_string()
+        } else {
+            format!("── context compacted ({}) ──", parts.join(", "))
+        }
+    }
+}
+
 /// What kind of transcript line an entry is. The renderer maps this to a style; the tests
 /// assert that reasoning and assistant text are distinguishable by style and position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +120,9 @@ pub enum EntryKind {
     /// The one-line `Tip: …` under the startup block. Its `Tip:` prefix is dim, the body
     /// muted.
     Tip,
+    /// A compaction summary (ADR 0028 R5): one line when folded, the summary and the user's
+    /// verbatim words when expanded.
+    Compaction,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -87,13 +141,19 @@ pub struct Entry {
     /// and (no producer yet) the duration. `None` for every non-tool entry, and for a tool
     /// entry whose message carried nothing to model.
     pub tool: Option<Box<crate::tools::ToolCard>>,
+    /// A compaction summary's data (ADR 0028 R5). `None` for every other entry.
+    pub compaction: Option<Box<CompactionInfo>>,
+    /// A **per-entry** fold override (ADR 0028 R6): `Some(true)` expands this entry whatever
+    /// the global fold says, which is how a search hit opens exactly one folded entry.
+    /// Cleared by the next global fold toggle. Part of the layout cache key.
+    pub fold_override: Option<bool>,
     /// The parsed blocks (ADR 0028 R1), keyed by text length and the reasoning mode. Only
     /// filled for assistant prose (the only kind with fence grammar today).
     pub(crate) block_cache: Option<((usize, ReasoningMode), Vec<Block>)>,
     /// How many lines this entry laid out to, for the width, text length and mode it was
     /// last measured at. The renderer keeps it so a frame only re-lays out entries that
     /// changed or are on screen.
-    pub(crate) layout_cache: Option<((usize, usize, crate::tools::DisplayModes), usize)>,
+    pub(crate) layout_cache: Option<(LayoutKey, usize)>,
     /// Rendered Mermaid diagrams (ADR 0028 R8), keyed by `(width, text_len)`: the width is in
     /// the key because `TooWide` can succeed on a wider terminal. Filled by the mutable
     /// measure pass; the immutable layout paths render fresh on a miss.
@@ -110,6 +170,8 @@ impl Entry {
             is_error: false,
             result: None,
             tool: None,
+            compaction: None,
+            fold_override: None,
             block_cache: None,
             layout_cache: None,
             diagram_cache: None,
@@ -912,6 +974,9 @@ pub struct App {
     selecting: Option<SelectDrag>,
     /// The last press, for double/triple-click detection.
     last_click: Option<LastClick>,
+    /// The revision and token counts of the compaction that just finished (ADR 0028 R5): the
+    /// summary message that follows takes them for its one-liner. Empty on a resume replay.
+    pending_compaction: Option<(u64, u64, u64)>,
     /// Whether mouse reporting is on (`tui.mouse`, default on). With it off the terminal
     /// never sends a mouse event and every mouse method here is a no-op: none of the
     /// selection/copy features exist (the belt behind the terminal's suspenders).
@@ -971,6 +1036,7 @@ impl App {
             selection: None,
             selecting: None,
             last_click: None,
+            pending_compaction: None,
             mouse_enabled: true,
             clipboard: ClipboardMode::Osc52,
             // ADR 0028 R3's default: thinking collapsed to one line.
@@ -1745,12 +1811,53 @@ impl App {
         self.find_recompute();
     }
 
-    /// Centers the current match in the viewport and stops following the bottom. A search that
-    /// matches nothing leaves the viewport alone.
+    /// Drops every per-entry fold override (ADR 0028 R6): a global fold toggle moots them.
+    fn clear_fold_overrides(&mut self) {
+        for entry in self.entries.iter_mut() {
+            entry.fold_override = None;
+        }
+    }
+
+    /// Centers the current match in the viewport and stops following the bottom. A search
+    /// that matches nothing leaves the viewport alone.
+    ///
+    /// ADR 0028 R6: when the match is in a **folded** entry, exactly that entry opens (a
+    /// per-entry override), the others stay folded, and the status bar says so. The override
+    /// stays until the next global fold toggle: collapsing the hit the moment the box closes
+    /// would take the text the user just searched for away again.
     fn find_jump(&mut self) {
-        let Some(line) = self.find_state().and_then(FindState::current_line) else {
+        let Some((entry, line)) = self
+            .find_state()
+            .and_then(FindState::current)
+            .map(|m| (m.entry, m.line))
+        else {
             return;
         };
+        if entry >= self.entries.len() {
+            return;
+        }
+        let modes = self.display_modes();
+        // Does this entry's display hide content? (Its count can coincide with the expanded
+        // one and still hide the text - a one-line thinking channel does exactly that.)
+        let folded = crate::blocks::is_folded(&self.entries[entry], modes);
+        if folded {
+            // Exactly one override at a time.
+            for other in self.entries.iter_mut() {
+                other.fold_override = None;
+            }
+            self.entries[entry].fold_override = Some(true);
+            self.note = Some("expanded 1 folded entry for the match".to_string());
+        }
+        // The display line of the match: the expanded line index only maps onto the display
+        // when the entries above it are laid out folded, so walk the display counts (the
+        // entry itself is measured with its override, so its own lines line up).
+        let modes = self.display_modes();
+        let width = self.transcript_width;
+        let mut display_line = 0usize;
+        for item in self.entries[..entry].iter_mut() {
+            display_line += crate::blocks::line_count_cached(item, modes, width);
+        }
+        let line = display_line + line;
         let height = usize::from(self.view_height.max(1));
         self.scroll = crate::find::centered_scroll(line, height, self.max_scroll);
         self.follow = false;
@@ -2602,6 +2709,8 @@ impl App {
             // the block/layout cache keys, so the next frame re-lays them out.
             Action::ToggleReasoning => {
                 self.reasoning_mode = self.reasoning_mode.toggled();
+                // A global fold toggle drops the per-entry search overrides (ADR 0028 R6).
+                self.clear_fold_overrides();
                 UpdateResult::dirty()
             }
             // ADR 0028 R4: Ctrl-O steps the tool bodies through errors -> expanded ->
@@ -2612,6 +2721,7 @@ impl App {
                     crate::tools::ToolFold::Expanded => crate::tools::ToolFold::Collapsed,
                     crate::tools::ToolFold::Collapsed => crate::tools::ToolFold::Errors,
                 };
+                self.clear_fold_overrides();
                 UpdateResult::dirty()
             }
             Action::DeleteWord => {
@@ -3292,6 +3402,7 @@ impl App {
                 ));
             }
             AgentEvent::CompactionFinished {
+                revision,
                 tokens_before,
                 tokens_after,
                 ..
@@ -3301,6 +3412,9 @@ impl App {
                     EntryKind::Notice,
                     format!("context compacted ({tokens_before} → {tokens_after} tokens)"),
                 ));
+                // The summary message arrives right after this event (ADR 0018): the numbers
+                // are handed to it, since the journaled message does not carry them.
+                self.pending_compaction = Some((*revision, *tokens_before, *tokens_after));
             }
             AgentEvent::CompactionFailed { reason } => {
                 self.note = None;
@@ -3347,6 +3461,33 @@ impl App {
         self.entries.retain(|entry| !entry.live);
         match message {
             Message::User { content, .. } => {
+                // A compaction summary (ADR 0028 R5) is a `User` message with a
+                // `compaction_summary` origin (ADR 0018); it shows as one line, not as a wall
+                // of user text. Core's readers supply the summary and the verbatim user
+                // words - nothing is parsed out of the body here.
+                if agent_core::compaction::is_compaction_summary(message) {
+                    let mut info = CompactionInfo {
+                        summary: agent_core::compaction::compaction_summary_text(message)
+                            .unwrap_or_default(),
+                        user_messages: agent_core::compaction::compaction_user_messages(message)
+                            .into_iter()
+                            .map(|message| message.text)
+                            .collect(),
+                        ..CompactionInfo::default()
+                    };
+                    // The live path knows the revision and the token counts from the
+                    // `CompactionFinished` event that preceded this message; a resume replay
+                    // does not, and omits them.
+                    if let Some((revision, before, after)) = self.pending_compaction.take() {
+                        info.revision = Some(revision);
+                        info.tokens_before = Some(before);
+                        info.tokens_after = Some(after);
+                    }
+                    let mut entry = Entry::new(EntryKind::Compaction, info.display_text());
+                    entry.compaction = Some(Box::new(info));
+                    self.entries.push(entry);
+                    return;
+                }
                 // ADR 0018: an attachment is its own part, so the display renders
                 // it as `[file: P, N lines]` rather than joining its body into the message.
                 self.entries.push(Entry::new(

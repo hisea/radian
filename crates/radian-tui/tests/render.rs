@@ -1004,6 +1004,95 @@ fn the_list_and_memory_cards_have_their_own_heads() {
     }
 }
 
+/// A compaction summary (ADR 0028 R5): one line, expandable to the summary and the user's
+/// verbatim words; the live path adds the revision and token counts, the resume replay shows
+/// the same line without them (the journaled message does not carry them).
+#[test]
+fn a_compaction_summary_is_one_line_that_expands() {
+    use agent_core::compaction::{RetainedUserMessage, compacted_history};
+    use radian_tui::tools::ToolFold;
+    let history = compacted_history(
+        "the earlier work, summarized",
+        &[RetainedUserMessage {
+            text: "the user's own words".to_string(),
+        }],
+        &[],
+    )
+    .expect("a valid history");
+    let summary = history[0].clone();
+
+    // Resume: the message alone, no revision or counts.
+    let mut resumed = App::new("m", "s");
+    resumed.push_message(&summary);
+    let text = screen(&render(&mut resumed, 70, 12));
+    assert!(text.contains("── context compacted ──"), "{text}");
+    assert!(
+        !text.contains("the earlier work"),
+        "folded by default: {text}"
+    );
+
+    // Expanded (Ctrl-O) shows the summary and the verbatim user words, and they copy.
+    resumed.tool_display.fold = ToolFold::Expanded;
+    let text = screen(&render(&mut resumed, 70, 20));
+    assert!(text.contains("the earlier work, summarized"), "{text}");
+    assert!(text.contains("the user's own words"), "{text}");
+
+    // Live: the same message after a `CompactionFinished` event carries the numbers.
+    let mut live = App::new("m", "s");
+    live.apply_event(&AgentEvent::CompactionFinished {
+        revision: 3,
+        tokens_before: 12_000,
+        tokens_after: 4_000,
+        below_target: false,
+    });
+    live.apply_event(&AgentEvent::TranscriptAppended {
+        index: 0,
+        message: summary.clone(),
+    });
+    let text = screen(&render(&mut live, 70, 12));
+    assert!(
+        text.contains("── context compacted (rev 3, 12000 → 4000) ──"),
+        "{text}"
+    );
+    // The two paths differ only in that line: the entries' data is otherwise the same.
+    let resumed_info = resumed
+        .entries
+        .iter()
+        .find_map(|entry| entry.compaction.as_deref())
+        .expect("the summary entry");
+    let live_info = live
+        .entries
+        .iter()
+        .find_map(|entry| entry.compaction.as_deref())
+        .expect("the summary entry");
+    assert_eq!(resumed_info.summary, live_info.summary);
+    assert_eq!(resumed_info.user_messages, live_info.user_messages);
+    assert_eq!(resumed_info.revision, None);
+    assert_eq!(live_info.revision, Some(3));
+    assert_eq!(live_info.tokens_before, Some(12_000));
+    assert_eq!(live_info.tokens_after, Some(4_000));
+}
+
+/// The folded summary line is one line; expanding changes the transcript's line count (the
+/// fold is a layout cache key, override included).
+#[test]
+fn the_summary_fold_changes_the_line_count() {
+    use agent_core::compaction::compacted_history;
+    use radian_tui::tools::ToolFold;
+    let history = compacted_history("one\ntwo\nthree\nfour", &[], &[]).expect("valid");
+    let mut app = App::new("m", "s");
+    app.push_message(&history[0]);
+    let _ = render(&mut app, 70, 20);
+    let folded = app.total_lines;
+    assert_eq!(folded, 1);
+    app.tool_display.fold = ToolFold::Expanded;
+    let _ = render(&mut app, 70, 20);
+    assert_eq!(app.total_lines, 4, "the summary's four lines");
+    app.tool_display.fold = ToolFold::Collapsed;
+    let _ = render(&mut app, 70, 20);
+    assert_eq!(app.total_lines, 1, "folded again");
+}
+
 /// An MCP tool's alias (`server__tool`) never reaches a built-in renderer: its arguments and
 /// output are its server's own, so it takes the generic card (name + argument JSON), while the
 /// exact built-in names keep their own renderers. The reviewer's T3.

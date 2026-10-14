@@ -376,3 +376,150 @@ fn a_folded_tool_body_is_still_found() {
     }
     assert_eq!(app.find_state().unwrap().matches.len(), 1);
 }
+
+/// ADR 0028 R6: the search matches the **full** content, and a hit in a folded entry opens
+/// exactly that entry - the per-entry override - with a status-bar note. The viewport lands on
+/// the match's display line (the folded geometry, not the search's expanded one).
+#[test]
+fn a_hit_in_a_folded_tool_body_expands_only_that_entry() {
+    use agent_core::{ContentPart, Message, ToolCall, ToolResult};
+    use radian_tui::tools::ToolFold;
+    let mut app = App::new("m", "s");
+    app.tool_display.fold = ToolFold::Collapsed;
+    // Two tool cards, each with a body longer than the preview: only one hides the needle.
+    for (call, body) in [
+        ("c1", "alpha\nbeta\ngamma\nNEEDLE-HERE"),
+        ("c2", "one\ntwo\nthree\nfour"),
+    ] {
+        app.push_message(&Message::Assistant {
+            content: vec![],
+            reasoning: vec![],
+            tool_calls: vec![ToolCall {
+                id: call.into(),
+                name: "generic_tool".into(),
+                arguments: json!({}),
+            }],
+            provider_payload: None,
+            interrupted: false,
+            meta: Default::default(),
+        });
+        app.push_message(&Message::Tool {
+            result: ToolResult {
+                call_id: call.into(),
+                content: vec![ContentPart::text(body)],
+                structured: None,
+                is_error: false,
+                error_code: None,
+            },
+            meta: Default::default(),
+        });
+    }
+    render(&mut app);
+    // Folded: neither body shows anything but its one-line hint.
+    let folded_total = app.total_lines;
+    app.on_key(ctrl('f'));
+    for c in "needle".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    let match_line = app.find_state().unwrap().matches[0];
+    assert_eq!(
+        app.find_state().unwrap().matches.len(),
+        1,
+        "the folded body is searched"
+    );
+    // Exactly one entry opened, and the note says so.
+    let overridden: Vec<usize> = app
+        .entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.fold_override == Some(true))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(overridden.len(), 1, "one entry at a time");
+    assert_eq!(
+        app.note.as_deref(),
+        Some("expanded 1 folded entry for the match")
+    );
+    render(&mut app);
+    assert_eq!(
+        app.total_lines,
+        folded_total + 3,
+        "the hit entry's four body lines replace its one-line hint"
+    );
+    // The match line is on screen, centered: the jump mapped it through the display geometry.
+    let display_line: usize = app.entries[..match_line.entry]
+        .iter()
+        .map(|entry| radian_tui::render::display_lines(entry, app.display_modes(), 40).len())
+        .sum::<usize>()
+        + match_line.line;
+    assert!(
+        display_line >= app.scroll && display_line < app.scroll + usize::from(app.view_height),
+        "display line {display_line} is outside the viewport (scroll {})",
+        app.scroll
+    );
+    // A global toggle drops the override.
+    app.on_key(ctrl('o'));
+    assert!(
+        app.entries
+            .iter()
+            .all(|entry| entry.fold_override.is_none())
+    );
+}
+
+/// A hit in a folded **thinking** block expands it too, and a hit in a folded compaction
+/// summary does the same.
+#[test]
+fn a_hit_in_folded_thinking_and_a_summary_expands_them() {
+    use agent_core::compaction::compacted_history;
+    use agent_core::{ContentPart, Message};
+    let mut app = App::new("m", "s");
+    app.reasoning_mode = radian_tui::blocks::ReasoningMode::Collapsed;
+    app.push_message(&Message::Assistant {
+        content: vec![ContentPart::text("the answer")],
+        // Three lines, so expanding it changes the transcript's line count.
+        reasoning: vec![ContentPart::text(
+            "a deep THOUGHT about it\nsecond line\nthird line",
+        )],
+        tool_calls: vec![],
+        provider_payload: None,
+        interrupted: false,
+        meta: Default::default(),
+    });
+    let history = compacted_history("the compacted SUMMARY body", &[], &[]).expect("valid");
+    app.push_message(&history[0]);
+    render(&mut app);
+    let folded = app.total_lines;
+    // Search for the thinking text.
+    app.on_key(ctrl('f'));
+    for c in "thought".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    assert_eq!(app.find_state().unwrap().matches.len(), 1);
+    let thinking = app
+        .entries
+        .iter()
+        .position(|entry| entry.fold_override == Some(true))
+        .expect("the thinking entry opened");
+    render(&mut app);
+    assert!(
+        app.total_lines > folded,
+        "the thinking text is laid out now"
+    );
+    // Now search for the summary's text: the override moves to that entry.
+    for _ in 0.."thought".len() {
+        app.on_key(key(KeyCode::Backspace));
+    }
+    for c in "summary".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    assert_eq!(app.find_state().unwrap().matches.len(), 1);
+    let now: Vec<usize> = app
+        .entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.fold_override == Some(true))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(now.len(), 1, "still exactly one");
+    assert_ne!(now[0], thinking, "the override moved to the summary");
+}

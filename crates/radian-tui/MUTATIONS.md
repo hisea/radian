@@ -796,3 +796,20 @@ Base `fdfc2cb` · 一次性检出 `/tmp/flaky-mut`（detached，跑完删除）�
 
 `--exit-trace`（4e607ef）保留为测试诊断：不传时不打开文件、不输出；`exit_trace_once` 在 `OnceLock`
 未设置时直接返回，连原子操作都不做。
+
+## Slice: ADR 0028 第 4 片（压缩摘要 R5、搜索自动展开 R6）
+
+Base `26ddda9` · 一次性 worktree `/tmp/s4-mut`（`git worktree add` 自本片 HEAD，结束后删除）·
+每个变异 `python3` 补丁（带 `assert`）、跑对应测试后 `git checkout -- .` 还原。
+
+| # | 需求 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| S1 | 按条目的展开状态进布局缓存键 | 键里覆盖恒为 `None` | `a_hit_in_a_folded_tool_body_expands_only_that_entry` | ✅ |
+| S2 | 搜索匹配完整内容 | `search_modes` 返回当前（折叠）几何 | 同上 | ✅ |
+| S3 | 命中只展开一条 | 命中时把所有折叠条目都展开 | 同上 | ✅ |
+| S4 | resume 的摘要不是普通用户消息 | 摘要判定恒假（走普通 User 分支） | `a_compaction_summary_is_one_line_that_expands` | ✅ |
+
+4/4 抓住。**过程记录（S1/S3 的第一轮）**：两个补丁都让 crate 编译失败（S1 改了类型别名却没改元组；
+S3 留下了 `was_overridden` 的悬空引用），而当时的 `run_mut` 只 grep `FAILED`，把编译失败也当成
+"没抓住"——是假象。改成先 grep `^error` 判编译失败、并修好补丁后，两条都抓住。顺带删掉了真实代码里
+那个无用的 `was_overridden` 局部变量（提交 `a642b17`）。

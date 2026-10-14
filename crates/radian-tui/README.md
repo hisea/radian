@@ -1039,6 +1039,26 @@ steps through them; a failed call's body is never hidden. The status line still 
 `tool <name> running` note, so the call, the wait for approval, execution and the result stay
 distinguishable states.
 
+## Compaction summaries and search over folded content (ADR 0028 R5/R6)
+
+A compaction summary (a `User` message with a `compaction_summary` origin, ADR 0018) shows as
+one line: `── context compacted (rev 3, 12000 → 4000) ──`. Expanding it (the tool-output fold,
+`Ctrl-O`) shows the model's summary and the user's words Core keeps verbatim (ADR 0018 revision
+6). The revision and the token counts are **live only** — the journaled message does not carry
+them, so a resume replay shows `── context compacted ──` rather than inventing numbers.
+
+`Ctrl-F` matches the **full** content: a folded thinking block, a folded tool body and a folded
+summary are all searched. A hit in a folded entry opens **exactly that entry** (a per-entry
+override, part of the layout cache key) and the status bar says `expanded 1 folded entry for the
+match`; the other entries stay folded. The override is dropped by the next global fold toggle
+(`Ctrl-T` / `Ctrl-O`); closing the search box keeps it, so the text the user searched for does
+not disappear again. The jump centers the match's **display** line, not its expanded one.
+
+Already a Notice-style one-liner (verified, R5): a memory injection never enters the transcript
+(the hook appends to the system prompt) and its only transcript trace is the startup
+`[memory] …` notice; an approval is a modal, not a transcript entry (the call and its result are
+the card). A pending question's result arrives as the `ask_user` card.
+
 ## Mermaid blocks (ADR 0028 R8)
 
 A fenced code block whose info string is `mermaid` (ASCII case-insensitive) and which is
