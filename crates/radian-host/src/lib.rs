@@ -34,9 +34,9 @@ pub use auth::{
     upsert_api_key as upsert_auth_api_key,
 };
 pub use catalog::{
-    CACHE_TTL, CATALOG_URL, Catalog, FETCH_TIMEOUT, ModelLimit, OUTPUT_RESERVATION_CAP, Window,
-    WindowCheck, WindowQuery, WindowSource, cache_path, host_of, input_budget,
-    output_ceiling_warning, output_reservation, provider_for_host, resolve,
+    CACHE_TTL, CATALOG_URL, Catalog, FETCH_TIMEOUT, ModelEntry, ModelLimit, OUTPUT_RESERVATION_CAP,
+    ProviderInfo, Window, WindowCheck, WindowQuery, WindowSource, cache_path, host_of,
+    input_budget, output_ceiling_warning, output_reservation, provider_for_host, resolve,
 };
 pub use config::migrate_pi::{PiDraft, PiMigrateError, import_pi, write_draft as write_pi_draft};
 pub use config::{

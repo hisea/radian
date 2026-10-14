@@ -136,10 +136,52 @@ pub fn output_ceiling_warning(
     })
 }
 
-/// The parsed catalog: provider id → model id → limits.
+/// One provider's catalog metadata (ADR 0026 D0). `api`/`env`/`name` are read so a descriptor
+/// can fall back to the catalog; only models that carry a `limit` are kept, so the existing
+/// window behavior is unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderInfo {
+    pub id: String,
+    /// The provider's display name (`"OpenCode Go"`).
+    pub name: Option<String>,
+    /// The provider's default base URL. Absent for `anthropic`/`openai` in the 2026-10-13
+    /// catalog (they rely on the SDK default).
+    pub api: Option<String>,
+    /// The environment variables the provider reads its key from. Informational only: ADR 0026
+    /// D2 makes `auth.json` the only runtime source.
+    pub env: Vec<String>,
+}
+
+/// One model in the catalog, for `/model`'s list (ADR 0026 D0). `limit` is the window ADR 0018
+/// uses; a model without a `limit` is not in the catalog at all (existing behavior).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelEntry {
+    pub id: String,
+    /// The model's display name (`"Claude Opus 5.5"`), when the catalog has one.
+    pub name: Option<String>,
+    pub limit: ModelLimit,
+}
+
+/// One catalog model as parsed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CatalogModel {
+    name: Option<String>,
+    limit: ModelLimit,
+}
+
+/// One catalog provider as parsed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CatalogProvider {
+    name: Option<String>,
+    api: Option<String>,
+    env: Vec<String>,
+    models: BTreeMap<String, CatalogModel>,
+}
+
+/// The parsed catalog: provider id → provider metadata and its models.
 #[derive(Debug, Clone, Default)]
 pub struct Catalog {
-    providers: BTreeMap<String, BTreeMap<String, ModelLimit>>,
+    providers: BTreeMap<String, CatalogProvider>,
 }
 
 impl Catalog {
@@ -162,22 +204,93 @@ impl Catalog {
                 };
                 models_out.insert(
                     model_id.clone(),
-                    ModelLimit {
-                        context: limit.get("context").and_then(Value::as_u64),
-                        output: limit.get("output").and_then(Value::as_u64),
-                        input: limit.get("input").and_then(Value::as_u64),
+                    CatalogModel {
+                        name: model.get("name").and_then(Value::as_str).map(str::to_owned),
+                        limit: ModelLimit {
+                            context: limit.get("context").and_then(Value::as_u64),
+                            output: limit.get("output").and_then(Value::as_u64),
+                            input: limit.get("input").and_then(Value::as_u64),
+                        },
                     },
                 );
             }
             if !models_out.is_empty() {
-                parsed.insert(provider_id.clone(), models_out);
+                parsed.insert(
+                    provider_id.clone(),
+                    CatalogProvider {
+                        name: provider
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        api: provider
+                            .get("api")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        env: provider
+                            .get("env")
+                            .and_then(Value::as_array)
+                            .map(|values| {
+                                values
+                                    .iter()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_owned)
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        models: models_out,
+                    },
+                );
             }
         }
         Some(Self { providers: parsed })
     }
 
     pub fn limit(&self, provider: &str, model: &str) -> Option<ModelLimit> {
-        self.providers.get(provider)?.get(model).copied()
+        self.providers
+            .get(provider)?
+            .models
+            .get(model)
+            .map(|entry| entry.limit)
+    }
+
+    /// The provider's catalog metadata (display name, `api`, `env`), if present.
+    pub fn provider_info(&self, provider: &str) -> Option<ProviderInfo> {
+        let entry = self.providers.get(provider)?;
+        Some(ProviderInfo {
+            id: provider.to_owned(),
+            name: entry.name.clone(),
+            api: entry.api.clone(),
+            env: entry.env.clone(),
+        })
+    }
+
+    /// The provider's models, in id order, for `/model`'s list.
+    pub fn models_for(&self, provider: &str) -> Vec<ModelEntry> {
+        self.providers
+            .get(provider)
+            .map(|entry| {
+                entry
+                    .models
+                    .iter()
+                    .map(|(id, model)| ModelEntry {
+                        id: id.clone(),
+                        name: model.name.clone(),
+                        limit: model.limit,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The model's display name (`"Claude Opus 5.5"`), or `None` when the catalog has no such
+    /// model or no name for it.
+    pub fn display_name(&self, provider: &str, model: &str) -> Option<&str> {
+        self.providers
+            .get(provider)?
+            .models
+            .get(model)?
+            .name
+            .as_deref()
     }
 
     pub fn provider_count(&self) -> usize {
@@ -185,7 +298,9 @@ impl Catalog {
     }
 
     pub fn model_count(&self, provider: &str) -> usize {
-        self.providers.get(provider).map_or(0, BTreeMap::len)
+        self.providers
+            .get(provider)
+            .map_or(0, |entry| entry.models.len())
     }
 }
 
@@ -657,6 +772,58 @@ mod tests {
             catalog.limit("opencode", "future").unwrap().context,
             Some(5)
         );
+    }
+
+    #[test]
+    fn provider_and_model_names_are_read() {
+        let text = r#"{
+            "opencode-go": {
+                "id": "opencode-go", "name": "OpenCode Go",
+                "api": "https://opencode.ai/inference/go/v1",
+                "env": ["OPENCODE_API_KEY"],
+                "models": {
+                    "deepseek-v4.1-flash": {"name": "DeepSeek V4.1 Flash", "limit": {"context": 1000000, "output": 384000}},
+                    "qwen3.7-max": {"name": "Qwen3.7 Max", "limit": {"context": 1000000, "output": 65536}}
+                }
+            },
+            "anthropic": {
+                "name": "Anthropic", "env": ["ANTHROPIC_API_KEY"],
+                "models": {
+                    "claude-opus-5-5": {"name": "Claude Opus 5.5", "limit": {"context": 1000000}},
+                    "no-name": {"limit": {"context": 5}}
+                }
+            }
+        }"#;
+        let catalog = Catalog::parse(text).unwrap();
+        let info = catalog.provider_info("opencode-go").unwrap();
+        assert_eq!(info.name.as_deref(), Some("OpenCode Go"));
+        assert_eq!(
+            info.api.as_deref(),
+            Some("https://opencode.ai/inference/go/v1")
+        );
+        assert_eq!(info.env, ["OPENCODE_API_KEY"]);
+        // `anthropic` has no `api` in the real catalog.
+        assert_eq!(catalog.provider_info("anthropic").unwrap().api, None);
+        assert_eq!(catalog.provider_info("nope"), None);
+
+        assert_eq!(
+            catalog.display_name("opencode-go", "deepseek-v4.1-flash"),
+            Some("DeepSeek V4.1 Flash")
+        );
+        assert_eq!(
+            catalog.display_name("anthropic", "claude-opus-5-5"),
+            Some("Claude Opus 5.5")
+        );
+        // A model without a `name`, and an unknown model, are both `None`.
+        assert_eq!(catalog.display_name("anthropic", "no-name"), None);
+        assert_eq!(catalog.display_name("opencode-go", "nope"), None);
+
+        let models = catalog.models_for("opencode-go");
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "deepseek-v4.1-flash");
+        assert_eq!(models[0].name.as_deref(), Some("DeepSeek V4.1 Flash"));
+        assert_eq!(models[0].limit.context, Some(1_000_000));
+        assert!(catalog.models_for("nope").is_empty());
     }
 
     #[test]
