@@ -671,6 +671,12 @@ async fn pty_skill_commands_expand_list_notice_and_escape() {
         30,
         110,
     );
+    // review (small-fixes 2): p3 saw this test time out once inside a loaded full suite
+    // and never standalone. It could not be reproduced here either (0/50 standalone, 0/3 full
+    // suites, 0/20 after the closed-master fix), and every wait below is already a **state**
+    // wait (`wait_for_screen` blocks until the text is on screen), so there is no race to
+    // remove. The notice waits use the same 20 s as the turn waits: a 10 s bound is the one
+    // place a heavily loaded machine can still fail the test without a wrong behavior.
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
 
     // `/skill:greet hello 世界`: the body and the args are one user message.
@@ -716,12 +722,12 @@ async fn pty_skill_commands_expand_list_notice_and_escape() {
     // `/skills` lists both the visible and the model-invocation-disabled skill.
     pty.send("/skills\r".as_bytes());
     assert!(
-        pty.wait_for_screen("greet: Say hello.", 10),
+        pty.wait_for_screen("greet: Say hello.", 20),
         "the list is missing:\n{}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("secret: SECRET-DESCRIPTION (model-invocation off)", 10),
+        pty.wait_for_screen("secret: SECRET-DESCRIPTION (model-invocation off)", 20),
         "the disabled skill is not listed:\n{}",
         pty.screen()
     );
@@ -729,7 +735,7 @@ async fn pty_skill_commands_expand_list_notice_and_escape() {
     // `/skill:nope` is a notice, not a message: no second request.
     pty.send("/skill:nope\r".as_bytes());
     assert!(
-        pty.wait_for_screen("no skill named `nope`", 10),
+        pty.wait_for_screen("no skill named `nope`", 20),
         "the notice is missing:\n{}",
         pty.screen()
     );
