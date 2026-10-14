@@ -715,7 +715,8 @@ mod tests {
         let scratch = Scratch::new("extras-missing");
         scratch.skill("a", &frontmatter("a", "A."));
         let missing = scratch.root.join("does-not-exist");
-        let discovery = discover_with_extras(Some(&scratch.skills_dir()), std::slice::from_ref(&missing));
+        let discovery =
+            discover_with_extras(Some(&scratch.skills_dir()), std::slice::from_ref(&missing));
         assert_eq!(discovery.skills.len(), 1);
         assert_eq!(discovery.warnings.len(), 1);
         assert!(
