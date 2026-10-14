@@ -29,6 +29,11 @@ fn app_rs_is_pure() {
         "std::fs",
         "std::process",
         "std::net",
+        // No stdout either: the clipboard copy (and everything else that touches the
+        // terminal) is an [`Effect`] the loop runs — a copy written from `update` would race
+        // the frame buffer and bypass the `tui.clipboard` modes.
+        "io::stdout",
+        "io::stderr",
         // No service and no async runtime handle.
         "MemoryService",
         "tokio",
