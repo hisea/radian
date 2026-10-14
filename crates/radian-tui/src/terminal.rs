@@ -210,6 +210,16 @@ struct PanicLog {
     secrets: SharedSecrets,
 }
 
+/// Snapshot the shared list. **Poison-safe**: a panic while a writer held the lock must not
+/// turn redaction off (failing open is the wrong direction for a redaction list), so the guard
+/// is taken through `into_inner` instead of being dropped. Every reader goes through here.
+pub fn shared_secrets(secrets: &SharedSecrets) -> Vec<String> {
+    secrets
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
 /// The message of the last panic, if any, collapsed to one line (the terminal gets one line;
 /// the multi-line detail lives in the panic log).
 ///
@@ -222,17 +232,19 @@ pub fn last_panic() -> Option<String> {
 /// terminal is entered. `secrets` (header values, the API key) are redacted out of both the
 /// stored summary and the log line. `None` (no diagnostics directory) disables the log.
 pub fn set_panic_log(path: Option<PathBuf>, secrets: SharedSecrets) {
-    if let Ok(mut slot) = PANIC_LOG.lock() {
-        *slot = path.map(|path| PanicLog { path, secrets });
-    }
+    let mut slot = PANIC_LOG
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *slot = path.map(|path| PanicLog { path, secrets });
 }
 
 /// Where the panic log is being written, for the exit line (dogfooding D4).
 pub fn panic_log_path() -> Option<PathBuf> {
     PANIC_LOG
         .lock()
-        .ok()
-        .and_then(|slot| slot.as_ref().map(|log| log.path.clone()))
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+        .map(|log| log.path.clone())
 }
 
 /// Replaces every value in `secrets` with `<redacted>`. Used for panic text and for the
@@ -256,18 +268,15 @@ fn record_panic(info: &std::panic::PanicHookInfo<'_>) -> String {
         .unwrap_or("<unnamed>")
         .to_owned();
     let full = info.to_string();
-    let (path, secrets) = match PANIC_LOG.lock() {
-        Ok(slot) => match slot.as_ref() {
-            Some(log) => (
-                Some(log.path.clone()),
-                log.secrets
-                    .read()
-                    .map(|secrets| secrets.clone())
-                    .unwrap_or_default(),
-            ),
+    let (path, secrets) = {
+        // Poison-tolerant too: a panicked holder of `PANIC_LOG` must not drop the list.
+        let slot = PANIC_LOG
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match slot.as_ref() {
+            Some(log) => (Some(log.path.clone()), shared_secrets(&log.secrets)),
             None => (None, Vec::new()),
-        },
-        Err(_) => (None, Vec::new()),
+        }
     };
     let redacted = redact(&full, &secrets);
     // The exit line is one line: keep the first line of the panic report.
@@ -315,4 +324,58 @@ pub fn install_panic_hook() {
         }
         let _ = writeln!(io::stderr(), "{report}");
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A poisoned secrets lock must still supply the list: redaction must never fail open
+    ///. The lock is poisoned by a thread that panics while
+    /// holding the write guard, which is exactly how a mid-panic writer poisons it.
+    #[test]
+    fn a_poisoned_shared_secrets_list_still_redacts() {
+        const KEY: &str = "late-secret-PTY-7";
+        let secrets: SharedSecrets =
+            std::sync::Arc::new(std::sync::RwLock::new(vec![KEY.to_string()]));
+
+        let poison = std::sync::Arc::clone(&secrets);
+        let _ = std::thread::spawn(move || {
+            let _guard = poison.write().unwrap_or_else(|e| e.into_inner());
+            panic!("poison the lock");
+        })
+        .join();
+        assert!(secrets.is_poisoned(), "the lock must be poisoned for the test");
+
+        // The redaction read path: snapshot the list, then redact with it.
+        let list = shared_secrets(&secrets);
+        assert_eq!(
+            list,
+            vec![KEY.to_string()],
+            "a poisoned lock must not empty the list"
+        );
+        let redacted = redact(&format!("the key is {KEY}"), &list);
+        assert!(redacted.contains("<redacted>"), "{redacted}");
+        assert!(!redacted.contains(KEY), "{redacted}");
+    }
+
+    /// The write side is poison-tolerant too: a poisoned lock does not stop an append (the
+    /// list only grows; failing to add a key is the dangerous direction).
+    #[test]
+    fn an_append_through_a_poisoned_lock_still_lands() {
+        let secrets: SharedSecrets = std::sync::Arc::new(std::sync::RwLock::new(vec![]));
+        let poison = std::sync::Arc::clone(&secrets);
+        let _ = std::thread::spawn(move || {
+            let _guard = poison.write().unwrap_or_else(|e| e.into_inner());
+            panic!("poison the lock");
+        })
+        .join();
+        {
+            let mut list = secrets
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            list.push("added-after-poison".to_string());
+        }
+        assert_eq!(shared_secrets(&secrets), vec!["added-after-poison".to_string()]);
+    }
 }

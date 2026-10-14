@@ -823,10 +823,7 @@ fn run(
         Arc::new(move |event: &radian_session::RuntimeEvent| {
             let redacted = match event {
                 radian_session::RuntimeEvent::TurnFailed { turn_id, message } => {
-                    let current = secrets
-                        .read()
-                        .map(|secrets| secrets.clone())
-                        .unwrap_or_default();
+                    let current = radian_tui::terminal::shared_secrets(&secrets);
                     radian_session::RuntimeEvent::TurnFailed {
                         turn_id: turn_id.clone(),
                         message: radian_tui::terminal::redact(message, &current),
@@ -1322,9 +1319,11 @@ fn program_name() -> String {
 /// saves one; `/logout` does **not** call it, because a value
 /// that has already appeared must stay redacted.
 fn refresh_secrets(secrets: &radian_tui::terminal::SharedSecrets) {
-    let Ok(mut list) = secrets.write() else {
-        return;
-    };
+    // Poison-tolerant: a panicked holder of the lock must not stop this append (the list only
+    // ever grows, and failing to add a key is the dangerous direction).
+    let mut list = secrets
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     for key in radian_host::resolved_keys() {
         if !key.is_empty() && !list.contains(&key) {
             list.push(key);
@@ -2684,11 +2683,7 @@ fn load_picker(host: &SessionHost, query: Option<String>) -> AppInput {
                 index: Some(index),
                 workspace: host.workspace.clone(),
                 query,
-                secrets: host
-                    .secrets
-                    .read()
-                    .map(|secrets| secrets.clone())
-                    .unwrap_or_default(),
+                secrets: radian_tui::terminal::shared_secrets(&host.secrets),
             }),
             Err(message) => AppInput::SessionDone(vec![message]),
         },
@@ -2731,11 +2726,7 @@ fn export_current(
     let settings = radian_host::ExportSettings {
         include_reasoning: false,
         include_provider_payload: false,
-        secrets: host
-            .secrets
-            .read()
-            .map(|secrets| secrets.clone())
-            .unwrap_or_default(),
+        secrets: radian_tui::terminal::shared_secrets(&host.secrets),
     };
     let rendered = radian_host::sessions::export(
         &host.dir,
