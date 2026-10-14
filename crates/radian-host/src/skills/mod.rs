@@ -31,8 +31,35 @@ pub const MAX_NAME_CHARS: usize = 64;
 /// The longest `description` (Agent Skills spec, via pi; ADR 0025 S1).
 pub const MAX_DESCRIPTION_CHARS: usize = 1024;
 
+/// Where a skill came from (ADR 0025). The order is the discovery order: a
+/// user-level or `extra_paths` skill of the same name wins over a built-in one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillSource {
+    /// `<RADIAN_HOME>/skills/`.
+    User,
+    /// A `[skills] extra_paths` root.
+    Extra,
+    /// Compiled into the binary (`include_str!`); not on the filesystem.
+    Builtin,
+}
+
+impl SkillSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SkillSource::User => "user",
+            SkillSource::Extra => "extra_paths",
+            SkillSource::Builtin => "builtin",
+        }
+    }
+}
+
+/// The built-in skills, compiled in (ADR 0025). `(name, SKILL.md text)`.
+pub const BUILTIN: &[(&str, &str)] =
+    &[("diagrams", include_str!("../../skills/diagrams/SKILL.md"))];
+
 /// One discovered skill. `path` is the `SKILL.md` (absolute); `dir` is its directory, the base
-/// for relative paths in the body (ADR 0025 S3).
+/// for relative paths in the body (ADR 0025 S3). For a built-in skill `body` is the embedded
+/// text and `path`/`dir` are synthetic (`<builtin>/<name>/…`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skill {
     pub name: String,
@@ -41,6 +68,9 @@ pub struct Skill {
     pub dir: PathBuf,
     /// `disable-model-invocation: true`: the skill is loaded but never listed in the prompt.
     pub disable_model_invocation: bool,
+    pub source: SkillSource,
+    /// The body of a built-in skill, so the `skill` tool and `/skill:` do not read a file.
+    pub body: Option<&'static str>,
 }
 
 /// The result of one scan: the skills in discovery (path) order, and the one-line warnings to
@@ -54,7 +84,9 @@ pub struct Discovery {
 /// Scans one skills directory (`<RADIAN_HOME>/skills`). A missing directory is an empty
 /// discovery, not an error (ADR 0025 S1: nothing blocks startup).
 pub fn discover(root: &Path) -> Discovery {
-    discover_with_extras(Some(root), &[])
+    // One root, no built-ins: this is the "scan this directory" helper (tests and callers that
+    // do not want the compiled-in skills). `open_session` uses `discover_with_extras`.
+    discover_with_extras(Some(root), &[], false, &[])
 }
 
 /// Scans the user-level skills directory (`primary`, usually `<RADIAN_HOME>/skills`) **and** the
@@ -62,13 +94,21 @@ pub fn discover(root: &Path) -> Discovery {
 /// user level is discovered first, so its skill wins a name conflict. An extra path that is not
 /// a directory is one warning, never an error; an extra root that holds a `SKILL.md` directly is
 /// itself one skill (the same rule as a subdirectory of the primary root).
-pub fn discover_with_extras(primary: Option<&Path>, extras: &[PathBuf]) -> Discovery {
+/// The built-in skills are discovered **last** (ADR 0025): a user-level or
+/// `extra_paths` skill of the same name wins. `builtin` is `[skills] builtin` (default true),
+/// `disabled` is `[skills] disabled`.
+pub fn discover_with_extras(
+    primary: Option<&Path>,
+    extras: &[PathBuf],
+    builtin: bool,
+    disabled: &[String],
+) -> Discovery {
     let mut discovery = Discovery::default();
     // One name map across every root: the first discovery of a name wins, whichever root it came
     // from, and a later one is warned about.
     let mut by_name: BTreeMap<String, PathBuf> = BTreeMap::new();
     if let Some(primary) = primary {
-        collect_from(primary, &mut discovery, &mut by_name);
+        collect_from(primary, SkillSource::User, &mut discovery, &mut by_name);
     }
     for extra in extras {
         if !extra.is_dir() {
@@ -78,13 +118,21 @@ pub fn discover_with_extras(primary: Option<&Path>, extras: &[PathBuf]) -> Disco
             ));
             continue;
         }
-        collect_from(extra, &mut discovery, &mut by_name);
+        collect_from(extra, SkillSource::Extra, &mut discovery, &mut by_name);
+    }
+    if builtin {
+        collect_builtin(&mut discovery, &mut by_name, disabled);
     }
     discovery
 }
 
 /// Collects the skills of one root into `discovery`, keeping the first name seen in `by_name`.
-fn collect_from(root: &Path, discovery: &mut Discovery, by_name: &mut BTreeMap<String, PathBuf>) {
+fn collect_from(
+    root: &Path,
+    source: SkillSource,
+    discovery: &mut Discovery,
+    by_name: &mut BTreeMap<String, PathBuf>,
+) {
     if !root.is_dir() {
         return;
     }
@@ -101,7 +149,16 @@ fn collect_from(root: &Path, discovery: &mut Discovery, by_name: &mut BTreeMap<S
     candidates.sort();
 
     for path in candidates {
-        match load(&path) {
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) => {
+                discovery
+                    .warnings
+                    .push(format!("skill {} cannot be read: {error}", path.display()));
+                continue;
+            }
+        };
+        match load_text(&path, &text, source, None) {
             Ok((skill, extra)) => {
                 discovery.warnings.extend(extra);
                 if let Some(first) = by_name.get(&skill.name) {
@@ -155,15 +212,50 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Reads and validates one `SKILL.md`. `Err` is the one-line warning; the skill is skipped.
-fn load(path: &Path) -> Result<(Skill, Vec<String>), String> {
+/// Collects the built-in skills (ADR 0025), last in the discovery order. A name in
+/// `disabled` is skipped; a name already discovered is shadowed with the usual warning.
+fn collect_builtin(
+    discovery: &mut Discovery,
+    by_name: &mut BTreeMap<String, PathBuf>,
+    disabled: &[String],
+) {
+    for (name, text) in BUILTIN {
+        if disabled.iter().any(|disabled| disabled == name) {
+            continue;
+        }
+        let path = PathBuf::from(format!("<builtin>/{name}/{SKILL_FILE_NAME}"));
+        match load_text(&path, text, SkillSource::Builtin, Some(text)) {
+            Ok((skill, extra)) => {
+                discovery.warnings.extend(extra);
+                if let Some(first) = by_name.get(&skill.name) {
+                    discovery.warnings.push(format!(
+                        "skill `{}` in {} shadows {} (kept the first)",
+                        skill.name,
+                        skill.dir.display(),
+                        first.display()
+                    ));
+                    continue;
+                }
+                by_name.insert(skill.name.clone(), skill.dir.clone());
+                discovery.skills.push(skill);
+            }
+            Err(reason) => discovery.warnings.push(reason),
+        }
+    }
+}
+
+/// Validates one `SKILL.md`'s text. `Err` is the one-line warning; the skill is skipped.
+fn load_text(
+    path: &Path,
+    text: &str,
+    source: SkillSource,
+    body: Option<&'static str>,
+) -> Result<(Skill, Vec<String>), String> {
     let dir = path
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let text = std::fs::read_to_string(path)
-        .map_err(|error| format!("skill {} cannot be read: {error}", path.display()))?;
-    let front = parse_frontmatter(&text)
+    let front = parse_frontmatter(text)
         .map_err(|reason| format!("skill {} has bad frontmatter: {reason}", path.display()))?;
     let name = front
         .get("name")
@@ -216,6 +308,8 @@ fn load(path: &Path) -> Result<(Skill, Vec<String>), String> {
             path: path.to_path_buf(),
             dir,
             disable_model_invocation,
+            source,
+            body,
         },
         warnings,
     ))
@@ -420,13 +514,17 @@ resolved from the skill's own directory.\n";
 /// `_expandSkillCommand`). Reads the file; the caller has already found `skill` in the
 /// discovered table.
 pub fn expand(skill: &Skill, args: &str) -> Result<String, String> {
-    let text = std::fs::read_to_string(&skill.path).map_err(|error| {
-        format!(
-            "skill `{}` cannot be read ({}): {error}",
-            skill.name,
-            skill.path.display()
-        )
-    })?;
+    // A built-in skill's body is embedded; only a filesystem skill is read (ADR 0025).
+    let text = match skill.body {
+        Some(body) => body.to_owned(),
+        None => std::fs::read_to_string(&skill.path).map_err(|error| {
+            format!(
+                "skill `{}` cannot be read ({}): {error}",
+                skill.name,
+                skill.path.display()
+            )
+        })?,
+    };
     let body = tools::strip_frontmatter(&text).unwrap_or(&text).trim();
     let block = format!(
         "<skill name=\"{}\" location=\"{}\">\nReferences are relative to {}.\n\n{body}\n</skill>",
@@ -517,12 +615,22 @@ pub fn notices(skills: &[Skill]) -> Vec<String> {
     skills
         .iter()
         .map(|skill| {
-            let marker = if skill.disable_model_invocation {
+            let disabled = if skill.disable_model_invocation {
                 " (model-invocation off)"
             } else {
                 ""
             };
-            format!("{}: {}{marker}", skill.name, fold(&skill.description))
+            // ADR 0025: a built-in skill's source is shown.
+            let source = if skill.source == SkillSource::Builtin {
+                " [builtin]"
+            } else {
+                ""
+            };
+            format!(
+                "{}: {}{source}{disabled}",
+                skill.name,
+                fold(&skill.description)
+            )
         })
         .collect()
 }
@@ -705,7 +813,7 @@ mod tests {
         )
         .unwrap();
 
-        let discovery = discover_with_extras(Some(&scratch.skills_dir()), &[extra]);
+        let discovery = discover_with_extras(Some(&scratch.skills_dir()), &[extra], false, &[]);
         let names: Vec<&str> = discovery.skills.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["same", "team-only"], "{:?}", discovery.warnings);
         assert_eq!(discovery.skills[0].description, "From the user level.");
@@ -724,8 +832,12 @@ mod tests {
         let scratch = Scratch::new("extras-missing");
         scratch.skill("a", &frontmatter("a", "A."));
         let missing = scratch.root.join("does-not-exist");
-        let discovery =
-            discover_with_extras(Some(&scratch.skills_dir()), std::slice::from_ref(&missing));
+        let discovery = discover_with_extras(
+            Some(&scratch.skills_dir()),
+            std::slice::from_ref(&missing),
+            false,
+            &[],
+        );
         assert_eq!(discovery.skills.len(), 1);
         assert_eq!(discovery.warnings.len(), 1);
         assert!(
@@ -752,12 +864,12 @@ mod tests {
         .unwrap();
 
         // Not listed: not read.
-        let discovery = discover_with_extras(Some(&scratch.skills_dir()), &[]);
+        let discovery = discover_with_extras(Some(&scratch.skills_dir()), &[], false, &[]);
         let names: Vec<&str> = discovery.skills.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["own"], "{:?}", discovery.warnings);
 
         // Listed: read, with the same parse and validation rules.
-        let discovery = discover_with_extras(Some(&scratch.skills_dir()), &[claude]);
+        let discovery = discover_with_extras(Some(&scratch.skills_dir()), &[claude], false, &[]);
         let names: Vec<&str> = discovery.skills.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["own", "borrowed"], "{:?}", discovery.warnings);
     }
@@ -770,9 +882,74 @@ mod tests {
         let single = scratch.root.join("one-skill");
         std::fs::create_dir_all(&single).unwrap();
         std::fs::write(single.join(SKILL_FILE_NAME), frontmatter("solo", "Solo.")).unwrap();
-        let discovery = discover_with_extras(Some(&scratch.skills_dir()), &[single]);
+        let discovery = discover_with_extras(Some(&scratch.skills_dir()), &[single], false, &[]);
         let names: Vec<&str> = discovery.skills.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["solo"], "{:?}", discovery.warnings);
+    }
+
+    /// ADR 0025: the compiled-in `diagrams` skill is discovered, marked `builtin`,
+    /// and listed by `/skills`.
+    #[test]
+    fn the_builtin_diagrams_skill_is_discovered_and_listed() {
+        let discovery = discover_with_extras(None, &[], true, &[]);
+        let skill = discovery
+            .skills
+            .iter()
+            .find(|skill| skill.name == "diagrams")
+            .expect("the built-in diagrams skill");
+        assert_eq!(skill.source, SkillSource::Builtin);
+        assert!(skill.body.is_some(), "the body is embedded");
+        assert!(!skill.description.is_empty());
+        let notices = notices(&discovery.skills);
+        assert!(
+            notices
+                .iter()
+                .any(|line| line.contains("diagrams") && line.contains("[builtin]")),
+            "{notices:?}"
+        );
+        // It is a completion candidate too.
+        assert!(
+            completion_candidates(&discovery.skills)
+                .iter()
+                .any(|(name, _)| name == "diagrams")
+        );
+    }
+
+    /// A user-level skill of the same name wins; the built-in is shadowed with the usual
+    /// warning.
+    #[test]
+    fn a_user_skill_of_the_same_name_overrides_the_builtin() {
+        let scratch = Scratch::new("builtin-override");
+        scratch.skill("diagrams", &frontmatter("diagrams", "My own."));
+        let discovery = discover_with_extras(Some(&scratch.skills_dir()), &[], true, &[]);
+        let diagrams: Vec<&Skill> = discovery
+            .skills
+            .iter()
+            .filter(|skill| skill.name == "diagrams")
+            .collect();
+        assert_eq!(diagrams.len(), 1, "only one wins");
+        assert_eq!(diagrams[0].source, SkillSource::User);
+        assert_eq!(diagrams[0].description, "My own.");
+        assert!(
+            discovery.warnings.iter().any(|w| w.contains("shadows")),
+            "{:?}",
+            discovery.warnings
+        );
+    }
+
+    /// `[skills] builtin = false` turns every built-in off; `disabled` turns one off by name.
+    #[test]
+    fn builtin_false_and_disabled_turn_the_builtin_off() {
+        assert!(
+            discover_with_extras(None, &[], false, &[])
+                .skills
+                .is_empty()
+        );
+        assert!(
+            discover_with_extras(None, &[], true, &["diagrams".to_owned()])
+                .skills
+                .is_empty()
+        );
     }
 
     #[test]
@@ -827,6 +1004,8 @@ mod tests {
                 path: PathBuf::from("/s/one/SKILL.md"),
                 dir: PathBuf::from("/s/one"),
                 disable_model_invocation: false,
+                source: SkillSource::User,
+                body: None,
             },
             Skill {
                 name: "two".into(),
@@ -834,6 +1013,8 @@ mod tests {
                 path: PathBuf::from("/s/two/SKILL.md"),
                 dir: PathBuf::from("/s/two"),
                 disable_model_invocation: false,
+                source: SkillSource::User,
+                body: None,
             },
             Skill {
                 name: "three".into(),
@@ -841,6 +1022,8 @@ mod tests {
                 path: PathBuf::from("/s/three/SKILL.md"),
                 dir: PathBuf::from("/s/three"),
                 disable_model_invocation: false,
+                source: SkillSource::User,
+                body: None,
             },
         ];
         // The header is long, so the budget is derived from the rendered text rather than
@@ -962,6 +1145,8 @@ mod tests {
                 path: PathBuf::from("/s/greet/SKILL.md"),
                 dir: PathBuf::from("/s/greet"),
                 disable_model_invocation: false,
+                source: SkillSource::User,
+                body: None,
             },
             Skill {
                 name: "secret".into(),
@@ -969,6 +1154,8 @@ mod tests {
                 path: PathBuf::from("/s/secret/SKILL.md"),
                 dir: PathBuf::from("/s/secret"),
                 disable_model_invocation: true,
+                source: SkillSource::User,
+                body: None,
             },
         ];
         let candidates = completion_candidates(&skills);

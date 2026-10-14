@@ -29,7 +29,7 @@ pub(crate) const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 
 /// The v1 events known to a schema-v1 reader (ADR 0006 §4). Anything else is unknown and
 /// handled by the `critical` policy.
-pub(crate) const KNOWN_EVENTS: [&str; 23] = [
+pub(crate) const KNOWN_EVENTS: [&str; 24] = [
     "SessionCreated",
     "InboxEnqueued",
     "InputClaimed",
@@ -53,6 +53,7 @@ pub(crate) const KNOWN_EVENTS: [&str; 23] = [
     "MemoryInjected",
     "ModelUsageRecorded",
     "SessionForked",
+    "ProjectTrustChanged",
 ];
 
 /// The parsed body of one known event. Events this slice does not interpret (for example
@@ -173,6 +174,12 @@ pub enum EventData {
     MemoryInjected {
         records: Vec<MemoryInjectedRecord>,
     },
+    /// A project-trust decision was written (ADR 0031 T2). Typed for an exact round trip;
+    /// audit only, never a transcript record.
+    ProjectTrustChanged {
+        path: String,
+        decision: bool,
+    },
     /// A known event this crate does not interpret (`SessionCreated`) or an unknown
     /// non-critical event.
     Other(Value),
@@ -217,6 +224,9 @@ pub(crate) struct ScanSummary {
     pub(crate) schema_version: u64,
     pub(crate) committed_bytes: u64,
     pub(crate) event_count: u64,
+    /// The last committed envelope `seq`, or `None` for a file with no complete line. This is
+    /// the writer's `next_seq - 1`; exposed so a resumed journal does not rescan the file.
+    pub(crate) last_seq: Option<u64>,
     pub(crate) skipped: Vec<(u64, String)>,
     pub(crate) uncommitted: Vec<UncommittedReplacement>,
 }
@@ -622,6 +632,13 @@ impl LineScanner {
                 let d: MemoryInjectedData = data_of(raw, self.lineno, path)?;
                 EventData::MemoryInjected { records: d.records }
             }
+            "ProjectTrustChanged" => {
+                let d: ProjectTrustChangedData = data_of(raw, self.lineno, path)?;
+                EventData::ProjectTrustChanged {
+                    path: d.path,
+                    decision: d.decision,
+                }
+            }
             "InboxEnqueued" => {
                 let d: InboxEnqueuedData = data_of(raw, self.lineno, path)?;
                 EventData::InboxEnqueued {
@@ -727,6 +744,9 @@ impl LineScanner {
             schema_version: self.schema_version.unwrap_or(SCHEMA_VERSION),
             committed_bytes,
             event_count: self.event_count,
+            // `expect_seq` is the next seq; the last committed one is one less. No complete
+            // line means no last seq (the writer's "empty file" case).
+            last_seq: (self.lineno > 0).then(|| self.expect_seq - 1),
             skipped: self.skipped,
             uncommitted,
         }
@@ -752,6 +772,7 @@ pub struct Session {
     session_id: String,
     schema_version: u64,
     committed_bytes: u64,
+    last_seq: Option<u64>,
     events: Vec<SessionEvent>,
     skipped: Vec<(u64, String)>,
     uncommitted: Vec<UncommittedReplacement>,
@@ -766,6 +787,8 @@ impl Session {
     /// where a session is opened to fold it. Code that only needs a summary (the index
     /// cache) uses [`scan_stream`] instead and does not retain.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ReadError> {
+        #[cfg(feature = "testing")]
+        crate::testing::note_open();
         let path = path.as_ref().to_path_buf();
         let mut events = Vec::new();
         let summary = scan_stream(&path, |event| -> Result<(), ReadError> {
@@ -777,6 +800,7 @@ impl Session {
             session_id: summary.session_id,
             schema_version: summary.schema_version,
             committed_bytes: summary.committed_bytes,
+            last_seq: summary.last_seq,
             events,
             skipped: summary.skipped,
             uncommitted: summary.uncommitted,
@@ -799,6 +823,12 @@ impl Session {
     /// a torn tail (ADR 0006 §3.2) and are not part of the session.
     pub fn committed_bytes(&self) -> u64 {
         self.committed_bytes
+    }
+
+    /// The last committed envelope `seq`, or `None` for a file with no complete line. A
+    /// resumed journal continues at `last_seq + 1` without rescanning the file.
+    pub fn last_seq(&self) -> Option<u64> {
+        self.last_seq
     }
 
     pub fn events(&self) -> &[SessionEvent] {
@@ -935,6 +965,7 @@ fn record_from_event(event: &SessionEvent) -> Option<JournalRecord> {
         | EventData::PermissionResolved { .. }
         | EventData::ApprovalPolicyChanged { .. }
         | EventData::MemoryInjected { .. }
+        | EventData::ProjectTrustChanged { .. }
         | EventData::Other(_) => None,
     }
 }
@@ -1107,6 +1138,12 @@ struct ApprovalPolicyChangedData {
 #[derive(Deserialize)]
 struct MemoryInjectedData {
     records: Vec<MemoryInjectedRecord>,
+}
+
+#[derive(Deserialize)]
+struct ProjectTrustChangedData {
+    path: String,
+    decision: bool,
 }
 
 /// Feeds one record to the shared replacement state machine, mapping a rejection to the

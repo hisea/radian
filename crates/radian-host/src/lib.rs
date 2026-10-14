@@ -12,6 +12,7 @@ pub mod atomic_write;
 pub mod auth;
 mod catalog;
 pub mod config;
+pub mod contrib;
 mod describe;
 mod diagnostics;
 mod errors;
@@ -20,6 +21,7 @@ mod home;
 pub mod login;
 mod mcp;
 pub mod memory;
+pub mod mermaid;
 mod model;
 mod output;
 pub mod pending;
@@ -39,12 +41,31 @@ pub use auth::{
     list as list_auth, remove as remove_auth, resolve_key, resolve_note, resolved_keys,
     upsert_api_key as upsert_auth_api_key,
 };
+/// The machine's hostname (ADR 0027 `host`), read once at startup. `HOSTNAME` is
+/// set by most shells (and by BSD's `login`); the `hostname` command is the portable fallback.
+/// No network, no new dependency, and never called at draw time.
+pub fn hostname() -> Option<String> {
+    if let Ok(name) = std::env::var("HOSTNAME") {
+        let name = name.trim();
+        if !name.is_empty() {
+            return Some(name.to_owned());
+        }
+    }
+    let output = std::process::Command::new("hostname").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let name = String::from_utf8(output.stdout).ok()?;
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
 pub use catalog::{
-    CACHE_TTL, CATALOG_URL, Catalog, FETCH_TIMEOUT, ModelEntry, ModelLimit, OUTPUT_RESERVATION_CAP,
-    ProviderInfo, ProviderModels, Window, WindowCheck, WindowQuery, WindowSource, cache_path,
-    fetch_provider_models, host_of, input_budget, output_ceiling_warning, output_reservation,
-    provider_for_host, provider_models_cache, provider_models_stale, read_provider_models, resolve,
-    resolve_offline, write_provider_models,
+    CACHE_TTL, CATALOG_URL, Catalog, FETCH_TIMEOUT, ModelEntry, ModelLimit, ModelPrice,
+    OUTPUT_RESERVATION_CAP, ProviderInfo, ProviderModels, Window, WindowCheck, WindowQuery,
+    WindowSource, cache_path, fetch_provider_models, host_of, input_budget, output_ceiling_warning,
+    output_reservation, provider_for_host, provider_models_cache, provider_models_stale,
+    read_provider_models, resolve, resolve_offline, write_provider_models,
 };
 pub use config::migrate_pi::{PiDraft, PiMigrateError, import_pi, write_draft as write_pi_draft};
 pub use config::theme_write::{ThemeWriteError, write_theme};
@@ -53,6 +74,10 @@ pub use config::{
     RADIAN_CONFIG_ENV, SUPPORTED_SCHEMA_VERSION, TuiConfig, load as load_config,
     parse as parse_config, resolve_path as resolve_config_path,
     resolved_path as resolved_config_path,
+};
+pub use contrib::{
+    Contribution, ContributionStore, ContributorRunner, GitContributor, Segment, SegmentRole,
+    StatusContributor, Tick, spawn as spawn_contributor,
 };
 pub use describe::{CLI_WORDING, TUI_WORDING, Wording, describe};
 pub use diagnostics::{
@@ -69,6 +94,7 @@ pub use home::{
     skills_dir_for, themes_dir, themes_dir_for, trust_dir, trust_dir_for, user_home,
 };
 pub use mcp::load_mcp_config;
+pub use mermaid::{MermaidCheckSession, MermaidCheckTools, check};
 pub use model::{
     DEFAULT_MAX_TOKENS, HostModel, MIN_THINKING_BUDGET, ModelArgs, Provider, RouteContext,
     SwitchableModel, Thinking, build_model, check_provider_flags, redact_base_url,
@@ -104,9 +130,9 @@ pub use sessions::{
     ExportSettings, Format, SEARCH_LIMIT, SUMMARY_MAX_CHARS, SearchRow, SessionRow,
 };
 pub use skills::{
-    Discovery, SECTION_BUDGET_TOKENS, SKILL_FILE_NAME, Skill, SkillsHooks, completion_candidates,
-    discover, discover_with_extras, expand, has_skill_file, notices, prompt_section,
+    BUILTIN, Discovery, SECTION_BUDGET_TOKENS, SKILL_FILE_NAME, Skill, SkillSource, SkillsHooks,
+    completion_candidates, discover, discover_with_extras, expand, has_skill_file, notices,
+    prompt_section,
 };
 pub use tools::{HostSession, HostTools, merge_tool_specs};
-pub use trust::{Decision, ProjectTrustChanged, Resolved, Source};
 pub use workspace::resolve_workspace;

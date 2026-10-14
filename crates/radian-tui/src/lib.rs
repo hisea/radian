@@ -27,6 +27,7 @@ pub mod signals;
 pub mod startup;
 pub mod terminal;
 pub mod theme;
+pub mod timing;
 pub mod tools;
 pub mod workspace;
 

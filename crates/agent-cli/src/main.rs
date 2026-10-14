@@ -257,6 +257,15 @@ struct Cli {
     /// unchanged (ADR 0018).
     #[arg(long)]
     no_auto_compact: bool,
+
+    /// Trust this workspace's project resources for **this process only** (never written to
+    /// `trust.json`; ADR 0031 T3).
+    #[arg(long, conflicts_with = "no_trust")]
+    trust: bool,
+
+    /// Do not trust this workspace's project resources for this process only (ADR 0031 T3).
+    #[arg(long)]
+    no_trust: bool,
 }
 
 /// Why startup failed. The message must not contain the key.
@@ -533,6 +542,49 @@ fn read_import(source: &str) -> Result<String, CommandError> {
     }
 }
 
+/// The startup trust question (ADR 0031 T3), the same one-line terminal shape as the
+/// approval: a numbered list, Enter takes the default (do not trust this directory). An
+/// unreadable or unrecognized answer is the default, never a trust.
+async fn trust_prompt(
+    lines: &LineHub,
+    workspace: &std::path::Path,
+) -> Option<radian_host::trust::Choice> {
+    use radian_host::trust::Choice;
+    eprintln!(
+        "project resources found in {}: trust them?",
+        workspace.display()
+    );
+    for (index, choice) in Choice::ALL.iter().enumerate() {
+        let label = choice
+            .label(workspace)
+            .unwrap_or_else(|| "Trust the parent directory".to_owned());
+        let marker = if *choice == Choice::UntrustHere {
+            " (default)"
+        } else {
+            ""
+        };
+        eprintln!("  [{}] {label}{marker}", index + 1);
+    }
+    eprint!("choice [4]: ");
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+    // The same line hub the approval prompt uses: one reader owns stdin.
+    let answer = lines.next().await.unwrap_or_default();
+    Some(trust_choice_from_answer(answer.trim()))
+}
+
+/// The answer to the trust question, as a choice. Anything unrecognized (including an empty
+/// line) is the fail-safe default, never a trust.
+fn trust_choice_from_answer(answer: &str) -> radian_host::trust::Choice {
+    use radian_host::trust::Choice;
+    match answer.trim() {
+        "1" => Choice::TrustHere,
+        "2" => Choice::TrustParent,
+        "3" => Choice::TrustSession,
+        "5" => Choice::UntrustSession,
+        _ => Choice::UntrustHere,
+    }
+}
+
 /// The confirmation for `forget`/`purge`/`split`/`merge` (ADR 0021 D7). A terminal asks;
 /// without a terminal and without `--yes` the command refuses (exit 2) and does nothing.
 fn confirm_or_refuse(message: &str) -> Result<(), CommandError> {
@@ -678,6 +730,10 @@ struct Setup {
     /// The extra skill roots from `[skills] extra_paths` (ADR 0025 slice 4), resolved against
     /// the config file's directory and the user's home.
     skills_extra_paths: Vec<PathBuf>,
+    /// `[skills] builtin` (ADR 0025); default true.
+    skills_builtin: bool,
+    /// `[skills] disabled`: built-in skill names to leave out.
+    skills_disabled: Vec<String>,
 }
 
 async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
@@ -1010,6 +1066,8 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
             config.source.as_deref().and_then(std::path::Path::parent),
             radian_host::user_home().as_deref(),
         ),
+        skills_builtin: config.skills.builtin.unwrap_or(true),
+        skills_disabled: config.skills.disabled.clone(),
     })
 }
 
@@ -1337,6 +1395,45 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         })
     };
 
+    // ADR 0031 T3: resolve project trust before the session exists. `--trust`/`--no-trust`
+    // override for this process only; a saved decision (or the non-interactive default) needs
+    // no question. The persistent write + audit happen after `open_session` (they need the
+    // journal), so the choice is kept.
+    // The trust question requires a real terminal. Piped stdin is **not** an interactive user:
+    // its first line could be a message (or even a stray `y`) and must never be read as the
+    // answer to a trust question. `-p` and piped input are both non-interactive here, so they
+    // take the untrusted default and the one-line hint. (The other CLI prompts keep their
+    // existing `can_ask` rule; only trust is this strict.)
+    let trust_interactive = cli.prompt.is_none() && std::io::stdin().is_terminal();
+    let cli_trust = if cli.trust {
+        Some(radian_host::trust::Decision::Trust)
+    } else if cli.no_trust {
+        Some(radian_host::trust::Decision::Untrust)
+    } else {
+        None
+    };
+    let (mut trust_setup, trust_warning) =
+        radian_host::trust::load_for(&workspace_path, cli_trust, trust_interactive);
+    if let Some(warning) = &trust_warning {
+        eprintln!("[trust] {warning}");
+    }
+    let mut trust_choice = None;
+    if trust_setup.needs_ask {
+        if let Some(choice) = trust_prompt(&lines, &workspace_path).await {
+            trust_setup.resolved =
+                radian_host::trust::resolved_for(choice, &workspace_path).map_err(SetupError)?;
+            trust_setup.needs_ask = false;
+            trust_choice = Some(choice);
+        }
+    } else if !trust_setup.resolved.decision.as_bool()
+        && trust_setup.resolved.source == radian_host::trust::Source::Default
+        && radian_host::trust::has_project_resources(&workspace_path)
+    {
+        // The non-interactive default (ADR 0031 T3): untrusted, with the one-line way out.
+        eprintln!("{}", radian_host::trust::untrusted_notice(&workspace_path));
+    }
+    eprintln!("{}", radian_host::trust::status_line(&trust_setup));
+
     // ADR 0023 U5: the one place a session is established; `radian-tui` calls the same function
     // with its own bindings.
     let resume_session = cli.resume.is_some();
@@ -1359,6 +1456,9 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             profile: permission_profile,
             memory_root,
             skills_extra_paths: setup.skills_extra_paths,
+            skills_builtin: setup.skills_builtin,
+            skills_disabled: setup.skills_disabled,
+            trust: trust_setup,
             resume: cli.resume.is_some(),
             config_snapshot: serde_json::json!({
                 "provider": setup.provider.as_str(),
@@ -1391,6 +1491,13 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     .await
     .map_err(|error| SetupError(error.to_string()))?;
     let session = Arc::new(session);
+
+    // ADR 0031 T3: persist the choice now that the journal exists, so the write audits once.
+    if let Some(choice) = trust_choice
+        && let Err(error) = session.record_trust_async(choice).await
+    {
+        eprintln!("agent: cannot write trust.json: {error}");
+    }
 
     // ADR 0026 D8: an explicit `--model`/`--provider` wins over the resumed change, and the
     // override is recorded so the journal stays the authority for the next resume.
@@ -2056,6 +2163,29 @@ impl EventSink for Ui {
                 self.finished.notify_one();
             }
             _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ADR 0031 T3: only the five numbered answers are choices; anything else (an empty line,
+    /// `4`, a stray `y`) is the fail-safe default.
+    #[test]
+    fn the_trust_answer_defaults_to_untrust() {
+        use radian_host::trust::Choice;
+        assert_eq!(trust_choice_from_answer("1"), Choice::TrustHere);
+        assert_eq!(trust_choice_from_answer(" 2 "), Choice::TrustParent);
+        assert_eq!(trust_choice_from_answer("3"), Choice::TrustSession);
+        assert_eq!(trust_choice_from_answer("5"), Choice::UntrustSession);
+        for other in ["", "4", "y", "yes", "99", "trust"] {
+            assert_eq!(
+                trust_choice_from_answer(other),
+                Choice::UntrustHere,
+                "{other:?}"
+            );
         }
     }
 }

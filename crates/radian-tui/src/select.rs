@@ -139,24 +139,40 @@ fn locate_in_entry(
     col: usize,
     index: usize,
 ) -> Hit {
-    let text = display_text(entry);
     let lines = body_lines(entry, modes, width);
     let line = &lines[local_line.min(lines.len() - 1)];
     let prefix = marker_prefix(entry.kind).width();
     let body_col = col.saturating_sub(prefix);
+    // The drawn char of each cell, and its source offset (`None` for a synthesized cell: a
+    // bullet, a heading's `##`, a link's `(url)`, an indent). A click on a synthesized cell
+    // anchors at the next source offset in the line (or the line's end gap), so it never
+    // selects source text that is not there - and never indexes into a multi-byte char.
+    let cells: Vec<(char, Option<usize>)> = line
+        .text
+        .chars()
+        .zip(&line.chars)
+        .map(|(ch, source)| (ch, *source))
+        .collect();
+    let mut next = vec![line.end; cells.len()];
+    let mut following = line.end;
+    for i in (0..cells.len()).rev() {
+        if let Some(offset) = cells[i].1 {
+            following = offset;
+        }
+        next[i] = following;
+    }
     // Walk the line's chars accumulating display cells; the click lands on the char whose
     // cell range covers `body_col` (the second cell of a wide char selects that char).
     let mut used = 0usize;
-    for &offset in &line.chars {
-        let ch = text[offset..].chars().next().expect("a char boundary");
+    for (i, (ch, source)) in cells.iter().enumerate() {
         let w = ch.width().unwrap_or(0);
         if body_col < used + w.max(1) {
             return Hit {
                 anchor: Anchor {
                     entry: index,
-                    offset,
+                    offset: source.unwrap_or(next[i]),
                 },
-                on_char: true,
+                on_char: source.is_some(),
             };
         }
         used += w;
@@ -178,11 +194,40 @@ fn body_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<crate::bl
     blocks::layout(entry, &blocks, modes, width)
 }
 
+/// The char starting at `offset`, or `None` when `offset` is not a char boundary. Offsets
+/// always are one (they come from the layout mapping), but a mapping bug must never panic the
+/// UI: this skips the cell instead.
+fn char_at(text: &str, offset: usize) -> Option<char> {
+    debug_assert!(
+        text.is_char_boundary(offset),
+        "offset {offset} is not a char boundary"
+    );
+    text.get(offset..).and_then(|rest| rest.chars().next())
+}
+
+/// The largest char-boundary substring of `text` inside `[start, end)`; an offset that is not
+/// a boundary is snapped back to one instead of panicking.
+fn slice(text: &str, start: usize, end: usize) -> &str {
+    let mut a = start.min(text.len());
+    let mut b = end.min(text.len());
+    debug_assert!(
+        text.is_char_boundary(a) && text.is_char_boundary(b),
+        "selection offsets {a}..{b} are not char boundaries"
+    );
+    while a > 0 && !text.is_char_boundary(a) {
+        a -= 1;
+    }
+    while b > 0 && !text.is_char_boundary(b) {
+        b -= 1;
+    }
+    if a < b { &text[a..b] } else { "" }
+}
+
 /// The byte length of the char at `anchor`'s offset in its entry's display text; `None` at
 /// or past the text's end.
 pub fn char_len_at(entries: &[Entry], anchor: Anchor) -> Option<usize> {
     let text = display_text(entries.get(anchor.entry)?);
-    text[anchor.offset..].chars().next().map(char::len_utf8)
+    char_at(&text, anchor.offset).map(char::len_utf8)
 }
 
 /// An entry's display-text length in bytes (what a triple-click selects: offsets `0..len`).
@@ -210,7 +255,7 @@ pub fn run_at(
     if anchor.offset >= text.len() {
         return None;
     }
-    let ch = text[anchor.offset..].chars().next()?;
+    let ch = char_at(&text, anchor.offset)?;
     let in_word = |c: char| c != ' ' && c != '\n';
     let want = in_word(ch);
     // Walk out from the clicked char while the run keeps its kind: the word it sits in, or
@@ -257,12 +302,7 @@ pub fn logical_text(entries: &[Entry], selection: &Selection) -> String {
             return String::new();
         };
         let text = display_text(entry);
-        let (a, b) = (start.offset.min(text.len()), end.offset.min(text.len()));
-        return if a < b {
-            text[a..b].to_owned()
-        } else {
-            String::new()
-        };
+        return slice(&text, start.offset, end.offset).to_owned();
     }
     let mut out = String::new();
     for (index, entry) in entries
@@ -277,9 +317,9 @@ pub fn logical_text(entries: &[Entry], selection: &Selection) -> String {
         }
         let text = display_text(entry);
         if index == start.entry {
-            out.push_str(&text[start.offset.min(text.len())..]);
+            out.push_str(slice(&text, start.offset, text.len()));
         } else if index == end.entry {
-            out.push_str(&text[..end.offset.min(text.len())]);
+            out.push_str(slice(&text, 0, end.offset));
         } else {
             out.push_str(&text);
         }
@@ -352,22 +392,54 @@ fn row_ranges(
     start: Anchor,
     end: Anchor,
 ) -> Vec<(usize, usize)> {
-    let text = display_text(entry);
     let prefix = marker_prefix(entry.kind).width();
     let lines = body_lines(entry, modes, width);
     let Some(line) = lines.get(local) else {
         return Vec::new();
     };
+    // Each cell's drawn char and its source offset (`None` for a synthesized cell). A cell is
+    // selected when the source text **around** it is selected: for a source cell that is its
+    // own offset; for a synthesized cell it is the source boundary before and after it, so a
+    // bullet inside a selection highlights but one that starts the selection does not.
+    let cells: Vec<(char, Option<usize>)> = line
+        .text
+        .chars()
+        .zip(&line.chars)
+        .map(|(ch, source)| (ch, *source))
+        .collect();
+    let n = cells.len();
+    let mut before = vec![line.end; n];
+    let mut after = vec![line.end; n];
+    let mut last_end: Option<usize> = None;
+    let mut first_offset: Option<usize> = None;
+    for i in 0..n {
+        match cells[i].1 {
+            Some(offset) => {
+                before[i] = offset;
+                last_end = Some(offset + cells[i].0.len_utf8());
+                first_offset.get_or_insert(offset);
+            }
+            None => before[i] = last_end.or(first_offset).unwrap_or(line.end),
+        }
+    }
+    let mut following = line.end;
+    for i in (0..n).rev() {
+        if let Some(offset) = cells[i].1 {
+            following = offset;
+        }
+        after[i] = following;
+    }
+    let in_range = |x: usize| {
+        index >= start.entry
+            && index <= end.entry
+            && (index > start.entry || x >= start.offset)
+            && (index < end.entry || x < end.offset)
+    };
     let mut ranges: Vec<(usize, usize)> = Vec::new();
     let mut used = prefix;
-    for &offset in &line.chars {
-        let ch = text[offset..].chars().next().expect("a char boundary");
-        let w = ch.width().unwrap_or(0);
-        let selected = index >= start.entry
-            && index <= end.entry
-            && (index > start.entry || offset >= start.offset)
-            && (index < end.entry || offset < end.offset);
-        if selected {
+    for i in 0..n {
+        let w = cells[i].0.width().unwrap_or(0);
+        if in_range(before[i]) && in_range(after[i]) {
             let cell_end = used + w;
             match ranges.last_mut() {
                 // Adjacent or zero-width (a combining mark joins its base's cells).

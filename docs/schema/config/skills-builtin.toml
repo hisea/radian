@@ -1,0 +1,13 @@
+# ADR 0025: `[skills] builtin = false` turns off every compiled-in skill;
+# `[skills] disabled = ["<name>"]` turns off individual built-ins by name. User-level and
+# extra_paths skills are unaffected. Default: builtin on, nothing disabled.
+schema_version = 1
+
+[model]
+provider = "example"
+base_url = "https://example.com/v1"
+model = "m-1"
+
+[skills]
+builtin = false
+disabled = ["diagrams"]

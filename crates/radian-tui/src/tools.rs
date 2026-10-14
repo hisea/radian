@@ -1144,8 +1144,23 @@ mod tests {
         // over the line copies the original tab (ADR 0028 R9's rule for code, applied to a
         // tool body).
         let laid = blocks::layout_for_test(&card, text, 40);
-        let (start, end) = (laid[0].chars.first().copied().expect("a char"), laid[0].end);
-        assert_eq!(&text[start..end], "a\tb", "the copy keeps the source tab");
+        // Every cell of a text line is a real source character (`Some`), and the tab's four
+        // cells all point at the tab's own offset, so the line's range copies the tab.
+        assert!(
+            laid[0].chars.iter().all(|cell| cell.is_some()),
+            "a text line's cells are all source offsets"
+        );
+        let start = laid[0]
+            .chars
+            .first()
+            .copied()
+            .flatten()
+            .expect("a source cell");
+        assert_eq!(
+            &text[start..laid[0].end],
+            "a\tb",
+            "the copy keeps the source tab"
+        );
     }
 
     #[test]

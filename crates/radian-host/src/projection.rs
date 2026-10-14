@@ -92,6 +92,11 @@ struct Facts {
     turn: TurnState,
     usage_input: Option<u64>,
     usage_output: Option<u64>,
+    /// The provider-reported cache **read** tokens (ADR 0027): the footer's
+    /// `{cache}`. A provider that never reports it leaves it `None`, never 0.
+    usage_cache_read: Option<u64>,
+    /// The provider-reported cache **write** tokens, for the same reason.
+    usage_cache_write: Option<u64>,
     budget: Option<BudgetReport>,
     /// The effective input budget `B` (ADR 0018), for the status bar's `T / B`.
     context_window: Option<u64>,
@@ -181,6 +186,22 @@ impl SessionProjection {
             }
             if let Some(output) = usage.output {
                 facts.usage_output = Some(facts.usage_output.unwrap_or(0).saturating_add(output));
+            }
+            if let Some(cache_read) = usage.cache_read {
+                facts.usage_cache_read = Some(
+                    facts
+                        .usage_cache_read
+                        .unwrap_or(0)
+                        .saturating_add(cache_read),
+                );
+            }
+            if let Some(cache_write) = usage.cache_write {
+                facts.usage_cache_write = Some(
+                    facts
+                        .usage_cache_write
+                        .unwrap_or(0)
+                        .saturating_add(cache_write),
+                );
             }
         })
     }
@@ -274,6 +295,14 @@ impl ProjectionRead<'_> {
 
     pub fn usage_output(&self) -> Option<u64> {
         self.facts.usage_output
+    }
+
+    pub fn usage_cache_read(&self) -> Option<u64> {
+        self.facts.usage_cache_read
+    }
+
+    pub fn usage_cache_write(&self) -> Option<u64> {
+        self.facts.usage_cache_write
     }
 
     pub fn budget(&self) -> Option<&BudgetReport> {
@@ -387,6 +416,7 @@ mod tests {
         let usage = ModelUsage {
             input: Some(10),
             output: Some(2),
+            cache_read: Some(7),
             ..ModelUsage::default()
         };
         assert!(
@@ -398,6 +428,7 @@ mod tests {
             let read = projection.read();
             assert_eq!(read.usage_input(), Some(10));
             assert_eq!(read.usage_output(), Some(2));
+            assert_eq!(read.usage_cache_read(), Some(7));
         }
         assert!(projection.take_dirty());
 
