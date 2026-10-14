@@ -1,6 +1,12 @@
 //! End-to-end through a pty: the bin is started under `portable-pty`, driven by bytes, and
 //! its rendering is read from a `vt100` screen model. **The full-screen program is never run
 //! in the test runner's own terminal.**
+//!
+//! **Timing rule**: `wait_for_screen(X)` only proves that `X` is on screen. An assertion about
+//! some *other* text must either be drawn in the same frame as `X` (the approval box, the status
+//! line and the input line are single widgets, so their text arrives together) or wait for that
+//! text too. `pty_two_approvals_are_shown_in_order` flaked on exactly this: `b.txt` appears in
+//! the transcript's tool-call line a frame before the second approval box is drawn.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -920,15 +926,14 @@ async fn pty_approval_deny_is_fed_back_to_the_model() {
         pty.screen()
     );
     pty.send(b"n");
+    // The reply and the denial are two different events: wait for both, so a frame that shows
+    // the reply before the tool result's line cannot make this flake.
     assert!(
-        pty.wait_for_screen("SAW-THE-DENIAL", 20),
+        pty.wait_until(20, |screen| {
+            screen.contains("SAW-THE-DENIAL") && screen.contains("denied")
+        }),
         "the turn did not continue after the denial:\n{}",
         pty.screen()
-    );
-    let screen = pty.screen();
-    assert!(
-        screen.contains("denied"),
-        "the denial is not shown: {screen}"
     );
     assert!(!ws.join("denied.txt").exists(), "the denied tool ran");
 
@@ -1964,7 +1969,7 @@ async fn pty_an_at_reference_attaches_the_file_and_folds_it() {
     assert!(!user.contains("<file path="), "{user}");
     // The transcript shows the folded form, not the file body.
     assert!(
-        pty.screen().contains("[file: notes.txt,"),
+        pty.wait_for_screen("[file: notes.txt,", 10),
         "the attachment is not folded:\n{}",
         pty.screen()
     );
@@ -5183,14 +5188,22 @@ async fn pty_two_approvals_are_shown_in_order() {
         pty.screen()
     );
     pty.send(b"y");
+    // The transcript shows the second tool call's arguments early, and the box's resolved
+    // `path:` line wraps at this width (the temp directory's name grows with the test index), so
+    // neither `b.txt` nor `path: …` identifies the prompt. The box's *pretty-printed* arguments
+    // do: `"path": "b.txt"` (with the space) is the box's form, while the transcript's tool-call
+    // line has the compact one.
+    let second = "\"path\": \"b.txt\"";
+    let first = "\"path\": \"a.txt\"";
     assert!(
-        pty.wait_for_screen("b.txt", 20),
+        pty.wait_until(20, |screen| screen.contains("approve tool call?")
+            && screen.contains(second)),
         "the second approval must follow the first: {}",
         pty.screen()
     );
     assert!(
-        pty.screen().contains("approve tool call?"),
-        "the second prompt is shown, not merged: {}",
+        !pty.screen().contains(first),
+        "the second prompt is shown alone, not merged with the first: {}",
         pty.screen()
     );
     pty.send(b"y");
