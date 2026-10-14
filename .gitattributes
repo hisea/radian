@@ -1,0 +1,3 @@
+# Mutation logs are append-only tables: parallel branches each append a section, so keep
+# both sides instead of stopping the merge (git's built-in union driver).
+crates/*/MUTATIONS.md merge=union
