@@ -623,14 +623,13 @@ fn run(
     validate_session_id(&session_id)?;
     app.session_id = session_id.clone();
     let user_headers = parse_headers(&header_args, &session_id)?;
-    // Header values and the key must not reach the panic log (dogfooding D4).
-    let mut secrets: Vec<String> = user_headers
-        .iter()
-        .map(|(_, value)| value.clone())
-        .collect();
-    if let Some(credential) = &credential {
-        secrets.push(credential.key.clone());
-    }
+    // Header values and **every** key in `auth.json` must not reach the panic log or an export
+    // (dogfooding D4; ADR 0013 T4). The startup provider's key alone is not enough: a session
+    // can mention another login, and `/model` can switch to one. `resolved_keys` reads and
+    // resolves them all, the same list the CLI's export uses.
+    let mut secrets: Vec<String> = radian_host::resolved_keys();
+    secrets.extend(user_headers.iter().map(|(_, value)| value.clone()));
+    secrets.retain(|secret| !secret.is_empty());
     // ADR 0026 D0/D10: the provider decides the adapter, base URL and headers.
     // `resolve_route_for` refuses `--base-url`/`--header` for everything but the generic
     // descriptor (a named provider's endpoint is its declaration).

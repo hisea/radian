@@ -135,7 +135,8 @@ struct Cli {
     prompt: Option<String>,
 
     /// Extra request headers, repeatable: `--header NAME=VALUE`. The value is never
-    /// printed; `Authorization` is refused because the key comes only from `--api-key-env`.
+    /// printed; `Authorization` is refused because the key comes only from
+    /// `~/.radian/credentials/auth.json` (ADR 0026 D2).
     /// A value may contain `{session_id}`, which expands to this process's session id.
     #[arg(long = "header", value_name = "NAME=VALUE")]
     header: Vec<String>,
@@ -1117,16 +1118,9 @@ fn export_session(cli: &Cli, session_id: &str) -> Result<(), OutputError> {
 /// `--header` value. Redaction itself is not optional (ADR 0013 decision 3). An export does
 /// not know which provider wrote the session, so every usable key in the store is redacted.
 fn export_secrets(cli: &Cli) -> Vec<String> {
-    let mut secrets = Vec::new();
-    if let Ok(entries) = radian_host::auth::list() {
-        for entry in entries {
-            if let Ok(Some(key)) = radian_host::auth::resolve_key(&entry.provider_id)
-                && !key.key.is_empty()
-            {
-                secrets.push(key.key);
-            }
-        }
-    }
+    // The shared rule: every resolvable key in `auth.json` (ADR 0013 T4), so the CLI and the
+    // TUI redact the same set.
+    let mut secrets = radian_host::resolved_keys();
     for header in &cli.header {
         if let Some((_, value)) = header.split_once('=')
             && !value.is_empty()
@@ -1134,6 +1128,7 @@ fn export_secrets(cli: &Cli) -> Vec<String> {
             secrets.push(value.to_owned());
         }
     }
+    secrets.retain(|secret| !secret.is_empty());
     secrets
 }
 
