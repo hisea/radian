@@ -1167,13 +1167,12 @@ const SPINNER: [char; 4] = ['⠋', '⠙', '⠸', '⠴'];
 /// line count stays 1 either way.
 fn placeholder(entry: &Entry) -> String {
     let lines = entry.text.lines().count().max(1);
+    // No `▸` here: the marker column carries it (ADR 0028 rule 5), so the body
+    // column is the same folded and expanded.
     if entry.live {
-        format!(
-            "▸ thinking ({lines} lines) {}",
-            SPINNER[entry.text.len() % 4]
-        )
+        format!("thinking ({lines} lines) {}", SPINNER[entry.text.len() % 4])
     } else {
-        format!("▸ thinking ({lines} lines)")
+        format!("thinking ({lines} lines)")
     }
 }
 
@@ -1279,6 +1278,19 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
     let prefix = crate::render::marker_prefix(entry.kind).width();
     let body_width = width.saturating_sub(prefix).max(1);
     let text = crate::render::display_text(entry);
+    // The stripped edge lines are part of the shape: the text-only path takes them from the
+    // layout when there are any (see `has_blank_edge`), so the search geometry and the drawing
+    // cannot disagree.
+    if has_blank_edge(&text) {
+        let plain = DisplayModes {
+            highlight: false,
+            ..modes
+        };
+        return layout(entry, &parse_blocks_for(entry, mode), plain, width)
+            .into_iter()
+            .map(|line| line.text)
+            .collect();
+    }
     let reasoning_expanded = expanded(entry, mode == ReasoningMode::Expanded);
     match (entry.kind, mode) {
         (EntryKind::Reasoning, ReasoningMode::Hidden) if !reasoning_expanded => Vec::new(),
@@ -2134,6 +2146,68 @@ mod tests {
     }
 
     #[test]
+    fn the_container_gap_is_one_line_except_within_a_block() {
+        let user = Entry::new(EntryKind::User, "hi");
+        let assistant = Entry::new(EntryKind::Assistant, "hello");
+        let notice = Entry::new(EntryKind::Notice, "note");
+        let banner = Entry::new(EntryKind::Banner, "radian");
+        let startup = Entry::new(EntryKind::Startup, "profile: x");
+        let mut call = Entry::new(EntryKind::ToolCall, "-> shell");
+        call.tool = Some(Box::new(tools::ToolCard::new(
+            "c1",
+            "shell",
+            serde_json::json!({}),
+        )));
+        let mut result = Entry::new(EntryKind::ToolResult, "ok");
+        result.tool = Some(Box::new(tools::ToolCard::new(
+            "c1",
+            "shell",
+            serde_json::json!({}),
+        )));
+        let mut other = Entry::new(EntryKind::ToolResult, "other");
+        other.tool = Some(Box::new(tools::ToolCard::new(
+            "c2",
+            "shell",
+            serde_json::json!({}),
+        )));
+
+        assert_eq!(block_gap(None, &assistant), 0, "the first entry has no gap");
+        assert_eq!(block_gap(Some(&assistant), &notice), 1, "ordinary blocks");
+        assert_eq!(block_gap(Some(&assistant), &user), 0, "a user block's pad");
+        assert_eq!(block_gap(Some(&user), &assistant), 0, "the same pad");
+        assert_eq!(block_gap(Some(&call), &result), 0, "a result hugs its call");
+        assert_eq!(
+            block_gap(Some(&call), &other),
+            1,
+            "another call's result is another block"
+        );
+        assert_eq!(block_gap(Some(&banner), &startup), 0, "the startup block");
+        assert_eq!(block_gap(Some(&startup), &assistant), 1, "after it");
+        assert_eq!(gaps(&[assistant, notice]).len(), 2);
+    }
+
+    #[test]
+    fn a_blank_edge_line_is_stripped_and_a_pad_is_kept() {
+        // A text-derived blank line at either edge is the container's job.
+        let mut text = Entry::new(EntryKind::Assistant, "\nhello\n\n");
+        assert_eq!(
+            layout(&text, &parse_blocks("\nhello\n\n"), EXPANDED, 20).len(),
+            1
+        );
+        assert_eq!(line_count(&text, EXPANDED, 20), 1);
+        assert_eq!(
+            body_text_lines(&text, EXPANDED, 20),
+            vec!["hello".to_string()]
+        );
+        // A user block's pad rows are its shape: they stay.
+        text.kind = EntryKind::User;
+        text.text = "hi".to_string();
+        let lines = layout(&text, &[], EXPANDED, 20);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].pad && lines[2].pad);
+    }
+
+    #[test]
     fn fences_split_paragraphs_and_carry_the_language() {
         let blocks = parse_blocks("prose one\n\n```rust\nlet x = 1;\n```\nprose two");
         assert_eq!(blocks.len(), 3);
@@ -2304,7 +2378,9 @@ mod tests {
         assert_eq!(line_count(&entry, EXPANDED, 40), 3);
         // The collapsed placeholder carries the spinner while streaming.
         let lines = layout(&entry, &[], modes_with(ReasoningMode::Collapsed), 40);
-        assert!(lines[0].text.contains("▸ thinking (3 lines)"));
+        // The `▸` is the marker column's glyph (rule 5), not part of the placeholder text.
+        assert!(lines[0].text.contains("thinking (3 lines)"));
+        assert!(lines[0].hint, "the placeholder is a synthesized line");
         assert!(
             lines[0]
                 .text
@@ -2314,6 +2390,6 @@ mod tests {
         );
         entry.live = false;
         let lines = layout(&entry, &[], modes_with(ReasoningMode::Collapsed), 40);
-        assert_eq!(lines[0].text, "▸ thinking (3 lines)");
+        assert_eq!(lines[0].text, "thinking (3 lines)");
     }
 }
