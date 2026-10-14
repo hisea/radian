@@ -350,3 +350,37 @@ fn the_id_level_asks_the_host_and_shows_the_answer() {
     assert!(!result.dirty);
     assert!(app.completion().is_none(), "a stale answer shows nothing");
 }
+
+/// ADR 0031 T3: the startup trust modal's **Esc** is the fail-safe answer —
+/// it must never trust. It maps to `UntrustSession`: do not trust **this session only**, which
+/// is **not persistent**, so the loop writes no `trust.json` and the next start asks again.
+#[test]
+fn escaping_the_trust_modal_untrusts_this_session_only() {
+    let mut app = App::new("m", "s");
+    app.push_trust_modal(std::path::PathBuf::from("/work/example"));
+    assert!(app.has_modal());
+    let effects = app.on_key(key(KeyCode::Esc)).effects;
+    assert_eq!(
+        effects,
+        vec![Effect::SetTrust {
+            choice: radian_host::trust::Choice::UntrustSession
+        }],
+        "Esc must choose `do not trust, this session only`, never a trust"
+    );
+    assert!(!app.has_modal(), "the modal is dismissed");
+    assert!(
+        !radian_host::trust::Choice::UntrustSession.persistent(),
+        "Esc writes no trust.json: the next start asks again"
+    );
+
+    // Enter takes the highlighted default: the **persistent** "do not trust this directory".
+    let mut app = App::new("m", "s");
+    app.push_trust_modal(std::path::PathBuf::from("/work/example"));
+    assert_eq!(
+        app.on_key(key(KeyCode::Enter)).effects,
+        vec![Effect::SetTrust {
+            choice: radian_host::trust::Choice::UntrustHere
+        }]
+    );
+    assert!(radian_host::trust::Choice::UntrustHere.persistent());
+}

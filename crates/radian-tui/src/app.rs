@@ -2761,7 +2761,12 @@ impl App {
                 KeyCode::Up => Some(Input::TrustMove(-1)),
                 KeyCode::Down => Some(Input::TrustMove(1)),
                 KeyCode::Enter => Some(Input::TrustChosen(wizard.selected())),
-                KeyCode::Esc => Some(Input::TrustChosen(radian_host::trust::Choice::UntrustHere)),
+                // Esc is "do not trust, this session only": it must not
+                // write `trust.json`, so the next start asks again. Enter takes the
+                // highlighted default, which is the persistent "do not trust this directory".
+                KeyCode::Esc => Some(Input::TrustChosen(
+                    radian_host::trust::Choice::UntrustSession,
+                )),
                 _ => None,
             },
             // The `/login` wizard's keys are hardcoded too: a login prompt is sensitive, and

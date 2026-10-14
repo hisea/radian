@@ -1031,3 +1031,22 @@ RESIZE-B **如实记录**：直接跑 5/5 通过；按 brief 加 4×`yes` 负载
 RESIZE-A 的过程记录：第一轮把 `size_changed()` 的**诊断调用**和真实调用写成了两次，
 诊断那一次把变化吃掉了（trace 里 `changed=Some` 但 `detected` 为 0），改成只调用一次后才由
 `pty_a_bare_resize_re_lays_out` 抓住——变异要真的改变被测行为，不能只加观察。
+## trust-Esc：Esc 不得信任（2026-10-14）
+
+Base `f1993bb` · 一次性 worktree `/tmp/radian-esc-mut`，跑完 `git checkout -- .`，`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| ESC-M1 | 启动信任 modal 的 Esc 映射从 `UntrustHere` 改成 `TrustHere` | `update::tests::escaping_the_trust_modal_does_not_trust` | ✅ |
+
+1/1 抓住。
+
+## trust-Esc＼�2026-10-14）
+
+Base `edfa320` · 一次性 worktree `/tmp/radian-esc-mut2`，跑完 `git checkout -- .`，`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| ESC-M2 | Esc 映射回 `UntrustHere`（持久，会写 `trust.json`） | `update::tests::escaping_the_trust_modal_untrusts_this_session_only` | ✅ |
+
+1/1 抓住。（早先 ESC-M1「Esc → `TrustHere`」见上一节。）
