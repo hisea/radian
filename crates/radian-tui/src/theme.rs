@@ -1,6 +1,9 @@
 //! The TUI color theme (ADR 0009; config key `tui.theme`; ADR 0029 for theme files).
 //!
 //! Every color in the UI comes from one [`Theme`]; `render.rs` never names a `Color` itself.
+//! A rendered Mermaid diagram (ADR 0028 R8) uses three roles — `mermaid_node` (accent),
+//! `mermaid_edge` (dim) and `mermaid_text` (primary) — mapped to pi's `accent`/`dim`/`text`
+//! in `file.rs`'s `fg_source`.
 //! `dark` is the original palette (the `TestBackend` screenshot test pins it), `light` is the
 //! same roles re-picked for a light background, and `mono` uses no color at all — only bold,
 //! underline and dim. The `NO_COLOR` convention (<https://no-color.org>) forces `mono`.
