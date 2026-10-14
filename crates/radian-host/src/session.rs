@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agent_core::{Agent, AgentConfig, ContextBudget, EventSink, Message, TurnOptions};
+use agent_core::{Agent, AgentConfig, ContextBudget, EventSink, Hooks, Message, TurnOptions};
 use agent_extensions::{McpServerConfig, McpToolProvider};
 use radian_coding::CodingTools;
 use radian_permissions::{ApprovalPolicy, Approver, AuditSink, PermissionHooks, Preset, Profile};
@@ -802,8 +802,9 @@ pub async fn open_session(
     let agent = Arc::new(
         Agent::new(model, tools)
             .with_config(agent_config)
-            .with_hooks((
-                (Arc::clone(&hooks), Arc::clone(&memory_hooks)),
+            .with_hooks(session_hooks(
+                Arc::clone(&hooks),
+                Arc::clone(&memory_hooks),
                 Arc::clone(&skills_hooks),
             )),
     );
@@ -911,6 +912,20 @@ pub async fn open_session(
         facts,
         config_snapshot,
     })
+}
+
+/// The agent's hook chain (ADR 0025 S6): the permission rules run first, then the memory section
+/// is appended, then the skills section. The order is a promise — the sections must be
+/// deterministic and memory must precede skills — so it lives in this one function, which
+/// `open_session` calls; `tests/skills_order.rs` builds the three real hooks and asserts the
+/// order on the composed chain. Swapping `memory` and `skills` here is the mutation that test
+/// catches.
+pub fn session_hooks(
+    permissions: Arc<PermissionHooks>,
+    memory: Arc<MemoryHooks>,
+    skills: Arc<SkillsHooks>,
+) -> impl Hooks {
+    ((permissions, memory), skills)
 }
 
 /// Creates or resumes the session file. The caller has already validated everything that can

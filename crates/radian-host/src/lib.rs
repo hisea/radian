@@ -89,6 +89,7 @@ pub use provider::{
     thinking_rank, valid_name, wire_budget,
 };
 pub use radian_runtime::ModelRoute;
+pub use session::session_hooks;
 pub use session::{
     ApprovalRouting, CommandRefused, DriverEnd, HostBindings, LocalSession, SessionCapability,
     SessionCommand, SessionError, SessionFacade, SessionFacts, SessionId, SessionQueue,
