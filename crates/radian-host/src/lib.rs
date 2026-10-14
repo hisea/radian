@@ -72,8 +72,8 @@ pub use projection::{
     LastToolCall, ProjectionRead, SessionProjection, StreamKind, StreamSnapshot, TurnState,
 };
 pub use provider::{
-    DESCRIPTORS, DescriptorModel, LoginMethod, Protocol, ProviderDescriptor, descriptor,
-    descriptors,
+    DESCRIPTORS, DescriptorModel, GENERIC_ID, LoginMethod, Protocol, ProviderDescriptor, Route,
+    descriptor, descriptors, resolve_route,
 };
 pub use session::{
     ApprovalRouting, CommandRefused, DriverEnd, HostBindings, LocalSession, SessionCapability,

@@ -316,7 +316,7 @@ the rest is sent as an ordinary message.
 - `/fork` (ADR 0022) creates a child session from this session's effective history at its
   last turn boundary, through the writer this process already holds (no second lock). It is
   refused while a turn is running, and it does **not** switch this window: the notice names
-  the child and how to open it (`radian-tui --resume <child>`).
+  the child and how to open it (`radian --resume <child>`).
 - An unknown command is an error notice, never a message to the model.
 - The grammar and the execution are `radian_host::memory::commands`, shared byte-for-byte with
   the CLI; the TUI only adds the framework and the notices.
@@ -397,14 +397,14 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   candidates in the order you expect, and is the description column readable at your width? Is
   the one-key-accepts-it rule (Tab/Enter) comfortable, or does Enter accepting a candidate
   surprise you?
-- **the default workspace**: run `radian-tui` with no `--workspace` from a
+- **the default workspace**: run `radian` with no `--workspace` from a
   project directory — the file tools must be there and the sandbox must confine them there. From
   `$HOME` the startup line must say `workspace: ~/tmp (cwd is $HOME)`, and the filesystem root
   must be refused.
 - **`--resume` without a value**: does the picker list only sessions (no `n`),
   and does Esc leave with nothing created?
 - **the exit line**: after Ctrl-C twice (or a SIGTERM), is the printed
-  `resume: radian-tui --resume <id> …` command paste-ready in your shell, with the paths and
+  `resume: radian --resume <id> …` command paste-ready in your shell, with the paths and
   quoting right?
 - **mouse selection/copy**: with the default `tui.mouse = true`, the app reports the wheel
   (and buttons) with `?1000h ?1006h`, so a plain drag no longer selects in the emulator. Try
@@ -550,10 +550,10 @@ Whatever ended the app, the normal screen now says why, once, after the terminal
 | How it ends | Exit | Reason line (stderr, after restore) |
 |---|---|---|
 | clean quit (Ctrl-C twice / driver ends by request) | 0 | `session <id> saved; resume with `--resume <id>`` |
-| startup/config refusal (bad workspace, failed probe, bad MCP file, bad header, ...) | 1 | `radian-tui: <the error>` (terminal never entered) |
-| driver task ends with a `RunError` | 1 | `radian-tui: driver: <error>` |
-| driver task panics | 1 | `radian-tui: the driver task ended unexpectedly: <join error>: <redacted panic>` |
-| the app itself panics (`main` thread) | 101 | `radian-tui: the app panicked: <redacted panic> (panic log: <path>)` |
+| startup/config refusal (bad workspace, failed probe, bad MCP file, bad header, ...) | 1 | `radian: <the error>` (terminal never entered) |
+| driver task ends with a `RunError` | 1 | `radian: driver: <error>` |
+| driver task panics | 1 | `radian: the driver task ended unexpectedly: <join error>: <redacted panic>` |
+| the app itself panics (`main` thread) | 101 | `radian: the app panicked: <redacted panic> (panic log: <path>)` |
 | `--list` | 0 | none: the listing is the output |
 | `--pick` quit (Esc/Ctrl-C) | 0 | none: the picker created nothing |
 
@@ -631,7 +631,7 @@ by one is resumable by the other:
   history comes from the journal (`radian-runtime` recovers it); the transcript view is the
   same history.
 - `--list` prints this workspace's sessions (id, created, last activity, message count) and
-  exits without touching the terminal. A closed stdout (`radian-tui --list | head -1`) stops
+  exits without touching the terminal. A closed stdout (`radian --list | head -1`) stops
   quietly with exit 0, never a panic (dogfooding D21).
 - `--pick` opens the session **picker overlay** (the same one `/sessions` uses) in the one
 event loop, before any session exists: `Up`/`Down` select, type to filter by id/summary,
@@ -653,7 +653,7 @@ are accepted aliases but not listed),
 `--context-window TOKENS`, `--offline-catalog`, `--catalog-provider PROVIDER`. The key is
 read only from the named environment variable and is never printed.
 
-`--version` prints `radian-tui <version>` and exits 0 before anything else runs: no
+`--version` prints `radian <version>` and exits 0 before anything else runs: no
 `--model` is needed, no key is read, no session file is created, and the terminal is never
 entered. The version is the package's own (`CARGO_PKG_VERSION` in `Cargo.toml`), never a
 literal in the source.
@@ -747,7 +747,7 @@ anything else. The status bar counts the queue (`N pending`) while it is not emp
 goes through the session facade (`answer`), which re-validates the `AnswerRequest` capability,
 so a facade without it refuses with a notice rather than resolving a request.
 
-`radian-tui` always registers `ask_user` (ADR 0024 Q5); `agent` never does and its startup line
+`radian` always registers `ask_user` (ADR 0024 Q5); `agent` never does and its startup line
 says `ask_user: off (no interactive user)`. The tool is fixed `allow` in every tier (ADR 0024
 Q6): it writes nothing and runs nothing, and the answer is data, not a permission.
 

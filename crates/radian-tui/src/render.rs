@@ -240,10 +240,21 @@ fn input_height(app: &App, width: usize) -> u16 {
     (rows.clamp(1, MAX_INPUT_ROWS) as u16) + 2
 }
 
-/// The approval prompt's text. The **resolved** resource is what is shown: `a/../secret`
-/// must not read as if it stayed under `a/` (the permission layer resolves it before the
-/// prompt, and that resolved form is also the session-grant key).
-pub fn approval_text(request: &ApprovalRequest) -> String {
+/// The approval prompt's key line. It is drawn on its **own** row under the body, never part
+/// of the wrapped text, so a long command can never push the keys out of the box (owner
+/// acceptance, 2026-10-13). `[Y] auto for this session` (ADR 0026 D9) will join this line; it
+/// is deliberately not implemented here.
+pub const APPROVAL_KEYS: &str = "[y] allow once   [a] always this session   [n] deny";
+
+/// The approval prompt's body: everything above the key line. The **resolved** resource is what
+/// is shown: `a/../secret` must not read as if it stayed under `a/` (the permission layer
+/// resolves it before the prompt, and that resolved form is also the session-grant key).
+///
+/// The resource's own argument is **not** repeated in `args`: the command or path already has
+/// its line, so the rest (`cwd`, `timeout`, …) is what `args` shows, and it is omitted entirely
+/// when nothing is left. The user must be able to read the whole command, so it is never
+/// truncated; the 400-byte cap applies to the remaining `args` only.
+pub fn approval_body(request: &ApprovalRequest) -> String {
     let label = if request.arguments.get("path").is_some() {
         "path"
     } else if request.arguments.get("command").is_some() {
@@ -254,18 +265,36 @@ pub fn approval_text(request: &ApprovalRequest) -> String {
     let mut text = String::new();
     text.push_str(&format!("tool: {}\n", request.tool));
     text.push_str(&format!("{label}: {}\n", request.resolved_resource));
-    let args = serde_json::to_string_pretty(&request.arguments)
-        .unwrap_or_else(|_| request.arguments.to_string());
-    let (shown, discarded) = truncate_for_display(&args, 400);
-    text.push_str(&format!("args: {shown}"));
-    if discarded > 0 {
-        text.push_str(&format!("\n      … {discarded} more bytes"));
+    let rest: serde_json::Map<String, serde_json::Value> = request
+        .arguments
+        .as_object()
+        .map(|object| {
+            object
+                .iter()
+                .filter(|(key, _)| key.as_str() != label)
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !rest.is_empty() {
+        let args = serde_json::to_string_pretty(&rest)
+            .unwrap_or_else(|_| serde_json::Value::Object(rest.clone()).to_string());
+        let (shown, discarded) = truncate_for_display(&args, 400);
+        text.push_str(&format!("args: {shown}"));
+        if discarded > 0 {
+            text.push_str(&format!("\n      … {discarded} more bytes"));
+        }
     }
     if let Some(reason) = &request.reason {
         text.push_str(&format!("\nwhy: {reason}"));
     }
-    text.push_str("\n[y] allow once   [a] always this session   [n] deny");
     text
+}
+
+/// The approval prompt's full text: body, then the key line. Kept for callers that want one
+/// string (tests, a future non-TUI rendering); the box itself draws the two separately.
+pub fn approval_text(request: &ApprovalRequest) -> String {
+    format!("{}\n{APPROVAL_KEYS}", approval_body(request))
 }
 
 /// Truncates a display string on a character boundary, returning the kept part and how many
@@ -281,10 +310,29 @@ fn truncate_for_display(text: &str, cap: usize) -> (String, usize) {
     (text[..end].to_owned(), text.len() - end)
 }
 
-/// The height the approval box needs, counting wrapped rows.
-fn approval_height(request: &ApprovalRequest, width: usize) -> u16 {
-    let rows = wrap(&approval_text(request), width.saturating_sub(2).max(1)).len();
-    (rows as u16 + 2).clamp(5, 14)
+/// The most of the terminal the approval box may take (owner acceptance: ~60%, the transcript
+/// keeps at least three rows). `completion` is the rows the `@` list above the box needs.
+pub fn approval_cap(screen_height: usize, completion: usize) -> usize {
+    let cap = (screen_height * 60 / 100).max(MIN_APPROVAL_HEIGHT);
+    cap.min(
+        screen_height
+            .saturating_sub(completion + 4)
+            .max(MIN_APPROVAL_HEIGHT),
+    )
+}
+
+/// The approval box's floor, border and key line included.
+pub const MIN_APPROVAL_HEIGHT: usize = 5;
+
+/// The height the approval box needs: the wrapped body rows (bounded by `cap`), the key line
+/// and the border. The body scrolls rather than growing past `cap`.
+fn approval_height(request: &ApprovalRequest, width: usize, cap: usize) -> u16 {
+    let rows = wrap(&approval_body(request), width.saturating_sub(2).max(1)).len();
+    let visible = rows.min(cap.saturating_sub(3).max(1));
+    (visible as u16 + 3).clamp(
+        MIN_APPROVAL_HEIGHT as u16,
+        cap.max(MIN_APPROVAL_HEIGHT) as u16,
+    )
 }
 
 /// Marks every occurrence of `query` (case-insensitive) in a rendered line with
@@ -468,14 +516,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     // ADR 0023 U4: the middle of the frame is drawn by the top modal (the approval box
     // replaces the input box), then the find overlay, then the ordinary input box.
+    let completion = completion_rows(app, area.width as usize);
     let middle = match app.top_modal() {
-        Some(Modal::Approval(prompt)) => approval_height(&prompt.request, area.width as usize),
+        Some(Modal::Approval(prompt)) => approval_height(
+            &prompt.request,
+            area.width as usize,
+            approval_cap(area.height as usize, completion.len()),
+        ),
         Some(Modal::Question(form)) => question_height(form, area.width as usize),
         _ => input_height(app, area.width as usize),
     };
     // The `@` completion list sits just above the input box (and never over an approval
     // prompt). A zero-height chunk keeps the rest of the layout identical when there is none.
-    let completion = completion_rows(app, area.width as usize);
     let chunks = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(completion.len() as u16),
@@ -520,14 +572,52 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     match app.top_modal() {
         Some(Modal::Approval(prompt)) => {
-            let block = Block::default()
+            // The body scrolls inside the box; the key line is the box's own last row, so a
+            // long command can never push the answers off screen.
+            let inner_width = (chunks[2].width as usize).saturating_sub(2).max(1);
+            let body = wrap(&approval_body(&prompt.request), inner_width);
+            let total = body.len();
+            let visible = (middle as usize).saturating_sub(3).max(1);
+            // Feed the measurement back, the way the transcript's viewport is fed back, so the
+            // scroll keys clamp against real rows.
+            let (scroll, total, visible) = {
+                let approval = app
+                    .approval_modal_mut()
+                    .expect("the top modal is an approval");
+                approval.total_rows = total;
+                approval.visible_rows = visible;
+                approval.scroll = approval.scroll.min(total.saturating_sub(visible));
+                (approval.scroll, total, visible)
+            };
+            let first = scroll.min(total.saturating_sub(1));
+            let last = (first + visible).min(total);
+            let lines: Vec<Line> = body[first..last]
+                .iter()
+                .map(|row| Line::from(row.clone()))
+                .collect();
+            let mut block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(app.theme.approval_border)
                 .title(" approve tool call? ");
-            let text = Paragraph::new(approval_text(&prompt.request))
-                .block(block)
-                .wrap(Wrap { trim: false });
-            frame.render_widget(text, chunks[2]);
+            if total > visible {
+                // The window indicator goes in the top-right corner: the bottom row belongs to
+                // the keys.
+                block = block.title_top(
+                    Line::from(format!(" lines {}–{} of {total} ", first + 1, last))
+                        .right_aligned(),
+                );
+            }
+            frame.render_widget(&block, chunks[2]);
+            let inner = block.inner(chunks[2]);
+            let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner);
+            frame.render_widget(Paragraph::new(lines), rows[0]);
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    APPROVAL_KEYS,
+                    app.theme.approval_border,
+                ))),
+                rows[1],
+            );
         }
         Some(Modal::Question(form)) => {
             // ADR 0024 Q7: the title names the source and the position; the box scrolls its
@@ -542,8 +632,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 .title(format!(" question {position} from {} ", form.origin));
             let inner = chunks[2].height.saturating_sub(2) as usize;
             let width = chunks[2].width.saturating_sub(2) as usize;
-            let lines = question_lines(form, width, inner);
-            frame.render_widget(Paragraph::new(lines).block(block), chunks[2]);
+            // The key line is the box's own last row, so a long option list can never push it
+            // out (same fix as the approval box).
+            let lines = question_lines(form, width, inner.saturating_sub(1));
+            frame.render_widget(&block, chunks[2]);
+            let inner_area = block.inner(chunks[2]);
+            let rows =
+                Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner_area);
+            frame.render_widget(Paragraph::new(lines), rows[0]);
+            frame.render_widget(
+                Paragraph::new(Line::from(clip_columns(QUESTION_KEYS, width))),
+                rows[1],
+            );
         }
         _ if app.find_state().is_some() => {
             // The find box replaces the input box's line; the input text itself is untouched
@@ -644,16 +744,21 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 /// list scrolls instead of growing the box without bound).
 const MAX_QUESTION_ROWS: u16 = 18;
 
-/// The height the question form's box needs: its content, bounded.
+/// The question form's key line, drawn on its own row under the content so a long option list
+/// can never push it out of the box (same fix as the approval box's `APPROVAL_KEYS`).
+pub const QUESTION_KEYS: &str = "Tab next · Space select · Enter next/submit · Esc decline";
+
+/// The height the question form's box needs: its content plus the key line, bounded.
 fn question_height(form: &QuestionForm, width: usize) -> u16 {
-    let rows = question_lines(form, width, usize::MAX).len();
+    let rows = question_lines(form, width, usize::MAX).len() + 1;
     (rows as u16 + 2).clamp(5, MAX_QUESTION_ROWS)
 }
 
 /// The question form's content lines, scrolled so the cursor stays visible (ADR 0024 Q7).
 ///
-/// Pure: the layout is testable without a terminal. `max_rows` is the visible budget (the
-/// box's inner height); `usize::MAX` means "no clipping", which is how the height is measured.
+/// Pure: the layout is testable without a terminal. `max_rows` is the visible budget (the box's
+/// inner height **minus the key line**, which `draw` renders separately so it is always
+/// visible); `usize::MAX` means "no clipping", which is how the height is measured.
 pub fn question_lines(form: &QuestionForm, width: usize, max_rows: usize) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
     match form.current_question() {
@@ -678,8 +783,9 @@ pub fn question_lines(form: &QuestionForm, width: usize, max_rows: usize) -> Vec
                 .current_answer()
                 .expect("a current question has an answer");
             let rows = QuestionForm::row_count(question);
-            // The window over the option rows: the prompt and the hint are two rows.
-            let visible = max_rows.saturating_sub(3).max(1);
+            // The window over the option rows: the prompt, the two clip markers and the decline
+            // note each take a row when present.
+            let visible = max_rows.saturating_sub(4).max(1);
             let first = if rows <= visible {
                 0
             } else {
@@ -710,10 +816,6 @@ pub fn question_lines(form: &QuestionForm, width: usize, max_rows: usize) -> Vec
             width,
         )));
     }
-    out.push(Line::from(clip_columns(
-        "Tab next · Space select · Enter next/submit · Esc decline",
-        width,
-    )));
     if out.len() > max_rows && max_rows != usize::MAX {
         out.truncate(max_rows);
     }

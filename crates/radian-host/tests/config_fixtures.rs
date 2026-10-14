@@ -35,6 +35,7 @@ fn the_reader_matches_the_reference_checker() {
         ("v1-unknown-fields.toml", "accept"),
         ("schema-version-newer.toml", "readonly"),
         ("schema-version-lower.toml", "reject"),
+        ("api-key-removed.toml", "reject"),
         ("plaintext-secret.toml", "reject"),
         ("heuristic-secret.toml", "reject"),
         ("plaintext-plain.toml", "reject"),

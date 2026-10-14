@@ -92,6 +92,11 @@ pub enum ConfigError {
         path: PathBuf,
         value: String,
     },
+    /// `model.api_key` is no longer a key source (ADR 0026 D2): the key comes only from
+    /// `auth.json`.
+    ApiKeyRemoved {
+        path: PathBuf,
+    },
 }
 
 impl fmt::Display for ConfigError {
@@ -144,6 +149,14 @@ impl fmt::Display for ConfigError {
                  (or the aliases); refusing rather than guessing",
                 path.display()
             ),
+            ConfigError::ApiKeyRemoved { path } => write!(
+                f,
+                "{}: `model.api_key` is no longer read (ADR 0026 D2); the API key comes only \
+                 from ~/.radian/credentials/auth.json. Add an entry for the provider there, e.g. \
+                 {{\"opencode-go\": {{\"type\": \"api_key\", \"key\": \"$MY_KEY\"}}}}, or use the \
+                 `/login` command (next slice)",
+                path.display()
+            ),
         }
     }
 }
@@ -157,9 +170,6 @@ pub struct ModelConfig {
     pub provider: Option<String>,
     pub base_url: Option<String>,
     pub model: Option<String>,
-    /// The environment variable named by `model.api_key`'s `SecretRef` (equivalent to
-    /// `--api-key-env`). The value itself is never in the file.
-    pub api_key_env: Option<String>,
     pub headers: Vec<(String, String)>,
     pub context_window: Option<u64>,
 }
@@ -346,12 +356,12 @@ fn parse_model(
             ("provider", Value::String(s)) => config.model.provider = Some(s.clone()),
             ("base_url", Value::String(s)) => config.model.base_url = Some(s.clone()),
             ("model", Value::String(s)) => config.model.model = Some(s.clone()),
-            ("api_key", Value::Table(secret)) => {
-                // The shape was validated by `check_secret_refs`; `from` is `env`.
-                config.model.api_key_env = secret
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
+            // ADR 0026 D2: `model.api_key` is refused, never silently ignored (a silent ignore
+            // would make the user think the key took effect).
+            ("api_key", _) => {
+                return Err(ConfigError::ApiKeyRemoved {
+                    path: path.to_path_buf(),
+                });
             }
             ("headers", Value::Table(headers)) => {
                 for (name, value) in headers {
@@ -747,7 +757,6 @@ provider = "anthropic"
 base_url = "https://example.com"
 model = "m-1"
 context_window = 200000
-api_key = { from = "env", name = "EXAMPLE_KEY" }
 [model.headers]
 x-a = "1"
 [permissions]
@@ -766,7 +775,6 @@ theme = "light"
         );
         assert_eq!(config.model.model.as_deref(), Some("m-1"));
         assert_eq!(config.model.context_window, Some(200_000));
-        assert_eq!(config.model.api_key_env.as_deref(), Some("EXAMPLE_KEY"));
         assert_eq!(
             config.model.headers,
             vec![("x-a".to_string(), "1".to_string())]
@@ -844,6 +852,22 @@ theme = "light"
         let text = error.to_string();
         assert!(!text.contains("sk-live"), "{text}");
         assert!(matches!(error, ConfigError::SecretLookalike { .. }));
+    }
+
+    /// ADR 0026 D2: `model.api_key` is refused with a pointer at `auth.json`, never silently
+    /// ignored.
+    #[test]
+    fn model_api_key_is_refused_with_an_auth_json_pointer() {
+        let error =
+            parse_str("schema_version = 1\n[model]\napi_key = { from = \"env\", name = \"K\" }\n")
+                .unwrap_err();
+        assert!(
+            matches!(error, ConfigError::ApiKeyRemoved { .. }),
+            "{error}"
+        );
+        let text = error.to_string();
+        assert!(text.contains("auth.json"), "{text}");
+        assert!(text.contains("/login"), "{text}");
     }
 
     #[test]

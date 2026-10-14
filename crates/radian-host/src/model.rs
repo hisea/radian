@@ -53,14 +53,6 @@ impl Provider {
         }
     }
 
-    /// The environment variable read when `--api-key-env` is omitted.
-    pub fn default_api_key_env(self) -> &'static str {
-        match self {
-            Self::OpenAiCompatible => "OPENAI_API_KEY",
-            Self::Anthropic => "ANTHROPIC_API_KEY",
-        }
-    }
-
     /// Parses the `--provider` value.
     pub fn from_name(name: &str) -> Result<Self, String> {
         match name {

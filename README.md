@@ -4,7 +4,7 @@
 top of it. The core (`agent-core`) runs a turn loop over an injected model, tools and hooks; the
 `radian-*` crates add durable sessions, a permission layer, an OS sandbox, built-in coding
 tools, durable memory and the host plumbing, and two hosts ship as binaries: the line-prompt CLI
-`agent` and the full-screen TUI `radian-tui`. Everything the runtime does is journalled to a
+`agent` and the full-screen TUI `radian`. Everything the runtime does is journalled to a
 per-session JSONL file, so a session can be resumed by either host.
 
 The design of record is `docs/minimal-headless-rust-agent-runtime-design.md`. Decisions that
@@ -28,7 +28,7 @@ constrain the code are ADRs under `docs/adr/` (see the index at the end of this 
 | `radian-memory` | The memory storage layer (ADR 0021 M1): Global/Project scope logs with replay, the source rules (an agent cannot touch a user record), Forget/Purge, the `projects.jsonl` registry and the Markdown import/export view. Host-free: the caller passes `~/.radian/memory/`. | `crates/radian-memory/README.md`, ADR 0021 |
 | `radian-host` | Host plumbing shared by both binaries so they cannot drift: `--header` parsing, session ids, the `--mcp-config` file, model construction, the startup description, the "built-in tools + MCP" provider, the `~/.radian/` layout and diagnostics, the model catalog, and the memory layer (`MemoryService`, project identity, the agent memory tools, injection, and the shared `agent memory` / `/memory` commands). | `crates/radian-host/README.md` |
 | `agent-cli` | The `agent` binary: a line-prompt chat client with optional built-in tools, MCP servers, session-management commands and the `agent memory` commands. | `crates/agent-cli/README.md` |
-| `radian-tui` | The `radian-tui` binary: a full-screen TUI (ADR 0009: full screen only, no inline mode) over `radian-runtime`, with a slash-command layer (`/help`, `/memory …`) and its own transcript scrolling. | `crates/radian-tui/README.md`, ADR 0009 |
+| `radian-tui` | The `radian` binary: a full-screen TUI (ADR 0009: full screen only, no inline mode) over `radian-runtime`, with a slash-command layer (`/help`, `/memory …`) and its own transcript scrolling. | `crates/radian-tui/README.md`, ADR 0009 |
 
 Two more binaries exist but are not part of the product surface: `agent-extensions`'s
 `mcp-fixture` (a hand-written MCP server for its tests) and `radian-sandbox`'s `sandbox-escape`
@@ -75,7 +75,7 @@ Release build:
 cargo build --workspace --locked --release
 ```
 
-The two binaries land in `target/debug/` (or `target/release/`) as `agent` and `radian-tui`.
+The two binaries land in `target/debug/` (or `target/release/`) as `agent` and `radian` (with a `rad` alias).
 The full verification suite an agent must run before calling a change done is in `AGENTS.md`.
 
 ## Run
@@ -127,15 +127,16 @@ Session-management commands need no model, no key and no network: `--list`, `--e
 (`--format json|markdown`, `--out FILE`), and `--search <text>`. `--export` and `--search`
 work on the sessions of the current workspace (`--workspace`, else the current directory).
 
-### `radian-tui` (full screen)
+### `radian` (full screen)
 
 Run this only in a real terminal: it enters the alternate screen and raw mode, and it takes
 over the screen. `--model` is required even for `--list`.
 
 ```sh
-export OPENAI_API_KEY=sk-...
+# The key comes only from ~/.radian/credentials/auth.json (ADR 0026 D2), e.g.
+#   {"openai-compatible": {"type": "api_key", "key": "$OPENAI_API_KEY"}}
 
-./target/debug/radian-tui \
+./target/debug/radian \
   --provider openai-compatible \
   --model gpt-5 \
   --profile workspace \
@@ -148,7 +149,7 @@ export OPENAI_API_KEY=sk-...
 Resume a session written by either host:
 
 ```sh
-./target/debug/radian-tui \
+./target/debug/radian \
   --provider openai-compatible \
   --model gpt-5 \
   --profile workspace \
@@ -233,7 +234,7 @@ never reached by forgetting a flag.
   outside the sandbox in this build, and the startup notice says so.
 - **`--yes` is not "allow everything".** It swaps the approver for one that answers "allow
   once" without showing the question; `deny` rules still deny, `allow` rules still allow, the
-  sandbox is unchanged, and every decision is still audited. `radian-tui` also has
+  sandbox is unchanged, and every decision is still audited. `radian` also has
   `--approval on-ask|always|never` (default `on-ask`).
 - **Audit**: every decision writes one `PermissionResolved` event to the session file
   (`approver` = `policy` for a rule or grant, `user` for an answered prompt).
@@ -243,7 +244,7 @@ never reached by forgetting a flag.
   Write these at the subcommand level, never at a bare program name.
 
 Common exit codes: `agent` uses 0 (turn completed), 1 (turn failed), 2 (usage/setup error,
-including a failed sandbox probe) and 130 (forced exit after a second Ctrl-C). `radian-tui` uses 0 (clean quit), 1 (startup refusal or a
+including a failed sandbox probe) and 130 (forced exit after a second Ctrl-C). `radian` uses 0 (clean quit), 1 (startup refusal or a
 driver error), 101 (the app panicked), and 128 + the signal number on SIGTERM/SIGHUP.
 
 ## Docs
@@ -259,3 +260,7 @@ driver error), 101 (the app panicked), and 128 + the signal number on SIGTERM/SI
 | Performance baseline and its reproduction commands | `docs/perf-baseline.md` |
 | Spike reports (sandbox, TUI, OAuth) | `docs/spikes/` |
 | Agent instructions (verify suite, delegation) | `AGENTS.md` |
+
+## License
+
+Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. Third-party code and its attribution are listed in [NOTICE](NOTICE).

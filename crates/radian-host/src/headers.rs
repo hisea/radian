@@ -29,7 +29,7 @@ pub fn parse_headers(raw: &[String], session_id: &str) -> Result<Vec<(String, St
         if name.eq_ignore_ascii_case("authorization") {
             return Err(
                 "--header authorization=... is refused: the API key comes only from \
-                 --api-key-env, so a header must not replace it"
+                 ~/.radian/credentials/auth.json, so a header must not replace it"
                     .to_string(),
             );
         }
