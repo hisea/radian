@@ -374,6 +374,7 @@ fn run(
     let resume_only = matches!(cli.resume, Some(None));
     let mut resume = cli.resume.clone().flatten();
     let startup_picker = if cli.pick || resume_only {
+        radian_session::trace::mark("picker/prepare-start");
         let workspace = workspace_path.to_string_lossy().into_owned();
         prepare_picker(&dir, &workspace)?.map(|picker| {
             if resume_only {
@@ -385,6 +386,7 @@ fn run(
     } else {
         None
     };
+    radian_session::trace::mark("picker/prepared");
     // Nothing to resume is a refusal, not a new session: `--resume` without a value never
     // creates a file.
     if resume_only && startup_picker.is_none() {
@@ -441,6 +443,7 @@ fn run(
     // the same terminal. No session file, journal, driver or MCP connection exists until the
     // choice is made (the session id and any `{session_id}` header are resolved after it).
     if let Some(picker) = startup_picker {
+        radian_session::trace::mark("picker/before-first-frame");
         let (guard, terminal) = startup_terminal
             .as_mut()
             .expect("the terminal was entered for the picker");

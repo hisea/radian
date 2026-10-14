@@ -439,7 +439,10 @@ pub(crate) enum DiagramOutcome {
 /// Renders `source` at `width` (ADR 0028 R8): a pure function of the two, so the cache key is
 /// exactly that pair. No partial diagram: `render_spans` either returns every line or an error.
 pub(crate) fn diagram_for(source: &str, width: usize) -> DiagramOutcome {
-    match codex_mermaid::render_spans(source, width) {
+    let t = std::time::Instant::now();
+    let rendered = codex_mermaid::render_spans(source, width);
+    radian_session::trace::took("first-frame/mermaid", t);
+    match rendered {
         Ok(lines) => DiagramOutcome::Rendered(
             lines
                 .into_iter()
@@ -1441,6 +1444,7 @@ fn syntax_lines_cached(
     highlight: bool,
 ) -> Option<std::sync::Arc<Vec<crate::highlight::HighlightedLine>>> {
     if !highlight || !closed {
+        radian_session::trace::took("first-frame/no-highlight", std::time::Instant::now());
         return None;
     }
     let body = code_body(&text[start..end], closed);
