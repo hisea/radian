@@ -17,10 +17,7 @@ use radian_host::{
     DEFAULT_MAX_TOKENS, ModelArgs, Provider, Thinking, build_model, check_provider_flags,
     load_mcp_config, parse_headers, validate_session_id,
 };
-use radian_permissions::{
-    ApprovalError, ApprovalOutcome, ApprovalRequest, Approver, AuditSink, PermissionResolved,
-    runtime_event,
-};
+use radian_permissions::{AuditSink, PermissionResolved, runtime_event};
 use radian_session::{Index, SessionJournal};
 use radian_tui::app::{AUTO_SCROLL_TICK, App, Effect, Input as AppInput, MemoryResult, PickerData};
 use radian_tui::clip::{ClipboardMode, osc52};
@@ -112,9 +109,11 @@ struct Cli {
     profile: Option<String>,
 
     /// How `ask` is resolved (ADR 0012's ApprovalPolicy): `on-ask` asks when a rule says so,
-    /// `always` asks for every call a rule does not deny, `never` turns `ask` into a denial.
-    #[arg(long, value_name = "POLICY", default_value = "on-ask")]
-    approval: String,
+    /// `always` asks for every call a rule does not deny, `never` turns `ask` into a denial,
+    /// `auto` answers every `ask` with "allow" (ADR 0026 D9). Omit to fall back to the
+    /// config's `[permissions] approval`, then the session's journaled state, then `on-ask`.
+    #[arg(long, value_name = "POLICY")]
+    approval: Option<String>,
 
     /// Approve every tool call without asking, like `agent --yes`. Not "allow everything":
     /// `deny` rules still deny and the sandbox still applies; only the question is removed.
@@ -343,25 +342,28 @@ fn run(
         .clone()
         .or_else(|| config.permissions.profile.clone())
         .unwrap_or_else(|| "workspace".to_string());
-    // ADR 0026 D0: `--provider`/config `model.provider` names a descriptor. The generic
-    // `openai-compatible` descriptor is the default (the pre-D0 behaviour); the model is
-    // never defaulted.
-    let provider_id = cli
+    // ADR 0026 D0/D10: `--provider`/config `model.provider` names a provider — a built-in
+    // descriptor or a named one (`[providers.<name>]` in the config, or the auth.json
+    // entry's `env`). The generic `openai-compatible` descriptor is the default (the pre-D0
+    // behaviour); the model is never defaulted. The key is looked up under the **name**
+    // (D10), so every custom endpoint has its own slot.
+    let provider_name = cli
         .provider
         .clone()
         .or_else(|| config.model.provider.clone())
         .unwrap_or_else(|| radian_host::GENERIC_ID.to_owned());
-    let descriptor = radian_host::descriptor(&provider_id).ok_or_else(|| {
-        format!(
-            "unknown provider {provider_id:?}: choose one of {}",
-            radian_host::descriptors()
-                .iter()
-                .map(|entry| entry.id)
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    })?;
-    let provider = descriptor.protocol_for(&model_name).adapter();
+    let auth_store = radian_host::AuthStore::open().map_err(|e| e.to_string())?;
+    let (provider_ref, provider_warning) = radian_host::resolve_provider(
+        &provider_name,
+        &config.providers,
+        auth_store.entry_env(&provider_name).as_ref(),
+    )?;
+    if let Some(warning) = &provider_warning {
+        // A display conflict, not an error: the startup line says which side won.
+        eprintln!("[provider] {warning}");
+    }
+    let key_id = provider_ref.key_id().to_owned();
+    let provider = provider_ref.protocol_for(&model_name).adapter();
     let thinking = match cli.thinking.as_deref() {
         Some(value) => value.parse::<Thinking>()?,
         None => Thinking::Off,
@@ -375,29 +377,27 @@ fn run(
         .clone()
         .or_else(|| config.model.base_url.clone());
     // The endpoint this run would talk to, before the session id: used only to allow a local
-    // server to run without a key (a loopback mock needs no credential).
-    let probe_base_url = descriptor
-        .model(&model_name)
-        .map(|entry| entry.base_url.to_owned())
-        .or_else(|| base_url_override.clone())
-        .unwrap_or_else(|| descriptor.default_base_url.to_owned());
+    // server to run without a key (a loopback mock needs no credential). `--base-url` only
+    // pre-fills the probe for the generic provider (a named one has a fixed endpoint).
+    let probe_base_url = if provider_ref.takes_base_url_override() {
+        base_url_override.clone()
+    } else {
+        None
+    }
+    .unwrap_or_else(|| provider_ref.base_url_for(&model_name, None));
     // ADR 0026 D2: the key comes only from `auth.json`. A missing entry is a clear refusal with
-    // the JSON to add (the `/login` command arrives in the next slice), unless the endpoint is
-    // local.
-    let credential = match radian_host::auth::resolve_key(&provider_id)
-        .map_err(|e| e.to_string())?
-    {
+    // the fix (run `/login <provider>` — D3, in this slice), unless the endpoint is local.
+    let credential = match radian_host::resolve_key(&key_id).map_err(|e| e.to_string())? {
         Some(credential) => Some(credential),
         None if is_local_base_url(&probe_base_url) => None,
         None => {
             return Err(
-                match radian_host::auth::resolve_note(&provider_id).map_err(|e| e.to_string())? {
+                match radian_host::resolve_note(&key_id).map_err(|e| e.to_string())? {
                     Some(note) => note,
                     None => format!(
-                        "no credential for `{provider_id}`: add an entry to \
-                         ~/.radian/credentials/auth.json, e.g.\n  {{\"{provider_id}\": {{\"type\": \
-                         \"api_key\", \"key\": \"$MY_KEY\"}}}}\n(or use `/login {provider_id}` in the next \
-                         release); refusing to continue because {} is not a local address",
+                        "no credential for `{key_id}`: run `agent login {key_id}`, or \
+                         `/login {key_id}` in the TUI; refusing to continue because {} is not a \
+                         local address",
                         radian_host::redact_base_url(&probe_base_url)
                     ),
                 },
@@ -414,28 +414,29 @@ fn run(
     header_args.extend(cli.header.iter().cloned());
     let workspace_root = coding_root(&cli)?;
     let workspace_path = radian_host::resolve_workspace(Some(&workspace_root.path))?;
-    // The window's base URL: the descriptor's per-model URL, then the generic override, then
-    // the descriptor default.
-    let catalog_base_url = descriptor
-        .model(&model_name)
-        .map(|entry| entry.base_url.to_owned())
-        .or_else(|| base_url_override.clone())
-        .unwrap_or_else(|| descriptor.default_base_url.to_owned());
-    // The window comes from `--context-window` or the models.dev catalog (ADR 0018). A fetch
-    // failure is not a startup failure: the window is then unknown and the budget stays off.
-    // Still before the session file exists. `R` comes from the request's own output setting:
-    // Anthropic sends `max_tokens`, OpenAI-compatible sends none.
+    // `R` comes from the request's own output setting: Anthropic sends `max_tokens`,
+    // OpenAI-compatible sends none.
     let request_max_output = match provider {
         Provider::Anthropic => Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
         Provider::OpenAiCompatible => None,
     };
+    // The window's base URL: the provider's endpoint (for a named provider, its declaration).
+    let catalog_base_url = provider_ref.base_url_for(&model_name, None);
+    // The catalog groups by provider id; the generic descriptor is not one, so its provider
+    // is derived from the base URL hostname. A named provider is its own group only when its
+    // name is a catalog provider; otherwise the hostname rule applies (the fallback below).
+    let catalog_provider = cli
+        .catalog_provider
+        .clone()
+        .or_else(|| match &provider_ref {
+            radian_host::ProviderRef::BuiltIn(descriptor) => {
+                (descriptor.id != radian_host::GENERIC_ID).then(|| descriptor.id.to_string())
+            }
+            radian_host::ProviderRef::Named(named) => Some(named.name.clone()),
+        });
     let window = runtime.block_on(radian_host::resolve(&radian_host::WindowQuery::production(
         cli.context_window.or(config.model.context_window),
-        cli.catalog_provider.clone().or_else(|| {
-            // `opencode-go`/`anthropic`/`openai` are catalog providers; the generic one is not,
-            // so its provider is derived from the base URL hostname.
-            (descriptor.id != radian_host::GENERIC_ID).then(|| descriptor.id.to_string())
-        }),
+        catalog_provider,
         &catalog_base_url,
         model_name.clone(),
         request_max_output,
@@ -574,10 +575,11 @@ fn run(
     if let Some(credential) = &credential {
         secrets.push(credential.key.clone());
     }
-    // ADR 0026 D0: the descriptor decides the adapter, base URL and headers. `resolve_route`
-    // refuses `--base-url`/`--header` for a non-generic descriptor.
-    let route = radian_host::resolve_route(
-        &provider_id,
+    // ADR 0026 D0/D10: the provider decides the adapter, base URL and headers.
+    // `resolve_route_for` refuses `--base-url`/`--header` for everything but the generic
+    // descriptor (a named provider's endpoint is its declaration).
+    let route = radian_host::resolve_route_for(
+        &provider_ref,
         &model_name,
         base_url_override.as_deref(),
         credential
@@ -627,19 +629,37 @@ fn run(
         Some(path) => load_mcp_config(path)?,
         None => Vec::new(),
     };
-    let approval = match cli.approval.as_str() {
-        "on-ask" => radian_permissions::ApprovalPolicy::OnAsk,
-        "always" => radian_permissions::ApprovalPolicy::Always,
-        "never" => radian_permissions::ApprovalPolicy::Never,
-        other => {
-            return Err(format!(
-                "--approval {other:?} is not one of on-ask, always, never"
-            ));
-        }
-    };
+    // ADR 0026 D9: `--approval` and `--yes` (its shorthand) are the command line's choice.
+    // When they are silent, the config's `[permissions] approval` and the journal's last
+    // in-session switch decide; `radian_host::resolve_startup` owns that precedence, the
+    // `full`-tier rules and the backfill record.
+    let cli_approval =
+        match &cli.approval {
+            Some(name) => Some(radian_permissions::ApprovalPolicy::parse(name).ok_or_else(
+                || format!("--approval {name:?} is not one of on-ask, always, never, auto"),
+            )?),
+            None => cli.yes.then_some(radian_permissions::ApprovalPolicy::Auto),
+        };
+    let config_approval = config
+        .permissions
+        .approval
+        .as_deref()
+        .and_then(radian_permissions::ApprovalPolicy::parse);
+    let journal_path = dir.join(format!("{session_id}.jsonl"));
+    let restored_approval = resume
+        .is_some()
+        .then(|| radian_host::restored_approval(&journal_path))
+        .flatten();
+    let startup_approval = radian_host::resolve_startup(
+        cli_approval,
+        config_approval,
+        restored_approval,
+        tier.preset(),
+        resume.is_some(),
+    );
     let profile =
         radian_tui::profile::build_profile(tier, &workspace_path, &cli.allow_shell_command)?
-            .with_approval(approval);
+            .with_approval(startup_approval.policy);
 
     // D4: panics after this point get a log in the diagnostics directory (ADR 0013 decision
     // 4), not next to the session: the session is the authoritative record and must not be
@@ -661,14 +681,9 @@ fn run(
     let live: Arc<dyn EventSink> =
         Arc::new(ProjectionSink::new(tx.clone(), Arc::clone(&projection)));
     // ADR 0023 U7: approvals go through the session's pending queue, so the UI shows one
-    // arrival order and never supersedes a request. `--yes` answers "allow once" without
-    // asking, so it bypasses the queue; rules, the sandbox and the audit record are untouched
-    // by it (same as `agent --yes`).
-    let approvals = if cli.yes {
-        radian_host::ApprovalRouting::Direct(Arc::new(AutoApprover) as Arc<dyn Approver>)
-    } else {
-        radian_host::ApprovalRouting::Queued
-    };
+    // arrival order and never supersedes a request. An `auto` policy (ADR 0026 D9) answers
+    // an `ask` before any approver is consulted, so nothing reaches the queue under it.
+    let approvals = radian_host::ApprovalRouting::Queued;
     // The audit sink needs the journal, which `open_session` creates; the binding is a factory
     // for that reason.
     let audit: Arc<dyn Fn(Arc<SessionJournal>) -> Arc<dyn AuditSink> + Send + Sync> = {
@@ -754,6 +769,18 @@ fn run(
             },
         ))
         .map_err(|error| error.to_string())?;
+    // ADR 0026 D9: an explicit command-line choice is recorded, so a resume restores it. The
+    // driver journals the change at the next turn boundary, revision after the journal's.
+    // The hooks already carry the policy (the profile above), so this is the record only —
+    // no audit line: nothing switched inside the session.
+    if let Some(policy) = startup_approval.backfill {
+        session
+            .config_queue()
+            .push(serde_json::json!({ "approval": policy.as_str() }));
+    }
+    // The status bar mirrors the live policy from the first frame; the switch below is the
+    // only other writer.
+    app.set_auto(startup_approval.policy == radian_permissions::ApprovalPolicy::Auto);
     // A plain run enters the terminal only now: every fallible check above, and the session
     // itself, have already run. (`--pick` entered it before the picker and keeps it here.)
     let (mut guard, mut terminal) = match startup_terminal {
@@ -901,10 +928,18 @@ fn run(
         radian_tui::EntryKind::Notice,
         session.facts().ask_user_line(),
     ));
-    if cli.yes {
+    // ADR 0026 D9: the startup line names the auto policy whichever way it was chosen, and
+    // the warnings say when a config value was ignored or a restore refused.
+    if startup_approval.policy == radian_permissions::ApprovalPolicy::Auto {
         app.entries.push(radian_tui::Entry::new(
             radian_tui::EntryKind::Notice,
-            "--yes: tool calls are approved without asking; deny rules and the sandbox still apply",
+            "auto: tool calls are approved without asking; deny rules and the sandbox still apply",
+        ));
+    }
+    for warning in &startup_approval.warnings {
+        app.entries.push(radian_tui::Entry::new(
+            radian_tui::EntryKind::Notice,
+            warning.clone(),
         ));
     }
     if pick_notice {
@@ -1451,6 +1486,22 @@ impl LoopContext<'_> {
             Effect::Steer(text) => self.command(radian_host::SessionCommand::Steer(text)),
             Effect::Cancel => self.command(radian_host::SessionCommand::Cancel),
             Effect::Quit => Ok(()),
+            // ADR 0026 D9: the in-session switch. The facade applies it to the hooks (which
+            // audit it) and queues the durable `ConfigChanged` for the next turn boundary.
+            Effect::SetApprovalPolicy { on } => self
+                .session
+                .set_approval(if on {
+                    radian_permissions::ApprovalPolicy::Auto
+                } else {
+                    radian_permissions::ApprovalPolicy::OnAsk
+                })
+                .map_err(|refused| {
+                    format!(
+                        "cannot switch auto: {} ({})",
+                        refused.reason,
+                        refused.capability.as_deref().unwrap_or("capability")
+                    )
+                }),
             Effect::AnswerRequest {
                 request_id,
                 response,
@@ -1484,6 +1535,28 @@ impl LoopContext<'_> {
                 let candidates = match &fetch {
                     radian_tui::command::Fetch::MemoryRecords { command, .. } => {
                         memory_record_candidates(self.memory, command)
+                    }
+                    // `/logout`'s candidates: every stored credential (D3).
+                    radian_tui::command::Fetch::LoggedInProviders { .. } => {
+                        match radian_host::list_auth() {
+                            Ok(entries) => entries
+                                .into_iter()
+                                .map(|entry| radian_tui::command::Candidate {
+                                    insert: entry.provider_id,
+                                    description: match entry.kind.as_str() {
+                                        "api_key" if entry.usable => "stored api key".to_owned(),
+                                        "api_key" => "stored (unusable here)".to_owned(),
+                                        other => format!("stored {other} entry"),
+                                    },
+                                })
+                                .collect(),
+                            Err(error) => {
+                                vec![radian_tui::command::Candidate {
+                                    insert: String::new(),
+                                    description: format!("cannot read auth.json: {error}"),
+                                }]
+                            }
+                        }
                     }
                 };
                 self.send(AppInput::CompletionsReady { fetch, candidates });
@@ -1534,6 +1607,42 @@ impl LoopContext<'_> {
             }
             Effect::OpenPicker { query } => {
                 self.send(load_picker(self.host, query));
+                Ok(())
+            }
+            // `/login`'s verification request (ADR 0026 D3): one GET, off the UI thread; the
+            // answer comes back as `Input::LoginVerified`. The key rides in the closure only —
+            // it is never logged here.
+            Effect::LoginVerify {
+                name,
+                protocol,
+                base_url,
+                key,
+            } => {
+                let protocol = radian_host::Protocol::from_kind(protocol)
+                    .unwrap_or(radian_host::Protocol::OpenAiCompatible);
+                let tx = self.tx.clone();
+                self.runtime.spawn(async move {
+                    let result = radian_host::login::verify(protocol, &base_url, &key).await;
+                    let _ = tx.send(UiEvent::Command(AppInput::LoginVerified { name, result }));
+                });
+                Ok(())
+            }
+            // The save: the only place `/login` writes, and it is `auth.json` (D3 — the
+            // config file stays read-only).
+            Effect::LoginSave { name, key, env } => {
+                let env: std::collections::BTreeMap<String, String> = env.into_iter().collect();
+                let result = radian_host::AuthStore::open()
+                    .and_then(|mut store| store.upsert_api_key(&name, &key, &env))
+                    .map_err(|error| error.to_string());
+                self.send(AppInput::LoginSaved { name, result });
+                Ok(())
+            }
+            // `/logout` after the `y`: remove the entry, everything else byte-for-byte (D3).
+            Effect::Logout { provider } => {
+                let result = radian_host::AuthStore::open()
+                    .and_then(|mut store| store.remove(&provider))
+                    .map_err(|error| error.to_string());
+                self.send(AppInput::LogoutDone { provider, result });
                 Ok(())
             }
             // The clipboard write is I/O, so it lives here (ADR 0023 U3); its result is the
@@ -2093,22 +2202,10 @@ fn list_sessions(cli: &Cli) -> Result<(), ListError> {
     Ok(())
 }
 
-/// The `--yes` approver: answers "allow once" without asking. Every decision still goes
-/// through the rules first and is still written to the audit record.
-struct AutoApprover;
-
-impl Approver for AutoApprover {
-    fn decide(
-        &self,
-        _request: ApprovalRequest,
-    ) -> futures_util::future::BoxFuture<'_, Result<ApprovalOutcome, ApprovalError>> {
-        Box::pin(async { Ok(ApprovalOutcome::AllowOnce) })
-    }
-}
-
 /// Writes every decision to the session journal as a `PermissionResolved` (ADR 0006 §5.9).
 /// The append is spawned: `AuditSink::record` is synchronous and runs inside the hook, so it
 /// must not block. The record is audit only (`critical = false`) and is never replayed.
+/// A policy switch (ADR 0026 D9) is journaled the same way, as `ApprovalPolicyChanged`.
 struct JournalAudit {
     journal: Arc<SessionJournal>,
     runtime: tokio::runtime::Handle,
@@ -2117,6 +2214,14 @@ struct JournalAudit {
 impl AuditSink for JournalAudit {
     fn record(&self, event: &PermissionResolved) {
         let event = runtime_event(event);
+        let journal = Arc::clone(&self.journal);
+        self.runtime.spawn(async move {
+            let _ = journal.append_runtime_event(event).await;
+        });
+    }
+
+    fn record_policy_change(&self, policy: radian_permissions::ApprovalPolicy) {
+        let event = radian_permissions::policy_change_event(policy);
         let journal = Arc::clone(&self.journal);
         self.runtime.spawn(async move {
             let _ = journal.append_runtime_event(event).await;

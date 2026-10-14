@@ -871,6 +871,30 @@ fn a_tool_card_paints_the_state_band() {
     }
 }
 
+/// The `/login` wizard renders with the theme's text levels (ADR 0028): the prompt is main
+/// text, the selected choice the emphasis role, the others secondary, and the key hints weak.
+#[test]
+fn the_login_wizard_uses_the_text_hierarchy() {
+    use radian_tui::login::{LoginStep, LoginWizard};
+    let mut app = App::new("m", "s");
+    app.push_modal(radian_tui::app::Modal::Login(Box::new(LoginWizard::new(
+        LoginStep::ChooseProvider { cursor: 0 },
+    ))));
+    let terminal = render(&mut app, 70, 14);
+    let text = screen(&terminal);
+    assert!(text.contains("choose a provider"), "{text}");
+    let prompt = style_of(&terminal, "choose").expect("the prompt");
+    assert_eq!(prompt.fg, app.theme.text.fg, "the prompt is main text");
+    let hint = style_of(&terminal, "(↑/↓,").expect("the key hint");
+    assert_eq!(hint.fg, app.theme.hint.fg, "the key hint is weak");
+    // The first choice row is the selection: the emphasis (accent) role.
+    let selected = style_of(&terminal, ">").expect("the selected row");
+    assert_eq!(
+        selected.fg, app.theme.notice_label.fg,
+        "the selected row is the emphasis"
+    );
+}
+
 /// The question form's key line stays visible when the option list fills the box (same bug the
 /// approval box had: the hint used to be the content's last line, and the clip cut it).
 #[test]

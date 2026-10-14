@@ -6,7 +6,8 @@ mod common;
 use agent_core::{JournalRecord, Message, TranscriptJournal, recover, replay};
 use common::{TempDir, created};
 use radian_session::{
-    EventData, PermissionApprover, PermissionDecision, RuntimeEvent, Session, SessionJournal,
+    ApprovalPolicyValue, EventData, PermissionApprover, PermissionDecision, RuntimeEvent, Session,
+    SessionJournal,
 };
 
 #[tokio::test]
@@ -67,5 +68,46 @@ async fn permission_resolved_round_trips_and_is_not_replayed() {
     ));
     assert_eq!(replay(&records).unwrap(), vec![Message::user("one")]);
     assert_eq!(recover(&records).unwrap(), vec![Message::user("one")]);
+    assert_eq!(session.history().unwrap(), vec![Message::user("one")]);
+}
+
+/// ADR 0026 D9: `ApprovalPolicyChanged` is the audit record of an in-session switch. It
+/// round-trips typed, is `critical = false`, and never enters the transcript fold.
+#[tokio::test]
+async fn approval_policy_changed_round_trips_and_is_not_replayed() {
+    let dir = TempDir::new("approval-policy-event");
+    let path = dir.file("s.jsonl");
+    let journal = SessionJournal::create(&path, "sid-approval", created()).unwrap();
+    let event = RuntimeEvent::ApprovalPolicyChanged {
+        policy: ApprovalPolicyValue::Auto,
+    };
+    assert_eq!(event.name(), "ApprovalPolicyChanged");
+    assert!(!event.critical(), "the switch is audit only");
+    journal.append_runtime_event(event).await.unwrap();
+    journal
+        .append(JournalRecord::Message {
+            index: 0,
+            message: Message::user("one"),
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let session = Session::open(&path).unwrap();
+    let event = session
+        .events()
+        .iter()
+        .find(|event| event.event == "ApprovalPolicyChanged")
+        .expect("the event was accepted");
+    assert!(!event.critical);
+    match &event.data {
+        EventData::ApprovalPolicyChanged { policy } => {
+            assert_eq!(*policy, ApprovalPolicyValue::Auto);
+        }
+        other => panic!("expected a typed ApprovalPolicyChanged, got {other:?}"),
+    }
+    // Audit only: never a transcript record.
+    let records = session.journal_records();
+    assert_eq!(records.len(), 1, "{records:?}");
     assert_eq!(session.history().unwrap(), vec![Message::user("one")]);
 }

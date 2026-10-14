@@ -86,13 +86,18 @@ const PI_ROLES: &[&str] = &[
     "bashMode",
 ];
 
-/// The pi role feeding each Radian role's **foreground** (ADR 0029 decision 3; the mapping
-/// is also documented in `crates/radian-tui/README.md`). Roles not listed here keep the
-/// built-in foreground unless `[tui.colors]` overrides them.
-/// The pi role feeding a Radian role's **foreground**. `None` for the roles pi styles by
+/// The pi role feeding a Radian role's **foreground** (ADR 0029 decision 3; the mapping is
+/// also documented in `crates/radian-tui/README.md`). `None` for the roles pi styles by
 /// background only — [`Role::Selection`] keeps whatever foreground the text under it has,
 /// and a theme file must not force one on it (the renderer patches the selection over the
 /// text's own style).
+/// The pi role feeding a Radian role's foreground — exposed so `theme.rs`'s mapping test can
+/// pin it without re-implementing the table.
+#[cfg(test)]
+pub(crate) fn fg_source_for_test(role: Role) -> Option<&'static str> {
+    fg_source(role)
+}
+
 fn fg_source(role: Role) -> Option<&'static str> {
     match role {
         Role::Reasoning => Some("thinkingText"),
@@ -125,6 +130,8 @@ fn fg_source(role: Role) -> Option<&'static str> {
         // The main text level itself (Pi's `text`): the mapping is used by the file themes;
         // the built-ins take pi's values directly.
         Role::Text => Some("text"),
+        // pi has no auto role; the warning role is the closest "this needs attention" color.
+        Role::Auto => Some("warning"),
     }
 }
 

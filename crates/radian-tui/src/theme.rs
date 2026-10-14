@@ -76,6 +76,8 @@ pub enum Role {
     Hint,
     Completion,
     Find,
+    /// The status bar's `AUTO` marker (ADR 0026 D9): the session auto-approves.
+    Auto,
     Selection,
     ToolPendingBg,
     ToolSuccessBg,
@@ -86,7 +88,7 @@ pub enum Role {
 }
 
 impl Role {
-    pub const ALL: [Role; 29] = [
+    pub const ALL: [Role; 30] = [
         Role::Reasoning,
         Role::Interrupted,
         Role::User,
@@ -109,6 +111,7 @@ impl Role {
         Role::Hint,
         Role::Completion,
         Role::Find,
+        Role::Auto,
         Role::Selection,
         Role::ToolPendingBg,
         Role::ToolSuccessBg,
@@ -143,6 +146,7 @@ impl Role {
             Role::Hint => "hint",
             Role::Completion => "completion",
             Role::Find => "find",
+            Role::Auto => "auto",
             Role::Selection => "selection",
             Role::ToolPendingBg => "tool_pending_bg",
             Role::ToolSuccessBg => "tool_success_bg",
@@ -181,6 +185,7 @@ impl Role {
             Role::Hint => &mut theme.hint,
             Role::Completion => &mut theme.completion,
             Role::Find => &mut theme.find,
+            Role::Auto => &mut theme.auto,
             Role::Selection => &mut theme.selection,
             Role::ToolPendingBg => &mut theme.tool_pending_bg,
             Role::ToolSuccessBg => &mut theme.tool_success_bg,
@@ -222,6 +227,8 @@ pub struct Theme {
     pub completion: Style,
     /// The find match position in the status bar (Phase 5).
     pub find: Style,
+    /// The status bar's `AUTO` marker (ADR 0026 D9): the session auto-approves.
+    pub auto: Style,
     /// A transcript selection (mouse drag). pi's role map: `selectedBg`.
     pub selection: Style,
     /// A tool card's background by state (running / success / failure). pi's role map:
@@ -385,6 +392,9 @@ impl Theme {
             hint: dim,
             completion: dim,
             find: spec(pi::VIOLET, Modifier::empty(), truecolor),
+            // ADR 0026 D9: the status bar's AUTO marker, reversed so it reads at a glance
+            // as "this session behaves differently"; the warning hue underneath.
+            auto: spec(pi::YELLOW, Modifier::REVERSED, truecolor),
             selection: spec_bg(pi::SELECTION_BG, Modifier::empty(), truecolor),
             tool_pending_bg: spec_bg(pi::TOOL_PENDING_BG, Modifier::empty(), truecolor),
             tool_success_bg: spec_bg(pi::TOOL_SUCCESS_BG, Modifier::empty(), truecolor),
@@ -431,6 +441,9 @@ impl Theme {
             hint: dim,
             completion: dim,
             find: spec(pi::VIOLET, Modifier::empty(), truecolor),
+            // ADR 0026 D9: the status bar's AUTO marker, reversed so it reads at a glance
+            // as "this session behaves differently"; the warning hue underneath.
+            auto: spec(pi::YELLOW, Modifier::REVERSED, truecolor),
             selection: spec_bg(pi::SELECTION_BG, Modifier::empty(), truecolor),
             tool_pending_bg: spec_bg(pi::TOOL_PENDING_BG, Modifier::empty(), truecolor),
             tool_success_bg: spec_bg(pi::TOOL_SUCCESS_BG, Modifier::empty(), truecolor),
@@ -465,6 +478,8 @@ impl Theme {
             hint: style(None, Modifier::DIM),
             completion: style(None, Modifier::DIM),
             find: style(None, Modifier::BOLD),
+            // ADR 0026 D9: the mono theme has no color, so `AUTO` stands out by reversal.
+            auto: style(None, Modifier::REVERSED),
             // No color at all: a selection is the reversed video, as the terminal itself
             // would draw it, and the tool states are told apart by modifiers.
             selection: style(None, Modifier::REVERSED),
@@ -502,7 +517,7 @@ impl Theme {
     }
 
     /// Every style this theme defines, for the "mono has no colors" test.
-    pub fn styles(&self) -> [Style; 29] {
+    pub fn styles(&self) -> [Style; 30] {
         [
             self.reasoning,
             self.interrupted,
@@ -533,6 +548,7 @@ impl Theme {
             self.notice_label,
             self.notice_body,
             self.text,
+            self.auto,
         ]
     }
 }
@@ -592,6 +608,27 @@ mod tests {
             assert_ne!(style.fg, dark.text.fg, "{name} is not the main level");
             assert_ne!(style.fg, dark.tool_result.fg, "{name} is not the secondary");
         }
+    }
+
+    /// ADR 0026 D9's `AUTO` marker keeps its reversal in all three built-ins (it is the
+    /// "this session behaves differently" signal); the file mapping gives it pi's `warning`.
+    #[test]
+    fn the_auto_marker_is_reversed_in_every_builtin() {
+        for theme in [Theme::dark(), Theme::light(), Theme::mono()] {
+            assert!(
+                theme.auto.add_modifier.contains(Modifier::REVERSED),
+                "{:?}",
+                theme.name
+            );
+        }
+        assert_eq!(
+            Theme::dark().auto.fg,
+            spec(pi_dark::YELLOW, Modifier::REVERSED, true).fg
+        );
+        assert_eq!(
+            crate::theme::file::fg_source_for_test(Role::Auto),
+            Some("warning")
+        );
     }
 
     /// The ui-r1 readability concern (`DarkGray` was too dark on a dark background) is now

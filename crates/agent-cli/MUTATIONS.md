@@ -282,3 +282,22 @@ Base `23149f4` · 就地变异，每个变异 `git checkout -- <file>` 还原、
 | M23 | 配置里的 `model.api_key` 被静默忽略（`("api_key", _) => {}`） | `radian-host::config::tests::model_api_key_is_refused_with_an_auth_json_pointer`、`cli::a_config_with_model_api_key_is_refused` | ✅ failed（错误变成「没有凭据」，不再点名 `model.api_key`） |
 | M24 | `opencode-go` 漏掉 `x-opencode-session` | `cli::opencode_go_sends_the_session_header_byte_for_byte` | ✅ failed（请求头为 `None`） |
 | M25 | 非通用描述符接受 `--base-url`（把检查短路） | `cli::a_non_generic_descriptor_refuses_base_url_and_header` | ✅ failed（退出码 0） |
+
+## Slice: `agent login` / `agent logout`,具名 provider(ADR 0026 D3/D10)
+
+Base `d3b5163` · 一次性 worktree `/tmp/login-mut` · 每个变异 `git checkout -- .` 还原后跑对应
+测试,`git status --short` 为空。L1(TUI 侧)见 `crates/radian-tui/MUTATIONS.md`。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| L1 | (TUI)向导明文渲染 key | key 输入不回显 | `radian-tui pty::pty_login_custom_walk_saves_without_showing_the_key` FAILED |
+| L2 | CLI 的 key 提示不关 echo(termios 原样) | key 输入不回显(粘贴同) | `cli::pty_agent_login_custom_hides_the_key_and_restores_echo` FAILED("the key leaked") |
+| L3 | 具名 provider 查 key 用通用描述符的槽位(D10 之前的行为) | 每个自定义端点有自己的 key 位 | `cli::named_providers_keep_separate_keys_and_config_wins_over_auth` FAILED;`radian-host provider::a_named_provider_resolves_from_config…` FAILED |
+| L4 | 同名时 auth.json 压过配置 | 配置优先 + 警告 | `radian-host provider::a_named_provider_resolves…`、`anthropic_kind…`、`a_named_route…`、`auth_env_is_the_fallback…` FAILED;`cli::named_providers…`(config-wins 断言)FAILED |
+| L5 | 验证请求的 401/403 报错把 key 拼进文本 | 错误文本无 key(ADR 0013) | `radian-host login::a_200_verifies_and_401_names_the_key_problem_without_the_key` FAILED |
+| L6 | `/logout` 清空整个 auth.json | 只删一个条目,其他原样 | `radian-tui pty::pty_login_failed_verification_can_save_and_logout_removes_only_one` FAILED("the sibling survives") |
+| L7 | CLI 任何路径都不恢复 echo(Drop 与显式调用都去掉) | Ctrl-C 与正常退出都恢复回显 | `cli::pty_agent_login_ctrl_c_during_the_key_prompt_restores_echo` FAILED(icanon 断言)、`pty_agent_login_custom…` FAILED |
+
+7/7 抓住。**诚实补充(L7 第一轮)**:只把 Drop 里的恢复去掉是等价变异——`read_hidden` 在成功
+与 Ctrl-C 路径上都**显式**调用 `guard.restore()`,Drop 只是兜底,测试照样过(假通过)。改成
+"所有路径都不恢复"(即 brief 说的"CLI 不恢复回显")后才被抓住。

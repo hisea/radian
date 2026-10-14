@@ -389,3 +389,115 @@ async fn observing_on_an_unset_source_stays_non_human() {
     ));
     assert_eq!(approver.calls(), 0);
 }
+
+// ---------- ADR 0026 D9: the `auto` approval policy ----------
+
+/// `Auto` answers every `ask` with "allow" without reaching the approver — the same
+/// observable behavior `--yes` has always had: only the question is removed.
+#[tokio::test]
+async fn auto_answers_an_ask_without_the_approver() {
+    let dir = TempDir::new("auto-ask");
+    // No rules: every call is `ask`, so `Auto` is the only thing that can allow it.
+    let profile = Profile::custom(
+        Preset::WorkspaceWrite,
+        ApprovalPolicy::Auto,
+        dir.path(),
+        Vec::new(),
+    )
+    .unwrap();
+    let audit = Arc::new(RecordingAudit::default());
+    let approver = ScriptedApprover::scripted(vec![]);
+    let hooks = make_hooks(profile, Arc::clone(&approver), Arc::clone(&audit));
+    hooks.set_turn_source(Some(InputSource::User));
+
+    assert_eq!(
+        hooks.approval(),
+        ApprovalPolicy::Auto,
+        "the profile seeds the live policy"
+    );
+    assert!(matches!(
+        decide(&hooks, &ctx(), &shell()).await.unwrap(),
+        ToolDecision::Allow
+    ));
+    assert_eq!(approver.calls(), 0, "auto must not ask");
+    // The audit record says the policy allowed it, not a human answer.
+    let events = audit.events();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].decision, ResolvedDecision::Allow);
+    assert_eq!(events[0].approver, AuditApprover::Policy);
+}
+
+/// `Auto` only removes the question: a `deny` rule still denies, and the denial is audited
+/// as a policy denial exactly as without `Auto`.
+#[tokio::test]
+async fn auto_still_honors_deny_rules() {
+    let dir = TempDir::new("auto-deny");
+    let profile = Profile::custom(
+        Preset::WorkspaceWrite,
+        ApprovalPolicy::Auto,
+        dir.path(),
+        vec![Rule::new(
+            ToolMatcher::Any,
+            ResourceMatcher::Any,
+            Action::Deny,
+        )],
+    )
+    .unwrap();
+    let approver = ScriptedApprover::scripted(vec![]);
+    let hooks = make_hooks(profile, approver, Arc::new(RecordingAudit::default()));
+    hooks.set_turn_source(Some(InputSource::User));
+
+    let decision = decide(&hooks, &ctx(), &shell()).await.unwrap();
+    let ToolDecision::Deny { reason } = decision else {
+        panic!("a deny rule must deny under auto, got {decision:?}")
+    };
+    assert!(!reason.is_empty());
+}
+
+/// The in-session switch (ADR 0026 D9): `set_approval` changes how the very next call is
+/// resolved, both ways, and writes one audit record per switch.
+#[tokio::test]
+async fn set_approval_switches_in_place_and_audits_each_switch() {
+    let dir = TempDir::new("auto-switch");
+    let audit = Arc::new(RecordingAudit::default());
+    let approver = ScriptedApprover::scripted(vec![ApprovalOutcome::AllowOnce]);
+    let hooks = make_hooks(
+        asking_profile(&dir),
+        Arc::clone(&approver),
+        Arc::clone(&audit),
+    );
+    hooks.set_turn_source(Some(InputSource::User));
+    let cx = ctx();
+
+    // On: the next call is allowed without asking.
+    hooks.set_approval(ApprovalPolicy::Auto);
+    assert!(matches!(
+        decide(&hooks, &cx, &shell()).await.unwrap(),
+        ToolDecision::Allow
+    ));
+    assert_eq!(approver.calls(), 0);
+
+    // Off: the same call asks again.
+    hooks.set_approval(ApprovalPolicy::OnAsk);
+    assert!(matches!(
+        decide(&hooks, &cx, &shell()).await.unwrap(),
+        ToolDecision::Allow
+    ));
+    assert_eq!(approver.calls(), 1, "on-ask must ask again");
+
+    assert_eq!(
+        audit.policy_changes(),
+        vec![ApprovalPolicy::Auto, ApprovalPolicy::OnAsk],
+        "one audit record per switch"
+    );
+}
+
+/// The `--approval` / config names (ADR 0012, ADR 0026 D9) round-trip.
+#[test]
+fn approval_policy_names_round_trip() {
+    for name in ["on-ask", "never", "always", "auto"] {
+        assert_eq!(ApprovalPolicy::parse(name).unwrap().as_str(), name);
+    }
+    assert_eq!(ApprovalPolicy::parse("yolo"), None);
+    assert_eq!(ApprovalPolicy::parse(""), None);
+}

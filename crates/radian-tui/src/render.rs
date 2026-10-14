@@ -16,6 +16,7 @@ use crate::app::{
     App, Entry, EntryKind, Modal, TurnState, budget_status_text, mcp_text, usage_text,
 };
 use crate::blocks::{self, BodyLine, ReasoningMode};
+use crate::login::LoginWizard;
 use crate::question::QuestionForm;
 use crate::theme::Theme;
 
@@ -526,6 +527,107 @@ const INPUT_PROMPT: &str = "> ";
 const INPUT_HINT: &str = "(type a message, Enter to send, Ctrl-J for a new line)";
 
 /// The input area's height: one rule above, the text rows, one rule below.
+/// The `/login` box's height (rows in `login_lines`, plus the two border rows).
+const LOGIN_HEIGHT: u16 = 8;
+
+/// The wizard's lines, styled with the app theme's levels (ADR 0028): the prompt is main
+/// text, the selected choice is the emphasis (accent), the rest is secondary, and the
+/// key hints are weak. **The key is never among them** (D3): a filled field renders one `*`
+/// per character, an empty one its hint.
+fn login_lines(wizard: &LoginWizard, theme: &Theme, width: usize) -> Vec<Line<'static>> {
+    use crate::login::LoginStep;
+    let _ = width;
+    let prompt = |text: &str| Line::from(Span::styled(text.to_owned(), theme.text));
+    let value = |text: String| Line::from(Span::styled(text, theme.text));
+    let hint = |text: &'static str| Span::styled(text.to_owned(), theme.hint);
+    let mut lines: Vec<Line> = Vec::new();
+    match &wizard.step {
+        LoginStep::ChooseProvider { cursor } => {
+            lines.push(Line::from(vec![
+                Span::styled("choose a provider ".to_owned(), theme.text),
+                hint("(↑/↓, Enter)"),
+                Span::styled(":".to_owned(), theme.text),
+            ]));
+            for (index, (id, description)) in LoginWizard::choices().into_iter().enumerate() {
+                let marker = if index == *cursor { "> " } else { "   " };
+                let style = if index == *cursor {
+                    theme.notice_label
+                } else {
+                    theme.notice_body
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!(" {marker} "), style),
+                    Span::styled(format!("{id:<20}"), style),
+                    Span::styled(description, theme.hint),
+                ]));
+            }
+        }
+        LoginStep::CustomName => {
+            lines.push(prompt("provider name (also its auth.json entry):"));
+            lines.push(value(format!(" {}", wizard.name)));
+        }
+        LoginStep::CustomProtocol { cursor } => {
+            lines.push(Line::from(vec![
+                Span::styled("wire protocol ".to_owned(), theme.text),
+                hint("(↑/↓, Enter)"),
+                Span::styled(":".to_owned(), theme.text),
+            ]));
+            for (index, kind) in crate::login::PROTOCOLS.iter().enumerate() {
+                let marker = if index == *cursor { "> " } else { "   " };
+                let style = if index == *cursor {
+                    theme.notice_label
+                } else {
+                    theme.notice_body
+                };
+                lines.push(Line::from(Span::styled(format!(" {marker} {kind}"), style)));
+            }
+        }
+        LoginStep::CustomBaseUrl => {
+            lines.push(prompt("base URL:"));
+            lines.push(value(format!(" {}", wizard.base_url)));
+        }
+        LoginStep::KeyInput => {
+            lines.push(prompt("API key (hidden; paste works too):"));
+            let masked = crate::login::LoginWizard::masked(&wizard.key);
+            lines.push(value(if masked.is_empty() {
+                String::new()
+            } else {
+                masked
+            }));
+        }
+        LoginStep::Verifying => {
+            lines.push(Line::from(Span::styled(
+                format!("verifying {} … ", wizard.provider_name()),
+                theme.text,
+            )));
+            lines
+                .last_mut()
+                .expect("just pushed")
+                .spans
+                .push(hint("(Esc cancels)"));
+        }
+        LoginStep::VerifyFailed { reason } => {
+            lines.push(Line::from(Span::styled(
+                format!("verification failed: {reason}"),
+                theme.turn_cancelled,
+            )));
+            lines.push(Line::from(vec![
+                Span::styled("save anyway? ".to_owned(), theme.text),
+                Span::styled("[y] save   ".to_owned(), theme.hint),
+                Span::styled("[n/Esc] cancel".to_owned(), theme.hint),
+            ]));
+        }
+    }
+    if let Some(error) = &wizard.error {
+        lines.push(Line::from(Span::styled(
+            error.clone(),
+            theme.turn_cancelled,
+        )));
+    }
+    lines
+}
+
+/// The error style for wizard problems (a note-colored line; no new theme role).
 fn input_height(app: &App, width: usize) -> u16 {
     let inner = width.saturating_sub(INPUT_PROMPT.len()).max(1);
     let rows = crate::composer::rows(&app.input.text(), inner).len();
@@ -534,9 +636,12 @@ fn input_height(app: &App, width: usize) -> u16 {
 
 /// The approval prompt's key line. It is drawn on its **own** row under the body, never part
 /// of the wrapped text, so a long command can never push the keys out of the box (owner
-/// acceptance, 2026-10-13). `[Y] auto for this session` (ADR 0026 D9) will join this line; it
-/// is deliberately not implemented here.
-pub const APPROVAL_KEYS: &str = "[y] allow once   [a] always this session   [n] deny";
+/// acceptance, 2026-10-13). The auto key is a constant like the line itself: if the owner
+/// changes the key, this string and [`crate::app::Input::ApprovalAuto`]'s `KeyCode` are the
+/// only two places (ADR 0026 D9, correction 2026-10-13: the key is `!`; `Y` stays
+/// `y` = allow once).
+pub const APPROVAL_KEYS: &str =
+    "[y] allow once   [a] always this session   [n] deny   [!] auto for this session";
 
 /// The approval prompt's body: everything above the key line. The **resolved** resource is what
 /// is shown: `a/../secret` must not read as if it stayed under `a/` (the permission layer
@@ -764,6 +869,14 @@ fn status_segments(app: &App) -> Vec<Segment> {
             style: app.theme.tier,
         });
     }
+    // ADR 0026 D9: while auto is on the status bar says so, prominently — the session is
+    // approving tool calls without asking.
+    if app.auto {
+        segments.push(Segment {
+            text: "AUTO".to_string(),
+            style: app.theme.auto,
+        });
+    }
     // ADR 0023 U7: how many requests are waiting. Shown only when there is one, so an idle
     // status bar does not carry a constant `0 pending`.
     if app.pending > 0 {
@@ -864,6 +977,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             approval_cap(area.height as usize, completion.len()),
         ),
         Some(Modal::Question(form)) => question_height(form, area.width as usize),
+        Some(Modal::Login(_)) => LOGIN_HEIGHT,
+        // The `/logout` confirmation is a two-line box like the `/memory` one.
+        Some(Modal::ConfirmLogout(_)) => 4,
         _ => input_height(app, area.width as usize),
     };
     // The `@` completion list sits just above the input box (and never over an approval
@@ -1018,6 +1134,32 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 Paragraph::new(Line::from(clip_columns(QUESTION_KEYS, width))),
                 rows[1],
             );
+        }
+        Some(Modal::Login(wizard)) => {
+            let lines = login_lines(wizard, &app.theme, chunks[2].width as usize);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(app.theme.approval_border)
+                .title(" /login ");
+            frame.render_widget(&block, chunks[2]);
+            let inner = block.inner(chunks[2]);
+            frame.render_widget(Paragraph::new(lines), inner);
+        }
+        Some(Modal::ConfirmLogout(provider)) => {
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(app.theme.approval_border)
+                .title(" /logout ");
+            frame.render_widget(&block, chunks[2]);
+            let inner = block.inner(chunks[2]);
+            let lines = vec![
+                Line::from(format!("remove the stored credential for `{provider}`?")),
+                Line::from(Span::styled(
+                    "[y] remove   [n/Esc] keep",
+                    app.theme.approval_border,
+                )),
+            ];
+            frame.render_widget(Paragraph::new(lines), inner);
         }
         _ if app.find_state().is_some() => {
             // The find box replaces the input box's line; the input text itself is untouched

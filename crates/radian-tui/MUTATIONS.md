@@ -576,6 +576,27 @@ Base `d76df67` · 就地变异，每个变异 `git checkout -- crates/radian-tui
 "通过"是**假通过**；改成 `return 14` 后才真正抓住。这与上一节 U3/U4 的教训相同：patch 必须
 `assert old in s`，并且要确认它真的改变了行为。
 
+## Slice: `/login` / `/logout`(ADR 0026 D3/D10)
+
+Base `d3b5163` · 一次性 worktree `/tmp/login-mut` · 每个变异 `git checkout -- .` 还原后跑对应
+测试,`git status --short` 为空。编号 L1–L7(与 agent-cli 的 MUTATIONS.md 同一张表)。
+
+| # | 变异 | 抓住它的测试 |
+|---|---|---|
+| L1 | 向导把 key 明文渲染(`wizard.key.clone()` 代替掩码) | `pty.rs::pty_login_custom_walk_saves_without_showing_the_key`(等 15 个掩码列出现的状态门 + 屏幕无明文;**诚实补充**:第一版测试只用 `pump()` 后的单次断言,逐字符 diff 渲染让明文连不成子串,变异"通过"是假通过;加状态门后才真正抓住) |
+/`logout` 的确认与删除由 L6 覆盖(见 agent-cli 表)。
+## ADR 0026 D9：`!` 自动批准键与 `/auto`（2026-10-13，owner 更正：键是 `!`，`Y` 保持 `y`）
+
+Base `43ddbff` · 一次性检出 `/tmp/auto-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+`cargo test -p radian-tui --test auto <test>`，变异后 `git checkout --` 还原。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| TM-A1 | `Y` 映射到 `Input::ApprovalAuto`（代替保持 `y`） | `Y` 永远只是 allow once，不开 auto | `auto.rs::y_stays_allow_once_and_never_enables_auto` FAILED |
+
+1/1 抓住。`!` 本身的流程由 `auto.rs::the_auto_key_approves_this_request_and_turns_auto_on`
+与 pty 层 `pty_auto_key_approves_once_and_enables_auto` 钉住；`/auto on|off` 与别名、用法
+报错各有纯测试，未再单独变异（同一条代码路径 `Outcome::AutoToggle` 被 4 个用例共享）。
 ## Slice: transcript selection and copy (mouse drag, OSC 52)
 
 Base `c8e1a35→`（本片 HEAD）· 一次性 worktree `/tmp/tui-mut-select`（`git worktree add` 自本片

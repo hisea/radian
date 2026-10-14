@@ -1901,7 +1901,7 @@ async fn pty_yes_runs_an_ask_without_a_prompt_and_still_audits_it() {
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
     assert!(
         pty.screen()
-            .contains("--yes: tool calls are approved without asking"),
+            .contains("auto: tool calls are approved without asking"),
         "the startup must say approvals are off:\n{}",
         pty.screen()
     );
@@ -5888,6 +5888,568 @@ async fn pty_a_theme_file_colors_the_user_line() {
         }
     }
     assert!(matched > 0, "the probe was not found on screen");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+// ---------- /login and /logout (ADR 0026 D3) ----------
+
+/// A small HTTP server that answers every connection with `status` until the process ends
+/// (the wizard's verification fires whenever the user submits the key).
+fn login_verify_server(status_line: &'static str) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut stream = stream;
+            use std::io::{Read, Write};
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+            let body = "{}";
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+        }
+    });
+    format!("http://{addr}")
+}
+
+/// Pre-seeds `~/.radian/credentials/auth.json` (0700 dir, 0600 file) with one unrelated
+/// entry, so the tests can prove it survives a login and a logout.
+fn seed_auth_json(home: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = home.join(".radian/credentials");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = dir.join("auth.json");
+    std::fs::write(
+        &path,
+        r#"{"existing": {"type": "api_key", "key": "$EXISTING_KEY"}}"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    path
+}
+
+fn auth_json_mode(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+/// The full custom login over a real pty: name → protocol → base URL → key, the verification
+/// request answered by a local server, the save, and the D3 "what next" line. **The key must
+/// never appear in any byte the app put on screen** — typed or after the fact — and the
+/// pre-existing `auth.json` entry must survive (only `corp` is added, the file still 0600).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_login_custom_walk_saves_without_showing_the_key() {
+    let _serial = pty_guard();
+    const KEY: &str = "sk-PTY-SECRET-42";
+    let verify = login_verify_server("200 OK");
+    let dir = TempDir::new("login");
+
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "login",
+        ],
+        30,
+        110,
+    );
+    // The app's HOME is the pty's own temp dir; the credentials live there.
+    let auth_path = seed_auth_json(pty.home.path());
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+
+    pty.send(b"/login custom\r");
+    assert!(pty.wait_for_screen("provider name", 5), "{}", pty.screen());
+    pty.send(b"corp\r");
+    assert!(pty.wait_for_screen("wire protocol", 5), "{}", pty.screen());
+    pty.send(b"\r"); // openai-compatible (the highlighted row)
+    assert!(pty.wait_for_screen("base URL", 5), "{}", pty.screen());
+    pty.send(format!("{verify}\r").as_bytes());
+    assert!(pty.wait_for_screen("API key", 5), "{}", pty.screen());
+    // Type the key **without submitting** and look at the screen: the field must be masked
+    // mid-typing, not only after the wizard closes (a plaintext echo is exactly what D3
+    // forbids — this is where a `key.clone()` render or an echo-on terminal would show).
+    for c in KEY.chars() {
+        pty.send(&[c as u8]);
+    }
+    // A state gate: the fully typed field is 15 masked columns wide. When the render leaks
+    // the plaintext the stars never appear — and the key does, which is what the next
+    // assertion is for.
+    let stars = "*".repeat(KEY.len());
+    assert!(
+        pty.wait_until(5, |screen| screen.contains(&stars)),
+        "the masked field never filled:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains(KEY),
+        "the key echoed onto the screen while typing:\n{}",
+        pty.screen()
+    );
+    pty.send(b"\r");
+    assert!(
+        pty.wait_for_screen("saved the key for `corp`", 10),
+        "{}",
+        pty.screen()
+    );
+
+    // The key is nowhere on screen, and never was in the byte stream.
+    pty.pump();
+    let raw_bytes = pty.raw();
+    let raw = String::from_utf8_lossy(&raw_bytes);
+    assert!(!raw.contains(KEY), "the key leaked into the pty stream");
+    assert!(
+        !pty.screen().contains(KEY),
+        "the key leaked onto the screen:\n{}",
+        pty.screen()
+    );
+
+    // The record landed in auth.json, next to the untouched entry, still 0600.
+    let saved = std::fs::read_to_string(&auth_path).unwrap();
+    let saved: serde_json::Value = serde_json::from_str(&saved).unwrap();
+    assert_eq!(saved["corp"]["type"], "api_key");
+    assert_eq!(saved["corp"]["key"], KEY);
+    assert_eq!(
+        saved["corp"]["env"]["RADIAN_BASE_URL"], verify,
+        "the custom endpoint rides in the entry's env (D10)"
+    );
+    assert_eq!(
+        saved["existing"]["type"], "api_key",
+        "the pre-existing entry survives"
+    );
+    assert_eq!(auth_json_mode(&auth_path), 0o600);
+
+    // The key reached neither the session journal nor any notice (D3: a key must never be
+    // persisted outside auth.json).
+    for entry in std::fs::read_dir(dir.path()).unwrap().flatten() {
+        if entry.path().extension().is_some_and(|ext| ext == "jsonl") {
+            let text = std::fs::read_to_string(entry.path()).unwrap();
+            assert!(!text.contains(KEY), "the key leaked into the journal");
+        }
+    }
+
+    // The D3 "what next" line names the switch.
+    assert!(pty.screen().contains("/model corp/"), "{}", pty.screen());
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// The verification failing does not block the save: the wizard shows the reason and `y`
+/// stores the key anyway (D3). The same run covers `/logout`: the confirmation, the removal,
+/// and the untouched sibling entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_login_failed_verification_can_save_and_logout_removes_only_one() {
+    let _serial = pty_guard();
+    const KEY: &str = "sk-SECOND-SECRET-7";
+    // No server on this port: the verification cannot connect (D3's failure path).
+    let dead = "http://127.0.0.1:9/v1";
+    let dir = TempDir::new("login-fail");
+
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "login-fail",
+        ],
+        30,
+        110,
+    );
+    let auth_path = seed_auth_json(pty.home.path());
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+
+    pty.send(b"/login custom\r");
+    assert!(pty.wait_for_screen("provider name", 5), "{}", pty.screen());
+    pty.send(b"corp\r");
+    assert!(pty.wait_for_screen("wire protocol", 5), "{}", pty.screen());
+    pty.send(b"\r");
+    assert!(pty.wait_for_screen("base URL", 5), "{}", pty.screen());
+    pty.send(format!("{dead}\r").as_bytes());
+    assert!(pty.wait_for_screen("API key", 5), "{}", pty.screen());
+    pty.send(format!("{KEY}\r").as_bytes());
+    assert!(
+        pty.wait_for_screen("verification failed", 15),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"y"); // save anyway
+    assert!(
+        pty.wait_for_screen("saved the key for `corp`", 10),
+        "{}",
+        pty.screen()
+    );
+
+    // `/logout corp`: confirm with `y`; the removal names the provider, the other entry and
+    // the file mode survive.
+    pty.send(b"/logout corp\r");
+    assert!(
+        pty.wait_for_screen("remove the stored credential for `corp`?", 5),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"y");
+    assert!(
+        pty.wait_for_screen("removed the stored credential for `corp`", 5),
+        "{}",
+        pty.screen()
+    );
+
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&auth_path).unwrap()).unwrap();
+    assert!(saved.get("corp").is_none(), "corp was removed: {saved}");
+    assert_eq!(saved["existing"]["type"], "api_key", "the sibling survives");
+    assert_eq!(auth_json_mode(&auth_path), 0o600);
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// `/logout` with `n` keeps the credential.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_logout_with_n_keeps_the_entry() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("logout-keep");
+
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "logout-keep",
+        ],
+        30,
+        110,
+    );
+    let auth_path = seed_auth_json(pty.home.path());
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"/logout existing\r");
+    assert!(
+        pty.wait_for_screen("remove the stored credential for `existing`?", 5),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"n");
+    assert!(
+        pty.wait_for_screen("kept `existing`", 5),
+        "{}",
+        pty.screen()
+    );
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&auth_path).unwrap()).unwrap();
+    assert_eq!(saved["existing"]["type"], "api_key", "kept means kept");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+// ---------- ADR 0026 D9: the in-session auto-approval switch ----------
+
+/// The `!` key end to end: it approves the pending request once **and** turns auto on for
+/// the session, so the next ask never prompts; the status bar says `AUTO`, and both the
+/// audit record of the switch and the durable `ConfigChanged` land in the journal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_auto_key_approves_once_and_enables_auto() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("auto-key");
+    let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "write", r#"{"path":"a.txt","content":"first"}"#),
+        tool_reply("call_2", "write", r#"{"path":"b.txt","content":"second"}"#),
+        text_reply("SWITCH-DONE"),
+    ])
+    .await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "auto-key",
+            "--workspace",
+            ws.to_str().unwrap(),
+            // `always` asks on every call, so the second write proves the switch took.
+            "--approval",
+            "always",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"please write\r");
+    assert!(
+        pty.wait_for_screen("approve tool call?", 20),
+        "no approval prompt:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("AUTO"),
+        "auto must be off before the switch:\n{}",
+        pty.screen()
+    );
+
+    // One press: approve this request and enable auto for the rest of the session.
+    pty.send(b"!");
+    assert!(
+        pty.wait_for_screen("SWITCH-DONE", 30),
+        "the turn did not finish after `!`:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.screen().contains("AUTO"),
+        "the status bar must say AUTO:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("approve tool call?"),
+        "the second write must not prompt under auto:\n{}",
+        pty.screen()
+    );
+    assert!(
+        ws.join("a.txt").exists() && ws.join("b.txt").exists(),
+        "both writes must have run: {}",
+        pty.screen()
+    );
+
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+    let session = std::fs::read_to_string(sessions.join("auto-key.jsonl")).unwrap();
+    assert!(
+        session.contains("ApprovalPolicyChanged") && session.contains("\"policy\":\"auto\""),
+        "the switch must be audited: {session}"
+    );
+    assert!(
+        session.contains("ConfigChanged") && session.contains("\"approval\":\"auto\""),
+        "the durable record must be journaled: {session}"
+    );
+}
+
+/// A journaled in-session switch restores auto on resume under `workspace` (D9).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_resume_restores_auto_on_workspace() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("auto-resume");
+    let path = dir.path().join("auto-resume.jsonl");
+    let journal = radian_session::SessionJournal::create(
+        &path,
+        "auto-resume",
+        radian_session::SessionCreatedData::new("/tmp", json!({})),
+    )
+    .expect("create the session file");
+    use agent_core::TranscriptJournal;
+    journal
+        .append(agent_core::JournalRecord::Message {
+            index: 0,
+            message: agent_core::Message::user("older turn"),
+        })
+        .await
+        .unwrap();
+    // What an in-session `/auto on` writes (the driver journals it at the turn boundary).
+    journal
+        .append_runtime_event(radian_session::RuntimeEvent::ConfigChanged {
+            revision: 1,
+            change: json!({"approval": "auto"}),
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--resume",
+            "auto-resume",
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("AUTO", 10),
+        "the resumed session must show AUTO:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.screen()
+            .contains("auto: tool calls are approved without asking"),
+        "the startup line must name the restored policy:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// `full` never restores auto (D9): the startup says how to get it back, and the status bar
+/// does not show AUTO.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_resume_does_not_restore_auto_on_full_and_hints() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("auto-resume-full");
+    let path = dir.path().join("auto-full.jsonl");
+    let journal = radian_session::SessionJournal::create(
+        &path,
+        "auto-full",
+        radian_session::SessionCreatedData::new("/tmp", json!({})),
+    )
+    .expect("create the session file");
+    journal
+        .append_runtime_event(radian_session::RuntimeEvent::ConfigChanged {
+            revision: 1,
+            change: json!({"approval": "auto"}),
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--resume",
+            "auto-full",
+            "--profile",
+            "full",
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen(
+            "auto was on in the previous run; run `/auto on` to re-enable",
+            10
+        ),
+        "the full-tier hint is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("AUTO"),
+        "full must not restore auto:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// Config `[permissions] approval = "auto"` is ignored under `full`, with a warning (D9).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_config_auto_is_ignored_under_full_with_a_warning() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("auto-config-full");
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "schema_version = 1\n[permissions]\napproval = \"auto\"\n",
+    )
+    .unwrap();
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--config",
+            config.to_str().unwrap(),
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "config-full",
+            "--profile",
+            "full",
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("ignored under the full tier", 10),
+        "the config warning is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("AUTO"),
+        "the config value must not enable auto under full:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// The same config value holds under `workspace`: auto is on from the first frame.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_config_auto_enables_auto_on_workspace() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("auto-config-ws");
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "schema_version = 1\n[permissions]\napproval = \"auto\"\n",
+    )
+    .unwrap();
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--config",
+            config.to_str().unwrap(),
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "config-ws",
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("AUTO", 10),
+        "the status bar must show AUTO:\n{}",
+        pty.screen()
+    );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
 }

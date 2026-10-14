@@ -7,6 +7,7 @@
 //! of a host that is the same whether the user is at a line prompt or a full-screen UI. The
 //! two binaries still decide their own flags, startup text and error wording.
 
+pub mod approval;
 pub mod auth;
 mod catalog;
 pub mod config;
@@ -15,6 +16,7 @@ mod diagnostics;
 mod errors;
 mod headers;
 mod home;
+pub mod login;
 mod mcp;
 pub mod memory;
 mod model;
@@ -28,6 +30,7 @@ pub mod sessions;
 mod tools;
 mod workspace;
 
+pub use approval::{StartupApproval, resolve_startup, restored_approval};
 pub use auth::{
     AUTH_FILE_NAME, AuthEntry, AuthError, AuthStore, RADIAN_BASE_URL, ResolvedKey, auth_path,
     list as list_auth, remove as remove_auth, resolve_key, resolve_note,
@@ -72,8 +75,10 @@ pub use projection::{
     LastToolCall, ProjectionRead, SessionProjection, StreamKind, StreamSnapshot, TurnState,
 };
 pub use provider::{
-    DESCRIPTORS, DescriptorModel, GENERIC_ID, LoginMethod, Protocol, ProviderDescriptor, Route,
-    descriptor, descriptors, resolve_route,
+    CUSTOM_LOGIN, DESCRIPTORS, DescriptorModel, GENERIC_ID, LoginMethod, NamedProvider,
+    NamedSource, Protocol, ProviderDecl, ProviderDescriptor, ProviderRef, RADIAN_KIND, Route,
+    descriptor, descriptors, login_choices, name_error, resolve_provider, resolve_route,
+    resolve_route_for, valid_name,
 };
 pub use session::{
     ApprovalRouting, CommandRefused, DriverEnd, HostBindings, LocalSession, SessionCapability,
