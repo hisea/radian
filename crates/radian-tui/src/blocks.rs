@@ -433,7 +433,8 @@ pub fn line_count(entry: &Entry, mode: ReasoningMode, width: usize, mermaid: boo
                         if is_mermaid(lang, *closed, mermaid) {
                             let index = diagram_index;
                             diagram_index += 1;
-                            match diagram_outcome(entry, index, source, width) {
+                            match diagram_outcome(entry, index, &code_body(source, *closed), width)
+                            {
                                 DiagramOutcome::Rendered(lines) => lines.len(),
                                 DiagramOutcome::Failed(_) => 1 + code_line_count(source, *closed),
                             }
@@ -459,7 +460,9 @@ fn mermaid_sources(blocks: &[Block], text: &str, mermaid: bool) -> Vec<String> {
                 end,
                 closed,
                 lang,
-            } if is_mermaid(lang, *closed, mermaid) => Some(text[*start..*end].to_owned()),
+            } if is_mermaid(lang, *closed, mermaid) => {
+                Some(code_body(&text[*start..*end], *closed))
+            }
             _ => None,
         })
         .collect()
@@ -619,7 +622,8 @@ pub fn layout(
                         if is_mermaid(lang, *closed, mermaid) {
                             let index = diagram_index;
                             diagram_index += 1;
-                            match diagram_outcome(entry, index, source, width) {
+                            match diagram_outcome(entry, index, &code_body(source, *closed), width)
+                            {
                                 DiagramOutcome::Rendered(rendered) => {
                                     lines.extend(
                                         rendered
@@ -750,6 +754,25 @@ fn code_line_text(line: &str, width: usize) -> String {
     code_line_layout(line, width).0
 }
 
+/// A fenced code block's **body** (the fences are markup), joined by newlines — what a
+/// renderer (Mermaid) sees. Mirrors [`code_lines`]'s skipping.
+fn code_body(raw: &str, closed: bool) -> String {
+    let lines: Vec<&str> = raw.lines().collect();
+    let body = match (lines.first(), lines.last()) {
+        (Some(first), Some(last))
+            if fence_open(first.trim()).is_some()
+                && closed
+                && lines.len() > 1
+                && fence_run(last.trim()).is_some() =>
+        {
+            &lines[1..lines.len() - 1]
+        }
+        (Some(first), _) if fence_open(first.trim()).is_some() && lines.len() > 1 => &lines[1..],
+        _ => &lines[..],
+    };
+    body.join("\n")
+}
+
 /// The text of a fenced code block's display lines (fences are markup). Mirrors [`code_lines`].
 fn code_text_lines(raw: &str, closed: bool, width: usize) -> Vec<String> {
     let lines: Vec<&str> = raw.lines().collect();
@@ -814,7 +837,7 @@ pub fn body_text_lines(
                         if is_mermaid(&lang, closed, mermaid) {
                             let index = diagram_index;
                             diagram_index += 1;
-                            match diagram_outcome(entry, index, source, width) {
+                            match diagram_outcome(entry, index, &code_body(source, closed), width) {
                                 DiagramOutcome::Rendered(rendered) => {
                                     lines.extend(rendered.into_iter().map(|spans| {
                                         spans
