@@ -689,6 +689,210 @@ fn a_wrapped_notice_continuation_is_not_a_label() {
     assert_eq!(label.fg, app.theme.notice_label.fg);
 }
 
+/// Tool cards (ADR 0028 R4): the live commit path and the resume replay path are the same
+/// `push_message`, so both produce the same header for the same call.
+#[test]
+fn a_tool_card_head_is_the_same_on_the_live_and_resume_paths() {
+    fn call() -> Message {
+        Message::Assistant {
+            content: vec![],
+            reasoning: vec![],
+            tool_calls: vec![ToolCall {
+                id: "c1".into(),
+                name: "shell".into(),
+                arguments: serde_json::json!({"command": "make test"}),
+            }],
+            provider_payload: None,
+            interrupted: false,
+            meta: Default::default(),
+        }
+    }
+    fn result() -> Message {
+        Message::Tool {
+            result: ToolResult {
+                call_id: "c1".into(),
+                content: vec![ContentPart::text("ok")],
+                structured: Some(serde_json::json!({"command": "make test", "exit_code": 0})),
+                is_error: false,
+                error_code: None,
+            },
+            meta: Default::default(),
+        }
+    }
+
+    // live: committed messages arrive as events.
+    let mut live = App::new("m", "s");
+    live.apply_event(&AgentEvent::TranscriptAppended {
+        index: 0,
+        message: call(),
+    });
+    live.apply_event(&AgentEvent::TranscriptAppended {
+        index: 1,
+        message: result(),
+    });
+    // resume: the journal's messages are replayed through `push_message`.
+    let mut resumed = App::new("m", "s");
+    resumed.push_message(&call());
+    resumed.push_message(&result());
+
+    let live_text = screen(&render(&mut live, 60, 12));
+    let resume_text = screen(&render(&mut resumed, 60, 12));
+    assert!(
+        live_text.contains("shell: make test (exit 0)"),
+        "{live_text}"
+    );
+    assert_eq!(live_text, resume_text, "live and resume render identically");
+}
+
+/// The tool fold (ADR 0028 R4): the three modes change the transcript's line count, Ctrl-O
+/// steps through them, and the count is never stale (the fold is a layout cache key).
+#[test]
+fn the_tool_fold_changes_the_line_count_and_ctrl_o_walks_it() {
+    use radian_tui::tools::ToolFold;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut app = App::new("m", "s");
+    app.apply_event(&AgentEvent::TranscriptAppended {
+        index: 0,
+        message: Message::Assistant {
+            content: vec![],
+            reasoning: vec![],
+            tool_calls: vec![ToolCall {
+                id: "c1".into(),
+                name: "generic_tool".into(),
+                arguments: serde_json::json!({}),
+            }],
+            provider_payload: None,
+            interrupted: false,
+            meta: Default::default(),
+        },
+    });
+    let body: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+    app.apply_event(&AgentEvent::TranscriptAppended {
+        index: 1,
+        message: Message::Tool {
+            result: ToolResult {
+                call_id: "c1".into(),
+                content: vec![ContentPart::text(body)],
+                structured: None,
+                is_error: false,
+                error_code: None,
+            },
+            meta: Default::default(),
+        },
+    });
+    // errors (the default): a success folds to the preview + one hint.
+    assert_eq!(app.tool_display.fold, ToolFold::Errors);
+    let _ = render(&mut app, 60, 30);
+    let folded = app.total_lines;
+    assert!(folded < 10, "folded: {folded} lines");
+    // Ctrl-O: errors -> expanded -> collapsed -> errors.
+    app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    assert_eq!(app.tool_display.fold, ToolFold::Expanded);
+    let _ = render(&mut app, 60, 30);
+    let expanded = app.total_lines;
+    assert_eq!(
+        expanded,
+        folded + 14,
+        "20 lines instead of 5 preview + hint"
+    );
+    app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    assert_eq!(app.tool_display.fold, ToolFold::Collapsed);
+    let _ = render(&mut app, 60, 30);
+    assert_eq!(app.total_lines, folded, "collapsed again: the same count");
+    app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    assert_eq!(app.tool_display.fold, ToolFold::Errors);
+}
+
+/// A failed call's body is never hidden (ADR 0028 R4), whatever the fold mode.
+#[test]
+fn an_error_card_stays_expanded_under_collapsed() {
+    use radian_tui::tools::ToolFold;
+    let mut app = App::new("m", "s");
+    app.tool_display.fold = ToolFold::Collapsed;
+    app.apply_event(&AgentEvent::TranscriptAppended {
+        index: 0,
+        message: Message::Assistant {
+            content: vec![],
+            reasoning: vec![],
+            tool_calls: vec![ToolCall {
+                id: "c1".into(),
+                name: "generic_tool".into(),
+                arguments: serde_json::json!({}),
+            }],
+            provider_payload: None,
+            interrupted: false,
+            meta: Default::default(),
+        },
+    });
+    app.apply_event(&AgentEvent::TranscriptAppended {
+        index: 1,
+        message: Message::Tool {
+            result: ToolResult {
+                call_id: "c1".into(),
+                content: vec![ContentPart::text("boom\nmore")],
+                structured: None,
+                is_error: true,
+                error_code: None,
+            },
+            meta: Default::default(),
+        },
+    });
+    let text = screen(&render(&mut app, 60, 12));
+    assert!(
+        text.contains("boom"),
+        "the error body stays visible:\n{text}"
+    );
+    assert!(text.contains("more"), "{text}");
+}
+
+/// The `shell` renderer's body marks the stderr section with the warning role (the tool's
+/// text separates the streams; the structured value has byte counts only).
+#[test]
+fn a_shell_body_marks_stderr_with_the_warning_role() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut app = App::new("m", "s");
+    app.apply_event(&AgentEvent::TranscriptAppended {
+        index: 0,
+        message: Message::Assistant {
+            content: vec![],
+            reasoning: vec![],
+            tool_calls: vec![ToolCall {
+                id: "c1".into(),
+                name: "shell".into(),
+                arguments: serde_json::json!({"command": "run"}),
+            }],
+            provider_payload: None,
+            interrupted: false,
+            meta: Default::default(),
+        },
+    });
+    app.apply_event(&AgentEvent::TranscriptAppended {
+        index: 1,
+        message: Message::Tool {
+            result: ToolResult {
+                call_id: "c1".into(),
+                content: vec![ContentPart::text(
+                    "$ run\nexit code: 1\n--- stdout ---\nhello\n--- stderr ---\nBOOM",
+                )],
+                structured: Some(serde_json::json!({"command": "run", "exit_code": 1})),
+                is_error: false,
+                error_code: None,
+            },
+            meta: Default::default(),
+        },
+    });
+    // Ctrl-O to expanded, so the whole body shows.
+    app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    let terminal = render(&mut app, 60, 14);
+    let text = screen(&terminal);
+    assert!(text.contains("BOOM"), "{text}");
+    let warn = style_of(&terminal, "BOOM").expect("the stderr line");
+    assert_eq!(
+        warn.fg, app.theme.note.fg,
+        "stderr renders on the warning level"
+    );
+}
+
 /// Thinking folds (ADR 0028 R3): collapsed is one placeholder line, Ctrl-T expands it to the
 /// full text, and toggling back collapses it — the fold state is part of the layout cache
 /// key, so the count changes with it.

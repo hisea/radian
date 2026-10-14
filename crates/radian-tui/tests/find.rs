@@ -325,3 +325,53 @@ const EXPANDED: DisplayModes = DisplayModes {
         preview_lines: 5,
     },
 };
+
+/// A folded tool body must not vanish from the search (ADR 0028 R4 / this slice): the match
+/// geometry is the expanded form, whatever `tui.display.tool_output` says. (Slice 4 will
+/// auto-expand on a hit; this slice only keeps the content findable.)
+#[test]
+fn a_folded_tool_body_is_still_found() {
+    use agent_core::{ContentPart, Message, ToolCall, ToolResult};
+    use radian_tui::tools::ToolFold;
+    let mut app = App::new("m", "s");
+    app.tool_display.fold = ToolFold::Collapsed;
+    let body: String = (1..=20)
+        .map(|i| format!("line {i}\n"))
+        .chain(std::iter::once("the need1e marker\n".to_string()))
+        .collect();
+    app.push_message(&Message::Assistant {
+        content: vec![],
+        reasoning: vec![],
+        tool_calls: vec![ToolCall {
+            id: "c1".into(),
+            name: "generic_tool".into(),
+            arguments: json!({}),
+        }],
+        provider_payload: None,
+        interrupted: false,
+        meta: Default::default(),
+    });
+    app.push_message(&Message::Tool {
+        result: ToolResult {
+            call_id: "c1".into(),
+            content: vec![ContentPart::text(body)],
+            structured: None,
+            is_error: false,
+            error_code: None,
+        },
+        meta: Default::default(),
+    });
+    // The displayed body is folded to the preview: the marker is not among the laid-out
+    // lines (`display_lines` is the display geometry the renderer uses).
+    let shown = radian_tui::render::display_lines(&app.entries[1], app.display_modes(), 80);
+    assert!(
+        !shown.iter().any(|line| line.contains("need1e")),
+        "folded out of the display: {shown:?}"
+    );
+    // ...and the search still finds it.
+    app.on_key(ctrl('f'));
+    for c in "need1e".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    assert_eq!(app.find_state().unwrap().matches.len(), 1);
+}

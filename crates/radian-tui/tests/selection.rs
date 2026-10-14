@@ -488,6 +488,49 @@ fn a_selection_across_a_banded_user_block_copies_the_text() {
 }
 
 #[test]
+fn a_selection_over_a_tool_card_head_copies_its_text() {
+    use agent_core::{ContentPart, Message, ToolCall, ToolResult};
+    let mut app = app();
+    app.entries.clear();
+    app.push_message(&Message::Assistant {
+        content: vec![],
+        reasoning: vec![],
+        tool_calls: vec![ToolCall {
+            id: "c1".into(),
+            name: "shell".into(),
+            arguments: serde_json::json!({"command": "make test"}),
+        }],
+        provider_payload: None,
+        interrupted: false,
+        meta: Default::default(),
+    });
+    app.push_message(&Message::Tool {
+        result: ToolResult {
+            call_id: "c1".into(),
+            content: vec![ContentPart::text("ok")],
+            structured: Some(serde_json::json!({"command": "make test", "exit_code": 0})),
+            is_error: false,
+            error_code: None,
+        },
+        meta: Default::default(),
+    });
+    app.set_viewport(6, 6);
+    app.set_transcript_width(60);
+    // Line 0 is the assistant message's (empty) line, line 1 the card head; the `-> ` marker
+    // is three cells, so the head's first character sits at column 3.
+    press(&mut app, 1, 3);
+    drag(&mut app, 1, 28);
+    let result = release(&mut app, 1, 28);
+    assert_eq!(
+        result.effects,
+        vec![Effect::Copy {
+            text: "shell: make test (exit 0)".into()
+        }],
+        "the whole head, character for character"
+    );
+}
+
+#[test]
 fn the_double_click_window_is_half_a_second() {
     assert_eq!(radian_tui::app::DOUBLE_CLICK_WINDOW.as_millis(), 500);
 }

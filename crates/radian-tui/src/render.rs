@@ -364,6 +364,10 @@ fn render_row(
         theme.reasoning
     } else if entry.kind == EntryKind::Notice {
         theme.notice_body
+    } else if row.warn {
+        // A tool body line from the warning channel (stderr, per the tool's own section
+        // markers): pi's warning level (`theme.note` in the role mapping).
+        theme.note
     } else {
         style
     };

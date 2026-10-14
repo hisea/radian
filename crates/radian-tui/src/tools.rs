@@ -370,3 +370,148 @@ pub struct DisplayModes {
     pub reasoning: ReasoningMode,
     pub tools: ToolDisplay,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn card(name: &str, arguments: Value) -> ToolCard {
+        ToolCard::new("c1", name, arguments)
+    }
+
+    fn lines(plan: &[BodyLine]) -> Vec<String> {
+        plan.iter()
+            .map(|line| match line {
+                BodyLine::Text { source, .. } => format!("text {source:?}"),
+                BodyLine::Hint(hint) => hint.clone(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_registry_falls_back_to_generic_for_an_unknown_tool() {
+        let unknown = renderer_for("mcp__server__do_thing");
+        let generic = renderer_for("some_other_tool");
+        let card = card("mcp__server__do_thing", json!({"a": 1}));
+        assert_eq!(unknown.head(&card), generic.head(&card));
+        assert!(unknown.head(&card).contains("mcp__server__do_thing"));
+        // A built-in name that is a suffix of a namespaced one still matches its renderer.
+        assert!(
+            renderer_for("server.shell")
+                .head(&card)
+                .starts_with("shell:")
+        );
+    }
+
+    #[test]
+    fn the_shell_head_carries_the_command_and_the_exit_code() {
+        let mut card = card("shell", json!({"command": "ls -la /tmp"}));
+        // No structured value yet (or ever): the exit code is simply not known.
+        assert_eq!(shell_head(&card), "shell: ls -la /tmp");
+        card.structured = Some(json!({"command": "ls -la /tmp", "exit_code": 2}));
+        assert_eq!(shell_head(&card), "shell: ls -la /tmp (exit 2)");
+        // A signal death (no code) from the structured value.
+        card.structured = Some(json!({"command": "sleep 9", "exit_code": null}));
+        assert_eq!(shell_head(&card), "shell: sleep 9 (no exit code)");
+        // A long command is cut to one line.
+        let mut long = ToolCard::new("c1", "shell", json!({"command": "x".repeat(200)}));
+        long.structured = Some(json!({"exit_code": 0}));
+        let head = shell_head(&long);
+        assert!(head.ends_with("(exit 0)"));
+        assert!(head.chars().count() < 100, "{head}");
+    }
+
+    #[test]
+    fn the_read_head_shows_the_path_and_the_line_range() {
+        assert_eq!(
+            read_head(&card("read", json!({"path": "a.rs"}))),
+            "read: a.rs"
+        );
+        assert_eq!(
+            read_head(&card(
+                "read",
+                json!({"path": "a.rs", "offset": 40, "limit": 10})
+            )),
+            "read: a.rs (lines 41..50)"
+        );
+        assert_eq!(
+            read_head(&card("read", json!({"path": "a.rs", "offset": 40}))),
+            "read: a.rs (from line 41)"
+        );
+        assert_eq!(
+            read_head(&card("read", json!({"path": "a.rs", "limit": 5}))),
+            "read: a.rs (first 5 lines)"
+        );
+    }
+
+    #[test]
+    fn the_fold_modes_decide_the_body() {
+        let text = "one\ntwo\nthree\nfour\nfive\nsix\nseven";
+        let card = card("generic_tool", json!({}));
+        let expanded = body_plan(&card, text, false, ToolFold::Expanded, 5);
+        assert_eq!(expanded.len(), 7);
+        // collapsed: a hint plus the LAST preview lines.
+        let collapsed = body_plan(&card, text, false, ToolFold::Collapsed, 3);
+        assert_eq!(collapsed.len(), 4);
+        assert_eq!(lines(&collapsed)[0], "[4 more lines]");
+        assert!(matches!(
+            &collapsed[1],
+            BodyLine::Text { source, .. } if source == &(text.find("five").unwrap()..text.find("five").unwrap() + 4)
+        ));
+        // errors: folded unless the call failed.
+        assert_eq!(body_plan(&card, text, false, ToolFold::Errors, 3).len(), 4);
+        assert_eq!(body_plan(&card, text, true, ToolFold::Errors, 3).len(), 7);
+        // A body that already fits the preview is left whole.
+        assert_eq!(
+            body_plan(&card, "a\nb", false, ToolFold::Collapsed, 5).len(),
+            2
+        );
+    }
+
+    #[test]
+    fn the_read_body_collapses_to_a_hint() {
+        let card = card("read", json!({"path": "a.rs"}));
+        let (body, hint) = read_body(&card, "l1\nl2\nl3");
+        assert_eq!(body.len(), 3);
+        assert_eq!(hint.as_deref(), Some("[read: 3 lines]"));
+        let collapsed = body_plan(&card, "l1\nl2\nl3", false, ToolFold::Collapsed, 5);
+        assert_eq!(lines(&collapsed), vec!["[read: 3 lines]"]);
+        // Expanded shows the lines.
+        assert_eq!(
+            body_plan(&card, "l1\nl2\nl3", false, ToolFold::Expanded, 5).len(),
+            3
+        );
+    }
+
+    #[test]
+    fn the_shell_body_marks_the_stderr_section() {
+        let text = "$ run\nexit code: 1\n--- stdout ---\nout\n--- stderr ---\nboom\nmore";
+        let card = card("shell", json!({"command": "run"}));
+        let (body, _) = shell_body(&card, text);
+        let warned: Vec<usize> = body
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| matches!(line, BodyLine::Text { warn: true, .. }))
+            .map(|(i, _)| i)
+            .collect();
+        // The marker line itself and the two stderr lines.
+        assert_eq!(warned, vec![4, 5, 6]);
+    }
+
+    #[test]
+    fn an_empty_body_is_one_empty_line() {
+        let (body, _) = generic_body(&card("t", json!({})), "");
+        assert_eq!(body.len(), 1);
+        assert_eq!(lines(&body), vec!["text 0..0".to_string()]);
+    }
+
+    #[test]
+    fn the_fold_modes_round_trip_through_their_spellings() {
+        for mode in [ToolFold::Collapsed, ToolFold::Expanded, ToolFold::Errors] {
+            assert_eq!(ToolFold::parse(mode.as_str()), Some(mode));
+        }
+        assert_eq!(ToolFold::default(), ToolFold::Errors);
+        assert_eq!(ToolFold::parse("sometimes"), None);
+    }
+}

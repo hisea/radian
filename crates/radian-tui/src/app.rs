@@ -3078,6 +3078,10 @@ impl App {
                         entry.result = Some(result.is_error);
                         let card = entry.tool.as_mut()?;
                         card.structured = result.structured.clone();
+                        // The header can only be final now (the `shell` exit code comes from
+                        // the result), so the entry's text - what renders and copies - is
+                        // regenerated from the same function the layout uses.
+                        entry.text = crate::tools::head_text(card);
                         Some((card.name.clone(), card.arguments.clone()))
                     });
                 let (name, arguments) = paired.unwrap_or_default();
