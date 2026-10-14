@@ -1,0 +1,24 @@
+# ADR 0029:主题文件名与逐角色颜色覆盖。`tui.theme` 接受任意名字(先内建、再
+# `~/.radian/themes/<name>.json`);`[tui.colors]` 的键是 Radian 或 pi 的角色名,
+# 值是一个颜色(只前景)或 `{fg,bg,bold,italic,dim,underline}` 表。读者原样携带,
+# 由 TUI 解析;未知角色/写法错误是启动警告,不是拒绝。
+schema_version = 1
+
+[model]
+provider = "openai-compatible"
+base_url = "https://example.com/v1"
+model = "m-1"
+api_key = { from = "env", name = "EXAMPLE_TOKEN" }
+
+[tui]
+theme = "kanagawa-wave"
+
+[tui.colors]
+# 一个颜色 = 只设前景。
+user = "#0af"
+# 256 色号也是颜色写法之一(pi 的六种写法)。
+tool_call = 39
+# 表 = 前景/背景/修饰符;颜色写法与主题文件相同(oklch/okhsl/hex/色号/"" )。
+notice = { fg = "oklch(62% 0.1 200)", bold = true }
+# pi 的角色名同样生效(未来角色保存在 reserved,不绘制)。
+mdHeading = { fg = "#e46876", underline = false }
