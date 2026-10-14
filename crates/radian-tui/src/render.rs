@@ -428,6 +428,29 @@ fn render_row(
         };
         spans.push(Span::styled(label.to_owned(), label_style));
         spans.push(Span::styled(rest.to_owned(), rest_style));
+    } else if let Some(md) = &row.md {
+        // Assistant Markdown (ADR 0028 R2): each piece takes its own role's style.
+        for piece in md {
+            let style = match piece.style {
+                blocks::MdStyle::Heading => theme.md_heading,
+                blocks::MdStyle::Bold => theme.md_heading.patch(Modifier::BOLD),
+                blocks::MdStyle::Italic => theme.text.add_modifier(Modifier::ITALIC),
+                blocks::MdStyle::Code => theme.md_code,
+                blocks::MdStyle::Link => theme.md_link,
+                blocks::MdStyle::LinkUrl => theme.md_link_url,
+                blocks::MdStyle::Quote => theme.md_quote,
+                blocks::MdStyle::QuoteBar => theme.md_quote_border,
+                blocks::MdStyle::Bullet => theme.md_list_bullet,
+                blocks::MdStyle::Rule => theme.md_hr,
+                blocks::MdStyle::TableBorder => theme.md_hr,
+                blocks::MdStyle::Plain => body_style,
+            };
+            let style = match band {
+                Some(band) => style.patch(band),
+                None => style,
+            };
+            spans.push(Span::styled(piece.text.clone(), style));
+        }
     } else if let Some(diagram) = &row.diagram {
         // A rendered diagram (ADR 0028 R8): each piece takes its own role's style.
         for (piece, role) in diagram {

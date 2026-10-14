@@ -131,6 +131,14 @@ fn fg_source(role: Role) -> Option<&'static str> {
         Role::MermaidNode => Some("accent"),
         Role::MermaidEdge => Some("dim"),
         Role::MermaidText => Some("text"),
+        Role::MdHeading => Some("mdHeading"),
+        Role::MdLink => Some("mdLink"),
+        Role::MdLinkUrl => Some("mdLinkUrl"),
+        Role::MdCode => Some("mdCode"),
+        Role::MdQuote => Some("mdQuote"),
+        Role::MdQuoteBorder => Some("mdQuoteBorder"),
+        Role::MdHr => Some("mdHr"),
+        Role::MdListBullet => Some("mdListBullet"),
         // The main text level itself (Pi's `text`): the mapping is used by the file themes;
         // the built-ins take pi's values directly.
         Role::Text => Some("text"),
@@ -785,7 +793,9 @@ mod tests {
             warnings.iter().all(|w| w.contains("missing role(s)")),
             "{warnings:?}"
         );
-        assert_eq!(theme.reserved["mdHeading"].fg, Some(Color::Rgb(1, 2, 3)));
+        // `mdHeading` is a real role now (ADR 0028 R2), so it lands in the theme, not in the
+        // reserved map.
+        assert_eq!(theme.md_heading.fg, Some(Color::Rgb(1, 2, 3)));
         assert_eq!(
             theme.reserved["syntaxKeyword"].fg,
             Some(Color::Rgb(4, 5, 6))
@@ -867,10 +877,7 @@ mod tests {
                 .add_modifier
                 .contains(ratatui::style::Modifier::BOLD)
         );
-        assert_eq!(
-            theme.reserved["mdHeading"].fg,
-            Some(Color::Rgb(0x55, 0x55, 0x55))
-        );
+        assert_eq!(theme.md_heading.fg, Some(Color::Rgb(0x55, 0x55, 0x55)));
     }
 
     #[test]
@@ -979,7 +986,13 @@ mod tests {
         // `diff_hunk` takes the accent (pi has no hunk role), kanagawa's `violet`.
         assert_eq!(theme.diff_hunk.fg, Some(Color::Rgb(0x95, 0x7F, 0xB8)));
         // Every pi role in the file is either mapped or kept; nothing was dropped.
-        assert!(theme.reserved.contains_key("mdHeading"));
+        // `mdHeading`/`mdLink`/… are real roles now; `syntaxKeyword` and `thinkingMax` are
+        // still reserved (slice 5).
+        assert!(
+            theme.md_heading.fg.is_some(),
+            "mdHeading resolved from the fixture"
+        );
+        assert!(theme.reserved.contains_key("syntaxKeyword"));
         assert!(theme.reserved.contains_key("syntaxKeyword"));
         assert!(theme.reserved.contains_key("thinkingMax"));
         assert!(!theme.reserved.contains_key("selectedBg"));

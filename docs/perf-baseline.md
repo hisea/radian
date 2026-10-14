@@ -618,3 +618,42 @@ text_len)` 不重渲）。
 50k 的搜索基准在更高的负载下反而更快（搜索几何与渲染几何共用 `body_text_lines`，本片没有给搜索
 路径加新的分配）。按条目的折叠覆盖只在命中时写一个字段并让该条目的行数缓存失效（键含覆盖），
 其余条目不受影响。
+## Markdown（ADR 0028 第 3 片 · R2/R7）
+
+Markdown 语料由 `perf_render.rs` 的 `markdown_entries(n)` 生成（不是大文件）：每 10 条里 6 条是
+Assistant Markdown（标题、带行内样式的段落与链接、嵌套列表、表格、代码块），其余是用户提问、
+thinking 和工具结果。命令与 §7 同。
+
+| 项目 | 1k | 10k | 50k |
+|---|---|---|---|
+| 稳态帧 p50 | 0.11–0.32 ms | 0.20–0.26 ms | **0.59–0.84 ms**（p95 0.71–1.97） |
+| 全局折叠首帧（Ctrl-T） | 0.42–0.61 ms | 3.6–5.4 ms | **24.0–27.7 ms** |
+
+**结论**：R7 两个门槛都过——稳态帧 < 1 ms（50k 0.84 ms 是本次负载下的上沿），折叠首帧
+< 100 ms（24–28 ms）。关键在于 Assistant 的 Markdown **段落行**按 `(width, text_len)` 缓存
+（`Entry.md_cache`）：折叠切换会重数每个条目，但不重新解析 Markdown，所以首帧与块模型同一量级。
+
+**`perf_tui_resume` 的失败与本片无关（已核实）**：它在**本片之前的 main（`5628737`，合并
+mermaid 后）**上同样超时，而且连 warm-up（1000 条）都超时。用同样的 pty 探针（20 s 后看原始
+输出）在两边都看到：应用**正常渲染**（transcript 在底部、状态栏正常），但 `resumed session …`
+这行属于 **startup 屏**，它排在 transcript 顶部；resume 时视图 `follow` 到底部，所以它在首帧
+**滚出屏幕**，测试等的那个字符串永远不出现。也就是说这是 startup 屏在 resume 长历史下的可见性
+问题（或测试该换一个判据），不是 Markdown 的性能回归。本片没有改它。
+
+### `perf_tui_resume` 判据修正与两组对照（markdown-4）
+
+`perf_tui_resume` 的判据在 ui-r2 之后失效（不是本片）：它等的 `resumed session …` 被 ui-r2 移进
+**startup 屏**，而 resume 跟随到底部，startup 屏首帧就滚出屏幕——所以它在**本片之前的 main 上
+也超时**。判据已改成首帧一定画出的状态栏 `context budget off`；Ctrl-Home 的判据从原始工具参数
+改成工具卡片标题 `-> read: file.txt`（tools 片改了渲染）。两个判据都仍然测到首帧/滚动完成。
+
+同一台机器、相近负载下分别测（`--ignored --nocapture --test-threads=1`，5 次取样）：
+
+| 语料 | main `a6a9cce` 首帧 p50 | pi/markdown `f7d4f41` 首帧 p50 | 比值 |
+|---|---|---|---|
+| 1 000 条 | 56 ms | 59 ms | 1.05× |
+| 10 000 条 | 1 235 ms | 1 270 ms | 1.03× |
+| 50 000 条 | 18 949 ms | 12 887 ms | **0.68×** |
+
+**结论**：Markdown 没有让 resume 首帧变慢（50k 反而更快，10k/1k 在噪声内），远低于 1.5× 的
+修修门槛，所以不做懒测量/尺寸上限。两个绝对值都由"resume 时首次测量全部条目"主导，与本片无关。

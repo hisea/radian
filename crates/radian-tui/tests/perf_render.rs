@@ -90,6 +90,35 @@ fn entries(n: usize) -> Vec<Entry> {
     out
 }
 
+/// One Markdown-heavy Assistant body (ADR 0028 R2): a heading, a paragraph with inline
+/// styles and a link, a nested list, a table and a code block. Generated, not stored, so the
+/// corpus stays a function.
+fn markdown_body(i: usize) -> String {
+    format!(
+        "## Section {i}\n\nA paragraph with **bold**, *italic*, `code` and a \
+         [link](https://example.com/{i}) plus enough words to wrap at the viewport width.\n\n\
+         - first item for {i}\n- second item\n  - nested item\n\n\
+         | column a | column b |\n| --- | --- |\n| value {i} | other value |\n\n\
+         ```rust\nlet value_{i} = {i};\n```\n\n> a quoted line about {i}\n"
+    )
+}
+
+/// A Markdown-heavy corpus: 6 of 10 entries are Assistant Markdown, the rest keep the mix
+/// realistic (user questions, reasoning, tool results).
+fn markdown_entries(n: usize) -> Vec<Entry> {
+    (0..n)
+        .map(|i| match i % 10 {
+            0..=5 => Entry::new(EntryKind::Assistant, markdown_body(i)),
+            6..=7 => Entry::new(EntryKind::User, format!("question {i}: what changed?")),
+            8 => Entry::new(EntryKind::Reasoning, format!("considering option {i} ...")),
+            _ => Entry::new(
+                EntryKind::ToolResult,
+                format!("ok: processed {i}\nsome ordinary output line"),
+            ),
+        })
+        .collect()
+}
+
 fn new_app(n: usize) -> App {
     let mut app = App::new("mock", "perf");
     app.entries = entries(n);
@@ -362,6 +391,32 @@ fn perf_render_reasoning_toggle() {
             ms(first),
             ms(back),
             ms(steady)
+        );
+    }
+}
+
+/// ADR 0028 R7 with a Markdown-heavy corpus: the steady frame stays under 1 ms at 50k and the
+/// first frame after a global toggle (Ctrl-T collapsing the reasoning) stays under 100 ms.
+#[test]
+#[ignore = "measurement, not an assertion; run with --ignored --nocapture"]
+fn perf_render_markdown() {
+    use radian_tui::blocks::ReasoningMode;
+    for n in [1_000usize, 10_000, 50_000] {
+        let mut terminal = test_terminal();
+        let mut app = App::new("mock", "perf");
+        app.entries = markdown_entries(n);
+        let (p50, p95, _max) = measure_draws(&mut app, &mut terminal, 30);
+        // The global toggle re-lays every entry out: the first frame after it.
+        app.reasoning_mode = ReasoningMode::Expanded;
+        let to_expanded = draw_once(&mut terminal, &mut app);
+        app.reasoning_mode = ReasoningMode::Collapsed;
+        let to_collapsed = draw_once(&mut terminal, &mut app);
+        println!(
+            "markdown {n:>6}: steady p50 {:>7.2} ms p95 {:>7.2} ms | to expanded {:>8.2} ms | to collapsed {:>8.2} ms",
+            ms(p50),
+            ms(p95),
+            ms(to_expanded),
+            ms(to_collapsed)
         );
     }
 }
@@ -686,8 +741,8 @@ fn perf_idle_redraw() {
 ///
 /// `radian --resume`: process start to the first frame, then `Ctrl-Home` to the top. The
 /// history is rendered before the run loop, so the first frame is the one that shows the
-/// bottom (the `resumed session …` notice). The top of the generated transcript is the first
-/// unit's tool call (`read({"path":"file.txt"})`), which is not on screen at the bottom.
+/// bottom (the status bar). The top of the generated transcript is the first unit's tool card
+/// header (`-> read: file.txt`), which is not on screen at the bottom.
 #[test]
 #[ignore = "measurement, not an assertion; run with --ignored --nocapture"]
 fn perf_tui_resume() {
@@ -710,7 +765,14 @@ fn perf_tui_resume() {
             24,
             100,
         );
-        pty.wait_for("resumed session", pty.start, 120);
+        // The first-frame marker is the **status bar** ("context budget off"), not the
+        // "resumed session" line: ui-r2 (`ba7568d`, "Startup screen: collapsed info, Tip,
+        // wordmark") moved that line into the startup screen, which sits at the top of the
+        // transcript. A resume follows the bottom (the product behaviour), so the startup
+        // screen is scrolled off on the first frame and the old marker never appeared. The
+        // status bar is drawn in the same first frame, so the timing is still
+        // process-start-to-first-frame.
+        pty.wait_for("context budget off", pty.start, 120);
         pty.quit();
     }
     for n in [1_000usize, 10_000, 50_000] {
@@ -734,11 +796,13 @@ fn perf_tui_resume() {
                 24,
                 100,
             );
-            first.push(pty.wait_for("resumed session", pty.start, 120));
-            // Ctrl-Home is CSI 1;5 H (Home with the CONTROL modifier).
+            first.push(pty.wait_for("context budget off", pty.start, 120));
+            // Ctrl-Home is CSI 1;5 H (Home with the CONTROL modifier). The marker is the
+            // first unit's tool card header (`-> read: file.txt`); the raw JSON arguments the
+            // old marker used are no longer rendered since the tool-card slice.
             let start = Instant::now();
             pty.send(b"\x1b[1;5H");
-            home.push(pty.wait_for(r#"read({"path":"file.txt"})"#, start, 30));
+            home.push(pty.wait_for("read: file.txt", start, 30));
             pty.quit();
         }
         let (first50, first95, first_max) = percentiles(first);
