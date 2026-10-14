@@ -143,3 +143,17 @@ round-trip 测试里没有"正文含同样 marker"的消息，于是补了
 `the_plan_reserves_the_verbatim_space`，并把 round-trip 的第二条改成
 `--- user message 9 ---` 与 heading 都在正文里的消息，两者随即被抓住（补测在
 `0a1c18b`）。
+
+## 修订 6 补提交：的三处修正
+
+Base `022afe9` · 一次性检出 `/tmp/vb-mut2`（detached，跑完删除）· `--no-fail-fast`；
+变异后从副本还原。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| X1 | `request_size` 重新把 `meta` 计入估计（`if true \|\| meta.is_empty()` 直接跳过扣减） | ✅ 抓住 | `budget::a_large_host_meta_does_not_change_the_request_estimate` |
+| X2 | 省略计数不累加（`omitted` 从 0 开始，不读上一轮的标记） | ✅ 抓住 | `compaction::the_omission_count_accumulates` |
+| X3 | 选取恢复 `continue`（跳过放不下的、继续挑更旧更短的） | ✅ 抓住 | `compaction::the_selection_is_the_contiguous_newest_run` |
+
+3/3 抓住。X1 是本节的"原话被算两遍"的根因（`request_size` 量 `meta.origin`），修好后兜底门槛
+回到约 76k；X2 与 X3 是两个行为 bug，各有具名测试。
