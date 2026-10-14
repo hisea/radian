@@ -222,6 +222,18 @@ struct Pty {
     home: TempDir,
 }
 
+/// What config file a spawned test gets (ADR 0027 C2): the suite's existing assertions were
+/// written for the pre-ADR one-line status bar, so most tests get `preset = classic`; a test
+/// that wants the real no-config default uses [`Pty::spawn_bare`].
+enum TestConfig<'a> {
+    /// Write `preset = "classic"` (the suite's default).
+    Classic,
+    /// Write this config file.
+    Explicit(&'a str),
+    /// Write nothing: the app starts on its real defaults.
+    Absent,
+}
+
 impl Pty {
     /// Spawns the bin under `sh -c '"$@"; echo EXITED:$?; stty -a'` so the same pty reports
     /// the exit code and the tty state after the app exits. `Drop` kills the whole process
@@ -232,7 +244,13 @@ impl Pty {
 
     /// Like [`Pty::spawn`], with extra environment for the app (e.g. the sandbox probe seam).
     fn spawn_with_env(args: &[&str], envs: &[(&str, &str)], rows: u16, cols: u16) -> Self {
-        Self::spawn_full(args, envs, None, rows, cols)
+        Self::spawn_full_mode(args, envs, TestConfig::Classic, rows, cols)
+    }
+
+    /// Like [`Pty::spawn`], writing **no** config file: the app runs its real defaults (the
+    /// two-row `pi` footer, ADR 0027 C2). A test about the shipped default must use this.
+    fn spawn_bare(args: &[&str], envs: &[(&str, &str)], rows: u16, cols: u16) -> Self {
+        Self::spawn_full_mode(args, envs, TestConfig::Absent, rows, cols)
     }
 
     /// Like [`Pty::spawn_with_env`], and writes `config` to `<RADIAN_HOME>/config/config.toml`
@@ -244,13 +262,13 @@ impl Pty {
         rows: u16,
         cols: u16,
     ) -> Self {
-        Self::spawn_full(args, envs, Some(config), rows, cols)
+        Self::spawn_full_mode(args, envs, TestConfig::Explicit(config), rows, cols)
     }
 
-    fn spawn_full(
+    fn spawn_full_mode(
         args: &[&str],
         envs: &[(&str, &str)],
-        config: Option<&str>,
+        config: TestConfig<'_>,
         rows: u16,
         cols: u16,
     ) -> Self {
@@ -297,17 +315,21 @@ impl Pty {
             })
             .unwrap_or_else(|| home.path().join(".radian"));
         write_auth_json(&auth_root, envs);
-        {
-            let dir = auth_root.join("config");
-            std::fs::create_dir_all(&dir).unwrap();
-            // The footer's default is the two-row `pi` layout (ADR 0027 C2). The suite's
-            // existing assertions were written for the pre-ADR one-line status bar, so a test
-            // that does not bring its own config gets `preset = "classic"`; the new footer
-            // tests either pass their own config or assert the pi layout explicitly.
-            let text = config.map(str::to_owned).unwrap_or_else(|| {
-                "schema_version = 1\n[tui.footer]\npreset = \"classic\"\n".to_string()
-            });
-            std::fs::write(dir.join("config.toml"), text).unwrap();
+        // The footer's default is the two-row `pi` layout (ADR 0027 C2). The suite's existing
+        // assertions were written for the pre-ADR one-line status bar, so a test that does not
+        // bring its own config gets `preset = "classic"`; `spawn_bare` writes nothing and sees
+        // the shipped default.
+        match config {
+            TestConfig::Absent => {}
+            other => {
+                let dir = auth_root.join("config");
+                std::fs::create_dir_all(&dir).unwrap();
+                let text = match other {
+                    TestConfig::Explicit(text) => text.to_owned(),
+                    _ => "schema_version = 1\n[tui.footer]\npreset = \"classic\"\n".to_string(),
+                };
+                std::fs::write(dir.join("config.toml"), text).unwrap();
+            }
         }
         // `cmd.env_clear()` above is what makes this hermetic: neither `RADIAN_HOME` nor
         // `RADIAN_CONFIG` reaches the child, so a config can only come from this temp `HOME`.
@@ -7667,4 +7689,117 @@ async fn pty_the_pi_footer_is_two_rows() {
     assert!(pty.screen().contains("mock"), "{}", pty.screen());
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// The **shipped default** with no config file: the two-row `pi` footer (ADR 0027 C2).
+/// `spawn_bare` writes no `[tui.footer]`, so this is exactly what a user gets.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_the_shipped_default_footer_is_two_rows_without_a_config() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("footer-default");
+    // A short workspace so the cwd item fits at a normal width (a long path is legitimately
+    // dropped by the narrow-terminal rule, which the second test covers).
+    let ws = short_workspace("footer-default");
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn_bare(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "footer-default",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[],
+        30,
+        90,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    let lines: Vec<String> = pty.screen().lines().map(str::to_owned).collect();
+    let first = lines.get(lines.len() - 2).cloned().unwrap_or_default();
+    let second = lines.last().cloned().unwrap_or_default();
+    // Row one: the model, the cwd, the context bar and the reasoning marker; row two: tokens.
+    assert!(
+        first.contains("mock"),
+        "the model is on the first footer row: {first:?}"
+    );
+    assert!(
+        first.contains("footer-default"),
+        "the cwd is on the first row: {first:?}"
+    );
+    assert!(
+        first.contains("─"),
+        "the context bar is on the first row: {first:?}"
+    );
+    assert!(
+        first.contains('◐'),
+        "reasoning is on the first row: {first:?}"
+    );
+    assert!(
+        second.contains('↑'),
+        "the tokens row is the second: {second:?}"
+    );
+    assert!(
+        !second.contains("mock"),
+        "the model is not on the tokens row: {second:?}"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// The shipped default on a narrow terminal follows the drop order: the `right` group
+/// (reasoning) goes before the `left` group's end, and the model (highest priority) stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_the_default_footer_drops_the_right_group_on_a_narrow_terminal() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("footer-narrow");
+    let ws = short_workspace("footer-narrow");
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn_bare(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "footer-narrow",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[],
+        30,
+        // Narrow enough that the right group cannot fit, wide enough for the model.
+        22,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    let lines: Vec<String> = pty.screen().lines().map(str::to_owned).collect();
+    let first = lines.get(lines.len() - 2).cloned().unwrap_or_default();
+    let second = lines.last().cloned().unwrap_or_default();
+    assert!(first.contains("mock"), "the model survives: {first:?}");
+    assert!(
+        !first.contains('◐'),
+        "the right group drops first: {first:?}"
+    );
+    assert!(
+        !second.contains("mock"),
+        "the tokens row is still the second: {second:?}"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// A short workspace directory under `/tmp`, so the footer's cwd item fits a narrow terminal
+/// (the long per-test temp path would be dropped by the truncation rule).
+fn short_workspace(label: &str) -> std::path::PathBuf {
+    let path = std::path::PathBuf::from(format!("/tmp/radian-{label}-{}", std::process::id()));
+    std::fs::create_dir_all(&path).unwrap();
+    path
 }
