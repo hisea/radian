@@ -866,3 +866,17 @@ Base `608c2b7`（键一致性修复后 `0b035d6` 复跑 M4）· 一次性 worktr
 
 4/4 抓住。**过程记录**：第一轮 M4 没抓住，暴露出 `fill_syntax_cache` 用 `body_width` 存、查找用完整
 `width` 的真 bug（键永不命中）；修在 `0b035d6`，M4 复跑抓住。
+
+## ADR 0028 片 5 审查：H1 懒高亮 + H2 上限 + vendored 语法（2026-10-15）
+
+Base `d7f663d` · 一次性 worktree `/tmp/radian-hl2-mut`，每条跑完 `git checkout -- .`，`git status --short`
+为空。命令 `cargo test -p radian-tui --test highlight`（基线 13 passed）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| H1-M1 | 测量阶段（`line_count_cached`）对每个已闭合块调 `highlight::highlighted` | `the_measure_pass_never_highlights`（计数器断言） | ✅ |
+| H1-M2 | 缓存键加回宽度（`highlighted` 收 width 并进键，`syntax_lines_cached` 传真实 width） | `a_resize_reuses_the_highlight_cache` | ✅ |
+| H2-M1 | 去掉 `MAX_HIGHLIGHT_LINES`/`MAX_HIGHLIGHT_BYTES` 上限 | `a_block_over_the_cap_is_not_highlighted` | ✅ |
+
+3/3 抓住。**过程记录**：H1-M2 第一轮写成了从 `syntax_lines_cached` 传常量 `0`，键不随真实宽度变化，
+测试当然抓不住——改成把真实 `width` 一路传下去后抓住（变异要真的改变行为，不能只改签名）。
