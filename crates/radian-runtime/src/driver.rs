@@ -512,12 +512,16 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         for change in self.queue.drain() {
             let revision = self.next_config_revision;
             self.next_config_revision += 1;
-            self.journal
-                .append_runtime_event(RuntimeEvent::ConfigChanged {
-                    revision,
-                    change: change.clone(),
-                })
-                .await?;
+            let event = RuntimeEvent::ConfigChanged {
+                revision,
+                change: change.clone(),
+            };
+            self.journal.append_runtime_event(event.clone()).await?;
+            // The host hears the applied change like any other runtime event: the UI's
+            // `next:` marker (D5) is spent exactly when the change is durable.
+            if let Some(sink) = &self.runtime_events {
+                sink.on_runtime_event(&event);
+            }
             self.apply_change(change, revision);
         }
         Ok(())

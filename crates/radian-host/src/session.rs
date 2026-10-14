@@ -893,3 +893,26 @@ fn memory_notice(memory: &Option<MemoryService>, config: &InjectionConfig) -> St
         None => "[memory] disabled (no RADIAN_HOME or HOME)".to_owned(),
     }
 }
+
+/// The model route a **resume** would restore (ADR 0026 D8): the journal's last model
+/// `ConfigChanged`. `None` when the file has none — the caller then falls back to the config
+/// and, failing that, requires `--model`. Reads the session file line by line; it is the one
+/// source of truth, and this runs before anything durable is created.
+pub fn resumed_model_route(
+    session_dir: &Path,
+    session_id: &str,
+) -> Option<radian_runtime::ModelRoute> {
+    let text = std::fs::read_to_string(session_dir.join(format!("{session_id}.jsonl"))).ok()?;
+    let mut route = None;
+    for line in text.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if value["event"] == "ConfigChanged"
+            && let Some(found) = radian_runtime::ModelRoute::from_value(&value["data"]["change"])
+        {
+            route = Some(found);
+        }
+    }
+    route
+}

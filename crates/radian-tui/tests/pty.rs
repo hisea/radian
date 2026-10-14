@@ -5371,6 +5371,157 @@ async fn pty_a_long_command_keeps_the_approval_keys_visible() {
     assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
 }
 
+/// `/model` switches the wire: after the switch the requests go to the **new** mock server
+/// with the new protocol (ADR 0026 D5, D6 — here opencode-go → anthropic).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_model_switch_sends_the_next_turn_to_the_new_provider() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("model-switch");
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let openai_server = MockServer::start(vec![text_reply("FIRST-PROVIDER-OK")]).await;
+    let anthropic_server =
+        anth::MockServer::start(vec![anth_text_reply("SWITCHED-PROVIDER-OK")]).await;
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &openai_server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "model-switch",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[
+            ("ANTHROPIC_API_KEY", "sk-ant-switch-test"),
+            ("RADIAN_BASE_URL", &anthropic_server.base_url),
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"one\r");
+    assert!(
+        pty.wait_for_screen("FIRST-PROVIDER-OK", 20),
+        "the first turn goes to the startup provider: {}",
+        pty.screen()
+    );
+    // The switch: the anthropic descriptor's endpoint comes from the credential's env. The
+    // first Enter accepts the slash completion (the owner's rule: Enter picks, never runs);
+    // the second submits the line.
+    pty.send(b"/model anthropic/claude-x\r\r");
+    assert!(
+        pty.wait_for_screen("next turn: anthropic/claude-x", 10),
+        "the status bar shows the queued switch: {}",
+        pty.screen()
+    );
+    pty.send(b"two\r");
+    assert!(
+        pty.wait_for_screen("SWITCHED-PROVIDER-OK", 20),
+        "the next turn goes to the new provider: {}",
+        pty.screen()
+    );
+    // The Messages API request reached the anthropic mock, with the key from auth.json.
+    let requests = anthropic_server.requests();
+    assert_eq!(requests.len(), 1, "one anthropic request");
+    assert_eq!(requests[0].path, "/v1/messages");
+    assert_eq!(requests[0].header("x-api-key"), Some("sk-ant-switch-test"));
+    // The status marker is spent (the transcript's notice stays, by design).
+    assert!(
+        pty.wait_until(10, |screen| !screen.contains("next: anthropic/claude-x")),
+        "the switch applied: {}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
+}
+
+/// D8: a resume uses the last switched model from the journal, with no flags.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_resume_replays_the_switched_model() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("model-resume");
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let openai_server = MockServer::start(vec![text_reply("OPENAI-RESUME")]).await;
+    let anthropic_server = anth::MockServer::start(vec![anth_text_reply("ANTHROPIC-RESUME")]).await;
+    // Turn 1 on the startup provider, then the switch, then turn 2 on anthropic.
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &openai_server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "model-resume",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[
+            ("ANTHROPIC_API_KEY", "sk-ant-resume-test"),
+            ("RADIAN_BASE_URL", &anthropic_server.base_url),
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"go\r");
+    assert!(pty.wait_for_screen("OPENAI-RESUME", 20), "{}", pty.screen());
+    pty.send(b"/model anthropic/claude-x\r\r");
+    assert!(
+        pty.wait_for_screen("next turn: anthropic/claude-x", 10),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"again\r");
+    assert!(
+        pty.wait_for_screen("ANTHROPIC-RESUME", 20),
+        "{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
+    drop(pty);
+
+    // Resume with no model flags: the journal's last change decides.
+    let anthropic_server2 =
+        anth::MockServer::start(vec![anth_text_reply("RESUMED-ON-ANTHROPIC")]).await;
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--resume",
+            "model-resume",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[
+            ("ANTHROPIC_API_KEY", "sk-ant-resume-test"),
+            ("RADIAN_BASE_URL", &anthropic_server2.base_url),
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"third\r");
+    assert!(
+        pty.wait_for_screen("RESUMED-ON-ANTHROPIC", 20),
+        "the resumed session stays on the switched model: {}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
+}
+
 /// ADR 0024 Q5: `--approval never` only affects approvals. The user is still there, so the
 /// TUI still registers `ask_user`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

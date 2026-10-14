@@ -80,7 +80,7 @@ pub use radian_runtime::ModelRoute;
 pub use session::{
     ApprovalRouting, CommandRefused, DriverEnd, HostBindings, LocalSession, SessionCapability,
     SessionCommand, SessionError, SessionFacade, SessionFacts, SessionId, SessionQueue,
-    SessionSetup, open_session,
+    SessionSetup, open_session, resumed_model_route,
 };
 pub use session_id::{generate_session_id, validate_session_id};
 pub use sessions::{

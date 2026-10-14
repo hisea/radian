@@ -329,21 +329,6 @@ fn finish(result: Result<(), OutputError>) -> i32 {
     }
 }
 
-/// The `--model` value. Clap requires it unless `--list`, `--export` or `--search` is present,
-/// so a conversation always has one; this makes the failure explicit instead of a panic if
-/// that invariant ever changes.
-fn model_name<'a>(
-    cli: &'a Cli,
-    config: &'a radian_host::config::Config,
-) -> Result<&'a str, SetupError> {
-    cli.model
-        .as_deref()
-        .or(config.model.model.as_deref())
-        .ok_or_else(|| {
-            SetupError("no model: pass --model, or set model.model in the config file".into())
-        })
-}
-
 /// The `--format` value for `--export`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 enum ExportFormat {
@@ -668,7 +653,26 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
             radian_host::SUPPORTED_SCHEMA_VERSION
         );
     }
-    let model_name = model_name(cli, &config)?.to_owned();
+    // ADR 0026 D8: on a resume the journal's last model change outranks the config file (the
+    // command line still outranks both, which `model_name` already enforces by being tried
+    // first).
+    let resumed_route = match cli.resume.as_ref() {
+        Some(id) => match session_dir(cli) {
+            Ok(dir) => radian_host::resumed_model_route(&dir, id),
+            Err(_) => None,
+        },
+        None => None,
+    };
+    let model_name = match cli.model.as_deref() {
+        Some(model) => model.to_owned(),
+        None => resumed_route
+            .as_ref()
+            .map(|route| route.model.clone())
+            .or_else(|| config.model.model.clone())
+            .ok_or_else(|| {
+                SetupError("no model: pass --model, or set model.model in the config file".into())
+            })?,
+    };
     let profile = match cli.profile {
         Some(profile) => profile,
         None => match config.permissions.profile.as_deref() {
@@ -687,9 +691,11 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     // ADR 0026 D0: `--provider`/config `model.provider` names a descriptor. The generic
     // `openai-compatible` descriptor is the default (the pre-D0 behaviour); the model is
     // never defaulted.
+    // ADR 0026 D8: the command line outranks the resumed journal, which outranks the config.
     let provider_id = cli
         .provider
         .clone()
+        .or_else(|| resumed_route.as_ref().map(|route| route.provider.clone()))
         .or_else(|| config.model.provider.clone())
         .unwrap_or_else(|| radian_host::GENERIC_ID.to_owned());
     let descriptor = radian_host::descriptor(&provider_id).ok_or_else(|| {

@@ -330,9 +330,16 @@ fn run(
     if let Err(error) = radian_tui::keys::Keymap::from_config(&config.tui.keybindings) {
         return Err(format!("config: {error}"));
     }
+    // ADR 0026 D8: on a resume the journal's last model change outranks the config file (the
+    // command line still outranks both). `--resume`'s id is known by here (`dir` too).
+    let resumed_route = match cli.resume.as_ref().map(Option::as_deref) {
+        Some(Some(id)) => radian_host::resumed_model_route(&dir, id),
+        _ => None,
+    };
     let model_name = cli
         .model
         .clone()
+        .or_else(|| resumed_route.as_ref().map(|route| route.model.clone()))
         .or_else(|| config.model.model.clone())
         .ok_or_else(|| {
             "no model: pass --model, or set model.model in the config file".to_string()
@@ -348,6 +355,7 @@ fn run(
     let provider_id = cli
         .provider
         .clone()
+        .or_else(|| resumed_route.as_ref().map(|route| route.provider.clone()))
         .or_else(|| config.model.provider.clone())
         .unwrap_or_else(|| radian_host::GENERIC_ID.to_owned());
     let descriptor = radian_host::descriptor(&provider_id).ok_or_else(|| {
