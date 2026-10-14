@@ -308,6 +308,8 @@ fn run(
     // startup. A failure is one line, never a fault.
     radian_host::clean_startup();
     let dir = session_dir(&cli)?;
+    let workspace_root = coding_root(&cli)?;
+    let workspace_path = radian_host::resolve_workspace(Some(&workspace_root.path))?;
     // ADR 0020 decision 5: never move a user's data; print a copy-pasteable command instead.
     if cli.session_dir.is_none()
         && std::env::var("RADIAN_SESSION_DIR").map_or(true, |dir| dir.is_empty())
@@ -332,155 +334,10 @@ fn run(
     }
     // ADR 0026 D8: on a resume the journal's last model change outranks the config file (the
     // command line still outranks both). `--resume`'s id is known by here (`dir` too).
-    let resumed_route = match cli.resume.as_ref().map(Option::as_deref) {
-        Some(Some(id)) => radian_host::resumed_model_route(&dir, id),
-        _ => None,
-    };
-    let model_name = cli
-        .model
-        .clone()
-        .or_else(|| resumed_route.as_ref().map(|route| route.model.clone()))
-        .or_else(|| config.model.model.clone())
-        .ok_or_else(|| {
-            "no model: pass --model, or set model.model in the config file".to_string()
-        })?;
-    let profile_name = cli
-        .profile
-        .clone()
-        .or_else(|| config.permissions.profile.clone())
-        .unwrap_or_else(|| "workspace".to_string());
-    // ADR 0026 D0/D10: `--provider`/config `model.provider` names a provider — a built-in
-    // descriptor or a named one (`[providers.<name>]` in the config, or the auth.json
-    // entry's `env`). The generic `openai-compatible` descriptor is the default (the pre-D0
-    // behaviour); the model is never defaulted. The key is looked up under the **name**
-    // (D10), so every custom endpoint has its own slot.
-    let provider_name = cli
-        .provider
-        .clone()
-        .or_else(|| resumed_route.as_ref().map(|route| route.provider.clone()))
-        .or_else(|| config.model.provider.clone())
-        .unwrap_or_else(|| radian_host::GENERIC_ID.to_owned());
-    let auth_store = radian_host::AuthStore::open().map_err(|e| e.to_string())?;
-    let (provider_ref, provider_warning) = radian_host::resolve_provider(
-        &provider_name,
-        &config.providers,
-        auth_store.entry_env(&provider_name).as_ref(),
-    )?;
-    if let Some(warning) = &provider_warning {
-        // A display conflict, not an error: the startup line says which side won.
-        eprintln!("[provider] {warning}");
-    }
-    let key_id = provider_ref.key_id().to_owned();
-    let provider = provider_ref.protocol_for(&model_name).adapter();
-    // ADR 0026 D11: the unified levels, with the legacy Anthropic spellings accepted for one
-    // version (a warning goes to stderr when one is used).
-    let (thinking, legacy_thinking) = match cli.thinking.as_deref() {
-        Some(raw) => {
-            let (level, legacy) = radian_host::parse_thinking_level(raw)?;
-            (level.to_owned(), legacy)
-        }
-        None => (radian_host::DEFAULT_THINKING_LEVEL.to_owned(), false),
-    };
-    if legacy_thinking {
-        eprintln!(
-            "radian: [thinking] the legacy `--thinking {}` spelling is deprecated; use one of {}",
-            cli.thinking.as_deref().unwrap_or_default(),
-            radian_host::THINKING_LEVELS.join("|")
-        );
-    }
-    // `--max-tokens` is Anthropic-only; under openai-compatible it would be ignored, so this is
-    // an error before the session file exists (dogfooding D15). `--thinking` left this check in
-    // D11: the unified levels ride both wire protocols.
-    check_provider_flags(provider, Thinking::Off, cli.max_tokens)?;
-    // The generic descriptor's endpoint; a non-generic descriptor refuses it (`resolve_route`).
-    let base_url_override = cli
-        .base_url
-        .clone()
-        .or_else(|| config.model.base_url.clone());
-    // The endpoint this run would talk to, before the session id: used only to allow a local
-    // server to run without a key (a loopback mock needs no credential). `--base-url` only
-    // pre-fills the probe for the generic provider (a named one has a fixed endpoint).
-    let probe_base_url = if provider_ref.takes_base_url_override() {
-        base_url_override.clone()
-    } else {
-        None
-    }
-    .unwrap_or_else(|| provider_ref.base_url_for(&model_name, None));
-    // ADR 0026 D2: the key comes only from `auth.json`. A missing entry is a clear refusal with
-    // the fix (run `/login <provider>` — D3, in this slice), unless the endpoint is local.
-    let credential = match radian_host::resolve_key(&key_id).map_err(|e| e.to_string())? {
-        Some(credential) => Some(credential),
-        None if is_local_base_url(&probe_base_url) => None,
-        None => {
-            return Err(
-                match radian_host::resolve_note(&key_id).map_err(|e| e.to_string())? {
-                    Some(note) => note,
-                    None => format!(
-                        "no credential for `{key_id}`: run `agent login {key_id}`, or \
-                         `/login {key_id}` in the TUI; refusing to continue because {} is not a \
-                         local address",
-                        radian_host::redact_base_url(&probe_base_url)
-                    ),
-                },
-            );
-        }
-    };
-    // The config's headers come first, so a `--header` of the same name wins.
-    let mut header_args: Vec<String> = config
-        .model
-        .headers
-        .iter()
-        .map(|(name, value)| format!("{name}={value}"))
-        .collect();
-    header_args.extend(cli.header.iter().cloned());
-    let workspace_root = coding_root(&cli)?;
-    let workspace_path = radian_host::resolve_workspace(Some(&workspace_root.path))?;
-    // `R` comes from the request's own output setting: Anthropic sends `max_tokens`,
-    // OpenAI-compatible sends none.
-    let request_max_output = match provider {
-        Provider::Anthropic => Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
-        Provider::OpenAiCompatible => None,
-    };
-    // The window's base URL: the provider's endpoint (for a named provider, its declaration).
-    let catalog_base_url = provider_ref.base_url_for(&model_name, None);
-    // The catalog groups by provider id; the generic descriptor is not one, so its provider
-    // is derived from the base URL hostname. A named provider is its own group only when its
-    // name is a catalog provider; otherwise the hostname rule applies (the fallback below).
-    let catalog_provider = cli
-        .catalog_provider
-        .clone()
-        .or_else(|| match &provider_ref {
-            radian_host::ProviderRef::BuiltIn(descriptor) => {
-                (descriptor.id != radian_host::GENERIC_ID).then(|| descriptor.id.to_string())
-            }
-            radian_host::ProviderRef::Named(named) => Some(named.name.clone()),
-        });
-    let window = runtime.block_on(radian_host::resolve(&radian_host::WindowQuery::production(
-        cli.context_window.or(config.model.context_window),
-        catalog_provider,
-        &catalog_base_url,
-        model_name.clone(),
-        request_max_output,
-        cli.offline_catalog,
-    )));
-    // ADR 0018: `C ≤ R` refuses an explicit `--context-window` and only warns for a catalog
-    // window (the budget is then off).
-    match window.startup_check() {
-        radian_host::WindowCheck::Ok => {}
-        radian_host::WindowCheck::Refuse(message) => return Err(message),
-        radian_host::WindowCheck::Warn(message) => eprintln!("{message}"),
-    }
-    if let Some(warning) = radian_host::output_ceiling_warning(request_max_output, window.output) {
-        eprintln!("{warning}");
-    }
-
-    // `--resume` with no value: the picker in "resume only" mode.
+    // `--resume` without a value (and `--pick`) are decided here, before the model block
+    // below: `resume` is what the journal route is read from (review M1).
     let resume_only = matches!(cli.resume, Some(None));
     let mut resume = cli.resume.clone().flatten();
-    // `--pick` (and `--resume` without a value): load the picker's rows **before** the terminal
-    // is entered. `open_index` can warn about a wide session directory, and that warning must be
-    // on the normal screen. The picker owns its data; the phase itself runs after the terminal
-    // (ADR 0023 U4).
     let startup_picker = if cli.pick || resume_only {
         let workspace = workspace_path.to_string_lossy().into_owned();
         prepare_picker(&dir, &workspace)?.map(|picker| {
@@ -518,7 +375,9 @@ fn run(
     // space), so the raw text stays on screen and corrupts the first row.
     // The session id is not known yet when `--pick` runs (the picker chooses it), so the app
     // starts with an empty one and `run` sets the real id after the choice.
-    let mut app = App::new(model_name.clone(), String::new());
+    // The model is resolved **after** the picker (review M1), so the app starts with a
+    // placeholder name and `run` sets the real one below.
+    let mut app = App::new(String::new(), String::new());
     // `Tab` (the `complete` action) completes `@` file references against the workspace.
     app.set_workspace(workspace_path.clone());
     let config_warnings = app
@@ -557,7 +416,12 @@ fn run(
             &rx,
             &tx,
             Phase::Picking,
-            (provider_name.clone(), model_name.clone()),
+            // The picking phase has no resolved model yet (review M1): the route is only a
+            // fallback for the `/thinking` clamp, which the picker overlay cannot reach.
+            (
+                cli.provider.clone().unwrap_or_default(),
+                cli.model.clone().unwrap_or_default(),
+            ),
             &config.providers,
         )?;
         if let Some(signal) = signal {
@@ -585,10 +449,172 @@ fn run(
         }
     }
 
-    // The session id is resolved before the headers: a `{session_id}` in a header expands to
-    // this process's id, and `--resume` uses the id being resumed. The parser is the same one
-    // `agent-cli` uses, so `{session_id}`, name validation and the `authorization` refusal
-    // behave identically in both hosts.
+    // ADR 0026 D8 + review M1: this runs **after** the picker, so `--pick` and a valueless
+    // `--resume` have already decided `resume` and the journal's last model change is what
+    // resolves the model, provider, credential, route, window and budget — one path, not a
+    // config-based guess that the driver's replay then contradicts. The command line still
+    // outranks the journal, which outranks the config.
+    // `resume` is the **resolved** id (the picker set it for `--pick`/a valueless `--resume`),
+    // not `cli.resume`: reading the journal needs the id the session will actually open with.
+    let resumed_route = match resume.as_deref() {
+        Some(id) => radian_host::resumed_model_route(&dir, id),
+        None => None,
+    };
+    let model_name = cli
+        .model
+        .clone()
+        .or_else(|| resumed_route.as_ref().map(|route| route.model.clone()))
+        .or_else(|| config.model.model.clone())
+        .ok_or_else(|| {
+            "no model: pass --model, or set model.model in the config file".to_string()
+        })?;
+    let profile_name = cli
+        .profile
+        .clone()
+        .or_else(|| config.permissions.profile.clone())
+        .unwrap_or_else(|| "workspace".to_string());
+    // ADR 0026 D0/D10: `--provider`/config `model.provider` names a provider — a built-in
+    // descriptor or a named one (`[providers.<name>]` in the config, or the auth.json
+    // entry's `env`). The generic `openai-compatible` descriptor is the default (the pre-D0
+    // behaviour); the model is never defaulted. The key is looked up under the **name**
+    // (D10), so every custom endpoint has its own slot.
+    // D8: the command line wins. An explicit `--base-url` is the generic provider's dial
+    // (D0), so it counts as the user choosing generic; otherwise the journal's route outranks
+    // the config (review M1: this runs after the picker, so the id is known).
+    let provider_name = if cli.base_url.is_some() {
+        cli.provider
+            .clone()
+            .unwrap_or_else(|| radian_host::GENERIC_ID.to_owned())
+    } else {
+        cli.provider
+            .clone()
+            .or_else(|| resumed_route.as_ref().map(|route| route.provider.clone()))
+            .or_else(|| config.model.provider.clone())
+            .unwrap_or_else(|| radian_host::GENERIC_ID.to_owned())
+    };
+    let auth_store = radian_host::AuthStore::open().map_err(|e| e.to_string())?;
+    let (provider_ref, provider_warning) = radian_host::resolve_provider(
+        &provider_name,
+        &config.providers,
+        auth_store.entry_env(&provider_name).as_ref(),
+    )?;
+    if let Some(warning) = &provider_warning {
+        // A display conflict, not an error: the startup line says which side won.
+        eprintln!("[provider] {warning}");
+    }
+    let key_id = provider_ref.key_id().to_owned();
+    let provider = provider_ref.protocol_for(&model_name).adapter();
+    // ADR 0026 D11: the unified levels, with the legacy Anthropic spellings accepted for one
+    // version (a warning goes to stderr when one is used).
+    let (thinking, legacy_thinking) = match cli.thinking.as_deref() {
+        Some(raw) => {
+            let (level, legacy) = radian_host::parse_thinking_level(raw)?;
+            (level.to_owned(), legacy)
+        }
+        None => (radian_host::DEFAULT_THINKING_LEVEL.to_owned(), false),
+    };
+    if legacy_thinking {
+        eprintln!(
+            "radian: [thinking] the legacy `--thinking {}` spelling is deprecated; use one of {}",
+            cli.thinking.as_deref().unwrap_or_default(),
+            radian_host::THINKING_LEVELS.join("|")
+        );
+    }
+    // `--max-tokens` is Anthropic-only; under openai-compatible it would be ignored, so this is
+    // an error before the session file exists (dogfooding D15). `--thinking` left this check in
+    // D11: the unified levels ride both wire protocols.
+    check_provider_flags(provider, Thinking::Off, cli.max_tokens)?;
+    // The generic descriptor's endpoint; a non-generic descriptor refuses it (`resolve_route`).
+    // The generic provider's endpoint override (D0): refused for any other provider, so it is
+    // dropped here rather than passed to `resolve_route_for`, which would error.
+    let base_url_override = cli
+        .base_url
+        .clone()
+        .or_else(|| config.model.base_url.clone())
+        .filter(|_| provider_ref.takes_base_url_override());
+    // The endpoint this run would talk to, before the session id: used only to allow a local
+    // server to run without a key (a loopback mock needs no credential). `--base-url` only
+    // pre-fills the probe for the generic provider (a named one has a fixed endpoint).
+    let probe_base_url = if provider_ref.takes_base_url_override() {
+        base_url_override.clone()
+    } else {
+        None
+    }
+    .unwrap_or_else(|| provider_ref.base_url_for(&model_name, None));
+    // ADR 0026 D2: the key comes only from `auth.json`. A missing entry is a clear refusal with
+    // the fix (run `/login <provider>` — D3, in this slice), unless the endpoint is local.
+    let credential = match radian_host::resolve_key(&key_id).map_err(|e| e.to_string())? {
+        Some(credential) => Some(credential),
+        None if is_local_base_url(&probe_base_url) => None,
+        None => {
+            return Err(
+                match radian_host::resolve_note(&key_id).map_err(|e| e.to_string())? {
+                    Some(note) => note,
+                    None => format!(
+                        "no credential for `{key_id}`: run `agent login {key_id}`, or \
+                         `/login {key_id}` in the TUI; refusing to continue because {} is not a \
+                         local address",
+                        radian_host::redact_base_url(&probe_base_url)
+                    ),
+                },
+            );
+        }
+    };
+    // The config's headers come first, so a `--header` of the same name wins.
+    let mut header_args: Vec<String> = config
+        .model
+        .headers
+        .iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect();
+    header_args.extend(cli.header.iter().cloned());
+    // `R` comes from the request's own output setting: Anthropic sends `max_tokens`,
+    // OpenAI-compatible sends none.
+    // The app was built before the model was resolved (review M1): the status bar's model name
+    // is set here, once, from the effective route.
+    app.model_name = model_name.clone();
+    let request_max_output = match provider {
+        Provider::Anthropic => Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
+        Provider::OpenAiCompatible => None,
+    };
+    // The window's base URL: the provider's endpoint (for a named provider, its declaration).
+    let catalog_base_url = provider_ref.base_url_for(&model_name, None);
+    // The catalog groups by provider id; the generic descriptor is not one, so its provider
+    // is derived from the base URL hostname. A named provider is its own group only when its
+    // name is a catalog provider; otherwise the hostname rule applies (the fallback below).
+    let catalog_provider = cli
+        .catalog_provider
+        .clone()
+        .or_else(|| match &provider_ref {
+            radian_host::ProviderRef::BuiltIn(descriptor) => {
+                (descriptor.id != radian_host::GENERIC_ID).then(|| descriptor.id.to_string())
+            }
+            radian_host::ProviderRef::Named(named) => Some(named.name.clone()),
+        });
+    let window = runtime.block_on(radian_host::resolve(&radian_host::WindowQuery::production(
+        cli.context_window.or(config.model.context_window),
+        catalog_provider,
+        &catalog_base_url,
+        model_name.clone(),
+        request_max_output,
+        cli.offline_catalog,
+    )));
+    // ADR 0018: `C ≤ R` refuses an explicit `--context-window` and only warns for a catalog
+    // window (the budget is then off).
+    match window.startup_check() {
+        radian_host::WindowCheck::Ok => {}
+        radian_host::WindowCheck::Refuse(message) => return Err(message),
+        radian_host::WindowCheck::Warn(message) => eprintln!("{message}"),
+    }
+    if let Some(warning) = radian_host::output_ceiling_warning(request_max_output, window.output) {
+        eprintln!("{warning}");
+    }
+
+    // `--resume` with no value: the picker in "resume only" mode.
+    // `--pick` (and `--resume` without a value): load the picker's rows **before** the terminal
+    // is entered. `open_index` can warn about a wide session directory, and that warning must be
+    // on the normal screen. The picker owns its data; the phase itself runs after the terminal
+    // (ADR 0023 U4).
     let session_id = match (&resume, &cli.session_id) {
         (Some(id), _) | (None, Some(id)) => id.clone(),
         (None, None) => radian_host::generate_session_id(),

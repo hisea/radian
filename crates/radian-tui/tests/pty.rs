@@ -5600,6 +5600,107 @@ async fn pty_thinking_clamps_up_and_sends_reasoning_effort() {
     assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
 }
 
+/// Review M1: a valueless `--resume` decides the session in the picker, and the model block
+/// runs **after** it, so the journal's last model change is the one resolved (status bar and
+/// request alike). The config's model (an OpenAI mock) must not be used.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_picked_resume_uses_the_journals_model() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("pick-model");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let workspace = std::fs::canonicalize(&ws)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    // A session whose journal switched to anthropic/claude-x.
+    let path = sessions.join("switched.jsonl");
+    let journal = radian_session::SessionJournal::create(
+        &path,
+        "switched",
+        radian_session::SessionCreatedData::new(&workspace, json!({})),
+    )
+    .unwrap();
+    use agent_core::TranscriptJournal;
+    journal
+        .append(agent_core::JournalRecord::Message {
+            index: 0,
+            message: agent_core::Message::user("earlier"),
+        })
+        .await
+        .unwrap();
+    journal
+        .append_runtime_event(radian_session::RuntimeEvent::ConfigChanged {
+            revision: 1,
+            change: radian_host::ModelRoute::new("anthropic", "claude-x").to_value(),
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    // The config's model is the OpenAI mock; the journal says anthropic.
+    let openai_server = MockServer::start(vec![text_reply("CONFIG-MODEL")]).await;
+    let anthropic_server = anth::MockServer::start(vec![anth_text_reply("JOURNAL-MODEL")]).await;
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"mock\"\n\
+             base_url = \"{}\"\n",
+            openai_server.base_url
+        ),
+    )
+    .unwrap();
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--resume",
+        ],
+        &[
+            ("RADIAN_CONFIG", config.to_str().unwrap()),
+            ("ANTHROPIC_API_KEY", "sk-ant-picked"),
+            ("RADIAN_BASE_URL", &anthropic_server.base_url),
+        ],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("switched", 10),
+        "the picker did not list the session: {}",
+        pty.screen()
+    );
+    pty.send(b"\r");
+    assert!(
+        pty.wait_for_screen("message", 10),
+        "the picked session did not open: {}",
+        pty.screen()
+    );
+    // The status bar names the journal's model, not the config's.
+    assert!(
+        pty.wait_until(10, |screen| screen.contains("claude-x")),
+        "the status bar must show the journal's model: {}",
+        pty.screen()
+    );
+    pty.send(b"go\r");
+    assert!(
+        pty.wait_for_screen("JOURNAL-MODEL", 20),
+        "the request must go to the journal's provider: {}",
+        pty.screen()
+    );
+    assert!(
+        openai_server.requests().is_empty(),
+        "the config model must not be used"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
+}
+
 /// ADR 0024 Q5: `--approval never` only affects approvals. The user is still there, so the
 /// TUI still registers `ask_user`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
