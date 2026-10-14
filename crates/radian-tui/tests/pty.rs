@@ -2286,7 +2286,8 @@ async fn pty_clean_exit_prints_one_reason_line() {
         .rsplit_once("\u{1b}[?1049l")
         .map(|(_, rest)| rest.to_string())
         .unwrap_or_default();
-    let reason = "session exit-reason saved; resume with `--resume exit-reason`";
+    // The owner's UI review: the line carries a paste-ready command, not just the flag.
+    let reason = "session exit-reason saved; resume: radian-tui --resume exit-reason";
     let start = after
         .find(reason)
         .unwrap_or_else(|| panic!("no exit reason on the normal screen: {after}"));
@@ -5534,4 +5535,54 @@ async fn pty_resume_without_a_value_picks_a_session() {
     assert!(pty.wait_for_exit(10).is_some(), "Esc did not leave");
     assert_eq!(pty.app_exit_code(), Some(0));
     assert_eq!(listing(&sessions), before, "no session file was created");
+}
+
+/// The exit line is a command the user can paste: the program name, the id,
+/// and the flags that must be repeated — and never a key or a header value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_the_exit_line_is_a_copyable_resume_command() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("resume-command");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let server = MockServer::start(vec![text_reply("OK")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "copyable",
+            "--header",
+            "x-trace=HEADER-VALUE",
+            "--api-key-env",
+            "MY_KEY",
+        ],
+        24,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    let after = raw
+        .rsplit_once("\u{1b}[?1049l")
+        .map(|(_, rest)| rest.to_string())
+        .unwrap_or_default();
+    let line = after
+        .lines()
+        .find(|line| line.contains("resume:"))
+        .unwrap_or_else(|| panic!("no resume command on the normal screen: {after}"));
+    assert!(line.contains("radian-tui --resume copyable"), "{line}");
+    assert!(line.contains("--session-dir"), "{line}");
+    assert!(line.contains(sessions.to_str().unwrap()), "{line}");
+    assert!(!line.contains("HEADER-VALUE"), "no header value: {line}");
+    assert!(!line.contains("MY_KEY"), "no key: {line}");
+    assert!(!line.contains("--header"), "{line}");
+    assert!(!line.contains("--api-key-env"), "{line}");
 }

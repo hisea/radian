@@ -919,11 +919,69 @@ fn run(
     }
     // A failure in the UI loop is the app's failure too; the terminal is already restored.
     let signal = outcome?;
-    let saved = format!("session {session_id} saved; resume with `--resume {session_id}`");
+    let saved = format!(
+        "session {session_id} saved; {}",
+        resume_command(&program_name(), &session_id, &cli, &workspace_path)
+    );
     Ok(Some(match signal {
         Some(signal) => format!("received {}; {saved}", radian_tui::signals::name(signal)),
         None => saved,
     }))
+}
+
+/// The program name for the resume command: `argv[0]`'s file name, so the line is copyable
+/// whatever the binary is called (a `cargo run`, an absolute path, a symlink).
+fn program_name() -> String {
+    std::env::args_os()
+        .next()
+        .map(|arg| {
+            Path::new(&arg)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| arg.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "radian-tui".to_string())
+}
+
+/// One argument of the resume command, quoted when it would not survive a shell.
+fn shell_arg(value: &str) -> String {
+    if value
+        .chars()
+        .any(|c| c.is_whitespace() || c == '\'' || c == '"' || c == '\\')
+    {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    } else {
+        value.to_string()
+    }
+}
+
+/// The command a clean exit prints: the program, `--resume <id>`, and only the flags this run
+/// was given that must be repeated. A key or a header value is **never** in
+/// it — the key comes from the environment and the headers from the config file.
+fn resume_command(program: &str, session_id: &str, cli: &Cli, workspace: &Path) -> String {
+    let mut parts = vec![
+        program.to_owned(),
+        "--resume".to_owned(),
+        session_id.to_owned(),
+    ];
+    if let Some(dir) = &cli.session_dir {
+        parts.push("--session-dir".to_owned());
+        parts.push(shell_arg(&dir.display().to_string()));
+    }
+    // Only when the workspace is not the current directory: the default is the cwd, so the
+    // command works from wherever the user runs it.
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| std::fs::canonicalize(cwd).ok());
+    if cli.workspace.is_some() || cwd.as_deref() != Some(workspace) {
+        parts.push("--workspace".to_owned());
+        parts.push(shell_arg(&workspace.display().to_string()));
+    }
+    if let Some(config) = &cli.config {
+        parts.push("--config".to_owned());
+        parts.push(shell_arg(&config.display().to_string()));
+    }
+    format!("resume: {}", parts.join(" "))
 }
 
 /// Test hook (`--block-input`): a path whose creation marks "the read is now blocked forever".
