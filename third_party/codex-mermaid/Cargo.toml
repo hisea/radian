@@ -1,0 +1,72 @@
+# Vendored from openai/codex, commit 2f05c0a71f59fb2f05800846351f3e9926c3e52b,
+# directory codex-rs/mermaid. Every file except this Cargo.toml is byte-identical
+# to upstream; see RADIAN-CHANGES.md.
+# Modified for Radian: workspace inheritance resolved (version, edition, license,
+# rust-version, unicode-width, dev-dependencies, lints).
+[package]
+name = "codex-mermaid"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.88"
+
+[lib]
+name = "codex_mermaid"
+path = "src/lib.rs"
+doctest = false
+
+# Upstream resolved these from codex's `[workspace.lints]`
+# (codex-rs/Cargo.toml at the pinned commit): `[workspace.lints.rust]` is empty and
+# the clippy table below is upstream's verbatim. Any `allow` added for Radian keeps
+# its reason inline.
+[lints.rust]
+
+[lints.clippy]
+await_holding_invalid_type = "deny"
+await_holding_lock = "deny"
+disallowed_methods = "deny"
+expect_used = "deny"
+identity_op = "deny"
+manual_clamp = "deny"
+manual_filter = "deny"
+manual_find = "deny"
+manual_flatten = "deny"
+manual_map = "deny"
+manual_memcpy = "deny"
+manual_non_exhaustive = "deny"
+manual_ok_or = "deny"
+manual_range_contains = "deny"
+manual_retain = "deny"
+manual_strip = "deny"
+manual_try_fold = "deny"
+manual_unwrap_or = "deny"
+needless_borrow = "deny"
+needless_borrowed_reference = "deny"
+needless_collect = "deny"
+needless_late_init = "deny"
+needless_option_as_deref = "deny"
+needless_question_mark = "deny"
+needless_update = "deny"
+redundant_clone = "deny"
+redundant_closure = "deny"
+redundant_closure_for_method_calls = "deny"
+redundant_static_lifetimes = "deny"
+trivially_copy_pass_by_ref = "deny"
+uninlined_format_args = "deny"
+unnecessary_filter_map = "deny"
+unnecessary_lazy_evaluations = "deny"
+unnecessary_sort_by = "deny"
+unnecessary_to_owned = "deny"
+# Radian-specific allow, so the upstream sources stay byte-identical:
+# - unwrap_used: all 53 hits are `.unwrap()` in the two upstream test files
+#   (src/tests.rs, src/families_tests.rs); the library code has none. Denying it
+#   here would force edits to upstream test code.
+unwrap_used = "allow"
+
+[dependencies]
+unicode-width = "0.2"
+
+[dev-dependencies]
+# Same versions codex pins in codex-rs/Cargo.toml at the pinned commit.
+insta = "1.46.3"
+pretty_assertions = "1.4.1"
