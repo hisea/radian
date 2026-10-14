@@ -19,3 +19,6 @@ profile = "ask"
 theme = "dark"
 mouse = false
 input_style = "lines"
+
+[tui.display]
+mermaid = true
