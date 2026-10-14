@@ -847,6 +847,11 @@ fn run(
                 tier: tier.preset(),
                 profile,
                 memory_root,
+                skills_extra_paths: radian_host::config::resolve_extra_paths(
+                    &config.skills.extra_paths,
+                    config.source.as_deref().and_then(std::path::Path::parent),
+                    radian_host::user_home().as_deref(),
+                ),
                 resume: resume.is_some(),
                 config_snapshot: serde_json::json!({
                     "provider": provider.as_str(),

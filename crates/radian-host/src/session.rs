@@ -284,6 +284,10 @@ pub struct SessionSetup {
     pub profile: Profile,
     /// The memory root, or `None` when neither `RADIAN_HOME` nor `HOME` is set.
     pub memory_root: Option<PathBuf>,
+    /// Extra skill roots from `[skills] extra_paths` (ADR 0025 slice 4), already resolved by the
+    /// host (`~` and paths relative to the config file). The user-level `~/.radian/skills` is
+    /// discovered first, so it wins a name conflict.
+    pub skills_extra_paths: Vec<PathBuf>,
     /// `true` to resume an existing session file, `false` to create one.
     pub resume: bool,
     /// The `SessionCreated` snapshot (a route reference: never a key or a header value).
@@ -700,6 +704,7 @@ pub async fn open_session(
         tier,
         profile,
         memory_root,
+        skills_extra_paths,
         resume,
         config_snapshot,
         turn_options,
@@ -773,15 +778,14 @@ pub async fn open_session(
     // Skills (ADR 0025 S1): discovery is best effort — a bad skill warns and is skipped. The
     // section is appended after the memory section, so the tuple below is ((perm, memory),
     // skills) and the prompt order is basic prompt, memory, skills (ADR 0025 S6).
-    let skills = match skills_dir() {
-        Some(dir) => {
-            let discovery = skills::discover(&dir);
-            for warning in &discovery.warnings {
-                memory_warning(warning);
-            }
-            discovery.skills
+    let skills = {
+        // The user level first, then `[skills] extra_paths` (ADR 0025 slice 4): the first
+        // discovery of a name wins, so `~/.radian/skills` beats an extra root.
+        let discovery = skills::discover_with_extras(skills_dir().as_deref(), &skills_extra_paths);
+        for warning in &discovery.warnings {
+            memory_warning(warning);
         }
-        None => Vec::new(),
+        discovery.skills
     };
     let shared_skills = Arc::new(skills);
     let skills_hooks = Arc::new(SkillsHooks::new(&shared_skills));

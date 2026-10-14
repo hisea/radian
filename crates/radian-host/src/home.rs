@@ -23,6 +23,13 @@ pub fn radian_home_for(radian_home: Option<&Path>, home: Option<&Path>) -> Optio
         .map(|home| home.join(".radian"))
 }
 
+/// The user's home directory (`HOME`), the base a `~` in `[skills] extra_paths` expands to
+/// (ADR 0025 slice 4). `None` when `HOME` is unset or empty; a `~` is then left unexpanded and
+/// reported as a missing directory, never guessed.
+pub fn user_home() -> Option<PathBuf> {
+    env_path("HOME")
+}
+
 /// The root for this process, or `None` when neither `RADIAN_HOME` nor `HOME` is usable.
 pub fn radian_home() -> Option<PathBuf> {
     let radian_home = env_path(RADIAN_HOME_ENV);

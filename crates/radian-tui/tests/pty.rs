@@ -747,6 +747,84 @@ async fn pty_skill_commands_expand_list_notice_and_escape() {
     assert_eq!(pty.app_exit_code(), Some(0), "clean exit code");
 }
 
+/// ADR 0025 slice 4: `[skills] extra_paths` in the config add skill roots. This drives the whole
+/// path — config reader, `~`/relative resolution (an absolute path here), discovery, the prompt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_skills_extra_paths_are_read_from_the_config() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![
+        text_reply("EXTRA-SKILL-REPLY-OK"),
+        text_reply("EXTRA-COMMAND-REPLY-OK"),
+    ])
+    .await;
+    let dir = TempDir::new("extra-session");
+    let home = TempDir::new("extra-home");
+    let extra = TempDir::new("extra-root");
+    std::fs::create_dir_all(extra.path().join("team-skill")).unwrap();
+    std::fs::write(
+        extra.path().join("team-skill/SKILL.md"),
+        "---\nname: team-skill\ndescription: From the extra root.\n---\nEXTRA-ROOT-BODY\n",
+    )
+    .unwrap();
+    let config = format!(
+        "schema_version = 1\n[skills]\nextra_paths = [\"{}\"]\n",
+        extra.path().to_str().unwrap()
+    );
+    let mut pty = Pty::spawn_with_config(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "extra",
+        ],
+        &[("RADIAN_HOME", home.path().to_str().unwrap())],
+        &config,
+        24,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send("hello\r".as_bytes());
+    assert!(
+        pty.wait_for_screen("EXTRA-SKILL-REPLY-OK", 20),
+        "the reply is missing:\n{}",
+        pty.screen()
+    );
+    let body = server.requests()[0].json();
+    let system = body["messages"]
+        .as_array()
+        .expect("messages is an array")
+        .iter()
+        .find(|message| message["role"] == "system")
+        .and_then(|message| message["content"].as_str())
+        .unwrap_or_default();
+    assert!(system.contains("team-skill"), "{system}");
+    assert!(system.contains("From the extra root."), "{system}");
+    // The extra skill is usable end to end through the command path too.
+    pty.send("/skill:team-skill\r".as_bytes());
+    assert!(
+        pty.wait_for_screen("EXTRA-COMMAND-REPLY-OK", 20),
+        "the extra skill got no reply:\n{}",
+        pty.screen()
+    );
+    let second = server.requests()[1].json();
+    let expanded = second["messages"]
+        .as_array()
+        .expect("messages is an array")
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .map(|message| message["content"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(expanded.contains("EXTRA-ROOT-BODY"), "{expanded}");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "clean exit code");
+}
+
 /// The diagnostics directory the app will use when `HOME` is `home` (ADR 0020):
 /// `<home>/.radian/cache/diagnostics`.
 fn diagnostics_dir(home: &Path) -> PathBuf {

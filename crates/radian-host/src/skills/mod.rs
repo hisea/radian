@@ -51,12 +51,42 @@ pub struct Discovery {
     pub warnings: Vec<String>,
 }
 
-/// Scans `root/skills`-style directory (`root` is `<RADIAN_HOME>/skills`). A missing directory
-/// is an empty discovery, not an error (ADR 0025 S1: nothing blocks startup).
+/// Scans one skills directory (`<RADIAN_HOME>/skills`). A missing directory is an empty
+/// discovery, not an error (ADR 0025 S1: nothing blocks startup).
 pub fn discover(root: &Path) -> Discovery {
+    discover_with_extras(Some(root), &[])
+}
+
+/// Scans the user-level skills directory (`primary`, usually `<RADIAN_HOME>/skills`) **and** the
+/// configured `[skills] extra_paths` roots, in that order (ADR 0025 slice 4 / ruling 2). The
+/// user level is discovered first, so its skill wins a name conflict. An extra path that is not
+/// a directory is one warning, never an error; an extra root that holds a `SKILL.md` directly is
+/// itself one skill (the same rule as a subdirectory of the primary root).
+pub fn discover_with_extras(primary: Option<&Path>, extras: &[PathBuf]) -> Discovery {
     let mut discovery = Discovery::default();
+    // One name map across every root: the first discovery of a name wins, whichever root it came
+    // from, and a later one is warned about.
+    let mut by_name: BTreeMap<String, PathBuf> = BTreeMap::new();
+    if let Some(primary) = primary {
+        collect_from(primary, &mut discovery, &mut by_name);
+    }
+    for extra in extras {
+        if !extra.is_dir() {
+            discovery.warnings.push(format!(
+                "skills.extra_paths: {} is not a directory; skipped",
+                extra.display()
+            ));
+            continue;
+        }
+        collect_from(extra, &mut discovery, &mut by_name);
+    }
+    discovery
+}
+
+/// Collects the skills of one root into `discovery`, keeping the first name seen in `by_name`.
+fn collect_from(root: &Path, discovery: &mut Discovery, by_name: &mut BTreeMap<String, PathBuf>) {
     if !root.is_dir() {
-        return discovery;
+        return;
     }
     // Every directory that holds a SKILL.md, in path order (the deterministic order ADR 0025
     // S2 requires); a directory with SKILL.md is a skill and is not descended into.
@@ -70,14 +100,13 @@ pub fn discover(root: &Path) -> Discovery {
     walk(root, &mut candidates);
     candidates.sort();
 
-    let mut by_name: BTreeMap<String, PathBuf> = BTreeMap::new();
     for path in candidates {
         match load(&path) {
             Ok((skill, extra)) => {
                 discovery.warnings.extend(extra);
                 if let Some(first) = by_name.get(&skill.name) {
-                    // ADR 0025 S1: keep the first discovered (the earlier path, since the list
-                    // is sorted) and warn once.
+                    // ADR 0025 S1: keep the first discovered (the earlier root, then the earlier
+                    // path) and warn once.
                     discovery.warnings.push(format!(
                         "skill `{}` in {} shadows {} (kept the first)",
                         skill.name,
@@ -92,7 +121,6 @@ pub fn discover(root: &Path) -> Discovery {
             Err(reason) => discovery.warnings.push(reason),
         }
     }
-    discovery
 }
 
 /// Collects every `SKILL.md` under `dir`, pruning at a directory that has one.
@@ -646,6 +674,95 @@ mod tests {
         let discovery = discover(&scratch.skills_dir());
         let names: Vec<&str> = discovery.skills.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["outer"], "{:?}", discovery.warnings);
+    }
+
+    /// ADR 0025 slice 4: the user level is discovered first, so its skill wins a name conflict
+    /// with an extra root; the extra root's own skills are still added.
+    #[test]
+    fn the_user_level_wins_a_conflict_with_an_extra_path() {
+        let scratch = Scratch::new("extras-conflict");
+        scratch.skill("same", &frontmatter("same", "From the user level."));
+        let extra = scratch.root.join("team-skills");
+        std::fs::create_dir_all(extra.join("same")).unwrap();
+        std::fs::write(
+            extra.join("same/SKILL.md"),
+            frontmatter("same", "From the team."),
+        )
+        .unwrap();
+        std::fs::create_dir_all(extra.join("team-only")).unwrap();
+        std::fs::write(
+            extra.join("team-only/SKILL.md"),
+            frontmatter("team-only", "Only in the team root."),
+        )
+        .unwrap();
+
+        let discovery = discover_with_extras(Some(&scratch.skills_dir()), &[extra]);
+        let names: Vec<&str> = discovery.skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["same", "team-only"], "{:?}", discovery.warnings);
+        assert_eq!(discovery.skills[0].description, "From the user level.");
+        assert_eq!(discovery.warnings.len(), 1);
+        assert!(
+            discovery.warnings[0].contains("shadows"),
+            "{:?}",
+            discovery.warnings
+        );
+    }
+
+    /// A configured extra path that is not a directory is one warning, never an error, and the
+    /// other roots are still discovered.
+    #[test]
+    fn a_missing_extra_path_is_one_warning() {
+        let scratch = Scratch::new("extras-missing");
+        scratch.skill("a", &frontmatter("a", "A."));
+        let missing = scratch.root.join("does-not-exist");
+        let discovery = discover_with_extras(Some(&scratch.skills_dir()), std::slice::from_ref(&missing));
+        assert_eq!(discovery.skills.len(), 1);
+        assert_eq!(discovery.warnings.len(), 1);
+        assert!(
+            discovery.warnings[0].contains("extra_paths")
+                && discovery.warnings[0].contains("skipped"),
+            "{:?}",
+            discovery.warnings
+        );
+        assert!(discovery.warnings[0].contains(missing.to_str().unwrap()));
+    }
+
+    /// Ruling 2: a root that is not listed is never read. `~/.claude/skills` is just another
+    /// directory here — the point is that discovery does not reach it until it is an extra path.
+    #[test]
+    fn an_unlisted_root_is_not_read_until_it_is_an_extra_path() {
+        let scratch = Scratch::new("extras-unlisted");
+        scratch.skill("own", &frontmatter("own", "Own."));
+        let claude = scratch.root.join("claude-skills");
+        std::fs::create_dir_all(claude.join("borrowed")).unwrap();
+        std::fs::write(
+            claude.join("borrowed/SKILL.md"),
+            frontmatter("borrowed", "From the other tool."),
+        )
+        .unwrap();
+
+        // Not listed: not read.
+        let discovery = discover_with_extras(Some(&scratch.skills_dir()), &[]);
+        let names: Vec<&str> = discovery.skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["own"], "{:?}", discovery.warnings);
+
+        // Listed: read, with the same parse and validation rules.
+        let discovery = discover_with_extras(Some(&scratch.skills_dir()), &[claude]);
+        let names: Vec<&str> = discovery.skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["own", "borrowed"], "{:?}", discovery.warnings);
+    }
+
+    /// An extra path that is itself a skill directory (it holds a `SKILL.md`) loads as one skill,
+    /// the same rule the primary root's subdirectories follow.
+    #[test]
+    fn an_extra_path_may_be_a_single_skill_directory() {
+        let scratch = Scratch::new("extras-single");
+        let single = scratch.root.join("one-skill");
+        std::fs::create_dir_all(&single).unwrap();
+        std::fs::write(single.join(SKILL_FILE_NAME), frontmatter("solo", "Solo.")).unwrap();
+        let discovery = discover_with_extras(Some(&scratch.skills_dir()), &[single]);
+        let names: Vec<&str> = discovery.skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["solo"], "{:?}", discovery.warnings);
     }
 
     #[test]

@@ -1,0 +1,12 @@
+# ADR 0025 slice 4 / ruling 2: `[skills] extra_paths` lists extra skill roots. `~/.claude/skills`
+# is read only when it appears here. The reader keeps the strings raw; the host expands `~` and
+# resolves a relative path against **this file's directory** (`~/.radian/config/`).
+schema_version = 1
+
+[model]
+provider = "example"
+base_url = "https://example.com/v1"
+model = "m-1"
+
+[skills]
+extra_paths = ["~/.claude/skills", "./team-skills", "/opt/shared/skills"]
