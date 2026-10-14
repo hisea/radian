@@ -531,3 +531,57 @@ fn an_empty_selection_draws_nothing() {
         "no band: the two anchors coincide"
     );
 }
+
+/// `wrap` (the renderer's hot path) and `wrap_char_offsets` (what selection maps cells
+/// through) are two views of one algorithm. This corpus — spaces that collapse, CJK, empty
+/// and blank lines, overlong words — pins them together: every line's offsets rebuild the
+/// exact string `wrap` produced, and the end gaps stay in bounds. Change either function
+/// without the other and this fails.
+#[test]
+fn wrap_and_wrap_char_offsets_agree() {
+    let corpus = [
+        ("hello world", 5usize),
+        ("hello world", 11),
+        ("hello world", 3),
+        ("", 5),
+        ("\n", 5),
+        ("a\n\nb", 5),
+        ("  leading and trailing  ", 7),
+        ("日本語のテキストは幅で折る", 5),
+        ("ab   cd", 4),
+        ("ab   cd", 2),
+        ("one two three four five six seven", 7),
+        ("mixed 日本語 text wrap", 6),
+        ("a", 1),
+        ("日本", 1),
+        ("trailing spaces   ", 5),
+        ("   ", 5),
+        ("word\n", 5),
+        ("\nword", 5),
+        ("aaaaaaaaaaaaaaaa", 5),
+        ("a b c d e f", 1),
+        ("日本 テキスト edge", 3),
+        ("combining a\u{301}b", 2),
+    ];
+    for (text, width) in corpus {
+        let lines = radian_tui::render::wrap(text, width);
+        let offsets = radian_tui::render::wrap_char_offsets(text, width);
+        assert_eq!(
+            lines.len(),
+            offsets.len(),
+            "line counts diverge for {text:?} at {width}"
+        );
+        for (line, wrapped) in lines.iter().zip(&offsets) {
+            let rebuilt: String = wrapped
+                .chars
+                .iter()
+                .map(|&i| {
+                    assert!(text.is_char_boundary(i), "offset {i} not a boundary");
+                    text[i..].chars().next().unwrap()
+                })
+                .collect();
+            assert_eq!(&rebuilt, line, "diverged for {text:?} at {width}");
+            assert!(wrapped.end <= text.len(), "end out of bounds");
+        }
+    }
+}

@@ -47,7 +47,7 @@ pub fn wrap_char_offsets(text: &str, width: usize) -> Vec<WrappedLine> {
     let mut line_width = 0usize;
     let mut end = 0usize;
     // One buffered space (its byte offset), flushed only when a following char stays on the
-    // line — so space runs collapse and trail them away (the `wrap` semantics, unchanged).
+    // line — so space runs collapse and trail away (the `wrap` semantics, unchanged).
     let mut pending_space: Option<usize> = None;
     for (idx, ch) in text.char_indices() {
         if ch == '\n' {
@@ -97,18 +97,40 @@ pub fn wrap_char_offsets(text: &str, width: usize) -> Vec<WrappedLine> {
 /// Hard-wraps `text` to `width` display columns, breaking on spaces where possible and on
 /// character boundaries otherwise (CJK has no spaces). Newlines start a new line.
 ///
-/// Derived from [`wrap_char_offsets`], so selection mapping and rendering agree by
-/// construction.
+/// This is the renderer's hot path (every visible entry, every frame), so it stays the
+/// plain string builder. [`wrap_char_offsets`] is the same algorithm reporting *where each
+/// rendered char came from*; [`crate::select`] maps cells through it, and the two are held
+/// together by the `wrap_and_wrap_char_offsets_agree` test — change either, change both.
 pub fn wrap(text: &str, width: usize) -> Vec<String> {
-    wrap_char_offsets(text, width)
-        .into_iter()
-        .map(|line| {
-            line.chars
-                .into_iter()
-                .map(|idx| text[idx..].chars().next().expect("a char boundary"))
-                .collect()
-        })
-        .collect()
+    let width = width.max(1);
+    let mut out = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut line = String::new();
+        let mut line_width = 0usize;
+        let mut pending_space = false;
+        for ch in paragraph.chars() {
+            if ch == ' ' {
+                pending_space = !line.is_empty();
+                continue;
+            }
+            let ch_width = ch.width().unwrap_or(0);
+            let extra = usize::from(pending_space);
+            if line_width + extra + ch_width > width && line_width > 0 {
+                out.push(std::mem::take(&mut line));
+                line_width = 0;
+                pending_space = false;
+            }
+            if pending_space {
+                line.push(' ');
+                line_width += 1;
+                pending_space = false;
+            }
+            line.push(ch);
+            line_width += ch_width;
+        }
+        out.push(line);
+    }
+    out
 }
 
 /// The visible marker for an entry kind (the transcript's `> `, `~ `, …). Also the cell
@@ -485,6 +507,15 @@ fn status_segments(app: &App) -> Vec<Segment> {
             style: app.theme.turn_running,
         });
     }
+    // The transient note ("tool … running", "copied N chars (via OSC 52)", a compaction
+    // failure) sits ahead of the long tails: a narrow terminal drops the *rightmost*
+    // segments, and a note the user just caused must survive that, not be the first to go.
+    if let Some(note) = &app.note {
+        segments.push(Segment {
+            text: note.clone(),
+            style: app.theme.note,
+        });
+    }
     segments.push(Segment {
         text: usage_text(session.usage_input(), session.usage_output()),
         style: app.theme.usage,
@@ -511,12 +542,6 @@ fn status_segments(app: &App) -> Vec<Segment> {
         ),
         style: Style::default(),
     });
-    if let Some(note) = &app.note {
-        segments.push(Segment {
-            text: note.clone(),
-            style: app.theme.note,
-        });
-    }
     segments
 }
 

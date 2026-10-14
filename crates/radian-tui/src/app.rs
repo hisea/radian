@@ -205,14 +205,19 @@ pub const MOUSE_WHEEL_LINES: usize = 3;
 pub const AUTO_SCROLL_TICK: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// The live left-button gesture: the press cell, and where the pointer last was (the
-/// auto-scroll edges are read off `last`). Screen rows/columns, `0`-based.
+/// auto-scroll edges are read off `last`). Screen rows/columns, `0`-based. `moved` says a
+/// drag event actually moved the pointer, so a release on the press cell is a click (which
+/// clears) and not a one-char selection. `anchor` is the press's located end, with whether
+/// the pointer was on a char there (the end-side extension at release needs to know).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SelectDrag {
     press: (u16, u16),
     last: (u16, u16),
+    moved: bool,
     /// The selection's fixed end, located once at press time (an anchor, not a cell, so
     /// scrolling during the drag cannot move it).
     anchor: Anchor,
+    anchor_on_char: bool,
 }
 
 /// Which startup phase the app is in (ADR 0023 U4, plan B). `--pick` runs the event
@@ -860,14 +865,17 @@ impl App {
         // The fixed end is located once, here: a scroll during the drag moves the view, not
         // the anchor. An empty transcript simply starts nothing.
         let press_line = self.scroll + row as usize;
-        let Some(anchor) = select::locate(&self.entries, self.transcript_width, press_line, col as usize)
+        let Some(hit) =
+            select::locate_hit(&self.entries, self.transcript_width, press_line, col as usize)
         else {
             return cleared.then(UpdateResult::dirty).unwrap_or(UpdateResult::none());
         };
         self.selecting = Some(SelectDrag {
             press: (row, col),
             last: (row, col),
-            anchor,
+            moved: false,
+            anchor: hit.anchor,
+            anchor_on_char: hit.on_char,
         });
         self.selection = None;
         cleared.then(UpdateResult::dirty).unwrap_or(UpdateResult::none())
@@ -879,22 +887,31 @@ impl App {
             return UpdateResult::none();
         }
         if let Some(drag) = self.selecting.as_mut() {
+            if (row, col) != drag.press {
+                drag.moved = true;
+            }
             drag.last = (row, col);
         }
         self.extend_selection_to(row, col);
         UpdateResult::dirty()
     }
 
-    /// The left button came up: the release cell extends the selection one last time; a
-    /// selection with two distinct ends is copied (as an [`Effect::Copy`], the loop's job —
-    /// `update` never writes). A click (no movement) leaves nothing selected and copies
-    /// nothing.
+    /// The left button came up: the release cell re-extends the selection one last time —
+    /// through the char under it ([`Self::extend_selection_to`]). A click — the pointer
+    /// never left the press cell — leaves nothing selected and copies nothing.
     pub fn mouse_up(&mut self, row: u16, col: u16) -> UpdateResult {
-        if !self.mouse_enabled || self.selecting.is_none() {
+        let Some(drag) = self.selecting else {
+            return UpdateResult::none();
+        };
+        if !self.mouse_enabled {
+            return UpdateResult::none();
+        }
+        self.selecting = None;
+        if !drag.moved && (row, col) == drag.press {
+            // The click: the press already cleared; nothing to copy.
             return UpdateResult::none();
         }
         self.extend_selection_to(row, col);
-        self.selecting = None;
         let Some(selection) = self.selection else {
             return UpdateResult::none();
         };
@@ -949,19 +966,35 @@ impl App {
         true
     }
 
-    /// Re-locates the selection's head under a pointer cell, from the drag's anchor.
+    /// Re-locates the selection under a pointer cell: the earlier of {press anchor, pointer}
+    /// is the inclusive start, the later the end — extended **through** the char under it
+    /// when that char is what the pointer is on (native-selection semantics: dragging across
+    /// "abc" copies "abc" in either direction). A gap (past a line's end, or on a folded
+    /// boundary) is a plain boundary and extends nothing. The stored selection is the
+    /// normalized `start..end`; rendering and copying read exactly this range.
     fn extend_selection_to(&mut self, row: u16, col: u16) {
         let Some(drag) = self.selecting else {
             return;
         };
         let head_line = self.scroll + row as usize;
-        let Some(head) = select::locate(&self.entries, self.transcript_width, head_line, col as usize)
+        let Some(hit) = select::locate_hit(&self.entries, self.transcript_width, head_line, col as usize)
         else {
             return;
         };
+        let ((start, mut end)) = if
+            (hit.anchor.entry, hit.anchor.offset) < (drag.anchor.entry, drag.anchor.offset)
+        {
+            (hit.anchor, drag.anchor)
+        } else {
+            (drag.anchor, hit.anchor)
+        };
+        let end_on_char = if end == hit.anchor { hit.on_char } else { drag.anchor_on_char };
+        if end_on_char {
+            end.offset += select::char_len_at(&self.entries, end).unwrap_or(1);
+        }
         self.selection = Some(Selection {
-            anchor: drag.anchor,
-            head,
+            anchor: start,
+            head: end,
         });
     }
 

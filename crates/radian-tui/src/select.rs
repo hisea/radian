@@ -30,6 +30,16 @@ pub struct Anchor {
     pub offset: usize,
 }
 
+/// Where a press or drag landed: the anchor, and whether the pointer is **on a char's cell**
+/// (rather than in the gap past a line's last cell, where nothing is under it). The moving
+/// end of a selection extends through the char under the pointer — native-selection
+/// semantics: dragging across "abc" copies "abc", not "ab".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hit {
+    pub anchor: Anchor,
+    pub on_char: bool,
+}
+
 /// A transcript selection: where the press landed and where the head (the latest drag cell)
 /// is. `anchor` is the fixed end, `head` the moving one; [`Selection::ordered`] sorts them,
 /// because a drag upward selects backwards.
@@ -61,6 +71,11 @@ impl Selection {
 /// the last entry, so a drag below the text keeps extending to the end. `None` only when
 /// there is no entry at all.
 pub fn locate(entries: &[Entry], width: usize, line: usize, col: usize) -> Option<Anchor> {
+    locate_hit(entries, width, line, col).map(|hit| hit.anchor)
+}
+
+/// [`locate`], plus whether the pointer sits on a char's cell ([`Hit`]).
+pub fn locate_hit(entries: &[Entry], width: usize, line: usize, col: usize) -> Option<Hit> {
     let mut remaining = line;
     for (index, entry) in entries.iter().enumerate() {
         let count = display_lines(entry, width).len();
@@ -70,19 +85,29 @@ pub fn locate(entries: &[Entry], width: usize, line: usize, col: usize) -> Optio
         }
         return Some(locate_in_entry(entry, width, remaining, col, index));
     }
-    // Past the last entry: the end of the last one (or `None` with no transcript).
+    // Past the last entry: the end of the last one (or `None` with no transcript) — a gap.
     let last = entries.len().checked_sub(1)?;
     let text_len = display_text(&entries[last]).len();
-    Some(Anchor {
-        entry: last,
-        offset: text_len,
+    Some(Hit {
+        anchor: Anchor {
+            entry: last,
+            offset: text_len,
+        },
+        on_char: false,
     })
 }
 
-/// Maps a cell inside one entry to an anchor. `local_line` is `0`-based within the entry's
+/// Maps a cell inside one entry to a hit. `local_line` is `0`-based within the entry's
 /// wrapped lines (clamped), `col` a transcript display column (the `> ` prefix's cells are
-/// part of the line, so a click on the marker lands on the line's first char).
-fn locate_in_entry(entry: &Entry, width: usize, local_line: usize, col: usize, index: usize) -> Anchor {
+/// part of the line, so a click on the marker lands on the line's first char — selecting
+/// through it, as a drag to the margin does).
+fn locate_in_entry(
+    entry: &Entry,
+    width: usize,
+    local_line: usize,
+    col: usize,
+    index: usize,
+) -> Hit {
     let text = display_text(entry);
     let prefix = marker_prefix(entry.kind).width();
     let body_width = width.saturating_sub(prefix).max(1);
@@ -96,18 +121,34 @@ fn locate_in_entry(entry: &Entry, width: usize, local_line: usize, col: usize, i
         let ch = text[offset..].chars().next().expect("a char boundary");
         let w = ch.width().unwrap_or(0);
         if body_col < used + w.max(1) {
-            return Anchor {
-                entry: index,
-                offset,
+            return Hit {
+                anchor: Anchor {
+                    entry: index,
+                    offset,
+                },
+                on_char: true,
             };
         }
         used += w;
     }
     // Past the line's last cell: the line's end gap (before the paragraph's own newline).
-    Anchor {
-        entry: index,
-        offset: line.end,
+    Hit {
+        anchor: Anchor {
+            entry: index,
+            offset: line.end,
+        },
+        on_char: false,
     }
+}
+
+/// The byte length of the char at `anchor`'s offset in its entry's display text; `None` at
+/// or past the text's end.
+pub fn char_len_at(entries: &[Entry], anchor: Anchor) -> Option<usize> {
+    let text = display_text(entries.get(anchor.entry)?);
+    text[anchor.offset..]
+        .chars()
+        .next()
+        .map(char::len_utf8)
 }
 
 /// The logical text of a selection: the entries' display text between the anchors, wrapped

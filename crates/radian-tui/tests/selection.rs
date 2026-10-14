@@ -282,3 +282,67 @@ fn the_tick_constant_is_bounded() {
     // 50 ms: ~20 lines/s, and only while a drag is live.
     assert_eq!(AUTO_SCROLL_TICK.as_millis(), 50);
 }
+
+#[test]
+fn the_char_under_the_release_is_inside_the_selection() {
+    let mut app = app();
+    // "hello there": dragging from the 'h' (col 2) onto the 'e' at body column 8 (col 10)
+    // copies "hello the" — the char under the pointer included.
+    press(&mut app, 0, 2);
+    drag(&mut app, 0, 10);
+    let result = release(&mut app, 0, 10);
+    assert_eq!(
+        result.effects,
+        vec![Effect::Copy {
+            text: "hello the".into()
+        }]
+    );
+    // Backwards: dragging from the 'e' back onto the 'h' selects "hello the" — both
+    // endpoint chars are inside, either direction.
+    press(&mut app, 0, 10);
+    drag(&mut app, 0, 2);
+    let result = release(&mut app, 0, 2);
+    assert_eq!(
+        result.effects,
+        vec![Effect::Copy {
+            text: "hello the".into()
+        }]
+    );
+    // A release past the line's end stays a plain boundary (nothing is under the pointer):
+    // "hello there" in full.
+    press(&mut app, 0, 2);
+    drag(&mut app, 0, 200);
+    let result = release(&mut app, 0, 200);
+    assert_eq!(
+        result.effects,
+        vec![Effect::Copy {
+            text: "hello there".into()
+        }]
+    );
+    // Pressing on the `> ` marker selects from the first char (the drag to the margin
+    // reaches through it).
+    press(&mut app, 0, 0);
+    drag(&mut app, 0, 1);
+    let result = release(&mut app, 0, 0);
+    assert_eq!(
+        result.effects,
+        vec![Effect::Copy {
+            text: "h".into()
+        }]
+    );
+}
+
+#[test]
+fn a_drag_that_returns_to_its_press_cell_is_still_a_selection() {
+    // The pointer left the press cell, so this is not a click: it comes back onto the same
+    // char, and that one char is the selection.
+    let mut app = app();
+    press(&mut app, 0, 2);
+    drag(&mut app, 0, 3);
+    drag(&mut app, 0, 2);
+    let result = release(&mut app, 0, 2);
+    assert_eq!(
+        result.effects,
+        vec![Effect::Copy { text: "h".into() }]
+    );
+}
