@@ -7930,30 +7930,31 @@ async fn pty_the_shipped_default_footer_is_two_rows_without_a_config() {
     let lines: Vec<String> = pty.screen().lines().map(str::to_owned).collect();
     let first = lines.get(lines.len() - 2).cloned().unwrap_or_default();
     let second = lines.last().cloned().unwrap_or_default();
-    // Row one: the model, the cwd, the context bar and the reasoning marker; row two: tokens.
+    // The shipped default is the `full` preset (ADR 0027): the identity row (brand,
+    // model, repo/worktree) and the numbers row (tokens, speed, cost, context, elapsed).
+    assert!(
+        first.contains('㎭') || first.contains("rad"),
+        "the brand is on the first row: {first:?}"
+    );
     assert!(
         first.contains("mock"),
-        "the model is on the first footer row: {first:?}"
+        "the model is on the identity row: {first:?}"
     );
     assert!(
         first.contains("footer-default"),
-        "the cwd is on the first row: {first:?}"
-    );
-    assert!(
-        first.contains("─"),
-        "the context bar is on the first row: {first:?}"
-    );
-    assert!(
-        first.contains('◐'),
-        "reasoning is on the first row: {first:?}"
+        "the repo/worktree name is on the identity row: {first:?}"
     );
     assert!(
         second.contains('↑'),
-        "the tokens row is the second: {second:?}"
+        "the numbers row shows the tokens: {second:?}"
+    );
+    assert!(
+        second.contains('%'),
+        "the numbers row shows the context share: {second:?}"
     );
     assert!(
         !second.contains("mock"),
-        "the model is not on the tokens row: {second:?}"
+        "the model is not on the numbers row: {second:?}"
     );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));

@@ -140,14 +140,23 @@ fn fg_of(app: &mut App, width: u16, height: u16, needle: &str) -> Option<ratatui
         .unwrap();
     let buffer = terminal.backend().buffer().clone();
     let area = *buffer.area();
-    let mut row: Vec<&str> = Vec::new();
+    let mut text = String::new();
+    let mut cells: Vec<u16> = Vec::new();
     for y in area.top()..area.bottom() {
-        row.clear();
+        text.clear();
+        cells.clear();
         for x in area.left()..area.right() {
-            row.push(buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
+            let symbol = buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or(" ");
+            text.push_str(symbol);
+            for _ in 0..symbol.len() {
+                cells.push(x);
+            }
         }
-        if let Some(col) = row.join("").find(needle) {
-            return buffer.cell((col as u16, y)).map(|c| c.fg);
+        if let Some(byte) = text.find(needle) {
+            return cells
+                .get(byte)
+                .and_then(|x| buffer.cell((*x, y)))
+                .map(|c| c.fg);
         }
     }
     None
