@@ -731,3 +731,18 @@ Base `eeadb11` · 一次性检出 `/tmp/ui2b-mut`（detached，跑完删除）·
 | R1-1 | 恢复"任何非 Cancel/QuitDeadline 输入都解除"（去掉 `is_user_input`） | 后台事件不解除待退出 | `quit.rs::background_events_do_not_disarm_the_quit_window` FAILED |
 
 1/1 抓住。
+
+## ADR 0028 R2：Markdown（2026-10-14）
+
+Base `eac7463` · 变异只在一次性 worktree 里做（`git worktree add --detach /tmp/radian-pi-mut-mdN <commit>`），
+跑完 `git worktree remove --force`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| MD1 | 链接只显示文字、丢掉 ` (url)` | `markdown::the_block_kinds_and_inline_roles_render` | ✅ |
+| MD2 | `md_line_count` 与 `md_lines` 不一致（+1） | `markdown::line_count_matches_the_layout` | ✅ |
+| MD3 | 表格不回退（两处 min_column 守卫都短路） | `markdown::tables_wrap_and_fall_back` | ✅ |
+| MD4 | 行内代码不用 `mdCode` 角色（用 body 样式） | `markdown::the_block_kinds_and_inline_roles_render` | ✅ |
+
+未做：**"已闭合的块被重新解析"**（需要一个解析计数器的测试，本片预算内没写）；
+`md3` 的第一/二轮只短路了一处守卫，另一处仍会回退，测试通过——两处都短路后才抓住。
