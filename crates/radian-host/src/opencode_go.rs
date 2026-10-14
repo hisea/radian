@@ -51,7 +51,7 @@ struct Window {
 
 /// The remaining percentage for a window: `100 − percent` (the API reports **used**),
 /// clamped to `[0, 100]`.
-pub fn remaining(window: &Window) -> Option<f64> {
+fn remaining(window: &Window) -> Option<f64> {
     window
         .percent
         .map(|percent| (100.0 - percent).clamp(0.0, 100.0))
@@ -68,7 +68,7 @@ fn label(name: &str) -> &'static str {
 
 /// The one-line display: the **remaining** share per window, then each window's reset
 /// countdown. `None` when the response carries no window at all.
-pub fn display(response: &UsageResponse, now: SystemTime) -> Option<String> {
+fn display(response: &UsageResponse, now: SystemTime) -> Option<String> {
     let usage = response.usage.as_ref()?;
     let windows = [
         ("rolling", usage.rolling.as_ref()),
