@@ -265,3 +265,59 @@ fn a_selection_across_a_soft_wrap_keeps_the_source_space() {
         "the source's space survives the soft wrap"
     );
 }
+
+/// The merge's integration point (s4's per-entry expansion × R2's Markdown): a `Ctrl-F` hit
+/// inside a Markdown paragraph still lands on that paragraph when a folded tool body sits
+/// above it. The search measures the body **fully expanded** (ADR 0028 R6), the jump measures
+/// it folded (the display) — the two geometries differ, so the hit's absolute line has to be
+/// recomputed against the display. The selection then copies the source the paragraph covers.
+#[test]
+fn a_find_jump_lands_on_the_markdown_paragraph_under_a_folded_body() {
+    let mut app = App::new("m", "s");
+    // A reasoning channel above: three lines expanded, one line folded.
+    app.entries.push(radian_tui::app::Entry::new(
+        EntryKind::Reasoning,
+        "thinking one\nthinking two\nthinking three",
+    ));
+    assistant(&mut app, "A **bold** paragraph here\n");
+    let width = 40;
+    let modes = modes(ReasoningMode::Collapsed);
+    let search = blocks::search_modes(modes);
+    let (matches, _starts) = radian_tui::find::compute(&app.entries, search, width, "bold");
+    assert_eq!(matches.len(), 1, "the rendered paragraph is searched");
+    let m = matches[0];
+    assert_eq!(m.entry, 1);
+    // The two geometries really differ, so the recomputation below is load-bearing.
+    let expanded = blocks::line_count_cached(&mut app.entries[0], search, width);
+    let folded = blocks::line_count_cached(&mut app.entries[0], modes, width);
+    assert!(folded < expanded, "folded {folded} vs expanded {expanded}");
+    // The jump (App::find_jump): entries above are measured folded, the hit entry with its
+    // override.
+    app.entries[1].fold_override = Some(true);
+    let mut absolute = 0;
+    for entry in &mut app.entries[..m.entry] {
+        absolute += blocks::line_count_cached(entry, modes, width);
+    }
+    let hit_line = absolute + m.line;
+    let lines = render::display_lines(&app.entries[1], modes, width);
+    assert!(
+        lines[m.line].contains("bold"),
+        "the match is the paragraph line: {:?}",
+        lines[m.line]
+    );
+    // The selection at that display line copies the paragraph's source (styles included).
+    let anchor = select::locate(&app.entries, modes, width, hit_line, 0).expect("anchor");
+    let head = select::locate(
+        &app.entries,
+        modes,
+        width,
+        hit_line,
+        lines[m.line].chars().count() + 2,
+    )
+    .expect("head");
+    let copied = select::logical_text(&app.entries, &select::Selection { anchor, head });
+    assert!(
+        copied.contains("**bold**"),
+        "the copy is the paragraph's source: {copied:?}"
+    );
+}
