@@ -456,3 +456,56 @@ async fn a_switch_moves_the_next_turns_budget() {
         "the switch moved the budget"
     );
 }
+
+/// ADR 0026 D11 + review M3: resume merges **every** `ConfigChanged` in revision order, so a
+/// thinking change, a model change and an unrelated `approval` change (pi/auto) all survive.
+/// "The last of each kind" would drop the thinking level as soon as a third key appeared.
+#[tokio::test]
+async fn resume_merges_every_config_change_not_one_per_kind() {
+    let model = ScriptedModel::new([text("one"), text("two"), text("three"), text("four")]);
+    let tools = MemTools::new();
+    let (mut driver, env) = open_env("config-merge", Arc::clone(&model), tools.clone()).await;
+    let queue = Arc::clone(driver.config_queue());
+    let handle = tokio::spawn(async move { driver.run().await });
+
+    // thinking=high, then model=X, then an unrelated approval=auto.
+    queue.push(serde_json::json!({"thinking": "high"}));
+    env.inbox.followup("a", InputSource::User).await.unwrap();
+    env.recorder.wait_finished().await;
+    queue.push(radian_runtime::ModelRoute::new("anthropic", "claude").to_value());
+    env.inbox.followup("b", InputSource::User).await.unwrap();
+    env.recorder.wait_finished().await;
+    queue.push(serde_json::json!({"approval": "auto"}));
+    env.inbox.followup("c", InputSource::User).await.unwrap();
+    env.recorder.wait_finished().await;
+    handle.abort();
+    let _ = handle.await;
+
+    let path = env.path.clone();
+    let copy =
+        std::env::temp_dir().join(format!("radian-config-merge-{}.jsonl", std::process::id()));
+    std::fs::copy(&path, &copy).unwrap();
+    drop(env);
+
+    let journal = Arc::new(SessionJournal::resume(&copy, "sid").unwrap());
+    let inbox = Inbox::durable(16, Arc::clone(&journal));
+    let agent = Arc::new(Agent::new(Arc::clone(&model), tools));
+    let driver2 = Driver::open(
+        &agent,
+        Arc::clone(&journal),
+        Arc::clone(&inbox),
+        Arc::new(Recorder::default()) as Arc<dyn agent_core::EventSink>,
+        TurnOptions::default(),
+    )
+    .await
+    .unwrap();
+    let value = driver2.config_slot().value();
+    std::fs::remove_file(&copy).ok();
+    assert_eq!(
+        value["thinking"], "high",
+        "the thinking change survived: {value}"
+    );
+    assert_eq!(value["model"]["provider"], "anthropic", "{value}");
+    assert_eq!(value["model"]["model"], "claude", "{value}");
+    assert_eq!(value["approval"], "auto", "{value}");
+}

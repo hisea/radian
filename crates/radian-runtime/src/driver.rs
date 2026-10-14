@@ -87,10 +87,11 @@ struct Recovery {
     /// The revision of the last committed replacement (ADR 0018), 0 when the file has none,
     /// so the next automatic compaction uses a strictly larger revision.
     transcript_revision: u64,
-    /// The last model change and the last thinking change (D8, D11): resume restores both,
-    /// merged, so neither kind erases the other.
-    last_model_change: Option<(serde_json::Value, u64)>,
-    last_thinking_change: Option<(serde_json::Value, u64)>,
+    /// Every `ConfigChanged` change merged in revision order (ADR 0026 D8/D11), and the last
+    /// revision seen. Merging **all** of them — not "the last of each kind" — is what keeps a
+    /// thinking change, a model change and an `approval` change (pi/auto) from erasing each
+    /// other on resume; a future key needs no new arm here.
+    config_state: Option<(serde_json::Value, u64)>,
 }
 
 /// The per-session driver.
@@ -189,11 +190,8 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         };
         // D8: resume restores the last recorded change (the model and its budget) before the
         // first turn, so the switchable model and the guard start where the journal left off.
-        if let Some((change, revision)) = recovery.last_model_change {
-            driver.apply_change(change, revision);
-        }
-        if let Some((change, revision)) = recovery.last_thinking_change {
-            driver.apply_change(change, revision);
+        if let Some((state, revision)) = recovery.config_state {
+            driver.apply_change(state, revision);
         }
         Ok(driver)
     }
@@ -541,13 +539,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         // survive the next model change and the reverse — the switchable model reads the
         // whole current state. A non-object change replaces.
         let mut merged = self.slot.value();
-        if let (Some(state), Some(partial)) = (merged.as_object_mut(), change.as_object()) {
-            for (key, value) in partial {
-                state.insert(key.clone(), value.clone());
-            }
-        } else {
-            merged = change.clone();
-        }
+        merge_change(&mut merged, &change);
         self.slot.apply(merged, revision);
         if let Some(route) = ModelRoute::from_value(&change)
             && let Some(resolver) = &self.budget_for
@@ -785,6 +777,20 @@ fn lane_of(lane: InboxLane) -> Lane {
 ///    durable, inputs that were enqueued but never claimed before the restart;
 /// 3. unpaired tool calls go through the core's `repair` (ADR 0002), and the repaired
 ///    messages are written back before the session is reopened (ADR 0002 E9).
+/// Merges one `ConfigChanged` change into a config state (ADR 0026 D8/D11): object keys are
+/// inserted, anything else replaces. One function for the live path and the resume replay, so
+/// the two cannot drift (review M3).
+fn merge_change(state: &mut serde_json::Value, change: &serde_json::Value) {
+    match (state.as_object_mut(), change.as_object()) {
+        (Some(state), Some(partial)) => {
+            for (key, value) in partial {
+                state.insert(key.clone(), value.clone());
+            }
+        }
+        _ => *state = change.clone(),
+    }
+}
+
 async fn recover(journal: &SessionJournal) -> Result<Recovery, DriverError> {
     let parsed = Session::open(journal.path())?;
     let records = parsed.journal_records();
@@ -819,9 +825,9 @@ async fn recover(journal: &SessionJournal) -> Result<Recovery, DriverError> {
     let mut next_turn = 1u64;
     // ADR 0006 §5.7: the session-local config revision starts at 1.
     let mut next_config_revision = 1u64;
-    // D8 + D11: the last change of each kind, so neither erases the other on resume.
-    let mut last_model_change: Option<(serde_json::Value, u64)> = None;
-    let mut last_thinking_change: Option<(serde_json::Value, u64)> = None;
+    // D8 + D11 (review M3): merge every change in revision order, exactly like `apply_change`,
+    // so no change of any kind can erase another.
+    let mut config_state: Option<(serde_json::Value, u64)> = None;
     for event in parsed.events() {
         match &event.data {
             EventData::InboxEnqueued {
@@ -839,12 +845,9 @@ async fn recover(journal: &SessionJournal) -> Result<Recovery, DriverError> {
             }
             EventData::ConfigChanged { revision, change } => {
                 next_config_revision = next_config_revision.max(revision + 1);
-                // D8 + D11: resume restores the **last** change of each kind.
-                if ModelRoute::from_value(change).is_some() {
-                    last_model_change = Some((change.clone(), *revision));
-                } else {
-                    last_thinking_change = Some((change.clone(), *revision));
-                }
+                let merged = config_state.get_or_insert_with(|| (serde_json::json!({}), 0));
+                merge_change(&mut merged.0, change);
+                merged.1 = *revision;
             }
             _ => {}
         }
@@ -881,8 +884,7 @@ async fn recover(journal: &SessionJournal) -> Result<Recovery, DriverError> {
         }
     }
     Ok(Recovery {
-        last_model_change,
-        last_thinking_change,
+        config_state,
         history,
         requeue,
         next_turn,
