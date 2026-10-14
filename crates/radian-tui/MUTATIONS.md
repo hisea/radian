@@ -813,3 +813,40 @@ Base `26ddda9` · 一次性 worktree `/tmp/s4-mut`（`git worktree add` 自本�
 S3 留下了 `was_overridden` 的悬空引用），而当时的 `run_mut` 只 grep `FAILED`，把编译失败也当成
 "没抓住"——是假象。改成先 grep `^error` 判编译失败、并修好补丁后，两条都抓住。顺带删掉了真实代码里
 那个无用的 `was_overridden` 局部变量（提交 `a642b17`）。
+
+## pty 偶发测试：memory 启动行（2026-10-14，结论：负载下无法复现）
+
+Base `a6a9cce` · worktree `../radian-pi-flakymem` · 负载进程：24 个 `yes > /dev/null`（记 pid，跑完
+按 pid 立刻 kill，核对过只剩测试进程）。
+
+**原始目击**：s4 的全量 `cargo test --workspace` 在 load ~300 下，
+`pty_the_memory_notice_names_the_project_state_and_the_budget` 失败一次（109 个 pty 测试里的一个）。
+失败时的屏幕：启动块已展开（`▼ startup information (Ctrl-P to fold)` + profile/shell/context 行都在），
+输入框与状态栏也在，但 `[memory]` 那几行不在屏幕上。
+
+**复现尝试**：
+
+| harness | 负载 | 次数 | 失败 |
+|---|---|---|---|
+| 顺序单跑 | 24×`yes`，load 122–155 | 20 | **0/20** |
+| 4 并发循环各 5 次 | 24×`yes`，load 190–260 | 20 | **0/20** |
+
+合计 **0/40**。原始目击只在"全量套件 + load ~300"（几十个 TUI 进程同时争用）下出现过一次。
+
+**静态分析（未能定案，如实记录）**：
+- 测试的时序假设：`expand_startup()` 等的是**代理**（`▼ startup information` 或第一行内容 `profile:`），
+  不是它随后断言的那几行；`screen()` 只反映 reader 线程此刻已读到的字节。
+- 但"帧只画了一半"解释不了那个屏幕：`rebuild_startup_entries`（`app.rs`）把整个启动块**一次性**
+  splice 进 `entries`（`set_startup`/`toggle_startup` 各一次 update → 一帧），所以任何一帧要么是
+  折叠块要么是完整展开块；而且屏幕里输入框/状态栏（字节流更靠后）都在，唯独中间几行缺失。
+- 因此**机制未确定**：既不能证明是产品少画了行，也不能用已读到的字节解释它。没有产品侧证据
+  （`App` 的启动块重建是原子的、有单元测试钉住），故不改产品代码；也没有可复现的"修前"计数，
+  故不改测试（改了也无从验证）。
+- **给下一片的建议**（未实施）：把该测试的等待从代理改成它真正断言的文本（`wait_for_screen("[memory]")`
+  或 `wait_until(|s| s.contains("[memory]"))`）——这类"等状态"改动本身不会引入回归，但需要有复现
+  才能证明它治的是这个偶发；本次 0/40 不构成证据。
+
+**流程记录（我的失误）**：第一版 harness 把 20 个 `yes` 和测试循环放在同一个 shell 里，末尾的
+`wait` 把永不退出的 `yes` 也等上了，命令挂了 7 小时 42 分，那些 `yes` 一直占着 CPU（整晚 load
+150–450 有它们一份），最后由 owner 按 `/tmp/flaky-pids.txt` 的 pid 逐个核对后杀掉。**以后起负载
+进程：记 pid，`wait` 只等测试循环的 pid（或把负载放进 `wait` 范围外的子 shell），跑完立刻按 pid kill。**
