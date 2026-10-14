@@ -49,3 +49,13 @@ Base `43ddbff` · 一次性检出 `/tmp/auto-mut`（detached，跑完删除）·
 
 2/2 抓住。owner 的更正把"自动批准键不经确认直接开启"这条变异换成"`Y` 开启了 auto"，
 那条变异改的是 `radian-tui` 的键位映射，记录在 `crates/radian-tui/MUTATIONS.md`（TM-A1）。
+
+## ADR 0028 R8：`mermaid_check` 三档 allow（2026-10-14）
+
+Base `cf37140` · 一次性 worktree `/tmp/radian-diag-mut`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| DG-M3 | 把 `mermaid_check` 从 `always_allowed()` 去掉（落到默认 ask） | `profile::tests::mermaid_check_is_allowed_in_every_tier` | ✅ |
+
+1/1 抓住。
