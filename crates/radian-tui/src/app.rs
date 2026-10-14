@@ -1387,7 +1387,7 @@ impl App {
             PickerOutcome::Quit => UpdateResult::dirty(),
             PickerOutcome::New => {
                 self.push_notice(
-                    "a new session starts on the next launch (run `radian-tui` with no `--resume`)",
+                    "a new session starts on the next launch (run `radian` with no `--resume`)",
                 );
                 UpdateResult::dirty()
             }

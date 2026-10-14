@@ -101,7 +101,12 @@ fn the_typical_fixture_maps_the_endpoint_model_key_and_preferences() {
     );
     assert_eq!(config.model.model.as_deref(), Some("gpt-5"));
     assert_eq!(config.model.provider.as_deref(), Some("openai-compatible"));
-    assert_eq!(config.model.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
+    // ADR 0026 D2: the key is not migrated; the note points at auth.json.
+    assert!(
+        draft.notes.iter().any(|note| note.contains("auth.json")),
+        "{:?}",
+        draft.notes
+    );
     assert_eq!(
         config.model.headers,
         vec![("x-tenant".to_string(), "team".to_string())]
@@ -128,10 +133,10 @@ fn the_typical_fixture_maps_the_endpoint_model_key_and_preferences() {
     );
 }
 
-/// A literal key is never copied: the draft references a suggested environment variable and
-/// neither the draft nor the report contains the value.
+/// A literal key is never copied: the draft has no `model.api_key`, and neither the draft nor
+/// the report contains the value; the note points at `auth.json`.
 #[test]
-fn a_literal_key_becomes_an_environment_reference_and_is_never_shown() {
+fn a_literal_key_is_never_shown_and_points_at_auth_json() {
     let dir = Temp::new("literal");
     write(
         dir.path(),
@@ -149,10 +154,19 @@ fn a_literal_key_becomes_an_environment_reference_and_is_never_shown() {
     );
     let draft = import_pi(dir.path()).unwrap();
     let config = radian_host::parse_config(Path::new("/tmp/draft.toml"), &draft.toml).unwrap();
-    assert_eq!(config.model.api_key_env.as_deref(), Some("OLLAMA_API_KEY"));
+    let _ = config;
     assert!(
-        !draft.toml.contains("sk-live"),
-        "the literal value must not be in the draft"
+        !draft.toml.contains("api_key") && !draft.toml.contains("sk-live"),
+        "the key must not be in the draft: {}",
+        draft.toml
+    );
+    assert!(
+        draft
+            .notes
+            .iter()
+            .any(|note| note.contains("auth.json") && note.contains("OLLAMA_API_KEY")),
+        "{:?}",
+        draft.notes
     );
     for note in &draft.notes {
         assert!(
@@ -193,7 +207,13 @@ fn a_command_key_is_listed_and_never_executed() {
         draft.notes
     );
     let config = radian_host::parse_config(Path::new("/tmp/draft.toml"), &draft.toml).unwrap();
-    assert_eq!(config.model.api_key_env, None);
+    let _ = config;
+    assert!(!draft.toml.contains("api_key"), "{}", draft.toml);
+    assert!(
+        draft.notes.iter().any(|note| note.contains("auth.json")),
+        "{:?}",
+        draft.notes
+    );
 }
 
 /// `auth.json` is never opened — not even `stat`ed — so a credential file that cannot be read

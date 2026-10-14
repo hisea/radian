@@ -7,7 +7,6 @@ future_top_level = { feature = true }
 provider = "openai-compatible"
 base_url = "https://example.com/v1"
 model = "m-1"
-api_key = { from = "env", name = "EXAMPLE_TOKEN" }
 future_option = "alpha"
 
 [tui.theme.hairline]
