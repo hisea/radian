@@ -8039,6 +8039,12 @@ async fn pty_bang_runs_and_enters_the_context() {
         "the command line is not on screen:\n{}",
         pty.screen()
     );
+    // ADR 0033 + ADR 0012: `!` is the human's own command; it never opens the approval box.
+    assert!(
+        !pty.screen().contains("approve tool call"),
+        "`!` must not ask for approval:\n{}",
+        pty.screen()
+    );
     pty.send(b"next\r");
     assert!(
         pty.wait_for_screen("AFTER-BANG", 20),
@@ -8217,4 +8223,27 @@ async fn pty_bang_is_single_and_escapable() {
     );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0033: the loop runs `!` through radian-coding's **sandboxed** executor, never a naked
+/// `Command`. A structural test pins it, so a future edit cannot quietly bypass the sandbox.
+#[test]
+fn the_bang_command_runs_through_the_sandboxed_executor() {
+    let source =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")).unwrap();
+    assert!(
+        source.contains("radian_coding::run_user_bash"),
+        "the loop must reuse the shell tool's sandboxed executor"
+    );
+    let arm = source
+        .split("Effect::RunBash")
+        .nth(1)
+        .unwrap_or_default()
+        .split("Effect::Inject")
+        .next()
+        .unwrap_or_default();
+    assert!(
+        !arm.contains("Command::new"),
+        "the RunBash arm must not build a command directly (that would bypass the sandbox):\n{arm}"
+    );
 }
