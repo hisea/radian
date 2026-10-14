@@ -657,3 +657,33 @@ mermaid 后）**上同样超时，而且连 warm-up（1000 条）都超时。用
 
 **结论**：Markdown 没有让 resume 首帧变慢（50k 反而更快，10k/1k 在噪声内），远低于 1.5× 的
 修修门槛，所以不做懒测量/尺寸上限。两个绝对值都由"resume 时首次测量全部条目"主导，与本片无关。
+
+## Syntax highlighting（ADR 0028 第 5 片 · R2）
+
+`syntect` 5.3（`default-features = false`，纯 Rust `regex-fancy`；syntect 的默认语法打包集）。
+测量用 `cargo test --release -p radian-tui`（debug 构建下解析慢 10–30×，不作为数据）。
+
+| 项目 | 值 |
+|---|---|
+| `SyntaxSet` 加载（`load_defaults_newlines`，75 语法） | **0.5 ms**（进程一次，`OnceLock`） |
+| 500 行 Rust 代码块首次高亮（含语法正则的惰性编译） | **≈ 125–285 ms** |
+| 同一块之后的高亮（正则已编译） | **≈ 130–270 ms**（5 次取样；每 1000 行 ≈ 0.22 s） |
+| 语言表外 / 未闭合 / `highlight = false` | 0（不高亮） |
+
+高亮结果按 `(width, text_len, highlight)` 缓存在 `Entry.syntax_cache`（角色，不是颜色，主题切换不失效），
+所以稳态帧不重新解析。
+
+**R7（50 000 条 Markdown 语料，每 10 条 6 条 Assistant、每条一个 ` ```rust ` 代码块）**，与同一台机器上
+**本片之前的 main `54534cb`** 对照（都 `--release`）：
+
+| 度量 | main `54534cb` | 本片 HEAD | 说明 |
+|---|---|---|---|
+| 稳态帧 p50 | 0.55 ms | **≈ 0.7 ms** | 高亮命中缓存；差异在噪声内 |
+| 全局折叠首帧（50k） | 282 / 129 ms | **166 / 120 ms** | 本片不慢于 main；文档里早先的 24–28 ms 是别的机器/负载下的旧值 |
+
+**二进制体积（release，含调试符号，`radian`）**：24 837 872 B → **25 758 480 B**，**+920 608 B
+（≈ +0.88 MiB，+3.7%）**。这是 syntect + `fancy-regex` + `regex` + `flate2`/`bincode` + 368 KB 压缩语法
+打包集的合计。手工精简 `.packdump` 未采用（见 README：跨语法上下文引用会在 build 时越界）。
+
+**结论**：R7 不退化；首次高亮一个很大的代码块会有百毫秒级的一次性开销（缓存后不再付），这是纯 Rust 正则
+后端（`fancy-regex`）的代价，记为已知取舍。

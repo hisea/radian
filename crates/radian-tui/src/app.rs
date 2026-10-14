@@ -163,6 +163,10 @@ pub struct Entry {
     /// the reasoning/tool folds, so a global fold toggle reuses it instead of re-parsing
     /// every Assistant entry (the R7 toggle gate).
     pub(crate) md_cache: Option<MdCache>,
+    /// The entry's highlighted code blocks (ADR 0028 R2), keyed by `(width, text_len, on)` and
+    /// indexed by the block's start offset. Roles, not colors; the width and text length are
+    /// in the key so a resize or a streaming append re-highlights.
+    pub(crate) syntax_cache: Option<SyntaxCache>,
 }
 
 impl Entry {
@@ -181,6 +185,7 @@ impl Entry {
             layout_cache: None,
             diagram_cache: None,
             md_cache: None,
+            syntax_cache: None,
         }
     }
 }
@@ -240,6 +245,15 @@ pub enum Overlay {
 /// The Markdown layout cache: `(width, text_len, paragraphs)`, where each paragraph is
 /// `(block start, lines)`. A type alias keeps the `Option` readable in `Entry`.
 pub(crate) type MdCache = (usize, usize, Vec<(usize, Vec<crate::blocks::BodyLine>)>);
+
+/// The syntax-highlight cache: `(width, text_len, on)` and, per code block, its start offset
+/// and one `HighlightedLine` per body line.
+pub(crate) type SyntaxCache = (
+    usize,
+    usize,
+    bool,
+    Vec<(usize, Vec<crate::highlight::HighlightedLine>)>,
+);
 
 /// One approval as the UI shows it: the queue's id (ADR 0023 U7), the session that asked and
 /// the request itself. The queue id is what the answer names, not the permission layer's own
@@ -1003,6 +1017,10 @@ pub struct App {
     /// diagram. `false` renders every code block as source. Part of `DisplayModes`, so it is
     /// in the layout cache key.
     pub mermaid_enabled: bool,
+    /// `tui.display.highlight` (ADR 0028 R2), default true: highlight a closed code block whose
+    /// info string names a common language. `false` renders every code block as plain text.
+    /// Part of `DisplayModes`, so it is in the layout cache key.
+    pub highlight_enabled: bool,
 }
 
 impl App {
@@ -1053,6 +1071,7 @@ impl App {
             reasoning_mode: ReasoningMode::Collapsed,
             tool_display: crate::tools::ToolDisplay::default(),
             mermaid_enabled: true,
+            highlight_enabled: true,
         }
     }
 
@@ -1089,6 +1108,7 @@ impl App {
             reasoning: self.reasoning_mode,
             tools: self.tool_display,
             mermaid: self.mermaid_enabled,
+            highlight: self.highlight_enabled,
         }
     }
 
@@ -1171,6 +1191,7 @@ impl App {
         };
         // `tui.display.mermaid` (ADR 0028 R8, default true).
         self.mermaid_enabled = config.tui.display_mermaid.unwrap_or(true);
+        self.highlight_enabled = config.tui.display_highlight.unwrap_or(true);
         // `tui.clipboard` (default OSC 52). An unknown spelling never reaches here (the host
         // config reader skips it with a warning); `pbcopy` off macOS does: warn once and fall
         // back, because the copy effect would have no program to run.

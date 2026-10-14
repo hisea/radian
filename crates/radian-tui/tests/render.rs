@@ -1647,6 +1647,7 @@ const EXPANDED: DisplayModes = DisplayModes {
         preview_lines: 5,
     },
     mermaid: true,
+    highlight: true,
 };
 
 /// The question form's key line stays visible when the option list fills the box (same bug the

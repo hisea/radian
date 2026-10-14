@@ -27,6 +27,7 @@ fn modes(reasoning: ReasoningMode) -> DisplayModes {
             preview_lines: 5,
         },
         mermaid: true,
+        highlight: true,
     }
 }
 
