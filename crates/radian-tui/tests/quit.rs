@@ -119,3 +119,50 @@ fn esc_still_quits_at_once_when_idle_and_empty() {
     assert!(quit_asked(&result.effects), "{:?}", result.effects);
     assert!(app.quit_pending.is_none());
 }
+
+/// Background events and asynchronous results must not disarm the quit window (review,
+/// 2026-10-14): a resize, a queue change, a clipboard confirmation or a completion answer is
+/// not the user changing their mind. Before the fix any of these made the second Ctrl-C only
+/// re-arm, which read as "pressing twice sometimes does not quit".
+#[test]
+fn background_events_do_not_disarm_the_quit_window() {
+    let mut app = App::new("m", "s");
+    let t0 = Instant::now();
+    app.on_key_at(ctrl_c(), t0);
+    assert!(app.quit_pending.is_some(), "the first press arms");
+
+    // Host facts and asynchronous results, in no particular order.
+    app.update(Input::Resize {
+        rows: 30,
+        cols: 100,
+    });
+    app.update(Input::Pending(None, 0));
+    app.update(Input::ClipboardDone("copied 3 chars".into()));
+    app.update(Input::CompletionReady(None));
+    assert!(
+        app.quit_pending.is_some(),
+        "a background event must not disarm"
+    );
+
+    let result = app.on_key_at(ctrl_c(), t0 + Duration::from_millis(1000));
+    assert!(app.quit, "the second press still quits");
+    assert!(quit_asked(&result.effects), "{:?}", result.effects);
+}
+
+/// The other direction: real user input (a typed character here) still disarms, so a press
+/// after it only re-arms.
+#[test]
+fn user_input_still_disarms_the_quit_window() {
+    let mut app = App::new("m", "s");
+    let t0 = Instant::now();
+    app.on_key_at(ctrl_c(), t0);
+    // Clear the character out of the input so the later Ctrl-C arms instead of clearing it.
+    app.update(Input::Char('x'));
+    app.input = String::new().into();
+    assert!(app.quit_pending.is_none(), "a typed character disarms");
+
+    let result = app.on_key_at(ctrl_c(), t0 + Duration::from_millis(2000));
+    assert!(!app.quit, "the press after a disarm only re-arms");
+    assert!(!quit_asked(&result.effects), "{:?}", result.effects);
+    assert!(app.quit_pending.is_some());
+}
