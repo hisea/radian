@@ -122,7 +122,7 @@ impl ThemeName {
     }
 }
 
-/// The 29 roles a [`Theme`] styles today (ADR 0009, ADR 0023). The config keys are the
+/// The 37 roles a [`Theme`] styles today (ADR 0009, ADR 0023). The config keys are the
 /// snake_case names; `[tui.colors]` accepts them and (mapped) pi's role names alike.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -157,13 +157,17 @@ pub enum Role {
     NoticeLabel,
     NoticeBody,
     Text,
+    DiffAdded,
+    DiffRemoved,
+    DiffContext,
+    DiffHunk,
     MermaidNode,
     MermaidEdge,
     MermaidText,
 }
 
 impl Role {
-    pub const ALL: [Role; 33] = [
+    pub const ALL: [Role; 37] = [
         Role::Reasoning,
         Role::Interrupted,
         Role::User,
@@ -194,6 +198,10 @@ impl Role {
         Role::NoticeLabel,
         Role::NoticeBody,
         Role::Text,
+        Role::DiffAdded,
+        Role::DiffRemoved,
+        Role::DiffContext,
+        Role::DiffHunk,
         Role::MermaidNode,
         Role::MermaidEdge,
         Role::MermaidText,
@@ -232,6 +240,10 @@ impl Role {
             Role::NoticeLabel => "notice_label",
             Role::NoticeBody => "notice_body",
             Role::Text => "text",
+            Role::DiffAdded => "diff_added",
+            Role::DiffRemoved => "diff_removed",
+            Role::DiffContext => "diff_context",
+            Role::DiffHunk => "diff_hunk",
             Role::MermaidNode => "mermaid_node",
             Role::MermaidEdge => "mermaid_edge",
             Role::MermaidText => "mermaid_text",
@@ -274,6 +286,10 @@ impl Role {
             Role::NoticeLabel => &mut theme.notice_label,
             Role::NoticeBody => &mut theme.notice_body,
             Role::Text => &mut theme.text,
+            Role::DiffAdded => &mut theme.diff_added,
+            Role::DiffRemoved => &mut theme.diff_removed,
+            Role::DiffContext => &mut theme.diff_context,
+            Role::DiffHunk => &mut theme.diff_hunk,
             Role::MermaidNode => &mut theme.mermaid_node,
             Role::MermaidEdge => &mut theme.mermaid_edge,
             Role::MermaidText => &mut theme.mermaid_text,
@@ -323,6 +339,13 @@ pub struct Theme {
     pub tool_error_bg: Style,
     /// The main text level (pi's `text`): the assistant's answers and the user's words.
     pub text: Style,
+    /// The unified-diff line roles (ADR 0028 R4 + ADR 0029 decision 3): pi's `toolDiffAdded`
+    /// / `toolDiffRemoved` / `toolDiffContext`, and `diff_hunk` for the file headers and the
+    /// `@@` markers (pi has no role for those; the mapping takes `borderAccent`).
+    pub diff_added: Style,
+    pub diff_removed: Style,
+    pub diff_context: Style,
+    pub diff_hunk: Style,
     /// A rendered Mermaid diagram's **nodes** (ADR 0028 R8) — pi's `accent` (强调 = 名字、标签;
     /// a node is a named box).
     pub mermaid_node: Style,
@@ -491,6 +514,12 @@ impl Theme {
             // ADR 0026 D9: the status bar's AUTO marker, reversed so it reads at a glance
             // as "this session behaves differently"; the warning hue underneath.
             auto: spec(pi::YELLOW, Modifier::REVERSED, truecolor),
+            // The unified-diff lines: pi's own toolDiff* roles; the hunk/file-header marker
+            // takes the accent (pi has no role for it).
+            diff_added: spec(pi::GREEN, Modifier::empty(), truecolor),
+            diff_removed: spec(pi::RED, Modifier::empty(), truecolor),
+            diff_context: muted,
+            diff_hunk: spec(pi::VIOLET, Modifier::empty(), truecolor),
             selection: spec_bg(pi::SELECTION_BG, Modifier::empty(), truecolor),
             tool_pending_bg: spec_bg(pi::TOOL_PENDING_BG, Modifier::empty(), truecolor),
             tool_success_bg: spec_bg(pi::TOOL_SUCCESS_BG, Modifier::empty(), truecolor),
@@ -545,6 +574,12 @@ impl Theme {
             // ADR 0026 D9: the status bar's AUTO marker, reversed so it reads at a glance
             // as "this session behaves differently"; the warning hue underneath.
             auto: spec(pi::YELLOW, Modifier::REVERSED, truecolor),
+            // The unified-diff lines: pi's own toolDiff* roles; the hunk/file-header marker
+            // takes the accent (pi has no role for it).
+            diff_added: spec(pi::GREEN, Modifier::empty(), truecolor),
+            diff_removed: spec(pi::RED, Modifier::empty(), truecolor),
+            diff_context: muted,
+            diff_hunk: spec(pi::VIOLET, Modifier::empty(), truecolor),
             selection: spec_bg(pi::SELECTION_BG, Modifier::empty(), truecolor),
             tool_pending_bg: spec_bg(pi::TOOL_PENDING_BG, Modifier::empty(), truecolor),
             tool_success_bg: spec_bg(pi::TOOL_SUCCESS_BG, Modifier::empty(), truecolor),
@@ -592,6 +627,12 @@ impl Theme {
             notice_label: style(None, Modifier::BOLD),
             notice_body: style(None, Modifier::DIM),
             text: style(None, Modifier::empty()),
+            // No color: the diff's own `+`/`-` prefixes distinguish added and removed, so the
+            // roles carry no modifier; the hunk/file-header structure is bold.
+            diff_added: style(None, Modifier::empty()),
+            diff_removed: style(None, Modifier::empty()),
+            diff_context: style(None, Modifier::empty()),
+            diff_hunk: style(None, Modifier::BOLD),
             // `mono` uses no color: the three roles differ by modifier only.
             mermaid_node: style(None, Modifier::BOLD),
             mermaid_edge: style(None, Modifier::DIM),
@@ -622,7 +663,7 @@ impl Theme {
     }
 
     /// Every style this theme defines, for the "mono has no colors" test.
-    pub fn styles(&self) -> [Style; 30] {
+    pub fn styles(&self) -> [Style; 37] {
         [
             self.reasoning,
             self.interrupted,
@@ -654,6 +695,13 @@ impl Theme {
             self.notice_body,
             self.text,
             self.auto,
+            self.diff_added,
+            self.diff_removed,
+            self.diff_context,
+            self.diff_hunk,
+            self.mermaid_node,
+            self.mermaid_edge,
+            self.mermaid_text,
         ]
     }
 }

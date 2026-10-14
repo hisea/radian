@@ -134,6 +134,12 @@ fn fg_source(role: Role) -> Option<&'static str> {
         // The main text level itself (Pi's `text`): the mapping is used by the file themes;
         // the built-ins take pi's values directly.
         Role::Text => Some("text"),
+        // ADR 0028 R4's diff lines, straight from pi's own roles; pi has no hunk role, so
+        // the file headers and `@@` markers take the accent.
+        Role::DiffAdded => Some("toolDiffAdded"),
+        Role::DiffRemoved => Some("toolDiffRemoved"),
+        Role::DiffContext => Some("toolDiffContext"),
+        Role::DiffHunk => Some("accent"),
         // pi has no auto role; the warning role is the closest "this needs attention" color.
         Role::Auto => Some("warning"),
     }
@@ -965,6 +971,13 @@ mod tests {
         // (`fg_dim` = #C8C093), per the owner's text-level decision.
         assert_eq!(theme.notice_label.fg, Some(Color::Rgb(0x95, 0x7F, 0xB8)));
         assert_eq!(theme.notice_body.fg, Some(Color::Rgb(0xC8, 0xC0, 0x93)));
+        // The unified-diff roles (ADR 0028 R4): the fixture's own toolDiff* values —
+        // `green`, `red` and (in kanagawa, unlike pi's builtin) `yellow` for context.
+        assert_eq!(theme.diff_added.fg, Some(Color::Rgb(0x98, 0xBB, 0x6C)));
+        assert_eq!(theme.diff_removed.fg, Some(Color::Rgb(0xE4, 0x68, 0x76)));
+        assert_eq!(theme.diff_context.fg, Some(Color::Rgb(0xE6, 0xC3, 0x84)));
+        // `diff_hunk` takes the accent (pi has no hunk role), kanagawa's `violet`.
+        assert_eq!(theme.diff_hunk.fg, Some(Color::Rgb(0x95, 0x7F, 0xB8)));
         // Every pi role in the file is either mapped or kept; nothing was dropped.
         assert!(theme.reserved.contains_key("mdHeading"));
         assert!(theme.reserved.contains_key("syntaxKeyword"));

@@ -273,9 +273,9 @@ pub struct BodyLine {
     pub code: bool,
     /// This line is a padding row around a user block.
     pub pad: bool,
-    /// A tool body line from a "warning" channel (stderr, per the tool's own section
-    /// markers): the renderer styles it with the warning role.
-    pub warn: bool,
+    /// The role a tool body line renders with (ADR 0028 R4's diff roles and the warning
+    /// channel); `Normal` for everything that is not a card body line.
+    pub role: tools::LineRole,
     /// A synthesized tool hint (no source characters: it neither copies nor matches).
     pub hint: bool,
     /// A rendered Mermaid diagram line (ADR 0028 R8): per-piece text and role. `None` for
@@ -295,7 +295,7 @@ impl BodyLine {
             text,
             code: false,
             pad: false,
-            warn: false,
+            role: tools::LineRole::Normal,
             hint: false,
             diagram: None,
             reason: false,
@@ -309,7 +309,7 @@ impl BodyLine {
             text: String::new(),
             code: false,
             pad: true,
-            warn: false,
+            role: tools::LineRole::Normal,
             hint: false,
             diagram: None,
             reason: false,
@@ -328,7 +328,7 @@ impl BodyLine {
             text,
             code: true,
             pad: false,
-            warn: false,
+            role: tools::LineRole::Normal,
             hint: false,
             diagram: Some(spans),
             reason: false,
@@ -342,7 +342,7 @@ impl BodyLine {
             text,
             code: false,
             pad: false,
-            warn: false,
+            role: tools::LineRole::Normal,
             hint: false,
             diagram: None,
             reason: true,
@@ -760,7 +760,7 @@ fn tool_line(text: &str, width: usize) -> Vec<BodyLine> {
         text: rendered,
         code: false,
         pad: false,
-        warn: false,
+        role: tools::LineRole::Normal,
         hint: false,
         diagram: None,
         reason: false,
@@ -773,10 +773,10 @@ fn body_plan_lines(plan: &[tools::BodyLine], text: &str, body_width: usize) -> V
     let mut out = Vec::new();
     for line in plan {
         match line {
-            tools::BodyLine::Text { source, warn } => {
+            tools::BodyLine::Text { source, role } => {
                 let slice = text.get(source.clone()).unwrap_or("");
                 for mut laid in prose_lines(slice, body_width) {
-                    laid.warn = *warn;
+                    laid.role = *role;
                     out.push(laid);
                 }
             }
@@ -786,7 +786,7 @@ fn body_plan_lines(plan: &[tools::BodyLine], text: &str, body_width: usize) -> V
                 text: hint.clone(),
                 code: false,
                 pad: false,
-                warn: false,
+                role: tools::LineRole::Normal,
                 hint: true,
                 diagram: None,
                 reason: false,
@@ -1042,7 +1042,7 @@ fn code_lines(raw: &str, offset: usize, closed: bool, width: usize) -> Vec<BodyL
             text,
             code: true,
             pad: false,
-            warn: false,
+            role: tools::LineRole::Normal,
             hint: false,
             diagram: None,
             reason: false,
@@ -1056,7 +1056,7 @@ fn code_lines(raw: &str, offset: usize, closed: bool, width: usize) -> Vec<BodyL
             text: String::new(),
             code: true,
             pad: false,
-            warn: false,
+            role: tools::LineRole::Normal,
             hint: false,
             diagram: None,
             reason: false,

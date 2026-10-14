@@ -3378,7 +3378,10 @@ impl App {
                         call.name.clone(),
                         call.arguments.clone(),
                     );
-                    let mut entry = Entry::new(EntryKind::ToolCall, crate::tools::head_text(&card));
+                    // The call-time head has no result text yet (a `git_diff` head is terse
+                    // until its diff arrives and the pairing refreshes it).
+                    let mut entry =
+                        Entry::new(EntryKind::ToolCall, crate::tools::head_text(&card, ""));
                     entry.tool = Some(Box::new(card));
                     self.entries.push(entry);
                 }
@@ -3405,14 +3408,18 @@ impl App {
                         // The header can only be final now (the `shell` exit code comes from
                         // the result), so the entry's text - what renders and copies - is
                         // regenerated from the same function the layout uses.
-                        entry.text = crate::tools::head_text(card);
+                        entry.text = crate::tools::head_text(card, &result.text());
                         Some((card.name.clone(), card.arguments.clone()))
                     });
                 let (name, arguments) = paired.unwrap_or_default();
-                let mut entry = Entry::new(EntryKind::ToolResult, result.text());
-                entry.is_error = result.is_error;
                 let mut card = crate::tools::ToolCard::new(result.call_id.clone(), name, arguments);
                 card.structured = result.structured.clone();
+                // The body's text **is** the entry's text (the mapping/search invariant): a
+                // `patch` shows the synthesized diff, a `write` the content written, every
+                // other tool its own result text.
+                let display = crate::tools::result_display_text(&card, &result.text());
+                let mut entry = Entry::new(EntryKind::ToolResult, display);
+                entry.is_error = result.is_error;
                 entry.tool = Some(Box::new(card));
                 self.entries.push(entry);
             }

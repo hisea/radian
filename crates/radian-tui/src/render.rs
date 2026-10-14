@@ -379,10 +379,17 @@ fn render_row(
         theme.reasoning
     } else if matches!(entry.kind, EntryKind::Notice | EntryKind::Startup) {
         theme.notice_body
-    } else if row.warn {
-        // A tool body line from the warning channel (stderr, per the tool's own section
-        // markers): pi's warning level (`theme.note` in the role mapping).
-        theme.note
+    } else if row.role != crate::tools::LineRole::Normal {
+        // A card body line's own role (ADR 0028 R4 + ADR 0029's diff roles): the warning
+        // channel and the unified-diff line kinds.
+        match row.role {
+            crate::tools::LineRole::Warn => theme.note,
+            crate::tools::LineRole::DiffAdded => theme.diff_added,
+            crate::tools::LineRole::DiffRemoved => theme.diff_removed,
+            crate::tools::LineRole::DiffContext => theme.diff_context,
+            crate::tools::LineRole::DiffHunk => theme.diff_hunk,
+            crate::tools::LineRole::Normal => style,
+        }
     } else {
         style
     };
