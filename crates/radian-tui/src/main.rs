@@ -589,7 +589,7 @@ fn run(
     // D1/D2: every check that can fail runs **before** the session file is created. The
     // workspace is validated first, so a typo is a workspace error and never reaches the
     // sandbox probe (dogfooding D1). `radian-host` owns the rule so both hosts share it.
-    let model = build_model(ModelArgs {
+    let initial = build_model(ModelArgs {
         provider: route.adapter(),
         base_url: route.base_url.clone(),
         model: model_name.clone(),
@@ -600,6 +600,40 @@ fn run(
         max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         thinking,
     })?;
+    // ADR 0026 D5: the model is switchable. The slot is shared with the driver (open_session
+    // wires it), so a `/model` change reaches the next request without touching the key.
+    let config_slot = radian_runtime::ConfigSlot::new(serde_json::Value::Null);
+    let model = radian_host::SwitchableModel::new(
+        initial,
+        radian_host::ModelRoute::new(&provider_id, &model_name),
+        std::sync::Arc::clone(&config_slot),
+        radian_host::RouteContext {
+            session_id: session_id.clone(),
+            user_headers: user_headers.clone(),
+            include_usage: None,
+            max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+            thinking,
+        },
+    );
+    // ADR 0026 D7: a switch recomputes `B` from the warm local catalog, never the network.
+    let window_query = radian_host::WindowQuery::production(
+        cli.context_window.or(config.model.context_window),
+        (descriptor.id != radian_host::GENERIC_ID).then(|| descriptor.id.to_string()),
+        catalog_base_url.clone(),
+        model_name.clone(),
+        request_max_output,
+        true,
+    );
+    let budget_for = std::sync::Arc::new(move |provider: &str, switch_model: &str| {
+        // The switched route carries its own provider id, so the resolver uses it directly
+        // instead of deriving one from the startup base URL.
+        radian_host::resolve_offline(&radian_host::WindowQuery {
+            catalog_provider: Some(provider.to_owned()),
+            model: switch_model.to_owned(),
+            ..window_query.clone()
+        })
+        .budget
+    }) as std::sync::Arc<dyn Fn(&str, &str) -> Option<u64> + Send + Sync>;
     // The permission tier and the sandbox. For an enforced tier a probe failure is an error
     // here, never a fallback to an unsandboxed run (ADR 0012 decision 2). Still before
     // the session file exists, so a refusal leaves nothing behind (dogfooding D2).
@@ -712,6 +746,8 @@ fn run(
     let session = runtime
         .block_on(radian_host::open_session(
             radian_host::SessionSetup {
+                config_slot: std::sync::Arc::clone(&config_slot),
+                budget_for: Some(budget_for),
                 session_id: radian_host::SessionId::new(session_id.clone()),
                 session_dir: dir.clone(),
                 workspace: workspace_path.clone(),

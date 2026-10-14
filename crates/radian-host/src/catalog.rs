@@ -440,6 +440,7 @@ fn human_age(age: Duration) -> String {
 
 /// Everything the resolver needs. `cache_path`/`url` are explicit so tests never touch the
 /// real cache or the network; [`WindowQuery::production`] fills them from the environment.
+#[derive(Debug, Clone)]
 pub struct WindowQuery {
     pub explicit: Option<u64>,
     pub catalog_provider: Option<String>,
@@ -531,6 +532,33 @@ pub async fn resolve(query: &WindowQuery) -> Window {
             provider,
             model: query.model.clone(),
             age,
+        },
+        Some(limit),
+    )
+}
+
+/// Resolves a window **offline**: the local catalog cache only, never the network. This is
+/// what the driver's budget resolver uses (ADR 0026 D7): a `/model` switch recomputes `B`
+/// from the warm cache, and a cache miss means "unknown", not a fetch.
+pub fn resolve_offline(query: &WindowQuery) -> Window {
+    let Some(provider) = query.provider() else {
+        return Window::unknown();
+    };
+    let Some((catalog, age)) = read_cache(&query.cache_path) else {
+        return Window::unknown();
+    };
+    let Some(limit) = catalog.limit(&provider, &query.model) else {
+        return Window::unknown();
+    };
+    build_window(
+        limit.context,
+        limit.input,
+        limit.output,
+        query.request_max_output,
+        WindowSource::Catalog {
+            provider,
+            model: query.model.clone(),
+            age: Some(age),
         },
         Some(limit),
     )

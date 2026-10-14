@@ -11,6 +11,6 @@ mod config;
 mod driver;
 mod inbox;
 
-pub use config::{ConfigQueue, ConfigSlot};
+pub use config::{ConfigQueue, ConfigSlot, ModelRoute};
 pub use driver::{Driver, DriverError, RuntimeEvents};
 pub use inbox::{CancelCause, Inbox, InboxEntry, InboxError, Lane};

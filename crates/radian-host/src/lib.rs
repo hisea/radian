@@ -37,6 +37,7 @@ pub use catalog::{
     CACHE_TTL, CATALOG_URL, Catalog, FETCH_TIMEOUT, ModelEntry, ModelLimit, OUTPUT_RESERVATION_CAP,
     ProviderInfo, Window, WindowCheck, WindowQuery, WindowSource, cache_path, host_of,
     input_budget, output_ceiling_warning, output_reservation, provider_for_host, resolve,
+    resolve_offline,
 };
 pub use config::migrate_pi::{PiDraft, PiMigrateError, import_pi, write_draft as write_pi_draft};
 pub use config::{
@@ -59,8 +60,8 @@ pub use home::{
 };
 pub use mcp::load_mcp_config;
 pub use model::{
-    DEFAULT_MAX_TOKENS, HostModel, MIN_THINKING_BUDGET, ModelArgs, Provider, Thinking, build_model,
-    check_provider_flags, redact_base_url,
+    DEFAULT_MAX_TOKENS, HostModel, MIN_THINKING_BUDGET, ModelArgs, Provider, RouteContext,
+    SwitchableModel, Thinking, build_model, check_provider_flags, redact_base_url,
 };
 pub use output::{StdoutError, write_line, write_stdout};
 pub use pending::{
@@ -74,6 +75,7 @@ pub use provider::{
     DESCRIPTORS, DescriptorModel, GENERIC_ID, LoginMethod, Protocol, ProviderDescriptor, Route,
     descriptor, descriptors, resolve_route,
 };
+pub use radian_runtime::ModelRoute;
 pub use session::{
     ApprovalRouting, CommandRefused, DriverEnd, HostBindings, LocalSession, SessionCapability,
     SessionCommand, SessionError, SessionFacade, SessionFacts, SessionId, SessionQueue,

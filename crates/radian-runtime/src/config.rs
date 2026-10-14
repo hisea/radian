@@ -74,3 +74,35 @@ impl ConfigQueue {
         std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()))
     }
 }
+
+/// One route a `/model` switch can name (ADR 0026 D5). This is the **only** content of a
+/// model `ConfigChanged`: no key, no header values — the key comes from `auth.json` at use
+/// time, so the journal can never hold a secret through a switch.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ModelRoute {
+    pub provider: String,
+    pub model: String,
+}
+
+impl ModelRoute {
+    pub fn new(provider: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            provider: provider.into(),
+            model: model.into(),
+        }
+    }
+
+    /// The `ConfigChanged` value this route is: `{"model": {"provider": …, "model": …}}`.
+    pub fn to_value(&self) -> Value {
+        serde_json::json!({"model": {"provider": self.provider, "model": self.model}})
+    }
+
+    /// Reads the route out of a slot value; `None` when the change is not a model change.
+    pub fn from_value(value: &Value) -> Option<Self> {
+        let model = value.get("model")?;
+        Some(Self {
+            provider: model.get("provider")?.as_str()?.to_owned(),
+            model: model.get("model")?.as_str()?.to_owned(),
+        })
+    }
+}

@@ -21,13 +21,14 @@ use agent_core::{Agent, AgentConfig, ContextBudget, EventSink, Message, TurnOpti
 use agent_extensions::{McpServerConfig, McpToolProvider};
 use radian_coding::CodingTools;
 use radian_permissions::{Approver, AuditSink, PermissionHooks, Preset, Profile};
+use radian_runtime::ConfigSlot;
 use radian_runtime::{CancelCause, Driver, Inbox, RuntimeEvents};
 use radian_sandbox::Sandbox;
 use radian_session::{SessionCreatedData, SessionJournal};
 
 use crate::describe::{Wording, describe};
 use crate::memory::{InjectionConfig, MemoryHooks, MemoryService, MemoryTools, ProjectState};
-use crate::model::HostModel;
+use crate::model::SwitchableModel;
 use crate::pending::{
     Answered, PendingQueue, PendingRequest, PendingResponse, QueuedApprover, QueuedPrompter,
 };
@@ -224,7 +225,12 @@ pub struct SessionSetup {
     pub workspace: PathBuf,
     /// The `--workspace` flag: the built-in coding tools exist only when it was given.
     pub coding_root: Option<PathBuf>,
-    pub model: HostModel,
+    /// The switchable model (ADR 0026 D5): the startup model wrapped in the route cache.
+    pub model: SwitchableModel,
+    /// The slot the model reads and the driver writes (one instance, shared).
+    pub config_slot: Arc<ConfigSlot>,
+    /// Computes `B` for a switched model from the local catalog (ADR 0026 D7).
+    pub budget_for: Option<Arc<dyn Fn(&str, &str) -> Option<u64> + Send + Sync>>,
     pub servers: Vec<McpServerConfig>,
     pub system_prompt: Option<String>,
     pub context_budget: Option<ContextBudget>,
@@ -559,6 +565,8 @@ pub async fn open_session(
         turn_timeout,
         wording,
         capabilities,
+        config_slot,
+        budget_for,
     } = setup;
 
     // The pending queue (ADR 0023 U7): approvals and questions share it. It exists before the
@@ -639,12 +647,13 @@ pub async fn open_session(
 
     // MCP server **processes** start here, when the tool session opens. The session file
     // already exists, so a failure names the way to continue it.
-    let mut driver = Driver::open(
+    let mut driver = Driver::open_with_slot(
         &agent,
         Arc::clone(&journal),
         Arc::clone(&inbox),
         events,
         turn_options,
+        config_slot,
     )
     .await
     .map_err(|error| {
@@ -657,6 +666,9 @@ pub async fn open_session(
     })?;
     driver.set_turn_timeout(turn_timeout);
     driver.set_runtime_events(runtime_events);
+    if let Some(budget_for) = budget_for {
+        driver.set_budget_for(budget_for);
+    }
 
     // The session is open, so the MCP status is known: what actually connected.
     let mcp_open = mcp.status().map(|status| (status.servers, status.tools));

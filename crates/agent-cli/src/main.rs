@@ -617,7 +617,9 @@ async fn run(mut cli: Cli) -> i32 {
 }
 
 struct Setup {
-    model: HostModel,
+    model: radian_host::SwitchableModel,
+    config_slot: std::sync::Arc<radian_runtime::ConfigSlot>,
+    budget_for: std::sync::Arc<dyn Fn(&str, &str) -> Option<u64> + Send + Sync>,
     /// The provider actually chosen, for the session's config snapshot.
     provider: Provider,
     servers: Vec<McpServerConfig>,
@@ -780,7 +782,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     .map_err(SetupError)?;
     // The catalog matches on the hostname of the endpoint the model actually talks to (ADR 0018).
     let catalog_base_url = route.base_url.clone();
-    let model = build_model(ModelArgs {
+    let initial = build_model(ModelArgs {
         provider: route.adapter(),
         base_url: route.base_url.clone(),
         model: model_name.clone(),
@@ -791,6 +793,41 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         thinking,
     })
     .map_err(SetupError)?;
+    // ADR 0026 D5: switchable, like the TUI. The CLI has no `/model`, but the journal can
+    // still carry a change the TUI wrote, so resume restores the right model (D8).
+    let config_slot = radian_runtime::ConfigSlot::new(serde_json::Value::Null);
+    let model = radian_host::SwitchableModel::new(
+        initial,
+        radian_host::ModelRoute::new(&provider_id, &model_name),
+        config_slot.clone(),
+        radian_host::RouteContext {
+            session_id: session_id.clone(),
+            user_headers: headers.clone(),
+            include_usage: cli.include_usage,
+            max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+            thinking,
+        },
+    );
+    let request_max_output = match provider {
+        Provider::Anthropic => Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
+        Provider::OpenAiCompatible => None,
+    };
+    let window_query = radian_host::WindowQuery::production(
+        cli.context_window.or(config.model.context_window),
+        (descriptor.id != radian_host::GENERIC_ID).then(|| descriptor.id.to_string()),
+        catalog_base_url.clone(),
+        model_name.clone(),
+        request_max_output,
+        true,
+    );
+    let budget_for = std::sync::Arc::new(move |provider: &str, switch_model: &str| {
+        radian_host::resolve_offline(&radian_host::WindowQuery {
+            catalog_provider: Some(provider.to_owned()),
+            model: switch_model.to_owned(),
+            ..window_query.clone()
+        })
+        .budget
+    }) as std::sync::Arc<dyn Fn(&str, &str) -> Option<u64> + Send + Sync>;
     let servers = match &cli.mcp_config {
         Some(path) => load_mcp_config(path).map_err(SetupError)?,
         None => Vec::new(),
@@ -815,10 +852,6 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     // This runs before the session file exists.
     // ADR 0018: `R` comes from the request's own output setting; Anthropic sends
     // `max_tokens`, OpenAI-compatible sends none.
-    let request_max_output = match provider {
-        Provider::Anthropic => Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
-        Provider::OpenAiCompatible => None,
-    };
     let window = radian_host::resolve(&radian_host::WindowQuery::production(
         context_window,
         cli.catalog_provider.clone(),
@@ -844,6 +877,8 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         .map(ContextBudget::new);
     Ok(Setup {
         model,
+        config_slot,
+        budget_for,
         provider,
         servers,
         system_prompt,
@@ -1199,6 +1234,8 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             workspace: workspace_path.clone(),
             coding_root: cli.workspace.clone().map(std::path::PathBuf::from),
             model: setup.model,
+            config_slot: setup.config_slot,
+            budget_for: Some(setup.budget_for),
             servers: setup.servers,
             system_prompt: setup.system_prompt.clone(),
             context_budget: setup.context_budget,

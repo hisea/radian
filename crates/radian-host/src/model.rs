@@ -8,7 +8,11 @@
 //! The host still owns its flags, its key lookup and its secrets; this module only turns the
 //! resolved values into a model, so the two hosts cannot build providers differently.
 
+use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
+
+use radian_runtime::{ConfigSlot, ModelRoute};
 
 use agent_core::{Model, ModelContext, ModelError, ModelRequest, ModelResponse};
 use agent_provider_anthropic::{Anthropic, AnthropicConfig, ThinkingConfig};
@@ -278,5 +282,118 @@ mod tests {
             Some(16384),
         )
         .unwrap();
+    }
+}
+
+// ---------- the switchable model (ADR 0026 D5) ----------
+
+/// What a switch needs to build a model for an arbitrary route: the facts that were fixed at
+/// startup and do not follow the model. The key is **not** here — it is read per route.
+#[derive(Debug, Clone)]
+pub struct RouteContext {
+    pub session_id: String,
+    /// The user's own headers (generic-descriptor only, `{session_id}` already expanded).
+    pub user_headers: Vec<(String, String)>,
+    pub include_usage: Option<bool>,
+    pub max_tokens: u32,
+    pub thinking: Thinking,
+}
+
+impl RouteContext {
+    /// Resolves one route into model arguments: `resolve_route` for the endpoint and headers,
+    /// `auth::resolve_key` for the credential (D2). A provider without a credential is an error
+    /// naming `/login <provider>` (D6), which the caller shows.
+    pub fn args_for(&self, provider_id: &str, model: &str) -> Result<ModelArgs, String> {
+        let credential = crate::auth::resolve_key(provider_id).map_err(|e| e.to_string())?;
+        if credential.is_none() {
+            return Err(format!(
+                "no credential for `{provider_id}`: run /login {provider_id} (or add an entry to \
+                 ~/.radian/credentials/auth.json)"
+            ));
+        }
+        let auth_base_url = credential
+            .as_ref()
+            .and_then(|credential| credential.env.get(crate::RADIAN_BASE_URL))
+            .map(String::as_str);
+        let route = crate::resolve_route(
+            provider_id,
+            model,
+            None,
+            auth_base_url,
+            &self.user_headers,
+            &self.session_id,
+        )?;
+        Ok(ModelArgs {
+            provider: route.adapter(),
+            base_url: route.base_url,
+            model: model.to_owned(),
+            api_key: credential.as_ref().map(|credential| credential.key.clone()),
+            headers: route.headers,
+            include_usage: self.include_usage,
+            max_tokens: self.max_tokens,
+            thinking: self.thinking,
+        })
+    }
+}
+
+/// The model behind a `/model` switch: every request reads the current route out of the
+/// driver's [`ConfigSlot`] and dispatches to the matching adapter, built once per route and
+/// cached. The driver only changes the slot between turns (ADR 0004 path B), so one request
+/// never sees a route change mid-turn.
+pub struct SwitchableModel {
+    slot: Arc<ConfigSlot>,
+    initial_route: ModelRoute,
+    ctx: RouteContext,
+    cache: std::sync::Mutex<HashMap<ModelRoute, Arc<HostModel>>>,
+}
+
+impl SwitchableModel {
+    /// `initial` is the model built at startup for `initial_route`.
+    pub fn new(
+        initial: HostModel,
+        initial_route: ModelRoute,
+        slot: Arc<ConfigSlot>,
+        ctx: RouteContext,
+    ) -> Self {
+        let cache =
+            std::sync::Mutex::new(HashMap::from([(initial_route.clone(), Arc::new(initial))]));
+        Self {
+            slot,
+            initial_route,
+            ctx,
+            cache,
+        }
+    }
+
+    /// The route in force right now: the slot's model change, else the startup route.
+    pub fn current_route(&self) -> ModelRoute {
+        ModelRoute::from_value(&self.slot.value()).unwrap_or_else(|| self.initial_route.clone())
+    }
+
+    /// The model for the current route, built and cached on first use. The `Arc` comes out of
+    /// the lock, so the lock is never held across the request.
+    fn current(&self) -> Result<Arc<HostModel>, String> {
+        let route = self.current_route();
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(model) = cache.get(&route) {
+            return Ok(model.clone());
+        }
+        let args = self.ctx.args_for(&route.provider, &route.model)?;
+        let model = build_model(args).map(Arc::new)?;
+        cache.insert(route, model.clone());
+        Ok(model)
+    }
+}
+
+impl Model for SwitchableModel {
+    async fn complete(
+        &self,
+        request: ModelRequest,
+        cx: ModelContext<'_>,
+    ) -> Result<ModelResponse, ModelError> {
+        // The route was read before the lock, so a switch that lands mid-request cannot swap
+        // this call's model (D5).
+        let model = self.current().map_err(ModelError::Protocol)?;
+        model.complete(request, cx).await
     }
 }
