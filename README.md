@@ -260,3 +260,7 @@ driver error), 101 (the app panicked), and 128 + the signal number on SIGTERM/SI
 | Performance baseline and its reproduction commands | `docs/perf-baseline.md` |
 | Spike reports (sandbox, TUI, OAuth) | `docs/spikes/` |
 | Agent instructions (verify suite, delegation) | `AGENTS.md` |
+
+## License
+
+Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. Third-party code and its attribution are listed in [NOTICE](NOTICE).
