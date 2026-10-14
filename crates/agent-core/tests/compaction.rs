@@ -824,3 +824,47 @@ fn a_second_compaction_does_not_stack_omission_markers() {
     );
     assert_eq!(omitted_marker(1), "[1 earlier user messages omitted]");
 }
+
+/// ADR 0018: the omission count accumulates across rolling compactions — the new
+/// marker names everything that is still missing, not just this round's drops — and a round
+/// that drops nothing keeps the previous count instead of losing the marker.
+#[test]
+fn the_omission_count_accumulates() {
+    use agent_core::select_user_messages;
+
+    // A window that fits the first message and one truncated long one, and nothing else.
+    let budget = Some(4_000);
+    let long = |index: usize| {
+        user_sourced(
+            &format!("long {index} {}", "y".repeat(2_000)),
+            Some(InputSource::User),
+        )
+    };
+    let marker_count = |kept: &[agent_core::RetainedUserMessage]| -> Option<usize> {
+        kept.iter().find_map(|message| {
+            message
+                .text
+                .strip_prefix('[')
+                .and_then(|rest| rest.strip_suffix(" earlier user messages omitted]"))
+                .and_then(|count| count.parse().ok())
+        })
+    };
+
+    // Round 1: four long messages. The newest is truncated into `U`; the other three do not
+    // fit and are counted.
+    let mut round1 = vec![user_sourced("the task", Some(InputSource::User))];
+    for index in 0..4 {
+        round1.push(long(index));
+    }
+    let first = select_user_messages(&[], &round1, budget);
+    assert_eq!(marker_count(&first), Some(3), "{:?}", texts(&first));
+
+    // A round with no new messages keeps the count (the bug dropped the marker entirely).
+    let same = select_user_messages(&first, &[], budget);
+    assert_eq!(marker_count(&same), Some(3), "{:?}", texts(&same));
+
+    // Two more long messages: the marker names all five.
+    let more = vec![long(4), long(5)];
+    let second = select_user_messages(&first, &more, budget);
+    assert_eq!(marker_count(&second), Some(5), "{:?}", texts(&second));
+}

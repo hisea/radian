@@ -635,14 +635,23 @@ pub struct RetainedUserMessage {
 
 /// The line that names the user messages a budget dropped (ADR 0018). It rides in
 /// the retained list so the model sees that something is missing; [`select_user_messages`]
-/// recognizes and replaces it on the next rolling compaction instead of accumulating it.
+/// recognizes it and **carries its count forward** on the next rolling compaction instead of
+/// accumulating one marker per round.
 pub fn omitted_marker(count: usize) -> String {
     format!("[{count} earlier user messages omitted]")
 }
 
+/// The count a previous omission marker named, when `text` is one. The format is Core's own
+/// ([`omitted_marker`]), so reading it back is a parse, not a guess.
+fn omitted_marker_count(text: &str) -> Option<usize> {
+    let rest = text.strip_prefix('[')?;
+    let count = rest.strip_suffix(" earlier user messages omitted]")?;
+    count.parse().ok()
+}
+
 /// Whether `text` is an omission marker rather than a real user message.
 fn is_omitted_marker(text: &str) -> bool {
-    text.starts_with('[') && text.ends_with("earlier user messages omitted]")
+    omitted_marker_count(text).is_some()
 }
 
 /// Whether `message` is a user message Core keeps verbatim (ADR 0018): a
@@ -734,6 +743,12 @@ pub fn select_user_messages(
         .filter(|kept| !is_omitted_marker(&kept.text))
         .map(|kept| kept.text.clone())
         .collect();
+    // A previous marker's count is carried forward: those messages are still omitted, and the
+    // new marker must name all of them, not just this round's.
+    let mut omitted: usize = previous
+        .iter()
+        .filter_map(|kept| omitted_marker_count(&kept.text))
+        .sum();
     for message in newly_summarized {
         if let Some(text) = retained_text(message) {
             texts.push(text);
@@ -748,7 +763,6 @@ pub fn select_user_messages(
     let first = truncate_text(&texts[0], u1).unwrap_or_else(|| texts[0].clone());
     let mut kept: Vec<String> = Vec::new();
     let mut used = 0u64;
-    let mut omitted = 0usize;
     // From the newest backwards: the newest is always placed, truncated into `U` when it alone
     // is larger.
     for (index, text) in texts[1..].iter().enumerate().rev() {
