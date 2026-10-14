@@ -943,3 +943,22 @@ Base `a6a9cce` · worktree `../radian-pi-flakymem` · 负载进程：24 个 `yes
 `wait` 把永不退出的 `yes` 也等上了，命令挂了 7 小时 42 分，那些 `yes` 一直占着 CPU（整晚 load
 150–450 有它们一份），最后由 owner 按 `/tmp/flaky-pids.txt` 的 pid 逐个核对后杀掉。**以后起负载
 进程：记 pid，`wait` 只等测试循环的 pid（或把负载放进 `wait` 范围外的子 shell），跑完立刻按 pid kill。**
+
+## 手测第三轮（ui-r3：光标、❯、工具输出的 Tab、Shift+Enter）
+
+Base `1a6f211` · 一次性 worktree `/tmp/ui3-mut*`（跑完删除）· 每个变异 `python3` 补丁（带 `assert`）、
+跑对应测试后 `git checkout -- .` 还原。
+
+| # | 需求 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| I1 | 提示符按**显示宽度**算列 | box 光标恢复 `BOX_PROMPT.len()`（字节） | `the_box_cursor_counts_the_prompts_display_width` | ✅ |
+| I3a | 工具正文显示前展开 Tab | `prose_lines` 不再把 `	` 展开成四个空格 | `a_tool_body_expands_its_tabs_for_display_and_copies_the_source` | ✅ |
+| I3b | Tab 按四列参与折行 | 三处 `ch_width` 都退回"Tab 宽 0" | `a_tab_wraps_as_four_columns` | ✅ |
+| I4 | Shift+Enter 换行不发送 | `newline` 的默认键去掉 `shift-enter` | `shift_enter_inserts_a_newline` | ✅ |
+
+4/4 抓住。**过程记录（三处假象）**：①I3 第一版只改了 `wrap_char_offsets`，而测试调的是 `wrap`
+（三处宽度规则各一份）→ "没抓住"是补丁没覆盖；②`run_mut` 用 `^error` 判编译失败，而失败测试的输出里
+也有 `error: test failed` 一行 → 把"抓住"误判成编译失败，已改成只匹配 `^test .* FAILED` 与
+`^error[`/`^error:`；③两次 `cargo test --lib tools a_...` 又给了两个位置参数（只认第一个）→ 空跑。
+④I3b 的正则忘了源码里是字面 `\t` 两个字符而不是制表符 → 0 处匹配（`assert` 如实报 PATCH FAILED，
+没有当成"抓住"）。
