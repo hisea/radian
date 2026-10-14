@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -300,7 +300,14 @@ impl GitContributor {
     }
 
     /// The values for `git_branch`, `worktree` and the change counts, as blocking work.
-    fn read(&self) -> (Option<String>, Option<String>, Option<(usize, usize)>) {
+    fn read(
+        &self,
+    ) -> (
+        Option<String>,
+        Option<String>,
+        Option<(usize, usize)>,
+        Option<String>,
+    ) {
         let branch = self.git(&["rev-parse", "--abbrev-ref", "HEAD"]);
         let branch = branch.filter(|name| name != "HEAD");
         // A linked worktree has a `--git-dir` different from the `--git-common-dir`; its name
@@ -318,6 +325,23 @@ impl GitContributor {
         // ADR 0027 C3 / revision 1: the change counts (modified tracked, untracked) are the
         // data slots the numbers row fills in slice 2b. `git status --porcelain` in the
         // background task, never at draw time.
+        // ADR 0027: `{repo}` is the repository root's directory name. In a linked
+        // worktree `--git-common-dir` points at the main repo's `.git`, so its parent is the
+        // shared root; in a plain checkout it is the relative `.git`, whose root is `self.dir`.
+        let repo = self
+            .git(&["rev-parse", "--git-common-dir"])
+            .and_then(|common| {
+                let path = Path::new(&common);
+                let root = if path.is_absolute() {
+                    path.parent().map(Path::to_path_buf)
+                } else {
+                    Some(self.dir.clone())
+                };
+                root.and_then(|root| {
+                    root.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                })
+            });
         let changes = self.git_raw(&["status", "--porcelain"]).map(|status| {
             let mut modified = 0usize;
             let mut untracked = 0usize;
@@ -330,7 +354,7 @@ impl GitContributor {
             }
             (modified, untracked)
         });
-        (branch, worktree, changes)
+        (branch, worktree, changes, repo)
     }
 }
 
@@ -340,7 +364,13 @@ impl StatusContributor for GitContributor {
     }
 
     fn items(&self) -> &'static [&'static str] {
-        &["git_branch", "worktree", "git_modified", "git_untracked"]
+        &[
+            "git_branch",
+            "worktree",
+            "git_root",
+            "git_modified",
+            "git_untracked",
+        ]
     }
 
     fn period(&self) -> Duration {
@@ -352,7 +382,7 @@ impl StatusContributor for GitContributor {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Contribution>, String>> + Send + '_>> {
         Box::pin(async move {
             let dir = self.dir.clone();
-            let (branch, worktree, changes) =
+            let (branch, worktree, changes, repo) =
                 tokio::task::spawn_blocking(move || GitContributor::new(dir).read())
                     .await
                     .map_err(|error| format!("the git refresh task failed: {error}"))?;
@@ -374,6 +404,13 @@ impl StatusContributor for GitContributor {
                         Segment::new("worktree ", SegmentRole::Accent),
                         Segment::new(name, SegmentRole::Normal),
                     ],
+                    stale: false,
+                });
+            }
+            if let Some(repo) = repo {
+                contributions.push(Contribution {
+                    item: "git_root".to_owned(),
+                    segments: vec![Segment::new(repo, SegmentRole::Normal)],
                     stale: false,
                 });
             }

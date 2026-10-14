@@ -118,9 +118,14 @@ async fn the_git_contributor_detects_a_worktree() {
         ],
     );
 
-    // The main checkout is not a worktree: the item hides.
+    // The main checkout is not a worktree: the item hides. `{repo}` is the root's name.
     let store = ContributionStore::new();
     assert_eq!(tick_text(&store, &main, "worktree").await, None);
+    let repo_name = main.file_name().unwrap().to_str().unwrap();
+    assert_eq!(
+        tick_text(&store, &main, "git_root").await.as_deref(),
+        Some(repo_name)
+    );
     // The linked checkout is: the value names it, and the branch is its own.
     let store = ContributionStore::new();
     let worktree = tick_text(&store, &linked, "worktree").await;
@@ -132,6 +137,11 @@ async fn the_git_contributor_detects_a_worktree() {
     assert_eq!(
         tick_text(&store, &linked, "git_branch").await.as_deref(),
         Some("side")
+    );
+    // `{repo}` is the shared root's name in a worktree too, not the worktree's own name.
+    assert_eq!(
+        tick_text(&store, &linked, "git_root").await.as_deref(),
+        Some(repo_name)
     );
 
     let _ = Command::new("git")
