@@ -121,6 +121,13 @@ impl Profile {
                     Action::Deny,
                 )
                 .with_reason("safe mode has no shell"),
+                // ADR 0030 R10: `git_commit` writes the repository; safe does not write.
+                Rule::new(
+                    ToolMatcher::Name("git_commit".into()),
+                    ResourceMatcher::Any,
+                    Action::Deny,
+                )
+                .with_reason("safe mode does not write the repository"),
                 Rule::new(ToolMatcher::Mcp, ResourceMatcher::Any, Action::Deny)
                     .with_reason("safe mode does not start MCP tools"),
             ]);

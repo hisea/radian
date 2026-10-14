@@ -13,6 +13,7 @@ use agent_core::{
 use agent_extensions::{McpSession, McpToolProvider};
 use radian_coding::{AskSession, AskTools, CodingSession, CodingTools};
 
+use crate::git_commit::{GitCommitTools, run as run_git_commit};
 use crate::memory::{MemorySession, MemoryTools};
 use crate::mermaid::{MermaidCheckSession, MermaidCheckTools};
 use crate::skills::tools::{SkillSession, SkillTools};
@@ -27,6 +28,9 @@ pub struct HostTools {
     skills: Option<SkillTools>,
     /// `mermaid_check` (ADR 0028 R8 / ADR 0025). Read-only and always mounted.
     mermaid: MermaidCheckTools,
+    /// `git_commit` (ADR 0030 R10). Runs in the host, outside the sandbox. `None` for a host
+    /// with no workspace/journal (the CLI's own tool tests).
+    git_commit: Option<GitCommitTools>,
     mcp: McpToolProvider,
 }
 
@@ -35,6 +39,7 @@ impl HostTools {
         coding: Option<CodingTools>,
         memory: Option<MemoryTools>,
         mcp: McpToolProvider,
+        git_commit: Option<GitCommitTools>,
     ) -> Self {
         Self {
             coding,
@@ -42,6 +47,7 @@ impl HostTools {
             ask: None,
             skills: None,
             mermaid: MermaidCheckTools::new(),
+            git_commit,
             mcp,
         }
     }
@@ -67,6 +73,7 @@ pub struct HostSession {
     ask: Option<AskSession>,
     skills: Option<SkillSession>,
     mermaid: MermaidCheckSession,
+    git_commit: Option<GitCommitTools>,
     mcp: McpSession,
     specs: Vec<ToolSpec>,
     coding_names: HashSet<String>,
@@ -74,6 +81,7 @@ pub struct HostSession {
     ask_names: HashSet<String>,
     skill_names: HashSet<String>,
     mermaid_names: HashSet<String>,
+    git_commit_names: HashSet<String>,
 }
 
 impl ToolProvider for HostTools {
@@ -99,12 +107,14 @@ impl ToolProvider for HostTools {
             None => None,
         };
         let mermaid = self.mermaid.open_session().await?;
+        let git_commit = self.git_commit.clone();
 
         let mut coding_names = HashSet::new();
         let mut memory_names = HashSet::new();
         let mut ask_names = HashSet::new();
         let mut skill_names = HashSet::new();
         let mut mermaid_names = HashSet::new();
+        let mut git_commit_names = HashSet::new();
         let mut built_in_specs: Vec<ToolSpec> = Vec::new();
         if let Some(coding) = &coding {
             for spec in coding.tool_specs() {
@@ -134,6 +144,11 @@ impl ToolProvider for HostTools {
             mermaid_names.insert(spec.name.clone());
             built_in_specs.push(spec.clone());
         }
+        if git_commit.is_some() {
+            let git_commit_spec = crate::git_commit::spec();
+            git_commit_names.insert(git_commit_spec.name.clone());
+            built_in_specs.push(git_commit_spec);
+        }
         let specs = merge_tool_specs(built_in_specs, mcp.tool_specs().to_vec())?;
 
         Ok(HostSession {
@@ -142,6 +157,7 @@ impl ToolProvider for HostTools {
             ask,
             skills,
             mermaid,
+            git_commit,
             mcp,
             specs,
             coding_names,
@@ -149,6 +165,7 @@ impl ToolProvider for HostTools {
             ask_names,
             skill_names,
             mermaid_names,
+            git_commit_names,
         })
     }
 }
@@ -163,7 +180,17 @@ impl ToolSession for HostSession {
         call: &ToolCall,
         cx: ToolContext<'_>,
     ) -> Result<ToolOutput, ToolFailure> {
-        if self.mermaid_names.contains(&call.name) {
+        if self.git_commit_names.contains(&call.name) {
+            // The host tool needs the workspace, the journal and the branch rules, so it runs
+            // through its own entry point rather than the plain `ToolSession` trait.
+            match &self.git_commit {
+                Some(git_commit) => run_git_commit(git_commit, call).await,
+                None => Err(ToolFailure::new(
+                    "unknown_tool",
+                    format!("`{}` has no host session", call.name),
+                )),
+            }
+        } else if self.mermaid_names.contains(&call.name) {
             self.mermaid.execute(call, cx).await
         } else if self.skill_names.contains(&call.name) {
             match &self.skills {

@@ -217,6 +217,14 @@ pub struct CompactionConfig {
 /// home, neither of which belongs in a TOML value). A directory that is not listed here is
 /// never scanned — in particular `~/.claude/skills` is read only when it appears in this list
 /// (ruling 2).
+/// `[git]` (ADR 0030 R10).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GitConfig {
+    /// `protected_branches = ["release"]`: branches `git_commit` refuses besides
+    /// `main`/`master`.
+    pub protected_branches: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SkillsConfig {
     pub extra_paths: Vec<String>,
@@ -366,6 +374,8 @@ pub struct Config {
     pub permissions: PermissionsConfig,
     pub compaction: CompactionConfig,
     pub skills: SkillsConfig,
+    /// `[git]` (ADR 0030 R10): the branches `git_commit` refuses besides `main`/`master`.
+    pub git: GitConfig,
     pub tui: TuiConfig,
     /// `[providers.<name>]`: named custom services (ADR 0026 D10). Carried raw; the hosts
     /// resolve them through `radian_host::provider::resolve_provider`.
@@ -469,6 +479,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
             "permissions" => parse_permissions(value, path, read_only, &mut config)?,
             "compaction" => parse_compaction(value, path, &mut config)?,
             "skills" => parse_skills(value, path, &mut config)?,
+            "git" => parse_git(value, &mut config)?,
             "tui" => parse_tui(value, path, &mut config)?,
             "providers" => parse_providers(value, path, &mut config)?,
             // Known by the ADR, not wired in this slice: the hosts take MCP servers from
@@ -690,6 +701,27 @@ fn parse_compaction(value: &Value, path: &Path, config: &mut Config) -> Result<(
 /// resolves them with [`resolve_extra_paths`]. A non-string or empty entry is a structural
 /// error (an empty path would silently resolve to the config directory); an unknown key under
 /// `[skills]` is skipped and named on the startup line, like every other unknown key.
+/// Parses `[git]` (ADR 0030 R10). An unknown key or a non-string entry is skipped, never a
+/// refusal (the `tui.*` rule's spirit: a preference never blocks startup).
+fn parse_git(value: &Value, config: &mut Config) -> Result<(), ConfigError> {
+    let Some(table) = value.as_table() else {
+        return Ok(());
+    };
+    for (key, value) in table {
+        match (key.as_str(), value) {
+            ("protected_branches", Value::Array(branches)) => {
+                for branch in branches {
+                    if let Value::String(branch) = branch {
+                        config.git.protected_branches.push(branch.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn parse_skills(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
     let Some(table) = value.as_table() else {
         return Err(wrong_type(path, "skills", "a table"));
