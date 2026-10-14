@@ -382,7 +382,7 @@ fn a_large_host_meta_does_not_change_the_request_estimate() {
             id: Some(MessageId("host-42".into())),
             source: Some(InputSource::Subagent),
             origin: Some(
-                OpaqueJson::parse(&json!({"blob": "x".repeat(20_000)}).to_string()).unwrap(),
+                OpaqueJson::parse(json!({"blob": "x".repeat(20_000)}).to_string()).unwrap(),
             ),
         },
     };
