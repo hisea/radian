@@ -1842,13 +1842,11 @@ impl App {
         let folded = crate::blocks::is_folded(&self.entries[entry], modes);
         if folded {
             // Exactly one override at a time.
-            let was_overridden = self.entries.iter().any(|e| e.fold_override == Some(true));
             for other in self.entries.iter_mut() {
                 other.fold_override = None;
             }
             self.entries[entry].fold_override = Some(true);
             self.note = Some("expanded 1 folded entry for the match".to_string());
-            let _ = was_overridden;
         }
         // The display line of the match: the expanded line index only maps onto the display
         // when the entries above it are laid out folded, so walk the display counts (the
