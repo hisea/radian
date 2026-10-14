@@ -140,11 +140,13 @@ fn a_press_on_a_modal_never_starts_one() {
     // shrunk transcript viewport (rows 0..2 are still transcript on screen) starts nothing —
     // the modal owns the input until it is answered.
     app.set_viewport(2, 6);
+    app.scroll = 0;
+    app.follow = false;
     assert!(!press(&mut app, 1, 5).dirty);
     assert!(app.selection.is_none());
     drag(&mut app, 1, 9);
     release(&mut app, 1, 9);
-    assert!(app.selection.is_none());
+    assert!(app.selection.is_none(), "the drag would have selected real text");
     // The modal's own rows are outside the viewport, doubly so.
     assert!(!press(&mut app, 4, 5).dirty);
     assert!(app.selection.is_none());
