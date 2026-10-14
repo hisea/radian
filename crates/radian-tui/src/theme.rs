@@ -85,10 +85,13 @@ pub enum Role {
     NoticeLabel,
     NoticeBody,
     Text,
+    MermaidNode,
+    MermaidEdge,
+    MermaidText,
 }
 
 impl Role {
-    pub const ALL: [Role; 30] = [
+    pub const ALL: [Role; 33] = [
         Role::Reasoning,
         Role::Interrupted,
         Role::User,
@@ -119,6 +122,9 @@ impl Role {
         Role::NoticeLabel,
         Role::NoticeBody,
         Role::Text,
+        Role::MermaidNode,
+        Role::MermaidEdge,
+        Role::MermaidText,
     ];
 
     /// The `[tui.colors]` key for this role (ADR 0029 decision 5).
@@ -154,6 +160,9 @@ impl Role {
             Role::NoticeLabel => "notice_label",
             Role::NoticeBody => "notice_body",
             Role::Text => "text",
+            Role::MermaidNode => "mermaid_node",
+            Role::MermaidEdge => "mermaid_edge",
+            Role::MermaidText => "mermaid_text",
         }
     }
 
@@ -193,6 +202,9 @@ impl Role {
             Role::NoticeLabel => &mut theme.notice_label,
             Role::NoticeBody => &mut theme.notice_body,
             Role::Text => &mut theme.text,
+            Role::MermaidNode => &mut theme.mermaid_node,
+            Role::MermaidEdge => &mut theme.mermaid_edge,
+            Role::MermaidText => &mut theme.mermaid_text,
         }
     }
 }
@@ -239,6 +251,13 @@ pub struct Theme {
     pub tool_error_bg: Style,
     /// The main text level (pi's `text`): the assistant's answers and the user's words.
     pub text: Style,
+    /// A rendered Mermaid diagram's **nodes** (ADR 0028 R8) — pi's `accent` (强调 = 名字、标签;
+    /// a node is a named box).
+    pub mermaid_node: Style,
+    /// A diagram's **edges**: pi's `dim` (弱 — connectors are structure, not content).
+    pub mermaid_edge: Style,
+    /// A diagram's plain **text** (labels outside a node): pi's `text` (主).
+    pub mermaid_text: Style,
     /// A structured notice's label (`profile:`, `[memory]`) — pi's `accent` (ADR 0028 owner
     /// decision: 强调 = 名字、标签).
     pub notice_label: Style,
@@ -377,6 +396,11 @@ impl Theme {
             notice: text,
             notice_label: spec(pi::VIOLET, Modifier::BOLD, truecolor),
             notice_body: muted,
+            // A diagram (ADR 0028 R8): nodes are names (accent), edges are structure (dim),
+            // plain text is the primary level.
+            mermaid_node: spec(pi::VIOLET, Modifier::empty(), truecolor),
+            mermaid_edge: dim,
+            mermaid_text: text,
             turn_idle: spec(pi::GREEN, Modifier::empty(), truecolor),
             turn_running: spec(pi::YELLOW, Modifier::empty(), truecolor),
             turn_cancelled: spec(pi::RED, Modifier::empty(), truecolor),
@@ -426,6 +450,11 @@ impl Theme {
             notice: text,
             notice_label: spec(pi::VIOLET, Modifier::BOLD, truecolor),
             notice_body: muted,
+            // A diagram (ADR 0028 R8): nodes are names (accent), edges are structure (dim),
+            // plain text is the primary level.
+            mermaid_node: spec(pi::VIOLET, Modifier::empty(), truecolor),
+            mermaid_edge: dim,
+            mermaid_text: text,
             turn_idle: spec(pi::GREEN, Modifier::empty(), truecolor),
             turn_running: spec(pi::YELLOW, Modifier::empty(), truecolor),
             turn_cancelled: spec(pi::RED, Modifier::empty(), truecolor),
@@ -491,6 +520,10 @@ impl Theme {
             notice_label: style(None, Modifier::BOLD),
             notice_body: style(None, Modifier::DIM),
             text: style(None, Modifier::empty()),
+            // `mono` uses no color: the three roles differ by modifier only.
+            mermaid_node: style(None, Modifier::BOLD),
+            mermaid_edge: style(None, Modifier::DIM),
+            mermaid_text: style(None, Modifier::empty()),
         }
     }
 
