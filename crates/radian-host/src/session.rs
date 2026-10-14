@@ -26,12 +26,15 @@ use radian_sandbox::Sandbox;
 use radian_session::{SessionCreatedData, SessionJournal};
 
 use crate::describe::{Wording, describe};
+use crate::home::skills_dir;
 use crate::memory::{InjectionConfig, MemoryHooks, MemoryService, MemoryTools, ProjectState};
 use crate::model::HostModel;
 use crate::pending::{
     Answered, PendingQueue, PendingRequest, PendingResponse, QueuedApprover, QueuedPrompter,
 };
 use crate::projection::{ProjectionRead, SessionProjection};
+use crate::skills::tools::SkillTools;
+use crate::skills::{self, SkillsHooks};
 use crate::tools::HostTools;
 
 /// A session's stable identifier: the session file's name and `SessionCreated.session_id`.
@@ -656,6 +659,21 @@ pub async fn open_session(
         Some(approver),
         audit(Arc::clone(&journal)),
     ));
+    // Skills (ADR 0025 S1): discovery is best effort — a bad skill warns and is skipped. The
+    // section is appended after the memory section, so the tuple below is ((perm, memory),
+    // skills) and the prompt order is basic prompt, memory, skills (ADR 0025 S6).
+    let skills = match skills_dir() {
+        Some(dir) => {
+            let discovery = skills::discover(&dir);
+            for warning in &discovery.warnings {
+                memory_warning(warning);
+            }
+            discovery.skills
+        }
+        None => Vec::new(),
+    };
+    let shared_skills = Arc::new(skills);
+    let skills_hooks = Arc::new(SkillsHooks::new(&shared_skills));
     let memory_hooks = Arc::new(MemoryHooks::new(
         memory.clone(),
         Arc::clone(&journal),
@@ -667,10 +685,16 @@ pub async fn open_session(
     if let Some(ask) = ask {
         tools = tools.with_ask(ask);
     }
+    if !shared_skills.is_empty() {
+        tools = tools.with_skills(SkillTools::new(Arc::clone(&shared_skills)));
+    }
     let agent = Arc::new(
         Agent::new(model, tools)
             .with_config(agent_config)
-            .with_hooks((Arc::clone(&hooks), Arc::clone(&memory_hooks))),
+            .with_hooks((
+                (Arc::clone(&hooks), Arc::clone(&memory_hooks)),
+                Arc::clone(&skills_hooks),
+            )),
     );
 
     // MCP server **processes** start here, when the tool session opens. The session file

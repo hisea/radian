@@ -166,6 +166,10 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
         std::fs::create_dir_all(radian_home.join(dir))?;
         std::fs::write(radian_home.join(dir).join(file), "radian-data\n")?;
     }
+    // ADR 0025 ruling 1: `skills/` is deliberately **not** on the deny list — a skill's body is
+    // read by the model and its scripts run inside the sandbox.
+    std::fs::create_dir_all(radian_home.join("skills/greet"))?;
+    std::fs::write(radian_home.join("skills/greet/SKILL.md"), "radian-data\n")?;
     // A sessions directory moved elsewhere (`--session-dir`): it must be denied too.
     std::fs::create_dir_all(root.join("custom-sessions"))?;
     let custom_sessions = std::fs::canonicalize(root.join("custom-sessions"))?;
@@ -719,6 +723,19 @@ impl Rig {
             &format!(
                 "cat {} > /dev/null",
                 q(&radian.join("credentials/auth.json"))
+            ),
+        );
+        // ADR 0025 ruling 1 / ADR 0020 revision: `skills/` joins config and cache on the
+        // readable side; only sessions, memory and credentials are denied.
+        self.sh_case(
+            sandbox,
+            control,
+            g,
+            "skills_readable",
+            Expect::MustSucceed,
+            &format!(
+                "cat {} > /dev/null",
+                q(&radian.join("skills/greet/SKILL.md"))
             ),
         );
         self.sh_case(

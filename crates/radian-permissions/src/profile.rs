@@ -251,15 +251,21 @@ fn read_only() -> Vec<Rule> {
         .collect()
 }
 
-/// Fixed `allow` in every tier (ADR 0024 Q6): `ask_user` writes nothing and runs nothing, so
-/// it never prompts. It still goes through the ordinary hook path, and the answer is data — it
-/// grants no permission for the calls the model makes afterwards.
+/// Fixed `allow` in every tier (ADR 0024 Q6 and ADR 0025 S3): `ask_user` writes nothing and
+/// runs nothing, and `skill` only reads a `SKILL.md` that discovery already accepted — a skill
+/// **is not a permission**, so reading one never prompts and grants nothing. Both still go
+/// through the ordinary hook path.
 fn always_allowed() -> Vec<Rule> {
-    vec![Rule::new(
-        ToolMatcher::Name("ask_user".into()),
-        ResourceMatcher::Any,
-        Action::Allow,
-    )]
+    ["ask_user", "skill"]
+        .into_iter()
+        .map(|name| {
+            Rule::new(
+                ToolMatcher::Name(name.into()),
+                ResourceMatcher::Any,
+                Action::Allow,
+            )
+        })
+        .collect()
 }
 
 /// File modification allowed only when the resolved path stays under the workspace.
@@ -334,6 +340,21 @@ mod tests {
         ] {
             let tier = profile.preset.as_str();
             assert_eq!(action(&profile, "ask_user"), Action::Allow, "{tier}");
+        }
+    }
+
+    /// ADR 0025 S3: reading a skill is `allow` in every tier — it is data, not a permission.
+    /// Removing the rule would make it fall through to the default `ask`.
+    #[test]
+    fn skill_is_allowed_in_every_tier() {
+        let ws = std::env::temp_dir();
+        for profile in [
+            Profile::safe(&ws).unwrap(),
+            Profile::workspace_write(&ws).unwrap(),
+            Profile::full_access(&ws).unwrap(),
+        ] {
+            let tier = profile.preset.as_str();
+            assert_eq!(action(&profile, "skill"), Action::Allow, "{tier}");
         }
     }
 }
