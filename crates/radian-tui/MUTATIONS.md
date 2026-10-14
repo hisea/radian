@@ -851,3 +851,18 @@ Base `0d1dde1` · 一次性检出 `/tmp/small2-mut`（detached，跑完删除）
 
 1/1 抓住。读侧四处（`record_panic`、运行期错误路径、picker、export）都走 `shared_secrets`；写侧
 `refresh_secrets` 用 `into_inner` 追加，第二个测试覆盖中毒后的追加。
+
+## ADR 0028 片 5：代码块语法高亮（2026-10-15）
+
+Base `608c2b7`（键一致性修复后 `0b035d6` 复跑 M4）· 一次性 worktree `/tmp/radian-hl-mut`，每条
+跑完 `git checkout -- .`，`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| HL-M1 | `syntax_lines_cached` 不看 `closed`（未闭合的流式块也高亮） | `an_unclosed_block_is_not_highlighted` | ✅ |
+| HL-M2 | `storage.type` 映射成 `String`（Rust 的 `fn`/`let` 用字符串色） | `rust_keyword_string_and_comment_take_their_theme_roles`（另 2 条也挂） | ✅ |
+| HL-M3 | `render.rs` 把 `SyntaxRole::Keyword` 映射成 `theme.md_code`（不用主题的 `syntax_keyword` 角色） | `rust_keyword_string_and_comment_take_their_theme_roles`（另 2 条也挂） | ✅ |
+| HL-M4 | 缓存键去掉 `text_len`（查找与 fill 的 fresh 判断都忽略） | `appending_a_line_rehighlights_it` | ✅（修复键宽度不一致前抓不住——那时缓存永不命中） |
+
+4/4 抓住。**过程记录**：第一轮 M4 没抓住，暴露出 `fill_syntax_cache` 用 `body_width` 存、查找用完整
+`width` 的真 bug（键永不命中）；修在 `0b035d6`，M4 复跑抓住。
