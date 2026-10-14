@@ -153,6 +153,15 @@ struct Cli {
     #[arg(long)]
     no_auto_compact: bool,
 
+    /// Trust this workspace's project resources for **this process only** (never written to
+    /// `trust.json`; ADR 0031 T3).
+    #[arg(long, conflicts_with = "no_trust")]
+    trust: bool,
+
+    /// Do not trust this workspace's project resources for this process only (ADR 0031 T3).
+    #[arg(long)]
+    no_trust: bool,
+
     #[arg(long)]
     system: Option<String>,
 
@@ -858,6 +867,24 @@ fn run(
         .then(|| Arc::new(panic_in_driver) as Arc<dyn Fn() + Send + Sync>);
     let memory_warning = Arc::new(|message: &str| eprintln!("radian: [memory] {message}"));
 
+    // ADR 0031 T3: resolve project trust before the session exists. The TUI is interactive, so
+    // a workspace with resources and no decision asks through a startup modal (pushed after
+    // the terminal is entered); the persistent write + audit happen then, once the journal
+    // exists. `--trust`/`--no-trust` override for this process only.
+    let cli_trust = if cli.trust {
+        Some(radian_host::trust::Decision::Trust)
+    } else if cli.no_trust {
+        Some(radian_host::trust::Decision::Untrust)
+    } else {
+        None
+    };
+    let (trust_setup, trust_warning) =
+        radian_host::trust::load_for(&workspace_path, cli_trust, true);
+    if let Some(warning) = &trust_warning {
+        eprintln!("[trust] {warning}");
+    }
+    eprintln!("{}", radian_host::trust::status_line(&trust_setup));
+
     // ADR 0023 U5: the one place a session is established; `agent-cli` calls the same function
     // with its own bindings. Every startup check that can fail has already run, so this is the
     // first thing that creates durable state.
@@ -889,6 +916,7 @@ fn run(
                 ),
                 skills_builtin: config.skills.builtin.unwrap_or(true),
                 skills_disabled: config.skills.disabled.clone(),
+                trust: trust_setup,
                 resume: resume.is_some(),
                 config_snapshot: serde_json::json!({
                     "provider": provider.as_str(),
@@ -996,15 +1024,35 @@ fn run(
     app.set_auto(startup_approval.policy == radian_permissions::ApprovalPolicy::Auto);
     // The footer's startup facts (ADR 0027 C2): the working directory, the model's display
     // name (the id until a catalog name is known), the provider and the applied thinking
-    // level. The git branch is read once here — startup I/O is allowed; the draw path never
-    // runs git, and a later refresh goes through `App::set_git_branch`.
+    // level. The git branch is not read here: the `git` contributor refreshes it in the
+    // background (ADR 0027 C3), and the draw path never runs git.
     app.set_footer_facts(
         Some(workspace_path.clone()),
         None,
         Some(provider_name.clone()),
         Some(thinking_for_footer),
     );
-    app.set_git_branch(read_git_branch(&workspace_path));
+    // ADR 0027: the hostname, the model's catalog prices (`cost`) and whether
+    // automatic compaction is on (`context`'s `{auto}`). Each is a startup fact.
+    app.set_hostname(radian_host::hostname());
+    app.set_model_price(window.price);
+    app.set_auto_compact(!cli.no_auto_compact && config.compaction.auto.unwrap_or(true));
+    // ADR 0027 C3: the contributors. Their changes wake the UI through the same dirty channel
+    // (ADR 0023 U2), and a refresh failure becomes a notice; the UI never waits for one.
+    let contributions = radian_host::ContributionStore::new();
+    let contrib_tx = tx.clone();
+    radian_host::spawn_contributor(
+        runtime.handle(),
+        Arc::new(radian_host::GitContributor::new(workspace_path.clone())),
+        Arc::clone(&contributions),
+        Arc::new(move |tick| {
+            let _ = contrib_tx.send(UiEvent::Dirty);
+            if let Some(notice) = tick.notice {
+                let _ = contrib_tx.send(UiEvent::Command(AppInput::SessionDone(vec![notice])));
+            }
+        }),
+    );
+    app.set_contributions(Arc::clone(&contributions));
     // A plain run enters the terminal only now: every fallible check above, and the session
     // itself, have already run. (`--pick` entered it before the picker and keeps it here.)
     let (mut guard, mut terminal) = match startup_terminal {
@@ -1185,6 +1233,8 @@ fn run(
         startup_lines.push("no sessions for this workspace yet; starting a new one".to_string());
     }
     startup_lines.push(session_line);
+    // ADR 0031 T3: the trust state, in the startup block (same style as `ask_user: off`).
+    startup_lines.push(radian_host::trust::status_line(&session.trust()));
     // The safety lines are never folded away: a workspace boundary that
     // was not the user's choice, and every config-file warning/ignored key. The config
     // warnings are also printed before the alternate screen, where a crash can still show
@@ -1226,6 +1276,12 @@ fn run(
         tip,
         expanded: false,
     });
+    // ADR 0031 T3: ask once, after the terminal is up and the startup screen is built, when
+    // the workspace has project resources and no saved decision. Until it is answered the
+    // session is untrusted (nothing project-provided is loaded).
+    if session.trust().needs_ask {
+        app.push_trust_modal(session.trust().workspace.clone());
+    }
 
     // ADR 0008 revision: `/theme` writes to the file this process read, or to the path it
     // would read when there is no file yet (the write creates it).
@@ -1358,25 +1414,6 @@ fn refresh_secrets(secrets: &radian_tui::terminal::SharedSecrets) {
             list.push(key);
         }
     }
-}
-
-/// The working directory's git branch, read once at startup (ADR 0027 C2). `None` when the
-/// directory is not a repository or git is unavailable; the draw path never calls git.
-fn read_git_branch(dir: &Path) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let name = String::from_utf8(output.stdout).ok()?;
-    let name = name.trim();
-    (!name.is_empty() && name != "HEAD").then(|| name.to_string())
 }
 
 /// One argument of the resume command, quoted when it would not survive a shell.
@@ -1837,6 +1874,9 @@ impl LoopContext<'_> {
     /// Feeds one event to the app. Returns whether the frame is dirty; the effects it produced
     /// are appended to `effects`.
     fn handle(&mut self, event: UiEvent, app: &mut App, effects: &mut Vec<Effect>) -> bool {
+        // ADR 0027: the loop is the only place that reads the wall clock for the
+        // footer's `speed`/`elapsed`; the timer itself is pure.
+        app.set_now(std::time::Instant::now());
         let result = match event {
             UiEvent::Agent(event) => app.update(AppInput::Event(event)),
             UiEvent::Runtime(event) => app.update(AppInput::Runtime(event)),
@@ -2074,6 +2114,21 @@ impl LoopContext<'_> {
             Effect::ListSkills => {
                 let notices = radian_host::notices(self.session.skills());
                 self.send(AppInput::SessionDone(notices));
+                Ok(())
+            }
+            // ADR 0031 T3: apply the startup trust choice through the facade (it writes
+            // `trust.json` and journals `ProjectTrustChanged`), then show the new state.
+            Effect::SetTrust { choice } => {
+                match self.session.record_trust(choice) {
+                    Ok(setup) => self.send(AppInput::TrustResolved(setup)),
+                    Err(error) => {
+                        self.send(AppInput::CommandRefused(radian_host::CommandRefused {
+                            command: "trust".to_owned(),
+                            reason: error,
+                            capability: None,
+                        }))
+                    }
+                }
                 Ok(())
             }
             Effect::Compact { instructions } => {

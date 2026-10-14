@@ -432,7 +432,12 @@ impl Pty {
         for _ in 0..3 {
             self.send(&[0x10]); // ctrl-p
             if self.wait_until(1, |screen| {
-                screen.contains("▼ startup information") || screen.contains("profile:")
+                // The expanded header and the first info line are at the **top** of the block;
+                // with the trust line the block can be taller than a 24-row pty, so accept a
+                // later info line that stays visible when the view is pinned to the bottom.
+                screen.contains("▼ startup information")
+                    || screen.contains("profile:")
+                    || screen.contains("ask_user:")
             }) {
                 return;
             }
@@ -878,6 +883,208 @@ async fn pty_skills_extra_paths_are_read_from_the_config() {
     assert!(expanded.contains("EXTRA-ROOT-BODY"), "{expanded}");
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0), "clean exit code");
+}
+
+/// ADR 0031 T3: a workspace with project resources and no saved decision shows the startup
+/// trust modal; Enter takes the default ("do not trust this directory"), writes `trust.json`
+/// and journals `ProjectTrustChanged`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_trust_modal_asks_and_enter_untrusts() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("TRUST-REPLY-OK")]).await;
+    let dir = TempDir::new("trust-session");
+    let home = TempDir::new("trust-home");
+    let ws = TempDir::new("trust-ws");
+    std::fs::create_dir_all(ws.path().join(".radian/skills/greet")).unwrap();
+    std::fs::write(
+        ws.path().join(".radian/skills/greet/SKILL.md"),
+        "---\nname: greet\ndescription: d\n---\nbody\n",
+    )
+    .unwrap();
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "trust",
+            "--workspace",
+            ws.path().to_str().unwrap(),
+        ],
+        &[("RADIAN_HOME", home.path().to_str().unwrap())],
+        30,
+        120,
+    );
+    assert!(
+        pty.wait_for_screen("project trust", 10),
+        "the trust modal is missing:\n{}",
+        pty.screen()
+    );
+    // All five options, and the default highlight is the fail-safe one.
+    assert!(
+        pty.wait_for_screen("Trust this directory", 10),
+        "{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("Trust the parent", 10),
+        "{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("Trust this session only", 10),
+        "{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("Do not trust this directory", 10),
+        "{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("Do not trust, this session only", 10),
+        "{}",
+        pty.screen()
+    );
+
+    // Enter = the highlighted default = do not trust this directory.
+    pty.send(b"\r");
+    pty.expand_startup();
+    assert!(
+        pty.wait_for_screen("project resources: not loaded", 10),
+        "the trust state was not shown:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+
+    // `trust.json` holds the workspace → false (canonicalized).
+    let canonical = std::fs::canonicalize(ws.path()).unwrap();
+    let trust = std::fs::read_to_string(home.path().join("trust/trust.json")).unwrap();
+    assert!(
+        trust.contains(&canonical.to_string_lossy().to_string()),
+        "{trust}"
+    );
+    assert!(trust.contains("false"), "{trust}");
+    // The write is audited in the session journal (ADR 0031 T2/T6).
+    let journal = std::fs::read_to_string(dir.path().join("trust.jsonl")).unwrap();
+    assert!(journal.contains("ProjectTrustChanged"), "{journal}");
+}
+
+/// ADR 0031 T3: `--trust` overrides for this process only and never writes `trust.json`; a
+/// saved decision (and a bare `.radian/`) means no question.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_trust_override_and_saved_decision_skip_the_modal() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![]).await;
+    let dir = TempDir::new("trust-session-2");
+    let home = TempDir::new("trust-home-2");
+    let ws = TempDir::new("trust-ws-2");
+    std::fs::create_dir_all(ws.path().join(".radian/skills/greet")).unwrap();
+    std::fs::write(
+        ws.path().join(".radian/skills/greet/SKILL.md"),
+        "---\nname: greet\ndescription: d\n---\nbody\n",
+    )
+    .unwrap();
+    let args = |id: &str, extra: &[&str]| -> Vec<String> {
+        let mut args: Vec<String> = vec![
+            "--model".into(),
+            "mock".into(),
+            "--base-url".into(),
+            server.base_url.clone(),
+            "--session-dir".into(),
+            dir.path().to_str().unwrap().into(),
+            "--session-id".into(),
+            id.into(),
+            "--workspace".into(),
+            ws.path().to_str().unwrap().into(),
+        ];
+        args.extend(extra.iter().map(|s| (*s).to_owned()));
+        args
+    };
+    // `--trust`: no modal, no file.
+    let owned = args("trust-a", &["--trust"]);
+    let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+    let mut pty = Pty::spawn_with_env(
+        &refs,
+        &[("RADIAN_HOME", home.path().to_str().unwrap())],
+        24,
+        110,
+    );
+    pty.expand_startup();
+    assert!(
+        pty.wait_for_screen("project resources: loaded", 10),
+        "{}",
+        pty.screen()
+    );
+    assert!(!pty.screen().contains("project trust"), "{}", pty.screen());
+    pty.quit();
+    assert!(
+        !home.path().join("trust/trust.json").exists(),
+        "`--trust` must not write"
+    );
+
+    // A saved decision: no modal, the saved source is named.
+    let canonical = std::fs::canonicalize(ws.path()).unwrap();
+    std::fs::create_dir_all(home.path().join("trust")).unwrap();
+    std::fs::write(
+        home.path().join("trust/trust.json"),
+        format!("{{\"{}\": true}}", canonical.display()),
+    )
+    .unwrap();
+    let owned = args("trust-b", &[]);
+    let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+    let mut pty = Pty::spawn_with_env(
+        &refs,
+        &[("RADIAN_HOME", home.path().to_str().unwrap())],
+        24,
+        110,
+    );
+    pty.expand_startup();
+    assert!(
+        pty.wait_for_screen("project resources: loaded (trusted: saved for", 10),
+        "{}",
+        pty.screen()
+    );
+    assert!(!pty.screen().contains("project trust"), "{}", pty.screen());
+    pty.quit();
+
+    // A bare `.radian/` does not trigger.
+    let bare = TempDir::new("trust-bare");
+    std::fs::create_dir_all(bare.path().join(".radian")).unwrap();
+    let home3 = TempDir::new("trust-home-3");
+    let owned = vec![
+        "--model".to_owned(),
+        "mock".to_owned(),
+        "--base-url".to_owned(),
+        server.base_url.clone(),
+        "--session-dir".to_owned(),
+        dir.path().to_str().unwrap().into(),
+        "--session-id".to_owned(),
+        "trust3".to_owned(),
+        "--workspace".to_owned(),
+        bare.path().to_str().unwrap().into(),
+    ];
+    let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+    let mut pty = Pty::spawn_with_env(
+        &refs,
+        &[("RADIAN_HOME", home3.path().to_str().unwrap())],
+        24,
+        110,
+    );
+    pty.expand_startup();
+    assert!(
+        pty.wait_for_screen("project resources: not loaded (untrusted: default)", 10),
+        "{}",
+        pty.screen()
+    );
+    assert!(!pty.screen().contains("project trust"), "{}", pty.screen());
+    pty.quit();
 }
 
 /// The diagnostics directory the app will use when `HOME` is `home` (ADR 0020):
@@ -7723,30 +7930,31 @@ async fn pty_the_shipped_default_footer_is_two_rows_without_a_config() {
     let lines: Vec<String> = pty.screen().lines().map(str::to_owned).collect();
     let first = lines.get(lines.len() - 2).cloned().unwrap_or_default();
     let second = lines.last().cloned().unwrap_or_default();
-    // Row one: the model, the cwd, the context bar and the reasoning marker; row two: tokens.
+    // The shipped default is the `full` preset (ADR 0027): the identity row (brand,
+    // model, repo/worktree) and the numbers row (tokens, speed, cost, context, elapsed).
+    assert!(
+        first.contains('㎭') || first.contains("rad"),
+        "the brand is on the first row: {first:?}"
+    );
     assert!(
         first.contains("mock"),
-        "the model is on the first footer row: {first:?}"
+        "the model is on the identity row: {first:?}"
     );
     assert!(
         first.contains("footer-default"),
-        "the cwd is on the first row: {first:?}"
-    );
-    assert!(
-        first.contains("─"),
-        "the context bar is on the first row: {first:?}"
-    );
-    assert!(
-        first.contains('◐'),
-        "reasoning is on the first row: {first:?}"
+        "the repo/worktree name is on the identity row: {first:?}"
     );
     assert!(
         second.contains('↑'),
-        "the tokens row is the second: {second:?}"
+        "the numbers row shows the tokens: {second:?}"
+    );
+    assert!(
+        second.contains('%'),
+        "the numbers row shows the context share: {second:?}"
     );
     assert!(
         !second.contains("mock"),
-        "the model is not on the tokens row: {second:?}"
+        "the model is not on the numbers row: {second:?}"
     );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));

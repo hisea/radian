@@ -58,6 +58,8 @@ pub enum Source {
     Ancestor(PathBuf),
     /// No saved decision and no command line: untrusted (fail-safe).
     Default,
+    /// The user chose "this session only": no file was written (ADR 0031 T3).
+    Session,
 }
 
 /// One resolved decision: what applies, and why.
@@ -65,6 +67,132 @@ pub enum Source {
 pub struct Resolved {
     pub decision: Decision,
     pub source: Source,
+}
+
+/// What a session starts with (ADR 0031 T3). The host computes it before `open_session`; the
+/// session stores it so the resources it gates and the startup line agree. `needs_ask` is
+/// true when there is no saved decision, no command-line override, and the workspace has
+/// project resources: an interactive host asks once, before the first turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Setup {
+    pub workspace: PathBuf,
+    pub resolved: Resolved,
+    pub needs_ask: bool,
+}
+
+impl Setup {
+    /// The setup for a workspace with no saved decision and no override. `needs_ask` is the
+    /// caller's (a non-interactive host passes `false` and takes the untrusted default).
+    pub fn untrusted(workspace: &Path, needs_ask: bool) -> Self {
+        Self {
+            workspace: workspace.to_path_buf(),
+            resolved: Resolved {
+                decision: Decision::Untrust,
+                source: Source::Default,
+            },
+            needs_ask,
+        }
+    }
+}
+
+/// The five choices the startup prompt offers (ADR 0031 T3, owner ruling 6). The order is the
+/// display order; `UntrustHere` is the default highlight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Choice {
+    TrustHere,
+    TrustParent,
+    TrustSession,
+    UntrustHere,
+    UntrustSession,
+}
+
+impl Choice {
+    pub const ALL: [Choice; 5] = [
+        Choice::TrustHere,
+        Choice::TrustParent,
+        Choice::TrustSession,
+        Choice::UntrustHere,
+        Choice::UntrustSession,
+    ];
+
+    /// Whether this choice writes `trust.json` (the session-only ones do not).
+    pub fn persistent(self) -> bool {
+        !matches!(self, Choice::TrustSession | Choice::UntrustSession)
+    }
+
+    pub fn decision(self) -> Decision {
+        match self {
+            Choice::TrustHere | Choice::TrustParent | Choice::TrustSession => Decision::Trust,
+            Choice::UntrustHere | Choice::UntrustSession => Decision::Untrust,
+        }
+    }
+
+    /// The one-line label, with the parent path when it applies. `None` for
+    /// [`Choice::TrustParent`] when the workspace has no parent (the host then omits it).
+    pub fn label(self, workspace: &Path) -> Option<String> {
+        Some(match self {
+            Choice::TrustHere => format!("Trust this directory ({})", workspace.display()),
+            Choice::TrustParent => format!(
+                "Trust the parent directory ({})",
+                workspace.parent()?.display()
+            ),
+            Choice::TrustSession => "Trust this session only".to_owned(),
+            Choice::UntrustHere => format!("Do not trust this directory ({})", workspace.display()),
+            Choice::UntrustSession => "Do not trust, this session only".to_owned(),
+        })
+    }
+}
+
+/// Applies a startup choice (ADR 0031 T3): the persistent choices write `trust.json` (each
+/// write audits once), the session-only ones do not. Returns the session's new resolved state.
+pub fn apply(choice: Choice, workspace: &Path, audit: Audit<'_>) -> Result<Resolved, String> {
+    let resolved = resolved_for(choice, workspace)?;
+    if !choice.persistent() {
+        return Ok(resolved);
+    }
+    let path = trust_file().ok_or("no RADIAN_HOME or HOME to place trust.json under")?;
+    match choice {
+        Choice::TrustHere | Choice::UntrustHere => {
+            set_at(&path, workspace, resolved.decision, audit)
+                .map_err(|error| error.to_string())?;
+        }
+        Choice::TrustParent => {
+            let parent = workspace
+                .parent()
+                .ok_or("the workspace has no parent directory")?;
+            set_at(&path, parent, resolved.decision, audit).map_err(|error| error.to_string())?;
+            // The child's own decision is cleared so the parent's trust is inherited, matching
+            // pi's "trust parent" option.
+            forget_at(&path, workspace, audit).map_err(|error| error.to_string())?;
+        }
+        Choice::TrustSession | Choice::UntrustSession => unreachable!("not persistent"),
+    }
+    Ok(resolved)
+}
+
+/// The session's resolved state for a choice, **without** writing anything. The host uses it
+/// for the pre-session setup, then [`apply`] persists and audits after the session exists.
+pub fn resolved_for(choice: Choice, workspace: &Path) -> Result<Resolved, String> {
+    let decision = choice.decision();
+    Ok(match choice {
+        Choice::TrustSession | Choice::UntrustSession => Resolved {
+            decision,
+            source: Source::Session,
+        },
+        Choice::TrustHere | Choice::UntrustHere => Resolved {
+            decision,
+            source: Source::Saved(canonical(workspace)),
+        },
+        Choice::TrustParent => {
+            let parent = workspace
+                .parent()
+                .ok_or("the workspace has no parent directory")?;
+            Resolved {
+                decision,
+                source: Source::Ancestor(canonical(parent)),
+            }
+        }
+    })
 }
 
 /// The record: canonical directory path → decision.
@@ -219,6 +347,59 @@ pub fn resolve(cwd: &Path, saved: &Store, cli: Option<Decision>) -> Resolved {
         decision: Decision::Untrust,
         source: Source::Default,
     }
+}
+
+/// Resolves the startup setup (ADR 0031 T3): read this process's store, apply the command-line
+/// override, and set `needs_ask` when there is no saved decision, no override, and the
+/// workspace has project resources. `interactive` gates the ask: a non-interactive host takes
+/// the untrusted default and prints the one-line hint itself. The `Err` is the warning for a
+/// store that was rejected whole (the caller warns and continues with the untrusted default).
+pub fn load_for(
+    workspace: &Path,
+    cli: Option<Decision>,
+    interactive: bool,
+) -> (Setup, Option<String>) {
+    let (saved, warning) = match read() {
+        Ok(saved) => (saved, None),
+        Err(warning) => (Store::new(), Some(warning)),
+    };
+    let resolved = resolve(workspace, &saved, cli);
+    let needs_ask =
+        interactive && resolved.source == Source::Default && has_project_resources(workspace);
+    (
+        Setup {
+            workspace: workspace.to_path_buf(),
+            resolved,
+            needs_ask,
+        },
+        warning,
+    )
+}
+
+/// The startup line (ADR 0031 T3/T6): what the trust decision is, and where it came from.
+/// Same style as ADR 0024 Q5's `ask_user: off`.
+pub fn status_line(setup: &Setup) -> String {
+    let source = match &setup.resolved.source {
+        Source::Cli => "command line".to_owned(),
+        Source::Saved(path) => format!("saved for {}", path.display()),
+        Source::Ancestor(path) => format!("inherited from {}", path.display()),
+        Source::Session => "this session only".to_owned(),
+        Source::Default => "default".to_owned(),
+    };
+    if setup.resolved.decision.as_bool() {
+        format!("project resources: loaded (trusted: {source})")
+    } else {
+        format!("project resources: not loaded (untrusted: {source})")
+    }
+}
+
+/// The one line a non-interactive host prints when project resources are present but
+/// untrusted (ADR 0031 T3).
+pub fn untrusted_notice(workspace: &Path) -> String {
+    format!(
+        "project resources not loaded (untrusted): pass --trust to load {}, or run interactively",
+        workspace.display()
+    )
 }
 
 /// Whether `workspace` holds a resource from T1's list: today only a project-level skill,

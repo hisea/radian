@@ -238,13 +238,26 @@ fn every_cell_maps_to_its_source_offset() {
                 let (line_index, column) = cell_of(&lines, cell).expect("a cell");
                 // `layout` is body-relative; `locate` takes screen columns (the assistant
                 // prefix is two cells).
-                let anchor = select::locate(&app.entries, modes, width, line_index, column + 2)
+                let hit = select::locate_hit(&app.entries, modes, width, line_index, column + 2)
                     .expect("an anchor");
-                assert_eq!(
-                    anchor.offset, lines[line_index].chars[column],
-                    "body {body:?} width {width} cell {cell}: the anchor must be the cell's \
-                     source offset"
-                );
+                match lines[line_index].chars[column] {
+                    Some(offset) => {
+                        assert_eq!(
+                            hit.anchor.offset, offset,
+                            "body {body:?} width {width} cell {cell}: a source cell anchors at \
+                             its source offset"
+                        );
+                        assert!(
+                            hit.on_char,
+                            "body {body:?} cell {cell}: a source cell is a char"
+                        );
+                    }
+                    None => assert!(
+                        !hit.on_char,
+                        "body {body:?} width {width} cell {cell}: a synthesized cell is not a \
+                         source char"
+                    ),
+                }
             }
         }
     }
@@ -449,4 +462,142 @@ fn a_user_message_shows_markup_literally() {
         bold.bg, app.theme.md_code.bg,
         "not the Markdown code role: {bold:?}"
     );
+}
+
+/// The crash: a selection over Chinese Markdown panicked at
+/// `select.rs`'s `text[offset..]` because a synthesized cell (a heading's `##`, a bullet, an
+/// indent, a link's `(url)`) carried a fake source offset that landed inside a multi-byte
+/// char. Every cell of every selection now maps safely, at every width.
+#[test]
+fn a_chinese_markdown_selection_does_not_panic() {
+    let body = "能。这就是上面那份文档里 7 张图……\n\n## 一个很长的中文标题\n\n- 所以我逐张在这个库上检查了每一张图的来源，其中 **7 张图** 和 `code`\n\n> 这是一段中文引用\n\n```mermaid\ngraph TD; A-->B;\n```\n";
+    for width in [80usize, 40, 20] {
+        let mut app = App::new("m", "s");
+        assistant(&mut app, body);
+        let modes = modes(ReasoningMode::Expanded);
+        // Every ordered pair of display cells is a selection: locate, copy and highlight must
+        // not panic. Synthesized cells are included.
+        let cells = display_cells(&app, modes, width);
+        for &(line_a, col_a) in &cells {
+            for &(line_b, col_b) in &cells {
+                let (Some(a), Some(b)) = (
+                    select::locate(&app.entries, modes, width, line_a, col_a + 2),
+                    select::locate(&app.entries, modes, width, line_b, col_b + 2),
+                ) else {
+                    continue;
+                };
+                let selection = select::Selection { anchor: a, head: b };
+                let _ = select::logical_text(&app.entries, &selection);
+                let _ = select::highlight_rows(&app.entries, modes, width, 0, 60, &selection);
+            }
+        }
+    }
+}
+
+/// Every `(line, column)` of the entry's laid-out body, including one column past each line's
+/// last cell (the end gap) and the synthesized cells.
+fn display_cells(app: &App, modes: DisplayModes, width: usize) -> Vec<(usize, usize)> {
+    let blocks = blocks::parse_blocks(&app.entries[0].text);
+    let lines = blocks::layout(&app.entries[0], &blocks, modes, width);
+    let mut out = Vec::new();
+    for (line, body) in lines.iter().enumerate() {
+        for column in 0..=body.chars.len() {
+            out.push((line, column));
+        }
+    }
+    out
+}
+
+/// The copy rule over the crash's body: selecting a Chinese run copies the source text. The
+/// item's bullet is a synthesized cell, so the copy starts at the item's own text.
+#[test]
+fn a_chinese_selection_copies_the_source() {
+    let mut app = App::new("m", "s");
+    assistant(&mut app, "## 标题\n\n- 所以我逐张核对\n");
+    let modes = modes(ReasoningMode::Expanded);
+    let width = 40;
+    let blocks = blocks::parse_blocks(&app.entries[0].text);
+    let lines = blocks::layout(&app.entries[0], &blocks, modes, width);
+    let line = lines
+        .iter()
+        .position(|l| l.text.contains("所以我逐张核对"))
+        .expect("the item line");
+    let sources: Vec<usize> = lines[line]
+        .chars
+        .iter()
+        .enumerate()
+        .filter_map(|(col, source)| source.map(|_| col))
+        .collect();
+    let first = sources[0];
+    let line_width = unicode_width::UnicodeWidthStr::width(lines[line].text.as_str());
+    let anchor = select::locate(&app.entries, modes, width, line, first + 2).expect("anchor");
+    // One screen column past the line's last cell: the line's end gap.
+    let head = select::locate(&app.entries, modes, width, line, line_width + 2).expect("head");
+    let copied = select::logical_text(&app.entries, &select::Selection { anchor, head });
+    assert_eq!(copied, "所以我逐张核对", "the item's source text");
+}
+
+/// Every laid-out line fits its width in **display columns**, not chars: a Chinese list item,
+/// heading, quote or table at 80/40/20 columns wraps instead of overflowing the right edge
+/// (the truncation the owner saw; the layout already measures display columns).
+#[test]
+fn every_chinese_line_fits_the_width() {
+    let bodies = [
+        "- 所以我逐张在这个库上检查了每一张图的来源和它的授权情况，然后整理成一份清单\n",
+        "10. 所以我逐张在这个库上检查了每一张图的来源和它的授权情况，然后整理成一份清单\n",
+        "- 所以我逐张在这个库上检查了每一张图的来源\n  - 所以我逐张在这个库上检查了每一张图的来源\n",
+        "## 一个很长的中文标题它应该也会折行而不是在右边缘被截断掉后面的字\n",
+        "> 这是一段很长的中文引用它应该也会在窗口右边缘折行而不是被直接截断\n",
+        "- 所以我逐张检查了 **7 张图** 和 `code`，链接 [这里](https://example.com/a/b/c)\n",
+        "| 中文表头 | 另一个中文表头 |\n| --- | --- |\n| 所以我逐张在这个库上检查 | 每一张图的来源 |\n",
+    ];
+    for body in bodies {
+        for width in [80usize, 40, 20] {
+            let mut app = App::new("m", "s");
+            assistant(&mut app, body);
+            let modes = modes(ReasoningMode::Expanded);
+            let blocks = blocks::parse_blocks(body);
+            let lines = blocks::layout(&app.entries[0], &blocks, modes, width);
+            for line in &lines {
+                assert!(
+                    unicode_width::UnicodeWidthStr::width(line.text.as_str()) <= width,
+                    "body {body:?} width {width}: line {:?} overflows",
+                    line.text
+                );
+            }
+        }
+    }
+}
+
+/// The owner's truncation report (2026-10-14): a long ordered-list item in a wide window
+/// (~160-200 columns) looked cut at the right edge. This is the message's **structure**
+/// (anonymized): `##` headings, a bullet list with inline code, and long ordered-list items
+/// with bold and inline code. Every line wraps in display columns and the whole text reaches
+/// the screen at 120/160/200 - the report did not reproduce on this layout.
+#[test]
+fn a_long_ordered_list_item_wraps_in_a_wide_window() {
+    let body = "图全部完成并实测通过。下面是结果。\n\n## 我做了什么\n\n在仓库里新增两个文件（`git status` 只有 `?? docs/notes/`，没有改动任何代码）：\n\n- `docs/notes/architecture-map.md` — 11 节的结构图与说明\n- `docs/notes/check-mermaid-blocks.py` — 校验脚本\n\n## 核对过的两个关键点\n\n1. **工作区不是 main**：当前在 `example-repo`（分支 `feature/example`，提交 `abc1234`）。我比对了 `git diff --stat main -- crates/`：`crates/` **无差异**，两边都有 ADR 0001–0032。所以这份图对 main 也成立（仓库比记忆里那次更新了一代：0032 已存在）。\n2. **图用项目自己的渲染器验证**：项目在 transcript 里画图用的是 vendored 渲染器，超宽或语法不支持就退回源码。所以这一项也要按显示列宽核对而不是按字符数。\n";
+    for width in [120usize, 160, 200] {
+        let mut app = App::new("m", "s");
+        assistant(&mut app, body);
+        let modes = modes(ReasoningMode::Expanded);
+        let blocks = blocks::parse_blocks(body);
+        let lines = blocks::layout(&app.entries[0], &blocks, modes, width);
+        for line in &lines {
+            assert!(
+                unicode_width::UnicodeWidthStr::width(line.text.as_str()) <= width,
+                "width {width}: line {:?} overflows",
+                line.text
+            );
+        }
+        // The tail of ordered item 1 reaches the screen (the report was that it vanished).
+        let terminal = render(&mut app, width as u16, 60);
+        let rendered: String = screen(&terminal).split_whitespace().collect();
+        for needle in ["0032", "已存在", "渲染器验证"] {
+            assert!(
+                rendered.contains(needle),
+                "width {width}: {needle:?} is missing from the frame"
+            );
+        }
+    }
 }

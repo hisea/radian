@@ -65,6 +65,44 @@ pub struct ModelLimit {
     pub input: Option<u64>,
 }
 
+/// One model's unit prices from the catalog (ADR 0027), in **millionths of a US
+/// dollar per million tokens**. models.dev reports `cost.{input,output,cache_read,cache_write}`
+/// as dollars per million tokens (e.g. `input: 3` is $3/Mtok); a float would break `Eq`, so the
+/// parsed values are kept as integers rounded to a micro-dollar, enough for every price in the
+/// 2026-10-14 catalog. A missing field is "unknown", never 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ModelPrice {
+    /// Micro-dollars per million input tokens (`3` → `3_000_000`).
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: Option<u64>,
+    pub cache_write: Option<u64>,
+}
+
+impl ModelPrice {
+    /// Whether the price can produce a cost at all: both the input and output rates are known.
+    pub fn is_usable(&self) -> bool {
+        self.input > 0 || self.output > 0
+    }
+}
+
+/// Parses a models.dev `cost` object (`dollars per million tokens`) into micro-dollars.
+fn parse_price(cost: &serde_json::Map<String, Value>) -> Option<ModelPrice> {
+    let rate = |key: &str| {
+        cost.get(key)
+            .and_then(Value::as_f64)
+            .filter(|value| *value >= 0.0)
+            .map(|value| (value * 1_000_000.0).round() as u64)
+    };
+    let price = ModelPrice {
+        input: rate("input")?,
+        output: rate("output")?,
+        cache_read: rate("cache_read"),
+        cache_write: rate("cache_write"),
+    };
+    price.is_usable().then_some(price)
+}
+
 /// The **cap** on the output reservation `R` (ADR 0018): the reservation is a
 /// quarter of the window, never more than this. A fixed 16384 made any window at or below 16K
 /// have no budget at all.
@@ -167,6 +205,7 @@ pub struct ModelEntry {
 struct CatalogModel {
     name: Option<String>,
     limit: ModelLimit,
+    price: Option<ModelPrice>,
 }
 
 /// One catalog provider as parsed.
@@ -206,6 +245,10 @@ impl Catalog {
                     model_id.clone(),
                     CatalogModel {
                         name: model.get("name").and_then(Value::as_str).map(str::to_owned),
+                        price: model
+                            .get("cost")
+                            .and_then(Value::as_object)
+                            .and_then(parse_price),
                         limit: ModelLimit {
                             context: limit.get("context").and_then(Value::as_u64),
                             output: limit.get("output").and_then(Value::as_u64),
@@ -251,6 +294,11 @@ impl Catalog {
             .models
             .get(model)
             .map(|entry| entry.limit)
+    }
+
+    /// The model's unit prices (ADR 0027), or `None` when the catalog has none.
+    pub fn price(&self, provider: &str, model: &str) -> Option<ModelPrice> {
+        self.providers.get(provider)?.models.get(model)?.price
     }
 
     /// The provider's catalog metadata (display name, `api`, `env`), if present.
@@ -338,6 +386,9 @@ pub struct Window {
     pub reservation: u64,
     pub source: WindowSource,
     pub limit: Option<ModelLimit>,
+    /// The model's unit prices (ADR 0027), when the catalog has them: the footer's
+    /// `cost` item. `None` means the cost is not shown (never a fabricated number).
+    pub price: Option<ModelPrice>,
 }
 
 /// What a host does at startup with a [`Window`] whose `C ≤ R`.
@@ -380,6 +431,7 @@ impl Window {
             reservation: 0,
             source: WindowSource::Unknown,
             limit: None,
+            price: None,
         }
     }
 
@@ -498,10 +550,15 @@ pub async fn resolve(query: &WindowQuery) -> Window {
     if let Some(explicit) = query.explicit {
         // ADR 0018: an explicit window never fetches. If a cache already exists,
         // its `input`/`output` are read from it; otherwise only the explicit number is used.
-        let limit = query.provider().and_then(|provider| {
-            read_cache(&query.cache_path)
-                .and_then(|(catalog, _)| catalog.limit(&provider, &query.model))
+        let cached = query.provider().and_then(|provider| {
+            read_cache(&query.cache_path).map(|(catalog, _)| {
+                (
+                    catalog.limit(&provider, &query.model),
+                    catalog.price(&provider, &query.model),
+                )
+            })
         });
+        let (limit, price) = cached.unwrap_or((None, None));
         let input = limit.and_then(|limit| limit.input);
         let output = limit.and_then(|limit| limit.output);
         return build_window(
@@ -511,6 +568,7 @@ pub async fn resolve(query: &WindowQuery) -> Window {
             query.request_max_output,
             WindowSource::Explicit,
             limit,
+            price,
         );
     }
     let Some(provider) = query.provider() else {
@@ -523,6 +581,7 @@ pub async fn resolve(query: &WindowQuery) -> Window {
     let Some(limit) = catalog.limit(&provider, &query.model) else {
         return Window::unknown();
     };
+    let price = catalog.price(&provider, &query.model);
     build_window(
         limit.context,
         limit.input,
@@ -534,6 +593,7 @@ pub async fn resolve(query: &WindowQuery) -> Window {
             age,
         },
         Some(limit),
+        price,
     )
 }
 
@@ -550,6 +610,7 @@ pub fn resolve_offline(query: &WindowQuery) -> Window {
     let Some(limit) = catalog.limit(&provider, &query.model) else {
         return Window::unknown();
     };
+    let price = catalog.price(&provider, &query.model);
     build_window(
         limit.context,
         limit.input,
@@ -561,6 +622,7 @@ pub fn resolve_offline(query: &WindowQuery) -> Window {
             age: Some(age),
         },
         Some(limit),
+        price,
     )
 }
 
@@ -573,6 +635,7 @@ fn build_window(
     request_max_output: Option<u32>,
     source: WindowSource,
     limit: Option<ModelLimit>,
+    price: Option<ModelPrice>,
 ) -> Window {
     let reservation = output_reservation(context, request_max_output);
     match input_budget(context, input, request_max_output) {
@@ -585,6 +648,7 @@ fn build_window(
             reservation,
             source,
             limit,
+            price,
         },
         Err(error) => Window {
             budget: None,
@@ -595,6 +659,7 @@ fn build_window(
             reservation,
             source,
             limit,
+            price,
         },
     }
 }
@@ -795,11 +860,39 @@ mod tests {
                 input: None
             })
         );
-        assert_eq!(catalog.limit("opencode", "no-limit"), None);
+
         assert_eq!(
             catalog.limit("opencode", "future").unwrap().context,
             Some(5)
         );
+    }
+
+    /// ADR 0027: the catalog's `cost` row is dollars per million tokens, kept as
+    /// micro-dollars so the type stays `Eq`; a model without a usable price has none.
+    #[test]
+    fn the_catalog_price_row_is_parsed_in_micro_dollars() {
+        let priced = r#"{
+            "anthropic": {"models": {
+                "claude-sonnet-4-5": {"limit": {"context": 200000},
+                    "cost": {"input": 3, "output": 15, "cache_read": 0.3, "cache_write": 3.75}},
+                "no-cost": {"limit": {"context": 5}},
+                "zero": {"limit": {"context": 5}, "cost": {"input": 0, "output": 0}}
+            }}
+        }"#;
+        let catalog = Catalog::parse(priced).unwrap();
+        assert_eq!(
+            catalog.price("anthropic", "claude-sonnet-4-5"),
+            Some(ModelPrice {
+                input: 3_000_000,
+                output: 15_000_000,
+                cache_read: Some(300_000),
+                cache_write: Some(3_750_000),
+            })
+        );
+        assert_eq!(catalog.price("anthropic", "no-cost"), None);
+        // A zero rate is not usable, so the cost hides rather than showing `$0.00`.
+        assert_eq!(catalog.price("anthropic", "zero"), None);
+        assert_eq!(catalog.price("anthropic", "missing"), None);
     }
 
     #[test]
@@ -872,6 +965,7 @@ mod tests {
             Some(16_384),
             WindowSource::Explicit,
             None,
+            None,
         );
         assert_eq!(explicit.budget, None);
         assert!(
@@ -890,6 +984,7 @@ mod tests {
                 age: None,
             },
             None,
+            None,
         );
         assert_eq!(catalog.budget, None);
         assert!(
@@ -903,6 +998,7 @@ mod tests {
             None,
             Some(16_384),
             WindowSource::Explicit,
+            None,
             None,
         );
         assert_eq!(fine.startup_check(), WindowCheck::Ok);
@@ -919,7 +1015,8 @@ mod tests {
                 output: None,
                 reservation: 250,
                 source: WindowSource::Explicit,
-                limit: None
+                limit: None,
+                price: None
             }
             .describe(),
             "C 1000, I ?, output ?, R 250, B 1000 from --context-window"
@@ -941,6 +1038,7 @@ mod tests {
                 input: Some(922_000),
                 output: Some(384_000),
             }),
+            price: None,
         };
         assert_eq!(
             catalog.describe(),
