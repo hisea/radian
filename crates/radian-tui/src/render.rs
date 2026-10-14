@@ -1172,9 +1172,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // The find matcher wraps at the same width; a resize recomputes it (once, not per frame).
     app.set_transcript_width(width);
     let modes = app.display_modes();
+    let t_draw = std::time::Instant::now();
     let (total, _) = visible_lines(&mut app.entries, modes, width, 0, 0, &theme);
+    radian_session::trace::took("draw/measure", t_draw);
     app.set_viewport(chunks[0].height, total);
+    let t_window = std::time::Instant::now();
     let (_, visible) = visible_lines(&mut app.entries, modes, width, app.scroll, height, &theme);
+    radian_session::trace::took("draw/window", t_window);
     let visible = match app.find_state() {
         Some(find) => visible
             .into_iter()
@@ -1209,7 +1213,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
         None => visible,
     };
+    let t_render = std::time::Instant::now();
     frame.render_widget(Paragraph::new(visible), chunks[0]);
+    radian_session::trace::took("draw/render-transcript", t_render);
 
     // The picker overlay draws over the transcript; the input box and the status bar stay
     // visible below it (ADR 0023 U4).
@@ -1461,10 +1467,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
     }
 
-    frame.render_widget(
-        Paragraph::new(status_lines(app, chunks[3].width as usize)),
-        chunks[3],
-    );
+    let t_status = std::time::Instant::now();
+    let status = status_lines(app, chunks[3].width as usize);
+    radian_session::trace::took("draw/status-lines", t_status);
+    frame.render_widget(Paragraph::new(status), chunks[3]);
+    radian_session::trace::mark("draw/end");
 }
 
 /// The status area's height: one row for the `classic` preset, the footer's rows for `pi`.
