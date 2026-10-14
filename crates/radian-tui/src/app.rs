@@ -163,10 +163,6 @@ pub struct Entry {
     /// the reasoning/tool folds, so a global fold toggle reuses it instead of re-parsing
     /// every Assistant entry (the R7 toggle gate).
     pub(crate) md_cache: Option<MdCache>,
-    /// The entry's highlighted code blocks (ADR 0028 R2), keyed by `(width, text_len, on)` and
-    /// indexed by the block's start offset. Roles, not colors; the width and text length are
-    /// in the key so a resize or a streaming append re-highlights.
-    pub(crate) syntax_cache: Option<SyntaxCache>,
 }
 
 impl Entry {
@@ -185,7 +181,6 @@ impl Entry {
             layout_cache: None,
             diagram_cache: None,
             md_cache: None,
-            syntax_cache: None,
         }
     }
 }
@@ -245,15 +240,6 @@ pub enum Overlay {
 /// The Markdown layout cache: `(width, text_len, paragraphs)`, where each paragraph is
 /// `(block start, lines)`. A type alias keeps the `Option` readable in `Entry`.
 pub(crate) type MdCache = (usize, usize, Vec<(usize, Vec<crate::blocks::BodyLine>)>);
-
-/// The syntax-highlight cache: `(width, text_len, on)` and, per code block, its start offset
-/// and one `HighlightedLine` per body line.
-pub(crate) type SyntaxCache = (
-    usize,
-    usize,
-    bool,
-    Vec<(usize, Vec<crate::highlight::HighlightedLine>)>,
-);
 
 /// One approval as the UI shows it: the queue's id (ADR 0023 U7), the session that asked and
 /// the request itself. The queue id is what the answer names, not the permission layer's own

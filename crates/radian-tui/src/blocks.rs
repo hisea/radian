@@ -736,12 +736,6 @@ pub fn line_count_cached(entry: &mut Entry, modes: DisplayModes, width: usize) -
             .saturating_sub(crate::render::marker_prefix(entry.kind).width())
             .max(1);
         fill_md_cache(entry, &blocks, body_width);
-        if modes.highlight {
-            // The **code** lines lay out at the full width (they carry no marker prefix), the
-            // same width `syntax_lines_cached` looks the cache up with; using `body_width` here
-            // would key the cache differently from every lookup and never hit.
-            fill_syntax_cache(entry, &blocks, width);
-        }
     }
     let lines = line_count(entry, modes, width);
     entry.layout_cache = Some((key, lines));
@@ -842,16 +836,7 @@ pub fn layout(entry: &Entry, blocks: &[Block], modes: DisplayModes, width: usize
                         let highlight = if is_mermaid(lang, *closed, modes.mermaid) {
                             None
                         } else {
-                            syntax_lines_cached(
-                                entry,
-                                *start,
-                                *end,
-                                &text,
-                                lang,
-                                *closed,
-                                width,
-                                modes.highlight,
-                            )
+                            syntax_lines_cached(*start, *end, &text, lang, *closed, modes.highlight)
                         };
                         if is_mermaid(lang, *closed, modes.mermaid) {
                             let index = diagram_index;
@@ -876,7 +861,7 @@ pub fn layout(entry: &Entry, blocks: &[Block], modes: DisplayModes, width: usize
                                         *start,
                                         *closed,
                                         width,
-                                        highlight.as_deref(),
+                                        highlight.as_deref().map(Vec::as_slice),
                                     ));
                                 }
                             }
@@ -886,7 +871,7 @@ pub fn layout(entry: &Entry, blocks: &[Block], modes: DisplayModes, width: usize
                                 *start,
                                 *closed,
                                 width,
-                                highlight.as_deref(),
+                                highlight.as_deref().map(Vec::as_slice),
                             ));
                         }
                     }
@@ -1433,70 +1418,25 @@ fn fill_md_cache(entry: &mut Entry, blocks: &[Block], width: usize) {
     entry.md_cache = Some((width, text_len, paragraphs));
 }
 
-/// The highlighted lines of the closed code block at `[start, end)`, from the entry's cache
-/// when it holds them, else highlighted fresh (the immutable paths may not have run the
-/// mutable measure pass). `None` when highlighting is off, the block is open (streaming), or
-/// the language is not one we highlight.
-#[allow(clippy::too_many_arguments)]
+/// The highlighted lines of the closed code block at `[start, end)`, or `None` when
+/// highlighting is off, the block is open (streaming), the language is not one we highlight,
+/// or the block is over the size cap. The result is a pure function of the body and language,
+/// so `highlight`'s **content-keyed** cache is used — no width in the key. This is reached
+/// only while laying out a visible line; the measure pass never calls it (a count does not
+/// need colors).
 fn syntax_lines_cached(
-    entry: &Entry,
     start: usize,
     end: usize,
     text: &str,
     lang: &str,
     closed: bool,
-    width: usize,
     highlight: bool,
-) -> Option<Vec<crate::highlight::HighlightedLine>> {
+) -> Option<std::sync::Arc<Vec<crate::highlight::HighlightedLine>>> {
     if !highlight || !closed {
         return None;
     }
-    if let Some((cached_width, cached_len, on, blocks)) = &entry.syntax_cache
-        && *cached_width == width
-        && *cached_len == entry.text.len()
-        && *on
-        && let Some((_, lines)) = blocks.iter().find(|(at, _)| *at == start)
-    {
-        return Some(lines.clone());
-    }
     let body = code_body(&text[start..end], closed);
-    crate::highlight::highlight_lines(&body.lines().collect::<Vec<_>>(), lang)
-}
-
-/// Builds the syntax cache for `width` (the mutable measure pass): one entry per closed code
-/// block whose language is highlighted. Roles, not colors — a theme change reuses it; the key
-/// carries the width and the text length, so a resize or an append re-highlights.
-fn fill_syntax_cache(entry: &mut Entry, blocks: &[Block], width: usize) {
-    let text_len = entry.text.len();
-    let fresh = entry
-        .syntax_cache
-        .as_ref()
-        .filter(|(cached_width, cached_len, on, _)| {
-            *cached_width == width && *cached_len == text_len && *on
-        })
-        .is_none();
-    if !fresh {
-        return;
-    }
-    let text = crate::render::display_text(entry).into_owned();
-    let mut highlighted = Vec::new();
-    for block in blocks {
-        if let Block::Code {
-            start,
-            end,
-            closed: true,
-            lang,
-        } = block
-        {
-            let body = code_body(&text[*start..*end], true);
-            if let Some(lines) =
-                crate::highlight::highlight_lines(&body.lines().collect::<Vec<_>>(), lang)
-            {
-                highlighted.push((*start, lines));
-            }
-        }
-    }
-    entry.syntax_cache = Some((width, text_len, true, highlighted));
+    crate::highlight::highlighted(&body, lang)
 }
 
 /// Appends the laid-out lines of `blocks`, indented by `indent` columns.

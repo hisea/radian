@@ -665,9 +665,12 @@ mermaid 后）**上同样超时，而且连 warm-up（1000 条）都超时。用
 
 | 项目 | 值 |
 |---|---|
-| `SyntaxSet` 加载（`load_defaults_newlines`，75 语法） | **0.5 ms**（进程一次，`OnceLock`） |
+| `SyntaxSet` 加载（反序列化 `build.rs` 嵌入的合并 dump：默认 75 语法 + vendored TS/TSX/TOML） | **≈ 1.1 ms**（进程一次，`OnceLock`） |
+| `build.rs` 解析 200 KB 的 TypeScript YAML（构建期，一次） | ≈ 2 s/文件（`yaml-rust`；所以放在构建期） |
 | 500 行 Rust 代码块首次高亮（含语法正则的惰性编译） | **≈ 125–285 ms** |
 | 同一块之后的高亮（正则已编译） | **≈ 130–270 ms**（5 次取样；每 1000 行 ≈ 0.22 s） |
+| TypeScript 首次解析（`fancy-regex` 编译该语法的全部正则，进程一次） | **≈ 380 ms**；之后 ≈ 0.3 ms |
+| TOML 首次解析 | ≈ 0.6 ms |
 | 语言表外 / 未闭合 / `highlight = false` | 0（不高亮） |
 
 高亮结果按 `(width, text_len, highlight)` 缓存在 `Entry.syntax_cache`（角色，不是颜色，主题切换不失效），
@@ -681,9 +684,11 @@ mermaid 后）**上同样超时，而且连 warm-up（1000 条）都超时。用
 | 稳态帧 p50 | 0.55 ms | **≈ 0.7 ms** | 高亮命中缓存；差异在噪声内 |
 | 全局折叠首帧（50k） | 282 / 129 ms | **166 / 120 ms** | 本片不慢于 main；文档里早先的 24–28 ms 是别的机器/负载下的旧值 |
 
-**二进制体积（release，含调试符号，`radian`）**：24 837 872 B → **25 758 480 B**，**+920 608 B
-（≈ +0.88 MiB，+3.7%）**。这是 syntect + `fancy-regex` + `regex` + `flate2`/`bincode` + 368 KB 压缩语法
-打包集的合计。手工精简 `.packdump` 未采用（见 README：跨语法上下文引用会在 build 时越界）。
+**二进制体积（release，含调试符号，`radian`）**：24 837 872 B → **25 865 344 B**，**+1 027 472 B
+（≈ +0.98 MiB，+4.1%）**。其中前一版（只有默认集）是 25 758 480 B；vendored TS/TSX/TOML 与它们并入后的
+dump 再加 **+106 864 B**（≈ 104 KiB）。合计是 syntect + `fancy-regex` + `regex` + `flate2`/`bincode` +
+合并后的语法 dump（约 431 KB）的代价。手工精简默认集未采用（跨语法上下文引用会在 build 时越界）；TS/TOML
+是原样 vendor 到 `third_party/syntaxes/`（见其 `RADIAN-CHANGES.md`）。
 
 **结论**：R7 不退化；首次高亮一个很大的代码块会有百毫秒级的一次性开销（缓存后不再付），这是纯 Rust 正则
 后端（`fancy-regex`）的代价，记为已知取舍。

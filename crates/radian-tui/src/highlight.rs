@@ -15,7 +15,9 @@
 //!
 //! The syntax set is loaded once ([`syntax_set`]) and cached for the process.
 
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use syntect::parsing::{ParseState, ScopeStack, ScopeStackOp, SyntaxReference, SyntaxSet};
 use unicode_width::UnicodeWidthChar;
@@ -43,8 +45,15 @@ pub type HighlightedLine = Vec<(String, SyntaxRole)>;
 /// 368 KB dump embedded by the `default-syntaxes` feature; loading it deserializes it on first
 /// use.
 fn syntax_set() -> &'static SyntaxSet {
+    // Built at compile time by `build.rs`: syntect's packed default set plus the vendored
+    // TypeScript/TSX/TOML grammars (see `third_party/syntaxes/RADIAN-CHANGES.md`). The YAML is
+    // parsed there (about 2 s each) so the runtime only deserializes this dump.
     static SET: OnceLock<SyntaxSet> = OnceLock::new();
-    SET.get_or_init(SyntaxSet::load_defaults_newlines)
+    SET.get_or_init(|| {
+        let bytes: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/syntaxes.packdump"));
+        // `dump_to_uncompressed_file` pairs with `from_uncompressed_data`.
+        syntect::dumps::from_uncompressed_data(bytes).expect("the embedded syntax dump is valid")
+    })
 }
 
 /// The languages a fenced block may name, mapped to syntect's own syntax name. This table **is**
@@ -74,6 +83,8 @@ const LANGUAGES: &[(&str, &str)] = &[
     ("graphviz", "Graphviz (DOT)"),
     ("haskell", "Haskell"),
     ("hs", "Haskell"),
+    ("mts", "TypeScript"),
+    ("cts", "TypeScript"),
     ("htm", "HTML"),
     ("html", "HTML"),
     ("java", "Java"),
@@ -110,6 +121,10 @@ const LANGUAGES: &[(&str, &str)] = &[
     ("shell", "Bourne Again Shell (bash)"),
     ("sql", "SQL"),
     ("tex", "LaTeX"),
+    ("toml", "TOML"),
+    ("ts", "TypeScript"),
+    ("tsx", "TypeScriptReact"),
+    ("typescript", "TypeScript"),
     ("xml", "XML"),
     ("yaml", "YAML"),
     ("yml", "YAML"),
@@ -127,11 +142,36 @@ pub fn syntax_for(lang: &str) -> Option<&'static SyntaxReference> {
     syntax_set().find_syntax_by_name(name)
 }
 
+/// The largest block that is highlighted. Above it the block renders as plain text: `syntect`'s
+/// pure-Rust backend costs roughly 0.4 ms per line warm, so 512 lines is about the most one
+/// synchronous render should pay (~200 ms); a bigger block would freeze the UI thread. The cap
+/// is on the **body** (fences excluded); the full text still copies and searches.
+pub const MAX_HIGHLIGHT_LINES: usize = 512;
+/// The same cap by size, for a few very long lines: 128 KiB.
+pub const MAX_HIGHLIGHT_BYTES: usize = 128 * 1024;
+
+/// How many blocks [`highlight_lines`] has run for, for the tests that prove the measure phase
+/// never highlights and that a resize does not re-highlight. One atomic add per block, not per
+/// line.
+static HIGHLIGHT_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// The number of blocks highlighted so far this process.
+pub fn highlight_calls() -> u64 {
+    HIGHLIGHT_CALLS.load(Ordering::Relaxed)
+}
+
 /// Highlights `lines` as one block: multi-line state (a comment or string spanning lines) is
 /// carried across lines, which is why the whole block is highlighted at once, not line by
-/// line. `None` when the language is unknown.
+/// line. `None` when the language is unknown or the block is over [`MAX_HIGHLIGHT_LINES`] /
+/// [`MAX_HIGHLIGHT_BYTES`].
 pub fn highlight_lines(lines: &[&str], lang: &str) -> Option<Vec<HighlightedLine>> {
+    if lines.len() > MAX_HIGHLIGHT_LINES
+        || lines.iter().map(|line| line.len() + 1).sum::<usize>() > MAX_HIGHLIGHT_BYTES
+    {
+        return None;
+    }
     let syntax = syntax_for(lang)?;
+    HIGHLIGHT_CALLS.fetch_add(1, Ordering::Relaxed);
     let set = syntax_set();
     let mut state = ParseState::new(syntax);
     let mut stack = ScopeStack::new();
@@ -141,6 +181,45 @@ pub fn highlight_lines(lines: &[&str], lang: &str) -> Option<Vec<HighlightedLine
         out.push(spans(line, &ops, &mut stack));
     }
     Some(out)
+}
+
+/// [`highlight_lines`] for one already-joined block body, cached **by content** (`lang` + the
+/// body), never by width: the roles do not depend on the width — truncation happens after
+/// coloring — so a resize must reuse the result. The cache is small and process-wide; the
+/// measure phase never calls this, only the layout of a visible entry does.
+pub fn highlighted(body: &str, lang: &str) -> Option<Arc<Vec<HighlightedLine>>> {
+    if body.is_empty() {
+        return Some(Arc::new(Vec::new()));
+    }
+    let key = (lang.to_ascii_lowercase(), body.to_owned());
+    if let Ok(cache) = cache().lock()
+        && let Some(hit) = cache.get(&key)
+    {
+        return Some(Arc::clone(hit));
+    }
+    let lines: Vec<&str> = body.lines().collect();
+    let highlighted = highlight_lines(&lines, lang)?;
+    let value = Arc::new(highlighted);
+    if let Ok(mut cache) = cache().lock() {
+        // Bounded: a long session can visit many blocks; the cache is a redraw accelerator,
+        // not a store.
+        if cache.len() >= CACHE_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(key, Arc::clone(&value));
+    }
+    Some(value)
+}
+
+/// The per-process highlight cache's bound.
+const CACHE_ENTRIES: usize = 64;
+
+/// The process-wide highlight cache: `(lang, body)` → the highlighted lines.
+type Cache = Mutex<HashMap<(String, String), Arc<Vec<HighlightedLine>>>>;
+
+fn cache() -> &'static Cache {
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// The pieces of one line from its scope operations, applying them to `stack` as it goes (the

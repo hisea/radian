@@ -967,18 +967,23 @@ comment/string-colored because comment and string outrank the punctuation inside
 else is `Plain` (the code block's own style). The mapping lives in `src/highlight.rs`.
 
 **Languages** (the info strings that highlight) are: `rust`/`rs`, `python`/`py`,
-`javascript`/`js`/`jsx`, `go`/`golang`, `sh`/`bash`/`shell`/`zsh`, `json`, `yaml`/`yml`,
-`markdown`/`md`, `diff`/`patch`, `c`, `c++`/`cpp`/`cc`/`cxx`, `c#`/`csharp`/`cs`, `java`,
-`ruby`/`rb`, `php`, `sql`, `html`/`htm`, `css`, `xml`, `lua`, `perl`/`pl`, `r`, `scala`,
-`haskell`/`hs`, `make`/`makefile`, `clojure`/`clj`, `erlang`/`erl`, `ocaml`/`ml`,
-`objective-c`/`objc`/`mm`, `latex`/`tex`, `matlab`, `lisp`/`el`, `graphviz`/`dot`.
+`javascript`/`js`/`jsx`, `typescript`/`ts`/`mts`/`cts`, `tsx`, `go`/`golang`,
+`sh`/`bash`/`shell`/`zsh`, `json`, `yaml`/`yml`, `toml`, `markdown`/`md`, `diff`/`patch`, `c`,
+`c++`/`cpp`/`cc`/`cxx`, `c#`/`csharp`/`cs`, `java`, `ruby`/`rb`, `php`, `sql`, `html`/`htm`,
+`css`, `xml`, `lua`, `perl`/`pl`, `r`, `scala`, `haskell`/`hs`, `make`/`makefile`,
+`clojure`/`clj`, `erlang`/`erl`, `ocaml`/`ml`, `objective-c`/`objc`/`mm`, `latex`/`tex`,
+`matlab`, `lisp`/`el`, `graphviz`/`dot`.
 
-The grammar data is syntect's packed default set (75 grammars, a compressed 368 KB dump,
-`default-syntaxes`). A hand-reduced `.packdump` was attempted first; syntect resolves
-cross-syntax context references at build time, so a hand-picked subset panics unless the full
-transitive closure is computed — and the compressed default set is already only 368 KB. The
-**language table above is what limits highlighting**; a grammar the set ships but the table does
-not name (and TypeScript/TOML/etc., which the set does not ship) renders as plain text.
+The grammar data is syntect's packed default set (75 grammars) plus three grammars vendored
+under `third_party/syntaxes` (`TypeScript`, `TypeScriptReact`, `TOML`; see its
+`RADIAN-CHANGES.md` and the root `NOTICE`) — syntect's set does not ship those. A hand-reduced
+`.packdump` of the default set was attempted first; syntect resolves cross-syntax context
+references at build time, so a hand-picked subset panics unless the full transitive closure is
+computed. `build.rs` instead loads the default set, parses the three vendored YAML grammars and
+dumps the **combined** set to `$OUT_DIR` (parsing the ~200 KB TypeScript YAML with `yaml-rust`
+costs ~2 s each, which would be a visible freeze on the first code block at runtime); the binary
+embeds that dump and only deserializes it. The **language table above is what limits
+highlighting**; a grammar the set ships but the table does not name renders as plain text.
 
 ## Context budget and the model catalog
 
