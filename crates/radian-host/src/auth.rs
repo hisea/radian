@@ -332,10 +332,9 @@ impl AuthStore {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_nanos())
             .unwrap_or(0);
-        let tmp = self.path.with_extension(format!(
-            "tmp-{}-{seq}-{nanos}",
-            std::process::id()
-        ));
+        let tmp = self
+            .path
+            .with_extension(format!("tmp-{}-{seq}-{nanos}", std::process::id()));
         // Clean up a leftover under the **old exact** name (`auth.json.tmp-<pid>`): it can only
         // be a crashed write from an older Radian, because this scheme never generates that
         // name, so it can never be a concurrent writer's in-flight file.

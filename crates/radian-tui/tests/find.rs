@@ -278,7 +278,10 @@ fn a_search_over_fifty_thousand_entries_is_fast() {
     let mut app = fifty_thousand_entries();
     let elapsed = timed_search(&mut app);
     assert_eq!(app.find_state().unwrap().matches.len(), 1);
-    eprintln!("find: 5k {baseline:?}, 50k {elapsed:?} (ratio {:.1}x)", elapsed.as_secs_f64() / baseline.as_secs_f64());
+    eprintln!(
+        "find: 5k {baseline:?}, 50k {elapsed:?} (ratio {:.1}x)",
+        elapsed.as_secs_f64() / baseline.as_secs_f64()
+    );
     assert!(
         elapsed < std::time::Duration::from_secs(2),
         "50k entries took {elapsed:?}, over the 2 s debug bound"

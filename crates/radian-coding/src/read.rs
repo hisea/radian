@@ -401,9 +401,7 @@ mod tests {
 
     /// The read phase must not pull more than the budget plus one reader buffer, even when the
     /// Unwraps the failure side without needing `Debug` on `ReadOutcome`.
-    fn expect_failure(
-        outcome: Result<ReadOutcome, ToolFailure>,
-    ) -> ToolFailure {
+    fn expect_failure(outcome: Result<ReadOutcome, ToolFailure>) -> ToolFailure {
         match outcome {
             Ok(outcome) => panic!(
                 "expected a failure, got content {:?} (truncated {})",
@@ -467,9 +465,15 @@ mod tests {
             outcome.content
         );
         assert!(outcome.line_truncated, "truncated: {}", outcome.content);
-        assert!(outcome.next_offset.is_some(), "next: {:?}", outcome.next_offset);
         assert!(
-            outcome.content.contains("[line 1 truncated at max_bytes; continue with offset="),
+            outcome.next_offset.is_some(),
+            "next: {:?}",
+            outcome.next_offset
+        );
+        assert!(
+            outcome
+                .content
+                .contains("[line 1 truncated at max_bytes; continue with offset="),
             "content: {}",
             outcome.content
         );
