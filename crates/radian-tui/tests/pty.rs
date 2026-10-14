@@ -2772,6 +2772,67 @@ fn pty_a_panic_writes_a_redacted_panic_log() {
     );
 }
 
+/// ADR 0013 T4 (audit 2026-10-15): the panic log's redaction list must carry **every** key in
+/// `auth.json`, not only the startup provider's. A second logged-in provider's key appearing in
+/// runtime text (here a synthesized panic) must not reach the log or the terminal.
+#[test]
+fn pty_the_panic_log_redacts_every_auth_key_not_only_the_startup_one() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("panic-all-keys");
+    let sessions = dir.path().join("sessions");
+    let home = dir.path().to_str().unwrap();
+    let startup = "SECRET-STARTUP-KEY-aaa";
+    let other = "SECRET-OTHER-PROVIDER-KEY-bbb";
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "panic-all-keys",
+            "--panic-message",
+            &format!("boom {other}"),
+        ],
+        // Two entries: the startup provider (`openai-compatible`) and `anthropic`, whose key
+        // is never used by this run but is still a secret that must not be written out.
+        &[
+            ("OPENAI_API_KEY", startup),
+            ("ANTHROPIC_API_KEY", other),
+            ("HOME", home),
+        ],
+        20,
+        100,
+    );
+    assert!(pty.wait_for_exit(15).is_some(), "the app did not exit");
+    assert_eq!(pty.app_exit_code(), Some(101), "a panic exits 101");
+
+    let diagnostics = diagnostics_dir(dir.path());
+    let log_path = std::fs::read_dir(&diagnostics)
+        .unwrap_or_else(|e| panic!("no diagnostics directory {}: {e}", diagnostics.display()))
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .find(|path| path.to_string_lossy().ends_with(".panic.log"))
+        .unwrap_or_else(|| panic!("no panic log in {}", diagnostics.display()));
+    let log = std::fs::read_to_string(&log_path)
+        .unwrap_or_else(|e| panic!("no panic log at {}: {e}", log_path.display()));
+    assert!(
+        !log.contains(other),
+        "every auth.json key must be redacted, not only the startup provider's: {log}"
+    );
+    assert!(
+        log.contains("<redacted>"),
+        "redaction marker missing: {log}"
+    );
+
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    assert!(
+        !raw.contains(other),
+        "the terminal output must not carry the other provider's key: {raw}"
+    );
+}
+
 /// The pid of the app the pty's `sh -c` wrapper started.
 fn app_pid(pty: &Pty) -> String {
     let shell = pty.child.process_id().expect("the wrapper shell has a pid");

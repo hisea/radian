@@ -301,3 +301,13 @@ Base `d3b5163` · 一次性 worktree `/tmp/login-mut` · 每个变异 `git check
 7/7 抓住。**诚实补充(L7 第一轮)**:只把 Drop 里的恢复去掉是等价变异——`read_hidden` 在成功
 与 Ctrl-C 路径上都**显式**调用 `guard.restore()`,Drop 只是兜底,测试照样过(假通过)。改成
 "所有路径都不恢复"(即 brief 说的"CLI 不恢复回显")后才被抓住。
+
+## ADR 0013 脱敏复审跟进：CLI 运行期错误也只装启动 key（2026-10-14）
+
+Base `3d014a5` · 一次性 worktree `/tmp/radian-pi-priv-mut2`，跑完 `git checkout -- .`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| P3 | CLI `setup.secrets` 退回"只用启动路由的 `credential.key` + route headers" | `a_runtime_error_redacts_every_auth_key_not_only_the_route_key`（401 错误体回显另一个 provider 的 key 原样进 stderr） | ✅ |
+
+1/1 抓住。
