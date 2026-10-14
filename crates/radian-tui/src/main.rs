@@ -232,7 +232,19 @@ const INPUT_POLL: Duration = Duration::from_millis(50);
 /// tick; it **does not draw** (the zero-redraw rule), so the cost is one syscall — negligible.
 const TTY_CHECK_TICK: Duration = Duration::from_millis(250);
 
+static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+fn mark(label: &str) {
+    if std::env::var_os("RADIAN_TRACE_PHASES").is_none() {
+        return;
+    }
+    if let Some(t) = T0.get() {
+        eprintln!("[trace] {label} {} ms", t.elapsed().as_millis());
+    }
+}
+
 fn main() -> ExitCode {
+    let _ = T0.set(std::time::Instant::now());
     radian_tui::terminal::install_panic_hook();
     let cli = Cli::parse();
     if let Some(path) = &cli.exit_trace {
@@ -318,6 +330,7 @@ fn run(
     rx: Receiver<UiEvent>,
     tx: Sender<UiEvent>,
 ) -> Result<Option<String>, String> {
+    mark("run-start");
     if cli.list {
         return match list_sessions(&cli) {
             Ok(()) | Err(ListError::BrokenPipe) => Ok(None),
@@ -900,6 +913,7 @@ fn run(
             },
         ))
         .map_err(|error| error.to_string())?;
+    mark("open-session-done");
     // The providers worth refreshing now: the one this run started with. `/model`'s other
     // targets refresh on their next use (the fetch itself is on the loop's runtime).
     let refresh_targets = vec![key_id.clone()];
@@ -988,6 +1002,7 @@ fn run(
             pair
         }
     };
+    mark("terminal-ready");
     // ADR 0023 U7: the queue's changes are a wake-up source. A push, an answer, an abort and
     // a waiter that gave up all bump it, so the UI re-reads the head and the modal matches the
     // queue even when nothing else happened.
@@ -1045,6 +1060,7 @@ fn run(
         Vec::new()
     };
 
+    mark("history-read");
     if let Some(path) = &cli.block_input {
         let _ = BLOCK_INPUT.set(path.clone());
     }
@@ -1077,7 +1093,9 @@ fn run(
     for message in &history {
         app.push_message(message);
     }
+    mark("entries-built");
     app.prefill_history(&history);
+    mark("prefill");
     // A draft from a previous exit is restored once, when resuming the same session.
     if resume.is_some() {
         let path = radian_tui::composer::draft_path(&dir, &session_id);
@@ -1186,6 +1204,7 @@ fn run(
         .tips
         .unwrap_or(true)
         .then(|| radian_tui::startup::tip_for(&session_id).to_string());
+    mark("before-startup");
     app.set_startup(radian_tui::startup::StartupScreen {
         banner,
         banner_narrow: format!(
@@ -1220,9 +1239,11 @@ fn run(
         theme_write_path: theme_write_path.clone(),
         config_read_only: config.read_only,
     };
+    mark("startup-set");
     let session = Arc::new(session);
     let facade: Arc<dyn radian_host::SessionFacade> =
         Arc::clone(&session) as Arc<dyn radian_host::SessionFacade>;
+    mark("before-ui-loop");
     let outcome = ui_loop(
         &mut terminal,
         &mut app,
@@ -2341,7 +2362,10 @@ fn ui_loop(
     };
     // The first frame: the startup notices and the resumed history are already in the app, and
     // zero-redraw means nothing else would draw one.
-    if !draw_frame(terminal, app)? {
+    mark("first-frame-start");
+    let drawn = draw_frame(terminal, app)?;
+    mark("first-frame-done");
+    if !drawn {
         return Ok(None);
     }
     radian_tui::terminal::set_cursor_visible(app.input_editable());
