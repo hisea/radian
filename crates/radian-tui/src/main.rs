@@ -197,6 +197,13 @@ struct Cli {
     /// draw-fairness test. Real producers are bounded by the turn structure; this one is not.
     #[arg(long, hide = true, value_name = "COUNT")]
     flood_facts: Option<u64>,
+
+    /// Test hook: append `<point> <unix-nanos>` to this file at each step of the
+    /// terminal-gone exit path. It tells "the exit path ran but slowly" from "the POLLHUP
+    /// path never fired" when the closed-master pty test flakes under load. Inert when the
+    /// flag is absent.
+    #[arg(long, hide = true, value_name = "FILE")]
+    exit_trace: Option<PathBuf>,
 }
 
 /// The TUI's per-turn model call limit when `--max-model-calls` is not given (decision
@@ -221,6 +228,9 @@ const INPUT_POLL: Duration = Duration::from_millis(50);
 fn main() -> ExitCode {
     radian_tui::terminal::install_panic_hook();
     let cli = Cli::parse();
+    if let Some(path) = &cli.exit_trace {
+        let _ = EXIT_TRACE.set(path.clone());
+    }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -250,6 +260,7 @@ fn main() -> ExitCode {
     let result =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(cli, &runtime, rx, tx)));
     runtime.shutdown_timeout(Duration::from_secs(2));
+    exit_trace("shutdown");
     match result {
         Ok(Ok(reason)) => {
             // A clean exit still says why, on the normal screen (dogfooding D4). `--list`
@@ -259,10 +270,12 @@ fn main() -> ExitCode {
             }
             // A signal-driven exit is still an orderly one, but the caller asked us to stop:
             // report it the way a shell does, 128 + the signal number.
-            match radian_tui::signals::received() {
+            let code = match radian_tui::signals::received() {
                 Some(signal) => ExitCode::from((128 + signal) as u8),
                 None => ExitCode::SUCCESS,
-            }
+            };
+            exit_trace("exit");
+            code
         }
         Ok(Err(message)) => {
             print_exit_line(&message);
@@ -1217,9 +1230,11 @@ fn run(
         &config.providers,
         cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
     );
+    exit_trace("loop-done");
     // Tell a pending signal task that the loop left on its own, so it does not force-exit.
     radian_tui::signals::confirm_exit();
     guard.restore();
+    exit_trace("restored");
     // The draft is written on every clean exit (normal quit, Ctrl-C, SIGTERM/SIGHUP). A panic
     // never reaches here, so the panic path does no file I/O.
     let draft = radian_tui::composer::draft_path(&dir, &session_id);
@@ -1231,7 +1246,9 @@ fn run(
     // The driver task is the session: if it died, the failure is the app's failure. A panic
     // inside it was caught by the runtime, so `join` reports it, and the message the hook
     // recorded is printed now that the alternate screen is gone.
-    match runtime.block_on(session.join()) {
+    let joined = runtime.block_on(session.join());
+    exit_trace("stopped");
+    match joined {
         radian_host::DriverEnd::Ok => {}
         radian_host::DriverEnd::Failed(error) => return Err(format!("driver: {error}")),
         radian_host::DriverEnd::Panicked(message) => {
@@ -1250,6 +1267,7 @@ fn run(
         "session {session_id} saved; {}",
         resume_command(&program_name(), &session_id, &cli, &workspace_path)
     );
+    exit_trace("run-done");
     Ok(Some(match signal {
         Some(signal) => format!("received {}; {saved}", radian_tui::signals::name(signal)),
         None => saved,
@@ -1338,6 +1356,38 @@ fn panic_in_driver() {
 
 static BLOCK_INPUT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
+/// The `--exit-trace` file (test hook). One `OnceLock` so every call site reads the same
+/// path; unset in production, where [`exit_trace`] is a no-op.
+static EXIT_TRACE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// [`exit_trace`] at most once per site (the input thread's poll loop runs every 50 ms; the
+/// trace must show its *state*, not a flood). Test-only, like the trace itself.
+fn exit_trace_once(marked: &std::sync::atomic::AtomicBool, point: &str) {
+    if !marked.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        exit_trace(point);
+    }
+}
+
+/// Appends one step of the terminal-gone exit path, when the test hook is on. A plain
+/// unbuffered append per point, so a hard failure still leaves the earlier points on disk.
+fn exit_trace(point: &str) {
+    let Some(path) = EXIT_TRACE.get() else {
+        return;
+    };
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "{point} {nanos}");
+    }
+}
+
 /// Parks forever when the `--block-input` test hook is on, writing its marker once.
 fn block_input_if_asked() {
     let Some(path) = BLOCK_INPUT.get() else {
@@ -1405,6 +1455,7 @@ fn tty_readiness(timeout: Duration) -> Tty {
 /// crossterm already holds a parsed event: its reader reads the fd, and a read that returns
 /// EOF loops forever (see [`read_input`]).
 fn crossterm_event() -> Input {
+    exit_trace_once(&TRACED_READ, "crossterm-read");
     match event::read() {
         Ok(event) => Input::Event(event),
         Err(_) => Input::Gone,
@@ -1431,14 +1482,30 @@ fn read_input(timeout: Duration) -> Input {
     block_input_if_asked();
     match tty_readiness(timeout) {
         Tty::Gone => Input::Gone,
-        Tty::Readable => crossterm_event(),
-        Tty::Idle => match event::poll(Duration::ZERO) {
-            Ok(true) => crossterm_event(),
-            Ok(false) => Input::Idle,
-            Err(_) => Input::Gone,
-        },
+        Tty::Readable => {
+            exit_trace_once(&TRACED_READABLE, "poll-readable");
+            crossterm_event()
+        }
+        Tty::Idle => {
+            exit_trace_once(&TRACED_IDLE, "poll-idle");
+            match event::poll(Duration::ZERO) {
+                Ok(true) => {
+                    exit_trace_once(&TRACED_CROSSTERM_ZERO, "poll-crossterm-zero");
+                    crossterm_event()
+                }
+                Ok(false) => Input::Idle,
+                Err(_) => Input::Gone,
+            }
+        }
     }
 }
+
+/// One-per-site markers for the input thread's trace (test hook only).
+static TRACED_READABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static TRACED_IDLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static TRACED_CROSSTERM_ZERO: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static TRACED_READ: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(not(unix))]
 fn read_input(timeout: Duration) -> Input {
@@ -1565,9 +1632,11 @@ fn run_pbcopy(text: &str) -> Result<(), String> {
 
 fn spawn_input_thread(tx: Sender<UiEvent>) {
     std::thread::spawn(move || {
+        exit_trace("input-thread-start");
         loop {
             match read_input(INPUT_POLL) {
                 Input::Gone => {
+                    exit_trace("pollhup");
                     let _ = tx.send(UiEvent::TerminalGone);
                     return;
                 }
@@ -1690,6 +1759,7 @@ impl LoopContext<'_> {
                 // The terminal went away (the pty master closed, the ssh session dropped):
                 // leave through the ordinary clean-exit path. No signal was received, so the
                 // exit code is the ordinary 0.
+                exit_trace("terminal-gone");
                 app.quit = true;
                 return false;
             }

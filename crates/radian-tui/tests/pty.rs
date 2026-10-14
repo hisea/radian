@@ -4321,6 +4321,9 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
     // inside it (ADR 0020).
     let sessions = dir.path().join("sessions");
     let frozen = dir.path().join("frozen");
+    // The exit path's timestamps (`--exit-trace`): on a failure this says which step was
+    // slow (or that the POLLHUP path never fired).
+    let trace = dir.path().join("exit-trace");
     let home = TempDir::new("master-gone-home");
     let (mut child, mut master) = spawn_direct(
         &[
@@ -4337,6 +4340,8 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
             ws.to_str().unwrap(),
             "--freeze-draw",
             frozen.to_str().unwrap(),
+            "--exit-trace",
+            trace.to_str().unwrap(),
         ],
         home.path(),
     );
@@ -4344,6 +4349,12 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
     // The first frame is drawn (its marker exists); from now on the app writes nothing.
     let mut drained = Vec::new();
     let mut buf = [0u8; 65536];
+    // These two waits poll with a short sleep. `frozen` is a file the app writes from its own
+    // task: without a filesystem watcher (kqueue/FSEvents, i.e. a dependency) there is no
+    // notification to block on. The exit wait could use `waitpid` on a helper thread with a
+    // channel timeout, but the child handle is shared with `KillOnDrop` (a double wait) and the
+    // outcome of the investigation is that the app does not exit at all on a crossterm reader
+    // hang, so the deadline is what the test is about — not the wait mechanism.
     let deadline = Instant::now() + Duration::from_secs(20);
     while !frozen.exists() {
         // Drain the output: the first frame is larger than the pty buffer, so the app is
@@ -4365,6 +4376,7 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
     }
 
     // Close the terminal: the master fd. No signal is sent (no controlling terminal).
+    let closed_at = Instant::now();
     drop(master);
 
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -4372,12 +4384,16 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
         if let Some(status) = child.0.try_wait().unwrap() {
             break status;
         }
-        assert!(
-            Instant::now() < deadline,
-            "the app did not exit within 5 s of its terminal closing: the input POLLHUP path \
-             did not fire, and drawing is frozen (--freeze-draw) so the draw path cannot rescue \
-             it either"
-        );
+        if Instant::now() >= deadline {
+            let steps = std::fs::read_to_string(&trace).unwrap_or_default();
+            panic!(
+                "the app did not exit within 5 s of its terminal closing: the input POLLHUP \
+                 path did not fire, and drawing is frozen (--freeze-draw) so the draw path \
+                 cannot rescue it either. Exit trace (review: a trace whose last point is \
+                 `poll-idle` means the input thread is inside crossterm's reader and its read \
+                 is looping on EOF):\n{steps}"
+            );
+        }
         std::thread::sleep(Duration::from_millis(20));
     };
     assert_eq!(
@@ -4385,6 +4401,14 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
         Some(0),
         "the terminal-gone exit is the ordinary clean one (exit 0, no signal): {status:?}"
     );
+    if std::env::var_os("RADIAN_FLAKY_VERBOSE").is_some() {
+        // Investigation aid: how long the exit path took and where the time went.
+        eprintln!(
+            "closed-master: exit took {:?}\n{}",
+            closed_at.elapsed(),
+            std::fs::read_to_string(&trace).unwrap_or_default()
+        );
+    }
 }
 
 /// The remaining window: the main loop can be stuck **inside crossterm's reader** (the tty can
