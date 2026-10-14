@@ -4060,7 +4060,8 @@ async fn anthropic_only_flags_are_refused_under_openai_compatible() {
     // `--thinking` left this check in ADR 0026 D11: the unified levels ride both wire
     // protocols (`reasoning_effort` for OpenAI-compatible), so only `--max-tokens` remains
     // Anthropic-only.
-    for (label, extra) in [("max-tokens", vec!["--max-tokens", "100"])] {
+    {
+        let (label, extra) = ("max-tokens", vec!["--max-tokens", "100"]);
         let dir = scratch(&format!("flag-{label}"));
         let sessions = dir.join("sessions");
         std::fs::create_dir_all(&sessions).unwrap();
