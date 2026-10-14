@@ -12,7 +12,7 @@
 //! written — never the config file (D3).
 
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::Write;
 
 use crate::USAGE_ERROR;
 
@@ -133,7 +133,7 @@ fn is_tty() -> bool {
 /// answer returns, and a Ctrl-C during the read ends the process after the restore.
 #[cfg(unix)]
 fn read_hidden(prompt: &str) -> Result<String, String> {
-    use std::io::{Read, Write};
+    use std::io::Write;
     let mut guard = termios::EchoGuard::new()?;
     write!(guard.tty(), "{prompt}").map_err(|error| format!("cannot write the prompt: {error}"))?;
     guard
@@ -141,8 +141,15 @@ fn read_hidden(prompt: &str) -> Result<String, String> {
         .flush()
         .map_err(|error| format!("cannot write the prompt: {error}"))?;
     let mut line = String::new();
-    for byte in guard.tty().bytes() {
-        let byte = byte.map_err(|error| format!("cannot read: {error}"))?;
+    let mut one = [0u8; 1];
+    loop {
+        use std::io::Read;
+        match guard.tty().read(&mut one) {
+            Ok(0) => break, // EOF: treat as Enter
+            Ok(_) => {}
+            Err(error) => return Err(format!("cannot read: {error}")),
+        }
+        let byte = one[0];
         if byte == b'\n' || byte == b'\r' {
             break;
         }
@@ -247,7 +254,7 @@ pub async fn run_login(provider: Option<String>) -> i32 {
                 ));
             }
         },
-        Some(_) | None => {
+        None => {
             // The choice list: built-ins + custom (D10's named providers are born here);
             // shared with the TUI's wizard so the two cannot drift.
             println!("choose a provider:");

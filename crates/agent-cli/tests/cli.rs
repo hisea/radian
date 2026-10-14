@@ -6537,8 +6537,14 @@ async fn pty_agent_login_custom_hides_the_key_and_restores_echo() {
             & 0o777,
         0o600
     );
-    // Echo restored after the exit: stty -a must show `echo` enabled.
-    assert!(pty.wait_for(&mut seen, "EXITED", 5).await, "no stty output");
+    // Echo restored after the exit: `stty -a` must show `echo` enabled. Wait for the `stty`
+    // output itself (its first line is "speed …"): waiting only for `EXITED:0` races the
+    // shell's next command.
+    assert!(
+        pty.wait_for(&mut seen, "speed ", 5).await,
+        "no stty output: {}",
+        String::from_utf8_lossy(&seen)
+    );
     let tail = String::from_utf8_lossy(&seen);
     let stty = tail.split("EXITED:0").nth(1).unwrap_or("");
     assert_stty_has_echo(stty);
