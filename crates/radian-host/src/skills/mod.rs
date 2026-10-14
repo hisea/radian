@@ -185,10 +185,12 @@ fn load(path: &Path) -> Result<(Skill, Vec<String>), String> {
 }
 
 /// The subset of YAML frontmatter Radian needs: top-level `key: value` scalars, with quoted
-/// scalars, empty values and block-list items tolerated. Blank lines and `#` comments are not
-/// keys (S1: before this, one blank line made the whole skill fail to load). Unknown keys are
-/// ignored (a Claude Code skill's private fields must not spam warnings). No YAML dependency:
-/// the keys we read are a few scalars (report the choice).
+/// scalars, empty values, `>`/`|` block scalars and indented continuation lines; a nested map
+/// or a list (such as `metadata:` or `allowed-tools:`) is not a value, so its keys never become
+/// top-level keys. Blank lines and `#` comments are not keys (S1: before this, one blank line
+/// made the whole skill fail to load). Unknown keys are ignored (a Claude Code skill's private
+/// fields must not spam warnings). No YAML dependency: the keys we read are a few scalars, and
+/// a real parser would be a large dependency for them (report the choice).
 fn parse_frontmatter(text: &str) -> Result<BTreeMap<String, String>, String> {
     let mut lines = text.lines();
     let Some(first) = lines.next() else {
@@ -197,7 +199,10 @@ fn parse_frontmatter(text: &str) -> Result<BTreeMap<String, String>, String> {
     if first.trim_end() != "---" {
         return Err("the file does not start with `---`".into());
     }
-    let mut front = BTreeMap::new();
+    let mut front: BTreeMap<String, String> = BTreeMap::new();
+    // The key the current indented block belongs to, and how its value continues (S2).
+    let mut current: Option<String> = None;
+    let mut style = BlockStyle::Plain;
     let mut closed = false;
     for line in lines {
         if line.trim_end() == "---" {
@@ -205,12 +210,47 @@ fn parse_frontmatter(text: &str) -> Result<BTreeMap<String, String>, String> {
             break;
         }
         let trimmed = line.trim();
-        // S1: a blank line or a `#` comment is not a `key: value` pair.
-        if trimmed.is_empty() || trimmed.starts_with('#') {
+        // S1: a blank line is not a `key: value` pair (and ends the current block).
+        if trimmed.is_empty() {
+            current = None;
+            style = BlockStyle::Plain;
             continue;
         }
-        // A block-list item (`- value`) belongs to the previous key; its values are not needed.
-        if trimmed.starts_with("- ") || trimmed == "-" {
+        let indented = line.starts_with(' ') || line.starts_with('\t');
+        // S1: a `#` comment is not a key. Inside a block scalar (`>`/`|`) a leading `#` is
+        // content, not a comment.
+        if trimmed.starts_with('#') && !(indented && style.is_block()) {
+            continue;
+        }
+        if indented {
+            // S2: an indented line belongs to the previous key. A list item (`- x`) or a nested
+            // `key: value` is a nested structure, not the value of that key, so it is ignored;
+            // otherwise the line continues a block scalar or a plain multi-line scalar.
+            let list_item = trimmed == "-" || trimmed.starts_with("- ");
+            let nested_key = trimmed.contains(':');
+            let Some(key) = current.clone() else { continue };
+            let value = front.entry(key).or_default();
+            match style {
+                BlockStyle::Literal => {
+                    if !value.is_empty() {
+                        value.push('\n');
+                    }
+                    value.push_str(trimmed);
+                }
+                BlockStyle::Fold => {
+                    if !value.is_empty() {
+                        value.push(' ');
+                    }
+                    value.push_str(trimmed);
+                }
+                // A plain scalar continues only when the key already has a value; a bare
+                // `key:` followed by indented `key: value` lines is a nested map, not a value.
+                BlockStyle::Plain if !value.is_empty() && !list_item && !nested_key => {
+                    value.push(' ');
+                    value.push_str(trimmed);
+                }
+                BlockStyle::Plain => {}
+            }
             continue;
         }
         let Some((key, value)) = line.split_once(':') else {
@@ -220,12 +260,43 @@ fn parse_frontmatter(text: &str) -> Result<BTreeMap<String, String>, String> {
         if key.is_empty() {
             return Err(format!("`{line}` has an empty key"));
         }
-        front.insert(key.to_owned(), unquote(value.trim()));
+        let value = value.trim();
+        current = Some(key.to_owned());
+        // A `>`/`|` marker (with an optional chomping indicator) starts a block scalar; its
+        // indented lines are the value. Anything else is a scalar on this line.
+        style = match value {
+            ">" | ">-" | ">+" => BlockStyle::Fold,
+            "|" | "|-" | "|+" => BlockStyle::Literal,
+            _ => BlockStyle::Plain,
+        };
+        if style.is_block() {
+            front.insert(key.to_owned(), String::new());
+        } else {
+            front.insert(key.to_owned(), unquote(value));
+        }
     }
     if !closed {
         return Err("the frontmatter is not closed with `---`".into());
     }
     Ok(front)
+}
+
+/// How an indented line continues the previous key (the subset of YAML block styles Radian
+/// reads; S2). A nested map or a list is not a value, so it is `Plain` with nothing to append.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockStyle {
+    /// A scalar on the key's own line, possibly continued by indented lines (folded).
+    Plain,
+    /// `>`, folded block scalar.
+    Fold,
+    /// `|`, literal block scalar.
+    Literal,
+}
+
+impl BlockStyle {
+    fn is_block(self) -> bool {
+        matches!(self, BlockStyle::Fold | BlockStyle::Literal)
+    }
 }
 
 /// Strips the YAML quoting Radian supports: matching single or double quotes.
@@ -251,10 +322,14 @@ pub fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// `description`: 1–1024 characters, no control characters.
+/// `description`: 1–1024 characters, no control characters other than newline and tab (S2: a
+/// `|` literal block scalar is a legitimate description, and its value contains newlines).
 pub fn valid_description(description: &str) -> bool {
     let count = description.chars().count();
-    (1..=MAX_DESCRIPTION_CHARS).contains(&count) && !description.chars().any(char::is_control)
+    (1..=MAX_DESCRIPTION_CHARS).contains(&count)
+        && !description
+            .chars()
+            .any(|c| c.is_control() && c != '\n' && c != '\t')
 }
 
 /// The system-prompt section: one line per listable skill (name, description, absolute path),
@@ -599,6 +674,63 @@ mod tests {
     /// S1: a blank line or a `#` comment in the frontmatter is not a `key: value` pair. Before
     /// this, one blank line made the whole skill fail to load (real Claude Code skills have
     /// both).
+    /// S2: an indented key under a nested map (`metadata:`) must not become a top-level key. The
+    /// nested line here comes *after* the real `name`, which is the order the old parser got
+    /// wrong (it overwrote the real name with the nested one).
+    #[test]
+    fn an_indented_nested_name_does_not_override_the_top_level_name() {
+        let scratch = Scratch::new("nested-name");
+        scratch.skill(
+            "a",
+            "---\nname: outer\ndescription: d\nmetadata:\n  name: inner\n  version: 1\n---\nBody.\n",
+        );
+        let discovery = discover(&scratch.skills_dir());
+        assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
+        assert_eq!(discovery.skills.len(), 1);
+        assert_eq!(discovery.skills[0].name, "outer");
+    }
+
+    /// S2: `>` folds its indented lines into one space-joined scalar.
+    #[test]
+    fn a_folded_block_scalar_is_joined_with_spaces() {
+        let scratches = Scratch::new("folded");
+        scratches.skill(
+            "a",
+            "---\nname: a\ndescription: >\n  Folded line one.\n  Folded line two.\n---\nBody.\n",
+        );
+        let discovery = discover(&scratches.skills_dir());
+        assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
+        assert_eq!(
+            discovery.skills[0].description,
+            "Folded line one. Folded line two."
+        );
+    }
+
+    /// S2: `|` keeps its indented lines' newlines.
+    #[test]
+    fn a_literal_block_scalar_keeps_newlines() {
+        let front =
+            parse_frontmatter("---\nname: a\ndescription: |\n  line one\n  line two\n---\n")
+                .unwrap();
+        assert_eq!(front.get("description").unwrap(), "line one\nline two");
+        // And such a skill still loads: a literal-block description is valid.
+        let scratch = Scratch::new("literal");
+        scratch.skill(
+            "a",
+            "---\nname: a\ndescription: |\n  line one\n  line two\n---\nBody.\n",
+        );
+        let discovery = discover(&scratch.skills_dir());
+        assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
+        assert_eq!(discovery.skills[0].description, "line one\nline two");
+    }
+
+    /// S2: a plain scalar continued on indented lines folds with spaces.
+    #[test]
+    fn a_plain_scalar_continued_on_an_indented_line_is_folded() {
+        let front = parse_frontmatter("---\nname: a\ndescription: first\n  second\n---\n").unwrap();
+        assert_eq!(front.get("description").unwrap(), "first second");
+    }
+
     #[test]
     fn blank_lines_and_comments_do_not_reject_a_skill() {
         let scratch = Scratch::new("blank-lines");
