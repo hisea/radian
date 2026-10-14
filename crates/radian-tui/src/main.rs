@@ -369,13 +369,26 @@ fn run(
         )
     })?;
     let provider = descriptor.protocol_for(&model_name).adapter();
-    let thinking = match cli.thinking.as_deref() {
-        Some(value) => value.parse::<Thinking>()?,
-        None => Thinking::Off,
+    // ADR 0026 D11: the unified levels, with the legacy Anthropic spellings accepted for one
+    // version (a warning goes to stderr when one is used).
+    let (thinking, legacy_thinking) = match cli.thinking.as_deref() {
+        Some(raw) => {
+            let (level, legacy) = radian_host::parse_thinking_level(raw)?;
+            (level.to_owned(), legacy)
+        }
+        None => (radian_host::DEFAULT_THINKING_LEVEL.to_owned(), false),
     };
-    // `--thinking` and `--max-tokens` are Anthropic-only; under openai-compatible they would
-    // be ignored, so this is an error before the session file exists (dogfooding D15).
-    check_provider_flags(provider, thinking, cli.max_tokens)?;
+    if legacy_thinking {
+        eprintln!(
+            "radian: [thinking] the legacy `--thinking {}` spelling is deprecated; use one of {}",
+            cli.thinking.as_deref().unwrap_or_default(),
+            radian_host::THINKING_LEVELS.join("|")
+        );
+    }
+    // `--max-tokens` is Anthropic-only; under openai-compatible it would be ignored, so this is
+    // an error before the session file exists (dogfooding D15). `--thinking` left this check in
+    // D11: the unified levels ride both wire protocols.
+    check_provider_flags(provider, Thinking::Off, cli.max_tokens)?;
     // The generic descriptor's endpoint; a non-generic descriptor refuses it (`resolve_route`).
     let base_url_override = cli
         .base_url
@@ -597,6 +610,8 @@ fn run(
     // D1/D2: every check that can fail runs **before** the session file is created. The
     // workspace is validated first, so a typo is a workspace error and never reaches the
     // sandbox probe (dogfooding D1). `radian-host` owns the rule so both hosts share it.
+    let (thinking_of, reasoning_effort) =
+        radian_host::resolve_thinking(&provider_id, &model_name, &thinking, route.adapter());
     let initial = build_model(ModelArgs {
         provider: route.adapter(),
         base_url: route.base_url.clone(),
@@ -606,7 +621,8 @@ fn run(
         // The TUI has no `--include-usage` flag; the adapter's default policy applies.
         include_usage: None,
         max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-        thinking,
+        thinking: thinking_of,
+        reasoning_effort,
     })?;
     // ADR 0026 D5: the model is switchable. The slot is shared with the driver (open_session
     // wires it), so a `/model` change reaches the next request without touching the key.

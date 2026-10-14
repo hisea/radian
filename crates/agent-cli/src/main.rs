@@ -713,13 +713,26 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         .base_url
         .clone()
         .or_else(|| config.model.base_url.clone());
-    let thinking = match cli.thinking.as_deref() {
-        Some(value) => value.parse::<Thinking>().map_err(SetupError)?,
-        None => Thinking::Off,
+    // ADR 0026 D11: the unified levels, with the legacy Anthropic spellings accepted for one
+    // version (a warning goes to stderr when one is used).
+    let (thinking, legacy_thinking) = match cli.thinking.as_deref() {
+        Some(raw) => {
+            let (level, legacy) = radian_host::parse_thinking_level(raw).map_err(SetupError)?;
+            (level.to_owned(), legacy)
+        }
+        None => (radian_host::DEFAULT_THINKING_LEVEL.to_owned(), false),
     };
-    // `--thinking` and `--max-tokens` are Anthropic-only; under openai-compatible they would
-    // be ignored, so this is a usage error before the session file exists (dogfooding D15).
-    check_provider_flags(provider, thinking, cli.max_tokens).map_err(SetupError)?;
+    if legacy_thinking {
+        eprintln!(
+            "[thinking] the legacy `--thinking {}` spelling is deprecated; use one of {}",
+            cli.thinking.as_deref().unwrap_or_default(),
+            radian_host::THINKING_LEVELS.join("|")
+        );
+    }
+    // `--max-tokens` is Anthropic-only; under openai-compatible it would be ignored, so this is
+    // a usage error before the session file exists (dogfooding D15). `--thinking` left this
+    // check in D11: the unified levels ride both wire protocols.
+    check_provider_flags(provider, Thinking::Off, cli.max_tokens).map_err(SetupError)?;
     // The endpoint this run would talk to, before the session id (for the local-endpoint check).
     let probe_base_url = descriptor
         .model(&model_name)
@@ -791,6 +804,8 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     .map_err(SetupError)?;
     // The catalog matches on the hostname of the endpoint the model actually talks to (ADR 0018).
     let catalog_base_url = route.base_url.clone();
+    let (thinking_of, reasoning_effort) =
+        radian_host::resolve_thinking(&provider_id, &model_name, &thinking, route.adapter());
     let initial = build_model(ModelArgs {
         provider: route.adapter(),
         base_url: route.base_url.clone(),
@@ -799,7 +814,8 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         headers: route.headers.clone(),
         include_usage: cli.include_usage,
         max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-        thinking,
+        thinking: thinking_of,
+        reasoning_effort,
     })
     .map_err(SetupError)?;
     // ADR 0026 D5: switchable, like the TUI. The CLI has no `/model`, but the journal can

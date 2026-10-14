@@ -2733,10 +2733,9 @@ fn pty_session_id_already_exists_points_at_resume() {
 #[test]
 fn pty_anthropic_only_flags_are_refused_under_openai_compatible() {
     let _serial = pty_guard();
-    for (label, extra) in [
-        ("thinking", ["--thinking", "adaptive"]),
-        ("max-tokens", ["--max-tokens", "100"]),
-    ] {
+    // `--thinking` left this check in ADR 0026 D11 (it rides both wire protocols now); only
+    // `--max-tokens` remains Anthropic-only.
+    for (label, extra) in [("max-tokens", ["--max-tokens", "100"])] {
         let dir = TempDir::new(&format!("flag-{label}"));
         let session_dir = dir.path().join("sessions");
         std::fs::create_dir_all(&session_dir).unwrap();

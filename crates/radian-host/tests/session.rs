@@ -69,6 +69,7 @@ async fn open_with(
         include_usage: None,
         max_tokens: 1024,
         thinking: radian_host::Thinking::Off,
+        reasoning_effort: None,
     })
     .unwrap();
     let model = radian_host::SwitchableModel::new(
@@ -80,7 +81,7 @@ async fn open_with(
             user_headers: Vec::new(),
             include_usage: None,
             max_tokens: 1024,
-            thinking: radian_host::Thinking::Off,
+            thinking: "medium".to_owned(),
         },
     );
     let profile = Profile::safe(&workspace).unwrap();
@@ -177,6 +178,7 @@ async fn a_local_session_accepts_a_declared_command() {
         include_usage: None,
         max_tokens: 1024,
         thinking: radian_host::Thinking::Off,
+        reasoning_effort: None,
     })
     .unwrap();
     let model = radian_host::SwitchableModel::new(
@@ -188,7 +190,7 @@ async fn a_local_session_accepts_a_declared_command() {
             user_headers: Vec::new(),
             include_usage: None,
             max_tokens: 1024,
-            thinking: radian_host::Thinking::Off,
+            thinking: "medium".to_owned(),
         },
     );
     let profile = Profile::safe(&workspace).unwrap();
