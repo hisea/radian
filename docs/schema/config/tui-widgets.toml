@@ -1,0 +1,7 @@
+# ADR 0027 C3: [tui.widgets] places contributor items on a line above or below the input box.
+# The ids are the same item ids a footer row can carry.
+schema_version = 1
+
+[tui.widgets]
+above_input = ["status"]
+below_input = ["opencode-go.usage"]

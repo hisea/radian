@@ -718,3 +718,27 @@ dump 再加 **+106 864 B**（≈ 104 KiB）。合计是 syntect + `fancy-regex` 
 
 **结论**：R7 不退化；首次高亮一个很大的代码块会有百毫秒级的一次性开销（缓存后不再付），这是纯 Rust 正则
 后端（`fancy-regex`）的代价，记为已知取舍。
+
+### Resume 首帧：只解析一次（resume-perf B）
+
+A 修掉 `push_message` 的 O(n²) 后，启动仍把同一份 JSONL 读 4 次。B 让它只解析一次
+（`SessionJournal::resume_parsed` 复用宿主已解析的 `Session`；`Driver::open_with_slot_parsed`
+的 `recover` 复用它；`LocalSession::history` 把已恢复的 transcript 交给 TUI，`main.rs` 不再
+`Session::open`）。只有写出 replacement abort（改变磁盘上的 fold）时驱动才重新解析。50k：
+
+| 段 | A（main `7ec6f62`） | B（本片） |
+|---|---|---|
+| `open/parse-once` | 扫描 + 解析 3 次（`journal/scan` + `journal/parse` + `recover/open`） | **~0.85 s（一次）** |
+| `open/journal` | ~1.3–2.0 s | ~0（复用解析） |
+| `recover/open` | ~1.0–1.5 s | ~0.14 s（只建 records） |
+| `history-read`（宿主再开一次） | ~1.4–1.5 s | ~0（用已恢复的 history） |
+| `entries-built` | ~0.1 s | ~0.15 s |
+| `line-counts`（首帧给全部条目算行数） | 1.8–3.4 s | 1.8–2.0 s |
+| 首帧合计（`perf_tui_resume` p50，同机 load ~300） | 3 574 ms | **2 325 ms** |
+
+1k：70 → 56 ms；10k：556 → 379 ms。目标 50k ≤ 4 s 达成。`RADIAN_TRACE_PHASES` 的打点已收成
+`agent_core::trace`（一个 `OnceLock` 只读一次环境变量），关时每次调用只多一个分支。
+
+**不依赖墙钟的测试与变异**：`radian-session` 的 `testing` 特性给 `Session::open` 计数，
+`crates/radian-host/tests/session.rs` 的 `a_resume_parses_the_journal_once` 断言 resume 恰好解析
+一次。变异（`open_journal` 传 `None`，或驱动 `recovery_parse` 传 `None`）→ 计数变 2，测试失败。

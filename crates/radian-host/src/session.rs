@@ -38,6 +38,7 @@ use crate::projection::{ProjectionRead, SessionProjection};
 use crate::skills::tools::SkillTools;
 use crate::skills::{self, Skill, SkillsHooks};
 use crate::tools::HostTools;
+use crate::trust;
 
 /// A session's stable identifier: the session file's name and `SessionCreated.session_id`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -221,6 +222,14 @@ pub trait SessionFacade: Send + Sync {
     /// Expands `/skill:<name> [args]` into the message ADR 0025 S3 sends to the inbox. `Err` is
     /// a notice (an unknown skill or an unreadable file), never a turn failure.
     fn expand_skill(&self, name: &str, args: &str) -> Result<String, String>;
+
+    /// The project-trust state (ADR 0031 T3): what the session starts with, and the source the
+    /// startup line shows.
+    fn trust(&self) -> trust::Setup;
+
+    /// Applies a startup trust choice (ADR 0031 T3): writes `trust.json` for the persistent
+    /// choices and journals `ProjectTrustChanged`, or changes only this session's state.
+    fn record_trust(&self, choice: trust::Choice) -> Result<trust::Setup, String>;
 }
 
 /// How the driver task ended.
@@ -288,6 +297,10 @@ pub struct SessionSetup {
     /// host (`~` and paths relative to the config file). The user-level `~/.radian/skills` is
     /// discovered first, so it wins a name conflict.
     pub skills_extra_paths: Vec<PathBuf>,
+    /// The project-trust state this session starts with (ADR 0031 T3). The host resolves it
+    /// before `open_session`; `needs_ask` means an interactive host must ask before the first
+    /// turn, and the session is untrusted until it answers.
+    pub trust: trust::Setup,
     /// `true` to resume an existing session file, `false` to create one.
     pub resume: bool,
     /// The `SessionCreated` snapshot (a route reference: never a key or a header value).
@@ -392,11 +405,17 @@ pub struct LocalSession {
     /// completion and `/skill:<name>` expansion; the prompt hook and the `skill` tool share the
     /// same `Arc`.
     skills: Arc<Vec<Skill>>,
+    /// The project-trust state (ADR 0031 T3). Interior mutability: the startup prompt resolves
+    /// it after `open_session` and the startup line reads it.
+    trust: Mutex<trust::Setup>,
     runtime: tokio::runtime::Handle,
     driver: DriverTask,
     capabilities: Vec<SessionCapability>,
     facts: SessionFacts,
     config_snapshot: serde_json::Value,
+    /// The recovered transcript (resume-perf B): `open_session` already folded it, so the host
+    /// does not re-open the journal for its initial view.
+    pub history: Vec<Message>,
 }
 
 impl LocalSession {
@@ -473,6 +492,70 @@ impl LocalSession {
             .find(|skill| skill.name == name)
             .ok_or_else(|| format!("no skill named `{name}`: /skills lists the available ones"))?;
         skills::expand(skill, args)
+    }
+
+    /// The project-trust state this session starts with (ADR 0031 T3). A snapshot: the startup
+    /// line and the prompt read it, and `record_trust` replaces it.
+    pub fn trust(&self) -> trust::Setup {
+        self.trust.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Applies a startup trust choice (ADR 0031 T3): the persistent choices write `trust.json`
+    /// through `trust::apply` and journal one `ProjectTrustChanged` per write (non-critical);
+    /// the session-only ones change nothing on disk. Returns the new state for the startup line.
+    pub fn record_trust(&self, choice: trust::Choice) -> Result<trust::Setup, String> {
+        let (setup, changes) = self.apply_trust(choice)?;
+        // The audit journals through the session's own writer, like the permission audit
+        // (best effort: the choice already happened). The TUI continues running, so the
+        // spawned append completes; a host that exits right after uses
+        // `record_trust_async` and awaits it.
+        for change in changes {
+            let event = trust_event(&change);
+            let journal = Arc::clone(&self.journal);
+            self.runtime.spawn(async move {
+                let _ = journal.append_runtime_event(event).await;
+            });
+        }
+        Ok(setup)
+    }
+
+    /// [`record_trust`] with the audit awaited, for a host that may exit immediately after
+    /// (the line mode). Returns the new setup.
+    pub async fn record_trust_async(&self, choice: trust::Choice) -> Result<trust::Setup, String> {
+        let (setup, changes) = self.apply_trust(choice)?;
+        for change in changes {
+            let _ = self
+                .journal
+                .append_runtime_event(trust_event(&change))
+                .await;
+        }
+        Ok(setup)
+    }
+
+    /// Applies the choice (writing `trust.json` and collecting the audit records), then
+    /// updates the stored setup. Shared by the sync and async entry points.
+    fn apply_trust(
+        &self,
+        choice: trust::Choice,
+    ) -> Result<(trust::Setup, Vec<trust::ProjectTrustChanged>), String> {
+        let workspace = self
+            .trust
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .workspace
+            .clone();
+        let changes = std::sync::Mutex::new(Vec::new());
+        let audit = |change: &trust::ProjectTrustChanged| {
+            changes.lock().unwrap().push(change.clone());
+        };
+        let resolved = trust::apply(choice, &workspace, &audit)?;
+        let setup = {
+            let mut setup = self.trust.lock().unwrap_or_else(|e| e.into_inner());
+            setup.resolved = resolved;
+            setup.needs_ask = false;
+            setup.clone()
+        };
+        Ok((setup, changes.into_inner().unwrap()))
     }
 
     pub fn capabilities(&self) -> &[SessionCapability] {
@@ -598,6 +681,14 @@ impl SessionFacade for LocalSession {
         LocalSession::expand_skill(self, name, args)
     }
 
+    fn trust(&self) -> trust::Setup {
+        LocalSession::trust(self)
+    }
+
+    fn record_trust(&self, choice: trust::Choice) -> Result<trust::Setup, String> {
+        LocalSession::record_trust(self, choice)
+    }
+
     /// Re-validates the capability, then runs the command. The check is here as well as in the
     /// UI: a facade whose list the UI ignored still refuses.
     fn command(&self, command: SessionCommand) -> Result<(), CommandRefused> {
@@ -674,12 +765,6 @@ impl SessionFacade for LocalSession {
 ///
 /// Async because opening the driver is (MCP servers start and the journal is recovered); a
 /// synchronous host calls it with `runtime.block_on`.
-fn os_mark(label: &str, t: std::time::Instant) {
-    if std::env::var_os("RADIAN_TRACE_PHASES").is_some() {
-        eprintln!("[trace] open/{label} {} ms", t.elapsed().as_millis());
-    }
-}
-
 pub async fn open_session(
     setup: SessionSetup,
     bindings: HostBindings,
@@ -712,6 +797,7 @@ pub async fn open_session(
         profile,
         memory_root,
         skills_extra_paths,
+        trust,
         resume,
         config_snapshot,
         turn_options,
@@ -747,22 +833,53 @@ pub async fn open_session(
         .as_ref()
         .map(|service| MemoryTools::new(service.clone()));
     let memory_notice = memory_notice(&memory, &injection_config);
-    os_mark("memory", t0);
+    radian_session::trace::took("open/memory", t0);
     let mcp = McpToolProvider::new(servers);
     let mcp_configured = mcp.configured();
 
     // The session file. Every check that can fail has already run in the host, so this is the
     // first thing that creates durable state.
     let journal_path = session_dir.join(format!("{}.jsonl", session_id.as_str()));
-    let journal = open_journal(
-        &session_id,
-        &session_dir,
-        &workspace,
-        resume,
-        &config_snapshot,
-        &journal_path,
-    )?;
-    os_mark("journal", t0);
+    // resume-perf B/B2: take the single-writer lock **first**, then parse under it, and reuse
+    // that one parse for the journal open, the driver's recovery and the host's initial view.
+    // Parsing before the lock could miss a concurrent appender's commit and truncate it away.
+    let (journal, parsed, wrote_abort) = if resume {
+        if !journal_path.exists() {
+            return Err(SessionError::Message(format!(
+                "no session {:?} in {}",
+                session_id.as_str(),
+                session_dir.display()
+            )));
+        }
+        let cannot = |error: radian_session::WriteError| {
+            SessionError::Message(format!(
+                "cannot resume session {:?}: {error}",
+                session_id.as_str()
+            ))
+        };
+        let t_parse = std::time::Instant::now();
+        let lock =
+            radian_session::SessionJournal::lock_for_resume(&journal_path).map_err(cannot)?;
+        let parsed = lock.parse().map_err(cannot)?;
+        radian_session::trace::took("open/parse-once", t_parse);
+        let (journal, wrote_abort) = lock
+            .into_journal(session_id.as_str(), &parsed)
+            .map_err(cannot)?;
+        (Arc::new(journal), Some(parsed), wrote_abort)
+    } else {
+        (
+            open_journal(
+                &session_id,
+                &session_dir,
+                &workspace,
+                &config_snapshot,
+                &journal_path,
+            )?,
+            None,
+            false,
+        )
+    };
+    radian_session::trace::took("open/journal", t0);
     let inbox = Inbox::durable(64, Arc::clone(&journal));
 
     let agent_config = AgentConfig {
@@ -804,7 +921,7 @@ pub async fn open_session(
         injection_config,
         memory_warning,
     ));
-    os_mark("hooks+skills", t0);
+    radian_session::trace::took("open/hooks+skills", t0);
     let mut tools = HostTools::new(coding, memory_tools, mcp.clone());
     let ask_registered = ask.is_some();
     if let Some(ask) = ask {
@@ -825,7 +942,12 @@ pub async fn open_session(
 
     // MCP server **processes** start here, when the tool session opens. The session file
     // already exists, so a failure names the way to continue it.
-    let mut driver = Driver::open_with_slot(
+    // A written abort changes the fold on disk, so the shared parse is stale: re-parse then.
+    let recovery_parse = match (&parsed, wrote_abort) {
+        (Some(parsed), false) => Some(parsed),
+        _ => None,
+    };
+    let mut driver = Driver::open_with_slot_parsed(
         &agent,
         Arc::clone(&journal),
         Arc::clone(&inbox),
@@ -833,6 +955,7 @@ pub async fn open_session(
         turn_options,
         config_slot.clone(),
         config_queue.clone(),
+        recovery_parse,
     )
     .await
     .map_err(|error| {
@@ -843,12 +966,15 @@ pub async fn open_session(
             session_id
         ))
     })?;
-    os_mark("driver-recover", t0);
+    radian_session::trace::took("open/driver-recover", t0);
     driver.set_turn_timeout(turn_timeout);
     driver.set_runtime_events(runtime_events);
     if let Some(budget_for) = budget_for.clone() {
         driver.set_budget_for(budget_for);
     }
+    // resume-perf B: the recovered transcript goes to the host, which would otherwise open and
+    // fold the same journal a second time for its initial view.
+    let recovered_history = driver.take_recovered_history().unwrap_or_default();
 
     // The config queue is owned by the driver; the facade only pushes to it, so clone the
     // handle before the driver moves into its task.
@@ -892,7 +1018,7 @@ pub async fn open_session(
         let _ = done_tx.send(end);
     });
 
-    os_mark("driver-task", t0);
+    radian_session::trace::took("open/driver-task", t0);
     let facts = SessionFacts {
         profile_line,
         sandbox_facts,
@@ -918,6 +1044,7 @@ pub async fn open_session(
         queue,
         memory,
         skills: shared_skills,
+        trust: Mutex::new(trust),
         runtime,
         driver: DriverTask {
             stop: Mutex::new(Some(stop_tx)),
@@ -927,6 +1054,7 @@ pub async fn open_session(
         capabilities,
         facts,
         config_snapshot,
+        history: recovered_history,
     })
 }
 
@@ -944,33 +1072,23 @@ pub fn session_hooks(
     ((permissions, memory), skills)
 }
 
+/// The durable audit event for one trust write (ADR 0031 T2).
+fn trust_event(change: &trust::ProjectTrustChanged) -> radian_session::RuntimeEvent {
+    radian_session::RuntimeEvent::trust_changed(
+        change.path.to_string_lossy().into_owned(),
+        change.decision.as_bool(),
+    )
+}
+
 /// Creates or resumes the session file. The caller has already validated everything that can
 /// fail, so this only reports the file's own state.
 fn open_journal(
     session_id: &SessionId,
     dir: &Path,
     workspace: &Path,
-    resume: bool,
     config_snapshot: &serde_json::Value,
     path: &Path,
 ) -> Result<Arc<SessionJournal>, SessionError> {
-    if resume {
-        if !path.exists() {
-            return Err(SessionError::Message(format!(
-                "no session {:?} in {}",
-                session_id.as_str(),
-                dir.display()
-            )));
-        }
-        return SessionJournal::resume(path, session_id.as_str())
-            .map(Arc::new)
-            .map_err(|error| {
-                SessionError::Message(format!(
-                    "cannot resume session {:?}: {error}",
-                    session_id.as_str()
-                ))
-            });
-    }
     crate::ensure_private_dir(dir).map_err(|error| {
         SessionError::Message(format!("cannot create {}: {error}", dir.display()))
     })?;

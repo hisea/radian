@@ -296,13 +296,24 @@ pub struct TuiConfig {
     /// TUI can consume; the reader validates types and the known top-level keys only. An
     /// unknown item id, placeholder or parameter is the TUI's warning, never a refusal.
     pub footer: TuiFooterConfig,
+    /// `[tui.widgets]` (ADR 0027 C3): contributor items shown on a line above or below the
+    /// input box, as item ids.
+    pub widgets: TuiWidgetsConfig,
+}
+
+/// `[tui.widgets]` (ADR 0027 C3): the item ids shown `above_input` and `below_input`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TuiWidgetsConfig {
+    pub above_input: Vec<String>,
+    pub below_input: Vec<String>,
 }
 
 /// `[tui.footer]` (ADR 0027 C2). Each row has a `left` and a `right` group of items; an item
 /// is a bare id string or a table with `item` plus options.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TuiFooterConfig {
-    /// `preset`: `"pi"` (the default) or `"classic"`. Any other value is the TUI's warning.
+    /// `preset`: `"full"` (the default, ADR 0027), `"pi"` or `"classic"`. Any
+    /// other value is the TUI's warning.
     pub preset: Option<String>,
     /// `separator`: the glyph(s) between items; a row may override it.
     pub separator: Option<String>,
@@ -865,6 +876,12 @@ fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
                 }
             }
             ("footer", _) => config.skipped.push("tui.footer".into()),
+            ("widgets", Value::Table(widgets)) => {
+                if let Err(key) = parse_widgets(widgets, config) {
+                    config.skipped.push(key);
+                }
+            }
+            ("widgets", _) => config.skipped.push("tui.widgets".into()),
             ("display", Value::Table(display)) => {
                 for (key, value) in display {
                     match (key.as_str(), value) {
@@ -913,6 +930,29 @@ fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
             (other, _) => config.skipped.push(format!("tui.{other}")),
         }
     }
+    Ok(())
+}
+
+/// Parses `[tui.widgets]` (ADR 0027 C3). A non-string entry is skipped with a warning.
+fn parse_widgets(table: &toml::map::Map<String, Value>, config: &mut Config) -> Result<(), String> {
+    let mut widgets = TuiWidgetsConfig::default();
+    for (key, value) in table {
+        let slot = match key.as_str() {
+            "above_input" => &mut widgets.above_input,
+            "below_input" => &mut widgets.below_input,
+            _ => return Err(format!("tui.widgets.{key}")),
+        };
+        let Value::Array(entries) = value else {
+            return Err(format!("tui.widgets.{key}"));
+        };
+        for entry in entries {
+            match entry {
+                Value::String(id) => slot.push(id.clone()),
+                _ => return Err(format!("tui.widgets.{key}")),
+            }
+        }
+    }
+    config.tui.widgets = widgets;
     Ok(())
 }
 
@@ -1758,5 +1798,35 @@ mod footer_tests {
         .unwrap();
         assert_eq!(config.tui.footer.rows[0].left[0].id, "future_item");
         assert!(config.skipped.is_empty(), "{:?}", config.skipped);
+    }
+}
+
+#[cfg(test)]
+mod widget_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn parse_str(text: &str) -> Result<Config, ConfigError> {
+        parse(Path::new("/tmp/test/config.toml"), text)
+    }
+
+    /// ADR 0027 C3: `[tui.widgets]` carries the item ids above/below the input box.
+    #[test]
+    fn tui_widgets_carry_the_item_ids() {
+        let config = parse_str(concat!(
+            "schema_version = 1\n",
+            "[tui.widgets]\n",
+            "above_input = [\"status\"]\n",
+            "below_input = [\"opencode-go.usage\"]\n",
+        ))
+        .unwrap();
+        assert_eq!(config.tui.widgets.above_input, vec!["status".to_string()]);
+        assert_eq!(
+            config.tui.widgets.below_input,
+            vec!["opencode-go.usage".to_string()]
+        );
+        // An unknown key or a non-string entry is skipped, never refused.
+        let config = parse_str("schema_version = 1\n[tui.widgets]\nfuture = [\"x\"]\n").unwrap();
+        assert!(config.skipped.iter().any(|k| k == "tui.widgets.future"));
     }
 }

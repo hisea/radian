@@ -56,9 +56,39 @@ async fn open_with(
     label: &str,
     capabilities: Vec<SessionCapability>,
 ) -> (Scratch, Arc<radian_host::LocalSession>) {
+    open_with_resume(label, capabilities, false).await
+}
+
+/// [`open_with`] with an explicit `resume`: `resume` writes a small journal first.
+async fn open_with_resume(
+    label: &str,
+    capabilities: Vec<SessionCapability>,
+    resume: bool,
+) -> (Scratch, Arc<radian_host::LocalSession>) {
     let scratch = Scratch::new(label);
     let workspace = scratch.0.join("ws");
     std::fs::create_dir_all(&workspace).unwrap();
+    if resume {
+        let path = scratch.0.join(format!("{label}.jsonl"));
+        let journal = radian_session::SessionJournal::create(
+            &path,
+            label,
+            radian_session::SessionCreatedData::new(workspace.to_string_lossy(), json!({})),
+        )
+        .unwrap();
+        for (index, message) in [
+            (0usize, agent_core::Message::user("go")),
+            (1, agent_core::Message::assistant("ok")),
+        ] {
+            agent_core::TranscriptJournal::append(
+                &journal,
+                agent_core::JournalRecord::Message { index, message },
+            )
+            .await
+            .unwrap();
+        }
+        drop(journal);
+    }
     let config_slot = radian_runtime::ConfigSlot::new(serde_json::Value::Null);
     let model = build_model(radian_host::ModelArgs {
         provider: radian_host::Provider::OpenAiCompatible,
@@ -106,7 +136,8 @@ async fn open_with(
             profile,
             memory_root: None,
             skills_extra_paths: Vec::new(),
-            resume: false,
+            trust: radian_host::trust::Setup::untrusted(&workspace, false),
+            resume,
             config_snapshot: json!({"provider": "openai-compatible", "model": "mock"}),
             turn_options: TurnOptions::default(),
             turn_timeout: None,
@@ -203,7 +234,7 @@ async fn a_local_session_accepts_a_declared_command() {
         SessionSetup {
             session_id: SessionId::new("can-send"),
             session_dir: scratch.0.clone(),
-            workspace,
+            workspace: workspace.clone(),
             coding_root: None,
             model,
             config_slot: config_slot.clone(),
@@ -218,6 +249,7 @@ async fn a_local_session_accepts_a_declared_command() {
             profile,
             memory_root: None,
             skills_extra_paths: Vec::new(),
+            trust: radian_host::trust::Setup::untrusted(&workspace, false),
             resume: false,
             config_snapshot: json!({}),
             turn_options: TurnOptions::default(),
@@ -373,6 +405,24 @@ async fn stopping_a_session_aborts_its_pending_requests() {
         "a question is aborted when the session closes"
     );
     assert!(session.queue().is_empty());
+    let _ = session.join().await;
+    drop(scratch);
+}
+
+/// resume-perf B: a resumed journal is parsed **once**. The host parses it, the journal open
+/// reuses that parse, and the driver's recovery reuses it too; only a written replacement
+/// abort makes the driver re-parse. The count, not a wall clock, is the assertion.
+#[tokio::test]
+async fn a_resume_parses_the_journal_once() {
+    radian_session::testing::reset_open_count();
+    let (scratch, session) =
+        open_with_resume("parse-once", vec![SessionCapability::Observe], true).await;
+    assert_eq!(
+        radian_session::testing::open_count(),
+        1,
+        "a resumed journal must be parsed exactly once"
+    );
+    session.stop();
     let _ = session.join().await;
     drop(scratch);
 }
