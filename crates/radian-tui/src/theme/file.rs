@@ -324,9 +324,10 @@ fn build(
     let mut unknown: Vec<String> = Vec::new();
     for (pi_name, fallback) in PI_FALLBACKS {
         if !resolved.contains_key(pi_name)
-            && let Some(&fallback_color) = resolved.get(fallback) {
-                resolved.insert(pi_name, fallback_color);
-            }
+            && let Some(&fallback_color) = resolved.get(fallback)
+        {
+            resolved.insert(pi_name, fallback_color);
+        }
     }
     for (pi_name, &color) in &resolved {
         if targets_for_pi_name(pi_name).is_empty() {
@@ -602,7 +603,6 @@ impl VarResolver<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     fn theme_json(vars: &str, colors: &str) -> String {
         format!("{{ \"name\": \"t\", \"vars\": {vars}, \"colors\": {colors} }}")
