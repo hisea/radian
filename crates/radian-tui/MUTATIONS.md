@@ -646,3 +646,12 @@ Base `82b07de` · 一次性 worktree `/tmp/blocks-mut`（`git worktree add` 自�
 `folding_changes_the_transcript_line_count`（断言 `app.total_lines` 随折叠变化）后才真正抓住。
 **B4 的第一轮**是 patch 文本与源码格式不符（`cargo fmt` 后换行），脚本的 `assert` 直接报
 PATCH FAILED 并跳过——没有当成"抓住"。
+
+### 审查第 1 轮的两条补充（blocks-r1，提交 `9afa1ff`）
+
+| # | 需求 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| C1 | 只对 notice 的第一行切标签（N1） | 去掉 `first_text` 条件，每行都切 | `a_wrapped_notice_continuation_is_not_a_label` | ✅ |
+| C2 | 恰好等宽的代码行不算截断（N2） | 恢复"总按 `width-1` 判断"（`if total <= width` 恒假） | `a_code_line_that_fits_exactly_is_not_truncated` | ✅ |
+
+2/2 抓住。**过程记录**：C2 第一轮跑的是 `cargo test --lib blocks a_code_line_that_fits` —— 两个位置参数，cargo 只把第一个当过滤器，于是"没抓住"是假象；改成单个过滤器 `--lib a_code_line_that_fits` 后立刻抓住。F0（fmt）在本轮之前的一次提交里已修好，本 HEAD 上 `cargo fmt --all -- --check` 通过。
