@@ -357,7 +357,15 @@ fn render_row(
     // The collapsed reasoning placeholder is one synthetic line: the reasoning role, not the
     // body style.
     let placeholder = entry.kind == EntryKind::Reasoning && row.chars.is_empty();
-    let body = if placeholder { theme.reasoning } else { style };
+    // A notice's content is the secondary level (the owner's assignment: its value is 次,
+    // only its label is 强调); the marker's own role stays `notice`.
+    let body = if placeholder {
+        theme.reasoning
+    } else if entry.kind == EntryKind::Notice {
+        theme.notice_body
+    } else {
+        style
+    };
     let lead_width = UnicodeWidthStr::width(lead.as_str());
     let mut spans = Vec::with_capacity(4);
     let lead_style = match band {
@@ -369,9 +377,12 @@ fn render_row(
         None => body,
     };
     spans.push(Span::styled(lead, lead_style));
-    // A structured notice line (`profile: …`, `[memory] …`) steps the label up with the
-    // accent role and keeps the body on pi's secondary level (ADR 0028, decision).
-    if entry.kind == EntryKind::Notice
+    // A structured notice's **first** line (`profile: …`, `[memory] …`) steps the label up
+    // with the accent role and keeps the body on pi's secondary level (ADR 0028, owner
+    // decision). Only the first: a wrapped continuation that happens to contain a colon
+    // (`https://…`, `12:30`, a `path:line`) is prose, not a label.
+    if first_text
+        && entry.kind == EntryKind::Notice
         && let Some((label, rest)) = split_label(&row.text)
     {
         let label_style = match band {

@@ -11,7 +11,7 @@
 //!   not grow with the entry's length (the text only ever grows while live);
 //! - the **line count** cache (keyed by width, text length and the mode, as before).
 
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{Entry, EntryKind};
 
@@ -483,29 +483,73 @@ fn placeholder(entry: &Entry) -> String {
     }
 }
 
-/// One code source line's rendered text: tab-expanded (4) and truncated to `width` with `…`
-/// (ADR 0028 R9). Shared by the body-line layout (which also maps offsets) and the text-only
-/// path the search uses, so the two can never show different text.
-fn code_line_text(line: &str, width: usize) -> String {
-    let mut text = String::new();
-    let mut used = 0usize;
-    let limit = width.saturating_sub(1);
-    for ch in line.chars() {
-        let mut expanded = [0; 4];
-        let expanded: &str = if ch == '\t' {
-            "    "
-        } else {
-            ch.encode_utf8(&mut expanded)
-        };
-        let w = UnicodeWidthStr::width(expanded);
-        if width > 0 && used + w > limit {
-            text.push('…');
-            return text;
+/// One code source line laid out for `width`: the rendered text (tab-expanded to 4 spaces,
+/// ADR 0028 R9), the char indices of `line` that survived (each expanded cell maps to its
+/// source char), and whether an ellipsis replaced a tail. A line that **fits** — including
+/// one exactly `width` columns wide — renders as-is; only a line that does not fit keeps
+/// `width - 1` columns and ends in `…`. Shared by the offset-mapping layout and the text-only
+/// search path, so the two can never show different text.
+fn code_line_layout(line: &str, width: usize) -> (String, Vec<usize>, bool) {
+    let total: usize = line
+        .chars()
+        .map(|ch| {
+            if ch == '\t' {
+                4
+            } else {
+                UnicodeWidthChar::width(ch).unwrap_or(0)
+            }
+        })
+        .sum();
+    if total <= width {
+        let mut text = String::new();
+        let mut chars = Vec::new();
+        for (idx, ch) in line.char_indices() {
+            if ch == '\t' {
+                text.push_str("    ");
+            } else {
+                text.push(ch);
+            }
+            // A char may expand to more than one rendered cell (only the tab does); the
+            // mapping repeats its source offset once per rendered char.
+            let rendered = if ch == '\t' { 4 } else { 1 };
+            for _ in 0..rendered {
+                chars.push(idx);
+            }
         }
-        text.push_str(expanded);
+        return (text, chars, false);
+    }
+    // It does not fit: keep what fits before the ellipsis's column.
+    let limit = width.saturating_sub(1);
+    let mut text = String::new();
+    let mut chars = Vec::new();
+    let mut used = 0usize;
+    for (idx, ch) in line.char_indices() {
+        let w = if ch == '\t' {
+            4
+        } else {
+            UnicodeWidthChar::width(ch).unwrap_or(0)
+        };
+        if used + w > limit {
+            break;
+        }
+        if ch == '\t' {
+            text.push_str("    ");
+        } else {
+            text.push(ch);
+        }
+        let rendered = if ch == '\t' { 4 } else { 1 };
+        for _ in 0..rendered {
+            chars.push(idx);
+        }
         used += w;
     }
-    text
+    text.push('…');
+    (text, chars, true)
+}
+
+/// One code source line's rendered text (see [`code_line_layout`]).
+fn code_line_text(line: &str, width: usize) -> String {
+    code_line_layout(line, width).0
 }
 
 /// The text of a fenced code block's display lines (fences are markup). Mirrors [`code_lines`].
@@ -596,28 +640,8 @@ fn code_lines(raw: &str, offset: usize, closed: bool, width: usize) -> Vec<BodyL
     for line in body {
         // Byte offset of the line's first char within the display text.
         let offset = line.as_ptr() as usize - base + offset;
-        let mut chars = Vec::new();
-        let mut used = 0usize;
-        let mut cut = false;
-        let limit = width.saturating_sub(1);
-        for (idx, ch) in line.char_indices() {
-            let mut expanded = [0; 4];
-            let expanded: &str = if ch == '\t' {
-                "    "
-            } else {
-                ch.encode_utf8(&mut expanded)
-            };
-            let w = UnicodeWidthStr::width(expanded);
-            if width > 0 && used + w > limit {
-                cut = true;
-                break;
-            }
-            for _ in 0..expanded.chars().count() {
-                chars.push(offset + idx);
-            }
-            used += w;
-        }
-        let text = code_line_text(line, width);
+        let (text, kept, cut) = code_line_layout(line, width);
+        let mut chars: Vec<usize> = kept.into_iter().map(|idx| offset + idx).collect();
         if cut {
             // The ellipsis is decoration; map it to the last kept char.
             if let Some(&last) = chars.last() {
@@ -764,6 +788,40 @@ mod tests {
             lines[0].chars,
             vec![base, base + 1, base + 1, base + 1, base + 1, base + 2]
         );
+    }
+
+    #[test]
+    fn a_code_line_that_fits_exactly_is_not_truncated() {
+        // Exactly the width: it fits, so no ellipsis (the `…` costs a column).
+        let entry = assistant(&format!("```\n{}\n```", "x".repeat(20)));
+        let blocks = parse_blocks(&entry.text);
+        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 20);
+        assert_eq!(lines[0].text, "x".repeat(20));
+        assert!(!lines[0].text.contains('…'));
+        // One over: it does not fit; keep width-1 and mark the cut.
+        let entry = assistant(&format!("```\n{}\n```", "x".repeat(21)));
+        let blocks = parse_blocks(&entry.text);
+        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 20);
+        assert_eq!(lines[0].text, format!("{}…", "x".repeat(19)));
+        // The mapping still reaches the source line's end either way (the offset is into the
+        // entry text, which starts with the "```\n" fence line).
+        assert_eq!(lines[0].end, "```\n".len() + 21);
+    }
+
+    #[test]
+    fn cjk_lines_follow_the_same_fit_rule() {
+        // 6 columns at width 6: as-is.
+        let entry = assistant("```\n日本語\n```");
+        let blocks = parse_blocks(&entry.text);
+        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 6);
+        assert_eq!(lines[0].text, "日本語");
+        // 6 columns at width 5: keep 4 columns (2 wide chars) and the ellipsis.
+        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 5);
+        assert_eq!(lines[0].text, "日本…");
+        assert_eq!(lines[0].chars.len(), lines[0].text.chars().count());
+        // 6 columns at width 7: as-is.
+        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 7);
+        assert_eq!(lines[0].text, "日本語");
     }
 
     #[test]

@@ -679,6 +679,35 @@ fn a_code_block_does_not_wrap_and_truncates_with_an_ellipsis() {
     assert!(screen(&terminal).contains("after"), "the prose after it");
 }
 
+/// Only a notice's **first** line is a structured label (ADR 0028): a wrapped continuation
+/// that happens to contain a colon (`12:30`, `https://…`, `path:line`) is prose and keeps the
+/// body's level, not the accent.
+#[test]
+fn a_wrapped_notice_continuation_is_not_a_label() {
+    let mut app = App::new("m", "s");
+    // Width 27 → body 25, so the break lands just before `12:30`: the continuation starts
+    // with a colon token (the case that used to be mis-drawn as an accent label).
+    app.push_notice("aaaa bbbb cccc dddd eeee 12:30 ffff");
+    let terminal = render(&mut app, 27, 10);
+    let text = screen(&terminal);
+    assert!(text.contains("12:30"), "{text}");
+    let continuation = style_of(&terminal, "12:30").expect("the continuation is on screen");
+    assert_eq!(
+        continuation.fg, app.theme.notice_body.fg,
+        "a continuation is body text, not a label"
+    );
+    assert_ne!(
+        continuation.fg, app.theme.notice_label.fg,
+        "it must not get the accent"
+    );
+    // The first line, which has no colon prefix, is unaffected either way; a first line
+    // WITH a label still takes the accent.
+    app.push_notice("profile: workspace");
+    let terminal = render(&mut app, 27, 10);
+    let label = style_of(&terminal, "profile:").expect("the label");
+    assert_eq!(label.fg, app.theme.notice_label.fg);
+}
+
 /// Thinking folds (ADR 0028 R3): collapsed is one placeholder line, Ctrl-T expands it to the
 /// full text, and toggling back collapses it — the fold state is part of the layout cache
 /// key, so the count changes with it.
