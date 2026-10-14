@@ -29,6 +29,10 @@ use radian_session::{
 };
 
 use crate::config::{ConfigQueue, ConfigSlot, ModelRoute};
+
+/// Computes `B` for a (provider, model) from the warm local catalog (ADR 0026 D7). The host
+/// supplies it; it must not touch the network.
+pub type BudgetFor = Arc<dyn Fn(&str, &str) -> Option<u64> + Send + Sync>;
 use crate::inbox::{ControlRequest, Inbox, InboxEntry, Lane};
 
 /// Why the driver could not continue.
@@ -111,7 +115,7 @@ pub struct Driver<M: Model, P: ToolProvider, H: Hooks> {
     closed: bool,
     /// Computes `B` for a (provider, model) from the local catalog (ADR 0026 D7). The host
     /// sets it; without it a switch cannot move the budget.
-    budget_for: Option<Arc<dyn Fn(&str, &str) -> Option<u64> + Send + Sync>>,
+    budget_for: Option<BudgetFor>,
     /// The budget the next turn runs under: set when a model change is applied, `None` keeps
     /// the configured one.
     turn_budget: Option<ContextBudget>,
@@ -191,10 +195,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
 
     /// Sets the resolver that recomputes `B` for a switched model (ADR 0026 D7). The host
     /// supplies it; it must not touch the network (the startup fetch warmed the cache).
-    pub fn set_budget_for(
-        &mut self,
-        resolver: Arc<dyn Fn(&str, &str) -> Option<u64> + Send + Sync>,
-    ) {
+    pub fn set_budget_for(&mut self, resolver: BudgetFor) {
         self.budget_for = Some(resolver);
     }
 
