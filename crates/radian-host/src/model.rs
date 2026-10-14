@@ -125,8 +125,11 @@ pub struct ModelArgs {
     pub include_usage: Option<bool>,
     /// `anthropic` only.
     pub max_tokens: u32,
-    /// `anthropic` only.
+    /// `anthropic` only: the resolved thinking setting.
     pub thinking: Thinking,
+    /// `openai-compatible` only: the thinking level's wire value (ADR 0026 D11), sent as
+    /// `reasoning_effort`. `None` sends no key.
+    pub reasoning_effort: Option<String>,
 }
 
 /// Either provider behind one `Model`. `Model` is not object safe, so this is an enum and not
@@ -190,6 +193,41 @@ pub fn check_provider_flags(
     ))
 }
 
+/// Resolves a thinking **level** against a route's map (ADR 0026 D11): the Anthropic-side
+/// `Thinking` and the OpenAI-side `reasoning_effort` it builds into. Shared by the startup
+/// build and by every switch, so the two paths cannot drift.
+pub fn resolve_thinking(
+    descriptor_id: &str,
+    model: &str,
+    level: &str,
+    adapter: Provider,
+) -> (Thinking, Option<String>) {
+    let map = crate::descriptor(descriptor_id)
+        .and_then(|descriptor| crate::thinking_map_for(descriptor, model));
+    match crate::clamp_thinking(map, level) {
+        Some((_, wire)) if adapter == Provider::OpenAiCompatible => {
+            (Thinking::Off, Some(wire.to_owned()))
+        }
+        Some((_, wire)) => (thinking_from_wire(wire), None),
+        None => (Thinking::Off, None),
+    }
+}
+
+/// The Anthropic wire value a thinking map carries, as the adapter's `Thinking` (ADR 0026 D11):
+/// an empty value sends no `thinking` key, `adaptive` is the existing setting, and
+/// `enabled:<budget>` is a manual budget.
+fn thinking_from_wire(wire: &str) -> Thinking {
+    match wire {
+        "" => Thinking::Off,
+        "adaptive" => Thinking::Adaptive,
+        other => other
+            .strip_prefix("enabled:")
+            .and_then(|budget| budget.parse::<u32>().ok())
+            .map(|budget_tokens| Thinking::Enabled { budget_tokens })
+            .unwrap_or(Thinking::Adaptive),
+    }
+}
+
 /// Builds the provider adapter named by `args.provider`. The error is the same shape the
 /// hosts already printed for a bad `--base-url`.
 pub fn build_model(args: ModelArgs) -> Result<HostModel, String> {
@@ -205,6 +243,7 @@ pub fn build_model(args: ModelArgs) -> Result<HostModel, String> {
             }
             config.headers = args.headers;
             config.include_usage = args.include_usage;
+            config.reasoning_effort = args.reasoning_effort;
             OpenAiCompatible::new(config)
                 .map(HostModel::OpenAi)
                 .map_err(|e| format!("--base-url {shown_url}: {e}"))
@@ -296,7 +335,8 @@ pub struct RouteContext {
     pub user_headers: Vec<(String, String)>,
     pub include_usage: Option<bool>,
     pub max_tokens: u32,
-    pub thinking: Thinking,
+    /// The unified thinking level's **name** (ADR 0026 D11); clamped per route at build time.
+    pub thinking: String,
 }
 
 impl RouteContext {
@@ -323,6 +363,10 @@ impl RouteContext {
             &self.user_headers,
             &self.session_id,
         )?;
+        // The thinking level is clamped against **this route's** map (ADR 0026 D11): the same
+        // level can mean different wire values — or nothing — on different models.
+        let (thinking, reasoning_effort) =
+            resolve_thinking(provider_id, model, &self.thinking, route.adapter());
         Ok(ModelArgs {
             provider: route.adapter(),
             base_url: route.base_url,
@@ -331,7 +375,8 @@ impl RouteContext {
             headers: route.headers,
             include_usage: self.include_usage,
             max_tokens: self.max_tokens,
-            thinking: self.thinking,
+            thinking,
+            reasoning_effort,
         })
     }
 }

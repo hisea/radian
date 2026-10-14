@@ -6,7 +6,14 @@ use serde_json::{Map, Value, json};
 use crate::config::OpenAiCompatibleConfig;
 
 /// Keys the adapter owns. Settings may not override them.
-const RESERVED: [&str; 5] = ["model", "messages", "tools", "stream", "stream_options"];
+const RESERVED: [&str; 6] = [
+    "model",
+    "messages",
+    "tools",
+    "stream",
+    "stream_options",
+    "reasoning_effort",
+];
 
 pub(crate) fn build_body(
     request: &ModelRequest,
@@ -26,6 +33,11 @@ pub(crate) fn build_body(
     }
     body.insert("model".into(), json!(config.model));
     body.insert("stream".into(), json!(true));
+    // ADR 0026 D11: the thinking level's wire value, when the route's map gives one. Absent
+    // otherwise, so a level-less model keeps the pre-D11 request byte for byte.
+    if let Some(effort) = &config.reasoning_effort {
+        body.insert("reasoning_effort".into(), json!(effort));
+    }
     // Only ask for streamed usage when we handle it; some compatible servers reject the key.
     if include_usage {
         body.insert("stream_options".into(), json!({ "include_usage": true }));
@@ -550,5 +562,23 @@ mod tests {
         assert!(!body_text.contains("chain of thought"));
         assert!(!body_text.contains("thinking"));
         assert_eq!(body["model"], "test-model");
+    }
+
+    /// ADR 0026 D11: `reasoning_effort` rides along only when the route's map gave a wire
+    /// value; without one the request is unchanged (byte-for-byte with pre-D11).
+    #[test]
+    fn reasoning_effort_is_sent_only_when_set() {
+        let mut cfg = config();
+        cfg.reasoning_effort = Some("high".into());
+        let body = build_body(&request(vec![Message::user("hi")]), &cfg, false).unwrap();
+        assert_eq!(body["reasoning_effort"], "high");
+
+        let plain = build_body(&request(vec![Message::user("hi")]), &config(), false).unwrap();
+        assert!(plain.get("reasoning_effort").is_none(), "{plain}");
+
+        // The adapter owns the key: a request setting cannot override it.
+        let mut override_request = request(vec![Message::user("hi")]);
+        override_request.settings = json!({"reasoning_effort": "low"});
+        assert!(build_body(&override_request, &cfg, false).is_err());
     }
 }
