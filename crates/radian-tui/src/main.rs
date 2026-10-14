@@ -1860,10 +1860,10 @@ fn model_route_candidates(provider: Option<&str>) -> Vec<radian_tui::command::Ca
     // Built-in list first, then the cached `/v1/models` ids (D0), merged by model id.
     let mut seen = std::collections::HashSet::new();
     let mut candidates: Vec<radian_tui::command::Candidate> = Vec::new();
-    let mut push = |id: String,
-                    description: String,
-                    candidates: &mut Vec<radian_tui::command::Candidate>,
-                    seen: &mut std::collections::HashSet<String>| {
+    let push = |id: String,
+                description: String,
+                candidates: &mut Vec<radian_tui::command::Candidate>,
+                seen: &mut std::collections::HashSet<String>| {
         if seen.insert(id.clone()) {
             candidates.push(radian_tui::command::Candidate {
                 insert: format!("{provider}/{id}"),
