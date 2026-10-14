@@ -741,11 +741,13 @@ fn the_deck_usage_row_appears_only_with_data() {
         Some("opencode-go".to_string()),
         Some("high".to_string()),
     );
+    // Without data the row is **dropped**, not left blank: two rows, not three.
+    assert_eq!(app.footer.lines(&app, 100).len(), 2, "no usage, no row");
     let without = render(&mut app, 100, 12);
     assert!(!screen(&without).contains("5h:"), "{}", screen(&without));
     publish(&app, "opencode-go.usage", "5h: 98% · 7d: 81%");
+    assert_eq!(app.footer.lines(&app, 100).len(), 3, "usage adds a row");
     let with = render(&mut app, 100, 12);
-    // Three rows now: the usage line is the first of them.
     assert!(
         row(&with, 9).contains("5h: 98%"),
         "the usage row is the first of three:\n{}",
