@@ -14,6 +14,7 @@ use agent_extensions::{McpSession, McpToolProvider};
 use radian_coding::{AskSession, AskTools, CodingSession, CodingTools};
 
 use crate::memory::{MemorySession, MemoryTools};
+use crate::skills::tools::{SkillSession, SkillTools};
 
 pub struct HostTools {
     coding: Option<CodingTools>,
@@ -21,6 +22,8 @@ pub struct HostTools {
     /// `ask_user` (ADR 0024 Q5). Separate from the coding tools: a host with no workspace
     /// still has a human to ask.
     ask: Option<AskTools>,
+    /// `skill` (ADR 0025 S3). Read-only, so it is mounted whenever skills were discovered.
+    skills: Option<SkillTools>,
     mcp: McpToolProvider,
 }
 
@@ -34,6 +37,7 @@ impl HostTools {
             coding,
             memory,
             ask: None,
+            skills: None,
             mcp,
         }
     }
@@ -44,17 +48,26 @@ impl HostTools {
         self.ask = Some(ask);
         self
     }
+
+    /// Mounts the `skill` tool (ADR 0025 S3). Without a discovered skill the model's tool list
+    /// has no `skill` at all, so a host with no skills does not advertise it.
+    pub fn with_skills(mut self, skills: SkillTools) -> Self {
+        self.skills = Some(skills);
+        self
+    }
 }
 
 pub struct HostSession {
     coding: Option<CodingSession>,
     memory: Option<MemorySession>,
     ask: Option<AskSession>,
+    skills: Option<SkillSession>,
     mcp: McpSession,
     specs: Vec<ToolSpec>,
     coding_names: HashSet<String>,
     memory_names: HashSet<String>,
     ask_names: HashSet<String>,
+    skill_names: HashSet<String>,
 }
 
 impl ToolProvider for HostTools {
@@ -75,10 +88,15 @@ impl ToolProvider for HostTools {
             Some(ask) => Some(ask.open_session().await?),
             None => None,
         };
+        let skills = match &self.skills {
+            Some(skills) => Some(skills.open_session().await?),
+            None => None,
+        };
 
         let mut coding_names = HashSet::new();
         let mut memory_names = HashSet::new();
         let mut ask_names = HashSet::new();
+        let mut skill_names = HashSet::new();
         let mut built_in_specs: Vec<ToolSpec> = Vec::new();
         if let Some(coding) = &coding {
             for spec in coding.tool_specs() {
@@ -98,17 +116,25 @@ impl ToolProvider for HostTools {
                 built_in_specs.push(spec.clone());
             }
         }
+        if let Some(skills) = &skills {
+            for spec in skills.tool_specs() {
+                skill_names.insert(spec.name.clone());
+                built_in_specs.push(spec.clone());
+            }
+        }
         let specs = merge_tool_specs(built_in_specs, mcp.tool_specs().to_vec())?;
 
         Ok(HostSession {
             coding,
             memory,
             ask,
+            skills,
             mcp,
             specs,
             coding_names,
             memory_names,
             ask_names,
+            skill_names,
         })
     }
 }
@@ -123,7 +149,15 @@ impl ToolSession for HostSession {
         call: &ToolCall,
         cx: ToolContext<'_>,
     ) -> Result<ToolOutput, ToolFailure> {
-        if self.ask_names.contains(&call.name) {
+        if self.skill_names.contains(&call.name) {
+            match &self.skills {
+                Some(skills) => skills.execute(call, cx).await,
+                None => Err(ToolFailure::new(
+                    "unknown_tool",
+                    format!("`{}` has no skill session", call.name),
+                )),
+            }
+        } else if self.ask_names.contains(&call.name) {
             match &self.ask {
                 Some(ask) => ask.execute(call, cx).await,
                 None => Err(ToolFailure::new(
