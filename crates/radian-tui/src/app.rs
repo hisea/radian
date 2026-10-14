@@ -21,9 +21,9 @@ use radian_permissions::{ApprovalOutcome, ApprovalRequest};
 use radian_session::RuntimeEvent;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::command::{self, PendingCommand};
 use crate::clip::ClipboardMode;
 use crate::clip::MAX_CLIPBOARD_BYTES;
+use crate::command::{self, PendingCommand};
 use crate::composer::Composer;
 use crate::find::FindState;
 use crate::keys::{Action, Keymap};
@@ -757,8 +757,7 @@ impl App {
             .as_deref()
             .and_then(ClipboardMode::parse)
             .unwrap_or_default();
-        if self.clipboard == ClipboardMode::PbCopy && !self.clipboard.supported_on_this_platform()
-        {
+        if self.clipboard == ClipboardMode::PbCopy && !self.clipboard.supported_on_this_platform() {
             self.clipboard = ClipboardMode::Osc52;
             warnings.push("tui.clipboard = \"pbcopy\" is macOS-only; using osc52".into());
         }
@@ -880,24 +879,38 @@ impl App {
             && self.transcript_width > 0;
         let cleared = had.is_some();
         if !inside {
-            return cleared.then(UpdateResult::dirty).unwrap_or(UpdateResult::none());
+            return cleared
+                .then(UpdateResult::dirty)
+                .unwrap_or(UpdateResult::none());
         }
         // The fixed end is located once, here: a scroll during the drag moves the view, not
         // the anchor. An empty transcript simply starts nothing.
         let press_line = self.scroll + row as usize;
-        let Some(hit) =
-            select::locate_hit(&self.entries, self.transcript_width, press_line, col as usize)
-        else {
-            return cleared.then(UpdateResult::dirty).unwrap_or(UpdateResult::none());
+        let Some(hit) = select::locate_hit(
+            &self.entries,
+            self.transcript_width,
+            press_line,
+            col as usize,
+        ) else {
+            return cleared
+                .then(UpdateResult::dirty)
+                .unwrap_or(UpdateResult::none());
         };
         // A multi-click replaces the just-cleared selection with its bigger range and
         // anchors the gesture at its start, so a following drag extends from the word (or
         // the entry).
         let (anchor, anchor_on_char) = match count {
-            2 => match select::run_at(&self.entries, self.transcript_width, press_line, col as usize)
-            {
+            2 => match select::run_at(
+                &self.entries,
+                self.transcript_width,
+                press_line,
+                col as usize,
+            ) {
                 Some((start, end)) => {
-                    self.selection = Some(Selection { anchor: start, head: end });
+                    self.selection = Some(Selection {
+                        anchor: start,
+                        head: end,
+                    });
                     (start, true)
                 }
                 None => (hit.anchor, hit.on_char),
@@ -906,10 +919,22 @@ impl App {
                 let len = select::entry_display_len(&self.entries, hit.anchor.entry);
                 if len > 0 {
                     self.selection = Some(Selection {
-                        anchor: Anchor { entry: hit.anchor.entry, offset: 0 },
-                        head: Anchor { entry: hit.anchor.entry, offset: len },
+                        anchor: Anchor {
+                            entry: hit.anchor.entry,
+                            offset: 0,
+                        },
+                        head: Anchor {
+                            entry: hit.anchor.entry,
+                            offset: len,
+                        },
                     });
-                    (Anchor { entry: hit.anchor.entry, offset: 0 }, true)
+                    (
+                        Anchor {
+                            entry: hit.anchor.entry,
+                            offset: 0,
+                        },
+                        true,
+                    )
                 } else {
                     (hit.anchor, hit.on_char)
                 }
@@ -924,7 +949,9 @@ impl App {
             anchor_on_char,
             count,
         });
-        cleared.then(UpdateResult::dirty).unwrap_or(UpdateResult::none())
+        cleared
+            .then(UpdateResult::dirty)
+            .unwrap_or(UpdateResult::none())
     }
 
     /// The press counter for double/triple-click: one more when the same cell is pressed
@@ -1043,18 +1070,25 @@ impl App {
             return;
         };
         let head_line = self.scroll + row as usize;
-        let Some(hit) = select::locate_hit(&self.entries, self.transcript_width, head_line, col as usize)
-        else {
+        let Some(hit) = select::locate_hit(
+            &self.entries,
+            self.transcript_width,
+            head_line,
+            col as usize,
+        ) else {
             return;
         };
-        let ((start, mut end)) = if
-            (hit.anchor.entry, hit.anchor.offset) < (drag.anchor.entry, drag.anchor.offset)
-        {
-            (hit.anchor, drag.anchor)
+        let (start, mut end) =
+            if (hit.anchor.entry, hit.anchor.offset) < (drag.anchor.entry, drag.anchor.offset) {
+                (hit.anchor, drag.anchor)
+            } else {
+                (drag.anchor, hit.anchor)
+            };
+        let end_on_char = if end == hit.anchor {
+            hit.on_char
         } else {
-            (drag.anchor, hit.anchor)
+            drag.anchor_on_char
         };
-        let end_on_char = if end == hit.anchor { hit.on_char } else { drag.anchor_on_char };
         if end_on_char {
             end.offset += select::char_len_at(&self.entries, end).unwrap_or(1);
         }

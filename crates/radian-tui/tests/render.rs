@@ -466,7 +466,7 @@ fn the_box_input_style_draws_the_bordered_box() {
 /// own foreground (the patch only adds the background).
 #[test]
 fn a_selection_draws_the_selection_role_on_its_cells() {
-    use radian_tui::select::{locate, Selection};
+    use radian_tui::select::{Selection, locate};
     let mut app = App::new("m", "s");
     app.push_message(&Message::user("hello selection"));
     app.set_transcript_width(40);
@@ -482,7 +482,11 @@ fn a_selection_draws_the_selection_role_on_its_cells() {
     let text = screen(&terminal);
     assert!(text.contains("hello selection"), "{text}");
     let word = style_of(&terminal, "selection").expect("the selected word is on screen");
-    assert_eq!(word.bg, Some(Color::DarkGray), "the dark theme's selection band");
+    assert_eq!(
+        word.bg,
+        Some(Color::DarkGray),
+        "the dark theme's selection band"
+    );
     let before = style_of(&terminal, "hello").expect("the unselected head of the line");
     assert_eq!(
         before.bg,
@@ -495,7 +499,7 @@ fn a_selection_draws_the_selection_role_on_its_cells() {
 /// The `mono` theme's selection is reverse video, never a color (`NO_COLOR` and `mono`).
 #[test]
 fn the_mono_selection_is_reversed_not_colored() {
-    use radian_tui::select::{locate, Selection};
+    use radian_tui::select::{Selection, locate};
     let mut app = App::new("m", "s");
     app.theme = radian_tui::theme::Theme::mono();
     app.push_message(&Message::user("hello selection"));
@@ -509,20 +513,26 @@ fn the_mono_selection_is_reversed_not_colored() {
     let terminal = render(&mut app, 40, 6);
     let word = style_of(&terminal, "selection").expect("on screen");
     assert_eq!(word.bg, Some(Color::Reset), "no colored band in mono");
-    assert!(word.add_modifier.contains(ratatui::style::Modifier::REVERSED));
+    assert!(
+        word.add_modifier
+            .contains(ratatui::style::Modifier::REVERSED)
+    );
 }
 
 /// A single click's empty selection draws nothing anywhere.
 #[test]
 fn an_empty_selection_draws_nothing() {
-    use radian_tui::select::{locate, Selection};
+    use radian_tui::select::{Selection, locate};
     let mut app = App::new("m", "s");
     app.push_message(&Message::user("hello selection"));
     app.set_transcript_width(40);
     let (total, _) = radian_tui::render::visible_lines(&mut app.entries, 40, 0, 0, &app.theme);
     app.set_viewport(u16::try_from(total).unwrap(), total);
     let at = locate(&app.entries, 40, 0, 8).expect("anchor");
-    app.selection = Some(Selection { anchor: at, head: at });
+    app.selection = Some(Selection {
+        anchor: at,
+        head: at,
+    });
     let text = screen(&render(&mut app, 40, 6));
     assert!(text.contains("hello selection"), "{text}");
     assert_eq!(

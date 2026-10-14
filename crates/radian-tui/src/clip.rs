@@ -52,7 +52,7 @@ impl ClipboardMode {
 /// predictable (`4 * ceil(n / 3)`).
 pub fn osc52(text: &str) -> String {
     let bytes = text.as_bytes();
-    let mut out = String::with_capacity(10 + (bytes.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(10 + bytes.len().div_ceil(3) * 4);
     out.push_str("\x1b]52;c;");
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     for chunk in bytes.chunks(3) {
@@ -85,12 +85,19 @@ mod tests {
 
     #[test]
     fn modes_round_trip_and_unknown_names_are_none() {
-        for mode in [ClipboardMode::Osc52, ClipboardMode::PbCopy, ClipboardMode::Off] {
-            assert_eq!(ClipboardMode::parse(match mode {
-                ClipboardMode::Osc52 => "osc52",
-                ClipboardMode::PbCopy => "pbcopy",
-                ClipboardMode::Off => "off",
-            }), Some(mode));
+        for mode in [
+            ClipboardMode::Osc52,
+            ClipboardMode::PbCopy,
+            ClipboardMode::Off,
+        ] {
+            assert_eq!(
+                ClipboardMode::parse(match mode {
+                    ClipboardMode::Osc52 => "osc52",
+                    ClipboardMode::PbCopy => "pbcopy",
+                    ClipboardMode::Off => "off",
+                }),
+                Some(mode)
+            );
         }
         assert_eq!(ClipboardMode::parse("system"), None);
         assert_eq!(ClipboardMode::parse(""), None);
@@ -109,7 +116,11 @@ mod tests {
         let seq = osc52("日");
         assert_eq!(seq, "\x1b]52;c;5pel\x07");
         // 5pel decodes to E6 97 A5 = U+65E5.
-        assert_eq!(seq.trim_start_matches("\x1b]52;c;").trim_end_matches('\x07'), "5pel");
+        assert_eq!(
+            seq.trim_start_matches("\x1b]52;c;")
+                .trim_end_matches('\x07'),
+            "5pel"
+        );
     }
 
     #[test]

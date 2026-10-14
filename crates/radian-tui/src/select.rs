@@ -145,10 +145,7 @@ fn locate_in_entry(
 /// or past the text's end.
 pub fn char_len_at(entries: &[Entry], anchor: Anchor) -> Option<usize> {
     let text = display_text(entries.get(anchor.entry)?);
-    text[anchor.offset..]
-        .chars()
-        .next()
-        .map(char::len_utf8)
+    text[anchor.offset..].chars().next().map(char::len_utf8)
 }
 
 /// An entry's display-text length in bytes (what a triple-click selects: offsets `0..len`).
@@ -163,7 +160,12 @@ pub fn entry_display_len(entries: &[Entry], index: usize) -> usize {
 /// one, the whitespace run when it is on a space. Both ends are `(start, end after the last
 /// char)` — a ready normalized selection range. A click on the prefix or past a line's end
 /// expands from the char the gap maps to, exactly like a drag from there would.
-pub fn run_at(entries: &[Entry], width: usize, line: usize, col: usize) -> Option<(Anchor, Anchor)> {
+pub fn run_at(
+    entries: &[Entry],
+    width: usize,
+    line: usize,
+    col: usize,
+) -> Option<(Anchor, Anchor)> {
     let hit = locate_hit(entries, width, line, col)?;
     let anchor = hit.anchor;
     let text = display_text(entries.get(anchor.entry)?);
@@ -426,10 +428,7 @@ mod tests {
 
     #[test]
     fn entries_are_joined_by_a_newline_and_prefixes_are_never_copied() {
-        let entries = [
-            Entry::new(EntryKind::User, "asked"),
-            entry("answered"),
-        ];
+        let entries = [Entry::new(EntryKind::User, "asked"), entry("answered")];
         let sel = Selection {
             anchor: locate(&entries, 20, 0, 2).expect("user start"),
             head: locate(&entries, 20, 1, 200).expect("assistant end"),
@@ -443,7 +442,13 @@ mod tests {
         };
         assert_eq!(logical_text(&entries, &sel), "ask");
         assert_eq!(
-            logical_text(&entries, &Selection { anchor: sel.anchor, head: sel.anchor }),
+            logical_text(
+                &entries,
+                &Selection {
+                    anchor: sel.anchor,
+                    head: sel.anchor
+                }
+            ),
             ""
         );
     }
@@ -487,7 +492,10 @@ mod tests {
         let rows = highlight_rows(&entries, width, 0, 1, &sel);
         assert_eq!(rows, vec![vec![(2, 8)]]);
         // Backwards selection normalizes to the same cells.
-        let rev = Selection { anchor: sel.head, head: sel.anchor };
+        let rev = Selection {
+            anchor: sel.head,
+            head: sel.anchor,
+        };
         assert_eq!(highlight_rows(&entries, width, 0, 1, &rev), rows);
     }
 
@@ -507,7 +515,10 @@ mod tests {
         // A window scrolled past the selection reports no rows at all.
         assert!(highlight_rows(&entries, width, 2, 3, &sel).is_empty());
         // And the row above it is simply not highlighted.
-        assert_eq!(highlight_rows(&entries, width, 1, 1, &sel), vec![vec![(2, 4)]]);
+        assert_eq!(
+            highlight_rows(&entries, width, 1, 1, &sel),
+            vec![vec![(2, 4)]]
+        );
     }
 
     #[test]
@@ -525,7 +536,10 @@ mod tests {
             anchor: locate(&entries, 8, 0, 2).expect("narrow, same text"),
             head: locate(&entries, 8, 1, 4).expect("narrow, same text"),
         };
-        assert_eq!(logical_text(&entries, &narrow), logical_text(&entries, &wide));
+        assert_eq!(
+            logical_text(&entries, &narrow),
+            logical_text(&entries, &wide)
+        );
         assert_eq!(logical_text(&entries, &wide), "aaaa bbb");
     }
 }

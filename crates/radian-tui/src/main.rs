@@ -22,8 +22,8 @@ use radian_permissions::{
     runtime_event,
 };
 use radian_session::{Index, SessionJournal};
-use radian_tui::app::{App, Effect, Input as AppInput, MemoryResult, PickerData, AUTO_SCROLL_TICK};
-use radian_tui::clip::{osc52, ClipboardMode};
+use radian_tui::app::{AUTO_SCROLL_TICK, App, Effect, Input as AppInput, MemoryResult, PickerData};
+use radian_tui::clip::{ClipboardMode, osc52};
 use radian_tui::events::{InputEvent, ProjectionSink, UiEvent};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;

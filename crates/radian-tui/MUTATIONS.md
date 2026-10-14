@@ -542,3 +542,27 @@ Base `613312c` · 一次性 worktree `/tmp/ui-r1-mut` · 独立 `CARGO_TARGET_DI
 是假通过。加上 `assert old in s` 并按实际文本重做后，两个都抓住。**U8** 是本次修的 bug 的变异
 （`/sessions` 在备用屏里打印 `[privacy]` 警告 → 渲染 diff 跳过那些 cell → picker 的标题/filter 行被糊掉）；
 它只在**全量套件**里稳定复现（单跑 10 次全过），所以那次变异跑的是整个 pty 套件。
+
+## Slice: transcript selection and copy (mouse drag, OSC 52)
+
+Base `c8e1a35→`（本片 HEAD）· 一次性 worktree `/tmp/tui-mut-select`（`git worktree add` 自本片
+HEAD，结束后删除）· 每个变异改完跑对应测试、`git checkout -- .` 还原、`git status --short`
+为空。变异脚本带 `assert old in s`（吸取 U3/U4 的教训：no-op patch 是假通过）。
+
+| # | 需求 | 变异 | 抓住它的测试 |
+|---|---|---|---|
+| SC1 | 多开 `?1002h`，`?1003h` 永不开 | 使能序列改成 `?1000h ?1003h ?1006h` | `pty_a_mouse_drag_copies_the_selection_via_osc52`（断言精确三元组 + 不含 `?1003`） |
+| SC2 | 折行处不插入换行 | 拷贝改成 `display_lines(..).join("\n")` | `a_copy_across_a_soft_wrap_inserts_no_newline`、`press_drag_release_produces_the_copy_effect` |
+| SC3 | 所有退出路径关闭 `?1002` | 关闭序列删掉 `?1002l` | `pty_quit_closes_button_motion_reporting`（另有 `assert_mouse_released` 双保险） |
+| SC4 | Modal 上按下不开始选择 | 去掉 `mouse_down` 的 `has_modal` 门 | `a_press_on_a_modal_never_starts_one` |
+| SC5 | `update` 不直接写 stdout | 在 `mouse_up` 里直接 `io::stdout().write_all(osc52(..))` | `purity::app_rs_is_pure`（本片把 `io::stdout`/`io::stderr` 加进禁止表） |
+
+5/5 抓住。**过程记录（SC4 的两轮）**：第一版测试在 `set_viewport(2, 6)` 后按 (4, 5)——
+视口已缩到 2 行，按下去本来就在 transcript 之外，变异等于没被实验；第二版按 (1, 5)（视口内）
+仍没抓住，因为 follow 把 scroll 钉在底部，press/drag 都钳到同一条「末尾之后的缝隙」，选区为空。
+最终 `scroll = 0; follow = false` 后变异才被抓住。教训：测「某个门存在」必须让门后路径真的产生
+可观察状态。
+
+**本片另加的两个行为断言**（不是变异，是回归钉）：`pty_pointer_motion_alone_draws_no_frame`
+（无按键移动 40 次、帧数不涨——SC1 的行为面）和
+`pty_quit_closes_button_motion_reporting`（退出序列精确为 `1006l 1002l 1000l`——SC3 的精确面）。

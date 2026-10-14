@@ -4,10 +4,10 @@
 //! is one tick of app state.
 
 use agent_core::Message;
-use radian_permissions::ApprovalRequest;
-use radian_tui::app::{App, Effect, Input, UpdateResult, AUTO_SCROLL_TICK};
-use radian_tui::clip::MAX_CLIPBOARD_BYTES;
 use radian_host::{PendingRequest, PendingView};
+use radian_permissions::ApprovalRequest;
+use radian_tui::app::{AUTO_SCROLL_TICK, App, Effect, Input, UpdateResult};
+use radian_tui::clip::MAX_CLIPBOARD_BYTES;
 use serde_json::json;
 
 fn approval() -> PendingView<PendingRequest> {
@@ -54,7 +54,10 @@ fn press_drag_release_produces_the_copy_effect() {
     let mut app = app();
     // Lines 0..2 are the entries (width 30 wraps nothing). Selecting from line 0's first
     // char through line 1's end copies both entries, joined by one newline.
-    assert!(!press(&mut app, 0, 2).dirty, "a press that starts nothing draws nothing");
+    assert!(
+        !press(&mut app, 0, 2).dirty,
+        "a press that starts nothing draws nothing"
+    );
     let drag = drag(&mut app, 1, 25);
     assert!(drag.dirty);
     assert!(app.selection.is_some(), "the drag is live");
@@ -146,7 +149,10 @@ fn a_press_on_a_modal_never_starts_one() {
     assert!(app.selection.is_none());
     drag(&mut app, 1, 9);
     release(&mut app, 1, 9);
-    assert!(app.selection.is_none(), "the drag would have selected real text");
+    assert!(
+        app.selection.is_none(),
+        "the drag would have selected real text"
+    );
     // The modal's own rows are outside the viewport, doubly so.
     assert!(!press(&mut app, 4, 5).dirty);
     assert!(app.selection.is_none());
@@ -162,11 +168,9 @@ fn a_press_on_the_picker_overlay_never_starts_one() {
         message_count: 1,
         summary: "first".into(),
     }];
-    app.push_overlay(radian_tui::app::Overlay::Picker(radian_tui::picker::Picker::new(
-        rows,
-        None,
-        "/w",
-    )));
+    app.push_overlay(radian_tui::app::Overlay::Picker(
+        radian_tui::picker::Picker::new(rows, None, "/w"),
+    ));
     assert!(!press(&mut app, 0, 0).dirty);
     assert!(app.selection.is_none());
 }
@@ -177,7 +181,10 @@ fn with_mouse_off_the_whole_feature_is_gone() {
     config.tui.mouse = Some(false);
     let mut app = app();
     app.apply_config(&config, false).unwrap();
-    assert!(app.clipboard == radian_tui::ClipboardMode::Osc52, "unrelated config still applies");
+    assert!(
+        app.clipboard == radian_tui::ClipboardMode::Osc52,
+        "unrelated config still applies"
+    );
     // Even a stray mouse event (which `tui.mouse = false` prevents upstream) does nothing.
     press(&mut app, 0, 2);
     drag(&mut app, 1, 7);
@@ -207,7 +214,10 @@ fn clipboard_config_selects_the_transport_and_pbcopy_falls_back_off_macos() {
         assert!(warnings.is_empty(), "{warnings:?}");
     } else {
         assert_eq!(app.clipboard, radian_tui::ClipboardMode::Osc52);
-        assert!(warnings.iter().any(|w| w.contains("pbcopy")), "{warnings:?}");
+        assert!(
+            warnings.iter().any(|w| w.contains("pbcopy")),
+            "{warnings:?}"
+        );
     }
 }
 
@@ -230,7 +240,11 @@ fn an_oversized_selection_is_refused_with_the_reason() {
     assert!(app.selection.is_none(), "the refused selection is dropped");
     let notice = app.entries.last().expect("the reason is a notice");
     assert!(notice.text.contains("too large"), "{:?}", notice.text);
-    assert!(notice.text.contains(&MAX_CLIPBOARD_BYTES.to_string()), "{:?}", notice.text);
+    assert!(
+        notice.text.contains(&MAX_CLIPBOARD_BYTES.to_string()),
+        "{:?}",
+        notice.text
+    );
 }
 
 #[test]
@@ -258,13 +272,19 @@ fn the_drag_autoscrolls_at_the_edges_one_tick_at_a_time() {
     assert!(!app.mouse_autoscroll(), "the pointer is not at an edge yet");
     drag(&mut app, 5, 0);
     assert!(app.is_selecting());
-    assert!(app.mouse_autoscroll(), "held past the bottom, the view moves");
+    assert!(
+        app.mouse_autoscroll(),
+        "held past the bottom, the view moves"
+    );
     assert_eq!(app.scroll, app.max_scroll - 9, "one line per tick");
     // Held at the top edge it scrolls back up.
     drag(&mut app, 0, 0);
     let mut ticks = 0;
     while app.scroll > 0 {
-        assert!(app.mouse_autoscroll(), "held at the top, the view keeps moving");
+        assert!(
+            app.mouse_autoscroll(),
+            "held at the top, the view keeps moving"
+        );
         ticks += 1;
         assert!(ticks < 100, "the ticks converge");
     }
@@ -284,7 +304,10 @@ fn auto_scroll_only_ticks_while_a_drag_is_live() {
     let mut app = app();
     assert!(!app.mouse_autoscroll());
     app.update(Input::Pending(Some(Box::new(approval())), 1));
-    assert!(!app.mouse_autoscroll(), "no drag, no tick — the loop stays in blocking recv");
+    assert!(
+        !app.mouse_autoscroll(),
+        "no drag, no tick — the loop stays in blocking recv"
+    );
 }
 
 #[test]
@@ -334,12 +357,7 @@ fn the_char_under_the_release_is_inside_the_selection() {
     press(&mut app, 0, 0);
     drag(&mut app, 0, 1);
     let result = release(&mut app, 0, 0);
-    assert_eq!(
-        result.effects,
-        vec![Effect::Copy {
-            text: "h".into()
-        }]
-    );
+    assert_eq!(result.effects, vec![Effect::Copy { text: "h".into() }]);
 }
 
 #[test]
@@ -351,10 +369,7 @@ fn a_drag_that_returns_to_its_press_cell_is_still_a_selection() {
     drag(&mut app, 0, 3);
     drag(&mut app, 0, 2);
     let result = release(&mut app, 0, 2);
-    assert_eq!(
-        result.effects,
-        vec![Effect::Copy { text: "h".into() }]
-    );
+    assert_eq!(result.effects, vec![Effect::Copy { text: "h".into() }]);
 }
 
 #[test]
@@ -365,11 +380,16 @@ fn a_double_click_selects_a_word_and_its_release_copies_it() {
     press(&mut app, 0, 8);
     let selection = app.selection.expect("the word is selected");
     let (start, end) = selection.ordered();
-    assert_eq!((start.entry, start.offset, end.entry, end.offset), (0, 6, 0, 11));
+    assert_eq!(
+        (start.entry, start.offset, end.entry, end.offset),
+        (0, 6, 0, 11)
+    );
     let result = release(&mut app, 0, 8);
     assert_eq!(
         result.effects,
-        vec![Effect::Copy { text: "there".into() }]
+        vec![Effect::Copy {
+            text: "there".into()
+        }]
     );
 }
 
@@ -395,7 +415,10 @@ fn a_click_sequence_on_different_cells_is_three_single_clicks() {
     press(&mut app, 0, 8);
     press(&mut app, 0, 9);
     press(&mut app, 0, 10);
-    assert!(app.selection.is_none(), "no word got selected: not one cell");
+    assert!(
+        app.selection.is_none(),
+        "no word got selected: not one cell"
+    );
 }
 
 #[test]

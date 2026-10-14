@@ -27,6 +27,6 @@ pub use app::{
     App, Effect, Entry, EntryKind, Input, MemoryResult, MouseScrollDirection, PickerData, Startup,
     TurnState, UpdateResult,
 };
-pub use composer::Composer;
 pub use clip::{ClipboardMode, MAX_CLIPBOARD_BYTES};
+pub use composer::Composer;
 pub use select::{Anchor, Selection};

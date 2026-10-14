@@ -420,13 +420,21 @@ pub fn highlight(line: Line<'static>, query: &str) -> Line<'static> {
 /// coordinates — the `> ` prefix's cells included — and a wide char is selected when either
 /// of its two cells is. A span is split only where the selection boundary falls inside it;
 /// runs never cross spans, so each piece keeps its own base style.
-fn apply_selection(line: Line<'static>, ranges: &[(usize, usize)], selection: Style) -> Line<'static> {
+fn apply_selection(
+    line: Line<'static>,
+    ranges: &[(usize, usize)],
+    selection: Style,
+) -> Line<'static> {
     let mut out: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + ranges.len());
     let mut col = 0usize;
     let mut run: Option<(String, bool)> = None;
     let flush = |out: &mut Vec<Span<'static>>, run: &mut Option<(String, bool)>, base: Style| {
         if let Some((text, run_selected)) = run.take() {
-            let styled = if run_selected { base.patch(selection) } else { base };
+            let styled = if run_selected {
+                base.patch(selection)
+            } else {
+                base
+            };
             out.push(Span::styled(text, styled));
         }
     };

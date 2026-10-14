@@ -5644,7 +5644,8 @@ fn sgr(code: u8, col: u16, row: u16, press: bool) -> Vec<u8> {
 /// The owner's ask: hold the left button, drag across transcript text, release — the
 /// selection's logical text reaches the clipboard as OSC 52 (`ESC]52;c;<base64>BEL`), and the
 /// status bar says what actually happened ("via OSC 52"), never that the clipboard holds it.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
 async fn pty_a_mouse_drag_copies_the_selection_via_osc52() {
     let _serial = pty_guard();
     let dir = TempDir::new("select-copy");
@@ -5740,7 +5741,11 @@ fn pty_pointer_motion_alone_draws_no_frame() {
         20,
         100,
     );
-    assert!(pty.wait_for_screen("type a message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("type a message", 10),
+        "{}",
+        pty.screen()
+    );
     let before = frame_count(&pty);
 
     // A pointer wandering across the screen, buttons up, for a while.
@@ -5777,7 +5782,11 @@ fn pty_quit_closes_button_motion_reporting() {
         20,
         100,
     );
-    assert!(pty.wait_for_screen("type a message", 10), "{}", pty.screen());
+    assert!(
+        pty.wait_for_screen("type a message", 10),
+        "{}",
+        pty.screen()
+    );
     pty.quit();
     let raw = String::from_utf8_lossy(&pty.raw()).to_string();
     assert!(

@@ -57,11 +57,20 @@ pub enum InputEvent {
     MouseScroll(MouseScrollDirection),
     /// The left button went down at `(row, col)` (screen coordinates, `0`-based): the press
     /// that may start a transcript selection.
-    MouseDown { row: u16, col: u16 },
+    MouseDown {
+        row: u16,
+        col: u16,
+    },
     /// The left button moved while held: extends the selection.
-    MouseDrag { row: u16, col: u16 },
+    MouseDrag {
+        row: u16,
+        col: u16,
+    },
     /// The left button came up: ends the selection and copies it.
-    MouseUp { row: u16, col: u16 },
+    MouseUp {
+        row: u16,
+        col: u16,
+    },
 }
 
 /// Maps a crossterm terminal event to the UI's input vocabulary. `None` means the event is
@@ -219,11 +228,20 @@ mod tests {
         ));
         // The selection gesture: left button down, drag, up — with the cell carried along.
         let down = input_event(mouse(MouseEventKind::Down(MouseButton::Left)));
-        assert!(matches!(down, Some(InputEvent::MouseDown { row: 4, col: 3 })), "{down:?}");
+        assert!(
+            matches!(down, Some(InputEvent::MouseDown { row: 4, col: 3 })),
+            "{down:?}"
+        );
         let drag = input_event(mouse(MouseEventKind::Drag(MouseButton::Left)));
-        assert!(matches!(drag, Some(InputEvent::MouseDrag { row: 4, col: 3 })), "{drag:?}");
+        assert!(
+            matches!(drag, Some(InputEvent::MouseDrag { row: 4, col: 3 })),
+            "{drag:?}"
+        );
         let up = input_event(mouse(MouseEventKind::Up(MouseButton::Left)));
-        assert!(matches!(up, Some(InputEvent::MouseUp { row: 4, col: 3 })), "{up:?}");
+        assert!(
+            matches!(up, Some(InputEvent::MouseUp { row: 4, col: 3 })),
+            "{up:?}"
+        );
         for dropped in [
             MouseEventKind::Down(MouseButton::Right),
             MouseEventKind::Up(MouseButton::Middle),
