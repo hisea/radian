@@ -290,6 +290,14 @@ fn a_find_jump_lands_on_the_markdown_paragraph_under_a_folded_entry() {
     app.entries
         .push(radian_tui::app::Entry::new(EntryKind::Reasoning, &thinking));
     assistant(&mut app, "A **bold** paragraph here\n");
+    // Filler below, so the transcript is longer than the viewport and the jump's scroll is
+    // not clamped to zero: an expanded jump would scroll the paragraph off the top.
+    for i in 0..30 {
+        app.entries.push(radian_tui::app::Entry::new(
+            EntryKind::Notice,
+            format!("filler {i}"),
+        ));
+    }
     let width = 40;
     let _ = render(&mut app, width as u16, 12);
     let modes = app.display_modes();
