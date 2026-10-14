@@ -39,6 +39,15 @@ context window"). All three end the turn `failed` today (ADR 0017); the automati
 that would retry an overflow is a later slice. A host that only has the error text recognizes
 the last by `CONTEXT_OVERFLOW_PREFIX`.
 
+`ModelUsage` carries the provider's own numbers unmodified (ADR 0007 J1), so it also records
+**what those numbers mean**: `input_includes_cache` is `Some(true)` when `input` already
+contains the cache hit (OpenAI-compatible `prompt_tokens`), `Some(false)` when it does not
+(Anthropic `input_tokens`), and `None` on a record written before ADR 0007. A
+consumer converts instead of adding fields up by hand: `prompt_total()` is the whole prompt
+(what the context budget is about) and `uncached_input()` is the part billed at the full input
+rate (what the fee is about); `has_billable_counters()` says whether there is anything to
+price at all. This is the ADR 0007 change to the public type.
+
 `compaction` (ADR 0018) is the I/O-free half of automatic compaction: `keep_target`,
 `units` (the atomic cut points), `plan`, `summary_request`, `check_summary` and
 `compacted_history`. It is pure and `async`-free; the turn loop that calls a summarizer,
@@ -95,6 +104,7 @@ so no host reimplements them.
 | Markers from before a replacement never repair a reused call id | `markers_from_before_a_replacement_never_repair_a_reused_call_id` | `tests/replace.rs` |
 | Usage follows its assistant message, is written only when present, and a failed append fails the turn | `usage_is_journaled_after_the_assistant_message_and_only_when_present`, `usage_append_failure_sweep` | `tests/usage.rs` |
 | `replay`/`recover` ignore usage records; an all-empty `ModelUsage` serializes as `{}`; nested `details` round-trip verbatim | `replay_and_recover_ignore_usage_records`, `default_usage_serializes_as_an_empty_object`, `details_round_trip_preserves_the_nested_object_verbatim` | `tests/usage.rs` |
+| Whether `input` contains the cache hit is the adapter's declaration, and `prompt_total()`/`uncached_input()` are the only consumer-side conversions (ADR 0007) | `the_prompt_total_is_the_whole_input_and_the_uncached_part_is_billed_at_the_full_rate`, `an_unmarked_record_is_taken_at_face_value_and_a_bad_one_never_wraps` | `tests/usage.rs` |
 | A failed or dropped `close()` can be retried and still closes | `failed_close_can_be_retried`, `dropped_close_can_be_retried` | `tests/close.rs` |
 
 The mutation records for this crate are `MUTATIONS-R1.md` (reasoning, 10/10 caught),

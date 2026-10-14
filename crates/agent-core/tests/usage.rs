@@ -56,6 +56,150 @@ fn old_json_with_missing_fields_reads_as_none() {
     assert_eq!(usage.cache_read, None);
     assert_eq!(usage.cache_write, None);
     assert_eq!(usage.details, None);
+    // A record written before ADR 0007 says nothing about the input's cache
+    // semantics; `None` is "not marked", which is not "zero" and not "false".
+    assert_eq!(usage.input_includes_cache, None);
+}
+
+// ---------- the input's cache semantics (ADR 0007) ----------
+
+/// The two shapes side by side, on the research's own numbers (§3.2): a 200 000-token prompt
+/// with 190 000 of it cached. `prompt_total()` is the whole request in both (the context
+/// budget's question), `uncached_input()` is the part billed at the full input rate (the
+/// fee's question) — and the cached tokens are in exactly one of the two terms.
+#[test]
+fn the_prompt_total_is_the_whole_input_and_the_uncached_part_is_billed_at_the_full_rate() {
+    // OpenAI shape: `input` contains the cached part.
+    let openai = ModelUsage {
+        input: Some(200_000),
+        output: Some(2_000),
+        cache_read: Some(190_000),
+        input_includes_cache: Some(true),
+        ..ModelUsage::default()
+    };
+    assert_eq!(openai.prompt_total(), Some(200_000));
+    assert_eq!(openai.uncached_input(), Some(10_000));
+
+    // Anthropic shape: `input` is a sibling of the cache fields.
+    let anthropic = ModelUsage {
+        input: Some(10_000),
+        output: Some(2_000),
+        cache_read: Some(190_000),
+        cache_write: Some(1_000),
+        input_includes_cache: Some(false),
+        ..ModelUsage::default()
+    };
+    assert_eq!(anthropic.prompt_total(), Some(201_000));
+    assert_eq!(anthropic.uncached_input(), Some(10_000));
+}
+
+/// An old record (no mark) is taken at face value: `input` alone, because adding the cache
+/// fields could double-count the very thing the flag exists to disambiguate. A provider that
+/// reports more cache than input must not make the subtraction wrap (saturating).
+#[test]
+fn an_unmarked_record_is_taken_at_face_value_and_a_bad_one_never_wraps() {
+    let old = ModelUsage {
+        input: Some(200_000),
+        cache_read: Some(190_000),
+        ..ModelUsage::default()
+    };
+    assert_eq!(old.input_includes_cache, None);
+    assert_eq!(old.prompt_total(), Some(200_000), "not 390_000");
+    assert_eq!(old.uncached_input(), Some(200_000), "not 10_000: unmarked");
+
+    let inconsistent = ModelUsage {
+        input: Some(5),
+        cache_read: Some(9),
+        input_includes_cache: Some(true),
+        ..ModelUsage::default()
+    };
+    assert_eq!(inconsistent.uncached_input(), Some(0), "never wraps");
+
+    // A cache reading with no input count at all is still something to report: the prompt is
+    // at least the cached part. With no counters whatsoever, nothing is claimed.
+    let cache_only = ModelUsage {
+        cache_read: Some(7),
+        ..ModelUsage::default()
+    };
+    assert_eq!(cache_only.prompt_total(), Some(7));
+    assert_eq!(cache_only.uncached_input(), None);
+    assert_eq!(ModelUsage::default().prompt_total(), None);
+    assert_eq!(ModelUsage::default().uncached_input(), None);
+}
+
+/// `has_billable_counters` separates "reported zeros" from "reported nothing": a response of
+/// all zeros has nothing to price, so the `cost` item hides instead of showing `$0.00`
+/// (ADR 0027).
+#[test]
+fn only_a_nonzero_counter_is_billable() {
+    assert!(
+        !ModelUsage {
+            input: Some(0),
+            output: Some(0),
+            cache_read: Some(0),
+            cache_write: Some(0),
+            input_includes_cache: Some(true),
+            ..ModelUsage::default()
+        }
+        .has_billable_counters()
+    );
+    assert!(!ModelUsage::default().has_billable_counters());
+    assert!(
+        !ModelUsage {
+            input_includes_cache: Some(false),
+            ..ModelUsage::default()
+        }
+        .has_billable_counters()
+    );
+    for billable in [
+        ModelUsage {
+            input: Some(1),
+            ..ModelUsage::default()
+        },
+        ModelUsage {
+            output: Some(1),
+            ..ModelUsage::default()
+        },
+        ModelUsage {
+            cache_read: Some(1),
+            ..ModelUsage::default()
+        },
+        ModelUsage {
+            cache_write: Some(1),
+            ..ModelUsage::default()
+        },
+    ] {
+        assert!(billable.has_billable_counters(), "{billable:?}");
+    }
+}
+
+/// The mark round-trips through the v1 JSON, and a record without it still reads: the journal
+/// needs no schema bump (ADR 0007; ADR 0006 §7a's "unknown optional field" rule in
+/// reverse — an old reader ignores the new key, a new reader reads an old file).
+#[test]
+fn the_cache_semantics_mark_round_trips_and_is_optional() {
+    let marked = ModelUsage {
+        input: Some(11),
+        cache_read: Some(3),
+        input_includes_cache: Some(true),
+        ..ModelUsage::default()
+    };
+    let json = serde_json::to_string(&marked).unwrap();
+    assert_eq!(
+        json,
+        r#"{"input":11,"cache_read":3,"input_includes_cache":true}"#
+    );
+    let back: ModelUsage = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, marked);
+
+    let old: ModelUsage = serde_json::from_str(r#"{"input":11,"cache_read":3}"#).unwrap();
+    assert_eq!(old.input_includes_cache, None);
+    // An unmarked usage serializes without the key, so the wire shape of an old record is
+    // byte-for-byte what it was.
+    assert_eq!(
+        serde_json::to_string(&old).unwrap(),
+        r#"{"input":11,"cache_read":3}"#
+    );
 }
 
 // ---------- journal and events (AC-A5-7/8/9/10) ----------
@@ -67,6 +211,8 @@ fn usage_value() -> ModelUsage {
         total: Some(10),
         cache_read: Some(1),
         cache_write: Some(0),
+        // The OpenAI shape (ADR 0007): `input` contains the one cached token.
+        input_includes_cache: Some(true),
         details: Some(OpaqueJson::parse(r#"{"cached_tokens":1}"#).unwrap()),
     }
 }
