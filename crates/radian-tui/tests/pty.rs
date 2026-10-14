@@ -4407,12 +4407,16 @@ fn wheel(up: bool) -> Vec<u8> {
 
 /// The mouse-reporting sequences, as bytes in the raw output.
 const MOUSE_ON: &str = "\u{1b}[?1000h";
+const MOUSE_MOTION_ON: &str = "\u{1b}[?1002h";
 const MOUSE_SGR_ON: &str = "\u{1b}[?1006h";
 const MOUSE_OFF: &str = "\u{1b}[?1000l";
+const MOUSE_MOTION_OFF: &str = "\u{1b}[?1002l";
 const MOUSE_SGR_OFF: &str = "\u{1b}[?1006l";
 
-/// The app enabled reporting and released it again; the any-motion forms (`?1002h`/`?1003h`)
-/// are never sent (a pointer move must not flood the input thread).
+/// The app enabled reporting and released it again. Button-motion (`?1002h`) is part of the
+/// switch: the transcript drag-selection needs it (selection slice). The any-motion form
+/// (`?1003h`) is still never sent — a pointer move must not flood the input thread
+/// (ADR 0023 U2), which the no-frame-on-move test asserts behaviorally.
 fn assert_mouse_released(pty: &Pty, label: &str) {
     let raw = String::from_utf8_lossy(&pty.raw()).to_string();
     assert!(
@@ -4420,11 +4424,15 @@ fn assert_mouse_released(pty: &Pty, label: &str) {
         "{label}: reporting was never enabled: {raw}"
     );
     assert!(
-        raw.contains(MOUSE_SGR_OFF) && raw.contains(MOUSE_OFF),
+        raw.contains(MOUSE_MOTION_ON),
+        "{label}: button-motion was never enabled: {raw}"
+    );
+    assert!(
+        raw.contains(MOUSE_SGR_OFF) && raw.contains(MOUSE_OFF) && raw.contains(MOUSE_MOTION_OFF),
         "{label}: the mouse was not released: {raw}"
     );
     assert!(
-        !raw.contains("\u{1b}[?1002h") && !raw.contains("\u{1b}[?1003h"),
+        !raw.contains("\u{1b}[?1003h"),
         "{label}: any-motion reporting must never be enabled: {raw}"
     );
 }
@@ -4561,7 +4569,7 @@ async fn pty_a_mouse_move_is_dropped() {
     );
     let raw = String::from_utf8_lossy(&pty.raw()).to_string();
     assert!(
-        !raw.contains("\u{1b}[?1002h") && !raw.contains("\u{1b}[?1003h"),
+        !raw.contains("\u{1b}[?1003h"),
         "any-motion reporting must never be enabled: {raw}"
     );
     pty.quit();
@@ -5882,4 +5890,187 @@ async fn pty_a_theme_file_colors_the_user_line() {
     assert!(matched > 0, "the probe was not found on screen");
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+// --- transcript selection and copy (mouse drag, OSC 52) ---
+
+/// Finds a needle's `(row, col)` (0-based, display cells) on the vt100 screen.
+fn find_on_screen(pty: &mut Pty, needle: &str) -> Option<(u16, u16)> {
+    pty.pump();
+    let screen = pty.parser.screen();
+    let (rows, cols) = screen.size();
+    for row in 0..rows {
+        let mut line = String::new();
+        for col in 0..cols {
+            line.push_str(screen.cell(row, col).map(|c| c.contents()).unwrap_or(" "));
+        }
+        if let Some(col) = line.find(needle) {
+            return Some((row, col as u16));
+        }
+    }
+    None
+}
+
+/// SGR mouse encoding (`?1006h`): button `code` at 1-based `(col, row)`. `M` presses/moves,
+/// `m` releases.
+fn sgr(code: u8, col: u16, row: u16, press: bool) -> Vec<u8> {
+    format!(
+        "\u{1b}[<{code};{col};{row}{}",
+        if press { "M" } else { "m" }
+    )
+    .into_bytes()
+}
+
+/// The owner's ask: hold the left button, drag across transcript text, release — the
+/// selection's logical text reaches the clipboard as OSC 52 (`ESC]52;c;<base64>BEL`), and the
+/// status bar says what actually happened ("via OSC 52"), never that the clipboard holds it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_mouse_drag_copies_the_selection_via_osc52() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("select-copy");
+    let path = dir.path().join("select-me.jsonl");
+    let journal = radian_session::SessionJournal::create(
+        &path,
+        "select-me",
+        radian_session::SessionCreatedData::new("/tmp", json!({})),
+    )
+    .expect("create the session file");
+    use agent_core::TranscriptJournal;
+    journal
+        .append(agent_core::JournalRecord::Message {
+            index: 0,
+            message: agent_core::Message::user("SELECT-ME-PLEASE"),
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--offline-catalog",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--resume",
+            "select-me",
+        ],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("SELECT-ME-PLEASE", 10),
+        "{}",
+        pty.screen()
+    );
+
+    // The mouse-reporting switch: button + button-motion + SGR, never any-motion.
+    let raw = pty.raw();
+    assert!(
+        String::from_utf8_lossy(&raw).contains("\u{1b}[?1000h\u{1b}[?1002h\u{1b}[?1006h"),
+        "the enable sequence must be 1000+1002+1006"
+    );
+    assert!(
+        !String::from_utf8_lossy(&raw).contains("\u{1b}[?1003"),
+        "?1003h (any-motion) must stay off: motion without a button would flood the input",
+    );
+
+    // Drag across the message's text (the "> " prefix stays out of the copy).
+    let (row, col) = find_on_screen(&mut pty, "SELECT-ME-PLEASE").expect("the text on screen");
+    let end = col + "SELECT-ME-PLEASE".len() as u16 - 1;
+    pty.send(&sgr(0, col + 1, row + 1, true));
+    pty.send(&sgr(32, end + 1, row + 1, true));
+    pty.send(&sgr(0, end + 1, row + 1, false));
+
+    // The copy: OSC 52 with exactly the selected text, and the honest notice.
+    let expected = radian_tui::clip::osc52("SELECT-ME-PLEASE");
+    assert!(
+        pty.wait_for_raw(&expected, 10),
+        "no OSC 52 with the selection: {}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("copied 16 chars (via OSC 52)", 10),
+        "the status bar must say what happened, not claim the clipboard:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+}
+
+/// Motion without a button (`?1002h` does not report it; `?1003h` stays off) produces no
+/// events, no wake-ups and no frames (ADR 0023 U2's zero-redraw, pointer edition).
+#[test]
+fn pty_pointer_motion_alone_draws_no_frame() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("motion-idle");
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "motion-idle",
+            "--offline-catalog",
+        ],
+        20,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("type a message", 10),
+        "{}",
+        pty.screen()
+    );
+    let before = frame_count(&pty);
+
+    // A pointer wandering across the screen, buttons up, for a while.
+    for step in 0..40u16 {
+        pty.send(&sgr(35, 5 + step, 3 + step % 10, true));
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let after = frame_count(&pty);
+    pty.quit();
+    assert_eq!(
+        after, before,
+        "pointer motion without a button must not wake the loop"
+    );
+}
+
+/// Every exit path turns mouse reporting back off, `?1002l` included (the drag tracking this
+/// slice added). The ordinary path: the guard's drop.
+#[test]
+fn pty_quit_closes_button_motion_reporting() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("select-exit");
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "select-exit",
+            "--offline-catalog",
+        ],
+        20,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("type a message", 10),
+        "{}",
+        pty.screen()
+    );
+    pty.quit();
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    assert!(
+        raw.contains("\u{1b}[?1006l\u{1b}[?1002l\u{1b}[?1000l"),
+        "the restore must close 1006, 1002 and 1000 together: {raw:?}"
+    );
 }

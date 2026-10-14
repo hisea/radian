@@ -50,7 +50,7 @@ impl ThemeName {
     }
 }
 
-/// The 22 roles a [`Theme`] styles today (ADR 0009, ADR 0023). The config keys are the
+/// The 23 roles a [`Theme`] styles today (ADR 0009, ADR 0023). The config keys are the
 /// snake_case names; `[tui.colors]` accepts them and (mapped) pi's role names alike.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -76,10 +76,11 @@ pub enum Role {
     Hint,
     Completion,
     Find,
+    Selection,
 }
 
 impl Role {
-    pub const ALL: [Role; 22] = [
+    pub const ALL: [Role; 23] = [
         Role::Reasoning,
         Role::Interrupted,
         Role::User,
@@ -102,6 +103,7 @@ impl Role {
         Role::Hint,
         Role::Completion,
         Role::Find,
+        Role::Selection,
     ];
 
     /// The `[tui.colors]` key for this role (ADR 0029 decision 5).
@@ -129,6 +131,7 @@ impl Role {
             Role::Hint => "hint",
             Role::Completion => "completion",
             Role::Find => "find",
+            Role::Selection => "selection",
         }
     }
 
@@ -160,6 +163,7 @@ impl Role {
             Role::Hint => &mut theme.hint,
             Role::Completion => &mut theme.completion,
             Role::Find => &mut theme.find,
+            Role::Selection => &mut theme.selection,
         }
     }
 }
@@ -194,11 +198,14 @@ pub struct Theme {
     pub completion: Style,
     /// The find match position in the status bar (Phase 5).
     pub find: Style,
+    /// A transcript selection (mouse drag). pi's role map: `selectedBg`.
+    pub selection: Style,
     /// Pi roles no current Radian role consumes — the `md*`, `toolDiff*`, `syntax*` and
-    /// `thinking*` families ADR 0027/0028 will wire, plus the panel roles (`selectedBg`,
-    /// `scrollbar*`, `searchMatch*`, `customMessage*`, `toolPendingBg`, `toolSuccessBg`,
-    /// `toolErrorBg`, `bashMode`). ADR 0029 decision 3: parsed and kept so a theme file's
-    /// values are not thrown away; nothing renders them yet. Keyed by pi's role name.
+    /// `thinking*` families ADR 0027/0028 will wire, plus the panel roles (`scrollbar*`,
+    /// `searchMatch*`, `customMessage*`, `toolPendingBg`, `toolSuccessBg`, `toolErrorBg`,
+    /// `bashMode`; `selectedBg` is a role now). ADR 0029 decision 3: parsed and kept so a
+    /// theme file's values are not thrown away; nothing renders them yet. Keyed by pi's
+    /// role name.
     pub reserved: BTreeMap<String, Style>,
 }
 
@@ -249,6 +256,9 @@ impl Theme {
             hint: style(Some(Color::Gray), Modifier::empty()),
             completion: style(Some(Color::DarkGray), Modifier::empty()),
             find: style(Some(Color::Yellow), Modifier::empty()),
+            // A selection is a background band; the text keeps its own foreground. `DarkGray`
+            // (ANSI 8) reads as a quiet band on a dark background.
+            selection: Style::default().bg(Color::DarkGray),
         }
     }
 
@@ -284,6 +294,8 @@ impl Theme {
             hint: style(Some(Color::DarkGray), Modifier::empty()),
             completion: style(Some(Color::DarkGray), Modifier::empty()),
             find: style(Some(Color::Magenta), Modifier::empty()),
+            // A quiet light band on a light background; the dark text stays readable.
+            selection: Style::default().bg(Color::Gray),
         }
     }
 
@@ -314,6 +326,9 @@ impl Theme {
             hint: style(None, Modifier::DIM),
             completion: style(None, Modifier::DIM),
             find: style(None, Modifier::BOLD),
+            // No color at all: a selection is the reversed video, as the terminal itself
+            // would draw it.
+            selection: style(None, Modifier::REVERSED),
         }
     }
 
@@ -344,7 +359,7 @@ impl Theme {
     }
 
     /// Every style this theme defines, for the "mono has no colors" test.
-    pub fn styles(&self) -> [Style; 22] {
+    pub fn styles(&self) -> [Style; 23] {
         [
             self.reasoning,
             self.interrupted,
@@ -368,6 +383,7 @@ impl Theme {
             self.hint,
             self.completion,
             self.find,
+            self.selection,
         ]
     }
 }

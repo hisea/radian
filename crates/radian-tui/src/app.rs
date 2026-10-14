@@ -21,6 +21,8 @@ use radian_permissions::{ApprovalOutcome, ApprovalRequest};
 use radian_session::RuntimeEvent;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::clip::ClipboardMode;
+use crate::clip::MAX_CLIPBOARD_BYTES;
 use crate::command::{self, PendingCommand};
 use crate::composer::Composer;
 use crate::find::FindState;
@@ -30,6 +32,7 @@ use crate::picker::{Outcome as PickerOutcome, Picker};
 use crate::projection::{SessionProjection, StreamSnapshot};
 use crate::question::{FormKey, FormOutcome, QuestionForm};
 use crate::render::InputStyle;
+use crate::select::{self, Anchor, Selection};
 use crate::theme::Theme;
 
 // ADR 0023 U5: the turn state is a **session fact**, so it lives in the projection
@@ -217,6 +220,43 @@ pub enum MouseScrollDirection {
 /// wheel is a coarse gesture (a notch is not a line), and this is the one place to tune it.
 pub const MOUSE_WHEEL_LINES: usize = 3;
 
+/// How often the drag's auto-scroll ticks while the pointer is held at the transcript's top
+/// or bottom edge. Only consulted while a drag is live (`recv_timeout` in the loop), so an
+/// idle app still blocks and never redraws (ADR 0023 U2).
+pub const AUTO_SCROLL_TICK: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// How quickly a second press counts as a double-click. Wall-clock (not frames): the loop
+/// is idle between clicks, so there is nothing else to measure with.
+pub const DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The last press, for double/triple-click detection: where and when, and how many presses
+/// in a row landed on the same cell inside the window (1, 2 or 3; capped at 3).
+#[derive(Debug, Clone, Copy)]
+struct LastClick {
+    at: std::time::Instant,
+    cell: (u16, u16),
+    count: usize,
+}
+
+/// The live left-button gesture: the press cell, and where the pointer last was (the
+/// auto-scroll edges are read off `last`). Screen rows/columns, `0`-based. `moved` says a
+/// drag event actually moved the pointer, so a release on the press cell is a click (which
+/// clears) and not a one-char selection. `anchor` is the press's located end, with whether
+/// the pointer was on a char there (the end-side extension at release needs to know).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SelectDrag {
+    press: (u16, u16),
+    last: (u16, u16),
+    moved: bool,
+    /// The selection's fixed end, located once at press time (an anchor, not a cell, so
+    /// scrolling during the drag cannot move it).
+    anchor: Anchor,
+    anchor_on_char: bool,
+    /// How many presses began this gesture (1 click, 2 double, 3 triple): the release counts
+    /// as a click — and clears — only for a plain 1.
+    count: usize,
+}
+
 /// Which startup phase the app is in (ADR 0023 U4, plan B). `--pick` runs the event
 /// loop once **before** a session exists; the loop returns as soon as the picker resolves, and
 /// the caller then establishes the session and runs the loop again in the same terminal.
@@ -344,6 +384,16 @@ pub enum Input {
     PickerClose,
     /// The session picker's data arrived (the result of [`Effect::OpenPicker`]).
     PickerOpened(PickerData),
+    /// The left button went down at a screen cell: the press that may start a transcript
+    /// selection (and that clears the previous one). Only arrives when mouse reporting is on.
+    MouseDown { row: u16, col: u16 },
+    /// The left button moved while held: extends the selection.
+    MouseDrag { row: u16, col: u16 },
+    /// The left button came up: ends the selection and copies it ([`Effect::Copy`]).
+    MouseUp { row: u16, col: u16 },
+    /// The clipboard write finished (the result of [`Effect::Copy`]): the honest status-bar
+    /// notice — what Radian did, never a claim about the clipboard it cannot verify.
+    ClipboardDone(String),
 }
 
 /// What the loop loaded for a picker overlay: the rows to show, the index for full-text
@@ -413,6 +463,10 @@ pub enum Effect {
     /// Load this workspace's sessions and open the picker overlay (`/sessions`). The result is
     /// [`Input::PickerOpened`]; loading is I/O, so it is the loop's job (ADR 0023 U3).
     OpenPicker { query: Option<String> },
+    /// Write the transcript selection to the system clipboard (`tui.clipboard` picks the
+    /// transport). The loop runs it and answers with [`Input::ClipboardDone`]: OSC 52 has no
+    /// receipt, and `pbcopy` can fail — the loop owns both facts, `update` only owns the text.
+    Copy { text: String },
 }
 
 /// Effects are compared by **meaning** in the tests. `MemoryCommand` (a clap enum) has no
@@ -458,6 +512,7 @@ impl PartialEq for Effect {
             (FetchCompletions(a), FetchCompletions(b)) => a == b,
             (OpenPicker { query: a }, OpenPicker { query: b }) => a == b,
             (Session(a), Session(b)) => a == b,
+            (Copy { text: a }, Copy { text: b }) => a == b,
             _ => false,
         }
     }
@@ -595,6 +650,20 @@ pub struct App {
     /// Set when the picker resolves during [`Startup::Picking`]. The pre-session loop leaves
     /// as soon as it is `Some`; the caller reads it with [`App::take_picker_outcome`].
     picker_outcome: Option<PickerOutcome>,
+    /// The transcript selection, anchored to entries and offsets ([`Selection`]) — never to
+    /// cells — so new output, scrolling and reflow leave it where it was. `Some` also while
+    /// the drag is still moving; the renderer highlights it each frame.
+    pub selection: Option<Selection>,
+    /// The live left-button gesture, from press to release.
+    selecting: Option<SelectDrag>,
+    /// The last press, for double/triple-click detection.
+    last_click: Option<LastClick>,
+    /// Whether mouse reporting is on (`tui.mouse`, default on). With it off the terminal
+    /// never sends a mouse event and every mouse method here is a no-op: none of the
+    /// selection/copy features exist (the belt behind the terminal's suspenders).
+    mouse_enabled: bool,
+    /// How a copy reaches the system clipboard (config `tui.clipboard`, default OSC 52).
+    pub clipboard: ClipboardMode,
 }
 
 impl App {
@@ -629,6 +698,11 @@ impl App {
             transcript_width: 80,
             startup: Startup::Session,
             picker_outcome: None,
+            selection: None,
+            selecting: None,
+            last_click: None,
+            mouse_enabled: true,
+            clipboard: ClipboardMode::Osc52,
         }
     }
 
@@ -707,6 +781,20 @@ impl App {
             .as_deref()
             .and_then(InputStyle::parse)
             .unwrap_or_default();
+        // `tui.clipboard` (default OSC 52). An unknown spelling never reaches here (the host
+        // config reader skips it with a warning); `pbcopy` off macOS does: warn once and fall
+        // back, because the copy effect would have no program to run.
+        self.mouse_enabled = config.tui.mouse.unwrap_or(true);
+        self.clipboard = config
+            .tui
+            .clipboard
+            .as_deref()
+            .and_then(ClipboardMode::parse)
+            .unwrap_or_default();
+        if self.clipboard == ClipboardMode::PbCopy && !self.clipboard.supported_on_this_platform() {
+            self.clipboard = ClipboardMode::Osc52;
+            warnings.push("tui.clipboard = \"pbcopy\" is macOS-only; using osc52".into());
+        }
         warnings.extend(
             config
                 .skipped
@@ -799,6 +887,249 @@ impl App {
             dirty,
             effects: Vec::new(),
         }
+    }
+
+    // ---------- transcript selection (left-button drag) ----------
+
+    /// Whether a left-button drag is live (the loop auto-scrolls only while it is).
+    pub fn is_selecting(&self) -> bool {
+        self.selecting.is_some()
+    }
+
+    /// The left button went down. Any press clears the previous selection (a later release
+    /// without movement is the click that clears, per the contract); only a press **inside
+    /// the transcript** starts a new one — never on the input box, the status bar, a modal
+    /// prompt or the picker overlay, and never with `tui.mouse = false`. A press that starts
+    /// nothing and clears nothing is not dirty: an idle screen is not redrawn (ADR 0023 U2).
+    pub fn mouse_down(&mut self, row: u16, col: u16) -> UpdateResult {
+        if !self.mouse_enabled {
+            return UpdateResult::none();
+        }
+        let count = self.bump_click_count(row, col);
+        let had = self.selection.take();
+        let inside = !self.has_modal()
+            && self.picker().is_none()
+            && (row as usize) < usize::from(self.view_height)
+            && self.transcript_width > 0;
+        let cleared = had.is_some();
+        if !inside {
+            return cleared
+                .then(UpdateResult::dirty)
+                .unwrap_or(UpdateResult::none());
+        }
+        // The fixed end is located once, here: a scroll during the drag moves the view, not
+        // the anchor. An empty transcript simply starts nothing.
+        let press_line = self.scroll + row as usize;
+        let Some(hit) = select::locate_hit(
+            &self.entries,
+            self.transcript_width,
+            press_line,
+            col as usize,
+        ) else {
+            return cleared
+                .then(UpdateResult::dirty)
+                .unwrap_or(UpdateResult::none());
+        };
+        // A multi-click replaces the just-cleared selection with its bigger range and
+        // anchors the gesture at its start, so a following drag extends from the word (or
+        // the entry).
+        let (anchor, anchor_on_char) = match count {
+            2 => match select::run_at(
+                &self.entries,
+                self.transcript_width,
+                press_line,
+                col as usize,
+            ) {
+                Some((start, end)) => {
+                    self.selection = Some(Selection {
+                        anchor: start,
+                        head: end,
+                    });
+                    (start, true)
+                }
+                None => (hit.anchor, hit.on_char),
+            },
+            3 => {
+                let len = select::entry_display_len(&self.entries, hit.anchor.entry);
+                if len > 0 {
+                    self.selection = Some(Selection {
+                        anchor: Anchor {
+                            entry: hit.anchor.entry,
+                            offset: 0,
+                        },
+                        head: Anchor {
+                            entry: hit.anchor.entry,
+                            offset: len,
+                        },
+                    });
+                    (
+                        Anchor {
+                            entry: hit.anchor.entry,
+                            offset: 0,
+                        },
+                        true,
+                    )
+                } else {
+                    (hit.anchor, hit.on_char)
+                }
+            }
+            _ => (hit.anchor, hit.on_char),
+        };
+        self.selecting = Some(SelectDrag {
+            press: (row, col),
+            last: (row, col),
+            moved: false,
+            anchor,
+            anchor_on_char,
+            count,
+        });
+        cleared
+            .then(UpdateResult::dirty)
+            .unwrap_or(UpdateResult::none())
+    }
+
+    /// The press counter for double/triple-click: one more when the same cell is pressed
+    /// again inside [`DOUBLE_CLICK_WINDOW`] (capped at 3), otherwise back to 1.
+    fn bump_click_count(&mut self, row: u16, col: u16) -> usize {
+        let next = match self.last_click {
+            Some(click)
+                if click.cell == (row, col) && click.at.elapsed() <= DOUBLE_CLICK_WINDOW =>
+            {
+                (click.count + 1).min(3)
+            }
+            _ => 1,
+        };
+        self.last_click = Some(LastClick {
+            at: std::time::Instant::now(),
+            cell: (row, col),
+            count: next,
+        });
+        next
+    }
+
+    /// The left button moved while held: extend the selection to the pointer's cell.
+    pub fn mouse_drag(&mut self, row: u16, col: u16) -> UpdateResult {
+        if !self.mouse_enabled || self.selecting.is_none() {
+            return UpdateResult::none();
+        }
+        if let Some(drag) = self.selecting.as_mut() {
+            if (row, col) != drag.press {
+                drag.moved = true;
+            }
+            drag.last = (row, col);
+        }
+        self.extend_selection_to(row, col);
+        UpdateResult::dirty()
+    }
+
+    /// The left button came up: the release cell re-extends the selection one last time —
+    /// through the char under it ([`Self::extend_selection_to`]). A click — the pointer
+    /// never left the press cell — leaves nothing selected and copies nothing.
+    pub fn mouse_up(&mut self, row: u16, col: u16) -> UpdateResult {
+        let Some(drag) = self.selecting else {
+            return UpdateResult::none();
+        };
+        if !self.mouse_enabled {
+            return UpdateResult::none();
+        }
+        self.selecting = None;
+        if drag.count == 1 && !drag.moved && (row, col) == drag.press {
+            // The click: the press already cleared; nothing to copy. A double/triple click's
+            // release copies the word or entry it just selected.
+            return UpdateResult::none();
+        }
+        self.extend_selection_to(row, col);
+        let Some(selection) = self.selection else {
+            return UpdateResult::none();
+        };
+        if selection.is_empty() {
+            self.selection = None;
+            return UpdateResult::none();
+        }
+        let text = select::logical_text(&self.entries, &selection);
+        if text.is_empty() {
+            self.selection = None;
+            return UpdateResult::dirty();
+        }
+        // Refuse the absurd honestly, with the reason: the transcript selection's own line.
+        if text.len() > MAX_CLIPBOARD_BYTES {
+            self.selection = None;
+            self.push_notice(format!(
+                "selection too large to copy: {} bytes (the limit is {})",
+                text.len(),
+                MAX_CLIPBOARD_BYTES
+            ));
+            return UpdateResult::dirty();
+        }
+        // `off` means the selection still draws, but releasing it copies nothing.
+        if self.clipboard == ClipboardMode::Off {
+            return UpdateResult::none();
+        }
+        UpdateResult::effect(Effect::Copy { text })
+    }
+
+    /// One auto-scroll tick of a live drag: the pointer held at (or beyond) the transcript's
+    /// top or bottom edge moves the view one line toward it, and the selection's head is
+    /// re-located under the pointer. Returns whether anything changed. The loop calls this
+    /// only while a drag is live, on its `recv_timeout` tick.
+    pub fn mouse_autoscroll(&mut self) -> bool {
+        let Some(drag) = self.selecting else {
+            return false;
+        };
+        let view = usize::from(self.view_height.max(1));
+        let direction: i32 = if drag.last.0 == 0 {
+            -1
+        } else if drag.last.0 as usize >= view {
+            1
+        } else {
+            return false;
+        };
+        let before = self.scroll;
+        self.scroll_by(direction);
+        if self.scroll == before {
+            return false;
+        }
+        self.extend_selection_to(drag.last.0, drag.last.1);
+        true
+    }
+
+    /// Re-locates the selection under a pointer cell: the earlier of {press anchor, pointer}
+    /// is the inclusive start, the later the end — extended **through** the char under it
+    /// when that char is what the pointer is on (native-selection semantics: dragging across
+    /// "abc" copies "abc" in either direction). A gap (past a line's end, or on a folded
+    /// boundary) is a plain boundary and extends nothing. The stored selection is the
+    /// normalized `start..end`; rendering and copying read exactly this range.
+    fn extend_selection_to(&mut self, row: u16, col: u16) {
+        let Some(drag) = self.selecting else {
+            return;
+        };
+        let head_line = self.scroll + row as usize;
+        let Some(hit) = select::locate_hit(
+            &self.entries,
+            self.transcript_width,
+            head_line,
+            col as usize,
+        ) else {
+            return;
+        };
+        let (start, mut end) =
+            if (hit.anchor.entry, hit.anchor.offset) < (drag.anchor.entry, drag.anchor.offset) {
+                (hit.anchor, drag.anchor)
+            } else {
+                (drag.anchor, hit.anchor)
+            };
+        let end_on_char = if end == hit.anchor {
+            hit.on_char
+        } else {
+            drag.anchor_on_char
+        };
+        if end_on_char {
+            end.offset += select::char_len_at(&self.entries, end).unwrap_or(1);
+        }
+        self.selection = Some(Selection {
+            anchor: start,
+            head: end,
+        });
     }
 
     // ---------- the layer stack (ADR 0023 U4) ----------
@@ -1277,6 +1608,15 @@ impl App {
                 UpdateResult::dirty()
             }
             Input::PickerOpened(data) => self.picker_opened(data),
+            Input::MouseDown { row, col } => self.mouse_down(row, col),
+            Input::MouseDrag { row, col } => self.mouse_drag(row, col),
+            Input::MouseUp { row, col } => self.mouse_up(row, col),
+            // The loop's clipboard write finished; its notice says what Radian did ("copied N
+            // chars (via OSC 52)"), never that the clipboard holds it — OSC 52 has no receipt.
+            Input::ClipboardDone(notice) => {
+                self.note = Some(notice);
+                UpdateResult::dirty()
+            }
         }
     }
 
