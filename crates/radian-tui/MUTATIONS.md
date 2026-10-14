@@ -813,3 +813,27 @@ Base `26ddda9` · 一次性 worktree `/tmp/s4-mut`（`git worktree add` 自本�
 S3 留下了 `was_overridden` 的悬空引用），而当时的 `run_mut` 只 grep `FAILED`，把编译失败也当成
 "没抓住"——是假象。改成先 grep `^error` 判编译失败、并修好补丁后，两条都抓住。顺带删掉了真实代码里
 那个无用的 `was_overridden` 局部变量（提交 `a642b17`）。
+## small-fixes：`/login` 脱敏列表刷新（2026-10-14）
+
+Base `a90ed5c` · 一次性检出 `/tmp/small-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+`cargo test -p radian-tui --test pty pty_a_login_key_is_redacted_from_an_export_in_the_same_session`。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| S1 | `Effect::LoginSave` 成功后不刷新脱敏列表（去掉 `refresh_secrets`） | 会话中 `/login` 的新 key 在 export 里被遮 | 测试 FAILED（"the export did not redact the mid-session key"） |
+
+1/1 抓住。注意第一版测试 key 用了 `sk-` 前缀，被 export 的**启发式**脱敏（`sk-`/`Bearer`，见
+`radian-session/src/export.rs`）遮住，变异因此假通过；换成不带 `sk-` 的 `late-secret-PTY-7` 后，
+测试只依赖已知 secret 列表，变异被抓住。sleep 变异没有——这是行为测试，不是时序测试。
+
+## small-fixes-2：脱敏列表的锁中毒不放开（2026-10-14）
+
+Base `0d1dde1` · 一次性检出 `/tmp/small2-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+`cargo test -p radian-tui --lib terminal::`，变异后 `git checkout --` 还原。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| S2 | `shared_secrets` 恢复 `.read().map(..).unwrap_or_default()`（中毒即空列表） | 锁中毒时仍取出内容、仍脱敏 | `terminal::tests::a_poisoned_shared_secrets_list_still_redacts` FAILED（`left: []`，`right: ["late-secret-PTY-7"]`） |
+
+1/1 抓住。读侧四处（`record_panic`、运行期错误路径、picker、export）都走 `shared_secrets`；写侧
+`refresh_secrets` 用 `into_inner` 追加，第二个测试覆盖中毒后的追加。
