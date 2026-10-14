@@ -909,7 +909,14 @@ const CONTRIBUTION_ITEMS: [&str; 3] = ["git_branch", "worktree", "status"];
 /// contributor has no value (the item hides). The symbol is prepended by `render_item`.
 fn contribution_item(app: &App, item: &Item) -> Option<(String, Style)> {
     if !CONTRIBUTION_ITEMS.contains(&item.id.as_str()) {
-        return None;
+        // Any other id a contributor publishes (C3/C4): its store text, stale drawn dim.
+        let (text, role, stale) = contribution(app, &item.id)?;
+        let role = if stale {
+            Role::Truncation
+        } else {
+            contrib_role(role)
+        };
+        return Some((text, role_style(app, role)));
     }
     let (text, role, stale) = match item.id.as_str() {
         "git_branch" => {
@@ -1264,6 +1271,29 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
     }
 }
 
+/// Expands the `{placeholder}`s in a plain string (used inside a `[text]` segment).
+fn expand_placeholders(text: &str, data: &ItemData<'_>) -> Result<String, String> {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('}') else {
+            out.push('{');
+            rest = &rest[open + 1..];
+            continue;
+        };
+        let name = &after[..close];
+        match data.values.iter().find(|(key, _)| *key == name) {
+            Some((_, value)) => out.push_str(value),
+            None => return Err(name.to_string()),
+        }
+        rest = &after[close + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
 /// Expands a format into styled segments: `{placeholder}` from the item's data, and
 /// `[text](style)` with an inline style (ADR 0027). An unknown placeholder or a bad
 /// inline style is an error; the caller warned at parse time and shows the format raw.
@@ -1284,7 +1314,8 @@ fn expand_spans(
                     if !plain.is_empty() {
                         out.push((std::mem::take(&mut plain), None));
                     }
-                    out.push((stripped[..close].to_string(), Some(style)));
+                    // The `[text]` may carry `{placeholder}`s too.
+                    out.push((expand_placeholders(&stripped[..close], data)?, Some(style)));
                     i += 1 + close + 2 + end + 1;
                     continue;
                 }
