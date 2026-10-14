@@ -913,6 +913,7 @@ fn run(
             },
         ))
         .map_err(|error| error.to_string())?;
+    mark("open-session-done");
     // The providers worth refreshing now: the one this run started with. `/model`'s other
     // targets refresh on their next use (the fetch itself is on the loop's runtime).
     let refresh_targets = vec![key_id.clone()];
@@ -1001,7 +1002,7 @@ fn run(
             pair
         }
     };
-    mark("session-opened");
+    mark("terminal-ready");
     // ADR 0023 U7: the queue's changes are a wake-up source. A push, an answer, an abort and
     // a waiter that gave up all bump it, so the UI re-reads the head and the modal matches the
     // queue even when nothing else happened.

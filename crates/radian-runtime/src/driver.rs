@@ -803,10 +803,24 @@ fn merge_change(state: &mut serde_json::Value, change: &serde_json::Value) {
 }
 
 async fn recover(journal: &SessionJournal) -> Result<Recovery, DriverError> {
+    let trace = std::env::var_os("RADIAN_TRACE_PHASES").is_some();
+    let t0 = std::time::Instant::now();
     let parsed = Session::open(journal.path())?;
     let records = parsed.journal_records();
+    if trace {
+        eprintln!("[trace] recover/open {} ms", t0.elapsed().as_millis());
+    }
+    let t1 = std::time::Instant::now();
     let replayed = agent_core::replay(&records)?;
+    if trace {
+        eprintln!("[trace] recover/replay {} ms", t1.elapsed().as_millis());
+    }
+    let t2 = std::time::Instant::now();
     let history = agent_core::recover(&records)?;
+    if trace {
+        eprintln!("[trace] recover/recover {} ms", t2.elapsed().as_millis());
+    }
+    let t3 = std::time::Instant::now();
 
     // E9: the repaired tail must be durable before the session is opened with it.
     for (offset, message) in history[replayed.len()..].iter().enumerate() {
@@ -818,6 +832,9 @@ async fn recover(journal: &SessionJournal) -> Result<Recovery, DriverError> {
             .await?;
     }
 
+    if trace {
+        eprintln!("[trace] recover/tail {} ms", t3.elapsed().as_millis());
+    }
     // The transcript is the authority on whether an input was admitted: the input is
     // committed at the **start** of a step, while `InputAdmitted` is written after the step
     // returns. A crash in between leaves the message in the transcript without the record —

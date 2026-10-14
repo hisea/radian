@@ -674,10 +674,17 @@ impl SessionFacade for LocalSession {
 ///
 /// Async because opening the driver is (MCP servers start and the journal is recovered); a
 /// synchronous host calls it with `runtime.block_on`.
+fn os_mark(label: &str, t: std::time::Instant) {
+    if std::env::var_os("RADIAN_TRACE_PHASES").is_some() {
+        eprintln!("[trace] open/{label} {} ms", t.elapsed().as_millis());
+    }
+}
+
 pub async fn open_session(
     setup: SessionSetup,
     bindings: HostBindings,
 ) -> Result<LocalSession, SessionError> {
+    let t0 = std::time::Instant::now();
     let HostBindings {
         approvals,
         ask_user,
@@ -740,6 +747,7 @@ pub async fn open_session(
         .as_ref()
         .map(|service| MemoryTools::new(service.clone()));
     let memory_notice = memory_notice(&memory, &injection_config);
+    os_mark("memory", t0);
     let mcp = McpToolProvider::new(servers);
     let mcp_configured = mcp.configured();
 
@@ -754,6 +762,7 @@ pub async fn open_session(
         &config_snapshot,
         &journal_path,
     )?;
+    os_mark("journal", t0);
     let inbox = Inbox::durable(64, Arc::clone(&journal));
 
     let agent_config = AgentConfig {
@@ -795,6 +804,7 @@ pub async fn open_session(
         injection_config,
         memory_warning,
     ));
+    os_mark("hooks+skills", t0);
     let mut tools = HostTools::new(coding, memory_tools, mcp.clone());
     let ask_registered = ask.is_some();
     if let Some(ask) = ask {
@@ -833,6 +843,7 @@ pub async fn open_session(
             session_id
         ))
     })?;
+    os_mark("driver-recover", t0);
     driver.set_turn_timeout(turn_timeout);
     driver.set_runtime_events(runtime_events);
     if let Some(budget_for) = budget_for.clone() {
@@ -881,6 +892,7 @@ pub async fn open_session(
         let _ = done_tx.send(end);
     });
 
+    os_mark("driver-task", t0);
     let facts = SessionFacts {
         profile_line,
         sandbox_facts,
