@@ -227,7 +227,7 @@ fn an_input_that_changes_nothing_is_not_dirty() {
 fn a_refused_command_is_shown_as_a_notice() {
     let mut app = App::new("m", "s");
     let refused = radian_host::CommandRefused::undeclared(
-        &radian_host::SessionCommand::SendFollowup("hi".into()),
+        &radian_host::SessionCommand::SendFollowup(agent_core::Message::user("hi")),
     );
     let result = app.update(Input::CommandRefused(refused));
     assert!(result.dirty, "a notice is a visible change");

@@ -26,6 +26,8 @@
 //! performs; nothing touches the terminal.
 
 use std::borrow::Cow;
+
+use agent_core::{ContentPart, Message, MessageMeta};
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 
@@ -47,13 +49,63 @@ const TRAILING_PUNCTUATION: &[char] = &[
 /// Entries never offered by completion (nor, in practice, attached: they are directories).
 const ALWAYS_HIDDEN: &[&str] = &[".git", ".radian-sandbox"];
 
-/// A message after expansion: the text to send, the files attached (relative paths, in
-/// first-reference order), and non-fatal warnings to show.
+/// One attached file: its workspace-relative path and its text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attachment {
+    pub path: String,
+    pub content: String,
+}
+
+/// A message after expansion: the user's text (attachments are **not** spliced into it), the
+/// files attached in first-reference order, and non-fatal warnings to show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Expansion {
     pub text: String,
-    pub attached: Vec<String>,
+    pub attachments: Vec<Attachment>,
     pub warnings: Vec<String>,
+}
+
+impl Expansion {
+    /// The attached paths, for the notice.
+    pub fn attached(&self) -> Vec<&str> {
+        self.attachments
+            .iter()
+            .map(|attachment| attachment.path.as_str())
+            .collect()
+    }
+}
+
+/// The message one send carries (ADR 0018): the user's text as one part, then one
+/// [`ContentPart::attachment`] part per file. The provider sees the same text it always did
+/// (joined), but the parts are separate, so Core can replace an attachment with a placeholder
+/// when it keeps the user's words verbatim.
+pub fn user_message(text: &str, attachments: &[Attachment]) -> Message {
+    let mut content = vec![ContentPart::text(text)];
+    for attachment in attachments {
+        content.push(ContentPart::attachment(
+            attachment.content.clone(),
+            attachment.path.clone(),
+        ));
+    }
+    Message::User {
+        content,
+        meta: MessageMeta::default(),
+    }
+}
+
+/// The display text of a user message's parts: an attachment part becomes
+/// `[file: P, N lines]`, never its content.
+pub fn display_parts(parts: &[ContentPart]) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for part in parts {
+        if let ContentPart::Text { text, .. } = part {
+            match part.attachment_path() {
+                Some(path) => lines.push(format!("[file: {path}, {} lines]", text.lines().count())),
+                None => lines.push(text.clone()),
+            }
+        }
+    }
+    lines.join("\n\n")
 }
 
 /// One referenced file that exists but cannot be attached.
@@ -106,8 +158,7 @@ pub struct Completion {
 /// exists but cannot be attached; the caller must keep the input and not send.
 pub fn expand(text: &str, workspace: &Path) -> Result<Expansion, ExpandError> {
     let root = std::fs::canonicalize(workspace).ok();
-    let mut attached: Vec<String> = Vec::new();
-    let mut contents: Vec<String> = Vec::new();
+    let mut attachments: Vec<Attachment> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     let mut rejections: Vec<Rejection> = Vec::new();
     let mut seen: Vec<PathBuf> = Vec::new();
@@ -185,8 +236,10 @@ pub fn expand(text: &str, workspace: &Path) -> Result<Expansion, ExpandError> {
                 }
                 seen.push(path);
                 total += content.len();
-                attached.push(candidate);
-                contents.push(content);
+                attachments.push(Attachment {
+                    path: candidate,
+                    content,
+                });
             }
             Resolve::Escape => warnings.push(format!(
                 "@{candidate} resolves outside the workspace, so it was not attached"
@@ -200,20 +253,9 @@ pub fn expand(text: &str, workspace: &Path) -> Result<Expansion, ExpandError> {
     if !rejections.is_empty() {
         return Err(ExpandError::Unusable(rejections));
     }
-    let mut out = text.to_string();
-    for (path, content) in attached.iter().zip(&contents) {
-        out.push_str("\n\n<file path=\"");
-        out.push_str(path);
-        out.push_str("\">\n");
-        out.push_str(content);
-        if !content.ends_with('\n') {
-            out.push('\n');
-        }
-        out.push_str("</file>");
-    }
     Ok(Expansion {
-        text: out,
-        attached,
+        text: text.to_string(),
+        attachments,
         warnings,
     })
 }
@@ -486,22 +528,17 @@ mod tests {
     // ---------- expansion ----------
 
     #[test]
-    fn a_reference_to_an_existing_file_is_appended_once() {
+    fn a_reference_to_an_existing_file_is_attached_once() {
         let dir = TempDir::new("expand");
         dir.write("notes.txt", "hello\nworld\n");
         let expansion = expand("look at @notes.txt and @notes.txt", dir.path()).unwrap();
-        assert_eq!(expansion.attached, ["notes.txt"]);
+        assert_eq!(expansion.attached(), ["notes.txt"]);
         assert!(expansion.warnings.is_empty());
-        assert!(
-            expansion
-                .text
-                .starts_with("look at @notes.txt and @notes.txt")
-        );
-        assert_eq!(
-            expansion.text.matches("<file path=\"notes.txt\">").count(),
-            1
-        );
-        assert!(expansion.text.contains("hello\nworld\n"));
+        // ADR 0018: the text is the user's own words, the file is its own part.
+        assert_eq!(expansion.text, "look at @notes.txt and @notes.txt");
+        assert_eq!(expansion.attachments.len(), 1);
+        assert_eq!(expansion.attachments[0].path, "notes.txt");
+        assert_eq!(expansion.attachments[0].content, "hello\nworld\n");
     }
 
     #[test]
@@ -509,7 +546,7 @@ mod tests {
         let dir = TempDir::new("not-a-file");
         std::fs::create_dir_all(dir.path().join("sub")).unwrap();
         let expansion = expand("hi @someone and @sub", dir.path()).unwrap();
-        assert!(expansion.attached.is_empty());
+        assert!(expansion.attached().is_empty());
         assert!(expansion.warnings.is_empty());
         assert_eq!(expansion.text, "hi @someone and @sub");
     }
@@ -526,17 +563,17 @@ mod tests {
         )
         .unwrap();
         let expansion = expand("read @link.txt", dir.path()).unwrap();
-        assert!(expansion.attached.is_empty());
+        assert!(expansion.attached().is_empty());
         assert_eq!(expansion.warnings.len(), 1, "{:?}", expansion.warnings);
         assert!(expansion.warnings[0].contains("outside the workspace"));
-        assert!(!expansion.text.contains("secret"));
+        assert!(expansion.attachments.is_empty());
     }
 
     #[test]
     fn an_absolute_path_or_a_parent_escape_warns_and_is_not_attached() {
         let dir = TempDir::new("parent-escape");
         let expansion = expand("read @../secret @/etc/hosts", dir.path()).unwrap();
-        assert!(expansion.attached.is_empty());
+        assert!(expansion.attached().is_empty());
         assert_eq!(expansion.warnings.len(), 2, "{:?}", expansion.warnings);
     }
 
@@ -600,7 +637,7 @@ mod tests {
         let dir = TempDir::new("none");
         let expansion = expand("just words", dir.path()).unwrap();
         assert_eq!(expansion.text, "just words");
-        assert!(expansion.attached.is_empty());
+        assert!(expansion.attached().is_empty());
     }
 
     // ---------- folding ----------

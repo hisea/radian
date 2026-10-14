@@ -368,3 +368,35 @@ async fn a_prefix_outside_the_transcript_leaves_the_estimate_alone() {
     assert_eq!(report.source, UsageSource::Estimated);
     assert_eq!(report.baseline_input_tokens, None);
 }
+
+/// ADR 0015 revision: the estimator counts only what a provider receives,
+/// so a message's host-only `meta` (ADR 0005) does not change the estimate. Before this, a
+/// host that put a large `origin` on a message — ADR 0018's verbatim user messages
+/// do — inflated the request estimate for content the provider never sees.
+#[test]
+fn a_large_host_meta_does_not_change_the_request_estimate() {
+    let plain = Message::user("hello");
+    let with_meta = Message::User {
+        content: vec![ContentPart::text("hello")],
+        meta: MessageMeta {
+            id: Some(MessageId("host-42".into())),
+            source: Some(InputSource::Subagent),
+            origin: Some(
+                OpaqueJson::parse(json!({"blob": "x".repeat(20_000)}).to_string()).unwrap(),
+            ),
+        },
+    };
+    let request = |message: Message| ModelRequest {
+        system_prompt: None,
+        messages: vec![message],
+        tools: Vec::new(),
+        settings: Value::Null,
+    };
+    assert_eq!(
+        estimate_tokens(&request(with_meta.clone()), 4),
+        estimate_tokens(&request(plain.clone()), 4),
+        "a 20 KB origin must not change the request estimate"
+    );
+    // The compaction ruler is the same estimator, so it agrees.
+    assert_eq!(message_tokens(&with_meta), message_tokens(&plain));
+}

@@ -21,7 +21,7 @@ fn press(app: &mut App, key: KeyEvent) -> Vec<Effect> {
 fn expanded(text: &str) -> Expansion {
     Expansion {
         text: text.to_owned(),
-        attached: Vec::new(),
+        attachments: Vec::new(),
         warnings: Vec::new(),
     }
 }
@@ -40,7 +40,10 @@ fn enter_expands_then_sends_a_followup_when_idle_and_a_steer_while_running() {
     );
     assert!(app.input.is_empty(), "the input is cleared on send");
     let result = app.update(Input::MentionsExpanded(Ok(expanded("hello"))));
-    assert_eq!(result.effects, vec![Effect::SendFollowup("hello".into())]);
+    assert_eq!(
+        result.effects,
+        vec![Effect::SendFollowup(agent_core::Message::user("hello"))]
+    );
 
     app.projection.set_turn(TurnState::Running);
     app.input = "change of plan".into();
@@ -51,7 +54,10 @@ fn enter_expands_then_sends_a_followup_when_idle_and_a_steer_while_running() {
         }]
     );
     let result = app.update(Input::MentionsExpanded(Ok(expanded("change of plan"))));
-    assert_eq!(result.effects, vec![Effect::Steer("change of plan".into())]);
+    assert_eq!(
+        result.effects,
+        vec![Effect::Steer(agent_core::Message::user("change of plan"))]
+    );
 }
 
 /// A failed `@` expansion must not lose the message the user typed: nothing is sent and the
@@ -104,7 +110,10 @@ fn ctrl_j_inserts_a_newline_and_enter_sends_the_whole_text() {
         }]
     );
     let result = app.update(Input::MentionsExpanded(Ok(expanded("a\nb"))));
-    assert_eq!(result.effects, vec![Effect::SendFollowup("a\nb".into())]);
+    assert_eq!(
+        result.effects,
+        vec![Effect::SendFollowup(agent_core::Message::user("a\nb"))]
+    );
 }
 
 #[test]

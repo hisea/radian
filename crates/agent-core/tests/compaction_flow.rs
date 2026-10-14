@@ -251,6 +251,7 @@ async fn a_compaction_reuses_the_previous_summary() {
     let agent = compaction_agent(model.clone(), 3_000, true);
     let history = compaction::compacted_history(
         "old summary text",
+        &[],
         &[Message::user("x".repeat(16_000)), Message::user("last")],
     )
     .unwrap();
@@ -385,7 +386,7 @@ async fn a_cancelled_summary_does_not_commit() {
 async fn insufficient_gain_fails_without_committing() {
     let model = ScriptedModel::new([summary_reply(&"s".repeat(4_000), 10), text("done")]);
     let journal = Arc::new(RecordingJournal::new());
-    let agent = compaction_agent(model.clone(), 3_000, true);
+    let agent = compaction_agent(model.clone(), 8_000, true);
     let history = vec![
         Message::user("x".repeat(4_000)),
         Message::user("y".repeat(12_000)),
@@ -425,7 +426,11 @@ async fn insufficient_gain_fails_without_committing() {
 async fn a_below_target_compaction_commits_and_is_flagged() {
     let model = ScriptedModel::new([summary_reply(&"s".repeat(2_600), 10), text("done")]);
     let journal = Arc::new(RecordingJournal::new());
-    let agent = compaction_agent(model.clone(), 3_000, true);
+    // ADR 0018: the verbatim user messages cost at most `U + U1` (1024 tokens by
+    // the `message_tokens` ruler) in `T_after`, which with this file's one-byte-per-token
+    // ruler is already over a 3000-token budget; the budget that lands in the below-target
+    // band is therefore larger.
+    let agent = compaction_agent(model.clone(), 8_000, true);
     let history = vec![
         Message::user("x".repeat(4_000)),
         Message::user("y".repeat(12_000)),
@@ -457,7 +462,10 @@ async fn a_below_target_compaction_commits_and_is_flagged() {
         })
         .expect("a candidate was written");
     assert!(candidate.0, "flagged below target: {candidate:?}");
-    assert!(candidate.2 <= 3_000 && candidate.2 * 4 > 3_000 * 3);
+    assert!(
+        candidate.2 <= 8_000 && candidate.2 * 4 > 8_000 * 3,
+        "{candidate:?}"
+    );
 }
 
 // ---------- 9. invalid summary retry ----------
@@ -711,7 +719,7 @@ async fn a_below_target_compaction_stops_auto_compaction_for_the_turn() {
         stop(StopReason::PauseTurn, &"a".repeat(2_000)),
     ]);
     let journal = Arc::new(RecordingJournal::new());
-    let agent = compaction_agent(model.clone(), 3_000, true);
+    let agent = compaction_agent(model.clone(), 8_000, true);
     let history = vec![
         Message::user("x".repeat(4_000)),
         Message::user("y".repeat(12_000)),
@@ -979,5 +987,162 @@ async fn the_auto_path_scales_the_summary_ceiling_with_the_window() {
     assert!(
         !prompt.contains("8192 tokens"),
         "the fixed ceiling must not be used for an automatic compaction: {prompt}"
+    );
+}
+
+// ---------- ADR 0018: rolling verbatim ----------
+
+/// A user message with `source = source`.
+fn user_sourced(text: &str, source: Option<agent_core::InputSource>) -> Message {
+    Message::User {
+        content: vec![ContentPart::text(text)],
+        meta: agent_core::MessageMeta {
+            source,
+            ..agent_core::MessageMeta::default()
+        },
+    }
+}
+
+/// The ADR's headline: the first user message is still there, word for word, after eleven
+/// rolling compactions. The rolling selection is pure, so this drives it directly: each round
+/// is one compaction's worth of new user messages.
+#[test]
+fn the_first_user_message_survives_eleven_rolling_compactions() {
+    use agent_core::{InputSource, RetainedUserMessage, select_user_messages};
+
+    const FIRST: &str = "FIRST-USER-MESSAGE-MARKER: do not lose this sentence";
+    let mut kept = vec![RetainedUserMessage {
+        text: FIRST.to_owned(),
+    }];
+    for round in 0..11 {
+        let newly = vec![
+            user_sourced(
+                &format!("round {round} {}", "x".repeat(9_000)),
+                Some(InputSource::User),
+            ),
+            user_sourced(&format!("a note {round}"), Some(InputSource::User)),
+        ];
+        kept = select_user_messages(&kept, &newly, Some(8_000));
+        assert_eq!(
+            kept.first().map(|message| message.text.as_str()),
+            Some(FIRST),
+            "round {round}: the first user message must survive verbatim"
+        );
+        assert!(
+            kept.iter()
+                .any(|message| message.text.contains(&format!("a note {round}"))),
+            "round {round}: the newest short message is kept"
+        );
+    }
+}
+
+/// The ADR's other headline: the previous verbatim list is **not** sent to the summarizer.
+/// The new conversation's user messages are (they are what is being summarized), but the
+/// rendered section, and the first message's earlier copies, are not.
+///
+/// This one runs the real turn loop twice. It uses the **default** ruler: with the one-byte
+/// ruler the other tests use, the last unit (the turn's own input) is kept whole, and a
+/// `T_after` that fits `B` is impossible once the input is big enough to cross `B`.
+#[tokio::test]
+async fn the_summary_request_does_not_carry_the_previous_verbatim_list() {
+    const FIRST: &str = "FIRST-USER-MESSAGE-MARKER";
+    let big_reply = "d".repeat(40_000);
+
+    let model = ScriptedModel::new([
+        summary_reply("a rolling summary", 10),
+        text(&big_reply),
+        summary_reply("a second rolling summary", 10),
+        text(&big_reply),
+    ]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = Arc::new(Agent::new(model.clone(), NoTools).with_config(AgentConfig {
+        context_budget: Some(ContextBudget::new(8_000)),
+        auto_compact: true,
+        ..Default::default()
+    }));
+    let history = vec![
+        Message::user(FIRST),
+        Message::assistant("y".repeat(40_000)),
+        Message::user("last"),
+    ];
+    let mut session = agent
+        .open_session_with_journal(history, journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+    for round in 0..2 {
+        session
+            .run_turn("go", TurnOptions::default(), &recorder)
+            .await
+            .unwrap();
+        assert_eq!(session.transcript_revision(), round + 1, "round {round}");
+    }
+
+    let requests = model.requests();
+    let summaries: Vec<&agent_core::ModelRequest> = requests
+        .iter()
+        .filter(|request| {
+            request
+                .system_prompt
+                .as_deref()
+                .is_some_and(|prompt| prompt.contains("You are compressing"))
+        })
+        .collect();
+    assert_eq!(summaries.len(), 2, "two compactions, two summary requests");
+    let second = summaries[1];
+    let text = second
+        .messages
+        .iter()
+        .map(|message| message.text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !text.contains(agent_core::USER_MESSAGES_HEADING),
+        "the rendered verbatim section must not be resent: {text}"
+    );
+    // The first message is not in the second summary's input either: it was summarized in the
+    // first round and now lives only in the previous verbatim list and the model summary.
+    assert!(!text.contains(FIRST), "{text}");
+    assert!(
+        text.contains("a rolling summary"),
+        "the previous model summary is still the rolling input: {text}"
+    );
+}
+
+/// ADR 0018: the plan reserves the space the verbatim list takes. Without the
+/// reservation the kept suffix would include one more (large) unit and `T_after` would cross
+/// `B`, so the compaction would fail instead of committing.
+#[tokio::test]
+async fn the_plan_reserves_the_verbatim_space() {
+    let model = ScriptedModel::new([summary_reply("a short summary", 10), text("done")]);
+    let journal = Arc::new(RecordingJournal::new());
+    // A budget the verbatim list itself fits in (it is at most `U + U1`), so the reservation
+    // is what decides whether the 7200-byte unit is kept.
+    let agent = compaction_agent(model.clone(), 8_000, true);
+    let history = vec![
+        // A big prefix: its verbatim copy is what the plan must reserve room for.
+        Message::user("x".repeat(48_000)),
+        // A unit that fits `K` but not `K - U₁`: with the reservation it is summarized.
+        Message::user("y".repeat(7_200)),
+        Message::user("last"),
+    ];
+    let mut session = agent
+        .open_session_with_journal(history, journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(session.transcript_revision(), 1, "the compaction committed");
+    let kept: Vec<usize> = session.transcript()[1..]
+        .iter()
+        .map(|message| message.text().chars().count())
+        .collect();
+    assert!(
+        kept.iter().all(|length| *length < 1_000),
+        "the 7200-byte unit must be summarized, not kept: {kept:?}"
     );
 }

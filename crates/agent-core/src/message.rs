@@ -101,7 +101,40 @@ impl ContentPart {
             meta: None,
         }
     }
+
+    /// A text part that is an **attached file** at `path` (ADR 0018). The host
+    /// writes this; Core only reads the annotation, to keep the user's words verbatim across
+    /// compaction without carrying the file's body.
+    pub fn attachment(text: impl Into<String>, path: impl Into<String>) -> Self {
+        Self::Text {
+            text: text.into(),
+            annotations: Some(serde_json::json!({
+                "kind": ATTACHMENT_KIND,
+                "path": path.into(),
+            })),
+            meta: None,
+        }
+    }
+
+    /// The attached file's path when this part carries the [`ATTACHMENT_KIND`] annotation.
+    pub fn attachment_path(&self) -> Option<&str> {
+        let Self::Text {
+            annotations: Some(value),
+            ..
+        } = self
+        else {
+            return None;
+        };
+        if value.get("kind").and_then(Value::as_str) != Some(ATTACHMENT_KIND) {
+            return None;
+        }
+        value.get("path").and_then(Value::as_str)
+    }
 }
+
+/// The `annotations.kind` a host sets on a text part that is an attached file (ADR 0018
+/// revision 6). Core reads it when it keeps the user's words verbatim; it never writes it.
+pub const ATTACHMENT_KIND: &str = "attachment";
 
 /// A tool call requested by the model, to be executed by the host.
 ///
@@ -150,6 +183,18 @@ impl ToolResult {
     /// Concatenated text parts, for display and tests.
     pub fn text(&self) -> String {
         joined_text(&self.content)
+    }
+}
+
+impl Message {
+    /// The host-owned metadata (ADR 0005). A provider never sees it, so the size estimator
+    /// (ADR 0015, revision 2026-10-13) excludes it from the request it measures.
+    pub fn meta(&self) -> &MessageMeta {
+        match self {
+            Self::User { meta, .. } | Self::Assistant { meta, .. } | Self::Tool { meta, .. } => {
+                meta
+            }
+        }
     }
 }
 

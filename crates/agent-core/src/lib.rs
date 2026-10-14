@@ -22,12 +22,15 @@ pub use budget::{
     estimate_tokens, over_budget,
 };
 pub use compaction::{
-    DEFAULT_SUMMARY_MAX_TOKENS, MAX_KEEP_TARGET, MIN_KEEP_TARGET, Plan, PlanError,
+    DEFAULT_SUMMARY_MAX_TOKENS, FIRST_USER_MESSAGE_MAX, MAX_KEEP_TARGET, MAX_USER_MESSAGE_BUDGET,
+    MIN_KEEP_TARGET, MIN_USER_MESSAGE_BUDGET, Plan, PlanError, RetainedUserMessage,
     SHORTEN_TARGET_PERCENT, SUMMARY_FACTS_DELETE_OLDEST, SUMMARY_FACTS_ORDER_RULE,
     SUMMARY_MESSAGE_PREFIX, SUMMARY_PLANS_ARE_NOT_FACTS, SUMMARY_SYSTEM_PROMPT, SummaryError,
-    TOOL_RESULT_LIMIT_CHARS, check_summary, compacted_history, keep_target, message_tokens, plan,
-    plan_with_keep, shorten_request, shorten_target, summary_max_tokens, summary_request,
-    summary_system_prompt, units, verified_facts_max_tokens,
+    TOOL_RESULT_LIMIT_CHARS, USER_MESSAGES_HEADING, check_summary, compacted_history,
+    compaction_summary_text, compaction_user_messages, is_compaction_summary, keep_target,
+    message_tokens, omitted_marker, plan, plan_with_keep, select_user_messages, shorten_request,
+    shorten_target, summary_max_tokens, summary_request, summary_system_prompt, units,
+    user_message_budget, verified_facts_max_tokens,
 };
 pub use event::{AgentEvent, CompactionTrigger, EventSink, NoopSink};
 pub use hooks::{HookContext, HookError, HookPoint, Hooks, ToolDecision};
@@ -36,7 +39,8 @@ pub use journal::{
     UncommittedReplacement, recover, repair, replay,
 };
 pub use message::{
-    ContentPart, InputSource, Message, MessageId, MessageMeta, OpaqueJson, ToolCall, ToolResult,
+    ATTACHMENT_KIND, ContentPart, InputSource, Message, MessageId, MessageMeta, OpaqueJson,
+    ToolCall, ToolResult,
 };
 pub use model::{
     CONTEXT_OVERFLOW_PREFIX, Model, ModelContext, ModelError, ModelRequest, ModelResponse,

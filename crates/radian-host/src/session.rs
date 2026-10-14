@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agent_core::{Agent, AgentConfig, ContextBudget, EventSink, TurnOptions};
+use agent_core::{Agent, AgentConfig, ContextBudget, EventSink, Message, TurnOptions};
 use agent_extensions::{McpServerConfig, McpToolProvider};
 use radian_coding::CodingTools;
 use radian_permissions::{Approver, AuditSink, PermissionHooks, Preset, Profile};
@@ -92,12 +92,13 @@ impl SessionCapability {
 }
 
 /// A command the UI asks a session to perform.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SessionCommand {
-    /// Start a new turn: `Inbox::followup`.
-    SendFollowup(String),
+    /// Start a new turn: `Inbox::followup`. A [`Message`], not a string: a send can carry an
+    /// attached file as its own part (ADR 0018).
+    SendFollowup(Message),
     /// Redirect the running turn: `Inbox::steer`.
-    Steer(String),
+    Steer(Message),
     /// Cancel the running turn.
     Cancel,
 }

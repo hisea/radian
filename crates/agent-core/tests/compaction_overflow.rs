@@ -203,8 +203,9 @@ async fn a_non_overflow_model_error_does_not_compact() {
 ///    `B/2` is required even though `T_before` is larger.
 #[tokio::test]
 async fn a_known_window_uses_min_of_projection_and_budget() {
-    // `T_before` (~120000 tokens) is well over `B = 30000`; the kept suffix (~20000) is too
-    // large for `B/2 = 15000`, but small enough that `T_before/2` would have passed.
+    // `T_before` (~110000 tokens) is well over `B = 30000`; the kept suffix (~15000, plus the
+    // verbatim copy of the huge prefix) is too large for `B/2 = 15000`, but small enough that
+    // `T_before/2` would have passed.
     let model = ScriptedModel::new([
         overflow("prompt is too long"),
         summary_reply("a short summary", 50),
@@ -212,14 +213,14 @@ async fn a_known_window_uses_min_of_projection_and_budget() {
     let journal = Arc::new(RecordingJournal::new());
     // `auto_compact = false`: the proactive path is off, so the request is sent and overflows.
     let agent = overflow_agent(model.clone(), Some(30_000), false);
-    // 38000-byte messages are 9500 tokens each, so the plan keeps `[b, asst, c, go]`
-    // (~19000) and summarizes the huge prefix; `T_after > B/2` makes the fallback fail.
+    // 30000-byte messages are 7500 tokens each, so the plan keeps `[asst, b, asst, c, go]`
+    // (~15000) and summarizes the huge prefix; `T_after > B/2` makes the fallback fail.
     let history = vec![
         Message::user("x".repeat(380_000)),
         Message::assistant("ok"),
-        Message::user("b".repeat(38_000)),
+        Message::user("b".repeat(30_000)),
         Message::assistant("ok"),
-        Message::user("c".repeat(38_000)),
+        Message::user("c".repeat(30_000)),
     ];
     let mut session = agent
         .open_session_with_journal(history, journal.clone())
@@ -616,4 +617,46 @@ async fn compact_now_scales_the_summary_ceiling_with_the_window() {
         .unwrap()
         .to_string();
     assert!(prompt.contains("8192 tokens"), "{prompt}");
+}
+
+/// ADR 0018: the verbatim user messages are part of `T_after`, so the fallback's
+/// half-gain threshold is higher than it was. This history is chosen to sit **inside** that
+/// band: without the verbatim `T_after` would be ~9000 and half of `T_before` (21000) would
+/// pass, while with it `T_after` is ~11000, so the fallback fails explicitly instead of sending
+/// a request that is still over the window.
+#[tokio::test]
+async fn the_verbatim_raises_the_fallback_threshold() {
+    let model = ScriptedModel::new([
+        overflow("prompt is too long"),
+        summary_reply("a short summary", 50),
+    ]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = overflow_agent(model.clone(), None, true);
+    let history = vec![
+        Message::user("x".repeat(48_000)),
+        Message::user("y".repeat(36_000)),
+    ];
+    let mut session = agent
+        .open_session_with_journal(history, journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let error = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            RunError::Compaction(CompactionError::Insufficient { .. })
+        ),
+        "{error:?}"
+    );
+    assert_eq!(session.transcript_revision(), 0, "nothing committed");
+    let kinds: Vec<String> = journal.records().iter().map(label).collect();
+    assert!(
+        !kinds.iter().any(|kind| kind.starts_with("compacted")),
+        "no candidate was written: {kinds:?}"
+    );
 }

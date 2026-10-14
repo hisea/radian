@@ -105,6 +105,14 @@ EXPECT = {
         uncommitted=[],
         repair={},
     ),
+    "compaction-verbatim.jsonl": dict(
+        outcome="accept",
+        events=9,
+        skips=[],
+        replacement=(6, 1, 2),
+        uncommitted=[],
+        repair={},
+    ),
     "compaction-candidate-only.jsonl": dict(
         outcome="accept",
         events=4,

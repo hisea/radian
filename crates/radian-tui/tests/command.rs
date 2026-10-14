@@ -75,7 +75,7 @@ fn run_effect(effect: &Effect, service: &MemoryService) -> Vec<Input> {
         // A message with no `@` reference: the expansion is the identity.
         Effect::ExpandMentions { text } => vec![Input::MentionsExpanded(Ok(Expansion {
             text: text.clone(),
-            attached: Vec::new(),
+            attachments: Vec::new(),
             warnings: Vec::new(),
         }))],
         _ => Vec::new(),
@@ -135,7 +135,7 @@ fn a_double_slash_sends_the_message_with_one_slash() {
         submit(&mut app, &service, "//hi"),
         vec![
             Effect::ExpandMentions { text: "/hi".into() },
-            Effect::SendFollowup("/hi".into())
+            Effect::SendFollowup(agent_core::Message::user("/hi"))
         ]
     );
     app.projection.set_turn(TurnState::Running);
@@ -145,7 +145,7 @@ fn a_double_slash_sends_the_message_with_one_slash() {
             Effect::ExpandMentions {
                 text: "/steer me".into()
             },
-            Effect::Steer("/steer me".into())
+            Effect::Steer(agent_core::Message::user("/steer me"))
         ]
     );
     let _ = std::fs::remove_dir_all(&dir);

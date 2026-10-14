@@ -154,6 +154,12 @@ pub fn summary_system_prompt(max_tokens: u64) -> String {
 pub const SUMMARY_MESSAGE_PREFIX: &str = "\
 This is a summary of the earlier conversation. Continue the work from it.";
 
+/// The heading that separates the model's summary from the verbatim user messages in the
+/// summary message's body (ADR 0018). The model's summary never contains it: it is
+/// the split point [`compaction_summary_text`] uses, and the user messages are read back from
+/// `origin`, never parsed out of the body.
+pub const USER_MESSAGES_HEADING: &str = "\n\n---\nUser messages kept verbatim (oldest first):";
+
 /// The summary length ceiling for an input budget `B`:
 /// `min(K, max(8192, ⌊B/8⌋))` with `K = keep_target(B)`. The old fixed [`DEFAULT_SUMMARY_MAX_TOKENS`]
 /// was too small for a large window: the rolling summary grows with every compaction, and at
@@ -408,22 +414,44 @@ pub fn shorten_request(overlong_summary: &str, target_tokens: u64) -> ModelReque
 /// The compacted history: the summary message followed by `kept` unchanged.
 ///
 /// The summary is a [`Message::User`] with `source = System` and an
-/// `origin = {"kind":"compaction_summary"}` marker, so a host, an exporter or a future
-/// compactor can recognize it without parsing the text. The result must pass
-/// [`validate_history`]; a failure is returned, never committed.
-pub fn compacted_history(summary: &str, kept: &[Message]) -> Result<Vec<Message>, SessionError> {
+/// `origin = {"kind":"compaction_summary","user_messages":[…]}` marker, so a host, an exporter
+/// or a future compactor can recognize it without parsing the text. `user_messages` are the
+/// user's words Core carries verbatim (ADR 0018): they are rendered into the body
+/// for the model, and written into `origin` so [`compaction_user_messages`] reads them back
+/// without parsing the body. The result must pass [`validate_history`]; a failure is returned,
+/// never committed.
+pub fn compacted_history(
+    summary: &str,
+    user_messages: &[RetainedUserMessage],
+    kept: &[Message],
+) -> Result<Vec<Message>, SessionError> {
+    let mut body = format!("{SUMMARY_MESSAGE_PREFIX}\n\n{}", summary.trim());
+    if !user_messages.is_empty() {
+        body.push_str(USER_MESSAGES_HEADING);
+        body.push('\n');
+        for (index, message) in user_messages.iter().enumerate() {
+            body.push_str(&format!(
+                "--- user message {} ---\n{}\n",
+                index + 1,
+                message.text
+            ));
+        }
+    }
+    let origin = serde_json::json!({
+        "kind": "compaction_summary",
+        "user_messages": user_messages
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>(),
+    });
     let mut history = Vec::with_capacity(kept.len() + 1);
     history.push(Message::User {
-        content: vec![ContentPart::text(format!(
-            "{SUMMARY_MESSAGE_PREFIX}\n\n{}",
-            summary.trim()
-        ))],
+        content: vec![ContentPart::text(body)],
         meta: MessageMeta {
             id: None,
             source: Some(InputSource::System),
             origin: Some(
-                OpaqueJson::parse(r#"{"kind":"compaction_summary"}"#)
-                    .expect("the origin literal is valid JSON"),
+                OpaqueJson::parse(origin.to_string()).expect("the origin we build is valid JSON"),
             ),
         },
     });
@@ -520,8 +548,10 @@ fn is_compaction_summary_origin(message: &Message) -> bool {
     value.get("kind").and_then(Value::as_str) == Some("compaction_summary")
 }
 
-/// The rolling summary text of a compaction-summary message, with the fixed
-/// [`SUMMARY_MESSAGE_PREFIX`] removed. `None` when `message` is not one.
+/// The rolling **model** summary of a compaction-summary message: the fixed
+/// [`SUMMARY_MESSAGE_PREFIX`] removed, and everything from [`USER_MESSAGES_HEADING`] on cut
+/// off (the verbatim user messages are not part of the model's summary). `None` when `message`
+/// is not one.
 pub fn compaction_summary_text(message: &Message) -> Option<String> {
     if !is_compaction_summary_origin(message) {
         return None;
@@ -531,5 +561,242 @@ pub fn compaction_summary_text(message: &Message) -> Option<String> {
     };
     let text = joined_text(content);
     let rest = text.strip_prefix(SUMMARY_MESSAGE_PREFIX)?;
-    Some(rest.trim().to_owned())
+    let summary = match rest.find(USER_MESSAGES_HEADING) {
+        Some(index) => &rest[..index],
+        None => rest,
+    };
+    Some(summary.trim().to_owned())
+}
+
+/// The user messages a compaction-summary message carries verbatim (ADR 0018),
+/// read from `origin` — never parsed out of the body. An old summary message (or any message
+/// that is not one) has no such field, so it reads back as an empty list; nothing is migrated.
+pub fn compaction_user_messages(message: &Message) -> Vec<RetainedUserMessage> {
+    let Message::User { meta, .. } = message else {
+        return Vec::new();
+    };
+    let Some(origin) = meta.origin.as_ref() else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<Value>(origin.get()) else {
+        return Vec::new();
+    };
+    if value.get("kind").and_then(Value::as_str) != Some("compaction_summary") {
+        return Vec::new();
+    }
+    value
+        .get("user_messages")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(Value::as_str)
+                .map(|text| RetainedUserMessage {
+                    text: text.to_owned(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+// ---------- ADR 0018: the user's words, kept verbatim ----------
+
+/// The lower bound of the verbatim budget `U` (ADR 0018): it guarantees the newest
+/// short user message fits even in a small window.
+pub const MIN_USER_MESSAGE_BUDGET: u64 = 512;
+
+/// The upper bound of `U`, and the value used when there is no window at all.
+pub const MAX_USER_MESSAGE_BUDGET: u64 = 8_192;
+
+/// The cap on the **first** user message `U₁` (ADR 0018): the task itself, usually a
+/// plan, may be longer than one ordinary message. It is `min(2000, U)`, so it shrinks with a
+/// small window instead of pushing the compacted request to 83% of `B` on every compaction.
+pub const FIRST_USER_MESSAGE_MAX: u64 = 2_000;
+
+/// The two-layer verbatim budget for an input budget `B`: `(U, U₁)`.
+///
+/// `U = max(512, min(8192, ⌊B/16⌋))` governs the user messages after the first; `U₁ =
+/// min(2000, U)` governs the first. No window (`None`) takes `U = 8192`, `U₁ = 2000`, the same
+/// way the summary ceiling falls back to a fixed value.
+pub fn user_message_budget(input_budget: Option<u64>) -> (u64, u64) {
+    let u = match input_budget {
+        Some(budget) => (budget / 16).clamp(MIN_USER_MESSAGE_BUDGET, MAX_USER_MESSAGE_BUDGET),
+        None => MAX_USER_MESSAGE_BUDGET,
+    };
+    (u, u.min(FIRST_USER_MESSAGE_MAX))
+}
+
+/// One user message Core carries verbatim across a compaction: its text, with every attached
+/// file replaced by a `[file: P, N lines]` placeholder. It is also the shape written into the
+/// summary message's `origin`, so the list reads back exactly.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RetainedUserMessage {
+    pub text: String,
+}
+
+/// The line that names the user messages a budget dropped (ADR 0018). It rides in
+/// the retained list so the model sees that something is missing; [`select_user_messages`]
+/// recognizes it and **carries its count forward** on the next rolling compaction instead of
+/// accumulating one marker per round.
+pub fn omitted_marker(count: usize) -> String {
+    format!("[{count} earlier user messages omitted]")
+}
+
+/// The count a previous omission marker named, when `text` is one. The format is Core's own
+/// ([`omitted_marker`]), so reading it back is a parse, not a guess.
+fn omitted_marker_count(text: &str) -> Option<usize> {
+    let rest = text.strip_prefix('[')?;
+    let count = rest.strip_suffix(" earlier user messages omitted]")?;
+    count.parse().ok()
+}
+
+/// Whether `text` is an omission marker rather than a real user message.
+fn is_omitted_marker(text: &str) -> bool {
+    omitted_marker_count(text).is_some()
+}
+
+/// Whether `message` is a user message Core keeps verbatim (ADR 0018): a
+/// [`Message::User`] whose `source` is [`InputSource::User`] **or missing**. A missing source
+/// counts as `User` at this summary layer only (the same rule the TUI uses to decide "did a
+/// human say this"); it is not an equality of semantics, and ADR 0005's "`None` never equals
+/// `User`" stands. Everything else — `System` (so the summary message itself), `SlashCommand`,
+/// `Scheduler`, `Mcp`, `Subagent`, `PermissionDecision` — is not retained.
+fn retained_text(message: &Message) -> Option<String> {
+    let Message::User { content, meta } = message else {
+        return None;
+    };
+    match meta.source {
+        None | Some(InputSource::User) => {}
+        Some(_) => return None,
+    }
+    let mut out = String::new();
+    for part in content {
+        if let ContentPart::Text { text, .. } = part {
+            let rendered = match part.attachment_path() {
+                Some(path) => format!("[file: {path}, {} lines]", text.lines().count()),
+                None => text.clone(),
+            };
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&rendered);
+        }
+    }
+    Some(out)
+}
+
+/// The tokens `text` costs by the same conservative ruler [`message_tokens`] uses.
+fn text_tokens(text: &str) -> u64 {
+    message_tokens(&Message::user(text))
+}
+
+/// Truncates `text` to at most `budget` tokens, keeping the first ~3/4 and the last ~1/4 with
+/// an omission marker between them. `None` when it already fits.
+///
+/// The cut shrinks geometrically from the proportional one, so a very long message converges
+/// in a few dozen measurements; the shape is what the ADR asks for ("about 3/4 and about
+/// 1/4"), and the result always fits.
+fn truncate_text(text: &str, budget: u64) -> Option<String> {
+    let total = text_tokens(text);
+    if total <= budget {
+        return None;
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let build = |keep: usize| -> String {
+        let head = keep * 3 / 4;
+        let tail = keep - head;
+        let head_text: String = chars[..head].iter().collect();
+        let tail_text: String = chars[chars.len() - tail..].iter().collect();
+        let body = format!("{head_text}{tail_text}");
+        let omitted = total.saturating_sub(text_tokens(&body));
+        format!("{head_text}[… {omitted} tokens omitted …]{tail_text}")
+    };
+    let mut keep = chars.len();
+    loop {
+        let candidate = build(keep);
+        if text_tokens(&candidate) <= budget {
+            return Some(candidate);
+        }
+        if keep == 0 {
+            return Some(format!("[… {total} tokens omitted …]"));
+        }
+        keep = (keep * 9) / 10;
+    }
+}
+
+/// The user messages Core carries verbatim through this compaction (ADR 0018).
+///
+/// `previous` is the list the earlier compaction wrote; `newly_summarized` are the messages
+/// this compaction is about to summarize. The result is `previous + the new user messages`,
+/// re-budgeted: the **first** message is always kept (cut to `U₁` when it is over), then the
+/// rest fill `U` from the newest backwards, with `[N earlier user messages omitted]` naming
+/// the ones that did not fit. The output is in chronological order.
+///
+/// `newly_summarized` is scanned for user messages only ([`retained_text`]); an attached file
+/// becomes a `[file: P, N lines]` placeholder, never its body.
+pub fn select_user_messages(
+    previous: &[RetainedUserMessage],
+    newly_summarized: &[Message],
+    input_budget: Option<u64>,
+) -> Vec<RetainedUserMessage> {
+    let mut texts: Vec<String> = previous
+        .iter()
+        .filter(|kept| !is_omitted_marker(&kept.text))
+        .map(|kept| kept.text.clone())
+        .collect();
+    // A previous marker's count is carried forward: those messages are still omitted, and the
+    // new marker must name all of them, not just this round's.
+    let mut omitted: usize = previous
+        .iter()
+        .filter_map(|kept| omitted_marker_count(&kept.text))
+        .sum();
+    for message in newly_summarized {
+        if let Some(text) = retained_text(message) {
+            texts.push(text);
+        }
+    }
+    if texts.is_empty() {
+        return Vec::new();
+    }
+    let (u, u1) = user_message_budget(input_budget);
+
+    // The first message is the task itself: always kept, cut to `U₁`.
+    let first = truncate_text(&texts[0], u1).unwrap_or_else(|| texts[0].clone());
+    let mut kept: Vec<String> = Vec::new();
+    let mut used = 0u64;
+    // From the newest backwards: the newest is always placed, truncated into `U` when it alone
+    // is larger. The walk **stops** at the first message that does not fit, so what is kept is
+    // the contiguous newest run and everything older is omitted (ADR 0018, owner
+    // 2026-10-13) — never a newer message plus an older short one with a gap between them.
+    for (index, text) in texts[1..].iter().enumerate().rev() {
+        let tokens = text_tokens(text);
+        let entry = if tokens > u {
+            // Only the newest may exceed `U`; it is truncated into `U`.
+            if index + 1 == texts.len() - 1 {
+                truncate_text(text, u).unwrap_or_else(|| text.clone())
+            } else {
+                omitted += index + 1;
+                break;
+            }
+        } else {
+            text.clone()
+        };
+        let entry_tokens = text_tokens(&entry);
+        if used + entry_tokens > u {
+            omitted += index + 1;
+            break;
+        }
+        used += entry_tokens;
+        kept.push(entry);
+    }
+    kept.reverse();
+
+    let mut out = Vec::with_capacity(kept.len() + 2);
+    out.push(RetainedUserMessage { text: first });
+    if omitted > 0 {
+        out.push(RetainedUserMessage {
+            text: omitted_marker(omitted),
+        });
+    }
+    out.extend(kept.into_iter().map(|text| RetainedUserMessage { text }));
+    out
 }

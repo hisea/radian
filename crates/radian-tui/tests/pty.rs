@@ -1894,11 +1894,13 @@ async fn pty_an_at_reference_attaches_the_file_and_folds_it() {
         user.contains("看看 @notes.txt"),
         "the text is unchanged: {user}"
     );
-    assert!(user.contains("<file path=\"notes.txt\">"), "{user}");
+    // ADR 0018: the file is its own part, so the OpenAI adapter joins the parts
+    // with a blank line and there is no `<file>` wrapper any more.
     assert!(
-        user.contains("alpha\nbeta"),
-        "the content is attached: {user}"
+        user.contains("看看 @notes.txt\n\nalpha\nbeta"),
+        "the attachment is a separate part: {user}"
     );
+    assert!(!user.contains("<file path="), "{user}");
     // The transcript shows the folded form, not the file body.
     assert!(
         pty.screen().contains("[file: notes.txt,"),
@@ -2017,8 +2019,10 @@ async fn pty_tab_completes_an_at_reference_and_enter_attaches_it() {
         .unwrap_or_default()
         .to_owned();
     assert!(user.contains("看 @notes.txt"), "{user}");
-    assert!(user.contains("<file path=\"notes.txt\">"), "{user}");
-    assert!(user.contains("alpha\nbeta"), "{user}");
+    // The completion leaves a trailing space, so the attachment part starts after it; the
+    // adapter joins the two parts with a blank line.
+    assert!(user.contains("\n\nalpha\nbeta"), "{user}");
+    assert!(!user.contains("<file path="), "{user}");
 
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));

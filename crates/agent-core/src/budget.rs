@@ -98,6 +98,19 @@ impl RequestSize {
         }
     }
 
+    /// The inverse of [`Self::add_str`], for a substring that was added and must not count.
+    /// Saturating: the caller computes it from a substring of what was added.
+    fn remove_str(&mut self, text: &str) {
+        for ch in text.chars() {
+            if ch.is_ascii() {
+                self.ascii_bytes = self.ascii_bytes.saturating_sub(1);
+            } else {
+                self.non_ascii_chars = self.non_ascii_chars.saturating_sub(1);
+                self.non_ascii_bytes = self.non_ascii_bytes.saturating_sub(ch.len_utf8() as u64);
+            }
+        }
+    }
+
     fn add_json<T: serde::Serialize>(&mut self, value: &T) {
         if let Ok(bytes) = serde_json::to_vec(value) {
             match std::str::from_utf8(&bytes) {
@@ -111,12 +124,30 @@ impl RequestSize {
 
 /// The size of the final request (after `before_model_call`): system prompt, messages, tool
 /// specs and settings, with JSON for the structured parts.
+///
+/// **Revision**: only what a provider actually receives counts. A message's
+/// `meta` is host-owned and never sent (ADR 0005), so each non-empty `meta` is subtracted here.
+/// Before this, a host that put a large `origin` on a message (ADR 0018's verbatim
+/// user messages) inflated the estimate for content the provider never saw.
 pub fn request_size(request: &ModelRequest) -> RequestSize {
     let mut size = RequestSize::default();
     if let Some(system) = &request.system_prompt {
         size.add_str(system);
     }
     size.add_json(&request.messages);
+    for message in &request.messages {
+        let meta = message.meta();
+        if meta.is_empty() {
+            continue;
+        }
+        // `serde` emits `"meta":<json>` last among the message's fields, so its contribution
+        // to the serialized message is `,"meta":<json>`.
+        let field = serde_json::json!({ "meta": meta }).to_string();
+        if let Some(inner) = field.strip_prefix('{').and_then(|f| f.strip_suffix('}')) {
+            size.remove_str(",");
+            size.remove_str(inner);
+        }
+    }
     size.add_json(&request.tools);
     size.add_json(&request.settings);
     size

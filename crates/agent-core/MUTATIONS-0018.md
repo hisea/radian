@@ -120,3 +120,40 @@ Base `faeae09` · 在本任务工作树内逐条施加后从副本还原（`--no
 
 4/4 抓住。测试断言用 `SUMMARY_FACTS_ORDER_RULE` / `SUMMARY_FACTS_DELETE_OLDEST` 两个稳定子串常量，
 W3/W4 因此分别落在 shorten 正文与系统提示上。
+
+## 修订 6：用户原话的逐字保留（2026-10-13）
+
+Base `0a1c18b` · 一次性检出 `/tmp/vb-mut`（detached，跑完删除）· 独立 target ·
+`--no-fail-fast`；每个变异后从副本还原，结束时 `git status --short` 只剩变异脚本。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| V1 | 摘要请求的 `previous_summary` 用摘要消息的**整段正文**（含上一份原话） | ✅ 抓住 | `compaction_flow::the_summary_request_does_not_carry_the_previous_verbatim_list` |
+| V2 | `select_user_messages` 丢掉第一条 | ✅ 抓住 | `compaction::the_first_message_is_kept_and_cut_to_u1`、`compaction_flow::the_first_user_message_survives_eleven_rolling_compactions` |
+| V3 | `U` 的填充顺序改成从旧到新 | ✅ 抓住 | `compaction::the_rest_fill_u_from_the_newest_with_the_omitted_count`（最新一条必须保留） |
+| V4 | plan 不扣原话的实际大小 | ✅ 抓住 | `compaction_flow::the_plan_reserves_the_verbatim_space` |
+| V5 | 不再按 `source` 过滤（`SlashCommand` 等也收） | ✅ 抓住 | `compaction::only_user_messages_are_retained`、`the_summary_message_is_not_retained` |
+| V6 | 附件正文直接进原话（不换占位行） | ✅ 抓住 | `compaction::an_attachment_becomes_a_placeholder` |
+| V7 | 读回解析正文、不读 `origin` | ✅ 抓住 | `compaction::the_verbatim_messages_are_written_and_read_back_from_origin`（正文里带同样的 marker/heading 的消息会被解析错） |
+| V8 | 去掉 `U` 的 512 下界 | ✅ 抓住 | `compaction::the_verbatim_budget_is_the_two_layer_rule`、`a_second_compaction_does_not_stack_omission_markers` |
+| V9 | `U₁` 固定 2000、不随 `U` 缩小 | ✅ 抓住 | `compaction::the_verbatim_budget_is_the_two_layer_rule` |
+
+9/9 抓住。V4 与 V7 起初**没被抓住**：V4 缺一条"plan 为原话留量"的流程测试，V7 的
+round-trip 测试里没有"正文含同样 marker"的消息，于是补了
+`the_plan_reserves_the_verbatim_space`，并把 round-trip 的第二条改成
+`--- user message 9 ---` 与 heading 都在正文里的消息，两者随即被抓住（补测在
+`0a1c18b`）。
+
+## 修订 6 补提交：的三处修正
+
+Base `022afe9` · 一次性检出 `/tmp/vb-mut2`（detached，跑完删除）· `--no-fail-fast`；
+变异后从副本还原。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| X1 | `request_size` 重新把 `meta` 计入估计（`if true \|\| meta.is_empty()` 直接跳过扣减） | ✅ 抓住 | `budget::a_large_host_meta_does_not_change_the_request_estimate` |
+| X2 | 省略计数不累加（`omitted` 从 0 开始，不读上一轮的标记） | ✅ 抓住 | `compaction::the_omission_count_accumulates` |
+| X3 | 选取恢复 `continue`（跳过放不下的、继续挑更旧更短的） | ✅ 抓住 | `compaction::the_selection_is_the_contiguous_newest_run` |
+
+3/3 抓住。X1 是本节的"原话被算两遍"的根因（`request_size` 量 `meta.origin`），修好后兜底门槛
+回到约 76k；X2 与 X3 是两个行为 bug，各有具名测试。

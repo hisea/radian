@@ -350,9 +350,9 @@ pub enum MemoryResult {
 #[derive(Debug, Clone)]
 pub enum Effect {
     /// Start a new turn: `Inbox::followup`.
-    SendFollowup(String),
+    SendFollowup(Message),
     /// Redirect the running turn: `Inbox::steer`.
-    Steer(String),
+    Steer(Message),
     /// Cancel the running turn.
     Cancel,
     /// Leave the app.
@@ -1616,19 +1616,23 @@ impl App {
                     self.entries
                         .push(Entry::new(EntryKind::Notice, warning.clone()));
                 }
-                if !expansion.attached.is_empty() {
+                let attached = expansion.attached();
+                if !attached.is_empty() {
                     self.entries.push(Entry::new(
                         EntryKind::Notice,
                         format!(
                             "attached {} file(s): {}",
-                            expansion.attached.len(),
-                            expansion.attached.join(", ")
+                            attached.len(),
+                            attached.join(", ")
                         ),
                     ));
                 }
+                // ADR 0018: the message carries the text and each attachment as
+                // separate parts, so Core can keep the user's words verbatim.
+                let message = crate::mention::user_message(&expansion.text, &expansion.attachments);
                 let effect = match pending.kind {
-                    PendingSend::Followup => Effect::SendFollowup(expansion.text),
-                    PendingSend::Steer => Effect::Steer(expansion.text),
+                    PendingSend::Followup => Effect::SendFollowup(message),
+                    PendingSend::Steer => Effect::Steer(message),
                 };
                 UpdateResult::effect(effect)
             }
@@ -1868,8 +1872,12 @@ impl App {
         self.entries.retain(|entry| !entry.live);
         match message {
             Message::User { content, .. } => {
-                self.entries
-                    .push(Entry::new(EntryKind::User, text_of(content)));
+                // ADR 0018: an attachment is its own part, so the display renders
+                // it as `[file: P, N lines]` rather than joining its body into the message.
+                self.entries.push(Entry::new(
+                    EntryKind::User,
+                    crate::mention::display_parts(content),
+                ));
             }
             Message::Assistant {
                 content,

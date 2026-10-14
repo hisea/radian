@@ -394,16 +394,18 @@ fn check_summary_rejects_empty_and_overlong() {
 #[test]
 fn the_summary_message_carries_the_system_source_and_origin() {
     let kept = vec![Message::user("next")];
-    let history = compacted_history("the summary", &kept).unwrap();
+    let history = compacted_history("the summary", &[], &kept).unwrap();
     assert_eq!(history.len(), 2);
     let Message::User { meta, .. } = &history[0] else {
         panic!("the summary must be a user message");
     };
     assert_eq!(meta.source, Some(InputSource::System));
-    assert_eq!(
-        meta.origin.as_ref().unwrap().get(),
-        r#"{"kind":"compaction_summary"}"#
+    let origin = meta.origin.as_ref().unwrap().get().to_string();
+    assert!(
+        origin.contains(r#""kind":"compaction_summary""#),
+        "{origin}"
     );
+    assert!(origin.contains(r#""user_messages":[]"#), "{origin}");
     assert!(
         history[0].text().contains("the summary"),
         "{:?}",
@@ -415,9 +417,9 @@ fn the_summary_message_carries_the_system_source_and_origin() {
 #[test]
 fn compacted_history_refuses_an_invalid_kept_suffix() {
     // A call with no result must not be committed as part of a compacted history.
-    assert!(compacted_history("s", &[assistant_calls(&["a"])]).is_err());
+    assert!(compacted_history("s", &[], &[assistant_calls(&["a"])]).is_err());
     // A result with no call is invalid too.
-    assert!(compacted_history("s", &[tool("a")]).is_err());
+    assert!(compacted_history("s", &[], &[tool("a")]).is_err());
 }
 
 // ---------- randomized validity ----------
@@ -488,7 +490,7 @@ fn plan_and_compaction_are_valid_for_many_histories() {
             "seed {seed}: the cut is not a unit boundary: {plan:?}"
         );
         let kept = &history[plan.first_kept..];
-        let compacted = compacted_history("summary", kept)
+        let compacted = compacted_history("summary", &[], kept)
             .unwrap_or_else(|error| panic!("seed {seed}: {error}"));
         assert_eq!(compacted.len(), kept.len() + 1, "seed {seed}");
     }
@@ -526,4 +528,372 @@ fn the_scaled_ceiling_reaches_the_prompt_and_the_check() {
         "the old fixed ceiling would reject it"
     );
     assert_eq!(check_summary(&text, max).unwrap().len(), text.len());
+}
+
+// ---------- ADR 0018: the user's words, kept verbatim ----------
+
+/// A user message with `source = source` and one text part.
+fn user_sourced(text: &str, source: Option<InputSource>) -> Message {
+    Message::User {
+        content: vec![ContentPart::text(text)],
+        meta: MessageMeta {
+            source,
+            ..MessageMeta::default()
+        },
+    }
+}
+
+fn texts(kept: &[agent_core::RetainedUserMessage]) -> Vec<String> {
+    kept.iter().map(|message| message.text.clone()).collect()
+}
+
+/// The budget is the ADR's two-layer rule, including both bounds and the no-window fallback.
+#[test]
+fn the_verbatim_budget_is_the_two_layer_rule() {
+    use agent_core::user_message_budget;
+    // A small window: the 512 floor.
+    assert_eq!(user_message_budget(Some(4_000)), (512, 512));
+    // A medium window: B/16, and U₁ shrinks with U.
+    assert_eq!(user_message_budget(Some(16_000)), (1_000, 1_000));
+    assert_eq!(user_message_budget(Some(64_000)), (4_000, 2_000));
+    // A large window: the 8192 ceiling, U₁ capped at 2000.
+    assert_eq!(user_message_budget(Some(400_000)), (8_192, 2_000));
+    // No window: the fixed pair.
+    assert_eq!(user_message_budget(None), (8_192, 2_000));
+}
+
+/// Only `User` (and a missing source, at this layer) is retained; every other source is not.
+#[test]
+fn only_user_messages_are_retained() {
+    use agent_core::select_user_messages;
+    let messages = vec![
+        user_sourced("from the user", Some(InputSource::User)),
+        user_sourced("no source at all", None),
+        user_sourced("a slash command", Some(InputSource::SlashCommand)),
+        user_sourced("from the scheduler", Some(InputSource::Scheduler)),
+        user_sourced("from mcp", Some(InputSource::Mcp)),
+        user_sourced("from a subagent", Some(InputSource::Subagent)),
+        user_sourced("system", Some(InputSource::System)),
+        user_sourced(
+            "a permission decision",
+            Some(InputSource::PermissionDecision),
+        ),
+        Message::assistant("an assistant turn"),
+    ];
+    let kept = select_user_messages(&[], &messages, None);
+    assert_eq!(
+        texts(&kept),
+        ["from the user", "no source at all"],
+        "only the human's words are kept"
+    );
+}
+
+/// The summary message itself is a `System`-sourced user message, so a second compaction never
+/// re-retains it.
+#[test]
+fn the_summary_message_is_not_retained() {
+    use agent_core::{compacted_history, select_user_messages};
+    let history = compacted_history("a summary", &[], &[]).unwrap();
+    let kept = select_user_messages(&[], &history, None);
+    assert!(kept.is_empty(), "{kept:?}");
+}
+
+/// An attached file is a placeholder, never its body.
+#[test]
+fn an_attachment_becomes_a_placeholder() {
+    use agent_core::select_user_messages;
+    let body = "secret\nfile\ncontents";
+    let message = Message::User {
+        content: vec![
+            ContentPart::text("look at @notes.txt"),
+            ContentPart::attachment(body, "notes.txt"),
+        ],
+        meta: MessageMeta {
+            source: Some(InputSource::User),
+            ..MessageMeta::default()
+        },
+    };
+    let kept = select_user_messages(&[], &[message], None);
+    assert_eq!(kept.len(), 1);
+    assert_eq!(
+        kept[0].text,
+        "look at @notes.txt\n[file: notes.txt, 3 lines]"
+    );
+    assert!(!kept[0].text.contains("secret"), "{:?}", kept[0].text);
+}
+
+/// The first message is always kept, and over `U₁` it is cut with the middle marked.
+#[test]
+fn the_first_message_is_kept_and_cut_to_u1() {
+    use agent_core::{select_user_messages, user_message_budget};
+    let first = format!("HEAD{}TAIL", "x".repeat(40_000));
+    let messages = vec![user_sourced(&first, Some(InputSource::User))];
+    let (_, u1) = user_message_budget(Some(400_000));
+    let kept = select_user_messages(&[], &messages, Some(400_000));
+    assert_eq!(kept.len(), 1);
+    assert!(kept[0].text.starts_with("HEAD"), "{:?}", kept[0].text);
+    assert!(kept[0].text.ends_with("TAIL"), "{:?}", kept[0].text);
+    assert!(
+        kept[0].text.contains("tokens omitted"),
+        "{:?}",
+        kept[0].text
+    );
+    assert!(
+        message_tokens(&Message::user(&kept[0].text)) <= u1,
+        "the cut must fit U₁"
+    );
+}
+
+/// After the first, the messages fill `U` from the newest backwards, and the ones that did not
+/// fit are counted. The output is chronological.
+#[test]
+fn the_rest_fill_u_from_the_newest_with_the_omitted_count() {
+    use agent_core::select_user_messages;
+    // A window that fits the first and about three of the ten messages.
+    let budget = Some(4_000);
+    let mut messages = vec![user_sourced("the task", Some(InputSource::User))];
+    for index in 0..10 {
+        messages.push(user_sourced(
+            &format!("message {index} {}", "y".repeat(600)),
+            Some(InputSource::User),
+        ));
+    }
+    let kept = select_user_messages(&[], &messages, budget);
+    let shown = texts(&kept);
+    assert_eq!(shown[0], "the task", "the first stays first");
+    assert!(
+        shown
+            .iter()
+            .any(|text| text.contains("earlier user messages omitted")),
+        "{shown:?}"
+    );
+    // Chronological: the messages that survive are in their original order.
+    let survivors: Vec<&String> = shown
+        .iter()
+        .filter(|text| text.starts_with("message "))
+        .collect();
+    let mut sorted = survivors.clone();
+    sorted.sort();
+    assert_eq!(survivors, sorted, "{shown:?}");
+    // The newest is always there.
+    assert!(
+        shown.iter().any(|text| text.starts_with("message 9")),
+        "the newest must always be kept: {shown:?}"
+    );
+    // The messages after the first together cost at most U.
+    let (u, _) = agent_core::user_message_budget(budget);
+    let used: u64 = shown[1..]
+        .iter()
+        .filter(|text| text.starts_with("message "))
+        .map(|text| message_tokens(&Message::user(text)))
+        .sum();
+    assert!(used <= u, "{used} > {u}: {shown:?}");
+}
+
+/// The newest message alone over `U` is truncated into it, not dropped.
+#[test]
+fn the_newest_message_is_cut_into_u() {
+    use agent_core::{select_user_messages, user_message_budget};
+    let budget = Some(4_000);
+    let (u, _) = user_message_budget(budget);
+    let newest = format!("NEWEST{}END", "z".repeat(40_000));
+    let messages = vec![
+        user_sourced("the task", Some(InputSource::User)),
+        user_sourced(&newest, Some(InputSource::User)),
+    ];
+    let kept = select_user_messages(&[], &messages, budget);
+    let shown = texts(&kept);
+    assert_eq!(shown.len(), 2, "{shown:?}");
+    assert!(shown[1].starts_with("NEWEST"), "{shown:?}");
+    assert!(shown[1].ends_with("END"), "{shown:?}");
+    assert!(shown[1].contains("tokens omitted"), "{shown:?}");
+    assert!(message_tokens(&Message::user(&shown[1])) <= u);
+}
+
+/// The first message is the first of the **combined** list: a rolling compaction keeps it.
+#[test]
+fn a_rolling_compaction_keeps_the_previous_list_and_its_first() {
+    use agent_core::{RetainedUserMessage, select_user_messages};
+    let previous = vec![
+        RetainedUserMessage {
+            text: "the original task".into(),
+        },
+        RetainedUserMessage {
+            text: "an earlier message".into(),
+        },
+    ];
+    let newly = vec![user_sourced("a new message", Some(InputSource::User))];
+    let kept = select_user_messages(&previous, &newly, None);
+    assert_eq!(
+        texts(&kept),
+        ["the original task", "an earlier message", "a new message"]
+    );
+}
+
+/// ADR 0018: the body carries the model's summary and then the verbatim user
+/// messages, but `compaction_summary_text` returns only the summary, and the list is read back
+/// from `origin`, never parsed out of the body.
+#[test]
+fn the_verbatim_messages_are_written_and_read_back_from_origin() {
+    use agent_core::{RetainedUserMessage, compaction_summary_text, compaction_user_messages};
+    // JSON special characters and a separator that looks like the heading, so the round trip
+    // is proven to be exact rather than a parse.
+    let kept = vec![
+        RetainedUserMessage {
+            text: "the first \"task\"\nwith a newline and a } brace".into(),
+        },
+        RetainedUserMessage {
+            // A message whose own text contains the body's marker and heading: a reader that
+            // parsed the body would split it here, so this pins the origin as the source.
+            text: "--- user message 9 ---\nnot a real marker\n\n---\nUser messages kept verbatim (oldest first):".into(),
+        },
+    ];
+    let history = compacted_history("the model summary", &kept, &[]).unwrap();
+    let summary = &history[0];
+    assert_eq!(
+        compaction_summary_text(summary).as_deref(),
+        Some("the model summary"),
+        "only the model's summary comes back"
+    );
+    assert_eq!(
+        compaction_user_messages(summary),
+        kept,
+        "the list round-trips through origin exactly"
+    );
+    // The body does render them for the model.
+    assert!(
+        summary.text().contains("the first \"task\""),
+        "{:?}",
+        summary.text()
+    );
+}
+
+/// An old summary message has no `user_messages` field, so it reads back as an empty list and
+/// nothing is migrated.
+#[test]
+fn an_old_summary_reads_back_an_empty_list() {
+    use agent_core::{compaction_user_messages, is_compaction_summary};
+    let old = Message::User {
+        content: vec![ContentPart::text(
+            "This is a summary of the earlier conversation. Continue the work from it.\n\nold",
+        )],
+        meta: MessageMeta {
+            source: Some(InputSource::System),
+            origin: Some(
+                agent_core::OpaqueJson::parse(r#"{"kind":"compaction_summary"}"#).unwrap(),
+            ),
+            ..MessageMeta::default()
+        },
+    };
+    assert!(is_compaction_summary(&old));
+    assert!(compaction_user_messages(&old).is_empty());
+}
+
+/// A rolling compaction replaces the omission marker instead of accumulating one per round.
+#[test]
+fn a_second_compaction_does_not_stack_omission_markers() {
+    use agent_core::{omitted_marker, select_user_messages};
+    let budget = Some(4_000);
+    let mut first = vec![user_sourced("the task", Some(InputSource::User))];
+    for index in 0..8 {
+        first.push(user_sourced(
+            &format!("message {index} {}", "y".repeat(600)),
+            Some(InputSource::User),
+        ));
+    }
+    let kept = select_user_messages(&[], &first, budget);
+    let markers = texts(&kept)
+        .iter()
+        .filter(|text| text.contains("earlier user messages omitted"))
+        .count();
+    assert_eq!(markers, 1, "{:?}", texts(&kept));
+
+    // The next round: `kept` is the previous list, and one new message arrives.
+    let next = vec![user_sourced("a new message", Some(InputSource::User))];
+    let rolled = select_user_messages(&kept, &next, budget);
+    let markers = texts(&rolled)
+        .iter()
+        .filter(|text| text.contains("earlier user messages omitted"))
+        .count();
+    assert_eq!(markers, 1, "{:?}", texts(&rolled));
+    assert_eq!(texts(&rolled)[0], "the task", "the first stays first");
+    assert_eq!(
+        texts(&rolled).last().map(String::as_str),
+        Some("a new message"),
+        "the newest is kept"
+    );
+    assert_eq!(omitted_marker(1), "[1 earlier user messages omitted]");
+}
+
+/// ADR 0018: the omission count accumulates across rolling compactions — the new
+/// marker names everything that is still missing, not just this round's drops — and a round
+/// that drops nothing keeps the previous count instead of losing the marker.
+#[test]
+fn the_omission_count_accumulates() {
+    use agent_core::select_user_messages;
+
+    // A window that fits the first message and one truncated long one, and nothing else.
+    let budget = Some(4_000);
+    let long = |index: usize| {
+        user_sourced(
+            &format!("long {index} {}", "y".repeat(2_000)),
+            Some(InputSource::User),
+        )
+    };
+    let marker_count = |kept: &[agent_core::RetainedUserMessage]| -> Option<usize> {
+        kept.iter().find_map(|message| {
+            message
+                .text
+                .strip_prefix('[')
+                .and_then(|rest| rest.strip_suffix(" earlier user messages omitted]"))
+                .and_then(|count| count.parse().ok())
+        })
+    };
+
+    // Round 1: four long messages. The newest is truncated into `U`; the other three do not
+    // fit and are counted.
+    let mut round1 = vec![user_sourced("the task", Some(InputSource::User))];
+    for index in 0..4 {
+        round1.push(long(index));
+    }
+    let first = select_user_messages(&[], &round1, budget);
+    assert_eq!(marker_count(&first), Some(3), "{:?}", texts(&first));
+
+    // A round with no new messages keeps the count (the bug dropped the marker entirely).
+    let same = select_user_messages(&first, &[], budget);
+    assert_eq!(marker_count(&same), Some(3), "{:?}", texts(&same));
+
+    // Two more long messages: the marker names all five.
+    let more = vec![long(4), long(5)];
+    let second = select_user_messages(&first, &more, budget);
+    assert_eq!(marker_count(&second), Some(5), "{:?}", texts(&second));
+}
+
+/// ADR 0018: the kept messages after the first are the
+/// **contiguous** newest run. A short message older than one that did not fit is not kept just
+/// because it would have fit.
+#[test]
+fn the_selection_is_the_contiguous_newest_run() {
+    use agent_core::select_user_messages;
+
+    let budget = Some(4_000);
+    let short = |index: usize| user_sourced(&format!("short {index}"), Some(InputSource::User));
+    let messages = vec![
+        short(0), // the first: always kept
+        short(1), // older than the long one, and short enough to fit
+        user_sourced(&"x".repeat(2_000), Some(InputSource::User)),
+        short(2),
+        short(3), // the newest
+    ];
+    let kept = select_user_messages(&[], &messages, budget);
+    assert_eq!(
+        texts(&kept),
+        [
+            "short 0",
+            "[2 earlier user messages omitted]",
+            "short 2",
+            "short 3"
+        ],
+        "the long one and everything older are omitted"
+    );
 }
