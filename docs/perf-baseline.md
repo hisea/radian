@@ -606,3 +606,21 @@ mermaid 后）**上同样超时，而且连 warm-up（1000 条）都超时。用
 这行属于 **startup 屏**，它排在 transcript 顶部；resume 时视图 `follow` 到底部，所以它在首帧
 **滚出屏幕**，测试等的那个字符串永远不出现。也就是说这是 startup 屏在 resume 长历史下的可见性
 问题（或测试该换一个判据），不是 Markdown 的性能回归。本片没有改它。
+
+### `perf_tui_resume` 判据修正与两组对照（markdown-4）
+
+`perf_tui_resume` 的判据在 ui-r2 之后失效（不是本片）：它等的 `resumed session …` 被 ui-r2 移进
+**startup 屏**，而 resume 跟随到底部，startup 屏首帧就滚出屏幕——所以它在**本片之前的 main 上
+也超时**。判据已改成首帧一定画出的状态栏 `context budget off`；Ctrl-Home 的判据从原始工具参数
+改成工具卡片标题 `-> read: file.txt`（tools 片改了渲染）。两个判据都仍然测到首帧/滚动完成。
+
+同一台机器、相近负载下分别测（`--ignored --nocapture --test-threads=1`，5 次取样）：
+
+| 语料 | main `a6a9cce` 首帧 p50 | pi/markdown `f7d4f41` 首帧 p50 | 比值 |
+|---|---|---|---|
+| 1 000 条 | 56 ms | 59 ms | 1.05× |
+| 10 000 条 | 1 235 ms | 1 270 ms | 1.03× |
+| 50 000 条 | 18 949 ms | 12 887 ms | **0.68×** |
+
+**结论**：Markdown 没有让 resume 首帧变慢（50k 反而更快，10k/1k 在噪声内），远低于 1.5× 的
+修修门槛，所以不做懒测量/尺寸上限。两个绝对值都由"resume 时首次测量全部条目"主导，与本片无关。
