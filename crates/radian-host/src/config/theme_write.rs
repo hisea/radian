@@ -113,17 +113,39 @@ pub fn write_theme(path: &Path, read_only: bool, theme: &str) -> Result<PathBuf,
         });
     }
 
+    // Resolve a symbolic link: a dotfiles setup links `config.toml` into a repository, and a
+    // rename onto the link's path would replace the link with a plain file.
+    // The write goes to the link's target; the notice keeps naming the path the user knows.
+    let target = resolve_target(path);
     let mut bytes = new_text.into_bytes();
     if !bytes.ends_with(b"\n") {
         bytes.push(b'\n');
     }
-    crate::atomic_write::write_atomic(path, &bytes, None).map_err(|source| {
+    crate::atomic_write::write_atomic(&target, &bytes, None).map_err(|source| {
         ThemeWriteError::Write {
             path: path.to_path_buf(),
             source,
         }
     })?;
     Ok(path.to_path_buf())
+}
+
+/// The real file a write targets: the symbolic link is resolved (all of it, through
+/// `canonicalize`), and when the file does not exist yet the nearest existing ancestor is
+/// resolved so a symlinked parent directory still lands in the repository.
+fn resolve_target(path: &Path) -> PathBuf {
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return real;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+            match std::fs::canonicalize(parent) {
+                Ok(real_parent) => real_parent.join(name),
+                Err(_) => path.to_path_buf(),
+            }
+        }
+        _ => path.to_path_buf(),
+    }
 }
 
 #[cfg(test)]
@@ -293,5 +315,49 @@ mod review_tests {
             .filter(|name| name.contains(".tmp-"))
             .collect();
         assert!(leftovers.is_empty(), "temp files left: {leftovers:?}");
+    }
+
+    /// U3: a dotfiles setup links `config.toml` into a repository. The write must reach the
+    /// target and leave the link a link.
+    #[cfg(unix)]
+    #[test]
+    fn write_theme_keeps_a_symlink_and_writes_its_target() {
+        let scratch = Scratch::new("symlink");
+        let dotfiles = scratch.file("dotfiles");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        let target = dotfiles.join("config.toml");
+        std::fs::write(&target, "schema_version = 1\n[tui]\ntheme = \"dark\"\n").unwrap();
+        let link = scratch.file("config.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        write_theme(&link, false, "light").unwrap();
+
+        let metadata = std::fs::symlink_metadata(&link).unwrap();
+        assert!(
+            metadata.file_type().is_symlink(),
+            "the link must survive the write"
+        );
+        let text = std::fs::read_to_string(&target).unwrap();
+        assert!(text.contains("theme = \"light\""), "{text}");
+    }
+
+    /// U3, the other shape: the link is on the **directory**. Writing a fresh file under a
+    /// linked parent must land in the real directory too.
+    #[cfg(unix)]
+    #[test]
+    fn write_theme_through_a_symlinked_directory() {
+        let scratch = Scratch::new("symlink-dir");
+        let real = scratch.file("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = scratch.file("linked");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let path = link.join("config.toml");
+
+        write_theme(&path, false, "mono").unwrap();
+
+        let written = real.join("config.toml");
+        assert!(written.exists(), "the file landed in the real directory");
+        let text = std::fs::read_to_string(&written).unwrap();
+        assert!(text.contains("theme = \"mono\""), "{text}");
     }
 }
