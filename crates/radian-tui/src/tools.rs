@@ -463,8 +463,14 @@ mod tests {
         // errors: folded unless the call failed; a failure never folds, in any mode.
         assert_eq!(body_plan(&card, text, false, ToolFold::Errors, 3).len(), 4);
         assert_eq!(body_plan(&card, text, true, ToolFold::Errors, 3).len(), 7);
-        assert_eq!(body_plan(&card, text, false, ToolFold::Collapsed, 3).len(), 4);
-        assert_eq!(body_plan(&card, text, true, ToolFold::Collapsed, 3).len(), 7);
+        assert_eq!(
+            body_plan(&card, text, false, ToolFold::Collapsed, 3).len(),
+            4
+        );
+        assert_eq!(
+            body_plan(&card, text, true, ToolFold::Collapsed, 3).len(),
+            7
+        );
         // A body that already fits the preview is left whole.
         assert_eq!(
             body_plan(&card, "a\nb", false, ToolFold::Collapsed, 5).len(),

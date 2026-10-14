@@ -829,7 +829,10 @@ fn an_error_card_stays_expanded_under_collapsed() {
         message: Message::Tool {
             result: ToolResult {
                 call_id: "c1".into(),
-                content: vec![ContentPart::text("boom\nmore")],
+                // Longer than the preview, so a wrong fold would really hide it.
+                content: vec![ContentPart::text(
+                    (1..=20).map(|i| format!("boom {i}\n")).collect::<String>(),
+                )],
                 structured: None,
                 is_error: true,
                 error_code: None,
@@ -837,12 +840,15 @@ fn an_error_card_stays_expanded_under_collapsed() {
             meta: Default::default(),
         },
     });
-    let text = screen(&render(&mut app, 60, 12));
+    // Tall enough that the whole transcript is on screen (the view follows the bottom).
+    let text = screen(&render(&mut app, 60, 40));
+    // The distinctive lines at both ends: a fold would show only the last preview lines.
     assert!(
-        text.contains("boom"),
-        "the error body stays visible:\n{text}"
+        text.contains("boom 1\n") || text.contains("boom 1 "),
+        "the first line: {text}"
     );
-    assert!(text.contains("more"), "{text}");
+    assert!(text.contains("boom 20"), "the last line: {text}");
+    assert!(!text.contains("more lines"), "nothing folded: {text}");
 }
 
 /// The `shell` renderer's body marks the stderr section with the warning role (the tool's
