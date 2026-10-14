@@ -424,9 +424,10 @@ fn an_aborted_segment_recovers_the_old_history_and_the_next_append_is_normal() {
 fn an_aborted_segment_and_one_at_end_of_file_fold_identically() {
     let fold = |abort: bool| {
         let mut fold = TranscriptFold::new();
+        // A committed assistant call: the abort must not clear its declared marker.
         fold.push(&JournalRecord::Message {
             index: 0,
-            message: Message::user("old"),
+            message: assistant_call("old-call"),
         })
         .unwrap();
         fold.push(&JournalRecord::TranscriptReplaced {
@@ -448,11 +449,15 @@ fn an_aborted_segment_and_one_at_end_of_file_fold_identically() {
     let aborted = fold(true);
     let at_end_of_file = fold(false);
     assert_eq!(aborted.history(), at_end_of_file.history());
-    assert_eq!(aborted.history(), &[Message::user("old")]);
-    assert_eq!(
-        aborted.is_call_declared("pending-call"),
-        at_end_of_file.is_call_declared("pending-call")
-    );
+    assert_eq!(aborted.history(), &[assistant_call("old-call")]);
+    for call in ["old-call", "pending-call"] {
+        assert_eq!(
+            aborted.is_call_declared(call),
+            at_end_of_file.is_call_declared(call),
+            "{call}"
+        );
+    }
+    assert!(aborted.is_call_declared("old-call"));
     assert!(!aborted.is_call_declared("pending-call"));
 }
 
