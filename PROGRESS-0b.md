@@ -36,3 +36,33 @@ Worktree `<home>/Code/radian-pi-0b`, branch `pi/0b`, base `0efe316` + merge `672
   `auth.json`). If this should be generic-only, the anthropic tests need a different seam.
 - The two `[[bin]]` targets share `src/main.rs`, so Cargo prints "file found to be present in
   multiple build targets". The brief asked for exactly this layout.
+
+## Verify (all pass)
+
+- `cargo fmt --all -- --check`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo test --workspace --locked --no-fail-fast` (142 test binaries ok)
+- `cargo test -p agent-core --locked --features journal-selfcheck`
+- `cargo clippy -p agent-core --all-targets --features journal-selfcheck -- -D warnings`
+- `bash docs/schema/check-fixtures.sh`
+- `bash docs/schema/check-config-fixtures.sh`
+- `cargo test -p agent-provider-openai-compatible --features testing --test contract`
+- `cargo test -p agent-provider-anthropic --features testing --test contract`
+- `cargo +1.88 check --workspace --all-targets`
+- `cargo build -p agent-extensions --bin mcp-fixture`
+- `cargo test -p radian-tui --test pty` 86/86 × 3
+
+## Owner migration (do not apply for you)
+
+`~/.radian/config/config.toml`:
+
+1. Delete the line `api_key = { from = "env", name = "MY_KEY" }` (it is now a refusal).
+2. Keep `model.provider = "opencode-go"` and `model.model = "<model>"`.
+
+`~/.radian/credentials/auth.json` (0600, in a 0700 `credentials/`):
+
+```json
+{"opencode-go": {"type": "api_key", "key": "$MY_KEY"}}
+```
+
+Then `radian` (or `rad`) with no arguments starts from the project directory.
