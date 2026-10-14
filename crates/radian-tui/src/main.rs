@@ -232,19 +232,12 @@ const INPUT_POLL: Duration = Duration::from_millis(50);
 /// tick; it **does not draw** (the zero-redraw rule), so the cost is one syscall — negligible.
 const TTY_CHECK_TICK: Duration = Duration::from_millis(250);
 
-static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-
 fn mark(label: &str) {
-    if std::env::var_os("RADIAN_TRACE_PHASES").is_none() {
-        return;
-    }
-    if let Some(t) = T0.get() {
-        eprintln!("[trace] {label} {} ms", t.elapsed().as_millis());
-    }
+    radian_session::trace::mark(label);
 }
 
 fn main() -> ExitCode {
-    let _ = T0.set(std::time::Instant::now());
+    radian_session::trace::start();
     radian_tui::terminal::install_panic_hook();
     let cli = Cli::parse();
     if let Some(path) = &cli.exit_trace {
@@ -868,7 +861,7 @@ fn run(
     // ADR 0023 U5: the one place a session is established; `agent-cli` calls the same function
     // with its own bindings. Every startup check that can fail has already run, so this is the
     // first thing that creates durable state.
-    let session = runtime
+    let mut session = runtime
         .block_on(radian_host::open_session(
             radian_host::SessionSetup {
                 config_slot: std::sync::Arc::clone(&config_slot),
@@ -1068,15 +1061,10 @@ fn run(
     }
     let memory_service = session.memory().cloned();
     // The history of a resumed session is rendered before the first frame, so the transcript
-    // shows it from the start. `Driver::open` recovers the same history from the journal for
-    // the model; this is only the view of it.
-    let history = if resume.is_some() {
-        radian_session::Session::open(session.journal_path())
-            .and_then(|history| history.history())
-            .map_err(|e| format!("cannot read session {session_id:?}: {e}"))?
-    } else {
-        Vec::new()
-    };
+    // shows it from the start. `open_session` already recovered exactly this transcript
+    // (`agent_core::recover` over the same journal records `Session::history` folds), so the
+    // host takes it instead of re-opening and re-folding the file (resume-perf B).
+    let history = std::mem::take(&mut session.history);
 
     mark("history-read");
     if let Some(path) = &cli.block_input {

@@ -275,3 +275,66 @@ async fn bench_append_latency() {
         "sanity bound"
     );
 }
+
+/// resume-perf B2: a resume takes the single-writer lock **before** it parses. With the lock
+/// already held elsewhere, the second resume must fail on the lock without ever opening the
+/// session - the parse counter proves the order (no wall clock).
+#[test]
+fn a_resume_locks_before_it_parses() {
+    let dir = TempDir::new("lock-order");
+    let path = dir.file("s.jsonl");
+    drop(SessionJournal::create(&path, "sid", created()).unwrap());
+
+    radian_session::testing::reset_open_count();
+    let held = SessionJournal::lock_for_resume(&path).unwrap();
+    let error = match SessionJournal::resume(&path, "sid") {
+        Ok(_) => panic!("the second resume must fail on the lock"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(error, radian_session::WriteError::Locked { .. }),
+        "the lock must be taken before the parse: {error:?}"
+    );
+    assert_eq!(
+        radian_session::testing::open_count(),
+        0,
+        "the parse ran before the lock"
+    );
+    drop(held);
+}
+
+/// resume-perf B2: a record another process appends while this resume is about to lock must
+/// survive. The hook appends it at the exact point the lock is taken; a resume that parsed
+/// first would hold a stale `committed_bytes` and `set_len` the appended line away.
+#[test]
+fn a_line_appended_before_the_lock_survives_the_resume() {
+    let dir = TempDir::new("lock-append");
+    let path = dir.file("s.jsonl");
+    {
+        let journal = SessionJournal::create(&path, "sid", created()).unwrap();
+        journal
+            .test_append_message(0, Message::user("first"))
+            .unwrap();
+    }
+    // The concurrent appender: takes the lock, appends one message, releases - all before this
+    // resume takes the lock.
+    *radian_session::testing::RESUME_BEFORE_LOCK.lock().unwrap() = Some(Box::new(|path| {
+        let journal = SessionJournal::resume(path, "sid").unwrap();
+        journal
+            .test_append_message(1, Message::user("appended"))
+            .unwrap();
+    }));
+    let journal = SessionJournal::resume(&path, "sid").unwrap();
+    // seq 0 is SessionCreated, seq 1 and 2 are the two messages: the next append is seq 3.
+    assert_eq!(
+        journal.next_seq(),
+        3,
+        "seq must continue after the appended line"
+    );
+    let history = Session::open(&path).unwrap().history().unwrap();
+    assert_eq!(
+        history.len(),
+        2,
+        "the appended line must still be there: {history:?}"
+    );
+}
