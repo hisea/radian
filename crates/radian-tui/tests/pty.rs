@@ -216,6 +216,9 @@ struct Pty {
     bytes: Arc<Mutex<Vec<u8>>>,
     parser: Parser,
     child: Box<dyn portable_pty::Child + Send + Sync>,
+    /// The pty master, kept so a test can change the window size (`TIOCSWINSZ`) without
+    /// sending any input (the owner's bare-resize bug).
+    master: Box<dyn portable_pty::MasterPty + Send>,
     processed: usize,
     /// A private `HOME` for the app: its catalog cache lives here, never in the user's real
     /// cache. Held only so the directory is removed when the pty is dropped.
@@ -345,6 +348,7 @@ impl Pty {
         let child = pair.slave.spawn_command(cmd).unwrap();
         let writer = pair.master.take_writer().unwrap();
         let mut reader = pair.master.try_clone_reader().unwrap();
+        let master = pair.master;
         let bytes: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let log = Arc::clone(&bytes);
         std::thread::spawn(move || {
@@ -361,9 +365,23 @@ impl Pty {
             bytes,
             parser: Parser::new(rows, cols, 5000),
             child,
+            master,
             processed: 0,
             home,
         }
+    }
+
+    /// Changes the pty's window size **without sending any input**: a `TIOCSWINSZ` on the
+    /// master, which is what dragging a window does. The app must re-lay out on its own.
+    fn resize(&mut self, rows: u16, cols: u16) {
+        self.master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
     }
 
     fn send(&mut self, bytes: &[u8]) {
@@ -8015,6 +8033,68 @@ fn short_workspace(label: &str) -> std::path::PathBuf {
     let path = std::path::PathBuf::from(format!("/tmp/radian-{label}-{}", std::process::id()));
     std::fs::create_dir_all(&path).unwrap();
     path
+}
+
+/// The longest run of `ch` on any screen line: the input box's rule length is a cheap proxy
+/// for "the app laid out at this width".
+fn longest_run(screen: &str, ch: char) -> usize {
+    screen
+        .lines()
+        .map(|line| {
+            line.chars()
+                .fold((0usize, 0usize), |(best, run), c| {
+                    if c == ch {
+                        (best.max(run + 1), run + 1)
+                    } else {
+                        (best, 0)
+                    }
+                })
+                .0
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// changing the window size with **no other input** must re-lay out. The
+/// old bug: crossterm only drains its SIGWINCH pipe while reading stdin, so an idle app stayed
+/// at the old width until a key or wheel arrived ("scroll once and it fixes itself"). The app
+/// now polls `TIOCGWINSZ` on its idle tick.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_bare_resize_re_lays_out() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let config = format!(
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
+         base_url = \"{}\"\n",
+        server.base_url
+    );
+    let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    let before = longest_run(&pty.screen(), '─');
+    assert!(before > 90, "the initial rule spans the terminal: {before}");
+
+    // Only the size changes; no key, no wheel.
+    pty.resize(24, 60);
+    assert!(
+        pty.wait_until(5, |screen| longest_run(screen, '─') < 62),
+        "no re-layout after a bare resize (rule was {before}, now {}):\n{}",
+        longest_run(&pty.screen(), '─'),
+        pty.screen()
+    );
+
+    // Three changes in a row land on the last size.
+    pty.resize(24, 70);
+    pty.resize(24, 80);
+    pty.resize(24, 50);
+    assert!(
+        pty.wait_until(5, |screen| longest_run(screen, '─') < 52),
+        "the final size must win (rule is {}):\n{}",
+        longest_run(&pty.screen(), '─'),
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
 }
 
 /// The keyboard-enhancement flags (kitty protocol, ): when the terminal

@@ -25,6 +25,7 @@ use radian_tui::events::{InputEvent, ProjectionSink, UiEvent};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{self, Event};
+use ratatui::crossterm::terminal;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -1618,6 +1619,14 @@ fn read_input(timeout: Duration) -> Input {
         }
         Tty::Idle => {
             exit_trace_once(&TRACED_IDLE, "poll-idle");
+            // A window resize reaches crossterm only while it is reading stdin, which an idle
+            // app never does: its SIGWINCH pipe is drained inside `event::poll`/`read`. So an
+            // idle app stayed at the old width until the next key or wheel ("scroll once and
+            // it re-lays out"). Ask the kernel directly instead: `TIOCGWINSZ` does not read
+            // stdin, so it cannot hit the EOF spin guard 1 exists for.
+            if let Some((rows, cols)) = size_changed() {
+                return Input::Event(Event::Resize(rows, cols));
+            }
             // Guard 1: do not enter crossterm unless a previous read may have buffered
             // events. Its `poll(0)` reads the fd on an empty buffer and loops on a hung-up
             // tty (see the function docs); a plain Idle is safe.
@@ -1652,6 +1661,20 @@ fn read_input(timeout: Duration) -> Input {
 /// up to 1024 bytes and parses one event). Only then is it safe to ask crossterm's `poll(0)`;
 /// see [`read_input`]'s docs.
 static MAY_HAVE_BUFFERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The last terminal size this thread reported, as `rows << 16 | cols` (`0` = never). A window
+/// resize is detected by comparing it against a fresh `TIOCGWINSZ`, because crossterm only
+/// drains its SIGWINCH pipe while it is reading stdin (see [`read_input`]).
+static LAST_SIZE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// The current terminal size when it differs from the last one reported, else `None`. `TIOCGWINSZ`
+/// only; never a stdin read. The first call records the size without reporting a change.
+fn size_changed() -> Option<(u16, u16)> {
+    let (cols, rows) = terminal::size().ok()?;
+    let packed = (u32::from(rows) << 16) | u32::from(cols);
+    let previous = LAST_SIZE.swap(packed, std::sync::atomic::Ordering::SeqCst);
+    (previous != 0 && previous != packed).then_some((rows, cols))
+}
 
 /// One-per-site markers for the input thread's trace (test hook only).
 static TRACED_READABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -1786,6 +1809,12 @@ fn run_pbcopy(text: &str) -> Result<(), String> {
 fn spawn_input_thread(tx: Sender<UiEvent>) {
     std::thread::spawn(move || {
         exit_trace("input-thread-start");
+        // Record the size the app is about to draw at, so a resize that lands before the
+        // first idle poll is still detected (the owner's bare-resize bug).
+        if let Ok((cols, rows)) = terminal::size() {
+            let packed = (u32::from(rows) << 16) | u32::from(cols);
+            LAST_SIZE.store(packed, std::sync::atomic::Ordering::SeqCst);
+        }
         loop {
             match read_input(INPUT_POLL) {
                 Input::Gone => {
@@ -1819,6 +1848,12 @@ fn spawn_input_thread(tx: Sender<UiEvent>) {
 fn coalesce_resize(rows: u16, cols: u16) -> InputEvent {
     let (mut rows, mut cols) = (rows, cols);
     while let Input::Event(Event::Resize(next_rows, next_cols)) = read_input(Duration::ZERO) {
+        rows = next_rows;
+        cols = next_cols;
+    }
+    // A drag may have moved the window again since; the last size is the one that matters, so
+    // report it rather than an intermediate one.
+    if let Some((next_rows, next_cols)) = size_changed() {
         rows = next_rows;
         cols = next_cols;
     }

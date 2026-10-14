@@ -993,3 +993,22 @@ Base `d483ec9` · 一次性 worktree `/tmp/radian-mut-s2c`（`git worktree add -
 | FS2C-B | 去掉 `GIT_OPTIONAL_LOCKS=0` 环境变量 | `the_background_git_disables_optional_locks` | ✅ |
 
 2/2 抓住。两个都断言，是因为新 git 认参数、旧 git 只认环境变量：只留一个就是给旧版本留洞。
+
+## resize-fix：空闲时也要重新布局＼�2026-10-16）
+
+Base `ea67319` · 一次性 worktree `/tmp/radian-mut-resize`（`git worktree add --detach`，独立
+`CARGO_TARGET_DIR`）· 每条跑完 `git checkout -- .`，`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| RESIZE-A | Idle 分支不做尺寸比较（`size_changed()` 恒 `None`） | `pty_a_bare_resize_re_lays_out` | ✅ |
+| RESIZE-B | 恢复无条件 `event::poll(0)`（去掉 flaky-master 的收窄） | `pty_a_closed_master_ends_the_app_cleanly` | ❌ 未抓住 |
+
+RESIZE-B **如实记录**：直接跑 5/5 通过；按 brief 加 4×`yes` 负载再跑 5/5 仍通过。这与本文件
+`flaky-master-fix` 的 F2 结论一致——**兜底（主循环每 250 ms 的 `terminal_is_gone`）会救场**，
+把"输入线程卡在 crossterm"变成"仍在 250 ms 内干净退出"，所以 closed-master 测试抓不到收窄的缺失
+（收窄的价值是省 CPU，不是保证退出）。这次修复没有动收窄，两层防护保持原样。
+
+RESIZE-A 的过程记录：第一轮把 `size_changed()` 的**诊断调用**和真实调用写成了两次，
+诊断那一次把变化吃掉了（trace 里 `changed=Some` 但 `detected` 为 0），改成只调用一次后才由
+`pty_a_bare_resize_re_lays_out` 抓住——变异要真的改变被测行为，不能只加观察。
