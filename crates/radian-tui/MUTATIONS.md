@@ -780,3 +780,19 @@ Base `a1d1343` · 复现 harness：20 个 `yes > /dev/null`（记 pid，末尾�
 **修前 1/48，修后 0/48**（同一 harness）。另外 plain 顺序单跑 20 次（同样 20 个 `yes`）：修前 0/20、
 修后 0/20——偶发需要并发 TUI 争用才明显。结论：**测试的时序假设**，不是产品多画帧（产品
 `input_event` 把 `MouseEventKind::Moved` 映射为 `None`，见 `events.rs:83-118`）。
+## flaky-master-fix：closed-master 卡死的两层防护（2026-10-14）
+
+Base `fdfc2cb` · 一次性检出 `/tmp/flaky-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+负载：40×`yes > /dev/null`（记下 pid，只杀这些），load average 262–457 ·
+`cargo test -p radian-tui --test pty pty_a_closed_master_ends_the_app_cleanly --exact`。
+
+| # | 变异 | 应体现 | 结果 |
+|---|---|---|---|
+| F1 | 去掉主循环兜底（两处 `if terminal_is_gone()` → `if false && …`），保留收窄 | 卡死重新偶发 | 负载下 **0/100** 失败：收窄本身已把窗口缩到 100 次内不复现；**兜底的必要性此变异无法演示**（如实记录）。修前同一测试在 load ~245 是 2/20 |
+| F2 | 去掉收窄（Idle 分支恢复修前：无条件 `event::poll(0)`），保留兜底 | 测试仍通过，且兜底真的救场 | 负载下 **0/30** 失败，其中 **1/30** 的打点证明兜底救场：`input-thread-start`、`poll-idle` 之后直接 `loop-done`（**无 `pollhup`、无 `terminal-gone`**），退出耗时 256.7 ms（一个 250 ms tick 内）；输入线程当时卡在 crossterm 里 |
+
+结论：收窄是主要修复（把"每次空闲 tick 都是一次机会"降到"仅在上一次 crossterm 读取可能留缓冲时"，
+再加调用前的零超时 `tty_readiness`）；兜底覆盖收窄仍留的微秒级窗口（F2 的那一次即证据）。两层都在。
+
+`--exit-trace`（4e607ef）保留为测试诊断：不传时不打开文件、不输出；`exit_trace_once` 在 `OnceLock`
+未设置时直接返回，连原子操作都不做。
