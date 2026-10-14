@@ -21,6 +21,7 @@ mod model;
 mod output;
 pub mod pending;
 pub mod projection;
+pub mod provider;
 pub mod session;
 mod session_id;
 pub mod sessions;
@@ -68,6 +69,10 @@ pub use pending::{
 };
 pub use projection::{
     LastToolCall, ProjectionRead, SessionProjection, StreamKind, StreamSnapshot, TurnState,
+};
+pub use provider::{
+    DESCRIPTORS, DescriptorModel, LoginMethod, Protocol, ProviderDescriptor, descriptor,
+    descriptors,
 };
 pub use session::{
     ApprovalRouting, CommandRefused, DriverEnd, HostBindings, LocalSession, SessionCapability,
