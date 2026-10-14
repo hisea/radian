@@ -278,6 +278,9 @@ fn the_approval_modal_above_a_question_keeps_its_keys() {
         radian_tui::app::PendingApproval {
             request_id: 2,
             origin: "session".into(),
+            scroll: 0,
+            total_rows: 0,
+            visible_rows: 0,
             request: radian_permissions::ApprovalRequest::new(
                 "perm-2",
                 "call-2",
