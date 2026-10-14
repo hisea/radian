@@ -1728,7 +1728,13 @@ fn draw_frame(
     if FREEZE_DRAW.get().is_some_and(|path| path.exists()) {
         return Ok(true);
     }
-    match terminal.draw(|frame| radian_tui::render::draw(frame, app)) {
+    // `draw/end` is the end of the render closure; the gap to `draw/terminal-done` is
+    // ratatui's buffer diff plus the write and flush to the terminal (resume-perf-c: the
+    // owner's 1.2 s first-frame gap had no mark here).
+    radian_session::trace::mark("draw/terminal-start");
+    let drawn = terminal.draw(|frame| radian_tui::render::draw(frame, app));
+    radian_session::trace::mark("draw/terminal-done");
+    match drawn {
         Ok(_) => {
             if let Some(path) = FREEZE_DRAW.get() {
                 let _ = std::fs::write(path, "drawn\n");
