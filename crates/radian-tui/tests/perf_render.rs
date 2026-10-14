@@ -807,14 +807,18 @@ fn dbg_render_costs() {
     ));
     let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
     let t = Instant::now();
-    terminal.draw(|frame| render::draw(frame, &mut app)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app))
+        .unwrap();
     println!(
         "first frame with a 200-line rust block (syntax set load): {} ms",
         t.elapsed().as_millis()
     );
     // A second frame is cached.
     let t = Instant::now();
-    terminal.draw(|frame| render::draw(frame, &mut app)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app))
+        .unwrap();
     println!("second frame (cached): {} ms", t.elapsed().as_millis());
     // A big mermaid diagram.
     let diagram: String = (0..200).map(|i| format!("A{i}-->B{i};\n")).collect();

@@ -662,3 +662,77 @@ fn extra_indexed_rows_are_a_mismatch_even_when_the_counts_agree() {
     assert!(index.audit(&path).unwrap().consistent);
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
+
+/// resume-perf-c: an unchanged file (same size and mtime) is **not** re-scanned, so opening
+/// the picker does not re-read every session. A touched file is.
+#[test]
+fn an_unchanged_file_is_not_reindexed_but_a_touched_one_is() {
+    let dir = TempDir::new("incremental");
+    let path = dir.file("s.jsonl");
+    write_synthetic(&path, "sid", "ws", 3);
+    let mut index = Index::open(dir.file("index.db")).unwrap();
+    index.rebuild_dir(dir.path()).unwrap();
+    let session_id = Session::open(&path).unwrap().session_id().to_owned();
+    let summary = |index: &Index| {
+        index
+            .list(Some("ws"))
+            .unwrap()
+            .into_iter()
+            .find(|s| s.session_id == session_id)
+            .unwrap()
+    };
+    assert_eq!(summary(&index).event_count, 4);
+
+    // Corrupt a row **without touching the file**: an unchanged file is not re-scanned, so the
+    // corruption stays (a changed file is what triggers a rebuild).
+    {
+        let db = rusqlite::Connection::open(dir.file("index.db")).unwrap();
+        db.execute(
+            "UPDATE sessions SET event_count = 999 WHERE session_id = ?1",
+            [&session_id],
+        )
+        .unwrap();
+    }
+    index.rebuild_dir(dir.path()).unwrap();
+    assert_eq!(
+        summary(&index).event_count,
+        999,
+        "an unchanged file must not be re-scanned"
+    );
+
+    // Touch the file (a newer mtime): the next rebuild re-scans it and the corruption is gone.
+    let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
+    file.set_times(std::fs::FileTimes::new().set_modified(later))
+        .unwrap();
+    drop(file);
+    index.rebuild_dir(dir.path()).unwrap();
+    assert_eq!(
+        summary(&index).event_count,
+        4,
+        "a touched file is re-scanned"
+    );
+}
+
+/// resume-perf-c: a session file that was deleted leaves the index (rows and events).
+#[test]
+fn a_deleted_session_leaves_the_index() {
+    let dir = TempDir::new("deleted");
+    let keep = dir.file("keep.jsonl");
+    let gone = dir.file("gone.jsonl");
+    write_synthetic(&keep, "keep", "ws", 2);
+    write_synthetic(&gone, "gone", "ws", 2);
+    let mut index = Index::open(dir.file("index.db")).unwrap();
+    index.rebuild_dir(dir.path()).unwrap();
+    assert_eq!(index.list(Some("ws")).unwrap().len(), 2);
+
+    std::fs::remove_file(&gone).unwrap();
+    index.rebuild_dir(dir.path()).unwrap();
+    let sessions = index.list(Some("ws")).unwrap();
+    assert_eq!(sessions.len(), 1, "the deleted session leaves the index");
+    assert_eq!(sessions[0].session_id, "keep");
+    assert!(
+        index.indexed_events("gone").unwrap().is_empty(),
+        "its events are gone too"
+    );
+}

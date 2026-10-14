@@ -27,7 +27,11 @@ CREATE TABLE IF NOT EXISTS sessions (
     event_count    INTEGER NOT NULL,
     skipped_count  INTEGER NOT NULL,
     file_bytes     INTEGER NOT NULL,
-    indexed_at     TEXT NOT NULL
+    indexed_at     TEXT NOT NULL,
+    -- The change signal for an incremental rebuild: the file's size and mtime when it was
+    -- indexed. A file whose size and mtime both match is not re-scanned.
+    file_size      INTEGER NOT NULL DEFAULT 0,
+    file_mtime     INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS events (
     session_id    TEXT NOT NULL,
@@ -145,6 +149,18 @@ impl Index {
         debug_assert_eq!(mode, "wal");
         conn.execute_batch("PRAGMA busy_timeout=5000;")?;
         conn.execute_batch(SCHEMA)?;
+        // The index is a disposable cache: an older database predates the incremental
+        // columns, so add them in place (a fresh database already has them).
+        for column in ["file_size", "file_mtime"] {
+            let present: bool = conn
+                .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name = ?1")?
+                .exists([column])?;
+            if !present {
+                conn.execute_batch(&format!(
+                    "ALTER TABLE sessions ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                ))?;
+            }
+        }
         Ok(Self { conn })
     }
 
@@ -176,16 +192,80 @@ impl Index {
             }
         }
         paths.sort();
-        self.rebuild(&paths)
+        let warnings = self.rebuild(&paths)?;
+        // A session whose file was deleted leaves the index (a disposable cache must not show
+        // a session that is gone).
+        let known: Vec<String> = {
+            let mut stmt = self.conn.prepare("SELECT session_id, path FROM sessions")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.filter_map(|row| row.ok())
+                .filter(|(_, path)| !paths.iter().any(|p| p.to_string_lossy() == *path))
+                .map(|(id, _)| id)
+                .collect()
+        };
+        for session_id in known {
+            self.conn.execute(
+                "DELETE FROM events WHERE session_id = ?1",
+                params![session_id],
+            )?;
+            self.conn.execute(
+                "DELETE FROM sessions WHERE session_id = ?1",
+                params![session_id],
+            )?;
+        }
+        Ok(warnings)
     }
 
     /// Rebuilds the listed session files: replaces their index rows with a fresh scan of
     /// the JSONL. Never writes the JSONL. A file that cannot be parsed yields a warning and
     /// leaves its previous rows in place.
     pub fn rebuild(&mut self, paths: &[PathBuf]) -> Result<Vec<RebuildWarning>, IndexError> {
+        self.rebuild_impl(paths, false)
+    }
+
+    /// [`Index::rebuild`] that re-scans every file, ignoring the size/mtime change signal.
+    /// `reconcile` uses it: the audit already proved the index is wrong, so the file must be
+    /// re-derived even when it has not changed.
+    pub fn rebuild_forced(&mut self, paths: &[PathBuf]) -> Result<Vec<RebuildWarning>, IndexError> {
+        self.rebuild_impl(paths, true)
+    }
+
+    fn rebuild_impl(
+        &mut self,
+        paths: &[PathBuf],
+        force: bool,
+    ) -> Result<Vec<RebuildWarning>, IndexError> {
         let tx = self.conn.transaction()?;
         let mut warnings = Vec::new();
         for path in paths {
+            // A file whose size and mtime are unchanged since it was indexed is not
+            // re-scanned (resume-perf-c): opening the picker used to re-read every session.
+            let meta = match std::fs::metadata(path) {
+                Ok(meta) => meta,
+                Err(e) => {
+                    warnings.push(RebuildWarning {
+                        path: path.clone(),
+                        message: e.to_string(),
+                    });
+                    continue;
+                }
+            };
+            let indexed: Option<(i64, i64)> = tx
+                .query_row(
+                    "SELECT file_size, file_mtime FROM sessions WHERE path = ?1",
+                    params![path.to_string_lossy()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            if !force
+                && let Some((size, mtime)) = indexed
+                && size as u64 == meta.len()
+                && mtime == mtime_nanos(&meta)
+            {
+                continue;
+            }
             if let Err(e) = index_file(&tx, path) {
                 warnings.push(RebuildWarning {
                     path: path.clone(),
@@ -445,7 +525,7 @@ impl Index {
                 warnings: Vec::new(),
             });
         }
-        let warnings = self.rebuild(std::slice::from_ref(&path))?;
+        let warnings = self.rebuild_forced(std::slice::from_ref(&path))?;
         Ok(Reconcile {
             rebuilt: warnings.is_empty(),
             issues: audit.issues,
@@ -479,6 +559,15 @@ fn committed_message_seqs(rows: &[IndexedEvent]) -> std::collections::HashSet<u6
         }
     }
     committed
+}
+
+/// The file's modification time in nanoseconds since the Unix epoch (0 when unavailable).
+fn mtime_nanos(meta: &std::fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
 }
 
 fn index_file(tx: &Connection, path: &Path) -> Result<(), IndexError> {
@@ -559,11 +648,12 @@ fn index_file(tx: &Connection, path: &Path) -> Result<(), IndexError> {
     drop(insert);
 
     let skipped = summary.skipped.len() as u64;
+    let meta = std::fs::metadata(path)?;
     tx.execute(
         "INSERT INTO sessions \
          (session_id, path, schema_version, workspace, created_ts, last_ts, event_count, \
-          skipped_count, file_bytes, indexed_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+          skipped_count, file_bytes, indexed_at, file_size, file_mtime) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             summary.session_id,
             path_str,
@@ -575,6 +665,8 @@ fn index_file(tx: &Connection, path: &Path) -> Result<(), IndexError> {
             skipped as i64,
             summary.committed_bytes as i64,
             now_utc(),
+            meta.len() as i64,
+            mtime_nanos(&meta),
         ],
     )?;
     Ok(())
