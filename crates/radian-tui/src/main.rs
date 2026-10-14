@@ -373,12 +373,21 @@ fn run(
         .base_url
         .clone()
         .or_else(|| config.model.base_url.clone());
+    // The endpoint this run would talk to, before the session id: used only to allow a local
+    // server to run without a key (a loopback mock needs no credential).
+    let probe_base_url = descriptor
+        .model(&model_name)
+        .map(|entry| entry.base_url.to_owned())
+        .or_else(|| base_url_override.clone())
+        .unwrap_or_else(|| descriptor.default_base_url.to_owned());
     // ADR 0026 D2: the key comes only from `auth.json`. A missing entry is a clear refusal with
-    // the JSON to add (the `/login` command arrives in the next slice).
+    // the JSON to add (the `/login` command arrives in the next slice), unless the endpoint is
+    // local.
     let credential = match radian_host::auth::resolve_key(&provider_id)
         .map_err(|e| e.to_string())?
     {
-        Some(credential) => credential,
+        Some(credential) => Some(credential),
+        None if is_local_base_url(&probe_base_url) => None,
         None => {
             return Err(
                 match radian_host::auth::resolve_note(&provider_id).map_err(|e| e.to_string())? {
@@ -387,7 +396,8 @@ fn run(
                         "no credential for `{provider_id}`: add an entry to \
                          ~/.radian/credentials/auth.json, e.g.\n  {{\"{provider_id}\": {{\"type\": \
                          \"api_key\", \"key\": \"$MY_KEY\"}}}}\n(or use `/login {provider_id}` in the next \
-                         release)"
+                         release); refusing to continue because {} is not a local address",
+                        radian_host::redact_base_url(&probe_base_url)
                     ),
                 },
             );
@@ -560,7 +570,9 @@ fn run(
         .iter()
         .map(|(_, value)| value.clone())
         .collect();
-    secrets.push(credential.key.clone());
+    if let Some(credential) = &credential {
+        secrets.push(credential.key.clone());
+    }
     // ADR 0026 D0: the descriptor decides the adapter, base URL and headers. `resolve_route`
     // refuses `--base-url`/`--header` for a non-generic descriptor.
     let route = radian_host::resolve_route(
@@ -568,8 +580,8 @@ fn run(
         &model_name,
         base_url_override.as_deref(),
         credential
-            .env
-            .get(radian_host::RADIAN_BASE_URL)
+            .as_ref()
+            .and_then(|credential| credential.env.get(radian_host::RADIAN_BASE_URL))
             .map(String::as_str),
         &user_headers,
         &session_id,
@@ -581,7 +593,7 @@ fn run(
         provider: route.adapter(),
         base_url: route.base_url.clone(),
         model: model_name.clone(),
-        api_key: Some(credential.key.clone()),
+        api_key: credential.as_ref().map(|credential| credential.key.clone()),
         headers: route.headers.clone(),
         // The TUI has no `--include-usage` flag; the adapter's default policy applies.
         include_usage: None,
@@ -979,6 +991,24 @@ fn run(
         Some(signal) => format!("received {}; {saved}", radian_tui::signals::name(signal)),
         None => saved,
     }))
+}
+
+/// Whether `base_url` points at this machine (loopback), where a server needs no credential.
+fn is_local_base_url(base_url: &str) -> bool {
+    let Some((_, rest)) = base_url.split_once("://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority.strip_prefix('[').map_or_else(
+        || {
+            authority
+                .rsplit_once(':')
+                .filter(|(_, port)| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
+                .map_or(authority, |(host, _)| host)
+        },
+        |bracketed| bracketed.split(']').next().unwrap_or_default(),
+    );
+    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
 }
 
 /// The program name for the resume command: `argv[0]`'s file name, so the line is copyable

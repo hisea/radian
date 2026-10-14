@@ -1,0 +1,9 @@
+# ADR 0026 D2：配置里的 model.api_key 一律拒绝（哪怕它是合法的 SecretRef），
+# 提示改用 ~/.radian/credentials/auth.json。
+schema_version = 1
+
+[model]
+provider = "openai-compatible"
+base_url = "https://example.com/v1"
+model = "m-1"
+api_key = { from = "env", name = "EXAMPLE_TOKEN" }
