@@ -5978,15 +5978,19 @@ async fn pty_login_custom_walk_saves_without_showing_the_key() {
     for c in KEY.chars() {
         pty.send(&[c as u8]);
     }
-    pty.pump();
+    // A state gate: the fully typed field is 15 masked columns wide. When the render leaks
+    // the plaintext the stars never appear — and the key does, which is what the next
+    // assertion is for.
+    let stars = "*".repeat(KEY.len());
+    assert!(
+        pty.wait_until(5, |screen| screen.contains(&stars)),
+        "the masked field never filled:\n{}",
+        pty.screen()
+    );
     assert!(
         !pty.screen().contains(KEY),
         "the key echoed onto the screen while typing:\n{}",
         pty.screen()
-    );
-    assert!(
-        pty.screen().contains('*'),
-        "the masked field should show *s"
     );
     pty.send(b"\r");
     assert!(
