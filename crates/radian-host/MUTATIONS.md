@@ -296,3 +296,14 @@ Base `deb583f` · 在本任务工作树内逐条施加后从副本还原（`--no
 变异 M23（静默忽略 `model.api_key`）、M24（漏掉 `x-opencode-session`）、M25（非通用描述符接受
 `--base-url`）改的是本 crate 的代码，但抓住它们的测试在 `agent-cli`；明细见
 `crates/agent-cli/MUTATIONS.md` 的 M22–M25。
+
+## ADR 0026 D11：统一思考级别（2026-10-14，重做）
+
+Base `442f55a` · 变异只在一次性 worktree 里做（`git worktree add --detach /tmp/radian-pi-mut-N <commit>`），
+跑完 `git worktree remove --force`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| T1 | 夹取改为先向下取（交换两段循环） | `provider::thinking_tests::the_clamp_prefers_the_nearest_supported_level_above` | ✅ |
+| T2 | 补全列出不支持的级别（filter 恒真） | `provider::thinking_tests::the_completion_lists_only_supported_levels_in_rank_order` | ✅ |
+| T3 | 没有映射表时仍发参数（`resolve_thinking` 的 `None` 分支返回 `Adaptive`） | `model::thinking_resolution_tests::a_mapless_model_resolves_to_nothing` | ✅ |
