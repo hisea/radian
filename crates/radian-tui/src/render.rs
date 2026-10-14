@@ -18,8 +18,89 @@ use crate::app::{
 use crate::question::QuestionForm;
 use crate::theme::Theme;
 
+/// One wrapped line as [`wrap_char_offsets`] sees it: the chars on the line (as byte offsets
+/// into the wrapped text, each on a char boundary) and the **gap** just after the line.
+///
+/// `end` is where a click past the line's last cell lands: the offset just after the last
+/// char, or, for an empty line, the offset of its terminating `\n` (or the text length for
+/// the final paragraph). Because `wrap` collapses space runs, `end` is not necessarily where
+/// the next line's first char sits; that in-between whitespace is exactly what a selection
+/// across the break copies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WrappedLine {
+    pub chars: Vec<usize>,
+    pub end: usize,
+}
+
+/// The same wrap [`wrap`] performs, but reporting *where each rendered char came from*: per
+/// line, the byte offsets (into `text`) of the chars on it, in order, plus the line's end gap
+/// (see [`WrappedLine`]). One algorithm, two views: `wrap` is derived from this, so a cell →
+/// offset mapping through [`crate::select`] can never drift from what is rendered.
+pub fn wrap_char_offsets(text: &str, width: usize) -> Vec<WrappedLine> {
+    let width = width.max(1);
+    let mut out: Vec<WrappedLine> = Vec::new();
+    // The byte offsets of the chars on the line being built, the line's display width, and
+    // the end gap so far (just after the last pushed char). The gap starts at 0 and is
+    // corrected to the `\n`'s offset for an empty line, and to `text.len()` for an empty
+    // final paragraph, when the line is finished.
+    let mut chars: Vec<usize> = Vec::new();
+    let mut line_width = 0usize;
+    let mut end = 0usize;
+    // One buffered space (its byte offset), flushed only when a following char stays on the
+    // line — so space runs collapse and trail away (the `wrap` semantics, unchanged).
+    let mut pending_space: Option<usize> = None;
+    for (idx, ch) in text.char_indices() {
+        if ch == '\n' {
+            let empty = chars.is_empty();
+            out.push(WrappedLine {
+                chars: std::mem::take(&mut chars),
+                end: if empty { idx } else { end },
+            });
+            line_width = 0;
+            end = idx + 1;
+            pending_space = None;
+            continue;
+        }
+        if ch == ' ' {
+            // A space only joins a line that already has a char on it; leading spaces and
+            // repeats collapse away.
+            if !chars.is_empty() {
+                pending_space = Some(idx);
+            }
+            continue;
+        }
+        let ch_width = ch.width().unwrap_or(0);
+        let extra = usize::from(pending_space.is_some());
+        if line_width + extra + ch_width > width && line_width > 0 {
+            out.push(WrappedLine {
+                chars: std::mem::take(&mut chars),
+                end,
+            });
+            line_width = 0;
+            pending_space = None;
+        }
+        if let Some(space) = pending_space.take() {
+            chars.push(space);
+            line_width += 1;
+        }
+        chars.push(idx);
+        line_width += ch_width;
+        end = idx + ch.len_utf8();
+    }
+    out.push(WrappedLine {
+        chars,
+        end: if end == 0 { text.len() } else { end },
+    });
+    out
+}
+
 /// Hard-wraps `text` to `width` display columns, breaking on spaces where possible and on
 /// character boundaries otherwise (CJK has no spaces). Newlines start a new line.
+///
+/// This is the renderer's hot path (every visible entry, every frame), so it stays the
+/// plain string builder. [`wrap_char_offsets`] is the same algorithm reporting *where each
+/// rendered char came from*; [`crate::select`] maps cells through it, and the two are held
+/// together by the `wrap_and_wrap_char_offsets_agree` test — change either, change both.
 pub fn wrap(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut out = Vec::new();
@@ -52,8 +133,9 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
     out
 }
 
-/// The visible marker for an entry kind (the transcript's `> `, `~ `, …).
-fn marker_prefix(kind: EntryKind) -> &'static str {
+/// The visible marker for an entry kind (the transcript's `> `, `~ `, …). Also the cell
+/// offset the selection mapping ([`crate::select`]) subtracts to get a body column.
+pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
     match kind {
         EntryKind::User => "> ",
         EntryKind::Assistant => "  ",
@@ -95,8 +177,9 @@ fn body_style(entry: &Entry, theme: &Theme) -> Style {
 
 /// The text a frame shows for `entry`. A user message's `@` attachments are folded to one
 /// `[file: P, N lines]` line each; every other entry shows its text unchanged. Display only:
-/// the message (and the journal) keep the full text.
-fn display_text(entry: &Entry) -> Cow<'_, str> {
+/// the message (and the journal) keep the full text. Also what a selection maps offsets into
+/// ([`crate::select`]): the shown text is the copied text.
+pub(crate) fn display_text(entry: &Entry) -> Cow<'_, str> {
     match entry.kind {
         EntryKind::User => crate::mention::fold_files(&entry.text),
         _ => Cow::Borrowed(&entry.text),
@@ -383,6 +466,51 @@ pub fn highlight(line: Line<'static>, query: &str) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Styles the selected display-column `ranges` of one rendered line with the theme's
+/// `selection` role (the text keeps its foreground; `mono` reverses). Columns are whole-line
+/// coordinates — the `> ` prefix's cells included — and a wide char is selected when either
+/// of its two cells is. A span is split only where the selection boundary falls inside it;
+/// runs never cross spans, so each piece keeps its own base style.
+fn apply_selection(
+    line: Line<'static>,
+    ranges: &[(usize, usize)],
+    selection: Style,
+) -> Line<'static> {
+    let mut out: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + ranges.len());
+    let mut col = 0usize;
+    let mut run: Option<(String, bool)> = None;
+    let flush = |out: &mut Vec<Span<'static>>, run: &mut Option<(String, bool)>, base: Style| {
+        if let Some((text, run_selected)) = run.take() {
+            let styled = if run_selected {
+                base.patch(selection)
+            } else {
+                base
+            };
+            out.push(Span::styled(text, styled));
+        }
+    };
+    for span in line.spans {
+        let base = span.style;
+        flush(&mut out, &mut run, base);
+        for ch in span.content.into_owned().chars() {
+            let w = ch.width().unwrap_or(0);
+            let selected = ranges
+                .iter()
+                .any(|&(start, end)| col < end && col + w.max(1) > start);
+            match &mut run {
+                Some((text, run_selected)) if *run_selected == selected => text.push(ch),
+                _ => {
+                    flush(&mut out, &mut run, base);
+                    run = Some((ch.to_string(), selected));
+                }
+            }
+            col += w;
+        }
+    }
+    flush(&mut out, &mut run, Style::default());
+    Line::from(out)
+}
+
 /// One status-bar segment: its text and its style.
 struct Segment {
     text: String,
@@ -446,6 +574,15 @@ fn status_segments(app: &App) -> Vec<Segment> {
             style: app.theme.turn_running,
         });
     }
+    // The transient note ("tool … running", "copied N chars (via OSC 52)", a compaction
+    // failure) sits ahead of the long tails: a narrow terminal drops the *rightmost*
+    // segments, and a note the user just caused must survive that, not be the first to go.
+    if let Some(note) = &app.note {
+        segments.push(Segment {
+            text: note.clone(),
+            style: app.theme.note,
+        });
+    }
     segments.push(Segment {
         text: usage_text(session.usage_input(), session.usage_output()),
         style: app.theme.usage,
@@ -472,12 +609,6 @@ fn status_segments(app: &App) -> Vec<Segment> {
         ),
         style: Style::default(),
     });
-    if let Some(note) = &app.note {
-        segments.push(Segment {
-            text: note.clone(),
-            style: app.theme.note,
-        });
-    }
     segments
 }
 
@@ -562,6 +693,32 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             .into_iter()
             .map(|line| highlight(line, &find.query))
             .collect(),
+        None => visible,
+    };
+    // A live transcript selection: the visible rows' selected display columns, styled with
+    // the theme's `selection` role. `highlight_rows` derives from the same wrap the lines
+    // above were rendered from, so the band lands exactly on the copied text.
+    let visible = match app.selection.filter(|sel| !sel.is_empty()) {
+        Some(selection) => {
+            let ranges = crate::select::highlight_rows(
+                &app.entries,
+                width,
+                app.scroll,
+                visible.len(),
+                &selection,
+            );
+            visible
+                .into_iter()
+                .zip(ranges)
+                .map(|(line, ranges)| {
+                    if ranges.is_empty() {
+                        line
+                    } else {
+                        apply_selection(line, &ranges, theme.selection)
+                    }
+                })
+                .collect()
+        }
         None => visible,
     };
     frame.render_widget(Paragraph::new(visible), chunks[0]);

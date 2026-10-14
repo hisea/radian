@@ -463,6 +463,141 @@ fn the_box_input_style_draws_the_bordered_box() {
     );
 }
 
+/// A transcript selection draws with the theme's `selection` role: the band lands exactly on
+/// the cells `select::highlight_rows` reports, prefix cells included, and the text keeps its
+/// own foreground (the patch only adds the background).
+#[test]
+fn a_selection_draws_the_selection_role_on_its_cells() {
+    use radian_tui::select::{Selection, locate};
+    let mut app = App::new("m", "s");
+    app.push_message(&Message::user("hello selection"));
+    app.set_transcript_width(40);
+    let (total, _) = radian_tui::render::visible_lines(&mut app.entries, 40, 0, 0, &app.theme);
+    app.set_viewport(u16::try_from(total).unwrap(), total);
+    // Select "selection" on the first line: body columns 6..15 → screen columns 8..17.
+    let selection = Selection {
+        anchor: locate(&app.entries, 40, 0, 8).expect("anchor"),
+        head: locate(&app.entries, 40, 0, 17).expect("head"),
+    };
+    app.selection = Some(selection);
+    let terminal = render(&mut app, 40, 6);
+    let text = screen(&terminal);
+    assert!(text.contains("hello selection"), "{text}");
+    let word = style_of(&terminal, "selection").expect("the selected word is on screen");
+    assert_eq!(
+        word.bg,
+        Some(Color::DarkGray),
+        "the dark theme's selection band"
+    );
+    let before = style_of(&terminal, "hello").expect("the unselected head of the line");
+    assert_eq!(
+        before.bg,
+        Some(Color::Reset),
+        "only the selection carries the band"
+    );
+    assert_eq!(before.fg, word.fg, "the text keeps its own foreground");
+}
+
+/// The `mono` theme's selection is reverse video, never a color (`NO_COLOR` and `mono`).
+#[test]
+fn the_mono_selection_is_reversed_not_colored() {
+    use radian_tui::select::{Selection, locate};
+    let mut app = App::new("m", "s");
+    app.theme = radian_tui::theme::Theme::mono();
+    app.push_message(&Message::user("hello selection"));
+    app.set_transcript_width(40);
+    let (total, _) = radian_tui::render::visible_lines(&mut app.entries, 40, 0, 0, &app.theme);
+    app.set_viewport(u16::try_from(total).unwrap(), total);
+    app.selection = Some(Selection {
+        anchor: locate(&app.entries, 40, 0, 8).expect("anchor"),
+        head: locate(&app.entries, 40, 0, 17).expect("head"),
+    });
+    let terminal = render(&mut app, 40, 6);
+    let word = style_of(&terminal, "selection").expect("on screen");
+    assert_eq!(word.bg, Some(Color::Reset), "no colored band in mono");
+    assert!(
+        word.add_modifier
+            .contains(ratatui::style::Modifier::REVERSED)
+    );
+}
+
+/// A single click's empty selection draws nothing anywhere.
+#[test]
+fn an_empty_selection_draws_nothing() {
+    use radian_tui::select::{Selection, locate};
+    let mut app = App::new("m", "s");
+    app.push_message(&Message::user("hello selection"));
+    app.set_transcript_width(40);
+    let (total, _) = radian_tui::render::visible_lines(&mut app.entries, 40, 0, 0, &app.theme);
+    app.set_viewport(u16::try_from(total).unwrap(), total);
+    let at = locate(&app.entries, 40, 0, 8).expect("anchor");
+    app.selection = Some(Selection {
+        anchor: at,
+        head: at,
+    });
+    let text = screen(&render(&mut app, 40, 6));
+    assert!(text.contains("hello selection"), "{text}");
+    assert_eq!(
+        style_of(&render(&mut app, 40, 6), "selection").map(|s| s.bg),
+        Some(Some(Color::Reset)),
+        "no band: the two anchors coincide"
+    );
+}
+
+/// `wrap` (the renderer's hot path) and `wrap_char_offsets` (what selection maps cells
+/// through) are two views of one algorithm. This corpus — spaces that collapse, CJK, empty
+/// and blank lines, overlong words — pins them together: every line's offsets rebuild the
+/// exact string `wrap` produced, and the end gaps stay in bounds. Change either function
+/// without the other and this fails.
+#[test]
+fn wrap_and_wrap_char_offsets_agree() {
+    let corpus = [
+        ("hello world", 5usize),
+        ("hello world", 11),
+        ("hello world", 3),
+        ("", 5),
+        ("\n", 5),
+        ("a\n\nb", 5),
+        ("  leading and trailing  ", 7),
+        ("日本語のテキストは幅で折る", 5),
+        ("ab   cd", 4),
+        ("ab   cd", 2),
+        ("one two three four five six seven", 7),
+        ("mixed 日本語 text wrap", 6),
+        ("a", 1),
+        ("日本", 1),
+        ("trailing spaces   ", 5),
+        ("   ", 5),
+        ("word\n", 5),
+        ("\nword", 5),
+        ("aaaaaaaaaaaaaaaa", 5),
+        ("a b c d e f", 1),
+        ("日本 テキスト edge", 3),
+        ("combining a\u{301}b", 2),
+    ];
+    for (text, width) in corpus {
+        let lines = radian_tui::render::wrap(text, width);
+        let offsets = radian_tui::render::wrap_char_offsets(text, width);
+        assert_eq!(
+            lines.len(),
+            offsets.len(),
+            "line counts diverge for {text:?} at {width}"
+        );
+        for (line, wrapped) in lines.iter().zip(&offsets) {
+            let rebuilt: String = wrapped
+                .chars
+                .iter()
+                .map(|&i| {
+                    assert!(text.is_char_boundary(i), "offset {i} not a boundary");
+                    text[i..].chars().next().unwrap()
+                })
+                .collect();
+            assert_eq!(&rebuilt, line, "diverged for {text:?} at {width}");
+            assert!(wrapped.end <= text.len(), "end out of bounds");
+        }
+    }
+}
+
 /// The question form's key line stays visible when the option list fills the box (same bug the
 /// approval box had: the hint used to be the content's last line, and the clip cut it).
 #[test]

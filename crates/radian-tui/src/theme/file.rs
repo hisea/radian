@@ -7,7 +7,7 @@
 //!   circular reference; Radian only falls the *affected roles* back to the built-in palette
 //!   (the file's `appearance`, `dark` by default) and warns once per problem. A broken file
 //!   falls back as a whole. Nothing here blocks startup.
-//! - **Coverage** (decision 3): pi styles its own UI roles; Radian maps them onto its 22
+//! - **Coverage** (decision 3): pi styles its own UI roles; Radian maps them onto its 23
 //!   [`Role`]s. The mapping is in [`fg_source`]/[`bg_source`] and pinned by tests. The pi
 //!   roles nothing consumes yet (the `md*`, `toolDiff*`, `syntax*`, `thinking*` families and
 //!   the panel roles) are parsed into [`Theme::reserved`] so their values survive until
@@ -86,43 +86,47 @@ const PI_ROLES: &[&str] = &[
     "bashMode",
 ];
 
-/// The pi role feeding each Radian role's **foreground** (ADR 0029 decision 3; the mapping
-/// is also documented in `crates/radian-tui/README.md`). Roles not listed here keep the
-/// built-in foreground unless `[tui.colors]` overrides them.
-fn fg_source(role: Role) -> &'static str {
+/// The pi role feeding a Radian role's **foreground** (ADR 0029 decision 3; the mapping is
+/// also documented in `crates/radian-tui/README.md`). `None` for the roles pi styles by
+/// background only — [`Role::Selection`] keeps whatever foreground the text under it has,
+/// and a theme file must not force one on it (the renderer patches the selection over the
+/// text's own style).
+fn fg_source(role: Role) -> Option<&'static str> {
     match role {
-        Role::Reasoning => "thinkingText",
-        Role::Interrupted => "warning",
-        Role::User => "userMessageText",
-        Role::ToolCall => "toolTitle",
-        Role::ToolResult => "toolOutput",
-        Role::ToolResultError => "error",
-        Role::Notice => "text",
-        Role::TurnIdle => "success",
-        Role::TurnRunning => "warning",
-        Role::TurnCancelled => "error",
-        Role::Model => "accent",
-        Role::Tier => "muted",
-        Role::Usage => "muted",
-        Role::Mcp => "accent",
-        Role::Budget => "muted",
-        Role::BudgetOver => "warning",
-        Role::Note => "warning",
-        Role::Truncation => "dim",
-        Role::ApprovalBorder => "borderAccent",
-        Role::Hint => "muted",
-        Role::Completion => "dim",
-        Role::Find => "accent",
+        Role::Reasoning => Some("thinkingText"),
+        Role::Interrupted => Some("warning"),
+        Role::User => Some("userMessageText"),
+        Role::ToolCall => Some("toolTitle"),
+        Role::ToolResult => Some("toolOutput"),
+        Role::ToolResultError => Some("error"),
+        Role::Notice => Some("text"),
+        Role::TurnIdle => Some("success"),
+        Role::TurnRunning => Some("warning"),
+        Role::TurnCancelled => Some("error"),
+        Role::Model => Some("accent"),
+        Role::Tier => Some("muted"),
+        Role::Usage => Some("muted"),
+        Role::Mcp => Some("accent"),
+        Role::Budget => Some("muted"),
+        Role::BudgetOver => Some("warning"),
+        Role::Note => Some("warning"),
+        Role::Truncation => Some("dim"),
+        Role::ApprovalBorder => Some("borderAccent"),
+        Role::Hint => Some("muted"),
+        Role::Completion => Some("dim"),
+        Role::Find => Some("accent"),
+        Role::Selection => None,
         // pi has no auto role; the warning role is the closest "this needs attention" color.
-        Role::Auto => "warning",
+        Role::Auto => Some("warning"),
     }
 }
 
-/// The pi role feeding a Radian role's **background**. Today only the user line has one
-/// (`userMessageBg`, ADR 0029 decision 3's example).
+/// The pi role feeding a Radian role's **background**. The user line (`userMessageBg`) and
+/// the transcript selection (`selectedBg`), ADR 0029 decision 3.
 fn bg_source(role: Role) -> Option<&'static str> {
     match role {
         Role::User => Some("userMessageBg"),
+        Role::Selection => Some("selectedBg"),
         _ => None,
     }
 }
@@ -133,7 +137,7 @@ fn bg_source(role: Role) -> Option<&'static str> {
 fn targets_for_pi_name(name: &str) -> Vec<(Role, Channel)> {
     let mut targets = Vec::new();
     for role in Role::ALL {
-        if fg_source(role) == name {
+        if fg_source(role) == Some(name) {
             targets.push((role, Channel::Foreground));
         }
         if bg_source(role) == Some(name) {
@@ -305,12 +309,13 @@ fn build(
         let mut fell_back = false;
         for (channel, source) in [
             (Channel::Foreground, fg_source(role)),
-            (Channel::Background, bg_source(role).unwrap_or("")),
+            (Channel::Background, bg_source(role)),
         ] {
+            let Some(source) = source else {
+                continue;
+            };
             let Some(&color) = resolved.get(source) else {
-                if !source.is_empty() {
-                    fell_back = true;
-                }
+                fell_back = true;
                 continue;
             };
             apply_color(&mut style, channel, color, truecolor);
@@ -382,7 +387,17 @@ fn apply_overrides(
         }
         let targets = targets_for_pi_name(key);
         if !targets.is_empty() {
-            if spec.bg.is_some() {
+            // The channels this pi name actually feeds: `userMessageBg` and `selectedBg` are
+            // backgrounds, the rest are foregrounds. A set channel the name does not carry
+            // would land nowhere, so it is an honest warning (not a silent no-op).
+            let carries = |channel: Channel| targets.iter().any(|&(_, target)| target == channel);
+            if spec.fg.is_some() && !carries(Channel::Foreground) {
+                warn(
+                    "this pi name is a background; a bare color (or `fg`) has no effect here"
+                        .into(),
+                );
+            }
+            if spec.bg.is_some() && !carries(Channel::Background) {
                 warn("this pi name names one channel; a `bg` has no effect here".into());
             }
             apply_override(targets, spec, theme, truecolor, &mut warn);
@@ -751,10 +766,14 @@ mod tests {
             theme.reserved["thinkingXhigh"].fg,
             Some(Color::Rgb(7, 8, 9))
         );
+        // `selectedBg` is a role now: its color lands on the selection's background, never
+        // on its foreground, and it is not kept as a reserved style.
+        assert_eq!(theme.selection.bg, Some(Color::Rgb(10, 11, 12)));
         assert_eq!(
-            theme.reserved["selectedBg"].fg,
-            Some(Color::Rgb(10, 11, 12))
+            theme.selection.fg, None,
+            "selection keeps the text's own fg"
         );
+        assert!(!theme.reserved.contains_key("selectedBg"));
         // pi's optional-role fallback: `scrollbarThumb` ← `text` when absent.
         let (with_fallback, _) = loaded(&theme_json(
             "{}",
@@ -909,11 +928,78 @@ mod tests {
         assert_eq!(theme.model.fg, Some(Color::Rgb(0x95, 0x7F, 0xB8)));
         assert_eq!(theme.find.fg, Some(Color::Rgb(0x95, 0x7F, 0xB8)));
         assert_eq!(theme.approval_border.fg, Some(Color::Rgb(0x54, 0x54, 0x6D)));
+        // The transcript selection comes from the file too: `selectedBg: "bg_p2"` →
+        // `#363646`, background only (the text keeps its own foreground under it).
+        assert_eq!(theme.selection.bg, Some(Color::Rgb(0x36, 0x36, 0x46)));
+        assert_eq!(theme.selection.fg, None);
         // Every pi role in the file is either mapped or kept; nothing was dropped.
         assert!(theme.reserved.contains_key("mdHeading"));
         assert!(theme.reserved.contains_key("syntaxKeyword"));
         assert!(theme.reserved.contains_key("thinkingMax"));
+        assert!(!theme.reserved.contains_key("selectedBg"));
         assert_eq!(theme.name, ThemeName::File);
+    }
+
+    /// The selection is settable everywhere: the three built-ins carry their own values, and
+    /// `[tui.colors]` reaches it both by the Radian name (both channels) and by pi's
+    /// `selectedBg` (background only — a bare color there warns, it cannot set an fg).
+    #[test]
+    fn the_selection_role_is_settable_by_builtins_and_overrides() {
+        assert_eq!(Theme::dark().selection.bg, Some(Color::DarkGray));
+        assert_eq!(Theme::light().selection.bg, Some(Color::Gray));
+        let mono = Theme::mono().selection;
+        assert_eq!(mono.bg, None);
+        assert!(
+            mono.add_modifier
+                .contains(ratatui::style::Modifier::REVERSED)
+        );
+
+        let overrides = |text: &str| -> Vec<(String, TuiColorOverride)> {
+            radian_host::config::parse(Path::new("/tmp/c.toml"), text)
+                .unwrap()
+                .tui
+                .colors
+        };
+        let (theme, warnings) = load(
+            None,
+            false,
+            true,
+            None,
+            &overrides("schema_version = 1\n[tui.colors]\nselection = { bg = \"#111213\" }\n"),
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(theme.selection.bg, Some(Color::Rgb(0x11, 0x12, 0x13)));
+        assert_eq!(theme.selection.fg, None);
+
+        // pi's `selectedBg` name reaches the same background (file order is unspecified, so
+        // each key is its own load).
+        let (theme, warnings) = load(
+            None,
+            false,
+            true,
+            None,
+            &overrides("schema_version = 1\n[tui.colors]\nselectedBg = { bg = \"#212223\" }\n"),
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(theme.selection.bg, Some(Color::Rgb(0x21, 0x22, 0x23)));
+        assert_eq!(theme.selection.fg, None);
+
+        // A bare color names a foreground, which `selectedBg` does not carry: warned, and
+        // the selection's foreground stays unset.
+        let (theme, warnings) = load(
+            None,
+            false,
+            true,
+            None,
+            &overrides("schema_version = 1\n[tui.colors]\nselectedBg = \"#010203\"\n"),
+        );
+        assert_eq!(theme.selection.fg, None);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("tui.colors.selectedBg") && w.contains("background")),
+            "{warnings:?}"
+        );
     }
 
     /// pi's reserved name and path-like names never touch the filesystem.

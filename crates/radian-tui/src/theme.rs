@@ -50,7 +50,7 @@ impl ThemeName {
     }
 }
 
-/// The 22 roles a [`Theme`] styles today (ADR 0009, ADR 0023). The config keys are the
+/// The 23 roles a [`Theme`] styles today (ADR 0009, ADR 0023). The config keys are the
 /// snake_case names; `[tui.colors]` accepts them and (mapped) pi's role names alike.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -78,10 +78,11 @@ pub enum Role {
     Find,
     /// The status bar's `AUTO` marker (ADR 0026 D9): the session auto-approves.
     Auto,
+    Selection,
 }
 
 impl Role {
-    pub const ALL: [Role; 23] = [
+    pub const ALL: [Role; 24] = [
         Role::Reasoning,
         Role::Interrupted,
         Role::User,
@@ -105,6 +106,7 @@ impl Role {
         Role::Completion,
         Role::Find,
         Role::Auto,
+        Role::Selection,
     ];
 
     /// The `[tui.colors]` key for this role (ADR 0029 decision 5).
@@ -133,6 +135,7 @@ impl Role {
             Role::Completion => "completion",
             Role::Find => "find",
             Role::Auto => "auto",
+            Role::Selection => "selection",
         }
     }
 
@@ -165,6 +168,7 @@ impl Role {
             Role::Completion => &mut theme.completion,
             Role::Find => &mut theme.find,
             Role::Auto => &mut theme.auto,
+            Role::Selection => &mut theme.selection,
         }
     }
 }
@@ -201,11 +205,14 @@ pub struct Theme {
     pub find: Style,
     /// The status bar's `AUTO` marker (ADR 0026 D9): the session auto-approves.
     pub auto: Style,
+    /// A transcript selection (mouse drag). pi's role map: `selectedBg`.
+    pub selection: Style,
     /// Pi roles no current Radian role consumes — the `md*`, `toolDiff*`, `syntax*` and
-    /// `thinking*` families ADR 0027/0028 will wire, plus the panel roles (`selectedBg`,
-    /// `scrollbar*`, `searchMatch*`, `customMessage*`, `toolPendingBg`, `toolSuccessBg`,
-    /// `toolErrorBg`, `bashMode`). ADR 0029 decision 3: parsed and kept so a theme file's
-    /// values are not thrown away; nothing renders them yet. Keyed by pi's role name.
+    /// `thinking*` families ADR 0027/0028 will wire, plus the panel roles (`scrollbar*`,
+    /// `searchMatch*`, `customMessage*`, `toolPendingBg`, `toolSuccessBg`, `toolErrorBg`,
+    /// `bashMode`; `selectedBg` is a role now). ADR 0029 decision 3: parsed and kept so a
+    /// theme file's values are not thrown away; nothing renders them yet. Keyed by pi's
+    /// role name.
     pub reserved: BTreeMap<String, Style>,
 }
 
@@ -258,6 +265,9 @@ impl Theme {
             find: style(Some(Color::Yellow), Modifier::empty()),
             // Reversed so `AUTO` reads at a glance as "this session behaves differently".
             auto: style(Some(Color::Yellow), Modifier::REVERSED),
+            // A selection is a background band; the text keeps its own foreground. `DarkGray`
+            // (ANSI 8) reads as a quiet band on a dark background.
+            selection: Style::default().bg(Color::DarkGray),
         }
     }
 
@@ -294,6 +304,8 @@ impl Theme {
             completion: style(Some(Color::DarkGray), Modifier::empty()),
             find: style(Some(Color::Magenta), Modifier::empty()),
             auto: style(Some(Color::Magenta), Modifier::REVERSED),
+            // A quiet light band on a light background; the dark text stays readable.
+            selection: Style::default().bg(Color::Gray),
         }
     }
 
@@ -326,6 +338,9 @@ impl Theme {
             find: style(None, Modifier::BOLD),
             // ADR 0026 D9: the mono theme has no color, so `AUTO` stands out by reversal.
             auto: style(None, Modifier::REVERSED),
+            // No color at all: a selection is the reversed video, as the terminal itself
+            // would draw it.
+            selection: style(None, Modifier::REVERSED),
         }
     }
 
@@ -356,7 +371,7 @@ impl Theme {
     }
 
     /// Every style this theme defines, for the "mono has no colors" test.
-    pub fn styles(&self) -> [Style; 22] {
+    pub fn styles(&self) -> [Style; 23] {
         [
             self.reasoning,
             self.interrupted,
@@ -380,6 +395,7 @@ impl Theme {
             self.hint,
             self.completion,
             self.find,
+            self.selection,
         ]
     }
 }
