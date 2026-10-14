@@ -6263,7 +6263,7 @@ async fn pty_the_slash_completion_walks_the_command_tree() {
     );
     pty.send(b"\t");
     assert!(
-        pty.wait_for_screen("> /memory ", 10),
+        pty.wait_for_screen("❯ /memory ", 10),
         "Tab did not complete the command name:\n{}",
         pty.screen()
     );
@@ -6276,7 +6276,7 @@ async fn pty_the_slash_completion_walks_the_command_tree() {
     );
     pty.send(b"\t");
     assert!(
-        pty.wait_for_screen("> /memory forget", 10),
+        pty.wait_for_screen("❯ /memory forget", 10),
         "Tab did not complete the subcommand:\n{}",
         pty.screen()
     );
