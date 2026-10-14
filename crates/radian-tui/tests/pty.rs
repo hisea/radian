@@ -1900,7 +1900,8 @@ async fn pty_yes_runs_an_ask_without_a_prompt_and_still_audits_it() {
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
     assert!(
-        pty.screen().contains("auto: tool calls are approved without asking"),
+        pty.screen()
+            .contains("auto: tool calls are approved without asking"),
         "the startup must say approvals are off:\n{}",
         pty.screen()
     );
@@ -6072,7 +6073,10 @@ async fn pty_resume_does_not_restore_auto_on_full_and_hints() {
         110,
     );
     assert!(
-        pty.wait_for_screen("auto was on in the previous run; run `/auto on` to re-enable", 10),
+        pty.wait_for_screen(
+            "auto was on in the previous run; run `/auto on` to re-enable",
+            10
+        ),
         "the full-tier hint is missing:\n{}",
         pty.screen()
     );

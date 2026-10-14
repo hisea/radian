@@ -93,7 +93,9 @@ impl AuditSink for JournalAudit {
 
     fn record_policy_change(&self, policy: radian_permissions::ApprovalPolicy) {
         // Same best effort as `record`: the switch has already happened.
-        let _ = self.tx.send(radian_permissions::policy_change_event(policy));
+        let _ = self
+            .tx
+            .send(radian_permissions::policy_change_event(policy));
     }
 }
 

@@ -17,10 +17,7 @@ use radian_host::{
     DEFAULT_MAX_TOKENS, ModelArgs, Provider, Thinking, build_model, check_provider_flags,
     load_mcp_config, parse_headers, validate_session_id,
 };
-use radian_permissions::{
-    AuditSink, PermissionResolved,
-    runtime_event,
-};
+use radian_permissions::{AuditSink, PermissionResolved, runtime_event};
 use radian_session::{Index, SessionJournal};
 use radian_tui::app::{App, Effect, Input as AppInput, MemoryResult, PickerData};
 use radian_tui::events::{InputEvent, ProjectionSink, UiEvent};
@@ -632,12 +629,13 @@ fn run(
     // When they are silent, the config's `[permissions] approval` and the journal's last
     // in-session switch decide; `radian_host::resolve_startup` owns that precedence, the
     // `full`-tier rules and the backfill record.
-    let cli_approval = match &cli.approval {
-        Some(name) => Some(radian_permissions::ApprovalPolicy::parse(name).ok_or_else(|| {
-            format!("--approval {name:?} is not one of on-ask, always, never, auto")
-        })?),
-        None => cli.yes.then_some(radian_permissions::ApprovalPolicy::Auto),
-    };
+    let cli_approval =
+        match &cli.approval {
+            Some(name) => Some(radian_permissions::ApprovalPolicy::parse(name).ok_or_else(
+                || format!("--approval {name:?} is not one of on-ask, always, never, auto"),
+            )?),
+            None => cli.yes.then_some(radian_permissions::ApprovalPolicy::Auto),
+        };
     let config_approval = config
         .permissions
         .approval
@@ -935,8 +933,10 @@ fn run(
         ));
     }
     for warning in &startup_approval.warnings {
-        app.entries
-            .push(radian_tui::Entry::new(radian_tui::EntryKind::Notice, warning.clone()));
+        app.entries.push(radian_tui::Entry::new(
+            radian_tui::EntryKind::Notice,
+            warning.clone(),
+        ));
     }
     if pick_notice {
         app.entries.push(radian_tui::Entry::new(
@@ -1439,10 +1439,7 @@ impl LoopContext<'_> {
                     format!(
                         "cannot switch auto: {} ({})",
                         refused.reason,
-                        refused
-                            .capability
-                            .as_deref()
-                            .unwrap_or("capability")
+                        refused.capability.as_deref().unwrap_or("capability")
                     )
                 }),
             Effect::AnswerRequest {

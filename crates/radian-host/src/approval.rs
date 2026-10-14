@@ -41,14 +41,11 @@ pub fn resolve_startup(
             backfill: Some(cli),
         };
     }
-    if resume
-        && let Some(restored) = restored
-    {
+    if resume && let Some(restored) = restored {
         if restored == ApprovalPolicy::Auto && tier == Preset::FullAccess {
             // D9: `full` never restores auto; the session must enable it explicitly.
-            warnings.push(
-                "auto was on in the previous run; run `/auto on` to re-enable".to_string(),
-            );
+            warnings
+                .push("auto was on in the previous run; run `/auto on` to re-enable".to_string());
             // Fall through to the config/default decision: under `full` the config's own
             // `auto` is ignored too, so this lands on `on-ask`.
         } else {
@@ -86,15 +83,17 @@ pub fn resolve_startup(
 /// fail startup over a policy default.
 pub fn restored_approval(journal_path: &Path) -> Option<ApprovalPolicy> {
     let session = radian_session::Session::open(journal_path).ok()?;
-    session.events().iter().rev().find_map(|event| {
-        match &event.data {
+    session
+        .events()
+        .iter()
+        .rev()
+        .find_map(|event| match &event.data {
             radian_session::EventData::ConfigChanged { change, .. } => change
                 .get("approval")
                 .and_then(|value| value.as_str())
                 .and_then(ApprovalPolicy::parse),
             _ => None,
-        }
-    })
+        })
 }
 
 #[cfg(test)]
@@ -113,7 +112,12 @@ mod tests {
                     tier,
                     resume,
                 );
-                assert_eq!(startup.policy, ApprovalPolicy::Auto, "tier {} resume {resume}", tier.as_str());
+                assert_eq!(
+                    startup.policy,
+                    ApprovalPolicy::Auto,
+                    "tier {} resume {resume}",
+                    tier.as_str()
+                );
                 assert_eq!(startup.backfill, Some(ApprovalPolicy::Auto));
                 assert!(startup.warnings.is_empty());
             }

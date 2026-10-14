@@ -129,7 +129,11 @@ fn auto_on_and_off_commands() {
         let mut app = App::new("m", "s");
         app.input = command.into();
         let effects = app.on_key(key(KeyCode::Enter)).effects;
-        assert_eq!(effects, vec![Effect::SetApprovalPolicy { on: true }], "{command}");
+        assert_eq!(
+            effects,
+            vec![Effect::SetApprovalPolicy { on: true }],
+            "{command}"
+        );
         assert!(app.auto, "{command} turns auto on");
     }
     for command in ["/auto off", "/yolo off"] {
@@ -137,7 +141,11 @@ fn auto_on_and_off_commands() {
         app.set_auto(true);
         app.input = command.into();
         let effects = app.on_key(key(KeyCode::Enter)).effects;
-        assert_eq!(effects, vec![Effect::SetApprovalPolicy { on: false }], "{command}");
+        assert_eq!(
+            effects,
+            vec![Effect::SetApprovalPolicy { on: false }],
+            "{command}"
+        );
         assert!(!app.auto, "{command} turns auto off");
     }
 }
@@ -152,7 +160,9 @@ fn a_wrong_auto_argument_is_a_usage_notice() {
         assert!(effects.is_empty(), "{command}: {effects:?}");
         assert!(!app.auto, "{command} must not enable auto");
         assert!(
-            notices(&app).iter().any(|notice| notice.contains("usage: /auto on|off")),
+            notices(&app)
+                .iter()
+                .any(|notice| notice.contains("usage: /auto on|off")),
             "{command}: {:?}",
             notices(&app)
         );

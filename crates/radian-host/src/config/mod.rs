@@ -950,16 +950,16 @@ theme = "light"
         }
         let error =
             parse_str("schema_version = 1\n[permissions]\napproval = \"yolo\"\n").unwrap_err();
-        assert!(matches!(error, ConfigError::UnknownApproval { .. }), "{error}");
+        assert!(
+            matches!(error, ConfigError::UnknownApproval { .. }),
+            "{error}"
+        );
         assert!(error.to_string().contains("auto"), "{error}");
-        let error =
-            parse_str("schema_version = 1\n[permissions]\napproval = true\n").unwrap_err();
+        let error = parse_str("schema_version = 1\n[permissions]\napproval = true\n").unwrap_err();
         assert!(error.to_string().contains("a string"), "{error}");
         // Read-only mode (a higher schema_version): ignored, not refused.
-        let config = parse_str(
-            "schema_version = 99\n[permissions]\napproval = \"future\"\n",
-        )
-        .unwrap();
+        let config =
+            parse_str("schema_version = 99\n[permissions]\napproval = \"future\"\n").unwrap();
         assert_eq!(config.permissions.approval, None);
         assert!(config.skipped.contains(&"permissions.approval".to_string()));
     }

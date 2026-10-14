@@ -341,9 +341,7 @@ pub fn runtime_event(event: &PermissionResolved) -> radian_session::RuntimeEvent
 
 /// A convenience so a host can journal a policy switch (ADR 0026 D9) as the
 /// `ApprovalPolicyChanged` audit event.
-pub fn policy_change_event(
-    policy: crate::profile::ApprovalPolicy,
-) -> radian_session::RuntimeEvent {
+pub fn policy_change_event(policy: crate::profile::ApprovalPolicy) -> radian_session::RuntimeEvent {
     use radian_session::{ApprovalPolicyValue, RuntimeEvent};
     RuntimeEvent::ApprovalPolicyChanged {
         policy: match policy {

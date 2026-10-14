@@ -545,7 +545,7 @@ fn auto_toggle(args: &[String]) -> Outcome {
         Some("on") => Outcome::AutoToggle(true),
         Some("off") => Outcome::AutoToggle(false),
         _ => Outcome::Notices(vec![
-            "usage: /auto on|off (deny rules and the sandbox still apply)".to_owned()
+            "usage: /auto on|off (deny rules and the sandbox still apply)".to_owned(),
         ]),
     }
 }

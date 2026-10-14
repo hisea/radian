@@ -436,7 +436,11 @@ async fn auto_still_honors_deny_rules() {
         Preset::WorkspaceWrite,
         ApprovalPolicy::Auto,
         dir.path(),
-        vec![Rule::new(ToolMatcher::Any, ResourceMatcher::Any, Action::Deny)],
+        vec![Rule::new(
+            ToolMatcher::Any,
+            ResourceMatcher::Any,
+            Action::Deny,
+        )],
     )
     .unwrap();
     let approver = ScriptedApprover::scripted(vec![]);
@@ -457,7 +461,11 @@ async fn set_approval_switches_in_place_and_audits_each_switch() {
     let dir = TempDir::new("auto-switch");
     let audit = Arc::new(RecordingAudit::default());
     let approver = ScriptedApprover::scripted(vec![ApprovalOutcome::AllowOnce]);
-    let hooks = make_hooks(asking_profile(&dir), Arc::clone(&approver), Arc::clone(&audit));
+    let hooks = make_hooks(
+        asking_profile(&dir),
+        Arc::clone(&approver),
+        Arc::clone(&audit),
+    );
     hooks.set_turn_source(Some(InputSource::User));
     let cx = ctx();
 

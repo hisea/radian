@@ -690,11 +690,13 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     // `auto` (with a warning) and never restores one. The TUI runs the same resolution in
     // its own startup; `radian_host::resolve_startup` owns the precedence for both.
     let cli_approval = match &cli.approval {
-        Some(name) => Some(radian_permissions::ApprovalPolicy::parse(name).ok_or_else(|| {
-            SetupError(format!(
-                "--approval {name:?} is not one of on-ask, always, never, auto"
-            ))
-        })?),
+        Some(name) => Some(
+            radian_permissions::ApprovalPolicy::parse(name).ok_or_else(|| {
+                SetupError(format!(
+                    "--approval {name:?} is not one of on-ask, always, never, auto"
+                ))
+            })?,
+        ),
         None => cli.yes.then_some(radian_permissions::ApprovalPolicy::Auto),
     };
     let config_approval = config
@@ -776,7 +778,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     // ADR 0026 D9: the journal's last in-session switch restores auto on `safe`/`workspace`
     // when the command line was silent. The precedence is `resolve_startup`'s, shared with
     // the TUI.
-    let journal_path = session_dir(&cli)?.join(format!("{session_id}.jsonl"));
+    let journal_path = session_dir(cli)?.join(format!("{session_id}.jsonl"));
     let restored_approval = cli
         .resume
         .is_some()

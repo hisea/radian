@@ -165,7 +165,9 @@ pub enum EventData {
     },
     /// The approval policy was switched in place (ADR 0026 D9). Typed for an exact round
     /// trip; audit only, never a transcript record.
-    ApprovalPolicyChanged { policy: ApprovalPolicyValue },
+    ApprovalPolicyChanged {
+        policy: ApprovalPolicyValue,
+    },
     /// The memory set injected before a model request (ADR 0021 D6). Typed for an exact round
     /// trip; audit only, never a transcript record. Ids, revisions and scopes only.
     MemoryInjected {

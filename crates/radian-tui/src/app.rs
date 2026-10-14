@@ -1159,7 +1159,10 @@ impl App {
              deny rules and the sandbox still apply",
         );
         effects.push(Effect::SetApprovalPolicy { on: true });
-        UpdateResult { dirty: true, effects }
+        UpdateResult {
+            dirty: true,
+            effects,
+        }
     }
 
     /// One key inside the question form (ADR 0024 Q7).
