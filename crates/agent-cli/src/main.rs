@@ -1121,6 +1121,11 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     if let Some(memory) = &memory_root {
         sandbox_deny_read.push(memory.clone());
     }
+    // ADR 0026 D4: the credential store is denied read in every enforced tier. Creating it
+    // first (0700) lets Linux's bwrap mask a path that exists.
+    if let Some(credentials) = radian_host::credentials_dir() {
+        sandbox_deny_read.push(credentials);
+    }
     let sandbox = profile::build_sandbox(profile_arg, &workspace_path, &sandbox_deny_read)?;
 
     // The approver and the audit sink. `--yes` swaps the approver for one that answers "allow

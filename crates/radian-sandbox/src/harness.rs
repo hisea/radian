@@ -161,6 +161,7 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
         ("memory", "m.txt"),
         ("config", "c.toml"),
         ("cache", "cache.txt"),
+        ("credentials", "auth.json"),
     ] {
         std::fs::create_dir_all(radian_home.join(dir))?;
         std::fs::write(radian_home.join(dir).join(file), "radian-data\n")?;
@@ -183,6 +184,8 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
             .deny_read(home.join(".ssh"))
             .deny_read(radian_home.join("sessions"))
             .deny_read(radian_home.join("memory"))
+            // ADR 0026 D4: the credential store is denied in every enforced tier.
+            .deny_read(radian_home.join("credentials"))
             .deny_read(&custom_sessions)
     };
     let policy = radian_deny(SandboxPolicy::workspace_write(&ws)?);
@@ -704,6 +707,19 @@ impl Rig {
             "memory_unreadable",
             Expect::MustFail,
             &format!("cat {} > /dev/null", q(&radian.join("memory/m.txt"))),
+        );
+        // ADR 0026 D4: `credentials/auth.json` is denied; the control (FullAccess) reads it,
+        // so the denial is the sandbox, not a missing file.
+        self.sh_case(
+            sandbox,
+            control,
+            g,
+            "credentials_unreadable",
+            Expect::MustFail,
+            &format!(
+                "cat {} > /dev/null",
+                q(&radian.join("credentials/auth.json"))
+            ),
         );
         self.sh_case(
             sandbox,

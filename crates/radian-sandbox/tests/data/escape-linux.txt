@@ -34,6 +34,7 @@ sensitive_read   fake_ssh_key_unreadable        fail   denied       ok  PASS
 sensitive_read   normal_file_still_readable       ok       ok       ok  PASS
 radian_home      sessions_unreadable            fail   denied       ok  PASS
 radian_home      memory_unreadable              fail   denied       ok  PASS
+radian_home      credentials_unreadable         fail   denied       ok  PASS
 radian_home      config_readable                  ok       ok       ok  PASS
 radian_home      cache_readable                   ok       ok       ok  PASS
 radian_home      moved_sessions_unreadable      fail   denied       ok  PASS
@@ -45,7 +46,7 @@ signals          signal_own_child_ok              ok       ok       ok  PASS
 signals          signal_own_grandchild_ok         ok       ok       ok  PASS
 signals          signal_outside_process         fail   denied       ok  PASS
 
-42 cases, 0 failed
+43 cases, 0 failed
 
 orphan check:
 (no orphan processes)
