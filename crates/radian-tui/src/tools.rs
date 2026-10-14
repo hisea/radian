@@ -128,34 +128,40 @@ pub fn body_plan(
     preview_lines: usize,
 ) -> Vec<BodyLine> {
     let (lines, collapsed_hint) = renderer_for(&card.name).body(card, text);
-    // An error is never hidden, in any mode (ADR 0028 R4).
-    let expanded = is_error
-        || match fold {
-            ToolFold::Expanded => true,
-            ToolFold::Errors => false,
-            ToolFold::Collapsed => false,
-        };
-    if expanded {
+    // An error's body is never hidden, in any mode (ADR 0028 R4).
+    if is_error {
         return lines;
     }
-    let preview = preview_lines.max(1);
-    if let Some(hint) = collapsed_hint {
-        // A renderer that shows nothing when collapsed (read): one hint line.
-        return vec![BodyLine::Hint(hint)];
-    }
+    // A renderer whose body is "not shown by default" (`read`) collapses to its hint in both
+    // folded modes; `expanded` shows its lines.
     let text_lines: Vec<BodyLine> = lines
         .iter()
         .filter(|line| matches!(line, BodyLine::Text { .. }))
         .cloned()
         .collect();
-    if text_lines.len() <= preview {
-        return lines;
+    match fold {
+        ToolFold::Expanded => lines,
+        // `collapsed` (ADR 0028 R4's interpretation): the header only, the body folded to one
+        // line count hint.
+        ToolFold::Collapsed => match collapsed_hint {
+            Some(hint) => vec![BodyLine::Hint(hint)],
+            None => vec![BodyLine::Hint(format!("[{} lines]", text_lines.len()))],
+        },
+        // `errors` (the default): the last `tool_preview_lines` lines.
+        ToolFold::Errors => {
+            if let Some(hint) = collapsed_hint {
+                return vec![BodyLine::Hint(hint)];
+            }
+            let preview = preview_lines.max(1);
+            if text_lines.len() <= preview {
+                return lines;
+            }
+            let hidden = text_lines.len() - preview;
+            let mut out = vec![BodyLine::Hint(format!("[{hidden} more lines]"))];
+            out.extend(text_lines.into_iter().skip(hidden));
+            out
+        }
     }
-    let hidden = text_lines.len() - preview;
-    let skip = hidden;
-    let mut out = vec![BodyLine::Hint(format!("[{hidden} more lines]"))];
-    out.extend(text_lines.into_iter().skip(skip));
-    out
 }
 
 /// A tool's body renderer: its lines, and — when the tool prefers to show nothing while
@@ -450,31 +456,34 @@ mod tests {
     fn the_fold_modes_decide_the_body() {
         let text = "one\ntwo\nthree\nfour\nfive\nsix\nseven";
         let card = card("generic_tool", json!({}));
-        let expanded = body_plan(&card, text, false, ToolFold::Expanded, 5);
-        assert_eq!(expanded.len(), 7);
-        // collapsed: a hint plus the LAST preview lines.
-        let collapsed = body_plan(&card, text, false, ToolFold::Collapsed, 3);
-        assert_eq!(collapsed.len(), 4);
-        assert_eq!(lines(&collapsed)[0], "[4 more lines]");
-        assert!(matches!(
-            &collapsed[1],
-            BodyLine::Text { source, .. } if source == &(text.find("five").unwrap()..text.find("five").unwrap() + 4)
-        ));
-        // errors: folded unless the call failed; a failure never folds, in any mode.
-        assert_eq!(body_plan(&card, text, false, ToolFold::Errors, 3).len(), 4);
-        assert_eq!(body_plan(&card, text, true, ToolFold::Errors, 3).len(), 7);
+        // The three modes differ for a successful card: everything, the last preview lines
+        // behind a hint, or the header with the body folded to its line count.
         assert_eq!(
-            body_plan(&card, text, false, ToolFold::Collapsed, 3).len(),
-            4
-        );
-        assert_eq!(
-            body_plan(&card, text, true, ToolFold::Collapsed, 3).len(),
+            body_plan(&card, text, false, ToolFold::Expanded, 3).len(),
             7
         );
-        // A body that already fits the preview is left whole.
+        let errors = body_plan(&card, text, false, ToolFold::Errors, 3);
+        assert_eq!(errors.len(), 4);
+        assert_eq!(lines(&errors)[0], "[4 more lines]");
+        assert!(matches!(
+            &errors[1],
+            BodyLine::Text { source, .. } if source == &(text.find("five").unwrap()..text.find("five").unwrap() + 4)
+        ));
+        let collapsed = body_plan(&card, text, false, ToolFold::Collapsed, 3);
+        assert_eq!(lines(&collapsed), vec!["[7 lines]"]);
+        // A failure never folds, in any mode.
+        for fold in [ToolFold::Expanded, ToolFold::Errors, ToolFold::Collapsed] {
+            assert_eq!(body_plan(&card, text, true, fold, 3).len(), 7, "{fold:?}");
+        }
+        // A body that fits the preview is left whole under `errors`...
+        assert_eq!(
+            body_plan(&card, "a\nb", false, ToolFold::Errors, 5).len(),
+            2
+        );
+        // ...and still folds to the hint under `collapsed`.
         assert_eq!(
             body_plan(&card, "a\nb", false, ToolFold::Collapsed, 5).len(),
-            2
+            1
         );
     }
 
@@ -486,6 +495,9 @@ mod tests {
         assert_eq!(hint.as_deref(), Some("[read: 3 lines]"));
         let collapsed = body_plan(&card, "l1\nl2\nl3", false, ToolFold::Collapsed, 5);
         assert_eq!(lines(&collapsed), vec!["[read: 3 lines]"]);
+        // `errors` shows the same hint (a read body is never previewed).
+        let errors = body_plan(&card, "l1\nl2\nl3", false, ToolFold::Errors, 5);
+        assert_eq!(lines(&errors), vec!["[read: 3 lines]"]);
         // Expanded shows the lines.
         assert_eq!(
             body_plan(&card, "l1\nl2\nl3", false, ToolFold::Expanded, 5).len(),

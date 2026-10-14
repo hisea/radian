@@ -808,6 +808,168 @@ fn the_tool_fold_changes_the_line_count_and_ctrl_o_walks_it() {
     assert_eq!(app.tool_display.fold, ToolFold::Errors);
 }
 
+/// A batch of calls pairs each result with **its own** call by id: results arriving in
+/// reverse order (one success, one failure) still land on the right cards. Covered on the live
+/// commit path and on the resume replay path.
+#[test]
+fn a_batch_of_calls_pairs_its_results_by_id_in_any_order() {
+    fn batch() -> Message {
+        assistant_with(
+            "",
+            "",
+            false,
+            vec![
+                ToolCall {
+                    id: "c1".into(),
+                    name: "generic_a".into(),
+                    arguments: serde_json::json!({"n": 1}),
+                },
+                ToolCall {
+                    id: "c2".into(),
+                    name: "generic_b".into(),
+                    arguments: serde_json::json!({"n": 2}),
+                },
+            ],
+        )
+    }
+    fn results() -> [Message; 2] {
+        [
+            // The SECOND call's result arrives first, and it failed.
+            Message::Tool {
+                result: ToolResult {
+                    call_id: "c2".into(),
+                    content: vec![ContentPart::text("b failed\nb detail\nb third")],
+                    structured: None,
+                    is_error: true,
+                    error_code: None,
+                },
+                meta: Default::default(),
+            },
+            Message::Tool {
+                result: ToolResult {
+                    call_id: "c1".into(),
+                    content: vec![ContentPart::text("a ok")],
+                    structured: None,
+                    is_error: false,
+                    error_code: None,
+                },
+                meta: Default::default(),
+            },
+        ]
+    }
+
+    let mut live = App::new("m", "s");
+    live.apply_event(&AgentEvent::TranscriptAppended {
+        index: 0,
+        message: batch(),
+    });
+    for (i, message) in results().into_iter().enumerate() {
+        live.apply_event(&AgentEvent::TranscriptAppended {
+            index: i + 1,
+            message,
+        });
+    }
+    let mut resumed = App::new("m", "s");
+    resumed.push_message(&batch());
+    for message in results() {
+        resumed.push_message(&message);
+    }
+
+    for app in [&mut live, &mut resumed] {
+        let calls: Vec<&Entry> = app
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::ToolCall)
+            .collect();
+        assert_eq!(calls.len(), 2, "one card per call");
+        let a = calls
+            .iter()
+            .find(|entry| entry.tool.as_ref().is_some_and(|c| c.name == "generic_a"))
+            .expect("card a");
+        let b = calls
+            .iter()
+            .find(|entry| entry.tool.as_ref().is_some_and(|c| c.name == "generic_b"))
+            .expect("card b");
+        assert_eq!(a.result, Some(false), "a is the success");
+        assert_eq!(b.result, Some(true), "b is the failure");
+        // The result entries carry their own call's data too.
+        let result_b = app
+            .entries
+            .iter()
+            .find(|entry| {
+                entry.kind == EntryKind::ToolResult
+                    && entry.tool.as_ref().is_some_and(|c| c.name == "generic_b")
+            })
+            .expect("b's result entry");
+        assert!(result_b.is_error);
+        let result_a = app
+            .entries
+            .iter()
+            .find(|entry| {
+                entry.kind == EntryKind::ToolResult
+                    && entry.tool.as_ref().is_some_and(|c| c.name == "generic_a")
+            })
+            .expect("a's result entry");
+        assert!(!result_a.is_error);
+    }
+    // And the failure's body is the one expanded: `a ok`'s body is not shown as a failure.
+    let text = screen(&render(&mut live, 60, 16));
+    assert!(text.contains("b failed"), "{text}");
+}
+
+/// ADR 0028 R4's fold interpretation: `expanded` shows everything, `errors` the last
+/// `tool_preview_lines` of a success, `collapsed` only the header; a failure is fully expanded
+/// in all three. (The reviewer's T2: `collapsed` and `errors` used to be indistinguishable.)
+#[test]
+fn collapsed_and_errors_differ_for_a_successful_card() {
+    use radian_tui::tools::ToolFold;
+    fn app_with(is_error: bool) -> App {
+        let mut app = App::new("m", "s");
+        app.push_message(&assistant_with(
+            "",
+            "",
+            false,
+            vec![ToolCall {
+                id: "c1".into(),
+                name: "generic_tool".into(),
+                arguments: serde_json::json!({}),
+            }],
+        ));
+        app.push_message(&Message::Tool {
+            result: ToolResult {
+                call_id: "c1".into(),
+                content: vec![ContentPart::text(
+                    (1..=20).map(|i| format!("line {i}\n")).collect::<String>(),
+                )],
+                structured: None,
+                is_error,
+                error_code: None,
+            },
+            meta: Default::default(),
+        });
+        app
+    }
+    let mut counts = Vec::new();
+    for fold in [ToolFold::Expanded, ToolFold::Errors, ToolFold::Collapsed] {
+        let mut app = app_with(false);
+        app.tool_display.fold = fold;
+        let _ = render(&mut app, 60, 30);
+        counts.push(app.total_lines);
+    }
+    // The assistant's (empty) line + the card head + the body: 20 lines expanded, 5 preview
+    // lines + 1 hint under `errors`, a single `[20 lines]` hint under `collapsed`.
+    assert_eq!(counts, vec![22, 8, 3], "expanded / errors / collapsed");
+    // A failure: the same count in all three, and the body really visible.
+    for fold in [ToolFold::Expanded, ToolFold::Errors, ToolFold::Collapsed] {
+        let mut app = app_with(true);
+        app.tool_display.fold = fold;
+        let text = screen(&render(&mut app, 60, 40));
+        assert!(text.contains("line 1 "), "{fold:?}: {text}");
+        assert!(text.contains("line 20"), "{fold:?}");
+        assert!(!text.contains("more lines"), "{fold:?}: nothing folded");
+    }
+}
+
 /// A failed call's body is never hidden (ADR 0028 R4), whatever the fold mode.
 #[test]
 fn an_error_card_stays_expanded_under_collapsed() {
