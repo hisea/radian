@@ -12,6 +12,7 @@ pub mod atomic_write;
 pub mod auth;
 mod catalog;
 pub mod config;
+pub mod contrib;
 mod describe;
 mod diagnostics;
 mod errors;
@@ -53,6 +54,10 @@ pub use config::{
     RADIAN_CONFIG_ENV, SUPPORTED_SCHEMA_VERSION, TuiConfig, load as load_config,
     parse as parse_config, resolve_path as resolve_config_path,
     resolved_path as resolved_config_path,
+};
+pub use contrib::{
+    Contribution, ContributionStore, ContributorRunner, GitContributor, Segment, SegmentRole,
+    StatusContributor, Tick, spawn as spawn_contributor,
 };
 pub use describe::{CLI_WORDING, TUI_WORDING, Wording, describe};
 pub use diagnostics::{
