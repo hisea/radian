@@ -289,6 +289,9 @@ pub struct BodyLine {
     /// every other line; `text` still holds the concatenation, so search and the line count
     /// agree with what is drawn.
     pub md: Option<Vec<MdPiece>>,
+    /// A syntax-highlighted code line (ADR 0028 R2): per-piece text and Radian syntax role
+    /// (`None` when the block is not highlighted). `text` still holds the concatenation.
+    pub syntax: Option<crate::highlight::HighlightedLine>,
 }
 
 /// One Markdown piece: its displayed text, its role, and its source offset (`None` when the
@@ -339,6 +342,7 @@ impl BodyLine {
             diagram: None,
             reason: false,
             md: None,
+            syntax: None,
         }
     }
 
@@ -354,6 +358,7 @@ impl BodyLine {
             diagram: None,
             reason: false,
             md: None,
+            syntax: None,
         }
     }
 
@@ -374,6 +379,7 @@ impl BodyLine {
             diagram: Some(spans),
             reason: false,
             md: None,
+            syntax: None,
         }
     }
 
@@ -391,6 +397,7 @@ impl BodyLine {
             diagram: None,
             reason: false,
             md: Some(pieces),
+            syntax: None,
         }
     }
 
@@ -406,6 +413,7 @@ impl BodyLine {
             diagram: None,
             reason: true,
             md: None,
+            syntax: None,
         }
     }
 }
@@ -522,8 +530,9 @@ pub fn search_modes(modes: DisplayModes) -> DisplayModes {
             preview_lines: modes.tools.preview_lines,
         },
         // A diagram is drawn (or not) the same way while searching: its lines are what the
-        // search matches.
+        // search matches. The same for syntax highlighting.
         mermaid: modes.mermaid,
+        highlight: modes.highlight,
     }
 }
 
@@ -822,6 +831,13 @@ pub fn layout(entry: &Entry, blocks: &[Block], modes: DisplayModes, width: usize
                         lang,
                     } => {
                         let source = &text[*start..*end];
+                        // A Mermaid block is drawn, not highlighted; every other closed block
+                        // whose language is in the table is (ADR 0028 R2).
+                        let highlight = if is_mermaid(lang, *closed, modes.mermaid) {
+                            None
+                        } else {
+                            syntax_lines_cached(*start, *end, &text, lang, *closed, modes.highlight)
+                        };
                         if is_mermaid(lang, *closed, modes.mermaid) {
                             let index = diagram_index;
                             diagram_index += 1;
@@ -840,11 +856,23 @@ pub fn layout(entry: &Entry, blocks: &[Block], modes: DisplayModes, width: usize
                                         *start,
                                         format!("mermaid: {reason}"),
                                     ));
-                                    lines.extend(code_lines(source, *start, *closed, width));
+                                    lines.extend(code_lines(
+                                        source,
+                                        *start,
+                                        *closed,
+                                        width,
+                                        highlight.as_deref().map(Vec::as_slice),
+                                    ));
                                 }
                             }
                         } else {
-                            lines.extend(code_lines(source, *start, *closed, width));
+                            lines.extend(code_lines(
+                                source,
+                                *start,
+                                *closed,
+                                width,
+                                highlight.as_deref().map(Vec::as_slice),
+                            ));
                         }
                     }
                 }
@@ -879,6 +907,7 @@ pub fn layout(entry: &Entry, blocks: &[Block], modes: DisplayModes, width: usize
                     diagram: None,
                     reason: false,
                     md: None,
+                    syntax: None,
                 }]
             }
         }
@@ -933,6 +962,7 @@ fn tool_line(text: &str, width: usize) -> Vec<BodyLine> {
         diagram: None,
         reason: false,
         md: None,
+        syntax: None,
     }]
 }
 
@@ -960,6 +990,7 @@ fn body_plan_lines(plan: &[tools::BodyLine], text: &str, body_width: usize) -> V
                 diagram: None,
                 reason: false,
                 md: None,
+                syntax: None,
             }),
         }
     }
@@ -1202,7 +1233,13 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
 /// clicked — while `end` still reaches the source line's end, so a selection that spans the
 /// line copies the full text. `raw` is the whole block range (fences included) starting at
 /// `offset` in the display text.
-fn code_lines(raw: &str, offset: usize, closed: bool, width: usize) -> Vec<BodyLine> {
+fn code_lines(
+    raw: &str,
+    offset: usize,
+    closed: bool,
+    width: usize,
+    highlight: Option<&[crate::highlight::HighlightedLine]>,
+) -> Vec<BodyLine> {
     let lines: Vec<&str> = raw.lines().collect();
     let base = raw.as_ptr() as usize;
     // The first line is the opening fence; when the block is closed, the last line is the
@@ -1220,10 +1257,10 @@ fn code_lines(raw: &str, offset: usize, closed: bool, width: usize) -> Vec<BodyL
         _ => &lines[..],
     };
     let mut out = Vec::new();
-    for line in body {
+    for (index, line) in body.iter().enumerate() {
         // Byte offset of the line's first char within the display text.
         let offset = line.as_ptr() as usize - base + offset;
-        let (text, kept, cut) = code_line_layout(line, width);
+        let (plain, kept, cut) = code_line_layout(line, width);
         let mut chars: Vec<usize> = kept.into_iter().map(|idx| offset + idx).collect();
         if cut {
             // The ellipsis is decoration; map it to the last kept char.
@@ -1232,6 +1269,15 @@ fn code_lines(raw: &str, offset: usize, closed: bool, width: usize) -> Vec<BodyL
             }
         }
         let end = offset + line.len();
+        // `styled_line` mirrors `code_line_layout` (same tab expansion, same width rule), so
+        // the drawn text is the same either way; only the roles differ.
+        let syntax = highlight
+            .and_then(|lines| lines.get(index))
+            .map(|hl| crate::highlight::styled_line(hl, width));
+        let text = match &syntax {
+            Some(pieces) => pieces.iter().map(|(text, _)| text.as_str()).collect(),
+            None => plain,
+        };
         out.push(BodyLine {
             chars,
             end,
@@ -1243,6 +1289,7 @@ fn code_lines(raw: &str, offset: usize, closed: bool, width: usize) -> Vec<BodyL
             diagram: None,
             reason: false,
             md: None,
+            syntax,
         });
     }
     if out.is_empty() {
@@ -1258,6 +1305,7 @@ fn code_lines(raw: &str, offset: usize, closed: bool, width: usize) -> Vec<BodyL
             diagram: None,
             reason: false,
             md: None,
+            syntax: None,
         });
     }
     out
@@ -1368,6 +1416,27 @@ fn fill_md_cache(entry: &mut Entry, blocks: &[Block], width: usize) {
         }
     }
     entry.md_cache = Some((width, text_len, paragraphs));
+}
+
+/// The highlighted lines of the closed code block at `[start, end)`, or `None` when
+/// highlighting is off, the block is open (streaming), the language is not one we highlight,
+/// or the block is over the size cap. The result is a pure function of the body and language,
+/// so `highlight`'s **content-keyed** cache is used — no width in the key. This is reached
+/// only while laying out a visible line; the measure pass never calls it (a count does not
+/// need colors).
+fn syntax_lines_cached(
+    start: usize,
+    end: usize,
+    text: &str,
+    lang: &str,
+    closed: bool,
+    highlight: bool,
+) -> Option<std::sync::Arc<Vec<crate::highlight::HighlightedLine>>> {
+    if !highlight || !closed {
+        return None;
+    }
+    let body = code_body(&text[start..end], closed);
+    crate::highlight::highlighted(&body, lang)
 }
 
 /// Appends the laid-out lines of `blocks`, indented by `indent` columns.
@@ -1846,6 +1915,7 @@ mod tests {
             preview_lines: 5,
         },
         mermaid: true,
+        highlight: true,
     };
 
     /// The given reasoning mode with the tools expanded.

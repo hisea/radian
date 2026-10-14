@@ -1003,6 +1003,10 @@ pub struct App {
     /// diagram. `false` renders every code block as source. Part of `DisplayModes`, so it is
     /// in the layout cache key.
     pub mermaid_enabled: bool,
+    /// `tui.display.highlight` (ADR 0028 R2), default true: highlight a closed code block whose
+    /// info string names a common language. `false` renders every code block as plain text.
+    /// Part of `DisplayModes`, so it is in the layout cache key.
+    pub highlight_enabled: bool,
 }
 
 impl App {
@@ -1053,6 +1057,7 @@ impl App {
             reasoning_mode: ReasoningMode::Collapsed,
             tool_display: crate::tools::ToolDisplay::default(),
             mermaid_enabled: true,
+            highlight_enabled: true,
         }
     }
 
@@ -1089,6 +1094,7 @@ impl App {
             reasoning: self.reasoning_mode,
             tools: self.tool_display,
             mermaid: self.mermaid_enabled,
+            highlight: self.highlight_enabled,
         }
     }
 
@@ -1171,6 +1177,7 @@ impl App {
         };
         // `tui.display.mermaid` (ADR 0028 R8, default true).
         self.mermaid_enabled = config.tui.display_mermaid.unwrap_or(true);
+        self.highlight_enabled = config.tui.display_highlight.unwrap_or(true);
         // `tui.clipboard` (default OSC 52). An unknown spelling never reaches here (the host
         // config reader skips it with a warning); `pbcopy` off macOS does: warn once and fall
         // back, because the copy effect would have no program to run.

@@ -35,10 +35,20 @@ codex-mermaid = { path = "../../third_party/codex-mermaid" }
 pulldown-cmark = { version = "0.12", default-features = false }
 # The slash-command arguments: quoted values like `/memory add "two words"`.
 shlex = "2"
+# Syntax highlighting (ADR 0028 R2 decision 2): syntect with the **pure-Rust** regex
+# backend (`regex-fancy`, no oniguruma) and the packed default syntax set (`default-syntaxes`).
+# No syntect themes: colors come from the Radian theme (ADR 0029).
+syntect = { version = "5.3", default-features = false, features = ["parsing", "regex-fancy", "dump-load"] }
 ratatui = "0.30.2"
 serde_json.workspace = true
 unicode-width = "0.2.2"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "process", "signal"] }
+
+[build-dependencies]
+# The build script (`build.rs`) loads syntect's packed default set, parses the vendored
+# TypeScript/TSX/TOML grammars and dumps the combined set to `$OUT_DIR/syntaxes.packdump`;
+# the runtime dep above only deserializes it.
+syntect = { version = "5.3", default-features = false, features = ["parsing", "regex-fancy", "default-syntaxes", "yaml-load", "dump-create"] }
 
 [target.'cfg(unix)'.dependencies]
 # `poll(2)` detects a terminal that has gone away (the pty master closed) before crossterm's
