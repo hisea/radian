@@ -542,3 +542,19 @@ Base `613312c` · 一次性 worktree `/tmp/ui-r1-mut` · 独立 `CARGO_TARGET_DI
 是假通过。加上 `assert old in s` 并按实际文本重做后，两个都抓住。**U8** 是本次修的 bug 的变异
 （`/sessions` 在备用屏里打印 `[privacy]` 警告 → 渲染 diff 跳过那些 cell → picker 的标题/filter 行被糊掉）；
 它只在**全量套件**里稳定复现（单跑 10 次全过），所以那次变异跑的是整个 pty 套件。
+
+## approval-fit：审批框在内容太长时看不到按键提示＼�2026-10-13）
+
+Base `d76df67` · 就地变异，每个变异 `git checkout -- crates/radian-tui/src/render.rs` 还原、
+`git status --short` 只留本片的新测试。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| F1 | 按键提示拼回正文末尾（`approval_body` 末尾追加 `APPROVAL_KEYS`） | `approval::a_shell_approval_shows_the_command_once`（断言正文不含键行） | ✅ |
+| F2 | 截断命令（`resolved_resource` 也过 400 字节截断） | `approval::the_args_cap_applies_after_the_dedup` | ✅ |
+| F3 | 恢复 `clamp(5, 14)`（`approval_cap` 直接返回 14） | `approval::the_box_height_is_capped_at_sixty_percent_of_the_terminal` | ✅ |
+| F4 | 不去重（`args` 的过滤条件改成恒真） | `approval::a_shell_approval_shows_the_command_once`、`args_are_omitted_when_the_resource_is_the_only_field` | ✅ |
+
+诚实补充（F3 的第一轮）：第一次的 patch 写的是 `14;`（一条丢弃值的语句），函数照常返回，测试
+"通过"是**假通过**；改成 `return 14` 后才真正抓住。这与上一节 U3/U4 的教训相同：patch 必须
+`assert old in s`，并且要确认它真的改变了行为。

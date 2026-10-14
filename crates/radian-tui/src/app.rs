@@ -164,11 +164,21 @@ pub enum Overlay {
 /// One approval as the UI shows it: the queue's id (ADR 0023 U7), the session that asked and
 /// the request itself. The queue id is what the answer names, not the permission layer's own
 /// `request_id`.
+///
+/// The scroll fields belong to this modal, not to the app: a new pending request builds a fresh
+/// `PendingApproval`, so the next question starts at the top of its body.
 #[derive(Debug, Clone)]
 pub struct PendingApproval {
     pub request_id: u64,
     pub origin: String,
     pub request: ApprovalRequest,
+    /// The body's first visible row. The renderer clamps it against what it measured, so a key
+    /// can never park the window past the end (or before the first frame move it at all).
+    pub scroll: usize,
+    /// The wrapped body rows and the visible rows, as the last frame measured them. Both zero
+    /// before the first frame, which clamps every scroll to zero.
+    pub total_rows: usize,
+    pub visible_rows: usize,
 }
 
 /// The state of one [`Tier::Modal`] layer.
@@ -182,6 +192,17 @@ pub enum Modal {
     /// the one modal whose input goes through the keymap. Boxed: the form is much larger than
     /// the other variants, and a `Modal` sits in every `Layer`.
     Question(Box<QuestionForm>),
+}
+
+/// How far one approval-scroll key moves the box's body (approval-fit). Hardcoded like the
+/// answers (ADR 0023 U4, invariant 2): scrolling must never depend on the keymap and must
+/// never collide with an answer key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalScroll {
+    LineUp,
+    LineDown,
+    PageUp,
+    PageDown,
 }
 
 /// One mouse-wheel notch (ADR 0023 U2, plan B). The input thread maps crossterm's
@@ -280,6 +301,9 @@ pub enum Input {
     Resize { rows: u16, cols: u16 },
     /// The hardcoded answer to the approval prompt on screen (`y`/`a`/`n`/`Esc`).
     ApprovalAnswer(ApprovalOutcome),
+    /// A scroll of the approval box's body (`↑`/`↓`/PgUp/PgDn). Hardcoded like the answers:
+    /// scrolling must never depend on the keymap, and it must never collide with an answer key.
+    ApprovalScroll(ApprovalScroll),
     /// The hardcoded answer to a `/memory` confirmation (`true` = confirmed).
     ConfirmCommand(bool),
     /// The streaming text the projection has accumulated (ADR 0023 U2). Deltas never come
@@ -818,6 +842,16 @@ impl App {
         }
     }
 
+    /// The topmost approval modal, mutably, so the renderer can feed the measured body size
+    /// back into it (the way the transcript's viewport is fed back) and the scroll keys can
+    /// move its window.
+    pub fn approval_modal_mut(&mut self) -> Option<&mut PendingApproval> {
+        self.layers.iter_mut().rev().find_map(|layer| match layer {
+            Layer::Modal(Modal::Approval(prompt)) => Some(&mut **prompt),
+            _ => None,
+        })
+    }
+
     /// The topmost modal, if any. The input box is not editable while one is up.
     pub fn top_modal(&self) -> Option<&Modal> {
         self.layers.iter().rev().find_map(|layer| match layer {
@@ -1021,12 +1055,40 @@ impl App {
                     request_id: view.request_id,
                     origin: view.origin,
                     request,
+                    // A new question starts at the top of its body.
+                    scroll: 0,
+                    total_rows: 0,
+                    visible_rows: 0,
                 })))
             }
             PendingRequest::Question(request) => self.push_modal(Modal::Question(Box::new(
                 QuestionForm::new(view.request_id, view.origin, request.questions),
             ))),
         }
+        UpdateResult::dirty()
+    }
+
+    /// Scrolls the approval box's body (approval-fit). The window is clamped against what the
+    /// last frame measured, so a key before the first draw (or past the end) moves nothing.
+    fn approval_scroll(&mut self, direction: ApprovalScroll) -> UpdateResult {
+        let Some(index) = self
+            .layers
+            .iter()
+            .rposition(|layer| matches!(layer, Layer::Modal(Modal::Approval(_))))
+        else {
+            return UpdateResult::none();
+        };
+        let Layer::Modal(Modal::Approval(prompt)) = &mut self.layers[index] else {
+            return UpdateResult::none();
+        };
+        let visible = prompt.visible_rows.max(1);
+        let max = prompt.total_rows.saturating_sub(visible);
+        prompt.scroll = match direction {
+            ApprovalScroll::LineUp => prompt.scroll.saturating_sub(1),
+            ApprovalScroll::LineDown => (prompt.scroll + 1).min(max),
+            ApprovalScroll::PageUp => prompt.scroll.saturating_sub(visible),
+            ApprovalScroll::PageDown => (prompt.scroll + visible).min(max),
+        };
         UpdateResult::dirty()
     }
 
@@ -1151,6 +1213,7 @@ impl App {
             }
             Input::Resize { .. } => UpdateResult::dirty(),
             Input::ApprovalAnswer(outcome) => self.answer_approval(outcome),
+            Input::ApprovalScroll(direction) => self.approval_scroll(direction),
             Input::ConfirmCommand(confirmed) => self.confirm_command(confirmed),
             Input::Stream(stream) => {
                 // The snapshot is the whole live view of the current stream, so the entries are
@@ -1343,6 +1406,13 @@ impl App {
                         reason: None,
                     }))
                 }
+                // The body's scroll keys (approval-fit). They are not answer keys, so they
+                // cannot be confused with one, and the answers stay un-rebindable. ADR 0026 D9
+                // will add `[Y] auto for this session`; it must not take a scroll key.
+                KeyCode::Up => Some(Input::ApprovalScroll(ApprovalScroll::LineUp)),
+                KeyCode::Down => Some(Input::ApprovalScroll(ApprovalScroll::LineDown)),
+                KeyCode::PageUp => Some(Input::ApprovalScroll(ApprovalScroll::PageUp)),
+                KeyCode::PageDown => Some(Input::ApprovalScroll(ApprovalScroll::PageDown)),
                 _ => None,
             },
             // The question form's keys are the rebindable `form` layer (ADR 0024 Q7), not
