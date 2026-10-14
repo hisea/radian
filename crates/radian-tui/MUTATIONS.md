@@ -878,3 +878,31 @@ Base `c2e835f` · 一次性检出 `/tmp/footer-mut3`（detached，跑完删除�
 
 1/1 抓住。注意：`Preset` 的 `#[default]`（FS-1）走的是 `App::new` 的 `Footer::default()`，二进制实际
 默认由 `from_config` 的 `None` 分支决定，所以 FS-5 必须改那里才能打到 pty 路径。
+## ADR 0028 片 5：代码块语法高亮（2026-10-15）
+
+Base `608c2b7`（键一致性修复后 `0b035d6` 复跑 M4）· 一次性 worktree `/tmp/radian-hl-mut`，每条
+跑完 `git checkout -- .`，`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| HL-M1 | `syntax_lines_cached` 不看 `closed`（未闭合的流式块也高亮） | `an_unclosed_block_is_not_highlighted` | ✅ |
+| HL-M2 | `storage.type` 映射成 `String`（Rust 的 `fn`/`let` 用字符串色） | `rust_keyword_string_and_comment_take_their_theme_roles`（另 2 条也挂） | ✅ |
+| HL-M3 | `render.rs` 把 `SyntaxRole::Keyword` 映射成 `theme.md_code`（不用主题的 `syntax_keyword` 角色） | `rust_keyword_string_and_comment_take_their_theme_roles`（另 2 条也挂） | ✅ |
+| HL-M4 | 缓存键去掉 `text_len`（查找与 fill 的 fresh 判断都忽略） | `appending_a_line_rehighlights_it` | ✅（修复键宽度不一致前抓不住——那时缓存永不命中） |
+
+4/4 抓住。**过程记录**：第一轮 M4 没抓住，暴露出 `fill_syntax_cache` 用 `body_width` 存、查找用完整
+`width` 的真 bug（键永不命中）；修在 `0b035d6`，M4 复跑抓住。
+
+## ADR 0028 片 5 审查：H1 懒高亮 + H2 上限 + vendored 语法（2026-10-15）
+
+Base `d7f663d` · 一次性 worktree `/tmp/radian-hl2-mut`，每条跑完 `git checkout -- .`，`git status --short`
+为空。命令 `cargo test -p radian-tui --test highlight`（基线 13 passed）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| H1-M1 | 测量阶段（`line_count_cached`）对每个已闭合块调 `highlight::highlighted` | `the_measure_pass_never_highlights`（计数器断言） | ✅ |
+| H1-M2 | 缓存键加回宽度（`highlighted` 收 width 并进键，`syntax_lines_cached` 传真实 width） | `a_resize_reuses_the_highlight_cache` | ✅ |
+| H2-M1 | 去掉 `MAX_HIGHLIGHT_LINES`/`MAX_HIGHLIGHT_BYTES` 上限 | `a_block_over_the_cap_is_not_highlighted` | ✅ |
+
+3/3 抓住。**过程记录**：H1-M2 第一轮写成了从 `syntax_lines_cached` 传常量 `0`，键不随真实宽度变化，
+测试当然抓不住——改成把真实 `width` 一路传下去后抓住（变异要真的改变行为，不能只改签名）。

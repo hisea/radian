@@ -451,6 +451,29 @@ fn render_row(
             };
             spans.push(Span::styled(piece.text.clone(), style));
         }
+    } else if let Some(syntax) = &row.syntax {
+        // A syntax-highlighted code line (ADR 0028 R2): each piece takes its Radian role's
+        // style; `Plain` keeps the code block's own style. The text is unchanged, so
+        // selection, copy and search are unaffected.
+        for (text, role) in syntax {
+            let style = match role {
+                crate::highlight::SyntaxRole::Comment => theme.syntax_comment,
+                crate::highlight::SyntaxRole::Keyword => theme.syntax_keyword,
+                crate::highlight::SyntaxRole::Function => theme.syntax_function,
+                crate::highlight::SyntaxRole::Variable => theme.syntax_variable,
+                crate::highlight::SyntaxRole::String => theme.syntax_string,
+                crate::highlight::SyntaxRole::Number => theme.syntax_number,
+                crate::highlight::SyntaxRole::Type => theme.syntax_type,
+                crate::highlight::SyntaxRole::Operator => theme.syntax_operator,
+                crate::highlight::SyntaxRole::Punctuation => theme.syntax_punctuation,
+                crate::highlight::SyntaxRole::Plain => body_style,
+            };
+            let style = match band {
+                Some(band) => style.patch(band),
+                None => style,
+            };
+            spans.push(Span::styled(text.clone(), style));
+        }
     } else if let Some(diagram) = &row.diagram {
         // A rendered diagram (ADR 0028 R8): each piece takes its own role's style.
         for (piece, role) in diagram {
@@ -515,10 +538,18 @@ pub fn visible_lines(
     height: usize,
     theme: &Theme,
 ) -> (usize, Vec<Line<'static>>) {
+    let __t = std::time::Instant::now();
     let counts: Vec<usize> = entries
         .iter_mut()
         .map(|entry| entry_line_count(entry, modes, width))
         .collect();
+    if std::env::var_os("RADIAN_TRACE_PHASES").is_some() {
+        eprintln!(
+            "[trace] line-counts {} entries {} ms",
+            counts.len(),
+            __t.elapsed().as_millis()
+        );
+    }
     let total: usize = counts.iter().sum();
     let mut out = Vec::with_capacity(height);
     let mut line = 0usize;

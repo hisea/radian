@@ -32,6 +32,7 @@ fn modes(reasoning: ReasoningMode, mermaid: bool) -> DisplayModes {
             preview_lines: 5,
         },
         mermaid,
+        highlight: true,
     }
 }
 

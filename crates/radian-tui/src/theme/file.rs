@@ -148,6 +148,16 @@ fn fg_source(role: Role) -> Option<&'static str> {
         Role::MdQuoteBorder => Some("mdQuoteBorder"),
         Role::MdHr => Some("mdHr"),
         Role::MdListBullet => Some("mdListBullet"),
+        // Code-block syntax roles (ADR 0028 R2): pi's own `syntax*` family, straight through.
+        Role::SyntaxComment => Some("syntaxComment"),
+        Role::SyntaxKeyword => Some("syntaxKeyword"),
+        Role::SyntaxFunction => Some("syntaxFunction"),
+        Role::SyntaxVariable => Some("syntaxVariable"),
+        Role::SyntaxString => Some("syntaxString"),
+        Role::SyntaxNumber => Some("syntaxNumber"),
+        Role::SyntaxType => Some("syntaxType"),
+        Role::SyntaxOperator => Some("syntaxOperator"),
+        Role::SyntaxPunctuation => Some("syntaxPunctuation"),
         // The main text level itself (Pi's `text`): the mapping is used by the file themes;
         // the built-ins take pi's values directly.
         Role::Text => Some("text"),
@@ -807,14 +817,12 @@ mod tests {
             warnings.iter().all(|w| w.contains("missing role(s)")),
             "{warnings:?}"
         );
-        // `mdHeading` is a real role now (ADR 0028 R2), so it lands in the theme, not in the
-        // reserved map.
+        // `mdHeading` and the `syntax*` family are real roles now (ADR 0028 R2), so they land
+        // in the theme, not in the reserved map.
         assert_eq!(theme.md_heading.fg, Some(Color::Rgb(1, 2, 3)));
-        assert_eq!(
-            theme.reserved["syntaxKeyword"].fg,
-            Some(Color::Rgb(4, 5, 6))
-        );
-        // `thinkingXhigh` feeds the footer's `reasoning_xhigh` role now (ADR 0027 C2).
+        // `syntaxKeyword` is a real role now (main's syntax slice) and `thinkingXhigh` feeds
+        // the footer's `reasoning_xhigh` (ADR 0027 C2), so both land in the theme.
+        assert_eq!(theme.syntax_keyword.fg, Some(Color::Rgb(4, 5, 6)));
         assert_eq!(theme.reasoning_xhigh.fg, Some(Color::Rgb(7, 8, 9)));
         // `selectedBg` is a role now: its color lands on the selection's background, never
         // on its foreground, and it is not kept as a reserved style.
@@ -998,14 +1006,17 @@ mod tests {
         // `diff_hunk` takes the accent (pi has no hunk role), kanagawa's `violet`.
         assert_eq!(theme.diff_hunk.fg, Some(Color::Rgb(0x95, 0x7F, 0xB8)));
         // Every pi role in the file is either mapped or kept; nothing was dropped.
-        // `mdHeading`/`mdLink`/… are real roles now, and `thinkingMax` feeds the footer's
-        // `reasoning_max` (ADR 0027 C2, through pi's optional-role fallback from
-        // `thinkingXhigh`); `syntaxKeyword` is still reserved (slice 5).
+        // `mdHeading`/`mdLink`/… and the `syntax*` family are real roles now, and `thinkingMax`
+        // feeds the footer's `reasoning_max` (ADR 0027 C2, through pi's optional-role fallback
+        // from `thinkingXhigh`).
         assert!(
             theme.md_heading.fg.is_some(),
             "mdHeading resolved from the fixture"
         );
-        assert!(theme.reserved.contains_key("syntaxKeyword"));
+        assert!(
+            theme.syntax_keyword.fg.is_some(),
+            "syntaxKeyword resolved from the fixture"
+        );
         assert_eq!(
             theme.reasoning_max.fg, theme.reasoning_xhigh.fg,
             "thinkingMax falls back to thinkingXhigh"

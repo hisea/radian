@@ -288,6 +288,10 @@ pub struct TuiConfig {
     /// Unicode diagram. `None` means the default (`true`); an unknown value is ignored with a
     /// warning.
     pub display_mermaid: Option<bool>,
+    /// `tui.display.highlight` (ADR 0028 R2): syntax-highlight a closed code block whose info
+    /// string names a common language. `None` means the default (`true`); an unknown value is
+    /// ignored with a warning.
+    pub display_highlight: Option<bool>,
     /// `[tui.footer]` (ADR 0027 C2): the footer's rows and their items. Carried in a shape the
     /// TUI can consume; the reader validates types and the known top-level keys only. An
     /// unknown item id, placeholder or parameter is the TUI's warning, never a refusal.
@@ -880,6 +884,9 @@ fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
                         ("mermaid", Value::Boolean(on)) => {
                             config.tui.display_mermaid = Some(*on);
                         }
+                        ("highlight", Value::Boolean(on)) => {
+                            config.tui.display_highlight = Some(*on);
+                        }
                         // A display preference: skip the key with a warning, never refuse the
                         // file. The TUI keeps its default.
                         _ => config.skipped.push(format!("tui.display.{key}")),
@@ -1300,6 +1307,27 @@ theme = "light"
         let config = parse_str("schema_version = 1\n[tui.display]\nmermaid = \"yes\"\n").unwrap();
         assert_eq!(config.tui.display_mermaid, None);
         assert!(config.skipped.contains(&"tui.display.mermaid".to_string()));
+    }
+
+    /// `tui.display.highlight` (ADR 0028 R2): a bool is carried; an unknown value is skipped.
+    #[test]
+    fn the_display_highlight_flag_is_carried_and_a_non_bool_is_skipped() {
+        let config = parse_str("schema_version = 1\n[tui.display]\nhighlight = false\n").unwrap();
+        assert_eq!(config.tui.display_highlight, Some(false));
+        assert_eq!(
+            parse_str("schema_version = 1\n")
+                .unwrap()
+                .tui
+                .display_highlight,
+            None
+        );
+        let config = parse_str("schema_version = 1\n[tui.display]\nhighlight = \"yes\"\n").unwrap();
+        assert_eq!(config.tui.display_highlight, None);
+        assert!(
+            config
+                .skipped
+                .contains(&"tui.display.highlight".to_string())
+        );
     }
 
     /// `tui.display.reasoning` (ADR 0028 R3): the three modes are carried; an unknown one is

@@ -12,6 +12,7 @@ pub mod composer;
 pub mod events;
 pub mod find;
 pub mod footer;
+pub mod highlight;
 pub mod keys;
 pub mod login;
 pub mod markdown;

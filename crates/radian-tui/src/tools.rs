@@ -659,6 +659,9 @@ pub struct DisplayModes {
     pub reasoning: ReasoningMode,
     pub tools: ToolDisplay,
     pub mermaid: bool,
+    /// Code-block syntax highlighting (ADR 0028 R2, `tui.display.highlight`). In the layout
+    /// cache key for the same reason as `mermaid`: highlighted lines are what is drawn.
+    pub highlight: bool,
 }
 
 impl Default for DisplayModes {
@@ -669,6 +672,7 @@ impl Default for DisplayModes {
             reasoning: ReasoningMode::default(),
             tools: ToolDisplay::default(),
             mermaid: true,
+            highlight: true,
         }
     }
 }

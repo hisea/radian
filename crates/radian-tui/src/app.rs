@@ -911,6 +911,11 @@ pub struct App {
     pub footer: crate::footer::Footer,
     pub session_id: String,
     pub entries: Vec<Entry>,
+    /// How many entries are currently `live` (fed by stream deltas, not yet a committed
+    /// message). Maintained so `push_message` scans the transcript for live entries only
+    /// when there are some: a resumed session pushes every message with none, and the old
+    /// unconditional `retain` was O(n^2) there (resume-perf A).
+    live_count: usize,
     /// The input composer: text plus a cursor (ADR 0009 Phase 4).
     pub input: Composer,
     /// This session's submitted inputs, oldest first (sent messages and `/…` commands). Not
@@ -1019,6 +1024,10 @@ pub struct App {
     /// diagram. `false` renders every code block as source. Part of `DisplayModes`, so it is
     /// in the layout cache key.
     pub mermaid_enabled: bool,
+    /// `tui.display.highlight` (ADR 0028 R2), default true: highlight a closed code block whose
+    /// info string names a common language. `false` renders every code block as plain text.
+    /// Part of `DisplayModes`, so it is in the layout cache key.
+    pub highlight_enabled: bool,
 }
 
 impl App {
@@ -1033,6 +1042,7 @@ impl App {
             footer: crate::footer::Footer::default(),
             session_id: session_id.into(),
             entries: Vec::new(),
+            live_count: 0,
             input: Composer::new(),
             history: Vec::new(),
             history_cursor: None,
@@ -1075,6 +1085,7 @@ impl App {
             reasoning_mode: ReasoningMode::Collapsed,
             tool_display: crate::tools::ToolDisplay::default(),
             mermaid_enabled: true,
+            highlight_enabled: true,
         }
     }
 
@@ -1111,6 +1122,7 @@ impl App {
             reasoning: self.reasoning_mode,
             tools: self.tool_display,
             mermaid: self.mermaid_enabled,
+            highlight: self.highlight_enabled,
         }
     }
 
@@ -1193,6 +1205,7 @@ impl App {
         };
         // `tui.display.mermaid` (ADR 0028 R8, default true).
         self.mermaid_enabled = config.tui.display_mermaid.unwrap_or(true);
+        self.highlight_enabled = config.tui.display_highlight.unwrap_or(true);
         // `tui.clipboard` (default OSC 52). An unknown spelling never reaches here (the host
         // config reader skips it with a warning); `pbcopy` off macOS does: warn once and fall
         // back, because the copy effect would have no program to run.
@@ -3485,6 +3498,7 @@ impl App {
                 let mut entry = Entry::new(kind, text);
                 entry.live = true;
                 self.entries.push(entry);
+                self.live_count += 1;
             }
         }
     }
@@ -3492,8 +3506,22 @@ impl App {
     /// Appends a committed message as transcript entries. Used for live commits and for the
     /// history of a resumed session.
     pub fn push_message(&mut self, message: &Message) {
-        // The committed message is the truth; discard the partial live view of it.
-        self.entries.retain(|entry| !entry.live);
+        // The committed message is the truth; discard the partial live view of it. The scan
+        // runs **only when a live entry exists**: a resume pushes every message before any
+        // stream has started, and an unconditional `retain` over a 66k-entry transcript per
+        // message was O(n^2) (resume-perf A). The count is the number of live entries, so a
+        // live entry is dropped wherever it sits - the stream can leave one behind a
+        // compaction notice (they are not always a suffix of `entries`).
+        if self.live_count > 0 {
+            let mut scanned = 0u64;
+            self.entries.retain(|entry| {
+                scanned += 1;
+                !entry.live
+            });
+            self.live_count = 0;
+            #[cfg(test)]
+            LIVE_SCANS.with(|count| count.set(count.get() + scanned));
+        }
         match message {
             Message::User { content, .. } => {
                 // A compaction summary (ADR 0028 R5) is a `User` message with a
@@ -3615,6 +3643,14 @@ pub fn text_of(parts: &[ContentPart]) -> String {
         .join("")
 }
 
+// Test-only: how many entries `push_message` has walked to drop live ones. A unit test
+// asserts it does not grow when no live entry exists, which is the property the O(n^2) fix
+// rests on (it is not wall-clock based). Thread-local so parallel tests do not interfere.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static LIVE_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// The `@`-mention slice needs exactly one `App` method. Kept in its own block at the end of
 /// the file so it merges cleanly with the composer work that owns the rest of the input
 /// handling.
@@ -3712,5 +3748,76 @@ impl App {
         for _ in 0..after {
             self.input.left();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn filler(count: usize) -> Vec<agent_core::Message> {
+        (0..count)
+            .map(|i| agent_core::Message::user(format!("message {i}")))
+            .collect()
+    }
+
+    fn scans() -> u64 {
+        LIVE_SCANS.with(std::cell::Cell::get)
+    }
+
+    /// resume-perf A: a resume pushes every message with no live entry, so the live-entry scan
+    /// must not run. The number of entries walked is the property; no wall clock.
+    #[test]
+    fn push_message_does_not_walk_the_transcript_without_a_live_entry() {
+        let mut app = App::new("m", "s");
+        for message in filler(2_000) {
+            app.push_message(&message);
+        }
+        assert_eq!(app.entries.len(), 2_000);
+        let before = scans();
+        for message in filler(1_000) {
+            app.push_message(&message);
+        }
+        assert_eq!(
+            scans(),
+            before,
+            "no live entry exists: push_message must not walk the transcript"
+        );
+    }
+
+    /// The counter is live: with a live entry the walk does happen, and the entry is dropped.
+    #[test]
+    fn push_message_walks_the_transcript_to_drop_a_live_entry() {
+        let mut app = App::new("m", "s");
+        app.set_live(EntryKind::Assistant, "partial");
+        let before = scans();
+        app.push_message(&agent_core::Message::user("committed"));
+        assert!(scans() > before, "a live entry makes the walk run");
+        assert!(app.entries.iter().all(|entry| !entry.live));
+        assert_eq!(app.live_count, 0);
+    }
+
+    /// A live entry is not always a suffix: a compaction notice can sit after it. The drop
+    /// must still find it (a count, not a trailing-only scan).
+    #[test]
+    fn push_message_drops_a_live_entry_that_is_not_at_the_tail() {
+        let mut app = App::new("m", "s");
+        app.set_live(EntryKind::Assistant, "partial");
+        app.entries.push(Entry::new(
+            EntryKind::Notice,
+            "context over the budget; compacting\u{2026}",
+        ));
+        app.push_message(&agent_core::Message::user("committed"));
+        assert!(
+            app.entries.iter().all(|entry| !entry.live),
+            "the live entry is dropped wherever it sits"
+        );
+        assert!(
+            app.entries
+                .iter()
+                .any(|entry| entry.kind == EntryKind::Notice),
+            "the non-live entry after it survives"
+        );
+        assert_eq!(app.live_count, 0);
     }
 }

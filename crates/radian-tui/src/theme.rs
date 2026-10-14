@@ -183,10 +183,22 @@ pub enum Role {
     MdQuoteBorder,
     MdHr,
     MdListBullet,
+    /// Code-block syntax roles (ADR 0028 R2 decision 2), pi's same-named `syntax*`
+    /// roles. The highlighter maps a syntect scope to exactly one of these; anything unmapped
+    /// falls back to the code block's uniform style.
+    SyntaxComment,
+    SyntaxKeyword,
+    SyntaxFunction,
+    SyntaxVariable,
+    SyntaxString,
+    SyntaxNumber,
+    SyntaxType,
+    SyntaxOperator,
+    SyntaxPunctuation,
 }
 
 impl Role {
-    pub const ALL: [Role; 52] = [
+    pub const ALL: [Role; 61] = [
         Role::Reasoning,
         Role::ReasoningOff,
         Role::ReasoningMinimal,
@@ -239,6 +251,15 @@ impl Role {
         Role::MdQuoteBorder,
         Role::MdHr,
         Role::MdListBullet,
+        Role::SyntaxComment,
+        Role::SyntaxKeyword,
+        Role::SyntaxFunction,
+        Role::SyntaxVariable,
+        Role::SyntaxString,
+        Role::SyntaxNumber,
+        Role::SyntaxType,
+        Role::SyntaxOperator,
+        Role::SyntaxPunctuation,
     ];
 
     /// The `[tui.colors]` key for this role (ADR 0029 decision 5).
@@ -296,6 +317,15 @@ impl Role {
             Role::MdQuoteBorder => "md_quote_border",
             Role::MdHr => "md_hr",
             Role::MdListBullet => "md_list_bullet",
+            Role::SyntaxComment => "syntax_comment",
+            Role::SyntaxKeyword => "syntax_keyword",
+            Role::SyntaxFunction => "syntax_function",
+            Role::SyntaxVariable => "syntax_variable",
+            Role::SyntaxString => "syntax_string",
+            Role::SyntaxNumber => "syntax_number",
+            Role::SyntaxType => "syntax_type",
+            Role::SyntaxOperator => "syntax_operator",
+            Role::SyntaxPunctuation => "syntax_punctuation",
         }
     }
 
@@ -359,6 +389,15 @@ impl Role {
             Role::MdQuoteBorder => &mut theme.md_quote_border,
             Role::MdHr => &mut theme.md_hr,
             Role::MdListBullet => &mut theme.md_list_bullet,
+            Role::SyntaxComment => &mut theme.syntax_comment,
+            Role::SyntaxKeyword => &mut theme.syntax_keyword,
+            Role::SyntaxFunction => &mut theme.syntax_function,
+            Role::SyntaxVariable => &mut theme.syntax_variable,
+            Role::SyntaxString => &mut theme.syntax_string,
+            Role::SyntaxNumber => &mut theme.syntax_number,
+            Role::SyntaxType => &mut theme.syntax_type,
+            Role::SyntaxOperator => &mut theme.syntax_operator,
+            Role::SyntaxPunctuation => &mut theme.syntax_punctuation,
         }
     }
 }
@@ -438,6 +477,26 @@ pub struct Theme {
     pub md_quote_border: Style,
     pub md_hr: Style,
     pub md_list_bullet: Style,
+    /// Code-block syntax roles (ADR 0028 R2 decision 2): the highlighter's nine roles,
+    /// pi's `syntax*` family. Colors come from here, never from a syntect theme.
+    ///
+    /// The scope → role table (the highlighter's `src/highlight.rs` is the authority; the
+    /// README repeats it): `comment*` → comment; `keyword*`/`storage*` → keyword;
+    /// `entity.name.function*`/`support.function*`/`entity.name.tag*` → function;
+    /// `variable*`/`meta.function.parameters*` → variable; `string*` → string;
+    /// `constant.numeric*` → number; `entity.name.type/class/struct/enum/namespace*` and
+    /// `support.type/class*` → type; `keyword.operator*` → operator; `punctuation*` →
+    /// punctuation; everything else → the code block's own style (`Plain`). Comment and
+    /// string outrank the punctuation inside them.
+    pub syntax_comment: Style,
+    pub syntax_keyword: Style,
+    pub syntax_function: Style,
+    pub syntax_variable: Style,
+    pub syntax_string: Style,
+    pub syntax_number: Style,
+    pub syntax_type: Style,
+    pub syntax_operator: Style,
+    pub syntax_punctuation: Style,
     /// A structured notice's label (`profile:`, `[memory]`) — pi's `accent` (ADR 0028 owner
     /// decision: 强调 = 名字、标签).
     pub notice_label: Style,
@@ -488,6 +547,9 @@ mod pi_dark {
     pub const MUTED: &str = "okhsl(229 6% 67%)";
     pub const DIM: &str = "okhsl(229 8% 56%)";
     pub const VIOLET: &str = "okhsl(295 50% 67%)"; // accent
+    pub const BLUE: &str = "okhsl(232 54% 67%)"; // syntaxKeyword
+    pub const SYNTAX_VARIABLE: &str = "okhsl(202 58% 67%)";
+    pub const SYNTAX_STRING: &str = "okhsl(52 67% 67%)";
     pub const GREEN: &str = "okhsl(159 59% 67%)"; // success
     pub const RED: &str = "okhsl(20 72% 67%)"; // error
     pub const YELLOW: &str = "okhsl(83 88% 67%)"; // warning
@@ -509,6 +571,9 @@ mod pi_light {
     pub const MUTED: &str = "okhsl(229 8% 47%)";
     pub const DIM: &str = "okhsl(229 7% 59%)";
     pub const VIOLET: &str = "okhsl(295 60% 46%)";
+    pub const BLUE: &str = "okhsl(231 68% 47%)"; // syntaxKeyword
+    pub const SYNTAX_VARIABLE: &str = "okhsl(203 73% 46%)";
+    pub const SYNTAX_STRING: &str = "okhsl(52 84% 46%)";
     pub const GREEN: &str = "okhsl(159 75% 46%)";
     pub const RED: &str = "okhsl(20 91% 47%)";
     pub const YELLOW: &str = "okhsl(83 99% 47%)";
@@ -597,6 +662,16 @@ impl Theme {
             md_quote_border: dim,
             md_hr: dim,
             md_list_bullet: spec(pi::VIOLET, Modifier::empty(), truecolor),
+            // Syntax (ADR 0028 R2): pi's `syntax*` values, read from its dark/light themes.
+            syntax_comment: muted,
+            syntax_keyword: spec(pi::BLUE, Modifier::empty(), truecolor),
+            syntax_function: spec(pi::YELLOW, Modifier::empty(), truecolor),
+            syntax_variable: spec(pi::SYNTAX_VARIABLE, Modifier::empty(), truecolor),
+            syntax_string: spec(pi::SYNTAX_STRING, Modifier::empty(), truecolor),
+            syntax_number: spec(pi::GREEN, Modifier::empty(), truecolor),
+            syntax_type: spec(pi::VIOLET, Modifier::empty(), truecolor),
+            syntax_operator: muted,
+            syntax_punctuation: muted,
             turn_idle: spec(pi::GREEN, Modifier::empty(), truecolor),
             turn_running: spec(pi::YELLOW, Modifier::empty(), truecolor),
             turn_cancelled: spec(pi::RED, Modifier::empty(), truecolor),
@@ -673,6 +748,16 @@ impl Theme {
             md_quote_border: dim,
             md_hr: dim,
             md_list_bullet: spec(pi::VIOLET, Modifier::empty(), truecolor),
+            // Syntax (ADR 0028 R2): pi's `syntax*` values, read from its dark/light themes.
+            syntax_comment: muted,
+            syntax_keyword: spec(pi::BLUE, Modifier::empty(), truecolor),
+            syntax_function: spec(pi::YELLOW, Modifier::empty(), truecolor),
+            syntax_variable: spec(pi::SYNTAX_VARIABLE, Modifier::empty(), truecolor),
+            syntax_string: spec(pi::SYNTAX_STRING, Modifier::empty(), truecolor),
+            syntax_number: spec(pi::GREEN, Modifier::empty(), truecolor),
+            syntax_type: spec(pi::VIOLET, Modifier::empty(), truecolor),
+            syntax_operator: muted,
+            syntax_punctuation: muted,
             turn_idle: spec(pi::GREEN, Modifier::empty(), truecolor),
             turn_running: spec(pi::YELLOW, Modifier::empty(), truecolor),
             turn_cancelled: spec(pi::RED, Modifier::empty(), truecolor),
@@ -770,6 +855,17 @@ impl Theme {
             md_quote_border: style(None, Modifier::DIM),
             md_hr: style(None, Modifier::DIM),
             md_list_bullet: style(None, Modifier::BOLD),
+            // `mono` uses no color: the syntax roles are plain, except a comment, which the
+            // owner allows one modifier (italic).
+            syntax_comment: style(None, Modifier::ITALIC),
+            syntax_keyword: style(None, Modifier::empty()),
+            syntax_function: style(None, Modifier::empty()),
+            syntax_variable: style(None, Modifier::empty()),
+            syntax_string: style(None, Modifier::empty()),
+            syntax_number: style(None, Modifier::empty()),
+            syntax_type: style(None, Modifier::empty()),
+            syntax_operator: style(None, Modifier::empty()),
+            syntax_punctuation: style(None, Modifier::empty()),
         }
     }
 

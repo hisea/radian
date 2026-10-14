@@ -210,6 +210,7 @@ const EXPANDED: DisplayModes = DisplayModes {
         preview_lines: 5,
     },
     mermaid: true,
+    highlight: true,
 };
 
 #[test]

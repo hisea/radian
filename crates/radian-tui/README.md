@@ -437,6 +437,7 @@ The transcript owns its scrolling:
 | 19 | `--pick` lists this workspace's sessions, filters, full-text searches, resumes the choice (the next request carries its history), `n` starts new, `Esc` exits 0 with no session file; `/sessions` lists a copyable `--resume`; `/export` writes and refuses to overwrite without `--force` | `tests/pty.rs`, `tests/sessions.rs` (host) |
 | 20 | Ctrl-C: idle with text, the first press clears it into the history (not a quit); idle and empty, the first press only shows `Press Ctrl-C again to quit` and a second inside 2 s quits with the exit line; a key in between, or the window closing, disarms | `tests/quit.rs`, `tests/pty.rs` |
 | 20 | auto (ADR 0026 D9): `!` approves once and enables auto (the next ask never prompts, `AUTO` on the status bar); `Y` stays allow-once; `/auto on\|off`, `/yolo` alias; switch audited + `ConfigChanged` journaled; resume restores on `workspace`, not on `full` (with the hint); config `auto` honored on `workspace`, ignored with a warning on `full` | `tests/auto.rs`, `tests/pty.rs` |
+| 21 | syntax highlighting (ADR 0028 R2): keyword/string/comment take the theme's `syntax*` colors, a theme file's value reaches the cells, an unclosed or unknown-language block stays plain, `highlight = false` disables it, a truncated line keeps its colors, and the text is unchanged (copy/search) | `tests/highlight.rs` |
 | — | Enter=followup idle / steer running; Ctrl-C cancel-then-quit | `tests/input.rs` |
 
 ## Must be hand-tested in a real terminal
@@ -961,6 +962,58 @@ form, so moving between questions keeps them. These are the **only** rebindable 
 approval's `y`/`a`/`n`/`Esc` stay hardcoded, and Ctrl-C still cancels the turn before the form
 sees the key (ADR 0023 U4, invariant 1). While a question is up, the model's streamed text
 before it stays on screen.
+
+## Syntax highlighting (ADR 0028 R2)
+
+A **closed** fenced code block whose info string names a common language is highlighted with the
+pure-Rust `syntect` (the `regex-fancy` backend; no oniguruma). While the fence is open
+(streaming) the block is plain; it is highlighted when the closing fence arrives — the same
+"only the fixed blocks are rendered" rule as Mermaid. An unknown language, or no info string,
+stays the code block's uniform style. Highlighting changes **colors only**, never the text:
+selection, copy, `Ctrl-F` and the line count all see the same characters (ADR 0028 R9's
+no-wrap and `…` truncation are unchanged).
+
+**Colors come from the Radian theme, not from syntect.** syntect's own themes are not compiled
+in; the parser yields one of nine roles, and the active theme resolves it (ADR 0029). A theme
+file's `syntax*` values and `[tui.colors]` overrides reach them like any other role; `mono`
+uses no color (a comment may be italic). `tui.display.highlight = false` (config) renders every
+code block as plain text.
+
+| Role | syntect scope (the innermost/highest-priority match) |
+|---|---|
+| `syntax_comment` | `comment*` |
+| `syntax_keyword` | `keyword*`, `storage*` (Sublime's `fn`/`let`/`struct`) |
+| `syntax_function` | `entity.name.function*`, `support.function*`, `entity.name.tag*` |
+| `syntax_variable` | `variable*`, `meta.function.parameters*` |
+| `syntax_string` | `string*` |
+| `syntax_number` | `constant.numeric*` |
+| `syntax_type` | `entity.name.type/class/struct/enum/namespace*`, `support.type/class*` |
+| `syntax_operator` | `keyword.operator*` |
+| `syntax_punctuation` | `punctuation*` |
+
+The table is ordered by **priority**, not just innermost-first: a comment's `//`
+(`punctuation.definition.comment`) and a string's quotes (`punctuation.definition.string`) stay
+comment/string-colored because comment and string outrank the punctuation inside them. Anything
+else is `Plain` (the code block's own style). The mapping lives in `src/highlight.rs`.
+
+**Languages** (the info strings that highlight) are: `rust`/`rs`, `python`/`py`,
+`javascript`/`js`/`jsx`, `typescript`/`ts`/`mts`/`cts`, `tsx`, `go`/`golang`,
+`sh`/`bash`/`shell`/`zsh`, `json`, `yaml`/`yml`, `toml`, `markdown`/`md`, `diff`/`patch`, `c`,
+`c++`/`cpp`/`cc`/`cxx`, `c#`/`csharp`/`cs`, `java`, `ruby`/`rb`, `php`, `sql`, `html`/`htm`,
+`css`, `xml`, `lua`, `perl`/`pl`, `r`, `scala`, `haskell`/`hs`, `make`/`makefile`,
+`clojure`/`clj`, `erlang`/`erl`, `ocaml`/`ml`, `objective-c`/`objc`/`mm`, `latex`/`tex`,
+`matlab`, `lisp`/`el`, `graphviz`/`dot`.
+
+The grammar data is syntect's packed default set (75 grammars) plus three grammars vendored
+under `third_party/syntaxes` (`TypeScript`, `TypeScriptReact`, `TOML`; see its
+`RADIAN-CHANGES.md` and the root `NOTICE`) — syntect's set does not ship those. A hand-reduced
+`.packdump` of the default set was attempted first; syntect resolves cross-syntax context
+references at build time, so a hand-picked subset panics unless the full transitive closure is
+computed. `build.rs` instead loads the default set, parses the three vendored YAML grammars and
+dumps the **combined** set to `$OUT_DIR` (parsing the ~200 KB TypeScript YAML with `yaml-rust`
+costs ~2 s each, which would be a visible freeze on the first code block at runtime); the binary
+embeds that dump and only deserializes it. The **language table above is what limits
+highlighting**; a grammar the set ships but the table does not name renders as plain text.
 
 ## Context budget and the model catalog
 

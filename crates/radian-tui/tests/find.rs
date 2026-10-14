@@ -325,6 +325,7 @@ const EXPANDED: DisplayModes = DisplayModes {
         preview_lines: 5,
     },
     mermaid: true,
+    highlight: true,
 };
 
 /// A folded tool body must not vanish from the search (ADR 0028 R4 / this slice): the match
