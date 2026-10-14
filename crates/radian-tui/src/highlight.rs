@@ -148,7 +148,7 @@ pub fn highlight_lines(lines: &[&str], lang: &str) -> Option<Vec<HighlightedLine
 fn spans(line: &str, ops: &[(usize, ScopeStackOp)], stack: &mut ScopeStack) -> HighlightedLine {
     let mut out: HighlightedLine = Vec::new();
     let mut cursor = 0usize;
-    let mut push = |text: &str, stack: &ScopeStack, out: &mut HighlightedLine| {
+    let push = |text: &str, stack: &ScopeStack, out: &mut HighlightedLine| {
         if !text.is_empty() {
             out.push((text.to_owned(), role_for(stack)));
         }

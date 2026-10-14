@@ -1478,7 +1478,7 @@ fn fill_syntax_cache(entry: &mut Entry, blocks: &[Block], width: usize) {
     if !fresh {
         return;
     }
-    let text = crate::render::display_text(entry).to_owned();
+    let text = crate::render::display_text(entry).into_owned();
     let mut highlighted = Vec::new();
     for block in blocks {
         if let Block::Code {
