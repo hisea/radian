@@ -715,6 +715,30 @@ fn thinking_folds_to_one_line_and_ctrl_t_expands_it() {
     assert!(!text.contains("FIRST THOUGHT"), "{text}");
 }
 
+/// The fold state is part of the **layout cache key** (ADR 0028 R1): collapsing changes the
+/// transcript's line count, so the viewport math (total lines, scroll range) changes with it.
+/// A cache that forgot the mode would keep serving the old count.
+#[test]
+fn folding_changes_the_transcript_line_count() {
+    let mut app = App::new("m", "s");
+    app.reasoning_mode = radian_tui::blocks::ReasoningMode::Expanded;
+    app.apply_event(&AgentEvent::TranscriptAppended {
+        index: 0,
+        message: assistant_with("ANSWER", "one\ntwo\nthree", false, vec![]),
+    });
+    let _ = render(&mut app, 60, 10);
+    let expanded = app.total_lines;
+    app.reasoning_mode = radian_tui::blocks::ReasoningMode::Collapsed;
+    let _ = render(&mut app, 60, 10);
+    let collapsed = app.total_lines;
+    assert_eq!(
+        expanded,
+        collapsed + 2,
+        "three thinking lines become one placeholder"
+    );
+    assert_eq!(collapsed, 2, "the placeholder plus the answer");
+}
+
 /// `tui.display.reasoning = "hidden"` removes the reasoning lines entirely.
 #[test]
 fn hidden_reasoning_contributes_nothing() {
