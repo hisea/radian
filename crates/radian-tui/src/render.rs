@@ -15,6 +15,7 @@ use radian_permissions::ApprovalRequest;
 use crate::app::{
     App, Entry, EntryKind, Modal, TurnState, WrapKey, budget_status_text, mcp_text, usage_text,
 };
+use crate::login::LoginWizard;
 use crate::question::QuestionForm;
 use crate::theme::Theme;
 
@@ -317,6 +318,83 @@ const INPUT_PROMPT: &str = "> ";
 const INPUT_HINT: &str = "(type a message, Enter to send, Ctrl-J for a new line)";
 
 /// The input area's height: one rule above, the text rows, one rule below.
+/// The `/login` box's height (rows in `login_lines`, plus the two border rows).
+const LOGIN_HEIGHT: u16 = 8;
+
+/// The wizard's lines. **The key is never among them** (D3): a filled field renders one `*`
+/// per character, an empty one its hint.
+fn login_lines(wizard: &LoginWizard, width: usize) -> Vec<Line<'static>> {
+    use crate::login::LoginStep;
+    let error_style = app_theme_error();
+    let _ = width;
+    let mut lines: Vec<Line> = Vec::new();
+    match &wizard.step {
+        LoginStep::ChooseProvider { cursor } => {
+            lines.push(Line::from("choose a provider (↑/↓, Enter):"));
+            for (index, (id, description)) in LoginWizard::choices().into_iter().enumerate() {
+                let marker = if index == *cursor { "> " } else { "   " };
+                let style = if index == *cursor {
+                    crate::theme::Theme::default().user
+                } else {
+                    crate::theme::Theme::default().hint
+                };
+                lines.push(Line::from(Span::styled(
+                    format!(" {marker} {id:<20} {description}"),
+                    style,
+                )));
+            }
+        }
+        LoginStep::CustomName => {
+            lines.push(Line::from("provider name (also its auth.json entry):"));
+            lines.push(Line::from(format!(" {}", wizard.name)));
+        }
+        LoginStep::CustomProtocol { cursor } => {
+            lines.push(Line::from("wire protocol (↑/↓, Enter):"));
+            for (index, kind) in crate::login::PROTOCOLS.iter().enumerate() {
+                let marker = if index == *cursor { "> " } else { "   " };
+                lines.push(Line::from(format!(" {marker} {kind}")));
+            }
+        }
+        LoginStep::CustomBaseUrl => {
+            lines.push(Line::from("base URL:"));
+            lines.push(Line::from(format!(" {}", wizard.base_url)));
+        }
+        LoginStep::KeyInput => {
+            lines.push(Line::from("API key (hidden; paste works too):"));
+            let masked = crate::login::LoginWizard::masked(&wizard.key);
+            lines.push(Line::from(if masked.is_empty() {
+                String::new()
+            } else {
+                masked
+            }));
+        }
+        LoginStep::Verifying => {
+            lines.push(Line::from(format!(
+                "verifying {} … (Esc cancels)",
+                wizard.provider_name()
+            )));
+        }
+        LoginStep::VerifyFailed { reason } => {
+            lines.push(Line::from(Span::styled(
+                format!("verification failed: {reason}"),
+                error_style,
+            )));
+            lines.push(Line::from(
+                "save anyway? [y] save   [n/Esc] cancel".to_owned(),
+            ));
+        }
+    }
+    if let Some(error) = &wizard.error {
+        lines.push(Line::from(Span::styled(error.clone(), error_style)));
+    }
+    lines
+}
+
+/// The error style for wizard problems (a note-colored line; no new theme role).
+fn app_theme_error() -> ratatui::style::Style {
+    crate::theme::Theme::default().note
+}
+
 fn input_height(app: &App, width: usize) -> u16 {
     let inner = width.saturating_sub(INPUT_PROMPT.len()).max(1);
     let rows = crate::composer::rows(&app.input.text(), inner).len();
@@ -666,6 +744,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             approval_cap(area.height as usize, completion.len()),
         ),
         Some(Modal::Question(form)) => question_height(form, area.width as usize),
+        Some(Modal::Login(_)) => LOGIN_HEIGHT,
+        // The `/logout` confirmation is a two-line box like the `/memory` one.
+        Some(Modal::ConfirmLogout(_)) => 4,
         _ => input_height(app, area.width as usize),
     };
     // The `@` completion list sits just above the input box (and never over an approval
@@ -812,6 +893,32 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 Paragraph::new(Line::from(clip_columns(QUESTION_KEYS, width))),
                 rows[1],
             );
+        }
+        Some(Modal::Login(wizard)) => {
+            let lines = login_lines(wizard, chunks[2].width as usize);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(app.theme.approval_border)
+                .title(" /login ");
+            frame.render_widget(&block, chunks[2]);
+            let inner = block.inner(chunks[2]);
+            frame.render_widget(Paragraph::new(lines), inner);
+        }
+        Some(Modal::ConfirmLogout(provider)) => {
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(app.theme.approval_border)
+                .title(" /logout ");
+            frame.render_widget(&block, chunks[2]);
+            let inner = block.inner(chunks[2]);
+            let lines = vec![
+                Line::from(format!("remove the stored credential for `{provider}`?")),
+                Line::from(Span::styled(
+                    "[y] remove   [n/Esc] keep",
+                    app.theme.approval_border,
+                )),
+            ];
+            frame.render_widget(Paragraph::new(lines), inner);
         }
         _ if app.find_state().is_some() => {
             // The find box replaces the input box's line; the input text itself is untouched

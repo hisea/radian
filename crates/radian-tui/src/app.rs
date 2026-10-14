@@ -27,6 +27,7 @@ use crate::command::{self, PendingCommand};
 use crate::composer::Composer;
 use crate::find::FindState;
 use crate::keys::{Action, Keymap};
+use crate::login::{LoginKey, LoginOutcome, LoginWizard};
 use crate::mention::{Completion, ExpandError, Expansion};
 use crate::picker::{Outcome as PickerOutcome, Picker};
 use crate::projection::{SessionProjection, StreamSnapshot};
@@ -195,6 +196,13 @@ pub enum Modal {
     /// the one modal whose input goes through the keymap. Boxed: the form is much larger than
     /// the other variants, and a `Modal` sits in every `Layer`.
     Question(Box<QuestionForm>),
+    /// The `/login` wizard (ADR 0026 D3). Its keys are hardcoded (a login prompt is
+    /// sensitive, like the approval), and the key field is never echoed. Boxed, like the
+    /// question.
+    Login(Box<LoginWizard>),
+    /// A `/logout` confirmation: the provider whose stored credential would be removed.
+    /// `y` removes, `n`/`Esc` keeps — hardcoded, like the `/memory` confirmation.
+    ConfirmLogout(String),
 }
 
 /// How far one approval-scroll key moves the box's body (approval-fit). Hardcoded like the
@@ -388,6 +396,28 @@ pub enum Input {
     PickerClose,
     /// The session picker's data arrived (the result of [`Effect::OpenPicker`]).
     PickerOpened(PickerData),
+    /// One key inside the `/login` wizard (ADR 0026 D3). Hardcoded keys, like the approval.
+    LoginKey(LoginKey),
+    /// The `/login` verification request finished (D3). `name` is the provider the wizard is
+    /// logging in (the answer is ignored unless the wizard is still waiting on it).
+    LoginVerified {
+        name: String,
+        result: Result<(), String>,
+    },
+    /// The `auth.json` write of a `/login` finished: the wizard closes either way. The
+    /// success notice names the provider and the way to switch to it (D3).
+    LoginSaved {
+        name: String,
+        result: Result<(), String>,
+    },
+    /// The hardcoded answer to a `/logout` confirmation (`true` = remove).
+    ConfirmLogout(bool),
+    /// A `/logout` removal finished: the provider and the outcome. The notice names the
+    /// provider (the removal is otherwise silent, D3's confirmation being the record).
+    LogoutDone {
+        provider: String,
+        result: Result<(), String>,
+    },
     /// The left button went down at a screen cell: the press that may start a transcript
     /// selection (and that clears the previous one). Only arrives when mouse reporting is on.
     MouseDown { row: u16, col: u16 },
@@ -467,6 +497,24 @@ pub enum Effect {
     /// Load this workspace's sessions and open the picker overlay (`/sessions`). The result is
     /// [`Input::PickerOpened`]; loading is I/O, so it is the loop's job (ADR 0023 U3).
     OpenPicker { query: Option<String> },
+    /// Run the `/login` verification request (ADR 0026 D3): one `GET <base>/models`. The
+    /// answer is [`Input::LoginVerified`].
+    LoginVerify {
+        name: String,
+        protocol: &'static str,
+        base_url: String,
+        key: String,
+    },
+    /// Write the `/login` entry into `credentials/auth.json` (D3; only auth.json is written).
+    /// The answer is [`Input::LoginSaved`].
+    LoginSave {
+        name: String,
+        key: String,
+        env: Vec<(String, String)>,
+    },
+    /// Remove one stored credential (`/logout`, after the confirmation). The answer is
+    /// [`Input::LogoutDone`].
+    Logout { provider: String },
     /// Switch the session's auto-approval (ADR 0026 D9). The loop applies it through the
     /// facade, which flips the hooks' live policy, audits the switch and queues the durable
     /// `ConfigChanged` record for the next resume.
@@ -521,6 +569,33 @@ impl PartialEq for Effect {
             (FetchCompletions(a), FetchCompletions(b)) => a == b,
             (OpenPicker { query: a }, OpenPicker { query: b }) => a == b,
             (Session(a), Session(b)) => a == b,
+            (
+                LoginVerify {
+                    name: an,
+                    protocol: ap,
+                    base_url: ab,
+                    key: ak,
+                },
+                LoginVerify {
+                    name: bn,
+                    protocol: bp,
+                    base_url: bb,
+                    key: bk,
+                },
+            ) => an == bn && ap == bp && ab == bb && ak == bk,
+            (
+                LoginSave {
+                    name: an,
+                    key: ak,
+                    env: ae,
+                },
+                LoginSave {
+                    name: bn,
+                    key: bk,
+                    env: be,
+                },
+            ) => an == bn && ak == bk && ae == be,
+            (Logout { provider: a }, Logout { provider: b }) => a == b,
             (Copy { text: a }, Copy { text: b }) => a == b,
             _ => false,
         }
@@ -1214,6 +1289,22 @@ impl App {
         })
     }
 
+    /// The topmost `/login` wizard, mutably, so `update` can step it.
+    pub fn login_modal_mut(&mut self) -> Option<&mut LoginWizard> {
+        self.layers.iter_mut().rev().find_map(|layer| match layer {
+            Layer::Modal(Modal::Login(wizard)) => Some(&mut **wizard),
+            _ => None,
+        })
+    }
+
+    /// The `/logout` confirmation on screen, if any.
+    pub fn pending_logout(&self) -> Option<&str> {
+        self.layers.iter().rev().find_map(|layer| match layer {
+            Layer::Modal(Modal::ConfirmLogout(provider)) => Some(provider.as_str()),
+            _ => None,
+        })
+    }
+
     /// The topmost modal, if any. The input box is not editable while one is up.
     pub fn top_modal(&self) -> Option<&Modal> {
         self.layers.iter().rev().find_map(|layer| match layer {
@@ -1596,8 +1687,16 @@ impl App {
                 self.find_backspace();
                 UpdateResult::dirty()
             }
-            // A bracketed paste is text for the message box, exactly as before.
+            // A bracketed paste is text for the message box — unless the `/login` wizard is
+            // up: its fields take the paste (masked like typing, D3), and the message box is
+            // frozen while a modal is up anyway.
             Input::Paste(text) => {
+                if matches!(self.top_modal(), Some(Modal::Login(_))) {
+                    let outcome = self
+                        .login_modal_mut()
+                        .map(|wizard| wizard.on_key(LoginKey::Paste(text)));
+                    return self.login_outcome(outcome.unwrap_or(LoginOutcome::Stay));
+                }
                 self.input.insert_str(&text);
                 UpdateResult::dirty()
             }
@@ -1658,6 +1757,68 @@ impl App {
                 UpdateResult::dirty()
             }
             Input::PickerOpened(data) => self.picker_opened(data),
+            // The `/login` wizard's keys, its verification result, and the save/removal
+            // results (ADR 0026 D3).
+            Input::LoginKey(key) => {
+                let outcome = self
+                    .login_modal_mut()
+                    .map(|wizard| wizard.on_key(key))
+                    .unwrap_or(LoginOutcome::Stay);
+                self.login_outcome(outcome)
+            }
+            Input::LoginVerified { name: _, result } => {
+                // Only a wizard still waiting consumes the answer (D3).
+                let waiting = matches!(
+                    self.top_modal(),
+                    Some(Modal::Login(wizard))
+                        if matches!(wizard.step, crate::login::LoginStep::Verifying)
+                );
+                if !waiting {
+                    return UpdateResult::none();
+                }
+                let outcome = self
+                    .login_modal_mut()
+                    .and_then(|wizard| wizard.verified(&result))
+                    .unwrap_or(LoginOutcome::Stay);
+                self.login_outcome(outcome)
+            }
+            Input::LoginSaved { name, result } => {
+                self.remove_modal(|modal| matches!(modal, Modal::Login(_)));
+                match result {
+                    Ok(()) => {
+                        // D3's required "what next" line: how to actually use the provider.
+                        self.push_notice(format!(
+                            "saved the key for `{name}` in credentials/auth.json; switch to it \
+                             with /model {name}/<model> (or set model.provider)"
+                        ));
+                    }
+                    Err(error) => self.push_notice(format!("could not save the key: {error}")),
+                }
+                UpdateResult::dirty()
+            }
+            Input::ConfirmLogout(confirmed) => {
+                let Some(provider) = self.pending_logout().map(str::to_owned) else {
+                    return UpdateResult::none();
+                };
+                self.remove_modal(|modal| matches!(modal, Modal::ConfirmLogout(_)));
+                if confirmed {
+                    UpdateResult::effect(Effect::Logout { provider })
+                } else {
+                    self.push_notice(format!("kept `{provider}`"));
+                    UpdateResult::dirty()
+                }
+            }
+            Input::LogoutDone { provider, result } => {
+                match result {
+                    Ok(()) => {
+                        self.push_notice(format!("removed the stored credential for `{provider}`"))
+                    }
+                    Err(error) => {
+                        self.push_notice(format!("could not remove `{provider}`: {error}"))
+                    }
+                }
+                UpdateResult::dirty()
+            }
             Input::MouseDown { row, col } => self.mouse_down(row, col),
             Input::MouseDrag { row, col } => self.mouse_drag(row, col),
             Input::MouseUp { row, col } => self.mouse_up(row, col),
@@ -1829,6 +1990,30 @@ impl App {
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                     Some(Input::ConfirmCommand(false))
                 }
+                _ => None,
+            },
+            // The `/logout` confirmation is hardcoded like the `/memory` one (ADR 0023 U4).
+            Modal::ConfirmLogout(_) => match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => Some(Input::ConfirmLogout(true)),
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    Some(Input::ConfirmLogout(false))
+                }
+                _ => None,
+            },
+            // The `/login` wizard's keys are hardcoded too: a login prompt is sensitive, and
+            // the key field must behave identically whoever rebinds what (ADR 0026 D3).
+            Modal::Login(_) => match key.code {
+                KeyCode::Char(c)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    Some(Input::LoginKey(LoginKey::Char(c)))
+                }
+                KeyCode::Backspace => Some(Input::LoginKey(LoginKey::Backspace)),
+                KeyCode::Enter => Some(Input::LoginKey(LoginKey::Enter)),
+                KeyCode::Esc => Some(Input::LoginKey(LoginKey::Esc)),
+                KeyCode::Up => Some(Input::LoginKey(LoginKey::Up)),
+                KeyCode::Down => Some(Input::LoginKey(LoginKey::Down)),
                 _ => None,
             },
         }
@@ -2298,6 +2483,13 @@ impl App {
             return UpdateResult::none();
         }
         let candidates = command::rank(candidates, fetch.partial());
+        // The `Ready` levels' rule holds here too: the one candidate that is already exactly
+        // what was typed is not a completion to accept — arming it would make Enter accept
+        // (inserting the same word) instead of submitting the finished line.
+        if candidates.len() == 1 && candidates[0].insert == fetch.partial() {
+            self.completion_clear();
+            return UpdateResult::dirty();
+        }
         self.set_slash(completion.range, candidates);
         UpdateResult::dirty()
     }
@@ -2393,6 +2585,35 @@ impl App {
         }
     }
 
+    /// Applies the wizard's outcome: stay, or hand the loop an effect / close. The "what
+    /// next" line on success is the loop's (it knows the save succeeded).
+    fn login_outcome(&mut self, outcome: LoginOutcome) -> UpdateResult {
+        match outcome {
+            LoginOutcome::Stay => {}
+            LoginOutcome::Cancel => {
+                self.remove_modal(|modal| matches!(modal, Modal::Login(_)));
+                self.push_notice("login cancelled; nothing was saved");
+            }
+            LoginOutcome::Verify {
+                name,
+                protocol,
+                base_url,
+                key,
+            } => {
+                return UpdateResult::effect(Effect::LoginVerify {
+                    name,
+                    protocol,
+                    base_url,
+                    key,
+                });
+            }
+            LoginOutcome::Save { name, key, env } => {
+                return UpdateResult::effect(Effect::LoginSave { name, key, env });
+            }
+        }
+        UpdateResult::dirty()
+    }
+
     /// Runs one `/…` line. Parsing is pure; everything that touches the world becomes an
     /// effect, and its result comes back as another [`Input`]. The line is not sent anywhere.
     fn run_slash_command(&mut self, line: &str) -> UpdateResult {
@@ -2430,6 +2651,43 @@ impl App {
                     return UpdateResult::dirty();
                 }
                 UpdateResult::effect(Effect::Session(command::SessionOutcome::Fork))
+            }
+            // `/login`: the wizard is app state (pure); its network and file work are effects
+            // the loop runs (ADR 0023 U3). An explicit `/login <id>` skips the choice step.
+            command::Outcome::Login(provider) => {
+                let step = match provider {
+                    None => crate::login::LoginStep::ChooseProvider { cursor: 0 },
+                    Some(id) if id.starts_with("no-such-provider:") => {
+                        let name = id.trim_start_matches("no-such-provider:").to_owned();
+                        self.push_notice(format!(
+                            "unknown provider {name:?}: /login takes a built-in provider or \
+                             `custom`"
+                        ));
+                        return UpdateResult::dirty();
+                    }
+                    Some(id) => {
+                        // for_provider builds the matching first step (D3).
+                        self.push_modal(Modal::Login(Box::new(LoginWizard::for_provider(&id))));
+                        return UpdateResult::dirty();
+                    }
+                };
+                self.push_modal(Modal::Login(Box::new(LoginWizard::new(step))));
+                UpdateResult::dirty()
+            }
+            // `/logout <provider>`: confirm first (`y`/`n`), then remove (D3).
+            command::Outcome::Logout(provider) => {
+                if provider.is_empty() {
+                    self.push_notice("usage: /logout <provider>");
+                    return UpdateResult::dirty();
+                }
+                if let Some(extra) = provider.strip_prefix("__extra__") {
+                    self.push_notice(format!(
+                        "unexpected extra name {extra:?}; usage: /logout <provider>"
+                    ));
+                    return UpdateResult::dirty();
+                }
+                self.push_modal(Modal::ConfirmLogout(provider));
+                UpdateResult::dirty()
             }
             command::Outcome::AutoToggle(on) => {
                 // ADR 0026 D9: the in-session switch. `/auto on` needs no confirmation (it is

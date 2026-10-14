@@ -1,0 +1,19 @@
+# ADR 0026 D10:具名 provider。`[providers.<名字>]` 声明一个自定义服务(名字即 `auth.json`
+# 里 key 的条目名);`kind` 是线上协议(本版只有 openai-compatible 与 anthropic),
+# `base_url` 是它的端点。名字不得与内建 provider id 或保留名 `openai-compatible` 重名,
+# 形状为字母、数字、`-`、`_`——非法名字拒绝整个文件。`--provider <名字>`、配置
+# `model.provider = "<名字>"` 与 `/model <名字>/…` 都用它;同名项也写在 auth.json 的
+# `env`(`RADIAN_BASE_URL`/`RADIAN_KIND`)里时,配置优先并警告一次。
+schema_version = 1
+
+[model]
+provider = "corp"
+model = "m-1"
+
+[providers.corp]
+kind = "openai-compatible"
+base_url = "https://llm.example.com/v1"
+
+[providers.relay]
+kind = "anthropic"
+base_url = "https://relay.example.com"

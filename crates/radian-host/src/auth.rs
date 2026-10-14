@@ -221,6 +221,26 @@ impl AuthStore {
         }
     }
 
+    /// A named provider's declaration from its entry's `env` (ADR 0026 D10:
+    /// `RADIAN_BASE_URL`, `RADIAN_KIND`), **even when the key itself is unusable** — the
+    /// declaration is what tells the host which endpoint and protocol the name names. `None`
+    /// when there is no entry or no `env` object.
+    pub fn entry_env(&self, provider_id: &str) -> Option<BTreeMap<String, String>> {
+        let values = self
+            .entries
+            .get(provider_id)
+            .and_then(Value::as_object)?
+            .get("env")?
+            .as_object()?;
+        let mut env = BTreeMap::new();
+        for (name, value) in values {
+            if let Some(value) = value.as_str() {
+                env.insert(name.clone(), value.to_owned());
+            }
+        }
+        Some(env)
+    }
+
     /// Adds or replaces the `api_key` entry for `provider_id`, merging into any existing
     /// object so its unknown fields survive. Other entries are untouched.
     pub fn upsert_api_key(

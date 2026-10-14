@@ -5892,6 +5892,280 @@ async fn pty_a_theme_file_colors_the_user_line() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
+// ---------- /login and /logout (ADR 0026 D3) ----------
+
+/// A small HTTP server that answers every connection with `status` until the process ends
+/// (the wizard's verification fires whenever the user submits the key).
+fn login_verify_server(status_line: &'static str) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut stream = stream;
+            use std::io::{Read, Write};
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+            let body = "{}";
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+        }
+    });
+    format!("http://{addr}")
+}
+
+/// Pre-seeds `~/.radian/credentials/auth.json` (0700 dir, 0600 file) with one unrelated
+/// entry, so the tests can prove it survives a login and a logout.
+fn seed_auth_json(home: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = home.join(".radian/credentials");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = dir.join("auth.json");
+    std::fs::write(
+        &path,
+        r#"{"existing": {"type": "api_key", "key": "$EXISTING_KEY"}}"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    path
+}
+
+fn auth_json_mode(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+/// The full custom login over a real pty: name → protocol → base URL → key, the verification
+/// request answered by a local server, the save, and the D3 "what next" line. **The key must
+/// never appear in any byte the app put on screen** — typed or after the fact — and the
+/// pre-existing `auth.json` entry must survive (only `corp` is added, the file still 0600).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_login_custom_walk_saves_without_showing_the_key() {
+    let _serial = pty_guard();
+    const KEY: &str = "sk-PTY-SECRET-42";
+    let verify = login_verify_server("200 OK");
+    let dir = TempDir::new("login");
+
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "login",
+        ],
+        30,
+        110,
+    );
+    // The app's HOME is the pty's own temp dir; the credentials live there.
+    let auth_path = seed_auth_json(pty.home.path());
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+
+    pty.send(b"/login custom\r");
+    assert!(pty.wait_for_screen("provider name", 5), "{}", pty.screen());
+    pty.send(b"corp\r");
+    assert!(pty.wait_for_screen("wire protocol", 5), "{}", pty.screen());
+    pty.send(b"\r"); // openai-compatible (the highlighted row)
+    assert!(pty.wait_for_screen("base URL", 5), "{}", pty.screen());
+    pty.send(format!("{verify}\r").as_bytes());
+    assert!(pty.wait_for_screen("API key", 5), "{}", pty.screen());
+    // Type the key **without submitting** and look at the screen: the field must be masked
+    // mid-typing, not only after the wizard closes (a plaintext echo is exactly what D3
+    // forbids — this is where a `key.clone()` render or an echo-on terminal would show).
+    for c in KEY.chars() {
+        pty.send(&[c as u8]);
+    }
+    // A state gate: the fully typed field is 15 masked columns wide. When the render leaks
+    // the plaintext the stars never appear — and the key does, which is what the next
+    // assertion is for.
+    let stars = "*".repeat(KEY.len());
+    assert!(
+        pty.wait_until(5, |screen| screen.contains(&stars)),
+        "the masked field never filled:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains(KEY),
+        "the key echoed onto the screen while typing:\n{}",
+        pty.screen()
+    );
+    pty.send(b"\r");
+    assert!(
+        pty.wait_for_screen("saved the key for `corp`", 10),
+        "{}",
+        pty.screen()
+    );
+
+    // The key is nowhere on screen, and never was in the byte stream.
+    pty.pump();
+    let raw_bytes = pty.raw();
+    let raw = String::from_utf8_lossy(&raw_bytes);
+    assert!(!raw.contains(KEY), "the key leaked into the pty stream");
+    assert!(
+        !pty.screen().contains(KEY),
+        "the key leaked onto the screen:\n{}",
+        pty.screen()
+    );
+
+    // The record landed in auth.json, next to the untouched entry, still 0600.
+    let saved = std::fs::read_to_string(&auth_path).unwrap();
+    let saved: serde_json::Value = serde_json::from_str(&saved).unwrap();
+    assert_eq!(saved["corp"]["type"], "api_key");
+    assert_eq!(saved["corp"]["key"], KEY);
+    assert_eq!(
+        saved["corp"]["env"]["RADIAN_BASE_URL"], verify,
+        "the custom endpoint rides in the entry's env (D10)"
+    );
+    assert_eq!(
+        saved["existing"]["type"], "api_key",
+        "the pre-existing entry survives"
+    );
+    assert_eq!(auth_json_mode(&auth_path), 0o600);
+
+    // The key reached neither the session journal nor any notice (D3: a key must never be
+    // persisted outside auth.json).
+    for entry in std::fs::read_dir(dir.path()).unwrap().flatten() {
+        if entry.path().extension().is_some_and(|ext| ext == "jsonl") {
+            let text = std::fs::read_to_string(entry.path()).unwrap();
+            assert!(!text.contains(KEY), "the key leaked into the journal");
+        }
+    }
+
+    // The D3 "what next" line names the switch.
+    assert!(pty.screen().contains("/model corp/"), "{}", pty.screen());
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// The verification failing does not block the save: the wizard shows the reason and `y`
+/// stores the key anyway (D3). The same run covers `/logout`: the confirmation, the removal,
+/// and the untouched sibling entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_login_failed_verification_can_save_and_logout_removes_only_one() {
+    let _serial = pty_guard();
+    const KEY: &str = "sk-SECOND-SECRET-7";
+    // No server on this port: the verification cannot connect (D3's failure path).
+    let dead = "http://127.0.0.1:9/v1";
+    let dir = TempDir::new("login-fail");
+
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "login-fail",
+        ],
+        30,
+        110,
+    );
+    let auth_path = seed_auth_json(pty.home.path());
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+
+    pty.send(b"/login custom\r");
+    assert!(pty.wait_for_screen("provider name", 5), "{}", pty.screen());
+    pty.send(b"corp\r");
+    assert!(pty.wait_for_screen("wire protocol", 5), "{}", pty.screen());
+    pty.send(b"\r");
+    assert!(pty.wait_for_screen("base URL", 5), "{}", pty.screen());
+    pty.send(format!("{dead}\r").as_bytes());
+    assert!(pty.wait_for_screen("API key", 5), "{}", pty.screen());
+    pty.send(format!("{KEY}\r").as_bytes());
+    assert!(
+        pty.wait_for_screen("verification failed", 15),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"y"); // save anyway
+    assert!(
+        pty.wait_for_screen("saved the key for `corp`", 10),
+        "{}",
+        pty.screen()
+    );
+
+    // `/logout corp`: confirm with `y`; the removal names the provider, the other entry and
+    // the file mode survive.
+    pty.send(b"/logout corp\r");
+    assert!(
+        pty.wait_for_screen("remove the stored credential for `corp`?", 5),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"y");
+    assert!(
+        pty.wait_for_screen("removed the stored credential for `corp`", 5),
+        "{}",
+        pty.screen()
+    );
+
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&auth_path).unwrap()).unwrap();
+    assert!(saved.get("corp").is_none(), "corp was removed: {saved}");
+    assert_eq!(saved["existing"]["type"], "api_key", "the sibling survives");
+    assert_eq!(auth_json_mode(&auth_path), 0o600);
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// `/logout` with `n` keeps the credential.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_logout_with_n_keeps_the_entry() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("logout-keep");
+
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "logout-keep",
+        ],
+        30,
+        110,
+    );
+    let auth_path = seed_auth_json(pty.home.path());
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"/logout existing\r");
+    assert!(
+        pty.wait_for_screen("remove the stored credential for `existing`?", 5),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"n");
+    assert!(
+        pty.wait_for_screen("kept `existing`", 5),
+        "{}",
+        pty.screen()
+    );
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&auth_path).unwrap()).unwrap();
+    assert_eq!(saved["existing"]["type"], "api_key", "kept means kept");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
 // ---------- ADR 0026 D9: the in-session auto-approval switch ----------
 
 /// The `!` key end to end: it approves the pending request once **and** turns auto on for
@@ -6179,6 +6453,7 @@ async fn pty_config_auto_enables_auto_on_workspace() {
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
 }
+
 // --- transcript selection and copy (mouse drag, OSC 52) ---
 
 /// Finds a needle's `(row, col)` (0-based, display cells) on the vt100 screen.

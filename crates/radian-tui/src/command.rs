@@ -22,6 +22,9 @@ pub const HELP: &str = "\
                       export this session (default md, default <workspace>/radian-<id>.<ext>)
 /memory <command>     durable memory: list, search, show, add, edit, archive, restore,
                       forget, purge, confirm, export, import, project, relink, split, merge
+/login [provider]     store an API key in credentials/auth.json (ADR 0026 D3); custom
+                      names a new endpoint (name, protocol, base URL, key)
+/logout <provider>    remove a stored credential (asks first)
 //…                   send a message that starts with `/`";
 
 /// A memory command waiting for the user's confirmation. Only the destructive commands
@@ -52,6 +55,11 @@ pub enum Outcome {
     Export(ExportRequest),
     /// `/fork`: the host forks the current (idle) session at its last turn boundary.
     Fork,
+    /// `/login [provider]`: open the credential wizard. `Some(id)` skips the provider
+    /// choice (a built-in id or `custom`); `None` starts at the choice.
+    Login(Option<String>),
+    /// `/logout <provider>`: remove one stored credential, after a confirmation.
+    Logout(String),
     /// `/auto on|off` (and `/yolo`, its alias): the in-session auto-approval switch
     /// (ADR 0026 D9). `true` = on.
     AutoToggle(bool),
@@ -75,6 +83,8 @@ pub struct Candidate {
 pub enum Fetch {
     /// `/memory <command> <partial>`: the record ids that command can act on.
     MemoryRecords { command: String, partial: String },
+    /// `/logout <partial>`: the providers with a stored credential (the `auth.json` entries).
+    LoggedInProviders { partial: String },
 }
 
 impl Fetch {
@@ -82,6 +92,7 @@ impl Fetch {
     pub fn partial(&self) -> &str {
         match self {
             Fetch::MemoryRecords { partial, .. } => partial,
+            Fetch::LoggedInProviders { partial, .. } => partial,
         }
     }
 }
@@ -156,8 +167,46 @@ pub fn tree() -> &'static [Command] {
             description: MEMORY_DESCRIPTION,
             levels: &[memory_level, memory_level],
         },
+        Command {
+            name: "login",
+            description: "store an API key in credentials/auth.json (ADR 0026 D3); custom \
+                          names a new endpoint",
+            levels: &[login_level],
+        },
+        Command {
+            name: "logout",
+            description: "remove a stored credential (asks first)",
+            levels: &[logout_level],
+        },
     ];
     TREE
+}
+
+/// `/login [provider]`: the built-in descriptors plus `custom` (ADR 0026 D3/D10).
+fn login_level(typed: &[&str], _partial: &str) -> Level {
+    match typed.first() {
+        None => Level::Ready(
+            crate::login::LoginWizard::choices()
+                .into_iter()
+                .map(|(id, description)| Candidate {
+                    insert: id,
+                    description,
+                })
+                .collect(),
+        ),
+        Some(_) => Level::Free,
+    }
+}
+
+/// `/logout <provider>`: the candidates are the stored credentials, which only the host
+/// knows (it reads `auth.json`).
+fn logout_level(typed: &[&str], partial: &str) -> Level {
+    match typed.first() {
+        None => Level::Needs(Fetch::LoggedInProviders {
+            partial: partial.to_owned(),
+        }),
+        Some(_) => Level::Free,
+    }
 }
 
 /// The `/help` line for `/memory` (kept next to the subcommand table so the two cannot drift).
@@ -526,9 +575,38 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         Some("/sessions") => Outcome::Sessions(sessions_query(&tokens[1..])),
         Some("/export") => export_request(&tokens[1..]),
         Some("/fork") => Outcome::Fork,
+        Some("/login") => Outcome::Login(login_provider(&tokens[1..])),
+        Some("/logout") => Outcome::Logout(logout_provider(&tokens[1..])),
         Some("/auto") | Some("/yolo") => auto_toggle(&tokens[1..]),
         Some(other) => Outcome::Notices(vec![format!("unknown command {other}; /help lists them")]),
         None => Outcome::Message,
+    }
+}
+
+/// `/login [provider]`: `custom` or a built-in id skips the choice step; anything else is a
+/// usage notice. More than one name is the same error.
+fn login_provider(args: &[String]) -> Option<String> {
+    match args {
+        [] => None,
+        [one] => {
+            let valid = one == crate::login::CUSTOM || radian_host::descriptor(one).is_some();
+            if valid {
+                Some(one.clone())
+            } else {
+                // Reported as a notice by the caller (an `Option` cannot carry the reason).
+                Some(format!("no-such-provider:{one}"))
+            }
+        }
+        [_, extra, ..] => Some(format!("no-such-provider:{extra}")),
+    }
+}
+
+/// `/logout <provider>`: exactly one name; empty is a usage notice the caller renders.
+fn logout_provider(args: &[String]) -> String {
+    match args {
+        [one] => one.clone(),
+        [] => String::new(),
+        [_, extra, ..] => format!("__extra__{extra}"),
     }
 }
 
