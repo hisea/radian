@@ -7,7 +7,10 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use ratatui::crossterm::cursor::{Hide, Show};
-use ratatui::crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
+use ratatui::crossterm::event::{
+    DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -17,6 +20,52 @@ use ratatui::crossterm::terminal::{
 /// the panic hook constructs a bare `TtyGuard` to restore the terminal and must know whether
 /// to send the `l` sequences (ADR 0023 U2).
 static MOUSE_REPORTING: AtomicBool = AtomicBool::new(false);
+
+/// Whether the keyboard-enhancement flags were pushed. Global for the same reason as
+/// [`MOUSE_REPORTING`]: the panic hook and the signal watchdog restore a terminal they did
+/// not enter, and must pop the flags exactly when they were pushed.
+static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
+
+/// The environment variable that decides the keyboard-enhancement query:
+///
+/// * unset — ask the terminal (`supports_keyboard_enhancement`), which is a **2 s** wait on a
+///   terminal that answers neither the kitty flags query nor the device-attributes query;
+/// * `0`/`false` — never ask and never push (the pty tests set this: a pty has nobody to
+///   answer, and the probe would cost 2 s per spawn);
+/// * `1`/`true` — push without asking (a pty test can then assert the push/pop sequences).
+pub const KEYBOARD_ENHANCEMENT_ENV: &str = "RADIAN_KEYBOARD_ENHANCEMENT";
+
+/// What [`KEYBOARD_ENHANCEMENT_ENV`] says: `Some(true)` force on, `Some(false)` off, `None`
+/// ask the terminal.
+fn keyboard_enhancement_override() -> Option<bool> {
+    match std::env::var(KEYBOARD_ENHANCEMENT_ENV).ok().as_deref() {
+        Some("0") | Some("false") => Some(false),
+        Some("1") | Some("true") => Some(true),
+        _ => None,
+    }
+}
+
+/// Whether the terminal should get the keyboard-enhancement flags: the override when set,
+/// otherwise the terminal's own answer.
+///
+/// `supports_keyboard_enhancement` (crossterm 0.29.0, `terminal/sys/unix.rs:188-263`) writes
+/// `ESC[?u ESC[c` to `/dev/tty` (stdout when that cannot be opened) and polls for the kitty
+/// flags reply for up to **2000 ms**. A terminal that answers the device-attributes query but
+/// not the flags query makes it return `Ok(None)` quickly (the reply ends the wait), so a
+/// modern terminal pays milliseconds; a terminal that answers neither pays the full 2 s and
+/// comes back as `Err`, which is treated as "unsupported" - never as a failure (ADR 0009: no
+/// correctness depends on a terminal's reply). It must run **before** the input thread reads:
+/// crossterm documents that the query blocks while `event::read`/`poll` are in progress, and
+/// both would race for the same bytes.
+fn should_enhance_keyboard() -> bool {
+    match keyboard_enhancement_override() {
+        Some(force) => force,
+        None => {
+            use ratatui::crossterm::terminal::supports_keyboard_enhancement;
+            supports_keyboard_enhancement().unwrap_or(false)
+        }
+    }
+}
 
 /// Turns mouse reporting on (`\x1b[?1000h\x1b[?1002h\x1b[?1006h`) or off (the `l` forms,
 /// reverse order) on `out`.
@@ -44,6 +93,10 @@ fn write_mouse(out: &mut impl Write, enabled: bool) -> io::Result<()> {
 /// already be gone. **One** copy of the escape sequences, shared by the guard, the panic hook
 /// and the signal watchdog.
 fn restore_to(out: &mut impl Write) {
+    if KEYBOARD_ENHANCED.swap(false, Ordering::SeqCst) {
+        // Popped before the alternate screen is left, like the mouse sequences.
+        let _ = execute!(out, PopKeyboardEnhancementFlags);
+    }
     if MOUSE_REPORTING.swap(false, Ordering::SeqCst) {
         let _ = write_mouse(out, false);
     }
@@ -145,6 +198,21 @@ impl TtyGuard {
             // sends the `l` forms, which are harmless when the `h` never took effect.
             MOUSE_REPORTING.store(true, Ordering::SeqCst);
             if let Err(error) = write_mouse(&mut out, true) {
+                let mut guard = Self { active: true };
+                guard.restore();
+                return Err(error);
+            }
+        }
+        // The keyboard-enhancement query runs **here**, before the caller spawns the input
+        // thread (see `should_enhance_keyboard`): it reads the terminal's reply, and an input
+        // thread reading at the same time would race it. `DISAMBIGUATE_ESCAPE_CODES` is what
+        // makes Shift+Enter arrive as Enter+SHIFT instead of a plain Enter.
+        if should_enhance_keyboard() {
+            KEYBOARD_ENHANCED.store(true, Ordering::SeqCst);
+            if let Err(error) = execute!(
+                out,
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            ) {
                 let mut guard = Self { active: true };
                 guard.restore();
                 return Err(error);

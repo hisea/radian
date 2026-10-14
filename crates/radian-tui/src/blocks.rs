@@ -970,7 +970,7 @@ fn tool_line(text: &str, width: usize) -> Vec<BodyLine> {
 }
 
 /// Turns a tool body plan into laid-out lines: a text line wraps like prose at the body width
-/// (its characters keep their source offsets), a hint is one synthesized line.
+/// (tabs expanded, its characters keeping their source offsets), a hint is one synthesized line.
 fn body_plan_lines(plan: &[tools::BodyLine], text: &str, body_width: usize) -> Vec<BodyLine> {
     let mut out = Vec::new();
     for line in plan {
@@ -1006,15 +1006,29 @@ fn prose_lines(text: &str, width: usize) -> Vec<BodyLine> {
         .into_iter()
         .map(|line| {
             let crate::render::WrappedLine { chars, end } = line;
-            let body = chars
-                .iter()
-                .map(|&i| {
-                    text.get(i..)
-                        .and_then(|rest| rest.chars().next())
-                        .unwrap_or(' ')
-                })
-                .collect();
-            BodyLine::prose(chars.into_iter().map(Some).collect(), end, body)
+            // A tab renders as four spaces (ADR 0028 R9); each of the four cells maps back to
+            // the tab's own offset, so a copy of them yields the source tab. Every cell is
+            // `Some(offset)` - these are real source characters - and a read that is out of
+            // range (a synthesized index) renders a space rather than panicking, the same
+            // defensive read the Markdown path uses.
+            let mut body = String::new();
+            let mut mapped: Vec<Option<usize>> = Vec::with_capacity(chars.len());
+            for &i in &chars {
+                let ch = text
+                    .get(i..)
+                    .and_then(|rest| rest.chars().next())
+                    .unwrap_or(' ');
+                if ch == '\t' {
+                    body.push_str("    ");
+                    for _ in 0..4 {
+                        mapped.push(Some(i));
+                    }
+                } else {
+                    body.push(ch);
+                    mapped.push(Some(i));
+                }
+            }
+            BodyLine::prose(mapped, end, body)
         })
         .collect()
 }
@@ -1223,7 +1237,9 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
             for line in &plan {
                 match line {
                     tools::BodyLine::Text { source, .. } => {
-                        out.extend(crate::render::wrap(&text[source.clone()], body_width));
+                        // The same lines the layout draws (tabs expanded included).
+                        let slice = text.get(source.clone()).unwrap_or("");
+                        out.extend(prose_lines(slice, body_width).into_iter().map(|l| l.text));
                     }
                     tools::BodyLine::Hint(hint) => out.push(hint.clone()),
                 }
@@ -1912,6 +1928,26 @@ fn md_table_fallback(
 fn pad_to(text: &str, width: usize) -> String {
     let used = UnicodeWidthStr::width(text);
     format!("{text}{}", " ".repeat(width.saturating_sub(used)))
+}
+
+/// The text lines a tool card's body lays out to, for tests that need the body geometry
+/// without building an `Entry`.
+#[cfg(test)]
+pub(crate) fn body_text_lines_for_test(
+    card: &tools::ToolCard,
+    text: &str,
+    width: usize,
+) -> Vec<String> {
+    let entry = Entry::new(EntryKind::ToolResult, text.to_owned());
+    let _ = card;
+    body_text_lines(&entry, DisplayModes::default(), width)
+}
+
+/// The laid-out body lines of a tool card, for tests that need the mapping.
+#[cfg(test)]
+pub(crate) fn layout_for_test(_card: &tools::ToolCard, text: &str, width: usize) -> Vec<BodyLine> {
+    let entry = Entry::new(EntryKind::ToolResult, text.to_owned());
+    layout(&entry, &[], DisplayModes::default(), width)
 }
 
 #[cfg(test)]

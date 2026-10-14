@@ -139,7 +139,7 @@ bare arrow keys belong to the composer.
 |---|---|
 | Enter | send. Idle → `Inbox::followup`; while a turn runs → `Inbox::steer`. **While a completion list is up it accepts the best candidate instead** (it completes, it never executes) |
 | Tab | complete what is at the cursor. On a `/…` line: the command tree (below). Otherwise the `@` file reference: one candidate is inserted (a directory keeps its trailing `/`, a file gets a space); several complete to their longest common prefix, and a second Tab already at that prefix shows the candidate list above the input box; any other word does nothing (the key is reserved) |
-| Ctrl-J (or Shift-Enter / Alt-Enter) | insert a newline in the input |
+| Ctrl-J (or Shift-Enter / Alt-Enter) | insert a newline in the input (Shift-Enter needs the keyboard-enhancement protocol; Ctrl-J works everywhere) |
 | Left / Right | move the cursor one character |
 | Ctrl-Left / Ctrl-Right (or Alt-Left / Alt-Right) | move by one word |
 | Home / End (or Ctrl-A / Ctrl-E) | the input **line's** start / end |
@@ -156,7 +156,15 @@ bare arrow keys belong to the composer.
 | Ctrl-F (`find` in the transcript, `find_prev` in the find box) | open the in-transcript search box (`find: <query>`, replacing the input line; the message draft is kept). Type to search the displayed transcript case-insensitively; a second Ctrl-F or Enter is the earlier match, Shift-Enter or Ctrl-G the later one (no wrap); the status bar shows `match i/N`; Esc closes the box where the viewport is |
 | bracketed paste | inserts at the cursor, `\r\n` normalized to `\n`, and never sends |
 
-Shift-Enter needs a terminal with the enhanced keyboard protocol; Ctrl-J works everywhere.
+Shift-Enter needs the terminal's **keyboard-enhancement** protocol: without it most terminals
+send Shift+Enter as a plain Enter, which sends. Radian asks the terminal at startup
+(`supports_keyboard_enhancement`, crossterm 0.29's kitty-protocol probe: it writes
+`ESC[?u ESC[c` and waits up to **2 s** for a reply; a terminal that answers the
+device-attributes query but not the flags query ends the wait immediately) and, when the answer
+is yes, pushes `DISAMBIGUATE_ESCAPE_CODES`; the flags are popped on every exit path, panic and
+signal included. `RADIAN_KEYBOARD_ENHANCEMENT=0` skips the probe and the push (a pty has nobody
+to answer, so the tests set it); `=1` pushes without asking. Ctrl-J and Alt-Enter work
+everywhere and stay the fallback.
 
 `@relative/path` in a message attaches the file's contents to the request (Phase 4): resolved
 inside the workspace like the `read` tool (no absolute path, no `..`, a symlink that leaves is
@@ -586,11 +594,18 @@ throwaway terminal, not your working one.
    *Look*: **does `㎭` render, and does it occupy two columns?** A one-column or
    double-drawn glyph shifts the whole line; try two fonts. *Fail*: record `unicode-width`'s
    assumption vs what you see, font name, and the exact width where it breaks.
-3. **Rounded input box and `❯`** (`tui.input_style = "box"`; merge `22b2753`). *Steps*: set
-   `input_style = "box"` in `[tui]`, restart; type a multi-line draft (`Ctrl-J`); resize.
-   *Expect*: rounded corners, `❯` prompt, the border in the theme accent (`notice_label`); the
-   continuation line aligns under the text; no corner breaks at any width. Compare with the
-   default `lines` (`> `). *Fail*: record the width where a corner/glyph breaks.
+3. **Rounded input box and `❯`** (`tui.input_style = "box"`; merge `22b2753`; the prompt and
+   cursor fixes are `pi/ui-r3`). *Steps*: set `input_style = "box"` in `[tui]`, restart; type a
+   multi-line draft (`Ctrl-J`); resize. *Expect*: rounded corners, the `❯` prompt **in both
+   styles**, the border in the theme accent (`notice_label`); the cursor sits right after the
+   text (empty: one cell into the prompt; the old byte-length bug put it two cells right); the
+   continuation line aligns under the text; no corner breaks at any width. *Fail*: record the
+   width where a corner/glyph breaks.
+3b. **Shift+Enter** (`pi/ui-r3`). *Steps*: in Terminal.app, iTerm2/Ghostty (or another
+   kitty-protocol terminal) and inside herdr, press `Shift+Enter` in a non-empty draft; then
+   `Ctrl-J`. *Expect*: Shift+Enter inserts a newline where the terminal reports it (herdr and
+   kitty-protocol terminals), and `Ctrl-J` always does; a terminal that cannot report it sends
+   instead - record which of the three did what. *Fail*: a newline that also sends.
 4. **Ctrl-C** (merge `22b2753`, `01177c2`). *Steps*: type text, `Ctrl-C` (clears; press `↑`
    to find it); empty the input, `Ctrl-C` (status shows `Press Ctrl-C again to quit`), then
    **resize the window** and `Ctrl-C` again inside 2 s; then `Ctrl-C` twice with no resize.

@@ -441,7 +441,7 @@ fn the_input_area_has_rules_and_a_prompt_instead_of_a_box() {
     assert_eq!(rules.len(), 2, "a rule above and below:\n{text}");
     // The two text rows sit between the rules, with the prompt on the first and the
     // continuation indented by the same two cells.
-    assert_eq!(lines[rules[0] + 1].trim_end(), "> first", "{text}");
+    assert_eq!(lines[rules[0] + 1].trim_end(), "❯ first", "{text}");
     assert_eq!(lines[rules[0] + 2].trim_end(), "  second", "{text}");
     assert_eq!(
         rules[1],
@@ -460,13 +460,13 @@ fn the_empty_input_shows_the_placeholder_after_the_prompt() {
     let mut app = App::new("m", "s");
     let text = screen(&render(&mut app, 80, 8));
     assert!(
-        text.contains("> (type a message, Enter to send, Ctrl-J for a new line)"),
+        text.contains("❯ (type a message, Enter to send, Ctrl-J for a new line)"),
         "{text}"
     );
 }
 
 /// `tui.input_style = "box"` is the owner's shape (2026-10-14): a **rounded** border and the
-/// `❯` prompt, not the old square box with `> `.
+/// `❯` prompt (which the `lines` style uses too, ).
 #[test]
 fn the_box_input_style_draws_the_rounded_box_with_the_prompt() {
     let mut app = App::new("m", "s");
@@ -480,7 +480,7 @@ fn the_box_input_style_draws_the_rounded_box_with_the_prompt() {
     );
     assert!(
         !text.contains("> first"),
-        "the lines prompt is not used:\n{text}"
+        "the old square prompt is gone:\n{text}"
     );
     assert!(
         text.contains('╭') && text.contains('╮') && text.contains('╰'),
@@ -607,6 +607,10 @@ fn wrap_and_wrap_char_offsets_agree() {
         ("a b c d e f", 1),
         ("日本 テキスト edge", 3),
         ("combining a\u{301}b", 2),
+        // A tab is four columns (ADR 0028 R9) in every view of the wrap.
+        ("a\tb", 4),
+        ("a\tb", 5),
+        ("x\ty\tz", 6),
     ];
     for (text, width) in corpus {
         let lines = radian_tui::render::wrap(text, width);
@@ -962,6 +966,70 @@ fn a_write_card_shows_the_content_without_markers() {
         body.fg, app.theme.tool_result.fg,
         "no diff role for a write body"
     );
+}
+
+/// A tab is four columns when the wrap decides where to break (ADR 0028 R9), not zero: a line
+/// that fits at six columns plus a tab does **not** fit in nine.
+#[test]
+fn a_tab_wraps_as_four_columns() {
+    // Six columns + a tab = 10 > 9: the tab moves to the next line (the wrap keeps the
+    // source char; the layout is what renders it as four spaces).
+    let wrapped = radian_tui::render::wrap("abcdef\t", 9);
+    assert_eq!(
+        wrapped,
+        vec!["abcdef".to_string(), "\t".to_string()],
+        "{wrapped:?}"
+    );
+    // At width 10 it fits on one line.
+    let wrapped = radian_tui::render::wrap("abcdef\t", 10);
+    assert_eq!(wrapped.len(), 1, "{wrapped:?}");
+    // The counting path agrees (the corpus test pins the rest).
+    assert_eq!(radian_tui::render::wrap_line_count("abcdef\t", 9), 2);
+}
+
+/// A `list` card shows an aligned table, not the tool's tab-separated text (owner hand test:
+/// `dir512crates` ran together because a tab occupies no column).
+#[test]
+fn a_list_card_shows_an_aligned_table() {
+    let mut app = App::new("m", "s");
+    app.push_message(&assistant_with(
+        "",
+        "",
+        false,
+        vec![ToolCall {
+            id: "c1".into(),
+            name: "list".into(),
+            arguments: serde_json::json!({"path": "src"}),
+        }],
+    ));
+    app.push_message(&Message::Tool {
+        result: ToolResult {
+            call_id: "c1".into(),
+            content: vec![ContentPart::text(
+                "file\t512\tb.md\ndir\t4096\tsrc\nfile\t1693\tCargo.toml\n",
+            )],
+            structured: Some(serde_json::json!({
+                "path": "src", "entries": 3, "total_entries": 3, "truncated": false
+            })),
+            is_error: false,
+            error_code: None,
+        },
+        meta: Default::default(),
+    });
+    app.tool_display.fold = radian_tui::tools::ToolFold::Expanded;
+    let text = screen(&render(&mut app, 70, 14));
+    assert!(text.contains("list: src (3 entries)"), "{text}");
+    assert!(text.contains("d ") && text.contains("src"), "{text}");
+    assert!(text.contains("4.0K"), "a human-readable size: {text}");
+    assert!(
+        !text.contains("dir\t4096"),
+        "no raw tab-separated text: {text}"
+    );
+    assert!(!text.contains('\t'), "no tab reaches the screen: {text}");
+    // Directories first.
+    let dir_row = text.find("d ").expect("a dir row");
+    let file_row = text.find("f ").expect("a file row");
+    assert!(dir_row < file_row, "the directory sorts first: {text}");
 }
 
 /// The list-like and memory renderers' heads.
@@ -1722,6 +1790,8 @@ fn the_line_count_matches_the_wrap() {
         ("word\n", 5),
         ("combining a\u{301}b", 2),
         ("a b c d e f", 1),
+        ("a\tb", 4),
+        ("x\ty\tz", 6),
     ];
     for (text, width) in corpus {
         assert_eq!(

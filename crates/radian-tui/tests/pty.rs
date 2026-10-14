@@ -180,6 +180,7 @@ fn spawn_direct_keeping_slave(
         cmd.current_dir(cwd);
     }
     cmd.env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json");
+    cmd.env("RADIAN_KEYBOARD_ENHANCEMENT", "0");
     let keep_slave = slave.try_clone().unwrap();
     cmd.stdin(std::process::Stdio::from(slave.try_clone().unwrap()));
     cmd.stdout(std::process::Stdio::from(slave.try_clone().unwrap()));
@@ -334,6 +335,10 @@ impl Pty {
         // `cmd.env_clear()` above is what makes this hermetic: neither `RADIAN_HOME` nor
         // `RADIAN_CONFIG` reaches the child, so a config can only come from this temp `HOME`.
         cmd.env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json");
+        // A pty has nobody to answer the kitty keyboard-enhancement query, and crossterm
+        // waits up to 2 s for it; the harness opts out (a test that wants the sequences sets
+        // the variable back to `1` through `envs`).
+        cmd.env("RADIAN_KEYBOARD_ENHANCEMENT", "0");
         for (name, value) in envs {
             cmd.env(name, value);
         }
@@ -6470,7 +6475,7 @@ async fn pty_the_slash_completion_walks_the_command_tree() {
     );
     pty.send(b"\t");
     assert!(
-        pty.wait_for_screen("> /memory ", 10),
+        pty.wait_for_screen("❯ /memory ", 10),
         "Tab did not complete the command name:\n{}",
         pty.screen()
     );
@@ -6483,7 +6488,7 @@ async fn pty_the_slash_completion_walks_the_command_tree() {
     );
     pty.send(b"\t");
     assert!(
-        pty.wait_for_screen("> /memory forget", 10),
+        pty.wait_for_screen("❯ /memory forget", 10),
         "Tab did not complete the subcommand:\n{}",
         pty.screen()
     );
@@ -8010,4 +8015,55 @@ fn short_workspace(label: &str) -> std::path::PathBuf {
     let path = std::path::PathBuf::from(format!("/tmp/radian-{label}-{}", std::process::id()));
     std::fs::create_dir_all(&path).unwrap();
     path
+}
+
+/// The keyboard-enhancement flags (kitty protocol, ): when the terminal
+/// supports them, `DISAMBIGUATE_ESCAPE_CODES` is pushed so Shift+Enter arrives as
+/// Enter+SHIFT instead of a plain Enter, and the flags are popped on **every** exit path.
+///
+/// A pty cannot answer the support query, so this test forces the push through the
+/// `RADIAN_KEYBOARD_ENHANCEMENT=1` override; the query itself is a real-terminal matter (the
+/// hand-test list). The push is `CSI > 1 u` (DISAMBIGUATE_ESCAPE_CODES = 1) and the pop is
+/// `CSI < 1 u` (crossterm 0.29.0 `event.rs:495-527`).
+#[test]
+fn pty_keyboard_enhancement_is_pushed_and_popped_on_exit() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("keyboard-enhance");
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "keyboard-enhance",
+            "--offline-catalog",
+        ],
+        &[("RADIAN_KEYBOARD_ENHANCEMENT", "1")],
+        20,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("type a message", 10),
+        "{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_raw("\u{1b}[>1u", 5),
+        "the enhancement flags are pushed at startup"
+    );
+    pty.quit();
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    let pop = raw
+        .find("\u{1b}[<1u")
+        .expect("the flags are popped on exit");
+    let leave = raw
+        .rfind("\u{1b}[?1049l")
+        .expect("the alternate screen is left");
+    assert!(
+        pop < leave,
+        "the pop comes before leaving the alternate screen"
+    );
 }
