@@ -126,14 +126,12 @@ async fn the_git_contributor_detects_a_worktree() {
         tick_text(&store, &main, "git_root").await.as_deref(),
         Some(repo_name)
     );
-    // The linked checkout is: the value names it, and the branch is its own.
+    // The linked checkout is: the value is the worktree's own name (the footer item adds the
+    // `worktree ` label), and the branch is its own.
     let store = ContributionStore::new();
     let worktree = tick_text(&store, &linked, "worktree").await;
     let name = linked.file_name().unwrap().to_str().unwrap();
-    assert_eq!(
-        worktree.as_deref(),
-        Some(format!("worktree {name}").as_str())
-    );
+    assert_eq!(worktree.as_deref(), Some(name));
     assert_eq!(
         tick_text(&store, &linked, "git_branch").await.as_deref(),
         Some("side")

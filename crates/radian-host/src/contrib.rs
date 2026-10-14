@@ -269,6 +269,23 @@ struct GitFacts {
     repo: Option<String>,
 }
 
+/// The command for **every** background git read (ADR 0027 C3). `--no-optional-locks` (and
+/// `GIT_OPTIONAL_LOCKS=0` for older git) keeps a background `git status` from refreshing the
+/// index, which would briefly take `.git/index.lock` and collide with the user's own
+/// `git add`/`commit` in another terminal ("Another git process seems to be running"). This is
+/// the standard editor/shell-prompt practice.
+fn background_git(dir: &Path) -> Command {
+    let mut command = Command::new("git");
+    command
+        .arg("--no-optional-locks")
+        .arg("-C")
+        .arg(dir)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command
+}
+
 impl GitContributor {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self { dir: dir.into() }
@@ -277,14 +294,7 @@ impl GitContributor {
     /// Like `git`, but keeps an empty successful output as `Some("")`: a clean tree is a real
     /// answer (zero changes), not a missing one.
     fn git_raw(&self, args: &[&str]) -> Option<String> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.dir)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .output()
-            .ok()?;
+        let output = background_git(&self.dir).args(args).output().ok()?;
         output
             .status
             .success()
@@ -292,14 +302,7 @@ impl GitContributor {
     }
 
     fn git(&self, args: &[&str]) -> Option<String> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.dir)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .output()
-            .ok()?;
+        let output = background_git(&self.dir).args(args).output().ok()?;
         if !output.status.success() {
             return None;
         }
@@ -444,7 +447,27 @@ impl StatusContributor for GitContributor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
     use std::sync::atomic::AtomicUsize;
+
+    /// ADR 0027 C3: every background git read carries `--no-optional-locks` **and**
+    /// `GIT_OPTIONAL_LOCKS=0`, so the periodic `git status` never takes `.git/index.lock` and
+    /// collides with the user's own `git add`/`commit` in another terminal. Both are asserted:
+    /// the flag is newer git's door, the variable is the one older git reads.
+    #[test]
+    fn the_background_git_disables_optional_locks() {
+        let command = background_git(Path::new("/tmp"));
+        let args: Vec<&OsStr> = command.get_args().collect();
+        assert!(
+            args.contains(&OsStr::new("--no-optional-locks")),
+            "the flag must be on every background git call: {args:?}"
+        );
+        let locks = command
+            .get_envs()
+            .find(|(key, _)| *key == "GIT_OPTIONAL_LOCKS")
+            .and_then(|(_, value)| value);
+        assert_eq!(locks, Some(OsStr::new("0")));
+    }
 
     /// A scripted contributor: each refresh returns the next outcome.
     struct Scripted {
