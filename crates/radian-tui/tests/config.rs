@@ -175,7 +175,9 @@ fn the_input_style_is_applied_and_an_unknown_value_falls_back_to_lines() {
         "an unknown style falls back to the default"
     );
     assert!(
-        warnings.iter().any(|warning| warning.contains("tui.input_style")),
+        warnings
+            .iter()
+            .any(|warning| warning.contains("tui.input_style")),
         "{warnings:?}"
     );
 

@@ -1245,6 +1245,17 @@ impl LoopContext<'_> {
                 self.send(AppInput::CompletionReady(result));
                 Ok(())
             }
+            Effect::FetchCompletions(fetch) => {
+                // A level that needs the host: list the candidates here (I/O) and send them back as
+                // `Input::CompletionsReady` (ADR 0023 U3: `update` never does I/O).
+                let candidates = match &fetch {
+                    radian_tui::command::Fetch::MemoryRecords { command, .. } => {
+                        memory_record_candidates(self.memory, command)
+                    }
+                };
+                self.send(AppInput::CompletionsReady { fetch, candidates });
+                Ok(())
+            }
             Effect::RunMemoryCommand { command, confirmed } => {
                 let result = match self.memory {
                     Some(service) => {
@@ -1476,6 +1487,41 @@ fn ui_loop(
         }
     }
     Ok(ctx.and_then(|ctx| ctx.signal).or(picking_signal))
+}
+
+/// The record ids a `/memory` command can act on, as completion candidates. A read failure is
+/// an empty list, never a turn failure (ADR 0021 invariant 2).
+fn memory_record_candidates(
+    memory: &Option<MemoryService>,
+    _command: &str,
+) -> Vec<radian_tui::command::Candidate> {
+    let Some(service) = memory else {
+        return Vec::new();
+    };
+    let Ok(records) = service.list(radian_host::memory::ScopeSelection::Default, false) else {
+        return Vec::new();
+    };
+    records
+        .into_iter()
+        .map(|record| radian_tui::command::Candidate {
+            insert: record.id.as_str().to_owned(),
+            description: format!(
+                "{} {}",
+                record.kind.as_str(),
+                record_snippet(&record.content)
+            ),
+        })
+        .collect()
+}
+
+/// One line of a record's content, cut for a single completion row.
+fn record_snippet(content: &str) -> String {
+    let first = content.lines().next().unwrap_or_default();
+    let mut text: String = first.chars().take(40).collect();
+    if first.chars().count() > 40 {
+        text.push('…');
+    }
+    text
 }
 
 /// The host facts `/sessions` and `/export` need: where sessions live, which workspace this

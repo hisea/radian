@@ -25,11 +25,11 @@ use crate::command::{self, PendingCommand};
 use crate::composer::Composer;
 use crate::find::FindState;
 use crate::keys::{Action, Keymap};
-use crate::render::InputStyle;
 use crate::mention::{Completion, ExpandError, Expansion};
 use crate::picker::{Outcome as PickerOutcome, Picker};
 use crate::projection::{SessionProjection, StreamSnapshot};
 use crate::question::{FormKey, FormOutcome, QuestionForm};
+use crate::render::InputStyle;
 use crate::theme::{Theme, ThemeName};
 
 // ADR 0023 U5: the turn state is a **session fact**, so it lives in the projection
@@ -298,6 +298,12 @@ pub enum Input {
     MentionsExpanded(Result<Expansion, ExpandError>),
     /// An `@` completion finished (`None` = nothing to complete).
     CompletionReady(Option<Completion>),
+    /// The host answered [`Effect::FetchCompletions`] with the candidates for one level of the
+    /// command tree.
+    CompletionsReady {
+        fetch: command::Fetch,
+        candidates: Vec<command::Candidate>,
+    },
     /// A `/memory` command finished (the result of [`Effect::RunMemoryCommand`]).
     MemoryCommandDone(MemoryResult),
     /// A manual `/compact` finished (the result of [`Effect::Compact`]).
@@ -368,6 +374,9 @@ pub enum Effect {
     ExpandMentions { text: String },
     /// Complete the `@` reference at the cursor (reads a directory).
     CompleteMention { text: String, cursor: usize },
+    /// List one level's candidates in the host (I/O): the loop answers with
+    /// [`Input::CompletionsReady`].
+    FetchCompletions(command::Fetch),
     /// Run a `/memory` command through the shared executor (`confirmed` skips the prompt).
     RunMemoryCommand {
         command: MemoryCommand,
@@ -422,6 +431,7 @@ impl PartialEq for Effect {
                 },
             ) => ac == bc && format!("{a:?}") == format!("{b:?}"),
             (Compact { instructions: a }, Compact { instructions: b }) => a == b,
+            (FetchCompletions(a), FetchCompletions(b)) => a == b,
             (OpenPicker { query: a }, OpenPicker { query: b }) => a == b,
             (Session(a), Session(b)) => a == b,
             _ => false,
@@ -468,6 +478,14 @@ impl UpdateResult {
             effects: vec![effect],
         }
     }
+}
+
+/// The `/…` completion on screen: the char range a chosen candidate replaces, and the
+/// candidates (best first).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlashCompletion {
+    pub range: std::ops::Range<usize>,
+    pub candidates: Vec<command::Candidate>,
 }
 
 /// Which inbox call an in-flight `@` expansion is for, so its result can become the right
@@ -526,6 +544,13 @@ pub struct App {
     pub memory_enabled: bool,
     /// The send waiting for its `@` expansion (see [`Effect::ExpandMentions`]).
     pending_expand: Option<PendingExpand>,
+    /// The `/…` completion on screen: the range a candidate replaces and the candidates, best
+    /// first. `None` when the line is not a slash command or the level has nothing to offer.
+    /// (The overlay's *rows* live in the layer stack, next to the `@` list's.)
+    pub slash_completion: Option<SlashCompletion>,
+    /// The host fetch the current completion waits for: a result is applied only when it
+    /// answers *this* fetch, so a stale answer cannot land on a newer line.
+    pending_fetch: Option<command::Fetch>,
     /// The color theme (config `tui.theme`, `NO_COLOR`).
     pub theme: Theme,
     /// The key bindings (config `tui.keybindings`), defaulting to the pre-config key table.
@@ -568,6 +593,8 @@ impl App {
             layers: vec![Layer::Surface],
             memory_enabled: false,
             pending_expand: None,
+            slash_completion: None,
+            pending_fetch: None,
             theme: Theme::default(),
             keymap: Keymap::default(),
             input_style: InputStyle::default(),
@@ -1068,14 +1095,35 @@ impl App {
 
     /// The single state-change entry point (ADR 0023 U3). Pure: no I/O, no runtime, no
     /// service. Anything that needs the outside world comes back as an [`Effect`].
+    ///
+    /// The `/…` completion follows the input text, so it is recomputed here whenever an input
+    /// changed the line (one place, instead of every editing arm).
     pub fn update(&mut self, input: Input) -> UpdateResult {
+        let before = self.input.text();
+        let mut result = self.update_inner(input);
+        if self.input.text() != before {
+            result.effects.extend(self.refresh_slash());
+            result.dirty = true;
+        }
+        result
+    }
+
+    fn update_inner(&mut self, input: Input) -> UpdateResult {
         match input {
             Input::Action(action) => {
-                // The `@` completion list: any key other than `complete` dismisses it, because
-                // typing continues the word and the list would be stale. `escape` only closes
-                // the list and keeps the input, so it does not reach its own action here.
-                if self.completion().is_some() && action != Action::Complete {
+                // The `/…` list is accepted by `complete` (Tab) and by `send` (Enter — the
+                // owner's rule: Enter picks the candidate, it never executes). Every other
+                // action dismisses both lists; the `@` list is dismissed by everything but
+                // `complete`. `escape` only closes the list and keeps the input, so it does not
+                // reach its own action here.
+                let accepts_slash = self.slash_completion.is_some()
+                    && matches!(action, Action::Complete | Action::Send);
+                if !accepts_slash
+                    && (self.completion().is_some() || self.slash_completion.is_some())
+                    && action != Action::Complete
+                {
                     self.completion_clear();
+                    self.slash_completion = None;
                     if action == Action::Escape {
                         return UpdateResult::dirty();
                     }
@@ -1132,6 +1180,9 @@ impl App {
             Input::Form(key) => self.form_key(key),
             Input::MentionsExpanded(result) => self.mentions_expanded(result),
             Input::CompletionReady(completion) => self.completion_ready(completion),
+            Input::CompletionsReady { fetch, candidates } => {
+                self.completions_ready(fetch, candidates)
+            }
             Input::MemoryCommandDone(result) => self.memory_command_done(result),
             Input::CompactDone(result) => self.compact_done(result),
             Input::SessionDone(notices) => {
@@ -1390,6 +1441,11 @@ impl App {
     fn update_action(&mut self, action: Action) -> UpdateResult {
         match action {
             Action::Send => {
+                // A completion list on screen means Enter picks the candidate instead of
+                // sending: it completes the line and never executes.
+                if self.slash_completion.is_some() {
+                    return self.accept_slash_candidate();
+                }
                 let text = std::mem::take(&mut self.input).text();
                 self.history_cursor = None;
                 self.history_stash.clear();
@@ -1466,6 +1522,11 @@ impl App {
             // it does nothing, so the key stays free for a future binding. Reading the
             // directory is the loop's job: this only asks for it.
             Action::Complete => {
+                // A `/…` line completes through the command tree (every level, one fuzzy
+                // match); anything else completes `@` file references.
+                if self.input.text().starts_with('/') {
+                    return self.accept_slash_candidate();
+                }
                 if self.workspace.is_none() {
                     self.completion_clear();
                     return UpdateResult::dirty();
@@ -1661,6 +1722,103 @@ impl App {
             }
             _ => self.completion_clear(),
         }
+        UpdateResult::dirty()
+    }
+
+    /// Recomputes the `/…` completion for the current input. Pure: a level that needs the host
+    /// returns the effect that fetches its candidates.
+    fn refresh_slash(&mut self) -> Vec<Effect> {
+        if !self.input.text().starts_with('/') {
+            self.slash_completion = None;
+            self.pending_fetch = None;
+            return Vec::new();
+        }
+        match command::complete_in(command::tree(), &self.input.text(), self.input.cursor()) {
+            Some(completion) => match completion.level_result {
+                command::Level::Ready(candidates) => {
+                    self.pending_fetch = None;
+                    self.set_slash(completion.range, candidates);
+                    Vec::new()
+                }
+                command::Level::Needs(fetch) => {
+                    // The candidates need the host: ask for them and keep no list until they
+                    // arrive (a list from the previous level would be misleading).
+                    self.slash_completion = None;
+                    self.completion_clear();
+                    self.pending_fetch = Some(fetch.clone());
+                    vec![Effect::FetchCompletions(fetch)]
+                }
+                command::Level::Free => {
+                    self.slash_completion = None;
+                    self.completion_clear();
+                    self.pending_fetch = None;
+                    Vec::new()
+                }
+            },
+            None => {
+                self.slash_completion = None;
+                self.completion_clear();
+                self.pending_fetch = None;
+                Vec::new()
+            }
+        }
+    }
+
+    /// Shows the `/…` candidates: the overlay rows, and the state Tab/Enter accepts from.
+    fn set_slash(&mut self, range: std::ops::Range<usize>, candidates: Vec<command::Candidate>) {
+        let width = candidates
+            .iter()
+            .map(|candidate| candidate.insert.chars().count())
+            .max()
+            .unwrap_or(0);
+        self.completion_set(
+            candidates
+                .iter()
+                .map(|candidate| format!("{:<width$}  {}", candidate.insert, candidate.description))
+                .collect(),
+        );
+        self.slash_completion = Some(SlashCompletion { range, candidates });
+    }
+
+    /// Accepts the best `/…` candidate: it completes the line and never executes. The text
+    /// change recomputes the next level (an effect when that level needs the host).
+    fn accept_slash_candidate(&mut self) -> UpdateResult {
+        let Some(pending) = self.slash_completion.take() else {
+            return UpdateResult::none();
+        };
+        let Some(candidate) = pending.candidates.first() else {
+            return UpdateResult::none();
+        };
+        // A trailing space, so the next level can be typed (or completed) right away.
+        let insert = format!("{} ", candidate.insert);
+        self.replace_range(pending.range.clone(), &insert);
+        self.completion_clear();
+        // The next level's list is recomputed by `update` (it sees the text change), so this
+        // returns no effect of its own.
+        UpdateResult::dirty()
+    }
+
+    /// The host answered [`Effect::FetchCompletions`]: show the candidates, unless the line has
+    /// moved on since (then the answer is stale and is dropped).
+    fn completions_ready(
+        &mut self,
+        fetch: command::Fetch,
+        candidates: Vec<command::Candidate>,
+    ) -> UpdateResult {
+        if self.pending_fetch.as_ref() != Some(&fetch) {
+            return UpdateResult::none();
+        }
+        self.pending_fetch = None;
+        let Some(completion) =
+            command::complete_in(command::tree(), &self.input.text(), self.input.cursor())
+        else {
+            return UpdateResult::none();
+        };
+        if completion.level_result != command::Level::Needs(fetch.clone()) {
+            return UpdateResult::none();
+        }
+        let candidates = command::rank(candidates, fetch.partial());
+        self.set_slash(completion.range, candidates);
         UpdateResult::dirty()
     }
 

@@ -238,3 +238,111 @@ fn a_refused_command_is_shown_as_a_notice() {
         "{shown:?}"
     );
 }
+
+/// The `/…` completion walks the command tree: typing shows the candidates, Tab completes the
+/// name (never executing it), the next level's list appears, and Tab completes that too.
+#[test]
+fn the_slash_completion_walks_the_command_tree() {
+    let mut app = App::new("m", "s");
+    for c in "/mem".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    let rows = app.completion().expect("a list").to_vec();
+    assert!(
+        rows.iter().any(|row| row.starts_with("/memory")),
+        "{rows:?}"
+    );
+
+    // Tab completes the name and does not run anything.
+    let result = app.on_key(key(KeyCode::Tab));
+    assert!(result.effects.is_empty(), "{:?}", result.effects);
+    assert_eq!(app.input, "/memory ");
+    // The next level's list appears without another key.
+    let rows = app.completion().expect("the subcommand list").to_vec();
+    assert!(rows.iter().any(|row| row.starts_with("list")), "{rows:?}");
+
+    // A partial second level is fuzzy-matched, and Tab completes it.
+    app.on_key(key(KeyCode::Char('f')));
+    app.on_key(key(KeyCode::Char('o')));
+    let rows = app.completion().expect("the fuzzy list").to_vec();
+    assert!(rows.iter().any(|row| row.starts_with("forget")), "{rows:?}");
+    let result = app.on_key(key(KeyCode::Tab));
+    assert_eq!(app.input, "/memory forget ");
+    assert!(
+        matches!(result.effects.as_slice(), [Effect::FetchCompletions(_)]),
+        "the id level needs the host: {:?}",
+        result.effects
+    );
+
+    // Enter picks the candidate too (it never executes), and Esc closes the list without
+    // clearing the text.
+    let mut app = App::new("m", "s");
+    for c in "/memory f".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    assert!(app.completion().is_some(), "the list follows the text");
+    let result = app.on_key(key(KeyCode::Enter));
+    assert!(
+        !matches!(result.effects.as_slice(), [Effect::SendFollowup(_)]),
+        "Enter completed, it did not send: {:?}",
+        result.effects
+    );
+    assert_eq!(app.input, "/memory forget ");
+
+    let mut app = App::new("m", "s");
+    for c in "/memory ".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    assert!(app.completion().is_some());
+    app.on_key(key(KeyCode::Esc));
+    assert!(app.completion().is_none(), "Esc closes the list");
+    assert_eq!(app.input, "/memory ", "and keeps the text");
+}
+
+/// A level whose candidates need the host asks with an effect; the answer becomes the list, and
+/// a stale answer (for a fetch the line has moved past) is dropped.
+#[test]
+fn the_id_level_asks_the_host_and_shows_the_answer() {
+    let mut app = App::new("m", "s");
+    let mut effects = Vec::new();
+    for c in "/memory forget ".chars() {
+        effects = app.on_key(key(KeyCode::Char(c))).effects;
+    }
+    let fetch = match effects.as_slice() {
+        [Effect::FetchCompletions(fetch)] => fetch.clone(),
+        other => panic!("expected one fetch, got {other:?}"),
+    };
+    assert!(app.completion().is_none(), "no list until the host answers");
+
+    let result = app.update(Input::CompletionsReady {
+        fetch: fetch.clone(),
+        candidates: vec![radian_tui::command::Candidate {
+            insert: "m-1".into(),
+            description: "fact note".into(),
+        }],
+    });
+    assert!(result.dirty);
+    let rows = app.completion().expect("the id list").to_vec();
+    assert!(rows.iter().any(|row| row.starts_with("m-1")), "{rows:?}");
+    let result = app.on_key(key(KeyCode::Tab));
+    assert!(result.effects.is_empty(), "{:?}", result.effects);
+    assert_eq!(app.input, "/memory forget m-1 ");
+
+    // A stale answer is dropped: ask for `ab`, then answer with a *different* fetch.
+    let mut app = App::new("m", "s");
+    for c in "/memory show ab".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    let result = app.update(Input::CompletionsReady {
+        fetch: radian_tui::command::Fetch::MemoryRecords {
+            command: "forget".into(),
+            partial: "ab".into(),
+        },
+        candidates: vec![radian_tui::command::Candidate {
+            insert: "stale".into(),
+            description: String::new(),
+        }],
+    });
+    assert!(!result.dirty);
+    assert!(app.completion().is_none(), "a stale answer shows nothing");
+}

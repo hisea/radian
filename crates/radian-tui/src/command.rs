@@ -54,6 +54,416 @@ pub enum Outcome {
     Message,
 }
 
+// ---------- the command tree and its per-level completion (ADR 0023 U4) ----------
+
+/// One completion candidate: what to insert and the one-line description shown beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    pub insert: String,
+    pub description: String,
+}
+
+/// What a level needs from the host when it cannot list its candidates by itself. `update` never
+/// does I/O (ADR 0023 U3), so the loop resolves this and feeds the answer back as
+/// [`crate::app::Input::CompletionsReady`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fetch {
+    /// `/memory <command> <partial>`: the record ids that command can act on.
+    MemoryRecords { command: String, partial: String },
+}
+
+impl Fetch {
+    /// The partial word the fetched candidates should be ranked against.
+    pub fn partial(&self) -> &str {
+        match self {
+            Fetch::MemoryRecords { partial, .. } => partial,
+        }
+    }
+}
+
+/// What one argument level of a command offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Level {
+    /// Candidates known here, ranked by [`rank`] against the partial word.
+    Ready(Vec<Candidate>),
+    /// The candidates need the host.
+    Needs(Fetch),
+    /// Free text: nothing to complete at this level.
+    Free,
+}
+
+/// A pure completion source: the argument words already typed before this level, and the partial
+/// word being typed at it.
+pub type LevelSource = fn(&[&str], &str) -> Level;
+
+/// One slash command: its name (without the slash), its `/help` line, and one source per
+/// argument level (`levels[0]` completes the first argument, and so on).
+///
+/// A command is **data**, so `/model` (provider → model, ADR 0026) and `/login` (provider) hang
+/// on this same shape later: a new command is one entry, a new level is one function.
+#[derive(Debug, Clone, Copy)]
+pub struct Command {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub levels: &'static [LevelSource],
+}
+
+/// The built-in tree.
+pub fn tree() -> &'static [Command] {
+    static TREE: &[Command] = &[
+        Command {
+            name: "help",
+            description: "list the commands",
+            levels: &[],
+        },
+        Command {
+            name: "compact",
+            description: "summarize the history now and keep the recent part (ADR 0018)",
+            levels: &[free_level],
+        },
+        Command {
+            name: "sessions",
+            description: "list this workspace's recent sessions, or search their text",
+            levels: &[free_level],
+        },
+        Command {
+            name: "fork",
+            description: "fork this session at its last turn boundary (ADR 0022)",
+            levels: &[],
+        },
+        Command {
+            name: "export",
+            description: "export this session (default md, default <workspace>/radian-<id>.<ext>)",
+            levels: &[export_level, export_level],
+        },
+        Command {
+            name: "memory",
+            description: MEMORY_DESCRIPTION,
+            levels: &[memory_level, memory_level],
+        },
+    ];
+    TREE
+}
+
+/// The `/help` line for `/memory` (kept next to the subcommand table so the two cannot drift).
+const MEMORY_DESCRIPTION: &str = "durable memory: list, search, show, add, edit, archive, \
+                                  restore, forget, purge, confirm, export, import, project, \
+                                  relink, split, merge";
+
+/// The `/memory` subcommands and a one-line description each. The list is the authority for
+/// completion; `the_memory_subcommand_table_matches_the_grammar` fails if it drifts from the
+/// clap grammar in `radian_host::memory::commands`.
+const MEMORY_SUBCOMMANDS: &[(&str, &str)] = &[
+    ("list", "list records (Project then Global)"),
+    ("search", "search records by keyword"),
+    ("show", "show one record by id"),
+    ("add", "add a record"),
+    ("edit", "change a record's content"),
+    ("archive", "archive a record"),
+    ("restore", "restore an archived record"),
+    ("forget", "forget a record (needs confirmation)"),
+    (
+        "purge",
+        "rewrite the log, removing forgotten content (needs confirmation)",
+    ),
+    ("confirm", "confirm a record"),
+    ("export", "print one scope as editable Markdown"),
+    ("import", "import an edited Markdown export"),
+    ("project", "show the project identity, or `project new`"),
+    ("relink", "attach this workspace to an existing project"),
+    (
+        "split",
+        "move records between projects (needs confirmation)",
+    ),
+    (
+        "merge",
+        "merge one project into another (needs confirmation)",
+    ),
+];
+
+/// The `/memory` subcommands whose first argument is a record id.
+const MEMORY_ID_COMMANDS: &[&str] = &["show", "edit", "archive", "restore", "forget", "confirm"];
+
+/// `/memory`: the subcommand, then the record id for the commands that take one.
+fn memory_level(typed: &[&str], partial: &str) -> Level {
+    match typed.first().copied() {
+        None => Level::Ready(
+            MEMORY_SUBCOMMANDS
+                .iter()
+                .map(|(name, description)| Candidate {
+                    insert: (*name).to_owned(),
+                    description: (*description).to_owned(),
+                })
+                .collect(),
+        ),
+        Some(command) if MEMORY_ID_COMMANDS.contains(&command) => {
+            Level::Needs(Fetch::MemoryRecords {
+                command: command.to_owned(),
+                partial: partial.to_owned(),
+            })
+        }
+        Some(_) => Level::Free,
+    }
+}
+
+/// `/export`: the format, then the path (with `--force` offered as a candidate).
+fn export_level(typed: &[&str], _partial: &str) -> Level {
+    match typed.first() {
+        None => Level::Ready(vec![
+            Candidate {
+                insert: "md".to_owned(),
+                description: "markdown: the readable transcript".to_owned(),
+            },
+            Candidate {
+                insert: "json".to_owned(),
+                description: "json: the event document".to_owned(),
+            },
+        ]),
+        Some(_) => Level::Ready(vec![Candidate {
+            insert: "--force".to_owned(),
+            description: "overwrite an existing file".to_owned(),
+        }]),
+    }
+}
+
+/// A level that takes free text: nothing to complete.
+fn free_level(_typed: &[&str], _partial: &str) -> Level {
+    Level::Free
+}
+
+/// The completion for `line` at `cursor`: the char range a candidate replaces, and what that
+/// level offers. Pure. `None` when the line is not a slash command, the command or the level is
+/// unknown, the level is free text, or the only candidate is already exactly what was typed.
+///
+/// `level` is 0 for the command name itself, 1 for the first argument, and so on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlashCompletion {
+    pub level: usize,
+    pub range: std::ops::Range<usize>,
+    pub level_result: Level,
+}
+
+/// See [`SlashCompletion`]. `tree` is a parameter so a test (or a later `/model`) can supply its
+/// own tree.
+pub fn complete_in(tree: &[Command], line: &str, cursor: usize) -> Option<SlashCompletion> {
+    let chars: Vec<char> = line.chars().collect();
+    let cursor = cursor.min(chars.len());
+    let before: String = chars[..cursor].iter().collect();
+    if !before.starts_with('/') {
+        return None;
+    }
+    // The words before the cursor with their char ranges; the last one is the partial word
+    // (empty when the line ends in whitespace, and then the cursor is the range).
+    let mut words: Vec<(String, std::ops::Range<usize>)> = Vec::new();
+    let mut start = None;
+    for (index, c) in before.chars().enumerate() {
+        if c.is_whitespace() {
+            if let Some(from) = start.take() {
+                words.push((chars[from..index].iter().collect(), from..index));
+            }
+        } else if start.is_none() {
+            start = Some(index);
+        }
+    }
+    let trailing = start.is_none() && !words.is_empty();
+    if let Some(from) = start {
+        words.push((chars[from..cursor].iter().collect(), from..cursor));
+    }
+    let (first, rest) = words.split_first()?;
+
+    // A bare `/`: every command.
+    if first.0 == "/" && rest.is_empty() {
+        return Some(SlashCompletion {
+            level: 0,
+            range: 0..cursor,
+            level_result: Level::Ready(command_candidates(tree)),
+        });
+    }
+
+    // An exact command name: complete that command's levels one at a time.
+    let name = first.0.trim_start_matches('/');
+    if let Some(command) = tree.iter().find(|command| command.name == name) {
+        if trailing {
+            // `/memory `: the *next* level's candidates, with an empty partial.
+            let typed: Vec<&str> = rest.iter().map(|(word, _)| word.as_str()).collect();
+            return argument_level(command, typed.len(), &typed, "", cursor, cursor);
+        }
+        let Some((partial, range)) = rest.last() else {
+            return None; // only the name is typed: nothing more to complete
+        };
+        let typed_args: Vec<&str> = rest[..rest.len() - 1]
+            .iter()
+            .map(|(word, _)| word.as_str())
+            .collect();
+        return argument_level(
+            command,
+            typed_args.len(),
+            &typed_args,
+            partial,
+            range.start,
+            range.end,
+        );
+    }
+
+    // A partial command name: chain the levels that each have exactly one fuzzy match, so
+    // `/mem fo` completes to `/memory forget` in one step. A level that needs the host stops the
+    // chain (its candidates are not known here).
+    let matches = rank(command_candidates(tree), name);
+    if matches.len() != 1 {
+        return None;
+    }
+    let matched = matches[0].insert.trim_start_matches('/').to_owned();
+    let command = tree.iter().find(|command| command.name == matched)?;
+    let mut insert = format!("/{matched}");
+    let mut end = first.1.end;
+    let mut level = 0;
+    for (index, (word, range)) in rest.iter().enumerate() {
+        let Some(source) = command.levels.get(index) else {
+            break;
+        };
+        let typed: Vec<&str> = rest[..index]
+            .iter()
+            .map(|(word, _)| word.as_str())
+            .collect();
+        let Level::Ready(candidates) = source(&typed, word) else {
+            break;
+        };
+        let ranked = rank(candidates, word);
+        if ranked.len() != 1 {
+            break;
+        }
+        insert.push(' ');
+        insert.push_str(&ranked[0].insert);
+        level = index + 1;
+        end = range.end;
+    }
+    if level == 0 && !trailing {
+        // Only the name was completed; the range covers the first word alone, so the arguments
+        // that follow are left for the next completion.
+        end = first.1.end;
+    }
+    if insert.trim_end() == before.trim_end() {
+        return None; // already exactly this: nothing to do
+    }
+    Some(SlashCompletion {
+        level,
+        range: 0..end,
+        level_result: Level::Ready(vec![Candidate {
+            insert,
+            description: matches[0].description.clone(),
+        }]),
+    })
+}
+
+/// The candidates of one argument level of `command`, ranked against `partial`. `None` when the
+/// level is free text, unknown, or already exactly what was typed.
+fn argument_level(
+    command: &Command,
+    level: usize,
+    typed: &[&str],
+    partial: &str,
+    from: usize,
+    to: usize,
+) -> Option<SlashCompletion> {
+    let source = command.levels.get(level)?;
+    let level_result = match source(typed, partial) {
+        Level::Ready(candidates) => {
+            let candidates = rank(candidates, partial);
+            if candidates.len() == 1 && candidates[0].insert == partial {
+                return None;
+            }
+            Level::Ready(candidates)
+        }
+        other => other,
+    };
+    non_empty(SlashCompletion {
+        level: level + 1,
+        range: from..to,
+        level_result,
+    })
+}
+
+/// The command-name candidates, from the tree's own `/help` lines.
+fn command_candidates(tree: &[Command]) -> Vec<Candidate> {
+    tree.iter()
+        .map(|command| Candidate {
+            insert: format!("/{}", command.name),
+            description: command.description.to_owned(),
+        })
+        .collect()
+}
+
+/// `None` when there is nothing to show: a `Ready` level with no candidates, or a level that
+/// takes free text.
+fn non_empty(completion: SlashCompletion) -> Option<SlashCompletion> {
+    match &completion.level_result {
+        Level::Ready(candidates) if candidates.is_empty() => None,
+        Level::Free => None,
+        _ => Some(completion),
+    }
+}
+
+/// Ranks `candidates` against `partial` with [`fuzzy_score`]: the best score first, then by name,
+/// so the order is deterministic. An empty partial keeps the source's own order.
+pub fn rank(mut candidates: Vec<Candidate>, partial: &str) -> Vec<Candidate> {
+    if partial.is_empty() {
+        return candidates;
+    }
+    let mut scored: Vec<(i32, Candidate)> = candidates
+        .drain(..)
+        .filter_map(|candidate| {
+            fuzzy_score(&candidate.insert, partial).map(|score| (score, candidate))
+        })
+        .collect();
+    scored.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| left.1.insert.cmp(&right.1.insert))
+    });
+    scored.into_iter().map(|(_, candidate)| candidate).collect()
+}
+
+/// A deterministic fuzzy score: every character of `query` must appear in `candidate` in order
+/// (case-insensitively; a leading `/` is ignored, so `/co` prefix-matches `/compact`).
+///
+/// `1000` for a prefix match, `+10` for each adjacent pair, `+1` per matched character, and `-1`
+/// for the index of the first match: a prefix beats a scattered match, and an early, dense match
+/// beats a late, sparse one. `None` when `query` is not a subsequence.
+pub fn fuzzy_score(candidate: &str, query: &str) -> Option<i32> {
+    let candidate = candidate.trim_start_matches('/').to_lowercase();
+    let query = query.trim_start_matches('/').to_lowercase();
+    if query.is_empty() {
+        return Some(0);
+    }
+    let mut score = if candidate.starts_with(&query) {
+        1000
+    } else {
+        0
+    };
+    let mut chars = candidate.char_indices();
+    let mut first: Option<usize> = None;
+    let mut previous: Option<usize> = None;
+    let mut matched = 0;
+    for wanted in query.chars() {
+        loop {
+            let (index, found) = chars.next()?;
+            if found == wanted {
+                if first.is_none() {
+                    first = Some(index);
+                }
+                if previous == Some(index.saturating_sub(1)) {
+                    score += 10;
+                }
+                previous = Some(index);
+                matched += 1;
+                break;
+            }
+        }
+    }
+    Some(score + matched - first.unwrap_or(0) as i32)
+}
+
 /// A parsed `/export` request. The host resolves the path, checks overwrite and writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportRequest {
@@ -252,6 +662,186 @@ mod tests {
         match parse("/compact focus on the parser", false) {
             Outcome::Compact(Some(note)) => assert_eq!(note, "focus on the parser"),
             other => panic!("expected a compact request, got {other:?}"),
+        }
+    }
+
+    /// The completion table and the clap grammar must name the same subcommands, in both
+    /// directions: the table is what the UI completes, the grammar is what runs.
+    #[test]
+    fn the_memory_subcommand_table_matches_the_grammar() {
+        let grammar: Vec<String> =
+            <MemoryCommand as clap::Subcommand>::augment_subcommands(clap::Command::new("memory"))
+                .get_subcommands()
+                .map(|sub| sub.get_name().to_owned())
+                .collect();
+        for (name, _) in MEMORY_SUBCOMMANDS {
+            assert!(
+                grammar.iter().any(|known| known == name),
+                "`{name}` is in the completion table but not in the grammar: {grammar:?}"
+            );
+        }
+        for name in &grammar {
+            assert!(
+                MEMORY_SUBCOMMANDS.iter().any(|(known, _)| known == name),
+                "`{name}` is in the grammar but not in the completion table"
+            );
+        }
+    }
+
+    #[test]
+    fn every_command_description_comes_from_help() {
+        // `/help` wraps its long lines, so compare on collapsed whitespace.
+        let help = HELP.split_whitespace().collect::<Vec<_>>().join(" ");
+        for command in tree() {
+            let description = command
+                .description
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                help.contains(&description),
+                "`{}`'s description is not in /help: {description}",
+                command.name
+            );
+        }
+    }
+
+    #[test]
+    fn fuzzy_matching_is_a_subsequence_with_prefixes_first() {
+        // `/cmp` finds `/compact` (c-m-p in order) ...
+        assert!(fuzzy_score("/compact", "cmp").is_some());
+        assert!(fuzzy_score("/memory", "cmp").is_none(), "not a subsequence");
+        // ... and a prefix beats a scattered match.
+        let prefix = fuzzy_score("/compact", "co").unwrap();
+        let scattered = fuzzy_score("/compact", "cpt").unwrap();
+        assert!(prefix > scattered, "{prefix} vs {scattered}");
+        // A leading slash is ignored on both sides.
+        assert_eq!(
+            fuzzy_score("/compact", "co"),
+            fuzzy_score("compact", "co"),
+            "the slash is not part of the match"
+        );
+
+        let ranked = rank(
+            vec![
+                Candidate {
+                    insert: "/memory".into(),
+                    description: String::new(),
+                },
+                Candidate {
+                    insert: "/compact".into(),
+                    description: String::new(),
+                },
+            ],
+            "co",
+        );
+        assert_eq!(ranked.len(), 1, "only /compact matches `co`");
+        assert_eq!(ranked[0].insert, "/compact");
+    }
+
+    #[test]
+    fn the_tree_completes_every_level() {
+        // The command name, and the chain: `/mem fo` completes to `/memory forget` in one step.
+        let completion = complete_in(tree(), "/mem fo", 7).expect("a completion");
+        match &completion.level_result {
+            Level::Ready(candidates) => {
+                assert_eq!(candidates.len(), 1, "{candidates:?}");
+                assert_eq!(candidates[0].insert, "/memory forget");
+            }
+            other => panic!("expected candidates, got {other:?}"),
+        }
+        assert_eq!(completion.range, 0..7);
+
+        // A bare partial name completes just the name, leaving the arguments for the next Tab.
+        let completion = complete_in(tree(), "/mem fo", 4).expect("a completion");
+        assert_eq!(completion.range, 0..4);
+        match &completion.level_result {
+            Level::Ready(candidates) => assert_eq!(candidates[0].insert, "/memory"),
+            other => panic!("expected candidates, got {other:?}"),
+        }
+
+        // Level 1: `/memory`'s subcommand, fuzzy (`/memory fo` → forget).
+        let line = "/memory fo";
+        let completion = complete_in(tree(), line, line.chars().count()).expect("a completion");
+        assert_eq!(completion.level, 1);
+        assert_eq!(completion.range, 8..10);
+        match &completion.level_result {
+            Level::Ready(candidates) => {
+                assert_eq!(candidates.len(), 1, "{candidates:?}");
+                assert_eq!(candidates[0].insert, "forget");
+            }
+            other => panic!("expected candidates, got {other:?}"),
+        }
+
+        // An empty partial after the space lists the whole level.
+        let line = "/memory ";
+        match complete_in(tree(), line, line.chars().count()).map(|c| c.level_result) {
+            Some(Level::Ready(candidates)) => {
+                assert_eq!(candidates.len(), MEMORY_SUBCOMMANDS.len())
+            }
+            other => panic!("expected the subcommand list, got {other:?}"),
+        }
+
+        // Level 2: the record id needs the host (an effect, never I/O in `update`).
+        let line = "/memory forget ab";
+        let completion = complete_in(tree(), line, line.chars().count()).expect("a completion");
+        assert_eq!(completion.level, 2);
+        assert_eq!(
+            completion.level_result,
+            Level::Needs(Fetch::MemoryRecords {
+                command: "forget".into(),
+                partial: "ab".into(),
+            })
+        );
+
+        // `/export`'s first level is the format, its second offers `--force`.
+        let line = "/export ";
+        match complete_in(tree(), line, line.chars().count()).map(|c| c.level_result) {
+            Some(Level::Ready(candidates)) => {
+                assert_eq!(
+                    candidates
+                        .iter()
+                        .map(|c| c.insert.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["md", "json"]
+                );
+            }
+            other => panic!("expected the format list, got {other:?}"),
+        }
+
+        // An exact command name shows no list, so Enter runs it.
+        assert!(complete_in(tree(), "/help", 5).is_none());
+        // Free text has nothing to complete.
+        assert!(complete_in(tree(), "/sessions par", 13).is_none());
+        // A line that is not a command has no slash completion.
+        assert!(complete_in(tree(), "hello", 5).is_none());
+    }
+
+    /// A later command (the owner's `/model`/`/login`) is one entry in the same tree, and its
+    /// level sources are ordinary pure functions: this fake one proves the structure carries it.
+    #[test]
+    fn a_future_command_hangs_on_the_same_tree() {
+        fn provider_level(_typed: &[&str], _partial: &str) -> Level {
+            Level::Ready(vec![Candidate {
+                insert: "anthropic".into(),
+                description: "the Messages API".into(),
+            }])
+        }
+        static FAKE: &[Command] = &[Command {
+            name: "model",
+            description: "pick the provider and model (ADR 0026)",
+            levels: &[provider_level, provider_level],
+        }];
+
+        let line = "/model an";
+        let completion = complete_in(FAKE, line, line.chars().count()).expect("a completion");
+        assert_eq!(completion.level, 1);
+        match &completion.level_result {
+            Level::Ready(candidates) => {
+                assert_eq!(candidates.len(), 1);
+                assert_eq!(candidates[0].insert, "anthropic");
+            }
+            other => panic!("expected candidates, got {other:?}"),
         }
     }
 

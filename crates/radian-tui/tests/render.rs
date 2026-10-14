@@ -420,7 +420,11 @@ fn the_input_area_has_rules_and_a_prompt_instead_of_a_box() {
     // continuation indented by the same two cells.
     assert_eq!(lines[rules[0] + 1].trim_end(), "> first", "{text}");
     assert_eq!(lines[rules[0] + 2].trim_end(), "  second", "{text}");
-    assert_eq!(rules[1], rules[0] + 3, "two text rows between them:\n{text}");
+    assert_eq!(
+        rules[1],
+        rules[0] + 3,
+        "two text rows between them:\n{text}"
+    );
     // No vertical border inside the input area (the status bar's `│` separators are elsewhere).
     for line in &lines[rules[0]..=rules[1]] {
         assert!(!line.contains('│'), "no vertical border:\n{text}");
@@ -446,7 +450,10 @@ fn the_box_input_style_draws_the_bordered_box() {
     app.input_style = radian_tui::render::InputStyle::Box;
     let text = screen(&render(&mut app, 20, 8));
     assert!(text.contains(" message "), "the box title is back:\n{text}");
-    assert!(text.contains("│first"), "the text starts after the border:\n{text}");
+    assert!(
+        text.contains("│first"),
+        "the text starts after the border:\n{text}"
+    );
     assert!(!text.contains("> first"), "{text}");
     assert!(
         text.contains("┌") && text.contains("└"),

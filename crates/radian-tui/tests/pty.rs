@@ -5220,3 +5220,60 @@ async fn pty_ask_user_is_registered_without_a_workspace() {
         "no coding tools exist without --workspace: {body}"
     );
 }
+
+/// The slash command tree completes every level: typing `/mem` lists the
+/// commands, Tab completes the name, the next level's list appears, and Tab completes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_the_slash_completion_walks_the_command_tree() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("slash-completion");
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "slash",
+            "--offline-catalog",
+        ],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("type a message", 10),
+        "{}",
+        pty.screen()
+    );
+
+    pty.send(b"/mem");
+    assert!(
+        pty.wait_for_screen("/memory", 10),
+        "the command list did not appear:\n{}",
+        pty.screen()
+    );
+    pty.send(b"\t");
+    assert!(
+        pty.wait_for_screen("> /memory ", 10),
+        "Tab did not complete the command name:\n{}",
+        pty.screen()
+    );
+    // The next level's list is already up; a partial is fuzzy-matched and completed.
+    pty.send(b"fo");
+    assert!(
+        pty.wait_for_screen("forget", 10),
+        "the subcommand list did not appear:\n{}",
+        pty.screen()
+    );
+    pty.send(b"\t");
+    assert!(
+        pty.wait_for_screen("> /memory forget", 10),
+        "Tab did not complete the subcommand:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
