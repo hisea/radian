@@ -941,12 +941,11 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         None => Vec::new(),
     };
     // The key and every header value are secrets: no error this program prints may contain
-    // any of them, and they are never written to the session file.
-    let mut secrets: Vec<String> = credential
-        .as_ref()
-        .map(|key| key.key.clone())
-        .into_iter()
-        .collect();
+    // any of them, and they are never written to the session file. "The key" is **every**
+    // login in `auth.json`, not only this route's (ADR 0013 T4, ): a provider
+    // error body can echo a key that the adapter does not know to mask, and a session can
+    // mention another login. `resolved_keys` is the same list the TUI and the exports use.
+    let mut secrets: Vec<String> = radian_host::resolved_keys();
     secrets.extend(route.headers.iter().map(|(_, value)| value.clone()));
     secrets.retain(|secret| !secret.is_empty());
     let context_window = cli.context_window.or(config.model.context_window);
