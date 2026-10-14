@@ -58,6 +58,9 @@ pub struct DescriptorModel {
     pub name: &'static str,
     pub protocol: Protocol,
     pub base_url: &'static str,
+    /// The model's `thinkingLevelMap` (ADR 0026 D11): level → wire value, a `None` wire value
+    /// is pi's `null` (unsupported). Empty = no model-level map; the provider's applies.
+    pub thinking: ThinkingMap,
 }
 
 /// One registered provider.
@@ -66,6 +69,8 @@ pub struct ProviderDescriptor {
     pub display_name: &'static str,
     pub default_base_url: &'static str,
     pub login: LoginMethod,
+    /// The provider-level thinking map (ADR 0026 D11), used when a model has none.
+    pub thinking: ThinkingMap,
     /// The protocol a model uses when the built-in list does not name it. Uniform for
     /// `anthropic`/`openai`/`openai-compatible`; `opencode-go` defaults to openai-compatible
     /// (its Anthropic models are all listed).
@@ -392,7 +397,10 @@ const OPENCODE_GO_MODELS: &[DescriptorModel] = &[
     go_openai("glm-5.3-flash", "GLM-5.3-Flash"),
     go_anthropic("qwen3.8-max", "Qwen3.8 Max"),
     go_openai("kimi-k3", "Kimi K3"),
-    go_openai("deepseek-v4.1-flash", "DeepSeek V4.1 Flash"),
+    DescriptorModel {
+        thinking: DEEPSEEK_V41_FLASH_THINKING,
+        ..go_openai("deepseek-v4.1-flash", "DeepSeek V4.1 Flash")
+    },
     go_openai(
         "deepseek-v4-flash-vision-exp",
         "DeepSeek V4 Flash Vision Exp",
@@ -448,8 +456,42 @@ const fn model(
         name,
         protocol,
         base_url,
+        thinking: &[],
     }
 }
+
+/// The verified `thinkingLevelMap` of `deepseek-v4.1-flash` (ADR 0026 D11; source:
+/// `monotykamary/pi-opencode-go-provider` `models.json`, local revision 6837adb). It supports
+/// **low/high/max** and cannot switch thinking off, so `off`/`minimal`/`medium`/`xhigh` are
+/// `null`. The clamp tests use this table.
+pub const DEEPSEEK_V41_FLASH_THINKING: ThinkingMap = &[
+    ("off", None),
+    ("minimal", None),
+    ("low", Some("low")),
+    ("medium", None),
+    ("high", Some("high")),
+    ("xhigh", None),
+    ("max", Some("max")),
+];
+
+/// The anthropic descriptor's provider-level map (ADR 0026 D11): every level gets a distinct
+/// wire value, so `/thinking low` and `/thinking max` are not the same request.
+///
+/// `off` sends no `thinking` key. `medium` — the default — uses `adaptive`, the provider's own
+/// budget choice, which is what the adapter already sent. The rest are `enabled:<budget>` with
+/// budgets that **fit the default `--max-tokens` (16384)**: the adapter refuses a budget that
+/// is not `>= 1024` and `< max_tokens`, so a smaller `--max-tokens` makes the higher levels a
+/// startup error (an existing rule, not this map's). These numbers are a proposal — the ADR
+/// names `enabled:<budget>` but gives no per-level budgets — and are marked for the owner.
+pub const ANTHROPIC_THINKING: ThinkingMap = &[
+    ("off", Some("")),
+    ("minimal", Some("enabled:1024")),
+    ("low", Some("enabled:2048")),
+    ("medium", Some("adaptive")),
+    ("high", Some("enabled:4096")),
+    ("xhigh", Some("enabled:8192")),
+    ("max", Some("enabled:12288")),
+];
 
 const fn go_openai(id: &'static str, name: &'static str) -> DescriptorModel {
     model(id, name, Protocol::OpenAiCompatible, OPENCODE_GO_BASE)
@@ -474,6 +516,7 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
         display_name: "OpenCode Go",
         default_base_url: OPENCODE_GO_BASE,
         login: LoginMethod::ApiKey { extra_fields: &[] },
+        thinking: &[],
         default_protocol: Protocol::OpenAiCompatible,
         models: OPENCODE_GO_MODELS,
         headers: opencode_go_headers,
@@ -483,6 +526,7 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
         display_name: "Anthropic",
         default_base_url: "https://api.anthropic.com",
         login: LoginMethod::ApiKey { extra_fields: &[] },
+        thinking: ANTHROPIC_THINKING,
         default_protocol: Protocol::Anthropic,
         models: ANTHROPIC_MODELS,
         headers: no_headers,
@@ -492,6 +536,7 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
         display_name: "OpenAI",
         default_base_url: "https://api.openai.com/v1",
         login: LoginMethod::ApiKey { extra_fields: &[] },
+        thinking: &[],
         default_protocol: Protocol::OpenAiCompatible,
         models: OPENAI_MODELS,
         headers: no_headers,
@@ -505,6 +550,7 @@ pub const DESCRIPTORS: &[ProviderDescriptor] = &[
             // entry's `env` (ADR 0026 D1/D3).
             extra_fields: &[crate::auth::RADIAN_BASE_URL, "id"],
         },
+        thinking: &[],
         default_protocol: Protocol::OpenAiCompatible,
         // The user supplies the model id; there is no built-in list.
         models: &[],
@@ -937,6 +983,283 @@ mod tests {
             resolve_route_for(&provider, "m", None, None, &headers, "s")
                 .unwrap_err()
                 .contains("--header")
+        );
+    }
+}
+
+// ---------- the unified thinking levels (ADR 0026 D11) ----------
+
+/// The seven unified thinking levels, in **rank order**. The clamp walks this order, so the
+/// array order is load-bearing.
+pub const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// The default level (ADR 0026 D11, owner pick A, matching pi's `defaultThinkingLevel`).
+pub const DEFAULT_THINKING_LEVEL: &str = "medium";
+
+/// One thinking map: level → wire value; a `None` wire value is pi's `null` — the level is
+/// **not supported** and must not be offered. Absent from the map = unsupported.
+pub type ThinkingMap = &'static [(&'static str, Option<&'static str>)];
+
+/// The rank of a level name, or `None` for an unknown name.
+pub fn thinking_rank(level: &str) -> Option<usize> {
+    THINKING_LEVELS.iter().position(|entry| *entry == level)
+}
+
+/// The wire value a map gives a level, if the map supports it.
+pub fn supported_wire(map: ThinkingMap, level: &str) -> Option<&'static str> {
+    map.iter()
+        .find(|(name, _)| *name == level)
+        .and_then(|(_, wire)| *wire)
+}
+
+/// Clamps a requested level to the nearest **supported** one (ADR 0026 D11, owner rule): first
+/// the nearest supported level **up** the rank order, then — when nothing above is supported —
+/// the nearest **down**. `None` when the map is absent (the caller then sends no parameter).
+///
+/// `deepseek-v4.1-flash` supports low/high/max, so `medium→high`, `minimal→low`, `xhigh→max`,
+/// and `off→low` (it cannot switch thinking off).
+pub fn clamp_thinking(
+    map: Option<ThinkingMap>,
+    requested: &str,
+) -> Option<(&'static str, &'static str)> {
+    clamp_thinking_with(map, requested, None)
+}
+
+/// The budget a wire value asks for, when it is `enabled:<budget>`.
+pub fn wire_budget(wire: &str) -> Option<u32> {
+    wire.strip_prefix("enabled:")?.parse().ok()
+}
+
+/// Whether a level's wire value fits the request's `max_tokens` (review B1). A budget the
+/// **level** chose must satisfy the adapter's range (`1024 <= budget < max_tokens`); `None`
+/// means "no cap". `adaptive` and "send nothing" always fit.
+pub fn level_fits(wire: &str, max_tokens: Option<u32>) -> bool {
+    let Some(budget) = wire_budget(wire) else {
+        return true;
+    };
+    // A budget the level chose is **clamped** to `max_tokens - 1` (review B1), so it fits as
+    // long as there is any room at all. Only `max_tokens <= MIN_THINKING_BUDGET` leaves no
+    // valid budget, and then the level is unsupported.
+    let _ = budget;
+    match max_tokens {
+        Some(max) => max > crate::MIN_THINKING_BUDGET,
+        None => true,
+    }
+}
+
+/// [`clamp_thinking`] with the request's `max_tokens`: a level whose **own** budget does not
+/// fit is treated as unsupported, so the clamp walks past it (review B1). The budget itself is
+/// clamped later, when the wire value is turned into the adapter's setting.
+pub fn clamp_thinking_with(
+    map: Option<ThinkingMap>,
+    requested: &str,
+    max_tokens: Option<u32>,
+) -> Option<(&'static str, &'static str)> {
+    let map = map?;
+    let rank = thinking_rank(requested)
+        .unwrap_or_else(|| thinking_rank(DEFAULT_THINKING_LEVEL).expect("the default is a level"));
+    // Up first: the nearest supported level at or above the request.
+    for level in &THINKING_LEVELS[rank..] {
+        if let Some(wire) = supported_wire(map, level)
+            && level_fits(wire, max_tokens)
+        {
+            return Some((level, wire));
+        }
+    }
+    // Nothing above: the nearest supported level below.
+    for level in THINKING_LEVELS[..rank].iter().rev() {
+        if let Some(wire) = supported_wire(map, level)
+            && level_fits(wire, max_tokens)
+        {
+            return Some((level, wire));
+        }
+    }
+    None
+}
+
+/// The map a model uses: its own `thinkingLevelMap` first, the descriptor's provider-level map
+/// second, and `None` (send nothing) when neither exists (ADR 0026 D11).
+pub fn thinking_map_for(descriptor: &ProviderDescriptor, model: &str) -> Option<ThinkingMap> {
+    if let Some(entry) = descriptor.model(model)
+        && !entry.thinking.is_empty()
+    {
+        return Some(entry.thinking);
+    }
+    (!descriptor.thinking.is_empty()).then_some(descriptor.thinking)
+}
+
+/// The descriptor id a named provider's protocol maps to (ADR 0026 D10).
+pub fn protocol_descriptor_id(protocol: Protocol) -> &'static str {
+    match protocol {
+        Protocol::OpenAiCompatible => GENERIC_ID,
+        Protocol::Anthropic => "anthropic",
+    }
+}
+
+/// The thinking map a [`ProviderRef`]'s model uses (ADR 0026 D11): a built-in descriptor's
+/// model/provider map, or the map of the descriptor its kind names.
+pub fn thinking_map_for_ref(provider: &ProviderRef, model: &str) -> Option<ThinkingMap> {
+    match provider {
+        ProviderRef::BuiltIn(descriptor) => thinking_map_for(descriptor, model),
+        ProviderRef::Named(named) => {
+            descriptor(protocol_descriptor_id(named.protocol)).and_then(|descriptor| {
+                (!descriptor.thinking.is_empty()).then_some(descriptor.thinking)
+            })
+        }
+    }
+}
+
+/// The levels a [`ProviderRef`]'s model supports, in rank order (ADR 0026 D11).
+pub fn supported_thinking_levels_ref(provider: &ProviderRef, model: &str) -> Vec<&'static str> {
+    supported_thinking_levels_ref_with(provider, model, None)
+}
+
+/// [`supported_thinking_levels_ref`] with the request's `max_tokens`: a level whose budget
+/// does not fit is not offered (review B1), so the completion never lists a level the switch
+/// would have to walk past.
+pub fn supported_thinking_levels_ref_with(
+    provider: &ProviderRef,
+    model: &str,
+    max_tokens: Option<u32>,
+) -> Vec<&'static str> {
+    let Some(map) = thinking_map_for_ref(provider, model) else {
+        return Vec::new();
+    };
+    THINKING_LEVELS
+        .iter()
+        .filter(|level| supported_wire(map, level).is_some_and(|wire| level_fits(wire, max_tokens)))
+        .copied()
+        .collect()
+}
+
+/// The levels a model supports, in rank order — `/thinking`'s completion (ADR 0026 D11). Empty
+/// when the model has no map: no parameter is ever sent, so nothing is offered.
+pub fn supported_thinking_levels(descriptor_id: &str, model: &str) -> Vec<&'static str> {
+    supported_thinking_levels_with(descriptor_id, model, None)
+}
+
+/// [`supported_thinking_levels`] with the request's `max_tokens` (review B1).
+pub fn supported_thinking_levels_with(
+    descriptor_id: &str,
+    model: &str,
+    max_tokens: Option<u32>,
+) -> Vec<&'static str> {
+    let Some(map) =
+        crate::descriptor(descriptor_id).and_then(|descriptor| thinking_map_for(descriptor, model))
+    else {
+        return Vec::new();
+    };
+    THINKING_LEVELS
+        .iter()
+        .filter(|level| supported_wire(map, level).is_some_and(|wire| level_fits(wire, max_tokens)))
+        .copied()
+        .collect()
+}
+
+/// Parses a level name. The legacy Anthropic spellings are accepted for one version and the
+/// caller warns. Returns `(level, legacy_budget, legacy)`: `adaptive` is the middle of the
+/// scale, and a manual `enabled:<budget>` keeps the user's budget (ADR 0026 D11: the legacy
+/// form still sends what the user asked for) while clamping to the level it resembles.
+pub fn parse_thinking_level(raw: &str) -> Result<(&'static str, Option<u32>, bool), String> {
+    if let Some(rank) = thinking_rank(raw) {
+        return Ok((THINKING_LEVELS[rank], None, false));
+    }
+    match raw {
+        "adaptive" => Ok(("medium", None, true)),
+        other if other.starts_with("enabled:") => {
+            let budget = other
+                .trim_start_matches("enabled:")
+                .parse::<u32>()
+                .map_err(|_| {
+                    format!("--thinking {other:?} needs a u32 budget, e.g. enabled:8192")
+                })?;
+            Ok(("high", Some(budget), true))
+        }
+        other => Err(format!(
+            "--thinking {other:?} is not one of {} (or the legacy off|adaptive|enabled:<budget>)",
+            THINKING_LEVELS.join("|")
+        )),
+    }
+}
+
+#[cfg(test)]
+mod thinking_tests {
+    use super::*;
+
+    /// The verified deepseek-v4.1-flash map clamps **up** first (ADR 0026 D11, owner rule).
+    #[test]
+    fn the_clamp_prefers_the_nearest_supported_level_above() {
+        let map = thinking_map_for(descriptor("opencode-go").unwrap(), "deepseek-v4.1-flash");
+        assert_eq!(clamp_thinking(map, "medium"), Some(("high", "high")));
+        assert_eq!(clamp_thinking(map, "minimal"), Some(("low", "low")));
+        assert_eq!(clamp_thinking(map, "xhigh"), Some(("max", "max")));
+        // Nothing above is supported from `max`, so the clamp comes back **down**.
+        assert_eq!(clamp_thinking(map, "off"), Some(("low", "low")));
+    }
+
+    /// The completion lists only the supported levels, in rank order (D11).
+    #[test]
+    fn the_completion_lists_only_supported_levels_in_rank_order() {
+        assert_eq!(
+            supported_thinking_levels("opencode-go", "deepseek-v4.1-flash"),
+            vec!["low", "high", "max"]
+        );
+        // A model with no map anywhere offers nothing and sends nothing.
+        assert!(supported_thinking_levels("opencode-go", "gpt-5-nano").is_empty());
+    }
+
+    /// A supported level passes through unchanged; an unknown name clamps from the default's
+    /// rank.
+    #[test]
+    fn a_supported_level_passes_through() {
+        let map = thinking_map_for(descriptor("opencode-go").unwrap(), "deepseek-v4.1-flash");
+        assert_eq!(clamp_thinking(map, "low"), Some(("low", "low")));
+        assert_eq!(clamp_thinking(map, "max"), Some(("max", "max")));
+        assert_eq!(clamp_thinking(map, "nonsense"), Some(("high", "high")));
+    }
+
+    /// No map anywhere: no parameter at all (D11: no invented wire values).
+    #[test]
+    fn a_mapless_model_sends_nothing() {
+        let map = thinking_map_for(descriptor("opencode-go").unwrap(), "gpt-5-nano");
+        assert_eq!(clamp_thinking(map, "high"), None);
+    }
+
+    /// The legacy Anthropic spellings parse with the warning flag, and a manual
+    /// `enabled:<budget>` keeps the user's budget (D11).
+    #[test]
+    fn the_legacy_spellings_still_parse() {
+        assert_eq!(parse_thinking_level("adaptive"), Ok(("medium", None, true)));
+        assert_eq!(parse_thinking_level("high"), Ok(("high", None, false)));
+        assert_eq!(parse_thinking_level("off"), Ok(("off", None, false)));
+        assert_eq!(
+            parse_thinking_level("enabled:8192"),
+            Ok(("high", Some(8192), true))
+        );
+        assert!(parse_thinking_level("enabled:not-a-number").is_err());
+        assert!(parse_thinking_level("yolo").is_err());
+    }
+
+    /// A1: the anthropic map gives every level a **distinct** wire value, so two levels are
+    /// never the same request, and the default (`medium`) is the provider's own `adaptive`.
+    #[test]
+    fn the_anthropic_levels_are_distinct() {
+        let wires: Vec<&str> = THINKING_LEVELS
+            .iter()
+            .filter_map(|level| supported_wire(ANTHROPIC_THINKING, level))
+            .collect();
+        let mut unique = wires.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(wires.len(), 7, "all seven levels are supported");
+        assert_eq!(unique.len(), 7, "every level has its own value: {wires:?}");
+        assert_eq!(
+            supported_wire(ANTHROPIC_THINKING, "medium"),
+            Some("adaptive")
+        );
+        assert_ne!(
+            supported_wire(ANTHROPIC_THINKING, "low"),
+            supported_wire(ANTHROPIC_THINKING, "max")
         );
     }
 }

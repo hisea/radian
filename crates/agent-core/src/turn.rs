@@ -40,6 +40,10 @@ pub struct TurnOptions {
     pub max_parallel_tools: usize,
     /// Overrides `AgentConfig::max_model_calls` for this turn.
     pub max_model_calls: Option<u32>,
+    /// Overrides `AgentConfig::context_budget` for this turn (ADR 0026 D7). The driver sets it
+    /// when a `/model` switch changes the model, because a budget frozen in `AgentConfig` could
+    /// never follow the model. `None` keeps the configured budget, so nothing else changes.
+    pub context_budget: Option<ContextBudget>,
     /// After cancellation, how long a running tool may keep going to clean up (for MCP:
     /// send the cancel notification, then stop and reap the server). After this, the tool's
     /// future is dropped.
@@ -52,6 +56,7 @@ impl Default for TurnOptions {
             deadline: None,
             steer_mode: SteerMode::default(),
             max_parallel_tools: DEFAULT_MAX_PARALLEL_TOOLS,
+            context_budget: None,
             max_model_calls: None,
             tool_cancel_grace: DEFAULT_TOOL_CANCEL_GRACE,
         }
@@ -304,12 +309,16 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         instructions: Option<String>,
         cancellation: &CancellationToken,
         events: &dyn EventSink,
+        budget: Option<ContextBudget>,
     ) -> Result<CompactionOutcome, CompactionFailure> {
         let interrupt = Interrupt {
             token: cancellation.clone(),
             deadline: None,
         };
-        let keep = match self.agent.config.context_budget {
+        // The caller's budget (ADR 0026 D7: the `/model` confirm compaction targets the new
+        // model's B') wins over the configured one.
+        let budget = budget.or(self.agent.config.context_budget);
+        let keep = match budget {
             Some(config) => compaction::keep_target(config.input_budget_tokens),
             None => compaction::MAX_KEEP_TARGET,
         };
@@ -321,10 +330,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
             tools: self.registry.specs().to_vec(),
             settings: self.agent.config.model_settings.clone(),
         };
-        let bytes_per_token = self
-            .agent
-            .config
-            .context_budget
+        let bytes_per_token = budget
             .map(|config| config.bytes_per_token)
             .unwrap_or(crate::budget::DEFAULT_BYTES_PER_TOKEN);
         let tokens_before = budget::request_size(&request).tokens(bytes_per_token);
@@ -335,11 +341,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
                 request: &mut request,
                 tokens_before,
                 keep,
-                summary_budget: self
-                    .agent
-                    .config
-                    .context_budget
-                    .map(|config| config.input_budget_tokens),
+                summary_budget: budget.map(|config| config.input_budget_tokens),
                 gain: Gain::Any,
                 trigger: CompactionTrigger::Manual,
                 instructions,
@@ -687,6 +689,15 @@ pub struct ActiveRun<'s, M: Model, P: ToolProvider, H: Hooks> {
 }
 
 impl<'s, M: Model, P: ToolProvider, H: Hooks> ActiveRun<'s, M, P, H> {
+    /// The budget in force this turn: the per-turn override (ADR 0026 D7) wins over the
+    /// config. Every budget read inside a turn goes through here, so a `/model` switch can
+    /// move `B` without rebuilding the `Agent`.
+    pub(crate) fn context_budget(&self) -> Option<ContextBudget> {
+        self.options
+            .context_budget
+            .or(self.agent.config.context_budget)
+    }
+
     pub(crate) fn new(
         session: &'s mut AgentSession<M, P, H>,
         options: TurnOptions,
@@ -1054,12 +1065,12 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
         // this is the request that would be sent. A provider-reported `input` from an earlier
         // request in this session is the baseline; without one the projection is a local
         // estimate. No configured budget means nothing is claimed.
-        let mut request_size = if agent.config.context_budget.is_some() {
+        let mut request_size = if self.run.context_budget().is_some() {
             Some(budget::request_size(&request))
         } else {
             None
         };
-        if let Some((config, size)) = agent.config.context_budget.zip(request_size) {
+        if let Some((config, size)) = self.run.context_budget().zip(request_size) {
             let report = budget::project(&config, self.run.session.budget_baseline, size);
             let over = budget::over_budget(&report);
             let tokens_before = report.projected_tokens;
@@ -1128,10 +1139,8 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
                 .context_budget
                 .map(|config| config.bytes_per_token)
                 .unwrap_or(crate::budget::DEFAULT_BYTES_PER_TOKEN);
-            let tokens_before = match (
-                agent.config.context_budget,
-                self.run.session.budget_baseline,
-            ) {
+            let tokens_before = match (self.run.context_budget(), self.run.session.budget_baseline)
+            {
                 (Some(config), Some(baseline)) => {
                     budget::project(&config, Some(baseline), size).projected_tokens
                 }
@@ -1185,7 +1194,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
                     // `--no-auto-compact` disables the proactive path only; the fallback
                     // stays (ADR 0018 §关闭). The reference is `min(T_before, B)` when the
                     // window is known, otherwise `T_before`.
-                    let reference = match agent.config.context_budget {
+                    let reference = match self.run.context_budget() {
                         Some(config) => tokens_before.min(config.input_budget_tokens),
                         None => tokens_before,
                     };
@@ -1198,9 +1207,9 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
                             request: &mut request,
                             tokens_before,
                             keep: compaction::MAX_KEEP_TARGET,
-                            summary_budget: agent
-                                .config
-                                .context_budget
+                            summary_budget: self
+                                .run
+                                .context_budget()
                                 .map(|config| config.input_budget_tokens),
                             gain: Gain::Half { reference },
                             trigger: CompactionTrigger::Overflow,

@@ -90,6 +90,9 @@ fn assistant_with(
 #[test]
 fn reasoning_and_assistant_text_are_visually_distinct() {
     let mut app = App::new("test-model", "s1");
+    // Thinking is collapsed by default (ADR 0028 R3): this test is about the two styles
+    // when the reasoning text is shown at all.
+    app.reasoning_mode = radian_tui::blocks::ReasoningMode::Expanded;
     // Live deltas arrive first (through the projection, exactly as the loop feeds them)...
     let projection = radian_tui::projection::SessionProjection::new();
     stream(
@@ -117,7 +120,7 @@ fn reasoning_and_assistant_text_are_visually_distinct() {
 
     let reasoning = style_of(&terminal, "THINKING-WORDS").expect("reasoning on screen");
     let answer = style_of(&terminal, "VISIBLE-ANSWER").expect("answer on screen");
-    assert_eq!(reasoning.fg, Some(Color::DarkGray));
+    assert_eq!(reasoning.fg, Some(Color::Rgb(150, 160, 164)));
     assert_ne!(
         reasoning, answer,
         "reasoning must not share the assistant text's style"
@@ -141,8 +144,12 @@ fn an_interrupted_prefix_is_marked() {
     let text = screen(&terminal);
     assert!(text.contains("half an ans"), "{text}");
     assert!(text.contains("[interrupted]"), "{text}");
-    let marker = style_of(&terminal, "[interrupted]").unwrap();
-    assert_eq!(marker.fg, Some(Color::Yellow));
+    let marker = style_of(&terminal, " [interrupted]").unwrap();
+    assert_eq!(
+        marker.fg,
+        Some(Color::Rgb(205, 154, 34)),
+        "pi's warning level"
+    );
 }
 
 #[test]
@@ -468,16 +475,25 @@ fn the_box_input_style_draws_the_bordered_box() {
 /// own foreground (the patch only adds the background).
 #[test]
 fn a_selection_draws_the_selection_role_on_its_cells() {
+    use radian_tui::blocks::ReasoningMode;
     use radian_tui::select::{Selection, locate};
     let mut app = App::new("m", "s");
     app.push_message(&Message::user("hello selection"));
     app.set_transcript_width(40);
-    let (total, _) = radian_tui::render::visible_lines(&mut app.entries, 40, 0, 0, &app.theme);
+    let (total, _) = radian_tui::render::visible_lines(
+        &mut app.entries,
+        ReasoningMode::Expanded,
+        40,
+        0,
+        0,
+        &app.theme,
+    );
     app.set_viewport(u16::try_from(total).unwrap(), total);
-    // Select "selection" on the first line: body columns 6..15 → screen columns 8..17.
+    // Select "selection" on the block's text line (a user block is pad / text / pad): body
+    // columns 6..15 → screen columns 8..17.
     let selection = Selection {
-        anchor: locate(&app.entries, 40, 0, 8).expect("anchor"),
-        head: locate(&app.entries, 40, 0, 17).expect("head"),
+        anchor: locate(&app.entries, ReasoningMode::Expanded, 40, 1, 8).expect("anchor"),
+        head: locate(&app.entries, ReasoningMode::Expanded, 40, 1, 17).expect("head"),
     };
     app.selection = Some(selection);
     let terminal = render(&mut app, 40, 6);
@@ -486,14 +502,14 @@ fn a_selection_draws_the_selection_role_on_its_cells() {
     let word = style_of(&terminal, "selection").expect("the selected word is on screen");
     assert_eq!(
         word.bg,
-        Some(Color::DarkGray),
+        Some(Color::Rgb(50, 84, 103)),
         "the dark theme's selection band"
     );
     let before = style_of(&terminal, "hello").expect("the unselected head of the line");
     assert_eq!(
         before.bg,
-        Some(Color::Reset),
-        "only the selection carries the band"
+        Some(Color::Rgb(33, 59, 73)),
+        "the user block's band, not the selection's"
     );
     assert_eq!(before.fg, word.fg, "the text keeps its own foreground");
 }
@@ -501,16 +517,24 @@ fn a_selection_draws_the_selection_role_on_its_cells() {
 /// The `mono` theme's selection is reverse video, never a color (`NO_COLOR` and `mono`).
 #[test]
 fn the_mono_selection_is_reversed_not_colored() {
+    use radian_tui::blocks::ReasoningMode;
     use radian_tui::select::{Selection, locate};
     let mut app = App::new("m", "s");
     app.theme = radian_tui::theme::Theme::mono();
     app.push_message(&Message::user("hello selection"));
     app.set_transcript_width(40);
-    let (total, _) = radian_tui::render::visible_lines(&mut app.entries, 40, 0, 0, &app.theme);
+    let (total, _) = radian_tui::render::visible_lines(
+        &mut app.entries,
+        ReasoningMode::Expanded,
+        40,
+        0,
+        0,
+        &app.theme,
+    );
     app.set_viewport(u16::try_from(total).unwrap(), total);
     app.selection = Some(Selection {
-        anchor: locate(&app.entries, 40, 0, 8).expect("anchor"),
-        head: locate(&app.entries, 40, 0, 17).expect("head"),
+        anchor: locate(&app.entries, ReasoningMode::Expanded, 40, 1, 8).expect("anchor"),
+        head: locate(&app.entries, ReasoningMode::Expanded, 40, 1, 17).expect("head"),
     });
     let terminal = render(&mut app, 40, 6);
     let word = style_of(&terminal, "selection").expect("on screen");
@@ -524,13 +548,21 @@ fn the_mono_selection_is_reversed_not_colored() {
 /// A single click's empty selection draws nothing anywhere.
 #[test]
 fn an_empty_selection_draws_nothing() {
+    use radian_tui::blocks::ReasoningMode;
     use radian_tui::select::{Selection, locate};
     let mut app = App::new("m", "s");
     app.push_message(&Message::user("hello selection"));
     app.set_transcript_width(40);
-    let (total, _) = radian_tui::render::visible_lines(&mut app.entries, 40, 0, 0, &app.theme);
+    let (total, _) = radian_tui::render::visible_lines(
+        &mut app.entries,
+        ReasoningMode::Expanded,
+        40,
+        0,
+        0,
+        &app.theme,
+    );
     app.set_viewport(u16::try_from(total).unwrap(), total);
-    let at = locate(&app.entries, 40, 0, 8).expect("anchor");
+    let at = locate(&app.entries, ReasoningMode::Expanded, 40, 1, 8).expect("anchor");
     app.selection = Some(Selection {
         anchor: at,
         head: at,
@@ -539,8 +571,8 @@ fn an_empty_selection_draws_nothing() {
     assert!(text.contains("hello selection"), "{text}");
     assert_eq!(
         style_of(&render(&mut app, 40, 6), "selection").map(|s| s.bg),
-        Some(Some(Color::Reset)),
-        "no band: the two anchors coincide"
+        Some(Some(Color::Rgb(33, 59, 73))),
+        "no selection band: the two anchors coincide, only the user band is there"
     );
 }
 
@@ -598,6 +630,300 @@ fn wrap_and_wrap_char_offsets_agree() {
     }
 }
 
+/// A fenced code block never wraps (ADR 0028 R9): a 200-column line on an 80-column screen
+/// is one line ending in an ellipsis, and the next source line is the next screen line.
+#[test]
+fn a_code_block_does_not_wrap_and_truncates_with_an_ellipsis() {
+    let mut app = App::new("m", "s");
+    let long = "x".repeat(200);
+    app.push_message(&Message::assistant(format!(
+        "before\n```rust\n{long}\nsecond\n```\nafter"
+    )));
+    let terminal = render(&mut app, 80, 12);
+    let buffer = terminal.backend().buffer();
+    // Find the long line's row: it starts with 79 'x' and ends with '…' on the same row.
+    let mut found = None;
+    for row in 0..12u16 {
+        let text: String = (0..80u16)
+            .map(|col| {
+                buffer
+                    .cell((col, row))
+                    .map(|c| c.symbol())
+                    .unwrap_or(" ")
+                    .to_string()
+            })
+            .collect();
+        if text.starts_with("xxxx") {
+            found = Some((row, text));
+            break;
+        }
+    }
+    let (row, text) = found.expect("the long code line is on screen");
+    assert_eq!(text.chars().filter(|&c| c == 'x').count(), 79, "{text:?}");
+    assert!(text.ends_with('…'), "the truncation marker: {text:?}");
+    // The next source line is its own row (no soft wrap pushed it down).
+    let next: String = (0..80u16)
+        .map(|col| {
+            buffer
+                .cell((col, row + 1))
+                .map(|c| c.symbol())
+                .unwrap_or(" ")
+                .to_string()
+        })
+        .collect();
+    assert!(
+        next.starts_with("second"),
+        "no wrap between code lines: {next:?}"
+    );
+    assert!(screen(&terminal).contains("before"), "the prose before it");
+    assert!(screen(&terminal).contains("after"), "the prose after it");
+}
+
+/// Only a notice's **first** line is a structured label (ADR 0028): a wrapped continuation
+/// that happens to contain a colon (`12:30`, `https://…`, `path:line`) is prose and keeps the
+/// body's level, not the accent.
+#[test]
+fn a_wrapped_notice_continuation_is_not_a_label() {
+    let mut app = App::new("m", "s");
+    // Width 27 → body 25, so the break lands just before `12:30`: the continuation starts
+    // with a colon token (the case that used to be mis-drawn as an accent label).
+    app.push_notice("aaaa bbbb cccc dddd eeee 12:30 ffff");
+    let terminal = render(&mut app, 27, 10);
+    let text = screen(&terminal);
+    assert!(text.contains("12:30"), "{text}");
+    let continuation = style_of(&terminal, "12:30").expect("the continuation is on screen");
+    assert_eq!(
+        continuation.fg, app.theme.notice_body.fg,
+        "a continuation is body text, not a label"
+    );
+    assert_ne!(
+        continuation.fg, app.theme.notice_label.fg,
+        "it must not get the accent"
+    );
+    // The first line, which has no colon prefix, is unaffected either way; a first line
+    // WITH a label still takes the accent.
+    app.push_notice("profile: workspace");
+    let terminal = render(&mut app, 27, 10);
+    let label = style_of(&terminal, "profile:").expect("the label");
+    assert_eq!(label.fg, app.theme.notice_label.fg);
+}
+
+/// Thinking folds (ADR 0028 R3): collapsed is one placeholder line, Ctrl-T expands it to the
+/// full text, and toggling back collapses it — the fold state is part of the layout cache
+/// key, so the count changes with it.
+#[test]
+fn thinking_folds_to_one_line_and_ctrl_t_expands_it() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut app = App::new("m", "s");
+    app.apply_event(&AgentEvent::TranscriptAppended {
+        index: 0,
+        message: assistant_with("THE ANSWER", "FIRST THOUGHT\nSECOND THOUGHT", false, vec![]),
+    });
+    let text = screen(&render(&mut app, 60, 10));
+    assert!(text.contains("▸ thinking (2 lines)"), "{text}");
+    assert!(
+        !text.contains("FIRST THOUGHT"),
+        "folded by default:
+{text}"
+    );
+    assert!(text.contains("THE ANSWER"), "{text}");
+
+    app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    let text = screen(&render(&mut app, 60, 12));
+    assert!(
+        text.contains("FIRST THOUGHT"),
+        "expanded:
+{text}"
+    );
+    assert!(text.contains("SECOND THOUGHT"), "{text}");
+    assert!(!text.contains("▸ thinking"), "{text}");
+
+    app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    let text = screen(&render(&mut app, 60, 10));
+    assert!(text.contains("▸ thinking (2 lines)"), "{text}");
+    assert!(!text.contains("FIRST THOUGHT"), "{text}");
+}
+
+/// The fold state is part of the **layout cache key** (ADR 0028 R1): collapsing changes the
+/// transcript's line count, so the viewport math (total lines, scroll range) changes with it.
+/// A cache that forgot the mode would keep serving the old count.
+#[test]
+fn folding_changes_the_transcript_line_count() {
+    let mut app = App::new("m", "s");
+    app.reasoning_mode = radian_tui::blocks::ReasoningMode::Expanded;
+    app.apply_event(&AgentEvent::TranscriptAppended {
+        index: 0,
+        message: assistant_with("ANSWER", "one\ntwo\nthree", false, vec![]),
+    });
+    let _ = render(&mut app, 60, 10);
+    let expanded = app.total_lines;
+    app.reasoning_mode = radian_tui::blocks::ReasoningMode::Collapsed;
+    let _ = render(&mut app, 60, 10);
+    let collapsed = app.total_lines;
+    assert_eq!(
+        expanded,
+        collapsed + 2,
+        "three thinking lines become one placeholder"
+    );
+    assert_eq!(collapsed, 2, "the placeholder plus the answer");
+}
+
+/// `tui.display.reasoning = "hidden"` removes the reasoning lines entirely.
+#[test]
+fn hidden_reasoning_contributes_nothing() {
+    let mut app = App::new("m", "s");
+    app.reasoning_mode = radian_tui::blocks::ReasoningMode::Hidden;
+    app.apply_event(&AgentEvent::TranscriptAppended {
+        index: 0,
+        message: assistant_with("THE ANSWER", "SECRET THOUGHT", false, vec![]),
+    });
+    let text = screen(&render(&mut app, 60, 10));
+    assert!(text.contains("THE ANSWER"), "{text}");
+    assert!(!text.contains("SECRET THOUGHT"), "{text}");
+    assert!(!text.contains("thinking"), "{text}");
+}
+
+/// `split_label`: a leading `[tag]`, or the short prefix before the first colon. Nothing is
+/// special-cased per notice — the startup lines and the runtime notices both go through it.
+#[test]
+fn the_structured_label_split_is_one_rule() {
+    use radian_tui::render::split_label;
+    assert_eq!(
+        split_label("profile: workspace · sandbox macos"),
+        Some(("profile:", " workspace · sandbox macos"))
+    );
+    assert_eq!(
+        split_label("[memory] no project linked"),
+        Some(("[memory]", " no project linked"))
+    );
+    assert_eq!(split_label("context: C ?"), Some(("context:", " C ?")));
+    // No label: a colon far in, an empty prefix, a `[` that never closes.
+    assert_eq!(split_label("just a sentence"), None);
+    assert_eq!(
+        split_label("a very long prefix that keeps going way past the cap: value"),
+        None
+    );
+    assert_eq!(split_label(": empty prefix"), None);
+    assert_eq!(split_label("[unclosed tag"), None);
+}
+
+/// A startup notice's label carries the accent role; its body stays on the secondary level,
+/// and the dark builtin keeps ui-r1's readable default foreground for the body.
+#[test]
+fn a_startup_line_colors_its_label_with_accent() {
+    let mut app = App::new("m", "s");
+    app.push_notice("profile: workspace · sandbox macos-seatbelt");
+    let terminal = render(&mut app, 60, 6);
+    let label = style_of(&terminal, "profile:").expect("the label is on screen");
+    assert_eq!(
+        label.fg,
+        Some(Color::Rgb(167, 152, 215)),
+        "accent = pi's violet"
+    );
+    assert!(
+        label.add_modifier.contains(ratatui::style::Modifier::BOLD),
+        "the label is the emphasis"
+    );
+    let body = style_of(&terminal, "workspace").expect("the body is on screen");
+    assert_eq!(
+        body.fg,
+        Some(Color::Rgb(157, 165, 169)),
+        "the body is pi's muted level"
+    );
+}
+
+/// The user block's band (ADR 0028 R4, owner acceptance): the `user` role's background covers
+/// the whole row — the marker, the text, the trailing whitespace — and the blank rows above
+/// and below it.
+#[test]
+fn a_user_block_paints_its_band_across_the_whole_block() {
+    let mut app = App::new("m", "s");
+    app.theme.user = ratatui::style::Style::default().bg(Color::Rgb(0x18, 0x18, 0x20));
+    app.push_message(&Message::user("hello band"));
+    let terminal = render(&mut app, 30, 8);
+    let buffer = terminal.backend().buffer();
+    let band = Color::Rgb(0x18, 0x18, 0x20);
+    // Rows 0 (pad), 1 (text) and 2 (pad) are the block; every cell carries the band.
+    for row in 0..3u16 {
+        for col in 0..30u16 {
+            let cell = buffer.cell((col, row)).expect("on screen");
+            assert_eq!(cell.bg, band, "row {row} col {col} must carry the band");
+        }
+    }
+    // The row below the block is not painted.
+    assert_ne!(buffer.cell((0, 3)).expect("on screen").bg, band);
+    assert!(screen(&terminal).contains("hello band"));
+}
+
+/// A tool card's band follows its state (ADR 0028 R4): running / success / failure, and the
+/// result entry carries the same two.
+#[test]
+fn a_tool_card_paints_the_state_band() {
+    for (result, expected) in [
+        (None, Color::Rgb(52, 56, 58)),
+        (Some(false), Color::Rgb(37, 65, 49)),
+        (Some(true), Color::Rgb(91, 40, 42)),
+    ] {
+        let mut app = App::new("m", "s");
+        let mut call = Entry::new(EntryKind::ToolCall, "shell({\"command\": \"ls\"})");
+        call.result = result;
+        app.entries.push(call);
+        let terminal = render(&mut app, 40, 6);
+        let buffer = terminal.backend().buffer();
+        assert_eq!(
+            buffer.cell((0, 0)).expect("on screen").bg,
+            expected,
+            "the head row's band for {result:?}"
+        );
+        assert_eq!(
+            buffer.cell((39, 0)).expect("on screen").bg,
+            expected,
+            "the band reaches the row's end"
+        );
+    }
+
+    // A tool result paints the card body the same way.
+    let mut app = App::new("m", "s");
+    let mut result = Entry::new(EntryKind::ToolResult, "line one\nline two");
+    result.is_error = true;
+    app.entries.push(result);
+    let terminal = render(&mut app, 40, 6);
+    let buffer = terminal.backend().buffer();
+    for row in 0..2u16 {
+        for col in 0..40u16 {
+            assert_eq!(
+                buffer.cell((col, row)).expect("on screen").bg,
+                Color::Rgb(91, 40, 42),
+                "the error band covers row {row} col {col}"
+            );
+        }
+    }
+}
+
+/// The `/login` wizard renders with the theme's text levels (ADR 0028): the prompt is main
+/// text, the selected choice the emphasis role, the others secondary, and the key hints weak.
+#[test]
+fn the_login_wizard_uses_the_text_hierarchy() {
+    use radian_tui::login::{LoginStep, LoginWizard};
+    let mut app = App::new("m", "s");
+    app.push_modal(radian_tui::app::Modal::Login(Box::new(LoginWizard::new(
+        LoginStep::ChooseProvider { cursor: 0 },
+    ))));
+    let terminal = render(&mut app, 70, 14);
+    let text = screen(&terminal);
+    assert!(text.contains("choose a provider"), "{text}");
+    let prompt = style_of(&terminal, "choose").expect("the prompt");
+    assert_eq!(prompt.fg, app.theme.text.fg, "the prompt is main text");
+    let hint = style_of(&terminal, "(↑/↓,").expect("the key hint");
+    assert_eq!(hint.fg, app.theme.hint.fg, "the key hint is weak");
+    // The first choice row is the selection: the emphasis (accent) role.
+    let selected = style_of(&terminal, ">").expect("the selected row");
+    assert_eq!(
+        selected.fg, app.theme.notice_label.fg,
+        "the selected row is the emphasis"
+    );
+}
+
 /// The question form's key line stays visible when the option list fills the box (same bug the
 /// approval box had: the hint used to be the content's last line, and the clip cut it).
 #[test]
@@ -631,4 +957,35 @@ fn the_question_keys_stay_visible_with_a_long_option_list() {
     assert!(text.contains("Esc decline"), "{text}");
     // The box is on screen with its scrolled list.
     assert!(text.contains("question 1/1"), "{text}");
+}
+
+/// `wrap_line_count` (the counting-only path, used to measure every entry on the first frame
+/// and after a resize) must agree with `wrap` for the same corpus, or the transcript's total
+/// line count and the virtualized window disagree.
+#[test]
+fn the_line_count_matches_the_wrap() {
+    let corpus = [
+        ("hello world", 5usize),
+        ("hello world", 11),
+        ("", 5),
+        ("\n", 5),
+        ("a\n\nb", 5),
+        ("  leading and trailing  ", 7),
+        ("日本語のテキストは幅で折る", 5),
+        ("ab   cd", 4),
+        ("one two three four five six seven", 7),
+        ("mixed 日本語 text wrap", 6),
+        ("日本", 1),
+        ("trailing spaces   ", 5),
+        ("word\n", 5),
+        ("combining a\u{301}b", 2),
+        ("a b c d e f", 1),
+    ];
+    for (text, width) in corpus {
+        assert_eq!(
+            radian_tui::render::wrap_line_count(text, width),
+            radian_tui::render::wrap(text, width).len(),
+            "{text:?} at {width}"
+        );
+    }
 }

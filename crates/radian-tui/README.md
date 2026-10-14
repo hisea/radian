@@ -182,9 +182,12 @@ find_next = ["ctrl-g", "shift-enter"]
 
 - `input_style`: `lines` (the default: a rule above and below, `> ` on the first line) or `box`
   (the bordered input box). An unknown value is ignored with a warning and falls back to `lines`.
-- `theme`: `dark` is the original palette, `light` re-picks it for a light background, `mono`
-  uses no color at all (bold/underline/dim only). A non-empty `NO_COLOR` environment variable
-  forces `mono` (<https://no-color.org>). An unknown theme is ignored with a warning.
+- `theme`: `dark` and `light` are **pi's own palettes**, read
+  through the same ADR 0029 conversion a theme file uses: the three text levels are pi's
+  brightness gradient (dark: `text` 89%, `muted` 67%, `dim` 56%), and every semantic color
+  sits at the 67% level, told apart by hue. `mono` uses no color at all (bold/underline/dim
+  only). A non-empty `NO_COLOR` environment variable forces `mono`
+  (<https://no-color.org>). An unknown theme is ignored with a warning.
 #### Theme files (ADR 0029): any pi theme works as-is
 
 `tui.theme` accepts any name. The built-ins (`dark`, `light`, `mono`) resolve first; any other
@@ -213,12 +216,17 @@ Every pi role maps onto a Radian role (`[tui.colors]` accepts both name families
 |---|---|
 | `user` | `userMessageText` (fg) + `userMessageBg` (bg) |
 | `selection` | `selectedBg` (bg only — the text keeps its own foreground under the band) |
+| `tool_pending_bg` / `tool_success_bg` / `tool_error_bg` | `toolPendingBg` / `toolSuccessBg` / `toolErrorBg` (the tool card's band by state) |
+| `notice_label` / `notice_body` | `accent` / `muted` (a structured notice's label and the rest) |
 | `reasoning` | `thinkingText` |
-| `tool_call` / `tool_result` / `tool_result_error` | `toolTitle` / `toolOutput` / `error` |
-| `notice` / `hint` / `completion` / `truncation` | `text` / `muted` / `dim` / `dim` |
+| `tool_call` / `tool_result` / `tool_result_error` | `toolTitle` (= `text`) / `toolOutput` (= `muted`) / `error` |
+| `text` | `text` (the main level: answers, user words, tool titles) |
+| `notice` | `text` (the notice line itself) |
+| `hint` / `completion` / `truncation` | `dim` (the weak level) |
 | `turn_idle` / `turn_running` / `turn_cancelled` | `success` / `warning` / `error` |
 | `interrupted` / `note` / `budget_over` | `warning` |
 | `model` / `mcp` / `find` | `accent` |
+| `auto` | `warning` (pi has no auto role; the status bar's `AUTO` marker is reversed) |
 | `tier` / `usage` / `budget` | `muted` |
 | `approval_border` | `borderAccent` |
 | `auto`（状态栏的 `AUTO` 标记，ADR 0026 D9） | `warning` |

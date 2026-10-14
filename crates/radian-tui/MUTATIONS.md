@@ -626,3 +626,40 @@ HEAD，结束后删除）· 每个变异改完跑对应测试、`git checkout --
 **本片另加的两个行为断言**（不是变异，是回归钉）：`pty_pointer_motion_alone_draws_no_frame`
 （无按键移动 40 次、帧数不涨——SC1 的行为面）和
 `pty_quit_closes_button_motion_reporting`（退出序列精确为 `1006l 1002l 1000l`——SC3 的精确面）。
+
+## Slice: ADR 0028 第 1 片（块模型、按块背景、thinking 折叠、代码块不折行）
+
+Base `82b07de` · 一次性 worktree `/tmp/blocks-mut`（`git worktree add` 自本片 HEAD，结束后删除）·
+每个变异 `python3` 补丁（带 `assert`，no-op 会显式报 PATCH FAILED）、跑对应测试后 `git checkout -- .`
+还原、`git status --short` 为空。
+
+| # | 需求 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| B1 | 用户块整行铺背景（含行尾与上下空行） | 去掉行尾填充 span，空行不铺 | `a_user_block_paints_its_band_across_the_whole_block` | ✅ |
+| B2 | 工具卡片按状态铺背景 | `card_band` 对 ToolCall/ToolResult 一律返回 pending | `a_tool_card_paints_the_state_band` | ✅ |
+| B3 | thinking 折叠成一行 | `layout`/`cheap_count` 不再处理 `Collapsed` | `thinking_folds_to_one_line_and_ctrl_t_expands_it` | ✅ |
+| B4 | 代码块不折行、超宽截断带 … | `layout`/`line_count` 的 Code 分支改成按正文折行 | `a_code_block_does_not_wrap_and_truncates_with_an_ellipsis` | ✅ |
+| B5 | 折叠状态进缓存键 | `layout_cache` 的键去掉 `ReasoningMode` | `folding_changes_the_transcript_line_count` | ✅ |
+
+5/5 抓住。**过程记录（B5 的第一轮）**：第一版跑的 `thinking_folds_…` 只看屏幕文本——可见条目每帧
+重新 `layout`（不走计数缓存），所以缓存键漏掉 mode 时屏幕内容仍然正确，是**假通过**。加
+`folding_changes_the_transcript_line_count`（断言 `app.total_lines` 随折叠变化）后才真正抓住。
+**B4 的第一轮**是 patch 文本与源码格式不符（`cargo fmt` 后换行），脚本的 `assert` 直接报
+PATCH FAILED 并跳过——没有当成"抓住"。
+
+### 审查第 1 轮的两条补充（blocks-r1，提交 `9afa1ff`）
+
+| # | 需求 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| C1 | 只对 notice 的第一行切标签（N1） | 去掉 `first_text` 条件，每行都切 | `a_wrapped_notice_continuation_is_not_a_label` | ✅ |
+| C2 | 恰好等宽的代码行不算截断（N2） | 恢复"总按 `width-1` 判断"（`if total <= width` 恒假） | `a_code_line_that_fits_exactly_is_not_truncated` | ✅ |
+
+2/2 抓住。**过程记录**：C2 第一轮跑的是 `cargo test --lib blocks a_code_line_that_fits` —— 两个位置参数，cargo 只把第一个当过滤器，于是"没抓住"是假象；改成单个过滤器 `--lib a_code_line_that_fits` 后立刻抓住。F0（fmt）在本轮之前的一次提交里已修好，本 HEAD 上 `cargo fmt --all -- --check` 通过。
+
+## ADR 0026 D8 审查 M1：picker 先于模型解析（2026-10-14）
+
+Base `0b9785b` · 一次性 worktree `/tmp/radian-pi-mut-m1`，跑完删除。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M1a | 只认命令行带 id 的 `--resume`（`resumed_route` 读 `cli.resume` 而非解析后的 `resume`） | `pty_a_picked_resume_uses_the_journals_model` | ✅ |

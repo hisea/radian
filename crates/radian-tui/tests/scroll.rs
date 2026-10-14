@@ -105,14 +105,16 @@ fn page_down_stops_at_the_bottom_and_resumes_following() {
     let mut app = App::new("m", "s");
     fill(&mut app, 40);
     render(&mut app);
-    for _ in 0..10 {
+    // A user block is three lines (pad / text / pad, ADR 0028 R1), so 40 entries are 120
+    // lines: enough pages to reach the top whatever the viewport height is.
+    for _ in 0..100 {
         app.on_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
     }
     render(&mut app);
     assert_eq!(app.scroll, 0, "page up stops at the top");
     assert!(!app.is_following());
 
-    for _ in 0..10 {
+    for _ in 0..100 {
         app.on_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
     }
     render(&mut app);

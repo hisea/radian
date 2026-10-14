@@ -3207,8 +3207,9 @@ async fn anthropic_provider_sends_a_messages_request_and_shows_the_reply() {
     assert_eq!(body["model"], "claude-x");
     // `max_tokens` is required by the Messages API and the host fills it in.
     assert_eq!(body["max_tokens"], 16384, "{body}");
-    // Default thinking is off: the request has no `thinking` key at all.
-    assert!(body.get("thinking").is_none(), "{body}");
+    // ADR 0026 D11: the default level is `medium`, and the anthropic descriptor's provider
+    // map sends it as the existing `adaptive` setting.
+    assert_eq!(body["thinking"], json!({"type": "adaptive"}), "{body}");
 }
 
 /// Without `--api-key-env`, `--provider anthropic` reads `ANTHROPIC_API_KEY`; the key never
@@ -3257,13 +3258,16 @@ async fn anthropic_reads_anthropic_api_key_env_by_default_and_never_leaks_it() {
     );
 }
 
-/// `--thinking adaptive` puts `{"type":"adaptive"}` in the request body; `enabled:<budget>`
-/// puts the budget in. The default (no `--thinking`) sends no `thinking` key, asserted in the
-/// messages test above.
+/// ADR 0026 D11 (review A1): every level has its own wire value on Anthropic — `adaptive` for
+/// the default `medium`, `enabled:<budget>` for the rest — and a legacy
+/// `--thinking enabled:<budget>` keeps the user's budget. `off` sends no `thinking` key,
+/// asserted in the messages test below.
 #[tokio::test]
 async fn anthropic_thinking_modes_are_sent_in_the_body() {
     for (mode, expected) in [
         ("adaptive", json!({"type": "adaptive"})),
+        ("high", json!({"type": "enabled", "budget_tokens": 4096})),
+        ("max", json!({"type": "enabled", "budget_tokens": 12288})),
         (
             "enabled:8192",
             json!({"type": "enabled", "budget_tokens": 8192}),
@@ -3382,47 +3386,145 @@ async fn the_default_provider_still_sends_an_openai_request() {
 /// `>= 1024` and `< --max-tokens` (Anthropic's rule, wire notes §2.3). Both a budget equal to
 /// `max_tokens` (16384 default) and one below 1024 are usage errors and leave no session file.
 #[tokio::test]
-async fn anthropic_rejects_a_thinking_budget_out_of_range_before_creating_a_session() {
-    let server = anth::MockServer::start(vec![anth_text_reply("ok")]).await;
-    for (mode, budget) in [("enabled:16384", 16384u64), ("enabled:1000", 1000)] {
-        let dir = fresh_session_dir();
-        let (code, _, stderr) = feed_and_wait(
-            spawn_agent_in(
-                &dir,
-                &[
-                    "--model",
-                    "claude",
-                    "--provider",
-                    "anthropic",
-                    "--thinking",
-                    mode,
-                    "-p",
-                    "hi",
-                ],
-                &[
-                    ("ANTHROPIC_API_KEY", "sk-ant-budget"),
-                    ("RADIAN_BASE_URL", &server.base_url),
-                ],
-            ),
-            "",
-        )
-        .await;
-        assert_eq!(code, 2, "{mode} must be a usage error: {stderr}");
-        assert!(stderr.contains("out of range"), "{mode}: {stderr}");
-        assert!(
-            stderr.contains(&format!("enabled:{budget}")),
-            "the message must name the budget: {stderr}"
-        );
-        // The rule and both numbers are in the message.
-        assert!(stderr.contains("1024"), "{mode}: {stderr}");
-        assert!(stderr.contains("16384"), "{mode}: {stderr}");
-        // No session file was created, and no request was sent.
-        assert_session_dir_empty(&dir);
-    }
+async fn the_legacy_enabled_budget_is_accepted_and_clamped_like_high() {
+    // ADR 0026 D11 (review A1): the legacy `enabled:<budget>` is accepted for one version with
+    // a warning and the user's budget is sent **as-is** (not replaced by the level's budget).
+    let server = anth::MockServer::start(vec![anth_text_reply("LEGACY-OK")]).await;
+    let dir = fresh_session_dir();
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent_in(
+            &dir,
+            &[
+                "--model",
+                "claude",
+                "--provider",
+                "anthropic",
+                "--thinking",
+                "enabled:8192",
+                "-p",
+                "hi",
+            ],
+            &[
+                ("ANTHROPIC_API_KEY", "sk-ant-budget"),
+                ("RADIAN_BASE_URL", &server.base_url),
+            ],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("LEGACY-OK"), "{stdout}");
     assert!(
-        server.requests().is_empty(),
-        "an out-of-range budget must not reach the model"
+        stderr.contains("deprecated"),
+        "the legacy spelling warns: {stderr}"
     );
+    let body = server.requests()[0].json();
+    assert_eq!(
+        body["thinking"],
+        json!({"type": "enabled", "budget_tokens": 8192}),
+        "{body}"
+    );
+}
+
+/// Review B1: a **level's** budget is clamped to `--max-tokens - 1` instead of failing the
+/// build, and the completion hides the levels only when no budget can fit at all. The user's
+/// explicit legacy budget is not clamped.
+#[tokio::test]
+async fn a_level_budget_clamps_to_max_tokens() {
+    // `--max-tokens 4096` + `--thinking max` (12288 in the map) -> 4095 on the wire.
+    let server = anth::MockServer::start(vec![anth_text_reply("CLAMPED")]).await;
+    let dir = fresh_session_dir();
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent_in(
+            &dir,
+            &[
+                "--model",
+                "claude",
+                "--provider",
+                "anthropic",
+                "--max-tokens",
+                "4096",
+                "--thinking",
+                "max",
+                "-p",
+                "hi",
+            ],
+            &[
+                ("ANTHROPIC_API_KEY", "sk-ant-clamp"),
+                ("RADIAN_BASE_URL", &server.base_url),
+            ],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("CLAMPED"), "{stdout}");
+    let body = server.requests()[0].json();
+    assert_eq!(
+        body["thinking"],
+        json!({"type": "enabled", "budget_tokens": 4095}),
+        "{body}"
+    );
+
+    // `--max-tokens 1024` leaves no room for any budget: an `enabled` level clamps to a
+    // budget-less one, so the request has no `enabled` setting.
+    let server = anth::MockServer::start(vec![anth_text_reply("NO-ROOM")]).await;
+    let dir = fresh_session_dir();
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent_in(
+            &dir,
+            &[
+                "--model",
+                "claude",
+                "--provider",
+                "anthropic",
+                "--max-tokens",
+                "1024",
+                "--thinking",
+                "high",
+                "-p",
+                "hi",
+            ],
+            &[
+                ("ANTHROPIC_API_KEY", "sk-ant-floor"),
+                ("RADIAN_BASE_URL", &server.base_url),
+            ],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("NO-ROOM"), "{stdout}");
+    let body = server.requests()[0].json();
+    assert!(
+        !body["thinking"].to_string().contains("enabled"),
+        "no enabled budget fits 1024: {body}"
+    );
+
+    // The user's explicit legacy budget is **not** clamped: over-limit stays a usage error.
+    let dir = fresh_session_dir();
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent_in(
+            &dir,
+            &[
+                "--model",
+                "claude",
+                "--provider",
+                "anthropic",
+                "--max-tokens",
+                "4096",
+                "--thinking",
+                "enabled:99999",
+                "-p",
+                "hi",
+            ],
+            &[("ANTHROPIC_API_KEY", "sk-ant-legacy")],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("out of range"), "{stderr}");
 }
 
 // ---------- session export and search (--export / --search) ----------
@@ -4060,10 +4162,11 @@ async fn session_id_already_exists_points_at_resume() {
 /// provider they are a usage error before any session file exists, not a silent no-op.
 #[tokio::test]
 async fn anthropic_only_flags_are_refused_under_openai_compatible() {
-    for (label, extra) in [
-        ("thinking", vec!["--thinking", "adaptive"]),
-        ("max-tokens", vec!["--max-tokens", "100"]),
-    ] {
+    // `--thinking` left this check in ADR 0026 D11: the unified levels ride both wire
+    // protocols (`reasoning_effort` for OpenAI-compatible), so only `--max-tokens` remains
+    // Anthropic-only.
+    {
+        let (label, extra) = ("max-tokens", vec!["--max-tokens", "100"]);
         let dir = scratch(&format!("flag-{label}"));
         let sessions = dir.join("sessions");
         std::fs::create_dir_all(&sessions).unwrap();

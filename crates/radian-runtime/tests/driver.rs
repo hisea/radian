@@ -314,3 +314,245 @@ async fn the_public_api_never_exposes_active_run() {
     );
     let _: Option<Step> = None; // `Step` exists, but no API here returns one.
 }
+
+// ---------- ADR 0026 slices 2+3: the /model switch ----------
+
+/// A model switch queues a route **only**: the durable `ConfigChanged` carries provider and
+/// model, and the resolved key appears nowhere in the journal (D5; mutation M-"key").
+#[tokio::test]
+async fn a_model_switch_writes_a_route_and_never_a_key() {
+    const KEY: &str = "sk-switch-secret-value";
+    let model = ScriptedModel::new([text("turn done"), text("second turn done")]);
+    let tools = MemTools::new();
+    let (mut driver, env) = open_env("switch-route", Arc::clone(&model), tools.clone()).await;
+    driver.set_budget_for(Arc::new(|provider, model| {
+        (provider == "anthropic" && model == "claude").then_some(4321)
+    }));
+    let slot = Arc::clone(driver.config_slot());
+    let queue = Arc::clone(driver.config_queue());
+    // The switch happens mid-run, exactly as `/model` does: `/model` pushes into the queue
+    // while turn 1 runs (here: at its first model call), and the boundary applies it.
+    model.watch_config(
+        Arc::clone(&slot),
+        Arc::clone(&queue),
+        radian_runtime::ModelRoute::new("anthropic", "claude").to_value(),
+        0,
+    );
+    let handle = tokio::spawn(async move { driver.run().await });
+
+    env.inbox
+        .followup("first", InputSource::User)
+        .await
+        .unwrap();
+    env.recorder.wait_finished().await;
+    env.inbox
+        .followup("second", InputSource::User)
+        .await
+        .unwrap();
+    while env
+        .recorder
+        .events()
+        .iter()
+        .filter(|e| matches!(e, agent_core::AgentEvent::RunFinished { .. }))
+        .count()
+        < 2
+    {
+        env.recorder.wait_finished().await;
+    }
+    handle.abort();
+
+    // The durable change is the route alone, and the key is nowhere in the file.
+    let events = common::events(&env.path);
+    let change = events
+        .iter()
+        .find_map(|(name, _, data)| {
+            (name == "ConfigChanged")
+                .then(|| data["change"].clone())
+                .filter(|change| change["model"]["provider"] == "anthropic")
+        })
+        .expect("a model ConfigChanged was journaled");
+    assert_eq!(change["model"]["model"], "claude");
+    assert!(
+        change.get("key").is_none() && change.get("api_key").is_none(),
+        "the change carries a key: {change}"
+    );
+    let file = std::fs::read_to_string(&env.path).unwrap();
+    assert!(!file.contains(KEY), "the key reached the journal");
+
+    // D7: the budget followed the switched model — asserted after the switch applied and the
+    // run task owns the driver, so read the reopened state below instead.
+}
+
+/// D8: resume replays the last model change and the last thinking change, merged (neither
+/// kind erases the other).
+#[tokio::test]
+async fn resume_replays_the_last_model_and_thinking_changes() {
+    let model = ScriptedModel::new([text("one"), text("two"), text("three"), text("four")]);
+    let tools = MemTools::new();
+    let (mut driver, env) = open_env("switch-resume", Arc::clone(&model), tools.clone()).await;
+    let queue = Arc::clone(driver.config_queue());
+    let handle = tokio::spawn(async move { driver.run().await });
+
+    env.inbox.followup("a", InputSource::User).await.unwrap();
+    env.recorder.wait_finished().await;
+    // A switch, then a thinking change: both must survive the restart.
+    queue.push(radian_runtime::ModelRoute::new("anthropic", "claude").to_value());
+    env.inbox.followup("b", InputSource::User).await.unwrap();
+    env.recorder.wait_finished().await;
+    queue.push(serde_json::json!({"thinking": "high"}));
+    env.inbox.followup("c", InputSource::User).await.unwrap();
+    env.recorder.wait_finished().await;
+    handle.abort();
+    // The journal's single-writer lock dies with the task **and** with every Arc to the file:
+    // wait for the task, then drop the env (it holds the journal), before reopening.
+    let _ = handle.await;
+    // The temp dir dies with `env`, so the file continues under a copy (the lock dies with
+    // the Arc, the bytes survive the copy).
+    let path = env.path.clone();
+    let copy =
+        std::env::temp_dir().join(format!("radian-switch-resume-{}.jsonl", std::process::id()));
+    std::fs::remove_file(&copy).ok();
+    std::fs::copy(&path, &copy).unwrap();
+    drop(env);
+
+    // Reopen from the copy: the slot state is the merge, not the last change alone.
+    let journal = Arc::new(SessionJournal::resume(&copy, "sid").unwrap());
+    let inbox = Inbox::durable(16, Arc::clone(&journal));
+    let agent = Arc::new(Agent::new(Arc::clone(&model), tools));
+    let driver2 = Driver::open(
+        &agent,
+        Arc::clone(&journal),
+        Arc::clone(&inbox),
+        Arc::new(Recorder::default()) as Arc<dyn agent_core::EventSink>,
+        TurnOptions::default(),
+    )
+    .await
+    .unwrap();
+    let value = driver2.config_slot().value();
+    std::fs::remove_file(&copy).ok();
+    assert_eq!(value["model"]["provider"], "anthropic", "{value}");
+    assert_eq!(value["model"]["model"], "claude", "{value}");
+    assert_eq!(value["thinking"], "high", "{value}");
+}
+
+/// D7: applying a model change recomputes `B` from the host's resolver, and the next turn runs
+/// under it.
+#[tokio::test]
+async fn a_switch_moves_the_next_turns_budget() {
+    let model = ScriptedModel::new([]);
+    let tools = MemTools::new();
+    let (mut driver, _env) = open_env("switch-budget", Arc::clone(&model), tools).await;
+    driver.set_budget_for(Arc::new(|provider, model| {
+        (provider == "anthropic" && model == "claude").then_some(1234)
+    }));
+    assert_eq!(driver.test_turn_budget(), None, "nothing switched yet");
+    driver
+        .config_queue()
+        .push(radian_runtime::ModelRoute::new("anthropic", "claude").to_value());
+    driver.test_apply_pending_config().await.unwrap();
+    assert_eq!(
+        driver.test_turn_budget(),
+        Some(agent_core::ContextBudget::new(1234)),
+        "the switch moved the budget"
+    );
+}
+
+/// ADR 0026 D11 + review M3: resume merges **every** `ConfigChanged` in revision order, so a
+/// thinking change, a model change and an unrelated `approval` change (pi/auto) all survive.
+/// "The last of each kind" would drop the thinking level as soon as a third key appeared.
+#[tokio::test]
+async fn resume_merges_every_config_change_not_one_per_kind() {
+    let model = ScriptedModel::new([text("one"), text("two"), text("three"), text("four")]);
+    let tools = MemTools::new();
+    let (mut driver, env) = open_env("config-merge", Arc::clone(&model), tools.clone()).await;
+    let queue = Arc::clone(driver.config_queue());
+    let handle = tokio::spawn(async move { driver.run().await });
+
+    // thinking=high, then model=X, then an unrelated approval=auto.
+    queue.push(serde_json::json!({"thinking": "high"}));
+    env.inbox.followup("a", InputSource::User).await.unwrap();
+    env.recorder.wait_finished().await;
+    queue.push(radian_runtime::ModelRoute::new("anthropic", "claude").to_value());
+    env.inbox.followup("b", InputSource::User).await.unwrap();
+    env.recorder.wait_finished().await;
+    queue.push(serde_json::json!({"approval": "auto"}));
+    env.inbox.followup("c", InputSource::User).await.unwrap();
+    env.recorder.wait_finished().await;
+    handle.abort();
+    let _ = handle.await;
+
+    let path = env.path.clone();
+    let copy =
+        std::env::temp_dir().join(format!("radian-config-merge-{}.jsonl", std::process::id()));
+    std::fs::copy(&path, &copy).unwrap();
+    drop(env);
+
+    let journal = Arc::new(SessionJournal::resume(&copy, "sid").unwrap());
+    let inbox = Inbox::durable(16, Arc::clone(&journal));
+    let agent = Arc::new(Agent::new(Arc::clone(&model), tools));
+    let driver2 = Driver::open(
+        &agent,
+        Arc::clone(&journal),
+        Arc::clone(&inbox),
+        Arc::new(Recorder::default()) as Arc<dyn agent_core::EventSink>,
+        TurnOptions::default(),
+    )
+    .await
+    .unwrap();
+    let value = driver2.config_slot().value();
+    std::fs::remove_file(&copy).ok();
+    assert_eq!(
+        value["thinking"], "high",
+        "the thinking change survived: {value}"
+    );
+    assert_eq!(value["model"]["provider"], "anthropic", "{value}");
+    assert_eq!(value["model"]["model"], "claude", "{value}");
+    assert_eq!(value["approval"], "auto", "{value}");
+}
+
+/// ADR 0026 D7 + review M2: on a resume the host sets the budget resolver **after** the driver
+/// replayed the journal's model change; `set_budget_for` must therefore recompute for the
+/// restored route at once, not wait for the next switch.
+#[tokio::test]
+async fn the_resumed_model_gets_its_budget_when_the_resolver_arrives() {
+    let model = ScriptedModel::new([text("one"), text("two")]);
+    let tools = MemTools::new();
+    let (mut driver, env) = open_env("resume-budget", Arc::clone(&model), tools.clone()).await;
+    let queue = Arc::clone(driver.config_queue());
+    let handle = tokio::spawn(async move { driver.run().await });
+    queue.push(radian_runtime::ModelRoute::new("anthropic", "claude").to_value());
+    env.inbox.followup("a", InputSource::User).await.unwrap();
+    env.recorder.wait_finished().await;
+    handle.abort();
+    let _ = handle.await;
+
+    let path = env.path.clone();
+    let copy =
+        std::env::temp_dir().join(format!("radian-resume-budget-{}.jsonl", std::process::id()));
+    std::fs::copy(&path, &copy).unwrap();
+    drop(env);
+
+    let journal = Arc::new(SessionJournal::resume(&copy, "sid").unwrap());
+    let inbox = Inbox::durable(16, Arc::clone(&journal));
+    let agent = Arc::new(Agent::new(Arc::clone(&model), tools));
+    let mut driver2 = Driver::open(
+        &agent,
+        Arc::clone(&journal),
+        Arc::clone(&inbox),
+        Arc::new(Recorder::default()) as Arc<dyn agent_core::EventSink>,
+        TurnOptions::default(),
+    )
+    .await
+    .unwrap();
+    std::fs::remove_file(&copy).ok();
+    // The replay put the model in the slot; the resolver arrives now (the host's order).
+    assert_eq!(driver2.test_turn_budget(), None, "no resolver yet");
+    driver2.set_budget_for(Arc::new(|provider, model| {
+        (provider == "anthropic" && model == "claude").then_some(4321)
+    }));
+    assert_eq!(
+        driver2.test_turn_budget(),
+        Some(agent_core::ContextBudget::new(4321)),
+        "the restored route gets its budget when the resolver arrives"
+    );
+}

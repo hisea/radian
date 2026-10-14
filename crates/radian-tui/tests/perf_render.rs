@@ -339,6 +339,33 @@ fn perf_render_streaming() {
 /// test in this binary builds a 50k `App` too, and an in-process reading would just report
 /// their peak. The outer run re-executes this test binary for that one test.
 #[cfg(unix)]
+/// ADR 0028 R7's third threshold: the **first frame after a global toggle** (Ctrl-T folding
+/// the thinking blocks) re-lays every entry out, and must stay under 100 ms at 50k.
+#[test]
+#[ignore = "measurement, not an assertion; run with --ignored --nocapture"]
+fn perf_render_reasoning_toggle() {
+    use radian_tui::blocks::ReasoningMode;
+    for n in [1_000usize, 10_000, 50_000] {
+        let mut terminal = test_terminal();
+        let mut app = new_app(n);
+        app.reasoning_mode = ReasoningMode::Expanded;
+        // Prime both the layout cache (Expanded) and the screen.
+        let _ = draw_once(&mut terminal, &mut app);
+        app.reasoning_mode = ReasoningMode::Collapsed;
+        let first = draw_once(&mut terminal, &mut app);
+        // Back the other way, now with the collapsed cache warm.
+        app.reasoning_mode = ReasoningMode::Expanded;
+        let back = draw_once(&mut terminal, &mut app);
+        let steady = draw_once(&mut terminal, &mut app);
+        println!(
+            "entries {n:>6}: collapse first frame {:>8.2} ms | expand back {:>8.2} ms | steady {:>5.2} ms",
+            ms(first),
+            ms(back),
+            ms(steady)
+        );
+    }
+}
+
 #[test]
 #[ignore = "measurement, not an assertion; run with --ignored --nocapture"]
 fn perf_render_memory_50k() {

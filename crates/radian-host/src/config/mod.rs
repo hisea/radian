@@ -256,6 +256,9 @@ pub struct TuiConfig {
     /// `"osc52"` (the default), `"pbcopy"` (macOS only; elsewhere a warning and OSC 52) or
     /// `"off"`. `None` means the default; an unknown value is ignored with a warning.
     pub clipboard: Option<String>,
+    /// `tui.display.reasoning`: `"collapsed"` (the default), `"expanded"` or `"hidden"`
+    /// (ADR 0028 R3). `None` means the default; an unknown value is ignored with a warning.
+    pub display_reasoning: Option<String>,
 }
 
 /// One parsed configuration file.
@@ -687,6 +690,21 @@ fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
             // An unknown input style is a display preference: ignore it (and say so), never
             // refuse the file. The TUI falls back to the default.
             ("input_style", _) => config.skipped.push("tui.input_style".into()),
+            ("display", Value::Table(display)) => {
+                for (key, value) in display {
+                    match (key.as_str(), value) {
+                        ("reasoning", Value::String(mode))
+                            if matches!(mode.as_str(), "collapsed" | "expanded" | "hidden") =>
+                        {
+                            config.tui.display_reasoning = Some(mode.clone());
+                        }
+                        // A display preference: skip the key with a warning, never refuse the
+                        // file. The TUI keeps its default.
+                        _ => config.skipped.push(format!("tui.display.{key}")),
+                    }
+                }
+            }
+            ("display", _) => config.skipped.push("tui.display".into()),
             ("clipboard", Value::String(mode))
                 if matches!(mode.as_str(), "osc52" | "pbcopy" | "off") =>
             {
@@ -922,6 +940,37 @@ theme = "light"
         let config = parse_str("schema_version = 1\n[tui]\ninput_style = \"future\"\n").unwrap();
         assert_eq!(config.tui.input_style, None);
         assert!(config.skipped.contains(&"tui.input_style".to_string()));
+    }
+
+    /// `tui.display.reasoning` (ADR 0028 R3): the three modes are carried; an unknown one is
+    /// skipped with the `tui.*` warning and the TUI keeps its default.
+    #[test]
+    fn the_display_reasoning_mode_is_carried_and_an_unknown_value_is_skipped() {
+        assert_eq!(
+            parse_str("schema_version = 1\n")
+                .unwrap()
+                .tui
+                .display_reasoning,
+            None
+        );
+        for mode in ["collapsed", "expanded", "hidden"] {
+            let config = parse_str(&format!(
+                "schema_version = 1\n[tui.display]\nreasoning = \"{mode}\"\n"
+            ))
+            .unwrap();
+            assert_eq!(config.tui.display_reasoning.as_deref(), Some(mode));
+        }
+        let config =
+            parse_str("schema_version = 1\n[tui.display]\nreasoning = \"sometimes\"\n").unwrap();
+        assert_eq!(config.tui.display_reasoning, None);
+        assert!(
+            config
+                .skipped
+                .contains(&"tui.display.reasoning".to_string())
+        );
+        // A `tui.display` that is not a table is skipped, not refused.
+        let config = parse_str("schema_version = 1\n[tui]\ndisplay = 3\n").unwrap();
+        assert!(config.skipped.contains(&"tui.display".to_string()));
     }
 
     /// `tui.mouse` is an optional tri-state: absent = the default (on), `true`/`false` are

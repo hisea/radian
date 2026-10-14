@@ -49,6 +49,9 @@ pub struct OpenAiCompatibleConfig {
     /// `None` = the default policy (on for `api.openai.com`, off everywhere else),
     /// `Some(b)` = explicit override.
     pub include_usage: Option<bool>,
+    /// The unified thinking level's wire value, sent as `reasoning_effort` (ADR 0026 D11).
+    /// `None` sends no key, which is byte-identical to the adapter before the feature.
+    pub reasoning_effort: Option<String>,
 }
 
 /// Header values are hidden: custom headers often carry credentials such as `X-API-Key`.
@@ -65,6 +68,7 @@ impl fmt::Debug for OpenAiCompatibleConfig {
             .field("idle_timeout", &self.idle_timeout)
             .field("max_response_bytes", &self.max_response_bytes)
             .field("include_usage", &self.include_usage)
+            .field("reasoning_effort", &self.reasoning_effort)
             .finish()
     }
 }
@@ -81,6 +85,7 @@ impl OpenAiCompatibleConfig {
             idle_timeout: Duration::from_secs(120),
             max_response_bytes: 32 * 1024 * 1024,
             include_usage: None,
+            reasoning_effort: None,
         }
     }
 

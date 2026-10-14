@@ -297,6 +297,17 @@ Base `deb583f` · 在本任务工作树内逐条施加后从副本还原（`--no
 `--base-url`）改的是本 crate 的代码，但抓住它们的测试在 `agent-cli`；明细见
 `crates/agent-cli/MUTATIONS.md` 的 M22–M25。
 
+## ADR 0026 D11：统一思考级别（2026-10-14，重做）
+
+Base `442f55a` · 变异只在一次性 worktree 里做（`git worktree add --detach /tmp/radian-pi-mut-N <commit>`），
+跑完 `git worktree remove --force`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| T1 | 夹取改为先向下取（交换两段循环） | `provider::thinking_tests::the_clamp_prefers_the_nearest_supported_level_above` | ✅ |
+| T2 | 补全列出不支持的级别（filter 恒真） | `provider::thinking_tests::the_completion_lists_only_supported_levels_in_rank_order` | ✅ |
+| T3 | 没有映射表时仍发参数（`resolve_thinking` 的 `None` 分支返回 `Adaptive`） | `model::thinking_resolution_tests::a_mapless_model_resolves_to_nothing` | ✅ |
+
 ## ADR 0026 第 1 片(`/login`、具名 provider)交叉引用
 
 变异 L3（查 key 仍用通用描述符的槽位）、L4（同名时 auth.json 压过配置）、L5（验证请求的
@@ -319,6 +330,14 @@ Base `43ddbff` · 一次性检出 `/tmp/auto-mut`（detached，跑完删除）·
 `approval::tests::an_explicit_cli_choice_wins_and_backfills` /
 `resume_restores_the_journaled_state_over_the_config` 钉住。
 
+## ADR 0026 D11 审查 A1：Anthropic 七档不同线上值（2026-10-14）
+
+Base `0b9785b` · 一次性 worktree `/tmp/radian-pi-mut-a1`，跑完删除。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| A1a | 映射表全部改回 `adaptive`（六档同值） | `provider::thinking_tests::the_anthropic_levels_are_distinct` | ✅ |
+
 ## review-fixes 片：`auth.json` 临时文件名冲突（P2）
 
 Base `c120b0e` · 就地变异（改 `write` 的临时名），跑完从备份还原、`git status --short` 为空。
@@ -328,6 +347,14 @@ Base `c120b0e` · 就地变异（改 `write` 的临时名），跑完从备份�
 | F2 | 临时名恢复成 `auth.json.tmp-<pid>`（无计数器/时间戳），并保留写前 `remove_file` | 同进程并发写不得互删临时文件 | `auth::tests::concurrent_writes_in_one_process_do_not_delete_each_other_s_temps` **5/5 次** FAILED，错误正是 `auth.json: No such file or directory (os error 2)`（另一个写者删掉了它正在写的临时文件） |
 
 1/1 抓住，且稳定复现（不是偶发）：Barrier 对齐 + 50 次写，5 次全失败。
+
+## ADR 0026 D11 审查 B1：档位预算夹到 max_tokens（2026-10-14）
+
+Base `b46f506` · 一次性 worktree `/tmp/radian-pi-mut-b1`，跑完删除。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| B1a | 去掉档位预算夹取（`Enabled` 原样发出） | `agent-cli::a_level_budget_clamps_to_max_tokens` | ✅ |
 
 ## skills 片 1+2：发现、提示节、`skill` 工具（ADR 0025）
 

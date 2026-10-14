@@ -8,7 +8,11 @@
 //! The host still owns its flags, its key lookup and its secrets; this module only turns the
 //! resolved values into a model, so the two hosts cannot build providers differently.
 
+use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
+
+use radian_runtime::{ConfigSlot, ModelRoute};
 
 use agent_core::{Model, ModelContext, ModelError, ModelRequest, ModelResponse};
 use agent_provider_anthropic::{Anthropic, AnthropicConfig, ThinkingConfig};
@@ -121,8 +125,11 @@ pub struct ModelArgs {
     pub include_usage: Option<bool>,
     /// `anthropic` only.
     pub max_tokens: u32,
-    /// `anthropic` only.
+    /// `anthropic` only: the resolved thinking setting.
     pub thinking: Thinking,
+    /// `openai-compatible` only: the thinking level's wire value (ADR 0026 D11), sent as
+    /// `reasoning_effort`. `None` sends no key.
+    pub reasoning_effort: Option<String>,
 }
 
 /// Either provider behind one `Model`. `Model` is not object safe, so this is an enum and not
@@ -186,6 +193,97 @@ pub fn check_provider_flags(
     ))
 }
 
+/// Resolves a thinking **level** against a route's map (ADR 0026 D11): the Anthropic-side
+/// `Thinking` and the OpenAI-side `reasoning_effort` it builds into. Shared by the startup
+/// build and by every switch, so the two paths cannot drift.
+pub fn resolve_thinking(
+    descriptor_id: &str,
+    model: &str,
+    level: &str,
+    adapter: Provider,
+    max_tokens: Option<u32>,
+) -> (Thinking, Option<String>) {
+    let map = crate::descriptor(descriptor_id)
+        .and_then(|descriptor| crate::thinking_map_for(descriptor, model));
+    resolve_thinking_map(map, level, None, adapter, max_tokens)
+}
+
+/// The shared resolution: `legacy_budget` is a manual `enabled:<budget>` the user typed, which
+/// is sent as-is for Anthropic (ADR 0026 D11) instead of the level's own budget — an
+/// over-limit manual budget stays a usage error, never a clamp (review B1).
+///
+/// A **level's** own budget is clamped to `[MIN_THINKING_BUDGET, max_tokens - 1]` (B1): the
+/// number is Radian's choice, not the user's, so a small `--max-tokens` must not fail the
+/// turn. `max_tokens <= MIN_THINKING_BUDGET` makes every `enabled` level unfitting, and the
+/// clamp walks past it.
+fn resolve_thinking_map(
+    map: Option<crate::ThinkingMap>,
+    level: &str,
+    legacy_budget: Option<u32>,
+    adapter: Provider,
+    max_tokens: Option<u32>,
+) -> (Thinking, Option<String>) {
+    if let Some(budget_tokens) = legacy_budget
+        && adapter == Provider::Anthropic
+    {
+        return (Thinking::Enabled { budget_tokens }, None);
+    }
+    match crate::clamp_thinking_with(map, level, max_tokens) {
+        Some((_, wire)) if adapter == Provider::OpenAiCompatible => {
+            (Thinking::Off, Some(wire.to_owned()))
+        }
+        Some((_, wire)) => {
+            let thinking = thinking_from_wire(wire);
+            // Clamp the level's own budget to what the request can hold (B1). `level_fits`
+            // already refused a level that cannot fit at all, so this only trims.
+            let thinking = match (thinking, max_tokens, crate::wire_budget(wire)) {
+                (Thinking::Enabled { budget_tokens }, Some(max), Some(_)) => Thinking::Enabled {
+                    budget_tokens: budget_tokens.min(max.saturating_sub(1)),
+                },
+                (thinking, _, _) => thinking,
+            };
+            (thinking, None)
+        }
+        None => (Thinking::Off, None),
+    }
+}
+
+/// The Anthropic wire value a thinking map carries, as the adapter's `Thinking` (ADR 0026 D11):
+/// an empty value sends no `thinking` key, `adaptive` is the existing setting, and
+/// `enabled:<budget>` is a manual budget.
+fn thinking_from_wire(wire: &str) -> Thinking {
+    match wire {
+        "" => Thinking::Off,
+        "adaptive" => Thinking::Adaptive,
+        other => other
+            .strip_prefix("enabled:")
+            .and_then(|budget| budget.parse::<u32>().ok())
+            .map(|budget_tokens| Thinking::Enabled { budget_tokens })
+            // A wire value the Anthropic adapter does not know sends **nothing**: inventing a
+            // setting for a map that never named it would violate D11's rule.
+            .unwrap_or(Thinking::Off),
+    }
+}
+
+/// [`resolve_thinking`] for a [`crate::ProviderRef`]: a named provider uses the map of the
+/// descriptor its kind names (ADR 0026 D10/D11).
+pub fn resolve_thinking_ref(
+    provider: &crate::ProviderRef,
+    model: &str,
+    level: &str,
+    legacy_budget: Option<u32>,
+    adapter: Provider,
+    max_tokens: Option<u32>,
+) -> (Thinking, Option<String>) {
+    resolve_thinking_map(
+        crate::thinking_map_for_ref(provider, model),
+        level,
+        legacy_budget,
+        adapter,
+        max_tokens,
+    )
+}
+
 /// Builds the provider adapter named by `args.provider`. The error is the same shape the
 /// hosts already printed for a bad `--base-url`.
 pub fn build_model(args: ModelArgs) -> Result<HostModel, String> {
@@ -201,6 +299,7 @@ pub fn build_model(args: ModelArgs) -> Result<HostModel, String> {
             }
             config.headers = args.headers;
             config.include_usage = args.include_usage;
+            config.reasoning_effort = args.reasoning_effort;
             OpenAiCompatible::new(config)
                 .map(HostModel::OpenAi)
                 .map_err(|e| format!("--base-url {shown_url}: {e}"))
@@ -278,5 +377,316 @@ mod tests {
             Some(16384),
         )
         .unwrap();
+    }
+}
+
+// ---------- the switchable model (ADR 0026 D5) ----------
+
+/// What a switch needs to build a model for an arbitrary route: the facts that were fixed at
+/// startup and do not follow the model. The key is **not** here — it is read per route.
+#[derive(Debug, Clone)]
+pub struct RouteContext {
+    /// The config's `[providers.<name>]` declarations (ADR 0026 D10), so a switch to a named
+    /// provider resolves the same way the startup did.
+    pub providers: std::collections::BTreeMap<String, crate::ProviderDecl>,
+    pub session_id: String,
+    /// The user's own headers (generic-descriptor only, `{session_id}` already expanded).
+    pub user_headers: Vec<(String, String)>,
+    pub include_usage: Option<bool>,
+    pub max_tokens: u32,
+    /// The unified thinking level's **name** (ADR 0026 D11); clamped per route at build time.
+    pub thinking: String,
+    /// A legacy `--thinking enabled:<budget>` the user typed: sent as-is for Anthropic (D11).
+    pub thinking_budget: Option<u32>,
+}
+
+impl RouteContext {
+    /// Resolves one route into model arguments: `resolve_route` for the endpoint and headers,
+    /// `auth::resolve_key` for the credential (D2). A provider without a credential is an error
+    /// naming `/login <provider>` (D6), which the caller shows.
+    pub fn args_for(&self, provider_name: &str, model: &str) -> Result<ModelArgs, String> {
+        // D10: the provider name resolves through the config's declarations and the auth
+        // entry's env, and the key lives under the **name**.
+        let auth_env = crate::AuthStore::open()
+            .ok()
+            .and_then(|store| store.entry_env(provider_name));
+        let (provider_ref, _warning) =
+            crate::resolve_provider(provider_name, &self.providers, auth_env.as_ref())?;
+        let credential = crate::auth::resolve_key(provider_name).map_err(|e| e.to_string())?;
+        if credential.is_none() {
+            return Err(format!(
+                "no credential for `{provider_name}`: run /login {provider_name} (or add an entry \
+                 to ~/.radian/credentials/auth.json)"
+            ));
+        }
+        let auth_base_url = credential
+            .as_ref()
+            .and_then(|credential| credential.env.get(crate::RADIAN_BASE_URL))
+            .map(String::as_str);
+        let route = crate::resolve_route_for(
+            &provider_ref,
+            model,
+            None,
+            auth_base_url,
+            &self.user_headers,
+            &self.session_id,
+        )?;
+        // The thinking level is clamped against **this route's** map (ADR 0026 D11): the same
+        // level can mean different wire values — or nothing — on different models.
+        let (thinking, reasoning_effort) = resolve_thinking_ref(
+            &provider_ref,
+            model,
+            &self.thinking,
+            self.thinking_budget,
+            route.adapter(),
+            Some(self.max_tokens),
+        );
+        Ok(ModelArgs {
+            provider: route.adapter(),
+            base_url: route.base_url,
+            model: model.to_owned(),
+            api_key: credential.as_ref().map(|credential| credential.key.clone()),
+            headers: route.headers,
+            include_usage: self.include_usage,
+            max_tokens: self.max_tokens,
+            thinking,
+            reasoning_effort,
+        })
+    }
+}
+
+/// The model behind a `/model` switch: every request reads the current route out of the
+/// driver's [`ConfigSlot`] and dispatches to the matching adapter, built once per route and
+/// cached. The driver only changes the slot between turns (ADR 0004 path B), so one request
+/// never sees a route change mid-turn.
+pub struct SwitchableModel {
+    slot: Arc<ConfigSlot>,
+    initial_route: ModelRoute,
+    ctx: RouteContext,
+    cache: std::sync::Mutex<HashMap<String, Arc<HostModel>>>,
+}
+
+impl SwitchableModel {
+    /// `initial` is the model built at startup for `initial_route`.
+    pub fn new(
+        initial: HostModel,
+        initial_route: ModelRoute,
+        slot: Arc<ConfigSlot>,
+        ctx: RouteContext,
+    ) -> Self {
+        let cache = std::sync::Mutex::new(HashMap::from([(
+            Self::cache_key(&initial_route, &ctx.thinking),
+            Arc::new(initial),
+        )]));
+        Self {
+            slot,
+            initial_route,
+            ctx,
+            cache,
+        }
+    }
+
+    /// The cache key: the route **and** the thinking level in force (ADR 0026 D11) — a
+    /// `/thinking` change must rebuild the model even though the route is unchanged.
+    fn cache_key(route: &ModelRoute, thinking: &str) -> String {
+        format!("{}/{model}#{thinking}", route.provider, model = route.model)
+    }
+
+    /// The route in force right now: the slot's model change, else the startup route.
+    pub fn current_route(&self) -> ModelRoute {
+        ModelRoute::from_value(&self.slot.value()).unwrap_or_else(|| self.initial_route.clone())
+    }
+
+    /// The thinking level in force: the slot's `thinking` change (D11), else the startup one.
+    pub fn current_thinking(&self) -> String {
+        self.slot
+            .value()
+            .get("thinking")
+            .and_then(|level| level.as_str())
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.ctx.thinking.clone())
+    }
+
+    /// The model for the current route and thinking, built and cached on first use. The `Arc`
+    /// comes out of the lock, so the lock is never held across the request.
+    fn current(&self) -> Result<Arc<HostModel>, String> {
+        let route = self.current_route();
+        let thinking = self.current_thinking();
+        let key = Self::cache_key(&route, &thinking);
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(model) = cache.get(&key) {
+            return Ok(model.clone());
+        }
+        let ctx = RouteContext {
+            thinking: thinking.clone(),
+            ..self.ctx.clone()
+        };
+        let args = ctx.args_for(&route.provider, &route.model)?;
+        let model = build_model(args).map(Arc::new)?;
+        cache.insert(key, model.clone());
+        Ok(model)
+    }
+}
+
+impl Model for SwitchableModel {
+    async fn complete(
+        &self,
+        request: ModelRequest,
+        cx: ModelContext<'_>,
+    ) -> Result<ModelResponse, ModelError> {
+        // The route was read before the lock, so a switch that lands mid-request cannot swap
+        // this call's model (D5).
+        let model = self.current().map_err(ModelError::Protocol)?;
+        model.complete(request, cx).await
+    }
+}
+
+#[cfg(test)]
+mod thinking_resolution_tests {
+    use super::*;
+
+    /// ADR 0026 D11: a model with no map anywhere gets **no** parameter — neither an
+    /// Anthropic `thinking` setting nor an OpenAI-compatible `reasoning_effort`. This is the
+    /// guard for the "no invented wire values" rule.
+    #[test]
+    fn a_mapless_model_resolves_to_nothing() {
+        let (thinking, effort) = resolve_thinking(
+            "opencode-go",
+            "gpt-5-nano",
+            "high",
+            Provider::OpenAiCompatible,
+            None,
+        );
+        assert_eq!(thinking, Thinking::Off);
+        assert_eq!(effort, None);
+        let (thinking, effort) = resolve_thinking(
+            "opencode-go",
+            "gpt-5-nano",
+            "high",
+            Provider::Anthropic,
+            None,
+        );
+        assert_eq!(thinking, Thinking::Off);
+        assert_eq!(effort, None);
+    }
+
+    /// The verified deepseek map resolves a level into the OpenAI-side wire value, and an
+    /// Anthropic route from the same level into its own setting.
+    #[test]
+    fn a_mapped_model_resolves_per_adapter() {
+        let (_, effort) = resolve_thinking(
+            "opencode-go",
+            "deepseek-v4.1-flash",
+            "medium",
+            Provider::OpenAiCompatible,
+            None,
+        );
+        assert_eq!(effort.as_deref(), Some("high"), "the clamp goes up");
+        let (thinking, effort) = resolve_thinking(
+            "opencode-go",
+            "deepseek-v4.1-flash",
+            "medium",
+            Provider::Anthropic,
+            None,
+        );
+        assert_eq!(effort, None);
+        assert_eq!(
+            thinking,
+            Thinking::Off,
+            "a wire value the anthropic adapter does not know sends nothing"
+        );
+    }
+}
+
+#[cfg(test)]
+mod thinking_clamp_tests {
+    use super::*;
+
+    /// Review B1: a **level's** own budget is clamped to the request's `max_tokens - 1`
+    /// instead of failing the model build.
+    #[test]
+    fn a_level_budget_is_clamped_to_max_tokens() {
+        let (thinking, _) = resolve_thinking(
+            "anthropic",
+            "claude-test",
+            "max",
+            Provider::Anthropic,
+            Some(4096),
+        );
+        assert_eq!(
+            thinking,
+            Thinking::Enabled {
+                budget_tokens: 4095
+            }
+        );
+    }
+
+    /// With `max_tokens <= 1024` no `enabled` level fits, so the clamp walks past them: the
+    /// request carries no `enabled` setting.
+    #[test]
+    fn no_enabled_level_fits_when_max_tokens_is_tiny() {
+        for level in ["minimal", "low", "high", "xhigh", "max"] {
+            let (thinking, _) = resolve_thinking(
+                "anthropic",
+                "claude-test",
+                level,
+                Provider::Anthropic,
+                Some(1024),
+            );
+            assert_ne!(
+                thinking,
+                Thinking::Enabled {
+                    budget_tokens: 1024
+                },
+                "{level} must not send an enabled budget"
+            );
+            assert!(
+                !matches!(thinking, Thinking::Enabled { .. }),
+                "{level} must not send enabled: {thinking:?}"
+            );
+        }
+        // `adaptive` (medium) and `off` still fit: they have no budget.
+        let (thinking, _) = resolve_thinking(
+            "anthropic",
+            "claude-test",
+            "medium",
+            Provider::Anthropic,
+            Some(1024),
+        );
+        assert_eq!(thinking, Thinking::Adaptive);
+    }
+
+    /// The user's explicit legacy budget is **not** clamped: it stays a usage error (B1.3).
+    #[test]
+    fn a_legacy_budget_is_not_clamped() {
+        let (thinking, _) = resolve_thinking_map(
+            Some(crate::provider::ANTHROPIC_THINKING),
+            "high",
+            Some(999_999),
+            Provider::Anthropic,
+            Some(4096),
+        );
+        assert_eq!(
+            thinking,
+            Thinking::Enabled {
+                budget_tokens: 999_999
+            }
+        );
+    }
+
+    /// The completion hides a level only when no budget can fit at all (B1.2): with room to
+    /// clamp, every level stays selectable.
+    #[test]
+    fn the_completion_hides_levels_that_cannot_fit() {
+        assert_eq!(
+            crate::supported_thinking_levels_with("anthropic", "claude-test", Some(4096)),
+            vec!["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+            "every budget clamps into 4096"
+        );
+        assert_eq!(
+            crate::supported_thinking_levels_with("anthropic", "claude-test", Some(1024)),
+            vec!["off", "medium"],
+            "only the budget-less levels fit"
+        );
     }
 }

@@ -39,8 +39,10 @@ pub use auth::{
 };
 pub use catalog::{
     CACHE_TTL, CATALOG_URL, Catalog, FETCH_TIMEOUT, ModelEntry, ModelLimit, OUTPUT_RESERVATION_CAP,
-    ProviderInfo, Window, WindowCheck, WindowQuery, WindowSource, cache_path, host_of,
-    input_budget, output_ceiling_warning, output_reservation, provider_for_host, resolve,
+    ProviderInfo, ProviderModels, Window, WindowCheck, WindowQuery, WindowSource, cache_path,
+    fetch_provider_models, host_of, input_budget, output_ceiling_warning, output_reservation,
+    provider_for_host, provider_models_cache, provider_models_stale, read_provider_models, resolve,
+    resolve_offline, write_provider_models,
 };
 pub use config::migrate_pi::{PiDraft, PiMigrateError, import_pi, write_draft as write_pi_draft};
 pub use config::{
@@ -64,8 +66,9 @@ pub use home::{
 };
 pub use mcp::load_mcp_config;
 pub use model::{
-    DEFAULT_MAX_TOKENS, HostModel, MIN_THINKING_BUDGET, ModelArgs, Provider, Thinking, build_model,
-    check_provider_flags, redact_base_url,
+    DEFAULT_MAX_TOKENS, HostModel, MIN_THINKING_BUDGET, ModelArgs, Provider, RouteContext,
+    SwitchableModel, Thinking, build_model, check_provider_flags, redact_base_url,
+    resolve_thinking, resolve_thinking_ref,
 };
 pub use output::{StdoutError, write_line, write_stdout};
 pub use pending::{
@@ -76,15 +79,20 @@ pub use projection::{
     LastToolCall, ProjectionRead, SessionProjection, StreamKind, StreamSnapshot, TurnState,
 };
 pub use provider::{
-    CUSTOM_LOGIN, DESCRIPTORS, DescriptorModel, GENERIC_ID, LoginMethod, NamedProvider,
-    NamedSource, Protocol, ProviderDecl, ProviderDescriptor, ProviderRef, RADIAN_KIND, Route,
-    descriptor, descriptors, login_choices, name_error, resolve_provider, resolve_route,
-    resolve_route_for, valid_name,
+    CUSTOM_LOGIN, DEFAULT_THINKING_LEVEL, DESCRIPTORS, DescriptorModel, GENERIC_ID, LoginMethod,
+    NamedProvider, NamedSource, Protocol, ProviderDecl, ProviderDescriptor, ProviderRef,
+    RADIAN_KIND, Route, THINKING_LEVELS, ThinkingMap, clamp_thinking, clamp_thinking_with,
+    descriptor, descriptors, level_fits, login_choices, name_error, parse_thinking_level,
+    resolve_provider, resolve_route, resolve_route_for, supported_thinking_levels,
+    supported_thinking_levels_ref, supported_thinking_levels_ref_with,
+    supported_thinking_levels_with, supported_wire, thinking_map_for, thinking_map_for_ref,
+    thinking_rank, valid_name, wire_budget,
 };
+pub use radian_runtime::ModelRoute;
 pub use session::{
     ApprovalRouting, CommandRefused, DriverEnd, HostBindings, LocalSession, SessionCapability,
     SessionCommand, SessionError, SessionFacade, SessionFacts, SessionId, SessionQueue,
-    SessionSetup, open_session,
+    SessionSetup, open_session, resumed_model_route,
 };
 pub use session_id::{generate_session_id, validate_session_id};
 pub use sessions::{
