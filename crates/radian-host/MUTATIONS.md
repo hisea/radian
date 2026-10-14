@@ -492,3 +492,21 @@ Base `e9397be` · 一次性 worktree `/tmp/radian-trustb2-mut`，跑完 `git che
 | T-B5 | `trust_interactive` 退回 `cli.prompt.is_none()`（无 `-p` 即提问，管道 stdin 也问） | cli `piped_stdin_is_never_read_as_the_trust_answer`（提问行出现、管道内容被当成回答、消息没到模型） | ✅ |
 
 1/1 抓住。
+
+## git-commit：宿主侧 `git_commit`（ADR 0030 R10，2026-10-16）
+
+Base `a584b4b` · 一次性 worktree `/tmp/radian-mut-gitcommit`（`git worktree add --detach`，
+共享 target 安全：radian-host 无 build.rs）· 每条跑完 `git checkout -- .`，`git status --short`
+为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| GC-A | 去掉 `--no-verify` | `the_commit_command_never_runs_a_hook`（命令参数单测） | ✅ |
+| GC-B | 去掉 `core.hooksPath=/dev/null` | `the_commit_command_never_runs_a_hook` | ✅ |
+| GC-C | 去掉路径边界检查 | `outside_paths_are_refused` | ✅ |
+| GC-D | 去掉保护分支检查 | `branch_rules_are_enforced` | ✅ |
+| GC-E | 不写审计事件 | `the_commit_is_audited` | ✅ |
+
+5/5 抓住。**过程记录**：GC-A/GC-B 第一轮**没抓住**——两者互为保险（只去一个，hook 仍然不会跑），
+所以加了 `commit_args` 的参数单测分别断言两者，才各自抓住。GC-E 第一轮变异写错（在 GitCommitted
+之前又插了一条 TurnStarted，没删掉 GitCommitted），改成真正删除后才由审计测试抓住。
