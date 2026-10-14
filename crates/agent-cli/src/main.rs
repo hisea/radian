@@ -730,6 +730,10 @@ struct Setup {
     /// The extra skill roots from `[skills] extra_paths` (ADR 0025 slice 4), resolved against
     /// the config file's directory and the user's home.
     skills_extra_paths: Vec<PathBuf>,
+    /// `[skills] builtin` (ADR 0025); default true.
+    skills_builtin: bool,
+    /// `[skills] disabled`: built-in skill names to leave out.
+    skills_disabled: Vec<String>,
 }
 
 async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
@@ -1062,6 +1066,8 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
             config.source.as_deref().and_then(std::path::Path::parent),
             radian_host::user_home().as_deref(),
         ),
+        skills_builtin: config.skills.builtin.unwrap_or(true),
+        skills_disabled: config.skills.disabled.clone(),
     })
 }
 
@@ -1450,6 +1456,8 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             profile: permission_profile,
             memory_root,
             skills_extra_paths: setup.skills_extra_paths,
+            skills_builtin: setup.skills_builtin,
+            skills_disabled: setup.skills_disabled,
             trust: trust_setup,
             resume: cli.resume.is_some(),
             config_snapshot: serde_json::json!({

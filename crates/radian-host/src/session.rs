@@ -297,6 +297,11 @@ pub struct SessionSetup {
     /// host (`~` and paths relative to the config file). The user-level `~/.radian/skills` is
     /// discovered first, so it wins a name conflict.
     pub skills_extra_paths: Vec<PathBuf>,
+    /// `[skills] builtin` (ADR 0025): include the compiled-in skills. Default true.
+    pub skills_builtin: bool,
+    /// `[skills] disabled`: built-in skill names to leave out.
+    pub skills_disabled: Vec<String>,
+    /// `true` to resume
     /// The project-trust state this session starts with (ADR 0031 T3). The host resolves it
     /// before `open_session`; `needs_ask` means an interactive host must ask before the first
     /// turn, and the session is untrusted until it answers.
@@ -797,6 +802,8 @@ pub async fn open_session(
         profile,
         memory_root,
         skills_extra_paths,
+        skills_builtin,
+        skills_disabled,
         trust,
         resume,
         config_snapshot,
@@ -907,7 +914,12 @@ pub async fn open_session(
     let skills = {
         // The user level first, then `[skills] extra_paths` (ADR 0025 slice 4): the first
         // discovery of a name wins, so `~/.radian/skills` beats an extra root.
-        let discovery = skills::discover_with_extras(skills_dir().as_deref(), &skills_extra_paths);
+        let discovery = skills::discover_with_extras(
+            skills_dir().as_deref(),
+            &skills_extra_paths,
+            skills_builtin,
+            &skills_disabled,
+        );
         for warning in &discovery.warnings {
             memory_warning(warning);
         }

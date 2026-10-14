@@ -97,15 +97,20 @@ impl ToolSession for SkillSession {
             .ok_or_else(|| {
                 ToolFailure::new("unknown_skill", format!("there is no skill named `{name}`"))
             })?;
-        let text = std::fs::read_to_string(&skill.path).map_err(|error| {
-            ToolFailure::new(
-                "skill_unreadable",
-                format!(
-                    "skill `{name}` cannot be read ({}): {error}",
-                    skill.path.display()
-                ),
-            )
-        })?;
+        // A built-in skill's body is embedded (ADR 0025); only a filesystem skill
+        // is read.
+        let text = match skill.body {
+            Some(body) => body.to_owned(),
+            None => std::fs::read_to_string(&skill.path).map_err(|error| {
+                ToolFailure::new(
+                    "skill_unreadable",
+                    format!(
+                        "skill `{name}` cannot be read ({}): {error}",
+                        skill.path.display()
+                    ),
+                )
+            })?,
+        };
         let body = strip_frontmatter(&text).unwrap_or(&text);
         if body.len() > SKILL_BODY_LIMIT_BYTES {
             return Err(ToolFailure::new(
@@ -352,6 +357,19 @@ mod tests {
         };
         let error = run(&session, &bad).await.unwrap_err();
         assert_eq!(error.code, "invalid_arguments");
+    }
+
+    /// ADR 0025: the `skill` tool reads a built-in skill's embedded body, no file.
+    #[tokio::test]
+    async fn the_skill_tool_reads_a_builtin_body() {
+        let skills = Arc::new(crate::skills::discover_with_extras(None, &[], true, &[]).skills);
+        let session = SkillTools::new(skills).open_session().await.unwrap();
+        let out = run(&session, &call("diagrams", None)).await.unwrap();
+        let text = text_of(&out);
+        // The body explains the check tool and the unsupported list; the frontmatter is gone.
+        assert!(text.contains("mermaid_check"), "{text}");
+        assert!(text.contains("subgraph"), "{text}");
+        assert!(!text.contains("description: How to draw"), "{text}");
     }
 
     #[test]

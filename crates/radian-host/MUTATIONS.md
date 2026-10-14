@@ -461,6 +461,9 @@ Base `9fef91d` · 一次性 worktree `/tmp/radian-trust-mut`，每条跑完 `git
 
 4/4 抓住。
 
+## ADR 0025 / ADR 0028 R8：内建 skill + diagrams + mermaid_check（2026-10-15）
+
+Base `cf37140` · 一次性 worktree `/tmp/radian-diag-mut`，每条跑完 `git checkout -- .`，`git status --short`
 ## ADR 0031 片 B：启动期提问、覆盖、审计（2026-10-14）
 
 Base `b2c9c1c` · 一次性 worktree `/tmp/radian-trustb-mut`，每条跑完 `git checkout -- .`，`git status --short`
@@ -468,6 +471,10 @@ Base `b2c9c1c` · 一次性 worktree `/tmp/radian-trustb-mut`，每条跑完 `gi
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
+| DG-M1 | 内建 skill 排在用户级**之前**（内建先发现，用户级被它 shadow） | `skills::tests::a_user_skill_of_the_same_name_overrides_the_builtin` | ✅ |
+| DG-M2 | `mermaid_check` 失败也返回 `ok: 0x0` | `mermaid::tests::each_failure_has_its_own_reason_and_a_hint`（另 2 条也挂） | ✅ |
+
+2/2 抓住。
 | T-B1 | 启动 modal 的默认高亮改成 `TrustHere`（回车即信任） | pty `pty_trust_modal_asks_and_enter_untrusts` | ✅ |
 | T-B2 | `trust::load_for` 在命令行覆盖时也 `set_at` 写盘 | cli `trust_flags_override_without_writing` | ✅ |
 | T-B3 | 非交互且无决策时把 decision 改成 `Trust` | cli `a_workspace_with_project_resources_is_untrusted_without_a_terminal`（含 status line 断言） | ✅ |

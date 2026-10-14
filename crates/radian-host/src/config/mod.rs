@@ -220,6 +220,11 @@ pub struct CompactionConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SkillsConfig {
     pub extra_paths: Vec<String>,
+    /// `[skills] builtin` (ADR 0025): include the compiled-in skills. `None` means
+    /// the default, **on**; the host reads `unwrap_or(true)`.
+    pub builtin: Option<bool>,
+    /// `[skills] disabled`: built-in skill names to leave out.
+    pub disabled: Vec<String>,
 }
 
 /// One `[tui.colors]` color value (ADR 0029 decision 5): a color literal (`#hex`,
@@ -713,6 +718,29 @@ fn parse_skills(value: &Value, path: &Path, config: &mut Config) -> Result<(), C
                     "skills.extra_paths",
                     "an array of strings",
                 ));
+            }
+            ("builtin", Value::Boolean(on)) => config.skills.builtin = Some(*on),
+            ("builtin", _) => {
+                return Err(wrong_type(path, "skills.builtin", "a boolean"));
+            }
+            ("disabled", Value::Array(items)) => {
+                for (index, item) in items.iter().enumerate() {
+                    match item {
+                        Value::String(name) if !name.trim().is_empty() => {
+                            config.skills.disabled.push(name.clone());
+                        }
+                        _ => {
+                            return Err(wrong_type(
+                                path,
+                                &format!("skills.disabled[{index}]"),
+                                "a non-empty string",
+                            ));
+                        }
+                    }
+                }
+            }
+            ("disabled", _) => {
+                return Err(wrong_type(path, "skills.disabled", "an array of strings"));
             }
             (other, _) => config.skipped.push(format!("skills.{other}")),
         }

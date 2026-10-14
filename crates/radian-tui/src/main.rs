@@ -914,6 +914,8 @@ fn run(
                     config.source.as_deref().and_then(std::path::Path::parent),
                     radian_host::user_home().as_deref(),
                 ),
+                skills_builtin: config.skills.builtin.unwrap_or(true),
+                skills_disabled: config.skills.disabled.clone(),
                 trust: trust_setup,
                 resume: resume.is_some(),
                 config_snapshot: serde_json::json!({
