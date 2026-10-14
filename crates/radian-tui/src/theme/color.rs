@@ -36,23 +36,7 @@ pub enum ColorValue {
 }
 
 // The Oklab matrices and the OKHSL fit constants (pi's `oklab.js`, Ottosson's reference).
-const LINEAR_SRGB_TO_LMS: [[f64; 3]; 3] = [
-    [
-        0.412_221_469_470_762_9,
-        0.536_332_537_261_734_9,
-        0.051_445_993_267_502_2,
-    ],
-    [
-        0.211_903_495_817_825_1,
-        0.680_699_550_645_234_4,
-        0.107_396_953_536_940_5,
-    ],
-    [
-        0.088_302_459_190_056_4,
-        0.281_718_839_136_121_5,
-        0.629_978_701_673_822_2,
-    ],
-];
+// Only the OKLab→sRGB direction is needed: a theme names colors, Radian renders them.
 const LAB_TO_LMS: [[f64; 3]; 3] = [
     [1.0, 0.396_337_777_376_174_9, 0.215_803_757_309_913_6],
     [1.0, -0.105_561_345_815_658_6, -0.063_854_172_825_813_3],

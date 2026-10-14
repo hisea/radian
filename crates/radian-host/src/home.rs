@@ -218,7 +218,10 @@ mod tests {
             credentials_dir_for(root),
             PathBuf::from("/home/u/.radian/credentials")
         );
-        assert_eq!(themes_dir_for(root), PathBuf::from("/home/u/.radian/themes"));
+        assert_eq!(
+            themes_dir_for(root),
+            PathBuf::from("/home/u/.radian/themes")
+        );
         assert_eq!(
             diagnostics_dir_for(root),
             PathBuf::from("/home/u/.radian/cache/diagnostics")

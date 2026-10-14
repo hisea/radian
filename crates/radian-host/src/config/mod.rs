@@ -174,9 +174,37 @@ pub struct CompactionConfig {
     pub auto: Option<bool>,
 }
 
+/// One `[tui.colors]` color value (ADR 0029 decision 5): a color literal (`#hex`,
+/// `oklch(..)`, `okhsl(..)` or `""` for the terminal default) or a 256-color index.
+/// The literal text is resolved by the TUI, which owns the color grammar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TuiColorValue {
+    Text(String),
+    Index(u8),
+}
+
+/// One `[tui.colors]` entry (ADR 0029 decision 5): the foreground/background colors and the
+/// modifier forces. An absent field leaves the theme's value alone; `bold = false` etc.
+/// removes the modifier.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TuiColorOverride {
+    pub fg: Option<TuiColorValue>,
+    pub bg: Option<TuiColorValue>,
+    pub bold: Option<bool>,
+    pub italic: Option<bool>,
+    pub dim: Option<bool>,
+    pub underline: Option<bool>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TuiConfig {
+    /// `tui.theme`: a built-in name (`dark|light|mono`) or a theme file name (ADR 0029). The
+    /// reader accepts any string — whether the name resolves is the TUI's finding, reported
+    /// as a startup warning.
     pub theme: Option<String>,
+    /// `tui.colors`: per-role color overrides, raw. The TUI validates the role names and
+    /// colors; unknown or malformed entries are startup warnings (the `tui.*` rule).
+    pub colors: Vec<(String, TuiColorOverride)>,
     /// The raw `tui.keybindings` table: action name → key strings. The TUI parses and
     /// validates it (its key grammar belongs to the terminal layer).
     pub keybindings: Vec<(String, Vec<String>)>,
@@ -429,14 +457,84 @@ fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
     };
     for (key, value) in table {
         match (key.as_str(), value) {
-            ("theme", Value::String(theme))
-                if matches!(theme.as_str(), "dark" | "light" | "mono") =>
-            {
-                config.tui.theme = Some(theme.clone());
-            }
-            // An unknown or non-string theme is a display preference: ignore it (and say so),
-            // never refuse the file.
+            // Any name is accepted (ADR 0029 decision 1): built-in names resolve directly,
+            // anything else is looked up in `~/.radian/themes/<name>.json` by the TUI, which
+            // warns and falls back when neither exists. A display preference never refuses
+            // the file.
+            ("theme", Value::String(theme)) => config.tui.theme = Some(theme.clone()),
             ("theme", _) => config.skipped.push("tui.theme".into()),
+            ("colors", Value::Table(colors)) => {
+                for (key, value) in colors {
+                    match value {
+                        // A bare value is the foreground color.
+                        Value::String(text) => config.tui.colors.push((
+                            key.clone(),
+                            TuiColorOverride {
+                                fg: Some(TuiColorValue::Text(text.clone())),
+                                ..TuiColorOverride::default()
+                            },
+                        )),
+                        Value::Integer(index) if *index >= 0 && *index <= 255 => {
+                            config.tui.colors.push((
+                                key.clone(),
+                                TuiColorOverride {
+                                    fg: Some(TuiColorValue::Index(*index as u8)),
+                                    ..TuiColorOverride::default()
+                                },
+                            ))
+                        }
+                        Value::Table(spec) => {
+                            let mut override_value = TuiColorOverride::default();
+                            let mut malformed = false;
+                            for (field, field_value) in spec {
+                                match (field.as_str(), field_value) {
+                                    ("fg" | "bg", Value::String(text)) => {
+                                        let value = TuiColorValue::Text(text.clone());
+                                        if field == "fg" {
+                                            override_value.fg = Some(value);
+                                        } else {
+                                            override_value.bg = Some(value);
+                                        }
+                                    }
+                                    ("fg" | "bg", Value::Integer(index))
+                                        if *index >= 0 && *index <= 255 =>
+                                    {
+                                        let value = TuiColorValue::Index(*index as u8);
+                                        if field == "fg" {
+                                            override_value.fg = Some(value);
+                                        } else {
+                                            override_value.bg = Some(value);
+                                        }
+                                    }
+                                    ("bold", Value::Boolean(flag)) => {
+                                        override_value.bold = Some(*flag)
+                                    }
+                                    ("italic", Value::Boolean(flag)) => {
+                                        override_value.italic = Some(*flag)
+                                    }
+                                    ("dim", Value::Boolean(flag)) => {
+                                        override_value.dim = Some(*flag)
+                                    }
+                                    ("underline", Value::Boolean(flag)) => {
+                                        override_value.underline = Some(*flag)
+                                    }
+                                    // An unknown field or a wrong-typed one makes the whole
+                                    // entry a display preference: ignore it (and say so).
+                                    _ => malformed = true,
+                                }
+                            }
+                            if malformed {
+                                config.skipped.push(format!("tui.colors.{key}"));
+                            } else {
+                                config.tui.colors.push((key.clone(), override_value));
+                            }
+                        }
+                        // A non-string, non-table color is a display preference.
+                        _ => config.skipped.push(format!("tui.colors.{key}")),
+                    }
+                }
+            }
+            ("colors", _) => return Err(wrong_type(path, "tui.colors", "a table")),
             ("keybindings", Value::Table(bindings)) => {
                 for (action, keys) in bindings {
                     match keys.as_array() {
@@ -761,7 +859,7 @@ theme = "light"
     }
 
     #[test]
-    fn an_unknown_profile_is_refused_and_an_unknown_theme_is_ignored() {
+    fn an_unknown_profile_is_refused_and_an_unknown_theme_is_carried() {
         let error =
             parse_str("schema_version = 1\n[permissions]\nprofile = \"future\"\n").unwrap_err();
         assert!(
@@ -769,9 +867,56 @@ theme = "light"
             "{error}"
         );
 
+        // ADR 0029: any theme name is carried; whether it resolves (built-in or
+        // `~/.radian/themes/<name>.json`) is the TUI's finding, a startup warning.
         let config = parse_str("schema_version = 1\n[tui]\ntheme = \"future\"\n").unwrap();
-        assert_eq!(config.tui.theme, None);
-        assert!(config.skipped.contains(&"tui.theme".to_string()));
+        assert_eq!(config.tui.theme.as_deref(), Some("future"));
+        assert!(config.skipped.is_empty());
+    }
+
+    /// ADR 0029 decision 5: `[tui.colors]` entries are carried raw; the TUI validates names
+    /// and colors. A malformed entry is a skipped key, never a refusal.
+    #[test]
+    fn tui_colors_entries_are_carried_and_malformed_ones_skipped() {
+        let config = parse_str(concat!(
+            "schema_version = 1\n",
+            "[tui]\n",
+            "theme = \"kanagawa-wave\"\n",
+            "[tui.colors]\n",
+            "user = \"#0af\"\n",
+            "tool_call = 39\n",
+            "notice = { fg = \"oklch(62% 0.1 200)\", bold = true }\n",
+            "hint = { fg = \"#fff\", neon = true }\n",
+            "muted = 2.5\n",
+        ))
+        .unwrap();
+        assert_eq!(config.tui.theme.as_deref(), Some("kanagawa-wave"));
+        assert_eq!(config.tui.colors.len(), 3, "{:?}", config.tui.colors);
+        let get = |key: &str| {
+            config
+                .tui
+                .colors
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value)
+                .unwrap()
+        };
+        assert_eq!(get("user").fg, Some(TuiColorValue::Text("#0af".to_owned())));
+        assert_eq!(get("tool_call").fg, Some(TuiColorValue::Index(39)));
+        let notice = get("notice");
+        assert_eq!(
+            notice.fg,
+            Some(TuiColorValue::Text("oklch(62% 0.1 200)".to_owned()))
+        );
+        assert_eq!(notice.bold, Some(true));
+        assert_eq!(
+            config.skipped,
+            vec!["tui.colors.hint".to_owned(), "tui.colors.muted".to_owned()]
+        );
+
+        // A non-table `tui.colors` is a wrong type (structural), like `tui.keybindings`.
+        let error = parse_str("schema_version = 1\n[tui]\ncolors = 3\n").unwrap_err();
+        assert!(matches!(error, ConfigError::WrongType { .. }), "{error}");
     }
 
     #[test]

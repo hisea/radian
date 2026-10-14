@@ -488,7 +488,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // total before the visible window is cut.
     let width = chunks[0].width as usize;
     let height = chunks[0].height as usize;
-    let theme = app.theme;
+    let theme = app.theme.clone();
     // The find matcher wraps at the same width; a resize recomputes it (once, not per frame).
     app.set_transcript_width(width);
     let (total, _) = visible_lines(&mut app.entries, width, 0, 0, &theme);
