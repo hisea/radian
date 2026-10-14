@@ -4741,6 +4741,14 @@ async fn pty_the_wheel_scrolls_an_open_overlay() {
         "the picker did not open:\n{}",
         pty.screen()
     );
+    // The header's `--resume <id>` hint is drawn with the picker's rows; `filter:` alone can
+    // be up a frame earlier under load. Wait for both before snapshotting.
+    assert!(
+        pty.wait_until(10, |screen| screen.contains("filter:")
+            && screen.contains("--resume ")),
+        "the picker's rows did not appear:\n{}",
+        pty.screen()
+    );
     let before = pty.screen();
     let before_hint = before
         .split("--resume ")
@@ -5352,14 +5360,15 @@ async fn pty_a_long_command_keeps_the_approval_keys_visible() {
         "no approval prompt: {}",
         pty.screen()
     );
-    let screen = pty.screen();
+    // The box is one widget, but the first frame after the prompt can still be a partial
+    // paint under load (observed: title and first rows drawn, key line not yet). Wait for a
+    // frame that has the whole key line and the window indicator, not for one snapshot.
     assert!(
-        screen.contains("[y] allow once") && screen.contains("[n] deny"),
-        "the key line is not fully on screen: {screen}"
-    );
-    assert!(
-        screen.contains("lines 1–"),
-        "a body this long must show the window indicator: {screen}"
+        pty.wait_until(10, |screen| screen.contains("[y] allow once")
+            && screen.contains("[n] deny")
+            && screen.contains("lines 1–")),
+        "the key line is not fully on screen: {}",
+        pty.screen()
     );
     // Scrolling the body keeps the keys on screen.
     pty.send(b"\x1b[B"); // Down

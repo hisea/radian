@@ -488,3 +488,24 @@ crossterm 的 `MouseEventKind::Moved` 在 `events::input_event` 里被丢掉，�
 
 实测门檻沿用 `pty_an_idle_screen_is_not_redrawn` 与 `pty_a_mouse_move_is_dropped`：前者证明空闲 5 秒
 零帧，后者证明指针移动/点击不消耗输入（输入框的草稿不变、且输出里没有 `?1002h`/`?1003h`）。
+
+## `find` 搜索 5 万条目（review-fixes 片）
+
+`find.rs` 的搜索不是逐帧测量：`ctrl-f` 打开后每敲一个字符都对**全部条目**重算一次匹配
+（`compute` 对每条目做 wrap，5 万次分配）。它的计时**不是断言、而是 `#[ignore]` 基准**，与
+`perf_render.rs` 同一条规则：debug 下的绝对值受负载支配（外部审查在 load 200+ 时观察到
+2.59 s，超过旧的 2 s 上限）。默认测试只保留正确性（找到那一条、状态栏 `match 1/1`），
+**不碰墙钟**；一条复杂度回归由基准里的 5k→50k 比值与 2 s 绝对值一起看。
+
+```sh
+cargo test -p radian-tui --test find a_search_over_fifty_thousand_entries_is_fast -- --ignored --nocapture
+```
+
+**负载**：本机 load average 119/98/96（同一台机器上还有别的 pi 在编译）。
+
+| 场景 | 5k 校准 | 50k | 比值 |
+|---|---|---|---|
+| 一次 `ctrl-f` + 输入 `needle`（debug） | 43.8 ms | 1238.9 ms | 28.3× |
+
+比值明显高于线性的 10×（5 万次分配的缓存/分配器压力），所以**比值也不能当硬界**；它只是让人
+在基准输出里一眼看出量级。绝对上限 2 s 只在机器空闲时才有意义（`--ignored` 是人为选择时机）。
