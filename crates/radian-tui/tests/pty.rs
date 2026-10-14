@@ -5271,11 +5271,12 @@ async fn pty_two_approvals_are_shown_in_order() {
     pty.send(b"y");
     // The transcript shows the second tool call's arguments early, and the box's resolved
     // `path:` line wraps at this width (the temp directory's name grows with the test index), so
-    // neither `b.txt` nor `path: …` identifies the prompt. The box's *pretty-printed* arguments
-    // do: `"path": "b.txt"` (with the space) is the box's form, while the transcript's tool-call
-    // line has the compact one.
-    let second = "\"path\": \"b.txt\"";
-    let first = "\"path\": \"a.txt\"";
+    // neither `b.txt` nor `path: …` identifies the prompt. A box-only marker is needed: the box
+    // no longer repeats the path in `args` (approval-fit dedups it), so the *pretty-printed*
+    // `content` field (with the space) marks the box, while the transcript's tool-call line has
+    // the compact form.
+    let second = "\"content\": \"two\"";
+    let first = "\"content\": \"one\"";
     assert!(
         pty.wait_until(20, |screen| screen.contains("approve tool call?")
             && screen.contains(second)),
