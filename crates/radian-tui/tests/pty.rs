@@ -5617,10 +5617,17 @@ async fn pty_a_theme_file_colors_the_user_line() {
     // `RADIAN_HOME` root with the theme file and a config selecting it by name.
     let themes = home.path().join("themes");
     std::fs::create_dir_all(&themes).unwrap();
-    let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/themes/kanagawa-wave.json");
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/data/themes/kanagawa-wave.json"
+    );
     std::fs::copy(fixture, themes.join("kanagawa-wave.json")).unwrap();
     let config = home.path().join("config.toml");
-    std::fs::write(&config, "schema_version = 1\n[tui]\ntheme = \"kanagawa-wave\"\n").unwrap();
+    std::fs::write(
+        &config,
+        "schema_version = 1\n[tui]\ntheme = \"kanagawa-wave\"\n",
+    )
+    .unwrap();
 
     let server = MockServer::start(vec![text_reply("REPLY-DONE")]).await;
     let mut pty = Pty::spawn_with_env(
