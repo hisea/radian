@@ -421,3 +421,15 @@ Base `beef4d5` · 一次性 worktree `/tmp/radian-pi-skills-mut4`，每条跑完
 
 3/3 抓住。（`~/.claude/skills` 只有列进 extra_paths 才读，由
 `an_unlisted_root_is_not_read_until_it_is_an_extra_path` 钉住。）
+
+## models-refresh：opencode-go 内建列表（2026-10-14）
+
+Base `71a9d1c` · 一次性检出 `/tmp/models-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+变异后 `git checkout --` 还原，提交前 `git status --short` 为空。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| MR-1 | `THINKING_LOW_HIGH_MAX` 的 `low` 线值改成 `"medium"` | 内建映射与上游逐字段一致 | `tests/opencode_go_models.rs::the_opencode_go_builtins_match_upstream` FAILED |
+
+1/1 抓住。注意 `every_thinking_map_matches_supported_thinking_levels` 在变异下仍通过：
+它只断言"哪些级别非 null"，不断言线值；抓住值改动的是结构测试（两者互补，都保留）。
