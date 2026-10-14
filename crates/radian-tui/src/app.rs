@@ -21,16 +21,20 @@ use radian_permissions::{ApprovalOutcome, ApprovalRequest};
 use radian_session::RuntimeEvent;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::clip::ClipboardMode;
+use crate::clip::MAX_CLIPBOARD_BYTES;
 use crate::command::{self, PendingCommand};
 use crate::composer::Composer;
 use crate::find::FindState;
 use crate::keys::{Action, Keymap};
+use crate::login::{LoginKey, LoginOutcome, LoginWizard};
 use crate::mention::{Completion, ExpandError, Expansion};
 use crate::picker::{Outcome as PickerOutcome, Picker};
 use crate::projection::{SessionProjection, StreamSnapshot};
 use crate::question::{FormKey, FormOutcome, QuestionForm};
 use crate::render::InputStyle;
-use crate::theme::{Theme, ThemeName};
+use crate::select::{self, Anchor, Selection};
+use crate::theme::Theme;
 
 // ADR 0023 U5: the turn state is a **session fact**, so it lives in the projection
 // (`radian-host`) and `App` only reads it. Re-exported here so the existing `app::TurnState`
@@ -192,6 +196,13 @@ pub enum Modal {
     /// the one modal whose input goes through the keymap. Boxed: the form is much larger than
     /// the other variants, and a `Modal` sits in every `Layer`.
     Question(Box<QuestionForm>),
+    /// The `/login` wizard (ADR 0026 D3). Its keys are hardcoded (a login prompt is
+    /// sensitive, like the approval), and the key field is never echoed. Boxed, like the
+    /// question.
+    Login(Box<LoginWizard>),
+    /// A `/logout` confirmation: the provider whose stored credential would be removed.
+    /// `y` removes, `n`/`Esc` keeps — hardcoded, like the `/memory` confirmation.
+    ConfirmLogout(String),
 }
 
 /// How far one approval-scroll key moves the box's body (approval-fit). Hardcoded like the
@@ -216,6 +227,43 @@ pub enum MouseScrollDirection {
 /// How many transcript lines one wheel notch scrolls. A constant, not a magic number: the
 /// wheel is a coarse gesture (a notch is not a line), and this is the one place to tune it.
 pub const MOUSE_WHEEL_LINES: usize = 3;
+
+/// How often the drag's auto-scroll ticks while the pointer is held at the transcript's top
+/// or bottom edge. Only consulted while a drag is live (`recv_timeout` in the loop), so an
+/// idle app still blocks and never redraws (ADR 0023 U2).
+pub const AUTO_SCROLL_TICK: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// How quickly a second press counts as a double-click. Wall-clock (not frames): the loop
+/// is idle between clicks, so there is nothing else to measure with.
+pub const DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The last press, for double/triple-click detection: where and when, and how many presses
+/// in a row landed on the same cell inside the window (1, 2 or 3; capped at 3).
+#[derive(Debug, Clone, Copy)]
+struct LastClick {
+    at: std::time::Instant,
+    cell: (u16, u16),
+    count: usize,
+}
+
+/// The live left-button gesture: the press cell, and where the pointer last was (the
+/// auto-scroll edges are read off `last`). Screen rows/columns, `0`-based. `moved` says a
+/// drag event actually moved the pointer, so a release on the press cell is a click (which
+/// clears) and not a one-char selection. `anchor` is the press's located end, with whether
+/// the pointer was on a char there (the end-side extension at release needs to know).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SelectDrag {
+    press: (u16, u16),
+    last: (u16, u16),
+    moved: bool,
+    /// The selection's fixed end, located once at press time (an anchor, not a cell, so
+    /// scrolling during the drag cannot move it).
+    anchor: Anchor,
+    anchor_on_char: bool,
+    /// How many presses began this gesture (1 click, 2 double, 3 triple): the release counts
+    /// as a click — and clears — only for a plain 1.
+    count: usize,
+}
 
 /// Which startup phase the app is in (ADR 0023 U4, plan B). `--pick` runs the event
 /// loop once **before** a session exists; the loop returns as soon as the picker resolves, and
@@ -301,6 +349,10 @@ pub enum Input {
     Resize { rows: u16, cols: u16 },
     /// The hardcoded answer to the approval prompt on screen (`y`/`a`/`n`/`Esc`).
     ApprovalAnswer(ApprovalOutcome),
+    /// The approval box's auto key `!` (ADR 0026 D9, a constant in `render.rs`): approve the
+    /// pending request once **and** turn auto on for the rest of the session. Hardcoded like
+    /// the answers (ADR 0023 U4, invariant 2).
+    ApprovalAuto,
     /// A scroll of the approval box's body (`↑`/`↓`/PgUp/PgDn). Hardcoded like the answers:
     /// scrolling must never depend on the keymap, and it must never collide with an answer key.
     ApprovalScroll(ApprovalScroll),
@@ -367,6 +419,38 @@ pub enum Input {
     PickerClose,
     /// The session picker's data arrived (the result of [`Effect::OpenPicker`]).
     PickerOpened(PickerData),
+    /// One key inside the `/login` wizard (ADR 0026 D3). Hardcoded keys, like the approval.
+    LoginKey(LoginKey),
+    /// The `/login` verification request finished (D3). `name` is the provider the wizard is
+    /// logging in (the answer is ignored unless the wizard is still waiting on it).
+    LoginVerified {
+        name: String,
+        result: Result<(), String>,
+    },
+    /// The `auth.json` write of a `/login` finished: the wizard closes either way. The
+    /// success notice names the provider and the way to switch to it (D3).
+    LoginSaved {
+        name: String,
+        result: Result<(), String>,
+    },
+    /// The hardcoded answer to a `/logout` confirmation (`true` = remove).
+    ConfirmLogout(bool),
+    /// A `/logout` removal finished: the provider and the outcome. The notice names the
+    /// provider (the removal is otherwise silent, D3's confirmation being the record).
+    LogoutDone {
+        provider: String,
+        result: Result<(), String>,
+    },
+    /// The left button went down at a screen cell: the press that may start a transcript
+    /// selection (and that clears the previous one). Only arrives when mouse reporting is on.
+    MouseDown { row: u16, col: u16 },
+    /// The left button moved while held: extends the selection.
+    MouseDrag { row: u16, col: u16 },
+    /// The left button came up: ends the selection and copies it ([`Effect::Copy`]).
+    MouseUp { row: u16, col: u16 },
+    /// The clipboard write finished (the result of [`Effect::Copy`]): the honest status-bar
+    /// notice — what Radian did, never a claim about the clipboard it cannot verify.
+    ClipboardDone(String),
 }
 
 /// What the loop loaded for a picker overlay: the rows to show, the index for full-text
@@ -453,6 +537,32 @@ pub enum Effect {
     /// Load this workspace's sessions and open the picker overlay (`/sessions`). The result is
     /// [`Input::PickerOpened`]; loading is I/O, so it is the loop's job (ADR 0023 U3).
     OpenPicker { query: Option<String> },
+    /// Run the `/login` verification request (ADR 0026 D3): one `GET <base>/models`. The
+    /// answer is [`Input::LoginVerified`].
+    LoginVerify {
+        name: String,
+        protocol: &'static str,
+        base_url: String,
+        key: String,
+    },
+    /// Write the `/login` entry into `credentials/auth.json` (D3; only auth.json is written).
+    /// The answer is [`Input::LoginSaved`].
+    LoginSave {
+        name: String,
+        key: String,
+        env: Vec<(String, String)>,
+    },
+    /// Remove one stored credential (`/logout`, after the confirmation). The answer is
+    /// [`Input::LogoutDone`].
+    Logout { provider: String },
+    /// Switch the session's auto-approval (ADR 0026 D9). The loop applies it through the
+    /// facade, which flips the hooks' live policy, audits the switch and queues the durable
+    /// `ConfigChanged` record for the next resume.
+    SetApprovalPolicy { on: bool },
+    /// Write the transcript selection to the system clipboard (`tui.clipboard` picks the
+    /// transport). The loop runs it and answers with [`Input::ClipboardDone`]: OSC 52 has no
+    /// receipt, and `pbcopy` can fail — the loop owns both facts, `update` only owns the text.
+    Copy { text: String },
 }
 
 /// Effects are compared by **meaning** in the tests. `MemoryCommand` (a clap enum) has no
@@ -463,6 +573,7 @@ impl PartialEq for Effect {
         match (self, other) {
             (SendFollowup(a), SendFollowup(b)) | (Steer(a), Steer(b)) => a == b,
             (Cancel, Cancel) | (Quit, Quit) => true,
+            (SetApprovalPolicy { on: a }, SetApprovalPolicy { on: b }) => a == b,
             (
                 AnswerRequest {
                     request_id: a,
@@ -498,6 +609,34 @@ impl PartialEq for Effect {
             (FetchCompletions(a), FetchCompletions(b)) => a == b,
             (OpenPicker { query: a }, OpenPicker { query: b }) => a == b,
             (Session(a), Session(b)) => a == b,
+            (
+                LoginVerify {
+                    name: an,
+                    protocol: ap,
+                    base_url: ab,
+                    key: ak,
+                },
+                LoginVerify {
+                    name: bn,
+                    protocol: bp,
+                    base_url: bb,
+                    key: bk,
+                },
+            ) => an == bn && ap == bp && ab == bb && ak == bk,
+            (
+                LoginSave {
+                    name: an,
+                    key: ak,
+                    env: ae,
+                },
+                LoginSave {
+                    name: bn,
+                    key: bk,
+                    env: be,
+                },
+            ) => an == bn && ak == bk && ae == be,
+            (Logout { provider: a }, Logout { provider: b }) => a == b,
+            (Copy { text: a }, Copy { text: b }) => a == b,
             _ => false,
         }
     }
@@ -596,6 +735,11 @@ pub struct App {
     pub note: Option<String>,
     /// How many requests the queue holds (ADR 0023 U7), for the status bar.
     pub pending: usize,
+    /// The in-session auto-approval state (ADR 0026 D9). The status bar shows `AUTO` while
+    /// it is on; the approval box's `!` key and `/auto` switch it. The live policy itself
+    /// is the hooks' — the loop applies it through [`Effect::SetApprovalPolicy`] — this is
+    /// the UI's mirror, so `update` stays pure.
+    pub auto: bool,
     /// The last request the UI answered: the queue's head stays that request for a moment, and
     /// re-showing it would flash a form the user just submitted.
     last_answered: Option<u64>,
@@ -639,6 +783,20 @@ pub struct App {
     /// Set when the picker resolves during [`Startup::Picking`]. The pre-session loop leaves
     /// as soon as it is `Some`; the caller reads it with [`App::take_picker_outcome`].
     picker_outcome: Option<PickerOutcome>,
+    /// The transcript selection, anchored to entries and offsets ([`Selection`]) — never to
+    /// cells — so new output, scrolling and reflow leave it where it was. `Some` also while
+    /// the drag is still moving; the renderer highlights it each frame.
+    pub selection: Option<Selection>,
+    /// The live left-button gesture, from press to release.
+    selecting: Option<SelectDrag>,
+    /// The last press, for double/triple-click detection.
+    last_click: Option<LastClick>,
+    /// Whether mouse reporting is on (`tui.mouse`, default on). With it off the terminal
+    /// never sends a mouse event and every mouse method here is a no-op: none of the
+    /// selection/copy features exist (the belt behind the terminal's suspenders).
+    mouse_enabled: bool,
+    /// How a copy reaches the system clipboard (config `tui.clipboard`, default OSC 52).
+    pub clipboard: ClipboardMode,
 }
 
 impl App {
@@ -657,6 +815,7 @@ impl App {
             quit: false,
             note: None,
             pending: 0,
+            auto: false,
             last_answered: None,
             layers: vec![Layer::Surface],
             memory_enabled: false,
@@ -675,6 +834,11 @@ impl App {
             transcript_width: 80,
             startup: Startup::Session,
             picker_outcome: None,
+            selection: None,
+            selecting: None,
+            last_click: None,
+            mouse_enabled: true,
+            clipboard: ClipboardMode::Osc52,
         }
     }
 
@@ -723,6 +887,12 @@ impl App {
         self.memory_enabled = enabled;
     }
 
+    /// The session's in-session auto state (ADR 0026 D9), set at startup from the resolved
+    /// policy and afterwards only by the switch itself.
+    pub fn set_auto(&mut self, auto: bool) {
+        self.auto = auto;
+    }
+
     /// Applies the wired `tui.*` configuration. A bad keymap (a key bound to two actions) is
     /// an error the host turns into a startup refusal; unknown actions/keys are warnings.
     pub fn apply_config(
@@ -730,8 +900,21 @@ impl App {
         config: &radian_host::config::Config,
         no_color: bool,
     ) -> Result<Vec<String>, String> {
-        let name = config.tui.theme.as_deref().and_then(ThemeName::parse);
-        self.theme = Theme::resolve(name, no_color);
+        let keymap = Keymap::from_config(&config.tui.keybindings).map_err(|e| e.to_string())?;
+        let mut warnings = keymap.warnings.clone();
+        self.keymap = keymap;
+        // The theme: built-in names resolve directly, anything else is a file in
+        // `~/.radian/themes/` (ADR 0029). NO_COLOR wins over both the file and the
+        // `[tui.colors]` overrides (ADR 0029 decision 7); the theme module owns the rules.
+        let (theme, theme_warnings) = crate::theme::load(
+            config.tui.theme.as_deref(),
+            no_color,
+            crate::theme::truecolor_env(),
+            radian_host::themes_dir().as_deref(),
+            &config.tui.colors,
+        );
+        self.theme = theme;
+        warnings.extend(theme_warnings);
         // An unknown `tui.input_style` is a skipped key (the reader warns once); the TUI falls
         // back to the default.
         self.input_style = config
@@ -740,9 +923,20 @@ impl App {
             .as_deref()
             .and_then(InputStyle::parse)
             .unwrap_or_default();
-        let keymap = Keymap::from_config(&config.tui.keybindings).map_err(|e| e.to_string())?;
-        let mut warnings = keymap.warnings.clone();
-        self.keymap = keymap;
+        // `tui.clipboard` (default OSC 52). An unknown spelling never reaches here (the host
+        // config reader skips it with a warning); `pbcopy` off macOS does: warn once and fall
+        // back, because the copy effect would have no program to run.
+        self.mouse_enabled = config.tui.mouse.unwrap_or(true);
+        self.clipboard = config
+            .tui
+            .clipboard
+            .as_deref()
+            .and_then(ClipboardMode::parse)
+            .unwrap_or_default();
+        if self.clipboard == ClipboardMode::PbCopy && !self.clipboard.supported_on_this_platform() {
+            self.clipboard = ClipboardMode::Osc52;
+            warnings.push("tui.clipboard = \"pbcopy\" is macOS-only; using osc52".into());
+        }
         warnings.extend(
             config
                 .skipped
@@ -837,6 +1031,249 @@ impl App {
         }
     }
 
+    // ---------- transcript selection (left-button drag) ----------
+
+    /// Whether a left-button drag is live (the loop auto-scrolls only while it is).
+    pub fn is_selecting(&self) -> bool {
+        self.selecting.is_some()
+    }
+
+    /// The left button went down. Any press clears the previous selection (a later release
+    /// without movement is the click that clears, per the contract); only a press **inside
+    /// the transcript** starts a new one — never on the input box, the status bar, a modal
+    /// prompt or the picker overlay, and never with `tui.mouse = false`. A press that starts
+    /// nothing and clears nothing is not dirty: an idle screen is not redrawn (ADR 0023 U2).
+    pub fn mouse_down(&mut self, row: u16, col: u16) -> UpdateResult {
+        if !self.mouse_enabled {
+            return UpdateResult::none();
+        }
+        let count = self.bump_click_count(row, col);
+        let had = self.selection.take();
+        let inside = !self.has_modal()
+            && self.picker().is_none()
+            && (row as usize) < usize::from(self.view_height)
+            && self.transcript_width > 0;
+        let cleared = had.is_some();
+        if !inside {
+            return cleared
+                .then(UpdateResult::dirty)
+                .unwrap_or(UpdateResult::none());
+        }
+        // The fixed end is located once, here: a scroll during the drag moves the view, not
+        // the anchor. An empty transcript simply starts nothing.
+        let press_line = self.scroll + row as usize;
+        let Some(hit) = select::locate_hit(
+            &self.entries,
+            self.transcript_width,
+            press_line,
+            col as usize,
+        ) else {
+            return cleared
+                .then(UpdateResult::dirty)
+                .unwrap_or(UpdateResult::none());
+        };
+        // A multi-click replaces the just-cleared selection with its bigger range and
+        // anchors the gesture at its start, so a following drag extends from the word (or
+        // the entry).
+        let (anchor, anchor_on_char) = match count {
+            2 => match select::run_at(
+                &self.entries,
+                self.transcript_width,
+                press_line,
+                col as usize,
+            ) {
+                Some((start, end)) => {
+                    self.selection = Some(Selection {
+                        anchor: start,
+                        head: end,
+                    });
+                    (start, true)
+                }
+                None => (hit.anchor, hit.on_char),
+            },
+            3 => {
+                let len = select::entry_display_len(&self.entries, hit.anchor.entry);
+                if len > 0 {
+                    self.selection = Some(Selection {
+                        anchor: Anchor {
+                            entry: hit.anchor.entry,
+                            offset: 0,
+                        },
+                        head: Anchor {
+                            entry: hit.anchor.entry,
+                            offset: len,
+                        },
+                    });
+                    (
+                        Anchor {
+                            entry: hit.anchor.entry,
+                            offset: 0,
+                        },
+                        true,
+                    )
+                } else {
+                    (hit.anchor, hit.on_char)
+                }
+            }
+            _ => (hit.anchor, hit.on_char),
+        };
+        self.selecting = Some(SelectDrag {
+            press: (row, col),
+            last: (row, col),
+            moved: false,
+            anchor,
+            anchor_on_char,
+            count,
+        });
+        cleared
+            .then(UpdateResult::dirty)
+            .unwrap_or(UpdateResult::none())
+    }
+
+    /// The press counter for double/triple-click: one more when the same cell is pressed
+    /// again inside [`DOUBLE_CLICK_WINDOW`] (capped at 3), otherwise back to 1.
+    fn bump_click_count(&mut self, row: u16, col: u16) -> usize {
+        let next = match self.last_click {
+            Some(click)
+                if click.cell == (row, col) && click.at.elapsed() <= DOUBLE_CLICK_WINDOW =>
+            {
+                (click.count + 1).min(3)
+            }
+            _ => 1,
+        };
+        self.last_click = Some(LastClick {
+            at: std::time::Instant::now(),
+            cell: (row, col),
+            count: next,
+        });
+        next
+    }
+
+    /// The left button moved while held: extend the selection to the pointer's cell.
+    pub fn mouse_drag(&mut self, row: u16, col: u16) -> UpdateResult {
+        if !self.mouse_enabled || self.selecting.is_none() {
+            return UpdateResult::none();
+        }
+        if let Some(drag) = self.selecting.as_mut() {
+            if (row, col) != drag.press {
+                drag.moved = true;
+            }
+            drag.last = (row, col);
+        }
+        self.extend_selection_to(row, col);
+        UpdateResult::dirty()
+    }
+
+    /// The left button came up: the release cell re-extends the selection one last time —
+    /// through the char under it ([`Self::extend_selection_to`]). A click — the pointer
+    /// never left the press cell — leaves nothing selected and copies nothing.
+    pub fn mouse_up(&mut self, row: u16, col: u16) -> UpdateResult {
+        let Some(drag) = self.selecting else {
+            return UpdateResult::none();
+        };
+        if !self.mouse_enabled {
+            return UpdateResult::none();
+        }
+        self.selecting = None;
+        if drag.count == 1 && !drag.moved && (row, col) == drag.press {
+            // The click: the press already cleared; nothing to copy. A double/triple click's
+            // release copies the word or entry it just selected.
+            return UpdateResult::none();
+        }
+        self.extend_selection_to(row, col);
+        let Some(selection) = self.selection else {
+            return UpdateResult::none();
+        };
+        if selection.is_empty() {
+            self.selection = None;
+            return UpdateResult::none();
+        }
+        let text = select::logical_text(&self.entries, &selection);
+        if text.is_empty() {
+            self.selection = None;
+            return UpdateResult::dirty();
+        }
+        // Refuse the absurd honestly, with the reason: the transcript selection's own line.
+        if text.len() > MAX_CLIPBOARD_BYTES {
+            self.selection = None;
+            self.push_notice(format!(
+                "selection too large to copy: {} bytes (the limit is {})",
+                text.len(),
+                MAX_CLIPBOARD_BYTES
+            ));
+            return UpdateResult::dirty();
+        }
+        // `off` means the selection still draws, but releasing it copies nothing.
+        if self.clipboard == ClipboardMode::Off {
+            return UpdateResult::none();
+        }
+        UpdateResult::effect(Effect::Copy { text })
+    }
+
+    /// One auto-scroll tick of a live drag: the pointer held at (or beyond) the transcript's
+    /// top or bottom edge moves the view one line toward it, and the selection's head is
+    /// re-located under the pointer. Returns whether anything changed. The loop calls this
+    /// only while a drag is live, on its `recv_timeout` tick.
+    pub fn mouse_autoscroll(&mut self) -> bool {
+        let Some(drag) = self.selecting else {
+            return false;
+        };
+        let view = usize::from(self.view_height.max(1));
+        let direction: i32 = if drag.last.0 == 0 {
+            -1
+        } else if drag.last.0 as usize >= view {
+            1
+        } else {
+            return false;
+        };
+        let before = self.scroll;
+        self.scroll_by(direction);
+        if self.scroll == before {
+            return false;
+        }
+        self.extend_selection_to(drag.last.0, drag.last.1);
+        true
+    }
+
+    /// Re-locates the selection under a pointer cell: the earlier of {press anchor, pointer}
+    /// is the inclusive start, the later the end — extended **through** the char under it
+    /// when that char is what the pointer is on (native-selection semantics: dragging across
+    /// "abc" copies "abc" in either direction). A gap (past a line's end, or on a folded
+    /// boundary) is a plain boundary and extends nothing. The stored selection is the
+    /// normalized `start..end`; rendering and copying read exactly this range.
+    fn extend_selection_to(&mut self, row: u16, col: u16) {
+        let Some(drag) = self.selecting else {
+            return;
+        };
+        let head_line = self.scroll + row as usize;
+        let Some(hit) = select::locate_hit(
+            &self.entries,
+            self.transcript_width,
+            head_line,
+            col as usize,
+        ) else {
+            return;
+        };
+        let (start, mut end) =
+            if (hit.anchor.entry, hit.anchor.offset) < (drag.anchor.entry, drag.anchor.offset) {
+                (hit.anchor, drag.anchor)
+            } else {
+                (drag.anchor, hit.anchor)
+            };
+        let end_on_char = if end == hit.anchor {
+            hit.on_char
+        } else {
+            drag.anchor_on_char
+        };
+        if end_on_char {
+            end.offset += select::char_len_at(&self.entries, end).unwrap_or(1);
+        }
+        self.selection = Some(Selection {
+            anchor: start,
+            head: end,
+        });
+    }
+
     // ---------- the layer stack (ADR 0023 U4) ----------
 
     /// The layer stack, bottom ([`Layer::Surface`]) first. Read-only; use the `push_*` and
@@ -894,6 +1331,22 @@ impl App {
     pub fn approval_modal_mut(&mut self) -> Option<&mut PendingApproval> {
         self.layers.iter_mut().rev().find_map(|layer| match layer {
             Layer::Modal(Modal::Approval(prompt)) => Some(&mut **prompt),
+            _ => None,
+        })
+    }
+
+    /// The topmost `/login` wizard, mutably, so `update` can step it.
+    pub fn login_modal_mut(&mut self) -> Option<&mut LoginWizard> {
+        self.layers.iter_mut().rev().find_map(|layer| match layer {
+            Layer::Modal(Modal::Login(wizard)) => Some(&mut **wizard),
+            _ => None,
+        })
+    }
+
+    /// The `/logout` confirmation on screen, if any.
+    pub fn pending_logout(&self) -> Option<&str> {
+        self.layers.iter().rev().find_map(|layer| match layer {
+            Layer::Modal(Modal::ConfirmLogout(provider)) => Some(provider.as_str()),
             _ => None,
         })
     }
@@ -1152,6 +1605,34 @@ impl App {
         }
     }
 
+    /// The approval box's `!` key (ADR 0026 D9): approve the pending request once **and**
+    /// turn auto on for the rest of the session, in one press, no confirmation (owner's
+    /// correction 2026-10-13: `!` had no meaning before, so it cannot be mistyped into one).
+    /// The effects run in order: the answer first, then the switch. The switch stands even
+    /// with nothing pending — it is the same switch `/auto on` makes.
+    fn approval_auto_key(&mut self) -> UpdateResult {
+        let mut effects = Vec::new();
+        if let Some(Modal::Approval(prompt)) =
+            self.remove_modal(|modal| matches!(modal, Modal::Approval(_)))
+        {
+            self.last_answered = Some(prompt.request_id);
+            effects.push(Effect::AnswerRequest {
+                request_id: prompt.request_id,
+                response: PendingResponse::Approval(ApprovalOutcome::AllowOnce),
+            });
+        }
+        self.auto = true;
+        self.push_notice(
+            "auto: tool calls are approved without asking for the rest of this session; \
+             deny rules and the sandbox still apply",
+        );
+        effects.push(Effect::SetApprovalPolicy { on: true });
+        UpdateResult {
+            dirty: true,
+            effects,
+        }
+    }
+
     /// One key inside the question form (ADR 0024 Q7).
     fn form_key(&mut self, key: FormKey) -> UpdateResult {
         let Some(index) = self
@@ -1252,13 +1733,22 @@ impl App {
                 self.find_backspace();
                 UpdateResult::dirty()
             }
-            // A bracketed paste is text for the message box, exactly as before.
+            // A bracketed paste is text for the message box — unless the `/login` wizard is
+            // up: its fields take the paste (masked like typing, D3), and the message box is
+            // frozen while a modal is up anyway.
             Input::Paste(text) => {
+                if matches!(self.top_modal(), Some(Modal::Login(_))) {
+                    let outcome = self
+                        .login_modal_mut()
+                        .map(|wizard| wizard.on_key(LoginKey::Paste(text)));
+                    return self.login_outcome(outcome.unwrap_or(LoginOutcome::Stay));
+                }
                 self.input.insert_str(&text);
                 UpdateResult::dirty()
             }
             Input::Resize { .. } => UpdateResult::dirty(),
             Input::ApprovalAnswer(outcome) => self.answer_approval(outcome),
+            Input::ApprovalAuto => self.approval_auto_key(),
             Input::ApprovalScroll(direction) => self.approval_scroll(direction),
             Input::ConfirmCommand(confirmed) => self.confirm_command(confirmed),
             Input::Stream(stream) => {
@@ -1329,6 +1819,77 @@ impl App {
                 UpdateResult::dirty()
             }
             Input::PickerOpened(data) => self.picker_opened(data),
+            // The `/login` wizard's keys, its verification result, and the save/removal
+            // results (ADR 0026 D3).
+            Input::LoginKey(key) => {
+                let outcome = self
+                    .login_modal_mut()
+                    .map(|wizard| wizard.on_key(key))
+                    .unwrap_or(LoginOutcome::Stay);
+                self.login_outcome(outcome)
+            }
+            Input::LoginVerified { name: _, result } => {
+                // Only a wizard still waiting consumes the answer (D3).
+                let waiting = matches!(
+                    self.top_modal(),
+                    Some(Modal::Login(wizard))
+                        if matches!(wizard.step, crate::login::LoginStep::Verifying)
+                );
+                if !waiting {
+                    return UpdateResult::none();
+                }
+                let outcome = self
+                    .login_modal_mut()
+                    .and_then(|wizard| wizard.verified(&result))
+                    .unwrap_or(LoginOutcome::Stay);
+                self.login_outcome(outcome)
+            }
+            Input::LoginSaved { name, result } => {
+                self.remove_modal(|modal| matches!(modal, Modal::Login(_)));
+                match result {
+                    Ok(()) => {
+                        // D3's required "what next" line: how to actually use the provider.
+                        self.push_notice(format!(
+                            "saved the key for `{name}` in credentials/auth.json; switch to it \
+                             with /model {name}/<model> (or set model.provider)"
+                        ));
+                    }
+                    Err(error) => self.push_notice(format!("could not save the key: {error}")),
+                }
+                UpdateResult::dirty()
+            }
+            Input::ConfirmLogout(confirmed) => {
+                let Some(provider) = self.pending_logout().map(str::to_owned) else {
+                    return UpdateResult::none();
+                };
+                self.remove_modal(|modal| matches!(modal, Modal::ConfirmLogout(_)));
+                if confirmed {
+                    UpdateResult::effect(Effect::Logout { provider })
+                } else {
+                    self.push_notice(format!("kept `{provider}`"));
+                    UpdateResult::dirty()
+                }
+            }
+            Input::LogoutDone { provider, result } => {
+                match result {
+                    Ok(()) => {
+                        self.push_notice(format!("removed the stored credential for `{provider}`"))
+                    }
+                    Err(error) => {
+                        self.push_notice(format!("could not remove `{provider}`: {error}"))
+                    }
+                }
+                UpdateResult::dirty()
+            }
+            Input::MouseDown { row, col } => self.mouse_down(row, col),
+            Input::MouseDrag { row, col } => self.mouse_drag(row, col),
+            Input::MouseUp { row, col } => self.mouse_up(row, col),
+            // The loop's clipboard write finished; its notice says what Radian did ("copied N
+            // chars (via OSC 52)"), never that the clipboard holds it — OSC 52 has no receipt.
+            Input::ClipboardDone(notice) => {
+                self.note = Some(notice);
+                UpdateResult::dirty()
+            }
         }
     }
 
@@ -1457,6 +2018,12 @@ impl App {
     fn modal_hardcoded_key(&self, key: &KeyEvent) -> Option<Input> {
         match self.top_modal()? {
             Modal::Approval(_) => match key.code {
+                // The auto key `!` (ADR 0026 D9, the constant in `render.rs`): approve this
+                // request once and turn auto on for the session. It must not take a scroll
+                // key, and it is un-rebindable like every answer key (ADR 0023 U4).
+                KeyCode::Char('!') => Some(Input::ApprovalAuto),
+                // `Y` is `y` (allow once); it never switches auto on (correction
+                // 2026-10-13: a Caps-Lock `y` must not silently enable auto).
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     Some(Input::ApprovalAnswer(ApprovalOutcome::AllowOnce))
                 }
@@ -1469,8 +2036,8 @@ impl App {
                     }))
                 }
                 // The body's scroll keys (approval-fit). They are not answer keys, so they
-                // cannot be confused with one, and the answers stay un-rebindable. ADR 0026 D9
-                // will add `[Y] auto for this session`; it must not take a scroll key.
+                // cannot be confused with one, and the answers stay un-rebindable. The auto
+                // key `!` (ADR 0026 D9) shares this property: it is no scroll key either.
                 KeyCode::Up => Some(Input::ApprovalScroll(ApprovalScroll::LineUp)),
                 KeyCode::Down => Some(Input::ApprovalScroll(ApprovalScroll::LineDown)),
                 KeyCode::PageUp => Some(Input::ApprovalScroll(ApprovalScroll::PageUp)),
@@ -1485,6 +2052,30 @@ impl App {
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                     Some(Input::ConfirmCommand(false))
                 }
+                _ => None,
+            },
+            // The `/logout` confirmation is hardcoded like the `/memory` one (ADR 0023 U4).
+            Modal::ConfirmLogout(_) => match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => Some(Input::ConfirmLogout(true)),
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    Some(Input::ConfirmLogout(false))
+                }
+                _ => None,
+            },
+            // The `/login` wizard's keys are hardcoded too: a login prompt is sensitive, and
+            // the key field must behave identically whoever rebinds what (ADR 0026 D3).
+            Modal::Login(_) => match key.code {
+                KeyCode::Char(c)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    Some(Input::LoginKey(LoginKey::Char(c)))
+                }
+                KeyCode::Backspace => Some(Input::LoginKey(LoginKey::Backspace)),
+                KeyCode::Enter => Some(Input::LoginKey(LoginKey::Enter)),
+                KeyCode::Esc => Some(Input::LoginKey(LoginKey::Esc)),
+                KeyCode::Up => Some(Input::LoginKey(LoginKey::Up)),
+                KeyCode::Down => Some(Input::LoginKey(LoginKey::Down)),
                 _ => None,
             },
         }
@@ -1980,6 +2571,13 @@ impl App {
             return UpdateResult::none();
         }
         let candidates = command::rank(candidates, fetch.partial());
+        // The `Ready` levels' rule holds here too: the one candidate that is already exactly
+        // what was typed is not a completion to accept — arming it would make Enter accept
+        // (inserting the same word) instead of submitting the finished line.
+        if candidates.len() == 1 && candidates[0].insert == fetch.partial() {
+            self.completion_clear();
+            return UpdateResult::dirty();
+        }
         self.set_slash(completion.range, candidates);
         UpdateResult::dirty()
     }
@@ -2079,6 +2677,35 @@ impl App {
         }
     }
 
+    /// Applies the wizard's outcome: stay, or hand the loop an effect / close. The "what
+    /// next" line on success is the loop's (it knows the save succeeded).
+    fn login_outcome(&mut self, outcome: LoginOutcome) -> UpdateResult {
+        match outcome {
+            LoginOutcome::Stay => {}
+            LoginOutcome::Cancel => {
+                self.remove_modal(|modal| matches!(modal, Modal::Login(_)));
+                self.push_notice("login cancelled; nothing was saved");
+            }
+            LoginOutcome::Verify {
+                name,
+                protocol,
+                base_url,
+                key,
+            } => {
+                return UpdateResult::effect(Effect::LoginVerify {
+                    name,
+                    protocol,
+                    base_url,
+                    key,
+                });
+            }
+            LoginOutcome::Save { name, key, env } => {
+                return UpdateResult::effect(Effect::LoginSave { name, key, env });
+            }
+        }
+        UpdateResult::dirty()
+    }
+
     /// Runs one `/…` line. Parsing is pure; everything that touches the world becomes an
     /// effect, and its result comes back as another [`Input`]. The line is not sent anywhere.
     fn run_slash_command(&mut self, line: &str) -> UpdateResult {
@@ -2124,6 +2751,58 @@ impl App {
                 provider: switch.provider,
                 model: switch.model,
             }),
+            // `/login`: the wizard is app state (pure); its network and file work are effects
+            // the loop runs (ADR 0023 U3). An explicit `/login <id>` skips the choice step.
+            command::Outcome::Login(provider) => {
+                let step = match provider {
+                    None => crate::login::LoginStep::ChooseProvider { cursor: 0 },
+                    Some(id) if id.starts_with("no-such-provider:") => {
+                        let name = id.trim_start_matches("no-such-provider:").to_owned();
+                        self.push_notice(format!(
+                            "unknown provider {name:?}: /login takes a built-in provider or \
+                             `custom`"
+                        ));
+                        return UpdateResult::dirty();
+                    }
+                    Some(id) => {
+                        // for_provider builds the matching first step (D3).
+                        self.push_modal(Modal::Login(Box::new(LoginWizard::for_provider(&id))));
+                        return UpdateResult::dirty();
+                    }
+                };
+                self.push_modal(Modal::Login(Box::new(LoginWizard::new(step))));
+                UpdateResult::dirty()
+            }
+            // `/logout <provider>`: confirm first (`y`/`n`), then remove (D3).
+            command::Outcome::Logout(provider) => {
+                if provider.is_empty() {
+                    self.push_notice("usage: /logout <provider>");
+                    return UpdateResult::dirty();
+                }
+                if let Some(extra) = provider.strip_prefix("__extra__") {
+                    self.push_notice(format!(
+                        "unexpected extra name {extra:?}; usage: /logout <provider>"
+                    ));
+                    return UpdateResult::dirty();
+                }
+                self.push_modal(Modal::ConfirmLogout(provider));
+                UpdateResult::dirty()
+            }
+            command::Outcome::AutoToggle(on) => {
+                // ADR 0026 D9: the in-session switch. `/auto on` needs no confirmation (it is
+                // typed, not one keypress), and a no-op switch is still recorded — the audit
+                // line says who switched, so the journal keeps every command.
+                self.auto = on;
+                if on {
+                    self.push_notice(
+                        "auto: tool calls are approved without asking for the rest of this \
+                         session; deny rules and the sandbox still apply",
+                    );
+                } else {
+                    self.push_notice("auto off: tool asks prompt again");
+                }
+                UpdateResult::effect(Effect::SetApprovalPolicy { on })
+            }
             command::Outcome::Message => UpdateResult::none(),
         }
     }

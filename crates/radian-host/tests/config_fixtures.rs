@@ -31,6 +31,8 @@ fn outcome(name: &str) -> &'static str {
 fn the_reader_matches_the_reference_checker() {
     let cases = [
         ("minimal.toml", "accept"),
+        ("tui-theme-colors.toml", "accept"),
+        ("providers.toml", "accept"),
         ("v1-unknown-fields.toml", "accept"),
         ("schema-version-newer.toml", "readonly"),
         ("schema-version-lower.toml", "reject"),
@@ -53,6 +55,56 @@ fn the_unknown_fields_are_ignored_but_reported() {
     assert!(config.skipped.contains(&"future_top_level".to_string()));
     assert!(config.skipped.contains(&"model.future_option".to_string()));
     assert!(config.skipped.contains(&"tui.theme".to_string()));
+}
+
+/// The `providers.toml` fixture (ADR 0026 D10) carries named providers; the names are the
+/// `auth.json` key slots, so `--provider corp` and `/model corp/…` resolve them.
+#[test]
+fn the_providers_fixture_carries_named_providers() {
+    let (path, text) = fixture("providers.toml");
+    let config = config::parse(&path, &text).unwrap();
+    assert_eq!(config.model.provider.as_deref(), Some("corp"));
+    assert_eq!(config.providers.len(), 2);
+    assert_eq!(config.providers["corp"].kind, "openai-compatible");
+    assert_eq!(
+        config.providers["corp"].base_url,
+        "https://llm.example.com/v1"
+    );
+    assert_eq!(config.providers["relay"].kind, "anthropic");
+    assert!(config.skipped.is_empty(), "{:?}", config.skipped);
+}
+
+/// The `tui-theme-colors.toml` fixture (ADR 0029) carries a theme-file name and raw
+/// `[tui.colors]` entries: the reader validates nothing beyond the TOML shape, the TUI
+/// resolves names and colors and reports the misses as startup warnings.
+#[test]
+fn the_tui_theme_colors_fixture_is_carried_raw() {
+    let (path, text) = fixture("tui-theme-colors.toml");
+    let config = config::parse(&path, &text).unwrap();
+    assert_eq!(config.tui.theme.as_deref(), Some("kanagawa-wave"));
+    assert!(config.skipped.is_empty());
+    let get = |key: &str| {
+        config
+            .tui
+            .colors
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value)
+            .unwrap()
+    };
+    assert_eq!(
+        get("user").fg,
+        Some(config::TuiColorValue::Text("#0af".to_owned()))
+    );
+    assert_eq!(get("tool_call").fg, Some(config::TuiColorValue::Index(39)));
+    let notice = get("notice");
+    assert_eq!(
+        notice.fg,
+        Some(config::TuiColorValue::Text("oklch(62% 0.1 200)".to_owned()))
+    );
+    assert_eq!(notice.bold, Some(true));
+    // A pi name is carried like any other key; the TUI decides where it lands.
+    assert!(get("mdHeading").underline == Some(false));
 }
 
 /// The minimal fixture carries the known `tui.mouse` preference (`false`): the reader keeps

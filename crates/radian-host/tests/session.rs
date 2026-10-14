@@ -77,6 +77,7 @@ async fn open_with(
         radian_host::ModelRoute::new("openai-compatible", "mock"),
         config_slot.clone(),
         radian_host::RouteContext {
+            providers: std::collections::BTreeMap::new(),
             session_id: label.to_owned(),
             user_headers: Vec::new(),
             include_usage: None,
@@ -186,6 +187,7 @@ async fn a_local_session_accepts_a_declared_command() {
         radian_host::ModelRoute::new("openai-compatible", "mock"),
         config_slot.clone(),
         radian_host::RouteContext {
+            providers: std::collections::BTreeMap::new(),
             session_id: "can-send".to_owned(),
             user_headers: Vec::new(),
             include_usage: None,

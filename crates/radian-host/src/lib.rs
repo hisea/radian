@@ -7,6 +7,7 @@
 //! of a host that is the same whether the user is at a line prompt or a full-screen UI. The
 //! two binaries still decide their own flags, startup text and error wording.
 
+pub mod approval;
 pub mod auth;
 mod catalog;
 pub mod config;
@@ -15,6 +16,7 @@ mod diagnostics;
 mod errors;
 mod headers;
 mod home;
+pub mod login;
 mod mcp;
 pub mod memory;
 mod model;
@@ -28,6 +30,7 @@ pub mod sessions;
 mod tools;
 mod workspace;
 
+pub use approval::{StartupApproval, resolve_startup, restored_approval};
 pub use auth::{
     AUTH_FILE_NAME, AuthEntry, AuthError, AuthStore, RADIAN_BASE_URL, ResolvedKey, auth_path,
     list as list_auth, remove as remove_auth, resolve_key, resolve_note,
@@ -57,13 +60,14 @@ pub use home::{
     RADIAN_HOME_ENV, cache_dir_for, catalog_cache, catalog_cache_for, config_dir, config_dir_for,
     credentials_dir, credentials_dir_for, diagnostics_dir_for, ensure_private_dir,
     legacy_sessions_dirs_for, legacy_sessions_hint, legacy_sessions_hint_for, memory_dir,
-    memory_dir_for, radian_home, radian_home_for, sessions_dir, sessions_dir_for,
+    memory_dir_for, radian_home, radian_home_for, sessions_dir, sessions_dir_for, themes_dir,
+    themes_dir_for,
 };
 pub use mcp::load_mcp_config;
 pub use model::{
     DEFAULT_MAX_TOKENS, HostModel, MIN_THINKING_BUDGET, ModelArgs, Provider, RouteContext,
     SwitchableModel, Thinking, build_model, check_provider_flags, redact_base_url,
-    resolve_thinking,
+    resolve_thinking, resolve_thinking_ref,
 };
 pub use output::{StdoutError, write_line, write_stdout};
 pub use pending::{
@@ -74,10 +78,12 @@ pub use projection::{
     LastToolCall, ProjectionRead, SessionProjection, StreamKind, StreamSnapshot, TurnState,
 };
 pub use provider::{
-    DEFAULT_THINKING_LEVEL, DESCRIPTORS, DescriptorModel, GENERIC_ID, LoginMethod, Protocol,
-    ProviderDescriptor, Route, THINKING_LEVELS, ThinkingMap, clamp_thinking, descriptor,
-    descriptors, parse_thinking_level, resolve_route, supported_thinking_levels, supported_wire,
-    thinking_map_for, thinking_rank,
+    CUSTOM_LOGIN, DEFAULT_THINKING_LEVEL, DESCRIPTORS, DescriptorModel, GENERIC_ID, LoginMethod,
+    NamedProvider, NamedSource, Protocol, ProviderDecl, ProviderDescriptor, ProviderRef,
+    RADIAN_KIND, Route, THINKING_LEVELS, ThinkingMap, clamp_thinking, descriptor, descriptors,
+    login_choices, name_error, parse_thinking_level, resolve_provider, resolve_route,
+    resolve_route_for, supported_thinking_levels, supported_thinking_levels_ref, supported_wire,
+    thinking_map_for, thinking_map_for_ref, thinking_rank, valid_name,
 };
 pub use radian_runtime::ModelRoute;
 pub use session::{

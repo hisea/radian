@@ -161,9 +161,15 @@ The file is read the same way as the CLI's (`--config`, `RADIAN_CONFIG`,
 ```toml
 schema_version = 1
 [tui]
-theme = "dark"                 # dark | light | mono
+theme = "dark"                 # a built-in name, or a theme file name (see below)
 input_style = "lines"          # lines (default) | box
-mouse = true                   # the wheel scrolls the transcript (default true)
+mouse = true                   # wheel + transcript selection (default true)
+clipboard = "osc52"            # osc52 (default) | pbcopy (macOS) | off
+
+[tui.colors]                   # per-role color overrides (ADR 0029 decision 5)
+user = "#0af"                  # a bare color: the foreground only
+notice = { fg = "oklch(62% 0.1 200)", bold = true }
+mdHeading = 203                # pi role names work too (kept, not drawn, until ADR 0028)
 
 [tui.keybindings]
 send = ["ctrl-s"]              # replaces the default `enter`
@@ -179,14 +185,66 @@ find_next = ["ctrl-g", "shift-enter"]
 - `theme`: `dark` is the original palette, `light` re-picks it for a light background, `mono`
   uses no color at all (bold/underline/dim only). A non-empty `NO_COLOR` environment variable
   forces `mono` (<https://no-color.org>). An unknown theme is ignored with a warning.
-- `mouse` (default `true`): the app enables button + wheel reporting (`CSI ?1000h`) with SGR
-  coordinates (`CSI ?1006h`), so a wheel notch scrolls the transcript instead of the terminal
-  translating it to arrow keys (dogfood p5: the wheel called the input history). Deliberately
-  **not** `?1002h`/`?1003h` (any-motion): a pointer move is not input and never causes a frame.
-  With `mouse = false` the app sends no mouse sequence at all and behaves exactly as before.
-  **Cost**: while reporting is on, a plain drag selects via the app rather than the emulator;
-  most terminals still select with Shift held, but that is the emulator's choice and is not
-  guaranteed here. Set `mouse = false` to keep native selection always.
+#### Theme files (ADR 0029): any pi theme works as-is
+
+`tui.theme` accepts any name. The built-ins (`dark`, `light`, `mono`) resolve first; any other
+name is read from `~/.radian/themes/<name>.json` — and that file is **pi's theme JSON, read
+as-is**. Copy a pi theme over and it just works:
+
+```sh
+mkdir -p ~/.radian/themes && cp ~/.pi/agent/themes/kanagawa-wave.json ~/.radian/themes/
+```
+
+(set `theme = "kanagawa-wave"` in the config; the file's `name` field should match.) Colors
+come in six forms, all supported: `#rgb`/`#rrggbb`, `oklch(L C H)`, `okhsl(H S L)`, a 0–255
+palette index, a `vars` reference (chains allowed), and `""` (the terminal default). With
+truecolor (`COLORTERM` is `truecolor` or `24bit`) colors render as RGB; otherwise each is
+approximated to the nearest 256-color entry, with the same algorithm pi uses.
+
+Radian is more forgiving than pi on purpose (ADR 0029 decision 4): a missing variable, a
+circular reference or an unknown role only makes the *affected roles* fall back to the
+built-in palette (chosen by the file's `appearance`, `dark` by default), each problem warning
+once on the startup line; a broken file falls back as a whole. Nothing blocks startup. pi's
+reserved `system` theme (OSC terminal probing) is deliberately not implemented.
+
+Every pi role maps onto a Radian role (`[tui.colors]` accepts both name families):
+
+| Radian role | pi role(s) it takes |
+|---|---|
+| `user` | `userMessageText` (fg) + `userMessageBg` (bg) |
+| `selection` | `selectedBg` (bg only — the text keeps its own foreground under the band) |
+| `reasoning` | `thinkingText` |
+| `tool_call` / `tool_result` / `tool_result_error` | `toolTitle` / `toolOutput` / `error` |
+| `notice` / `hint` / `completion` / `truncation` | `text` / `muted` / `dim` / `dim` |
+| `turn_idle` / `turn_running` / `turn_cancelled` | `success` / `warning` / `error` |
+| `interrupted` / `note` / `budget_over` | `warning` |
+| `model` / `mcp` / `find` | `accent` |
+| `tier` / `usage` / `budget` | `muted` |
+| `approval_border` | `borderAccent` |
+| `auto`（状态栏的 `AUTO` 标记，ADR 0026 D9） | `warning` |
+
+The pi roles nothing renders yet — the `md*`, `toolDiff*`, `syntax*` and `thinking*` families
+and the panel roles (`scrollbar*`, `searchMatch*`, `customMessage*`, `toolPendingBg`,
+`toolSuccessBg`, `toolErrorBg`, `bashMode`) — are parsed and kept on the theme (ADR 0029
+decision 3), so ADR 0027/0028 can wire them without re-reading the file.
+- `mouse` (default `true`): the app enables button + wheel reporting (`CSI ?1000h`), button
+  motion (`CSI ?1002h`, the transcript drag) and SGR coordinates (`CSI ?1006h`), so a wheel
+  notch scrolls the transcript instead of the terminal translating it to arrow keys (dogfood
+  p5: the wheel called the input history). Deliberately **not** `?1003h` (any-motion): a
+  pointer move without a button is not input and never causes a frame. With `mouse = false`
+  the app sends no mouse sequence at all and behaves exactly as before — no wheel scrolling
+  and no transcript selection/copy. **Cost**: while reporting is on, a plain drag selects via
+  the app rather than the emulator; most terminals keep their native selection on
+  **Shift+drag** (they do not report a shifted mouse at all — Radian drops such events if one
+  arrives), but that is the emulator's choice and is not guaranteed here. Set `mouse = false`
+  to keep native selection always.
+- `clipboard` (default `osc52`): how a transcript-selection copy reaches the system clipboard.
+  `osc52` writes `CSI ]52;c;<base64>BEL` to stdout — no child process, works over ssh, but it
+  is fire-and-forget: the status bar therefore says `copied N chars (via OSC 52)`, what
+  Radian did, never that the clipboard holds it. `pbcopy` runs macOS's `pbcopy` and can
+  report failure honestly; configured anywhere else it is a startup warning and OSC 52.
+  Selections over 1 MiB are refused with the reason. `off` keeps the selection visual and
+  copies nothing.
 - `keybindings` maps an **action** to one or more key strings; a listed action's keys
   **replace** its defaults. Key strings are `[ctrl-][alt-][shift-]key` (`enter`, `ctrl-j`,
   `alt-enter`, `shift-up`, `pageup`, `space`, a single character, …). An unknown action or key
@@ -199,9 +257,11 @@ find_next = ["ctrl-g", "shift-enter"]
   `escape`, `cancel`, `complete`, `find`, `find_prev`, `find_next`, `find_close`,
   `form_next`, `form_prev`, `form_up`, `form_down`, `form_select`, `form_submit`,
   `form_decline`. The defaults are exactly the table above, so an empty config changes nothing.
-- **The approval and command-confirmation prompts are not rebindable.** `y`/`a`/`n` and `Esc`
-  are handled before the keymap, so a bad keybinding cannot approve a tool call the user meant
-  to deny; `cancel` still works while a prompt is up.
+- **The approval and command-confirmation prompts are not rebindable.** `y`/`a`/`n`, `!` and
+  `Esc` are handled before the keymap, so a bad keybinding cannot approve a tool call the user
+  meant to deny; `cancel` still works while a prompt is up. `!` (ADR 0026 D9) approves the
+  pending request and turns auto on for the session; `Y` stays `y` (allow once) and never
+  switches auto on.
 - There are three **contexts**, and a binding only conflicts with another binding of its own
   context. The find box (`find_prev`, `find_next`, `find_close`) is a layer over the
   transcript: while it is open its keys are looked up first, so `enter` is `find_prev` there
@@ -318,6 +378,7 @@ The transcript owns its scrolling:
 | 17 | `--version` prints `<program> <CARGO_PKG_VERSION>` and exits 0 without entering the terminal | `tests/version.rs` |
 | 18 | an `@path` reference attaches the file to the request and the transcript folds it to `[file: P, N lines]`; a binary attachment is not sent and the input is kept | `tests/pty.rs`, `tests/render.rs`, `src/mention.rs` |
 | 19 | `--pick` lists this workspace's sessions, filters, full-text searches, resumes the choice (the next request carries its history), `n` starts new, `Esc` exits 0 with no session file; `/sessions` lists a copyable `--resume`; `/export` writes and refuses to overwrite without `--force` | `tests/pty.rs`, `tests/sessions.rs` (host) |
+| 20 | auto (ADR 0026 D9): `!` approves once and enables auto (the next ask never prompts, `AUTO` on the status bar); `Y` stays allow-once; `/auto on\|off`, `/yolo` alias; switch audited + `ConfigChanged` journaled; resume restores on `workspace`, not on `full` (with the hint); config `auto` honored on `workspace`, ignored with a warning on `full` | `tests/auto.rs`, `tests/pty.rs` |
 | — | Enter=followup idle / steer running; Ctrl-C cancel-then-quit | `tests/input.rs` |
 
 ## Must be hand-tested in a real terminal
@@ -341,6 +402,9 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
 - **the budget status segment**: with a small `--context-window`, is the `T / B` projection
   and the reported-vs-estimated wording readable at your width, and does the over-budget
   highlight stand out without looking like an error?
+- **the `AUTO` status marker** (ADR 0026 D9): turn auto on with `/auto on` — does the reversed
+  `AUTO` segment stand out as "this session behaves differently" in `dark`, `light` and `mono`,
+  without reading as an error? pty automation asserts the text, not the prominence.
 - **the input area's two styles**: is `lines` (the default) comfortable, and is
   the `> ` prompt clear when the input is multi-line? Try `input_style = "box"` and compare.
 - **notice and hint readability**: `/help`'s output and the placeholder must be
@@ -360,12 +424,15 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
 - **the exit line**: after Ctrl-C twice (or a SIGTERM), is the printed
   `resume: radian --resume <id> …` command paste-ready in your shell, with the paths and
   quoting right?
-- **mouse selection/copy**: with the default `tui.mouse = true`, the app reports the wheel
-  (and buttons) with `?1000h ?1006h`, so a plain drag no longer selects in the emulator. Try
-  **Shift+drag** (most terminals) or set `mouse = false` in the config to restore the
-  emulator's own selection (drag, Cmd-C on macOS, or the emulator's copy key) — then the wheel
-  is back to the terminal's alternate-scroll translation and no longer scrolls the app.
-  Whichever way, verify that the selection and copy do what you expect.
+- **mouse selection/copy**: with the default `tui.mouse = true`, the app reports the wheel,
+  buttons and button motion (`?1000h ?1002h ?1006h`) and owns the transcript selection
+  itself: press, drag, release copies (double-click a word, triple-click a message). Drag to
+  the top or bottom edge and hold: the view auto-scrolls. Verify the copy lands where you
+  expect (`tui.clipboard`: `osc52`/`pbcopy`/`off`) and that the status bar's `copied N chars
+  (via …)` wording is what you want. **Shift+drag** stays the emulator's native selection on
+  most terminals (Radian drops shifted mouse events) and `mouse = false` restores it
+  everywhere — then the wheel is back to the terminal's alternate-scroll translation and no
+  longer scrolls the app.
 - **the mouse wheel**: with `tui.mouse = true` (default), type a draft in the message box and
   scroll the wheel **up** — the transcript must move up by three lines per notch and the draft
   must stay (dogfood p5 was the wheel replacing it with the input history). Scroll down: it

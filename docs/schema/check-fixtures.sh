@@ -15,8 +15,8 @@ KNOWN_EVENTS = {
     "TurnStarted", "MessageAppended", "ToolExecutionStarted", "ToolExecutionSettled",
     "TranscriptReplaced", "TranscriptReplacementCommitted", "TranscriptReplacementAborted",
     "TurnFinished", "ConfigChanged", "ContextCompacted",
-    "Rewound", "ContextBudgetReached", "PermissionResolved", "MemoryInjected",
-    "ModelUsageRecorded", "CompactionUsageRecorded", "SessionForked",
+    "Rewound", "ContextBudgetReached", "PermissionResolved", "ApprovalPolicyChanged",
+    "MemoryInjected", "ModelUsageRecorded", "CompactionUsageRecorded", "SessionForked",
 }
 # ADR 0005/0006 §5.5：InputSource 的 snake_case 全集。
 SOURCES = {
@@ -64,6 +64,13 @@ EXPECT = {
         events=6,
         skips=[],
         memory_injected=[(3, "mem-1", "global"), (1, "mem-2", "prj-1")],
+        repair={},
+    ),
+    "approval-policy-changed.jsonl": dict(
+        outcome="accept",
+        events=7,
+        skips=[],
+        approval_changed=(6, "auto"),
         repair={},
     ),
     "replace-committed.jsonl": dict(
@@ -498,6 +505,18 @@ def check_fixture(name, exp):
             raise Corruption(
                 f"{name}: memory_injected {got} != 期望 {exp['memory_injected']}"
             )
+    if "approval_changed" in exp:
+        changed = [
+            (e["seq"], e["data"].get("policy"))
+            for e in events
+            if e["event"] == "ApprovalPolicyChanged"
+        ]
+        if changed != [exp["approval_changed"]]:
+            raise Corruption(f"{name}: approval_changed {changed} != 期望 {[exp['approval_changed']]}")
+        # ADR 0026 D9：开关审计是非 critical 事件。
+        for e in events:
+            if e["event"] == "ApprovalPolicyChanged" and e["critical"]:
+                raise Corruption(f"{name}: ApprovalPolicyChanged 必须是 critical:false")
     if outcome == "accept_drop_tail":
         return f"PASS {name}: 接受，丢弃 torn tail {len(tail)} 字节，replay {len(events)} 个事件"
     if outcome == "accept_with_skips":

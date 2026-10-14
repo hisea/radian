@@ -1,19 +1,33 @@
-//! The TUI color theme (ADR 0009; config key `tui.theme`).
+//! The TUI color theme (ADR 0009; config key `tui.theme`; ADR 0029 for theme files).
 //!
 //! Every color in the UI comes from one [`Theme`]; `render.rs` never names a `Color` itself.
 //! `dark` is the original palette (the `TestBackend` screenshot test pins it), `light` is the
 //! same roles re-picked for a light background, and `mono` uses no color at all — only bold,
 //! underline and dim. The `NO_COLOR` convention (<https://no-color.org>) forces `mono`.
 
+mod color;
+mod file;
+
+pub use color::{
+    ColorValue, Rgb, approximate_256, parse_color_value, truecolor_env, truecolor_for,
+};
+pub use file::load;
+
+use std::collections::BTreeMap;
+
 use ratatui::style::{Color, Modifier, Style};
 
-/// The three named themes.
+/// The named built-in themes, plus `File` for a theme loaded from
+/// `~/.radian/themes/<name>.json` (ADR 0029 decision 1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThemeName {
     #[default]
     Dark,
     Light,
     Mono,
+    /// A theme file. Which built-in palette its missing roles fell back to is already baked
+    /// into the styles (chosen by the file's `appearance`, dark by default).
+    File,
 }
 
 impl ThemeName {
@@ -31,12 +45,136 @@ impl ThemeName {
             ThemeName::Dark => "dark",
             ThemeName::Light => "light",
             ThemeName::Mono => "mono",
+            ThemeName::File => "file",
+        }
+    }
+}
+
+/// The 23 roles a [`Theme`] styles today (ADR 0009, ADR 0023). The config keys are the
+/// snake_case names; `[tui.colors]` accepts them and (mapped) pi's role names alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    Reasoning,
+    Interrupted,
+    User,
+    ToolCall,
+    ToolResult,
+    ToolResultError,
+    Notice,
+    TurnIdle,
+    TurnRunning,
+    TurnCancelled,
+    Model,
+    Tier,
+    Usage,
+    Mcp,
+    Budget,
+    BudgetOver,
+    Note,
+    Truncation,
+    ApprovalBorder,
+    Hint,
+    Completion,
+    Find,
+    /// The status bar's `AUTO` marker (ADR 0026 D9): the session auto-approves.
+    Auto,
+    Selection,
+}
+
+impl Role {
+    pub const ALL: [Role; 24] = [
+        Role::Reasoning,
+        Role::Interrupted,
+        Role::User,
+        Role::ToolCall,
+        Role::ToolResult,
+        Role::ToolResultError,
+        Role::Notice,
+        Role::TurnIdle,
+        Role::TurnRunning,
+        Role::TurnCancelled,
+        Role::Model,
+        Role::Tier,
+        Role::Usage,
+        Role::Mcp,
+        Role::Budget,
+        Role::BudgetOver,
+        Role::Note,
+        Role::Truncation,
+        Role::ApprovalBorder,
+        Role::Hint,
+        Role::Completion,
+        Role::Find,
+        Role::Auto,
+        Role::Selection,
+    ];
+
+    /// The `[tui.colors]` key for this role (ADR 0029 decision 5).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Role::Reasoning => "reasoning",
+            Role::Interrupted => "interrupted",
+            Role::User => "user",
+            Role::ToolCall => "tool_call",
+            Role::ToolResult => "tool_result",
+            Role::ToolResultError => "tool_result_error",
+            Role::Notice => "notice",
+            Role::TurnIdle => "turn_idle",
+            Role::TurnRunning => "turn_running",
+            Role::TurnCancelled => "turn_cancelled",
+            Role::Model => "model",
+            Role::Tier => "tier",
+            Role::Usage => "usage",
+            Role::Mcp => "mcp",
+            Role::Budget => "budget",
+            Role::BudgetOver => "budget_over",
+            Role::Note => "note",
+            Role::Truncation => "truncation",
+            Role::ApprovalBorder => "approval_border",
+            Role::Hint => "hint",
+            Role::Completion => "completion",
+            Role::Find => "find",
+            Role::Auto => "auto",
+            Role::Selection => "selection",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Role::ALL.into_iter().find(|role| role.as_str() == name)
+    }
+
+    fn style_mut(self, theme: &mut Theme) -> &mut Style {
+        match self {
+            Role::Reasoning => &mut theme.reasoning,
+            Role::Interrupted => &mut theme.interrupted,
+            Role::User => &mut theme.user,
+            Role::ToolCall => &mut theme.tool_call,
+            Role::ToolResult => &mut theme.tool_result,
+            Role::ToolResultError => &mut theme.tool_result_error,
+            Role::Notice => &mut theme.notice,
+            Role::TurnIdle => &mut theme.turn_idle,
+            Role::TurnRunning => &mut theme.turn_running,
+            Role::TurnCancelled => &mut theme.turn_cancelled,
+            Role::Model => &mut theme.model,
+            Role::Tier => &mut theme.tier,
+            Role::Usage => &mut theme.usage,
+            Role::Mcp => &mut theme.mcp,
+            Role::Budget => &mut theme.budget,
+            Role::BudgetOver => &mut theme.budget_over,
+            Role::Note => &mut theme.note,
+            Role::Truncation => &mut theme.truncation,
+            Role::ApprovalBorder => &mut theme.approval_border,
+            Role::Hint => &mut theme.hint,
+            Role::Completion => &mut theme.completion,
+            Role::Find => &mut theme.find,
+            Role::Auto => &mut theme.auto,
+            Role::Selection => &mut theme.selection,
         }
     }
 }
 
 /// One role's style, by theme.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Theme {
     pub name: ThemeName,
     /// The model's separate reasoning channel (ADR 0014).
@@ -65,6 +203,17 @@ pub struct Theme {
     pub completion: Style,
     /// The find match position in the status bar (Phase 5).
     pub find: Style,
+    /// The status bar's `AUTO` marker (ADR 0026 D9): the session auto-approves.
+    pub auto: Style,
+    /// A transcript selection (mouse drag). pi's role map: `selectedBg`.
+    pub selection: Style,
+    /// Pi roles no current Radian role consumes — the `md*`, `toolDiff*`, `syntax*` and
+    /// `thinking*` families ADR 0027/0028 will wire, plus the panel roles (`scrollbar*`,
+    /// `searchMatch*`, `customMessage*`, `toolPendingBg`, `toolSuccessBg`, `toolErrorBg`,
+    /// `bashMode`; `selectedBg` is a role now). ADR 0029 decision 3: parsed and kept so a
+    /// theme file's values are not thrown away; nothing renders them yet. Keyed by pi's
+    /// role name.
+    pub reserved: BTreeMap<String, Style>,
 }
 
 fn style(color: Option<Color>, modifiers: Modifier) -> Style {
@@ -87,6 +236,7 @@ impl Theme {
     pub fn dark() -> Self {
         Self {
             name: ThemeName::Dark,
+            reserved: BTreeMap::new(),
             reasoning: style(Some(Color::DarkGray), Modifier::ITALIC | Modifier::DIM),
             interrupted: style(Some(Color::Yellow), Modifier::BOLD),
             user: style(Some(Color::Cyan), Modifier::BOLD),
@@ -113,6 +263,11 @@ impl Theme {
             hint: style(Some(Color::Gray), Modifier::empty()),
             completion: style(Some(Color::DarkGray), Modifier::empty()),
             find: style(Some(Color::Yellow), Modifier::empty()),
+            // Reversed so `AUTO` reads at a glance as "this session behaves differently".
+            auto: style(Some(Color::Yellow), Modifier::REVERSED),
+            // A selection is a background band; the text keeps its own foreground. `DarkGray`
+            // (ANSI 8) reads as a quiet band on a dark background.
+            selection: Style::default().bg(Color::DarkGray),
         }
     }
 
@@ -121,6 +276,7 @@ impl Theme {
     pub fn light() -> Self {
         Self {
             name: ThemeName::Light,
+            reserved: BTreeMap::new(),
             reasoning: style(Some(Color::DarkGray), Modifier::ITALIC),
             interrupted: style(Some(Color::Red), Modifier::BOLD),
             user: style(Some(Color::Blue), Modifier::BOLD),
@@ -147,6 +303,9 @@ impl Theme {
             hint: style(Some(Color::DarkGray), Modifier::empty()),
             completion: style(Some(Color::DarkGray), Modifier::empty()),
             find: style(Some(Color::Magenta), Modifier::empty()),
+            auto: style(Some(Color::Magenta), Modifier::REVERSED),
+            // A quiet light band on a light background; the dark text stays readable.
+            selection: Style::default().bg(Color::Gray),
         }
     }
 
@@ -154,6 +313,7 @@ impl Theme {
     pub fn mono() -> Self {
         Self {
             name: ThemeName::Mono,
+            reserved: BTreeMap::new(),
             reasoning: style(None, Modifier::ITALIC | Modifier::DIM),
             interrupted: style(None, Modifier::BOLD | Modifier::UNDERLINED),
             user: style(None, Modifier::BOLD),
@@ -176,12 +336,17 @@ impl Theme {
             hint: style(None, Modifier::DIM),
             completion: style(None, Modifier::DIM),
             find: style(None, Modifier::BOLD),
+            // ADR 0026 D9: the mono theme has no color, so `AUTO` stands out by reversal.
+            auto: style(None, Modifier::REVERSED),
+            // No color at all: a selection is the reversed video, as the terminal itself
+            // would draw it.
+            selection: style(None, Modifier::REVERSED),
         }
     }
 
     pub fn for_name(name: ThemeName) -> Self {
         match name {
-            ThemeName::Dark => Theme::dark(),
+            ThemeName::Dark | ThemeName::File => Theme::dark(),
             ThemeName::Light => Theme::light(),
             ThemeName::Mono => Theme::mono(),
         }
@@ -206,7 +371,7 @@ impl Theme {
     }
 
     /// Every style this theme defines, for the "mono has no colors" test.
-    pub fn styles(&self) -> [Style; 22] {
+    pub fn styles(&self) -> [Style; 23] {
         [
             self.reasoning,
             self.interrupted,
@@ -230,6 +395,7 @@ impl Theme {
             self.hint,
             self.completion,
             self.find,
+            self.selection,
         ]
     }
 }

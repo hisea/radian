@@ -38,7 +38,7 @@ pub use audit::{
     Approver as AuditApprover, AuditSink, NoopAudit, PermissionResolved, RecordingAudit,
     ResolvedDecision,
 };
-pub use hooks::{PermissionHooks, runtime_event};
+pub use hooks::{PermissionHooks, policy_change_event, runtime_event};
 pub use profile::{ApprovalPolicy, Preset, Profile, ProfileError};
 pub use rule::{
     Action, Evaluated, Resource, ResourceMatcher, Rule, ToolMatcher, evaluate, resource_of,

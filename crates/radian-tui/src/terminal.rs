@@ -18,17 +18,22 @@ use ratatui::crossterm::terminal::{
 /// to send the `l` sequences (ADR 0023 U2).
 static MOUSE_REPORTING: AtomicBool = AtomicBool::new(false);
 
-/// Turns mouse reporting on (`\x1b[?1000h\x1b[?1006h`) or off (the `l` forms) on `out`.
+/// Turns mouse reporting on (`\x1b[?1000h\x1b[?1002h\x1b[?1006h`) or off (the `l` forms,
+/// reverse order) on `out`.
 ///
-/// Deliberately **not** crossterm's `EnableMouseCapture`: that also enables `?1002h`
-/// (button-motion) and `?1003h` (any-motion), so a pointer move would flood the input thread
-/// (crossterm 0.29.0 `event.rs:325-333`). We only need button + wheel presses (`?1000h`),
-/// SGR-encoded (`?1006h`) so the coordinates do not overflow past column 223.
+/// Deliberately **not** crossterm's `EnableMouseCapture`: that also enables `?1003h`
+/// (any-motion), so a pointer move would flood the input thread (crossterm 0.29.0
+/// `event.rs:325-333`). We need `?1000h` (button + wheel presses), `?1002h` (motion while a
+/// button is held: the drag of a transcript selection) and `?1006h` (SGR encoding, so the
+/// coordinates do not overflow past column 223). Motion **without** a button is not reported
+/// under `?1002h`, and `?1003h` stays off, so an idle pointer produces no events and no
+/// frames (ADR 0023 U2's zero-redraw). Shift+button is still left to the terminal (most do
+/// not report it), so the native selection remains the fallback.
 fn write_mouse(out: &mut impl Write, enabled: bool) -> io::Result<()> {
     if enabled {
-        out.write_all(b"\x1b[?1000h\x1b[?1006h")?;
+        out.write_all(b"\x1b[?1000h\x1b[?1002h\x1b[?1006h")?;
     } else {
-        out.write_all(b"\x1b[?1006l\x1b[?1000l")?;
+        out.write_all(b"\x1b[?1006l\x1b[?1002l\x1b[?1000l")?;
     }
     out.flush()
 }

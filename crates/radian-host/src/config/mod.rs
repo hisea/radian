@@ -92,10 +92,23 @@ pub enum ConfigError {
         path: PathBuf,
         value: String,
     },
+    /// `[permissions] approval` has a value this build does not know (ADR 0008 §5.1:
+    /// `permissions` is fail-closed). Refused, never guessed at.
+    UnknownApproval {
+        path: PathBuf,
+        value: String,
+    },
     /// `model.api_key` is no longer a key source (ADR 0026 D2): the key comes only from
     /// `auth.json`.
     ApiKeyRemoved {
         path: PathBuf,
+    },
+    /// A `[providers.<name>]` entry that can never be used (ADR 0026 D10): the name is not a
+    /// valid provider name, or it shadows a built-in id. Refused, never guessed around.
+    InvalidProviderName {
+        path: PathBuf,
+        name: String,
+        reason: String,
     },
 }
 
@@ -149,6 +162,12 @@ impl fmt::Display for ConfigError {
                  (or the aliases); refusing rather than guessing",
                 path.display()
             ),
+            ConfigError::UnknownApproval { path, value } => write!(
+                f,
+                "{}: permissions.approval = {value:?} is not one of on-ask|always|never|auto \
+                 (ADR 0026 D9); refusing rather than guessing",
+                path.display()
+            ),
             ConfigError::ApiKeyRemoved { path } => write!(
                 f,
                 "{}: `model.api_key` is no longer read (ADR 0026 D2); the API key comes only \
@@ -157,6 +176,9 @@ impl fmt::Display for ConfigError {
                  `/login` command (next slice)",
                 path.display()
             ),
+            ConfigError::InvalidProviderName { path, name, reason } => {
+                write!(f, "{}: providers.{name}: {reason}", path.display())
+            }
         }
     }
 }
@@ -177,6 +199,10 @@ pub struct ModelConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PermissionsConfig {
     pub profile: Option<String>,
+    /// `[permissions] approval` (ADR 0012, ADR 0026 D9): how an `ask` resolves. The name
+    /// set is `ApprovalPolicy::parse`'s; an unknown value is refused (fail-closed, the
+    /// `permissions` rule).
+    pub approval: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -184,9 +210,37 @@ pub struct CompactionConfig {
     pub auto: Option<bool>,
 }
 
+/// One `[tui.colors]` color value (ADR 0029 decision 5): a color literal (`#hex`,
+/// `oklch(..)`, `okhsl(..)` or `""` for the terminal default) or a 256-color index.
+/// The literal text is resolved by the TUI, which owns the color grammar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TuiColorValue {
+    Text(String),
+    Index(u8),
+}
+
+/// One `[tui.colors]` entry (ADR 0029 decision 5): the foreground/background colors and the
+/// modifier forces. An absent field leaves the theme's value alone; `bold = false` etc.
+/// removes the modifier.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TuiColorOverride {
+    pub fg: Option<TuiColorValue>,
+    pub bg: Option<TuiColorValue>,
+    pub bold: Option<bool>,
+    pub italic: Option<bool>,
+    pub dim: Option<bool>,
+    pub underline: Option<bool>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TuiConfig {
+    /// `tui.theme`: a built-in name (`dark|light|mono`) or a theme file name (ADR 0029). The
+    /// reader accepts any string — whether the name resolves is the TUI's finding, reported
+    /// as a startup warning.
     pub theme: Option<String>,
+    /// `tui.colors`: per-role color overrides, raw. The TUI validates the role names and
+    /// colors; unknown or malformed entries are startup warnings (the `tui.*` rule).
+    pub colors: Vec<(String, TuiColorOverride)>,
     /// The raw `tui.keybindings` table: action name → key strings. The TUI parses and
     /// validates it (its key grammar belongs to the terminal layer).
     pub keybindings: Vec<(String, Vec<String>)>,
@@ -198,6 +252,10 @@ pub struct TuiConfig {
     /// line) or `"box"` (the bordered input box). `None` means the default; an unknown value is
     /// ignored with a warning (the `tui.*` rule), and the TUI falls back to `lines`.
     pub input_style: Option<String>,
+    /// `tui.clipboard`: how a transcript-selection copy reaches the system clipboard —
+    /// `"osc52"` (the default), `"pbcopy"` (macOS only; elsewhere a warning and OSC 52) or
+    /// `"off"`. `None` means the default; an unknown value is ignored with a warning.
+    pub clipboard: Option<String>,
 }
 
 /// One parsed configuration file.
@@ -214,6 +272,9 @@ pub struct Config {
     pub permissions: PermissionsConfig,
     pub compaction: CompactionConfig,
     pub tui: TuiConfig,
+    /// `[providers.<name>]`: named custom services (ADR 0026 D10). Carried raw; the hosts
+    /// resolve them through `radian_host::provider::resolve_provider`.
+    pub providers: std::collections::BTreeMap<String, crate::provider::ProviderDecl>,
     /// Known-but-unwired and unknown keys, as dotted paths, for the startup line. Never a
     /// value.
     pub skipped: Vec<String>,
@@ -303,6 +364,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
             "permissions" => parse_permissions(value, path, read_only, &mut config)?,
             "compaction" => parse_compaction(value, path, &mut config)?,
             "tui" => parse_tui(value, path, &mut config)?,
+            "providers" => parse_providers(value, path, &mut config)?,
             // Known by the ADR, not wired in this slice: the hosts take MCP servers from
             // `--mcp-config`. Ignored, and named on the startup line.
             "mcp" => config.skipped.push("mcp".into()),
@@ -312,6 +374,70 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
     config.skipped.sort();
     config.skipped.dedup();
     Ok(config)
+}
+
+/// `[providers.<name>]`: named custom services (ADR 0026 D10). `kind` must be one of the two
+/// wire protocols, `base_url` a non-empty string; the name must be valid and must not shadow
+/// a built-in id — a bad name is refused, never warned around (the hosts would silently
+/// resolve the built-in instead).
+fn parse_providers(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
+    let Some(table) = value.as_table() else {
+        return Err(wrong_type(path, "providers", "a table"));
+    };
+    for (name, value) in table {
+        let Some(spec) = value.as_table() else {
+            return Err(wrong_type(path, &format!("providers.{name}"), "a table"));
+        };
+        if let Some(reason) = crate::provider::name_error(name) {
+            return Err(ConfigError::InvalidProviderName {
+                path: path.to_path_buf(),
+                name: name.clone(),
+                reason,
+            });
+        }
+        let mut decl = crate::provider::ProviderDecl {
+            kind: String::new(),
+            base_url: String::new(),
+        };
+        for (field, value) in spec {
+            match (field.as_str(), value) {
+                ("kind", Value::String(kind))
+                    if matches!(kind.as_str(), "openai-compatible" | "anthropic") =>
+                {
+                    decl.kind = kind.clone();
+                }
+                // D10: only the two wire protocols exist in this build; anything else is a
+                // structural error, not a display preference to skip.
+                ("kind", _) => {
+                    return Err(wrong_type(
+                        path,
+                        &format!("providers.{name}.kind"),
+                        "one of openai-compatible|anthropic",
+                    ));
+                }
+                ("base_url", Value::String(base_url)) if !base_url.is_empty() => {
+                    decl.base_url = base_url.clone();
+                }
+                ("base_url", Value::String(_)) => {
+                    return Err(ConfigError::InvalidProviderName {
+                        path: path.to_path_buf(),
+                        name: name.clone(),
+                        reason: "base_url must not be empty".into(),
+                    });
+                }
+                ("base_url", _) => {
+                    return Err(wrong_type(
+                        path,
+                        &format!("providers.{name}.base_url"),
+                        "a string",
+                    ));
+                }
+                (other, _) => config.skipped.push(format!("providers.{name}.{other}")),
+            }
+        }
+        config.providers.insert(name.clone(), decl);
+    }
+    Ok(())
 }
 
 fn parse_model(
@@ -413,6 +539,27 @@ fn parse_permissions(
                     config.skipped.push("permissions.profile".into());
                 }
             }
+            ("approval", Value::String(approval)) => {
+                if radian_permissions::ApprovalPolicy::parse(approval).is_none() {
+                    if read_only {
+                        // A higher schema_version may define a policy this version does not
+                        // know; read-only mode ignores it instead of refusing the file.
+                        config.skipped.push("permissions.approval".into());
+                    } else {
+                        // Fail-closed (ADR 0008 §5.1): a `permissions` value this build does
+                        // not know is refused, never guessed at.
+                        return Err(ConfigError::UnknownApproval {
+                            path: path.to_path_buf(),
+                            value: approval.clone(),
+                        });
+                    }
+                } else {
+                    config.permissions.approval = Some(approval.clone());
+                }
+            }
+            ("approval", _) => {
+                return Err(wrong_type(path, "permissions.approval", "a string"));
+            }
             (other, _) => config.skipped.push(format!("permissions.{other}")),
         }
     }
@@ -439,14 +586,84 @@ fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
     };
     for (key, value) in table {
         match (key.as_str(), value) {
-            ("theme", Value::String(theme))
-                if matches!(theme.as_str(), "dark" | "light" | "mono") =>
-            {
-                config.tui.theme = Some(theme.clone());
-            }
-            // An unknown or non-string theme is a display preference: ignore it (and say so),
-            // never refuse the file.
+            // Any name is accepted (ADR 0029 decision 1): built-in names resolve directly,
+            // anything else is looked up in `~/.radian/themes/<name>.json` by the TUI, which
+            // warns and falls back when neither exists. A display preference never refuses
+            // the file.
+            ("theme", Value::String(theme)) => config.tui.theme = Some(theme.clone()),
             ("theme", _) => config.skipped.push("tui.theme".into()),
+            ("colors", Value::Table(colors)) => {
+                for (key, value) in colors {
+                    match value {
+                        // A bare value is the foreground color.
+                        Value::String(text) => config.tui.colors.push((
+                            key.clone(),
+                            TuiColorOverride {
+                                fg: Some(TuiColorValue::Text(text.clone())),
+                                ..TuiColorOverride::default()
+                            },
+                        )),
+                        Value::Integer(index) if *index >= 0 && *index <= 255 => {
+                            config.tui.colors.push((
+                                key.clone(),
+                                TuiColorOverride {
+                                    fg: Some(TuiColorValue::Index(*index as u8)),
+                                    ..TuiColorOverride::default()
+                                },
+                            ))
+                        }
+                        Value::Table(spec) => {
+                            let mut override_value = TuiColorOverride::default();
+                            let mut malformed = false;
+                            for (field, field_value) in spec {
+                                match (field.as_str(), field_value) {
+                                    ("fg" | "bg", Value::String(text)) => {
+                                        let value = TuiColorValue::Text(text.clone());
+                                        if field == "fg" {
+                                            override_value.fg = Some(value);
+                                        } else {
+                                            override_value.bg = Some(value);
+                                        }
+                                    }
+                                    ("fg" | "bg", Value::Integer(index))
+                                        if *index >= 0 && *index <= 255 =>
+                                    {
+                                        let value = TuiColorValue::Index(*index as u8);
+                                        if field == "fg" {
+                                            override_value.fg = Some(value);
+                                        } else {
+                                            override_value.bg = Some(value);
+                                        }
+                                    }
+                                    ("bold", Value::Boolean(flag)) => {
+                                        override_value.bold = Some(*flag)
+                                    }
+                                    ("italic", Value::Boolean(flag)) => {
+                                        override_value.italic = Some(*flag)
+                                    }
+                                    ("dim", Value::Boolean(flag)) => {
+                                        override_value.dim = Some(*flag)
+                                    }
+                                    ("underline", Value::Boolean(flag)) => {
+                                        override_value.underline = Some(*flag)
+                                    }
+                                    // An unknown field or a wrong-typed one makes the whole
+                                    // entry a display preference: ignore it (and say so).
+                                    _ => malformed = true,
+                                }
+                            }
+                            if malformed {
+                                config.skipped.push(format!("tui.colors.{key}"));
+                            } else {
+                                config.tui.colors.push((key.clone(), override_value));
+                            }
+                        }
+                        // A non-string, non-table color is a display preference.
+                        _ => config.skipped.push(format!("tui.colors.{key}")),
+                    }
+                }
+            }
+            ("colors", _) => return Err(wrong_type(path, "tui.colors", "a table")),
             ("keybindings", Value::Table(bindings)) => {
                 for (action, keys) in bindings {
                     match keys.as_array() {
@@ -470,6 +687,14 @@ fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
             // An unknown input style is a display preference: ignore it (and say so), never
             // refuse the file. The TUI falls back to the default.
             ("input_style", _) => config.skipped.push("tui.input_style".into()),
+            ("clipboard", Value::String(mode))
+                if matches!(mode.as_str(), "osc52" | "pbcopy" | "off") =>
+            {
+                config.tui.clipboard = Some(mode.clone());
+            }
+            // An unknown clipboard transport is a display preference too: skip it with the
+            // same warning, and the TUI keeps its default.
+            ("clipboard", _) => config.skipped.push("tui.clipboard".into()),
             // A non-boolean mouse is a display preference: ignore it (and say so), never
             // refuse the file.
             ("mouse", _) => config.skipped.push("tui.mouse".into()),
@@ -785,7 +1010,7 @@ theme = "light"
     }
 
     #[test]
-    fn an_unknown_profile_is_refused_and_an_unknown_theme_is_ignored() {
+    fn an_unknown_profile_is_refused_and_an_unknown_theme_is_carried() {
         let error =
             parse_str("schema_version = 1\n[permissions]\nprofile = \"future\"\n").unwrap_err();
         assert!(
@@ -793,9 +1018,161 @@ theme = "light"
             "{error}"
         );
 
+        // ADR 0029: any theme name is carried; whether it resolves (built-in or
+        // `~/.radian/themes/<name>.json`) is the TUI's finding, a startup warning.
         let config = parse_str("schema_version = 1\n[tui]\ntheme = \"future\"\n").unwrap();
-        assert_eq!(config.tui.theme, None);
-        assert!(config.skipped.contains(&"tui.theme".to_string()));
+        assert_eq!(config.tui.theme.as_deref(), Some("future"));
+        assert!(config.skipped.is_empty());
+    }
+
+    /// ADR 0026 D9: `[permissions] approval` carries the four known policy names; an
+    /// unknown value is refused (fail-closed), a non-string is a type error, and in
+    /// read-only mode an unknown future value is skipped instead.
+    #[test]
+    fn permissions_approval_carries_known_names_and_refuses_unknown_ones() {
+        for name in ["on-ask", "always", "never", "auto"] {
+            let config = parse_str(&format!(
+                "schema_version = 1\n[permissions]\napproval = \"{name}\"\n"
+            ))
+            .unwrap();
+            assert_eq!(config.permissions.approval.as_deref(), Some(name), "{name}");
+            assert!(config.skipped.is_empty(), "{name}");
+        }
+        let error =
+            parse_str("schema_version = 1\n[permissions]\napproval = \"yolo\"\n").unwrap_err();
+        assert!(
+            matches!(error, ConfigError::UnknownApproval { .. }),
+            "{error}"
+        );
+        assert!(error.to_string().contains("auto"), "{error}");
+        let error = parse_str("schema_version = 1\n[permissions]\napproval = true\n").unwrap_err();
+        assert!(error.to_string().contains("a string"), "{error}");
+        // Read-only mode (a higher schema_version): ignored, not refused.
+        let config =
+            parse_str("schema_version = 99\n[permissions]\napproval = \"future\"\n").unwrap();
+        assert_eq!(config.permissions.approval, None);
+        assert!(config.skipped.contains(&"permissions.approval".to_string()));
+    }
+
+    /// ADR 0029 decision 5: `[tui.colors]` entries are carried raw; the TUI validates names
+    /// and colors. A malformed entry is a skipped key, never a refusal.
+    #[test]
+    fn tui_colors_entries_are_carried_and_malformed_ones_skipped() {
+        let config = parse_str(concat!(
+            "schema_version = 1\n",
+            "[tui]\n",
+            "theme = \"kanagawa-wave\"\n",
+            "[tui.colors]\n",
+            "user = \"#0af\"\n",
+            "tool_call = 39\n",
+            "notice = { fg = \"oklch(62% 0.1 200)\", bold = true }\n",
+            "hint = { fg = \"#fff\", neon = true }\n",
+            "muted = 2.5\n",
+        ))
+        .unwrap();
+        assert_eq!(config.tui.theme.as_deref(), Some("kanagawa-wave"));
+        assert_eq!(config.tui.colors.len(), 3, "{:?}", config.tui.colors);
+        let get = |key: &str| {
+            config
+                .tui
+                .colors
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value)
+                .unwrap()
+        };
+        assert_eq!(get("user").fg, Some(TuiColorValue::Text("#0af".to_owned())));
+        assert_eq!(get("tool_call").fg, Some(TuiColorValue::Index(39)));
+        let notice = get("notice");
+        assert_eq!(
+            notice.fg,
+            Some(TuiColorValue::Text("oklch(62% 0.1 200)".to_owned()))
+        );
+        assert_eq!(notice.bold, Some(true));
+        assert_eq!(
+            config.skipped,
+            vec!["tui.colors.hint".to_owned(), "tui.colors.muted".to_owned()]
+        );
+
+        // A non-table `tui.colors` is a wrong type (structural), like `tui.keybindings`.
+        let error = parse_str("schema_version = 1\n[tui]\ncolors = 3\n").unwrap_err();
+        assert!(matches!(error, ConfigError::WrongType { .. }), "{error}");
+    }
+
+    /// ADR 0026 D10: `[providers.<name>]` is carried into `Config.providers`; a bad or
+    /// shadowing name refuses the file (fail-closed, like `permissions.profile`).
+    #[test]
+    fn named_providers_are_carried_and_bad_names_refused() {
+        let config = parse_str(concat!(
+            "schema_version = 1\n",
+            "[providers.corp]\n",
+            "kind = \"openai-compatible\"\n",
+            "base_url = \"https://llm.example.com/v1\"\n",
+            "[providers.relay]\n",
+            "kind = \"anthropic\"\n",
+            "base_url = \"https://relay.example\"\n",
+        ))
+        .unwrap();
+        assert_eq!(config.providers.len(), 2);
+        assert_eq!(config.providers["corp"].kind, "openai-compatible");
+        assert_eq!(config.providers["relay"].base_url, "https://relay.example");
+        assert!(config.skipped.is_empty(), "{:?}", config.skipped);
+
+        // A name shadowing a built-in refuses the file, naming the rule.
+        let error = parse_str(concat!(
+            "schema_version = 1\n",
+            "[providers.anthropic]\n",
+            "kind = \"anthropic\"\n",
+            "base_url = \"https://x\"\n",
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(error, ConfigError::InvalidProviderName { .. }),
+            "{error}"
+        );
+        let text = error.to_string();
+        assert!(text.contains("providers.anthropic"), "{text}");
+        assert!(text.contains("built-in"), "{text}");
+
+        // An invalid name too.
+        let error = parse_str(concat!(
+            "schema_version = 1\n",
+            "[providers.\"has space\"]\n",
+            "kind = \"openai-compatible\"\n",
+            "base_url = \"https://x\"\n",
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(error, ConfigError::InvalidProviderName { .. }),
+            "{error}"
+        );
+
+        // `openai-compatible` is reserved.
+        let error = parse_str(concat!(
+            "schema_version = 1\n",
+            "[providers.openai-compatible]\n",
+            "kind = \"openai-compatible\"\n",
+            "base_url = \"https://x\"\n",
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(error, ConfigError::InvalidProviderName { .. }),
+            "{error}"
+        );
+
+        // An unknown kind is refused (never guessed at the host).
+        let error = parse_str(concat!(
+            "schema_version = 1\n",
+            "[providers.ok-name]\n",
+            "kind = \"grpc\"\n",
+            "base_url = \"https://x\"\n",
+        ))
+        .unwrap_err();
+        assert!(matches!(error, ConfigError::WrongType { .. }), "{error}");
+        assert!(
+            error.to_string().contains("openai-compatible|anthropic"),
+            "{error}"
+        );
     }
 
     #[test]

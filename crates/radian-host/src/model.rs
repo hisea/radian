@@ -230,6 +230,24 @@ fn thinking_from_wire(wire: &str) -> Thinking {
     }
 }
 
+/// [`resolve_thinking`] for a [`crate::ProviderRef`]: a named provider uses the map of the
+/// descriptor its kind names (ADR 0026 D10/D11).
+pub fn resolve_thinking_ref(
+    provider: &crate::ProviderRef,
+    model: &str,
+    level: &str,
+    adapter: Provider,
+) -> (Thinking, Option<String>) {
+    let map = crate::thinking_map_for_ref(provider, model);
+    match crate::clamp_thinking(map, level) {
+        Some((_, wire)) if adapter == Provider::OpenAiCompatible => {
+            (Thinking::Off, Some(wire.to_owned()))
+        }
+        Some((_, wire)) => (thinking_from_wire(wire), None),
+        None => (Thinking::Off, None),
+    }
+}
+
 /// Builds the provider adapter named by `args.provider`. The error is the same shape the
 /// hosts already printed for a bad `--base-url`.
 pub fn build_model(args: ModelArgs) -> Result<HostModel, String> {
@@ -332,6 +350,9 @@ mod tests {
 /// startup and do not follow the model. The key is **not** here — it is read per route.
 #[derive(Debug, Clone)]
 pub struct RouteContext {
+    /// The config's `[providers.<name>]` declarations (ADR 0026 D10), so a switch to a named
+    /// provider resolves the same way the startup did.
+    pub providers: std::collections::BTreeMap<String, crate::ProviderDecl>,
     pub session_id: String,
     /// The user's own headers (generic-descriptor only, `{session_id}` already expanded).
     pub user_headers: Vec<(String, String)>,
@@ -345,20 +366,27 @@ impl RouteContext {
     /// Resolves one route into model arguments: `resolve_route` for the endpoint and headers,
     /// `auth::resolve_key` for the credential (D2). A provider without a credential is an error
     /// naming `/login <provider>` (D6), which the caller shows.
-    pub fn args_for(&self, provider_id: &str, model: &str) -> Result<ModelArgs, String> {
-        let credential = crate::auth::resolve_key(provider_id).map_err(|e| e.to_string())?;
+    pub fn args_for(&self, provider_name: &str, model: &str) -> Result<ModelArgs, String> {
+        // D10: the provider name resolves through the config's declarations and the auth
+        // entry's env, and the key lives under the **name**.
+        let auth_env = crate::AuthStore::open()
+            .ok()
+            .and_then(|store| store.entry_env(provider_name));
+        let (provider_ref, _warning) =
+            crate::resolve_provider(provider_name, &self.providers, auth_env.as_ref())?;
+        let credential = crate::auth::resolve_key(provider_name).map_err(|e| e.to_string())?;
         if credential.is_none() {
             return Err(format!(
-                "no credential for `{provider_id}`: run /login {provider_id} (or add an entry to \
-                 ~/.radian/credentials/auth.json)"
+                "no credential for `{provider_name}`: run /login {provider_name} (or add an entry \
+                 to ~/.radian/credentials/auth.json)"
             ));
         }
         let auth_base_url = credential
             .as_ref()
             .and_then(|credential| credential.env.get(crate::RADIAN_BASE_URL))
             .map(String::as_str);
-        let route = crate::resolve_route(
-            provider_id,
+        let route = crate::resolve_route_for(
+            &provider_ref,
             model,
             None,
             auth_base_url,
@@ -368,7 +396,7 @@ impl RouteContext {
         // The thinking level is clamped against **this route's** map (ADR 0026 D11): the same
         // level can mean different wire values — or nothing — on different models.
         let (thinking, reasoning_effort) =
-            resolve_thinking(provider_id, model, &self.thinking, route.adapter());
+            resolve_thinking_ref(&provider_ref, model, &self.thinking, route.adapter());
         Ok(ModelArgs {
             provider: route.adapter(),
             base_url: route.base_url,

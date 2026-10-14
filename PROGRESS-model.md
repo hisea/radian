@@ -86,3 +86,25 @@ queue_config、resumed_model_route、driver 测试）都在。
 
 立即切换（不等下一轮）；ConfigChanged 写入 key；T>B' 不确认直接切换；压缩失败仍切换；
 resume 忽略 ConfigChanged；预算不随模型更新；（D11）夹取改向下取；不支持的级别仍显示；无映射表仍发参数。
+
+## D11 重做（2026-10-14）提交清单
+
+- `a7a7597` piece 1：七档级别 + thinkingLevelMap + 夹取 + 补全过滤 + 解析（radian-host）
+- `db5327f` piece 2+3：`resolve_thinking`、`ModelArgs.reasoning_effort`、OpenAI 适配器 `reasoning_effort`
+- `e4edb2f` piece 4：SwitchableModel 缓存键含 thinking、`current_thinking`
+- `60b22bb` piece 5：`--thinking` 七档（两个宿主），旧写法警告
+- `40e7e18` piece 6：`/thinking` 命令 + 补全 + clamp 提示 + 状态栏
+- `f831881` piece 7：recover 合并**全部** ConfigChanged（审查 M3）
+- `b474256` piece 8：thinking 补全按 partial 排序；空列表不再吞掉 Enter
+- `442f55a` piece 9：无映射表不发参数；未知 wire 值不发
+- `e03616d` 变异记录（T1–T3、C1）+ M4 取消跟踪本文件
+- `5aa7193` 审查 M2：`set_budget_for` 立即为已恢复路由重算 B
+- `35edc75` 旧 `enabled:<budget>` 测试改为"接受并夹取"
+- 变异（一次性 worktree）：T1 夹取改向下、T2 列不支持级别、T3 无映射表仍发参数、C1 按种类各留最后一条 —— 4/4 抓住。
+
+## 未做（明确）
+
+- **审查 M1**（valueless `--resume` / `--pick` 用 config 的模型与预算）：需要把
+  模型/provider/凭据/路由/window/budget 的解析**整体移到 picker 之后**（picker 才定下 id）。
+  本片试过局部刷新，但 `credential`/`descriptor`/`route`/`window` 都在 picker 之前算好，
+  局部补不全，已回退以保持分支绿。留给下一片。

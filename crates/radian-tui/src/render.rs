@@ -15,11 +15,93 @@ use radian_permissions::ApprovalRequest;
 use crate::app::{
     App, Entry, EntryKind, Modal, TurnState, WrapKey, budget_status_text, mcp_text, usage_text,
 };
+use crate::login::LoginWizard;
 use crate::question::QuestionForm;
 use crate::theme::Theme;
 
+/// One wrapped line as [`wrap_char_offsets`] sees it: the chars on the line (as byte offsets
+/// into the wrapped text, each on a char boundary) and the **gap** just after the line.
+///
+/// `end` is where a click past the line's last cell lands: the offset just after the last
+/// char, or, for an empty line, the offset of its terminating `\n` (or the text length for
+/// the final paragraph). Because `wrap` collapses space runs, `end` is not necessarily where
+/// the next line's first char sits; that in-between whitespace is exactly what a selection
+/// across the break copies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WrappedLine {
+    pub chars: Vec<usize>,
+    pub end: usize,
+}
+
+/// The same wrap [`wrap`] performs, but reporting *where each rendered char came from*: per
+/// line, the byte offsets (into `text`) of the chars on it, in order, plus the line's end gap
+/// (see [`WrappedLine`]). One algorithm, two views: `wrap` is derived from this, so a cell →
+/// offset mapping through [`crate::select`] can never drift from what is rendered.
+pub fn wrap_char_offsets(text: &str, width: usize) -> Vec<WrappedLine> {
+    let width = width.max(1);
+    let mut out: Vec<WrappedLine> = Vec::new();
+    // The byte offsets of the chars on the line being built, the line's display width, and
+    // the end gap so far (just after the last pushed char). The gap starts at 0 and is
+    // corrected to the `\n`'s offset for an empty line, and to `text.len()` for an empty
+    // final paragraph, when the line is finished.
+    let mut chars: Vec<usize> = Vec::new();
+    let mut line_width = 0usize;
+    let mut end = 0usize;
+    // One buffered space (its byte offset), flushed only when a following char stays on the
+    // line — so space runs collapse and trail away (the `wrap` semantics, unchanged).
+    let mut pending_space: Option<usize> = None;
+    for (idx, ch) in text.char_indices() {
+        if ch == '\n' {
+            let empty = chars.is_empty();
+            out.push(WrappedLine {
+                chars: std::mem::take(&mut chars),
+                end: if empty { idx } else { end },
+            });
+            line_width = 0;
+            end = idx + 1;
+            pending_space = None;
+            continue;
+        }
+        if ch == ' ' {
+            // A space only joins a line that already has a char on it; leading spaces and
+            // repeats collapse away.
+            if !chars.is_empty() {
+                pending_space = Some(idx);
+            }
+            continue;
+        }
+        let ch_width = ch.width().unwrap_or(0);
+        let extra = usize::from(pending_space.is_some());
+        if line_width + extra + ch_width > width && line_width > 0 {
+            out.push(WrappedLine {
+                chars: std::mem::take(&mut chars),
+                end,
+            });
+            line_width = 0;
+            pending_space = None;
+        }
+        if let Some(space) = pending_space.take() {
+            chars.push(space);
+            line_width += 1;
+        }
+        chars.push(idx);
+        line_width += ch_width;
+        end = idx + ch.len_utf8();
+    }
+    out.push(WrappedLine {
+        chars,
+        end: if end == 0 { text.len() } else { end },
+    });
+    out
+}
+
 /// Hard-wraps `text` to `width` display columns, breaking on spaces where possible and on
 /// character boundaries otherwise (CJK has no spaces). Newlines start a new line.
+///
+/// This is the renderer's hot path (every visible entry, every frame), so it stays the
+/// plain string builder. [`wrap_char_offsets`] is the same algorithm reporting *where each
+/// rendered char came from*; [`crate::select`] maps cells through it, and the two are held
+/// together by the `wrap_and_wrap_char_offsets_agree` test — change either, change both.
 pub fn wrap(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut out = Vec::new();
@@ -52,8 +134,9 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
     out
 }
 
-/// The visible marker for an entry kind (the transcript's `> `, `~ `, …).
-fn marker_prefix(kind: EntryKind) -> &'static str {
+/// The visible marker for an entry kind (the transcript's `> `, `~ `, …). Also the cell
+/// offset the selection mapping ([`crate::select`]) subtracts to get a body column.
+pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
     match kind {
         EntryKind::User => "> ",
         EntryKind::Assistant => "  ",
@@ -95,8 +178,9 @@ fn body_style(entry: &Entry, theme: &Theme) -> Style {
 
 /// The text a frame shows for `entry`. A user message's `@` attachments are folded to one
 /// `[file: P, N lines]` line each; every other entry shows its text unchanged. Display only:
-/// the message (and the journal) keep the full text.
-fn display_text(entry: &Entry) -> Cow<'_, str> {
+/// the message (and the journal) keep the full text. Also what a selection maps offsets into
+/// ([`crate::select`]): the shown text is the copied text.
+pub(crate) fn display_text(entry: &Entry) -> Cow<'_, str> {
     match entry.kind {
         EntryKind::User => crate::mention::fold_files(&entry.text),
         _ => Cow::Borrowed(&entry.text),
@@ -234,6 +318,83 @@ const INPUT_PROMPT: &str = "> ";
 const INPUT_HINT: &str = "(type a message, Enter to send, Ctrl-J for a new line)";
 
 /// The input area's height: one rule above, the text rows, one rule below.
+/// The `/login` box's height (rows in `login_lines`, plus the two border rows).
+const LOGIN_HEIGHT: u16 = 8;
+
+/// The wizard's lines. **The key is never among them** (D3): a filled field renders one `*`
+/// per character, an empty one its hint.
+fn login_lines(wizard: &LoginWizard, width: usize) -> Vec<Line<'static>> {
+    use crate::login::LoginStep;
+    let error_style = app_theme_error();
+    let _ = width;
+    let mut lines: Vec<Line> = Vec::new();
+    match &wizard.step {
+        LoginStep::ChooseProvider { cursor } => {
+            lines.push(Line::from("choose a provider (↑/↓, Enter):"));
+            for (index, (id, description)) in LoginWizard::choices().into_iter().enumerate() {
+                let marker = if index == *cursor { "> " } else { "   " };
+                let style = if index == *cursor {
+                    crate::theme::Theme::default().user
+                } else {
+                    crate::theme::Theme::default().hint
+                };
+                lines.push(Line::from(Span::styled(
+                    format!(" {marker} {id:<20} {description}"),
+                    style,
+                )));
+            }
+        }
+        LoginStep::CustomName => {
+            lines.push(Line::from("provider name (also its auth.json entry):"));
+            lines.push(Line::from(format!(" {}", wizard.name)));
+        }
+        LoginStep::CustomProtocol { cursor } => {
+            lines.push(Line::from("wire protocol (↑/↓, Enter):"));
+            for (index, kind) in crate::login::PROTOCOLS.iter().enumerate() {
+                let marker = if index == *cursor { "> " } else { "   " };
+                lines.push(Line::from(format!(" {marker} {kind}")));
+            }
+        }
+        LoginStep::CustomBaseUrl => {
+            lines.push(Line::from("base URL:"));
+            lines.push(Line::from(format!(" {}", wizard.base_url)));
+        }
+        LoginStep::KeyInput => {
+            lines.push(Line::from("API key (hidden; paste works too):"));
+            let masked = crate::login::LoginWizard::masked(&wizard.key);
+            lines.push(Line::from(if masked.is_empty() {
+                String::new()
+            } else {
+                masked
+            }));
+        }
+        LoginStep::Verifying => {
+            lines.push(Line::from(format!(
+                "verifying {} … (Esc cancels)",
+                wizard.provider_name()
+            )));
+        }
+        LoginStep::VerifyFailed { reason } => {
+            lines.push(Line::from(Span::styled(
+                format!("verification failed: {reason}"),
+                error_style,
+            )));
+            lines.push(Line::from(
+                "save anyway? [y] save   [n/Esc] cancel".to_owned(),
+            ));
+        }
+    }
+    if let Some(error) = &wizard.error {
+        lines.push(Line::from(Span::styled(error.clone(), error_style)));
+    }
+    lines
+}
+
+/// The error style for wizard problems (a note-colored line; no new theme role).
+fn app_theme_error() -> ratatui::style::Style {
+    crate::theme::Theme::default().note
+}
+
 fn input_height(app: &App, width: usize) -> u16 {
     let inner = width.saturating_sub(INPUT_PROMPT.len()).max(1);
     let rows = crate::composer::rows(&app.input.text(), inner).len();
@@ -242,9 +403,12 @@ fn input_height(app: &App, width: usize) -> u16 {
 
 /// The approval prompt's key line. It is drawn on its **own** row under the body, never part
 /// of the wrapped text, so a long command can never push the keys out of the box (owner
-/// acceptance, 2026-10-13). `[Y] auto for this session` (ADR 0026 D9) will join this line; it
-/// is deliberately not implemented here.
-pub const APPROVAL_KEYS: &str = "[y] allow once   [a] always this session   [n] deny";
+/// acceptance, 2026-10-13). The auto key is a constant like the line itself: if the owner
+/// changes the key, this string and [`crate::app::Input::ApprovalAuto`]'s `KeyCode` are the
+/// only two places (ADR 0026 D9, correction 2026-10-13: the key is `!`; `Y` stays
+/// `y` = allow once).
+pub const APPROVAL_KEYS: &str =
+    "[y] allow once   [a] always this session   [n] deny   [!] auto for this session";
 
 /// The approval prompt's body: everything above the key line. The **resolved** resource is what
 /// is shown: `a/../secret` must not read as if it stayed under `a/` (the permission layer
@@ -380,6 +544,51 @@ pub fn highlight(line: Line<'static>, query: &str) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Styles the selected display-column `ranges` of one rendered line with the theme's
+/// `selection` role (the text keeps its foreground; `mono` reverses). Columns are whole-line
+/// coordinates — the `> ` prefix's cells included — and a wide char is selected when either
+/// of its two cells is. A span is split only where the selection boundary falls inside it;
+/// runs never cross spans, so each piece keeps its own base style.
+fn apply_selection(
+    line: Line<'static>,
+    ranges: &[(usize, usize)],
+    selection: Style,
+) -> Line<'static> {
+    let mut out: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + ranges.len());
+    let mut col = 0usize;
+    let mut run: Option<(String, bool)> = None;
+    let flush = |out: &mut Vec<Span<'static>>, run: &mut Option<(String, bool)>, base: Style| {
+        if let Some((text, run_selected)) = run.take() {
+            let styled = if run_selected {
+                base.patch(selection)
+            } else {
+                base
+            };
+            out.push(Span::styled(text, styled));
+        }
+    };
+    for span in line.spans {
+        let base = span.style;
+        flush(&mut out, &mut run, base);
+        for ch in span.content.into_owned().chars() {
+            let w = ch.width().unwrap_or(0);
+            let selected = ranges
+                .iter()
+                .any(|&(start, end)| col < end && col + w.max(1) > start);
+            match &mut run {
+                Some((text, run_selected)) if *run_selected == selected => text.push(ch),
+                _ => {
+                    flush(&mut out, &mut run, base);
+                    run = Some((ch.to_string(), selected));
+                }
+            }
+            col += w;
+        }
+    }
+    flush(&mut out, &mut run, Style::default());
+    Line::from(out)
+}
+
 /// One status-bar segment: its text and its style.
 struct Segment {
     text: String,
@@ -441,12 +650,29 @@ fn status_segments(app: &App) -> Vec<Segment> {
             style: app.theme.tier,
         });
     }
+    // ADR 0026 D9: while auto is on the status bar says so, prominently — the session is
+    // approving tool calls without asking.
+    if app.auto {
+        segments.push(Segment {
+            text: "AUTO".to_string(),
+            style: app.theme.auto,
+        });
+    }
     // ADR 0023 U7: how many requests are waiting. Shown only when there is one, so an idle
     // status bar does not carry a constant `0 pending`.
     if app.pending > 0 {
         segments.push(Segment {
             text: format!("{} pending", app.pending),
             style: app.theme.turn_running,
+        });
+    }
+    // The transient note ("tool … running", "copied N chars (via OSC 52)", a compaction
+    // failure) sits ahead of the long tails: a narrow terminal drops the *rightmost*
+    // segments, and a note the user just caused must survive that, not be the first to go.
+    if let Some(note) = &app.note {
+        segments.push(Segment {
+            text: note.clone(),
+            style: app.theme.note,
         });
     }
     segments.push(Segment {
@@ -475,12 +701,6 @@ fn status_segments(app: &App) -> Vec<Segment> {
         ),
         style: Style::default(),
     });
-    if let Some(note) = &app.note {
-        segments.push(Segment {
-            text: note.clone(),
-            style: app.theme.note,
-        });
-    }
     segments
 }
 
@@ -538,6 +758,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             approval_cap(area.height as usize, completion.len()),
         ),
         Some(Modal::Question(form)) => question_height(form, area.width as usize),
+        Some(Modal::Login(_)) => LOGIN_HEIGHT,
+        // The `/logout` confirmation is a two-line box like the `/memory` one.
+        Some(Modal::ConfirmLogout(_)) => 4,
         _ => input_height(app, area.width as usize),
     };
     // The `@` completion list sits just above the input box (and never over an approval
@@ -554,7 +777,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // total before the visible window is cut.
     let width = chunks[0].width as usize;
     let height = chunks[0].height as usize;
-    let theme = app.theme;
+    let theme = app.theme.clone();
     // The find matcher wraps at the same width; a resize recomputes it (once, not per frame).
     app.set_transcript_width(width);
     let (total, _) = visible_lines(&mut app.entries, width, 0, 0, &theme);
@@ -565,6 +788,32 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             .into_iter()
             .map(|line| highlight(line, &find.query))
             .collect(),
+        None => visible,
+    };
+    // A live transcript selection: the visible rows' selected display columns, styled with
+    // the theme's `selection` role. `highlight_rows` derives from the same wrap the lines
+    // above were rendered from, so the band lands exactly on the copied text.
+    let visible = match app.selection.filter(|sel| !sel.is_empty()) {
+        Some(selection) => {
+            let ranges = crate::select::highlight_rows(
+                &app.entries,
+                width,
+                app.scroll,
+                visible.len(),
+                &selection,
+            );
+            visible
+                .into_iter()
+                .zip(ranges)
+                .map(|(line, ranges)| {
+                    if ranges.is_empty() {
+                        line
+                    } else {
+                        apply_selection(line, &ranges, theme.selection)
+                    }
+                })
+                .collect()
+        }
         None => visible,
     };
     frame.render_widget(Paragraph::new(visible), chunks[0]);
@@ -658,6 +907,32 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 Paragraph::new(Line::from(clip_columns(QUESTION_KEYS, width))),
                 rows[1],
             );
+        }
+        Some(Modal::Login(wizard)) => {
+            let lines = login_lines(wizard, chunks[2].width as usize);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(app.theme.approval_border)
+                .title(" /login ");
+            frame.render_widget(&block, chunks[2]);
+            let inner = block.inner(chunks[2]);
+            frame.render_widget(Paragraph::new(lines), inner);
+        }
+        Some(Modal::ConfirmLogout(provider)) => {
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(app.theme.approval_border)
+                .title(" /logout ");
+            frame.render_widget(&block, chunks[2]);
+            let inner = block.inner(chunks[2]);
+            let lines = vec![
+                Line::from(format!("remove the stored credential for `{provider}`?")),
+                Line::from(Span::styled(
+                    "[y] remove   [n/Esc] keep",
+                    app.theme.approval_border,
+                )),
+            ];
+            frame.render_widget(Paragraph::new(lines), inner);
         }
         _ if app.find_state().is_some() => {
             // The find box replaces the input box's line; the input text itself is untouched

@@ -36,6 +36,12 @@ tokio = { workspace = true, features = [
     "time",
 ] }
 
+[target.'cfg(unix)'.dependencies]
+# `agent login` turns the terminal's echo off for the key prompt and restores it on every
+# path, Ctrl-C included (signals are blocked across the echo-off window and delivered after
+# the restore). The pty tests already used it as a dev-dependency.
+libc = "0.2"
+
 [dev-dependencies]
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible", features = ["testing"] }
 agent-provider-anthropic = { path = "../agent-provider-anthropic", features = ["testing"] }

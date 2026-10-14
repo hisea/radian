@@ -1903,7 +1903,7 @@ async fn pty_yes_runs_an_ask_without_a_prompt_and_still_audits_it() {
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
     assert!(
         pty.screen()
-            .contains("--yes: tool calls are approved without asking"),
+            .contains("auto: tool calls are approved without asking"),
         "the startup must say approvals are off:\n{}",
         pty.screen()
     );
@@ -4409,12 +4409,16 @@ fn wheel(up: bool) -> Vec<u8> {
 
 /// The mouse-reporting sequences, as bytes in the raw output.
 const MOUSE_ON: &str = "\u{1b}[?1000h";
+const MOUSE_MOTION_ON: &str = "\u{1b}[?1002h";
 const MOUSE_SGR_ON: &str = "\u{1b}[?1006h";
 const MOUSE_OFF: &str = "\u{1b}[?1000l";
+const MOUSE_MOTION_OFF: &str = "\u{1b}[?1002l";
 const MOUSE_SGR_OFF: &str = "\u{1b}[?1006l";
 
-/// The app enabled reporting and released it again; the any-motion forms (`?1002h`/`?1003h`)
-/// are never sent (a pointer move must not flood the input thread).
+/// The app enabled reporting and released it again. Button-motion (`?1002h`) is part of the
+/// switch: the transcript drag-selection needs it (selection slice). The any-motion form
+/// (`?1003h`) is still never sent — a pointer move must not flood the input thread
+/// (ADR 0023 U2), which the no-frame-on-move test asserts behaviorally.
 fn assert_mouse_released(pty: &Pty, label: &str) {
     let raw = String::from_utf8_lossy(&pty.raw()).to_string();
     assert!(
@@ -4422,11 +4426,15 @@ fn assert_mouse_released(pty: &Pty, label: &str) {
         "{label}: reporting was never enabled: {raw}"
     );
     assert!(
-        raw.contains(MOUSE_SGR_OFF) && raw.contains(MOUSE_OFF),
+        raw.contains(MOUSE_MOTION_ON),
+        "{label}: button-motion was never enabled: {raw}"
+    );
+    assert!(
+        raw.contains(MOUSE_SGR_OFF) && raw.contains(MOUSE_OFF) && raw.contains(MOUSE_MOTION_OFF),
         "{label}: the mouse was not released: {raw}"
     );
     assert!(
-        !raw.contains("\u{1b}[?1002h") && !raw.contains("\u{1b}[?1003h"),
+        !raw.contains("\u{1b}[?1003h"),
         "{label}: any-motion reporting must never be enabled: {raw}"
     );
 }
@@ -4563,7 +4571,7 @@ async fn pty_a_mouse_move_is_dropped() {
     );
     let raw = String::from_utf8_lossy(&pty.raw()).to_string();
     assert!(
-        !raw.contains("\u{1b}[?1002h") && !raw.contains("\u{1b}[?1003h"),
+        !raw.contains("\u{1b}[?1003h"),
         "any-motion reporting must never be enabled: {raw}"
     );
     pty.quit();
@@ -6024,4 +6032,828 @@ async fn pty_the_exit_line_is_a_copyable_resume_command() {
     assert!(!line.contains("MY_KEY"), "no key: {line}");
     assert!(!line.contains("--header"), "{line}");
     assert!(!line.contains("credentials"), "{line}");
+}
+
+// ---------- theme files (ADR 0029) ----------
+
+/// A pi theme file under `RADIAN_HOME/themes/` colors the real screen: the transcript's user
+/// line renders with the fixture's `userMessageText` RGB (via `userMessageText → var fg`).
+/// `COLORTERM=truecolor` makes the app emit RGB, which the vt100 model reports per cell.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_theme_file_colors_the_user_line() {
+    let _serial = pty_guard();
+    let home = TempDir::new("theme-home");
+    // `RADIAN_HOME` root with the theme file and a config selecting it by name.
+    let themes = home.path().join("themes");
+    std::fs::create_dir_all(&themes).unwrap();
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/data/themes/kanagawa-wave.json"
+    );
+    std::fs::copy(fixture, themes.join("kanagawa-wave.json")).unwrap();
+    let config = home.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "schema_version = 1\n[tui]\ntheme = \"kanagawa-wave\"\n",
+    )
+    .unwrap();
+
+    let server = MockServer::start(vec![text_reply("REPLY-DONE")]).await;
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--config",
+            config.to_str().unwrap(),
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            home.path().join("sessions").to_str().unwrap(),
+            "--session-id",
+            "theme",
+        ],
+        &[
+            ("RADIAN_HOME", home.path().to_str().unwrap()),
+            ("COLORTERM", "truecolor"),
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"COLOR-PROBE\r");
+    assert!(pty.wait_for_screen("REPLY-DONE", 15), "{}", pty.screen());
+
+    // The user entry's `> ` marker carries the theme's `user` style (the body text is the
+    // terminal default by design), so check the marker cell: three columns before the probe.
+    // The kanagawa fixture's `userMessageText` is `vars.fg = #DCD7BA`.
+    let expected = vt100::Color::Rgb(0xDC, 0xD7, 0xBA);
+    let screen = pty.parser.screen();
+    let mut matched = 0;
+    for (row, text) in screen.rows(0, 110).enumerate() {
+        for col in text.match_indices("COLOR-PROBE").map(|(i, _)| i) {
+            // The input line echoes the probe without a marker; only the transcript entry
+            // has "> " before it.
+            let Some(marker_col) = (col as u16).checked_sub(2) else {
+                continue;
+            };
+            if let Some(cell) = screen.cell(row as u16, marker_col) {
+                assert_eq!(cell.contents(), ">", "expected the user marker");
+                assert_eq!(
+                    cell.fgcolor(),
+                    expected,
+                    "the user marker must carry the theme color"
+                );
+                matched += 1;
+            }
+        }
+    }
+    assert!(matched > 0, "the probe was not found on screen");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+// ---------- /login and /logout (ADR 0026 D3) ----------
+
+/// A small HTTP server that answers every connection with `status` until the process ends
+/// (the wizard's verification fires whenever the user submits the key).
+fn login_verify_server(status_line: &'static str) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut stream = stream;
+            use std::io::{Read, Write};
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+            let body = "{}";
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+        }
+    });
+    format!("http://{addr}")
+}
+
+/// Pre-seeds `~/.radian/credentials/auth.json` (0700 dir, 0600 file) with one unrelated
+/// entry, so the tests can prove it survives a login and a logout.
+fn seed_auth_json(home: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = home.join(".radian/credentials");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = dir.join("auth.json");
+    std::fs::write(
+        &path,
+        r#"{"existing": {"type": "api_key", "key": "$EXISTING_KEY"}}"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    path
+}
+
+fn auth_json_mode(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+/// The full custom login over a real pty: name → protocol → base URL → key, the verification
+/// request answered by a local server, the save, and the D3 "what next" line. **The key must
+/// never appear in any byte the app put on screen** — typed or after the fact — and the
+/// pre-existing `auth.json` entry must survive (only `corp` is added, the file still 0600).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_login_custom_walk_saves_without_showing_the_key() {
+    let _serial = pty_guard();
+    const KEY: &str = "sk-PTY-SECRET-42";
+    let verify = login_verify_server("200 OK");
+    let dir = TempDir::new("login");
+
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "login",
+        ],
+        30,
+        110,
+    );
+    // The app's HOME is the pty's own temp dir; the credentials live there.
+    let auth_path = seed_auth_json(pty.home.path());
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+
+    pty.send(b"/login custom\r");
+    assert!(pty.wait_for_screen("provider name", 5), "{}", pty.screen());
+    pty.send(b"corp\r");
+    assert!(pty.wait_for_screen("wire protocol", 5), "{}", pty.screen());
+    pty.send(b"\r"); // openai-compatible (the highlighted row)
+    assert!(pty.wait_for_screen("base URL", 5), "{}", pty.screen());
+    pty.send(format!("{verify}\r").as_bytes());
+    assert!(pty.wait_for_screen("API key", 5), "{}", pty.screen());
+    // Type the key **without submitting** and look at the screen: the field must be masked
+    // mid-typing, not only after the wizard closes (a plaintext echo is exactly what D3
+    // forbids — this is where a `key.clone()` render or an echo-on terminal would show).
+    for c in KEY.chars() {
+        pty.send(&[c as u8]);
+    }
+    // A state gate: the fully typed field is 15 masked columns wide. When the render leaks
+    // the plaintext the stars never appear — and the key does, which is what the next
+    // assertion is for.
+    let stars = "*".repeat(KEY.len());
+    assert!(
+        pty.wait_until(5, |screen| screen.contains(&stars)),
+        "the masked field never filled:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains(KEY),
+        "the key echoed onto the screen while typing:\n{}",
+        pty.screen()
+    );
+    pty.send(b"\r");
+    assert!(
+        pty.wait_for_screen("saved the key for `corp`", 10),
+        "{}",
+        pty.screen()
+    );
+
+    // The key is nowhere on screen, and never was in the byte stream.
+    pty.pump();
+    let raw_bytes = pty.raw();
+    let raw = String::from_utf8_lossy(&raw_bytes);
+    assert!(!raw.contains(KEY), "the key leaked into the pty stream");
+    assert!(
+        !pty.screen().contains(KEY),
+        "the key leaked onto the screen:\n{}",
+        pty.screen()
+    );
+
+    // The record landed in auth.json, next to the untouched entry, still 0600.
+    let saved = std::fs::read_to_string(&auth_path).unwrap();
+    let saved: serde_json::Value = serde_json::from_str(&saved).unwrap();
+    assert_eq!(saved["corp"]["type"], "api_key");
+    assert_eq!(saved["corp"]["key"], KEY);
+    assert_eq!(
+        saved["corp"]["env"]["RADIAN_BASE_URL"], verify,
+        "the custom endpoint rides in the entry's env (D10)"
+    );
+    assert_eq!(
+        saved["existing"]["type"], "api_key",
+        "the pre-existing entry survives"
+    );
+    assert_eq!(auth_json_mode(&auth_path), 0o600);
+
+    // The key reached neither the session journal nor any notice (D3: a key must never be
+    // persisted outside auth.json).
+    for entry in std::fs::read_dir(dir.path()).unwrap().flatten() {
+        if entry.path().extension().is_some_and(|ext| ext == "jsonl") {
+            let text = std::fs::read_to_string(entry.path()).unwrap();
+            assert!(!text.contains(KEY), "the key leaked into the journal");
+        }
+    }
+
+    // The D3 "what next" line names the switch.
+    assert!(pty.screen().contains("/model corp/"), "{}", pty.screen());
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// The verification failing does not block the save: the wizard shows the reason and `y`
+/// stores the key anyway (D3). The same run covers `/logout`: the confirmation, the removal,
+/// and the untouched sibling entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_login_failed_verification_can_save_and_logout_removes_only_one() {
+    let _serial = pty_guard();
+    const KEY: &str = "sk-SECOND-SECRET-7";
+    // No server on this port: the verification cannot connect (D3's failure path).
+    let dead = "http://127.0.0.1:9/v1";
+    let dir = TempDir::new("login-fail");
+
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "login-fail",
+        ],
+        30,
+        110,
+    );
+    let auth_path = seed_auth_json(pty.home.path());
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+
+    pty.send(b"/login custom\r");
+    assert!(pty.wait_for_screen("provider name", 5), "{}", pty.screen());
+    pty.send(b"corp\r");
+    assert!(pty.wait_for_screen("wire protocol", 5), "{}", pty.screen());
+    pty.send(b"\r");
+    assert!(pty.wait_for_screen("base URL", 5), "{}", pty.screen());
+    pty.send(format!("{dead}\r").as_bytes());
+    assert!(pty.wait_for_screen("API key", 5), "{}", pty.screen());
+    pty.send(format!("{KEY}\r").as_bytes());
+    assert!(
+        pty.wait_for_screen("verification failed", 15),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"y"); // save anyway
+    assert!(
+        pty.wait_for_screen("saved the key for `corp`", 10),
+        "{}",
+        pty.screen()
+    );
+
+    // `/logout corp`: confirm with `y`; the removal names the provider, the other entry and
+    // the file mode survive.
+    pty.send(b"/logout corp\r");
+    assert!(
+        pty.wait_for_screen("remove the stored credential for `corp`?", 5),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"y");
+    assert!(
+        pty.wait_for_screen("removed the stored credential for `corp`", 5),
+        "{}",
+        pty.screen()
+    );
+
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&auth_path).unwrap()).unwrap();
+    assert!(saved.get("corp").is_none(), "corp was removed: {saved}");
+    assert_eq!(saved["existing"]["type"], "api_key", "the sibling survives");
+    assert_eq!(auth_json_mode(&auth_path), 0o600);
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// `/logout` with `n` keeps the credential.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_logout_with_n_keeps_the_entry() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("logout-keep");
+
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "logout-keep",
+        ],
+        30,
+        110,
+    );
+    let auth_path = seed_auth_json(pty.home.path());
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"/logout existing\r");
+    assert!(
+        pty.wait_for_screen("remove the stored credential for `existing`?", 5),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"n");
+    assert!(
+        pty.wait_for_screen("kept `existing`", 5),
+        "{}",
+        pty.screen()
+    );
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&auth_path).unwrap()).unwrap();
+    assert_eq!(saved["existing"]["type"], "api_key", "kept means kept");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+// ---------- ADR 0026 D9: the in-session auto-approval switch ----------
+
+/// The `!` key end to end: it approves the pending request once **and** turns auto on for
+/// the session, so the next ask never prompts; the status bar says `AUTO`, and both the
+/// audit record of the switch and the durable `ConfigChanged` land in the journal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_auto_key_approves_once_and_enables_auto() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("auto-key");
+    let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "write", r#"{"path":"a.txt","content":"first"}"#),
+        tool_reply("call_2", "write", r#"{"path":"b.txt","content":"second"}"#),
+        text_reply("SWITCH-DONE"),
+    ])
+    .await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "auto-key",
+            "--workspace",
+            ws.to_str().unwrap(),
+            // `always` asks on every call, so the second write proves the switch took.
+            "--approval",
+            "always",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"please write\r");
+    assert!(
+        pty.wait_for_screen("approve tool call?", 20),
+        "no approval prompt:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("AUTO"),
+        "auto must be off before the switch:\n{}",
+        pty.screen()
+    );
+
+    // One press: approve this request and enable auto for the rest of the session.
+    pty.send(b"!");
+    assert!(
+        pty.wait_for_screen("SWITCH-DONE", 30),
+        "the turn did not finish after `!`:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.screen().contains("AUTO"),
+        "the status bar must say AUTO:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("approve tool call?"),
+        "the second write must not prompt under auto:\n{}",
+        pty.screen()
+    );
+    assert!(
+        ws.join("a.txt").exists() && ws.join("b.txt").exists(),
+        "both writes must have run: {}",
+        pty.screen()
+    );
+
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+    let session = std::fs::read_to_string(sessions.join("auto-key.jsonl")).unwrap();
+    assert!(
+        session.contains("ApprovalPolicyChanged") && session.contains("\"policy\":\"auto\""),
+        "the switch must be audited: {session}"
+    );
+    assert!(
+        session.contains("ConfigChanged") && session.contains("\"approval\":\"auto\""),
+        "the durable record must be journaled: {session}"
+    );
+}
+
+/// A journaled in-session switch restores auto on resume under `workspace` (D9).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_resume_restores_auto_on_workspace() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("auto-resume");
+    let path = dir.path().join("auto-resume.jsonl");
+    let journal = radian_session::SessionJournal::create(
+        &path,
+        "auto-resume",
+        radian_session::SessionCreatedData::new("/tmp", json!({})),
+    )
+    .expect("create the session file");
+    use agent_core::TranscriptJournal;
+    journal
+        .append(agent_core::JournalRecord::Message {
+            index: 0,
+            message: agent_core::Message::user("older turn"),
+        })
+        .await
+        .unwrap();
+    // What an in-session `/auto on` writes (the driver journals it at the turn boundary).
+    journal
+        .append_runtime_event(radian_session::RuntimeEvent::ConfigChanged {
+            revision: 1,
+            change: json!({"approval": "auto"}),
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--resume",
+            "auto-resume",
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("AUTO", 10),
+        "the resumed session must show AUTO:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.screen()
+            .contains("auto: tool calls are approved without asking"),
+        "the startup line must name the restored policy:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// `full` never restores auto (D9): the startup says how to get it back, and the status bar
+/// does not show AUTO.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_resume_does_not_restore_auto_on_full_and_hints() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("auto-resume-full");
+    let path = dir.path().join("auto-full.jsonl");
+    let journal = radian_session::SessionJournal::create(
+        &path,
+        "auto-full",
+        radian_session::SessionCreatedData::new("/tmp", json!({})),
+    )
+    .expect("create the session file");
+    journal
+        .append_runtime_event(radian_session::RuntimeEvent::ConfigChanged {
+            revision: 1,
+            change: json!({"approval": "auto"}),
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--resume",
+            "auto-full",
+            "--profile",
+            "full",
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen(
+            "auto was on in the previous run; run `/auto on` to re-enable",
+            10
+        ),
+        "the full-tier hint is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("AUTO"),
+        "full must not restore auto:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// Config `[permissions] approval = "auto"` is ignored under `full`, with a warning (D9).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_config_auto_is_ignored_under_full_with_a_warning() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("auto-config-full");
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "schema_version = 1\n[permissions]\napproval = \"auto\"\n",
+    )
+    .unwrap();
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--config",
+            config.to_str().unwrap(),
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "config-full",
+            "--profile",
+            "full",
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("ignored under the full tier", 10),
+        "the config warning is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("AUTO"),
+        "the config value must not enable auto under full:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// The same config value holds under `workspace`: auto is on from the first frame.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_config_auto_enables_auto_on_workspace() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("auto-config-ws");
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "schema_version = 1\n[permissions]\napproval = \"auto\"\n",
+    )
+    .unwrap();
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--config",
+            config.to_str().unwrap(),
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "config-ws",
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("AUTO", 10),
+        "the status bar must show AUTO:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+// --- transcript selection and copy (mouse drag, OSC 52) ---
+
+/// Finds a needle's `(row, col)` (0-based, display cells) on the vt100 screen.
+fn find_on_screen(pty: &mut Pty, needle: &str) -> Option<(u16, u16)> {
+    pty.pump();
+    let screen = pty.parser.screen();
+    let (rows, cols) = screen.size();
+    for row in 0..rows {
+        let mut line = String::new();
+        for col in 0..cols {
+            line.push_str(screen.cell(row, col).map(|c| c.contents()).unwrap_or(" "));
+        }
+        if let Some(col) = line.find(needle) {
+            return Some((row, col as u16));
+        }
+    }
+    None
+}
+
+/// SGR mouse encoding (`?1006h`): button `code` at 1-based `(col, row)`. `M` presses/moves,
+/// `m` releases.
+fn sgr(code: u8, col: u16, row: u16, press: bool) -> Vec<u8> {
+    format!(
+        "\u{1b}[<{code};{col};{row}{}",
+        if press { "M" } else { "m" }
+    )
+    .into_bytes()
+}
+
+/// The owner's ask: hold the left button, drag across transcript text, release — the
+/// selection's logical text reaches the clipboard as OSC 52 (`ESC]52;c;<base64>BEL`), and the
+/// status bar says what actually happened ("via OSC 52"), never that the clipboard holds it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_mouse_drag_copies_the_selection_via_osc52() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("select-copy");
+    let path = dir.path().join("select-me.jsonl");
+    let journal = radian_session::SessionJournal::create(
+        &path,
+        "select-me",
+        radian_session::SessionCreatedData::new("/tmp", json!({})),
+    )
+    .expect("create the session file");
+    use agent_core::TranscriptJournal;
+    journal
+        .append(agent_core::JournalRecord::Message {
+            index: 0,
+            message: agent_core::Message::user("SELECT-ME-PLEASE"),
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--offline-catalog",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--resume",
+            "select-me",
+        ],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("SELECT-ME-PLEASE", 10),
+        "{}",
+        pty.screen()
+    );
+
+    // The mouse-reporting switch: button + button-motion + SGR, never any-motion.
+    let raw = pty.raw();
+    assert!(
+        String::from_utf8_lossy(&raw).contains("\u{1b}[?1000h\u{1b}[?1002h\u{1b}[?1006h"),
+        "the enable sequence must be 1000+1002+1006"
+    );
+    assert!(
+        !String::from_utf8_lossy(&raw).contains("\u{1b}[?1003"),
+        "?1003h (any-motion) must stay off: motion without a button would flood the input",
+    );
+
+    // Drag across the message's text (the "> " prefix stays out of the copy).
+    let (row, col) = find_on_screen(&mut pty, "SELECT-ME-PLEASE").expect("the text on screen");
+    let end = col + "SELECT-ME-PLEASE".len() as u16 - 1;
+    pty.send(&sgr(0, col + 1, row + 1, true));
+    pty.send(&sgr(32, end + 1, row + 1, true));
+    pty.send(&sgr(0, end + 1, row + 1, false));
+
+    // The copy: OSC 52 with exactly the selected text, and the honest notice.
+    let expected = radian_tui::clip::osc52("SELECT-ME-PLEASE");
+    assert!(
+        pty.wait_for_raw(&expected, 10),
+        "no OSC 52 with the selection: {}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("copied 16 chars (via OSC 52)", 10),
+        "the status bar must say what happened, not claim the clipboard:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+}
+
+/// Motion without a button (`?1002h` does not report it; `?1003h` stays off) produces no
+/// events, no wake-ups and no frames (ADR 0023 U2's zero-redraw, pointer edition).
+#[test]
+fn pty_pointer_motion_alone_draws_no_frame() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("motion-idle");
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "motion-idle",
+            "--offline-catalog",
+        ],
+        20,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("type a message", 10),
+        "{}",
+        pty.screen()
+    );
+    let before = frame_count(&pty);
+
+    // A pointer wandering across the screen, buttons up, for a while.
+    for step in 0..40u16 {
+        pty.send(&sgr(35, 5 + step, 3 + step % 10, true));
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let after = frame_count(&pty);
+    pty.quit();
+    assert_eq!(
+        after, before,
+        "pointer motion without a button must not wake the loop"
+    );
+}
+
+/// Every exit path turns mouse reporting back off, `?1002l` included (the drag tracking this
+/// slice added). The ordinary path: the guard's drop.
+#[test]
+fn pty_quit_closes_button_motion_reporting() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("select-exit");
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "select-exit",
+            "--offline-catalog",
+        ],
+        20,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("type a message", 10),
+        "{}",
+        pty.screen()
+    );
+    pty.quit();
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    assert!(
+        raw.contains("\u{1b}[?1006l\u{1b}[?1002l\u{1b}[?1000l"),
+        "the restore must close 1006, 1002 and 1000 together: {raw:?}"
+    );
 }

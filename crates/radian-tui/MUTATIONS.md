@@ -543,6 +543,23 @@ Base `613312c` · 一次性 worktree `/tmp/ui-r1-mut` · 独立 `CARGO_TARGET_DI
 （`/sessions` 在备用屏里打印 `[privacy]` 警告 → 渲染 diff 跳过那些 cell → picker 的标题/filter 行被糊掉）；
 它只在**全量套件**里稳定复现（单跑 10 次全过），所以那次变异跑的是整个 pty 套件。
 
+## Slice: theme files and per-role overrides (ADR 0029)
+
+Base `9ee35b4` · 一次性 worktree `/tmp/tui-mut` · 每个变异 `git checkout -- .` 还原后跑对应测试,
+`git status --short` 为空。变异用 `python3` 补丁 + `assert old in s`(吸取 U3/U4 的教训)。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| T1 | 变量不解析(所有 `vars` 引用一律报 missing) | 主题文件的变量链必须真的解析 | `theme::file::tests::chained_variables_resolve_and_a_loop_only_breaks_its_own_roles`、`the_kanagawa_wave_fixture_loads_with_all_roles_resolved` FAILED |
+| T2 | oklch→OKLab 换算 a/b 通道互换 | 换算与 pi 逐字节一致 | `theme::color::tests::oklch_matches_pis_conversion`、`oklch_out_of_gamut_is_clipped_not_rejected`、`functional_notation_follows_pis_grammar` FAILED |
+| T3 | 缺失的角色变无色(`Style::default()`),不回退内建 | 缺角色必须回退内建调色板 | `theme::file::tests::missing_roles_fall_back_by_appearance` 等 6 个 FAILED |
+| T4 | `[tui.colors]` 覆盖整体丢弃 | 覆盖必须生效、格式错误必须警告 | `theme::file::tests::overrides_accept_radian_and_pi_names_and_tables`、`malformed_overrides_warn_and_are_ignored` FAILED |
+| T5 | `NO_COLOR` 只在无主题名时强制 mono(配置了主题名就放行) | `NO_COLOR` 优先于主题文件与覆盖 | `theme::file::tests::no_color_beats_theme_files_and_overrides`、`config.rs::a_configured_theme_is_applied_and_no_color_forces_mono` FAILED |
+| T6 | 内建 dark 的 `user` 从 Cyan 改成 Green | `dark` 截图/调色板逐字节钉住 | `theme::tests::dark_keeps_the_original_palette`、`config.rs::the_dark_theme_keeps_the_original_colors` FAILED |
+| T7 | 256 色近似的灰阶分支被禁用(cube 永远赢) | 近似算法与 pi 一致(两个分支都有钉住值) | `theme::color::tests::ansi256_approximation_matches_pis_algorithm` FAILED |
+
+7/7 抓住,无等价变异。
+
 ## approval-fit：审批框在内容太长时看不到按键提示＼�2026-10-13）
 
 Base `d76df67` · 就地变异，每个变异 `git checkout -- crates/radian-tui/src/render.rs` 还原、
@@ -558,3 +575,54 @@ Base `d76df67` · 就地变异，每个变异 `git checkout -- crates/radian-tui
 诚实补充（F3 的第一轮）：第一次的 patch 写的是 `14;`（一条丢弃值的语句），函数照常返回，测试
 "通过"是**假通过**；改成 `return 14` 后才真正抓住。这与上一节 U3/U4 的教训相同：patch 必须
 `assert old in s`，并且要确认它真的改变了行为。
+
+## Slice: `/login` / `/logout`(ADR 0026 D3/D10)
+
+Base `d3b5163` · 一次性 worktree `/tmp/login-mut` · 每个变异 `git checkout -- .` 还原后跑对应
+测试,`git status --short` 为空。编号 L1–L7(与 agent-cli 的 MUTATIONS.md 同一张表)。
+
+| # | 变异 | 抓住它的测试 |
+|---|---|---|
+| L1 | 向导把 key 明文渲染(`wizard.key.clone()` 代替掩码) | `pty.rs::pty_login_custom_walk_saves_without_showing_the_key`(等 15 个掩码列出现的状态门 + 屏幕无明文;**诚实补充**:第一版测试只用 `pump()` 后的单次断言,逐字符 diff 渲染让明文连不成子串,变异"通过"是假通过;加状态门后才真正抓住) |
+/`logout` 的确认与删除由 L6 覆盖(见 agent-cli 表)。
+## ADR 0026 D9：`!` 自动批准键与 `/auto`（2026-10-13，owner 更正：键是 `!`，`Y` 保持 `y`）
+
+Base `43ddbff` · 一次性检出 `/tmp/auto-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+`cargo test -p radian-tui --test auto <test>`，变异后 `git checkout --` 还原。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| TM-A1 | `Y` 映射到 `Input::ApprovalAuto`（代替保持 `y`） | `Y` 永远只是 allow once，不开 auto | `auto.rs::y_stays_allow_once_and_never_enables_auto` FAILED |
+
+1/1 抓住。`!` 本身的流程由 `auto.rs::the_auto_key_approves_this_request_and_turns_auto_on`
+与 pty 层 `pty_auto_key_approves_once_and_enables_auto` 钉住；`/auto on|off` 与别名、用法
+报错各有纯测试，未再单独变异（同一条代码路径 `Outcome::AutoToggle` 被 4 个用例共享）。
+## Slice: transcript selection and copy (mouse drag, OSC 52)
+
+Base `c8e1a35→`（本片 HEAD）· 一次性 worktree `/tmp/tui-mut-select`（`git worktree add` 自本片
+HEAD，结束后删除）· 每个变异改完跑对应测试、`git checkout -- .` 还原、`git status --short`
+为空。变异脚本带 `assert old in s`（吸取 U3/U4 的教训：no-op patch 是假通过）。
+
+| # | 需求 | 变异 | 抓住它的测试 |
+|---|---|---|---|
+| SC1 | 多开 `?1002h`，`?1003h` 永不开 | 使能序列改成 `?1000h ?1003h ?1006h` | `pty_a_mouse_drag_copies_the_selection_via_osc52`（断言精确三元组 + 不含 `?1003`） |
+| SC2 | 折行处不插入换行 | 拷贝改成 `display_lines(..).join("\n")` | `a_copy_across_a_soft_wrap_inserts_no_newline`、`press_drag_release_produces_the_copy_effect` |
+| SC3 | 所有退出路径关闭 `?1002` | 关闭序列删掉 `?1002l` | `pty_quit_closes_button_motion_reporting`（另有 `assert_mouse_released` 双保险） |
+| SC4 | Modal 上按下不开始选择 | 去掉 `mouse_down` 的 `has_modal` 门 | `a_press_on_a_modal_never_starts_one` |
+| SC5 | `update` 不直接写 stdout | 在 `mouse_up` 里直接 `io::stdout().write_all(osc52(..))` | `purity::app_rs_is_pure`（本片把 `io::stdout`/`io::stderr` 加进禁止表） |
+
+5/5 抓住。**审查补漏（SC6，merge main 之后）**：owner 审查发现 base64 表尾两个字符（索引
+62/63 的 `+`/`/`）没有任何向量覆盖——把表换成 URL-safe 的 `-_` 全部测试仍绿。补 `osc52("~~~")`
+→ `fn5+`（`~` = 六个 1，索引 62）与 `osc52("???")` → `Pz8/`（`?` = 六个 1，索引 63）后，同一
+变异在 `clip::tests::osc52_encodes_base64_with_the_clipboard_selection` 被抓住（实测输出
+`fn5-` ≠ 期望 `fn5+`）。
+
+**过程记录（SC4 的两轮）**：第一版测试在 `set_viewport(2, 6)` 后按 (4, 5)——
+视口已缩到 2 行，按下去本来就在 transcript 之外，变异等于没被实验；第二版按 (1, 5)（视口内）
+仍没抓住，因为 follow 把 scroll 钉在底部，press/drag 都钳到同一条「末尾之后的缝隙」，选区为空。
+最终 `scroll = 0; follow = false` 后变异才被抓住。教训：测「某个门存在」必须让门后路径真的产生
+可观察状态。
+
+**本片另加的两个行为断言**（不是变异，是回归钉）：`pty_pointer_motion_alone_draws_no_frame`
+（无按键移动 40 次、帧数不涨——SC1 的行为面）和
+`pty_quit_closes_button_motion_reporting`（退出序列精确为 `1006l 1002l 1000l`——SC3 的精确面）。

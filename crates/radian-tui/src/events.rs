@@ -13,7 +13,9 @@ use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
 use agent_core::{AgentEvent, EventSink, RunStatus};
-use ratatui::crossterm::event::{Event, KeyEvent, KeyEventKind, MouseEventKind};
+use ratatui::crossterm::event::{
+    Event, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
 
 use crate::app::{Input as AppInput, MouseScrollDirection};
 use crate::projection::{LastToolCall, SessionProjection, StreamKind, TurnState};
@@ -42,6 +44,7 @@ pub enum UiEvent {
 }
 
 /// A terminal event, forwarded by the input thread.
+#[derive(Debug)]
 pub enum InputEvent {
     Key(KeyEvent),
     Paste(String),
@@ -52,12 +55,36 @@ pub enum InputEvent {
     /// A mouse-wheel notch. Only `ScrollUp`/`ScrollDown` map here; every other mouse event
     /// (click, drag, move, focus) is dropped by [`input_event`].
     MouseScroll(MouseScrollDirection),
+    /// The left button went down at `(row, col)` (screen coordinates, `0`-based): the press
+    /// that may start a transcript selection.
+    MouseDown {
+        row: u16,
+        col: u16,
+    },
+    /// The left button moved while held: extends the selection.
+    MouseDrag {
+        row: u16,
+        col: u16,
+    },
+    /// The left button came up: ends the selection and copies it.
+    MouseUp {
+        row: u16,
+        col: u16,
+    },
 }
 
 /// Maps a crossterm terminal event to the UI's input vocabulary. `None` means the event is
 /// dropped: it never reaches the channel and never causes a frame. Terminal input is ordered,
 /// so this is the one place the raw event names are translated; it is pure, so the mapping (in
 /// particular "a click is not input") has a unit test.
+///
+/// Mouse mapping: the wheel scrolls, and the **left** button's `Down`/`Drag`/`Up` become the
+/// transcript-selection gesture (the terminal must have `?1002h` on, which it has whenever
+/// mouse reporting is on). Motion *without* a button (`Moved`) is not reported under
+/// `?1002h` and maps to `None` either way, so an idle pointer never wakes the loop.
+/// Everything else — other buttons, scroll-press/release, focus — is dropped. A **Shift**ed
+/// left button is dropped too: the terminals that do report it use Shift as the "bypass
+/// mouse reporting" key, and Radian keeps the terminal's native selection as the fallback.
 ///
 /// The resize is special-cased by the caller, which coalesces a burst into the last one.
 pub fn input_event(event: Event) -> Option<InputEvent> {
@@ -66,11 +93,31 @@ pub fn input_event(event: Event) -> Option<InputEvent> {
         Event::Key(key) => Some(InputEvent::Key(key)),
         Event::Paste(text) => Some(InputEvent::Paste(text)),
         Event::Resize(rows, cols) => Some(InputEvent::Resize { rows, cols }),
-        Event::Mouse(mouse) => match mouse.kind {
-            MouseEventKind::ScrollUp => Some(InputEvent::MouseScroll(MouseScrollDirection::Up)),
-            MouseEventKind::ScrollDown => Some(InputEvent::MouseScroll(MouseScrollDirection::Down)),
-            _ => None,
-        },
+        Event::Mouse(mouse) => {
+            let shifted = mouse.modifiers.contains(KeyModifiers::SHIFT);
+            let at = || (mouse.row, mouse.column);
+            match mouse.kind {
+                MouseEventKind::ScrollUp if !shifted => {
+                    Some(InputEvent::MouseScroll(MouseScrollDirection::Up))
+                }
+                MouseEventKind::ScrollDown if !shifted => {
+                    Some(InputEvent::MouseScroll(MouseScrollDirection::Down))
+                }
+                MouseEventKind::Down(MouseButton::Left) if !shifted => {
+                    let (row, col) = at();
+                    Some(InputEvent::MouseDown { row, col })
+                }
+                MouseEventKind::Drag(MouseButton::Left) if !shifted => {
+                    let (row, col) = at();
+                    Some(InputEvent::MouseDrag { row, col })
+                }
+                MouseEventKind::Up(MouseButton::Left) if !shifted => {
+                    let (row, col) = at();
+                    Some(InputEvent::MouseUp { row, col })
+                }
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -167,10 +214,10 @@ mod tests {
         })
     }
 
-    /// The wheel maps to a scroll; every other mouse event is dropped before the channel, so
-    /// a pointer move can never cause a frame (ADR 0023 U2, plan B).
+    /// The wheel and the left button map; every other mouse event is dropped before the
+    /// channel, so a pointer move can never cause a frame (ADR 0023 U2, plan B).
     #[test]
-    fn only_a_wheel_notch_is_mouse_input() {
+    fn only_a_wheel_notch_and_the_left_button_are_mouse_input() {
         assert!(matches!(
             input_event(mouse(MouseEventKind::ScrollUp)),
             Some(InputEvent::MouseScroll(MouseScrollDirection::Up))
@@ -179,15 +226,48 @@ mod tests {
             input_event(mouse(MouseEventKind::ScrollDown)),
             Some(InputEvent::MouseScroll(MouseScrollDirection::Down))
         ));
+        // The selection gesture: left button down, drag, up — with the cell carried along.
+        let down = input_event(mouse(MouseEventKind::Down(MouseButton::Left)));
+        assert!(
+            matches!(down, Some(InputEvent::MouseDown { row: 4, col: 3 })),
+            "{down:?}"
+        );
+        let drag = input_event(mouse(MouseEventKind::Drag(MouseButton::Left)));
+        assert!(
+            matches!(drag, Some(InputEvent::MouseDrag { row: 4, col: 3 })),
+            "{drag:?}"
+        );
+        let up = input_event(mouse(MouseEventKind::Up(MouseButton::Left)));
+        assert!(
+            matches!(up, Some(InputEvent::MouseUp { row: 4, col: 3 })),
+            "{up:?}"
+        );
         for dropped in [
-            MouseEventKind::Down(MouseButton::Left),
-            MouseEventKind::Up(MouseButton::Left),
-            MouseEventKind::Drag(MouseButton::Left),
+            MouseEventKind::Down(MouseButton::Right),
+            MouseEventKind::Up(MouseButton::Middle),
+            MouseEventKind::Drag(MouseButton::Right),
             MouseEventKind::Moved,
             MouseEventKind::ScrollLeft,
             MouseEventKind::ScrollRight,
         ] {
             assert!(input_event(mouse(dropped)).is_none(), "{dropped:?}");
+        }
+        // Shift is the terminals' "bypass mouse reporting" key: a shifted left button or
+        // wheel is dropped, so the terminal's native selection stays the fallback (README).
+        for shifted in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::ScrollUp,
+            MouseEventKind::ScrollDown,
+        ] {
+            let event = MouseEvent {
+                kind: shifted,
+                column: 3,
+                row: 4,
+                modifiers: KeyModifiers::SHIFT,
+            };
+            assert!(input_event(Event::Mouse(event)).is_none(), "{shifted:?}");
         }
         // A key release is dropped too; a key press is not.
         assert!(

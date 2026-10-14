@@ -151,3 +151,15 @@ Base `442f55a` · 一次性 worktree `/tmp/radian-pi-mut-4`。
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
 | C1 | 恢复时按"种类"各留最后一条（thinking 被 approval 挤掉） | `driver::resume_merges_every_config_change_not_one_per_kind` | ✅ |
+
+## ADR 0026 D9：收尾排空（2026-10-13）
+
+Base `43ddbff` · 一次性检出 `/tmp/auto-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+变异后 `git checkout --` 还原。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| RR-A1 | `run()` 去掉收尾的 `apply_pending_config`（最后一回合中排队的变化随退出丢失） | 退出前排空队列，resume 能恢复 | pty `pty_auto_key_approves_once_and_enables_auto`（journal 断言）FAILED |
+
+1/1 抓住。回合边界上的正常排空由本 crate 既有测试覆盖；这里钉住的是"开关发生在最后一
+回合中、宿主随即退出"的那一条路径。

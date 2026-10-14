@@ -290,6 +290,18 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
     /// the servers' process groups — that is the supported use of an abort.
     pub async fn run(&mut self) -> Result<(), DriverError> {
         let result = self.run_loop().await;
+        // A change queued during the final turn (ADR 0026 D9's approval switch is the case:
+        // it is made mid-turn, and the host may stop right after) has no next turn boundary
+        // to land on. Journal it before the session closes, so a resume still restores it.
+        // A queued change that the journal cannot take is a real failure only when nothing
+        // else already failed; the original result wins otherwise.
+        let result = match self.apply_pending_config().await {
+            Ok(()) => result,
+            Err(error) => Err(match result {
+                Ok(()) => error,
+                Err(original) => original,
+            }),
+        };
         let closed = self.session.close().await;
         match (result, closed) {
             (Err(error), _) => Err(error),

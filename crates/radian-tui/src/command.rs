@@ -19,10 +19,15 @@ pub const HELP: &str = "\
 /model <provider>/<model>
                       switch the model at the next turn boundary (ADR 0026 D5)
 /thinking <level>     set the thinking level (off…max); unsupported levels clamp (ADR 0026 D11)
+/auto on|off          auto-approve tool asks for this session (ADR 0026 D9)
+/yolo                 alias of /auto
 /export [md|json] [path] [--force]
                       export this session (default md, default <workspace>/radian-<id>.<ext>)
 /memory <command>     durable memory: list, search, show, add, edit, archive, restore,
                       forget, purge, confirm, export, import, project, relink, split, merge
+/login [provider]     store an API key in credentials/auth.json (ADR 0026 D3); custom
+                      names a new endpoint (name, protocol, base URL, key)
+/logout <provider>    remove a stored credential (asks first)
 //…                   send a message that starts with `/`";
 
 /// A memory command waiting for the user's confirmation. Only the destructive commands
@@ -61,6 +66,14 @@ pub enum Outcome {
     Model(ModelSwitch),
     /// `/thinking <level>` (ADR 0026 D11): the loop clamps it against the current route's map.
     Thinking(String),
+    /// `/login [provider]`: open the credential wizard. `Some(id)` skips the provider
+    /// choice (a built-in id or `custom`); `None` starts at the choice.
+    Login(Option<String>),
+    /// `/logout <provider>`: remove one stored credential, after a confirmation.
+    Logout(String),
+    /// `/auto on|off` (and `/yolo`, its alias): the in-session auto-approval switch
+    /// (ADR 0026 D9). `true` = on.
+    AutoToggle(bool),
     /// Not a command after all (an empty token list); the caller sends the line.
     Message,
 }
@@ -90,6 +103,8 @@ pub enum Fetch {
     /// `/thinking <level>`: only the levels the **current** model supports (ADR 0026 D11),
     /// ranked against `partial`.
     ThinkingLevels { partial: String },
+    /// `/logout <partial>`: the providers with a stored credential (the `auth.json` entries).
+    LoggedInProviders { partial: String },
 }
 
 impl Fetch {
@@ -98,7 +113,8 @@ impl Fetch {
         match self {
             Fetch::MemoryRecords { partial, .. }
             | Fetch::ModelRoute { partial, .. }
-            | Fetch::ThinkingLevels { partial } => partial,
+            | Fetch::ThinkingLevels { partial }
+            | Fetch::LoggedInProviders { partial, .. } => partial,
         }
     }
 }
@@ -164,6 +180,16 @@ pub fn tree() -> &'static [Command] {
             levels: &[thinking_level_level],
         },
         Command {
+            name: "auto",
+            description: "auto-approve tool asks for this session (ADR 0026 D9)",
+            levels: &[auto_level],
+        },
+        Command {
+            name: "yolo",
+            description: "alias of /auto",
+            levels: &[auto_level],
+        },
+        Command {
             name: "export",
             description: "export this session (default md, default <workspace>/radian-<id>.<ext>)",
             levels: &[export_level, export_level],
@@ -173,8 +199,46 @@ pub fn tree() -> &'static [Command] {
             description: MEMORY_DESCRIPTION,
             levels: &[memory_level, memory_level],
         },
+        Command {
+            name: "login",
+            description: "store an API key in credentials/auth.json (ADR 0026 D3); custom \
+                          names a new endpoint",
+            levels: &[login_level],
+        },
+        Command {
+            name: "logout",
+            description: "remove a stored credential (asks first)",
+            levels: &[logout_level],
+        },
     ];
     TREE
+}
+
+/// `/login [provider]`: the built-in descriptors plus `custom` (ADR 0026 D3/D10).
+fn login_level(typed: &[&str], _partial: &str) -> Level {
+    match typed.first() {
+        None => Level::Ready(
+            crate::login::LoginWizard::choices()
+                .into_iter()
+                .map(|(id, description)| Candidate {
+                    insert: id,
+                    description,
+                })
+                .collect(),
+        ),
+        Some(_) => Level::Free,
+    }
+}
+
+/// `/logout <provider>`: the candidates are the stored credentials, which only the host
+/// knows (it reads `auth.json`).
+fn logout_level(typed: &[&str], partial: &str) -> Level {
+    match typed.first() {
+        None => Level::Needs(Fetch::LoggedInProviders {
+            partial: partial.to_owned(),
+        }),
+        Some(_) => Level::Free,
+    }
 }
 
 /// The `/help` line for `/memory` (kept next to the subcommand table so the two cannot drift).
@@ -236,6 +300,20 @@ fn memory_level(typed: &[&str], partial: &str) -> Level {
         }
         Some(_) => Level::Free,
     }
+}
+
+/// `/auto on|off` (and `/yolo`): the two words are the whole argument grammar (ADR 0026 D9).
+fn auto_level(_typed: &[&str], _partial: &str) -> Level {
+    Level::Ready(vec![
+        Candidate {
+            insert: "on".to_owned(),
+            description: "approve tool asks without asking, this session".to_owned(),
+        },
+        Candidate {
+            insert: "off".to_owned(),
+            description: "ask again (back to on-ask)".to_owned(),
+        },
+    ])
 }
 
 /// `/export`: the format, then the path (with `--force` offered as a candidate).
@@ -593,8 +671,38 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
             Ok(switch) => Outcome::Model(switch),
             Err(usage) => Outcome::Notices(vec![usage]),
         },
+        Some("/login") => Outcome::Login(login_provider(&tokens[1..])),
+        Some("/logout") => Outcome::Logout(logout_provider(&tokens[1..])),
+        Some("/auto") | Some("/yolo") => auto_toggle(&tokens[1..]),
         Some(other) => Outcome::Notices(vec![format!("unknown command {other}; /help lists them")]),
         None => Outcome::Message,
+    }
+}
+
+/// `/login [provider]`: `custom` or a built-in id skips the choice step; anything else is a
+/// usage notice. More than one name is the same error.
+fn login_provider(args: &[String]) -> Option<String> {
+    match args {
+        [] => None,
+        [one] => {
+            let valid = one == crate::login::CUSTOM || radian_host::descriptor(one).is_some();
+            if valid {
+                Some(one.clone())
+            } else {
+                // Reported as a notice by the caller (an `Option` cannot carry the reason).
+                Some(format!("no-such-provider:{one}"))
+            }
+        }
+        [_, extra, ..] => Some(format!("no-such-provider:{extra}")),
+    }
+}
+
+/// `/logout <provider>`: exactly one name; empty is a usage notice the caller renders.
+fn logout_provider(args: &[String]) -> String {
+    match args {
+        [one] => one.clone(),
+        [] => String::new(),
+        [_, extra, ..] => format!("__extra__{extra}"),
     }
 }
 
@@ -603,6 +711,17 @@ fn compact_instructions(args: &[String]) -> Option<String> {
     let joined = args.join(" ");
     let joined = joined.trim();
     (!joined.is_empty()).then(|| joined.to_owned())
+}
+
+/// `/auto on|off` (and `/yolo`, its alias). Anything else is a usage notice (ADR 0026 D9).
+fn auto_toggle(args: &[String]) -> Outcome {
+    match args.first().map(String::as_str) {
+        Some("on") => Outcome::AutoToggle(true),
+        Some("off") => Outcome::AutoToggle(false),
+        _ => Outcome::Notices(vec![
+            "usage: /auto on|off (deny rules and the sandbox still apply)".to_owned(),
+        ]),
+    }
 }
 
 /// The optional `/sessions` query: the arguments joined with spaces, or `None` when empty.

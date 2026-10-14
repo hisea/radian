@@ -15,6 +15,7 @@ members = [
     "crates/radian-tui",
     "crates/radian-permissions",
     "crates/radian-memory",
+    "third_party/codex-mermaid",
 ]
 
 [workspace.package]

@@ -20,9 +20,10 @@ use std::time::Duration;
 use agent_core::{Agent, AgentConfig, ContextBudget, EventSink, Message, TurnOptions};
 use agent_extensions::{McpServerConfig, McpToolProvider};
 use radian_coding::CodingTools;
-use radian_permissions::{Approver, AuditSink, PermissionHooks, Preset, Profile};
-use radian_runtime::{BudgetFor, ConfigQueue, ConfigSlot};
-use radian_runtime::{CancelCause, Driver, Inbox, RuntimeEvents};
+use radian_permissions::{ApprovalPolicy, Approver, AuditSink, PermissionHooks, Preset, Profile};
+use radian_runtime::{
+    BudgetFor, CancelCause, ConfigQueue, ConfigSlot, Driver, Inbox, RuntimeEvents,
+};
 use radian_sandbox::Sandbox;
 use radian_session::{SessionCreatedData, SessionJournal};
 
@@ -203,6 +204,12 @@ pub trait SessionFacade: Send + Sync {
     /// `B` for a switched route, from the local catalog only (ADR 0026 D7). `None` when the
     /// window is unknown — the app then queues without a comparison.
     fn budget_for_route(&self, provider: &str, model: &str) -> Option<u64>;
+
+    /// Switch the session's approval policy in place (ADR 0026 D9's in-session `auto`).
+    /// The hooks audit the switch and the facade queues the durable `ConfigChanged` record
+    /// (`{"approval": …}`) the driver journals at the next turn boundary. Needs the same
+    /// capability as answering: it belongs to the interactive approver.
+    fn set_approval(&self, policy: ApprovalPolicy) -> Result<(), CommandRefused>;
 }
 
 /// How the driver task ended.
@@ -350,7 +357,8 @@ impl SessionFacts {
 /// approval routing (the injected approver), and serves the UI.
 pub struct LocalSession {
     id: SessionId,
-    /// The config change queue shared with the driver (`/model`, ADR 0026 D5).
+    /// The config change queue shared with the driver (`/model`, ADR 0026 D5; the in-session
+    /// approval switch, D9). The driver journals a queued change before the next turn.
     config_queue: Arc<ConfigQueue>,
     /// The slot the model reads and the driver writes (the resume replay lands here, D8).
     config_slot: Arc<ConfigSlot>,
@@ -400,10 +408,17 @@ impl LocalSession {
         &self.projection
     }
 
-    /// The pending-request queue (ADR 0023 U7): the UI reads the head and the count, and
-    /// subscribes to changes.
+    /// The pending approvals and questions (ADR 0023 U7): approvals and questions share it,
+    /// so the UI shows one arrival order.
     pub fn queue(&self) -> &Arc<SessionQueue> {
         &self.queue
+    }
+
+    /// The turn-boundary config changes (ADR 0004 path B). A host pushes its own startup
+    /// backfill here (ADR 0026 D9: an explicit `--approval` is recorded); the driver
+    /// journals the change before the next turn.
+    pub fn config_queue(&self) -> &Arc<ConfigQueue> {
+        &self.config_queue
     }
 
     /// The inbox, for a host whose loop is not the TUI's: the CLI's line loop enqueues with a
@@ -514,6 +529,26 @@ impl SessionFacade for LocalSession {
         match self.queue.answer(request_id, response) {
             Ok(()) | Err(Answered::Late) | Err(Answered::Unknown) => Ok(()),
         }
+    }
+
+    fn set_approval(&self, policy: ApprovalPolicy) -> Result<(), CommandRefused> {
+        if !self
+            .capabilities
+            .contains(&SessionCapability::AnswerRequest)
+        {
+            return Err(CommandRefused {
+                command: "set-approval".into(),
+                capability: Some(SessionCapability::AnswerRequest.as_str().to_string()),
+                reason: "this session does not declare the `answer` capability".into(),
+            });
+        }
+        // The live switch first (the very next call obeys it), then the durable record: a
+        // `ConfigChanged` the driver journals at the next turn boundary (ADR 0004 path B)
+        // and a resume replays (ADR 0026 D9). One record per switch.
+        self.hooks.set_approval(policy);
+        self.config_queue
+            .push(serde_json::json!({ "approval": policy.as_str() }));
+        Ok(())
     }
 
     /// Re-validates the capability, then runs the command. The check is here as well as in the
@@ -734,6 +769,10 @@ pub async fn open_session(
     if let Some(budget_for) = budget_for.clone() {
         driver.set_budget_for(budget_for);
     }
+
+    // The config queue is owned by the driver; the facade only pushes to it, so clone the
+    // handle before the driver moves into its task.
+    let config_queue = Arc::clone(driver.config_queue());
 
     // The session is open, so the MCP status is known: what actually connected.
     let mcp_open = mcp.status().map(|status| (status.servers, status.tools));
