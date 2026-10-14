@@ -627,6 +627,24 @@ HEAD，结束后删除）· 每个变异改完跑对应测试、`git checkout --
 （无按键移动 40 次、帧数不涨——SC1 的行为面）和
 `pty_quit_closes_button_motion_reporting`（退出序列精确为 `1006l 1002l 1000l`——SC3 的精确面）。
 
+## ui-r2：启动画面、Tip、圆角框、Ctrl-C（2026-10-14）
+
+Base `ba7568d` · 一次性检出 `/tmp/ui2-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+变异后 `git checkout --` 还原，提交前 `git status --short` 为空。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| U2-1 | 安全提示折进启动块（`EntryKind::Warning` → `Startup`） | 安全提示不折叠、用 warning 类 | `startup.rs::safety_lines_stay_visible_while_collapsed` FAILED |
+| U2-2 | Tip 引用不存在的功能（`Ctrl-C twice quits` → `/warp jumps time`） | 每条 Tip 对应现有命令/按键 | `startup.rs::every_tip_names_a_real_feature` FAILED |
+| U2-3 | 去掉 `BorderType::Rounded`（直角框） | `box` 是圆角框 | `render.rs::the_box_input_style_draws_the_rounded_box_with_the_prompt` FAILED |
+| U2-4 | `cancel_or_quit_at` 的 arm 分支直接退出（一次就退） | 第一次只进入"待退出" | `quit.rs::idle_and_empty_the_first_ctrl_c_only_arms_the_window` FAILED |
+| U2-5 | 不检查 2 秒时限（`Some(_) => quit`） | 窗口过期只重新提示 | `quit.rs::a_second_ctrl_c_after_the_window_re_arms` FAILED |
+| U2-6 | 清空时不进历史 | 清掉的内容按 `Up` 找回 | `quit.rs::idle_with_text_the_first_ctrl_c_clears_it_into_the_history` FAILED |
+| U2-7 | 运行中按 Ctrl-C 走清空输入（把 Running 判定放到清空之后） | 运行中仍是取消 | `quit.rs::ctrl_c_while_running_cancels` FAILED |
+| U2-8 | `update_inner` 里直接 `std::fs::read_to_string` | `update` 保持纯（结构测试） | `purity.rs::app_rs_is_pure` FAILED |
+
+8/8 抓住。`/theme` 的两条变异（丢掉注释、高版本照样写）改的是 `radian-host`，记录在
+`crates/radian-host/MUTATIONS.md`（TW1/TW2）。
 ## Slice: ADR 0028 第 1 片（块模型、按块背景、thinking 折叠、代码块不折行）
 
 Base `82b07de` · 一次性 worktree `/tmp/blocks-mut`（`git worktree add` 自本片 HEAD，结束后删除）·

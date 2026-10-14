@@ -451,23 +451,28 @@ fn the_empty_input_shows_the_placeholder_after_the_prompt() {
     );
 }
 
-/// `tui.input_style = "box"` keeps the bordered input box (the pre-review shape).
+/// `tui.input_style = "box"` is the owner's shape (2026-10-14): a **rounded** border and the
+/// `❯` prompt, not the old square box with `> `.
 #[test]
-fn the_box_input_style_draws_the_bordered_box() {
+fn the_box_input_style_draws_the_rounded_box_with_the_prompt() {
     let mut app = App::new("m", "s");
     app.input = "first\nsecond".into();
     app.input_style = radian_tui::render::InputStyle::Box;
     let text = screen(&render(&mut app, 20, 8));
     assert!(text.contains(" message "), "the box title is back:\n{text}");
     assert!(
-        text.contains("│first"),
-        "the text starts after the border:\n{text}"
+        text.contains("│❯ first"),
+        "the text starts after the border and the prompt:\n{text}"
     );
-    assert!(!text.contains("> first"), "{text}");
     assert!(
-        text.contains("┌") && text.contains("└"),
-        "the box has corners, the lines style has none:\n{text}"
+        !text.contains("> first"),
+        "the lines prompt is not used:\n{text}"
     );
+    assert!(
+        text.contains('╭') && text.contains('╮') && text.contains('╰'),
+        "the box has **rounded** corners:\n{text}"
+    );
+    assert!(!text.contains('┌'), "no square corners:\n{text}");
 }
 
 /// A transcript selection draws with the theme's `selection` role: the band lands exactly on

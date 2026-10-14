@@ -395,8 +395,28 @@ impl Pty {
     }
 
     /// Ctrl-C cancels a running turn and quits when idle, so press it until the app exits.
+    /// Expands the startup information block (Ctrl-P). the block is folded
+    /// by default, so a test that asserts one of the full startup lines expands it first. A
+    /// lost keypress is retried; the wait after each send means a successful toggle is never
+    /// pressed twice.
+    fn expand_startup(&mut self) {
+        for _ in 0..3 {
+            self.send(&[0x10]); // ctrl-p
+            if self.wait_until(1, |screen| {
+                screen.contains("▼ startup information") || screen.contains("profile:")
+            }) {
+                return;
+            }
+        }
+        panic!("the startup block did not expand:\n{}", self.screen());
+    }
+
     fn quit(&mut self) {
+        // The first idle Ctrl-C arms the 2 s quit window and the second inside it quits
+        //, so a quit is a **pair** of presses; a running turn needs a
+        // cancel first, which the retries cover (the next pair then arms and quits).
         for _ in 0..4 {
+            self.send(&[0x03]);
             self.send(&[0x03]);
             if self.wait_for_exit(3).is_some() {
                 return;
@@ -863,6 +883,7 @@ async fn pty_resume_renders_the_stored_history() {
         "the assistant reply is missing:\n{}",
         pty.screen()
     );
+    pty.expand_startup();
     assert!(
         pty.wait_for_screen("resumed session resume-me", 10),
         "the resume notice is missing:\n{}",
@@ -1843,6 +1864,8 @@ async fn pty_the_workspace_write_notice_names_the_mcp_sandbox_gap() {
         110,
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // The sandbox facts line is one of the folded startup lines.
+    pty.expand_startup();
     // The notice wraps across lines; collapse whitespace before matching the sentence.
     let notice = pty
         .screen()
@@ -1901,6 +1924,7 @@ async fn pty_yes_runs_an_ask_without_a_prompt_and_still_audits_it() {
         110,
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.expand_startup();
     assert!(
         pty.screen()
             .contains("auto: tool calls are approved without asking"),
@@ -2895,6 +2919,7 @@ async fn pty_the_startup_notice_names_the_window_source() {
         24,
         110,
     );
+    pty.expand_startup();
     assert!(
         pty.wait_for_screen("B 15000 from --context-window", 10),
         "the startup notice does not name the explicit window and its B:\n{}",
@@ -2931,6 +2956,8 @@ async fn pty_the_memory_notice_names_the_project_state_and_the_budget() {
         110,
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // The memory notice is one of the folded startup lines.
+    pty.expand_startup();
     let notice = pty
         .screen()
         .split_whitespace()
@@ -3211,8 +3238,25 @@ async fn pty_a_draft_is_written_on_exit_and_restored_by_resume() {
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
     pty.send(b"unsent draft");
-    pty.quit();
-    assert_eq!(pty.app_exit_code(), Some(0));
+    // Wait for the whole line to render before signalling: the input thread delivers bytes
+    // and the app redraws them, and a signal must not race the last characters.
+    assert!(
+        pty.wait_for_screen("unsent draft", 10),
+        "the draft is not in the input box:\n{}",
+        pty.screen()
+    );
+    // Exit by signal, not Ctrl-C: an idle Ctrl-C clears a non-empty input first (owner
+    // 2026-10-14), which would discard the draft. A signal exit takes the same exit path
+    // (the draft is written, the resume line printed) without clearing the input.
+    let pid = app_pid(&pty);
+    let status = std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(&pid)
+        .status()
+        .unwrap();
+    assert!(status.success(), "kill -TERM {pid}");
+    assert!(pty.wait_for_exit(15).is_some(), "the app did not exit");
+    assert_eq!(pty.app_exit_code(), Some(143), "128 + SIGTERM");
     assert_eq!(
         std::fs::read_to_string(&draft).unwrap(),
         "unsent draft",
@@ -3350,6 +3394,7 @@ async fn pty_pick_lists_filters_and_resumes_the_chosen_session() {
         pty.screen()
     );
     pty.send(b"\r");
+    pty.expand_startup();
     assert!(
         pty.wait_for_screen("resumed session beta", 10),
         "Enter did not resume the filtered row:\n{}",
@@ -3453,6 +3498,7 @@ async fn pty_pick_starts_new_and_escape_leaves_no_session() {
     );
     assert!(pty.wait_for_screen("alpha", 10), "{}", pty.screen());
     pty.send(b"n");
+    pty.expand_startup();
     assert!(
         pty.wait_for_screen("new session", 10),
         "`n` did not start a new session:\n{}",
@@ -3487,6 +3533,7 @@ async fn pty_pick_without_sessions_starts_a_new_one() {
         24,
         100,
     );
+    pty.expand_startup();
     assert!(
         pty.wait_for_screen("no sessions for this workspace yet", 10),
         "the no-session notice is missing:\n{}",
@@ -4824,14 +4871,17 @@ async fn pty_pick_resumes_the_selected_id_and_enters_once() {
         pty.screen()
     );
     pty.send(b"\r");
+    // Wait for the resumed session to open (the picker's phase ends first), then expand the
+    // startup block so the resumed-session line is on screen.
+    assert!(
+        pty.wait_for_screen("BETA-HISTORY", 10),
+        "the resumed history is not on screen:\n{}",
+        pty.screen()
+    );
+    pty.expand_startup();
     assert!(
         pty.wait_for_screen("resumed session beta", 10),
         "the picker did not resume the selection:\n{}",
-        pty.screen()
-    );
-    assert!(
-        pty.wait_for_screen("BETA-HISTORY", 5),
-        "the resumed history is not on screen:\n{}",
         pty.screen()
     );
     pty.send(b"go\r");
@@ -5124,6 +5174,7 @@ async fn pty_ask_user_answers_three_questions_and_the_turn_continues() {
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
     // ADR 0024 Q5: this host has an interactive user, so the startup line says so.
+    pty.expand_startup();
     assert!(
         pty.wait_for_screen("ask_user: on", 10),
         "the startup line must say ask_user is on: {}",
@@ -5741,6 +5792,7 @@ async fn pty_approval_never_still_registers_ask_user() {
         110,
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.expand_startup();
     assert!(
         pty.wait_for_screen("ask_user: on", 10),
         "`--approval never` must not turn ask_user off: {}",
@@ -5772,6 +5824,7 @@ async fn pty_ask_user_is_registered_without_a_workspace() {
         110,
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.expand_startup();
     assert!(
         pty.wait_for_screen("ask_user: on", 10),
         "the startup line must say ask_user is on: {}",
@@ -6055,6 +6108,7 @@ async fn pty_resume_without_a_value_picks_a_session() {
         pty.screen()
     );
     pty.send(b"\r");
+    pty.expand_startup();
     assert!(
         pty.wait_for_screen("resumed session beta", 10),
         "Enter did not resume the chosen session:\n{}",
@@ -6635,6 +6689,8 @@ async fn pty_resume_restores_auto_on_workspace() {
         "the resumed session must show AUTO:\n{}",
         pty.screen()
     );
+    // The startup line is one of the folded lines.
+    pty.expand_startup();
     assert!(
         pty.screen()
             .contains("auto: tool calls are approved without asking"),
@@ -6966,4 +7022,186 @@ fn pty_quit_closes_button_motion_reporting() {
         raw.contains("\u{1b}[?1006l\u{1b}[?1002l\u{1b}[?1000l"),
         "the restore must close 1006, 1002 and 1000 together: {raw:?}"
     );
+}
+
+// ---------- Ctrl-C: clear first, then press twice to quit ----------
+
+/// Idle and empty, Ctrl-C asks twice: the first press only shows the hint and never exits;
+/// the second inside the window exits 0 with the copyable resume line.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_ctrl_c_twice_quits_and_one_press_only_hints() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("ctrl-c-quit");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let server = MockServer::start(vec![]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "ctrl-c-quit",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+
+    pty.send(&[0x03]);
+    assert!(
+        pty.wait_for_screen("Press Ctrl-C again to quit", 10),
+        "the first press must show the hint:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.app_exit_code().is_none(),
+        "a single Ctrl-C must not quit:\n{}",
+        pty.screen()
+    );
+
+    pty.send(&[0x03]);
+    assert!(
+        pty.wait_for_exit(5).is_some(),
+        "the second press must quit:\n{}",
+        pty.screen()
+    );
+    assert_eq!(pty.app_exit_code(), Some(0));
+
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    let after = raw
+        .rsplit_once("\u{1b}[?1049l")
+        .map(|(_, rest)| rest.to_string())
+        .unwrap_or_default();
+    assert!(
+        after
+            .lines()
+            .any(|line| line.contains("resume: radian --resume ctrl-c-quit")),
+        "the exit line is missing: {after}"
+    );
+}
+
+/// Idle with text, one Ctrl-C clears the input (it does not quit) and the cleared line is
+/// back through `Up`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_ctrl_c_clears_a_draft_before_quitting() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("ctrl-c-clear");
+    let server = MockServer::start(vec![]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "ctrl-c-clear",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"a draft");
+    assert!(pty.wait_for_screen("a draft", 10), "{}", pty.screen());
+    pty.send(&[0x03]);
+    // The input line is empty again and the app is still running (no quit).
+    assert!(
+        pty.app_exit_code().is_none(),
+        "clearing must not quit:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.wait_for_screen("Press Ctrl-C again to quit", 2),
+        "clearing must not arm the quit window:\n{}",
+        pty.screen()
+    );
+    // `Up` recalls the cleared line from the history.
+    pty.send(&[0x1b, b'[', b'A']);
+    assert!(
+        pty.wait_for_screen("a draft", 10),
+        "the cleared line is in the history:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+// ---------- /theme: switch and write back (ADR 0008 revision) ----------
+
+/// `/theme light` end to end: the notice names the saved file, the config's other bytes
+/// survive, and only `tui.theme` changed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_slash_theme_switches_and_writes_the_config() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("theme-switch");
+    let config = dir.path().join("config.toml");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let original = "# kept\nschema_version = 1\n\n[tui]\ntheme = \"dark\"\n";
+    std::fs::write(&config, original).unwrap();
+    let server = MockServer::start(vec![]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--config",
+            config.to_str().unwrap(),
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "theme-switch",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"/theme light");
+    assert!(
+        pty.wait_for_screen("/theme light", 10),
+        "the line did not render:\n{}",
+        pty.screen()
+    );
+    // Enter may pick the completion candidate first; the next Enter submits the line.
+    pty.send(b"\r");
+    pty.send(b"\r");
+    assert!(
+        pty.wait_for_screen("theme saved to", 10),
+        "the save notice is missing:\n{}",
+        pty.screen()
+    );
+    let after = std::fs::read_to_string(&config).unwrap();
+    assert_eq!(
+        after,
+        original.replace("dark", "light"),
+        "only theme changed"
+    );
+
+    // An unknown name is refused and the file is untouched.
+    pty.send(b"/theme nope");
+    assert!(
+        pty.wait_for_screen("/theme nope", 10),
+        "the line did not render:\n{}",
+        pty.screen()
+    );
+    pty.send(b"\r");
+    pty.send(b"\r");
+    assert!(
+        pty.wait_for_screen("no theme \"nope\"", 10),
+        "the refusal notice is missing:\n{}",
+        pty.screen()
+    );
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), after);
+
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
 }

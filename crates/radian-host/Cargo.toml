@@ -36,9 +36,10 @@ thiserror.workspace = true
 # returns a `BoxFuture`.
 futures-util.workspace = true
 tokio = { workspace = true }
-# The read-only configuration file (ADR 0008) is TOML (its fixtures are TOML). Parsing only:
-# this slice never writes the file, so `toml_edit` is not needed.
+# The configuration file (ADR 0008) is TOML. `toml` reads it; `toml_edit` is the one place
+# that writes it back, format-preserving (`/theme`, ADR 0008 revision).
 toml = "0.8"
+toml_edit = "0.22"
 
 [dev-dependencies]
 # The catalog tests use the adapter's local mock HTTP server, never the real network.

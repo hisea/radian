@@ -181,6 +181,12 @@ pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
         EntryKind::ToolCall => "-> ",
         EntryKind::ToolResult => "<- ",
         EntryKind::Notice => "* ",
+        // The startup block has no marker of its own: its lines carry `▶`/`▼` (or none for
+        // the wordmark). The warning marker is its own; `Tip:` is styled separately.
+        EntryKind::Banner => "  ",
+        EntryKind::Startup => "  ",
+        EntryKind::Warning => "! ",
+        EntryKind::Tip => "Tip: ",
     }
 }
 
@@ -192,6 +198,11 @@ fn marker(kind: EntryKind, theme: &Theme) -> (&'static str, Style) {
         EntryKind::ToolCall => theme.tool_call,
         EntryKind::ToolResult => theme.tool_result,
         EntryKind::Notice => theme.notice,
+        EntryKind::Banner => theme.hint,
+        EntryKind::Startup => theme.hint,
+        EntryKind::Warning => theme.note,
+        // The `Tip:` label steps down (dim), the body is muted.
+        EntryKind::Tip => theme.truncation,
     };
     (marker_prefix(kind), style)
 }
@@ -203,6 +214,10 @@ fn body_style(entry: &Entry, theme: &Theme) -> Style {
         EntryKind::ToolResult if entry.is_error => theme.tool_result_error,
         EntryKind::ToolResult => theme.tool_result,
         EntryKind::Notice => theme.notice,
+        EntryKind::Banner => theme.text,
+        EntryKind::Startup => theme.notice_body,
+        EntryKind::Warning => theme.note,
+        EntryKind::Tip => theme.hint,
         EntryKind::User | EntryKind::Assistant => {
             if entry.interrupted {
                 Style::default().add_modifier(Modifier::ITALIC)
@@ -361,7 +376,7 @@ fn render_row(
     // only its label is 强调); the marker's own role stays `notice`.
     let body = if placeholder {
         theme.reasoning
-    } else if entry.kind == EntryKind::Notice {
+    } else if matches!(entry.kind, EntryKind::Notice | EntryKind::Startup) {
         theme.notice_body
     } else {
         style
@@ -382,7 +397,7 @@ fn render_row(
     // decision). Only the first: a wrapped continuation that happens to contain a colon
     // (`https://…`, `12:30`, a `path:line`) is prose, not a label.
     if first_text
-        && entry.kind == EntryKind::Notice
+        && matches!(entry.kind, EntryKind::Notice | EntryKind::Startup)
         && let Some((label, rest)) = split_label(&row.text)
     {
         let label_style = match band {
@@ -530,6 +545,10 @@ impl InputStyle {
 /// it, which is why `input_height` measures the text at `width - 2`.
 const INPUT_PROMPT: &str = "> ";
 
+/// The bordered style's prompt: the owner's `❯`, colored with the theme's
+/// accent role (`theme.model`, pi's `accent`). Two cells, like `> `.
+const BOX_PROMPT: &str = "❯ ";
+
 /// The placeholder shown while the input is empty.
 const INPUT_HINT: &str = "(type a message, Enter to send, Ctrl-J for a new line)";
 
@@ -636,9 +655,19 @@ fn login_lines(wizard: &LoginWizard, theme: &Theme, width: usize) -> Vec<Line<'s
 
 /// The error style for wizard problems (a note-colored line; no new theme role).
 fn input_height(app: &App, width: usize) -> u16 {
-    let inner = width.saturating_sub(INPUT_PROMPT.len()).max(1);
+    let inner = input_inner_width(app, width);
     let rows = crate::composer::rows(&app.input.text(), inner).len();
     (rows.clamp(1, MAX_INPUT_ROWS) as u16) + 2
+}
+
+/// The text width inside the input area: `> ` on the first line for `lines`, a border plus the
+/// `❯ ` prompt for `box`.
+fn input_inner_width(app: &App, width: usize) -> usize {
+    let reserved = match app.input_style {
+        InputStyle::Lines => INPUT_PROMPT.len(),
+        InputStyle::Box => 2 + BOX_PROMPT.len(),
+    };
+    width.saturating_sub(reserved).max(1)
 }
 
 /// The approval prompt's key line. It is drawn on its **own** row under the body, never part
@@ -882,6 +911,14 @@ fn status_segments(app: &App) -> Vec<Segment> {
         segments.push(Segment {
             text: status,
             style: app.theme.find,
+        });
+    }
+    // The first idle Ctrl-C armed "press again to quit": the hint sits
+    // high, right after the turn state, because it is a mode the user just entered.
+    if app.quit_pending.is_some() {
+        segments.push(Segment {
+            text: "Press Ctrl-C again to quit".to_string(),
+            style: app.theme.note,
         });
     }
     if let Some(tier) = session.tier() {
@@ -1198,10 +1235,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             // pi-style: a rule above and below instead of a box, and
             // `> ` on the first line. `input_height` already reserves the two rule rows, so the
             // layout of everything else is unchanged.
-            let inner_width = chunks[2]
-                .width
-                .saturating_sub(INPUT_PROMPT.len() as u16)
-                .max(1) as usize;
+            let inner_width = input_inner_width(app, chunks[2].width as usize);
             let visible = chunks[2].height.saturating_sub(2).max(1) as usize;
             let text = app.input.text();
             let rows = crate::composer::rows(&text, inner_width);
@@ -1243,15 +1277,33 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                     frame.render_widget(Paragraph::new(body).block(block), chunks[2]);
                 }
                 InputStyle::Box => {
-                    let shown = if empty {
-                        INPUT_HINT.to_string()
+                    // judged against ADR 0029: the accent level is
+                    // for labels and attention surfaces. `notice_label` is the theme's general
+                    // accent role (pi's `accent`), so the rounded border and the `❯` prompt use
+                    // it; the body stays on the ordinary text level. (`model` is the model's
+                    // own display color, not chrome.)
+                    let accent = app.theme.notice_label;
+                    let mut body: Vec<Line> = Vec::new();
+                    if empty {
+                        body.push(Line::from(vec![
+                            Span::styled(BOX_PROMPT, accent),
+                            Span::styled(INPUT_HINT, style),
+                        ]));
                     } else {
-                        rows[offset..].join("\n")
-                    };
-                    let input = Paragraph::new(Span::styled(shown, style))
-                        .block(Block::default().borders(Borders::ALL).title(" message "))
-                        .wrap(Wrap { trim: false });
-                    frame.render_widget(input, chunks[2]);
+                        for (index, row) in rows[offset..].iter().enumerate() {
+                            let lead = if index == 0 { BOX_PROMPT } else { "  " };
+                            body.push(Line::from(vec![
+                                Span::styled(lead, accent),
+                                Span::styled(row.clone(), style),
+                            ]));
+                        }
+                    }
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(ratatui::widgets::BorderType::Rounded)
+                        .border_style(accent)
+                        .title(" message ");
+                    frame.render_widget(Paragraph::new(body).block(block), chunks[2]);
                 }
             }
             if app.input_editable() {
@@ -1260,7 +1312,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 // rule or the border.
                 let lead = match app.input_style {
                     InputStyle::Lines => INPUT_PROMPT.len() as u16,
-                    InputStyle::Box => 1,
+                    // Border (1) + the `❯ ` prompt (2).
+                    InputStyle::Box => 1 + BOX_PROMPT.len() as u16,
                 };
                 let col = cursor_col.min(inner_width.saturating_sub(1)) as u16;
                 let row = (cursor_row - offset).min(visible.saturating_sub(1)) as u16;

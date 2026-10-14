@@ -212,10 +212,14 @@ fn an_input_that_changes_nothing_is_not_dirty() {
     assert_eq!(cancel.effects, vec![Effect::Cancel]);
     assert!(!cancel.dirty, "cancelling does not repaint");
     app.projection.set_turn(TurnState::Idle);
-    assert!(
-        !app.on_key(ctrl(KeyCode::Char('c'))).dirty,
-        "quitting neither"
-    );
+    // An idle Ctrl-C now arms the 2 s quit window: that *does* repaint
+    // (the hint appears), and the second press quits without repainting.
+    let arm = app.on_key(ctrl(KeyCode::Char('c')));
+    assert!(arm.effects.is_empty(), "the first press only arms");
+    assert!(arm.dirty, "the hint must be drawn");
+    let quit = app.on_key(ctrl(KeyCode::Char('c')));
+    assert_eq!(quit.effects, vec![Effect::Quit]);
+    assert!(!quit.dirty, "quitting does not repaint");
     // Typing does.
     assert!(app.on_key(key(KeyCode::Char('a'))).dirty);
 }

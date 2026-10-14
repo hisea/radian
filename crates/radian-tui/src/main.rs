@@ -1060,79 +1060,125 @@ fn run(
             Err(error) => eprintln!("[draft] cannot read {}: {error}", path.display()),
         }
     }
-    app.entries.push(radian_tui::Entry::new(
-        radian_tui::EntryKind::Notice,
-        format!("profile: {}", session.facts().profile_line),
-    ));
-    // ADR 0012 decision 4: the meaning line must not claim credential isolation.
-    app.entries.push(radian_tui::Entry::new(
-        radian_tui::EntryKind::Notice,
-        session.facts().sandbox_facts.clone(),
-    ));
-    // ADR 0018: the window and exactly where it came from.
-    app.entries.push(radian_tui::Entry::new(
-        radian_tui::EntryKind::Notice,
-        format!("context: {}", window.describe()),
-    ));
-    // Owner UI review: say so when the default workspace was adjusted, so the session's
-    // boundary is never a surprise.
+    // the startup information is one collapsible block (wordmark, one
+    // information line, the safety lines that never fold, one Tip) instead of a wall of
+    // notices. The full lines are what the notices used to be; the summary keeps each field
+    // to a word or two.
+    let home = std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let workspace_line = workspace_root.note.as_ref().map(|note| {
+        format!(
+            "workspace: {} ({note})",
+            radian_tui::workspace::display_coding_root(&workspace_root, home.as_deref())
+        )
+    });
+    let context_line = format!("context: {}", window.describe());
+    let session_line = match &resume {
+        Some(id) => format!(
+            "resumed session {id} ({} messages) · Enter sends · Ctrl-C cancels a turn · \
+             Ctrl-C again quits",
+            history.len()
+        ),
+        None => format!(
+            "new session {session_id} · Enter sends · Ctrl-C cancels a turn · Ctrl-C again quits"
+        ),
+    };
+    let sandbox_facts = session.facts().sandbox_facts.clone();
+    let sandbox_word = ["seatbelt", "bwrap"]
+        .into_iter()
+        .find(|name| sandbox_facts.contains(name))
+        .unwrap_or("none");
+    let budget = window
+        .budget
+        .map_or_else(|| "unknown".to_string(), |b| b.to_string());
+    let mut summary = format!(
+        "{} · {sandbox_word} · context {budget} · memory {} · ask_user {}",
+        tier.as_str(),
+        if session.facts().memory_enabled {
+            "on"
+        } else {
+            "off"
+        },
+        if session.facts().ask_user {
+            "on"
+        } else {
+            "off"
+        },
+    );
     if let Some(note) = &workspace_root.note {
-        let home = std::env::var_os("HOME")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from);
-        app.entries.push(radian_tui::Entry::new(
-            radian_tui::EntryKind::Notice,
-            format!(
-                "workspace: {} ({note})",
-                radian_tui::workspace::display_coding_root(&workspace_root, home.as_deref())
-            ),
-        ));
+        summary.push_str(" · ");
+        summary.push_str(note);
     }
-    // ADR 0021 D2/D6: the project state and the injection budget.
-    app.entries.push(radian_tui::Entry::new(
-        radian_tui::EntryKind::Notice,
-        session.facts().memory_notice.clone(),
-    ));
-    // ADR 0024 Q5: this host has an interactive user, so `ask_user` is registered.
-    app.entries.push(radian_tui::Entry::new(
-        radian_tui::EntryKind::Notice,
-        session.facts().ask_user_line(),
-    ));
-    // ADR 0026 D9: the startup line names the auto policy whichever way it was chosen, and
-    // the warnings say when a config value was ignored or a restore refused.
+    let mut startup_lines = vec![
+        format!("profile: {}", session.facts().profile_line),
+        sandbox_facts,
+        context_line,
+    ];
+    if let Some(line) = &workspace_line {
+        startup_lines.push(line.clone());
+    }
+    startup_lines.push(session.facts().memory_notice.clone());
+    startup_lines.push(session.facts().ask_user_line());
+    // ADR 0026 D9: the startup line names the auto policy whichever way it was chosen.
     if startup_approval.policy == radian_permissions::ApprovalPolicy::Auto {
-        app.entries.push(radian_tui::Entry::new(
-            radian_tui::EntryKind::Notice,
-            "auto: tool calls are approved without asking; deny rules and the sandbox still apply",
-        ));
-    }
-    for warning in &startup_approval.warnings {
-        app.entries.push(radian_tui::Entry::new(
-            radian_tui::EntryKind::Notice,
-            warning.clone(),
-        ));
+        startup_lines.push(
+            "auto: tool calls are approved without asking; deny rules and the sandbox still \
+             apply"
+                .to_string(),
+        );
     }
     if pick_notice {
-        app.entries.push(radian_tui::Entry::new(
-            radian_tui::EntryKind::Notice,
-            "no sessions for this workspace yet; starting a new one",
-        ));
+        startup_lines.push("no sessions for this workspace yet; starting a new one".to_string());
     }
-    app.entries.push(radian_tui::Entry::new(
-        radian_tui::EntryKind::Notice,
-        match &resume {
-            Some(id) => format!(
-                "resumed session {id} ({} messages) · Enter sends · Ctrl-C cancels a turn · \
-                 Ctrl-C again quits",
-                history.len()
-            ),
-            None => format!(
-                "new session {session_id} · Enter sends · Ctrl-C cancels a turn · Ctrl-C again \
-                 quits"
-            ),
-        },
-    ));
+    startup_lines.push(session_line);
+    // The safety lines are never folded away: a workspace boundary that
+    // was not the user's choice, and every config-file warning/ignored key. The config
+    // warnings are also printed before the alternate screen, where a crash can still show
+    // them.
+    let mut safety = Vec::new();
+    if let Some(line) = &workspace_line {
+        safety.push(line.clone());
+    }
+    // The policy warnings (a config `auto` ignored under `full`, a suppressed restore) are
+    // never folded either: they explain why the session's approvals behave as they do.
+    for warning in &startup_approval.warnings {
+        safety.push(warning.clone());
+    }
+    for warning in &config_warnings {
+        safety.push(format!("config: {warning}"));
+    }
+    let banner = if config.tui.banner.unwrap_or(true) {
+        let path = radian_tui::workspace::display_coding_root(&workspace_root, home.as_deref());
+        radian_tui::startup::banner_rows(env!("CARGO_PKG_VERSION"), &model_name, &path)
+    } else {
+        Vec::new()
+    };
+    let tip = config
+        .tui
+        .tips
+        .unwrap_or(true)
+        .then(|| radian_tui::startup::tip_for(&session_id).to_string());
+    app.set_startup(radian_tui::startup::StartupScreen {
+        banner,
+        banner_narrow: format!(
+            "{} radian {}",
+            radian_tui::startup::RAD_MARK,
+            env!("CARGO_PKG_VERSION")
+        ),
+        summary,
+        lines: startup_lines,
+        safety,
+        tip,
+        expanded: false,
+    });
 
+    // ADR 0008 revision: `/theme` writes to the file this process read, or to the path it
+    // would read when there is no file yet (the write creates it).
+    let theme_write_path = config
+        .source
+        .clone()
+        .or_else(|| radian_host::resolved_config_path(cli.config.as_deref()));
     let session_host = SessionHost {
         dir: dir.clone(),
         workspace: workspace_path.to_string_lossy().into_owned(),
@@ -1143,6 +1189,9 @@ fn run(
             "provider": provider.as_str(),
             "model": cli.model,
         }),
+        theme_colors: config.tui.colors.clone(),
+        theme_write_path: theme_write_path.clone(),
+        config_read_only: config.read_only,
     };
     let session = Arc::new(session);
     let facade: Arc<dyn radian_host::SessionFacade> =
@@ -1667,6 +1716,23 @@ impl LoopContext<'_> {
             Effect::Steer(text) => self.command(radian_host::SessionCommand::Steer(text)),
             Effect::Cancel => self.command(radian_host::SessionCommand::Cancel),
             Effect::Quit => Ok(()),
+            // ADR 0008 revision: `/theme` loads the theme and writes `tui.theme` back. Both
+            // are I/O, so they run here and the result comes back as `Input::ThemeReady`.
+            Effect::Theme { name } => {
+                let outcome = radian_tui::theme::switch(
+                    &name,
+                    radian_tui::theme::Theme::no_color_env(),
+                    radian_host::themes_dir().as_deref(),
+                    &self.host.theme_colors,
+                    self.host.theme_write_path.as_deref(),
+                    self.host.config_read_only,
+                );
+                self.send(AppInput::ThemeReady {
+                    theme: outcome.theme.map(Box::new),
+                    notices: outcome.notices,
+                });
+                Ok(())
+            }
             // ADR 0026 D9: the in-session switch. The facade applies it to the hooks (which
             // audit it) and queues the durable `ConfigChanged` for the next turn boundary.
             Effect::SetApprovalPolicy { on } => self
@@ -1716,6 +1782,9 @@ impl LoopContext<'_> {
                 let candidates = match &fetch {
                     radian_tui::command::Fetch::MemoryRecords { command, .. } => {
                         memory_record_candidates(self.memory, command)
+                    }
+                    radian_tui::command::Fetch::Themes { .. } => {
+                        radian_tui::command::theme_candidates(radian_host::themes_dir().as_deref())
                     }
                     radian_tui::command::Fetch::ModelRoute { provider, .. } => {
                         model_route_candidates(provider.as_deref(), &self.config_providers)
@@ -2110,14 +2179,35 @@ fn ui_loop(
         // display would take the timeout branch at this line. The one exception is a live
         // selection drag held at the transcript's top or bottom edge: the auto-scroll is
         // time-driven, so the loop takes a bounded timeout **only while the drag is live**,
-        // and goes straight back to blocking `recv` when it ends.
-        let first = if app.is_selecting() {
-            match rx.recv_timeout(AUTO_SCROLL_TICK) {
+        // and goes straight back to blocking `recv` when it ends. The armed Ctrl-C quit
+        // window is the other time-driven display (ADR 0023 U2): while it is armed the loop
+        // wakes at its deadline to drop the hint.
+        let quit_remaining = app
+            .quit_pending
+            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()));
+        let first = if app.is_selecting() || quit_remaining.is_some() {
+            // The nearer of the two deadlines; `AUTO_SCROLL_TICK` is the drag's own tick.
+            let timeout = match (app.is_selecting(), quit_remaining) {
+                (true, Some(quit)) => quit.min(AUTO_SCROLL_TICK),
+                (true, None) => AUTO_SCROLL_TICK,
+                (false, Some(quit)) => quit.max(std::time::Duration::ZERO),
+                (false, None) => unreachable!("the branch requires selection or a quit window"),
+            };
+            match rx.recv_timeout(timeout) {
                 Ok(event) => Some(event),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    // The pointer is held at an edge: scroll one line and re-draw. A tick
-                    // that scrolls nothing (already at the end) draws nothing.
-                    if app.mouse_autoscroll() && !draw_frame(terminal, app)? {
+                    // The quit window closed: disarm and redraw, so the hint disappears. A
+                    // drag at an edge (or both) still ticks its scroll on the same wake.
+                    if app
+                        .quit_pending
+                        .is_some_and(|d| std::time::Instant::now() >= d)
+                        && app.update(AppInput::QuitDeadline).dirty
+                        && !draw_frame(terminal, app)?
+                    {
+                        app.quit = true;
+                        break;
+                    }
+                    if app.is_selecting() && app.mouse_autoscroll() && !draw_frame(terminal, app)? {
                         app.quit = true;
                         break;
                     }
@@ -2338,6 +2428,14 @@ struct SessionHost {
     journal: Arc<SessionJournal>,
     /// The child's `SessionCreated.config_snapshot` (a model-route reference).
     config_snapshot: serde_json::Value,
+    /// `[tui.colors]` overrides, so a `/theme` switch keeps them (ADR 0029).
+    theme_colors: Vec<(String, radian_host::config::TuiColorOverride)>,
+    /// Where `/theme` writes `tui.theme` back: the file this process read, or the path it
+    /// would read (ADR 0008 revision). `None` when there is no config location at all.
+    theme_write_path: Option<PathBuf>,
+    /// The reader's read-only verdict (a newer `schema_version`): `/theme` applies in the
+    /// session but never writes.
+    config_read_only: bool,
 }
 
 /// Runs one `/sessions`, `/export` or `/fork` request and returns the notices to show. Pure
