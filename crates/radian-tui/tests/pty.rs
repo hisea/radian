@@ -230,6 +230,28 @@ impl Pty {
 
     /// Like [`Pty::spawn`], with extra environment for the app (e.g. the sandbox probe seam).
     fn spawn_with_env(args: &[&str], envs: &[(&str, &str)], rows: u16, cols: u16) -> Self {
+        Self::spawn_full(args, envs, None, rows, cols)
+    }
+
+    /// Like [`Pty::spawn_with_env`], and writes `config` to `<RADIAN_HOME>/config/config.toml`
+    /// so the app can start with no arguments (ADR 0026 slice 0b).
+    fn spawn_with_config(
+        args: &[&str],
+        envs: &[(&str, &str)],
+        config: &str,
+        rows: u16,
+        cols: u16,
+    ) -> Self {
+        Self::spawn_full(args, envs, Some(config), rows, cols)
+    }
+
+    fn spawn_full(
+        args: &[&str],
+        envs: &[(&str, &str)],
+        config: Option<&str>,
+        rows: u16,
+        cols: u16,
+    ) -> Self {
         let pair = portable_pty::native_pty_system()
             .openpty(PtySize {
                 rows,
@@ -260,12 +282,24 @@ impl Pty {
         // overrides both through `envs`.
         let home = TempDir::new("home");
         cmd.env("HOME", home.path().as_os_str());
+        // The credential file lives under the same root the app will use: `RADIAN_HOME` if
+        // the test set one, else the `HOME` it set, else the fresh `HOME` above.
         let auth_root = envs
             .iter()
             .find(|(name, _)| *name == "RADIAN_HOME")
             .map(|(_, value)| PathBuf::from(value))
+            .or_else(|| {
+                envs.iter()
+                    .find(|(name, _)| *name == "HOME")
+                    .map(|(_, value)| PathBuf::from(value).join(".radian"))
+            })
             .unwrap_or_else(|| home.path().join(".radian"));
         write_auth_json(&auth_root, envs);
+        if let Some(config) = config {
+            let dir = auth_root.join("config");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("config.toml"), config).unwrap();
+        }
         // `cmd.env_clear()` above is what makes this hermetic: neither `RADIAN_HOME` nor
         // `RADIAN_CONFIG` reaches the child, so a config can only come from this temp `HOME`.
         cmd.env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json");
@@ -540,6 +574,37 @@ async fn pty_end_to_end_conversation_and_clean_exit() {
     assert!(dir.path().join("e2e.jsonl").exists());
 }
 
+/// ADR 0026 slice 0b acceptance: with `model.provider` and `model.model` in the config and a
+/// matching `auth.json` entry, `radian` starts with **no arguments** from the project directory.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_launches_with_no_arguments_from_the_config_and_auth_json() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("NO-ARGS-REPLY-OK")]).await;
+    let config = format!(
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
+         base_url = \"{}\"\n",
+        server.base_url
+    );
+    let mut pty =
+        Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-no-args")], &config, 24, 100);
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"hello\r");
+    assert!(
+        pty.wait_for_screen("NO-ARGS-REPLY-OK", 20),
+        "the reply is not on screen:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1, "one request expected");
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some("Bearer sk-no-args")
+    );
+}
+
 /// The diagnostics directory the app will use when `HOME` is `home` (ADR 0020):
 /// `<home>/.radian/cache/diagnostics`.
 fn diagnostics_dir(home: &Path) -> PathBuf {
@@ -566,7 +631,7 @@ fn pty_panic_path_restores_the_terminal() {
             sessions.to_str().unwrap(),
             "--panic-after-enter",
         ],
-        &[("HOME", home)],
+        &[("HOME", home), ("OPENAI_API_KEY", "sk-panic-secret")],
         20,
         80,
     );
@@ -607,6 +672,16 @@ fn pty_panic_path_restores_the_terminal() {
             .find(|path| path.to_string_lossy().ends_with(".panic.log"))
             .expect("a panic log was written");
         assert_eq!(mode(&log), 0o600, "the panic log must be 0600");
+        // ADR 0013: the resolved key is redacted everywhere, including the panic log.
+        assert!(
+            !raw_text.contains("sk-panic-secret"),
+            "the key reached the terminal: {raw_text}"
+        );
+        let log_text = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            !log_text.contains("sk-panic-secret"),
+            "the key reached the panic log: {log_text}"
+        );
         // Nothing was written next to the session.
         let beside = std::fs::read_dir(&sessions)
             .unwrap()
@@ -2582,6 +2657,12 @@ async fn pty_anthropic_provider_sends_a_messages_request_and_renders_the_reply()
     assert!(
         !session.contains("sk-ant-tui-key"),
         "the key reached the session file"
+    );
+    // ADR 0013: the key never reaches the terminal (startup line, errors, redraws).
+    let raw_text = String::from_utf8_lossy(&pty.raw()).to_string();
+    assert!(
+        !raw_text.contains("sk-ant-tui-key"),
+        "the key reached the terminal"
     );
 }
 

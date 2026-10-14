@@ -140,6 +140,8 @@ fn write_auth_json(root: &Path, envs: &[(&str, &str)]) {
     for (name, value) in envs {
         let provider = if *name == "ANTHROPIC_API_KEY" {
             "anthropic"
+        } else if *name == "OPENCODE_GO_API_KEY" {
+            "opencode-go"
         } else if name.ends_with("KEY") {
             "openai-compatible"
         } else {
@@ -656,7 +658,10 @@ async fn a_remote_base_url_without_a_key_fails_fast() {
     .await;
 
     assert_eq!(code, 2);
-    assert!(stderr.contains("auth.json"), "{stderr}");
+    // ADR 0026 D2: the message names the file, shows the JSON to add and points at `/login`.
+    assert!(stderr.contains("credentials/auth.json"), "{stderr}");
+    assert!(stderr.contains("\"type\": \"api_key\""), "{stderr}");
+    assert!(stderr.contains("/login"), "{stderr}");
     // No network round trip was attempted.
     assert!(
         start.elapsed() < Duration::from_secs(2),
@@ -681,6 +686,109 @@ async fn a_local_base_url_needs_no_key_and_sends_no_authorization() {
     assert_eq!(code, 0);
     assert_eq!(stdout, "ok\n");
     assert_eq!(server.requests()[0].header("authorization"), None);
+}
+
+/// ADR 0026 D0: `--base-url`/`--header` only apply to the generic descriptor; a non-generic
+/// descriptor sets its own endpoint and headers, so passing them is a usage error.
+#[tokio::test]
+async fn a_non_generic_descriptor_refuses_base_url_and_header() {
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--provider",
+                "anthropic",
+                "--model",
+                "claude-x",
+                "--base-url",
+                "https://api.example.com",
+                "-p",
+                "hi",
+            ],
+            &[("ANTHROPIC_API_KEY", "sk-ant-test")],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("openai-compatible"), "{stderr}");
+    assert!(stderr.contains("--base-url"), "{stderr}");
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--provider",
+                "anthropic",
+                "--model",
+                "claude-x",
+                "--header",
+                "x-a=b",
+                "-p",
+                "hi",
+            ],
+            &[("ANTHROPIC_API_KEY", "sk-ant-test")],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("--header"), "{stderr}");
+}
+
+/// ADR 0026 D0 acceptance: `--provider opencode-go` sends `x-opencode-session` exactly as the
+/// old `--header 'x-opencode-session={session_id}'` did, plus `x-opencode-client: radian`.
+#[tokio::test]
+async fn opencode_go_sends_the_session_header_byte_for_byte() {
+    let server = MockServer::start(vec![text_reply("GO-OK")]).await;
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--provider",
+                "opencode-go",
+                "--model",
+                "deepseek-v4.1-flash",
+                "--session-id",
+                "go-session",
+                "-p",
+                "hi",
+            ],
+            &[
+                ("OPENCODE_GO_API_KEY", "sk-go-test"),
+                ("RADIAN_BASE_URL", &server.base_url),
+            ],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("GO-OK"), "{stdout}");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1, "one request expected");
+    assert_eq!(requests[0].header("x-opencode-session"), Some("go-session"));
+    assert_eq!(requests[0].header("x-opencode-client"), Some("radian"));
+}
+
+/// ADR 0026 D2 acceptance: a config that still has `model.api_key` is refused, never silently
+/// ignored, and the message points at `auth.json`.
+#[tokio::test]
+async fn a_config_with_model_api_key_is_refused() {
+    let dir = scratch("api-key-removed");
+    let path = dir.join("config.toml");
+    std::fs::write(
+        &path,
+        "schema_version = 1\n[model]\napi_key = { from = \"env\", name = \"K\" }\n",
+    )
+    .unwrap();
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &["--model", "m", "-p", "hi"],
+            &[("RADIAN_CONFIG", path.to_str().unwrap())],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("auth.json"), "{stderr}");
+    assert!(stderr.contains("/login"), "{stderr}");
 }
 
 // ---------- custom headers ----------
