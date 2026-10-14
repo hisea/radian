@@ -15,7 +15,9 @@ use crate::event::{AgentEvent, CompactionTrigger, EventSink};
 use crate::hooks::{HookContext, HookError, HookPoint, Hooks, ToolDecision};
 use crate::journal::{JournalError, JournalRecord, TranscriptJournal};
 use crate::message::{ContentPart, Message, MessageMeta, ToolCall, ToolResult};
-use crate::model::{Model, ModelContext, ModelError, ModelRequest, ModelResponse, StopReason};
+use crate::model::{
+    Model, ModelContext, ModelError, ModelRequest, ModelResponse, ModelUsage, StopReason,
+};
 use crate::outcome::{
     CancelReason, CompactionError, CompactionFailure, CompactionOutcome, IncompleteReason,
     RunError, RunOutcome, RunStatus, Step,
@@ -1254,10 +1256,13 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
             tool_calls: response.tool_calls.len(),
             usage: response.usage.clone(),
         });
-        // Remember the provider's own `input` as the next projection's baseline (ADR 0015
-        // C1). `None` means the provider did not report it; we never substitute zero.
+        // Remember the provider's own prompt size as the next projection's baseline (ADR 0015
+        // C1). `prompt_total()` is the whole input, cache reads and cache writes included
+        // (ADR 0007): for an Anthropic record `input` alone is only the *uncached*
+        // part, so taking it would make the projection too small and the guard would act too
+        // late. `None` means the provider did not report it; we never substitute zero.
         if let Some(size) = request_size
-            && let Some(input) = response.usage.as_ref().and_then(|usage| usage.input)
+            && let Some(input) = response.usage.as_ref().and_then(ModelUsage::prompt_total)
         {
             self.run.session.budget_baseline = Some((input, size));
         }
