@@ -35,9 +35,10 @@ pub use auth::{
 };
 pub use catalog::{
     CACHE_TTL, CATALOG_URL, Catalog, FETCH_TIMEOUT, ModelEntry, ModelLimit, OUTPUT_RESERVATION_CAP,
-    ProviderInfo, Window, WindowCheck, WindowQuery, WindowSource, cache_path, host_of,
-    input_budget, output_ceiling_warning, output_reservation, provider_for_host, resolve,
-    resolve_offline,
+    ProviderInfo, ProviderModels, Window, WindowCheck, WindowQuery, WindowSource, cache_path,
+    fetch_provider_models, host_of, input_budget, output_ceiling_warning, output_reservation,
+    provider_for_host, provider_models_cache, provider_models_stale, read_provider_models, resolve,
+    resolve_offline, write_provider_models,
 };
 pub use config::migrate_pi::{PiDraft, PiMigrateError, import_pi, write_draft as write_pi_draft};
 pub use config::{

@@ -790,6 +790,53 @@ fn run(
             },
         ))
         .map_err(|error| error.to_string())?;
+    // The providers worth refreshing now: the one this run started with. `/model`'s other
+    // targets refresh on their next use (the fetch itself is on the loop's runtime).
+    let refresh_targets = vec![provider_id.clone()];
+    // ADR 0026 D0: refresh the switched-to providers' `/v1/models` in the background. It never
+    // blocks startup and its failures are silent (the next `/model` just sees the old cache).
+    runtime.spawn(async move {
+        for provider_id in refresh_targets {
+            let Some(key) = radian_host::auth::resolve_key(&provider_id)
+                .ok()
+                .flatten()
+                .map(|resolved| resolved.key)
+            else {
+                continue;
+            };
+            // The retry rule (D0): skip when the cache is fresh, or when a fetch failed less
+            // than the retry delay ago (the failure marker is an empty `models` write).
+            let age = radian_host::provider_models_cache(&provider_id).and_then(|path| {
+                std::fs::metadata(path).ok().and_then(|meta| {
+                    meta.modified()
+                        .ok()
+                        .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
+                })
+            });
+            let cached = radian_host::auth::resolve_key(&provider_id)
+                .ok()
+                .flatten()
+                .and_then(|resolved| {
+                    radian_host::read_provider_models(&provider_id, &resolved.key)
+                });
+            let cached_models = cached.as_ref().map_or(0, |cache| cache.models.len());
+            if !radian_host::provider_models_stale(age, cached_models) {
+                continue;
+            }
+            let base_url = radian_host::descriptor(&provider_id)
+                .map(|descriptor| descriptor.default_base_url.to_owned())
+                .unwrap_or_default();
+            match radian_host::fetch_provider_models(&base_url, &key).await {
+                Some(models) => {
+                    let _ = radian_host::write_provider_models(&provider_id, &key, models);
+                }
+                None => {
+                    // The failure marker: an empty list, so the retry delay applies (D0).
+                    let _ = radian_host::write_provider_models(&provider_id, &key, Vec::new());
+                }
+            }
+        }
+    });
     // ADR 0026 D8: an explicit `--model`/`--provider` wins over the resumed change, and the
     // override is recorded so the journal stays the authority for the next resume.
     if cli.resume.is_some()
@@ -1794,9 +1841,8 @@ fn ui_loop(
 /// The record ids a `/memory` command can act on, as completion candidates. A read failure is
 /// an empty list, never a turn failure (ADR 0021 invariant 2).
 /// The `/model` completion candidates (ADR 0026 D5): the logged-in providers before the
-/// slash, or one provider's models after it — the descriptor's built-in list plus the
-/// models.dev catalog. Reads local files only; the background `/v1/models` refresh (D0)
-/// writes the cache this reads.
+/// slash, or one provider's models after it — the descriptor's built-in list plus the cached
+/// `/v1/models` list. Reads local files only; the background refresh (D0) writes that cache.
 fn model_route_candidates(provider: Option<&str>) -> Vec<radian_tui::command::Candidate> {
     let Some(provider) = provider else {
         return match radian_host::auth::list() {
@@ -1811,21 +1857,41 @@ fn model_route_candidates(provider: Option<&str>) -> Vec<radian_tui::command::Ca
             Err(_) => Vec::new(),
         };
     };
-    radian_host::descriptor(provider)
-        .map(|descriptor| {
-            descriptor
-                .models
-                .iter()
-                .map(|model| radian_tui::command::Candidate {
-                    insert: format!("{provider}/{}", model.id),
-                    description: model.name.to_owned(),
-                })
-                .collect()
-        })
-        .unwrap_or_else(|| {
-            // A named provider with no built-in list: free text, nothing to offer.
-            Vec::new()
-        })
+    // Built-in list first, then the cached `/v1/models` ids (D0), merged by model id.
+    let mut seen = std::collections::HashSet::new();
+    let mut candidates: Vec<radian_tui::command::Candidate> = Vec::new();
+    let mut push = |id: String,
+                    description: String,
+                    candidates: &mut Vec<radian_tui::command::Candidate>,
+                    seen: &mut std::collections::HashSet<String>| {
+        if seen.insert(id.clone()) {
+            candidates.push(radian_tui::command::Candidate {
+                insert: format!("{provider}/{id}"),
+                description,
+            });
+        }
+    };
+    if let Some(descriptor) = radian_host::descriptor(provider) {
+        for model in descriptor.models {
+            push(
+                model.id.to_owned(),
+                model.name.to_owned(),
+                &mut candidates,
+                &mut seen,
+            );
+        }
+    }
+    if let Some(key) = radian_host::auth::resolve_key(provider)
+        .ok()
+        .flatten()
+        .map(|resolved| resolved.key)
+        && let Some(cache) = radian_host::read_provider_models(provider, &key)
+    {
+        for id in cache.models {
+            push(id, "from /v1/models".to_owned(), &mut candidates, &mut seen);
+        }
+    }
+    candidates
 }
 
 fn memory_record_candidates(
