@@ -707,3 +707,14 @@ Base `c5a84f6` · 与 `radian-host` 同一一次性 worktree `/tmp/radian-pi-ski
 | SL-M1 | `/skill:<name>` 解析成 `Outcome::Message`（不展开，当普通消息发） | `pty_skill_commands_expand_list_notice_and_escape`（请求正文没正文/args，journal 断言也挂） | ✅ |
 
 1/1 抓住。
+
+## ADR 0013 出网/脱敏复审：TUI 脱敏列表漏掉其它 auth key（2026-10-14）
+
+Base `a9c88c8` · 一次性 worktree `/tmp/radian-pi-priv-mut`，每条跑完 `git checkout -- .`，`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| P1 | TUI 的 `secrets` 退回"只用启动 provider 的 `credential.key` + header 值" | `pty_the_panic_log_redacts_every_auth_key_not_only_the_startup_one`（另一个 auth.json 条目的 key 原样进 panic log） | ✅ |
+| P2 | `AuthStore::resolved_keys` 只返回第一个 key（不排序去重、不覆盖全部条目） | `auth::tests::resolved_keys_carries_every_login_sorted_and_deduplicated` | ✅ |
+
+2/2 抓住。修复见 `crates/radian-host/src/auth.rs` 的 `resolved_keys`；ADR 0013 两节的复审记录在 `a9c88c8`。
