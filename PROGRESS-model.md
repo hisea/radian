@@ -27,8 +27,24 @@ Branch `pi/model`, base `efddc11` + merge main (`170eddc`).
 - 模型列表来源：描述符内建列表 + `Catalog::models_for`/`display_name`（models.dev 缓存）。
 - facade（`LocalSession`）目前**不持有** ConfigQueue（driver 自建）——第 3 步要先把队列共享出来。
 
+## 事故（2026-10-14）：D11 的 thinking 片被我自己弄丢了
+
+我在修 clippy 时跑了 `git reset --hard HEAD~1`（撤掉了当时**未提交**的 D11 提交内容），
+之后的重做只补了 clippy 那两行，D11 的 thinking 机制从未真正落盘；随后变异脚本里的
+`git checkout -- <file>` 又把 app.rs/command.rs/provider.rs/model.rs 里未提交的 thinking
+改动还原成了 HEAD。**结果：D11（七档级别、夹取、thinkingLevelMap、reasoning_effort、
+/thinking）不在分支上**。已核实：`grep THINKING_LEVELS provider.rs` = 0、
+`reasoning_effort` = 0、`Outcome::Thinking` = 0；而第 1–6 步（SwitchableModel、ModelRoute、
+queue_config、resumed_model_route、driver 测试）都在。
+
+教训：变异与还原只用 `git checkout --` 作用在**已提交**的文件上，或先把改动提交；绝不在
+未提交的工作上跑 `git reset --hard`。
+
 ## 下一步（按 model-switch.md 顺序）
 
+0. **已加提交**：`adf61eb`(第3/4步) `af3b71f`(取消跟踪本文件) `d321916`(第5步后台刷新)
+   `2444a0c`(第6步跨provider) `cfacb1e`(D11) `efa6afc`(driver测试) `b19d20c`?(resume回退+sink)
+   —— 以 git log 为准。
 1. **第 3+4 步已完成（`adf61eb`）**：/model 命令树（两级补全，provider 来自 auth.json 可用条目，
    model 来自描述符内建列表）；loop 审核（凭据 D6、B' 经 budget_for_route 离线解析、T 取
    projection 的 budget report）；T≤B' 直接排队并提示；T>B' 弹硬编码 y/n 确认 Modal，y 走

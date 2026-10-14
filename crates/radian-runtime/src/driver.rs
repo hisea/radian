@@ -204,6 +204,13 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
 
     /// Sets the resolver that recomputes `B` for a switched model (ADR 0026 D7). The host
     /// supplies it; it must not touch the network (the startup fetch warmed the cache).
+    /// Runs the turn-boundary apply now (`testing` only): the D7 assertion needs the budget a
+    /// real boundary would compute without spawning the run loop.
+    #[cfg(feature = "testing")]
+    pub async fn test_apply_pending_config(&mut self) -> Result<(), DriverError> {
+        self.apply_pending_config().await
+    }
+
     pub fn set_budget_for(&mut self, resolver: BudgetFor) {
         self.budget_for = Some(resolver);
     }

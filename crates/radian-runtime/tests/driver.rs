@@ -429,12 +429,30 @@ async fn resume_replays_the_last_model_and_thinking_changes() {
     .await
     .unwrap();
     let value = driver2.config_slot().value();
-    if std::env::var("DUMP").is_ok() {
-        std::fs::copy(&copy, "/tmp/0b-journal-dump.jsonl").ok();
-        println!("SLOT: {value}");
-    }
     std::fs::remove_file(&copy).ok();
     assert_eq!(value["model"]["provider"], "anthropic", "{value}");
     assert_eq!(value["model"]["model"], "claude", "{value}");
     assert_eq!(value["thinking"], "high", "{value}");
+}
+
+/// D7: applying a model change recomputes `B` from the host's resolver, and the next turn runs
+/// under it.
+#[tokio::test]
+async fn a_switch_moves_the_next_turns_budget() {
+    let model = ScriptedModel::new([]);
+    let tools = MemTools::new();
+    let (mut driver, _env) = open_env("switch-budget", Arc::clone(&model), tools).await;
+    driver.set_budget_for(Arc::new(|provider, model| {
+        (provider == "anthropic" && model == "claude").then_some(1234)
+    }));
+    assert_eq!(driver.test_turn_budget(), None, "nothing switched yet");
+    driver
+        .config_queue()
+        .push(radian_runtime::ModelRoute::new("anthropic", "claude").to_value());
+    driver.test_apply_pending_config().await.unwrap();
+    assert_eq!(
+        driver.test_turn_budget(),
+        Some(agent_core::ContextBudget::new(1234)),
+        "the switch moved the budget"
+    );
 }

@@ -5437,6 +5437,16 @@ async fn pty_a_model_switch_sends_the_next_turn_to_the_new_provider() {
         "the switch applied: {}",
         pty.screen()
     );
+    // D5: the durable change is a route; the auth.json key is nowhere in the journal.
+    let journal = std::fs::read_to_string(sessions.join("model-switch.jsonl")).unwrap();
+    assert!(
+        !journal.contains("sk-ant-switch-test"),
+        "the key reached the journal"
+    );
+    assert!(
+        journal.contains("\"model{\"provider\":\"anthropic\"") || journal.contains("anthropic"),
+        "the switch is journaled"
+    );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
 }
