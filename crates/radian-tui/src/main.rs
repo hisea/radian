@@ -2002,6 +2002,7 @@ impl Approver for AutoApprover {
 /// Writes every decision to the session journal as a `PermissionResolved` (ADR 0006 §5.9).
 /// The append is spawned: `AuditSink::record` is synchronous and runs inside the hook, so it
 /// must not block. The record is audit only (`critical = false`) and is never replayed.
+/// A policy switch (ADR 0026 D9) is journaled the same way, as `ApprovalPolicyChanged`.
 struct JournalAudit {
     journal: Arc<SessionJournal>,
     runtime: tokio::runtime::Handle,
@@ -2010,6 +2011,14 @@ struct JournalAudit {
 impl AuditSink for JournalAudit {
     fn record(&self, event: &PermissionResolved) {
         let event = runtime_event(event);
+        let journal = Arc::clone(&self.journal);
+        self.runtime.spawn(async move {
+            let _ = journal.append_runtime_event(event).await;
+        });
+    }
+
+    fn record_policy_change(&self, policy: radian_permissions::ApprovalPolicy) {
+        let event = radian_permissions::policy_change_event(policy);
         let journal = Arc::clone(&self.journal);
         self.runtime.spawn(async move {
             let _ = journal.append_runtime_event(event).await;

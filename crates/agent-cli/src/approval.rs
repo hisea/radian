@@ -102,6 +102,11 @@ impl AuditSink for JournalAudit {
         // own writes.
         let _ = self.tx.send(radian_permissions::runtime_event(event));
     }
+
+    fn record_policy_change(&self, policy: radian_permissions::ApprovalPolicy) {
+        // Same best effort as `record`: the switch has already happened.
+        let _ = self.tx.send(radian_permissions::policy_change_event(policy));
+    }
 }
 
 /// The source a terminal-triggered turn runs with. Kept as one value so the permission layer
