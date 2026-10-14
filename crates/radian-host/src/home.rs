@@ -64,6 +64,9 @@ pub fn themes_dir_for(root: &Path) -> PathBuf {
 pub fn skills_dir_for(root: &Path) -> PathBuf {
     root.join("skills")
 }
+pub fn trust_dir_for(root: &Path) -> PathBuf {
+    root.join("trust")
+}
 pub fn diagnostics_dir_for(root: &Path) -> PathBuf {
     cache_dir_for(root).join("diagnostics")
 }
@@ -73,7 +76,7 @@ pub fn catalog_cache_for(root: &Path) -> PathBuf {
 
 /// Creates `path` (and its parents) owner-only (0700) and returns it. A failure is not fatal
 /// here: the caller that writes reports it, and the path is still returned so it can be named.
-fn private(path: PathBuf) -> PathBuf {
+pub(crate) fn private(path: PathBuf) -> PathBuf {
     let _ = radian_session::ensure_private_dir(&path);
     path
 }
@@ -115,6 +118,12 @@ pub fn themes_dir() -> Option<PathBuf> {
 /// by shell inside the sandbox, so the directory is not on the deny-read list.
 pub fn skills_dir() -> Option<PathBuf> {
     Some(private(skills_dir_for(&radian_home()?)))
+}
+
+/// The trust directory for this process, created 0700. **Sandbox-denied** (ADR 0031 T2): it
+/// holds `trust.json`, the user's map of trusted directories.
+pub fn trust_dir() -> Option<PathBuf> {
+    Some(private(trust_dir_for(&radian_home()?)))
 }
 
 /// The diagnostics directory for this process, created 0700. Sandbox-readable (ADR 0020).

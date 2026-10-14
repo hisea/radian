@@ -743,6 +743,11 @@ fn run(
     if let Some(credentials) = radian_host::credentials_dir() {
         sandbox_deny_read.push(credentials);
     }
+    // ADR 0031 T2: the trust store is denied read in every enforced tier (it is the user's map
+    // of trusted directories). Creating it first (0700) lets Linux's bwrap mask it.
+    if let Some(trust) = radian_host::trust_dir() {
+        sandbox_deny_read.push(trust);
+    }
     let sandbox = radian_tui::profile::build_sandbox(tier, &workspace_path, &sandbox_deny_read)?;
     // The MCP config file is read and validated here: before any server process starts and
     // before a session file exists, so a bad file leaves nothing behind (dogfooding D2). The

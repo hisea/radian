@@ -1297,6 +1297,11 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     if let Some(credentials) = radian_host::credentials_dir() {
         sandbox_deny_read.push(credentials);
     }
+    // ADR 0031 T2: the trust store is denied read in every enforced tier (it is the user's map
+    // of trusted directories). Creating it first (0700) lets Linux's bwrap mask it.
+    if let Some(trust) = radian_host::trust_dir() {
+        sandbox_deny_read.push(trust);
+    }
     let sandbox = profile::build_sandbox(profile_arg, &workspace_path, &sandbox_deny_read)?;
 
     // The approver and the audit sink. An `auto` policy (ADR 0026 D9, from `--yes`/`--approval

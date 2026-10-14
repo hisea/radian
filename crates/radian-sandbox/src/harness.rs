@@ -170,6 +170,9 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
     // read by the model and its scripts run inside the sandbox.
     std::fs::create_dir_all(radian_home.join("skills/greet"))?;
     std::fs::write(radian_home.join("skills/greet/SKILL.md"), "radian-data\n")?;
+    // ADR 0031 T2: `trust/` is on the deny list — the user's map of trusted directories.
+    std::fs::create_dir_all(radian_home.join("trust"))?;
+    std::fs::write(radian_home.join("trust/trust.json"), "{}\n")?;
     // A sessions directory moved elsewhere (`--session-dir`): it must be denied too.
     std::fs::create_dir_all(root.join("custom-sessions"))?;
     let custom_sessions = std::fs::canonicalize(root.join("custom-sessions"))?;
@@ -190,6 +193,8 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
             .deny_read(radian_home.join("memory"))
             // ADR 0026 D4: the credential store is denied in every enforced tier.
             .deny_read(radian_home.join("credentials"))
+            // ADR 0031 T2: the trust store is denied too.
+            .deny_read(radian_home.join("trust"))
             .deny_read(&custom_sessions)
     };
     let policy = radian_deny(SandboxPolicy::workspace_write(&ws)?);
@@ -725,8 +730,18 @@ impl Rig {
                 q(&radian.join("credentials/auth.json"))
             ),
         );
+        // ADR 0031 T2 / ADR 0020 revision: `trust/` is denied like sessions, memory and
+        // credentials; the control (FullAccess) reads it, so the denial is the sandbox.
+        self.sh_case(
+            sandbox,
+            control,
+            g,
+            "trust_unreadable",
+            Expect::MustFail,
+            &format!("cat {} > /dev/null", q(&radian.join("trust/trust.json"))),
+        );
         // ADR 0025 ruling 1 / ADR 0020 revision: `skills/` joins config and cache on the
-        // readable side; only sessions, memory and credentials are denied.
+        // readable side; only sessions, memory, credentials and trust are denied.
         self.sh_case(
             sandbox,
             control,

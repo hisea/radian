@@ -123,6 +123,15 @@ fn collect_from(root: &Path, discovery: &mut Discovery, by_name: &mut BTreeMap<S
     }
 }
 
+/// Whether `root` holds at least one `SKILL.md` under the discovery rules, **without parsing
+/// it**. Project trust uses this as its trigger (ADR 0031 T1): "the workspace provides
+/// something" is a file question, and a malformed skill is still something the loader reads.
+pub fn has_skill_file(root: &Path) -> bool {
+    let mut candidates = Vec::new();
+    walk(root, &mut candidates);
+    !candidates.is_empty()
+}
+
 /// Collects every `SKILL.md` under `dir`, pruning at a directory that has one.
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {

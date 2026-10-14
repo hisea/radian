@@ -30,6 +30,7 @@ mod session_id;
 pub mod sessions;
 pub mod skills;
 mod tools;
+pub mod trust;
 mod workspace;
 
 pub use approval::{StartupApproval, resolve_startup, restored_approval};
@@ -65,7 +66,7 @@ pub use home::{
     credentials_dir, credentials_dir_for, diagnostics_dir_for, ensure_private_dir,
     legacy_sessions_dirs_for, legacy_sessions_hint, legacy_sessions_hint_for, memory_dir,
     memory_dir_for, radian_home, radian_home_for, sessions_dir, sessions_dir_for, skills_dir,
-    skills_dir_for, themes_dir, themes_dir_for, user_home,
+    skills_dir_for, themes_dir, themes_dir_for, trust_dir, trust_dir_for, user_home,
 };
 pub use mcp::load_mcp_config;
 pub use model::{
@@ -104,7 +105,8 @@ pub use sessions::{
 };
 pub use skills::{
     Discovery, SECTION_BUDGET_TOKENS, SKILL_FILE_NAME, Skill, SkillsHooks, completion_candidates,
-    discover, discover_with_extras, expand, notices, prompt_section,
+    discover, discover_with_extras, expand, has_skill_file, notices, prompt_section,
 };
 pub use tools::{HostSession, HostTools, merge_tool_specs};
+pub use trust::{Decision, ProjectTrustChanged, Resolved, Source};
 pub use workspace::resolve_workspace;
