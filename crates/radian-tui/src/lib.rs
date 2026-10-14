@@ -5,6 +5,7 @@
 //! [`terminal::TtyGuard`] owns the terminal's modified state.
 
 pub mod app;
+pub mod clip;
 pub mod command;
 pub mod composer;
 pub mod events;
@@ -17,6 +18,7 @@ pub mod profile;
 pub mod projection;
 pub mod question;
 pub mod render;
+pub mod select;
 pub mod signals;
 pub mod terminal;
 pub mod theme;
@@ -26,4 +28,6 @@ pub use app::{
     App, Effect, Entry, EntryKind, Input, MemoryResult, MouseScrollDirection, PickerData, Startup,
     TurnState, UpdateResult,
 };
+pub use clip::{ClipboardMode, MAX_CLIPBOARD_BYTES};
 pub use composer::Composer;
+pub use select::{Anchor, Selection};

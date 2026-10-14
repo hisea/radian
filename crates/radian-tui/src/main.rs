@@ -22,7 +22,8 @@ use radian_permissions::{
     runtime_event,
 };
 use radian_session::{Index, SessionJournal};
-use radian_tui::app::{App, Effect, Input as AppInput, MemoryResult, PickerData};
+use radian_tui::app::{AUTO_SCROLL_TICK, App, Effect, Input as AppInput, MemoryResult, PickerData};
+use radian_tui::clip::{ClipboardMode, osc52};
 use radian_tui::events::{InputEvent, ProjectionSink, UiEvent};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -1259,6 +1260,50 @@ fn draw_frame(
     }
 }
 
+/// Writes the OSC 52 clipboard sequence for `text` to stdout. Fire-and-forget: the terminal
+/// never answers, so the caller's notice says "via OSC 52", never that the clipboard holds
+/// the text.
+fn write_osc52(text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    out.write_all(osc52(text).as_bytes())?;
+    out.flush()
+}
+
+/// Feeds `text` to macOS's `pbcopy` and reports whether it accepted it. Only reachable when
+/// `tui.clipboard = "pbcopy"` on macOS (anywhere else the config warns and falls back to
+/// OSC 52 before the loop ever sees the mode). The pipe write happens on a thread so a large
+/// selection cannot deadlock against `pbcopy`'s own buffer.
+fn run_pbcopy(text: &str) -> Result<(), String> {
+    use std::io::Write;
+    let mut child = std::process::Command::new("pbcopy")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let text = text.to_owned();
+    let writer = std::thread::spawn(move || {
+        stdin
+            .write_all(text.as_bytes())
+            .and_then(|()| stdin.flush())
+            .map_err(|error| error.to_string())
+    });
+    let status = child.wait().map_err(|error| error.to_string())?;
+    writer
+        .join()
+        .map_err(|_| "the pbcopy writer panicked".to_string())??;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(match status.code() {
+            Some(code) => format!("exited with status {code}"),
+            None => "was terminated by a signal".to_string(),
+        })
+    }
+}
+
 fn spawn_input_thread(tx: Sender<UiEvent>) {
     std::thread::spawn(move || {
         loop {
@@ -1331,6 +1376,9 @@ struct LoopContext<'a> {
     /// The signal that stopped the loop, if any: it decides the reason line (and, in `main`,
     /// the exit code).
     signal: Option<i32>,
+    /// How a selection copy reaches the clipboard (`tui.clipboard`), read once from the app
+    /// when the context is built: the mode cannot change mid-run.
+    clipboard: ClipboardMode,
 }
 
 impl LoopContext<'_> {
@@ -1353,6 +1401,15 @@ impl LoopContext<'_> {
                 app.update(AppInput::Resize { rows, cols })
             }
             UiEvent::Input(InputEvent::MouseScroll(direction)) => app.mouse_scroll(direction),
+            UiEvent::Input(InputEvent::MouseDown { row, col }) => {
+                app.update(AppInput::MouseDown { row, col })
+            }
+            UiEvent::Input(InputEvent::MouseDrag { row, col }) => {
+                app.update(AppInput::MouseDrag { row, col })
+            }
+            UiEvent::Input(InputEvent::MouseUp { row, col }) => {
+                app.update(AppInput::MouseUp { row, col })
+            }
             UiEvent::Dirty => return apply_dirty(app),
             UiEvent::Signal(signal) => {
                 // Leave through the ordinary clean-exit path: the terminal is restored, the
@@ -1540,6 +1597,24 @@ impl LoopContext<'_> {
                 self.send(AppInput::LogoutDone { provider, result });
                 Ok(())
             }
+            // The clipboard write is I/O, so it lives here (ADR 0023 U3); its result is the
+            // honest status-bar notice. OSC 52 has no receipt, so success says only what
+            // Radian did ("via OSC 52"); `pbcopy` can fail, and says so.
+            Effect::Copy { text } => {
+                let notice = match self.clipboard {
+                    ClipboardMode::Off => return Ok(()),
+                    ClipboardMode::Osc52 => match write_osc52(&text) {
+                        Ok(()) => format!("copied {} chars (via OSC 52)", text.chars().count()),
+                        Err(error) => format!("clipboard write failed: {error}"),
+                    },
+                    ClipboardMode::PbCopy => match run_pbcopy(&text) {
+                        Ok(()) => format!("copied {} chars (via pbcopy)", text.chars().count()),
+                        Err(error) => format!("pbcopy failed: {error}"),
+                    },
+                };
+                self.send(AppInput::ClipboardDone(notice));
+                Ok(())
+            }
         }
     }
 
@@ -1608,6 +1683,17 @@ fn handle_picking(event: UiEvent, app: &mut App, signal: &mut Option<i32>) -> bo
             app.update(AppInput::Resize { rows, cols }).dirty
         }
         UiEvent::Input(InputEvent::MouseScroll(direction)) => app.mouse_scroll(direction).dirty,
+        // Mouse presses during `--pick` reach the same gated path (the picker overlay blocks
+        // them); there is no transcript yet, so they are no-ops at worst.
+        UiEvent::Input(InputEvent::MouseDown { row, col }) => {
+            app.update(AppInput::MouseDown { row, col }).dirty
+        }
+        UiEvent::Input(InputEvent::MouseDrag { row, col }) => {
+            app.update(AppInput::MouseDrag { row, col }).dirty
+        }
+        UiEvent::Input(InputEvent::MouseUp { row, col }) => {
+            app.update(AppInput::MouseUp { row, col }).dirty
+        }
         UiEvent::Signal(value) => {
             // Remembered so the caller can exit like the session phase (128 + signal and the
             // reason line); nothing has been created.
@@ -1650,6 +1736,7 @@ fn ui_loop(
             tx,
             queue: session.pending(),
             signal: None,
+            clipboard: app.clipboard,
         }),
     };
     // The first frame: the startup notices and the resumed history are already in the app, and
@@ -1663,8 +1750,28 @@ fn ui_loop(
         // Block until there is something to do. No display in this build changes with time (the
         // status bar, the notes, the find box and the budget line are static text), so there is
         // no `recv_timeout` here: an idle app is not redrawn at all (ADR 0023 U2). A clock-like
-        // display would take the timeout branch at this line.
-        let Ok(first) = rx.recv() else {
+        // display would take the timeout branch at this line. The one exception is a live
+        // selection drag held at the transcript's top or bottom edge: the auto-scroll is
+        // time-driven, so the loop takes a bounded timeout **only while the drag is live**,
+        // and goes straight back to blocking `recv` when it ends.
+        let first = if app.is_selecting() {
+            match rx.recv_timeout(AUTO_SCROLL_TICK) {
+                Ok(event) => Some(event),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    // The pointer is held at an edge: scroll one line and re-draw. A tick
+                    // that scrolls nothing (already at the end) draws nothing.
+                    if app.mouse_autoscroll() && !draw_frame(terminal, app)? {
+                        app.quit = true;
+                        break;
+                    }
+                    continue;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => None,
+            }
+        } else {
+            rx.recv().ok()
+        };
+        let Some(first) = first else {
             // Every sender is gone: nothing left to drive the UI.
             break;
         };

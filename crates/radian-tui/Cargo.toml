@@ -44,6 +44,8 @@ libc = "0.2"
 libc = "0.2"
 
 [dev-dependencies]
+# Smoke test for the vendored codex-mermaid crate (ADR 0028 R8).
+codex-mermaid = { path = "../../third_party/codex-mermaid" }
 agent-core = { path = "../agent-core" }
 radian-memory = { path = "../radian-memory" }
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible", features = ["testing"] }

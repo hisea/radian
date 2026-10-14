@@ -236,6 +236,10 @@ pub struct TuiConfig {
     /// line) or `"box"` (the bordered input box). `None` means the default; an unknown value is
     /// ignored with a warning (the `tui.*` rule), and the TUI falls back to `lines`.
     pub input_style: Option<String>,
+    /// `tui.clipboard`: how a transcript-selection copy reaches the system clipboard —
+    /// `"osc52"` (the default), `"pbcopy"` (macOS only; elsewhere a warning and OSC 52) or
+    /// `"off"`. `None` means the default; an unknown value is ignored with a warning.
+    pub clipboard: Option<String>,
 }
 
 /// One parsed configuration file.
@@ -646,6 +650,14 @@ fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
             // An unknown input style is a display preference: ignore it (and say so), never
             // refuse the file. The TUI falls back to the default.
             ("input_style", _) => config.skipped.push("tui.input_style".into()),
+            ("clipboard", Value::String(mode))
+                if matches!(mode.as_str(), "osc52" | "pbcopy" | "off") =>
+            {
+                config.tui.clipboard = Some(mode.clone());
+            }
+            // An unknown clipboard transport is a display preference too: skip it with the
+            // same warning, and the TUI keeps its default.
+            ("clipboard", _) => config.skipped.push("tui.clipboard".into()),
             // A non-boolean mouse is a display preference: ignore it (and say so), never
             // refuse the file.
             ("mouse", _) => config.skipped.push("tui.mouse".into()),
