@@ -292,6 +292,48 @@ pub struct TuiConfig {
     /// string names a common language. `None` means the default (`true`); an unknown value is
     /// ignored with a warning.
     pub display_highlight: Option<bool>,
+    /// `[tui.footer]` (ADR 0027 C2): the footer's rows and their items. Carried in a shape the
+    /// TUI can consume; the reader validates types and the known top-level keys only. An
+    /// unknown item id, placeholder or parameter is the TUI's warning, never a refusal.
+    pub footer: TuiFooterConfig,
+}
+
+/// `[tui.footer]` (ADR 0027 C2). Each row has a `left` and a `right` group of items; an item
+/// is a bare id string or a table with `item` plus options.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TuiFooterConfig {
+    /// `preset`: `"pi"` (the default) or `"classic"`. Any other value is the TUI's warning.
+    pub preset: Option<String>,
+    /// `separator`: the glyph(s) between items; a row may override it.
+    pub separator: Option<String>,
+    /// `glyphs`: `"unicode"` (the default), `"nerd"` or `"ascii"`. The TUI validates it.
+    pub glyphs: Option<String>,
+    pub rows: Vec<TuiFooterRowConfig>,
+}
+
+/// One `[[tui.footer.rows]]`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TuiFooterRowConfig {
+    pub left: Vec<TuiFooterItemConfig>,
+    pub right: Vec<TuiFooterItemConfig>,
+    /// The row's own `separator`, overriding the footer's.
+    pub separator: Option<String>,
+}
+
+/// One footer item: either a bare id or a table with `item` plus options. Options the reader
+/// does not know are kept as text in `params`, so the TUI can warn about (and show) them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TuiFooterItemConfig {
+    pub id: String,
+    pub icon: Option<String>,
+    pub format: Option<String>,
+    pub style: Option<String>,
+    /// The item's priority for narrow-terminal truncation (higher survives longer).
+    pub priority: Option<i64>,
+    /// `thresholds = [{ at = 70, style = "warn" }, …]` in file order.
+    pub thresholds: Vec<(i64, String)>,
+    /// The item's own parameters (`width`, `fill`, `empty`, …) as text.
+    pub params: Vec<(String, String)>,
 }
 
 /// One parsed configuration file.
@@ -817,6 +859,12 @@ fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
             // An unknown input style is a display preference: ignore it (and say so), never
             // refuse the file. The TUI falls back to the default.
             ("input_style", _) => config.skipped.push("tui.input_style".into()),
+            ("footer", Value::Table(footer)) => {
+                if let Err(key) = parse_footer(footer, config) {
+                    config.skipped.push(key);
+                }
+            }
+            ("footer", _) => config.skipped.push("tui.footer".into()),
             ("display", Value::Table(display)) => {
                 for (key, value) in display {
                     match (key.as_str(), value) {
@@ -866,6 +914,116 @@ fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
         }
     }
     Ok(())
+}
+
+/// Parses `[tui.footer]` (ADR 0027 C2). A structural problem names the key it skipped; a
+/// display preference never refuses the file (the `tui.*` rule).
+fn parse_footer(table: &toml::map::Map<String, Value>, config: &mut Config) -> Result<(), String> {
+    let mut footer = TuiFooterConfig::default();
+    for (key, value) in table {
+        match (key.as_str(), value) {
+            ("preset", Value::String(preset)) => footer.preset = Some(preset.clone()),
+            ("separator", Value::String(separator)) => footer.separator = Some(separator.clone()),
+            ("glyphs", Value::String(glyphs)) => footer.glyphs = Some(glyphs.clone()),
+            ("rows", Value::Array(rows)) => {
+                for row in rows {
+                    let Some(row) = row.as_table() else {
+                        return Err("tui.footer.rows".into());
+                    };
+                    footer.rows.push(parse_footer_row(row)?);
+                }
+            }
+            (other, _) => return Err(format!("tui.footer.{other}")),
+        }
+    }
+    config.tui.footer = footer;
+    Ok(())
+}
+
+fn parse_footer_row(table: &toml::map::Map<String, Value>) -> Result<TuiFooterRowConfig, String> {
+    let mut row = TuiFooterRowConfig::default();
+    for (key, value) in table {
+        match (key.as_str(), value) {
+            ("left", Value::Array(items)) => {
+                for item in items {
+                    row.left.push(parse_footer_item(item)?);
+                }
+            }
+            ("right", Value::Array(items)) => {
+                for item in items {
+                    row.right.push(parse_footer_item(item)?);
+                }
+            }
+            ("separator", Value::String(separator)) => row.separator = Some(separator.clone()),
+            (other, _) => return Err(format!("tui.footer.rows.{other}")),
+        }
+    }
+    Ok(row)
+}
+
+/// One item: a bare id string, or a table with `item` plus options. Anything else is skipped.
+fn parse_footer_item(value: &Value) -> Result<TuiFooterItemConfig, String> {
+    let mut item = TuiFooterItemConfig::default();
+    match value {
+        Value::String(id) => {
+            item.id = id.clone();
+            return Ok(item);
+        }
+        Value::Table(table) => {
+            for (key, value) in table {
+                match (key.as_str(), value) {
+                    ("item", Value::String(id)) => item.id = id.clone(),
+                    ("icon", Value::String(icon)) => item.icon = Some(icon.clone()),
+                    ("format", Value::String(format)) => item.format = Some(format.clone()),
+                    ("style", Value::String(style)) => item.style = Some(style.clone()),
+                    ("priority", Value::Integer(priority)) => item.priority = Some(*priority),
+                    ("thresholds", Value::Array(thresholds)) => {
+                        for threshold in thresholds {
+                            let Some(threshold) = threshold.as_table() else {
+                                return Err("tui.footer.rows.thresholds".into());
+                            };
+                            let at = threshold.get("at").and_then(Value::as_integer);
+                            let style = threshold.get("style").and_then(Value::as_str);
+                            match (at, style) {
+                                (Some(at), Some(style)) => {
+                                    item.thresholds.push((at, style.to_owned()));
+                                }
+                                _ => return Err("tui.footer.rows.thresholds".into()),
+                            }
+                        }
+                    }
+                    // A known option with the wrong type is skipped, not a refusal.
+                    ("item" | "icon" | "format" | "style" | "priority", _) => {
+                        return Err("tui.footer.rows.item".into());
+                    }
+                    // Everything else is the item's own parameter, kept as text.
+                    (param, value) => {
+                        if let Some(text) = value_to_text(value) {
+                            item.params.push((param.to_owned(), text));
+                        } else {
+                            return Err(format!("tui.footer.rows.{param}"));
+                        }
+                    }
+                }
+            }
+        }
+        _ => return Err("tui.footer.rows.item".into()),
+    }
+    if item.id.is_empty() {
+        return Err("tui.footer.rows.item".into());
+    }
+    Ok(item)
+}
+
+/// A scalar parameter as the text the TUI parses (`20`, `"─"`, `true`).
+fn value_to_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Integer(number) => Some(number.to_string()),
+        Value::Float(number) => Some(number.to_string()),
+        Value::Boolean(flag) => Some(flag.to_string()),
+        _ => None,
+    }
 }
 
 fn wrong_type(path: &Path, key: &str, expected: &'static str) -> ConfigError {
@@ -1512,5 +1670,93 @@ mod startup_pref_tests {
         let config = parse_str("schema_version = 1\n[tui]\ntips = \"yes\"\n").unwrap();
         assert_eq!(config.tui.tips, None);
         assert!(config.skipped.contains(&"tui.tips".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod footer_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn parse_str(text: &str) -> Result<Config, ConfigError> {
+        parse(Path::new("/tmp/test/config.toml"), text)
+    }
+
+    /// ADR 0027 C2: the full `[tui.footer]` shape — preset, separator, glyphs, two rows, both
+    /// item spellings, an option table and a threshold.
+    #[test]
+    fn the_footer_config_is_carried() {
+        let config = parse_str(concat!(
+            "schema_version = 1\n",
+            "[tui.footer]\n",
+            "preset = \"pi\"\n",
+            "separator = \" | \"\n",
+            "glyphs = \"unicode\"\n",
+            "[[tui.footer.rows]]\n",
+            "left = [\n",
+            "  { item = \"model\", format = \"{display_name}\" },\n",
+            "  { item = \"context_bar\", width = 20, fill = \"━\", empty = \"─\", format = \"{bar} {percent}%\" },\n",
+            "]\n",
+            "right = [\"reasoning\"]\n",
+            "[[tui.footer.rows]]\n",
+            "left = [\"tokens\", \"cost\"]\n",
+            "separator = \" · \"\n",
+            "[[tui.footer.rows]]\n",
+            "left = [{ item = \"context\", thresholds = [{ at = 70, style = \"warn\" }, { at = 90, style = \"error\" }] }]\n",
+        ))
+        .unwrap();
+        let footer = &config.tui.footer;
+        assert_eq!(footer.preset.as_deref(), Some("pi"));
+        assert_eq!(footer.separator.as_deref(), Some(" | "));
+        assert_eq!(footer.glyphs.as_deref(), Some("unicode"));
+        assert_eq!(footer.rows.len(), 3);
+        assert_eq!(footer.rows[0].left.len(), 2);
+        assert_eq!(footer.rows[0].left[0].id, "model");
+        assert_eq!(
+            footer.rows[0].left[0].format.as_deref(),
+            Some("{display_name}")
+        );
+        assert_eq!(footer.rows[0].left[1].params.len(), 3);
+        assert_eq!(footer.rows[0].right[0].id, "reasoning");
+        assert_eq!(footer.rows[1].separator.as_deref(), Some(" · "));
+        assert_eq!(footer.rows[1].left[1].id, "cost");
+        assert_eq!(
+            footer.rows[2].left[0].thresholds,
+            vec![(70, "warn".into()), (90, "error".into())]
+        );
+        assert!(config.skipped.is_empty(), "{:?}", config.skipped);
+    }
+
+    /// An unknown item id is **carried** (the TUI warns and shows it raw), but an unknown
+    /// `[tui.footer]` key or a wrong type is skipped with a warning, never refused.
+    #[test]
+    fn unknown_footer_keys_and_types_are_skipped_never_refused() {
+        let config = parse_str(concat!(
+            "schema_version = 1\n",
+            "[tui.footer]\n",
+            "future_key = true\n",
+            "[[tui.footer.rows]]\n",
+            "left = [{ item = \"future_item\" }, 5, \"model\"]\n",
+        ))
+        .unwrap();
+        // `future_key` skipped; the row is dropped whole (its second item is not a string or a
+        // table), so the footer falls back to the default.
+        assert!(
+            config
+                .skipped
+                .iter()
+                .any(|key| key.starts_with("tui.footer")),
+            "{:?}",
+            config.skipped
+        );
+        assert!(config.tui.footer.rows.is_empty());
+
+        // A well-formed row with an unknown item id keeps the id.
+        let config = parse_str(
+            "schema_version = 1\n[tui.footer]\n[[tui.footer.rows]]\nleft = [\"future_item\"]\n",
+        )
+        .unwrap();
+        assert_eq!(config.tui.footer.rows[0].left[0].id, "future_item");
+        assert!(config.skipped.is_empty(), "{:?}", config.skipped);
     }
 }

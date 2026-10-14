@@ -25,6 +25,16 @@ fn stream(
     app.update(radian_tui::app::Input::Stream(projection.snapshot()));
 }
 
+/// Puts a test on the pre-ADR one-line status bar (`preset = classic`). The footer default is
+/// the two-row `pi` layout now (ADR 0027 C2); a test about transcript geometry keeps the
+/// layout it was written for, rather than shifting its expected rows.
+fn classic_footer(app: &mut App) {
+    app.apply_footer(&radian_host::config::TuiFooterConfig {
+        preset: Some("classic".to_string()),
+        ..Default::default()
+    });
+}
+
 fn render(app: &mut App, width: u16, height: u16) -> Terminal<TestBackend> {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal.draw(|frame| render::draw(frame, app)).unwrap();
@@ -186,6 +196,7 @@ fn tool_calls_and_results_are_shown() {
 #[test]
 fn the_status_line_shows_model_and_turn_state() {
     let mut app = App::new("my-model", "s");
+    classic_footer(&mut app);
     // The turn state is a session fact: the event sink writes it to the projection
     // (ADR 0023 U5), so the test writes it there too.
     app.projection.set_turn(radian_tui::TurnState::Running);
@@ -199,6 +210,7 @@ fn the_status_line_shows_model_and_turn_state() {
 #[test]
 fn live_deltas_are_replaced_by_the_committed_message_not_duplicated() {
     let mut app = App::new("m", "s");
+    classic_footer(&mut app);
     let projection = radian_tui::projection::SessionProjection::new();
     stream(&mut app, &projection, StreamKind::Assistant, "hel");
     stream(&mut app, &projection, StreamKind::Assistant, "lo");
@@ -484,6 +496,7 @@ fn the_box_input_style_draws_the_rounded_box_with_the_prompt() {
 fn a_selection_draws_the_selection_role_on_its_cells() {
     use radian_tui::select::{Selection, locate};
     let mut app = App::new("m", "s");
+    classic_footer(&mut app);
     app.push_message(&Message::user("hello selection"));
     app.set_transcript_width(40);
     let (total, _) =
@@ -519,6 +532,7 @@ fn a_selection_draws_the_selection_role_on_its_cells() {
 fn the_mono_selection_is_reversed_not_colored() {
     use radian_tui::select::{Selection, locate};
     let mut app = App::new("m", "s");
+    classic_footer(&mut app);
     app.theme = radian_tui::theme::Theme::mono();
     app.push_message(&Message::user("hello selection"));
     app.set_transcript_width(40);
@@ -543,6 +557,7 @@ fn the_mono_selection_is_reversed_not_colored() {
 fn an_empty_selection_draws_nothing() {
     use radian_tui::select::{Selection, locate};
     let mut app = App::new("m", "s");
+    classic_footer(&mut app);
     app.push_message(&Message::user("hello selection"));
     app.set_transcript_width(40);
     let (total, _) =
@@ -1597,6 +1612,7 @@ fn a_tool_card_paints_the_state_band() {
 
     // A tool result paints the card body the same way.
     let mut app = App::new("m", "s");
+    classic_footer(&mut app);
     let mut result = Entry::new(EntryKind::ToolResult, "line one\nline two");
     result.is_error = true;
     app.entries.push(result);

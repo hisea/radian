@@ -2,6 +2,16 @@
 //! a `TestBackend` frame.
 
 use radian_tui::App;
+
+/// Puts a test on the pre-ADR one-line status bar (`preset = classic`; ADR 0027 C2). The
+/// default footer is the two-row `pi` layout now; a geometry test keeps the layout it was
+/// written for.
+fn classic_footer(app: &mut App) {
+    app.apply_footer(&radian_host::config::TuiFooterConfig {
+        preset: Some("classic".to_string()),
+        ..Default::default()
+    });
+}
 use radian_tui::render;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -15,6 +25,7 @@ fn render(app: &mut App, width: u16, height: u16) -> Terminal<TestBackend> {
 #[test]
 fn the_cursor_cell_counts_display_width_not_chars() {
     let mut app = App::new("m", "s");
+    classic_footer(&mut app);
     app.input.set_text("你好");
     let terminal = render(&mut app, 20, 8);
     let cursor = terminal.backend().cursor_position();
@@ -28,6 +39,7 @@ fn the_cursor_cell_counts_display_width_not_chars() {
 #[test]
 fn the_cursor_follows_soft_wrap() {
     let mut app = App::new("m", "s");
+    classic_footer(&mut app);
     app.input.set_text("abcdefghij");
     let terminal = render(&mut app, 10, 8);
     let cursor = terminal.backend().cursor_position();
@@ -39,6 +51,7 @@ fn the_cursor_follows_soft_wrap() {
 #[test]
 fn a_multiline_input_grows_the_box_and_a_long_one_scrolls_to_the_cursor() {
     let mut app = App::new("m", "s");
+    classic_footer(&mut app);
     app.input.set_text("a\nb\nc");
     let terminal = render(&mut app, 20, 12);
     let cursor = terminal.backend().cursor_position();
@@ -47,6 +60,7 @@ fn a_multiline_input_grows_the_box_and_a_long_one_scrolls_to_the_cursor() {
 
     // More than ten rows: the box caps and follows the cursor instead of growing.
     let mut app = App::new("m", "s");
+    classic_footer(&mut app);
     app.input.set_text(&"x\n".repeat(20));
     let terminal = render(&mut app, 20, 30);
     let cursor = terminal.backend().cursor_position();

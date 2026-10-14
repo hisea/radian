@@ -197,8 +197,34 @@ find_next = ["ctrl-g", "shift-enter"]
   falls back to `lines`.
 - `tips` / `banner`: whether the startup screen shows the one Tip line and the wordmark. Both
   default to on; `false` hides them.
-- `tips` / `banner`: whether the startup screen shows the one Tip line and the wordmark. Both
-  default to on; `false` hides them.
+- `footer` (ADR 0027 C2): the status area's rows. `preset` is `pi` (the default: two rows) or
+  `classic` (today's one line, byte-for-byte). `separator` joins items (default `" │ "`), each
+  row may override it, and `glyphs` is `unicode` (default), `nerd` or `ascii`. Each
+  `[[tui.footer.rows]]` has a `left` and a `right` group; an item is a bare id or a table with
+  `item`, `icon`, `format`, `style` (a theme role name, or pi's `dim`/`muted`/`accent`/`warn`/
+  `error`/`ok`/`text`), `priority`, `thresholds = [{ at = 70, style = "warn" }, …]` and the
+  item's own parameters. An unknown item id, placeholder, style or parameter is shown raw
+  with one warning and never blocks startup. Narrow terminals drop the `right` group first,
+  then the `left` group from its end, lowest `priority` first. `cwd` and `git_branch` are read
+  once at startup; the draw path never runs git.
+
+| item | placeholders | default |
+|---|---|---|
+| `model` | `{display_name}`, `{id}`, `{provider}` | the model's display name (or id) |
+| `reasoning` | `{level}` | the thinking level, one theme role per level |
+| `tier` | `{tier}` | the permission tier |
+| `cwd` | `{path}`, `{path_home}`, `{basename}` | `{path_home}` (`$HOME` → `~`) |
+| `git_branch` | `{branch}`, `{dirty}` | the branch (read once at startup) |
+| `session` | `{id}` | the session id |
+| `context` | `{bar}`, `{percent}`, `{used}`, `{budget}` | `{used}/{budget}` |
+| `context_bar` | `{bar}`, `{percent}`, `{used}`, `{budget}` | `{bar} {percent}%`, `width` 10, `fill` `━`, `empty` `─` |
+| `tokens` | `{in}`, `{out}`, `{cache}` | `↑{in} ↓{out}` |
+| `cost` | `{usd}` | empty: no cost is tracked yet (never a fabricated number) |
+| `pending` | `{count}` | shown only when a request waits |
+| `mcp` | `{mcp}` | the configured/connected servers |
+| `scroll` | `{position}`, `{mode}` | `{position} {mode}` |
+
+`worktree` and `status` are slice 2 (they need the contributor mechanism).
 - `theme`: `dark` and `light` are **pi's own palettes**, read
   through the same ADR 0029 conversion a theme file uses: the three text levels are pi's
   brightness gradient (dark: `text` 89%, `muted` 67%, `dim` 56%), and every semantic color
@@ -238,6 +264,7 @@ Every pi role maps onto a Radian role (`[tui.colors]` accepts both name families
 | `diff_added` / `diff_removed` / `diff_context` | `toolDiffAdded` / `toolDiffRemoved` / `toolDiffContext` (the unified-diff line kinds) |
 | `diff_hunk` | `accent` (pi has no hunk role; this covers the `@@` markers and the file headers) |
 | `reasoning` | `thinkingText` |
+| `reasoning_off` … `reasoning_max` | pi's `thinkingOff` … `thinkingMax` (the footer's `reasoning` item, one role per level) |
 | `tool_call` / `tool_result` / `tool_result_error` | `toolTitle` (= `text`) / `toolOutput` (= `muted`) / `error` |
 | `text` | `text` (the main level: answers, user words, tool titles) |
 | `notice` | `text` (the notice line itself) |
@@ -434,6 +461,9 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
 - **the budget status segment**: with a small `--context-window`, is the `T / B` projection
   and the reported-vs-estimated wording readable at your width, and does the over-budget
   highlight stand out without looking like an error?
+- **the footer** (ADR 0027 C2): the default is pi's two rows. Does the context bar read at
+  your width, do the reasoning colors tell the levels apart, and does a narrow terminal drop
+  the right group before the left? Try `tui.footer.preset = "classic"` and compare.
 - **the `AUTO` status marker** (ADR 0026 D9): turn auto on with `/auto on` — does the reversed
   `AUTO` segment stand out as "this session behaves differently" in `dark`, `light` and `mono`,
   without reading as an error? pty automation asserts the text, not the prominence.

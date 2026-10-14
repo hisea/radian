@@ -1,0 +1,29 @@
+# ADR 0027 C2: the footer is rows of left/right item groups. An item is a bare id or a table
+# with `item` plus options; unknown item ids/placeholders/params are shown raw with a warning
+# and never refuse the file.
+schema_version = 1
+
+[model]
+provider = "example"
+base_url = "https://example.com/v1"
+model = "m-1"
+
+[tui.footer]
+preset = "pi"
+separator = " │ "
+glyphs = "unicode"
+
+[[tui.footer.rows]]
+left = [
+  { item = "model", format = "{display_name}" },
+  { item = "cwd" },
+  { item = "git_branch" },
+  { item = "context_bar", width = 20, fill = "━", empty = "─", format = "{bar}  {percent}%" },
+]
+right = ["reasoning"]
+
+[[tui.footer.rows]]
+left = [
+  { item = "tokens", format = "↑{in} ↓{out}" },
+  { item = "cost", thresholds = [{ at = 70, style = "warn" }, { at = 90, style = "error" }] },
+]

@@ -101,6 +101,15 @@ pub(crate) fn fg_source_for_test(role: Role) -> Option<&'static str> {
 fn fg_source(role: Role) -> Option<&'static str> {
     match role {
         Role::Reasoning => Some("thinkingText"),
+        // The footer's `reasoning` item: one role per level, fed by pi's matching
+        // `thinking*` role (ADR 0027 C2).
+        Role::ReasoningOff => Some("thinkingOff"),
+        Role::ReasoningMinimal => Some("thinkingMinimal"),
+        Role::ReasoningLow => Some("thinkingLow"),
+        Role::ReasoningMedium => Some("thinkingMedium"),
+        Role::ReasoningHigh => Some("thinkingHigh"),
+        Role::ReasoningXhigh => Some("thinkingXhigh"),
+        Role::ReasoningMax => Some("thinkingMax"),
         Role::Interrupted => Some("warning"),
         Role::User => Some("userMessageText"),
         Role::ToolCall => Some("toolTitle"),
@@ -348,6 +357,18 @@ fn build(
         }
     }
 
+    // pi's optional roles inherit another role when absent (its docs). Apply that to
+    // `resolved` **before** the role loop, so an optional role that a Radian role consumes
+    // (the `thinking*` levels now feed the footer's `reasoning` item) is not reported
+    // missing when its fallback is present.
+    for (pi_name, fallback) in PI_FALLBACKS {
+        if !resolved.contains_key(pi_name)
+            && let Some(&fallback_color) = resolved.get(fallback)
+        {
+            resolved.insert(pi_name, fallback_color);
+        }
+    }
+
     let mut theme = base;
     let mut missing: Vec<&'static str> = Vec::new();
     for role in Role::ALL {
@@ -372,16 +393,9 @@ fn build(
         *role.style_mut(&mut theme) = style;
     }
 
-    // The pi roles no Radian role consumes yet: parse and keep (ADR 0029 decision 3), with
-    // pi's documented optional-role fallbacks.
+    // The pi roles no Radian role consumes yet: parse and keep (ADR 0029 decision 3). The
+    // optional-role fallbacks were applied above, before the role loop.
     let mut unknown: Vec<String> = Vec::new();
-    for (pi_name, fallback) in PI_FALLBACKS {
-        if !resolved.contains_key(pi_name)
-            && let Some(&fallback_color) = resolved.get(fallback)
-        {
-            resolved.insert(pi_name, fallback_color);
-        }
-    }
     for (pi_name, &color) in &resolved {
         if targets_for_pi_name(pi_name).is_empty() {
             if PI_ROLES.contains(pi_name) {
@@ -806,11 +820,10 @@ mod tests {
         // `mdHeading` and the `syntax*` family are real roles now (ADR 0028 R2), so they land
         // in the theme, not in the reserved map.
         assert_eq!(theme.md_heading.fg, Some(Color::Rgb(1, 2, 3)));
+        // `syntaxKeyword` is a real role now (main's syntax slice) and `thinkingXhigh` feeds
+        // the footer's `reasoning_xhigh` (ADR 0027 C2), so both land in the theme.
         assert_eq!(theme.syntax_keyword.fg, Some(Color::Rgb(4, 5, 6)));
-        assert_eq!(
-            theme.reserved["thinkingXhigh"].fg,
-            Some(Color::Rgb(7, 8, 9))
-        );
+        assert_eq!(theme.reasoning_xhigh.fg, Some(Color::Rgb(7, 8, 9)));
         // `selectedBg` is a role now: its color lands on the selection's background, never
         // on its foreground, and it is not kept as a reserved style.
         assert_eq!(theme.selection.bg, Some(Color::Rgb(10, 11, 12)));
@@ -993,8 +1006,9 @@ mod tests {
         // `diff_hunk` takes the accent (pi has no hunk role), kanagawa's `violet`.
         assert_eq!(theme.diff_hunk.fg, Some(Color::Rgb(0x95, 0x7F, 0xB8)));
         // Every pi role in the file is either mapped or kept; nothing was dropped.
-        // `mdHeading`/`mdLink`/… and the `syntax*` family are real roles now; `thinkingMax` is
-        // still reserved.
+        // `mdHeading`/`mdLink`/… and the `syntax*` family are real roles now, and `thinkingMax`
+        // feeds the footer's `reasoning_max` (ADR 0027 C2, through pi's optional-role fallback
+        // from `thinkingXhigh`).
         assert!(
             theme.md_heading.fg.is_some(),
             "mdHeading resolved from the fixture"
@@ -1003,7 +1017,10 @@ mod tests {
             theme.syntax_keyword.fg.is_some(),
             "syntaxKeyword resolved from the fixture"
         );
-        assert!(theme.reserved.contains_key("thinkingMax"));
+        assert_eq!(
+            theme.reasoning_max.fg, theme.reasoning_xhigh.fg,
+            "thinkingMax falls back to thinkingXhigh"
+        );
         assert!(!theme.reserved.contains_key("selectedBg"));
         assert_eq!(theme.name, ThemeName::File);
     }

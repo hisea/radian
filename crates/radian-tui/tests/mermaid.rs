@@ -4,6 +4,16 @@
 //! diagram roles' colors are asserted on real cells.
 
 use radian_tui::app::{App, EntryKind};
+
+/// Puts a test on the pre-ADR one-line status bar (`preset = classic`; ADR 0027 C2). The
+/// default footer is the two-row `pi` layout now; a geometry test keeps the layout it was
+/// written for.
+fn classic_footer(app: &mut App) {
+    app.apply_footer(&radian_host::config::TuiFooterConfig {
+        preset: Some("classic".to_string()),
+        ..Default::default()
+    });
+}
 use radian_tui::blocks::{self, ReasoningMode};
 use radian_tui::render;
 use radian_tui::tools::{DisplayModes, ToolDisplay, ToolFold};
@@ -150,6 +160,7 @@ fn the_config_flag_disables_the_diagram() {
 #[test]
 fn the_diagram_roles_come_from_the_theme() {
     let mut app = App::new("m", "s");
+    classic_footer(&mut app);
     assistant(&mut app, &fenced(FLOW, true));
     let terminal = render(&mut app, 80, 12);
     let node = style_of(&terminal, "┌").expect("a box-drawing char");
@@ -172,6 +183,7 @@ fn the_diagram_roles_come_from_the_theme() {
 #[test]
 fn a_width_change_recounts_and_redraws() {
     let mut app = App::new("m", "s");
+    classic_footer(&mut app);
     assistant(&mut app, &fenced(FLOW, true));
     let entry = &app.entries[0];
     let blocks = blocks::parse_blocks(entry.text.as_str());

@@ -547,6 +547,8 @@ fn run(
         }
         None => (radian_host::DEFAULT_THINKING_LEVEL.to_owned(), None, false),
     };
+    // Kept for the footer's `reasoning` item: `thinking` is moved into the route below.
+    let thinking_for_footer = thinking.clone();
     if legacy_thinking {
         eprintln!(
             "radian: [thinking] the legacy `--thinking {}` spelling is deprecated; use one of {}",
@@ -997,6 +999,17 @@ fn run(
     // The status bar mirrors the live policy from the first frame; the switch below is the
     // only other writer.
     app.set_auto(startup_approval.policy == radian_permissions::ApprovalPolicy::Auto);
+    // The footer's startup facts (ADR 0027 C2): the working directory, the model's display
+    // name (the id until a catalog name is known), the provider and the applied thinking
+    // level. The git branch is read once here — startup I/O is allowed; the draw path never
+    // runs git, and a later refresh goes through `App::set_git_branch`.
+    app.set_footer_facts(
+        Some(workspace_path.clone()),
+        None,
+        Some(provider_name.clone()),
+        Some(thinking_for_footer),
+    );
+    app.set_git_branch(read_git_branch(&workspace_path));
     // A plain run enters the terminal only now: every fallible check above, and the session
     // itself, have already run. (`--pick` entered it before the picker and keeps it here.)
     let (mut guard, mut terminal) = match startup_terminal {
@@ -1355,6 +1368,25 @@ fn refresh_secrets(secrets: &radian_tui::terminal::SharedSecrets) {
             list.push(key);
         }
     }
+}
+
+/// The working directory's git branch, read once at startup (ADR 0027 C2). `None` when the
+/// directory is not a repository or git is unavailable; the draw path never calls git.
+fn read_git_branch(dir: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let name = String::from_utf8(output.stdout).ok()?;
+    let name = name.trim();
+    (!name.is_empty() && name != "HEAD").then(|| name.to_string())
 }
 
 /// One argument of the resume command, quoted when it would not survive a shell.

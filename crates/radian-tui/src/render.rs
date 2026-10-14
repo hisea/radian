@@ -1131,11 +1131,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     };
     // The `@` completion list sits just above the input box (and never over an approval
     // prompt). A zero-height chunk keeps the rest of the layout identical when there is none.
+    // The status area's height follows the footer preset (ADR 0027 C2): one row for `classic`
+    // (today's line), the configured rows for `pi`.
+    let status_height = status_height(app, area.width as usize);
     let chunks = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(completion.len() as u16),
         Constraint::Length(middle),
-        Constraint::Length(1),
+        Constraint::Length(status_height),
     ])
     .split(area);
 
@@ -1408,9 +1411,73 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     frame.render_widget(
-        Paragraph::new(status_line(app, chunks[3].width as usize)),
+        Paragraph::new(status_lines(app, chunks[3].width as usize)),
         chunks[3],
     );
+}
+
+/// The status area's height: one row for the `classic` preset, the footer's rows for `pi`.
+fn status_height(app: &App, width: usize) -> u16 {
+    status_lines(app, width).len().clamp(1, 4) as u16
+}
+
+/// The status area's lines: the `classic` one-liner, or the `pi` footer's rows plus the
+/// **chrome** line when a mode is active (a queued switch, the find status, the armed quit
+/// hint, the AUTO marker, a transient note). Those are not configurable items: they are states
+/// the UI must show regardless of the footer layout (ADR 0026 D9, review).
+fn status_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+    match app.footer.preset() {
+        crate::footer::Preset::Classic => vec![status_line(app, width)],
+        crate::footer::Preset::Pi => {
+            let mut lines = app.footer.lines(app, width);
+            if let Some(chrome) = chrome_line(app, width) {
+                lines.push(chrome);
+            }
+            lines
+        }
+    }
+}
+
+/// The chrome segments that survive any footer layout, as one line (empty when none is on).
+fn chrome_line(app: &App, width: usize) -> Option<Line<'static>> {
+    let mut segments = Vec::new();
+    if let Some(next) = &app.next_model {
+        segments.push(Segment {
+            text: format!("next: {next}"),
+            style: app.theme.turn_running,
+        });
+    }
+    if let Some(next) = &app.next_thinking {
+        segments.push(Segment {
+            text: format!("next: thinking {next}"),
+            style: app.theme.turn_running,
+        });
+    }
+    if let Some(status) = app.find_state().and_then(crate::find::FindState::status) {
+        segments.push(Segment {
+            text: status,
+            style: app.theme.find,
+        });
+    }
+    if app.quit_pending.is_some() {
+        segments.push(Segment {
+            text: "Press Ctrl-C again to quit".to_string(),
+            style: app.theme.note,
+        });
+    }
+    if app.auto {
+        segments.push(Segment {
+            text: "AUTO".to_string(),
+            style: app.theme.auto,
+        });
+    }
+    if let Some(note) = &app.note {
+        segments.push(Segment {
+            text: note.clone(),
+            style: app.theme.note,
+        });
+    }
+    (!segments.is_empty()).then(|| fit_segments(segments, width, &app.theme))
 }
 
 /// The most rows a question form's box may take, border included (ADR 0024 Q7: a long option

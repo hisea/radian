@@ -737,6 +737,18 @@ fn perf_idle_redraw() {
     );
 }
 
+/// A `preset = classic` config in `dir`, for the tests whose assertion is the pre-ADR one-line
+/// status bar (ADR 0027 C2).
+fn classic_config(dir: &TempDir) -> std::path::PathBuf {
+    let path = dir.path().join("classic.toml");
+    std::fs::write(
+        &path,
+        "schema_version = 1\n[tui.footer]\npreset = \"classic\"\n",
+    )
+    .unwrap();
+    path
+}
+
 /// A valid v1 session with `n` messages, using the shared long-session generator.
 ///
 /// `radian --resume`: process start to the first frame, then `Ctrl-Home` to the top. The
@@ -789,8 +801,13 @@ fn perf_tui_resume() {
     {
         let dir = TempDir::new("resume-warmup");
         long_session::write_long_session(&dir.path().join("resume.jsonl"), "resume", 1_000, 0);
+        // The first-frame marker below is the pre-ADR one-line status bar (ADR 0027 C2 moved
+        // the context text into the itemized footer), so this runs the `classic` preset.
+        let config = classic_config(&dir);
         let mut pty = Pty::spawn(
             &[
+                "--config",
+                config.to_str().unwrap(),
                 "--model",
                 "mock",
                 "--base-url",
@@ -817,11 +834,14 @@ fn perf_tui_resume() {
         let dir = TempDir::new(&format!("resume-{n}"));
         let stats =
             long_session::write_long_session(&dir.path().join("resume.jsonl"), "resume", n, 0);
+        let config = classic_config(&dir);
         let mut first = Vec::new();
         let mut home = Vec::new();
         for _ in 0..5 {
             let mut pty = Pty::spawn(
                 &[
+                    "--config",
+                    config.to_str().unwrap(),
                     "--model",
                     "mock",
                     "--base-url",

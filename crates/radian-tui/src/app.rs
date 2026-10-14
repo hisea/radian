@@ -893,6 +893,22 @@ struct PendingExpand {
 
 pub struct App {
     pub model_name: String,
+    /// The model's display name (ADR 0027 C2 `{display_name}`): the descriptor/catalog name
+    /// when known, else the id. Set once at startup.
+    pub model_display: Option<String>,
+    /// The provider's name for the footer's `{provider}` placeholder. Set once at startup.
+    pub provider: Option<String>,
+    /// The session's working directory (the footer's `{path_home}`), and whether the git
+    /// branch was read. Both are startup facts; the branch is refreshed by the host (this
+    /// slice reads it once and exposes [`App::set_git_branch`] for the refresh).
+    pub cwd: Option<PathBuf>,
+    pub git_branch: Option<String>,
+    /// The applied thinking level (ADR 0026 D11), for the footer's `reasoning` item. A queued
+    /// switch shows the queued level until the driver applies it.
+    pub thinking_level: Option<String>,
+    /// The footer (ADR 0027 C2): its preset, glyphs and rows. Set from `[tui.footer]` at
+    /// startup; the default is the two-row `pi` preset.
+    pub footer: crate::footer::Footer,
     pub session_id: String,
     pub entries: Vec<Entry>,
     /// How many entries are currently `live` (fed by stream deltas, not yet a committed
@@ -1018,6 +1034,12 @@ impl App {
     pub fn new(model_name: impl Into<String>, session_id: impl Into<String>) -> Self {
         Self {
             model_name: model_name.into(),
+            model_display: None,
+            provider: None,
+            cwd: None,
+            git_branch: None,
+            thinking_level: None,
+            footer: crate::footer::Footer::default(),
             session_id: session_id.into(),
             entries: Vec::new(),
             live_count: 0,
@@ -1198,6 +1220,9 @@ impl App {
             self.clipboard = ClipboardMode::Osc52;
             warnings.push("tui.clipboard = \"pbcopy\" is macOS-only; using osc52".into());
         }
+        // `[tui.footer]` (ADR 0027 C2): the footer's own warnings (unknown item, placeholder,
+        // style) join the startup warnings; an unknown key is a skipped key above.
+        warnings.extend(self.apply_footer(&config.tui.footer));
         warnings.extend(
             config
                 .skipped
@@ -3639,6 +3664,45 @@ impl App {
     /// Records the workspace root, so `Tab` can complete `@` file references against it.
     pub fn set_workspace(&mut self, workspace: impl Into<PathBuf>) {
         self.workspace = Some(workspace.into());
+    }
+
+    /// The footer's startup facts (ADR 0027 C2): the working directory, the model's display
+    /// name and provider, and the applied thinking level.
+    pub fn set_footer_facts(
+        &mut self,
+        cwd: Option<PathBuf>,
+        model_display: Option<String>,
+        provider: Option<String>,
+        thinking_level: Option<String>,
+    ) {
+        self.cwd = cwd;
+        self.model_display = model_display;
+        self.provider = provider;
+        self.thinking_level = thinking_level;
+    }
+
+    /// The background-refreshed git branch (ADR 0027 C2: the draw path never runs git). The
+    /// host sets it once at startup and may refresh it later through this same setter.
+    pub fn set_git_branch(&mut self, branch: Option<String>) {
+        self.git_branch = branch;
+    }
+
+    /// The applied thinking level, once the driver reports it (ADR 0026 D11).
+    pub fn set_thinking_level(&mut self, level: Option<String>) {
+        self.thinking_level = level;
+    }
+
+    /// The footer's glyph set, for the items that draw an icon.
+    pub fn footer_glyphs(&self) -> crate::footer::Glyphs {
+        self.footer.glyphs()
+    }
+
+    /// Applies `[tui.footer]` (ADR 0027 C2). Returns the footer's warnings (unknown item,
+    /// placeholder, style), shown once at startup.
+    pub fn apply_footer(&mut self, config: &radian_host::config::TuiFooterConfig) -> Vec<String> {
+        let (footer, warnings) = crate::footer::Footer::from_config(config);
+        self.footer = footer;
+        warnings
     }
 
     /// Applies one `@` completion (Phase 4):
