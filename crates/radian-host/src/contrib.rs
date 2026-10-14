@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -265,6 +265,23 @@ impl GitContributor {
         Self { dir: dir.into() }
     }
 
+    /// Like `git`, but keeps an empty successful output as `Some("")`: a clean tree is a real
+    /// answer (zero changes), not a missing one.
+    fn git_raw(&self, args: &[&str]) -> Option<String> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&self.dir)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
     fn git(&self, args: &[&str]) -> Option<String> {
         let output = Command::new("git")
             .arg("-C")
@@ -282,22 +299,38 @@ impl GitContributor {
         (!text.is_empty()).then(|| text.to_owned())
     }
 
-    /// The values for `git_branch` and `worktree`, as blocking work.
-    fn read(&self) -> (Option<String>, Option<String>) {
+    /// The values for `git_branch`, `worktree` and the change counts, as blocking work.
+    fn read(&self) -> (Option<String>, Option<String>, Option<(usize, usize)>) {
         let branch = self.git(&["rev-parse", "--abbrev-ref", "HEAD"]);
         let branch = branch.filter(|name| name != "HEAD");
         // A linked worktree has a `--git-dir` different from the `--git-common-dir`; its name
-        // is the worktree directory's basename.
-        let git_dir = self.git(&["rev-parse", "--absolute-git-dir"]);
+        // is the worktree directory's basename. Both come from the same resolution, so they
+        // are comparable even when one is relative (the main checkout's `.git`).
+        let git_dir = self.git(&["rev-parse", "--git-dir"]);
         let common = self.git(&["rev-parse", "--git-common-dir"]);
         let worktree = match (git_dir, common) {
-            (Some(dir), Some(common)) if Path::new(&dir) != Path::new(&common) => self
+            (Some(dir), Some(common)) if dir != common => self
                 .dir
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned()),
             _ => None,
         };
-        (branch, worktree)
+        // ADR 0027 C3 / revision 1: the change counts (modified tracked, untracked) are the
+        // data slots the numbers row fills in slice 2b. `git status --porcelain` in the
+        // background task, never at draw time.
+        let changes = self.git_raw(&["status", "--porcelain"]).map(|status| {
+            let mut modified = 0usize;
+            let mut untracked = 0usize;
+            for line in status.lines() {
+                if line.starts_with("??") {
+                    untracked += 1;
+                } else if !line.trim().is_empty() {
+                    modified += 1;
+                }
+            }
+            (modified, untracked)
+        });
+        (branch, worktree, changes)
     }
 }
 
@@ -307,7 +340,7 @@ impl StatusContributor for GitContributor {
     }
 
     fn items(&self) -> &'static [&'static str] {
-        &["git_branch", "worktree"]
+        &["git_branch", "worktree", "git_modified", "git_untracked"]
     }
 
     fn period(&self) -> Duration {
@@ -319,35 +352,44 @@ impl StatusContributor for GitContributor {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Contribution>, String>> + Send + '_>> {
         Box::pin(async move {
             let dir = self.dir.clone();
-            let (branch, worktree) =
+            let (branch, worktree, changes) =
                 tokio::task::spawn_blocking(move || GitContributor::new(dir).read())
                     .await
                     .map_err(|error| format!("the git refresh task failed: {error}"))?;
-            // Not a repository: `git_branch` is empty (the footer hides it), and `worktree`
-            // too. An empty contribution is the honest "no data".
-            let segments = |value: Option<String>| {
-                value.map_or_else(Vec::new, |text| {
-                    vec![Segment::new(text, SegmentRole::Normal)]
-                })
-            };
-            Ok(vec![
-                Contribution {
+            // Not a repository: no value. An item with no value is not written at all, so the
+            // footer hides it and an empty value never counts as a change.
+            let mut contributions = Vec::new();
+            if let Some(branch) = branch {
+                contributions.push(Contribution {
                     item: "git_branch".to_owned(),
-                    segments: segments(branch),
+                    segments: vec![Segment::new(branch, SegmentRole::Normal)],
                     stale: false,
-                },
-                Contribution {
+                });
+            }
+            if let Some(name) = worktree {
+                // `worktree` shows a label (the accent) plus the name.
+                contributions.push(Contribution {
                     item: "worktree".to_owned(),
-                    // `worktree` shows a label (the accent) plus the name.
-                    segments: worktree.map_or_else(Vec::new, |text| {
-                        vec![
-                            Segment::new("worktree ", SegmentRole::Accent),
-                            Segment::new(text, SegmentRole::Normal),
-                        ]
-                    }),
+                    segments: vec![
+                        Segment::new("worktree ", SegmentRole::Accent),
+                        Segment::new(name, SegmentRole::Normal),
+                    ],
                     stale: false,
-                },
-            ])
+                });
+            }
+            if let Some((modified, untracked)) = changes {
+                contributions.push(Contribution {
+                    item: "git_modified".to_owned(),
+                    segments: vec![Segment::new(modified.to_string(), SegmentRole::Normal)],
+                    stale: false,
+                });
+                contributions.push(Contribution {
+                    item: "git_untracked".to_owned(),
+                    segments: vec![Segment::new(untracked.to_string(), SegmentRole::Normal)],
+                    stale: false,
+                });
+            }
+            Ok(contributions)
         })
     }
 }
