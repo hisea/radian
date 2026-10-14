@@ -1071,14 +1071,14 @@ mod tests {
         files.sort();
         assert_eq!(files.len(), 17, "16 bundled themes + kanagawa-wave");
         for path in files {
-            let name = path.file_stem().expect("a name").to_string_lossy().into_owned();
+            let name = path
+                .file_stem()
+                .expect("a name")
+                .to_string_lossy()
+                .into_owned();
             let text = std::fs::read_to_string(&path).expect("readable");
             let (theme, warnings) = load(Some(&name), false, true, Some(&dir), &[]);
-            assert_eq!(
-                warnings,
-                Vec::<String>::new(),
-                "{name} produced warnings"
-            );
+            assert_eq!(warnings, Vec::<String>::new(), "{name} produced warnings");
             assert_eq!(theme.name, ThemeName::File, "{name} loaded as a file theme");
             // The three levels exist (a level may legitimately be the terminal default).
             for (level, style) in [
