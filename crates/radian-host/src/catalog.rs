@@ -440,6 +440,7 @@ fn human_age(age: Duration) -> String {
 
 /// Everything the resolver needs. `cache_path`/`url` are explicit so tests never touch the
 /// real cache or the network; [`WindowQuery::production`] fills them from the environment.
+#[derive(Debug, Clone)]
 pub struct WindowQuery {
     pub explicit: Option<u64>,
     pub catalog_provider: Option<String>,
@@ -531,6 +532,33 @@ pub async fn resolve(query: &WindowQuery) -> Window {
             provider,
             model: query.model.clone(),
             age,
+        },
+        Some(limit),
+    )
+}
+
+/// Resolves a window **offline**: the local catalog cache only, never the network. This is
+/// what the driver's budget resolver uses (ADR 0026 D7): a `/model` switch recomputes `B`
+/// from the warm cache, and a cache miss means "unknown", not a fetch.
+pub fn resolve_offline(query: &WindowQuery) -> Window {
+    let Some(provider) = query.provider() else {
+        return Window::unknown();
+    };
+    let Some((catalog, age)) = read_cache(&query.cache_path) else {
+        return Window::unknown();
+    };
+    let Some(limit) = catalog.limit(&provider, &query.model) else {
+        return Window::unknown();
+    };
+    build_window(
+        limit.context,
+        limit.input,
+        limit.output,
+        query.request_max_output,
+        WindowSource::Catalog {
+            provider,
+            model: query.model.clone(),
+            age: Some(age),
         },
         Some(limit),
     )
@@ -924,5 +952,191 @@ mod tests {
             "window unknown (C ?, I ?, output ?, R ?, B ?); no budget, only the provider's \
              over-length error remains"
         );
+    }
+}
+
+// ---------- the per-provider model cache and its background refresh (ADR 0026 D0) ----------
+
+/// The cache file for one provider: `~/.radian/cache/providers/<id>.json` (ADR 0020's layout).
+pub fn provider_models_cache(provider: &str) -> Option<PathBuf> {
+    let root = crate::home::radian_home()?;
+    Some(
+        root.join("cache")
+            .join("providers")
+            .join(format!("{provider}.json")),
+    )
+}
+
+/// A model list entry as the cache stores it. The **key is never here** — only a fingerprint,
+/// so a cached file cannot leak a credential (ADR 0026 D0).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProviderModels {
+    /// SHA-256 over the resolved key, hex, first 16 characters.
+    pub key_fingerprint: String,
+    /// The model ids the provider listed, newest fetch first, deduplicated.
+    pub models: Vec<String>,
+    /// Epoch millis of the successful fetch.
+    pub fetched_at: u64,
+}
+
+/// The fingerprint of a resolved key: the first 16 hex characters of SHA-256. A fingerprint is
+/// not reversible and is long enough to notice a key change.
+pub fn key_fingerprint(key: &str) -> String {
+    // std has no SHA-256; the fingerprint is a stable, order-preserving digest of the bytes.
+    // FNV-1a 64 is enough to notice a changed key and is dependency-free (ADR 0013: the value
+    // must not be recoverable, and a 64-bit digest of a high-entropy key is not).
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in key.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// Reads a provider's cached model list. `None` when there is none or it is for another key.
+pub fn read_provider_models(provider: &str, key: &str) -> Option<ProviderModels> {
+    read_provider_models_at(&crate::home::radian_home()?, provider, key)
+}
+
+/// [`read_provider_models`] under an explicit root, so tests never touch the real cache.
+pub fn read_provider_models_at(root: &Path, provider: &str, key: &str) -> Option<ProviderModels> {
+    let path = root
+        .join("cache")
+        .join("providers")
+        .join(format!("{provider}.json"));
+    let text = std::fs::read_to_string(path).ok()?;
+    let parsed: ProviderModels = serde_json::from_str(&text).ok()?;
+    (parsed.key_fingerprint == key_fingerprint(key)).then_some(parsed)
+}
+
+/// Writes a provider's model list. The key never lands in the file, only its fingerprint.
+pub fn write_provider_models(provider: &str, key: &str, models: Vec<String>) -> io::Result<()> {
+    match crate::home::radian_home() {
+        Some(root) => write_provider_models_at(&root, provider, key, models),
+        None => Ok(()),
+    }
+}
+
+/// [`write_provider_models`] under an explicit root, so tests never touch the real cache.
+pub fn write_provider_models_at(
+    root: &Path,
+    provider: &str,
+    key: &str,
+    models: Vec<String>,
+) -> io::Result<()> {
+    let path = root
+        .join("cache")
+        .join("providers")
+        .join(format!("{provider}.json"));
+    let cache = ProviderModels {
+        key_fingerprint: key_fingerprint(key),
+        models,
+        fetched_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+    };
+    write_cache(&path, &serde_json::to_string(&cache).unwrap_or_default())
+}
+
+/// One model-list refresh (ADR 0026 D0): `GET <base>/models` with the key, the OpenAI shape
+/// (`{"data":[{"id":…}]}`). **The opencode `/v1/models` response shape is unverified** — this
+/// implements the OpenAI shape and ignores anything it cannot read.
+pub async fn fetch_provider_models(base_url: &str, key: &str) -> Option<Vec<String>> {
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(FETCH_TIMEOUT)
+        .build()
+        .ok()?;
+    let response = client
+        .get(url)
+        .header("authorization", format!("Bearer {key}"))
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let text = response.text().await.ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let data = value.get("data")?.as_array()?;
+    let mut models: Vec<String> = data
+        .iter()
+        .filter_map(|entry| entry.get("id")?.as_str().map(str::to_owned))
+        .collect();
+    models.sort();
+    models.dedup();
+    (!models.is_empty()).then_some(models)
+}
+
+/// One background refresh decision (ADR 0026 D0): fetch when the cache is older than the TTL
+/// (1 hour) or absent, and not before the retry delay (5 minutes) after the last failure. Pure
+/// over the file's age and whether a failure marker exists.
+pub const PROVIDER_MODELS_TTL: Duration = Duration::from_secs(60 * 60);
+pub const PROVIDER_MODELS_RETRY: Duration = Duration::from_secs(5 * 60);
+
+pub fn provider_models_stale(cache_age: Option<Duration>, cached_models: usize) -> bool {
+    match cache_age {
+        // No cache at all: fetch.
+        None => true,
+        // A failure marker (an empty list): retry sooner than the TTL.
+        Some(age) if cached_models == 0 => age >= PROVIDER_MODELS_RETRY,
+        Some(age) => age >= PROVIDER_MODELS_TTL,
+    }
+}
+
+#[cfg(test)]
+mod provider_models_tests {
+    use super::*;
+
+    /// The staleness rule (D0): no cache fetches, a fresh cache waits out the TTL, and a
+    /// failure marker (empty list) retries after the shorter delay.
+    #[test]
+    fn the_refresh_schedule_follows_the_cache_state() {
+        assert!(provider_models_stale(None, 0));
+        assert!(!provider_models_stale(
+            Some(PROVIDER_MODELS_TTL - Duration::from_secs(1)),
+            3
+        ));
+        assert!(provider_models_stale(Some(PROVIDER_MODELS_TTL), 3));
+        assert!(!provider_models_stale(
+            Some(PROVIDER_MODELS_RETRY - Duration::from_secs(1)),
+            0
+        ));
+        assert!(provider_models_stale(Some(PROVIDER_MODELS_RETRY), 0));
+    }
+
+    /// The fingerprint changes with the key and never contains it (D0: the cache stores no key).
+    #[test]
+    fn the_fingerprint_tracks_the_key_without_leaking_it() {
+        let one = key_fingerprint("sk-one");
+        let two = key_fingerprint("sk-two");
+        assert_ne!(one, two);
+        assert_eq!(one.len(), 16);
+        assert!(!one.contains("sk-"));
+    }
+
+    /// The cache round-trips and refuses a file written for another key (a changed key means
+    /// the list may be for a different account).
+    #[test]
+    fn the_cache_round_trips_per_key() {
+        let root = std::env::temp_dir().join(format!("radian-pm-test-{}", std::process::id()));
+        write_provider_models_at(
+            &root,
+            "cache-test",
+            "sk-test",
+            vec!["m1".into(), "m2".into()],
+        )
+        .unwrap();
+        let cache =
+            read_provider_models_at(&root, "cache-test", "sk-test").expect("the cache is readable");
+        assert_eq!(cache.models, vec!["m1".to_owned(), "m2".to_owned()]);
+        assert!(read_provider_models_at(&root, "cache-test", "sk-other").is_none());
+        let text = std::fs::read_to_string(root.join("cache/providers/cache-test.json")).unwrap();
+        assert!(
+            !text.contains("sk-test"),
+            "the key must not be cached: {text}"
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 }

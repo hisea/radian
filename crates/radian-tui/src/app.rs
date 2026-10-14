@@ -384,6 +384,29 @@ pub enum Input {
     MemoryCommandDone(MemoryResult),
     /// A manual `/compact` finished (the result of [`Effect::Compact`]).
     CompactDone(Result<CompactionOutcome, String>),
+    /// A `/thinking` level was clamped against the current model's map (D11): `applied` is the
+    /// level that will be used (`None` when the model supports no level at all) and
+    /// `supported` the levels the completion offered.
+    ThinkingChecked {
+        requested: String,
+        applied: Option<String>,
+        supported: Vec<String>,
+    },
+    /// A `/model` target was vetted by the loop (ADR 0026 D5/D7). `tokens` is the current
+    /// context estimate `T` (`None` = unknown, so it cannot exceed anything), `budget` the
+    /// new model's `B'` (`None` = unknown, so no comparison is possible).
+    ModelChecked {
+        provider: String,
+        model: String,
+        tokens: Option<u64>,
+        budget: Option<u64>,
+    },
+    /// The compaction before a switch finished (D7). Success queues the switch.
+    SwitchCompacted {
+        provider: String,
+        model: String,
+        result: Result<CompactionOutcome, String>,
+    },
     /// A `/sessions`, `/export` or `/fork` finished: the notices to show.
     SessionDone(Vec<String>),
     /// The session's facade refused a command (ADR 0023 U5): an undeclared capability. The UI
@@ -492,6 +515,23 @@ pub enum Effect {
     },
     /// Run a manual `/compact` on the runtime, between turns.
     Compact { instructions: Option<String> },
+    /// A `/model` target to vet: the loop resolves the credential and the new model's budget
+    /// (ADR 0026 D5/D7) and reports back as `Input::ModelChecked`.
+    ModelSwitch { provider: String, model: String },
+    /// Compact the context to make room for a switch (D7): the loop runs the same compaction
+    /// path as `/compact`, targeting the **new** model's budget.
+    CompactForSwitch {
+        provider: String,
+        model: String,
+        budget: u64,
+    },
+    /// Queue a model route for the next turn boundary (D5). The change is a route only.
+    QueueModel { provider: String, model: String },
+    /// A `/thinking` level to clamp against the current route's map (ADR 0026 D11); the loop
+    /// reports back as `Input::ThinkingChecked`.
+    SetThinking { level: String },
+    /// Queue a thinking level for the next turn boundary (D11): a level name only.
+    QueueThinking { level: String },
     /// Run a `/sessions`, `/export` or `/fork` request.
     Session(command::SessionOutcome),
     /// Load this workspace's sessions and open the picker overlay (`/sessions`). The result is
@@ -719,6 +759,10 @@ pub struct App {
     /// The host fetch the current completion waits for: a result is applied only when it
     /// answers *this* fetch, so a stale answer cannot land on a newer line.
     pending_fetch: Option<command::Fetch>,
+    /// The queued switch, shown as `next: <provider/model>` until the driver applies it.
+    pub next_model: Option<String>,
+    /// The queued thinking level (D11), cleared when the driver applies it.
+    pub next_thinking: Option<String>,
     /// The color theme (config `tui.theme`, `NO_COLOR`).
     pub theme: Theme,
     /// The key bindings (config `tui.keybindings`), defaulting to the pre-config key table.
@@ -778,6 +822,8 @@ impl App {
             pending_expand: None,
             slash_completion: None,
             pending_fetch: None,
+            next_model: None,
+            next_thinking: None,
             theme: Theme::default(),
             keymap: Keymap::default(),
             input_style: InputStyle::default(),
@@ -1738,6 +1784,22 @@ impl App {
             }
             Input::MemoryCommandDone(result) => self.memory_command_done(result),
             Input::CompactDone(result) => self.compact_done(result),
+            Input::ThinkingChecked {
+                requested,
+                applied,
+                supported,
+            } => self.thinking_checked(requested, applied, supported),
+            Input::ModelChecked {
+                provider,
+                model,
+                tokens,
+                budget,
+            } => self.model_checked(provider, model, tokens, budget),
+            Input::SwitchCompacted {
+                provider,
+                model,
+                result,
+            } => self.switch_compacted(provider, model, result),
             Input::SessionDone(notices) => {
                 for notice in notices {
                     self.push_notice(notice);
@@ -2306,6 +2368,19 @@ impl App {
         else {
             return UpdateResult::none();
         };
+        // A `/model` confirm (D7): y compacts first, n cancels the switch. The modal's y/n are
+        // hardcoded (ADR 0023 U4), exactly like the approval's.
+        if let Some((provider, model, budget)) = pending.switch {
+            if !confirmed {
+                self.push_notice("cancelled; the model is unchanged");
+                return UpdateResult::dirty();
+            }
+            return UpdateResult::effect(Effect::CompactForSwitch {
+                provider,
+                model,
+                budget,
+            });
+        }
         if !confirmed {
             self.push_notice("cancelled");
             return UpdateResult::dirty();
@@ -2318,6 +2393,11 @@ impl App {
 
     /// ADR 0017: a failed turn is shown in the transcript; the session stays open.
     fn apply_runtime_event(&mut self, event: &RuntimeEvent) -> UpdateResult {
+        if matches!(event, RuntimeEvent::ConfigChanged { .. }) {
+            // The driver applied the queued change: the status bar's `next:` promise is done.
+            self.next_model = None;
+            self.next_thinking = None;
+        }
         if let RuntimeEvent::TurnFailed { message, .. } = event {
             self.entries.push(Entry::new(
                 EntryKind::Notice,
@@ -2431,6 +2511,14 @@ impl App {
 
     /// Shows the `/…` candidates: the overlay rows, and the state Tab/Enter accepts from.
     fn set_slash(&mut self, range: std::ops::Range<usize>, candidates: Vec<command::Candidate>) {
+        if candidates.is_empty() {
+            // Nothing to offer at this level: an empty list must not stay "open", or the next
+            // Enter would be swallowed accepting a candidate that does not exist (and the
+            // line could never be submitted).
+            self.slash_completion = None;
+            self.completion_clear();
+            return;
+        }
         let width = candidates
             .iter()
             .map(|candidate| candidate.insert.chars().count())
@@ -2505,7 +2593,11 @@ impl App {
             MemoryResult::NeedsConfirmation { command, prompt } => {
                 self.entries
                     .push(Entry::new(EntryKind::Notice, format!("{prompt} [y/N]")));
-                self.push_modal(Modal::ConfirmCommand(PendingCommand { command, prompt }));
+                self.push_modal(Modal::ConfirmCommand(PendingCommand {
+                    command,
+                    prompt,
+                    switch: None,
+                }));
             }
             MemoryResult::Failed(message) => self.push_notice(message),
         }
@@ -2652,6 +2744,13 @@ impl App {
                 }
                 UpdateResult::effect(Effect::Session(command::SessionOutcome::Fork))
             }
+            command::Outcome::Thinking(level) => {
+                UpdateResult::effect(Effect::SetThinking { level })
+            }
+            command::Outcome::Model(switch) => UpdateResult::effect(Effect::ModelSwitch {
+                provider: switch.provider,
+                model: switch.model,
+            }),
             // `/login`: the wizard is app state (pure); its network and file work are effects
             // the loop runs (ADR 0023 U3). An explicit `/login <id>` skips the choice step.
             command::Outcome::Login(provider) => {
@@ -2705,6 +2804,96 @@ impl App {
                 UpdateResult::effect(Effect::SetApprovalPolicy { on })
             }
             command::Outcome::Message => UpdateResult::none(),
+        }
+    }
+
+    /// The `/model` decision (ADR 0026 D5/D7). The loop has already refused a provider without
+    /// a credential; here the app decides between queueing directly and asking first.
+    fn model_checked(
+        &mut self,
+        provider: String,
+        model: String,
+        tokens: Option<u64>,
+        budget: Option<u64>,
+    ) -> UpdateResult {
+        match (tokens, budget) {
+            (Some(t), Some(b)) if t > b => {
+                // D7: the switch does not fit, so compaction comes first — with the user's yes.
+                let prompt = format!(
+                    "switching to {provider}/{model} needs a compact first: about {t} tokens, \
+                     over the new model's budget {b}. compact and switch? [y] compact and switch \
+                     [n] cancel"
+                );
+                // The payload's `command` is unused on this path: `confirm_command` routes
+                // on `switch` first, so `y` can never run a memory command. `Purge` is the
+                // one variant a refusal can never reach.
+                let command = radian_host::memory::commands::MemoryCommand::List {
+                    global: false,
+                    project: false,
+                    all: false,
+                    json: false,
+                };
+                self.push_modal(Modal::ConfirmCommand(PendingCommand {
+                    command,
+                    prompt,
+                    switch: Some((provider, model, b)),
+                }));
+                UpdateResult::dirty()
+            }
+            _ => self.queue_model(provider, model),
+        }
+    }
+
+    /// Queues the route (D5) and says what happens next. The cache warning is the accepted
+    /// cost of a switch (ADR 0026 已接受的代价).
+    fn queue_model(&mut self, provider: String, model: String) -> UpdateResult {
+        self.next_model = Some(format!("{provider}/{model}"));
+        self.push_notice(format!(
+            "next turn: {provider}/{model}; the first turn after a switch will not hit the cache"
+        ));
+        UpdateResult::effect(Effect::QueueModel { provider, model })
+    }
+
+    /// The clamped `/thinking` (D11): queue it, and say so when the clamp moved the level.
+    fn thinking_checked(
+        &mut self,
+        requested: String,
+        applied: Option<String>,
+        supported: Vec<String>,
+    ) -> UpdateResult {
+        let Some(applied) = applied else {
+            self.push_notice("this model supports no thinking level; nothing changed");
+            return UpdateResult::dirty();
+        };
+        if applied != requested {
+            self.push_notice(format!(
+                "{requested} → {applied} (this model supports {})",
+                supported.join("/")
+            ));
+        }
+        self.next_thinking = Some(applied.clone());
+        self.push_notice(format!("next turn: thinking {applied}"));
+        UpdateResult::effect(Effect::QueueThinking { level: applied })
+    }
+
+    /// The pre-switch compaction finished (D7): only success queues the switch.
+    fn switch_compacted(
+        &mut self,
+        provider: String,
+        model: String,
+        result: Result<CompactionOutcome, String>,
+    ) -> UpdateResult {
+        match result {
+            Ok(_) => {
+                self.push_notice(format!("compacted; switching to {provider}/{model}"));
+                self.queue_model(provider, model)
+            }
+            Err(error) => {
+                self.push_notice(format!(
+                    "the switch was not queued: the compaction failed ({error})"
+                ));
+                UpdateResult::dirty()
+            }
         }
     }
 

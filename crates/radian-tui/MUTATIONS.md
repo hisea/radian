@@ -626,3 +626,11 @@ HEAD，结束后删除）· 每个变异改完跑对应测试、`git checkout --
 **本片另加的两个行为断言**（不是变异，是回归钉）：`pty_pointer_motion_alone_draws_no_frame`
 （无按键移动 40 次、帧数不涨——SC1 的行为面）和
 `pty_quit_closes_button_motion_reporting`（退出序列精确为 `1006l 1002l 1000l`——SC3 的精确面）。
+
+## ADR 0026 D8 审查 M1：picker 先于模型解析（2026-10-14）
+
+Base `0b9785b` · 一次性 worktree `/tmp/radian-pi-mut-m1`，跑完删除。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M1a | 只认命令行带 id 的 `--resume`（`resumed_route` 读 `cli.resume` 而非解析后的 `resume`） | `pty_a_picked_resume_uses_the_journals_model` | ✅ |

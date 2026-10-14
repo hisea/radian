@@ -81,6 +81,8 @@ fn write_auth_json(root: &Path, envs: &[(&str, &str)]) {
     for (name, value) in envs {
         let provider = if *name == "ANTHROPIC_API_KEY" {
             "anthropic"
+        } else if *name == "OPENCODE_GO_API_KEY" {
+            "opencode-go"
         } else if name.ends_with("KEY") {
             "openai-compatible"
         } else {
@@ -2733,10 +2735,10 @@ fn pty_session_id_already_exists_points_at_resume() {
 #[test]
 fn pty_anthropic_only_flags_are_refused_under_openai_compatible() {
     let _serial = pty_guard();
-    for (label, extra) in [
-        ("thinking", ["--thinking", "adaptive"]),
-        ("max-tokens", ["--max-tokens", "100"]),
-    ] {
+    // `--thinking` left this check in ADR 0026 D11 (it rides both wire protocols now); only
+    // `--max-tokens` remains Anthropic-only.
+    {
+        let (label, extra) = ("max-tokens", ["--max-tokens", "100"]);
         let dir = TempDir::new(&format!("flag-{label}"));
         let session_dir = dir.path().join("sessions");
         std::fs::create_dir_all(&session_dir).unwrap();
@@ -5383,6 +5385,326 @@ async fn pty_a_long_command_keeps_the_approval_keys_visible() {
         pty.wait_for_screen("APPROVAL-FIT-RAN", 20),
         "y must run the command: {}",
         pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
+}
+
+/// `/model` switches the wire: after the switch the requests go to the **new** mock server
+/// with the new protocol (ADR 0026 D5, D6 — here opencode-go → anthropic).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_model_switch_sends_the_next_turn_to_the_new_provider() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("model-switch");
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let openai_server = MockServer::start(vec![text_reply("FIRST-PROVIDER-OK")]).await;
+    let anthropic_server =
+        anth::MockServer::start(vec![anth_text_reply("SWITCHED-PROVIDER-OK")]).await;
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &openai_server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "model-switch",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[
+            ("ANTHROPIC_API_KEY", "sk-ant-switch-test"),
+            ("RADIAN_BASE_URL", &anthropic_server.base_url),
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"one\r");
+    assert!(
+        pty.wait_for_screen("FIRST-PROVIDER-OK", 20),
+        "the first turn goes to the startup provider: {}",
+        pty.screen()
+    );
+    // The switch: the anthropic descriptor's endpoint comes from the credential's env. The
+    // first Enter accepts the slash completion (the owner's rule: Enter picks, never runs);
+    // the second submits the line.
+    pty.send(b"/model anthropic/claude-x\r\r");
+    assert!(
+        pty.wait_for_screen("next turn: anthropic/claude-x", 10),
+        "the status bar shows the queued switch: {}",
+        pty.screen()
+    );
+    pty.send(b"two\r");
+    assert!(
+        pty.wait_for_screen("SWITCHED-PROVIDER-OK", 20),
+        "the next turn goes to the new provider: {}",
+        pty.screen()
+    );
+    // The Messages API request reached the anthropic mock, with the key from auth.json.
+    let requests = anthropic_server.requests();
+    assert_eq!(requests.len(), 1, "one anthropic request");
+    assert_eq!(requests[0].path, "/v1/messages");
+    assert_eq!(requests[0].header("x-api-key"), Some("sk-ant-switch-test"));
+    // The status marker is spent (the transcript's notice stays, by design).
+    assert!(
+        pty.wait_until(10, |screen| !screen.contains("next: anthropic/claude-x")),
+        "the switch applied: {}",
+        pty.screen()
+    );
+    // D5: the durable change is a route; the auth.json key is nowhere in the journal.
+    let journal = std::fs::read_to_string(sessions.join("model-switch.jsonl")).unwrap();
+    assert!(
+        !journal.contains("sk-ant-switch-test"),
+        "the key reached the journal"
+    );
+    assert!(
+        journal.contains("\"model{\"provider\":\"anthropic\"") || journal.contains("anthropic"),
+        "the switch is journaled"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
+}
+
+/// D8: a resume uses the last switched model from the journal, with no flags.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_resume_replays_the_switched_model() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("model-resume");
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let openai_server = MockServer::start(vec![text_reply("OPENAI-RESUME")]).await;
+    let anthropic_server = anth::MockServer::start(vec![anth_text_reply("ANTHROPIC-RESUME")]).await;
+    // Turn 1 on the startup provider, then the switch, then turn 2 on anthropic.
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &openai_server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "model-resume",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[
+            ("ANTHROPIC_API_KEY", "sk-ant-resume-test"),
+            ("RADIAN_BASE_URL", &anthropic_server.base_url),
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"go\r");
+    assert!(pty.wait_for_screen("OPENAI-RESUME", 20), "{}", pty.screen());
+    pty.send(b"/model anthropic/claude-x\r\r");
+    assert!(
+        pty.wait_for_screen("next turn: anthropic/claude-x", 10),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"again\r");
+    assert!(
+        pty.wait_for_screen("ANTHROPIC-RESUME", 20),
+        "{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
+    drop(pty);
+
+    // Resume with no model flags: the journal's last change decides.
+    let anthropic_server2 =
+        anth::MockServer::start(vec![anth_text_reply("RESUMED-ON-ANTHROPIC")]).await;
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--resume",
+            "model-resume",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[
+            ("ANTHROPIC_API_KEY", "sk-ant-resume-test"),
+            ("RADIAN_BASE_URL", &anthropic_server2.base_url),
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"third\r");
+    assert!(
+        pty.wait_for_screen("RESUMED-ON-ANTHROPIC", 20),
+        "the resumed session stays on the switched model: {}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
+}
+
+/// `/thinking medium` on deepseek-v4.1-flash clamps **up** to high (ADR 0026 D11: it supports
+/// low/high/max), names the clamp, and the next request carries the wire value as
+/// `reasoning_effort`. `medium` matches no candidate, so Enter submits the typed level.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_thinking_clamps_up_and_sends_reasoning_effort() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("thinking-clamp");
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("THINKING-OK")]).await;
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--provider",
+            "opencode-go",
+            "--model",
+            "deepseek-v4.1-flash",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "thinking-clamp",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[
+            ("OPENCODE_GO_API_KEY", "sk-go-thinking"),
+            ("RADIAN_BASE_URL", &server.base_url),
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"/thinking medium\r");
+    assert!(
+        pty.wait_for_screen("medium → high", 10),
+        "the clamp is named: {}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("next turn: thinking high", 10),
+        "the clamped level is queued: {}",
+        pty.screen()
+    );
+    pty.send(b"go\r");
+    assert!(pty.wait_for_screen("THINKING-OK", 20), "{}", pty.screen());
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1, "one request");
+    assert_eq!(
+        requests[0].json()["reasoning_effort"],
+        "high",
+        "the clamped level is on the wire: {}",
+        requests[0].json()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
+}
+
+/// Review M1: a valueless `--resume` decides the session in the picker, and the model block
+/// runs **after** it, so the journal's last model change is the one resolved (status bar and
+/// request alike). The config's model (an OpenAI mock) must not be used.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_picked_resume_uses_the_journals_model() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("pick-model");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let workspace = std::fs::canonicalize(&ws)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    // A session whose journal switched to anthropic/claude-x.
+    let path = sessions.join("switched.jsonl");
+    let journal = radian_session::SessionJournal::create(
+        &path,
+        "switched",
+        radian_session::SessionCreatedData::new(&workspace, json!({})),
+    )
+    .unwrap();
+    use agent_core::TranscriptJournal;
+    journal
+        .append(agent_core::JournalRecord::Message {
+            index: 0,
+            message: agent_core::Message::user("earlier"),
+        })
+        .await
+        .unwrap();
+    journal
+        .append_runtime_event(radian_session::RuntimeEvent::ConfigChanged {
+            revision: 1,
+            change: radian_host::ModelRoute::new("anthropic", "claude-x").to_value(),
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    // The config's model is the OpenAI mock; the journal says anthropic.
+    let openai_server = MockServer::start(vec![text_reply("CONFIG-MODEL")]).await;
+    let anthropic_server = anth::MockServer::start(vec![anth_text_reply("JOURNAL-MODEL")]).await;
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"mock\"\n\
+             base_url = \"{}\"\n",
+            openai_server.base_url
+        ),
+    )
+    .unwrap();
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--resume",
+        ],
+        &[
+            ("RADIAN_CONFIG", config.to_str().unwrap()),
+            ("ANTHROPIC_API_KEY", "sk-ant-picked"),
+            ("RADIAN_BASE_URL", &anthropic_server.base_url),
+        ],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("switched", 10),
+        "the picker did not list the session: {}",
+        pty.screen()
+    );
+    pty.send(b"\r");
+    assert!(
+        pty.wait_for_screen("message", 10),
+        "the picked session did not open: {}",
+        pty.screen()
+    );
+    // The status bar names the journal's model, not the config's.
+    assert!(
+        pty.wait_until(10, |screen| screen.contains("claude-x")),
+        "the status bar must show the journal's model: {}",
+        pty.screen()
+    );
+    pty.send(b"go\r");
+    assert!(
+        pty.wait_for_screen("JOURNAL-MODEL", 20),
+        "the request must go to the journal's provider: {}",
+        pty.screen()
+    );
+    assert!(
+        openai_server.requests().is_empty(),
+        "the config model must not be used"
     );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());

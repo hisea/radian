@@ -28,9 +28,9 @@ use clap::Parser;
 use radian_host::memory::MemoryService;
 use radian_host::memory::commands::{self, CommandError, MemoryCommand};
 use radian_host::{
-    DEFAULT_MAX_TOKENS, HostModel, ModelArgs, Provider, SESSION_PLACEHOLDER, Thinking, build_model,
-    check_provider_flags, generate_session_id, load_mcp_config, parse_headers, resolve_workspace,
-    validate_session_id,
+    DEFAULT_MAX_TOKENS, ModelArgs, Provider, SESSION_PLACEHOLDER, SessionFacade, Thinking,
+    build_model, check_provider_flags, generate_session_id, load_mcp_config, parse_headers,
+    resolve_workspace, validate_session_id,
 };
 use radian_permissions::{Approver, AuditSink, PermissionHooks};
 use radian_runtime::{CancelCause, Inbox, InboxError};
@@ -343,21 +343,6 @@ fn finish(result: Result<(), OutputError>) -> i32 {
     }
 }
 
-/// The `--model` value. Clap requires it unless `--list`, `--export` or `--search` is present,
-/// so a conversation always has one; this makes the failure explicit instead of a panic if
-/// that invariant ever changes.
-fn model_name<'a>(
-    cli: &'a Cli,
-    config: &'a radian_host::config::Config,
-) -> Result<&'a str, SetupError> {
-    cli.model
-        .as_deref()
-        .or(config.model.model.as_deref())
-        .ok_or_else(|| {
-            SetupError("no model: pass --model, or set model.model in the config file".into())
-        })
-}
-
 /// The `--format` value for `--export`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 enum ExportFormat {
@@ -651,7 +636,12 @@ async fn run(mut cli: Cli) -> i32 {
 }
 
 struct Setup {
-    model: HostModel,
+    model: radian_host::SwitchableModel,
+    /// The descriptor id the run started with (the switch vocabulary, ADR 0026 D5).
+    provider_id: String,
+    config_slot: std::sync::Arc<radian_runtime::ConfigSlot>,
+    config_queue: std::sync::Arc<radian_runtime::ConfigQueue>,
+    budget_for: radian_runtime::BudgetFor,
     /// The provider actually chosen, for the session's config snapshot.
     provider: Provider,
     servers: Vec<McpServerConfig>,
@@ -699,7 +689,26 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
             radian_host::SUPPORTED_SCHEMA_VERSION
         );
     }
-    let model_name = model_name(cli, &config)?.to_owned();
+    // ADR 0026 D8: on a resume the journal's last model change outranks the config file (the
+    // command line still outranks both, which `model_name` already enforces by being tried
+    // first).
+    let resumed_route = match cli.resume.as_ref() {
+        Some(id) => match session_dir(cli) {
+            Ok(dir) => radian_host::resumed_model_route(&dir, id),
+            Err(_) => None,
+        },
+        None => None,
+    };
+    let model_name = match cli.model.as_deref() {
+        Some(model) => model.to_owned(),
+        None => resumed_route
+            .as_ref()
+            .map(|route| route.model.clone())
+            .or_else(|| config.model.model.clone())
+            .ok_or_else(|| {
+                SetupError("no model: pass --model, or set model.model in the config file".into())
+            })?,
+    };
     let profile = match cli.profile {
         Some(profile) => profile,
         None => match config.permissions.profile.as_deref() {
@@ -737,9 +746,11 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     // ADR 0026 D0/D10: `--provider`/config `model.provider` names a provider — a built-in
     // descriptor or a named one (`[providers.<name>]`, or the auth.json entry's `env`). The
     // key is looked up under the **name** (D10), so every custom endpoint has its own slot.
+    // ADR 0026 D8: the command line outranks the resumed journal, which outranks the config.
     let provider_name = cli
         .provider
         .clone()
+        .or_else(|| resumed_route.as_ref().map(|route| route.provider.clone()))
         .or_else(|| config.model.provider.clone())
         .unwrap_or_else(|| radian_host::GENERIC_ID.to_owned());
     let auth_store = radian_host::AuthStore::open().map_err(|e| SetupError(e.to_string()))?;
@@ -758,13 +769,27 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         .base_url
         .clone()
         .or_else(|| config.model.base_url.clone());
-    let thinking = match cli.thinking.as_deref() {
-        Some(value) => value.parse::<Thinking>().map_err(SetupError)?,
-        None => Thinking::Off,
+    // ADR 0026 D11: the unified levels, with the legacy Anthropic spellings accepted for one
+    // version (a warning goes to stderr when one is used).
+    let (thinking, thinking_budget, legacy_thinking) = match cli.thinking.as_deref() {
+        Some(raw) => {
+            let (level, budget, legacy) =
+                radian_host::parse_thinking_level(raw).map_err(SetupError)?;
+            (level.to_owned(), budget, legacy)
+        }
+        None => (radian_host::DEFAULT_THINKING_LEVEL.to_owned(), None, false),
     };
-    // `--thinking` and `--max-tokens` are Anthropic-only; under openai-compatible they would
-    // be ignored, so this is a usage error before the session file exists (dogfooding D15).
-    check_provider_flags(provider, thinking, cli.max_tokens).map_err(SetupError)?;
+    if legacy_thinking {
+        eprintln!(
+            "[thinking] the legacy `--thinking {}` spelling is deprecated; use one of {}",
+            cli.thinking.as_deref().unwrap_or_default(),
+            radian_host::THINKING_LEVELS.join("|")
+        );
+    }
+    // `--max-tokens` is Anthropic-only; under openai-compatible it would be ignored, so this is
+    // a usage error before the session file exists (dogfooding D15). `--thinking` left this
+    // check in D11: the unified levels ride both wire protocols.
+    check_provider_flags(provider, Thinking::Off, cli.max_tokens).map_err(SetupError)?;
     // The endpoint this run would talk to, before the session id (for the local-endpoint check).
     let probe_base_url = if provider_ref.takes_base_url_override() {
         base_url_override.clone()
@@ -849,7 +874,14 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     .map_err(SetupError)?;
     // The catalog matches on the hostname of the endpoint the model actually talks to (ADR 0018).
     let catalog_base_url = route.base_url.clone();
-    let model = build_model(ModelArgs {
+    let (thinking_of, reasoning_effort) = radian_host::resolve_thinking_ref(
+        &provider_ref,
+        &model_name,
+        &thinking,
+        thinking_budget,
+        route.adapter(),
+    );
+    let initial = build_model(ModelArgs {
         provider: route.adapter(),
         base_url: route.base_url.clone(),
         model: model_name.clone(),
@@ -857,9 +889,48 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         headers: route.headers.clone(),
         include_usage: cli.include_usage,
         max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-        thinking,
+        thinking: thinking_of,
+        reasoning_effort,
     })
     .map_err(SetupError)?;
+    // ADR 0026 D5: switchable, like the TUI. The CLI has no `/model`, but the journal can
+    // still carry a change the TUI wrote, so resume restores the right model (D8).
+    let config_slot = radian_runtime::ConfigSlot::new(serde_json::Value::Null);
+    let config_queue = radian_runtime::ConfigQueue::new();
+    let model = radian_host::SwitchableModel::new(
+        initial,
+        radian_host::ModelRoute::new(&provider_name, &model_name),
+        config_slot.clone(),
+        radian_host::RouteContext {
+            providers: config.providers.clone(),
+            session_id: session_id.clone(),
+            user_headers: headers.clone(),
+            include_usage: cli.include_usage,
+            max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+            thinking,
+            thinking_budget,
+        },
+    );
+    let request_max_output = match provider {
+        Provider::Anthropic => Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
+        Provider::OpenAiCompatible => None,
+    };
+    let window_query = radian_host::WindowQuery::production(
+        cli.context_window.or(config.model.context_window),
+        (provider_name != radian_host::GENERIC_ID).then(|| provider_name.clone()),
+        catalog_base_url.clone(),
+        model_name.clone(),
+        request_max_output,
+        true,
+    );
+    let budget_for = std::sync::Arc::new(move |provider: &str, switch_model: &str| {
+        radian_host::resolve_offline(&radian_host::WindowQuery {
+            catalog_provider: Some(provider.to_owned()),
+            model: switch_model.to_owned(),
+            ..window_query.clone()
+        })
+        .budget
+    }) as radian_runtime::BudgetFor;
     let servers = match &cli.mcp_config {
         Some(path) => load_mcp_config(path).map_err(SetupError)?,
         None => Vec::new(),
@@ -884,10 +955,6 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     // This runs before the session file exists.
     // ADR 0018: `R` comes from the request's own output setting; Anthropic sends
     // `max_tokens`, OpenAI-compatible sends none.
-    let request_max_output = match provider {
-        Provider::Anthropic => Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
-        Provider::OpenAiCompatible => None,
-    };
     let window = radian_host::resolve(&radian_host::WindowQuery::production(
         context_window,
         cli.catalog_provider.clone(),
@@ -913,6 +980,10 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         .map(ContextBudget::new);
     Ok(Setup {
         model,
+        provider_id: provider_name.clone(),
+        config_slot,
+        config_queue,
+        budget_for,
         provider,
         servers,
         system_prompt,
@@ -1260,6 +1331,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
 
     // ADR 0023 U5: the one place a session is established; `radian-tui` calls the same function
     // with its own bindings.
+    let resume_session = cli.resume.is_some();
     let session = radian_host::open_session(
         radian_host::SessionSetup {
             session_id: radian_host::SessionId::new(setup.session_id.clone()),
@@ -1267,6 +1339,9 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             workspace: workspace_path.clone(),
             coding_root: cli.workspace.clone().map(std::path::PathBuf::from),
             model: setup.model,
+            config_slot: setup.config_slot,
+            config_queue: setup.config_queue,
+            budget_for: Some(setup.budget_for),
             servers: setup.servers,
             system_prompt: setup.system_prompt.clone(),
             context_budget: setup.context_budget,
@@ -1308,6 +1383,25 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     .map_err(|error| SetupError(error.to_string()))?;
     let session = Arc::new(session);
 
+    // ADR 0026 D8: an explicit `--model`/`--provider` wins over the resumed change, and the
+    // override is recorded so the journal stays the authority for the next resume.
+    if resume_session && let Some((recorded_provider, recorded_model)) = session.model_route() {
+        let model_differs = cli.model.as_deref().is_some_and(|m| m != recorded_model);
+        let provider_differs = cli
+            .provider
+            .as_deref()
+            .is_some_and(|p| p != recorded_provider);
+        if model_differs || provider_differs {
+            eprintln!(
+                "[model] resume recorded {recorded_provider}/{recorded_model}; using the \
+                 command line's {}/{}",
+                setup.provider_id, setup.model_name
+            );
+            session.queue_config(
+                radian_host::ModelRoute::new(&setup.provider_id, &setup.model_name).to_value(),
+            );
+        }
+    }
     // ADR 0026 D9: an explicit command-line choice is recorded, so a resume restores it. The
     // hooks already carry the policy (the profile above), so this is the record only — no
     // audit line: nothing switched inside the session. The driver journals it at the next

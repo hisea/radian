@@ -144,6 +144,14 @@ Base `dc307e6` · 一次性检出 `/tmp/covf-mut` · 独立 `CARGO_TARGET_DIR` �
 |---|---|---|---|
 | M6 | 手动 `/compact` 把说明 `commit` 进 transcript（runtime 侧看到 `MessageAppended`） | `compact_control::compact_between_turns_commits_and_enqueues_nothing` | ✅ failed |
 
+## ADR 0026 D11 + 审查 M3：resume 合并全部 ConfigChanged（2026-10-14）
+
+Base `442f55a` · 一次性 worktree `/tmp/radian-pi-mut-4`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| C1 | 恢复时按"种类"各留最后一条（thinking 被 approval 挤掉） | `driver::resume_merges_every_config_change_not_one_per_kind` | ✅ |
+
 ## ADR 0026 D9：收尾排空（2026-10-13）
 
 Base `43ddbff` · 一次性检出 `/tmp/auto-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·

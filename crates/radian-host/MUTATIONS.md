@@ -297,6 +297,17 @@ Base `deb583f` · 在本任务工作树内逐条施加后从副本还原（`--no
 `--base-url`）改的是本 crate 的代码，但抓住它们的测试在 `agent-cli`；明细见
 `crates/agent-cli/MUTATIONS.md` 的 M22–M25。
 
+## ADR 0026 D11：统一思考级别（2026-10-14，重做）
+
+Base `442f55a` · 变异只在一次性 worktree 里做（`git worktree add --detach /tmp/radian-pi-mut-N <commit>`），
+跑完 `git worktree remove --force`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| T1 | 夹取改为先向下取（交换两段循环） | `provider::thinking_tests::the_clamp_prefers_the_nearest_supported_level_above` | ✅ |
+| T2 | 补全列出不支持的级别（filter 恒真） | `provider::thinking_tests::the_completion_lists_only_supported_levels_in_rank_order` | ✅ |
+| T3 | 没有映射表时仍发参数（`resolve_thinking` 的 `None` 分支返回 `Adaptive`） | `model::thinking_resolution_tests::a_mapless_model_resolves_to_nothing` | ✅ |
+
 ## ADR 0026 第 1 片(`/login`、具名 provider)交叉引用
 
 变异 L3（查 key 仍用通用描述符的槽位）、L4（同名时 auth.json 压过配置）、L5（验证请求的
@@ -318,6 +329,14 @@ Base `43ddbff` · 一次性检出 `/tmp/auto-mut`（detached，跑完删除）·
 3/3 抓住。CLI 优先与 workspace 恢复的正路径由
 `approval::tests::an_explicit_cli_choice_wins_and_backfills` /
 `resume_restores_the_journaled_state_over_the_config` 钉住。
+
+## ADR 0026 D11 审查 A1：Anthropic 七档不同线上值（2026-10-14）
+
+Base `0b9785b` · 一次性 worktree `/tmp/radian-pi-mut-a1`，跑完删除。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| A1a | 映射表全部改回 `adaptive`（六档同值） | `provider::thinking_tests::the_anthropic_levels_are_distinct` | ✅ |
 
 ## review-fixes 片：`auth.json` 临时文件名冲突（P2）
 
