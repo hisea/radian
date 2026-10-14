@@ -350,3 +350,37 @@ fn the_id_level_asks_the_host_and_shows_the_answer() {
     assert!(!result.dirty);
     assert!(app.completion().is_none(), "a stale answer shows nothing");
 }
+
+/// ADR 0031 T3: the startup trust modal's **Esc** is the fail-safe answer — it must never
+/// trust. It maps to `UntrustHere`, the same choice as the default highlight, and that choice
+/// is **persistent**: the loop writes `false` for this directory to `trust.json` and journals
+/// one `ProjectTrustChanged` (the same as selecting "Do not trust this directory" with Enter).
+#[test]
+fn escaping_the_trust_modal_does_not_trust() {
+    let mut app = App::new("m", "s");
+    app.push_trust_modal(std::path::PathBuf::from("/work/example"));
+    assert!(app.has_modal());
+    let effects = app.on_key(key(KeyCode::Esc)).effects;
+    assert_eq!(
+        effects,
+        vec![Effect::SetTrust {
+            choice: radian_host::trust::Choice::UntrustHere
+        }],
+        "Esc must choose `do not trust`, never a trust"
+    );
+    assert!(!app.has_modal(), "the modal is dismissed");
+    assert!(
+        radian_host::trust::Choice::UntrustHere.persistent(),
+        "Esc records the decision: the loop writes trust.json"
+    );
+
+    // Enter takes the highlighted default, which is the same fail-safe choice.
+    let mut app = App::new("m", "s");
+    app.push_trust_modal(std::path::PathBuf::from("/work/example"));
+    assert_eq!(
+        app.on_key(key(KeyCode::Enter)).effects,
+        vec![Effect::SetTrust {
+            choice: radian_host::trust::Choice::UntrustHere
+        }]
+    );
+}
