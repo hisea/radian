@@ -186,6 +186,18 @@ impl ToolResult {
     }
 }
 
+impl Message {
+    /// The host-owned metadata (ADR 0005). A provider never sees it, so the size estimator
+    /// (ADR 0015, revision 2026-10-13) excludes it from the request it measures.
+    pub fn meta(&self) -> &MessageMeta {
+        match self {
+            Self::User { meta, .. } | Self::Assistant { meta, .. } | Self::Tool { meta, .. } => {
+                meta
+            }
+        }
+    }
+}
+
 fn joined_text(parts: &[ContentPart]) -> String {
     parts
         .iter()

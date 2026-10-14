@@ -265,6 +265,9 @@ fn plan_with_verbatim(
             transcript[..first_kept].to_vec()
         }
     };
+    // The reservation is `K - used`, not a running subtraction: the list is re-selected for
+    // each candidate plan, so its size is measured against the original target every time.
+    let target = keep;
     let mut keep = keep;
     let mut plan = compaction::plan_with_keep(transcript, keep, &compaction::message_tokens)?;
     let mut user_messages = compaction::select_user_messages(
@@ -277,7 +280,7 @@ fn plan_with_verbatim(
             .iter()
             .map(|message| compaction::message_tokens(&Message::user(&message.text)))
             .sum();
-        let next = keep.saturating_sub(used);
+        let next = target.saturating_sub(used);
         if next == keep {
             break;
         }
@@ -553,6 +556,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
             }
         }
         let size_after = budget::request_size(request);
+
         let bytes_per_token = self
             .agent
             .config

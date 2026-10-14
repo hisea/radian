@@ -76,7 +76,7 @@ fn label(record: &JournalRecord) -> String {
 async fn a_request_over_the_budget_is_compacted_and_committed() {
     let model = ScriptedModel::new([summary_reply("short summary", 50), text("done")]);
     let journal = Arc::new(RecordingJournal::new());
-    let agent = compaction_agent(model.clone(), 8_000, true);
+    let agent = compaction_agent(model.clone(), 3_000, true);
     let mut session = agent
         .open_session_with_journal(big_history(), journal.clone())
         .await
@@ -173,7 +173,7 @@ async fn a_summary_failure_fails_the_turn_without_touching_the_transcript() {
         text("done"),
     ]);
     let journal = Arc::new(RecordingJournal::new());
-    let agent = compaction_agent(model.clone(), 8_000, true);
+    let agent = compaction_agent(model.clone(), 3_000, true);
     let before = big_history();
     let mut session = agent
         .open_session_with_journal(before.clone(), journal.clone())
@@ -248,7 +248,7 @@ async fn without_auto_compact_the_request_is_sent_over_budget() {
 async fn a_compaction_reuses_the_previous_summary() {
     let model = ScriptedModel::new([summary_reply("updated summary", 10), text("done")]);
     let journal = Arc::new(RecordingJournal::new());
-    let agent = compaction_agent(model.clone(), 8_000, true);
+    let agent = compaction_agent(model.clone(), 3_000, true);
     let history = compaction::compacted_history(
         "old summary text",
         &[],
@@ -311,7 +311,7 @@ async fn a_tool_unit_crossing_the_cut_stays_whole() {
 
     let model = ScriptedModel::new([summary_reply("summary", 10), text("done")]);
     let journal = Arc::new(RecordingJournal::new());
-    let agent = compaction_agent(model.clone(), 8_000, true);
+    let agent = compaction_agent(model.clone(), 3_000, true);
     let history = vec![
         Message::user("x".repeat(8_000)),
         assistant,
@@ -353,7 +353,7 @@ async fn a_tool_unit_crossing_the_cut_stays_whole() {
 async fn a_cancelled_summary_does_not_commit() {
     let model = ScriptedModel::new([Reply::Hang]);
     let journal = Arc::new(RecordingJournal::new());
-    let agent = compaction_agent(model.clone(), 8_000, true);
+    let agent = compaction_agent(model.clone(), 3_000, true);
     let mut session = agent
         .open_session_with_journal(big_history(), journal.clone())
         .await
@@ -386,10 +386,10 @@ async fn a_cancelled_summary_does_not_commit() {
 async fn insufficient_gain_fails_without_committing() {
     let model = ScriptedModel::new([summary_reply(&"s".repeat(4_000), 10), text("done")]);
     let journal = Arc::new(RecordingJournal::new());
-    let agent = compaction_agent(model.clone(), 3_500, true);
+    let agent = compaction_agent(model.clone(), 8_000, true);
     let history = vec![
-        Message::user("the task"),
-        Message::assistant("y".repeat(16_000)),
+        Message::user("x".repeat(4_000)),
+        Message::user("y".repeat(12_000)),
         Message::user("last"),
     ];
     let mut session = agent
@@ -426,14 +426,14 @@ async fn insufficient_gain_fails_without_committing() {
 async fn a_below_target_compaction_commits_and_is_flagged() {
     let model = ScriptedModel::new([summary_reply(&"s".repeat(2_600), 10), text("done")]);
     let journal = Arc::new(RecordingJournal::new());
-    // ADR 0018: the verbatim user messages are part of `T_after`, and with this
-    // test's one-byte-per-token ruler they cost four times their `message_tokens` budget. The
-    // big message is therefore an **assistant** turn: it is what forces the compaction, and
-    // the user's own (short) words are what the verbatim carries.
-    let agent = compaction_agent(model.clone(), 3_500, true);
+    // ADR 0018: the verbatim user messages cost at most `U + U1` (1024 tokens by
+    // the `message_tokens` ruler) in `T_after`, which with this file's one-byte-per-token
+    // ruler is already over a 3000-token budget; the budget that lands in the below-target
+    // band is therefore larger.
+    let agent = compaction_agent(model.clone(), 8_000, true);
     let history = vec![
-        Message::user("the task"),
-        Message::assistant("y".repeat(16_000)),
+        Message::user("x".repeat(4_000)),
+        Message::user("y".repeat(12_000)),
         Message::user("last"),
     ];
     let mut session = agent
@@ -463,7 +463,7 @@ async fn a_below_target_compaction_commits_and_is_flagged() {
         .expect("a candidate was written");
     assert!(candidate.0, "flagged below target: {candidate:?}");
     assert!(
-        candidate.2 <= 3_500 && candidate.2 * 4 > 3_500 * 3,
+        candidate.2 <= 8_000 && candidate.2 * 4 > 8_000 * 3,
         "{candidate:?}"
     );
 }
@@ -479,7 +479,7 @@ async fn an_invalid_summary_is_retried_once() {
         text("done"),
     ]);
     let journal = Arc::new(RecordingJournal::new());
-    let agent = compaction_agent(model.clone(), 8_000, true);
+    let agent = compaction_agent(model.clone(), 3_000, true);
     let mut session = agent
         .open_session_with_journal(big_history(), journal.clone())
         .await
@@ -502,7 +502,7 @@ async fn an_invalid_summary_is_retried_once() {
 async fn two_invalid_summaries_fail_the_turn() {
     let model = ScriptedModel::new([summary_reply("", 10), summary_reply("", 10), text("done")]);
     let journal = Arc::new(RecordingJournal::new());
-    let agent = compaction_agent(model.clone(), 8_000, true);
+    let agent = compaction_agent(model.clone(), 3_000, true);
     let mut session = agent
         .open_session_with_journal(big_history(), journal.clone())
         .await
@@ -535,7 +535,7 @@ async fn a_replacement_abort_keeps_the_usage_and_recovers_the_old_history() {
     let model = ScriptedModel::new([summary_reply("summary", 10)]);
     // The 4th append is the `TranscriptReplaced` marker.
     let journal = Arc::new(FailingJournal::fail_at(4));
-    let agent = compaction_agent(model.clone(), 8_000, true);
+    let agent = compaction_agent(model.clone(), 3_000, true);
     let before = big_history();
     let mut session = agent
         .open_session_with_journal(before.clone(), journal.clone())
@@ -593,7 +593,7 @@ async fn a_committed_compaction_clears_the_budget_baseline() {
 
     let model = ScriptedModel::new([summary_reply("short", 50), text("done")]);
     let journal = Arc::new(RecordingJournal::new());
-    let agent = compaction_agent(model.clone(), 8_000, true);
+    let agent = compaction_agent(model.clone(), 3_000, true);
     let mut session = agent
         .open_session_with_journal(big_history(), journal.clone())
         .await
@@ -633,7 +633,7 @@ async fn a_committed_compaction_clears_the_budget_baseline() {
 async fn a_changed_source_view_is_abandoned() {
     let model = ScriptedModel::new([summary_reply("summary", 10), text("done")]);
     let journal = Arc::new(RecordingJournal::new());
-    let agent = compaction_agent(model.clone(), 8_000, true);
+    let agent = compaction_agent(model.clone(), 3_000, true);
     let mut session = agent
         .open_session_with_journal(big_history(), journal.clone())
         .await
@@ -719,10 +719,10 @@ async fn a_below_target_compaction_stops_auto_compaction_for_the_turn() {
         stop(StopReason::PauseTurn, &"a".repeat(2_000)),
     ]);
     let journal = Arc::new(RecordingJournal::new());
-    let agent = compaction_agent(model.clone(), 3_500, true);
+    let agent = compaction_agent(model.clone(), 8_000, true);
     let history = vec![
-        Message::user("the task"),
-        Message::assistant("y".repeat(16_000)),
+        Message::user("x".repeat(4_000)),
+        Message::user("y".repeat(12_000)),
         Message::user("last"),
     ];
     let mut session = agent
@@ -807,7 +807,7 @@ async fn an_overlong_summary_is_shortened_on_the_retry() {
         text("done"),
     ]);
     let journal = Arc::new(RecordingJournal::new());
-    let agent = compaction_agent(model.clone(), 8_000, true);
+    let agent = compaction_agent(model.clone(), 3_000, true);
     let mut session = agent
         .open_session_with_journal(big_history(), journal.clone())
         .await
@@ -874,7 +874,7 @@ async fn an_empty_summary_resends_the_original_request() {
         text("done"),
     ]);
     let journal = Arc::new(RecordingJournal::new());
-    let agent = compaction_agent(model.clone(), 8_000, true);
+    let agent = compaction_agent(model.clone(), 3_000, true);
     let mut session = agent
         .open_session_with_journal(big_history(), journal.clone())
         .await
@@ -917,7 +917,7 @@ async fn two_overlong_summaries_fail_the_turn() {
         text("never"),
     ]);
     let journal = Arc::new(RecordingJournal::new());
-    let agent = compaction_agent(model.clone(), 8_000, true);
+    let agent = compaction_agent(model.clone(), 3_000, true);
     let mut session = agent
         .open_session_with_journal(big_history(), journal.clone())
         .await
@@ -1116,6 +1116,8 @@ async fn the_summary_request_does_not_carry_the_previous_verbatim_list() {
 async fn the_plan_reserves_the_verbatim_space() {
     let model = ScriptedModel::new([summary_reply("a short summary", 10), text("done")]);
     let journal = Arc::new(RecordingJournal::new());
+    // A budget the verbatim list itself fits in (it is at most `U + U1`), so the reservation
+    // is what decides whether the 7200-byte unit is kept.
     let agent = compaction_agent(model.clone(), 8_000, true);
     let history = vec![
         // A big prefix: its verbatim copy is what the plan must reserve room for.

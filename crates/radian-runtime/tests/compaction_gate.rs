@@ -69,10 +69,7 @@ async fn a_steer_during_an_open_segment_does_not_deadlock_the_driver() {
     ]);
     let agent = Arc::new(
         Agent::new(Arc::clone(&model), agent_core::NoTools).with_config(AgentConfig {
-            // ADR 0018: the verbatim user messages are part of `T_after`, and with
-            // this test's one-byte-per-token ruler they cost four times their `message_tokens`
-            // budget, so the budget has to leave room for them.
-            context_budget: Some(ContextBudget::new(8_000).with_bytes_per_token(1)),
+            context_budget: Some(ContextBudget::new(3_000).with_bytes_per_token(1)),
             auto_compact: true,
             ..Default::default()
         }),
