@@ -523,7 +523,10 @@ fn code_text_lines(raw: &str, closed: bool, width: usize) -> Vec<String> {
         (Some(first), _) if fence_open(first.trim()).is_some() && lines.len() > 1 => &lines[1..],
         _ => &lines[..],
     };
-    let mut out: Vec<String> = body.iter().map(|line| code_line_text(line, width)).collect();
+    let mut out: Vec<String> = body
+        .iter()
+        .map(|line| code_line_text(line, width))
+        .collect();
     if out.is_empty() {
         out.push(String::new());
     }
@@ -553,7 +556,9 @@ pub fn body_text_lines(entry: &Entry, mode: ReasoningMode, width: usize) -> Vec<
                     Block::Paragraph { start, end, .. } => {
                         lines.extend(crate::render::wrap(&text[start..end], body_width));
                     }
-                    Block::Code { start, end, closed, .. } => {
+                    Block::Code {
+                        start, end, closed, ..
+                    } => {
                         lines.extend(code_text_lines(&text[start..end], closed, width));
                     }
                 }
