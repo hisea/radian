@@ -54,6 +54,17 @@ fn item(id: &str) -> TuiFooterItemConfig {
 }
 
 /// `preset = classic` config.
+/// A config whose single row is `left`.
+fn rows(left: Vec<TuiFooterItemConfig>) -> TuiFooterConfig {
+    TuiFooterConfig {
+        rows: vec![TuiFooterRowConfig {
+            left,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
 fn classic() -> TuiFooterConfig {
     TuiFooterConfig {
         preset: Some("classic".to_string()),
@@ -371,12 +382,7 @@ fn publish(app: &App, item: &str, text: &str) {
 fn the_worktree_item_shows_only_when_the_store_has_one() {
     let mut app = App::new("mock", "s");
     app.git_branch = None;
-    let mut config = TuiFooterConfig::default();
-    config.rows = vec![TuiFooterRowConfig {
-        left: vec![item("model"), item("worktree")],
-        ..Default::default()
-    }];
-    app.apply_footer(&config);
+    app.apply_footer(&rows(vec![item("model"), item("worktree")]));
     let before = render(&mut app, 80, 12);
     assert!(
         !row(&before, 11).contains("worktree"),
@@ -397,12 +403,7 @@ fn the_worktree_item_shows_only_when_the_store_has_one() {
 #[test]
 fn the_status_item_lists_status_contributions_and_filters_by_keys() {
     let mut app = App::new("mock", "s");
-    let mut config = TuiFooterConfig::default();
-    config.rows = vec![TuiFooterRowConfig {
-        left: vec![item("status")],
-        ..Default::default()
-    }];
-    app.apply_footer(&config);
+    app.apply_footer(&rows(vec![item("status")]));
     publish(&app, "status.alpha", "alpha-text");
     publish(&app, "status.beta", "beta-text");
     let all = render(&mut app, 80, 12);
@@ -412,17 +413,12 @@ fn the_status_item_lists_status_contributions_and_filters_by_keys() {
         "{text:?}"
     );
 
-    let mut config = TuiFooterConfig::default();
-    config.rows = vec![TuiFooterRowConfig {
-        left: vec![TuiFooterItemConfig {
-            id: "status".to_string(),
-            params: vec![("keys".to_string(), "alpha".to_string())],
-            ..Default::default()
-        }],
-        ..Default::default()
-    }];
     let mut filtered = App::new("mock", "s");
-    filtered.apply_footer(&config);
+    filtered.apply_footer(&rows(vec![TuiFooterItemConfig {
+        id: "status".to_string(),
+        params: vec![("keys".to_string(), "alpha".to_string())],
+        ..Default::default()
+    }]));
     publish(&filtered, "status.alpha", "alpha-text");
     publish(&filtered, "status.beta", "beta-text");
     let only = render(&mut filtered, 80, 12);
@@ -435,12 +431,7 @@ fn the_status_item_lists_status_contributions_and_filters_by_keys() {
 #[test]
 fn a_stale_contribution_draws_with_the_dim_role() {
     let mut app = App::new("mock", "s");
-    let mut config = TuiFooterConfig::default();
-    config.rows = vec![TuiFooterRowConfig {
-        left: vec![item("git_branch")],
-        ..Default::default()
-    }];
-    app.apply_footer(&config);
+    app.apply_footer(&rows(vec![item("git_branch")]));
     publish(&app, "git_branch", "main");
     let fresh = render(&mut app, 80, 12);
     assert_eq!(
