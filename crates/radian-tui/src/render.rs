@@ -157,7 +157,6 @@ pub fn wrap_line_count(text: &str, width: usize) -> usize {
                 lines += 1;
                 line_width = 0;
                 pending_space = false;
-                any = false;
             }
             if pending_space {
                 line_width += 1;
@@ -288,7 +287,7 @@ fn entry_lines(
         let mut line = render_row(
             entry,
             &row,
-            &prefix,
+            prefix,
             prefix_style,
             style,
             theme,
@@ -332,6 +331,7 @@ pub fn split_label(text: &str) -> Option<(&str, &str)> {
 /// the lead; a padding row renders as an empty line; a code line has no lead at all (it is
 /// full-width by design, ADR 0028 R9). A block with a band (ADR 0028 R4) is padded out to the
 /// full transcript width, so the band covers the row's trailing cells too.
+#[allow(clippy::too_many_arguments)]
 fn render_row(
     entry: &Entry,
     row: &BodyLine,
@@ -471,7 +471,7 @@ pub fn visible_lines(
                         let mut line = render_row(
                             entry,
                             &row,
-                            &prefix,
+                            prefix,
                             prefix_style,
                             style,
                             theme,

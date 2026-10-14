@@ -8,7 +8,7 @@ use radian_tui::{render, theme};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::style::{Color, Modifier};
+use ratatui::style::Color;
 
 fn config(text: &str) -> radian_host::config::Config {
     radian_host::config::parse(std::path::Path::new("/tmp/config.toml"), text).unwrap()

@@ -32,7 +32,6 @@ fn approval() -> PendingView<PendingRequest> {
 /// (text on 5).
 const USER1: u16 = 1;
 const ASSISTANT: u16 = 3;
-const USER2: u16 = 5;
 
 fn app() -> App {
     let mut app = App::new("m", "s");

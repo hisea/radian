@@ -161,7 +161,6 @@ pub fn parse_blocks_incremental(text: &str, prev: Option<&[Block]>) -> Vec<Block
                     closed: true,
                 });
             }
-            block_open = false;
             fence = Some(marker);
             lang = info;
             block_start = line_start;
@@ -201,7 +200,9 @@ pub fn parse_blocks_incremental(text: &str, prev: Option<&[Block]>) -> Vec<Block
                     end: line_end,
                     closed: false,
                 });
-                block_open = false;
+                // The assignment below (`block_open = false`) is what the trailing block
+                // flush checks; this arm leaves it open so the flush does not double-push.
+                break;
             }
         }
         if line_end >= text.len() {
@@ -211,7 +212,6 @@ pub fn parse_blocks_incremental(text: &str, prev: Option<&[Block]>) -> Vec<Block
                     end: line_end,
                     closed: true,
                 });
-                block_open = false;
             }
             break;
         }

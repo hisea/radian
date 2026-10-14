@@ -282,7 +282,6 @@ mod pi_dark {
     pub const MUTED: &str = "okhsl(229 6% 67%)";
     pub const DIM: &str = "okhsl(229 8% 56%)";
     pub const VIOLET: &str = "okhsl(295 50% 67%)"; // accent
-    pub const BLUE: &str = "okhsl(232 54% 67%)";
     pub const GREEN: &str = "okhsl(159 59% 67%)"; // success
     pub const RED: &str = "okhsl(20 72% 67%)"; // error
     pub const YELLOW: &str = "okhsl(83 88% 67%)"; // warning
@@ -304,7 +303,6 @@ mod pi_light {
     pub const MUTED: &str = "okhsl(229 8% 47%)";
     pub const DIM: &str = "okhsl(229 7% 59%)";
     pub const VIOLET: &str = "okhsl(295 60% 46%)";
-    pub const BLUE: &str = "okhsl(231 68% 47%)";
     pub const GREEN: &str = "okhsl(159 75% 46%)";
     pub const RED: &str = "okhsl(20 91% 47%)";
     pub const YELLOW: &str = "okhsl(83 99% 47%)";
@@ -350,10 +348,10 @@ impl Theme {
 
     /// pi's palette, resolved for this terminal (ADR 0029 decision 2).
     fn dark_palette(truecolor: bool) -> Self {
-        use pi_dark::*;
-        let text = spec(pi_dark::TEXT, Modifier::empty(), truecolor);
-        let muted = spec(pi_dark::MUTED, Modifier::empty(), truecolor);
-        let dim = spec(pi_dark::DIM, Modifier::empty(), truecolor);
+        use pi_dark as pi;
+        let text = spec(pi::TEXT, Modifier::empty(), truecolor);
+        let muted = spec(pi::MUTED, Modifier::empty(), truecolor);
+        let dim = spec(pi::DIM, Modifier::empty(), truecolor);
         Self {
             name: ThemeName::Dark,
             reserved: BTreeMap::new(),
@@ -361,45 +359,45 @@ impl Theme {
             // titles; secondary = tool output, notices and thinking; weak = hints,
             // truncation, counters and completion descriptions.
             text,
-            user: text.bg(spec_bg(pi_dark::USER_BG, Modifier::empty(), truecolor)
+            user: text.bg(spec_bg(pi::USER_BG, Modifier::empty(), truecolor)
                 .bg
                 .expect("a bg")),
-            reasoning: spec(pi_dark::THINKING, Modifier::ITALIC, truecolor),
-            interrupted: spec(pi_dark::YELLOW, Modifier::BOLD, truecolor),
+            reasoning: spec(pi::THINKING, Modifier::ITALIC, truecolor),
+            interrupted: spec(pi::YELLOW, Modifier::BOLD, truecolor),
             tool_call: text,
             tool_result: muted,
-            tool_result_error: spec(pi_dark::RED, Modifier::empty(), truecolor),
+            tool_result_error: spec(pi::RED, Modifier::empty(), truecolor),
             notice: text,
-            notice_label: spec(pi_dark::VIOLET, Modifier::BOLD, truecolor),
+            notice_label: spec(pi::VIOLET, Modifier::BOLD, truecolor),
             notice_body: muted,
-            turn_idle: spec(pi_dark::GREEN, Modifier::empty(), truecolor),
-            turn_running: spec(pi_dark::YELLOW, Modifier::empty(), truecolor),
-            turn_cancelled: spec(pi_dark::RED, Modifier::empty(), truecolor),
-            model: spec(pi_dark::VIOLET, Modifier::empty(), truecolor),
+            turn_idle: spec(pi::GREEN, Modifier::empty(), truecolor),
+            turn_running: spec(pi::YELLOW, Modifier::empty(), truecolor),
+            turn_cancelled: spec(pi::RED, Modifier::empty(), truecolor),
+            model: spec(pi::VIOLET, Modifier::empty(), truecolor),
             tier: muted,
             usage: muted,
-            mcp: spec(pi_dark::VIOLET, Modifier::empty(), truecolor),
+            mcp: spec(pi::VIOLET, Modifier::empty(), truecolor),
             budget: muted,
-            budget_over: spec(pi_dark::YELLOW, Modifier::empty(), truecolor),
-            note: spec(pi_dark::YELLOW, Modifier::empty(), truecolor),
+            budget_over: spec(pi::YELLOW, Modifier::empty(), truecolor),
+            note: spec(pi::YELLOW, Modifier::empty(), truecolor),
             truncation: dim,
-            approval_border: spec(pi_dark::BORDER_ACCENT, Modifier::empty(), truecolor),
+            approval_border: spec(pi::BORDER_ACCENT, Modifier::empty(), truecolor),
             hint: dim,
             completion: dim,
-            find: spec(pi_dark::VIOLET, Modifier::empty(), truecolor),
-            selection: spec_bg(pi_dark::SELECTION_BG, Modifier::empty(), truecolor),
-            tool_pending_bg: spec_bg(pi_dark::TOOL_PENDING_BG, Modifier::empty(), truecolor),
-            tool_success_bg: spec_bg(pi_dark::TOOL_SUCCESS_BG, Modifier::empty(), truecolor),
-            tool_error_bg: spec_bg(pi_dark::TOOL_ERROR_BG, Modifier::empty(), truecolor),
+            find: spec(pi::VIOLET, Modifier::empty(), truecolor),
+            selection: spec_bg(pi::SELECTION_BG, Modifier::empty(), truecolor),
+            tool_pending_bg: spec_bg(pi::TOOL_PENDING_BG, Modifier::empty(), truecolor),
+            tool_success_bg: spec_bg(pi::TOOL_SUCCESS_BG, Modifier::empty(), truecolor),
+            tool_error_bg: spec_bg(pi::TOOL_ERROR_BG, Modifier::empty(), truecolor),
         }
     }
 
     /// pi's palette, resolved for this terminal (ADR 0029 decision 2).
     fn light_palette(truecolor: bool) -> Self {
-        use pi_light::*;
-        let text = spec(pi_light::TEXT, Modifier::empty(), truecolor);
-        let muted = spec(pi_light::MUTED, Modifier::empty(), truecolor);
-        let dim = spec(pi_light::DIM, Modifier::empty(), truecolor);
+        use pi_light as pi;
+        let text = spec(pi::TEXT, Modifier::empty(), truecolor);
+        let muted = spec(pi::MUTED, Modifier::empty(), truecolor);
+        let dim = spec(pi::DIM, Modifier::empty(), truecolor);
         Self {
             name: ThemeName::Light,
             reserved: BTreeMap::new(),
@@ -407,36 +405,36 @@ impl Theme {
             // titles; secondary = tool output, notices and thinking; weak = hints,
             // truncation, counters and completion descriptions.
             text,
-            user: text.bg(spec_bg(pi_light::USER_BG, Modifier::empty(), truecolor)
+            user: text.bg(spec_bg(pi::USER_BG, Modifier::empty(), truecolor)
                 .bg
                 .expect("a bg")),
-            reasoning: spec(pi_light::THINKING, Modifier::ITALIC, truecolor),
-            interrupted: spec(pi_light::YELLOW, Modifier::BOLD, truecolor),
+            reasoning: spec(pi::THINKING, Modifier::ITALIC, truecolor),
+            interrupted: spec(pi::YELLOW, Modifier::BOLD, truecolor),
             tool_call: text,
             tool_result: muted,
-            tool_result_error: spec(pi_light::RED, Modifier::empty(), truecolor),
+            tool_result_error: spec(pi::RED, Modifier::empty(), truecolor),
             notice: text,
-            notice_label: spec(pi_light::VIOLET, Modifier::BOLD, truecolor),
+            notice_label: spec(pi::VIOLET, Modifier::BOLD, truecolor),
             notice_body: muted,
-            turn_idle: spec(pi_light::GREEN, Modifier::empty(), truecolor),
-            turn_running: spec(pi_light::YELLOW, Modifier::empty(), truecolor),
-            turn_cancelled: spec(pi_light::RED, Modifier::empty(), truecolor),
-            model: spec(pi_light::VIOLET, Modifier::empty(), truecolor),
+            turn_idle: spec(pi::GREEN, Modifier::empty(), truecolor),
+            turn_running: spec(pi::YELLOW, Modifier::empty(), truecolor),
+            turn_cancelled: spec(pi::RED, Modifier::empty(), truecolor),
+            model: spec(pi::VIOLET, Modifier::empty(), truecolor),
             tier: muted,
             usage: muted,
-            mcp: spec(pi_light::VIOLET, Modifier::empty(), truecolor),
+            mcp: spec(pi::VIOLET, Modifier::empty(), truecolor),
             budget: muted,
-            budget_over: spec(pi_light::YELLOW, Modifier::empty(), truecolor),
-            note: spec(pi_light::YELLOW, Modifier::empty(), truecolor),
+            budget_over: spec(pi::YELLOW, Modifier::empty(), truecolor),
+            note: spec(pi::YELLOW, Modifier::empty(), truecolor),
             truncation: dim,
-            approval_border: spec(pi_light::BORDER_ACCENT, Modifier::empty(), truecolor),
+            approval_border: spec(pi::BORDER_ACCENT, Modifier::empty(), truecolor),
             hint: dim,
             completion: dim,
-            find: spec(pi_light::VIOLET, Modifier::empty(), truecolor),
-            selection: spec_bg(pi_light::SELECTION_BG, Modifier::empty(), truecolor),
-            tool_pending_bg: spec_bg(pi_light::TOOL_PENDING_BG, Modifier::empty(), truecolor),
-            tool_success_bg: spec_bg(pi_light::TOOL_SUCCESS_BG, Modifier::empty(), truecolor),
-            tool_error_bg: spec_bg(pi_light::TOOL_ERROR_BG, Modifier::empty(), truecolor),
+            find: spec(pi::VIOLET, Modifier::empty(), truecolor),
+            selection: spec_bg(pi::SELECTION_BG, Modifier::empty(), truecolor),
+            tool_pending_bg: spec_bg(pi::TOOL_PENDING_BG, Modifier::empty(), truecolor),
+            tool_success_bg: spec_bg(pi::TOOL_SUCCESS_BG, Modifier::empty(), truecolor),
+            tool_error_bg: spec_bg(pi::TOOL_ERROR_BG, Modifier::empty(), truecolor),
         }
     }
 

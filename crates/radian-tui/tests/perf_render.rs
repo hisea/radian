@@ -339,9 +339,9 @@ fn perf_render_streaming() {
 /// test in this binary builds a 50k `App` too, and an in-process reading would just report
 /// their peak. The outer run re-executes this test binary for that one test.
 #[cfg(unix)]
-#[test]
 /// ADR 0028 R7's third threshold: the **first frame after a global toggle** (Ctrl-T folding
 /// the thinking blocks) re-lays every entry out, and must stay under 100 ms at 50k.
+#[test]
 #[ignore = "measurement, not an assertion; run with --ignored --nocapture"]
 fn perf_render_reasoning_toggle() {
     use radian_tui::blocks::ReasoningMode;
@@ -366,6 +366,7 @@ fn perf_render_reasoning_toggle() {
     }
 }
 
+#[test]
 #[ignore = "measurement, not an assertion; run with --ignored --nocapture"]
 fn perf_render_memory_50k() {
     if std::env::var_os("PERF_RENDER_MEMORY_CHILD").is_none() {
