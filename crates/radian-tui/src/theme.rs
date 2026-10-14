@@ -127,6 +127,16 @@ impl ThemeName {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     Reasoning,
+    /// The `reasoning` footer item's per-level colors (ADR 0027 C2): one role per thinking
+    /// level, so a level's marker can be told apart at a glance. `reasoning` (above) stays the
+    /// body style of the reasoning channel itself.
+    ReasoningOff,
+    ReasoningMinimal,
+    ReasoningLow,
+    ReasoningMedium,
+    ReasoningHigh,
+    ReasoningXhigh,
+    ReasoningMax,
     Interrupted,
     User,
     ToolCall,
@@ -176,8 +186,15 @@ pub enum Role {
 }
 
 impl Role {
-    pub const ALL: [Role; 45] = [
+    pub const ALL: [Role; 52] = [
         Role::Reasoning,
+        Role::ReasoningOff,
+        Role::ReasoningMinimal,
+        Role::ReasoningLow,
+        Role::ReasoningMedium,
+        Role::ReasoningHigh,
+        Role::ReasoningXhigh,
+        Role::ReasoningMax,
         Role::Interrupted,
         Role::User,
         Role::ToolCall,
@@ -228,6 +245,13 @@ impl Role {
     pub fn as_str(self) -> &'static str {
         match self {
             Role::Reasoning => "reasoning",
+            Role::ReasoningOff => "reasoning_off",
+            Role::ReasoningMinimal => "reasoning_minimal",
+            Role::ReasoningLow => "reasoning_low",
+            Role::ReasoningMedium => "reasoning_medium",
+            Role::ReasoningHigh => "reasoning_high",
+            Role::ReasoningXhigh => "reasoning_xhigh",
+            Role::ReasoningMax => "reasoning_max",
             Role::Interrupted => "interrupted",
             Role::User => "user",
             Role::ToolCall => "tool_call",
@@ -282,6 +306,13 @@ impl Role {
     fn style_mut(self, theme: &mut Theme) -> &mut Style {
         match self {
             Role::Reasoning => &mut theme.reasoning,
+            Role::ReasoningOff => &mut theme.reasoning_off,
+            Role::ReasoningMinimal => &mut theme.reasoning_minimal,
+            Role::ReasoningLow => &mut theme.reasoning_low,
+            Role::ReasoningMedium => &mut theme.reasoning_medium,
+            Role::ReasoningHigh => &mut theme.reasoning_high,
+            Role::ReasoningXhigh => &mut theme.reasoning_xhigh,
+            Role::ReasoningMax => &mut theme.reasoning_max,
             Role::Interrupted => &mut theme.interrupted,
             Role::User => &mut theme.user,
             Role::ToolCall => &mut theme.tool_call,
@@ -336,6 +367,15 @@ pub struct Theme {
     pub name: ThemeName,
     /// The model's separate reasoning channel (ADR 0014).
     pub reasoning: Style,
+    /// The reasoning level markers (ADR 0027 C2): the footer's `reasoning` item, one role per
+    /// level so `/thinking` changes the color.
+    pub reasoning_off: Style,
+    pub reasoning_minimal: Style,
+    pub reasoning_low: Style,
+    pub reasoning_medium: Style,
+    pub reasoning_high: Style,
+    pub reasoning_xhigh: Style,
+    pub reasoning_max: Style,
     /// The `[interrupted]` marker (ADR 0003).
     pub interrupted: Style,
     pub user: Style,
@@ -527,6 +567,13 @@ impl Theme {
                 .bg
                 .expect("a bg")),
             reasoning: spec(pi::THINKING, Modifier::ITALIC, truecolor),
+            reasoning_off: spec(pi::DIM, Modifier::DIM, truecolor),
+            reasoning_minimal: spec(pi::MUTED, Modifier::empty(), truecolor),
+            reasoning_low: spec(pi::THINKING, Modifier::empty(), truecolor),
+            reasoning_medium: spec(pi::GREEN, Modifier::empty(), truecolor),
+            reasoning_high: spec(pi::YELLOW, Modifier::empty(), truecolor),
+            reasoning_xhigh: spec(pi::BORDER_ACCENT, Modifier::empty(), truecolor),
+            reasoning_max: spec(pi::RED, Modifier::BOLD, truecolor),
             interrupted: spec(pi::YELLOW, Modifier::BOLD, truecolor),
             tool_call: text,
             tool_result: muted,
@@ -596,6 +643,13 @@ impl Theme {
                 .bg
                 .expect("a bg")),
             reasoning: spec(pi::THINKING, Modifier::ITALIC, truecolor),
+            reasoning_off: spec(pi::DIM, Modifier::DIM, truecolor),
+            reasoning_minimal: spec(pi::MUTED, Modifier::empty(), truecolor),
+            reasoning_low: spec(pi::THINKING, Modifier::empty(), truecolor),
+            reasoning_medium: spec(pi::GREEN, Modifier::empty(), truecolor),
+            reasoning_high: spec(pi::YELLOW, Modifier::empty(), truecolor),
+            reasoning_xhigh: spec(pi::BORDER_ACCENT, Modifier::empty(), truecolor),
+            reasoning_max: spec(pi::RED, Modifier::BOLD, truecolor),
             interrupted: spec(pi::YELLOW, Modifier::BOLD, truecolor),
             tool_call: text,
             tool_result: muted,
@@ -654,6 +708,13 @@ impl Theme {
             name: ThemeName::Mono,
             reserved: BTreeMap::new(),
             reasoning: style(None, Modifier::ITALIC | Modifier::DIM),
+            reasoning_off: style(None, Modifier::DIM),
+            reasoning_minimal: style(None, Modifier::DIM),
+            reasoning_low: style(None, Modifier::empty()),
+            reasoning_medium: style(None, Modifier::empty()),
+            reasoning_high: style(None, Modifier::BOLD),
+            reasoning_xhigh: style(None, Modifier::BOLD | Modifier::UNDERLINED),
+            reasoning_max: style(None, Modifier::BOLD | Modifier::UNDERLINED),
             interrupted: style(None, Modifier::BOLD | Modifier::UNDERLINED),
             user: style(None, Modifier::BOLD),
             tool_call: style(None, Modifier::REVERSED),

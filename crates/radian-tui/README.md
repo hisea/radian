@@ -238,6 +238,7 @@ Every pi role maps onto a Radian role (`[tui.colors]` accepts both name families
 | `diff_added` / `diff_removed` / `diff_context` | `toolDiffAdded` / `toolDiffRemoved` / `toolDiffContext` (the unified-diff line kinds) |
 | `diff_hunk` | `accent` (pi has no hunk role; this covers the `@@` markers and the file headers) |
 | `reasoning` | `thinkingText` |
+| `reasoning_off` … `reasoning_max` | pi's `thinkingOff` … `thinkingMax` (the footer's `reasoning` item, one role per level) |
 | `tool_call` / `tool_result` / `tool_result_error` | `toolTitle` (= `text`) / `toolOutput` (= `muted`) / `error` |
 | `text` | `text` (the main level: answers, user words, tool titles) |
 | `notice` | `text` (the notice line itself) |
