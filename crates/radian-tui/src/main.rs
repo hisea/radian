@@ -83,9 +83,10 @@ struct Cli {
     #[arg(long, value_name = "VALUE", conflicts_with = "resume")]
     session_id: Option<String>,
 
-    /// Resume an existing session by id, rendering its history into the transcript.
-    #[arg(long, value_name = "SESSION_ID", conflicts_with = "list")]
-    resume: Option<String>,
+    /// Resume an existing session by id, rendering its history into the transcript. Without a
+    /// value it shows the session picker (resuming only: no "new" entry).
+    #[arg(long, value_name = "SESSION_ID", num_args = 0..=1, conflicts_with = "list")]
+    resume: Option<Option<String>>,
 
     /// List this workspace's sessions and exit.
     #[arg(long)]
@@ -297,7 +298,7 @@ fn print_exit_line(message: &str) {
 }
 
 fn run(
-    mut cli: Cli,
+    cli: Cli,
     runtime: &tokio::runtime::Runtime,
     rx: Receiver<UiEvent>,
     tx: Sender<UiEvent>,
@@ -406,15 +407,32 @@ fn run(
         eprintln!("{warning}");
     }
 
-    // `--pick`: load the picker's rows **before** the terminal is entered. `open_index` can
-    // warn about a wide session directory, and that warning must be on the normal screen.
-    // The picker owns its data; the phase itself runs after the terminal (ADR 0023 U4).
-    let startup_picker = if cli.pick {
+    // `--resume` with no value: the picker in "resume only" mode.
+    let resume_only = matches!(cli.resume, Some(None));
+    let mut resume = cli.resume.clone().flatten();
+    // `--pick` (and `--resume` without a value): load the picker's rows **before** the terminal
+    // is entered. `open_index` can warn about a wide session directory, and that warning must be
+    // on the normal screen. The picker owns its data; the phase itself runs after the terminal
+    // (ADR 0023 U4).
+    let startup_picker = if cli.pick || resume_only {
         let workspace = workspace_path.to_string_lossy().into_owned();
-        prepare_picker(&dir, &workspace)?
+        prepare_picker(&dir, &workspace)?.map(|picker| {
+            if resume_only {
+                picker.without_new()
+            } else {
+                picker
+            }
+        })
     } else {
         None
     };
+    // Nothing to resume is a refusal, not a new session: `--resume` without a value never
+    // creates a file.
+    if resume_only && startup_picker.is_none() {
+        return Err(format!(
+            "no sessions for this workspace to resume; run without --resume to start one"
+        ));
+    }
     let pick_notice = cli.pick && startup_picker.is_none();
 
     // ADR 0020 decision 3 / ADR 0013: create the session directory owner-only, or warn once
@@ -479,7 +497,7 @@ fn run(
         }
         app.finish_picking();
         match app.take_picker_outcome() {
-            Some(radian_tui::picker::Outcome::Resume(id)) => cli.resume = Some(id),
+            Some(radian_tui::picker::Outcome::Resume(id)) => resume = Some(id),
             Some(radian_tui::picker::Outcome::New) => {}
             // `Quit`, Ctrl-C, or the terminal going away before any session: nothing was
             // created, so leave through the ordinary clean-exit path.
@@ -495,7 +513,7 @@ fn run(
     // this process's id, and `--resume` uses the id being resumed. The parser is the same one
     // `agent-cli` uses, so `{session_id}`, name validation and the `authorization` refusal
     // behave identically in both hosts.
-    let session_id = match (&cli.resume, &cli.session_id) {
+    let session_id = match (&resume, &cli.session_id) {
         (Some(id), _) | (None, Some(id)) => id.clone(),
         (None, None) => radian_host::generate_session_id(),
     };
@@ -644,7 +662,7 @@ fn run(
                 tier: tier.preset(),
                 profile,
                 memory_root,
-                resume: cli.resume.is_some(),
+                resume: resume.is_some(),
                 config_snapshot: serde_json::json!({
                     "provider": provider.as_str(),
                     "model": cli.model,
@@ -729,7 +747,7 @@ fn run(
     // The history of a resumed session is rendered before the first frame, so the transcript
     // shows it from the start. `Driver::open` recovers the same history from the journal for
     // the model; this is only the view of it.
-    let history = if cli.resume.is_some() {
+    let history = if resume.is_some() {
         radian_session::Session::open(session.journal_path())
             .and_then(|history| history.history())
             .map_err(|e| format!("cannot read session {session_id:?}: {e}"))?
@@ -771,7 +789,7 @@ fn run(
     }
     app.prefill_history(&history);
     // A draft from a previous exit is restored once, when resuming the same session.
-    if cli.resume.is_some() {
+    if resume.is_some() {
         let path = radian_tui::composer::draft_path(&dir, &session_id);
         match radian_tui::composer::take_draft(&path) {
             Ok(Some(text)) => app.input.set_text(&text),
@@ -831,7 +849,7 @@ fn run(
     }
     app.entries.push(radian_tui::Entry::new(
         radian_tui::EntryKind::Notice,
-        match &cli.resume {
+        match &resume {
             Some(id) => format!(
                 "resumed session {id} ({} messages) · Enter sends · Ctrl-C cancels a turn · \
                  Ctrl-C again quits",

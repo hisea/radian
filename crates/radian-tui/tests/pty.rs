@@ -5430,3 +5430,108 @@ fn pty_a_session_started_from_the_filesystem_root_is_refused() {
     assert!(text.contains("filesystem root"), "{text}");
     assert!(text.contains("--workspace"), "{text}");
 }
+
+/// `--resume` without a value is the picker in "resume only" mode: it lists
+/// this workspace's sessions, offers no "new" entry, resumes the chosen one, and Esc leaves
+/// without creating a file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_resume_without_a_value_picks_a_session() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("resume-pick");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let workspace = std::fs::canonicalize(&ws)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    seed_session(&sessions, "alpha", &workspace, "ALPHA-HISTORY").await;
+    seed_session(&sessions, "beta", &workspace, "BETA-HISTORY").await;
+    let listing = |sessions: &std::path::Path| -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(sessions)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            // Session files only: the picker's index database is not a session.
+            .filter(|name| name.ends_with(".jsonl"))
+            .collect();
+        names.sort();
+        names
+    };
+    let before = listing(&sessions);
+
+    let server = MockServer::start(vec![text_reply("PICKED-REPLY")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--resume",
+        ],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("alpha", 10),
+        "the picker did not list the sessions:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("n new"),
+        "a resume-only picker must not offer a new session:\n{}",
+        pty.screen()
+    );
+    // Filter to beta (without it, Enter would resume the first row) and resume it.
+    pty.send(b"beta");
+    assert!(
+        pty.wait_until(5, |screen| !screen.contains("alpha")),
+        "the filter did not narrow the list:\n{}",
+        pty.screen()
+    );
+    pty.send(b"\r");
+    assert!(
+        pty.wait_for_screen("resumed session beta", 10),
+        "Enter did not resume the chosen session:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("BETA-HISTORY", 10),
+        "the resumed history is missing:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+
+    // Esc (Quit) leaves the pre-session phase without creating anything.
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--resume",
+            "--offline-catalog",
+        ],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("alpha", 10),
+        "the picker did not open again:\n{}",
+        pty.screen()
+    );
+    pty.send(&[0x1b]);
+    assert!(pty.wait_for_exit(10).is_some(), "Esc did not leave");
+    assert_eq!(pty.app_exit_code(), Some(0));
+    assert_eq!(listing(&sessions), before, "no session file was created");
+}
