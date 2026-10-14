@@ -111,11 +111,12 @@ fn a_click_clears_the_selection() {
     press(&mut app, 0, 2);
     drag(&mut app, 1, 25);
     assert!(app.selection.is_some());
-    // A second press clears immediately...
-    assert!(press(&mut app, 0, 2).dirty);
+    // A second press on a different cell clears immediately (the same cell inside the
+    // double-click window would be a word select, not a clear).
+    assert!(press(&mut app, 2, 4).dirty);
     assert!(app.selection.is_none());
     // ...and its release (the click) copies nothing.
-    let release = release(&mut app, 0, 2);
+    let release = release(&mut app, 2, 4);
     assert!(release.effects.is_empty());
     assert!(app.selection.is_none());
 }
@@ -135,9 +136,16 @@ fn a_press_outside_the_transcript_never_starts_one() {
 fn a_press_on_a_modal_never_starts_one() {
     let mut app = app();
     app.update(Input::Pending(Some(Box::new(approval())), 1));
-    // With the approval modal up the transcript viewport shrinks: the modal's own rows are
-    // outside it, so a press there starts nothing. (Rows inside the transcript still do.)
+    // With the approval modal up the selection is off entirely: even a press inside the
+    // shrunk transcript viewport (rows 0..2 are still transcript on screen) starts nothing —
+    // the modal owns the input until it is answered.
     app.set_viewport(2, 6);
+    assert!(!press(&mut app, 1, 5).dirty);
+    assert!(app.selection.is_none());
+    drag(&mut app, 1, 9);
+    release(&mut app, 1, 9);
+    assert!(app.selection.is_none());
+    // The modal's own rows are outside the viewport, doubly so.
     assert!(!press(&mut app, 4, 5).dirty);
     assert!(app.selection.is_none());
 }
@@ -345,4 +353,79 @@ fn a_drag_that_returns_to_its_press_cell_is_still_a_selection() {
         result.effects,
         vec![Effect::Copy { text: "h".into() }]
     );
+}
+
+#[test]
+fn a_double_click_selects_a_word_and_its_release_copies_it() {
+    let mut app = app();
+    // "hello there": double-click the 'h' of "there" (body col 6 → col 8).
+    press(&mut app, 0, 8);
+    press(&mut app, 0, 8);
+    let selection = app.selection.expect("the word is selected");
+    let (start, end) = selection.ordered();
+    assert_eq!((start.entry, start.offset, end.entry, end.offset), (0, 6, 0, 11));
+    let result = release(&mut app, 0, 8);
+    assert_eq!(
+        result.effects,
+        vec![Effect::Copy { text: "there".into() }]
+    );
+}
+
+#[test]
+fn a_triple_click_selects_the_whole_entry() {
+    let mut app = app();
+    for _ in 0..3 {
+        press(&mut app, 1, 5);
+    }
+    let result = release(&mut app, 1, 5);
+    assert_eq!(
+        result.effects,
+        vec![Effect::Copy {
+            text: "aaaa bbbb cccc dddd".into()
+        }],
+        "the whole message, prefixes excluded"
+    );
+}
+
+#[test]
+fn a_click_sequence_on_different_cells_is_three_single_clicks() {
+    let mut app = app();
+    press(&mut app, 0, 8);
+    press(&mut app, 0, 9);
+    press(&mut app, 0, 10);
+    assert!(app.selection.is_none(), "no word got selected: not one cell");
+}
+
+#[test]
+fn a_drag_after_a_double_click_extends_from_the_word() {
+    let mut app = app();
+    press(&mut app, 0, 8);
+    press(&mut app, 0, 8);
+    drag(&mut app, 1, 200);
+    let result = release(&mut app, 1, 200);
+    assert_eq!(
+        result.effects,
+        vec![Effect::Copy {
+            text: "there\naaaa bbbb cccc dddd".into()
+        }],
+        "the drag extends the double-clicked word"
+    );
+}
+
+#[test]
+fn a_double_click_on_whitespace_selects_the_whitespace_run() {
+    let mut app = app();
+    press(&mut app, 0, 7);
+    press(&mut app, 0, 7);
+    let result = release(&mut app, 0, 7);
+    assert_eq!(
+        result.effects,
+        vec![Effect::Copy { text: " ".into() }],
+        "the single space between the words"
+    );
+}
+
+#[test]
+fn the_double_click_window_is_half_a_second() {
+    assert_eq!(radian_tui::app::DOUBLE_CLICK_WINDOW.as_millis(), 500);
 }

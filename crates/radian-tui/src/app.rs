@@ -204,6 +204,19 @@ pub const MOUSE_WHEEL_LINES: usize = 3;
 /// idle app still blocks and never redraws (ADR 0023 U2).
 pub const AUTO_SCROLL_TICK: std::time::Duration = std::time::Duration::from_millis(50);
 
+/// How quickly a second press counts as a double-click. Wall-clock (not frames): the loop
+/// is idle between clicks, so there is nothing else to measure with.
+pub const DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The last press, for double/triple-click detection: where and when, and how many presses
+/// in a row landed on the same cell inside the window (1, 2 or 3; capped at 3).
+#[derive(Debug, Clone, Copy)]
+struct LastClick {
+    at: std::time::Instant,
+    cell: (u16, u16),
+    count: usize,
+}
+
 /// The live left-button gesture: the press cell, and where the pointer last was (the
 /// auto-scroll edges are read off `last`). Screen rows/columns, `0`-based. `moved` says a
 /// drag event actually moved the pointer, so a release on the press cell is a click (which
@@ -218,6 +231,9 @@ struct SelectDrag {
     /// scrolling during the drag cannot move it).
     anchor: Anchor,
     anchor_on_char: bool,
+    /// How many presses began this gesture (1 click, 2 double, 3 triple): the release counts
+    /// as a click — and clears — only for a plain 1.
+    count: usize,
 }
 
 /// Which startup phase the app is in (ADR 0023 U4, plan B). `--pick` runs the event
@@ -616,6 +632,8 @@ pub struct App {
     pub selection: Option<Selection>,
     /// The live left-button gesture, from press to release.
     selecting: Option<SelectDrag>,
+    /// The last press, for double/triple-click detection.
+    last_click: Option<LastClick>,
     /// Whether mouse reporting is on (`tui.mouse`, default on). With it off the terminal
     /// never sends a mouse event and every mouse method here is a no-op: none of the
     /// selection/copy features exist (the belt behind the terminal's suspenders).
@@ -658,6 +676,7 @@ impl App {
             picker_outcome: None,
             selection: None,
             selecting: None,
+            last_click: None,
             mouse_enabled: true,
             clipboard: ClipboardMode::Osc52,
         }
@@ -853,6 +872,7 @@ impl App {
         if !self.mouse_enabled {
             return UpdateResult::none();
         }
+        let count = self.bump_click_count(row, col);
         let had = self.selection.take();
         let inside = !self.has_modal()
             && self.picker().is_none()
@@ -870,15 +890,60 @@ impl App {
         else {
             return cleared.then(UpdateResult::dirty).unwrap_or(UpdateResult::none());
         };
+        // A multi-click replaces the just-cleared selection with its bigger range and
+        // anchors the gesture at its start, so a following drag extends from the word (or
+        // the entry).
+        let (anchor, anchor_on_char) = match count {
+            2 => match select::run_at(&self.entries, self.transcript_width, press_line, col as usize)
+            {
+                Some((start, end)) => {
+                    self.selection = Some(Selection { anchor: start, head: end });
+                    (start, true)
+                }
+                None => (hit.anchor, hit.on_char),
+            },
+            3 => {
+                let len = select::entry_display_len(&self.entries, hit.anchor.entry);
+                if len > 0 {
+                    self.selection = Some(Selection {
+                        anchor: Anchor { entry: hit.anchor.entry, offset: 0 },
+                        head: Anchor { entry: hit.anchor.entry, offset: len },
+                    });
+                    (Anchor { entry: hit.anchor.entry, offset: 0 }, true)
+                } else {
+                    (hit.anchor, hit.on_char)
+                }
+            }
+            _ => (hit.anchor, hit.on_char),
+        };
         self.selecting = Some(SelectDrag {
             press: (row, col),
             last: (row, col),
             moved: false,
-            anchor: hit.anchor,
-            anchor_on_char: hit.on_char,
+            anchor,
+            anchor_on_char,
+            count,
         });
-        self.selection = None;
         cleared.then(UpdateResult::dirty).unwrap_or(UpdateResult::none())
+    }
+
+    /// The press counter for double/triple-click: one more when the same cell is pressed
+    /// again inside [`DOUBLE_CLICK_WINDOW`] (capped at 3), otherwise back to 1.
+    fn bump_click_count(&mut self, row: u16, col: u16) -> usize {
+        let next = match self.last_click {
+            Some(click)
+                if click.cell == (row, col) && click.at.elapsed() <= DOUBLE_CLICK_WINDOW =>
+            {
+                (click.count + 1).min(3)
+            }
+            _ => 1,
+        };
+        self.last_click = Some(LastClick {
+            at: std::time::Instant::now(),
+            cell: (row, col),
+            count: next,
+        });
+        next
     }
 
     /// The left button moved while held: extend the selection to the pointer's cell.
@@ -907,8 +972,9 @@ impl App {
             return UpdateResult::none();
         }
         self.selecting = None;
-        if !drag.moved && (row, col) == drag.press {
-            // The click: the press already cleared; nothing to copy.
+        if drag.count == 1 && !drag.moved && (row, col) == drag.press {
+            // The click: the press already cleared; nothing to copy. A double/triple click's
+            // release copies the word or entry it just selected.
             return UpdateResult::none();
         }
         self.extend_selection_to(row, col);

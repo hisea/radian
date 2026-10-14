@@ -151,6 +151,59 @@ pub fn char_len_at(entries: &[Entry], anchor: Anchor) -> Option<usize> {
         .map(char::len_utf8)
 }
 
+/// An entry's display-text length in bytes (what a triple-click selects: offsets `0..len`).
+pub fn entry_display_len(entries: &[Entry], index: usize) -> usize {
+    entries
+        .get(index)
+        .map(|entry| display_text(entry).len())
+        .unwrap_or(0)
+}
+
+/// The run of similar chars around a click: a word (non-whitespace) when the pointer is on
+/// one, the whitespace run when it is on a space. Both ends are `(start, end after the last
+/// char)` — a ready normalized selection range. A click on the prefix or past a line's end
+/// expands from the char the gap maps to, exactly like a drag from there would.
+pub fn run_at(entries: &[Entry], width: usize, line: usize, col: usize) -> Option<(Anchor, Anchor)> {
+    let hit = locate_hit(entries, width, line, col)?;
+    let anchor = hit.anchor;
+    let text = display_text(entries.get(anchor.entry)?);
+    if anchor.offset >= text.len() {
+        return None;
+    }
+    let ch = text[anchor.offset..].chars().next()?;
+    let in_word = |c: char| c != ' ' && c != '\n';
+    let want = in_word(ch);
+    // Walk out from the clicked char while the run keeps its kind: the word it sits in, or
+    // the whitespace run (which may cross the entry's own newlines).
+    let mut start = anchor.offset;
+    while start > 0 {
+        let Some(prev) = text[..start].chars().next_back() else {
+            break;
+        };
+        if in_word(prev) != want {
+            break;
+        }
+        start -= prev.len_utf8();
+    }
+    let mut end = anchor.offset + ch.len_utf8();
+    while let Some(next) = text[end..].chars().next() {
+        if in_word(next) != want {
+            break;
+        }
+        end += next.len_utf8();
+    }
+    Some((
+        Anchor {
+            entry: anchor.entry,
+            offset: start,
+        },
+        Anchor {
+            entry: anchor.entry,
+            offset: end,
+        },
+    ))
+}
+
 /// The logical text of a selection: the entries' display text between the anchors, wrapped
 /// lines rejoined (a soft wrap inserts nothing), the text's own newlines kept, entries
 /// joined by one newline. An empty or `is_empty` selection copies nothing.

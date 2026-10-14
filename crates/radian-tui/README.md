@@ -163,7 +163,8 @@ schema_version = 1
 [tui]
 theme = "dark"                 # dark | light | mono
 input_style = "lines"          # lines (default) | box
-mouse = true                   # the wheel scrolls the transcript (default true)
+mouse = true                   # wheel + transcript selection (default true)
+clipboard = "osc52"            # osc52 (default) | pbcopy (macOS) | off
 
 [tui.keybindings]
 send = ["ctrl-s"]              # replaces the default `enter`
@@ -179,14 +180,24 @@ find_next = ["ctrl-g", "shift-enter"]
 - `theme`: `dark` is the original palette, `light` re-picks it for a light background, `mono`
   uses no color at all (bold/underline/dim only). A non-empty `NO_COLOR` environment variable
   forces `mono` (<https://no-color.org>). An unknown theme is ignored with a warning.
-- `mouse` (default `true`): the app enables button + wheel reporting (`CSI ?1000h`) with SGR
-  coordinates (`CSI ?1006h`), so a wheel notch scrolls the transcript instead of the terminal
-  translating it to arrow keys (dogfood p5: the wheel called the input history). Deliberately
-  **not** `?1002h`/`?1003h` (any-motion): a pointer move is not input and never causes a frame.
-  With `mouse = false` the app sends no mouse sequence at all and behaves exactly as before.
-  **Cost**: while reporting is on, a plain drag selects via the app rather than the emulator;
-  most terminals still select with Shift held, but that is the emulator's choice and is not
-  guaranteed here. Set `mouse = false` to keep native selection always.
+- `mouse` (default `true`): the app enables button + wheel reporting (`CSI ?1000h`), button
+  motion (`CSI ?1002h`, the transcript drag) and SGR coordinates (`CSI ?1006h`), so a wheel
+  notch scrolls the transcript instead of the terminal translating it to arrow keys (dogfood
+  p5: the wheel called the input history). Deliberately **not** `?1003h` (any-motion): a
+  pointer move without a button is not input and never causes a frame. With `mouse = false`
+  the app sends no mouse sequence at all and behaves exactly as before — no wheel scrolling
+  and no transcript selection/copy. **Cost**: while reporting is on, a plain drag selects via
+  the app rather than the emulator; most terminals keep their native selection on
+  **Shift+drag** (they do not report a shifted mouse at all — Radian drops such events if one
+  arrives), but that is the emulator's choice and is not guaranteed here. Set `mouse = false`
+  to keep native selection always.
+- `clipboard` (default `osc52`): how a transcript-selection copy reaches the system clipboard.
+  `osc52` writes `CSI ]52;c;<base64>BEL` to stdout — no child process, works over ssh, but it
+  is fire-and-forget: the status bar therefore says `copied N chars (via OSC 52)`, what
+  Radian did, never that the clipboard holds it. `pbcopy` runs macOS's `pbcopy` and can
+  report failure honestly; configured anywhere else it is a startup warning and OSC 52.
+  Selections over 1 MiB are refused with the reason. `off` keeps the selection visual and
+  copies nothing.
 - `keybindings` maps an **action** to one or more key strings; a listed action's keys
   **replace** its defaults. Key strings are `[ctrl-][alt-][shift-]key` (`enter`, `ctrl-j`,
   `alt-enter`, `shift-up`, `pageup`, `space`, a single character, …). An unknown action or key
@@ -360,12 +371,15 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
 - **the exit line**: after Ctrl-C twice (or a SIGTERM), is the printed
   `resume: radian-tui --resume <id> …` command paste-ready in your shell, with the paths and
   quoting right?
-- **mouse selection/copy**: with the default `tui.mouse = true`, the app reports the wheel
-  (and buttons) with `?1000h ?1006h`, so a plain drag no longer selects in the emulator. Try
-  **Shift+drag** (most terminals) or set `mouse = false` in the config to restore the
-  emulator's own selection (drag, Cmd-C on macOS, or the emulator's copy key) — then the wheel
-  is back to the terminal's alternate-scroll translation and no longer scrolls the app.
-  Whichever way, verify that the selection and copy do what you expect.
+- **mouse selection/copy**: with the default `tui.mouse = true`, the app reports the wheel,
+  buttons and button motion (`?1000h ?1002h ?1006h`) and owns the transcript selection
+  itself: press, drag, release copies (double-click a word, triple-click a message). Drag to
+  the top or bottom edge and hold: the view auto-scrolls. Verify the copy lands where you
+  expect (`tui.clipboard`: `osc52`/`pbcopy`/`off`) and that the status bar's `copied N chars
+  (via …)` wording is what you want. **Shift+drag** stays the emulator's native selection on
+  most terminals (Radian drops shifted mouse events) and `mouse = false` restores it
+  everywhere — then the wheel is back to the terminal's alternate-scroll translation and no
+  longer scrolls the app.
 - **the mouse wheel**: with `tui.mouse = true` (default), type a draft in the message box and
   scroll the wheel **up** — the transcript must move up by three lines per notch and the draft
   must stay (dogfood p5 was the wheel replacing it with the input history). Scroll down: it
