@@ -926,3 +926,15 @@ Base `f699306` · 一次性 worktree `/tmp/radian-mut-s2`（`git worktree add --
 是红），改成插进函数体后由结构测试抓住。FS2-A 的第一次断言（变 stale 也是重绘）依赖脏标志被消费，
 说明 `write`/`mark_stale` 的返回值只表达"值是否变化"，脏标志单独由 `take_dirty` 消费——这正是
 ADR 0023 U2 的协议，不改。
+
+## footer-s2c：后台 git 加 `--no-optional-locks`（ADR 0027 C3，2026-10-16）
+
+Base `d483ec9` · 一次性 worktree `/tmp/radian-mut-s2c`（`git worktree add --detach`），每条跑完
+`git checkout -- .`，`git status --short` 为空。命令 `cargo test -p radian-host --lib the_background_git`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| FS2C-A | 去掉 `--no-optional-locks` 参数 | `the_background_git_disables_optional_locks` | ✅ |
+| FS2C-B | 去掉 `GIT_OPTIONAL_LOCKS=0` 环境变量 | `the_background_git_disables_optional_locks` | ✅ |
+
+2/2 抓住。两个都断言，是因为新 git 认参数、旧 git 只认环境变量：只留一个就是给旧版本留洞。
