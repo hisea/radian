@@ -1,9 +1,9 @@
-//! The **read-only** configuration file reader (ADR 0008; its location is ADR 0020's
-//! `~/.radian/config/config.toml`).
+//! The configuration file (ADR 0008; its location is ADR 0020's `~/.radian/config/config.toml`).
 //!
-//! This slice only reads: there is no migration entry point and nothing is ever written back,
-//! so ADR 0008 §5.4's "write-back must be faithful or refused" cannot be violated here (the
-//! reader never writes).
+//! Reading is the main job; the reader never rewrites a file it read. The one writer is
+//! [`theme_write::write_theme`] (`/theme`, ADR 0008 revision): it edits **only** `tui.theme`
+//! through `toml_edit` and refuses when the result would differ in anything else (ADR 0008
+//! §5.4's "faithful or refused").
 //!
 //! The rules the reader enforces (each one is a test):
 //!
@@ -21,6 +21,7 @@
 //! errors name the key path and nothing else.
 
 pub mod migrate_pi;
+pub mod theme_write;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -285,6 +286,16 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
             }),
         },
     }
+}
+
+/// The path this process reads its configuration from (`--config` > `RADIAN_CONFIG` >
+/// `<root>/config/config.toml`), even when the file does not exist yet. [`Config::source`]
+/// is `None` in that case; the `/theme` write-back needs the path to create it (ADR 0008
+/// revision).
+pub fn resolved_path(explicit: Option<&Path>) -> Option<PathBuf> {
+    let env = std::env::var(RADIAN_CONFIG_ENV).ok();
+    let home = crate::home::radian_home();
+    resolve_path(explicit, env.as_deref(), home.as_deref())
 }
 
 /// Parses one configuration document. Split out so the fixture consistency test can feed the

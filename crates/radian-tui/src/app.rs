@@ -408,6 +408,13 @@ pub enum Input {
     /// The clipboard write finished (the result of [`Effect::Copy`]): the honest status-bar
     /// notice — what Radian did, never a claim about the clipboard it cannot verify.
     ClipboardDone(String),
+    /// `/theme` finished (the result of [`Effect::Theme`]): the loaded theme (`None` when the
+    /// switch did not happen, e.g. an unknown name or `NO_COLOR`) and the notices the loop
+    /// produced (warnings, and whether the write-back happened).
+    ThemeReady {
+        theme: Option<Box<crate::theme::Theme>>,
+        notices: Vec<String>,
+    },
 }
 
 /// What the loop loaded for a picker overlay: the rows to show, the index for full-text
@@ -481,6 +488,10 @@ pub enum Effect {
     /// transport). The loop runs it and answers with [`Input::ClipboardDone`]: OSC 52 has no
     /// receipt, and `pbcopy` can fail — the loop owns both facts, `update` only owns the text.
     Copy { text: String },
+    /// `/theme <name>` (ADR 0008 revision): load the theme and write `tui.theme` back to the
+    /// config file. Both are I/O, so the loop runs them and answers with
+    /// [`Input::ThemeReady`].
+    Theme { name: String },
 }
 
 /// Effects are compared by **meaning** in the tests. `MemoryCommand` (a clap enum) has no
@@ -527,6 +538,7 @@ impl PartialEq for Effect {
             (OpenPicker { query: a }, OpenPicker { query: b }) => a == b,
             (Session(a), Session(b)) => a == b,
             (Copy { text: a }, Copy { text: b }) => a == b,
+            (Theme { name: a }, Theme { name: b }) => a == b,
             _ => false,
         }
     }
@@ -1651,6 +1663,15 @@ impl App {
                 self.note = Some(notice);
                 UpdateResult::dirty()
             }
+            Input::ThemeReady { theme, notices } => {
+                if let Some(theme) = theme {
+                    self.theme = *theme;
+                }
+                for notice in notices {
+                    self.push_notice(notice);
+                }
+                UpdateResult::dirty()
+            }
         };
         if disarmed {
             result.dirty = true;
@@ -2457,6 +2478,11 @@ impl App {
                     return UpdateResult::dirty();
                 }
                 UpdateResult::effect(Effect::Session(command::SessionOutcome::Fork))
+            }
+            command::Outcome::Theme(name) => {
+                // ADR 0008 revision: the loop loads the theme (I/O) and writes `tui.theme`
+                // back to the config file; the notice says which of those happened.
+                UpdateResult::effect(Effect::Theme { name })
             }
             command::Outcome::Message => UpdateResult::none(),
         }

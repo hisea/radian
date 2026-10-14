@@ -16,6 +16,7 @@ pub const HELP: &str = "\
 /compact [note]       summarize the history now and keep the recent part (ADR 0018)
 /sessions [query]     list this workspace's recent sessions, or search their text
 /fork                 fork this session at its last turn boundary (ADR 0022)
+/theme <name>         switch the color theme and write it back to the config file
 /export [md|json] [path] [--force]
                       export this session (default md, default <workspace>/radian-<id>.<ext>)
 /memory <command>     durable memory: list, search, show, add, edit, archive, restore,
@@ -50,6 +51,9 @@ pub enum Outcome {
     Export(ExportRequest),
     /// `/fork`: the host forks the current (idle) session at its last turn boundary.
     Fork,
+    /// `/theme <name>` (ADR 0008 revision): switch the theme now and write `tui.theme` back
+    /// to the config file. The loop loads the theme (I/O) and does the write-back.
+    Theme(String),
     /// Not a command after all (an empty token list); the caller sends the line.
     Message,
 }
@@ -70,13 +74,15 @@ pub struct Candidate {
 pub enum Fetch {
     /// `/memory <command> <partial>`: the record ids that command can act on.
     MemoryRecords { command: String, partial: String },
+    /// `/theme <partial>`: the built-in names plus the theme files in `~/.radian/themes/`.
+    Themes { partial: String },
 }
 
 impl Fetch {
     /// The partial word the fetched candidates should be ranked against.
     pub fn partial(&self) -> &str {
         match self {
-            Fetch::MemoryRecords { partial, .. } => partial,
+            Fetch::MemoryRecords { partial, .. } | Fetch::Themes { partial } => partial,
         }
     }
 }
@@ -130,6 +136,11 @@ pub fn tree() -> &'static [Command] {
             name: "fork",
             description: "fork this session at its last turn boundary (ADR 0022)",
             levels: &[],
+        },
+        Command {
+            name: "theme",
+            description: "switch the color theme and write it back to the config file",
+            levels: &[theme_level],
         },
         Command {
             name: "export",
@@ -204,6 +215,49 @@ fn memory_level(typed: &[&str], partial: &str) -> Level {
         }
         Some(_) => Level::Free,
     }
+}
+
+/// `/theme`: the built-in names (`dark`/`light`/`mono`) and the theme files in
+/// `~/.radian/themes/` (ADR 0029). Listing the directory is I/O, so the loop answers. The
+/// command takes exactly one name: once it is typed the level offers nothing, so the list
+/// closes and Enter submits.
+fn theme_level(typed: &[&str], partial: &str) -> Level {
+    if typed.is_empty() {
+        Level::Needs(Fetch::Themes {
+            partial: partial.to_owned(),
+        })
+    } else {
+        Level::Free
+    }
+}
+
+/// The `/theme` completion candidates: the built-ins plus the `*.json` files in `themes_dir`
+/// (ADR 0029). Sorting makes the list stable; the app ranks it against the partial word.
+pub fn theme_candidates(themes_dir: Option<&std::path::Path>) -> Vec<Candidate> {
+    let mut out: Vec<Candidate> = ["dark", "light", "mono"]
+        .into_iter()
+        .map(|name| Candidate {
+            insert: name.to_string(),
+            description: "built-in theme".to_string(),
+        })
+        .collect();
+    if let Some(dir) = themes_dir
+        && let Ok(entries) = std::fs::read_dir(dir)
+    {
+        for entry in entries.flatten() {
+            let file = entry.file_name();
+            let name = file.to_string_lossy();
+            if let Some(stem) = name.strip_suffix(".json") {
+                out.push(Candidate {
+                    insert: stem.to_string(),
+                    description: "theme file".to_string(),
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| a.insert.cmp(&b.insert));
+    out.dedup_by(|a, b| a.insert == b.insert);
+    out
 }
 
 /// `/export`: the format, then the path (with `--force` offered as a candidate).
@@ -497,8 +551,20 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         Some("/sessions") => Outcome::Sessions(sessions_query(&tokens[1..])),
         Some("/export") => export_request(&tokens[1..]),
         Some("/fork") => Outcome::Fork,
+        Some("/theme") => theme_name(&tokens[1..]),
         Some(other) => Outcome::Notices(vec![format!("unknown command {other}; /help lists them")]),
         None => Outcome::Message,
+    }
+}
+
+/// `/theme <dark|light|mono|name>`: exactly one name (ADR 0008 revision). Anything else is
+/// a usage notice.
+fn theme_name(args: &[String]) -> Outcome {
+    match (args.first(), args.get(1)) {
+        (Some(name), None) => Outcome::Theme(name.clone()),
+        _ => Outcome::Notices(vec![
+            "usage: /theme <dark|light|mono|theme-file-name>".to_owned(),
+        ]),
     }
 }
 
@@ -851,5 +917,51 @@ mod tests {
             Outcome::Notices(notices) => assert!(notices[0].contains("disabled")),
             other => panic!("expected a notice, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod theme_tests {
+    use super::*;
+
+    #[test]
+    fn theme_parses_one_name_and_rejects_the_rest() {
+        match parse("/theme light", false) {
+            Outcome::Theme(name) => assert_eq!(name, "light"),
+            other => panic!("expected Theme, got {other:?}"),
+        }
+        for line in ["/theme", "/theme light dark"] {
+            match parse(line, false) {
+                Outcome::Notices(notices) => {
+                    assert!(notices[0].contains("usage: /theme"), "{line}: {notices:?}")
+                }
+                other => panic!("{line}: expected notices, got {other:?}"),
+            }
+        }
+    }
+
+    /// The completion asks the host (the loop lists the directory), and the host's listing
+    /// carries the built-ins plus the `*.json` stems.
+    #[test]
+    fn the_theme_level_needs_the_host_and_lists_files() {
+        let level = theme_level(&[], "li");
+        assert!(
+            matches!(level, Level::Needs(Fetch::Themes { .. })),
+            "{level:?}"
+        );
+
+        let dir = std::env::temp_dir().join(format!("radian-themes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("kanagawa.json"), "{}").unwrap();
+        std::fs::write(dir.join("notes.txt"), "not a theme").unwrap();
+        let candidates = theme_candidates(Some(&dir));
+        let names: Vec<&str> = candidates.iter().map(|c| c.insert.as_str()).collect();
+        assert!(names.contains(&"dark") && names.contains(&"light") && names.contains(&"mono"));
+        assert!(names.contains(&"kanagawa"), "{names:?}");
+        assert!(
+            !names.contains(&"notes"),
+            "only *.json is a theme: {names:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

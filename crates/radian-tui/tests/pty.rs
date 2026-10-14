@@ -6204,3 +6204,76 @@ async fn pty_ctrl_c_clears_a_draft_before_quitting() {
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
 }
+
+// ---------- /theme: switch and write back (ADR 0008 revision) ----------
+
+/// `/theme light` end to end: the notice names the saved file, the config's other bytes
+/// survive, and only `tui.theme` changed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_slash_theme_switches_and_writes_the_config() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("theme-switch");
+    let config = dir.path().join("config.toml");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let original = "# kept\nschema_version = 1\n\n[tui]\ntheme = \"dark\"\n";
+    std::fs::write(&config, original).unwrap();
+    let server = MockServer::start(vec![]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--config",
+            config.to_str().unwrap(),
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "theme-switch",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"/theme light");
+    assert!(
+        pty.wait_for_screen("/theme light", 10),
+        "the line did not render:\n{}",
+        pty.screen()
+    );
+    // Enter may pick the completion candidate first; the next Enter submits the line.
+    pty.send(b"\r");
+    pty.send(b"\r");
+    assert!(
+        pty.wait_for_screen("theme saved to", 10),
+        "the save notice is missing:\n{}",
+        pty.screen()
+    );
+    let after = std::fs::read_to_string(&config).unwrap();
+    assert_eq!(
+        after,
+        original.replace("dark", "light"),
+        "only theme changed"
+    );
+
+    // An unknown name is refused and the file is untouched.
+    pty.send(b"/theme nope");
+    assert!(
+        pty.wait_for_screen("/theme nope", 10),
+        "the line did not render:\n{}",
+        pty.screen()
+    );
+    pty.send(b"\r");
+    pty.send(b"\r");
+    assert!(
+        pty.wait_for_screen("no theme \"nope\"", 10),
+        "the refusal notice is missing:\n{}",
+        pty.screen()
+    );
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), after);
+
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}

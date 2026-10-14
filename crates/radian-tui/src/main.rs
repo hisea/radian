@@ -928,6 +928,12 @@ fn run(
         },
     ));
 
+    // ADR 0008 revision: `/theme` writes to the file this process read, or to the path it
+    // would read when there is no file yet (the write creates it).
+    let theme_write_path = config
+        .source
+        .clone()
+        .or_else(|| radian_host::resolved_config_path(cli.config.as_deref()));
     let session_host = SessionHost {
         dir: dir.clone(),
         workspace: workspace_path.to_string_lossy().into_owned(),
@@ -938,6 +944,9 @@ fn run(
             "provider": provider.as_str(),
             "model": cli.model,
         }),
+        theme_colors: config.tui.colors.clone(),
+        theme_write_path: theme_write_path.clone(),
+        config_read_only: config.read_only,
     };
     let session = Arc::new(session);
     let facade: Arc<dyn radian_host::SessionFacade> =
@@ -1451,6 +1460,23 @@ impl LoopContext<'_> {
             Effect::Steer(text) => self.command(radian_host::SessionCommand::Steer(text)),
             Effect::Cancel => self.command(radian_host::SessionCommand::Cancel),
             Effect::Quit => Ok(()),
+            // ADR 0008 revision: `/theme` loads the theme and writes `tui.theme` back. Both
+            // are I/O, so they run here and the result comes back as `Input::ThemeReady`.
+            Effect::Theme { name } => {
+                let outcome = radian_tui::theme::switch(
+                    &name,
+                    radian_tui::theme::Theme::no_color_env(),
+                    radian_host::themes_dir().as_deref(),
+                    &self.host.theme_colors,
+                    self.host.theme_write_path.as_deref(),
+                    self.host.config_read_only,
+                );
+                self.send(AppInput::ThemeReady {
+                    theme: outcome.theme.map(Box::new),
+                    notices: outcome.notices,
+                });
+                Ok(())
+            }
             Effect::AnswerRequest {
                 request_id,
                 response,
@@ -1484,6 +1510,9 @@ impl LoopContext<'_> {
                 let candidates = match &fetch {
                     radian_tui::command::Fetch::MemoryRecords { command, .. } => {
                         memory_record_candidates(self.memory, command)
+                    }
+                    radian_tui::command::Fetch::Themes { .. } => {
+                        radian_tui::command::theme_candidates(radian_host::themes_dir().as_deref())
                     }
                 };
                 self.send(AppInput::CompletionsReady { fetch, candidates });
@@ -1840,6 +1869,14 @@ struct SessionHost {
     journal: Arc<SessionJournal>,
     /// The child's `SessionCreated.config_snapshot` (a model-route reference).
     config_snapshot: serde_json::Value,
+    /// `[tui.colors]` overrides, so a `/theme` switch keeps them (ADR 0029).
+    theme_colors: Vec<(String, radian_host::config::TuiColorOverride)>,
+    /// Where `/theme` writes `tui.theme` back: the file this process read, or the path it
+    /// would read (ADR 0008 revision). `None` when there is no config location at all.
+    theme_write_path: Option<PathBuf>,
+    /// The reader's read-only verdict (a newer `schema_version`): `/theme` applies in the
+    /// session but never writes.
+    config_read_only: bool,
 }
 
 /// Runs one `/sessions`, `/export` or `/fork` request and returns the notices to show. Pure

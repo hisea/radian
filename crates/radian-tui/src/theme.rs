@@ -13,6 +13,75 @@ pub use color::{
 };
 pub use file::load;
 
+/// The outcome of `/theme <name>` (ADR 0008 revision): the theme to apply (`None` when the
+/// switch did not happen — an unknown name or `NO_COLOR`), and the notices to show.
+pub struct Switch {
+    pub theme: Option<Theme>,
+    pub notices: Vec<String>,
+}
+
+/// Loads `/theme <name>` and writes `tui.theme` back to the config file.
+///
+/// I/O lives here (the loop calls it); `App::update` only applies the result. `no_color`,
+/// `themes_dir` and `write_path` are passed in so the caller owns the environment and the
+/// function is testable without touching process-wide state.
+pub fn switch(
+    name: &str,
+    no_color: bool,
+    themes_dir: Option<&std::path::Path>,
+    colors: &[(String, radian_host::config::TuiColorOverride)],
+    write_path: Option<&std::path::Path>,
+    read_only: bool,
+) -> Switch {
+    // NO_COLOR wins over every theme (ADR 0029 decision 7): switching does nothing.
+    if no_color {
+        return Switch {
+            theme: None,
+            notices: vec![
+                "NO_COLOR is set: the theme is fixed, so /theme does not switch it".to_string(),
+            ],
+        };
+    }
+    let builtin = matches!(name, "dark" | "light" | "mono");
+    let is_file = themes_dir.is_some_and(|dir| dir.join(format!("{name}.json")).is_file());
+    if !builtin && !is_file {
+        return Switch {
+            theme: None,
+            notices: vec![format!(
+                "no theme {name:?}: built-ins are dark, light, mono; theme files live in {}",
+                themes_dir.map_or_else(
+                    || "~/.radian/themes/ (no RADIAN_HOME)".to_string(),
+                    |dir| dir.display().to_string()
+                )
+            )],
+        };
+    }
+    let (theme, warnings) = load(
+        Some(name),
+        false,
+        crate::theme::truecolor_env(),
+        themes_dir,
+        colors,
+    );
+    let mut notices = warnings;
+    match write_path {
+        Some(path) => match radian_host::write_theme(path, read_only, name) {
+            Ok(path) => notices.push(format!("theme saved to {}", path.display())),
+            Err(error) => notices.push(format!(
+                "theme applied for this session; could not save: {error}"
+            )),
+        },
+        None => notices.push(
+            "theme applied for this session; there is no configuration file location to save it"
+                .to_string(),
+        ),
+    }
+    Switch {
+        theme: Some(theme),
+        notices,
+    }
+}
+
 use std::collections::BTreeMap;
 
 use ratatui::style::{Color, Modifier, Style};
@@ -391,6 +460,115 @@ impl Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A unique scratch directory per test, removed on drop.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(label: &str) -> Self {
+            static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let dir = std::env::temp_dir().join(format!(
+                "radian-theme-switch-{}-{label}-{n}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+        fn file(&self, name: &str) -> std::path::PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// `/theme light` loads the built-in, writes the config and says where.
+    #[test]
+    fn switch_loads_a_builtin_and_saves_it() {
+        let scratch = Scratch::new("builtin");
+        let config = scratch.file("config.toml");
+        std::fs::write(&config, "schema_version = 1\n[tui]\ntheme = \"dark\"\n").unwrap();
+        let outcome = switch("light", false, None, &[], Some(&config), false);
+        assert_eq!(outcome.theme.expect("a theme").name, ThemeName::Light);
+        let text = std::fs::read_to_string(&config).unwrap();
+        assert!(text.contains("theme = \"light\""), "{text}");
+        assert!(
+            outcome
+                .notices
+                .iter()
+                .any(|n| n.starts_with("theme saved to ")),
+            "{:?}",
+            outcome.notices
+        );
+    }
+
+    /// An unknown name is refused: no theme, a notice naming the built-ins.
+    #[test]
+    fn switch_refuses_an_unknown_name() {
+        let scratch = Scratch::new("unknown");
+        let config = scratch.file("config.toml");
+        let outcome = switch("nope", false, None, &[], Some(&config), false);
+        assert!(outcome.theme.is_none());
+        assert!(!config.exists(), "a refused switch writes nothing");
+        assert!(
+            outcome.notices[0].contains("no theme \"nope\""),
+            "{:?}",
+            outcome.notices
+        );
+    }
+
+    /// NO_COLOR wins: the switch does nothing and says why.
+    #[test]
+    fn switch_does_nothing_under_no_color() {
+        let scratch = Scratch::new("no-color");
+        let config = scratch.file("config.toml");
+        let outcome = switch("light", true, None, &[], Some(&config), false);
+        assert!(outcome.theme.is_none());
+        assert!(!config.exists(), "NO_COLOR must not write the config");
+        assert!(
+            outcome.notices[0].contains("NO_COLOR"),
+            "{:?}",
+            outcome.notices
+        );
+    }
+
+    /// A read-only config applies in the session and reports the refusal.
+    #[test]
+    fn switch_applies_but_does_not_save_a_read_only_config() {
+        let scratch = Scratch::new("read-only");
+        let config = scratch.file("config.toml");
+        let original = "schema_version = 99\n[tui]\ntheme = \"dark\"\n";
+        std::fs::write(&config, original).unwrap();
+        let outcome = switch("light", false, None, &[], Some(&config), true);
+        assert!(outcome.theme.is_some(), "the theme still applies");
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), original);
+        assert!(
+            outcome.notices.iter().any(|n| n.contains("could not save")),
+            "{:?}",
+            outcome.notices
+        );
+    }
+
+    /// A theme file in the themes directory resolves by name.
+    #[test]
+    fn switch_resolves_a_theme_file() {
+        let scratch = Scratch::new("file");
+        let themes = scratch.file("themes");
+        std::fs::create_dir_all(&themes).unwrap();
+        std::fs::write(
+            themes.join("my-theme.json"),
+            r##"{"name": "my-theme", "colors": {"userMessageText": "#ff0000"}}"##,
+        )
+        .unwrap();
+        let config = scratch.file("config.toml");
+        let outcome = switch("my-theme", false, Some(&themes), &[], Some(&config), false);
+        assert!(outcome.theme.is_some());
+        assert!(config.exists());
+    }
 
     #[test]
     fn names_round_trip_and_unknown_names_are_none() {

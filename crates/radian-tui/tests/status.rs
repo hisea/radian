@@ -118,3 +118,48 @@ fn the_status_bar_shows_the_ctrl_c_quit_hint_while_armed() {
     let text = screen(&mut app, 120, 12);
     assert!(!text.contains("Press Ctrl-C again to quit"), "{text}");
 }
+
+/// The foreground color of the first cell of the first row containing `needle`.
+fn fg_of(app: &mut App, width: u16, height: u16, needle: &str) -> Option<ratatui::style::Color> {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal
+        .draw(|frame| radian_tui::render::draw(frame, app))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let area = *buffer.area();
+    let mut row: Vec<&str> = Vec::new();
+    for y in area.top()..area.bottom() {
+        row.clear();
+        for x in area.left()..area.right() {
+            row.push(buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
+        }
+        if let Some(col) = row.join("").find(needle) {
+            return buffer.cell((col as u16, y)).map(|c| c.fg);
+        }
+    }
+    None
+}
+
+/// `/theme` applies immediately: the same cell renders with the new theme's color (owner
+/// 2026-10-14). `dark`'s model segment is cyan, `light`'s is blue.
+#[test]
+fn applying_a_theme_changes_the_rendered_colors() {
+    let mut app = App::new("mock", "s");
+    let dark = fg_of(&mut app, 120, 12, "mock").expect("the model segment");
+    assert_eq!(dark, ratatui::style::Color::Cyan, "dark's model color");
+
+    let result = app.update(radian_tui::app::Input::ThemeReady {
+        theme: Some(Box::new(radian_tui::theme::Theme::light())),
+        notices: vec!["theme saved to /tmp/config.toml".to_string()],
+    });
+    assert!(result.dirty);
+    let light = fg_of(&mut app, 120, 12, "mock").expect("the model segment");
+    assert_eq!(light, ratatui::style::Color::Blue, "light's model color");
+    assert_ne!(dark, light, "the switch must change the rendered color");
+    assert!(
+        app.entries
+            .iter()
+            .any(|entry| entry.text.contains("theme saved to /tmp/config.toml")),
+        "the notice is shown"
+    );
+}

@@ -308,6 +308,7 @@ the rest is sent as an ordinary message.
 | `/help` | list the commands |
 | `/compact [note]` | summarize the history now and keep the recent part (ADR 0018) |
 | `/fork` | fork this session at its last turn boundary (ADR 0022); idle only, and it does not switch to the child |
+| `/theme <name>` | switch the color theme immediately and write `tui.theme` back to the config file (ADR 0008 revision): a built-in (`dark`/`light`/`mono`) or a `*.json` file in `~/.radian/themes/`. `NO_COLOR` wins, so it does not switch; a read-only config (a newer `schema_version`) applies for the session but is never written |
 | `/sessions [query]` | open the session **picker overlay** for this workspace (the `--pick` screen); type to filter, `Tab` full-text search, Enter shows the copyable `--resume <id>` line |
 | `/export [md\|json] [path] [--force]` | export **this** session (default `md`, default `<workspace>/radian-<id>.<ext>`) |
 | `/memory <command> …` | the same durable-memory commands as `agent memory` (ADR 0021 D7): `list`, `search`, `show`, `add`, `edit`, `archive`, `restore`, `forget`, `purge`, `confirm`, `export`, `import`, `project` / `project new`, `relink`, `split`, `merge` |
