@@ -209,10 +209,23 @@ pub fn parse(source: &str, base: usize) -> Vec<MdBlock> {
                     Piece::styled(text.into_string(), style, Some(base + range.start)),
                 );
             }
-            Event::Code(text) => append(
-                &mut stack,
-                Piece::styled(text.into_string(), Inline::Code, Some(base + range.start)),
-            ),
+            Event::Code(text) => {
+                // pulldown-cmark's range for a code span covers the opening backtick run too
+                // (`\`code\`` starts at the first backtick); the content starts after it, and
+                // the copy must map to the content, not the fence.
+                let fence = source[range.start..]
+                    .chars()
+                    .take_while(|c| *c == '`')
+                    .count();
+                append(
+                    &mut stack,
+                    Piece::styled(
+                        text.into_string(),
+                        Inline::Code,
+                        Some(base + range.start + fence),
+                    ),
+                );
+            }
             Event::SoftBreak | Event::HardBreak => {
                 // A table cell cannot hold a line break: it becomes a space there.
                 let in_cell = matches!(stack.last(), Some(Container::Pieces(_, PiecesKind::Cell)));

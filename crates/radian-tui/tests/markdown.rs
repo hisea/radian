@@ -349,3 +349,74 @@ fn a_find_jump_lands_on_the_markdown_paragraph_under_a_folded_entry() {
         "the copy is the paragraph's source: {copied:?}"
     );
 }
+
+/// The stronger form of the property, independent of `chars`: at a width where the block is one
+/// display line, selecting the whole line copies the block's **source** exactly (inline markup
+/// included). A `chars` mapping that collapsed onto a piece's start would truncate the copy.
+#[test]
+fn a_whole_line_selection_copies_the_source_line() {
+    for body in [
+        "alpha beta gamma delta epsilon\n",
+        "A **bold** *italic* `code` tail\n",
+        "a plain sentence with a long tail that still fits\n",
+    ] {
+        let mut app = App::new("m", "s");
+        assistant(&mut app, body);
+        let modes = modes(ReasoningMode::Expanded);
+        let blocks = blocks::parse_blocks(body);
+        let lines = blocks::layout(&app.entries[0], &blocks, modes, 80);
+        // Padding rows (if any) come along; the copy still has to be the source.
+        let last = lines.len() - 1;
+        let cells = lines[last].chars.len();
+        let anchor = select::locate(&app.entries, modes, 80, 0, 0).expect("anchor");
+        let head = select::locate(&app.entries, modes, 80, last, cells + 2).expect("head");
+        let copied = select::logical_text(&app.entries, &select::Selection { anchor, head });
+        assert_eq!(
+            copied, body,
+            "the whole line copies the source for {body:?}"
+        );
+    }
+}
+
+/// The source-independent half of the property: for every cell whose **displayed** character is
+/// alphanumeric (no synthesized cell - a bullet, a table border, a link's ` (url)` - is
+/// alphanumeric), the source at the anchor's offset starts with that same character. This does
+/// not read `chars` to decide what is expected, so a mapping that collapsed onto a piece's start
+/// fails here.
+#[test]
+fn every_displayed_source_char_is_at_its_offset() {
+    for body in [
+        "alpha beta gamma delta epsilon\n",
+        "A **bold** *italic* `code` tail\n",
+        "first paragraph\n\nsecond paragraph\n",
+        "# Heading\n\nbody text\n",
+    ] {
+        for width in [80usize, 30, 16] {
+            let mut app = App::new("m", "s");
+            assistant(&mut app, body);
+            let modes = modes(ReasoningMode::Expanded);
+            let blocks = blocks::parse_blocks(body);
+            let lines = blocks::layout(&app.entries[0], &blocks, modes, width);
+            let cells: usize = lines.iter().map(|line| line.chars.len()).sum();
+            for cell in 0..cells {
+                let (line, column) = cell_of(&lines, cell).expect("a cell");
+                let display = lines[line]
+                    .text
+                    .chars()
+                    .nth(column)
+                    .expect("the display char");
+                if !display.is_alphanumeric() {
+                    continue;
+                }
+                let anchor = select::locate(&app.entries, modes, width, line, column + 2)
+                    .expect("an anchor");
+                assert!(
+                    body[anchor.offset..].starts_with(display),
+                    "body {body:?} width {width} cell {cell}: offset {} does not start with \
+                     {display:?}",
+                    anchor.offset
+                );
+            }
+        }
+    }
+}
