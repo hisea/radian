@@ -63,6 +63,9 @@ pub struct Entry {
     /// The committed assistant message was an interrupted prefix (ADR 0003).
     pub interrupted: bool,
     pub is_error: bool,
+    /// A tool call's outcome, once its result has arrived: `None` while it is running,
+    /// `Some(is_error)` after. The card's background follows it (ADR 0028 R4's states).
+    pub result: Option<bool>,
     /// The parsed blocks (ADR 0028 R1), keyed by text length and the reasoning mode. Only
     /// filled for assistant prose (the only kind with fence grammar today).
     pub(crate) block_cache: Option<((usize, ReasoningMode), Vec<Block>)>,
@@ -80,6 +83,7 @@ impl Entry {
             live: false,
             interrupted: false,
             is_error: false,
+            result: None,
             block_cache: None,
             layout_cache: None,
         }
@@ -2478,6 +2482,16 @@ impl App {
                 }
             }
             Message::Tool { result, .. } => {
+                // The card's head entry learns its outcome from the result that just
+                // arrived: the last tool call still marked running is the one it answers.
+                if let Some(call) = self
+                    .entries
+                    .iter_mut()
+                    .rev()
+                    .find(|entry| entry.kind == EntryKind::ToolCall && entry.result.is_none())
+                {
+                    call.result = Some(result.is_error);
+                }
                 let mut entry = Entry::new(EntryKind::ToolResult, result.text());
                 entry.is_error = result.is_error;
                 self.entries.push(entry);

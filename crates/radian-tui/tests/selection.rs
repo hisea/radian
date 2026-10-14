@@ -465,6 +465,24 @@ fn a_double_click_on_whitespace_selects_the_whitespace_run() {
 }
 
 #[test]
+fn a_selection_across_a_banded_user_block_copies_the_text() {
+    // The band is paint; the copy is still the block's logical text, padding rows included
+    // in the geometry but contributing nothing.
+    let mut app = app();
+    app.theme.user =
+        ratatui::style::Style::default().bg(ratatui::style::Color::Rgb(0x18, 0x18, 0x20));
+    press(&mut app, 0, 0); // the top padding row
+    drag(&mut app, ASSISTANT, 25);
+    let result = release(&mut app, ASSISTANT, 25);
+    assert_eq!(
+        result.effects,
+        vec![Effect::Copy {
+            text: "hello there\naaaa bbbb cccc dddd".into()
+        }]
+    );
+}
+
+#[test]
 fn the_double_click_window_is_half_a_second() {
     assert_eq!(radian_tui::app::DOUBLE_CLICK_WINDOW.as_millis(), 500);
 }

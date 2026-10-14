@@ -623,6 +623,74 @@ fn wrap_and_wrap_char_offsets_agree() {
     }
 }
 
+/// The user block's band (ADR 0028 R4, owner acceptance): the `user` role's background covers
+/// the whole row — the marker, the text, the trailing whitespace — and the blank rows above
+/// and below it.
+#[test]
+fn a_user_block_paints_its_band_across_the_whole_block() {
+    let mut app = App::new("m", "s");
+    app.theme.user = ratatui::style::Style::default().bg(Color::Rgb(0x18, 0x18, 0x20));
+    app.push_message(&Message::user("hello band"));
+    let terminal = render(&mut app, 30, 8);
+    let buffer = terminal.backend().buffer();
+    let band = Color::Rgb(0x18, 0x18, 0x20);
+    // Rows 0 (pad), 1 (text) and 2 (pad) are the block; every cell carries the band.
+    for row in 0..3u16 {
+        for col in 0..30u16 {
+            let cell = buffer.cell((col, row)).expect("on screen");
+            assert_eq!(cell.bg, band, "row {row} col {col} must carry the band");
+        }
+    }
+    // The row below the block is not painted.
+    assert_ne!(buffer.cell((0, 3)).expect("on screen").bg, band);
+    assert!(screen(&terminal).contains("hello band"));
+}
+
+/// A tool card's band follows its state (ADR 0028 R4): running / success / failure, and the
+/// result entry carries the same two.
+#[test]
+fn a_tool_card_paints_the_state_band() {
+    for (result, expected) in [
+        (None, Color::Blue),
+        (Some(false), Color::Green),
+        (Some(true), Color::Red),
+    ] {
+        let mut app = App::new("m", "s");
+        let mut call = Entry::new(EntryKind::ToolCall, "shell({\"command\": \"ls\"})");
+        call.result = result;
+        app.entries.push(call);
+        let terminal = render(&mut app, 40, 6);
+        let buffer = terminal.backend().buffer();
+        assert_eq!(
+            buffer.cell((0, 0)).expect("on screen").bg,
+            expected,
+            "the head row's band for {result:?}"
+        );
+        assert_eq!(
+            buffer.cell((39, 0)).expect("on screen").bg,
+            expected,
+            "the band reaches the row's end"
+        );
+    }
+
+    // A tool result paints the card body the same way.
+    let mut app = App::new("m", "s");
+    let mut result = Entry::new(EntryKind::ToolResult, "line one\nline two");
+    result.is_error = true;
+    app.entries.push(result);
+    let terminal = render(&mut app, 40, 6);
+    let buffer = terminal.backend().buffer();
+    for row in 0..2u16 {
+        for col in 0..40u16 {
+            assert_eq!(
+                buffer.cell((col, row)).expect("on screen").bg,
+                Color::Red,
+                "the error band covers row {row} col {col}"
+            );
+        }
+    }
+}
+
 /// The question form's key line stays visible when the option list fills the box (same bug the
 /// approval box had: the hint used to be the content's last line, and the clip cut it).
 #[test]

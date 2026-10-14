@@ -50,7 +50,7 @@ impl ThemeName {
     }
 }
 
-/// The 23 roles a [`Theme`] styles today (ADR 0009, ADR 0023). The config keys are the
+/// The 26 roles a [`Theme`] styles today (ADR 0009, ADR 0023). The config keys are the
 /// snake_case names; `[tui.colors]` accepts them and (mapped) pi's role names alike.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -77,10 +77,13 @@ pub enum Role {
     Completion,
     Find,
     Selection,
+    ToolPendingBg,
+    ToolSuccessBg,
+    ToolErrorBg,
 }
 
 impl Role {
-    pub const ALL: [Role; 23] = [
+    pub const ALL: [Role; 26] = [
         Role::Reasoning,
         Role::Interrupted,
         Role::User,
@@ -104,6 +107,9 @@ impl Role {
         Role::Completion,
         Role::Find,
         Role::Selection,
+        Role::ToolPendingBg,
+        Role::ToolSuccessBg,
+        Role::ToolErrorBg,
     ];
 
     /// The `[tui.colors]` key for this role (ADR 0029 decision 5).
@@ -132,6 +138,9 @@ impl Role {
             Role::Completion => "completion",
             Role::Find => "find",
             Role::Selection => "selection",
+            Role::ToolPendingBg => "tool_pending_bg",
+            Role::ToolSuccessBg => "tool_success_bg",
+            Role::ToolErrorBg => "tool_error_bg",
         }
     }
 
@@ -164,6 +173,9 @@ impl Role {
             Role::Completion => &mut theme.completion,
             Role::Find => &mut theme.find,
             Role::Selection => &mut theme.selection,
+            Role::ToolPendingBg => &mut theme.tool_pending_bg,
+            Role::ToolSuccessBg => &mut theme.tool_success_bg,
+            Role::ToolErrorBg => &mut theme.tool_error_bg,
         }
     }
 }
@@ -200,6 +212,12 @@ pub struct Theme {
     pub find: Style,
     /// A transcript selection (mouse drag). pi's role map: `selectedBg`.
     pub selection: Style,
+    /// A tool card's background by state (running / success / failure). pi's role map:
+    /// `toolPendingBg`, `toolSuccessBg`, `toolErrorBg`. With no color at all (`mono`) they
+    /// carry a modifier instead, so the cards still read apart.
+    pub tool_pending_bg: Style,
+    pub tool_success_bg: Style,
+    pub tool_error_bg: Style,
     /// Pi roles no current Radian role consumes — the `md*`, `toolDiff*`, `syntax*` and
     /// `thinking*` families ADR 0027/0028 will wire, plus the panel roles (`scrollbar*`,
     /// `searchMatch*`, `customMessage*`, `toolPendingBg`, `toolSuccessBg`, `toolErrorBg`,
@@ -259,6 +277,12 @@ impl Theme {
             // A selection is a background band; the text keeps its own foreground. `DarkGray`
             // (ANSI 8) reads as a quiet band on a dark background.
             selection: Style::default().bg(Color::DarkGray),
+            // Tool cards by state (ADR 0028 R4): a quick band, not a shout. `Green`/`Blue`/
+            // `Red` are the ANSI 2/4/1 shades (not bright), and none collides with the
+            // selection's `DarkGray`, so a selection stays visible over a card.
+            tool_pending_bg: Style::default().bg(Color::Blue),
+            tool_success_bg: Style::default().bg(Color::Green),
+            tool_error_bg: Style::default().bg(Color::Red),
         }
     }
 
@@ -296,6 +320,9 @@ impl Theme {
             find: style(Some(Color::Magenta), Modifier::empty()),
             // A quiet light band on a light background; the dark text stays readable.
             selection: Style::default().bg(Color::Gray),
+            tool_pending_bg: Style::default().bg(Color::Blue),
+            tool_success_bg: Style::default().bg(Color::Green),
+            tool_error_bg: Style::default().bg(Color::Red),
         }
     }
 
@@ -327,8 +354,13 @@ impl Theme {
             completion: style(None, Modifier::DIM),
             find: style(None, Modifier::BOLD),
             // No color at all: a selection is the reversed video, as the terminal itself
-            // would draw it.
+            // would draw it, and the tool states are told apart by modifiers.
             selection: style(None, Modifier::REVERSED),
+            // No colors: the states are modifiers, and none uses REVERSED — that is the
+            // selection's, so a selection stays visible over a card.
+            tool_pending_bg: style(None, Modifier::DIM),
+            tool_success_bg: style(None, Modifier::empty()),
+            tool_error_bg: style(None, Modifier::BOLD | Modifier::UNDERLINED),
         }
     }
 
@@ -359,7 +391,7 @@ impl Theme {
     }
 
     /// Every style this theme defines, for the "mono has no colors" test.
-    pub fn styles(&self) -> [Style; 23] {
+    pub fn styles(&self) -> [Style; 26] {
         [
             self.reasoning,
             self.interrupted,
@@ -384,6 +416,9 @@ impl Theme {
             self.completion,
             self.find,
             self.selection,
+            self.tool_pending_bg,
+            self.tool_success_bg,
+            self.tool_error_bg,
         ]
     }
 }

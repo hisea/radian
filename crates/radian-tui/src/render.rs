@@ -213,6 +213,30 @@ fn body_style(entry: &Entry, theme: &Theme) -> Style {
     }
 }
 
+/// The background band an entry's block paints across the transcript (ADR 0028 R4 + owner
+/// acceptance): a user message uses the `user` role's background, a tool card the state's
+/// (`tool_pending_bg` / `tool_success_bg` / `tool_error_bg`). `None` means no band — the
+/// built-in themes without a user background, and every other kind.
+fn card_band(entry: &Entry, theme: &Theme) -> Option<Style> {
+    let role = match entry.kind {
+        EntryKind::User => theme.user,
+        EntryKind::ToolCall => match entry.result {
+            None => theme.tool_pending_bg,
+            Some(false) => theme.tool_success_bg,
+            Some(true) => theme.tool_error_bg,
+        },
+        EntryKind::ToolResult if entry.is_error => theme.tool_error_bg,
+        EntryKind::ToolResult => theme.tool_success_bg,
+        _ => return None,
+    };
+    // Background and modifiers only: the text under the band keeps its own foreground.
+    let mut band = Style::default().add_modifier(role.add_modifier);
+    if let Some(bg) = role.bg {
+        band = band.bg(bg);
+    }
+    (band.bg.is_some() || !band.add_modifier.is_empty()).then_some(band)
+}
+
 /// The text a frame shows for `entry`. A user message's `@` attachments are folded to one
 /// `[file: P, N lines]` line each; every other entry shows its text unchanged. Display only:
 /// the message (and the journal) keep the full text. Also what a selection maps offsets into
@@ -247,6 +271,7 @@ fn entry_lines(
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     let (prefix, prefix_style) = marker(entry.kind, theme);
+    let band = card_band(entry, theme);
     let blocks = blocks::parse_blocks_for(entry, mode);
     let body = blocks::layout(entry, &blocks, mode, width);
     let style = body_style(entry, theme);
@@ -268,6 +293,8 @@ fn entry_lines(
             style,
             theme,
             Some(i) == first_text,
+            band,
+            width,
         );
         if Some(i) == last && entry.interrupted {
             line.spans
@@ -280,7 +307,8 @@ fn entry_lines(
 
 /// One laid-out [`BodyLine`] as styled spans. `first_text` puts the entry's marker prefix on
 /// the lead; a padding row renders as an empty line; a code line has no lead at all (it is
-/// full-width by design, ADR 0028 R9).
+/// full-width by design, ADR 0028 R9). A block with a band (ADR 0028 R4) is padded out to the
+/// full transcript width, so the band covers the row's trailing cells too.
 fn render_row(
     entry: &Entry,
     row: &BodyLine,
@@ -289,9 +317,15 @@ fn render_row(
     style: Style,
     theme: &Theme,
     first_text: bool,
+    band: Option<Style>,
+    width: usize,
 ) -> Line<'static> {
     if row.pad {
-        return Line::from(vec![Span::raw(String::new())]);
+        return match band {
+            // The blank rows of a banded block carry the band too.
+            Some(band) => Line::from(Span::styled(" ".repeat(width), band)),
+            None => Line::from(vec![Span::raw(String::new())]),
+        };
     }
     let lead = if row.code {
         String::new()
@@ -304,10 +338,27 @@ fn render_row(
     // body style.
     let placeholder = entry.kind == EntryKind::Reasoning && row.chars.is_empty();
     let body = if placeholder { theme.reasoning } else { style };
-    Line::from(vec![
-        Span::styled(lead, prefix_style),
-        Span::styled(row.text.clone(), body),
-    ])
+    let lead_width = UnicodeWidthStr::width(lead.as_str());
+    let mut spans = Vec::with_capacity(3);
+    let lead_style = match band {
+        Some(band) => prefix_style.patch(band),
+        None => prefix_style,
+    };
+    let body_style = match band {
+        Some(band) => body.patch(band),
+        None => body,
+    };
+    spans.push(Span::styled(lead, lead_style));
+    spans.push(Span::styled(row.text.clone(), body_style));
+    if let Some(band) = band {
+        // Pad to the full width so the band reaches the row's end (owner acceptance:
+        // including the row's trailing whitespace).
+        let used = lead_width + UnicodeWidthStr::width(row.text.as_str());
+        if used < width {
+            spans.push(Span::styled(" ".repeat(width - used), band));
+        }
+    }
+    Line::from(spans)
 }
 
 /// How many lines `entry` lays out to at `width`, from its cache when the entry has not
@@ -362,6 +413,7 @@ pub fn visible_lines(
             let prefix = marker_prefix(entry.kind);
             let prefix_style = marker(entry.kind, theme).1;
             let style = body_style(entry, theme);
+            let band = card_band(entry, theme);
             let text_rows: Vec<usize> = body
                 .iter()
                 .enumerate()
@@ -384,6 +436,8 @@ pub fn visible_lines(
                             style,
                             theme,
                             Some(i) == first_text,
+                            band,
+                            width,
                         );
                         if Some(i) == last && entry.interrupted {
                             line.spans

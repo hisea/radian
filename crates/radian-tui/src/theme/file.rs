@@ -10,8 +10,8 @@
 //! - **Coverage** (decision 3): pi styles its own UI roles; Radian maps them onto its 23
 //!   [`Role`]s. The mapping is in [`fg_source`]/[`bg_source`] and pinned by tests. The pi
 //!   roles nothing consumes yet (the `md*`, `toolDiff*`, `syntax*`, `thinking*` families and
-//!   the panel roles) are parsed into [`Theme::reserved`] so their values survive until
-//!   ADR 0027/0028 wire them.
+//!   the remaining panel roles) are parsed into [`Theme::reserved`] so their values survive
+//!   until ADR 0027/0028 wire them.
 //!
 //! Warnings are strings for the startup line; each problem is reported once.
 
@@ -118,15 +118,20 @@ fn fg_source(role: Role) -> Option<&'static str> {
         Role::Completion => Some("dim"),
         Role::Find => Some("accent"),
         Role::Selection => None,
+        Role::ToolPendingBg | Role::ToolSuccessBg | Role::ToolErrorBg => None,
     }
 }
 
-/// The pi role feeding a Radian role's **background**. The user line (`userMessageBg`) and
-/// the transcript selection (`selectedBg`), ADR 0029 decision 3.
+/// The pi role feeding a Radian role's **background**: the user line (`userMessageBg`), the
+/// transcript selection (`selectedBg`), and the tool cards by state (`toolPendingBg` /
+/// `toolSuccessBg` / `toolErrorBg`, ADR 0029 decision 3 + ADR 0028 R4).
 fn bg_source(role: Role) -> Option<&'static str> {
     match role {
         Role::User => Some("userMessageBg"),
         Role::Selection => Some("selectedBg"),
+        Role::ToolPendingBg => Some("toolPendingBg"),
+        Role::ToolSuccessBg => Some("toolSuccessBg"),
+        Role::ToolErrorBg => Some("toolErrorBg"),
         _ => None,
     }
 }
@@ -932,6 +937,13 @@ mod tests {
         // `#363646`, background only (the text keeps its own foreground under it).
         assert_eq!(theme.selection.bg, Some(Color::Rgb(0x36, 0x36, 0x46)));
         assert_eq!(theme.selection.fg, None);
+        // The block backgrounds (ADR 0028 R4): `userMessageBg: "bg_m2"` → `#181820`,
+        // `toolPendingBg: "bg_m3"` → `#16161D`, `toolSuccessBg: "diff_add_bg"` → `#2B3328`,
+        // `toolErrorBg: "diff_del_bg"` → `#43242B`.
+        assert_eq!(theme.user.bg, Some(Color::Rgb(0x18, 0x18, 0x20)));
+        assert_eq!(theme.tool_pending_bg.bg, Some(Color::Rgb(0x16, 0x16, 0x1D)));
+        assert_eq!(theme.tool_success_bg.bg, Some(Color::Rgb(0x2B, 0x33, 0x28)));
+        assert_eq!(theme.tool_error_bg.bg, Some(Color::Rgb(0x43, 0x24, 0x2B)));
         // Every pi role in the file is either mapped or kept; nothing was dropped.
         assert!(theme.reserved.contains_key("mdHeading"));
         assert!(theme.reserved.contains_key("syntaxKeyword"));
@@ -983,6 +995,28 @@ mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(theme.selection.bg, Some(Color::Rgb(0x21, 0x22, 0x23)));
         assert_eq!(theme.selection.fg, None);
+
+        // A tool background by its Radian name and by pi's name.
+        let (theme, warnings) = load(
+            None,
+            false,
+            true,
+            None,
+            &overrides(
+                "schema_version = 1\n[tui.colors]\ntool_success_bg = { bg = \"#0a0b0c\" }\n",
+            ),
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(theme.tool_success_bg.bg, Some(Color::Rgb(10, 11, 12)));
+        let (theme, warnings) = load(
+            None,
+            false,
+            true,
+            None,
+            &overrides("schema_version = 1\n[tui.colors]\ntoolErrorBg = { bg = \"#0d0e0f\" }\n"),
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(theme.tool_error_bg.bg, Some(Color::Rgb(13, 14, 15)));
 
         // A bare color names a foreground, which `selectedBg` does not carry: warned, and
         // the selection's foreground stays unset.
