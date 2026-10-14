@@ -29,7 +29,7 @@ pub(crate) const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 
 /// The v1 events known to a schema-v1 reader (ADR 0006 §4). Anything else is unknown and
 /// handled by the `critical` policy.
-pub(crate) const KNOWN_EVENTS: [&str; 24] = [
+pub(crate) const KNOWN_EVENTS: [&str; 25] = [
     "SessionCreated",
     "InboxEnqueued",
     "InputClaimed",
@@ -54,6 +54,7 @@ pub(crate) const KNOWN_EVENTS: [&str; 24] = [
     "ModelUsageRecorded",
     "SessionForked",
     "ProjectTrustChanged",
+    "UserBash",
 ];
 
 /// The parsed body of one known event. Events this slice does not interpret (for example
@@ -179,6 +180,14 @@ pub enum EventData {
     ProjectTrustChanged {
         path: String,
         decision: bool,
+    },
+    /// A user's `!`/`!!` command ran (ADR 0033). Typed for an exact round trip; audit only,
+    /// never a transcript record.
+    UserBash {
+        command: String,
+        exclude_from_context: bool,
+        exit_code: Option<i32>,
+        cancelled: bool,
     },
     /// A known event this crate does not interpret (`SessionCreated`) or an unknown
     /// non-critical event.
@@ -639,6 +648,15 @@ impl LineScanner {
                     decision: d.decision,
                 }
             }
+            "UserBash" => {
+                let d: UserBashData = data_of(raw, self.lineno, path)?;
+                EventData::UserBash {
+                    command: d.command,
+                    exclude_from_context: d.exclude_from_context,
+                    exit_code: d.exit_code,
+                    cancelled: d.cancelled,
+                }
+            }
             "InboxEnqueued" => {
                 let d: InboxEnqueuedData = data_of(raw, self.lineno, path)?;
                 EventData::InboxEnqueued {
@@ -966,6 +984,7 @@ fn record_from_event(event: &SessionEvent) -> Option<JournalRecord> {
         | EventData::ApprovalPolicyChanged { .. }
         | EventData::MemoryInjected { .. }
         | EventData::ProjectTrustChanged { .. }
+        | EventData::UserBash { .. }
         | EventData::Other(_) => None,
     }
 }
@@ -1144,6 +1163,14 @@ struct MemoryInjectedData {
 struct ProjectTrustChangedData {
     path: String,
     decision: bool,
+}
+
+#[derive(Deserialize)]
+struct UserBashData {
+    command: String,
+    exclude_from_context: bool,
+    exit_code: Option<i32>,
+    cancelled: bool,
 }
 
 /// Feeds one record to the shared replacement state machine, mapping a rejection to the
