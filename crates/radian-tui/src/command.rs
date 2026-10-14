@@ -16,6 +16,8 @@ pub const HELP: &str = "\
 /compact [note]       summarize the history now and keep the recent part (ADR 0018)
 /sessions [query]     list this workspace's recent sessions, or search their text
 /fork                 fork this session at its last turn boundary (ADR 0022)
+/auto on|off          auto-approve tool asks for this session (ADR 0026 D9)
+/yolo                 alias of /auto
 /export [md|json] [path] [--force]
                       export this session (default md, default <workspace>/radian-<id>.<ext>)
 /memory <command>     durable memory: list, search, show, add, edit, archive, restore,
@@ -50,6 +52,9 @@ pub enum Outcome {
     Export(ExportRequest),
     /// `/fork`: the host forks the current (idle) session at its last turn boundary.
     Fork,
+    /// `/auto on|off` (and `/yolo`, its alias): the in-session auto-approval switch
+    /// (ADR 0026 D9). `true` = on.
+    AutoToggle(bool),
     /// Not a command after all (an empty token list); the caller sends the line.
     Message,
 }
@@ -132,6 +137,16 @@ pub fn tree() -> &'static [Command] {
             levels: &[],
         },
         Command {
+            name: "auto",
+            description: "auto-approve tool asks for this session (ADR 0026 D9)",
+            levels: &[auto_level],
+        },
+        Command {
+            name: "yolo",
+            description: "alias of /auto",
+            levels: &[auto_level],
+        },
+        Command {
             name: "export",
             description: "export this session (default md, default <workspace>/radian-<id>.<ext>)",
             levels: &[export_level, export_level],
@@ -204,6 +219,20 @@ fn memory_level(typed: &[&str], partial: &str) -> Level {
         }
         Some(_) => Level::Free,
     }
+}
+
+/// `/auto on|off` (and `/yolo`): the two words are the whole argument grammar (ADR 0026 D9).
+fn auto_level(_typed: &[&str], _partial: &str) -> Level {
+    Level::Ready(vec![
+        Candidate {
+            insert: "on".to_owned(),
+            description: "approve tool asks without asking, this session".to_owned(),
+        },
+        Candidate {
+            insert: "off".to_owned(),
+            description: "ask again (back to on-ask)".to_owned(),
+        },
+    ])
 }
 
 /// `/export`: the format, then the path (with `--force` offered as a candidate).
@@ -497,6 +526,7 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         Some("/sessions") => Outcome::Sessions(sessions_query(&tokens[1..])),
         Some("/export") => export_request(&tokens[1..]),
         Some("/fork") => Outcome::Fork,
+        Some("/auto") | Some("/yolo") => auto_toggle(&tokens[1..]),
         Some(other) => Outcome::Notices(vec![format!("unknown command {other}; /help lists them")]),
         None => Outcome::Message,
     }
@@ -507,6 +537,17 @@ fn compact_instructions(args: &[String]) -> Option<String> {
     let joined = args.join(" ");
     let joined = joined.trim();
     (!joined.is_empty()).then(|| joined.to_owned())
+}
+
+/// `/auto on|off` (and `/yolo`, its alias). Anything else is a usage notice (ADR 0026 D9).
+fn auto_toggle(args: &[String]) -> Outcome {
+    match args.first().map(String::as_str) {
+        Some("on") => Outcome::AutoToggle(true),
+        Some("off") => Outcome::AutoToggle(false),
+        _ => Outcome::Notices(vec![
+            "usage: /auto on|off (deny rules and the sandbox still apply)".to_owned()
+        ]),
+    }
 }
 
 /// The optional `/sessions` query: the arguments joined with spaces, or `None` when empty.

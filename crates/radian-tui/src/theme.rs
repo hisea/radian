@@ -76,10 +76,12 @@ pub enum Role {
     Hint,
     Completion,
     Find,
+    /// The status bar's `AUTO` marker (ADR 0026 D9): the session auto-approves.
+    Auto,
 }
 
 impl Role {
-    pub const ALL: [Role; 22] = [
+    pub const ALL: [Role; 23] = [
         Role::Reasoning,
         Role::Interrupted,
         Role::User,
@@ -102,6 +104,7 @@ impl Role {
         Role::Hint,
         Role::Completion,
         Role::Find,
+        Role::Auto,
     ];
 
     /// The `[tui.colors]` key for this role (ADR 0029 decision 5).
@@ -129,6 +132,7 @@ impl Role {
             Role::Hint => "hint",
             Role::Completion => "completion",
             Role::Find => "find",
+            Role::Auto => "auto",
         }
     }
 
@@ -160,6 +164,7 @@ impl Role {
             Role::Hint => &mut theme.hint,
             Role::Completion => &mut theme.completion,
             Role::Find => &mut theme.find,
+            Role::Auto => &mut theme.auto,
         }
     }
 }
@@ -194,6 +199,8 @@ pub struct Theme {
     pub completion: Style,
     /// The find match position in the status bar (Phase 5).
     pub find: Style,
+    /// The status bar's `AUTO` marker (ADR 0026 D9): the session auto-approves.
+    pub auto: Style,
     /// Pi roles no current Radian role consumes — the `md*`, `toolDiff*`, `syntax*` and
     /// `thinking*` families ADR 0027/0028 will wire, plus the panel roles (`selectedBg`,
     /// `scrollbar*`, `searchMatch*`, `customMessage*`, `toolPendingBg`, `toolSuccessBg`,
@@ -249,6 +256,8 @@ impl Theme {
             hint: style(Some(Color::Gray), Modifier::empty()),
             completion: style(Some(Color::DarkGray), Modifier::empty()),
             find: style(Some(Color::Yellow), Modifier::empty()),
+            // Reversed so `AUTO` reads at a glance as "this session behaves differently".
+            auto: style(Some(Color::Yellow), Modifier::REVERSED),
         }
     }
 
@@ -284,6 +293,7 @@ impl Theme {
             hint: style(Some(Color::DarkGray), Modifier::empty()),
             completion: style(Some(Color::DarkGray), Modifier::empty()),
             find: style(Some(Color::Magenta), Modifier::empty()),
+            auto: style(Some(Color::Magenta), Modifier::REVERSED),
         }
     }
 
@@ -314,6 +324,8 @@ impl Theme {
             hint: style(None, Modifier::DIM),
             completion: style(None, Modifier::DIM),
             find: style(None, Modifier::BOLD),
+            // ADR 0026 D9: the mono theme has no color, so `AUTO` stands out by reversal.
+            auto: style(None, Modifier::REVERSED),
         }
     }
 

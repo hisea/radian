@@ -1900,8 +1900,7 @@ async fn pty_yes_runs_an_ask_without_a_prompt_and_still_audits_it() {
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
     assert!(
-        pty.screen()
-            .contains("--yes: tool calls are approved without asking"),
+        pty.screen().contains("auto: tool calls are approved without asking"),
         "the startup must say approvals are off:\n{}",
         pty.screen()
     );

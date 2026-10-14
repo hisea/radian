@@ -65,20 +65,8 @@ impl Approver for TerminalApprover {
     }
 }
 
-/// `--yes`: answer every approval with "allow once" without asking.
-///
-/// This is *not* "allow everything": `deny` rules still deny, `allow` rules still allow, and
-/// the sandbox is untouched. It only removes the question.
-pub(crate) struct AutoApprover;
-
-impl Approver for AutoApprover {
-    fn decide(
-        &self,
-        _request: ApprovalRequest,
-    ) -> BoxFuture<'_, Result<ApprovalOutcome, ApprovalError>> {
-        Box::pin(async { Ok(ApprovalOutcome::AllowOnce) })
-    }
-}
+// The `--yes` approver was removed by ADR 0026 D9: `--yes` is now shorthand for
+// `--approval auto`, which the approval policy resolves before any approver is consulted.
 
 /// Writes every decision into the session journal as a `PermissionResolved` (ADR 0006 §5.9).
 ///

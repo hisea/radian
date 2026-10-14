@@ -113,6 +113,8 @@ fn fg_source(role: Role) -> &'static str {
         Role::Hint => "muted",
         Role::Completion => "dim",
         Role::Find => "accent",
+        // pi has no auto role; the warning role is the closest "this needs attention" color.
+        Role::Auto => "warning",
     }
 }
 
