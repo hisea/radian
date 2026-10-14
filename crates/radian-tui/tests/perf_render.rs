@@ -564,7 +564,7 @@ impl Pty {
         cmd.stderr(Stdio::from(slave));
         cmd.env_clear();
         let home = TempDir::new("perf-home");
-        for name in ["PATH", "TMPDIR", "LANG", "TERM"] {
+        for name in ["PATH", "TMPDIR", "LANG", "TERM", "RADIAN_TRACE_PHASES"] {
             if let Ok(value) = std::env::var(name) {
                 cmd.env(name, value);
             }
@@ -743,6 +743,44 @@ fn perf_idle_redraw() {
 /// history is rendered before the run loop, so the first frame is the one that shows the
 /// bottom (the status bar). The top of the generated transcript is the first unit's tool card
 /// header (`-> read: file.txt`), which is not on screen at the bottom.
+#[test]
+#[ignore = "debug trace"]
+fn dbg_resume_trace() {
+    let _serial = guard();
+    for n in [1_000usize, 10_000, 50_000] {
+        let dir = TempDir::new(&format!("trace-{n}"));
+        long_session::write_long_session(&dir.path().join("resume.jsonl"), "resume", n, 0);
+        let mut pty = Pty::spawn(
+            &[
+                "--model",
+                "mock",
+                "--base-url",
+                "http://127.0.0.1:1/v1",
+                "--session-dir",
+                dir.path().to_str().unwrap(),
+                "--resume",
+                "resume",
+            ],
+            24,
+            100,
+        );
+        let first = pty.wait_for("context budget off", pty.start, 180);
+        std::thread::sleep(Duration::from_millis(500));
+        let raw = pty.snapshot();
+        let text = String::from_utf8_lossy(&raw);
+        println!(
+            "=== n={n} first-frame {:.0} ms ===",
+            first.as_secs_f64() * 1000.0
+        );
+        for line in text.split(|c| c == '\n' || c == '\r') {
+            if let Some(at) = line.find("[trace]") {
+                println!("{}", &line[at..]);
+            }
+        }
+        pty.quit();
+    }
+}
+
 #[test]
 #[ignore = "measurement, not an assertion; run with --ignored --nocapture"]
 fn perf_tui_resume() {

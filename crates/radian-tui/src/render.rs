@@ -515,10 +515,18 @@ pub fn visible_lines(
     height: usize,
     theme: &Theme,
 ) -> (usize, Vec<Line<'static>>) {
+    let __t = std::time::Instant::now();
     let counts: Vec<usize> = entries
         .iter_mut()
         .map(|entry| entry_line_count(entry, modes, width))
         .collect();
+    if std::env::var_os("RADIAN_TRACE_PHASES").is_some() {
+        eprintln!(
+            "[trace] line-counts {} entries {} ms",
+            counts.len(),
+            __t.elapsed().as_millis()
+        );
+    }
     let total: usize = counts.iter().sum();
     let mut out = Vec::with_capacity(height);
     let mut line = 0usize;
