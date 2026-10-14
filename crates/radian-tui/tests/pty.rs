@@ -4382,6 +4382,9 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
     // inside it (ADR 0020).
     let sessions = dir.path().join("sessions");
     let frozen = dir.path().join("frozen");
+    // The exit path's timestamps (`--exit-trace`): on a failure this says which step was
+    // slow (or that the POLLHUP path never fired).
+    let trace = dir.path().join("exit-trace");
     let home = TempDir::new("master-gone-home");
     let (mut child, mut master) = spawn_direct(
         &[
@@ -4398,6 +4401,8 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
             ws.to_str().unwrap(),
             "--freeze-draw",
             frozen.to_str().unwrap(),
+            "--exit-trace",
+            trace.to_str().unwrap(),
         ],
         home.path(),
     );
@@ -4405,6 +4410,12 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
     // The first frame is drawn (its marker exists); from now on the app writes nothing.
     let mut drained = Vec::new();
     let mut buf = [0u8; 65536];
+    // These two waits poll with a short sleep. `frozen` is a file the app writes from its own
+    // task: without a filesystem watcher (kqueue/FSEvents, i.e. a dependency) there is no
+    // notification to block on. The exit wait could use `waitpid` on a helper thread with a
+    // channel timeout, but the child handle is shared with `KillOnDrop` (a double wait) and the
+    // outcome of the investigation is that the app does not exit at all on a crossterm reader
+    // hang, so the deadline is what the test is about — not the wait mechanism.
     let deadline = Instant::now() + Duration::from_secs(20);
     while !frozen.exists() {
         // Drain the output: the first frame is larger than the pty buffer, so the app is
@@ -4426,6 +4437,7 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
     }
 
     // Close the terminal: the master fd. No signal is sent (no controlling terminal).
+    let closed_at = Instant::now();
     drop(master);
 
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -4433,12 +4445,16 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
         if let Some(status) = child.0.try_wait().unwrap() {
             break status;
         }
-        assert!(
-            Instant::now() < deadline,
-            "the app did not exit within 5 s of its terminal closing: the input POLLHUP path \
-             did not fire, and drawing is frozen (--freeze-draw) so the draw path cannot rescue \
-             it either"
-        );
+        if Instant::now() >= deadline {
+            let steps = std::fs::read_to_string(&trace).unwrap_or_default();
+            panic!(
+                "the app did not exit within 5 s of its terminal closing: the input POLLHUP \
+                 path did not fire, and drawing is frozen (--freeze-draw) so the draw path \
+                 cannot rescue it either. Exit trace (review: a trace whose last point is \
+                 `poll-idle` means the input thread is inside crossterm's reader and its read \
+                 is looping on EOF):\n{steps}"
+            );
+        }
         std::thread::sleep(Duration::from_millis(20));
     };
     assert_eq!(
@@ -4446,6 +4462,14 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
         Some(0),
         "the terminal-gone exit is the ordinary clean one (exit 0, no signal): {status:?}"
     );
+    if std::env::var_os("RADIAN_FLAKY_VERBOSE").is_some() {
+        // Investigation aid: how long the exit path took and where the time went.
+        eprintln!(
+            "closed-master: exit took {:?}\n{}",
+            closed_at.elapsed(),
+            std::fs::read_to_string(&trace).unwrap_or_default()
+        );
+    }
 }
 
 /// The remaining window: the main loop can be stuck **inside crossterm's reader** (the tty can
@@ -4579,6 +4603,34 @@ fn frame_count(pty: &Pty) -> usize {
         .count()
 }
 
+/// [`frame_count`] after the pty output has gone quiet for `QUIET`.
+///
+/// `frame_count` counts the bytes the test's reader thread has **received**, and the app writes
+/// a frame's cursor-show (`[?25h`) *after* the frame text that `wait_for_screen` matches. Under
+/// load the reader can lag, so a bare `frame_count` right after `wait_for_screen` can read the
+/// startup frames as zero — and then a later read counts them as if the input under test had
+/// drawn them (`left: 2, right: 0`). Waiting for the output to stop changing makes the baseline
+/// a state, not a race. The wait is bounded; on timeout it returns the current count.
+fn settled_frame_count(pty: &mut Pty) -> usize {
+    const QUIET: std::time::Duration = std::time::Duration::from_millis(250);
+    const LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + LIMIT;
+    let mut seen = pty.raw().len();
+    let mut changed = std::time::Instant::now();
+    loop {
+        pty.pump();
+        let len = pty.raw().len();
+        if len != seen {
+            seen = len;
+            changed = std::time::Instant::now();
+        } else if changed.elapsed() >= QUIET || std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    frame_count(pty)
+}
+
 /// ADR 0023 U2's zero-redraw rule: an idle screen is not redrawn at all. Before the
 /// event-driven loop the app drew ~19 frames/s while nothing happened (`docs/perf-baseline.md`
 /// §7); now the frame count over an idle window must not move.
@@ -4606,7 +4658,7 @@ fn pty_an_idle_screen_is_not_redrawn() {
         "{}",
         pty.screen()
     );
-    let before = frame_count(&pty);
+    let before = settled_frame_count(&mut pty);
     assert!(before >= 1, "the first frame is drawn");
 
     let window = std::time::Instant::now();
@@ -7254,14 +7306,16 @@ fn pty_pointer_motion_alone_draws_no_frame() {
         "{}",
         pty.screen()
     );
-    let before = frame_count(&pty);
+    // The startup frames' cursor-show bytes are written after the text `wait_for_screen`
+    // matched; settle first, so the baseline cannot miss them and blame the motion under load.
+    let before = settled_frame_count(&mut pty);
 
     // A pointer wandering across the screen, buttons up, for a while.
     for step in 0..40u16 {
         pty.send(&sgr(35, 5 + step, 3 + step % 10, true));
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    let after = frame_count(&pty);
+    let after = settled_frame_count(&mut pty);
     pty.quit();
     assert_eq!(
         after, before,
