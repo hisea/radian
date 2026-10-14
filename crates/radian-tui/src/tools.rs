@@ -204,11 +204,14 @@ impl ToolRender {
     }
 }
 
-/// The compile-time registry (ADR 0028 decision 5). The name is the model-facing tool
-/// name; everything not listed — MCP tools included — takes [`generic`]. A name listed here
-/// is never a panic: the fallback is the generic renderer, by construction.
+/// The compile-time registry (ADR 0028 decision 5). The match is on the **exact**
+/// model-facing built-in name: an MCP tool is aliased `server__tool` (verified in
+/// `agent-extensions`' `alias.rs`), so a server-provided `read` arrives as `fs__read` — its
+/// arguments and output are not the built-in's, and it must take [`generic`] like every other
+/// unknown tool. Everything not listed falls back to the generic renderer; the fallback is by
+/// construction, never a panic.
 pub fn renderer_for(name: &str) -> ToolRender {
-    match base_name(name) {
+    match name {
         "shell" => ToolRender {
             head: shell_head,
             body: shell_body,
@@ -264,18 +267,6 @@ pub fn renderer_for(name: &str) -> ToolRender {
             body: generic_body,
         },
     }
-}
-
-/// The renderer's lookup key: an MCP tool may be namespaced (`server.tool` or
-/// `mcp__server__tool`), so a **double** namespace separator (or the `mcp__` prefix) is
-/// stripped — but a single `_` is part of a built-in name (`git_status`, `ask_user`,
-/// `memory_search`), not a separator.
-fn base_name(name: &str) -> &str {
-    let last = name.rsplit('.').next().unwrap_or(name);
-    if last.starts_with("mcp__") || last.contains("__") {
-        return last.rsplit("__").next().unwrap_or(last);
-    }
-    last
 }
 
 /// `MCP and other tools`: the name and the arguments' JSON summary.
@@ -508,8 +499,7 @@ fn diff_counts(text: &str) -> (usize, usize, usize) {
 
 /// `git_status` / `list`: the entry count.
 fn list_head(card: &ToolCard, _text: &str) -> String {
-    let name = base_name(&card.name);
-    match name {
+    match card.name.as_str() {
         "git_status" => {
             let entries = card
                 .structured
@@ -569,7 +559,7 @@ fn ask_head(card: &ToolCard, _text: &str) -> String {
 
 /// The memory tools: the operation and the record id (or the search query).
 fn memory_head(card: &ToolCard, _text: &str) -> String {
-    let operation = base_name(&card.name).trim_start_matches("memory_");
+    let operation = card.name.strip_prefix("memory_").unwrap_or(&card.name);
     let id = string_field(&card.arguments, "id")
         .or_else(|| string_field(&card.arguments, "key"))
         .or_else(|| string_field(&card.arguments, "query"));
@@ -597,7 +587,7 @@ fn plain_body(_card: &ToolCard, text: &str) -> (Vec<BodyLine>, Option<String>) {
 /// keeps the one invariant the selection mapping and the search need: **the body's text is
 /// the entry's text**, so what is shown is what is copied and searched.
 pub fn result_display_text(card: &ToolCard, tool_text: &str) -> String {
-    match base_name(&card.name) {
+    match card.name.as_str() {
         "patch" => patch_diff_text(card).unwrap_or_else(|| tool_text.to_owned()),
         "write" => string_field(&card.arguments, "content").unwrap_or_else(|| tool_text.to_owned()),
         _ => tool_text.to_owned(),
@@ -660,10 +650,27 @@ impl Default for ToolDisplay {
 }
 
 /// Everything the layout cache key depends on besides the width and the text length.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// `mermaid` (ADR 0028 R8) is here rather than beside the layout call: a rendered diagram is
+/// part of what a laid-out line is, so toggling it must invalidate the same caches the folds
+/// do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DisplayModes {
     pub reasoning: ReasoningMode,
     pub tools: ToolDisplay,
+    pub mermaid: bool,
+}
+
+impl Default for DisplayModes {
+    fn default() -> Self {
+        // The config default (`tui.display.mermaid`) is on, so a default set of modes draws
+        // diagrams too.
+        Self {
+            reasoning: ReasoningMode::default(),
+            tools: ToolDisplay::default(),
+            mermaid: true,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -691,12 +698,6 @@ mod tests {
         let card = card("mcp__server__do_thing", json!({"a": 1}));
         assert_eq!(unknown.head(&card, ""), generic.head(&card, ""));
         assert!(unknown.head(&card, "").contains("mcp__server__do_thing"));
-        // A built-in name that is a suffix of a namespaced one still matches its renderer.
-        assert!(
-            renderer_for("server.shell")
-                .head(&card, "")
-                .starts_with("shell:")
-        );
     }
 
     #[test]

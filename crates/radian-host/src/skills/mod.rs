@@ -51,12 +51,42 @@ pub struct Discovery {
     pub warnings: Vec<String>,
 }
 
-/// Scans `root/skills`-style directory (`root` is `<RADIAN_HOME>/skills`). A missing directory
-/// is an empty discovery, not an error (ADR 0025 S1: nothing blocks startup).
+/// Scans one skills directory (`<RADIAN_HOME>/skills`). A missing directory is an empty
+/// discovery, not an error (ADR 0025 S1: nothing blocks startup).
 pub fn discover(root: &Path) -> Discovery {
+    discover_with_extras(Some(root), &[])
+}
+
+/// Scans the user-level skills directory (`primary`, usually `<RADIAN_HOME>/skills`) **and** the
+/// configured `[skills] extra_paths` roots, in that order (ADR 0025 slice 4 / ruling 2). The
+/// user level is discovered first, so its skill wins a name conflict. An extra path that is not
+/// a directory is one warning, never an error; an extra root that holds a `SKILL.md` directly is
+/// itself one skill (the same rule as a subdirectory of the primary root).
+pub fn discover_with_extras(primary: Option<&Path>, extras: &[PathBuf]) -> Discovery {
     let mut discovery = Discovery::default();
+    // One name map across every root: the first discovery of a name wins, whichever root it came
+    // from, and a later one is warned about.
+    let mut by_name: BTreeMap<String, PathBuf> = BTreeMap::new();
+    if let Some(primary) = primary {
+        collect_from(primary, &mut discovery, &mut by_name);
+    }
+    for extra in extras {
+        if !extra.is_dir() {
+            discovery.warnings.push(format!(
+                "skills.extra_paths: {} is not a directory; skipped",
+                extra.display()
+            ));
+            continue;
+        }
+        collect_from(extra, &mut discovery, &mut by_name);
+    }
+    discovery
+}
+
+/// Collects the skills of one root into `discovery`, keeping the first name seen in `by_name`.
+fn collect_from(root: &Path, discovery: &mut Discovery, by_name: &mut BTreeMap<String, PathBuf>) {
     if !root.is_dir() {
-        return discovery;
+        return;
     }
     // Every directory that holds a SKILL.md, in path order (the deterministic order ADR 0025
     // S2 requires); a directory with SKILL.md is a skill and is not descended into.
@@ -70,14 +100,13 @@ pub fn discover(root: &Path) -> Discovery {
     walk(root, &mut candidates);
     candidates.sort();
 
-    let mut by_name: BTreeMap<String, PathBuf> = BTreeMap::new();
     for path in candidates {
         match load(&path) {
             Ok((skill, extra)) => {
                 discovery.warnings.extend(extra);
                 if let Some(first) = by_name.get(&skill.name) {
-                    // ADR 0025 S1: keep the first discovered (the earlier path, since the list
-                    // is sorted) and warn once.
+                    // ADR 0025 S1: keep the first discovered (the earlier root, then the earlier
+                    // path) and warn once.
                     discovery.warnings.push(format!(
                         "skill `{}` in {} shadows {} (kept the first)",
                         skill.name,
@@ -92,7 +121,6 @@ pub fn discover(root: &Path) -> Discovery {
             Err(reason) => discovery.warnings.push(reason),
         }
     }
-    discovery
 }
 
 /// Collects every `SKILL.md` under `dir`, pruning at a directory that has one.
@@ -185,9 +213,12 @@ fn load(path: &Path) -> Result<(Skill, Vec<String>), String> {
 }
 
 /// The subset of YAML frontmatter Radian needs: top-level `key: value` scalars, with quoted
-/// scalars, empty values and block-list items tolerated. Unknown keys are ignored (a Claude
-/// Code skill's private fields must not spam warnings). No YAML dependency: three scalar keys
-/// do not justify one (report the choice).
+/// scalars, empty values, `>`/`|` block scalars and indented continuation lines; a nested map
+/// or a list (such as `metadata:` or `allowed-tools:`) is not a value, so its keys never become
+/// top-level keys. Blank lines and `#` comments are not keys (S1: before this, one blank line
+/// made the whole skill fail to load). Unknown keys are ignored (a Claude Code skill's private
+/// fields must not spam warnings). No YAML dependency: the keys we read are a few scalars, and
+/// a real parser would be a large dependency for them (report the choice).
 fn parse_frontmatter(text: &str) -> Result<BTreeMap<String, String>, String> {
     let mut lines = text.lines();
     let Some(first) = lines.next() else {
@@ -196,15 +227,58 @@ fn parse_frontmatter(text: &str) -> Result<BTreeMap<String, String>, String> {
     if first.trim_end() != "---" {
         return Err("the file does not start with `---`".into());
     }
-    let mut front = BTreeMap::new();
+    let mut front: BTreeMap<String, String> = BTreeMap::new();
+    // The key the current indented block belongs to, and how its value continues (S2).
+    let mut current: Option<String> = None;
+    let mut style = BlockStyle::Plain;
     let mut closed = false;
     for line in lines {
         if line.trim_end() == "---" {
             closed = true;
             break;
         }
-        // A block-list item (`- value`) belongs to the previous key; its values are not needed.
-        if line.trim_start().starts_with("- ") || line.trim() == "-" {
+        let trimmed = line.trim();
+        // S1: a blank line is not a `key: value` pair (and ends the current block).
+        if trimmed.is_empty() {
+            current = None;
+            style = BlockStyle::Plain;
+            continue;
+        }
+        let indented = line.starts_with(' ') || line.starts_with('\t');
+        // S1: a `#` comment is not a key. Inside a block scalar (`>`/`|`) a leading `#` is
+        // content, not a comment.
+        if trimmed.starts_with('#') && !(indented && style.is_block()) {
+            continue;
+        }
+        if indented {
+            // S2: an indented line belongs to the previous key. A list item (`- x`) or a nested
+            // `key: value` is a nested structure, not the value of that key, so it is ignored;
+            // otherwise the line continues a block scalar or a plain multi-line scalar.
+            let list_item = trimmed == "-" || trimmed.starts_with("- ");
+            let nested_key = trimmed.contains(':');
+            let Some(key) = current.clone() else { continue };
+            let value = front.entry(key).or_default();
+            match style {
+                BlockStyle::Literal => {
+                    if !value.is_empty() {
+                        value.push('\n');
+                    }
+                    value.push_str(trimmed);
+                }
+                BlockStyle::Fold => {
+                    if !value.is_empty() {
+                        value.push(' ');
+                    }
+                    value.push_str(trimmed);
+                }
+                // A plain scalar continues only when the key already has a value; a bare
+                // `key:` followed by indented `key: value` lines is a nested map, not a value.
+                BlockStyle::Plain if !value.is_empty() && !list_item && !nested_key => {
+                    value.push(' ');
+                    value.push_str(trimmed);
+                }
+                BlockStyle::Plain => {}
+            }
             continue;
         }
         let Some((key, value)) = line.split_once(':') else {
@@ -214,12 +288,43 @@ fn parse_frontmatter(text: &str) -> Result<BTreeMap<String, String>, String> {
         if key.is_empty() {
             return Err(format!("`{line}` has an empty key"));
         }
-        front.insert(key.to_owned(), unquote(value.trim()));
+        let value = value.trim();
+        current = Some(key.to_owned());
+        // A `>`/`|` marker (with an optional chomping indicator) starts a block scalar; its
+        // indented lines are the value. Anything else is a scalar on this line.
+        style = match value {
+            ">" | ">-" | ">+" => BlockStyle::Fold,
+            "|" | "|-" | "|+" => BlockStyle::Literal,
+            _ => BlockStyle::Plain,
+        };
+        if style.is_block() {
+            front.insert(key.to_owned(), String::new());
+        } else {
+            front.insert(key.to_owned(), unquote(value));
+        }
     }
     if !closed {
         return Err("the frontmatter is not closed with `---`".into());
     }
     Ok(front)
+}
+
+/// How an indented line continues the previous key (the subset of YAML block styles Radian
+/// reads; S2). A nested map or a list is not a value, so it is `Plain` with nothing to append.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockStyle {
+    /// A scalar on the key's own line, possibly continued by indented lines (folded).
+    Plain,
+    /// `>`, folded block scalar.
+    Fold,
+    /// `|`, literal block scalar.
+    Literal,
+}
+
+impl BlockStyle {
+    fn is_block(self) -> bool {
+        matches!(self, BlockStyle::Fold | BlockStyle::Literal)
+    }
 }
 
 /// Strips the YAML quoting Radian supports: matching single or double quotes.
@@ -245,10 +350,14 @@ pub fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// `description`: 1–1024 characters, no control characters.
+/// `description`: 1–1024 characters, no control characters other than newline and tab (S2: a
+/// `|` literal block scalar is a legitimate description, and its value contains newlines).
 pub fn valid_description(description: &str) -> bool {
     let count = description.chars().count();
-    (1..=MAX_DESCRIPTION_CHARS).contains(&count) && !description.chars().any(char::is_control)
+    (1..=MAX_DESCRIPTION_CHARS).contains(&count)
+        && !description
+            .chars()
+            .any(|c| c.is_control() && c != '\n' && c != '\t')
 }
 
 /// The system-prompt section: one line per listable skill (name, description, absolute path),
@@ -295,6 +404,33 @@ pub const SECTION_HEADER: &str = "\n\n## Skills (ADR 0025)\n\
 Skills are user-provided instructions, not permissions. Only their names and descriptions are \
 listed here; read one's full body with the `skill` tool. Relative paths in a skill's body are \
 resolved from the skill's own directory.\n";
+
+/// The message text `/skill:<name> [args]` puts into the inbox (ADR 0025 S3): the body with the
+/// frontmatter stripped, wrapped in a `<skill name=… location=…>` block that names the skill's
+/// directory as the base for relative paths, and `args` appended verbatim (pi's
+/// `_expandSkillCommand`). Reads the file; the caller has already found `skill` in the
+/// discovered table.
+pub fn expand(skill: &Skill, args: &str) -> Result<String, String> {
+    let text = std::fs::read_to_string(&skill.path).map_err(|error| {
+        format!(
+            "skill `{}` cannot be read ({}): {error}",
+            skill.name,
+            skill.path.display()
+        )
+    })?;
+    let body = tools::strip_frontmatter(&text).unwrap_or(&text).trim();
+    let block = format!(
+        "<skill name=\"{}\" location=\"{}\">\nReferences are relative to {}.\n\n{body}\n</skill>",
+        skill.name,
+        skill.path.display(),
+        skill.dir.display()
+    );
+    Ok(if args.is_empty() {
+        block
+    } else {
+        format!("{block}\n\n{args}")
+    })
+}
 
 /// Counts a string the way `agent_core` does, without building a `ModelRequest` (the same
 /// helper as `memory/injection.rs`; ADR 0015 C2's conservative estimate).
@@ -349,6 +485,42 @@ impl Hooks for SkillsHooks {
         }
         Ok(())
     }
+}
+
+/// The `/skill:` completion candidates (ADR 0025 S3, ruling 7): every discovered skill as
+/// `(name, description)`. `disable-model-invocation: true` skills **are** included — the flag
+/// hides a skill from the *model* (the prompt and the `skill` tool), not from the user, who can
+/// still invoke it with `/skill:<name>` (pi registers every loaded skill as a `skill:<name>`
+/// command). A description with newlines (a `|` literal block) is folded to one line.
+pub fn completion_candidates(skills: &[Skill]) -> Vec<(String, String)> {
+    skills
+        .iter()
+        .map(|skill| (skill.name.clone(), fold(&skill.description)))
+        .collect()
+}
+
+/// The `/skills` notice lines: `name: description`, with a marker for the skills the model
+/// cannot auto-invoke (they are still user-invocable via `/skill:`).
+pub fn notices(skills: &[Skill]) -> Vec<String> {
+    if skills.is_empty() {
+        return vec!["no skills found under ~/.radian/skills".to_owned()];
+    }
+    skills
+        .iter()
+        .map(|skill| {
+            let marker = if skill.disable_model_invocation {
+                " (model-invocation off)"
+            } else {
+                ""
+            };
+            format!("{}: {}{marker}", skill.name, fold(&skill.description))
+        })
+        .collect()
+}
+
+/// One line: a `|` literal-block description can contain newlines.
+fn fold(description: &str) -> String {
+    description.replace('\n', " ")
 }
 
 /// A shared, immutable skill list (`Arc` so the hook and the tool share one discovery).
@@ -504,6 +676,96 @@ mod tests {
         assert_eq!(names, ["outer"], "{:?}", discovery.warnings);
     }
 
+    /// ADR 0025 slice 4: the user level is discovered first, so its skill wins a name conflict
+    /// with an extra root; the extra root's own skills are still added.
+    #[test]
+    fn the_user_level_wins_a_conflict_with_an_extra_path() {
+        let scratch = Scratch::new("extras-conflict");
+        scratch.skill("same", &frontmatter("same", "From the user level."));
+        let extra = scratch.root.join("team-skills");
+        std::fs::create_dir_all(extra.join("same")).unwrap();
+        std::fs::write(
+            extra.join("same/SKILL.md"),
+            frontmatter("same", "From the team."),
+        )
+        .unwrap();
+        std::fs::create_dir_all(extra.join("team-only")).unwrap();
+        std::fs::write(
+            extra.join("team-only/SKILL.md"),
+            frontmatter("team-only", "Only in the team root."),
+        )
+        .unwrap();
+
+        let discovery = discover_with_extras(Some(&scratch.skills_dir()), &[extra]);
+        let names: Vec<&str> = discovery.skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["same", "team-only"], "{:?}", discovery.warnings);
+        assert_eq!(discovery.skills[0].description, "From the user level.");
+        assert_eq!(discovery.warnings.len(), 1);
+        assert!(
+            discovery.warnings[0].contains("shadows"),
+            "{:?}",
+            discovery.warnings
+        );
+    }
+
+    /// A configured extra path that is not a directory is one warning, never an error, and the
+    /// other roots are still discovered.
+    #[test]
+    fn a_missing_extra_path_is_one_warning() {
+        let scratch = Scratch::new("extras-missing");
+        scratch.skill("a", &frontmatter("a", "A."));
+        let missing = scratch.root.join("does-not-exist");
+        let discovery =
+            discover_with_extras(Some(&scratch.skills_dir()), std::slice::from_ref(&missing));
+        assert_eq!(discovery.skills.len(), 1);
+        assert_eq!(discovery.warnings.len(), 1);
+        assert!(
+            discovery.warnings[0].contains("extra_paths")
+                && discovery.warnings[0].contains("skipped"),
+            "{:?}",
+            discovery.warnings
+        );
+        assert!(discovery.warnings[0].contains(missing.to_str().unwrap()));
+    }
+
+    /// Ruling 2: a root that is not listed is never read. `~/.claude/skills` is just another
+    /// directory here — the point is that discovery does not reach it until it is an extra path.
+    #[test]
+    fn an_unlisted_root_is_not_read_until_it_is_an_extra_path() {
+        let scratch = Scratch::new("extras-unlisted");
+        scratch.skill("own", &frontmatter("own", "Own."));
+        let claude = scratch.root.join("claude-skills");
+        std::fs::create_dir_all(claude.join("borrowed")).unwrap();
+        std::fs::write(
+            claude.join("borrowed/SKILL.md"),
+            frontmatter("borrowed", "From the other tool."),
+        )
+        .unwrap();
+
+        // Not listed: not read.
+        let discovery = discover_with_extras(Some(&scratch.skills_dir()), &[]);
+        let names: Vec<&str> = discovery.skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["own"], "{:?}", discovery.warnings);
+
+        // Listed: read, with the same parse and validation rules.
+        let discovery = discover_with_extras(Some(&scratch.skills_dir()), &[claude]);
+        let names: Vec<&str> = discovery.skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["own", "borrowed"], "{:?}", discovery.warnings);
+    }
+
+    /// An extra path that is itself a skill directory (it holds a `SKILL.md`) loads as one skill,
+    /// the same rule the primary root's subdirectories follow.
+    #[test]
+    fn an_extra_path_may_be_a_single_skill_directory() {
+        let scratch = Scratch::new("extras-single");
+        let single = scratch.root.join("one-skill");
+        std::fs::create_dir_all(&single).unwrap();
+        std::fs::write(single.join(SKILL_FILE_NAME), frontmatter("solo", "Solo.")).unwrap();
+        let discovery = discover_with_extras(Some(&scratch.skills_dir()), &[single]);
+        let names: Vec<&str> = discovery.skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["solo"], "{:?}", discovery.warnings);
+    }
+
     #[test]
     fn a_missing_skills_directory_is_empty_and_silent() {
         let scratch = Scratch::new("missing");
@@ -590,6 +852,82 @@ mod tests {
         assert!(section.contains("3 more skills not listed"), "{section}");
     }
 
+    /// S1: a blank line or a `#` comment in the frontmatter is not a `key: value` pair. Before
+    /// this, one blank line made the whole skill fail to load (real Claude Code skills have
+    /// both).
+    /// S2: an indented key under a nested map (`metadata:`) must not become a top-level key. The
+    /// nested line here comes *after* the real `name`, which is the order the old parser got
+    /// wrong (it overwrote the real name with the nested one).
+    #[test]
+    fn an_indented_nested_name_does_not_override_the_top_level_name() {
+        let scratch = Scratch::new("nested-name");
+        scratch.skill(
+            "a",
+            "---\nname: outer\ndescription: d\nmetadata:\n  name: inner\n  version: 1\n---\nBody.\n",
+        );
+        let discovery = discover(&scratch.skills_dir());
+        assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
+        assert_eq!(discovery.skills.len(), 1);
+        assert_eq!(discovery.skills[0].name, "outer");
+    }
+
+    /// S2: `>` folds its indented lines into one space-joined scalar.
+    #[test]
+    fn a_folded_block_scalar_is_joined_with_spaces() {
+        let scratches = Scratch::new("folded");
+        scratches.skill(
+            "a",
+            "---\nname: a\ndescription: >\n  Folded line one.\n  Folded line two.\n---\nBody.\n",
+        );
+        let discovery = discover(&scratches.skills_dir());
+        assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
+        assert_eq!(
+            discovery.skills[0].description,
+            "Folded line one. Folded line two."
+        );
+    }
+
+    /// S2: `|` keeps its indented lines' newlines.
+    #[test]
+    fn a_literal_block_scalar_keeps_newlines() {
+        let front =
+            parse_frontmatter("---\nname: a\ndescription: |\n  line one\n  line two\n---\n")
+                .unwrap();
+        assert_eq!(front.get("description").unwrap(), "line one\nline two");
+        // And such a skill still loads: a literal-block description is valid.
+        let scratch = Scratch::new("literal");
+        scratch.skill(
+            "a",
+            "---\nname: a\ndescription: |\n  line one\n  line two\n---\nBody.\n",
+        );
+        let discovery = discover(&scratch.skills_dir());
+        assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
+        assert_eq!(discovery.skills[0].description, "line one\nline two");
+    }
+
+    /// S2: a plain scalar continued on indented lines folds with spaces.
+    #[test]
+    fn a_plain_scalar_continued_on_an_indented_line_is_folded() {
+        let front = parse_frontmatter("---\nname: a\ndescription: first\n  second\n---\n").unwrap();
+        assert_eq!(front.get("description").unwrap(), "first second");
+    }
+
+    #[test]
+    fn blank_lines_and_comments_do_not_reject_a_skill() {
+        let scratch = Scratch::new("blank-lines");
+        scratch.skill(
+            "a",
+            "---\nname: a\n# a comment\n\ndescription: Has a blank line and a comment.\n\n---\nBody.\n",
+        );
+        let discovery = discover(&scratch.skills_dir());
+        assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
+        assert_eq!(discovery.skills.len(), 1);
+        assert_eq!(
+            discovery.skills[0].description,
+            "Has a blank line and a comment."
+        );
+    }
+
     #[test]
     fn quotes_and_extra_fields_are_tolerated() {
         let scratch = Scratch::new("quotes");
@@ -601,6 +939,68 @@ mod tests {
         assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
         assert_eq!(discovery.skills[0].name, "a");
         assert_eq!(discovery.skills[0].description, "Quoted description.");
+    }
+
+    /// ADR 0025 S3 / ruling 7: the `/skill:` completion candidates and the `/skills` notices
+    /// include `disable-model-invocation: true` skills — the flag hides them from the model, not
+    /// from the user (pi registers every loaded skill as a `skill:<name>` command).
+    #[test]
+    fn completion_and_notices_include_model_invocation_disabled_skills() {
+        let skills = vec![
+            Skill {
+                name: "greet".into(),
+                description: "Say hello.".into(),
+                path: PathBuf::from("/s/greet/SKILL.md"),
+                dir: PathBuf::from("/s/greet"),
+                disable_model_invocation: false,
+            },
+            Skill {
+                name: "secret".into(),
+                description: "Only the user.".into(),
+                path: PathBuf::from("/s/secret/SKILL.md"),
+                dir: PathBuf::from("/s/secret"),
+                disable_model_invocation: true,
+            },
+        ];
+        let candidates = completion_candidates(&skills);
+        assert_eq!(
+            candidates,
+            vec![
+                ("greet".to_owned(), "Say hello.".to_owned()),
+                ("secret".to_owned(), "Only the user.".to_owned()),
+            ]
+        );
+        let lines = notices(&skills);
+        assert_eq!(
+            lines,
+            vec![
+                "greet: Say hello.",
+                "secret: Only the user. (model-invocation off)"
+            ]
+        );
+        // No skills at all: one line says so.
+        assert_eq!(notices(&[]), vec!["no skills found under ~/.radian/skills"]);
+    }
+
+    /// ADR 0025 S3: `expand` reads the body, strips the frontmatter, names the base directory and
+    /// appends the args verbatim.
+    #[test]
+    fn expand_wraps_the_body_and_appends_the_args() {
+        let scratch = Scratch::new("expand");
+        scratch.skill(
+            "greet",
+            "---\nname: greet\ndescription: d\n---\nBody line.\n",
+        );
+        let skill = &discover(&scratch.skills_dir()).skills[0];
+        let expanded = expand(skill, "hello \"world\"").unwrap();
+        assert!(expanded.contains("<skill name=\"greet\""), "{expanded}");
+        assert!(expanded.contains("Body line."), "{expanded}");
+        assert!(!expanded.contains("description: d"), "{expanded}");
+        assert!(expanded.contains("hello \"world\""), "{expanded}");
+        assert!(expanded.ends_with("hello \"world\""), "{expanded}");
+        // No args: the block stands alone.
+        let bare = expand(skill, "").unwrap();
+        assert!(bare.ends_with("</skill>"), "{bare}");
     }
 
     /// The exact tuple shape `session.rs` builds — `((perm, memory), skills)` — puts the skills

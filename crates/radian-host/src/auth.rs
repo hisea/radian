@@ -29,7 +29,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
@@ -321,52 +320,16 @@ impl AuthStore {
                 message: error.to_string(),
             },
         )?;
-        // A unique temp name per write: pid + a process-local counter + nanoseconds. Two
-        // concurrent writes in one process therefore never share a temp file (the old
-        // `tmp-<pid>` scheme let the later `remove_file` delete the earlier writer's file).
-        // No randomness dependency: the counter alone is unique within the process, the
-        // timestamp disambiguates leftovers across restarts.
-        static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or(0);
-        let tmp = self
-            .path
-            .with_extension(format!("tmp-{}-{seq}-{nanos}", std::process::id()));
-        // Clean up a leftover under the **old exact** name (`auth.json.tmp-<pid>`): it can only
-        // be a crashed write from an older Radian, because this scheme never generates that
-        // name, so it can never be a concurrent writer's in-flight file.
-        let legacy = self
-            .path
-            .with_extension(format!("tmp-{}", std::process::id()));
-        if legacy != tmp {
-            let _ = std::fs::remove_file(&legacy);
-        }
-        // `create_new` still guards the (now unique) name: `mode(0o600)` only applies to a
-        // fresh inode, so a reused file would keep its old (possibly wide) mode.
-        {
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(radian_session::PRIVATE_FILE_MODE);
-            }
-            let mut file = options.open(&tmp).map_err(|source| AuthError::Io {
-                path: tmp.clone(),
-                source,
-            })?;
-            file.write_all(text.as_bytes())
-                .and_then(|()| file.write_all(b"\n"))
-                .and_then(|()| file.sync_all())
-                .map_err(|source| AuthError::Io {
-                    path: tmp.clone(),
-                    source,
-                })?;
-        }
-        std::fs::rename(&tmp, &self.path).map_err(|source| AuthError::Io {
+        // The shared atomic write owns the unique temp name, `create_new`, the `0600` mode
+        // and the cleanup.
+        let mut bytes = text.into_bytes();
+        bytes.push(b'\n');
+        crate::atomic_write::write_atomic(
+            &self.path,
+            &bytes,
+            Some(radian_session::PRIVATE_FILE_MODE),
+        )
+        .map_err(|source| AuthError::Io {
             path: self.path.clone(),
             source,
         })

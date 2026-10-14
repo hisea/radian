@@ -1004,6 +1004,76 @@ fn the_list_and_memory_cards_have_their_own_heads() {
     }
 }
 
+/// An MCP tool's alias (`server__tool`) never reaches a built-in renderer: its arguments and
+/// output are its server's own, so it takes the generic card (name + argument JSON), while the
+/// exact built-in names keep their own renderers. The reviewer's T3.
+#[test]
+fn an_mcp_alias_renders_generic_and_the_builtin_keeps_its_card() {
+    fn card_for(name: &str, arguments: serde_json::Value) -> App {
+        let mut app = App::new("m", "s");
+        app.push_message(&assistant_with(
+            "",
+            "",
+            false,
+            vec![ToolCall {
+                id: "c1".into(),
+                name: name.into(),
+                arguments,
+            }],
+        ));
+        app.push_message(&Message::Tool {
+            result: ToolResult {
+                call_id: "c1".into(),
+                content: vec![ContentPart::text("file contents")],
+                structured: None,
+                is_error: false,
+                error_code: None,
+            },
+            meta: Default::default(),
+        });
+        app
+    }
+    // An MCP-provided `read`: the generic head (name + the arguments' JSON), not `read: path`.
+    let text = screen(&render(
+        &mut card_for("fs__read", serde_json::json!({"file_path": "a.rs"})),
+        70,
+        12,
+    ));
+    assert!(text.contains("fs__read"), "{text}");
+    assert!(
+        text.contains("file_path"),
+        "the argument JSON summary: {text}"
+    );
+    assert!(
+        !text.contains("read: a.rs"),
+        "not the built-in read card: {text}"
+    );
+    // Same for a `shell` and a `list` from a server.
+    let text = screen(&render(
+        &mut card_for("x__shell", serde_json::json!({"cmd": "ls"})),
+        70,
+        12,
+    ));
+    assert!(text.contains("x__shell"), "{text}");
+    assert!(!text.contains("shell: ls"), "{text}");
+    let text = screen(&render(
+        &mut card_for("mcp__github__list", serde_json::json!({"repo": "r"})),
+        70,
+        12,
+    ));
+    assert!(text.contains("mcp__github__list"), "{text}");
+    // The exact built-in still gets its own renderer.
+    let text = screen(&render(
+        &mut card_for(
+            "read",
+            serde_json::json!({"path": "a.rs", "offset": 3, "limit": 2}),
+        ),
+        70,
+        12,
+    ));
+    assert!(text.contains("read: a.rs (lines 4..5)"), "{text}");
+}
+
 /// A batch of calls pairs each result with **its own** call by id: results arriving in
 /// reverse order (one success, one failure) still land on the right cards. Covered on the live
 /// commit path and on the resume replay path.
@@ -1487,6 +1557,7 @@ const EXPANDED: DisplayModes = DisplayModes {
         fold: radian_tui::tools::ToolFold::Expanded,
         preview_lines: 5,
     },
+    mermaid: true,
 };
 
 /// The question form's key line stays visible when the option list fills the box (same bug the

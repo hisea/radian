@@ -388,3 +388,61 @@ Base `4984e8b` · 在一次性 worktree（`/tmp/radian-pi-skills-mut`，detach�
 （防止将来 `walk` 改动悄悄破坏顺序），而不是靠某条测试钉住一个等价变异。
 
 片 3（TUI `/skill:` / `/skills`）不在本片范围内，另行处理。
+
+## skills 审查第 1 轮 S2/S4/S5 + 片 3（2026-10-14）
+
+Base `c5a84f6` · 一次性 worktree `/tmp/radian-pi-skills-mut3`，每条跑完 `git checkout -- .`，最后
+`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| S2-M1 | 缩进行重新当顶层键处理（去掉 `if indented` 分支，`line.trim_start()`） | `skills::tests::an_indented_nested_name_does_not_override_the_top_level_name`（另 4 条也挂） | ✅ |
+| S4-M1 | `skills::tools` 查表去掉 `!disable_model_invocation` | `skills::tools::tests::a_model_invocation_disabled_skill_is_unknown_to_the_tool` | ✅ |
+| S5-M1 | `session_hooks` 里对调 `memory` 与 `skills` | `tests/skills_order.rs::the_production_hook_chain_puts_memory_before_skills` | ✅ |
+| SL-M2 | `completion_candidates` 过滤掉 `disable_model_invocation` 的 skill | `skills::tests::completion_and_notices_include_model_invocation_disabled_skills` | ✅ |
+
+4/4 抓住。片 1+2 的 SK-M1..M4 见上一节。
+
+**关于"展开不进 journal 而只给模型"**：本实现里 `/skill:` 展开成的文本**就是**送进 inbox 的那条
+消息，journal 与模型看到的是同一份，没有"只给模型"的旁路；pty 测试直接断言 `skill.jsonl` 里有展开后的
+正文（`GREET-SKILL-BODY-MARKER`），把这层锁住。SL-M1（`/skill:` 不再展开走 `Outcome::Message`）会让
+检查请求正文与 journal 的断言同时失败。
+
+## skills 片 4：`[skills] extra_paths`（2026-10-14）
+
+Base `beef4d5` · 一次性 worktree `/tmp/radian-pi-skills-mut4`，每条跑完 `git checkout -- .`，最后
+`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| S4-M1 | `discover_with_extras` 先扫 extra_paths 再扫用户级（extra 抢同名） | `skills::tests::the_user_level_wins_a_conflict_with_an_extra_path`（另 1 条也挂） | ✅ |
+| S4-M2 | 配置里的 extra_path 不存在时静默跳过（不警告） | `skills::tests::a_missing_extra_path_is_one_warning` | ✅ |
+| S4-M3 | `resolve_extra_path` 不把相对路径拼到配置文件所在目录 | `config::tests::extra_paths_resolve_tilde_relative_and_absolute` | ✅ |
+
+3/3 抓住。（`~/.claude/skills` 只有列进 extra_paths 才读，由
+`an_unlisted_root_is_not_read_until_it_is_an_extra_path` 钉住。）
+## ui2-review1 U2/U3：共用原子写与符号链接（2026-10-14）
+
+Base `eeadb11` · 一次性检出 `/tmp/ui2b-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+`cargo test -p radian-host --lib <test>`，变异后 `git checkout --` 还原。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| R2-1 | 临时名去掉计数器与纳秒（退化成 `tmp-<pid>`） | 同进程并发写不互删临时文件 | `config::theme_write::review_tests::concurrent_writes_do_not_error_and_leave_no_temp_files` FAILED（连跑 3 次全部抓住） |
+| R3-1 | 写回前不解析符号链接（`target = path`） | 链接保持为链接、写到目标 | `config::theme_write::review_tests::write_theme_keeps_a_symlink_and_writes_its_target` FAILED |
+
+2/2 抓住（R3-1 的补充测试 `write_theme_through_a_symlinked_directory` 在变异下仍通过：
+当文件还不存在、只是父目录是链接时，直接 `open` 会经父链接落到真实目录，所以那条用例
+本身对"是否显式解析链接"不敏感；抓住变异的是文件链接那条。两条都保留作回归）。
+
+## models-refresh：opencode-go 内建列表（2026-10-14）
+
+Base `71a9d1c` · 一次性检出 `/tmp/models-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+变异后 `git checkout --` 还原，提交前 `git status --short` 为空。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| MR-1 | `THINKING_LOW_HIGH_MAX` 的 `low` 线值改成 `"medium"` | 内建映射与上游逐字段一致 | `tests/opencode_go_models.rs::the_opencode_go_builtins_match_upstream` FAILED |
+
+1/1 抓住。注意 `every_thinking_map_matches_supported_thinking_levels` 在变异下仍通过：
+它只断言"哪些级别非 null"，不断言线值；抓住值改动的是结构测试（两者互补，都保留）。

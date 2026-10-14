@@ -15,6 +15,7 @@
 | `tui-tips-banner.toml` | ADR 0008：`tui.tips`/`tui.banner`（布尔，默认都开）关闭启动画面的 Tip 行与字标。 | **接受**，0 拒绝；无明文密钥样字符串。 | §2 |
 | `providers.toml` | ADR 0026 D10:`[providers.<名字>]` 具名 provider(`kind` + `base_url`),`model.provider = "<名字>"` 选用。 | **接受**，0 拒绝；名字非法/与内建重名是另一个拒绝场景（读取器报 `providers.<name>` 错误）。 | §2 / ADR 0026 D10 |
 | `permissions-approval.toml` | ADR 0026 D9:`[permissions] approval = "auto"`(四个已知名字之一)。`full` 档位下这个值被忽略并警告;命令行 `--approval`/`--yes` 永远优先。 | **接受**,0 拒绝;无明文密钥样字符串。 | §2 / ADR 0026 D9 |
+| `skills-extra-paths.toml` | ADR 0025 片4:`[skills] extra_paths` 列出额外的 skill 根(裁决 2:`~/.claude/skills` 只有列出时才读)。读取器原样保留字符串(不碰文件系统);宿主展开 `~`、相对路径相对**配置文件所在目录**。不存在的目录只警告一次,不报错。 | **接受**,0 拒绝;无明文密钥样字符串。 | §2 / ADR 0025 片4 |
 | `api-key-removed.toml` | `model.api_key` 是**合法**的 `SecretRef`（`{ from = "env", name = "EXAMPLE_TOKEN" }`）。 | **拒绝**（ADR 0026 D2）；提示改用 `~/.radian/credentials/auth.json`，不静默忽略。 | §4.2 / ADR 0026 D2 |
 | `plaintext-secret.toml` | `api_key` 是明文串 `sk-live-…`。 | **拒绝打开**；报错点名键名/路径（敏感键被赋裸字符串，或明显的密钥样字符串出现在配置里）。 | §4.2 |
 | `heuristic-secret.toml` | 明文串出现在**非敏感键**（`tui.status_template` = `sk-heuristic-…`）。 | **拒绝打开**；启发式前缀扫到即拒——再次证明"出现在任何位置"不是只查敏感键。 | §4.2 |

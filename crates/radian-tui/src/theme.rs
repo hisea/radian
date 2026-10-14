@@ -1,6 +1,9 @@
 //! The TUI color theme (ADR 0009; config key `tui.theme`; ADR 0029 for theme files).
 //!
 //! Every color in the UI comes from one [`Theme`]; `render.rs` never names a `Color` itself.
+//! A rendered Mermaid diagram (ADR 0028 R8) uses three roles — `mermaid_node` (accent),
+//! `mermaid_edge` (dim) and `mermaid_text` (primary) — mapped to pi's `accent`/`dim`/`text`
+//! in `file.rs`'s `fg_source`.
 //! `dark` is the original palette (the `TestBackend` screenshot test pins it), `light` is the
 //! same roles re-picked for a light background, and `mono` uses no color at all — only bold,
 //! underline and dim. The `NO_COLOR` convention (<https://no-color.org>) forces `mono`.
@@ -119,7 +122,7 @@ impl ThemeName {
     }
 }
 
-/// The 34 roles a [`Theme`] styles today (ADR 0009, ADR 0023). The config keys are the
+/// The 37 roles a [`Theme`] styles today (ADR 0009, ADR 0023). The config keys are the
 /// snake_case names; `[tui.colors]` accepts them and (mapped) pi's role names alike.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -158,10 +161,13 @@ pub enum Role {
     DiffRemoved,
     DiffContext,
     DiffHunk,
+    MermaidNode,
+    MermaidEdge,
+    MermaidText,
 }
 
 impl Role {
-    pub const ALL: [Role; 34] = [
+    pub const ALL: [Role; 37] = [
         Role::Reasoning,
         Role::Interrupted,
         Role::User,
@@ -196,6 +202,9 @@ impl Role {
         Role::DiffRemoved,
         Role::DiffContext,
         Role::DiffHunk,
+        Role::MermaidNode,
+        Role::MermaidEdge,
+        Role::MermaidText,
     ];
 
     /// The `[tui.colors]` key for this role (ADR 0029 decision 5).
@@ -235,6 +244,9 @@ impl Role {
             Role::DiffRemoved => "diff_removed",
             Role::DiffContext => "diff_context",
             Role::DiffHunk => "diff_hunk",
+            Role::MermaidNode => "mermaid_node",
+            Role::MermaidEdge => "mermaid_edge",
+            Role::MermaidText => "mermaid_text",
         }
     }
 
@@ -278,6 +290,9 @@ impl Role {
             Role::DiffRemoved => &mut theme.diff_removed,
             Role::DiffContext => &mut theme.diff_context,
             Role::DiffHunk => &mut theme.diff_hunk,
+            Role::MermaidNode => &mut theme.mermaid_node,
+            Role::MermaidEdge => &mut theme.mermaid_edge,
+            Role::MermaidText => &mut theme.mermaid_text,
         }
     }
 }
@@ -331,6 +346,13 @@ pub struct Theme {
     pub diff_removed: Style,
     pub diff_context: Style,
     pub diff_hunk: Style,
+    /// A rendered Mermaid diagram's **nodes** (ADR 0028 R8) — pi's `accent` (强调 = 名字、标签;
+    /// a node is a named box).
+    pub mermaid_node: Style,
+    /// A diagram's **edges**: pi's `dim` (弱 — connectors are structure, not content).
+    pub mermaid_edge: Style,
+    /// A diagram's plain **text** (labels outside a node): pi's `text` (主).
+    pub mermaid_text: Style,
     /// A structured notice's label (`profile:`, `[memory]`) — pi's `accent` (ADR 0028 owner
     /// decision: 强调 = 名字、标签).
     pub notice_label: Style,
@@ -469,6 +491,11 @@ impl Theme {
             notice: text,
             notice_label: spec(pi::VIOLET, Modifier::BOLD, truecolor),
             notice_body: muted,
+            // A diagram (ADR 0028 R8): nodes are names (accent), edges are structure (dim),
+            // plain text is the primary level.
+            mermaid_node: spec(pi::VIOLET, Modifier::empty(), truecolor),
+            mermaid_edge: dim,
+            mermaid_text: text,
             turn_idle: spec(pi::GREEN, Modifier::empty(), truecolor),
             turn_running: spec(pi::YELLOW, Modifier::empty(), truecolor),
             turn_cancelled: spec(pi::RED, Modifier::empty(), truecolor),
@@ -524,6 +551,11 @@ impl Theme {
             notice: text,
             notice_label: spec(pi::VIOLET, Modifier::BOLD, truecolor),
             notice_body: muted,
+            // A diagram (ADR 0028 R8): nodes are names (accent), edges are structure (dim),
+            // plain text is the primary level.
+            mermaid_node: spec(pi::VIOLET, Modifier::empty(), truecolor),
+            mermaid_edge: dim,
+            mermaid_text: text,
             turn_idle: spec(pi::GREEN, Modifier::empty(), truecolor),
             turn_running: spec(pi::YELLOW, Modifier::empty(), truecolor),
             turn_cancelled: spec(pi::RED, Modifier::empty(), truecolor),
@@ -601,6 +633,10 @@ impl Theme {
             diff_removed: style(None, Modifier::empty()),
             diff_context: style(None, Modifier::empty()),
             diff_hunk: style(None, Modifier::BOLD),
+            // `mono` uses no color: the three roles differ by modifier only.
+            mermaid_node: style(None, Modifier::BOLD),
+            mermaid_edge: style(None, Modifier::DIM),
+            mermaid_text: style(None, Modifier::empty()),
         }
     }
 
@@ -627,7 +663,7 @@ impl Theme {
     }
 
     /// Every style this theme defines, for the "mono has no colors" test.
-    pub fn styles(&self) -> [Style; 34] {
+    pub fn styles(&self) -> [Style; 37] {
         [
             self.reasoning,
             self.interrupted,
@@ -663,6 +699,9 @@ impl Theme {
             self.diff_removed,
             self.diff_context,
             self.diff_hunk,
+            self.mermaid_node,
+            self.mermaid_edge,
+            self.mermaid_text,
         ]
     }
 }

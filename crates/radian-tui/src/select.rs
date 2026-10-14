@@ -314,6 +314,7 @@ pub fn highlight_rows(
 /// The selected display-column ranges of one entry's `local`-th wrapped line. A char is
 /// selected when its offset is in `[start.offset, end.offset)`; zero-width chars (which sit
 /// between two cells of the same run) join their neighbour's range.
+#[allow(clippy::too_many_arguments)]
 fn row_ranges(
     entry: &Entry,
     modes: DisplayModes,
@@ -364,6 +365,7 @@ mod tests {
             fold: ToolFold::Expanded,
             preview_lines: 5,
         },
+        mermaid: true,
     };
     use crate::app::{Entry, EntryKind};
     use agent_core::{ContentPart, Message, MessageMeta};

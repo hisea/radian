@@ -26,6 +26,8 @@ pub const HELP: &str = "\
                       export this session (default md, default <workspace>/radian-<id>.<ext>)
 /memory <command>     durable memory: list, search, show, add, edit, archive, restore,
                       forget, purge, confirm, export, import, project, relink, split, merge
+/skill:<name> [args]  run a skill: read its body into the message (ADR 0025)
+/skills               list the discovered skills
 /login [provider]     store an API key in credentials/auth.json (ADR 0026 D3); custom
                       names a new endpoint (name, protocol, base URL, key)
 /logout <provider>    remove a stored credential (asks first)
@@ -78,6 +80,12 @@ pub enum Outcome {
     /// `/auto on|off` (and `/yolo`, its alias): the in-session auto-approval switch
     /// (ADR 0026 D9). `true` = on.
     AutoToggle(bool),
+    /// `/skill:<name> [args]` (ADR 0025 S3): the host reads the body and sends
+    /// `<skill name=…>…</skill>` + `args` as one user message. `args` is the raw remainder,
+    /// verbatim.
+    Skill { name: String, args: String },
+    /// `/skills`: list the discovered skills (name + description) as notices.
+    Skills,
     /// Not a command after all (an empty token list); the caller sends the line.
     Message,
 }
@@ -111,6 +119,9 @@ pub enum Fetch {
     ThinkingLevels { partial: String },
     /// `/logout <partial>`: the providers with a stored credential (the `auth.json` entries).
     LoggedInProviders { partial: String },
+    /// `/skill:<partial>`: the discovered skill names (ADR 0025 S3, ruling 7). The host owns
+    /// discovery, so the app cannot list them.
+    SkillNames { partial: String },
 }
 
 impl Fetch {
@@ -121,7 +132,8 @@ impl Fetch {
             | Fetch::Themes { partial }
             | Fetch::ModelRoute { partial, .. }
             | Fetch::ThinkingLevels { partial }
-            | Fetch::LoggedInProviders { partial, .. } => partial,
+            | Fetch::LoggedInProviders { partial, .. }
+            | Fetch::SkillNames { partial } => partial,
         }
     }
 }
@@ -210,6 +222,16 @@ pub fn tree() -> &'static [Command] {
             name: "memory",
             description: MEMORY_DESCRIPTION,
             levels: &[memory_level, memory_level],
+        },
+        Command {
+            name: "skills",
+            description: "list the discovered skills",
+            levels: &[],
+        },
+        Command {
+            name: "skill:",
+            description: "run a skill: read its body into the message",
+            levels: &[],
         },
         Command {
             name: "login",
@@ -445,8 +467,22 @@ pub fn complete_in(tree: &[Command], line: &str, cursor: usize) -> Option<SlashC
         });
     }
 
-    // An exact command name: complete that command's levels one at a time.
+    // `/skill:<partial>` (ADR 0025 S3, ruling 7): the candidates are the discovered skill
+    // names, which only the host knows. A dedicated branch, because the name is glued to the
+    // command with `:` rather than separated by a space, so the argument-level machinery cannot
+    // see it.
     let name = first.0.trim_start_matches('/');
+    if let Some(partial) = name.strip_prefix("skill:") {
+        return non_empty(SlashCompletion {
+            level: 1,
+            range: first.1.start + "/skill:".len()..first.1.end,
+            level_result: Level::Needs(Fetch::SkillNames {
+                partial: partial.to_owned(),
+            }),
+        });
+    }
+
+    // An exact command name: complete that command's levels one at a time.
     if let Some(command) = tree.iter().find(|command| command.name == name) {
         if trailing {
             // `/memory `: the *next* level's candidates, with an empty partial.
@@ -703,6 +739,22 @@ fn thinking_level_level(_typed: &[&str], partial: &str) -> Level {
     })
 }
 
+/// `/skill:<name> [args]` (ADR 0025 S3). The name is the rest of the first word after the
+/// colon; the arguments are the raw remainder of the line, verbatim (so quotes survive). An
+/// empty name is a usage notice.
+fn skill_command(first: &str, line: &str) -> Outcome {
+    let name = first.trim_start_matches("/skill:").to_owned();
+    if name.is_empty() {
+        return Outcome::Notices(vec!["usage: /skill:<name> [args]".to_owned()]);
+    }
+    let args = line
+        .trim()
+        .split_once(char::is_whitespace)
+        .map(|(_, rest)| rest.trim().to_owned())
+        .unwrap_or_default();
+    Outcome::Skill { name, args }
+}
+
 /// Interprets a trimmed line that starts with `/`. `memory_enabled` says whether this process
 /// has a memory root; without one `/memory` is refused with a notice. Pure: it never runs a
 /// command (ADR 0023 U3).
@@ -730,6 +782,9 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         Some("/login") => Outcome::Login(login_provider(&tokens[1..])),
         Some("/logout") => Outcome::Logout(logout_provider(&tokens[1..])),
         Some("/auto") | Some("/yolo") => auto_toggle(&tokens[1..]),
+        Some("/skills") if tokens.len() == 1 => Outcome::Skills,
+        Some("/skills") => Outcome::Notices(vec!["usage: /skills (no arguments)".to_owned()]),
+        Some(other) if other.starts_with("/skill:") => skill_command(other, line),
         Some(other) => Outcome::Notices(vec![format!("unknown command {other}; /help lists them")]),
         None => Outcome::Message,
     }
@@ -986,6 +1041,75 @@ mod tests {
                 command.name
             );
         }
+    }
+
+    /// ADR 0025 S3: `/skill:<name> [args]` parses to the skill command with the raw remainder as
+    /// verbatim args (quotes survive); an empty name and `/skills` with arguments are notices.
+    #[test]
+    fn skill_commands_parse() {
+        match parse("/skill:greet hello \"big world\"", false) {
+            Outcome::Skill { name, args } => {
+                assert_eq!(name, "greet");
+                assert_eq!(args, "hello \"big world\"");
+            }
+            other => panic!("expected the skill command, got {other:?}"),
+        }
+        match parse("/skill:greet", false) {
+            Outcome::Skill { name, args } => {
+                assert_eq!(name, "greet");
+                assert!(args.is_empty(), "{args:?}");
+            }
+            other => panic!("expected the skill command, got {other:?}"),
+        }
+        match parse("/skill:", false) {
+            Outcome::Notices(notices) => {
+                assert!(notices[0].contains("usage: /skill:"), "{notices:?}")
+            }
+            other => panic!("expected a usage notice, got {other:?}"),
+        }
+        match parse("/skills", false) {
+            Outcome::Skills => {}
+            other => panic!("expected /skills, got {other:?}"),
+        }
+        match parse("/skills now", false) {
+            Outcome::Notices(notices) => {
+                assert!(notices[0].contains("usage: /skills"), "{notices:?}")
+            }
+            other => panic!("expected a usage notice, got {other:?}"),
+        }
+    }
+
+    /// ADR 0025 S3 / ruling 7: `/skill:` completes the discovered names, which only the host
+    /// knows, so the completion is a `Needs(SkillNames)` fetch with the name's own range.
+    #[test]
+    fn the_skill_command_completes_the_name_through_the_host() {
+        let line = "/skill:gr";
+        let completion = complete_in(tree(), line, line.chars().count()).expect("a completion");
+        assert_eq!(completion.level, 1);
+        assert_eq!(completion.range, 7..9, "the range covers the partial name");
+        assert_eq!(
+            completion.level_result,
+            Level::Needs(Fetch::SkillNames {
+                partial: "gr".into()
+            })
+        );
+
+        // `/skill:` with nothing after the colon lists every name.
+        let line = "/skill:";
+        let completion = complete_in(tree(), line, line.chars().count()).expect("a completion");
+        assert_eq!(completion.range, 7..7);
+        assert_eq!(
+            completion.level_result,
+            Level::Needs(Fetch::SkillNames {
+                partial: String::new()
+            })
+        );
+
+        // The command is in the tree, so a bare `/` offers it.
+        assert!(tree().iter().any(|command| command.name == "skill:"));
+        assert!(tree().iter().any(|command| command.name == "skills"));
+        assert!(HELP.contains("/skill:<name>"));
+        assert!(HELP.contains("/skills"));
     }
 
     #[test]

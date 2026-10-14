@@ -94,6 +94,10 @@ pub struct Entry {
     /// last measured at. The renderer keeps it so a frame only re-lays out entries that
     /// changed or are on screen.
     pub(crate) layout_cache: Option<((usize, usize, crate::tools::DisplayModes), usize)>,
+    /// Rendered Mermaid diagrams (ADR 0028 R8), keyed by `(width, text_len)`: the width is in
+    /// the key because `TooWide` can succeed on a wider terminal. Filled by the mutable
+    /// measure pass; the immutable layout paths render fresh on a miss.
+    pub(crate) diagram_cache: Option<(usize, usize, Vec<crate::blocks::DiagramOutcome>)>,
 }
 
 impl Entry {
@@ -108,6 +112,7 @@ impl Entry {
             tool: None,
             block_cache: None,
             layout_cache: None,
+            diagram_cache: None,
         }
     }
 }
@@ -240,6 +245,57 @@ pub const DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_m
 /// 2026-10-14). A second Ctrl-C inside the window quits; the window closing, or any other
 /// key, disarms it and the hint disappears.
 pub const QUIT_WINDOW: Duration = Duration::from_secs(2);
+
+/// Whether an [`Input`] is something the **user** did — a key, a paste, a mouse action, an
+/// approval answer — as opposed to a host fact or an asynchronous result. Only user input
+/// disarms the Ctrl-C quit window: a terminal resize or a
+/// background `/v1/models` refresh must not silently cancel the pending quit.
+///
+/// The match is exhaustive on purpose: a new `Input` variant forces a decision here.
+fn is_user_input(input: &Input) -> bool {
+    match input {
+        Input::Action(_)
+        | Input::Cancel { .. }
+        | Input::Char(_)
+        | Input::FindBackspace
+        | Input::Paste(_)
+        | Input::ApprovalAnswer(_)
+        | Input::ApprovalAuto
+        | Input::ApprovalScroll(_)
+        | Input::ConfirmCommand(_)
+        | Input::Form(_)
+        | Input::PickerKey(_)
+        | Input::PickerClose
+        | Input::LoginKey(_)
+        | Input::ConfirmLogout(_)
+        | Input::MouseDown { .. }
+        | Input::MouseDrag { .. }
+        | Input::MouseUp { .. } => true,
+        Input::QuitDeadline
+        | Input::Resize { .. }
+        | Input::Stream(_)
+        | Input::Event(_)
+        | Input::Runtime(_)
+        | Input::Pending(..)
+        | Input::MentionsExpanded(_)
+        | Input::CompletionReady(_)
+        | Input::CompletionsReady { .. }
+        | Input::MemoryCommandDone(_)
+        | Input::CompactDone(_)
+        | Input::ThinkingChecked { .. }
+        | Input::ModelChecked { .. }
+        | Input::SwitchCompacted { .. }
+        | Input::SessionDone(_)
+        | Input::CommandRefused(_)
+        | Input::PickerOpened(_)
+        | Input::LoginVerified { .. }
+        | Input::LoginSaved { .. }
+        | Input::LogoutDone { .. }
+        | Input::ClipboardDone(_)
+        | Input::ThemeReady { .. }
+        | Input::SkillExpanded { .. } => false,
+    }
+}
 
 /// The last press, for double/triple-click detection: where and when, and how many presses
 /// in a row landed on the same cell inside the window (1, 2 or 3; capped at 3).
@@ -421,6 +477,13 @@ pub enum Input {
     },
     /// A `/sessions`, `/export` or `/fork` finished: the notices to show.
     SessionDone(Vec<String>),
+    /// A `/skill:<name> [args]` expansion finished (ADR 0025 S3): the message text to send, or
+    /// a notice (an unknown skill or a file that can no longer be read). `steer` mirrors the
+    /// turn state when the command was submitted.
+    SkillExpanded {
+        result: Result<String, String>,
+        steer: bool,
+    },
     /// The session's facade refused a command (ADR 0023 U5): an undeclared capability. The UI
     /// shows a notice instead of failing the loop.
     CommandRefused(radian_host::CommandRefused),
@@ -578,6 +641,17 @@ pub enum Effect {
     /// facade, which flips the hooks' live policy, audits the switch and queues the durable
     /// `ConfigChanged` record for the next resume.
     SetApprovalPolicy { on: bool },
+    /// Expand `/skill:<name> [args]` (ADR 0025 S3): the host reads the body and the loop sends
+    /// the folded `<skill …>` text as one user message (`steer` picks steer vs follow-up). The
+    /// answer is [`Input::SkillExpanded`].
+    ExpandSkill {
+        name: String,
+        args: String,
+        steer: bool,
+    },
+    /// List the discovered skills (`/skills`, ADR 0025 S3) as notices. The answer is
+    /// [`Input::SessionDone`].
+    ListSkills,
     /// Write the transcript selection to the system clipboard (`tui.clipboard` picks the
     /// transport). The loop runs it and answers with [`Input::ClipboardDone`]: OSC 52 has no
     /// receipt, and `pbcopy` can fail — the loop owns both facts, `update` only owns the text.
@@ -660,6 +734,19 @@ impl PartialEq for Effect {
             ) => an == bn && ak == bk && ae == be,
             (Logout { provider: a }, Logout { provider: b }) => a == b,
             (Copy { text: a }, Copy { text: b }) => a == b,
+            (
+                ExpandSkill {
+                    name: an,
+                    args: aa,
+                    steer: as_,
+                },
+                ExpandSkill {
+                    name: bn,
+                    args: ba,
+                    steer: bs,
+                },
+            ) => an == bn && aa == ba && as_ == bs,
+            (ListSkills, ListSkills) => true,
             (Theme { name: a }, Theme { name: b }) => a == b,
             _ => false,
         }
@@ -837,6 +924,10 @@ pub struct App {
     /// How tool card bodies fold (ADR 0028 R4, `tui.display.tool_output` +
     /// `tool_preview_lines`). Also part of the layout cache keys.
     pub tool_display: crate::tools::ToolDisplay,
+    /// `tui.display.mermaid` (ADR 0028 R8), default true: draw a closed ```mermaid block as a
+    /// diagram. `false` renders every code block as source. Part of `DisplayModes`, so it is
+    /// in the layout cache key.
+    pub mermaid_enabled: bool,
 }
 
 impl App {
@@ -885,6 +976,7 @@ impl App {
             // ADR 0028 R3's default: thinking collapsed to one line.
             reasoning_mode: ReasoningMode::Collapsed,
             tool_display: crate::tools::ToolDisplay::default(),
+            mermaid_enabled: true,
         }
     }
 
@@ -920,6 +1012,7 @@ impl App {
         crate::tools::DisplayModes {
             reasoning: self.reasoning_mode,
             tools: self.tool_display,
+            mermaid: self.mermaid_enabled,
         }
     }
 
@@ -1000,6 +1093,8 @@ impl App {
                 .map(|lines| lines as usize)
                 .unwrap_or(5),
         };
+        // `tui.display.mermaid` (ADR 0028 R8, default true).
+        self.mermaid_enabled = config.tui.display_mermaid.unwrap_or(true);
         // `tui.clipboard` (default OSC 52). An unknown spelling never reaches here (the host
         // config reader skips it with a warning); `pbcopy` off macOS does: warn once and fall
         // back, because the copy effect would have no program to run.
@@ -1841,10 +1936,14 @@ impl App {
     }
 
     fn update_inner(&mut self, input: Input) -> UpdateResult {
-        // A pending quit is disarmed by anything except the confirming Ctrl-C (or the
-        // deadline input itself): any other key means the user is still working.
+        // A pending quit is disarmed by user input only: a resize,
+        // a stream/runtime fact or an asynchronous result is not the user changing their mind,
+        // and letting one disarm the window made the second Ctrl-C look like it did nothing.
+        // The confirming Ctrl-C itself and the deadline input are excluded here because this
+        // match handles them.
         let disarmed = self.quit_pending.is_some()
-            && !matches!(input, Input::Cancel { .. } | Input::QuitDeadline);
+            && is_user_input(&input)
+            && !matches!(input, Input::Cancel { .. });
         if disarmed {
             self.quit_pending = None;
         }
@@ -1964,6 +2063,7 @@ impl App {
                 }
                 UpdateResult::dirty()
             }
+            Input::SkillExpanded { result, steer } => self.skill_expanded(result, steer),
             Input::CommandRefused(refused) => {
                 self.push_notice(format!(
                     "the session refused `{}`: {}",
@@ -2651,6 +2751,26 @@ impl App {
         UpdateResult::none()
     }
 
+    /// A `/skill:<name>` expansion finished (ADR 0025 S3). On success the message is sent like
+    /// a typed one (steer when a turn was running); on failure the notice is shown and nothing
+    /// is sent — an unknown skill is not a message.
+    fn skill_expanded(&mut self, result: Result<String, String>, steer: bool) -> UpdateResult {
+        match result {
+            Ok(text) => {
+                let message = Message::user(text);
+                UpdateResult::effect(if steer {
+                    Effect::Steer(message)
+                } else {
+                    Effect::SendFollowup(message)
+                })
+            }
+            Err(error) => {
+                self.push_notice(error);
+                UpdateResult::dirty()
+            }
+        }
+    }
+
     /// The `@` expansion finished. On success the send effect is produced, with the notices the
     /// expansion reported; on failure the original text goes back into the input box, so
     /// nothing is sent and the user can fix the message.
@@ -3042,6 +3162,14 @@ impl App {
                 }
                 UpdateResult::effect(Effect::SetApprovalPolicy { on })
             }
+            // `/skill:` (ADR 0025 S3): the host reads the body and the expanded text becomes a
+            // user message. Whether it steers is decided here, like a typed send.
+            command::Outcome::Skill { name, args } => {
+                let steer = self.turn() == TurnState::Running;
+                UpdateResult::effect(Effect::ExpandSkill { name, args, steer })
+            }
+            // `/skills`: the host lists the discovered skills as notices.
+            command::Outcome::Skills => UpdateResult::effect(Effect::ListSkills),
             command::Outcome::Message => UpdateResult::none(),
         }
     }

@@ -627,6 +627,224 @@ async fn pty_launches_with_no_arguments_from_the_config_and_auth_json() {
     );
 }
 
+/// ADR 0025 slice 3 acceptance: `/skill:<name> [args]` puts the skill's body in one user
+/// message, `/skills` lists the discovered skills, `/skill:nope` is a notice and not a message,
+/// and `//skill:x` is an ordinary message. A `disable-model-invocation: true` skill is listed for
+/// the user but never reaches the prompt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_skill_commands_expand_list_notice_and_escape() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![
+        text_reply("SKILL-REPLY-OK"),
+        text_reply("ESCAPE-REPLY-OK"),
+    ])
+    .await;
+    let dir = TempDir::new("skill-session");
+    let home = TempDir::new("skill-home");
+    // A normal skill and one the model must not invoke.
+    std::fs::create_dir_all(home.path().join("skills/greet")).unwrap();
+    std::fs::write(
+        home.path().join("skills/greet/SKILL.md"),
+        "---\nname: greet\ndescription: Say hello.\n---\nGREET-SKILL-BODY-MARKER\nRun scripts/x.sh relative to me.\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(home.path().join("skills/secret")).unwrap();
+    std::fs::write(
+        home.path().join("skills/secret/SKILL.md"),
+        "---\nname: secret\ndescription: SECRET-DESCRIPTION\ndisable-model-invocation: true\n---\nSECRET-BODY-MARKER\n",
+    )
+    .unwrap();
+
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "skill",
+        ],
+        &[("RADIAN_HOME", home.path().to_str().unwrap())],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+
+    // `/skill:greet hello 世界`: the body and the args are one user message.
+    pty.send("/skill:greet hello 世界\r".as_bytes());
+    assert!(
+        pty.wait_for_screen("SKILL-REPLY-OK", 20),
+        "the reply is missing:\n{}",
+        pty.screen()
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1, "one request expected");
+    let body = requests[0].json();
+    let messages = body["messages"].as_array().expect("messages is an array");
+    let user = messages
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .map(|message| message["content"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(user.contains("<skill name=\"greet\""), "{user}");
+    assert!(user.contains("GREET-SKILL-BODY-MARKER"), "{user}");
+    assert!(user.contains("hello 世界"), "{user}");
+    assert!(
+        !user.contains("description: Say hello."),
+        "the frontmatter is stripped: {user}"
+    );
+    // The disabled skill is not in the system prompt; the visible one is.
+    let system = messages
+        .iter()
+        .find(|message| message["role"] == "system")
+        .and_then(|message| message["content"].as_str())
+        .unwrap_or_default();
+    assert!(system.contains("## Skills (ADR 0025)"), "{system}");
+    assert!(system.contains("greet"), "{system}");
+    assert!(!system.contains("secret"), "{system}");
+
+    // The journal records what the model saw (ADR 0025 S3): the expanded body, not the command.
+    // The expansion is the message itself, so there is no path where the model sees one text and
+    // the journal another; this pins that.
+    let journal = std::fs::read_to_string(dir.path().join("skill.jsonl")).unwrap();
+    assert!(journal.contains("GREET-SKILL-BODY-MARKER"), "{journal}");
+
+    // `/skills` lists both the visible and the model-invocation-disabled skill.
+    pty.send("/skills\r".as_bytes());
+    assert!(
+        pty.wait_for_screen("greet: Say hello.", 10),
+        "the list is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("secret: SECRET-DESCRIPTION (model-invocation off)", 10),
+        "the disabled skill is not listed:\n{}",
+        pty.screen()
+    );
+
+    // `/skill:nope` is a notice, not a message: no second request.
+    pty.send("/skill:nope\r".as_bytes());
+    assert!(
+        pty.wait_for_screen("no skill named `nope`", 10),
+        "the notice is missing:\n{}",
+        pty.screen()
+    );
+    assert_eq!(
+        server.requests().len(),
+        1,
+        "an unknown skill must not reach the model"
+    );
+
+    // `//skill:greet` is the escape: an ordinary message with one slash dropped.
+    pty.send("//skill:greet\r".as_bytes());
+    assert!(
+        pty.wait_for_screen("ESCAPE-REPLY-OK", 20),
+        "the escaped message got no reply:\n{}",
+        pty.screen()
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2, "the escaped message is a normal turn");
+    let body = requests[1].json();
+    let last_user = body["messages"]
+        .as_array()
+        .expect("messages is an array")
+        .iter()
+        .rev()
+        .find(|message| message["role"] == "user")
+        .and_then(|message| message["content"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    assert_eq!(
+        last_user, "/skill:greet",
+        "the escape sends the text as typed"
+    );
+
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "clean exit code");
+}
+
+/// ADR 0025 slice 4: `[skills] extra_paths` in the config add skill roots. This drives the whole
+/// path — config reader, `~`/relative resolution (an absolute path here), discovery, the prompt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_skills_extra_paths_are_read_from_the_config() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![
+        text_reply("EXTRA-SKILL-REPLY-OK"),
+        text_reply("EXTRA-COMMAND-REPLY-OK"),
+    ])
+    .await;
+    let dir = TempDir::new("extra-session");
+    let home = TempDir::new("extra-home");
+    let extra = TempDir::new("extra-root");
+    std::fs::create_dir_all(extra.path().join("team-skill")).unwrap();
+    std::fs::write(
+        extra.path().join("team-skill/SKILL.md"),
+        "---\nname: team-skill\ndescription: From the extra root.\n---\nEXTRA-ROOT-BODY\n",
+    )
+    .unwrap();
+    let config = format!(
+        "schema_version = 1\n[skills]\nextra_paths = [\"{}\"]\n",
+        extra.path().to_str().unwrap()
+    );
+    let mut pty = Pty::spawn_with_config(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "extra",
+        ],
+        &[("RADIAN_HOME", home.path().to_str().unwrap())],
+        &config,
+        24,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send("hello\r".as_bytes());
+    assert!(
+        pty.wait_for_screen("EXTRA-SKILL-REPLY-OK", 20),
+        "the reply is missing:\n{}",
+        pty.screen()
+    );
+    let body = server.requests()[0].json();
+    let system = body["messages"]
+        .as_array()
+        .expect("messages is an array")
+        .iter()
+        .find(|message| message["role"] == "system")
+        .and_then(|message| message["content"].as_str())
+        .unwrap_or_default();
+    assert!(system.contains("team-skill"), "{system}");
+    assert!(system.contains("From the extra root."), "{system}");
+    // The extra skill is usable end to end through the command path too.
+    pty.send("/skill:team-skill\r".as_bytes());
+    assert!(
+        pty.wait_for_screen("EXTRA-COMMAND-REPLY-OK", 20),
+        "the extra skill got no reply:\n{}",
+        pty.screen()
+    );
+    let second = server.requests()[1].json();
+    let expanded = second["messages"]
+        .as_array()
+        .expect("messages is an array")
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .map(|message| message["content"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(expanded.contains("EXTRA-ROOT-BODY"), "{expanded}");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "clean exit code");
+}
+
 /// The diagnostics directory the app will use when `HOME` is `home` (ADR 0020):
 /// `<home>/.radian/cache/diagnostics`.
 fn diagnostics_dir(home: &Path) -> PathBuf {

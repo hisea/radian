@@ -674,6 +674,9 @@ struct Setup {
     config_path: Option<PathBuf>,
     /// Known-but-unwired and unknown config keys, named (never their values) at startup.
     config_skipped: Vec<String>,
+    /// The extra skill roots from `[skills] extra_paths` (ADR 0025 slice 4), resolved against
+    /// the config file's directory and the user's home.
+    skills_extra_paths: Vec<PathBuf>,
 }
 
 async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
@@ -1002,6 +1005,11 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         approval: startup_approval,
         config_path: config.source.clone(),
         config_skipped: config.skipped.clone(),
+        skills_extra_paths: radian_host::config::resolve_extra_paths(
+            &config.skills.extra_paths,
+            config.source.as_deref().and_then(std::path::Path::parent),
+            radian_host::user_home().as_deref(),
+        ),
     })
 }
 
@@ -1351,6 +1359,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             tier: profile_arg.preset(),
             profile: permission_profile,
             memory_root,
+            skills_extra_paths: setup.skills_extra_paths,
             resume: cli.resume.is_some(),
             config_snapshot: serde_json::json!({
                 "provider": setup.provider.as_str(),

@@ -211,6 +211,17 @@ pub struct CompactionConfig {
     pub auto: Option<bool>,
 }
 
+/// `[skills] extra_paths` (ADR 0025 slice 4, ruling 2): more skill roots, **as written** in the
+/// file. The reader keeps the strings; the host resolves them with
+/// [`resolve_extra_paths`] (the resolution needs the config file's directory and the user's
+/// home, neither of which belongs in a TOML value). A directory that is not listed here is
+/// never scanned — in particular `~/.claude/skills` is read only when it appears in this list
+/// (ruling 2).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkillsConfig {
+    pub extra_paths: Vec<String>,
+}
+
 /// One `[tui.colors]` color value (ADR 0029 decision 5): a color literal (`#hex`,
 /// `oklch(..)`, `okhsl(..)` or `""` for the terminal default) or a 256-color index.
 /// The literal text is resolved by the TUI, which owns the color grammar.
@@ -273,6 +284,10 @@ pub struct TuiConfig {
     /// (default 5). `None` means the default; a non-positive or non-integer value is skipped
     /// with a warning.
     pub display_tool_preview_lines: Option<u64>,
+    /// `tui.display.mermaid` (ADR 0028 R8): draw a closed ```` ```mermaid ```` block as a
+    /// Unicode diagram. `None` means the default (`true`); an unknown value is ignored with a
+    /// warning.
+    pub display_mermaid: Option<bool>,
 }
 
 /// One parsed configuration file.
@@ -288,6 +303,7 @@ pub struct Config {
     pub model: ModelConfig,
     pub permissions: PermissionsConfig,
     pub compaction: CompactionConfig,
+    pub skills: SkillsConfig,
     pub tui: TuiConfig,
     /// `[providers.<name>]`: named custom services (ADR 0026 D10). Carried raw; the hosts
     /// resolve them through `radian_host::provider::resolve_provider`.
@@ -390,6 +406,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
             "model" => parse_model(value, path, read_only, &mut config)?,
             "permissions" => parse_permissions(value, path, read_only, &mut config)?,
             "compaction" => parse_compaction(value, path, &mut config)?,
+            "skills" => parse_skills(value, path, &mut config)?,
             "tui" => parse_tui(value, path, &mut config)?,
             "providers" => parse_providers(value, path, &mut config)?,
             // Known by the ADR, not wired in this slice: the hosts take MCP servers from
@@ -607,6 +624,88 @@ fn parse_compaction(value: &Value, path: &Path, config: &mut Config) -> Result<(
     Ok(())
 }
 
+/// `[skills] extra_paths = ["…"]` (ADR 0025 slice 4). The strings are kept raw; the host
+/// resolves them with [`resolve_extra_paths`]. A non-string or empty entry is a structural
+/// error (an empty path would silently resolve to the config directory); an unknown key under
+/// `[skills]` is skipped and named on the startup line, like every other unknown key.
+fn parse_skills(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
+    let Some(table) = value.as_table() else {
+        return Err(wrong_type(path, "skills", "a table"));
+    };
+    for (key, value) in table {
+        match (key.as_str(), value) {
+            ("extra_paths", Value::Array(items)) => {
+                for (index, item) in items.iter().enumerate() {
+                    match item {
+                        Value::String(entry) if !entry.trim().is_empty() => {
+                            config.skills.extra_paths.push(entry.clone());
+                        }
+                        _ => {
+                            return Err(wrong_type(
+                                path,
+                                &format!("skills.extra_paths[{index}]"),
+                                "a non-empty string",
+                            ));
+                        }
+                    }
+                }
+            }
+            ("extra_paths", _) => {
+                return Err(wrong_type(
+                    path,
+                    "skills.extra_paths",
+                    "an array of strings",
+                ));
+            }
+            (other, _) => config.skipped.push(format!("skills.{other}")),
+        }
+    }
+    Ok(())
+}
+
+/// Turns `[skills] extra_paths` into filesystem paths (ADR 0025 slice 4). In order:
+///
+/// - a leading `~` (or exactly `~`) is the user's home;
+/// - a relative path is relative to the **config file's directory** — the list lives next to
+///   the config that declares it, not next to the workspace;
+/// - an absolute path is kept.
+///
+/// Pure, so the rules are testable without touching the environment. A `~` with no home is left
+/// alone (it will then be reported as a missing directory, never silently expanded).
+pub fn resolve_extra_paths(
+    raw: &[String],
+    config_dir: Option<&Path>,
+    home: Option<&Path>,
+) -> Vec<PathBuf> {
+    raw.iter()
+        .map(|entry| resolve_extra_path(entry, config_dir, home))
+        .collect()
+}
+
+fn resolve_extra_path(entry: &str, config_dir: Option<&Path>, home: Option<&Path>) -> PathBuf {
+    let tilde = entry == "~" || entry.starts_with("~/");
+    let expanded = if entry == "~" {
+        home.map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(entry))
+    } else if let Some(rest) = entry.strip_prefix("~/") {
+        match home {
+            Some(home) => home.join(rest),
+            None => PathBuf::from(entry),
+        }
+    } else {
+        PathBuf::from(entry)
+    };
+    // An unexpanded `~` is left as written (and reported as a missing directory), never joined
+    // to the config directory: `~/.claude/skills` is a clearer warning than a path under `~/.radian/config/`.
+    if expanded.is_absolute() || tilde {
+        expanded
+    } else if let Some(dir) = config_dir {
+        dir.join(expanded)
+    } else {
+        expanded
+    }
+}
+
 fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
     let Some(table) = value.as_table() else {
         return Err(wrong_type(path, "tui", "a table"));
@@ -729,6 +828,9 @@ fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
                         }
                         ("tool_preview_lines", Value::Integer(lines)) if *lines > 0 => {
                             config.tui.display_tool_preview_lines = Some(*lines as u64);
+                        }
+                        ("mermaid", Value::Boolean(on)) => {
+                            config.tui.display_mermaid = Some(*on);
                         }
                         // A display preference: skip the key with a warning, never refuse the
                         // file. The TUI keeps its default.
@@ -929,6 +1031,59 @@ mod tests {
         assert_eq!(resolve_path(None, None, None), None);
     }
 
+    /// ADR 0025 slice 4: `~` is the user's home, a relative entry is relative to the **config
+    /// file's directory**, and an absolute entry is kept. No home means `~` is left alone.
+    #[test]
+    fn extra_paths_resolve_tilde_relative_and_absolute() {
+        let config_dir = Path::new("/home/u/.radian/config");
+        let home = Path::new("/home/u");
+        let raw = vec![
+            "~/.claude/skills".to_owned(),
+            "~".to_owned(),
+            "./team-skills".to_owned(),
+            "shared".to_owned(),
+            "/opt/shared/skills".to_owned(),
+        ];
+        assert_eq!(
+            resolve_extra_paths(&raw, Some(config_dir), Some(home)),
+            vec![
+                PathBuf::from("/home/u/.claude/skills"),
+                PathBuf::from("/home/u"),
+                PathBuf::from("/home/u/.radian/config/team-skills"),
+                PathBuf::from("/home/u/.radian/config/shared"),
+                PathBuf::from("/opt/shared/skills"),
+            ]
+        );
+        // No home: `~` is not guessed at (it will be reported as a missing directory).
+        let no_home = resolve_extra_paths(&raw[..2], Some(config_dir), None);
+        assert_eq!(
+            no_home,
+            vec![PathBuf::from("~/.claude/skills"), PathBuf::from("~"),]
+        );
+        // No config file: a relative path stays relative.
+        assert_eq!(
+            resolve_extra_paths(&["shared".to_owned()], None, Some(home)),
+            vec![PathBuf::from("shared")]
+        );
+    }
+
+    /// `[skills] extra_paths` must be an array of non-empty strings; a bad shape is refused
+    /// (an empty string would silently mean the config directory), an unknown key is skipped.
+    #[test]
+    fn skills_extra_paths_validate_the_shape() {
+        let config =
+            parse_str("schema_version = 1\n[skills]\nextra_paths = [\"a\", \"b\"]\nfuture = 1\n")
+                .unwrap();
+        assert_eq!(
+            config.skills.extra_paths,
+            vec!["a".to_owned(), "b".to_owned()]
+        );
+        assert!(config.skipped.contains(&"skills.future".to_owned()));
+        assert!(parse_str("schema_version = 1\n[skills]\nextra_paths = \"a\"\n").is_err());
+        assert!(parse_str("schema_version = 1\n[skills]\nextra_paths = [\"\"]\n").is_err());
+        assert!(parse_str("schema_version = 1\n[skills]\nextra_paths = [1]\n").is_err());
+    }
+
     #[test]
     fn a_minimal_file_wires_the_known_keys() {
         let config = parse_str(
@@ -977,6 +1132,16 @@ theme = "light"
         let config = parse_str("schema_version = 1\n[tui]\ninput_style = \"future\"\n").unwrap();
         assert_eq!(config.tui.input_style, None);
         assert!(config.skipped.contains(&"tui.input_style".to_string()));
+    }
+
+    /// `tui.display.mermaid` (ADR 0028 R8): a bool is carried; an unknown value is skipped.
+    #[test]
+    fn the_display_mermaid_flag_is_carried_and_a_non_bool_is_skipped() {
+        let config = parse_str("schema_version = 1\n[tui.display]\nmermaid = false\n").unwrap();
+        assert_eq!(config.tui.display_mermaid, Some(false));
+        let config = parse_str("schema_version = 1\n[tui.display]\nmermaid = \"yes\"\n").unwrap();
+        assert_eq!(config.tui.display_mermaid, None);
+        assert!(config.skipped.contains(&"tui.display.mermaid".to_string()));
     }
 
     /// `tui.display.reasoning` (ADR 0028 R3): the three modes are carried; an unknown one is

@@ -682,6 +682,21 @@ Base `0b9785b` · 一次性 worktree `/tmp/radian-pi-mut-m1`，跑完删除。
 |---|---|---|---|
 | M1a | 只认命令行带 id 的 `--resume`（`resumed_route` 读 `cli.resume` 而非解析后的 `resume`） | `pty_a_picked_resume_uses_the_journals_model` | ✅ |
 
+## ADR 0028 R8：Mermaid 图（2026-10-14）
+
+Base `a13dd6a` · 变异只在一次性 worktree 里做（`git worktree add --detach /tmp/radian-pi-mut-mmN <commit>`），
+跑完 `git worktree remove --force`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M1 | 渲染失败时留空（不显示源码与原因行） | `mermaid::a_diagram_that_does_not_fit_keeps_the_source_and_names_the_reason` | ✅ |
+| M2 | 图缓存键不含宽度（`diagram_outcome` 的查找忽略宽度） | `mermaid::a_width_change_recounts_and_redraws`（80 渲染后立即用不可变 `layout(16)` 断言回退） | ✅ |
+| M3 | 未闭合的代码块也渲染（`is_mermaid` 忽略 `closed`） | `mermaid::an_unclosed_block_shows_the_source` | ✅ |
+| M4 | `line_count` 不计图的行数（用源码行数代替） | `mermaid::a_width_change_recounts_and_redraws`（count == laid out） | ✅ |
+
+诚实补充：M2 的第一版变异放在 `line_count_cached` 的新鲜度检查上，测试**没抓住**——那个检查与
+`diagram_outcome` 的查找宽度检查冗余，只去掉它时两条路径仍会重渲；改成变异查找（并让测试在 80
+渲染后立刻用不可变 `layout(16)` 断言）后抓住。
 ## Slice: ADR 0028 第 2 片 a（工具卡片数据、渲染器注册表、Ctrl-O）
 
 Base `4208170` · 一次性 worktree `/tmp/tools-mut`（`git worktree add` 自本片 HEAD，结束后删除）·
@@ -717,3 +732,21 @@ Base `106a4d6` · 一次性 worktree `/tmp/tools2-mut`（`git worktree add` 自�
 cargo 只认第一个，跑出来"没抓住"是假象；改成单个过滤器 `--test render the_list_and_memory` 后立刻抓住。
 另：本片实现时发现 `base_name` 按单个 `_` 切分，导致 `git_status`/`ask_user`/`memory_*` 全部落到通用渲染器
 （已修：只有 `__` 或 `mcp__` 前缀才算命名空间），这一条由头部的单测与渲染测试共同钉住。
+## skills 片 3：`/skill:` 展开（2026-10-14）
+
+Base `c5a84f6` · 与 `radian-host` 同一一次性 worktree `/tmp/radian-pi-skills-mut3`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SL-M1 | `/skill:<name>` 解析成 `Outcome::Message`（不展开，当普通消息发） | `pty_skill_commands_expand_list_notice_and_escape`（请求正文没正文/args，journal 断言也挂） | ✅ |
+## ui2-review1 U1：Ctrl-C 待退出只由用户输入解除（2026-10-14）
+
+Base `eeadb11` · 一次性检出 `/tmp/ui2b-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+`cargo test -p radian-tui --test quit <test>`，变异后 `git checkout --` 还原，提交前
+`git status --short` 为空。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| R1-1 | 恢复"任何非 Cancel/QuitDeadline 输入都解除"（去掉 `is_user_input`） | 后台事件不解除待退出 | `quit.rs::background_events_do_not_disarm_the_quit_window` FAILED |
+
+1/1 抓住。

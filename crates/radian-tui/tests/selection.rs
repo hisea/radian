@@ -209,6 +209,7 @@ const EXPANDED: DisplayModes = DisplayModes {
         fold: radian_tui::tools::ToolFold::Expanded,
         preview_lines: 5,
     },
+    mermaid: true,
 };
 
 #[test]

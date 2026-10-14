@@ -544,6 +544,30 @@ cargo test -p radian-tui --test find a_search_over_fifty_thousand_entries_is_fas
 比值明显高于线性的 10×（5 万次分配的缓存/分配器压力），所以**比值也不能当硬界**；它只是让人
 在基准输出里一眼看出量级。绝对上限 2 s 只在机器空闲时才有意义（`--ignored` 是人为选择时机）。
 
+## Mermaid 图（ADR 0028 第 2 片 · R8）
+
+闭合的 ```mermaid 块在 `blocks.rs` 里按 `(source, width)` 渲染并缓存（键含宽度），失败回退到
+源码 + 一行弱色原因。测量命令与 §7 同：
+`cargo test --release -p radian-tui --test perf_render -- --ignored --nocapture --test-threads=1`。
+
+本次运行的机器负载高于基线（绝对数字偏悲观）。perf 语料是混合内容，**不含** mermaid 块，
+所以数字与上一节同量级；mermaid 只影响含图的条目，而图一旦渲染就进缓存（同一 `(width,
+text_len)` 不重渲）。
+
+| 项目 | 块模型（上一节） | 本次（含 mermaid 接入） |
+|---|---|---|
+| 稳态帧 50k（p50） | 0.25–0.46 ms | **0.71 ms**（p95 1.59） |
+| 改宽首帧 50k（p50） | 27.3 ms | **30.9–32.6 ms**（p95 59–63） |
+| 50k 折叠首帧 | 34.2 ms | **36.9 ms** |
+| 50k PageUp ×100 每键 p50 | 0.26 ms | **0.42 ms** |
+
+**结论**：R7 门槛仍过——常规一帧 < 1 ms（50k 0.71 ms，p95 1.59 ms < 30 ms），全局重排
+（改宽、折叠切换）后的第一帧 < 100 ms（30.9 / 36.9 ms）。语料不含 mermaid，所以这一节主要
+证明接入没有让既有的每帧路径退化；含图的条目首帧多一次渲染，之后命中缓存。
+
+**二进制体积**：`cargo build --release -p radian-tui --bin radian`，接入前 23,993,056 字节，
+接入后 **24,169,680 字节**（+176,624，+0.74%）。
+
 ## 工具卡片（ADR 0028 第 2 片 a · R4/R7 门槛）
 
 工具卡片（数据、按名注册的渲染器、`tui.display.tool_output` 折叠 + Ctrl-O）加在块模型之上。
