@@ -708,15 +708,12 @@ fn parse_git(value: &Value, config: &mut Config) -> Result<(), ConfigError> {
         return Ok(());
     };
     for (key, value) in table {
-        match (key.as_str(), value) {
-            ("protected_branches", Value::Array(branches)) => {
-                for branch in branches {
-                    if let Value::String(branch) = branch {
-                        config.git.protected_branches.push(branch.clone());
-                    }
+        if let ("protected_branches", Value::Array(branches)) = (key.as_str(), value) {
+            for branch in branches {
+                if let Value::String(branch) = branch {
+                    config.git.protected_branches.push(branch.clone());
                 }
             }
-            _ => {}
         }
     }
     Ok(())
