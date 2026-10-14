@@ -87,16 +87,18 @@ pub enum Fetch {
         provider: Option<String>,
         partial: String,
     },
-    /// `/thinking <level>`: only the levels the **current** model supports (ADR 0026 D11).
-    ThinkingLevels,
+    /// `/thinking <level>`: only the levels the **current** model supports (ADR 0026 D11),
+    /// ranked against `partial`.
+    ThinkingLevels { partial: String },
 }
 
 impl Fetch {
     /// The partial word the fetched candidates should be ranked against.
     pub fn partial(&self) -> &str {
         match self {
-            Fetch::MemoryRecords { partial, .. } | Fetch::ModelRoute { partial, .. } => partial,
-            Fetch::ThinkingLevels => "",
+            Fetch::MemoryRecords { partial, .. }
+            | Fetch::ModelRoute { partial, .. }
+            | Fetch::ThinkingLevels { partial } => partial,
         }
     }
 }
@@ -562,8 +564,10 @@ fn model_route_level(typed: &[&str], partial: &str) -> Level {
 
 /// `/thinking`'s one level: only the levels the current model supports are offered
 /// (ADR 0026 D11), which the loop resolves from the route's map.
-fn thinking_level_level(_typed: &[&str], _partial: &str) -> Level {
-    Level::Needs(Fetch::ThinkingLevels)
+fn thinking_level_level(_typed: &[&str], partial: &str) -> Level {
+    Level::Needs(Fetch::ThinkingLevels {
+        partial: partial.to_owned(),
+    })
 }
 
 /// Interprets a trimmed line that starts with `/`. `memory_enabled` says whether this process

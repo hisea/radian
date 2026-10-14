@@ -1568,7 +1568,7 @@ impl LoopContext<'_> {
                     radian_tui::command::Fetch::ModelRoute { provider, .. } => {
                         model_route_candidates(provider.as_deref())
                     }
-                    radian_tui::command::Fetch::ThinkingLevels => {
+                    radian_tui::command::Fetch::ThinkingLevels { .. } => {
                         // D11: only the levels the current model supports.
                         let (route_provider, route_model) = self
                             .session

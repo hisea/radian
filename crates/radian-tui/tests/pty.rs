@@ -81,6 +81,8 @@ fn write_auth_json(root: &Path, envs: &[(&str, &str)]) {
     for (name, value) in envs {
         let provider = if *name == "ANTHROPIC_API_KEY" {
             "anthropic"
+        } else if *name == "OPENCODE_GO_API_KEY" {
+            "opencode-go"
         } else if name.ends_with("KEY") {
             "openai-compatible"
         } else {
@@ -5526,6 +5528,64 @@ async fn pty_a_resume_replays_the_switched_model() {
         pty.wait_for_screen("RESUMED-ON-ANTHROPIC", 20),
         "the resumed session stays on the switched model: {}",
         pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
+}
+
+/// `/thinking medium` on deepseek-v4.1-flash clamps **up** to high (ADR 0026 D11: it supports
+/// low/high/max), names the clamp, and the next request carries the wire value as
+/// `reasoning_effort`. `medium` matches no candidate, so Enter submits the typed level.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_thinking_clamps_up_and_sends_reasoning_effort() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("thinking-clamp");
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("THINKING-OK")]).await;
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--provider",
+            "opencode-go",
+            "--model",
+            "deepseek-v4.1-flash",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "thinking-clamp",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[
+            ("OPENCODE_GO_API_KEY", "sk-go-thinking"),
+            ("RADIAN_BASE_URL", &server.base_url),
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"/thinking medium\r");
+    assert!(
+        pty.wait_for_screen("medium → high", 10),
+        "the clamp is named: {}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("next turn: thinking high", 10),
+        "the clamped level is queued: {}",
+        pty.screen()
+    );
+    pty.send(b"go\r");
+    assert!(pty.wait_for_screen("THINKING-OK", 20), "{}", pty.screen());
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1, "one request");
+    assert_eq!(
+        requests[0].json()["reasoning_effort"],
+        "high",
+        "the clamped level is on the wire: {}",
+        requests[0].json()
     );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());

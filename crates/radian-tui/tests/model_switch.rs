@@ -219,3 +219,72 @@ fn the_confirm_keys_are_hardcoded() {
     // And the queue only happens once the compaction succeeds.
     assert!(app.next_model.is_none());
 }
+
+// ---------- /thinking (ADR 0026 D11) ----------
+
+/// The completion offers only the levels the **current** model supports; the loop resolves
+/// them from the route's map.
+#[test]
+fn the_thinking_completion_needs_the_host() {
+    let level = command::complete_in(command::tree(), "/thinking ", 10).expect("a completion");
+    assert!(
+        matches!(
+            level.level_result,
+            command::Level::Needs(command::Fetch::ThinkingLevels { .. })
+        ),
+        "{:?}",
+        level.level_result
+    );
+}
+
+/// A clamped level queues, and the clamp is named with the supported list.
+#[test]
+fn a_thinking_level_queues_after_the_clamp() {
+    let mut app = App::new("m", "s");
+    let result = app.update(Input::ThinkingChecked {
+        requested: "medium".into(),
+        applied: Some("high".into()),
+        supported: vec!["low".into(), "high".into(), "max".into()],
+    });
+    assert!(
+        result.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::QueueThinking { level } if level == "high"
+        )),
+        "{:?}",
+        result.effects
+    );
+    assert_eq!(app.next_thinking.as_deref(), Some("high"));
+}
+
+/// A model with no supported level changes nothing.
+#[test]
+fn a_levelless_model_changes_nothing() {
+    let mut app = App::new("m", "s");
+    let result = app.update(Input::ThinkingChecked {
+        requested: "high".into(),
+        applied: None,
+        supported: Vec::new(),
+    });
+    assert!(result.effects.is_empty(), "{:?}", result.effects);
+    assert!(app.next_thinking.is_none());
+}
+
+/// The queued level clears when the driver applies it (same rule as `next:`).
+#[test]
+fn the_thinking_marker_clears_when_applied() {
+    let mut app = App::new("m", "s");
+    app.update(Input::ThinkingChecked {
+        requested: "high".into(),
+        applied: Some("high".into()),
+        supported: vec!["high".into()],
+    });
+    assert!(app.next_thinking.is_some());
+    app.update(Input::Runtime(
+        radian_session::RuntimeEvent::ConfigChanged {
+            revision: 3,
+            change: serde_json::json!({"thinking": "high"}),
+        },
+    ));
+    assert!(app.next_thinking.is_none());
+}

@@ -1920,6 +1920,14 @@ impl App {
 
     /// Shows the `/…` candidates: the overlay rows, and the state Tab/Enter accepts from.
     fn set_slash(&mut self, range: std::ops::Range<usize>, candidates: Vec<command::Candidate>) {
+        if candidates.is_empty() {
+            // Nothing to offer at this level: an empty list must not stay "open", or the next
+            // Enter would be swallowed accepting a candidate that does not exist (and the
+            // line could never be submitted).
+            self.slash_completion = None;
+            self.completion_clear();
+            return;
+        }
         let width = candidates
             .iter()
             .map(|candidate| candidate.insert.chars().count())
