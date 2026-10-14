@@ -941,9 +941,10 @@ theme = "light"
     #[test]
     fn permissions_approval_carries_known_names_and_refuses_unknown_ones() {
         for name in ["on-ask", "always", "never", "auto"] {
-            let config =
-                parse_str(format!("schema_version = 1\n[permissions]\napproval = \"{name}\"\n"))
-                    .unwrap();
+            let config = parse_str(&format!(
+                "schema_version = 1\n[permissions]\napproval = \"{name}\"\n"
+            ))
+            .unwrap();
             assert_eq!(config.permissions.approval.as_deref(), Some(name), "{name}");
             assert!(config.skipped.is_empty(), "{name}");
         }

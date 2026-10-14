@@ -20,7 +20,7 @@ use std::time::Duration;
 use agent_core::{Agent, AgentConfig, ContextBudget, EventSink, Message, TurnOptions};
 use agent_extensions::{McpServerConfig, McpToolProvider};
 use radian_coding::CodingTools;
-use radian_permissions::{Approver, AuditSink, PermissionHooks, Preset, Profile};
+use radian_permissions::{ApprovalPolicy, Approver, AuditSink, PermissionHooks, Preset, Profile};
 use radian_runtime::{CancelCause, Driver, Inbox, RuntimeEvents};
 use radian_sandbox::Sandbox;
 use radian_session::{SessionCreatedData, SessionJournal};
@@ -181,6 +181,11 @@ pub trait SessionFacade: Send + Sync {
         instructions: Option<String>,
         on_done: Box<dyn FnOnce(Result<agent_core::CompactionOutcome, String>) + Send>,
     );
+
+    /// Switch the session's approval policy in place (ADR 0026 D9's in-session `auto`).
+    /// The hooks audit the switch; the durable `ConfigChanged` record is the UI's to queue.
+    /// Needs the same capability as answering: it belongs to the interactive approver.
+    fn set_approval(&self, policy: ApprovalPolicy) -> Result<(), CommandRefused>;
 }
 
 /// How the driver task ended.
@@ -459,6 +464,21 @@ impl SessionFacade for LocalSession {
         match self.queue.answer(request_id, response) {
             Ok(()) | Err(Answered::Late) | Err(Answered::Unknown) => Ok(()),
         }
+    }
+
+    fn set_approval(&self, policy: ApprovalPolicy) -> Result<(), CommandRefused> {
+        if !self
+            .capabilities
+            .contains(&SessionCapability::AnswerRequest)
+        {
+            return Err(CommandRefused {
+                command: "set-approval".into(),
+                capability: Some(SessionCapability::AnswerRequest.as_str().to_string()),
+                reason: "this session does not declare the `answer` capability".into(),
+            });
+        }
+        self.hooks.set_approval(policy);
+        Ok(())
     }
 
     /// Re-validates the capability, then runs the command. The check is here as well as in the
