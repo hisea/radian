@@ -60,6 +60,12 @@ pub fn discover(root: &Path) -> Discovery {
     }
     // Every directory that holds a SKILL.md, in path order (the deterministic order ADR 0025
     // S2 requires); a directory with SKILL.md is a skill and is not descended into.
+    //
+    // `walk` already yields `Path` order — its per-directory sort is the first component of
+    // `Path`'s component-wise comparison, so the order is a depth-first walk with each
+    // directory's entries in name order, which is exactly `Path` order. The explicit sort is
+    // kept as the statement of the contract (and so a future `walk` change cannot quietly
+    // break it); removing it is an equivalent mutation.
     let mut candidates: Vec<PathBuf> = Vec::new();
     walk(root, &mut candidates);
     candidates.sort();
