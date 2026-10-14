@@ -568,3 +568,36 @@ fn every_chinese_line_fits_the_width() {
         }
     }
 }
+
+/// The owner's truncation report (2026-10-14): a long ordered-list item in a wide window
+/// (~160-200 columns) looked cut at the right edge. This is the message's **structure**
+/// (anonymized): `##` headings, a bullet list with inline code, and long ordered-list items
+/// with bold and inline code. Every line wraps in display columns and the whole text reaches
+/// the screen at 120/160/200 - the report did not reproduce on this layout.
+#[test]
+fn a_long_ordered_list_item_wraps_in_a_wide_window() {
+    let body = "图全部完成并实测通过。下面是结果。\n\n## 我做了什么\n\n在仓库里新增两个文件（`git status` 只有 `?? docs/notes/`，没有改动任何代码）：\n\n- `docs/notes/architecture-map.md` — 11 节的结构图与说明\n- `docs/notes/check-mermaid-blocks.py` — 校验脚本\n\n## 核对过的两个关键点\n\n1. **工作区不是 main**：当前在 `example-repo`（分支 `feature/example`，提交 `abc1234`）。我比对了 `git diff --stat main -- crates/`：`crates/` **无差异**，两边都有 ADR 0001–0032。所以这份图对 main 也成立（仓库比记忆里那次更新了一代：0032 已存在）。\n2. **图用项目自己的渲染器验证**：项目在 transcript 里画图用的是 vendored 渲染器，超宽或语法不支持就退回源码。所以这一项也要按显示列宽核对而不是按字符数。\n";
+    for width in [120usize, 160, 200] {
+        let mut app = App::new("m", "s");
+        assistant(&mut app, body);
+        let modes = modes(ReasoningMode::Expanded);
+        let blocks = blocks::parse_blocks(body);
+        let lines = blocks::layout(&app.entries[0], &blocks, modes, width);
+        for line in &lines {
+            assert!(
+                unicode_width::UnicodeWidthStr::width(line.text.as_str()) <= width,
+                "width {width}: line {:?} overflows",
+                line.text
+            );
+        }
+        // The tail of ordered item 1 reaches the screen (the report was that it vanished).
+        let terminal = render(&mut app, width as u16, 60);
+        let rendered: String = screen(&terminal).split_whitespace().collect();
+        for needle in ["0032", "已存在", "渲染器验证"] {
+            assert!(
+                rendered.contains(needle),
+                "width {width}: {needle:?} is missing from the frame"
+            );
+        }
+    }
+}
