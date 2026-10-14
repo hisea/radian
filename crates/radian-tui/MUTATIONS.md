@@ -705,5 +705,14 @@ Base `c5a84f6` · 与 `radian-host` 同一一次性 worktree `/tmp/radian-pi-ski
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
 | SL-M1 | `/skill:<name>` 解析成 `Outcome::Message`（不展开，当普通消息发） | `pty_skill_commands_expand_list_notice_and_escape`（请求正文没正文/args，journal 断言也挂） | ✅ |
+## ui2-review1 U1：Ctrl-C 待退出只由用户输入解除（2026-10-14）
+
+Base `eeadb11` · 一次性检出 `/tmp/ui2b-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+`cargo test -p radian-tui --test quit <test>`，变异后 `git checkout --` 还原，提交前
+`git status --short` 为空。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| R1-1 | 恢复"任何非 Cancel/QuitDeadline 输入都解除"（去掉 `is_user_input`） | 后台事件不解除待退出 | `quit.rs::background_events_do_not_disarm_the_quit_window` FAILED |
 
 1/1 抓住。

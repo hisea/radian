@@ -241,6 +241,57 @@ pub const DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_m
 /// key, disarms it and the hint disappears.
 pub const QUIT_WINDOW: Duration = Duration::from_secs(2);
 
+/// Whether an [`Input`] is something the **user** did — a key, a paste, a mouse action, an
+/// approval answer — as opposed to a host fact or an asynchronous result. Only user input
+/// disarms the Ctrl-C quit window: a terminal resize or a
+/// background `/v1/models` refresh must not silently cancel the pending quit.
+///
+/// The match is exhaustive on purpose: a new `Input` variant forces a decision here.
+fn is_user_input(input: &Input) -> bool {
+    match input {
+        Input::Action(_)
+        | Input::Cancel { .. }
+        | Input::Char(_)
+        | Input::FindBackspace
+        | Input::Paste(_)
+        | Input::ApprovalAnswer(_)
+        | Input::ApprovalAuto
+        | Input::ApprovalScroll(_)
+        | Input::ConfirmCommand(_)
+        | Input::Form(_)
+        | Input::PickerKey(_)
+        | Input::PickerClose
+        | Input::LoginKey(_)
+        | Input::ConfirmLogout(_)
+        | Input::MouseDown { .. }
+        | Input::MouseDrag { .. }
+        | Input::MouseUp { .. } => true,
+        Input::QuitDeadline
+        | Input::Resize { .. }
+        | Input::Stream(_)
+        | Input::Event(_)
+        | Input::Runtime(_)
+        | Input::Pending(..)
+        | Input::MentionsExpanded(_)
+        | Input::CompletionReady(_)
+        | Input::CompletionsReady { .. }
+        | Input::MemoryCommandDone(_)
+        | Input::CompactDone(_)
+        | Input::ThinkingChecked { .. }
+        | Input::ModelChecked { .. }
+        | Input::SwitchCompacted { .. }
+        | Input::SessionDone(_)
+        | Input::CommandRefused(_)
+        | Input::PickerOpened(_)
+        | Input::LoginVerified { .. }
+        | Input::LoginSaved { .. }
+        | Input::LogoutDone { .. }
+        | Input::ClipboardDone(_)
+        | Input::ThemeReady { .. }
+        | Input::SkillExpanded { .. } => false,
+    }
+}
+
 /// The last press, for double/triple-click detection: where and when, and how many presses
 /// in a row landed on the same cell inside the window (1, 2 or 3; capped at 3).
 #[derive(Debug, Clone, Copy)]
@@ -1872,10 +1923,14 @@ impl App {
     }
 
     fn update_inner(&mut self, input: Input) -> UpdateResult {
-        // A pending quit is disarmed by anything except the confirming Ctrl-C (or the
-        // deadline input itself): any other key means the user is still working.
+        // A pending quit is disarmed by user input only: a resize,
+        // a stream/runtime fact or an asynchronous result is not the user changing their mind,
+        // and letting one disarm the window made the second Ctrl-C look like it did nothing.
+        // The confirming Ctrl-C itself and the deadline input are excluded here because this
+        // match handles them.
         let disarmed = self.quit_pending.is_some()
-            && !matches!(input, Input::Cancel { .. } | Input::QuitDeadline);
+            && is_user_input(&input)
+            && !matches!(input, Input::Cancel { .. });
         if disarmed {
             self.quit_pending = None;
         }

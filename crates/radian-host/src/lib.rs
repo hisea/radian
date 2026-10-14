@@ -8,6 +8,7 @@
 //! two binaries still decide their own flags, startup text and error wording.
 
 pub mod approval;
+pub mod atomic_write;
 pub mod auth;
 mod catalog;
 pub mod config;

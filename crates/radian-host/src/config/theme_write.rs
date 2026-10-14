@@ -4,10 +4,10 @@
 //! through `toml_edit`, so every other byte — comments, blank lines, key order, unknown
 //! fields (ADR 0008 §5.4) — is preserved. The result is re-read with the normal reader and
 //! the write is refused (nothing is written) when anything but `tui.theme` differs. The write
-//! is atomic (a unique temp file in the same directory + rename) and keeps the original
-//! file's permissions.
+//! goes through the shared [`crate::atomic_write`] helper (a unique temp file + rename, the
+//! original file's permissions), and a symbolic link is resolved first so a dotfiles setup
+//! keeps its link.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use toml_edit::{DocumentMut, Item, Table, value};
@@ -113,37 +113,39 @@ pub fn write_theme(path: &Path, read_only: bool, theme: &str) -> Result<PathBuf,
         });
     }
 
-    write_atomic(path, new_text.as_bytes())?;
+    // Resolve a symbolic link: a dotfiles setup links `config.toml` into a repository, and a
+    // rename onto the link's path would replace the link with a plain file.
+    // The write goes to the link's target; the notice keeps naming the path the user knows.
+    let target = resolve_target(path);
+    let mut bytes = new_text.into_bytes();
+    if !bytes.ends_with(b"\n") {
+        bytes.push(b'\n');
+    }
+    crate::atomic_write::write_atomic(&target, &bytes, None).map_err(|source| {
+        ThemeWriteError::Write {
+            path: path.to_path_buf(),
+            source,
+        }
+    })?;
     Ok(path.to_path_buf())
 }
 
-/// A unique temp file in the same directory, the original's permissions, then rename.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ThemeWriteError> {
-    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
-    let _ = std::fs::remove_file(&tmp);
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    let result = (|| -> std::io::Result<()> {
-        let mut file = options.open(&tmp)?;
-        file.write_all(bytes)?;
-        if !bytes.ends_with(b"\n") {
-            file.write_all(b"\n")?;
-        }
-        file.sync_all()?;
-        // Preserve the original file's permissions; a fresh file keeps the umask default.
-        if let Ok(metadata) = std::fs::metadata(path) {
-            std::fs::set_permissions(&tmp, metadata.permissions())?;
-        }
-        std::fs::rename(&tmp, path)
-    })();
-    if let Err(source) = result {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(ThemeWriteError::Write {
-            path: path.to_path_buf(),
-            source,
-        });
+/// The real file a write targets: the symbolic link is resolved (all of it, through
+/// `canonicalize`), and when the file does not exist yet the nearest existing ancestor is
+/// resolved so a symlinked parent directory still lands in the repository.
+fn resolve_target(path: &Path) -> PathBuf {
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return real;
     }
-    Ok(())
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+            match std::fs::canonicalize(parent) {
+                Ok(real_parent) => real_parent.join(name),
+                Err(_) => path.to_path_buf(),
+            }
+        }
+        _ => path.to_path_buf(),
+    }
 }
 
 #[cfg(test)]
@@ -256,5 +258,106 @@ user = \"#0af\"\n";
         write_theme(&path, false, "light").unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o640, "the mode is preserved");
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(label: &str) -> Self {
+            static N: AtomicU64 = AtomicU64::new(0);
+            let n = N.fetch_add(1, Ordering::SeqCst);
+            let dir = std::env::temp_dir().join(format!(
+                "radian-theme-review-{}-{label}-{n}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+        fn file(&self, name: &str) -> std::path::PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// U2: two writes that overlap in one process must not fight over a temp file (the old
+    /// `tmp-<pid>` name let the later `remove_file` delete the earlier writer's file) and must
+    /// leave nothing behind.
+    #[test]
+    fn concurrent_writes_do_not_error_and_leave_no_temp_files() {
+        let scratch = Scratch::new("concurrent");
+        let path = scratch.file("config.toml");
+        std::fs::write(&path, "schema_version = 1\n[tui]\ntheme = \"dark\"\n").unwrap();
+        std::thread::scope(|scope| {
+            for name in ["light", "mono", "dark", "light", "mono", "dark"] {
+                let path = path.clone();
+                scope.spawn(move || {
+                    write_theme(&path, false, name).expect("a concurrent write must not fail");
+                });
+            }
+        });
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("theme = \""), "{text}");
+        let leftovers: Vec<String> = std::fs::read_dir(&scratch.0)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files left: {leftovers:?}");
+    }
+
+    /// U3: a dotfiles setup links `config.toml` into a repository. The write must reach the
+    /// target and leave the link a link.
+    #[cfg(unix)]
+    #[test]
+    fn write_theme_keeps_a_symlink_and_writes_its_target() {
+        let scratch = Scratch::new("symlink");
+        let dotfiles = scratch.file("dotfiles");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        let target = dotfiles.join("config.toml");
+        std::fs::write(&target, "schema_version = 1\n[tui]\ntheme = \"dark\"\n").unwrap();
+        let link = scratch.file("config.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        write_theme(&link, false, "light").unwrap();
+
+        let metadata = std::fs::symlink_metadata(&link).unwrap();
+        assert!(
+            metadata.file_type().is_symlink(),
+            "the link must survive the write"
+        );
+        let text = std::fs::read_to_string(&target).unwrap();
+        assert!(text.contains("theme = \"light\""), "{text}");
+    }
+
+    /// U3, the other shape: the link is on the **directory**. Writing a fresh file under a
+    /// linked parent must land in the real directory too.
+    #[cfg(unix)]
+    #[test]
+    fn write_theme_through_a_symlinked_directory() {
+        let scratch = Scratch::new("symlink-dir");
+        let real = scratch.file("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = scratch.file("linked");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let path = link.join("config.toml");
+
+        write_theme(&path, false, "mono").unwrap();
+
+        let written = real.join("config.toml");
+        assert!(written.exists(), "the file landed in the real directory");
+        let text = std::fs::read_to_string(&written).unwrap();
+        assert!(text.contains("theme = \"mono\""), "{text}");
     }
 }

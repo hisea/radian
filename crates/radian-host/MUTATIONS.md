@@ -421,3 +421,16 @@ Base `beef4d5` · 一次性 worktree `/tmp/radian-pi-skills-mut4`，每条跑完
 
 3/3 抓住。（`~/.claude/skills` 只有列进 extra_paths 才读，由
 `an_unlisted_root_is_not_read_until_it_is_an_extra_path` 钉住。）
+## ui2-review1 U2/U3：共用原子写与符号链接（2026-10-14）
+
+Base `eeadb11` · 一次性检出 `/tmp/ui2b-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+`cargo test -p radian-host --lib <test>`，变异后 `git checkout --` 还原。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| R2-1 | 临时名去掉计数器与纳秒（退化成 `tmp-<pid>`） | 同进程并发写不互删临时文件 | `config::theme_write::review_tests::concurrent_writes_do_not_error_and_leave_no_temp_files` FAILED（连跑 3 次全部抓住） |
+| R3-1 | 写回前不解析符号链接（`target = path`） | 链接保持为链接、写到目标 | `config::theme_write::review_tests::write_theme_keeps_a_symlink_and_writes_its_target` FAILED |
+
+2/2 抓住（R3-1 的补充测试 `write_theme_through_a_symlinked_directory` 在变异下仍通过：
+当文件还不存在、只是父目录是链接时，直接 `open` 会经父链接落到真实目录，所以那条用例
+本身对"是否显式解析链接"不敏感；抓住变异的是文件链接那条。两条都保留作回归）。
