@@ -475,3 +475,13 @@ Base `b2c9c1c` · 一次性 worktree `/tmp/radian-trustb-mut`，每条跑完 `gi
 
 4/4 抓住。**过程记录**：T-B3 第一轮没抓住——当时 CLI 只在 `source == Default` 时打那一行，所以"默认但
 decision=Trust"的变异仍打印解法；把条件改成 `!decision && source == Default` 并补 status line 断言后抓住。
+
+## ADR 0031 片 B2：信任提问要求终端（2026-10-14）
+
+Base `e9397be` · 一次性 worktree `/tmp/radian-trustb2-mut`，跑完 `git checkout -- .`，`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| T-B5 | `trust_interactive` 退回 `cli.prompt.is_none()`（无 `-p` 即提问，管道 stdin 也问） | cli `piped_stdin_is_never_read_as_the_trust_answer`（提问行出现、管道内容被当成回答、消息没到模型） | ✅ |
+
+1/1 抓住。
