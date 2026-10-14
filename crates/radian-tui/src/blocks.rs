@@ -451,13 +451,19 @@ fn mermaid_sources(blocks: &[Block], text: &str, mermaid: bool) -> Vec<String> {
         .collect()
 }
 
+/// Whether a foldable entry shows its content: the global fold says so, or a per-entry
+/// override (ADR 0028 R6: a search hit opens exactly one entry).
+pub fn expanded(entry: &Entry, global: bool) -> bool {
+    entry.fold_override.unwrap_or(global)
+}
+
 /// How many display lines an entry's body lays out to (including padding rows; a `Hidden`
 /// reasoning entry contributes zero). **Counts only**: no line is materialized, so the frame
 /// that measures every entry (the first one, or the first after a resize) does not allocate
 /// per entry — the virtualization budget (ADR 0028 R7) depends on this.
 pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
     let mode = modes.reasoning;
-    if let Some(count) = cheap_count(entry, mode) {
+    if let Some(count) = cheap_count(entry, modes) {
         return count;
     }
     let prefix = crate::render::marker_prefix(entry.kind).width();
@@ -502,7 +508,7 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
         EntryKind::ToolCall => 1,
         EntryKind::ToolResult => {
             let card = entry.tool.as_deref();
-            let plan = tool_plan(card, &text, entry.is_error, modes);
+            let plan = tool_plan(card, &text, entry.is_error, modes, entry.fold_override);
             plan.iter()
                 .map(|line| match line {
                     tools::BodyLine::Text { source, .. } => {
@@ -523,15 +529,15 @@ fn tool_plan(
     text: &str,
     is_error: bool,
     modes: DisplayModes,
+    fold_override: Option<bool>,
 ) -> Vec<tools::BodyLine> {
+    let fold = if fold_override.unwrap_or(modes.tools.fold == tools::ToolFold::Expanded) {
+        tools::ToolFold::Expanded
+    } else {
+        modes.tools.fold
+    };
     match card {
-        Some(card) => tools::body_plan(
-            card,
-            text,
-            is_error,
-            modes.tools.fold,
-            modes.tools.preview_lines,
-        ),
+        Some(card) => tools::body_plan(card, text, is_error, fold, modes.tools.preview_lines),
         // No card data: the raw text, always expanded (a renderer copes with "no card").
         None => tools::body_plan(
             &tools::ToolCard::new("", "", serde_json::Value::Null),
@@ -568,7 +574,7 @@ fn code_line_count(raw: &str, closed: bool) -> usize {
 /// The cached count (the renderer's per-frame path for **every** entry, on screen or not).
 pub fn line_count_cached(entry: &mut Entry, modes: DisplayModes, width: usize) -> usize {
     let text_len = entry.text.len();
-    let key = (width, text_len, modes);
+    let key = (width, text_len, modes, entry.fold_override);
     if let Some(lines) = entry
         .layout_cache
         .as_ref()
@@ -605,10 +611,17 @@ pub fn line_count_cached(entry: &mut Entry, modes: DisplayModes, width: usize) -
 }
 
 /// Counts that need no layout pass at all.
-fn cheap_count(entry: &Entry, mode: ReasoningMode) -> Option<usize> {
-    match (entry.kind, mode) {
-        (EntryKind::Reasoning, ReasoningMode::Hidden) => Some(0),
-        (EntryKind::Reasoning, ReasoningMode::Collapsed) => Some(1),
+fn cheap_count(entry: &Entry, modes: DisplayModes) -> Option<usize> {
+    // A per-entry override (a search hit, ADR 0028 R6) expands a folded entry — a hidden
+    // reasoning channel included: the user asked for the content by searching for it.
+    let reasoning_expanded = expanded(entry, modes.reasoning == ReasoningMode::Expanded);
+    let tools_expanded = expanded(entry, modes.tools.fold == tools::ToolFold::Expanded);
+    match entry.kind {
+        EntryKind::Reasoning if !reasoning_expanded => Some(match modes.reasoning {
+            ReasoningMode::Hidden => 0,
+            _ => 1,
+        }),
+        EntryKind::Compaction if !tools_expanded => Some(1),
         _ => None,
     }
 }
@@ -657,9 +670,11 @@ pub fn layout(entry: &Entry, blocks: &[Block], modes: DisplayModes, width: usize
     let prefix = crate::render::marker_prefix(entry.kind).width();
     let body_width = width.saturating_sub(prefix).max(1);
     let text = crate::render::display_text(entry);
+    let tool_expanded = expanded(entry, modes.tools.fold == tools::ToolFold::Expanded);
+    let reasoning_expanded = expanded(entry, mode == ReasoningMode::Expanded);
     match (entry.kind, mode) {
-        (EntryKind::Reasoning, ReasoningMode::Hidden) => Vec::new(),
-        (EntryKind::Reasoning, ReasoningMode::Collapsed) => {
+        (EntryKind::Reasoning, ReasoningMode::Hidden) if !reasoning_expanded => Vec::new(),
+        (EntryKind::Reasoning, ReasoningMode::Collapsed) if !reasoning_expanded => {
             vec![BodyLine::prose(Vec::new(), 0, placeholder(entry))]
         }
         (EntryKind::User, _) => {
@@ -719,6 +734,30 @@ pub fn layout(entry: &Entry, blocks: &[Block], modes: DisplayModes, width: usize
             // from the same function), so the characters map back and copy correctly.
             tool_line(&text, width)
         }
+        (EntryKind::Compaction, _) => {
+            // ADR 0028 R5: one line when folded, the summary and the user's verbatim words
+            // (the entry's own text) when expanded.
+            if expanded(entry, modes.tools.fold == tools::ToolFold::Expanded) {
+                prose_lines(&text, body_width)
+            } else {
+                let line = entry
+                    .compaction
+                    .as_deref()
+                    .map(crate::app::CompactionInfo::line)
+                    .unwrap_or_else(|| "── context compacted ──".to_string());
+                vec![BodyLine {
+                    chars: Vec::new(),
+                    end: 0,
+                    text: line,
+                    code: false,
+                    pad: false,
+                    role: tools::LineRole::Normal,
+                    hint: true,
+                    diagram: None,
+                    reason: false,
+                }]
+            }
+        }
         (EntryKind::ToolResult, _) => {
             let card = entry.tool.as_deref();
             let plan = match card {
@@ -726,7 +765,12 @@ pub fn layout(entry: &Entry, blocks: &[Block], modes: DisplayModes, width: usize
                     card,
                     &text,
                     entry.is_error,
-                    modes.tools.fold,
+                    // The per-entry override (a search hit) opens this body.
+                    if tool_expanded {
+                        tools::ToolFold::Expanded
+                    } else {
+                        modes.tools.fold
+                    },
                     modes.tools.preview_lines,
                 ),
                 // No card data (an older entry, or a shape the TUI did not model): the raw
@@ -931,9 +975,12 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
     let prefix = crate::render::marker_prefix(entry.kind).width();
     let body_width = width.saturating_sub(prefix).max(1);
     let text = crate::render::display_text(entry);
+    let reasoning_expanded = expanded(entry, mode == ReasoningMode::Expanded);
     match (entry.kind, mode) {
-        (EntryKind::Reasoning, ReasoningMode::Hidden) => Vec::new(),
-        (EntryKind::Reasoning, ReasoningMode::Collapsed) => vec![placeholder(entry)],
+        (EntryKind::Reasoning, ReasoningMode::Hidden) if !reasoning_expanded => Vec::new(),
+        (EntryKind::Reasoning, ReasoningMode::Collapsed) if !reasoning_expanded => {
+            vec![placeholder(entry)]
+        }
         (EntryKind::User, _) => {
             let mut lines = vec![String::new()];
             lines.extend(crate::render::wrap(&text, body_width));
@@ -983,8 +1030,27 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
         (EntryKind::ToolCall, _) => {
             vec![code_line_layout(&text, width).0]
         }
+        (EntryKind::Compaction, _) => {
+            if expanded(entry, modes.tools.fold == tools::ToolFold::Expanded) {
+                crate::render::wrap(&text, body_width)
+            } else {
+                vec![
+                    entry
+                        .compaction
+                        .as_deref()
+                        .map(crate::app::CompactionInfo::line)
+                        .unwrap_or_else(|| "── context compacted ──".to_string()),
+                ]
+            }
+        }
         (EntryKind::ToolResult, _) => {
-            let plan = tool_plan(entry.tool.as_deref(), &text, entry.is_error, modes);
+            let plan = tool_plan(
+                entry.tool.as_deref(),
+                &text,
+                entry.is_error,
+                modes,
+                entry.fold_override,
+            );
             let mut out = Vec::new();
             for line in &plan {
                 match line {

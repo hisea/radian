@@ -182,6 +182,8 @@ pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
         EntryKind::ToolCall => "-> ",
         EntryKind::ToolResult => "<- ",
         EntryKind::Notice => "* ",
+        // The compaction line has no marker of its own: it is a rule-like `── … ──` line.
+        EntryKind::Compaction => "",
         // The startup block has no marker of its own: its lines carry `▶`/`▼` (or none for
         // the wordmark). The warning marker is its own; `Tip:` is styled separately.
         EntryKind::Banner => "  ",
@@ -204,6 +206,8 @@ fn marker(kind: EntryKind, theme: &Theme) -> (&'static str, Style) {
         EntryKind::Warning => theme.note,
         // The `Tip:` label steps down (dim), the body is muted.
         EntryKind::Tip => theme.truncation,
+        // The compaction one-liner is structural: the hunk/accent role.
+        EntryKind::Compaction => theme.diff_hunk,
     };
     (marker_prefix(kind), style)
 }
@@ -219,6 +223,8 @@ fn body_style(entry: &Entry, theme: &Theme) -> Style {
         EntryKind::Startup => theme.notice_body,
         EntryKind::Warning => theme.note,
         EntryKind::Tip => theme.hint,
+        // The expanded summary is body text; its one-liner is styled by `marker`.
+        EntryKind::Compaction => theme.notice_body,
         EntryKind::User | EntryKind::Assistant => {
             if entry.interrupted {
                 Style::default().add_modifier(Modifier::ITALIC)
