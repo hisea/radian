@@ -543,7 +543,7 @@ pub fn visible_lines(
         .iter_mut()
         .map(|entry| entry_line_count(entry, modes, width))
         .collect();
-    if agent_core::trace::enabled() {
+    if radian_session::trace::enabled() {
         eprintln!(
             "[trace] line-counts {} entries {} ms",
             counts.len(),

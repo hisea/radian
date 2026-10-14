@@ -844,13 +844,13 @@ async fn recover(
         }
     };
     let records = parsed.journal_records();
-    agent_core::trace::took("recover/open", t0);
+    radian_session::trace::took("recover/open", t0);
     let t1 = std::time::Instant::now();
     let replayed = agent_core::replay(&records)?;
-    agent_core::trace::took("recover/replay", t1);
+    radian_session::trace::took("recover/replay", t1);
     let t2 = std::time::Instant::now();
     let history = agent_core::recover(&records)?;
-    agent_core::trace::took("recover/recover", t2);
+    radian_session::trace::took("recover/recover", t2);
     let t3 = std::time::Instant::now();
 
     // E9: the repaired tail must be durable before the session is opened with it.
@@ -863,7 +863,7 @@ async fn recover(
             .await?;
     }
 
-    agent_core::trace::took("recover/tail", t3);
+    radian_session::trace::took("recover/tail", t3);
     // The transcript is the authority on whether an input was admitted: the input is
     // committed at the **start** of a step, while `InputAdmitted` is written after the step
     // returns. A crash in between leaves the message in the transcript without the record —

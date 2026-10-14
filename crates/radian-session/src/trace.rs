@@ -1,8 +1,8 @@
 //! A phase trace for startup measurements, off unless `RADIAN_TRACE_PHASES` is set.
 //!
-//! The env var is read once (`OnceLock`), so every call site is a single branch when the trace
-//! is off. The TUI hosts, the session reader and the runtime driver all use this one helper
-//! instead of keeping their own copy of the flag and the clock.
+//! Host-side diagnostics, not a Core concern: it lives here because the runtime, the host and
+//! the TUI all already depend on `radian-session`. The env var is read once (`OnceLock`), so
+//! every call site is a single branch when the trace is off.
 
 use std::sync::OnceLock;
 use std::time::Instant;

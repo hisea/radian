@@ -744,39 +744,53 @@ pub async fn open_session(
         .as_ref()
         .map(|service| MemoryTools::new(service.clone()));
     let memory_notice = memory_notice(&memory, &injection_config);
-    agent_core::trace::took("open/memory", t0);
+    radian_session::trace::took("open/memory", t0);
     let mcp = McpToolProvider::new(servers);
     let mcp_configured = mcp.configured();
 
     // The session file. Every check that can fail has already run in the host, so this is the
     // first thing that creates durable state.
     let journal_path = session_dir.join(format!("{}.jsonl", session_id.as_str()));
-    // resume-perf B: parse the journal **once**. The journal open, the driver's recovery and
-    // the host's initial view all reuse this one `Session`.
-    let t_parse = std::time::Instant::now();
-    let parsed = if resume && journal_path.exists() {
-        Some(
-            radian_session::Session::open(&journal_path).map_err(|error| {
-                SessionError::Message(format!(
-                    "cannot resume session {:?}: {error}",
-                    session_id.as_str()
-                ))
-            })?,
-        )
+    // resume-perf B/B2: take the single-writer lock **first**, then parse under it, and reuse
+    // that one parse for the journal open, the driver's recovery and the host's initial view.
+    // Parsing before the lock could miss a concurrent appender's commit and truncate it away.
+    let (journal, parsed, wrote_abort) = if resume {
+        if !journal_path.exists() {
+            return Err(SessionError::Message(format!(
+                "no session {:?} in {}",
+                session_id.as_str(),
+                session_dir.display()
+            )));
+        }
+        let cannot = |error: radian_session::WriteError| {
+            SessionError::Message(format!(
+                "cannot resume session {:?}: {error}",
+                session_id.as_str()
+            ))
+        };
+        let t_parse = std::time::Instant::now();
+        let lock =
+            radian_session::SessionJournal::lock_for_resume(&journal_path).map_err(cannot)?;
+        let parsed = lock.parse().map_err(cannot)?;
+        radian_session::trace::took("open/parse-once", t_parse);
+        let (journal, wrote_abort) = lock
+            .into_journal(session_id.as_str(), &parsed)
+            .map_err(cannot)?;
+        (Arc::new(journal), Some(parsed), wrote_abort)
     } else {
-        None
+        (
+            open_journal(
+                &session_id,
+                &session_dir,
+                &workspace,
+                &config_snapshot,
+                &journal_path,
+            )?,
+            None,
+            false,
+        )
     };
-    agent_core::trace::took("open/parse-once", t_parse);
-    let (journal, wrote_abort) = open_journal(
-        &session_id,
-        &session_dir,
-        &workspace,
-        resume,
-        &config_snapshot,
-        &journal_path,
-        parsed.as_ref(),
-    )?;
-    agent_core::trace::took("open/journal", t0);
+    radian_session::trace::took("open/journal", t0);
     let inbox = Inbox::durable(64, Arc::clone(&journal));
 
     let agent_config = AgentConfig {
@@ -818,7 +832,7 @@ pub async fn open_session(
         injection_config,
         memory_warning,
     ));
-    agent_core::trace::took("open/hooks+skills", t0);
+    radian_session::trace::took("open/hooks+skills", t0);
     let mut tools = HostTools::new(coding, memory_tools, mcp.clone());
     let ask_registered = ask.is_some();
     if let Some(ask) = ask {
@@ -863,7 +877,7 @@ pub async fn open_session(
             session_id
         ))
     })?;
-    agent_core::trace::took("open/driver-recover", t0);
+    radian_session::trace::took("open/driver-recover", t0);
     driver.set_turn_timeout(turn_timeout);
     driver.set_runtime_events(runtime_events);
     if let Some(budget_for) = budget_for.clone() {
@@ -915,7 +929,7 @@ pub async fn open_session(
         let _ = done_tx.send(end);
     });
 
-    agent_core::trace::took("open/driver-task", t0);
+    radian_session::trace::took("open/driver-task", t0);
     let facts = SessionFacts {
         profile_line,
         sandbox_facts,
@@ -974,37 +988,9 @@ fn open_journal(
     session_id: &SessionId,
     dir: &Path,
     workspace: &Path,
-    resume: bool,
     config_snapshot: &serde_json::Value,
     path: &Path,
-    parsed: Option<&radian_session::Session>,
-) -> Result<(Arc<SessionJournal>, bool), SessionError> {
-    if resume {
-        if !path.exists() {
-            return Err(SessionError::Message(format!(
-                "no session {:?} in {}",
-                session_id.as_str(),
-                dir.display()
-            )));
-        }
-        // resume-perf B: a `Session` the host already parsed is reused instead of scanning and
-        // parsing the file again. The flag says whether an aborted replacement was written, so
-        // the caller knows the shared parse no longer reflects the file.
-        let resumed = match parsed {
-            Some(parsed) => SessionJournal::resume_parsed(path, session_id.as_str(), parsed),
-            None => {
-                SessionJournal::resume(path, session_id.as_str()).map(|journal| (journal, false))
-            }
-        };
-        return resumed
-            .map(|(journal, wrote_abort)| (Arc::new(journal), wrote_abort))
-            .map_err(|error| {
-                SessionError::Message(format!(
-                    "cannot resume session {:?}: {error}",
-                    session_id.as_str()
-                ))
-            });
-    }
+) -> Result<Arc<SessionJournal>, SessionError> {
     crate::ensure_private_dir(dir).map_err(|error| {
         SessionError::Message(format!("cannot create {}: {error}", dir.display()))
     })?;
@@ -1012,7 +998,7 @@ fn open_journal(
     // URL that could carry credentials (ADR 0008 §4, ADR 0013).
     let created = SessionCreatedData::new(workspace.to_string_lossy(), config_snapshot.clone());
     match SessionJournal::create(path, session_id.as_str(), created) {
-        Ok(journal) => Ok((Arc::new(journal), false)),
+        Ok(journal) => Ok(Arc::new(journal)),
         Err(radian_session::WriteError::NotEmpty { .. }) => Err(SessionError::Message(format!(
             "session {:?} already exists in {}; continue it with `--resume {}`",
             session_id.as_str(),

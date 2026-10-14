@@ -26,6 +26,7 @@ mod index;
 mod reader;
 mod runtime;
 mod tail;
+pub mod trace;
 mod writer;
 
 /// Re-exported so a reader of [`UncommittedReplacement::end`] need not depend on `agent-core`
@@ -85,5 +86,23 @@ pub mod testing {
 
     pub(crate) fn note_open() {
         OPENS.with(|count| count.set(count.get() + 1));
+    }
+
+    /// A hook run by `SessionJournal::lock_for_resume` **before** it takes the lock
+    /// (resume-perf B2). A test appends a record here to prove the parse happens after the
+    /// lock: a resume that parsed first would miss it and truncate it away.
+    type ResumeBeforeLock = Box<dyn Fn(&std::path::Path) + Send + Sync>;
+
+    pub static RESUME_BEFORE_LOCK: std::sync::Mutex<Option<ResumeBeforeLock>> =
+        std::sync::Mutex::new(None);
+
+    pub(crate) fn resume_before_lock(path: &std::path::Path) {
+        let hook = RESUME_BEFORE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(hook) = hook {
+            hook(path);
+        }
     }
 }

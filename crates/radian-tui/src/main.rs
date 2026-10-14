@@ -233,11 +233,11 @@ const INPUT_POLL: Duration = Duration::from_millis(50);
 const TTY_CHECK_TICK: Duration = Duration::from_millis(250);
 
 fn mark(label: &str) {
-    agent_core::trace::mark(label);
+    radian_session::trace::mark(label);
 }
 
 fn main() -> ExitCode {
-    agent_core::trace::start();
+    radian_session::trace::start();
     radian_tui::terminal::install_panic_hook();
     let cli = Cli::parse();
     if let Some(path) = &cli.exit_trace {

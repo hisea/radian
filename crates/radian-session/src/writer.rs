@@ -175,90 +175,23 @@ impl SessionJournal {
     /// file itself, and continues `seq` after the last complete line. This is the entry a
     /// host uses for repair write-back (ADR 0002 E9) and for resuming after a crash.
     pub fn resume(path: impl AsRef<Path>, session_id: &str) -> Result<Self, WriteError> {
-        let path = path.as_ref().to_path_buf();
-        let parsed = crate::reader::Session::open(&path)?;
-        Self::resume_parsed(path, session_id, &parsed).map(|(journal, _)| journal)
+        let lock = Self::lock_for_resume(path)?;
+        let parsed = lock.parse()?;
+        lock.into_journal(session_id, &parsed)
+            .map(|(journal, _)| journal)
     }
 
-    /// [`SessionJournal::resume`], reusing a `Session` the caller already parsed (resume-perf
-    /// B). Without this a resume scanned and parsed the whole file here and again in the
-    /// driver's recovery and in the host's initial view - three reads of the same journal.
-    ///
-    /// The returned flag says whether an aborted replacement segment was written, so a caller
-    /// that shares the parse knows whether the fold it holds is still the one on disk.
-    pub fn resume_parsed(
-        path: impl AsRef<Path>,
-        session_id: &str,
-        parsed: &crate::reader::Session,
-    ) -> Result<(Self, bool), WriteError> {
+    /// Takes the single-writer lock for a resume **before** anything reads the file
+    /// (resume-perf B2). A resume that parsed before locking could hold a `committed_bytes`
+    /// from before a concurrent appender's commit and then `set_len` truncate that appender's
+    /// committed lines away. The caller parses under the lock ([`ResumeLock::parse`]) and
+    /// builds the appending journal from that parse ([`ResumeLock::into_journal`]).
+    pub fn lock_for_resume(path: impl AsRef<Path>) -> Result<ResumeLock, WriteError> {
         let path = path.as_ref().to_path_buf();
+        #[cfg(feature = "testing")]
+        crate::testing::resume_before_lock(&path);
         let file = Self::open_locked(&path)?;
-        let Some(last_seq) = parsed.last_seq() else {
-            return Err(WriteError::Empty { path });
-        };
-        if parsed.schema_version() > SCHEMA_VERSION {
-            return Err(ReadError::SchemaTooNew {
-                path: path.clone(),
-                found: parsed.schema_version(),
-                supported: SCHEMA_VERSION,
-            }
-            .into());
-        }
-        if parsed.schema_version() != SCHEMA_VERSION {
-            return Err(ReadError::UnsupportedSchema {
-                path: path.clone(),
-                found: parsed.schema_version(),
-            }
-            .into());
-        }
-        if parsed.session_id() != session_id {
-            return Err(ReadError::Envelope {
-                path: path.clone(),
-                line: 1,
-                message: format!(
-                    "declared session_id {:?}, expected {session_id:?}",
-                    parsed.session_id()
-                ),
-            }
-            .into());
-        }
-        // ADR 0019 §6/§7: validate before touching the file. `Session::open` ignores a torn
-        // tail and folds the committed prefix, so a corrupt file is refused with its bytes
-        // exactly as they were — the torn tail is not truncated first. An already-aborted
-        // segment is closed, so a second `resume` does not repeat the abort.
-        let abort_revision = parsed
-            .uncommitted_replacements()
-            .iter()
-            .rev()
-            .find(|segment| segment.end == agent_core::ReplacementEnd::EndOfFile)
-            .map(|segment| segment.revision);
-        // Only now that the file is known sound is the torn tail (ADR 0006 §3.2) removed:
-        // everything past the committed prefix.
-        let size = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
-        if size > parsed.committed_bytes() {
-            file.set_len(parsed.committed_bytes())
-                .map_err(|e| io_err(&path, e))?;
-        }
-        let journal = SessionJournal {
-            path,
-            session_id: session_id.to_owned(),
-            inner: Arc::new(Mutex::new(Writer {
-                file,
-                next_seq: last_seq + 1,
-            })),
-            gate: Arc::new(SegmentGate::new()),
-            #[cfg(feature = "testing")]
-            segment_pause: Arc::new(SegmentPause::default()),
-        };
-        let mut wrote_abort = false;
-        if let Some(revision) = abort_revision {
-            journal.write_line(
-                EVT_TRANSCRIPT_REPLACEMENT_ABORTED,
-                &AbortedData { revision },
-            )?;
-            wrote_abort = true;
-        }
-        Ok((journal, wrote_abort))
+        Ok(ResumeLock { path, file })
     }
 
     pub fn session_id(&self) -> &str {
@@ -375,6 +308,117 @@ impl SessionJournal {
         let data = raw_data(data).map_err(|e| invalid_data(&self.path, e))?;
         let mut writer = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         write_locked(&mut writer, &self.session_id, event, &data).map_err(|e| io_err(&self.path, e))
+    }
+
+    /// Test-only: appends a message synchronously, so a test can play a concurrent appender
+    /// without an async runtime (resume-perf B2's lock-order test).
+    #[cfg(feature = "testing")]
+    pub fn test_append_message(
+        &self,
+        index: u64,
+        message: agent_core::Message,
+    ) -> Result<(), WriteError> {
+        self.write_line(
+            EVT_MESSAGE_APPENDED,
+            &serde_json::json!({ "index": index, "message": message }),
+        )
+    }
+}
+
+/// A held single-writer lock on a session file being resumed, from
+/// [`SessionJournal::lock_for_resume`]. The lock is held from before the parse until
+/// [`ResumeLock::into_journal`] builds the appending journal, so nothing can append between
+/// the parse and the `set_len` that removes a torn tail.
+pub struct ResumeLock {
+    path: PathBuf,
+    file: File,
+}
+
+impl ResumeLock {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Parses the file **while the lock is held**. This is the one parse a resume needs: the
+    /// journal open, the driver's recovery and the host's initial view all reuse it.
+    pub fn parse(&self) -> Result<crate::reader::Session, WriteError> {
+        Ok(crate::reader::Session::open(&self.path)?)
+    }
+
+    /// Builds the appending journal from `parsed`. Returns whether an aborted replacement
+    /// segment was written, so a caller that shares the parse knows the fold on disk changed.
+    pub fn into_journal(
+        self,
+        session_id: &str,
+        parsed: &crate::reader::Session,
+    ) -> Result<(SessionJournal, bool), WriteError> {
+        let ResumeLock { path, file } = self;
+        let Some(last_seq) = parsed.last_seq() else {
+            return Err(WriteError::Empty { path });
+        };
+        if parsed.schema_version() > SCHEMA_VERSION {
+            return Err(ReadError::SchemaTooNew {
+                path: path.clone(),
+                found: parsed.schema_version(),
+                supported: SCHEMA_VERSION,
+            }
+            .into());
+        }
+        if parsed.schema_version() != SCHEMA_VERSION {
+            return Err(ReadError::UnsupportedSchema {
+                path: path.clone(),
+                found: parsed.schema_version(),
+            }
+            .into());
+        }
+        if parsed.session_id() != session_id {
+            return Err(ReadError::Envelope {
+                path: path.clone(),
+                line: 1,
+                message: format!(
+                    "declared session_id {:?}, expected {session_id:?}",
+                    parsed.session_id()
+                ),
+            }
+            .into());
+        }
+        // ADR 0019 §6/§7: validate before touching the file. `Session::open` ignores a torn
+        // tail and folds the committed prefix, so a corrupt file is refused with its bytes
+        // exactly as they were — the torn tail is not truncated first. An already-aborted
+        // segment is closed, so a second `resume` does not repeat the abort.
+        let abort_revision = parsed
+            .uncommitted_replacements()
+            .iter()
+            .rev()
+            .find(|segment| segment.end == agent_core::ReplacementEnd::EndOfFile)
+            .map(|segment| segment.revision);
+        // Only now that the file is known sound is the torn tail (ADR 0006 §3.2) removed:
+        // everything past the committed prefix of the parse we made under this lock.
+        let size = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+        if size > parsed.committed_bytes() {
+            file.set_len(parsed.committed_bytes())
+                .map_err(|e| io_err(&path, e))?;
+        }
+        let journal = SessionJournal {
+            path,
+            session_id: session_id.to_owned(),
+            inner: Arc::new(Mutex::new(Writer {
+                file,
+                next_seq: last_seq + 1,
+            })),
+            gate: Arc::new(SegmentGate::new()),
+            #[cfg(feature = "testing")]
+            segment_pause: Arc::new(SegmentPause::default()),
+        };
+        let mut wrote_abort = false;
+        if let Some(revision) = abort_revision {
+            journal.write_line(
+                EVT_TRANSCRIPT_REPLACEMENT_ABORTED,
+                &AbortedData { revision },
+            )?;
+            wrote_abort = true;
+        }
+        Ok((journal, wrote_abort))
     }
 }
 

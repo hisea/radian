@@ -64,6 +64,5 @@ pub use turn::{
 
 #[cfg(feature = "testing")]
 pub mod testing;
-pub mod trace;
 
 pub use tokio_util::sync::CancellationToken;
