@@ -803,9 +803,526 @@ fn the_tool_fold_changes_the_line_count_and_ctrl_o_walks_it() {
     app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
     assert_eq!(app.tool_display.fold, ToolFold::Collapsed);
     let _ = render(&mut app, 60, 30);
-    assert_eq!(app.total_lines, folded, "collapsed again: the same count");
+    // `collapsed` keeps the header only: the five preview lines `errors` showed are gone
+    // (ADR 0028 R4's interpretation - the reviewer's T2).
+    assert_eq!(
+        app.total_lines,
+        folded - 5,
+        "collapsed shows the header only"
+    );
     app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
     assert_eq!(app.tool_display.fold, ToolFold::Errors);
+}
+
+/// The `git_diff` body colors the four line kinds with the theme's own roles (ADR 0028 R4 +
+/// ADR 0029): added, removed, context and the hunk/file-header structure.
+#[test]
+fn a_git_diff_body_colors_its_line_kinds() {
+    let mut app = App::new("m", "s");
+    app.push_message(&assistant_with(
+        "",
+        "",
+        false,
+        vec![ToolCall {
+            id: "c1".into(),
+            name: "git_diff".into(),
+            arguments: serde_json::json!({}),
+        }],
+    ));
+    let diff = "diff --git a/x.rs b/x.rs\nindex 1..2 100644\n--- a/x.rs\n+++ b/x.rs\n@@ -1,2 +1,2 @@\n context\n-old line\n+new line";
+    app.push_message(&Message::Tool {
+        result: ToolResult {
+            call_id: "c1".into(),
+            content: vec![ContentPart::text(diff)],
+            structured: None,
+            is_error: false,
+            error_code: None,
+        },
+        meta: Default::default(),
+    });
+    // Expanded, so the whole diff shows.
+    app.tool_display.fold = radian_tui::tools::ToolFold::Expanded;
+    let terminal = render(&mut app, 70, 20);
+    let theme = app.theme;
+    let style = |needle: &str| style_of(&terminal, needle).expect(needle);
+    assert_eq!(style("+new line").fg, theme.diff_added.fg, "added");
+    assert_eq!(style("-old line").fg, theme.diff_removed.fg, "removed");
+    assert_eq!(style(" context").fg, theme.diff_context.fg, "context");
+    assert_eq!(style("@@").fg, theme.diff_hunk.fg, "@@ is structure");
+    assert_eq!(
+        style("diff --git").fg,
+        theme.diff_hunk.fg,
+        "the file header is structure"
+    );
+    // The head's counts come from the same text.
+    let text = screen(&terminal);
+    assert!(text.contains("git_diff: 1 files +1/-1"), "{text}");
+}
+
+/// A `patch` card shows the replacement: the head's +N/-M and the `-old`/`+new` body, whose
+/// lines carry the diff roles. The body **is** the entry's text, so it copies as shown.
+#[test]
+fn a_patch_card_shows_the_replacement_with_diff_roles() {
+    let mut app = App::new("m", "s");
+    app.push_message(&assistant_with(
+        "",
+        "",
+        false,
+        vec![ToolCall {
+            id: "c1".into(),
+            name: "patch".into(),
+            arguments: serde_json::json!({
+                "path": "src/main.rs",
+                "old": "let a = 1;\nlet b = 2;",
+                "new": "let a = 3;",
+            }),
+        }],
+    ));
+    app.push_message(&Message::Tool {
+        result: ToolResult {
+            call_id: "c1".into(),
+            content: vec![ContentPart::text("replaced 1 occurrence in src/main.rs")],
+            structured: Some(serde_json::json!({"path": "src/main.rs", "replaced": 1})),
+            is_error: false,
+            error_code: None,
+        },
+        meta: Default::default(),
+    });
+    app.tool_display.fold = radian_tui::tools::ToolFold::Expanded;
+    let terminal = render(&mut app, 70, 20);
+    let text = screen(&terminal);
+    assert!(text.contains("patch: src/main.rs +1/-2"), "{text}");
+    let theme = app.theme;
+    assert_eq!(
+        style_of(&terminal, "-let a = 1;").expect("removed").fg,
+        theme.diff_removed.fg
+    );
+    assert_eq!(
+        style_of(&terminal, "+let a = 3;").expect("added").fg,
+        theme.diff_added.fg
+    );
+    assert!(
+        style_of(&terminal, "replaced").is_none(),
+        "the result text is replaced by the diff: {text}"
+    );
+}
+
+/// A `write` card: the head counts, the body is the content (no `+` markers), and a CJK path
+/// renders.
+#[test]
+fn a_write_card_shows_the_content_without_markers() {
+    // A CJK path and content: the byte count is UTF-8 bytes, the line count is lines.
+    let mut app = App::new("m", "s");
+    app.push_message(&assistant_with(
+        "",
+        "",
+        false,
+        vec![ToolCall {
+            id: "c1".into(),
+            name: "write".into(),
+            arguments: serde_json::json!({"path": "笔记.md", "content": "第一行\n第二行"}),
+        }],
+    ));
+    app.push_message(&Message::Tool {
+        result: ToolResult {
+            call_id: "c1".into(),
+            content: vec![ContentPart::text("wrote 19 bytes to 笔记.md")],
+            structured: Some(serde_json::json!({"path": "笔记.md", "bytes_written": 19})),
+            is_error: false,
+            error_code: None,
+        },
+        meta: Default::default(),
+    });
+    app.tool_display.fold = radian_tui::tools::ToolFold::Expanded;
+    let terminal = render(&mut app, 70, 20);
+    let text = screen(&terminal);
+    // Wide characters make the screen model insert a blank cell after each; compare without
+    // spaces so the assertion is about the text, not the terminal's cell model.
+    let squeezed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(squeezed.contains("write:笔记.md(19bytes,2lines)"), "{text}");
+    assert!(squeezed.contains("第一行"), "{text}");
+    assert!(squeezed.contains("第二行"), "{text}");
+    let body = style_of(&terminal, "第").expect("the content");
+    assert_eq!(
+        body.fg, app.theme.tool_result.fg,
+        "no diff role for a write body"
+    );
+}
+
+/// The list-like and memory renderers' heads.
+#[test]
+fn the_list_and_memory_cards_have_their_own_heads() {
+    for (name, arguments, structured, expected) in [
+        (
+            "git_status",
+            serde_json::json!({}),
+            serde_json::json!({"entries": 2}),
+            "git_status: 2 entries",
+        ),
+        (
+            "list",
+            serde_json::json!({"path": "src"}),
+            serde_json::json!({"path": "src", "entries": 3, "total_entries": 3}),
+            "list: src (3 entries)",
+        ),
+        (
+            "ask_user",
+            serde_json::json!({"questions": [{"id": "q1"}, {"id": "q2"}]}),
+            serde_json::json!({"request_id": "r", "answers": []}),
+            "ask_user: 2 questions",
+        ),
+        (
+            "memory_get",
+            serde_json::json!({"id": "mem-7"}),
+            serde_json::json!({}),
+            "memory_get: mem-7",
+        ),
+    ] {
+        let mut app = App::new("m", "s");
+        app.push_message(&assistant_with(
+            "",
+            "",
+            false,
+            vec![ToolCall {
+                id: "c1".into(),
+                name: name.into(),
+                arguments,
+            }],
+        ));
+        app.push_message(&Message::Tool {
+            result: ToolResult {
+                call_id: "c1".into(),
+                content: vec![ContentPart::text("body line")],
+                structured: Some(structured),
+                is_error: false,
+                error_code: None,
+            },
+            meta: Default::default(),
+        });
+        let text = screen(&render(&mut app, 70, 12));
+        assert!(text.contains(expected), "{name}: {text}");
+    }
+}
+
+/// A compaction summary (ADR 0028 R5): one line, expandable to the summary and the user's
+/// verbatim words; the live path adds the revision and token counts, the resume replay shows
+/// the same line without them (the journaled message does not carry them).
+#[test]
+fn a_compaction_summary_is_one_line_that_expands() {
+    use agent_core::compaction::{RetainedUserMessage, compacted_history};
+    use radian_tui::tools::ToolFold;
+    let history = compacted_history(
+        "the earlier work, summarized",
+        &[RetainedUserMessage {
+            text: "the user's own words".to_string(),
+        }],
+        &[],
+    )
+    .expect("a valid history");
+    let summary = history[0].clone();
+
+    // Resume: the message alone, no revision or counts.
+    let mut resumed = App::new("m", "s");
+    resumed.push_message(&summary);
+    let text = screen(&render(&mut resumed, 70, 12));
+    assert!(text.contains("── context compacted ──"), "{text}");
+    assert!(
+        !text.contains("the earlier work"),
+        "folded by default: {text}"
+    );
+
+    // Expanded (Ctrl-O) shows the summary and the verbatim user words, and they copy.
+    resumed.tool_display.fold = ToolFold::Expanded;
+    let text = screen(&render(&mut resumed, 70, 20));
+    assert!(text.contains("the earlier work, summarized"), "{text}");
+    assert!(text.contains("the user's own words"), "{text}");
+
+    // Live: the same message after a `CompactionFinished` event carries the numbers.
+    let mut live = App::new("m", "s");
+    live.apply_event(&AgentEvent::CompactionFinished {
+        revision: 3,
+        tokens_before: 12_000,
+        tokens_after: 4_000,
+        below_target: false,
+    });
+    live.apply_event(&AgentEvent::TranscriptAppended {
+        index: 0,
+        message: summary.clone(),
+    });
+    let text = screen(&render(&mut live, 70, 12));
+    assert!(
+        text.contains("── context compacted (rev 3, 12000 → 4000) ──"),
+        "{text}"
+    );
+    // The two paths differ only in that line: the entries' data is otherwise the same.
+    let resumed_info = resumed
+        .entries
+        .iter()
+        .find_map(|entry| entry.compaction.as_deref())
+        .expect("the summary entry");
+    let live_info = live
+        .entries
+        .iter()
+        .find_map(|entry| entry.compaction.as_deref())
+        .expect("the summary entry");
+    assert_eq!(resumed_info.summary, live_info.summary);
+    assert_eq!(resumed_info.user_messages, live_info.user_messages);
+    assert_eq!(resumed_info.revision, None);
+    assert_eq!(live_info.revision, Some(3));
+    assert_eq!(live_info.tokens_before, Some(12_000));
+    assert_eq!(live_info.tokens_after, Some(4_000));
+}
+
+/// The folded summary line is one line; expanding changes the transcript's line count (the
+/// fold is a layout cache key, override included).
+#[test]
+fn the_summary_fold_changes_the_line_count() {
+    use agent_core::compaction::compacted_history;
+    use radian_tui::tools::ToolFold;
+    let history = compacted_history("one\ntwo\nthree\nfour", &[], &[]).expect("valid");
+    let mut app = App::new("m", "s");
+    app.push_message(&history[0]);
+    let _ = render(&mut app, 70, 20);
+    let folded = app.total_lines;
+    assert_eq!(folded, 1);
+    app.tool_display.fold = ToolFold::Expanded;
+    let _ = render(&mut app, 70, 20);
+    assert_eq!(app.total_lines, 4, "the summary's four lines");
+    app.tool_display.fold = ToolFold::Collapsed;
+    let _ = render(&mut app, 70, 20);
+    assert_eq!(app.total_lines, 1, "folded again");
+}
+
+/// An MCP tool's alias (`server__tool`) never reaches a built-in renderer: its arguments and
+/// output are its server's own, so it takes the generic card (name + argument JSON), while the
+/// exact built-in names keep their own renderers. The reviewer's T3.
+#[test]
+fn an_mcp_alias_renders_generic_and_the_builtin_keeps_its_card() {
+    fn card_for(name: &str, arguments: serde_json::Value) -> App {
+        let mut app = App::new("m", "s");
+        app.push_message(&assistant_with(
+            "",
+            "",
+            false,
+            vec![ToolCall {
+                id: "c1".into(),
+                name: name.into(),
+                arguments,
+            }],
+        ));
+        app.push_message(&Message::Tool {
+            result: ToolResult {
+                call_id: "c1".into(),
+                content: vec![ContentPart::text("file contents")],
+                structured: None,
+                is_error: false,
+                error_code: None,
+            },
+            meta: Default::default(),
+        });
+        app
+    }
+    // An MCP-provided `read`: the generic head (name + the arguments' JSON), not `read: path`.
+    let text = screen(&render(
+        &mut card_for("fs__read", serde_json::json!({"file_path": "a.rs"})),
+        70,
+        12,
+    ));
+    assert!(text.contains("fs__read"), "{text}");
+    assert!(
+        text.contains("file_path"),
+        "the argument JSON summary: {text}"
+    );
+    assert!(
+        !text.contains("read: a.rs"),
+        "not the built-in read card: {text}"
+    );
+    // Same for a `shell` and a `list` from a server.
+    let text = screen(&render(
+        &mut card_for("x__shell", serde_json::json!({"cmd": "ls"})),
+        70,
+        12,
+    ));
+    assert!(text.contains("x__shell"), "{text}");
+    assert!(!text.contains("shell: ls"), "{text}");
+    let text = screen(&render(
+        &mut card_for("mcp__github__list", serde_json::json!({"repo": "r"})),
+        70,
+        12,
+    ));
+    assert!(text.contains("mcp__github__list"), "{text}");
+    // The exact built-in still gets its own renderer.
+    let text = screen(&render(
+        &mut card_for(
+            "read",
+            serde_json::json!({"path": "a.rs", "offset": 3, "limit": 2}),
+        ),
+        70,
+        12,
+    ));
+    assert!(text.contains("read: a.rs (lines 4..5)"), "{text}");
+}
+
+/// A batch of calls pairs each result with **its own** call by id: results arriving in
+/// reverse order (one success, one failure) still land on the right cards. Covered on the live
+/// commit path and on the resume replay path.
+#[test]
+fn a_batch_of_calls_pairs_its_results_by_id_in_any_order() {
+    fn batch() -> Message {
+        assistant_with(
+            "",
+            "",
+            false,
+            vec![
+                ToolCall {
+                    id: "c1".into(),
+                    name: "generic_a".into(),
+                    arguments: serde_json::json!({"n": 1}),
+                },
+                ToolCall {
+                    id: "c2".into(),
+                    name: "generic_b".into(),
+                    arguments: serde_json::json!({"n": 2}),
+                },
+            ],
+        )
+    }
+    fn results() -> [Message; 2] {
+        [
+            // The SECOND call's result arrives first, and it failed.
+            Message::Tool {
+                result: ToolResult {
+                    call_id: "c2".into(),
+                    content: vec![ContentPart::text("b failed\nb detail\nb third")],
+                    structured: None,
+                    is_error: true,
+                    error_code: None,
+                },
+                meta: Default::default(),
+            },
+            Message::Tool {
+                result: ToolResult {
+                    call_id: "c1".into(),
+                    content: vec![ContentPart::text("a ok")],
+                    structured: None,
+                    is_error: false,
+                    error_code: None,
+                },
+                meta: Default::default(),
+            },
+        ]
+    }
+
+    let mut live = App::new("m", "s");
+    live.apply_event(&AgentEvent::TranscriptAppended {
+        index: 0,
+        message: batch(),
+    });
+    for (i, message) in results().into_iter().enumerate() {
+        live.apply_event(&AgentEvent::TranscriptAppended {
+            index: i + 1,
+            message,
+        });
+    }
+    let mut resumed = App::new("m", "s");
+    resumed.push_message(&batch());
+    for message in results() {
+        resumed.push_message(&message);
+    }
+
+    for app in [&mut live, &mut resumed] {
+        let calls: Vec<&Entry> = app
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::ToolCall)
+            .collect();
+        assert_eq!(calls.len(), 2, "one card per call");
+        let a = calls
+            .iter()
+            .find(|entry| entry.tool.as_ref().is_some_and(|c| c.name == "generic_a"))
+            .expect("card a");
+        let b = calls
+            .iter()
+            .find(|entry| entry.tool.as_ref().is_some_and(|c| c.name == "generic_b"))
+            .expect("card b");
+        assert_eq!(a.result, Some(false), "a is the success");
+        assert_eq!(b.result, Some(true), "b is the failure");
+        // The result entries carry their own call's data too.
+        let result_b = app
+            .entries
+            .iter()
+            .find(|entry| {
+                entry.kind == EntryKind::ToolResult
+                    && entry.tool.as_ref().is_some_and(|c| c.name == "generic_b")
+            })
+            .expect("b's result entry");
+        assert!(result_b.is_error);
+        let result_a = app
+            .entries
+            .iter()
+            .find(|entry| {
+                entry.kind == EntryKind::ToolResult
+                    && entry.tool.as_ref().is_some_and(|c| c.name == "generic_a")
+            })
+            .expect("a's result entry");
+        assert!(!result_a.is_error);
+    }
+    // And the failure's body is the one expanded: `a ok`'s body is not shown as a failure.
+    let text = screen(&render(&mut live, 60, 16));
+    assert!(text.contains("b failed"), "{text}");
+}
+
+/// ADR 0028 R4's fold interpretation: `expanded` shows everything, `errors` the last
+/// `tool_preview_lines` of a success, `collapsed` only the header; a failure is fully expanded
+/// in all three. (The reviewer's T2: `collapsed` and `errors` used to be indistinguishable.)
+#[test]
+fn collapsed_and_errors_differ_for_a_successful_card() {
+    use radian_tui::tools::ToolFold;
+    fn app_with(is_error: bool) -> App {
+        let mut app = App::new("m", "s");
+        app.push_message(&assistant_with(
+            "",
+            "",
+            false,
+            vec![ToolCall {
+                id: "c1".into(),
+                name: "generic_tool".into(),
+                arguments: serde_json::json!({}),
+            }],
+        ));
+        app.push_message(&Message::Tool {
+            result: ToolResult {
+                call_id: "c1".into(),
+                content: vec![ContentPart::text(
+                    (1..=20).map(|i| format!("line {i}\n")).collect::<String>(),
+                )],
+                structured: None,
+                is_error,
+                error_code: None,
+            },
+            meta: Default::default(),
+        });
+        app
+    }
+    let mut counts = Vec::new();
+    for fold in [ToolFold::Expanded, ToolFold::Errors, ToolFold::Collapsed] {
+        let mut app = app_with(false);
+        app.tool_display.fold = fold;
+        let _ = render(&mut app, 60, 30);
+        counts.push(app.total_lines);
+    }
+    // The assistant's (empty) line + the card head + the body: 20 lines expanded, 5 preview
+    // lines + 1 hint under `errors`, a single `[20 lines]` hint under `collapsed`.
+    assert_eq!(counts, vec![22, 8, 3], "expanded / errors / collapsed");
+    // A failure: the same count in all three, and the body really visible.
+    for fold in [ToolFold::Expanded, ToolFold::Errors, ToolFold::Collapsed] {
+        let mut app = app_with(true);
+        app.tool_display.fold = fold;
+        let text = screen(&render(&mut app, 60, 40));
+        assert!(text.contains("line 1 "), "{fold:?}: {text}");
+        assert!(text.contains("line 20"), "{fold:?}");
+        assert!(!text.contains("more lines"), "{fold:?}: nothing folded");
+    }
 }
 
 /// A failed call's body is never hidden (ADR 0028 R4), whatever the fold mode.

@@ -713,6 +713,25 @@ Base `4208170` · 一次性 worktree `/tmp/tools-mut`（`git worktree add` 自�
 两行，本来就短于预览行数，折与不折看起来一样；(b) 我改测试时 `.replace` 没命中（没加 `assert`），
 改动根本没落盘。修好后：正文 20 行、屏幕够高，变异立刻抓住；同时发现**实现本身也不对**——原来的
 `collapsed` 会把错误正文折起来（ADR 说"错误一律展开"），已一并修正（提交 `0e5315a`）。
+
+## Slice: ADR 0028 第 2 片 b（其余内建渲染器 + 审查两项）
+
+Base `106a4d6` · 一次性 worktree `/tmp/tools2-mut`（`git worktree add` 自本片 HEAD，结束后删除）·
+每个变异 `python3` 补丁（带 `assert`）、跑对应测试后 `git checkout -- .` 还原。
+
+| # | 需求 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| U1 | 审查 T1：结果按 call_id 配对 | 配对条件恒真（配给最后一张卡片） | `a_batch_of_calls_pairs_its_results_by_id_in_any_order` | ✅ |
+| U2 | 审查 T2：`collapsed` 与 `errors` 不同 | `collapsed` 恢复成与 `errors` 相同 | `collapsed_and_errors_differ_for_a_successful_card` | ✅ |
+| U3 | diff 行按角色着色 | `diff_body` 全部用 `Normal` | `a_git_diff_body_colors_its_line_kinds` | ✅ |
+| U4 | patch 的加/删方向 | `old`/`new` 的前缀对调 | `a_patch_card_shows_the_replacement_with_diff_roles` | ✅ |
+| U5 | `@@` 与上下文不同 | `@@` 归为 context | `a_git_diff_body_colors_its_line_kinds` | ✅ |
+| U6 | 记忆工具有自己的渲染器 | 四个 memory 渲染器不注册（回落通用） | `the_list_and_memory_cards_have_their_own_heads` | ✅ |
+
+6/6 抓住。**过程记录（U6 的第一轮）**：`run_mut` 那一次给了两个位置参数（`--test render the_list_and_memory --lib tools`），
+cargo 只认第一个，跑出来"没抓住"是假象；改成单个过滤器 `--test render the_list_and_memory` 后立刻抓住。
+另：本片实现时发现 `base_name` 按单个 `_` 切分，导致 `git_status`/`ask_user`/`memory_*` 全部落到通用渲染器
+（已修：只有 `__` 或 `mcp__` 前缀才算命名空间），这一条由头部的单测与渲染测试共同钉住。
 ## skills 片 3：`/skill:` 展开（2026-10-14）
 
 Base `c5a84f6` · 与 `radian-host` 同一一次性 worktree `/tmp/radian-pi-skills-mut3`。
@@ -746,3 +765,89 @@ Base `eac7463` · 变异只在一次性 worktree 里做（`git worktree add --de
 
 未做：**"已闭合的块被重新解析"**（需要一个解析计数器的测试，本片预算内没写）；
 `md3` 的第一/二轮只短路了一处守卫，另一处仍会回退，测试通过——两处都短路后才抓住。
+## ADR 0013 出网/脱敏复审：TUI 脱敏列表漏掉其它 auth key（2026-10-14）
+
+Base `a9c88c8` · 一次性 worktree `/tmp/radian-pi-priv-mut`，每条跑完 `git checkout -- .`，`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| P1 | TUI 的 `secrets` 退回"只用启动 provider 的 `credential.key` + header 值" | `pty_the_panic_log_redacts_every_auth_key_not_only_the_startup_one`（另一个 auth.json 条目的 key 原样进 panic log） | ✅ |
+| P2 | `AuthStore::resolved_keys` 只返回第一个 key（不排序去重、不覆盖全部条目） | `auth::tests::resolved_keys_carries_every_login_sorted_and_deduplicated` | ✅ |
+
+2/2 抓住。修复见 `crates/radian-host/src/auth.rs` 的 `resolved_keys`；ADR 0013 两节的复审记录在 `a9c88c8`。
+### 审查 T3 的变异（tools2-review1，提交见 tools-b2 回报）
+
+| # | 需求 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| V1 | MCP 别名（`server__tool`）只走通用渲染器 | `renderer_for` 恢复"按 `__` 取后缀" | `an_mcp_alias_never_reaches_a_builtin_renderer`（单元）、`an_mcp_alias_renders_generic_and_the_builtin_keeps_its_card`（TestBackend） | ✅ |
+
+**说明**：T3 的代码与两条测试落在了 `Merge main into pi/tools2` 那个提交的树里（我先解冲突、后写 T3，提交时一起带上了）。为便于检索，T3 的变异记录与这两条测试的关键词都写在以 T3 命名的测试里；流程上这是本片的一个失误：合并提交应当先落盘，再做后续改动。
+## pty 偶发测试：pointer-motion 的帧数基线（2026-10-14）
+
+Base `a1d1343` · 复现 harness：20 个 `yes > /dev/null`（记 pid，末尾只 kill 这些 pid）+ 4 个并发循环各
+跑 `pty_pointer_motion_alone_draws_no_frame` 12 次（每次一个全新 pty/进程）。
+
+| # | 变异 | 观察 | 结果 |
+|---|---|---|---|
+| HT1 | 去掉 `settled_frame_count`，退回 `let before = frame_count(&pty)`（基线不等输出安静） | 同一 harness 下 `assert_eq!(after, before)` 报 `left: 2, right: 0`：启动帧的 `[?25h` 在基线之后才被测试的 reader 线程读到，被误算成 pointer motion 画的帧 | ✅ 复现 |
+
+**修前 1/48，修后 0/48**（同一 harness）。另外 plain 顺序单跑 20 次（同样 20 个 `yes`）：修前 0/20、
+修后 0/20——偶发需要并发 TUI 争用才明显。结论：**测试的时序假设**，不是产品多画帧（产品
+`input_event` 把 `MouseEventKind::Moved` 映射为 `None`，见 `events.rs:83-118`）。
+## flaky-master-fix：closed-master 卡死的两层防护（2026-10-14）
+
+Base `fdfc2cb` · 一次性检出 `/tmp/flaky-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+负载：40×`yes > /dev/null`（记下 pid，只杀这些），load average 262–457 ·
+`cargo test -p radian-tui --test pty pty_a_closed_master_ends_the_app_cleanly --exact`。
+
+| # | 变异 | 应体现 | 结果 |
+|---|---|---|---|
+| F1 | 去掉主循环兜底（两处 `if terminal_is_gone()` → `if false && …`），保留收窄 | 卡死重新偶发 | 负载下 **0/100** 失败：收窄本身已把窗口缩到 100 次内不复现；**兜底的必要性此变异无法演示**（如实记录）。修前同一测试在 load ~245 是 2/20 |
+| F2 | 去掉收窄（Idle 分支恢复修前：无条件 `event::poll(0)`），保留兜底 | 测试仍通过，且兜底真的救场 | 负载下 **0/30** 失败，其中 **1/30** 的打点证明兜底救场：`input-thread-start`、`poll-idle` 之后直接 `loop-done`（**无 `pollhup`、无 `terminal-gone`**），退出耗时 256.7 ms（一个 250 ms tick 内）；输入线程当时卡在 crossterm 里 |
+
+结论：收窄是主要修复（把"每次空闲 tick 都是一次机会"降到"仅在上一次 crossterm 读取可能留缓冲时"，
+再加调用前的零超时 `tty_readiness`）；兜底覆盖收窄仍留的微秒级窗口（F2 的那一次即证据）。两层都在。
+
+`--exit-trace`（4e607ef）保留为测试诊断：不传时不打开文件、不输出；`exit_trace_once` 在 `OnceLock`
+未设置时直接返回，连原子操作都不做。
+
+## Slice: ADR 0028 第 4 片（压缩摘要 R5、搜索自动展开 R6）
+
+Base `26ddda9` · 一次性 worktree `/tmp/s4-mut`（`git worktree add` 自本片 HEAD，结束后删除）·
+每个变异 `python3` 补丁（带 `assert`）、跑对应测试后 `git checkout -- .` 还原。
+
+| # | 需求 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| S1 | 按条目的展开状态进布局缓存键 | 键里覆盖恒为 `None` | `a_hit_in_a_folded_tool_body_expands_only_that_entry` | ✅ |
+| S2 | 搜索匹配完整内容 | `search_modes` 返回当前（折叠）几何 | 同上 | ✅ |
+| S3 | 命中只展开一条 | 命中时把所有折叠条目都展开 | 同上 | ✅ |
+| S4 | resume 的摘要不是普通用户消息 | 摘要判定恒假（走普通 User 分支） | `a_compaction_summary_is_one_line_that_expands` | ✅ |
+
+4/4 抓住。**过程记录（S1/S3 的第一轮）**：两个补丁都让 crate 编译失败（S1 改了类型别名却没改元组；
+S3 留下了 `was_overridden` 的悬空引用），而当时的 `run_mut` 只 grep `FAILED`，把编译失败也当成
+"没抓住"——是假象。改成先 grep `^error` 判编译失败、并修好补丁后，两条都抓住。顺带删掉了真实代码里
+那个无用的 `was_overridden` 局部变量（提交 `a642b17`）。
+## small-fixes：`/login` 脱敏列表刷新（2026-10-14）
+
+Base `a90ed5c` · 一次性检出 `/tmp/small-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+`cargo test -p radian-tui --test pty pty_a_login_key_is_redacted_from_an_export_in_the_same_session`。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| S1 | `Effect::LoginSave` 成功后不刷新脱敏列表（去掉 `refresh_secrets`） | 会话中 `/login` 的新 key 在 export 里被遮 | 测试 FAILED（"the export did not redact the mid-session key"） |
+
+1/1 抓住。注意第一版测试 key 用了 `sk-` 前缀，被 export 的**启发式**脱敏（`sk-`/`Bearer`，见
+`radian-session/src/export.rs`）遮住，变异因此假通过；换成不带 `sk-` 的 `late-secret-PTY-7` 后，
+测试只依赖已知 secret 列表，变异被抓住。sleep 变异没有——这是行为测试，不是时序测试。
+
+## small-fixes-2：脱敏列表的锁中毒不放开（2026-10-14）
+
+Base `0d1dde1` · 一次性检出 `/tmp/small2-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+`cargo test -p radian-tui --lib terminal::`，变异后 `git checkout --` 还原。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| S2 | `shared_secrets` 恢复 `.read().map(..).unwrap_or_default()`（中毒即空列表） | 锁中毒时仍取出内容、仍脱敏 | `terminal::tests::a_poisoned_shared_secrets_list_still_redacts` FAILED（`left: []`，`right: ["late-secret-PTY-7"]`） |
+
+1/1 抓住。读侧四处（`record_panic`、运行期错误路径、picker、export）都走 `shared_secrets`；写侧
+`refresh_secrets` 用 `into_inner` 追加，第二个测试覆盖中毒后的追加。

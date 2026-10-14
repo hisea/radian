@@ -197,6 +197,15 @@ struct Cli {
     /// draw-fairness test. Real producers are bounded by the turn structure; this one is not.
     #[arg(long, hide = true, value_name = "COUNT")]
     flood_facts: Option<u64>,
+
+    /// Test hook, **kept** as a diagnostic: append
+    /// `<point> <unix-nanos>` to this file at each step of the terminal-gone exit path. It
+    /// tells "the exit path ran but slowly" from "the POLLHUP path never fired" (and, with
+    /// the main-loop fallback, shows the fallback firing: a trace that lacks `pollhup` but has
+    /// `loop-done`). Inert when the flag is absent: no file, no output, and the input thread's
+    /// per-site counters are not even touched (`exit_trace_once` returns on an unset `OnceLock`).
+    #[arg(long, hide = true, value_name = "FILE")]
+    exit_trace: Option<PathBuf>,
 }
 
 /// The TUI's per-turn model call limit when `--max-model-calls` is not given (decision
@@ -218,9 +227,17 @@ const MAX_EFFECT_ROUNDS: usize = 8;
 /// synchronization device.
 const INPUT_POLL: Duration = Duration::from_millis(50);
 
+/// How often the main loop runs its own non-consuming `poll(2)` hang-up check (guard 2 in
+/// [`read_input`]'s docs). An idle app wakes 4 times a second and makes one `poll(2)` call per
+/// tick; it **does not draw** (the zero-redraw rule), so the cost is one syscall — negligible.
+const TTY_CHECK_TICK: Duration = Duration::from_millis(250);
+
 fn main() -> ExitCode {
     radian_tui::terminal::install_panic_hook();
     let cli = Cli::parse();
+    if let Some(path) = &cli.exit_trace {
+        let _ = EXIT_TRACE.set(path.clone());
+    }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -250,6 +267,7 @@ fn main() -> ExitCode {
     let result =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(cli, &runtime, rx, tx)));
     runtime.shutdown_timeout(Duration::from_secs(2));
+    exit_trace("shutdown");
     match result {
         Ok(Ok(reason)) => {
             // A clean exit still says why, on the normal screen (dogfooding D4). `--list`
@@ -259,10 +277,12 @@ fn main() -> ExitCode {
             }
             // A signal-driven exit is still an orderly one, but the caller asked us to stop:
             // report it the way a shell does, 128 + the signal number.
-            match radian_tui::signals::received() {
+            let code = match radian_tui::signals::received() {
                 Some(signal) => ExitCode::from((128 + signal) as u8),
                 None => ExitCode::SUCCESS,
-            }
+            };
+            exit_trace("exit");
+            code
         }
         Ok(Err(message)) => {
             print_exit_line(&message);
@@ -623,14 +643,16 @@ fn run(
     validate_session_id(&session_id)?;
     app.session_id = session_id.clone();
     let user_headers = parse_headers(&header_args, &session_id)?;
-    // Header values and the key must not reach the panic log (dogfooding D4).
-    let mut secrets: Vec<String> = user_headers
-        .iter()
-        .map(|(_, value)| value.clone())
-        .collect();
-    if let Some(credential) = &credential {
-        secrets.push(credential.key.clone());
-    }
+    // Header values and **every** key in `auth.json` must not reach the panic log or an export
+    // (dogfooding D4; ADR 0013 T4). The startup provider's key alone is not enough: a session
+    // can mention another login, and `/model` can switch to one. `resolved_keys` reads and
+    // resolves them all, the same list the CLI's export uses.
+    let mut redactions: Vec<String> = radian_host::resolved_keys();
+    redactions.extend(user_headers.iter().map(|(_, value)| value.clone()));
+    redactions.retain(|secret| !secret.is_empty());
+    // Shared and append-only: `/login` adds a key mid-session, `/logout` never removes one.
+    let secrets: radian_tui::terminal::SharedSecrets =
+        std::sync::Arc::new(std::sync::RwLock::new(redactions));
     // ADR 0026 D0/D10: the provider decides the adapter, base URL and headers.
     // `resolve_route_for` refuses `--base-url`/`--header` for everything but the generic
     // descriptor (a named provider's endpoint is its declaration).
@@ -771,8 +793,7 @@ fn run(
             radian_host::now_millis(),
         ))
     });
-    let secrets_for_errors = Arc::new(secrets.clone());
-    radian_tui::terminal::set_panic_log(panic_log, secrets);
+    radian_tui::terminal::set_panic_log(panic_log, Arc::clone(&secrets));
 
     // The session facts the renderer reads, and the sink that writes them (ADR 0023 U2/U5).
     let projection = Arc::new(radian_host::SessionProjection::new());
@@ -798,13 +819,14 @@ fn run(
     };
     let runtime_events = {
         let tx = tx.clone();
-        let secrets = Arc::clone(&secrets_for_errors);
+        let secrets = Arc::clone(&secrets);
         Arc::new(move |event: &radian_session::RuntimeEvent| {
             let redacted = match event {
                 radian_session::RuntimeEvent::TurnFailed { turn_id, message } => {
+                    let current = radian_tui::terminal::shared_secrets(&secrets);
                     radian_session::RuntimeEvent::TurnFailed {
                         turn_id: turn_id.clone(),
-                        message: radian_tui::terminal::redact(message, &secrets),
+                        message: radian_tui::terminal::redact(message, &current),
                     }
                 }
                 other => other.clone(),
@@ -1188,7 +1210,7 @@ fn run(
         dir: dir.clone(),
         workspace: workspace_path.to_string_lossy().into_owned(),
         session_id: session_id.clone(),
-        secrets: secrets_for_errors.as_ref().clone(),
+        secrets: Arc::clone(&secrets),
         journal: Arc::clone(session.journal()),
         config_snapshot: serde_json::json!({
             "provider": provider.as_str(),
@@ -1217,9 +1239,11 @@ fn run(
         &config.providers,
         cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
     );
+    exit_trace("loop-done");
     // Tell a pending signal task that the loop left on its own, so it does not force-exit.
     radian_tui::signals::confirm_exit();
     guard.restore();
+    exit_trace("restored");
     // The draft is written on every clean exit (normal quit, Ctrl-C, SIGTERM/SIGHUP). A panic
     // never reaches here, so the panic path does no file I/O.
     let draft = radian_tui::composer::draft_path(&dir, &session_id);
@@ -1231,7 +1255,9 @@ fn run(
     // The driver task is the session: if it died, the failure is the app's failure. A panic
     // inside it was caught by the runtime, so `join` reports it, and the message the hook
     // recorded is printed now that the alternate screen is gone.
-    match runtime.block_on(session.join()) {
+    let joined = runtime.block_on(session.join());
+    exit_trace("stopped");
+    match joined {
         radian_host::DriverEnd::Ok => {}
         radian_host::DriverEnd::Failed(error) => return Err(format!("driver: {error}")),
         radian_host::DriverEnd::Panicked(message) => {
@@ -1250,6 +1276,7 @@ fn run(
         "session {session_id} saved; {}",
         resume_command(&program_name(), &session_id, &cli, &workspace_path)
     );
+    exit_trace("run-done");
     Ok(Some(match signal {
         Some(signal) => format!("received {}; {saved}", radian_tui::signals::name(signal)),
         None => saved,
@@ -1286,6 +1313,22 @@ fn program_name() -> String {
                 .unwrap_or_else(|| arg.to_string_lossy().into_owned())
         })
         .unwrap_or_else(|| "radian".to_string())
+}
+
+/// Adds every key now in `auth.json` to the session's redaction list. Called after `/login`
+/// saves one; `/logout` does **not** call it, because a value
+/// that has already appeared must stay redacted.
+fn refresh_secrets(secrets: &radian_tui::terminal::SharedSecrets) {
+    // Poison-tolerant: a panicked holder of the lock must not stop this append (the list only
+    // ever grows, and failing to add a key is the dangerous direction).
+    let mut list = secrets
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for key in radian_host::resolved_keys() {
+        if !key.is_empty() && !list.contains(&key) {
+            list.push(key);
+        }
+    }
 }
 
 /// One argument of the resume command, quoted when it would not survive a shell.
@@ -1337,6 +1380,42 @@ fn panic_in_driver() {
 }
 
 static BLOCK_INPUT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The `--exit-trace` file (test hook). One `OnceLock` so every call site reads the same
+/// path; unset in production, where [`exit_trace`] is a no-op.
+static EXIT_TRACE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// [`exit_trace`] at most once per site (the input thread's poll loop runs every 50 ms; the
+/// trace must show its *state*, not a flood). Test-only, like the trace itself.
+fn exit_trace_once(marked: &std::sync::atomic::AtomicBool, point: &str) {
+    // Zero cost when the test hook is off (production): no atomic, no write, no output.
+    if EXIT_TRACE.get().is_none() {
+        return;
+    }
+    if !marked.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        exit_trace(point);
+    }
+}
+
+/// Appends one step of the terminal-gone exit path, when the test hook is on. A plain
+/// unbuffered append per point, so a hard failure still leaves the earlier points on disk.
+fn exit_trace(point: &str) {
+    let Some(path) = EXIT_TRACE.get() else {
+        return;
+    };
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "{point} {nanos}");
+    }
+}
 
 /// Parks forever when the `--block-input` test hook is on, writing its marker once.
 fn block_input_if_asked() {
@@ -1405,6 +1484,7 @@ fn tty_readiness(timeout: Duration) -> Tty {
 /// crossterm already holds a parsed event: its reader reads the fd, and a read that returns
 /// EOF loops forever (see [`read_input`]).
 fn crossterm_event() -> Input {
+    exit_trace_once(&TRACED_READ, "crossterm-read");
     match event::read() {
         Ok(event) => Input::Event(event),
         Err(_) => Input::Gone,
@@ -1420,25 +1500,80 @@ fn crossterm_event() -> Input {
 /// the pty master is closed, and the caller leaves through the ordinary clean-exit path.
 ///
 /// crossterm reads up to 1024 bytes per call and buffers the extra events, so after a readable
-/// tty is drained the remaining events must still be returned: `event::poll(0)` checks those
-/// buffers before it touches the fd. This covers the common case, but it has a window — the
-/// tty can hang up between `poll(2)` and this call, and a half-read escape sequence can make
-/// crossterm read again — and then crossterm's reader loops on EOF. The `signals` task is the
-/// backstop for that window: a hang-up is a SIGHUP (or the signal task's own watchdog), and it
-/// exits the process when the loop does not confirm within [`signals`]'s watchdog.
+/// tty is drained the remaining events must still be returned. **The buffer check is not a
+/// safe guard**: `event::poll(0)` returns a buffered event if the parser has one
+/// (`crossterm-0.29.0/src/event/source/unix/mio.rs:69`), but with an empty buffer it polls the
+/// fd and, when the fd is ready, reads it (`mio.rs:95`); a hung-up tty is "ready" (macOS
+/// returns `POLLIN|POLLHUP`), the read returns 0 (EOF), and the inner `loop` (`mio.rs:94-114`)
+/// **never leaves** — the read spins on EOF forever. The `signals` task is not a backstop for
+/// this either: a pty master close sends no SIGHUP (review, 2026-10-14; the closed-master
+/// pty test reproduced a hang whose stack was 424/424 samples inside `event::poll` →
+/// `try_read` → `read`).
+///
+/// Two guards keep it out (both needed; each one's mutation is in the pty test):
+/// 1. **Narrowing**: the idle branch calls `event::poll(0)` only when a previous
+///    [`crossterm_event`] read may have buffered something ([`MAY_HAVE_BUFFERED`]), and
+///    re-checks `tty_readiness(0)` immediately before, so a Close raced since the readiness
+///    poll above is reported as [`Input::Gone`] instead of entering crossterm.
+/// 2. **Fallback**: the main loop calls [`terminal_is_gone`] (a non-consuming `poll(2)`) on a
+///    periodic tick, so even a thread stuck inside crossterm ends the process through the
+///    ordinary [`UiEvent::TerminalGone`] path.
 #[cfg(unix)]
 fn read_input(timeout: Duration) -> Input {
     block_input_if_asked();
     match tty_readiness(timeout) {
         Tty::Gone => Input::Gone,
-        Tty::Readable => crossterm_event(),
-        Tty::Idle => match event::poll(Duration::ZERO) {
-            Ok(true) => crossterm_event(),
-            Ok(false) => Input::Idle,
-            Err(_) => Input::Gone,
-        },
+        Tty::Readable => {
+            exit_trace_once(&TRACED_READABLE, "poll-readable");
+            let input = crossterm_event();
+            if matches!(input, Input::Event(_)) {
+                MAY_HAVE_BUFFERED.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            input
+        }
+        Tty::Idle => {
+            exit_trace_once(&TRACED_IDLE, "poll-idle");
+            // Guard 1: do not enter crossterm unless a previous read may have buffered
+            // events. Its `poll(0)` reads the fd on an empty buffer and loops on a hung-up
+            // tty (see the function docs); a plain Idle is safe.
+            if !MAY_HAVE_BUFFERED.load(std::sync::atomic::Ordering::SeqCst) {
+                return Input::Idle;
+            }
+            // The master may have closed since the readiness poll above. The zero-timeout
+            // poll is non-consuming, so a Gone here is safe to report.
+            if matches!(tty_readiness(Duration::ZERO), Tty::Gone) {
+                return Input::Gone;
+            }
+            match event::poll(Duration::ZERO) {
+                Ok(true) => {
+                    exit_trace_once(&TRACED_CROSSTERM_ZERO, "poll-crossterm-zero");
+                    let input = crossterm_event();
+                    if !matches!(input, Input::Event(_)) {
+                        MAY_HAVE_BUFFERED.store(false, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    input
+                }
+                Ok(false) => {
+                    MAY_HAVE_BUFFERED.store(false, std::sync::atomic::Ordering::SeqCst);
+                    Input::Idle
+                }
+                Err(_) => Input::Gone,
+            }
+        }
     }
 }
+
+/// Whether a previous [`crossterm_event`] read may have buffered more events (crossterm reads
+/// up to 1024 bytes and parses one event). Only then is it safe to ask crossterm's `poll(0)`;
+/// see [`read_input`]'s docs.
+static MAY_HAVE_BUFFERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// One-per-site markers for the input thread's trace (test hook only).
+static TRACED_READABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static TRACED_IDLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static TRACED_CROSSTERM_ZERO: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static TRACED_READ: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(not(unix))]
 fn read_input(timeout: Duration) -> Input {
@@ -1565,9 +1700,11 @@ fn run_pbcopy(text: &str) -> Result<(), String> {
 
 fn spawn_input_thread(tx: Sender<UiEvent>) {
     std::thread::spawn(move || {
+        exit_trace("input-thread-start");
         loop {
             match read_input(INPUT_POLL) {
                 Input::Gone => {
+                    exit_trace("pollhup");
                     let _ = tx.send(UiEvent::TerminalGone);
                     return;
                 }
@@ -1690,6 +1827,7 @@ impl LoopContext<'_> {
                 // The terminal went away (the pty master closed, the ssh session dropped):
                 // leave through the ordinary clean-exit path. No signal was received, so the
                 // exit code is the ordinary 0.
+                exit_trace("terminal-gone");
                 app.quit = true;
                 return false;
             }
@@ -2036,6 +2174,11 @@ impl LoopContext<'_> {
                 let result = radian_host::AuthStore::open()
                     .and_then(|mut store| store.upsert_api_key(&name, &key, &env))
                     .map_err(|error| error.to_string());
+                if result.is_ok() {
+                    // The session's redaction list must know the new key from now on
+                    //: the panic log and an export read it live.
+                    refresh_secrets(&self.host.secrets);
+                }
                 self.send(AppInput::LoginSaved { name, result });
                 Ok(())
             }
@@ -2223,10 +2366,19 @@ fn ui_loop(
                 (true, None) => AUTO_SCROLL_TICK,
                 (false, Some(quit)) => quit.max(std::time::Duration::ZERO),
                 (false, None) => unreachable!("the branch requires selection or a quit window"),
-            };
+            }
+            // Also wake for the hang-up check, so a drag or an armed quit window never
+            // postpones it for longer than one tick.
+            .min(TTY_CHECK_TICK);
             match rx.recv_timeout(timeout) {
                 Ok(event) => Some(event),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    // Guard 2: the input thread may be stuck inside crossterm's reader; a
+                    // non-consuming `poll(2)` on stdin still reports the hang-up.
+                    if terminal_is_gone() {
+                        app.quit = true;
+                        break;
+                    }
                     // The quit window closed: disarm and redraw, so the hint disappears. A
                     // drag at an edge (or both) still ticks its scroll on the same wake.
                     if app
@@ -2247,7 +2399,19 @@ fn ui_loop(
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => None,
             }
         } else {
-            rx.recv().ok()
+            // A bounded wait, not a blocking one: guard 2's hang-up check runs every tick even
+            // while the app is idle. A timeout with the tty alive loops without drawing.
+            match rx.recv_timeout(TTY_CHECK_TICK) {
+                Ok(event) => Some(event),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if terminal_is_gone() {
+                        app.quit = true;
+                        break;
+                    }
+                    continue;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => None,
+            }
         };
         let Some(first) = first else {
             // Every sender is gone: nothing left to drive the UI.
@@ -2453,7 +2617,8 @@ struct SessionHost {
     dir: PathBuf,
     workspace: String,
     session_id: String,
-    secrets: Vec<String>,
+    /// Live redaction list (shared with the panic hook); snapshot it for a renderer.
+    secrets: radian_tui::terminal::SharedSecrets,
     /// The parent's writer, so `/fork` records the lineage through the same single-writer lock
     /// instead of opening a second one (ADR 0022 §1).
     journal: Arc<SessionJournal>,
@@ -2518,7 +2683,7 @@ fn load_picker(host: &SessionHost, query: Option<String>) -> AppInput {
                 index: Some(index),
                 workspace: host.workspace.clone(),
                 query,
-                secrets: host.secrets.clone(),
+                secrets: radian_tui::terminal::shared_secrets(&host.secrets),
             }),
             Err(message) => AppInput::SessionDone(vec![message]),
         },
@@ -2561,7 +2726,7 @@ fn export_current(
     let settings = radian_host::ExportSettings {
         include_reasoning: false,
         include_provider_payload: false,
-        secrets: host.secrets.clone(),
+        secrets: radian_tui::terminal::shared_secrets(&host.secrets),
     };
     let rendered = radian_host::sessions::export(
         &host.dir,

@@ -35,7 +35,7 @@ mod workspace;
 pub use approval::{StartupApproval, resolve_startup, restored_approval};
 pub use auth::{
     AUTH_FILE_NAME, AuthEntry, AuthError, AuthStore, RADIAN_BASE_URL, ResolvedKey, auth_path,
-    list as list_auth, remove as remove_auth, resolve_key, resolve_note,
+    list as list_auth, remove as remove_auth, resolve_key, resolve_note, resolved_keys,
     upsert_api_key as upsert_auth_api_key,
 };
 pub use catalog::{

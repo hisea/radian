@@ -637,6 +637,44 @@ async fn the_key_comes_from_the_named_env_and_never_leaks() {
     assert!(!stderr.contains(KEY), "stderr leaked the key");
 }
 
+/// ADR 0013 T4: a runtime error is redacted with **every** login in
+/// `auth.json`, not only the route's key. The server echoes a key that belongs to another
+/// provider; the adapter cannot mask that one (it only knows its own key), so the host must.
+#[tokio::test]
+async fn a_runtime_error_redacts_every_auth_key_not_only_the_route_key() {
+    let route_key = "sk-ROUTE-KEY-111111";
+    let other_key = "sk-OTHER-PROVIDER-KEY-222222";
+    let server = MockServer::start(vec![Reply::status(
+        401,
+        &format!("{{\"error\":{{\"message\":\"bad {other_key}\"}}}}"),
+    )])
+    .await;
+
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent(
+            &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
+            &[
+                ("OPENAI_API_KEY", route_key),
+                ("ANTHROPIC_API_KEY", other_key),
+            ],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 1);
+    assert_eq!(
+        server.requests()[0].header("authorization"),
+        Some(format!("Bearer {route_key}").as_str())
+    );
+    assert!(
+        !stderr.contains(other_key),
+        "the runtime error leaked another provider's key: {stderr}"
+    );
+    assert!(!stdout.contains(other_key), "stdout leaked it: {stdout}");
+    assert!(stderr.contains("<redacted>"), "{stderr}");
+}
+
 #[tokio::test]
 async fn a_remote_base_url_without_a_key_fails_fast() {
     let start = Instant::now();

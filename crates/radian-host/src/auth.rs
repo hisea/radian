@@ -280,6 +280,22 @@ impl AuthStore {
     }
 
     /// Every entry: id, type, and whether it is usable in this build.
+    /// Every usable key in this store, sorted and deduplicated (ADR 0013 T4). The free
+    /// [`resolved_keys`] is this for the process store.
+    pub fn resolved_keys(&self) -> Vec<String> {
+        let mut keys = Vec::new();
+        for entry in self.list() {
+            if let Ok(Some(key)) = self.resolve_key(&entry.provider_id)
+                && !key.key.is_empty()
+            {
+                keys.push(key.key);
+            }
+        }
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
     pub fn list(&self) -> Vec<AuthEntry> {
         self.entries
             .iter()
@@ -368,6 +384,19 @@ pub fn remove(provider_id: &str) -> Result<(), AuthError> {
 /// [`AuthStore::list`] for the process's store.
 pub fn list() -> Result<Vec<AuthEntry>, AuthError> {
     Ok(AuthStore::open()?.list())
+}
+
+/// Every usable key in this process's `auth.json`, sorted and deduplicated (ADR 0013 T4).
+///
+/// A redaction list must carry **every** login, not only the provider this process uses: a
+/// session can mention a key that belongs to another provider (a model echo, a message the
+/// user pasted), and an export or a panic log must not write it out. An entry that cannot be
+/// resolved (a missing `$ENV`, a malformed value) contributes nothing — there is no key to
+/// redact. `$ENV` interpolation happens here, so the list holds the values that would be sent.
+pub fn resolved_keys() -> Vec<String> {
+    AuthStore::open()
+        .map(|store| store.resolved_keys())
+        .unwrap_or_default()
 }
 
 /// Refuses a file wider than `0600`. On non-Unix there are no mode bits to check.
@@ -552,6 +581,33 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
+    }
+
+    /// ADR 0013 T4: the redaction list covers **every** resolvable login, so an export or a
+    /// panic log cannot leak a key that belongs to a provider other than the current route.
+    #[test]
+    fn resolved_keys_carries_every_login_sorted_and_deduplicated() {
+        let scratch = Scratch::new("resolved-keys");
+        write_auth(
+            &scratch,
+            r#"{
+                "anthropic": {"type": "api_key", "key": "sk-a"},
+                "opencode-go": {"type": "api_key", "key": "k-b"},
+                "unused": {"type": "oauth", "access": "not-a-key"}
+            }"#,
+        );
+        let store = scratch.open().unwrap();
+        assert_eq!(
+            store.resolved_keys(),
+            vec!["k-b".to_owned(), "sk-a".to_owned()]
+        );
+        // An entry that cannot be resolved (a missing `$ENV`) contributes nothing.
+        write_auth(
+            &scratch,
+            r#"{"anthropic": {"type": "api_key", "key": "$NO_SUCH_VAR_FOR_THE_TEST"}}"#,
+        );
+        let store = scratch.open().unwrap();
+        assert!(store.resolved_keys().is_empty());
     }
 
     #[test]

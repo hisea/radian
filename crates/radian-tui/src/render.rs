@@ -182,6 +182,8 @@ pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
         EntryKind::ToolCall => "-> ",
         EntryKind::ToolResult => "<- ",
         EntryKind::Notice => "* ",
+        // The compaction line has no marker of its own: it is a rule-like `── … ──` line.
+        EntryKind::Compaction => "",
         // The startup block has no marker of its own: its lines carry `▶`/`▼` (or none for
         // the wordmark). The warning marker is its own; `Tip:` is styled separately.
         EntryKind::Banner => "  ",
@@ -204,6 +206,8 @@ fn marker(kind: EntryKind, theme: &Theme) -> (&'static str, Style) {
         EntryKind::Warning => theme.note,
         // The `Tip:` label steps down (dim), the body is muted.
         EntryKind::Tip => theme.truncation,
+        // The compaction one-liner is structural: the hunk/accent role.
+        EntryKind::Compaction => theme.diff_hunk,
     };
     (marker_prefix(kind), style)
 }
@@ -219,6 +223,8 @@ fn body_style(entry: &Entry, theme: &Theme) -> Style {
         EntryKind::Startup => theme.notice_body,
         EntryKind::Warning => theme.note,
         EntryKind::Tip => theme.hint,
+        // The expanded summary is body text; its one-liner is styled by `marker`.
+        EntryKind::Compaction => theme.notice_body,
         EntryKind::User | EntryKind::Assistant => {
             if entry.interrupted {
                 Style::default().add_modifier(Modifier::ITALIC)
@@ -379,10 +385,17 @@ fn render_row(
         theme.reasoning
     } else if matches!(entry.kind, EntryKind::Notice | EntryKind::Startup) {
         theme.notice_body
-    } else if row.warn {
-        // A tool body line from the warning channel (stderr, per the tool's own section
-        // markers): pi's warning level (`theme.note` in the role mapping).
-        theme.note
+    } else if row.role != crate::tools::LineRole::Normal {
+        // A card body line's own role (ADR 0028 R4 + ADR 0029's diff roles): the warning
+        // channel and the unified-diff line kinds.
+        match row.role {
+            crate::tools::LineRole::Warn => theme.note,
+            crate::tools::LineRole::DiffAdded => theme.diff_added,
+            crate::tools::LineRole::DiffRemoved => theme.diff_removed,
+            crate::tools::LineRole::DiffContext => theme.diff_context,
+            crate::tools::LineRole::DiffHunk => theme.diff_hunk,
+            crate::tools::LineRole::Normal => style,
+        }
     } else {
         style
     };

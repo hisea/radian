@@ -671,6 +671,12 @@ async fn pty_skill_commands_expand_list_notice_and_escape() {
         30,
         110,
     );
+    // review (small-fixes 2): p3 saw this test time out once inside a loaded full suite
+    // and never standalone. It could not be reproduced here either (0/50 standalone, 0/3 full
+    // suites, 0/20 after the closed-master fix), and every wait below is already a **state**
+    // wait (`wait_for_screen` blocks until the text is on screen), so there is no race to
+    // remove. The notice waits use the same 20 s as the turn waits: a 10 s bound is the one
+    // place a heavily loaded machine can still fail the test without a wrong behavior.
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
 
     // `/skill:greet hello 世界`: the body and the args are one user message.
@@ -716,12 +722,12 @@ async fn pty_skill_commands_expand_list_notice_and_escape() {
     // `/skills` lists both the visible and the model-invocation-disabled skill.
     pty.send("/skills\r".as_bytes());
     assert!(
-        pty.wait_for_screen("greet: Say hello.", 10),
+        pty.wait_for_screen("greet: Say hello.", 20),
         "the list is missing:\n{}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("secret: SECRET-DESCRIPTION (model-invocation off)", 10),
+        pty.wait_for_screen("secret: SECRET-DESCRIPTION (model-invocation off)", 20),
         "the disabled skill is not listed:\n{}",
         pty.screen()
     );
@@ -729,7 +735,7 @@ async fn pty_skill_commands_expand_list_notice_and_escape() {
     // `/skill:nope` is a notice, not a message: no second request.
     pty.send("/skill:nope\r".as_bytes());
     assert!(
-        pty.wait_for_screen("no skill named `nope`", 10),
+        pty.wait_for_screen("no skill named `nope`", 20),
         "the notice is missing:\n{}",
         pty.screen()
     );
@@ -2772,6 +2778,67 @@ fn pty_a_panic_writes_a_redacted_panic_log() {
     );
 }
 
+/// ADR 0013 T4 (audit 2026-10-15): the panic log's redaction list must carry **every** key in
+/// `auth.json`, not only the startup provider's. A second logged-in provider's key appearing in
+/// runtime text (here a synthesized panic) must not reach the log or the terminal.
+#[test]
+fn pty_the_panic_log_redacts_every_auth_key_not_only_the_startup_one() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("panic-all-keys");
+    let sessions = dir.path().join("sessions");
+    let home = dir.path().to_str().unwrap();
+    let startup = "SECRET-STARTUP-KEY-aaa";
+    let other = "SECRET-OTHER-PROVIDER-KEY-bbb";
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "panic-all-keys",
+            "--panic-message",
+            &format!("boom {other}"),
+        ],
+        // Two entries: the startup provider (`openai-compatible`) and `anthropic`, whose key
+        // is never used by this run but is still a secret that must not be written out.
+        &[
+            ("OPENAI_API_KEY", startup),
+            ("ANTHROPIC_API_KEY", other),
+            ("HOME", home),
+        ],
+        20,
+        100,
+    );
+    assert!(pty.wait_for_exit(15).is_some(), "the app did not exit");
+    assert_eq!(pty.app_exit_code(), Some(101), "a panic exits 101");
+
+    let diagnostics = diagnostics_dir(dir.path());
+    let log_path = std::fs::read_dir(&diagnostics)
+        .unwrap_or_else(|e| panic!("no diagnostics directory {}: {e}", diagnostics.display()))
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .find(|path| path.to_string_lossy().ends_with(".panic.log"))
+        .unwrap_or_else(|| panic!("no panic log in {}", diagnostics.display()));
+    let log = std::fs::read_to_string(&log_path)
+        .unwrap_or_else(|e| panic!("no panic log at {}: {e}", log_path.display()));
+    assert!(
+        !log.contains(other),
+        "every auth.json key must be redacted, not only the startup provider's: {log}"
+    );
+    assert!(
+        log.contains("<redacted>"),
+        "redaction marker missing: {log}"
+    );
+
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    assert!(
+        !raw.contains(other),
+        "the terminal output must not carry the other provider's key: {raw}"
+    );
+}
+
 /// The pid of the app the pty's `sh -c` wrapper started.
 fn app_pid(pty: &Pty) -> String {
     let shell = pty.child.process_id().expect("the wrapper shell has a pid");
@@ -4321,6 +4388,9 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
     // inside it (ADR 0020).
     let sessions = dir.path().join("sessions");
     let frozen = dir.path().join("frozen");
+    // The exit path's timestamps (`--exit-trace`): on a failure this says which step was
+    // slow (or that the POLLHUP path never fired).
+    let trace = dir.path().join("exit-trace");
     let home = TempDir::new("master-gone-home");
     let (mut child, mut master) = spawn_direct(
         &[
@@ -4337,6 +4407,8 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
             ws.to_str().unwrap(),
             "--freeze-draw",
             frozen.to_str().unwrap(),
+            "--exit-trace",
+            trace.to_str().unwrap(),
         ],
         home.path(),
     );
@@ -4344,6 +4416,12 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
     // The first frame is drawn (its marker exists); from now on the app writes nothing.
     let mut drained = Vec::new();
     let mut buf = [0u8; 65536];
+    // These two waits poll with a short sleep. `frozen` is a file the app writes from its own
+    // task: without a filesystem watcher (kqueue/FSEvents, i.e. a dependency) there is no
+    // notification to block on. The exit wait could use `waitpid` on a helper thread with a
+    // channel timeout, but the child handle is shared with `KillOnDrop` (a double wait) and the
+    // outcome of the investigation is that the app does not exit at all on a crossterm reader
+    // hang, so the deadline is what the test is about — not the wait mechanism.
     let deadline = Instant::now() + Duration::from_secs(20);
     while !frozen.exists() {
         // Drain the output: the first frame is larger than the pty buffer, so the app is
@@ -4365,6 +4443,7 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
     }
 
     // Close the terminal: the master fd. No signal is sent (no controlling terminal).
+    let closed_at = Instant::now();
     drop(master);
 
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -4372,12 +4451,16 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
         if let Some(status) = child.0.try_wait().unwrap() {
             break status;
         }
-        assert!(
-            Instant::now() < deadline,
-            "the app did not exit within 5 s of its terminal closing: the input POLLHUP path \
-             did not fire, and drawing is frozen (--freeze-draw) so the draw path cannot rescue \
-             it either"
-        );
+        if Instant::now() >= deadline {
+            let steps = std::fs::read_to_string(&trace).unwrap_or_default();
+            panic!(
+                "the app did not exit within 5 s of its terminal closing: the input POLLHUP \
+                 path did not fire, and drawing is frozen (--freeze-draw) so the draw path \
+                 cannot rescue it either. Exit trace (review: a trace whose last point is \
+                 `poll-idle` means the input thread is inside crossterm's reader and its read \
+                 is looping on EOF):\n{steps}"
+            );
+        }
         std::thread::sleep(Duration::from_millis(20));
     };
     assert_eq!(
@@ -4385,6 +4468,14 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
         Some(0),
         "the terminal-gone exit is the ordinary clean one (exit 0, no signal): {status:?}"
     );
+    if std::env::var_os("RADIAN_FLAKY_VERBOSE").is_some() {
+        // Investigation aid: how long the exit path took and where the time went.
+        eprintln!(
+            "closed-master: exit took {:?}\n{}",
+            closed_at.elapsed(),
+            std::fs::read_to_string(&trace).unwrap_or_default()
+        );
+    }
 }
 
 /// The remaining window: the main loop can be stuck **inside crossterm's reader** (the tty can
@@ -4518,6 +4609,34 @@ fn frame_count(pty: &Pty) -> usize {
         .count()
 }
 
+/// [`frame_count`] after the pty output has gone quiet for `QUIET`.
+///
+/// `frame_count` counts the bytes the test's reader thread has **received**, and the app writes
+/// a frame's cursor-show (`[?25h`) *after* the frame text that `wait_for_screen` matches. Under
+/// load the reader can lag, so a bare `frame_count` right after `wait_for_screen` can read the
+/// startup frames as zero — and then a later read counts them as if the input under test had
+/// drawn them (`left: 2, right: 0`). Waiting for the output to stop changing makes the baseline
+/// a state, not a race. The wait is bounded; on timeout it returns the current count.
+fn settled_frame_count(pty: &mut Pty) -> usize {
+    const QUIET: std::time::Duration = std::time::Duration::from_millis(250);
+    const LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + LIMIT;
+    let mut seen = pty.raw().len();
+    let mut changed = std::time::Instant::now();
+    loop {
+        pty.pump();
+        let len = pty.raw().len();
+        if len != seen {
+            seen = len;
+            changed = std::time::Instant::now();
+        } else if changed.elapsed() >= QUIET || std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    frame_count(pty)
+}
+
 /// ADR 0023 U2's zero-redraw rule: an idle screen is not redrawn at all. Before the
 /// event-driven loop the app drew ~19 frames/s while nothing happened (`docs/perf-baseline.md`
 /// §7); now the frame count over an idle window must not move.
@@ -4545,7 +4664,7 @@ fn pty_an_idle_screen_is_not_redrawn() {
         "{}",
         pty.screen()
     );
-    let before = frame_count(&pty);
+    let before = settled_frame_count(&mut pty);
     assert!(before >= 1, "the first frame is drawn");
 
     let window = std::time::Instant::now();
@@ -7193,14 +7312,16 @@ fn pty_pointer_motion_alone_draws_no_frame() {
         "{}",
         pty.screen()
     );
-    let before = frame_count(&pty);
+    // The startup frames' cursor-show bytes are written after the text `wait_for_screen`
+    // matched; settle first, so the baseline cannot miss them and blame the motion under load.
+    let before = settled_frame_count(&mut pty);
 
     // A pointer wandering across the screen, buttons up, for a while.
     for step in 0..40u16 {
         pty.send(&sgr(35, 5 + step, 3 + step % 10, true));
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    let after = frame_count(&pty);
+    let after = settled_frame_count(&mut pty);
     pty.quit();
     assert_eq!(
         after, before,
@@ -7420,6 +7541,75 @@ async fn pty_slash_theme_switches_and_writes_the_config() {
     );
     assert_eq!(std::fs::read_to_string(&config).unwrap(), after);
 
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// review (small-fixes 1): a key `/login` saves **mid-session** joins this session's
+/// redaction list, so an export of the same session hides it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_login_key_is_redacted_from_an_export_in_the_same_session() {
+    let _serial = pty_guard();
+    // Deliberately not `sk-`-prefixed and not after `Bearer`: the export's heuristic
+    // redaction would catch such a token on its own, and this test is about the *known*
+    // secret list (the mid-session `/login`), not the heuristic.
+    const KEY: &str = "late-secret-PTY-7";
+    let verify = login_verify_server("200 OK");
+    let dir = TempDir::new("login-redact");
+    let server = MockServer::start(vec![text_reply("DONE")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "login-redact",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+
+    pty.send(b"/login custom\r");
+    assert!(pty.wait_for_screen("provider name", 5), "{}", pty.screen());
+    pty.send(b"corp\r");
+    assert!(pty.wait_for_screen("wire protocol", 5), "{}", pty.screen());
+    pty.send(b"\r"); // openai-compatible
+    assert!(pty.wait_for_screen("base URL", 5), "{}", pty.screen());
+    pty.send(format!("{verify}\r").as_bytes());
+    assert!(pty.wait_for_screen("API key", 5), "{}", pty.screen());
+    pty.send(format!("{KEY}\r").as_bytes());
+    assert!(
+        pty.wait_for_screen("saved the key for `corp`", 10),
+        "{}",
+        pty.screen()
+    );
+
+    // Put the key into the transcript, then export this same session.
+    pty.send(format!("the key is {KEY}\r").as_bytes());
+    assert!(pty.wait_for_screen("DONE", 15), "{}", pty.screen());
+
+    let out = dir.path().join("export.json");
+    pty.send(format!("/export json {}\r", out.display()).as_bytes());
+    assert!(
+        pty.wait_for_screen("exported to", 10),
+        "the export notice is missing:\n{}",
+        pty.screen()
+    );
+
+    let text = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        text.contains("<redacted>"),
+        "the export did not redact the mid-session key: {text}"
+    );
+    assert!(
+        !text.contains(KEY),
+        "the mid-session key leaked into the export: {text}"
+    );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
 }

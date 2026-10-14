@@ -10,7 +10,7 @@
 
 use crate::app::Entry;
 use crate::render::display_lines;
-use crate::tools::{DisplayModes, ToolFold};
+use crate::tools::DisplayModes;
 
 /// One matching wrapped display line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +73,11 @@ impl FindState {
     }
 
     /// The absolute transcript line of the current match.
+    /// The current match's entry and within-entry line.
+    pub fn current(&self) -> Option<MatchLine> {
+        self.matches.get(self.cursor?).copied()
+    }
+
     pub fn current_line(&self) -> Option<usize> {
         let cursor = self.cursor?;
         let m = self.matches.get(cursor)?;
@@ -132,10 +137,11 @@ pub fn compute(
     let mut line = 0usize;
     for (entry, item) in entries.iter().enumerate() {
         starts.push(line);
-        // Folded tool bodies must not vanish from the search (this slice): the match
-        // geometry is the **expanded** form. Slice 4's auto-expand will line the jump up.
-        let mut modes = modes;
-        modes.tools.fold = ToolFold::Expanded;
+        // Folded content must not vanish from the search (ADR 0028 R6): matching runs over
+        // the **fully expanded** form - thinking, tool bodies and compaction summaries alike.
+        // A hit then expands exactly that entry, and the jump maps the expanded line onto the
+        // display (App::find_jump).
+        let modes = crate::blocks::search_modes(modes);
         let lines = display_lines(item, modes, width);
         if !needle.is_empty() {
             for (index, text) in lines.iter().enumerate() {
@@ -164,7 +170,7 @@ mod tests {
     const EXPANDED: DisplayModes = DisplayModes {
         reasoning: ReasoningMode::Expanded,
         tools: crate::tools::ToolDisplay {
-            fold: ToolFold::Expanded,
+            fold: crate::tools::ToolFold::Expanded,
             preview_lines: 5,
         },
         mermaid: true,

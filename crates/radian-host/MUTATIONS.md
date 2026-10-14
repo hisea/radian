@@ -434,3 +434,15 @@ Base `eeadb11` · 一次性检出 `/tmp/ui2b-mut`（detached，跑完删除）·
 2/2 抓住（R3-1 的补充测试 `write_theme_through_a_symlinked_directory` 在变异下仍通过：
 当文件还不存在、只是父目录是链接时，直接 `open` 会经父链接落到真实目录，所以那条用例
 本身对"是否显式解析链接"不敏感；抓住变异的是文件链接那条。两条都保留作回归）。
+
+## models-refresh：opencode-go 内建列表（2026-10-14）
+
+Base `71a9d1c` · 一次性检出 `/tmp/models-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+变异后 `git checkout --` 还原，提交前 `git status --short` 为空。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| MR-1 | `THINKING_LOW_HIGH_MAX` 的 `low` 线值改成 `"medium"` | 内建映射与上游逐字段一致 | `tests/opencode_go_models.rs::the_opencode_go_builtins_match_upstream` FAILED |
+
+1/1 抓住。注意 `every_thinking_map_matches_supported_thinking_levels` 在变异下仍通过：
+它只断言"哪些级别非 null"，不断言线值；抓住值改动的是结构测试（两者互补，都保留）。
