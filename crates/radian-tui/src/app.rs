@@ -21,6 +21,7 @@ use radian_permissions::{ApprovalOutcome, ApprovalRequest};
 use radian_session::RuntimeEvent;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::blocks::{Block, ReasoningMode};
 use crate::clip::ClipboardMode;
 use crate::clip::MAX_CLIPBOARD_BYTES;
 use crate::command::{self, PendingCommand};
@@ -62,9 +63,13 @@ pub struct Entry {
     /// The committed assistant message was an interrupted prefix (ADR 0003).
     pub interrupted: bool,
     pub is_error: bool,
-    /// How many lines this entry wrapped to, for the width and text it was last measured at.
-    /// The renderer keeps it so a frame only re-wraps entries that changed or are on screen.
-    pub(crate) wrap_cache: WrapCache,
+    /// The parsed blocks (ADR 0028 R1), keyed by text length and the reasoning mode. Only
+    /// filled for assistant prose (the only kind with fence grammar today).
+    pub(crate) block_cache: Option<((usize, ReasoningMode), Vec<Block>)>,
+    /// How many lines this entry laid out to, for the width, text length and mode it was
+    /// last measured at. The renderer keeps it so a frame only re-lays out entries that
+    /// changed or are on screen.
+    pub(crate) layout_cache: Option<((usize, usize, ReasoningMode), usize)>,
 }
 
 impl Entry {
@@ -75,40 +80,9 @@ impl Entry {
             live: false,
             interrupted: false,
             is_error: false,
-            wrap_cache: WrapCache::default(),
+            block_cache: None,
+            layout_cache: None,
         }
-    }
-}
-
-/// A measured line count, keyed by what it depends on: the width, the text length (entry text
-/// only ever grows while live, and a committed entry is a new `Entry`), and the interrupted
-/// marker. A cache, not state: two entries that differ only here are equal.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct WrapCache(Option<WrapKey>);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct WrapKey {
-    pub width: usize,
-    pub text_len: usize,
-    pub interrupted: bool,
-    pub lines: usize,
-}
-
-impl WrapCache {
-    pub(crate) fn get(&self, width: usize, text_len: usize, interrupted: bool) -> Option<usize> {
-        self.0
-            .filter(|k| k.width == width && k.text_len == text_len && k.interrupted == interrupted)
-            .map(|k| k.lines)
-    }
-
-    pub(crate) fn set(&mut self, key: WrapKey) {
-        self.0 = Some(key);
-    }
-}
-
-impl PartialEq for WrapCache {
-    fn eq(&self, _: &Self) -> bool {
-        true
     }
 }
 
@@ -664,6 +638,9 @@ pub struct App {
     mouse_enabled: bool,
     /// How a copy reaches the system clipboard (config `tui.clipboard`, default OSC 52).
     pub clipboard: ClipboardMode,
+    /// How the reasoning channel displays (ADR 0028 R3, `tui.display.reasoning`). Part of
+    /// the block/layout cache keys: toggling re-lays the reasoning entries out.
+    pub reasoning_mode: ReasoningMode,
 }
 
 impl App {
@@ -703,6 +680,9 @@ impl App {
             last_click: None,
             mouse_enabled: true,
             clipboard: ClipboardMode::Osc52,
+            // ADR 0028 R3's default is collapsed; this slice ships expanded and the config
+            // + toggle land with the folding work itself.
+            reasoning_mode: ReasoningMode::Expanded,
         }
     }
 
@@ -922,6 +902,7 @@ impl App {
         let press_line = self.scroll + row as usize;
         let Some(hit) = select::locate_hit(
             &self.entries,
+            self.reasoning_mode,
             self.transcript_width,
             press_line,
             col as usize,
@@ -936,6 +917,7 @@ impl App {
         let (anchor, anchor_on_char) = match count {
             2 => match select::run_at(
                 &self.entries,
+                self.reasoning_mode,
                 self.transcript_width,
                 press_line,
                 col as usize,
@@ -1106,6 +1088,7 @@ impl App {
         let head_line = self.scroll + row as usize;
         let Some(hit) = select::locate_hit(
             &self.entries,
+            self.reasoning_mode,
             self.transcript_width,
             head_line,
             col as usize,
@@ -1323,6 +1306,7 @@ impl App {
         let width = self.transcript_width;
         // Split the borrow: the entries to match and the layer that holds the query are two
         // different fields of `self`.
+        let mode = self.reasoning_mode;
         let App {
             entries, layers, ..
         } = self;
@@ -1330,7 +1314,7 @@ impl App {
             Layer::Overlay(Overlay::Find(find)) => Some(find),
             _ => None,
         }) {
-            find.recompute(entries.as_slice(), width);
+            find.recompute(entries.as_slice(), mode, width);
         }
         self.find_jump();
     }

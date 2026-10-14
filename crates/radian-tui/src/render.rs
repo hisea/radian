@@ -13,8 +13,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use radian_permissions::ApprovalRequest;
 
 use crate::app::{
-    App, Entry, EntryKind, Modal, TurnState, WrapKey, budget_status_text, mcp_text, usage_text,
+    App, Entry, EntryKind, Modal, TurnState, budget_status_text, mcp_text, usage_text,
 };
+use crate::blocks::{self, BodyLine, ReasoningMode};
 use crate::question::QuestionForm;
 use crate::theme::Theme;
 
@@ -133,6 +134,43 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
     out
 }
 
+/// How many lines [`wrap`] would produce, without building any of them. The virtualization
+/// budget (ADR 0028 R7) measures every entry on the first frame and after a resize; this is
+/// that path, so it must not allocate.
+pub fn wrap_line_count(text: &str, width: usize) -> usize {
+    let width = width.max(1);
+    let mut lines = 0usize;
+    for paragraph in text.split('\n') {
+        let mut line_width = 0usize;
+        let mut pending_space = false;
+        let mut any = false;
+        for ch in paragraph.chars() {
+            if ch == ' ' {
+                // A space only joins a line that already has content (`wrap`'s
+                // `!line.is_empty()`): leading spaces are dropped.
+                pending_space = any;
+                continue;
+            }
+            let ch_width = ch.width().unwrap_or(0);
+            let extra = usize::from(pending_space);
+            if line_width + extra + ch_width > width && line_width > 0 {
+                lines += 1;
+                line_width = 0;
+                pending_space = false;
+                any = false;
+            }
+            if pending_space {
+                line_width += 1;
+                pending_space = false;
+            }
+            line_width += ch_width;
+            any = true;
+        }
+        lines += 1;
+    }
+    lines
+}
+
 /// The visible marker for an entry kind (the transcript's `> `, `~ `, …). Also the cell
 /// offset the selection mapping ([`crate::select`]) subtracts to get a body column.
 pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
@@ -186,72 +224,120 @@ pub(crate) fn display_text(entry: &Entry) -> Cow<'_, str> {
     }
 }
 
-/// The wrapped display lines of `entry`'s body (the prefix and the interrupted marker are not
-/// included), at `width`. The renderer wraps exactly these, and [`crate::find`] matches
-/// against exactly these, so a folded `@` attachment is shown and searched as its
-/// `[file: path, N lines]` line, never as the hidden content.
-pub fn display_lines(entry: &Entry, width: usize) -> Vec<String> {
-    let prefix = marker_prefix(entry.kind);
-    let body_width = width.saturating_sub(prefix.width()).max(1);
-    wrap(&display_text(entry), body_width)
-}
-
-/// One entry's styled lines. An interrupted assistant entry gets an explicit marker on its
-/// last line.
-fn entry_lines(entry: &Entry, width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let (prefix, prefix_style) = marker(entry.kind, theme);
-    let wrapped = display_lines(entry, width);
-    let style = body_style(entry, theme);
-    let last = wrapped.len().saturating_sub(1);
-    let mut lines = Vec::with_capacity(wrapped.len());
-    for (i, row) in wrapped.into_iter().enumerate() {
-        let lead = if i == 0 {
-            prefix.to_string()
-        } else {
-            " ".repeat(prefix.width())
-        };
-        let mut spans = vec![Span::styled(lead, prefix_style), Span::styled(row, style)];
-        if entry.interrupted && i == last {
-            spans.push(Span::styled(" [interrupted]", theme.interrupted));
-        }
-        lines.push(Line::from(spans));
-    }
-    lines
-}
-
-/// How many lines `entry` wraps to at `width`, from its cache when the entry has not changed
-/// since it was last measured.
-fn entry_line_count(entry: &mut Entry, width: usize) -> usize {
-    let text_len = entry.text.len();
-    if let Some(lines) = entry.wrap_cache.get(width, text_len, entry.interrupted) {
-        return lines;
-    }
-    let lines = display_lines(entry, width).len();
-    entry.wrap_cache.set(WrapKey {
-        width,
-        text_len,
-        interrupted: entry.interrupted,
-        lines,
-    });
-    lines
-}
-
-/// Wraps the whole transcript into styled lines. The frame does not use this (it wraps only
-/// the visible entries, see [`visible_lines`]); it is the reference the virtualized path is
-/// tested against.
-pub fn transcript_lines(entries: &[Entry], width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    entries
-        .iter()
-        .flat_map(|entry| entry_lines(entry, width, theme))
+/// The display text lines of `entry`'s body (the prefix and the interrupted marker are not
+/// included), at `width` — the block model's layout, flattened to strings. The renderer
+/// renders exactly these, and [`crate::find`] matches against exactly these, so a folded `@`
+/// attachment is shown and searched as its `[file: path, N lines]` line, never as the hidden
+/// content. Padding rows (a user block's blank rows) come through as empty lines: they occupy
+/// transcript lines and occupy space in the geometry, they just never match a query.
+pub fn display_lines(entry: &Entry, mode: ReasoningMode, width: usize) -> Vec<String> {
+    let blocks = blocks::parse_blocks_for(entry, mode);
+    blocks::layout(entry, &blocks, mode, width)
+        .into_iter()
+        .map(|line| line.text)
         .collect()
 }
 
-/// The transcript's total line count and the `height` lines starting at line `start`,
-/// wrapping only the entries that overlap that window (dogfooding D9). Every other entry
+/// One entry's styled lines (ADR 0028 R1: the block layout, styled). An interrupted
+/// assistant entry gets an explicit marker on its last line.
+fn entry_lines(
+    entry: &Entry,
+    mode: ReasoningMode,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let (prefix, prefix_style) = marker(entry.kind, theme);
+    let blocks = blocks::parse_blocks_for(entry, mode);
+    let body = blocks::layout(entry, &blocks, mode, width);
+    let style = body_style(entry, theme);
+    let text_rows: Vec<usize> = body
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| !line.pad)
+        .map(|(i, _)| i)
+        .collect();
+    let first_text = text_rows.first().copied();
+    let last = text_rows.last().copied();
+    let mut lines = Vec::with_capacity(body.len());
+    for (i, row) in body.into_iter().enumerate() {
+        let mut line = render_row(
+            entry,
+            &row,
+            &prefix,
+            prefix_style,
+            style,
+            theme,
+            Some(i) == first_text,
+        );
+        if Some(i) == last && entry.interrupted {
+            line.spans
+                .push(Span::styled(" [interrupted]", theme.interrupted));
+        }
+        lines.push(line);
+    }
+    lines
+}
+
+/// One laid-out [`BodyLine`] as styled spans. `first_text` puts the entry's marker prefix on
+/// the lead; a padding row renders as an empty line; a code line has no lead at all (it is
+/// full-width by design, ADR 0028 R9).
+fn render_row(
+    entry: &Entry,
+    row: &BodyLine,
+    prefix: &str,
+    prefix_style: Style,
+    style: Style,
+    theme: &Theme,
+    first_text: bool,
+) -> Line<'static> {
+    if row.pad {
+        return Line::from(vec![Span::raw(String::new())]);
+    }
+    let lead = if row.code {
+        String::new()
+    } else if first_text {
+        prefix.to_string()
+    } else {
+        " ".repeat(prefix.width())
+    };
+    // The collapsed reasoning placeholder is one synthetic line: the reasoning role, not the
+    // body style.
+    let placeholder = entry.kind == EntryKind::Reasoning && row.chars.is_empty();
+    let body = if placeholder { theme.reasoning } else { style };
+    Line::from(vec![
+        Span::styled(lead, prefix_style),
+        Span::styled(row.text.clone(), body),
+    ])
+}
+
+/// How many lines `entry` lays out to at `width`, from its cache when the entry has not
+/// changed since it was last measured.
+fn entry_line_count(entry: &mut Entry, mode: ReasoningMode, width: usize) -> usize {
+    blocks::line_count_cached(entry, mode, width)
+}
+
+/// Lays the whole transcript out into styled lines. The frame does not use this (it lays out
+/// only the visible entries, see [`visible_lines`]); it is the reference the virtualized path
+/// is tested against.
+pub fn transcript_lines(
+    entries: &[Entry],
+    mode: ReasoningMode,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    entries
+        .iter()
+        .flat_map(|entry| entry_lines(entry, mode, width, theme))
+        .collect()
+}
+
+/// The transcript's total line count and the `height` lines starting at line `start`, laying
+/// out only the entries that overlap that window (dogfooding D9). Every other entry
 /// contributes its cached line count, so a long session costs an integer sum per frame
-/// instead of re-wrapping every entry.
+/// instead of re-laying out every entry.
 pub fn visible_lines(
     entries: &mut [Entry],
+    mode: ReasoningMode,
     width: usize,
     start: usize,
     height: usize,
@@ -259,23 +345,52 @@ pub fn visible_lines(
 ) -> (usize, Vec<Line<'static>>) {
     let counts: Vec<usize> = entries
         .iter_mut()
-        .map(|entry| entry_line_count(entry, width))
+        .map(|entry| entry_line_count(entry, mode, width))
         .collect();
     let total: usize = counts.iter().sum();
     let mut out = Vec::with_capacity(height);
     let mut line = 0usize;
-    for (entry, count) in entries.iter().zip(&counts) {
+    for (entry, count) in entries.iter_mut().zip(&counts) {
         if out.len() >= height {
             break;
         }
         let next = line + count;
         if next > start {
             let skip = start.saturating_sub(line);
+            let blocks = blocks::blocks_for(entry, mode);
+            let body = blocks::layout(entry, &blocks, mode, width);
+            let prefix = marker_prefix(entry.kind);
+            let prefix_style = marker(entry.kind, theme).1;
+            let style = body_style(entry, theme);
+            let text_rows: Vec<usize> = body
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| !line.pad)
+                .map(|(i, _)| i)
+                .collect();
+            let first_text = text_rows.first().copied();
+            let last = text_rows.last().copied();
             out.extend(
-                entry_lines(entry, width, theme)
-                    .into_iter()
+                body.into_iter()
+                    .enumerate()
                     .skip(skip)
-                    .take(height - out.len()),
+                    .take(height - out.len())
+                    .map(|(i, row)| {
+                        let mut line = render_row(
+                            entry,
+                            &row,
+                            &prefix,
+                            prefix_style,
+                            style,
+                            theme,
+                            Some(i) == first_text,
+                        );
+                        if Some(i) == last && entry.interrupted {
+                            line.spans
+                                .push(Span::styled(" [interrupted]", theme.interrupted));
+                        }
+                        line
+                    }),
             );
         }
         line = next;
@@ -674,9 +789,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let theme = app.theme.clone();
     // The find matcher wraps at the same width; a resize recomputes it (once, not per frame).
     app.set_transcript_width(width);
-    let (total, _) = visible_lines(&mut app.entries, width, 0, 0, &theme);
+    let (total, _) = visible_lines(&mut app.entries, app.reasoning_mode, width, 0, 0, &theme);
     app.set_viewport(chunks[0].height, total);
-    let (_, visible) = visible_lines(&mut app.entries, width, app.scroll, height, &theme);
+    let (_, visible) = visible_lines(
+        &mut app.entries,
+        app.reasoning_mode,
+        width,
+        app.scroll,
+        height,
+        &theme,
+    );
     let visible = match app.find_state() {
         Some(find) => visible
             .into_iter()
@@ -691,6 +813,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(selection) => {
             let ranges = crate::select::highlight_rows(
                 &app.entries,
+                app.reasoning_mode,
                 width,
                 app.scroll,
                 visible.len(),

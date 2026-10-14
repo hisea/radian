@@ -5,6 +5,7 @@
 //! [`terminal::TtyGuard`] owns the terminal's modified state.
 
 pub mod app;
+pub mod blocks;
 pub mod clip;
 pub mod command;
 pub mod composer;

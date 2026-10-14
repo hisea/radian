@@ -468,16 +468,25 @@ fn the_box_input_style_draws_the_bordered_box() {
 /// own foreground (the patch only adds the background).
 #[test]
 fn a_selection_draws_the_selection_role_on_its_cells() {
+    use radian_tui::blocks::ReasoningMode;
     use radian_tui::select::{Selection, locate};
     let mut app = App::new("m", "s");
     app.push_message(&Message::user("hello selection"));
     app.set_transcript_width(40);
-    let (total, _) = radian_tui::render::visible_lines(&mut app.entries, 40, 0, 0, &app.theme);
+    let (total, _) = radian_tui::render::visible_lines(
+        &mut app.entries,
+        ReasoningMode::Expanded,
+        40,
+        0,
+        0,
+        &app.theme,
+    );
     app.set_viewport(u16::try_from(total).unwrap(), total);
-    // Select "selection" on the first line: body columns 6..15 → screen columns 8..17.
+    // Select "selection" on the block's text line (a user block is pad / text / pad): body
+    // columns 6..15 → screen columns 8..17.
     let selection = Selection {
-        anchor: locate(&app.entries, 40, 0, 8).expect("anchor"),
-        head: locate(&app.entries, 40, 0, 17).expect("head"),
+        anchor: locate(&app.entries, ReasoningMode::Expanded, 40, 1, 8).expect("anchor"),
+        head: locate(&app.entries, ReasoningMode::Expanded, 40, 1, 17).expect("head"),
     };
     app.selection = Some(selection);
     let terminal = render(&mut app, 40, 6);
@@ -501,16 +510,24 @@ fn a_selection_draws_the_selection_role_on_its_cells() {
 /// The `mono` theme's selection is reverse video, never a color (`NO_COLOR` and `mono`).
 #[test]
 fn the_mono_selection_is_reversed_not_colored() {
+    use radian_tui::blocks::ReasoningMode;
     use radian_tui::select::{Selection, locate};
     let mut app = App::new("m", "s");
     app.theme = radian_tui::theme::Theme::mono();
     app.push_message(&Message::user("hello selection"));
     app.set_transcript_width(40);
-    let (total, _) = radian_tui::render::visible_lines(&mut app.entries, 40, 0, 0, &app.theme);
+    let (total, _) = radian_tui::render::visible_lines(
+        &mut app.entries,
+        ReasoningMode::Expanded,
+        40,
+        0,
+        0,
+        &app.theme,
+    );
     app.set_viewport(u16::try_from(total).unwrap(), total);
     app.selection = Some(Selection {
-        anchor: locate(&app.entries, 40, 0, 8).expect("anchor"),
-        head: locate(&app.entries, 40, 0, 17).expect("head"),
+        anchor: locate(&app.entries, ReasoningMode::Expanded, 40, 1, 8).expect("anchor"),
+        head: locate(&app.entries, ReasoningMode::Expanded, 40, 1, 17).expect("head"),
     });
     let terminal = render(&mut app, 40, 6);
     let word = style_of(&terminal, "selection").expect("on screen");
@@ -524,13 +541,21 @@ fn the_mono_selection_is_reversed_not_colored() {
 /// A single click's empty selection draws nothing anywhere.
 #[test]
 fn an_empty_selection_draws_nothing() {
+    use radian_tui::blocks::ReasoningMode;
     use radian_tui::select::{Selection, locate};
     let mut app = App::new("m", "s");
     app.push_message(&Message::user("hello selection"));
     app.set_transcript_width(40);
-    let (total, _) = radian_tui::render::visible_lines(&mut app.entries, 40, 0, 0, &app.theme);
+    let (total, _) = radian_tui::render::visible_lines(
+        &mut app.entries,
+        ReasoningMode::Expanded,
+        40,
+        0,
+        0,
+        &app.theme,
+    );
     app.set_viewport(u16::try_from(total).unwrap(), total);
-    let at = locate(&app.entries, 40, 0, 8).expect("anchor");
+    let at = locate(&app.entries, ReasoningMode::Expanded, 40, 1, 8).expect("anchor");
     app.selection = Some(Selection {
         anchor: at,
         head: at,
@@ -631,4 +656,35 @@ fn the_question_keys_stay_visible_with_a_long_option_list() {
     assert!(text.contains("Esc decline"), "{text}");
     // The box is on screen with its scrolled list.
     assert!(text.contains("question 1/1"), "{text}");
+}
+
+/// `wrap_line_count` (the counting-only path, used to measure every entry on the first frame
+/// and after a resize) must agree with `wrap` for the same corpus, or the transcript's total
+/// line count and the virtualized window disagree.
+#[test]
+fn the_line_count_matches_the_wrap() {
+    let corpus = [
+        ("hello world", 5usize),
+        ("hello world", 11),
+        ("", 5),
+        ("\n", 5),
+        ("a\n\nb", 5),
+        ("  leading and trailing  ", 7),
+        ("日本語のテキストは幅で折る", 5),
+        ("ab   cd", 4),
+        ("one two three four five six seven", 7),
+        ("mixed 日本語 text wrap", 6),
+        ("日本", 1),
+        ("trailing spaces   ", 5),
+        ("word\n", 5),
+        ("combining a\u{301}b", 2),
+        ("a b c d e f", 1),
+    ];
+    for (text, width) in corpus {
+        assert_eq!(
+            radian_tui::render::wrap_line_count(text, width),
+            radian_tui::render::wrap(text, width).len(),
+            "{text:?} at {width}"
+        );
+    }
 }

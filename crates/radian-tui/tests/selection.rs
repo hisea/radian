@@ -7,6 +7,7 @@ use agent_core::Message;
 use radian_host::{PendingRequest, PendingView};
 use radian_permissions::ApprovalRequest;
 use radian_tui::app::{AUTO_SCROLL_TICK, App, Effect, Input, UpdateResult};
+use radian_tui::blocks::ReasoningMode;
 use radian_tui::clip::MAX_CLIPBOARD_BYTES;
 use serde_json::json;
 
@@ -26,13 +27,19 @@ fn approval() -> PendingView<PendingRequest> {
     }
 }
 
-/// A transcript with three single-line entries at width 30: lines 0/1/2 are the entries.
+/// A transcript at width 30. A user block is pad / text / pad (ADR 0028 R1), so the lines
+/// are: 0-2 the first user block (text on 1), 3 the assistant, 4-6 the second user block
+/// (text on 5).
+const USER1: u16 = 1;
+const ASSISTANT: u16 = 3;
+const USER2: u16 = 5;
+
 fn app() -> App {
     let mut app = App::new("m", "s");
     app.push_message(&Message::user("hello there"));
     app.push_message(&Message::assistant("aaaa bbbb cccc dddd"));
     app.push_message(&Message::user("second message"));
-    app.set_viewport(3, 3);
+    app.set_viewport(7, 7);
     app.set_transcript_width(30);
     app
 }
@@ -52,16 +59,16 @@ fn release(app: &mut App, row: u16, col: u16) -> UpdateResult {
 #[test]
 fn press_drag_release_produces_the_copy_effect() {
     let mut app = app();
-    // Lines 0..2 are the entries (width 30 wraps nothing). Selecting from line 0's first
-    // char through line 1's end copies both entries, joined by one newline.
+    // Width 30 wraps nothing: selecting from the first user line through the assistant's
+    // end copies both entries, joined by one newline.
     assert!(
-        !press(&mut app, 0, 2).dirty,
+        !press(&mut app, USER1, 2).dirty,
         "a press that starts nothing draws nothing"
     );
-    let drag = drag(&mut app, 1, 25);
+    let drag = drag(&mut app, ASSISTANT, 25);
     assert!(drag.dirty);
     assert!(app.selection.is_some(), "the drag is live");
-    let release = release(&mut app, 1, 25);
+    let release = release(&mut app, ASSISTANT, 25);
     assert!(release.dirty);
     assert_eq!(
         release.effects,
@@ -80,11 +87,11 @@ fn a_copy_across_a_soft_wrap_inserts_no_newline() {
     // "cccc dddd" (lines 1 and 2). Selecting line 1 through line 2 copies the one-line text.
     let mut app = app();
     app.set_transcript_width(12);
-    // Width 12: "hello there" wraps to "hello" / "there" (lines 0-1), the assistant to
-    // "aaaa bbbb" / "cccc dddd" (lines 2-3). Selecting lines 2-3 copies the one-line text.
-    press(&mut app, 2, 2);
-    drag(&mut app, 3, 200);
-    let release = release(&mut app, 3, 200);
+    // Width 12: the user block is pad / "hello" / "there" / pad, the assistant "aaaa bbbb"
+    // (4) / "cccc dddd" (5). Selecting its two lines copies the one-line text.
+    press(&mut app, 4, 2);
+    drag(&mut app, 5, 200);
+    let release = release(&mut app, 5, 200);
     assert_eq!(
         release.effects,
         vec![Effect::Copy {
@@ -97,9 +104,9 @@ fn a_copy_across_a_soft_wrap_inserts_no_newline() {
 #[test]
 fn a_backwards_drag_normalizes_to_the_same_copy() {
     let mut app = app();
-    press(&mut app, 1, 25);
-    drag(&mut app, 0, 2);
-    let release = release(&mut app, 0, 2);
+    press(&mut app, ASSISTANT, 25);
+    drag(&mut app, USER1, 2);
+    let release = release(&mut app, USER1, 2);
     assert_eq!(
         release.effects,
         vec![Effect::Copy {
@@ -127,11 +134,11 @@ fn a_click_clears_the_selection() {
 #[test]
 fn a_press_outside_the_transcript_never_starts_one() {
     let mut app = app();
-    // Rows 6.. are the input box and the status bar (viewport height 6).
-    assert!(!press(&mut app, 6, 0).dirty);
+    // Rows 7.. are the input box and the status bar (viewport height 7).
+    assert!(!press(&mut app, 7, 0).dirty);
     assert!(app.selection.is_none());
-    drag(&mut app, 7, 3);
-    release(&mut app, 7, 3);
+    drag(&mut app, 8, 3);
+    release(&mut app, 8, 3);
     assert!(app.selection.is_none(), "no gesture, no selection");
 }
 
@@ -229,7 +236,14 @@ fn an_oversized_selection_is_refused_with_the_reason() {
     app.entries.clear();
     app.push_message(&Message::assistant("z".repeat(MAX_CLIPBOARD_BYTES + 1)));
     app.set_transcript_width(30);
-    let (total, _) = radian_tui::render::visible_lines(&mut app.entries, 30, 0, 0, &app.theme);
+    let (total, _) = radian_tui::render::visible_lines(
+        &mut app.entries,
+        ReasoningMode::Expanded,
+        30,
+        0,
+        0,
+        &app.theme,
+    );
     app.set_viewport(1, total);
     app.scroll = 0;
     app.follow = false;
@@ -321,9 +335,9 @@ fn the_char_under_the_release_is_inside_the_selection() {
     let mut app = app();
     // "hello there": dragging from the 'h' (col 2) onto the 'e' at body column 8 (col 10)
     // copies "hello the" — the char under the pointer included.
-    press(&mut app, 0, 2);
-    drag(&mut app, 0, 10);
-    let result = release(&mut app, 0, 10);
+    press(&mut app, USER1, 2);
+    drag(&mut app, USER1, 10);
+    let result = release(&mut app, USER1, 10);
     assert_eq!(
         result.effects,
         vec![Effect::Copy {
@@ -332,9 +346,9 @@ fn the_char_under_the_release_is_inside_the_selection() {
     );
     // Backwards: dragging from the 'e' back onto the 'h' selects "hello the" — both
     // endpoint chars are inside, either direction.
-    press(&mut app, 0, 10);
-    drag(&mut app, 0, 2);
-    let result = release(&mut app, 0, 2);
+    press(&mut app, USER1, 10);
+    drag(&mut app, USER1, 2);
+    let result = release(&mut app, USER1, 2);
     assert_eq!(
         result.effects,
         vec![Effect::Copy {
@@ -343,9 +357,9 @@ fn the_char_under_the_release_is_inside_the_selection() {
     );
     // A release past the line's end stays a plain boundary (nothing is under the pointer):
     // "hello there" in full.
-    press(&mut app, 0, 2);
-    drag(&mut app, 0, 200);
-    let result = release(&mut app, 0, 200);
+    press(&mut app, USER1, 2);
+    drag(&mut app, USER1, 200);
+    let result = release(&mut app, USER1, 200);
     assert_eq!(
         result.effects,
         vec![Effect::Copy {
@@ -354,9 +368,9 @@ fn the_char_under_the_release_is_inside_the_selection() {
     );
     // Pressing on the `> ` marker selects from the first char (the drag to the margin
     // reaches through it).
-    press(&mut app, 0, 0);
-    drag(&mut app, 0, 1);
-    let result = release(&mut app, 0, 0);
+    press(&mut app, USER1, 0);
+    drag(&mut app, USER1, 1);
+    let result = release(&mut app, USER1, 0);
     assert_eq!(result.effects, vec![Effect::Copy { text: "h".into() }]);
 }
 
@@ -365,10 +379,10 @@ fn a_drag_that_returns_to_its_press_cell_is_still_a_selection() {
     // The pointer left the press cell, so this is not a click: it comes back onto the same
     // char, and that one char is the selection.
     let mut app = app();
-    press(&mut app, 0, 2);
-    drag(&mut app, 0, 3);
-    drag(&mut app, 0, 2);
-    let result = release(&mut app, 0, 2);
+    press(&mut app, USER1, 2);
+    drag(&mut app, USER1, 3);
+    drag(&mut app, USER1, 2);
+    let result = release(&mut app, USER1, 2);
     assert_eq!(result.effects, vec![Effect::Copy { text: "h".into() }]);
 }
 
@@ -376,15 +390,15 @@ fn a_drag_that_returns_to_its_press_cell_is_still_a_selection() {
 fn a_double_click_selects_a_word_and_its_release_copies_it() {
     let mut app = app();
     // "hello there": double-click the 'h' of "there" (body col 6 → col 8).
-    press(&mut app, 0, 8);
-    press(&mut app, 0, 8);
+    press(&mut app, USER1, 8);
+    press(&mut app, USER1, 8);
     let selection = app.selection.expect("the word is selected");
     let (start, end) = selection.ordered();
     assert_eq!(
         (start.entry, start.offset, end.entry, end.offset),
         (0, 6, 0, 11)
     );
-    let result = release(&mut app, 0, 8);
+    let result = release(&mut app, USER1, 8);
     assert_eq!(
         result.effects,
         vec![Effect::Copy {
@@ -397,9 +411,9 @@ fn a_double_click_selects_a_word_and_its_release_copies_it() {
 fn a_triple_click_selects_the_whole_entry() {
     let mut app = app();
     for _ in 0..3 {
-        press(&mut app, 1, 5);
+        press(&mut app, ASSISTANT, 5);
     }
-    let result = release(&mut app, 1, 5);
+    let result = release(&mut app, ASSISTANT, 5);
     assert_eq!(
         result.effects,
         vec![Effect::Copy {
@@ -412,9 +426,9 @@ fn a_triple_click_selects_the_whole_entry() {
 #[test]
 fn a_click_sequence_on_different_cells_is_three_single_clicks() {
     let mut app = app();
-    press(&mut app, 0, 8);
-    press(&mut app, 0, 9);
-    press(&mut app, 0, 10);
+    press(&mut app, USER1, 8);
+    press(&mut app, USER1, 9);
+    press(&mut app, USER1, 10);
     assert!(
         app.selection.is_none(),
         "no word got selected: not one cell"
@@ -424,10 +438,10 @@ fn a_click_sequence_on_different_cells_is_three_single_clicks() {
 #[test]
 fn a_drag_after_a_double_click_extends_from_the_word() {
     let mut app = app();
-    press(&mut app, 0, 8);
-    press(&mut app, 0, 8);
-    drag(&mut app, 1, 200);
-    let result = release(&mut app, 1, 200);
+    press(&mut app, USER1, 8);
+    press(&mut app, USER1, 8);
+    drag(&mut app, ASSISTANT, 200);
+    let result = release(&mut app, ASSISTANT, 200);
     assert_eq!(
         result.effects,
         vec![Effect::Copy {
@@ -440,9 +454,9 @@ fn a_drag_after_a_double_click_extends_from_the_word() {
 #[test]
 fn a_double_click_on_whitespace_selects_the_whitespace_run() {
     let mut app = app();
-    press(&mut app, 0, 7);
-    press(&mut app, 0, 7);
-    let result = release(&mut app, 0, 7);
+    press(&mut app, USER1, 7);
+    press(&mut app, USER1, 7);
+    let result = release(&mut app, USER1, 7);
     assert_eq!(
         result.effects,
         vec![Effect::Copy { text: " ".into() }],

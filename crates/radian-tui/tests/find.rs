@@ -2,6 +2,7 @@
 
 use radian_permissions::ApprovalRequest;
 use radian_tui::app::{App, Entry, EntryKind, Input};
+use radian_tui::blocks::ReasoningMode;
 use radian_tui::render;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -39,7 +40,7 @@ fn fill(app: &mut App, needle_entries: &[usize]) {
 fn entry_line(app: &App, entry: usize) -> usize {
     app.entries[..entry]
         .iter()
-        .map(|e| render::display_lines(e, WIDTH).len())
+        .map(|e| render::display_lines(e, ReasoningMode::Expanded, WIDTH).len())
         .sum()
 }
 
