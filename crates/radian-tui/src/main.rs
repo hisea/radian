@@ -558,6 +558,7 @@ fn run(
             &tx,
             Phase::Picking,
             (provider_name.clone(), model_name.clone()),
+            &config.providers,
         )?;
         if let Some(signal) = signal {
             // A signal during the pre-session phase leaves exactly like the session phase —
@@ -1125,6 +1126,7 @@ fn run(
             memory: &memory_service,
         },
         (provider_name.clone(), model_name.clone()),
+        &config.providers,
     );
     // Tell a pending signal task that the loop left on its own, so it does not force-exit.
     radian_tui::signals::confirm_exit();
@@ -1532,6 +1534,9 @@ fn apply_dirty(app: &mut App) -> bool {
 struct LoopContext<'a> {
     /// The startup route (ADR 0026 D11): the fallback when the session has no route yet.
     startup_route: (String, String),
+    /// The config's `[providers.<name>]` declarations (ADR 0026 D10), for `/model`'s provider
+    /// completion.
+    config_providers: std::collections::BTreeMap<String, radian_host::ProviderDecl>,
     workspace: &'a Path,
     runtime: &'a tokio::runtime::Runtime,
     /// The UI's one handle on the session (ADR 0023 U5): commands go through it, and it
@@ -1675,7 +1680,7 @@ impl LoopContext<'_> {
                         memory_record_candidates(self.memory, command)
                     }
                     radian_tui::command::Fetch::ModelRoute { provider, .. } => {
-                        model_route_candidates(provider.as_deref())
+                        model_route_candidates(provider.as_deref(), &self.config_providers)
                     }
                     radian_tui::command::Fetch::ThinkingLevels { .. } => {
                         // D11: only the levels the current model supports.
@@ -2018,6 +2023,7 @@ fn ui_loop(
     tx: &Sender<UiEvent>,
     phase: Phase<'_>,
     startup_route: (String, String),
+    config_providers: &std::collections::BTreeMap<String, radian_host::ProviderDecl>,
 ) -> Result<Option<i32>, String> {
     let mut picking_signal: Option<i32> = None;
     let mut ctx = match phase {
@@ -2030,6 +2036,7 @@ fn ui_loop(
             memory,
         } => Some(LoopContext {
             startup_route: startup_route.clone(),
+            config_providers: config_providers.clone(),
             workspace,
             runtime,
             session,
@@ -2140,19 +2147,47 @@ fn ui_loop(
 /// The `/model` completion candidates (ADR 0026 D5): the logged-in providers before the
 /// slash, or one provider's models after it — the descriptor's built-in list plus the cached
 /// `/v1/models` list. Reads local files only; the background refresh (D0) writes that cache.
-fn model_route_candidates(provider: Option<&str>) -> Vec<radian_tui::command::Candidate> {
+fn model_route_candidates(
+    provider: Option<&str>,
+    config_providers: &std::collections::BTreeMap<String, radian_host::ProviderDecl>,
+) -> Vec<radian_tui::command::Candidate> {
     let Some(provider) = provider else {
-        return match radian_host::auth::list() {
-            Ok(entries) => entries
-                .into_iter()
-                .filter(|entry| entry.usable)
-                .map(|entry| radian_tui::command::Candidate {
-                    insert: format!("{}/", entry.provider_id),
-                    description: format!("switch to {}", entry.provider_id),
-                })
-                .collect(),
-            Err(_) => Vec::new(),
-        };
+        // Every provider a switch could name (ADR 0026 D5/D10): the built-in descriptors, the
+        // config's `[providers.<name>]` declarations, and the usable `auth.json` entries. Each
+        // is resolved with `resolve_provider` so the list matches what a switch would accept,
+        // and the description says which side declared it.
+        let auth_entries = radian_host::auth::list().unwrap_or_default();
+        let mut names: Vec<(String, &'static str)> = Vec::new();
+        for descriptor in radian_host::descriptors() {
+            names.push((descriptor.id.to_owned(), "built-in"));
+        }
+        for name in config_providers.keys() {
+            names.push((name.clone(), "config providers"));
+        }
+        for entry in &auth_entries {
+            if entry.usable {
+                names.push((entry.provider_id.clone(), "logged in"));
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut candidates = Vec::new();
+        for (name, source) in names {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let auth_env = auth_entries
+                .iter()
+                .find(|entry| entry.provider_id == name)
+                .and_then(|_| radian_host::AuthStore::open().ok())
+                .and_then(|store| store.entry_env(&name));
+            if radian_host::resolve_provider(&name, config_providers, auth_env.as_ref()).is_ok() {
+                candidates.push(radian_tui::command::Candidate {
+                    insert: format!("{name}/"),
+                    description: format!("switch to {name} ({source})"),
+                });
+            }
+        }
+        return candidates;
     };
     // Built-in list first, then the cached `/v1/models` ids (D0), merged by model id.
     let mut seen = std::collections::HashSet::new();

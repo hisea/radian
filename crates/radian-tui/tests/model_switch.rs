@@ -288,3 +288,36 @@ fn the_thinking_marker_clears_when_applied() {
     ));
     assert!(app.next_thinking.is_none());
 }
+
+/// p4's provider completion (ADR 0026 D10): the list a switch could name comes from the
+/// built-ins, the config's declarations and the usable `auth.json` entries — each resolved
+/// with `resolve_provider`, so the completion and the switch agree.
+#[test]
+fn the_provider_list_resolves_built_ins_config_and_auth() {
+    // The pure part of the rule is `resolve_provider`: a built-in resolves; an unknown name
+    // does not; a config declaration resolves to a named provider.
+    let mut providers = std::collections::BTreeMap::new();
+    providers.insert(
+        "acme".to_owned(),
+        radian_host::ProviderDecl {
+            kind: "openai-compatible".to_owned(),
+            base_url: "https://acme.example/v1".to_owned(),
+        },
+    );
+    for name in [
+        "opencode-go",
+        "anthropic",
+        "openai",
+        "openai-compatible",
+        "acme",
+    ] {
+        assert!(
+            radian_host::resolve_provider(name, &providers, None).is_ok(),
+            "{name} must resolve"
+        );
+    }
+    assert!(
+        radian_host::resolve_provider("nope", &providers, None).is_err(),
+        "an unknown name must not be offered"
+    );
+}
