@@ -716,6 +716,10 @@ async fn a_workspace_with_project_resources_is_untrusted_without_a_terminal() {
         stderr.contains("project resources not loaded (untrusted)"),
         "{stderr}"
     );
+    assert!(
+        stderr.contains("project resources: not loaded (untrusted: default)"),
+        "{stderr}"
+    );
     assert!(stderr.contains("--trust"), "{stderr}");
     assert!(
         !home.join("trust/trust.json").exists(),

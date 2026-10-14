@@ -924,6 +924,7 @@ async fn pty_trust_modal_asks_and_enter_untrusts() {
 
     // Enter = the highlighted default = do not trust this directory.
     pty.send(b"\r");
+    pty.expand_startup();
     assert!(
         pty.wait_for_screen("project resources: not loaded", 10),
         "the trust state was not shown:\n{}",
@@ -986,6 +987,7 @@ async fn pty_trust_override_and_saved_decision_skip_the_modal() {
         24,
         110,
     );
+    pty.expand_startup();
     assert!(
         pty.wait_for_screen("project resources: loaded", 10),
         "{}",
@@ -1014,6 +1016,7 @@ async fn pty_trust_override_and_saved_decision_skip_the_modal() {
         24,
         110,
     );
+    pty.expand_startup();
     assert!(
         pty.wait_for_screen("project resources: loaded (trusted: saved for", 10),
         "{}",
@@ -1045,6 +1048,7 @@ async fn pty_trust_override_and_saved_decision_skip_the_modal() {
         24,
         110,
     );
+    pty.expand_startup();
     assert!(
         pty.wait_for_screen("project resources: not loaded (untrusted: default)", 10),
         "{}",

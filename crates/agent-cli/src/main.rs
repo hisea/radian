@@ -1411,7 +1411,8 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             trust_setup.needs_ask = false;
             trust_choice = Some(choice);
         }
-    } else if trust_setup.resolved.source == radian_host::trust::Source::Default
+    } else if !trust_setup.resolved.decision.as_bool()
+        && trust_setup.resolved.source == radian_host::trust::Source::Default
         && radian_host::trust::has_project_resources(&workspace_path)
     {
         // The non-interactive default (ADR 0031 T3): untrusted, with the one-line way out.
