@@ -851,3 +851,17 @@ Base `0d1dde1` · 一次性检出 `/tmp/small2-mut`（detached，跑完删除）
 
 1/1 抓住。读侧四处（`record_panic`、运行期错误路径、picker、export）都走 `shared_secrets`；写侧
 `refresh_secrets` 用 `into_inner` 追加，第二个测试覆盖中毒后的追加。
+
+## footer-s1：footer 的默认预设、阈值、截断与容错（ADR 0027 C2，2026-10-14）
+
+Base `e6c7013` · 一次性检出 `/tmp/footer-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+`cargo test -p radian-tui --test footer <test>`，变异后 `git checkout --` 还原。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| FS-1 | `Preset` 的默认从 `Pi` 改成 `Classic` | 默认是 pi 的两行 | `footer.rs::the_default_footer_is_two_rows` FAILED |
+| FS-2 | 忽略 `thresholds`（只用 item 的 style/默认角色） | 70/90 换样式 | `footer.rs::the_context_thresholds_change_the_style` FAILED |
+| FS-3 | 窄终端先从 **左** 组省（`drop_lowest(left) || drop_lowest(right)`） | 先省右侧，再省左侧末尾 | `footer.rs::truncation_drops_the_right_group_then_the_left_and_priority_wins` FAILED |
+| FS-4 | 未知条目 panic（而不是原样显示） | 未知条目原样显示 + 警告 | `footer.rs::unknown_items_placeholders_and_styles_warn_once_and_show_raw` FAILED |
+
+4/4 抓住。绘制路径不调用 git 由结构测试 `footer.rs::the_draw_path_does_not_call_git` 覆盖（无需变异）。
