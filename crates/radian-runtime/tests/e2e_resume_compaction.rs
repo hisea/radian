@@ -7,10 +7,12 @@
 //! ADR 0019 (the replacement commit) and ADR 0005 (host meta invisible to adapters) have to
 //! hold together. Both adapters run the same scenario.
 //!
-//! Scenario: three turns (the first user message is huge and carries JSON special
-//! characters), one manual compaction, close; resume, a fourth turn; compact again, resume,
-//! a fifth turn. Assertions read the recorded request bodies (parsed, not raw — the special
-//! characters are JSON-escaped on the wire) and the journal's revision records.
+//! Scenario: three turns (the first user message is short and carries JSON special characters,
+//! so it can survive a compaction verbatim; the second and third assistant replies are the
+//! huge ones, and steer the compaction boundary), one manual compaction, close; resume, a
+//! fourth turn; compact again, resume, a fifth turn. Assertions read the recorded request
+//! bodies (parsed, not raw — the special characters are JSON-escaped on the wire) and the
+//! journal's revision records.
 //!
 //! **Journal self-check coverage**: this test lives in `radian-runtime`, so the AGENTS.md
 //! command `cargo test -p agent-core --features journal-selfcheck` does *not* run it (that
@@ -104,8 +106,8 @@ async fn turns(inbox: &Arc<Inbox>, recorder: &Arc<Recorder>, inputs: &[&str]) {
 }
 
 /// The configuration shared by every driver: `bytes_per_token 1` keeps the arithmetic in
-/// bytes, so the 16k first message is far over the keep target and a manual compaction has a
-/// prefix to summarize.
+/// bytes, so the 16k assistant replies are far over the keep target and a manual compaction
+/// has a prefix to summarize.
 fn agent_config() -> AgentConfig {
     AgentConfig {
         context_budget: Some(ContextBudget::new(3_000).with_bytes_per_token(1)),
