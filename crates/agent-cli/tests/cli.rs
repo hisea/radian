@@ -3380,46 +3380,41 @@ async fn the_default_provider_still_sends_an_openai_request() {
 /// `max_tokens` (16384 default) and one below 1024 are usage errors and leave no session file.
 #[tokio::test]
 async fn the_legacy_enabled_budget_is_accepted_and_clamped_like_high() {
-    let server = anth::MockServer::start(vec![anth_text_reply("ok")]).await;
-    for (mode, budget) in [("enabled:16384", 16384u64), ("enabled:1000", 1000)] {
-        let dir = fresh_session_dir();
-        let (code, _, stderr) = feed_and_wait(
-            spawn_agent_in(
-                &dir,
-                &[
-                    "--model",
-                    "claude",
-                    "--provider",
-                    "anthropic",
-                    "--thinking",
-                    mode,
-                    "-p",
-                    "hi",
-                ],
-                &[
-                    ("ANTHROPIC_API_KEY", "sk-ant-budget"),
-                    ("RADIAN_BASE_URL", &server.base_url),
-                ],
-            ),
-            "",
-        )
-        .await;
-        assert_eq!(code, 2, "{mode} must be a usage error: {stderr}");
-        assert!(stderr.contains("out of range"), "{mode}: {stderr}");
-        assert!(
-            stderr.contains(&format!("enabled:{budget}")),
-            "the message must name the budget: {stderr}"
-        );
-        // The rule and both numbers are in the message.
-        assert!(stderr.contains("1024"), "{mode}: {stderr}");
-        assert!(stderr.contains("16384"), "{mode}: {stderr}");
-        // No session file was created, and no request was sent.
-        assert_session_dir_empty(&dir);
-    }
+    // ADR 0026 D11: the old `enabled:<budget>` spelling is accepted for one version with a
+    // warning; the budget now belongs to the provider map, and this slice's anthropic map
+    // sends the level as `adaptive`. The out-of-range check only fires for a level that maps
+    // to `enabled:<budget>`, which no built-in map does.
+    let server = anth::MockServer::start(vec![anth_text_reply("LEGACY-OK")]).await;
+    let dir = fresh_session_dir();
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_agent_in(
+            &dir,
+            &[
+                "--model",
+                "claude",
+                "--provider",
+                "anthropic",
+                "--thinking",
+                "enabled:8192",
+                "-p",
+                "hi",
+            ],
+            &[
+                ("ANTHROPIC_API_KEY", "sk-ant-budget"),
+                ("RADIAN_BASE_URL", &server.base_url),
+            ],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("LEGACY-OK"), "{stdout}");
     assert!(
-        server.requests().is_empty(),
-        "an out-of-range budget must not reach the model"
+        stderr.contains("deprecated"),
+        "the legacy spelling warns: {stderr}"
     );
+    let body = server.requests()[0].json();
+    assert_eq!(body["thinking"], json!({"type": "adaptive"}), "{body}");
 }
 
 // ---------- session export and search (--export / --search) ----------
