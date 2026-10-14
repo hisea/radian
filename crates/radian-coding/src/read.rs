@@ -209,8 +209,17 @@ fn read_stream<R: BufRead>(
             LineRead::TooLong => {
                 if out.is_empty() {
                     // The start line alone is longer than the whole budget: return a UTF-8
-                    // prefix of it and continue at the next line.
-                    out.extend_from_slice(utf8_prefix(&line, budget));
+                    // prefix of it and continue at the next line. A definite invalid byte
+                    // inside the budget is refused here, exactly like the normal path below.
+                    match utf8_prefix(&line, budget) {
+                        Ok(prefix) => out.extend_from_slice(prefix),
+                        Err(position) => {
+                            return Err(fail(
+                                "not_utf8",
+                                format!("{path} is not valid UTF-8 (byte {position})"),
+                            ));
+                        }
+                    }
                     end_line = lineno;
                     line_truncated = true;
                     next_offset = Some(lineno + 1);
@@ -354,13 +363,19 @@ fn skip_lines<R: BufRead>(reader: &mut R, lines: i64) -> std::io::Result<i64> {
 }
 
 /// The longest prefix of `bytes` that is at most `budget` bytes and ends on a UTF-8 boundary.
-/// The caller has already established that `bytes` is valid UTF-8, so the only failure is an
-/// incomplete character cut by the budget.
-fn utf8_prefix(bytes: &[u8], budget: usize) -> &[u8] {
+///
+/// `Err(position)` when the range holds a **definite** invalid byte (the read must be refused,
+/// like the normal path). An incomplete character *cut by the budget* is not an error: its
+/// valid prefix is returned (that is the legitimate truncation the caller names
+/// `line_truncated`).
+fn utf8_prefix(bytes: &[u8], budget: usize) -> Result<&[u8], usize> {
     let end = budget.min(bytes.len());
     match std::str::from_utf8(&bytes[..end]) {
-        Ok(_) => &bytes[..end],
-        Err(error) => &bytes[..error.valid_up_to()],
+        Ok(_) => Ok(&bytes[..end]),
+        // `error_len() == None`: the budget cut a multi-byte character. Keep the prefix.
+        Err(error) if error.error_len().is_none() => Ok(&bytes[..error.valid_up_to()]),
+        // A definite invalid byte inside the budget: the same refusal as the normal path.
+        Err(error) => Err(error.valid_up_to()),
     }
 }
 
@@ -385,6 +400,100 @@ mod tests {
     }
 
     /// The read phase must not pull more than the budget plus one reader buffer, even when the
+    /// Unwraps the failure side without needing `Debug` on `ReadOutcome`.
+    fn expect_failure(
+        outcome: Result<ReadOutcome, ToolFailure>,
+    ) -> ToolFailure {
+        match outcome {
+            Ok(outcome) => panic!(
+                "expected a failure, got content {:?} (truncated {})",
+                outcome.content, outcome.line_truncated
+            ),
+            Err(error) => error,
+        }
+    }
+
+    /// An over-long start line with a **definite** invalid byte inside the budget is refused,
+    /// not silently cut into "looks-valid" text (the tool's description promises binary
+    /// content is refused). `0xFF` can never appear in UTF-8.
+    #[test]
+    fn an_over_long_first_line_with_an_invalid_byte_is_refused() {
+        // The invalid byte sits inside the budget (position 2 of an 8-byte budget).
+        let bytes = b"ab\xFFcd".repeat(64);
+        let mut reader = BufReader::new(&bytes[..]);
+        let error = expect_failure(read_stream(
+            &mut reader,
+            "bad.bin",
+            bytes.len() as u64,
+            8,
+            1,
+            None,
+        ));
+        assert_eq!(error.code, "not_utf8", "{error:?}");
+        assert!(
+            error.message.contains("byte 2"),
+            "the message names the byte position: {error:?}"
+        );
+
+        // At the very start of the line: refused too (the old code returned empty content).
+        let bytes = b"\xFFfill".repeat(64);
+        let mut reader = BufReader::new(&bytes[..]);
+        let error = expect_failure(read_stream(
+            &mut reader,
+            "bad.bin",
+            bytes.len() as u64,
+            8,
+            1,
+            None,
+        ));
+        assert_eq!(error.code, "not_utf8", "{error:?}");
+        assert!(error.message.contains("byte 0"), "{error:?}");
+    }
+
+    /// A budget that cuts a multi-byte character in half is the legitimate truncation: the
+    /// prefix is returned, never half a character, with `line_truncated` and the hint.
+    #[test]
+    fn an_over_long_first_line_cut_mid_character_keeps_a_valid_prefix() {
+        // "ab" + a 3-byte character + filler; budget 4 cuts inside the character.
+        let mut bytes = b"ab".to_vec();
+        bytes.extend_from_slice("€".as_bytes());
+        bytes.extend_from_slice(&b"x".repeat(64));
+        let mut reader = BufReader::new(&bytes[..]);
+        let outcome = read_stream(&mut reader, "long.txt", bytes.len() as u64, 4, 1, None)
+            .expect("a budget cut is not an error");
+        assert!(
+            outcome.content.starts_with("ab"),
+            "only complete characters survive: {}",
+            outcome.content
+        );
+        assert!(outcome.line_truncated, "truncated: {}", outcome.content);
+        assert!(outcome.next_offset.is_some(), "next: {:?}", outcome.next_offset);
+        assert!(
+            outcome.content.contains("[line 1 truncated at max_bytes; continue with offset="),
+            "content: {}",
+            outcome.content
+        );
+    }
+
+    /// An invalid byte **beyond** the budget is this read's business only in so far as it was
+    /// not read: the read stops at the budget, so it succeeds. (Intentional: the tool answers
+    /// for the bytes it read, not for the rest of the file.)
+    #[test]
+    fn an_invalid_byte_beyond_the_budget_does_not_fail_the_read() {
+        let mut bytes = b"a".repeat(20);
+        bytes.push(0xFF);
+        bytes.extend_from_slice(&b"b".repeat(64));
+        let mut reader = BufReader::new(&bytes[..]);
+        let outcome = read_stream(&mut reader, "late-bad.bin", bytes.len() as u64, 8, 1, None)
+            .expect("the invalid byte was never read");
+        assert!(
+            outcome.content.starts_with("aaaaaaaa"),
+            "content: {}",
+            outcome.content
+        );
+        assert!(outcome.line_truncated, "truncated: {}", outcome.content);
+    }
+
     /// file is one enormous line with no newline (the OOM case `read_until` had). The source is
     /// an infinite repeat, so only a bounded implementation terminates at all.
     #[test]
