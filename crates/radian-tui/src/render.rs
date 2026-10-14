@@ -190,6 +190,8 @@ pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
         EntryKind::Startup => "  ",
         EntryKind::Warning => "! ",
         EntryKind::Tip => "Tip: ",
+        // ADR 0033: the command line; `!` (context) vs `!!` (not) differ in color, not marker.
+        EntryKind::Bash { .. } => "$ ",
     }
 }
 
@@ -208,6 +210,13 @@ fn marker(kind: EntryKind, theme: &Theme) -> (&'static str, Style) {
         EntryKind::Tip => theme.truncation,
         // The compaction one-liner is structural: the hunk/accent role.
         EntryKind::Compaction => theme.diff_hunk,
+        // ADR 0033: `!` uses the command color; `!!` steps down to the hint level.
+        EntryKind::Bash {
+            exclude_from_context: false,
+        } => theme.tool_call,
+        EntryKind::Bash {
+            exclude_from_context: true,
+        } => theme.hint,
     };
     (marker_prefix(kind), style)
 }
@@ -225,6 +234,13 @@ fn body_style(entry: &Entry, theme: &Theme) -> Style {
         EntryKind::Tip => theme.hint,
         // The expanded summary is body text; its one-liner is styled by `marker`.
         EntryKind::Compaction => theme.notice_body,
+        // ADR 0033: the same split as `marker`.
+        EntryKind::Bash {
+            exclude_from_context: false,
+        } => theme.tool_call,
+        EntryKind::Bash {
+            exclude_from_context: true,
+        } => theme.hint,
         EntryKind::User | EntryKind::Assistant => {
             if entry.interrupted {
                 Style::default().add_modifier(Modifier::ITALIC)

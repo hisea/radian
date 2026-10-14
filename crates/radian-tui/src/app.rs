@@ -123,6 +123,11 @@ pub enum EntryKind {
     /// A compaction summary (ADR 0028 R5): one line when folded, the summary and the user's
     /// verbatim words when expanded.
     Compaction,
+    /// A user's `!`/`!!` command and its output (ADR 0033). The renderer colors `!` (goes to
+    /// the model's context) and `!!` (does not) differently; the first line is `$ cmd`.
+    Bash {
+        exclude_from_context: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -373,6 +378,87 @@ pub const QUIT_WINDOW: Duration = Duration::from_secs(2);
 /// background `/v1/models` refresh must not silently cancel the pending quit.
 ///
 /// The match is exhaustive on purpose: a new `Input` variant forces a decision here.
+/// The transcript block for a `!`/`!!` command (ADR 0033): `$ cmd` first, the output, the exit
+/// status. The live-display form; the model-side text is [`bash_context_text`].
+fn bash_entry(command: &str, exclude_from_context: bool, run: &radian_coding::UserBash) -> Entry {
+    // The renderer's marker column carries the `$ ` (ADR 0028); the text here is
+    // the command and its output.
+    let mut text = command.to_owned();
+    if !run.stdout.is_empty() {
+        text.push('\n');
+        text.push_str(run.stdout.trim_end_matches('\n'));
+    }
+    if !run.stderr.is_empty() {
+        text.push('\n');
+        text.push_str(run.stderr.trim_end_matches('\n'));
+    }
+    text.push('\n');
+    if run.cancelled {
+        text.push_str("[cancelled]");
+    } else if run.timed_out {
+        text.push_str("[timed out]");
+    } else {
+        text.push_str(&format!(
+            "[exit code: {}]",
+            run.exit_code
+                .map_or_else(|| "none".to_owned(), |code| code.to_string())
+        ));
+    }
+    Entry::new(
+        EntryKind::Bash {
+            exclude_from_context,
+        },
+        text,
+    )
+}
+
+/// The user message a `!` command injects (ADR 0033; omp's shape): ``Ran `cmd` `` + a fenced
+/// output block + the exit status. The command string is part of the context too.
+fn bash_context_text(command: &str, run: &radian_coding::UserBash) -> String {
+    let mut out = format!("Ran `{command}`\n```\n");
+    out.push_str(&run.stdout);
+    if !run.stderr.is_empty() {
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&run.stderr);
+    }
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("```\n");
+    if run.cancelled {
+        out.push_str("(command cancelled)");
+    } else if run.timed_out {
+        out.push_str("(command timed out)");
+    } else {
+        match run.exit_code {
+            Some(code) => out.push_str(&format!("Command exited with code {code}")),
+            None => out.push_str("Command exited without a code (killed by a signal)"),
+        }
+    }
+    out
+}
+
+/// The command in a `Ran \`cmd\`` context message, or `None` when the text is not one.
+fn bash_context_command(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("Ran `")?;
+    let end = rest.find('`')?;
+    Some(&rest[..end])
+}
+
+/// A resumed `!` context message as a Bash block: `$ cmd` (its first line) and the fenced body.
+fn bash_entry_from_context(text: &str) -> Option<Entry> {
+    let command = bash_context_command(text)?;
+    let body = text.find('\n').map_or("", |i| &text[i + 1..]);
+    Some(Entry::new(
+        EntryKind::Bash {
+            exclude_from_context: false,
+        },
+        format!("{command}\n{}", body.trim_end_matches('\n')),
+    ))
+}
+
 fn is_user_input(input: &Input) -> bool {
     match input {
         Input::Action(_)
@@ -405,6 +491,7 @@ fn is_user_input(input: &Input) -> bool {
         | Input::CompletionsReady { .. }
         | Input::MemoryCommandDone(_)
         | Input::CompactDone(_)
+        | Input::BashDone { .. }
         | Input::ThinkingChecked { .. }
         | Input::ModelChecked { .. }
         | Input::SwitchCompacted { .. }
@@ -576,6 +663,12 @@ pub enum Input {
     MemoryCommandDone(MemoryResult),
     /// A manual `/compact` finished (the result of [`Effect::Compact`]).
     CompactDone(Result<CompactionOutcome, String>),
+    /// A `!`/`!!` command finished (the result of [`Effect::RunBash`]).
+    BashDone {
+        command: String,
+        exclude_from_context: bool,
+        result: Result<radian_coding::UserBash, String>,
+    },
     /// A `/thinking` level was clamped against the current model's map (D11): `applied` is the
     /// level that will be used (`None` when the model supports no level at all) and
     /// `supported` the levels the completion offered.
@@ -794,6 +887,24 @@ pub enum Effect {
     /// facade and journals one `ProjectTrustChanged` per write. The answer is
     /// [`Input::TrustResolved`].
     SetTrust { choice: radian_host::trust::Choice },
+    /// Run a `!`/`!!` command in the sandbox (ADR 0033). The loop spawns it and answers with
+    /// [`Input::BashDone`].
+    RunBash {
+        command: String,
+        exclude_from_context: bool,
+    },
+    /// Enqueue the `Ran \`cmd\`` message for `!` (ADR 0033) as an input that does **not** wake
+    /// an idle driver (ADR 0011's `inject`), so the next turn carries it and no turn starts now.
+    Inject(Message),
+    /// Append one durable `UserBash` audit record (ADR 0033). `!!` emits it too.
+    AuditUserBash {
+        command: String,
+        exclude_from_context: bool,
+        exit_code: Option<i32>,
+        cancelled: bool,
+    },
+    /// Cancel the running `!`/`!!` command (Esc, ADR 0033).
+    CancelBash,
 }
 
 /// Effects are compared by **meaning** in the tests. `MemoryCommand` (a clap enum) has no
@@ -883,6 +994,32 @@ impl PartialEq for Effect {
             ) => an == bn && aa == ba && as_ == bs,
             (ListSkills, ListSkills) => true,
             (Theme { name: a }, Theme { name: b }) => a == b,
+            (Inject(a), Inject(b)) => a == b,
+            (CancelBash, CancelBash) => true,
+            (
+                RunBash {
+                    command: ac,
+                    exclude_from_context: ae,
+                },
+                RunBash {
+                    command: bc,
+                    exclude_from_context: be,
+                },
+            ) => ac == bc && ae == be,
+            (
+                AuditUserBash {
+                    command: ac,
+                    exclude_from_context: ae,
+                    exit_code: aix,
+                    cancelled: aca,
+                },
+                AuditUserBash {
+                    command: bc,
+                    exclude_from_context: be,
+                    exit_code: bix,
+                    cancelled: bca,
+                },
+            ) => ac == bc && ae == be && aix == bix && aca == bca,
             _ => false,
         }
     }
@@ -1056,6 +1193,16 @@ pub struct App {
     pub next_model: Option<String>,
     /// The queued thinking level (D11), cleared when the driver applies it.
     pub next_thinking: Option<String>,
+    /// The `!`/`!!` command currently running (ADR 0033); `Some` blocks a second one.
+    pub bash_running: Option<String>,
+    /// A `!`/`!!` command submitted while a turn was running: it starts when the turn ends.
+    pub queued_bash: Option<(String, bool)>,
+    /// Whether this session has a shell (`!`) at all: false on the `safe` tier (ADR 0012).
+    pub bash_available: bool,
+    /// The exact `Ran \`cmd\`` text we displayed live as a [`EntryKind::Bash`] block for a `!`
+    /// command. When that message is admitted to the transcript, `push_message` skips it so
+    /// the block is not shown twice; a resume has no pending text and renders it as a block.
+    bash_context_pending: Option<String>,
     /// The color theme (config `tui.theme`, `NO_COLOR`).
     pub theme: Theme,
     /// The key bindings (config `tui.keybindings`), defaulting to the pre-config key table.
@@ -1151,6 +1298,10 @@ impl App {
             pending_fetch: None,
             next_model: None,
             next_thinking: None,
+            bash_running: None,
+            queued_bash: None,
+            bash_available: true,
+            bash_context_pending: None,
             theme: Theme::default(),
             keymap: Keymap::default(),
             input_style: InputStyle::default(),
@@ -2288,6 +2439,11 @@ impl App {
             }
             Input::MemoryCommandDone(result) => self.memory_command_done(result),
             Input::CompactDone(result) => self.compact_done(result),
+            Input::BashDone {
+                command,
+                exclude_from_context,
+                result,
+            } => self.bash_done(command, exclude_from_context, result),
             Input::ThinkingChecked {
                 requested,
                 applied,
@@ -2774,8 +2930,10 @@ impl App {
                 if let Some(escaped) = trimmed.strip_prefix("//") {
                     return self.begin_send(format!("/{escaped}"));
                 }
-                // A `/…` line is a command: it never reaches the model or the journal.
-                if trimmed.starts_with('/') {
+                // A `/…` line is a command: it never reaches the model or the journal. A `!`
+                // line is the user's shell command (ADR 0033), routed before `/` so `!/bin/sh`
+                // is a command and not the unknown `/bin/sh`.
+                if trimmed.starts_with('/') || trimmed.starts_with('!') {
                     return self.run_slash_command(trimmed);
                 }
                 self.begin_send(text)
@@ -2937,6 +3095,11 @@ impl App {
                     self.history_cursor = None;
                     self.history_stash.clear();
                     UpdateResult::dirty()
+                } else if self.bash_running.is_some() {
+                    // Esc cancels the running `!` command (ADR 0033); the task reports back
+                    // as a cancelled `BashDone`.
+                    self.push_notice("cancelling the command…");
+                    UpdateResult::effect(Effect::CancelBash)
                 } else {
                     self.cancel_or_quit_now()
                 }
@@ -3338,8 +3501,78 @@ impl App {
         UpdateResult::dirty()
     }
 
-    /// Runs one `/…` line. Parsing is pure; everything that touches the world becomes an
-    /// effect, and its result comes back as another [`Input`]. The line is not sent anywhere.
+    /// A `!`/`!!` command (ADR 0033): one at a time, and while a turn is running it waits for
+    /// the turn to end rather than racing it. The `safe` tier has no shell at all.
+    fn begin_bash(&mut self, command: String, exclude_from_context: bool) -> UpdateResult {
+        if !self.bash_available {
+            self.push_notice(
+                "the `safe` tier has no shell (ADR 0012); `!` needs a shell-capable tier",
+            );
+            return UpdateResult::dirty();
+        }
+        if self.bash_running.is_some() {
+            self.push_notice("a shell command is already running; Esc cancels it first");
+            return UpdateResult::dirty();
+        }
+        if self.turn() == TurnState::Running {
+            self.queued_bash = Some((command, exclude_from_context));
+            self.push_notice("a turn is running; the command runs when it ends");
+            return UpdateResult::dirty();
+        }
+        self.bash_running = Some(command.clone());
+        UpdateResult::effect(Effect::RunBash {
+            command,
+            exclude_from_context,
+        })
+    }
+
+    /// A `!`/`!!` command finished: show its block, and for `!` enqueue the `Ran \`cmd\``
+    /// message for the next turn (never starting one, ADR 0011). The audit record is emitted
+    /// for both `!` and `!!`.
+    fn bash_done(
+        &mut self,
+        command: String,
+        exclude_from_context: bool,
+        result: Result<radian_coding::UserBash, String>,
+    ) -> UpdateResult {
+        self.bash_running = None;
+        let mut effects = Vec::new();
+        let (exit_code, cancelled) = match &result {
+            Ok(run) => (run.exit_code, run.cancelled),
+            Err(_) => (None, false),
+        };
+        match result {
+            Ok(run) => {
+                self.entries
+                    .push(bash_entry(&command, exclude_from_context, &run));
+                if !exclude_from_context {
+                    let text = bash_context_text(&command, &run);
+                    // Shown live; the same message coming back through the transcript is
+                    // skipped so the block is not drawn twice.
+                    self.bash_context_pending = Some(text.clone());
+                    effects.push(Effect::Inject(Message::user(text)));
+                }
+            }
+            Err(error) => self.entries.push(Entry::new(
+                EntryKind::Notice,
+                format!("!{command}: {error}"),
+            )),
+        }
+        effects.push(Effect::AuditUserBash {
+            command,
+            exclude_from_context,
+            exit_code,
+            cancelled,
+        });
+        UpdateResult {
+            dirty: true,
+            effects,
+        }
+    }
+
+    /// Runs one `/…` line (and a `!`/`!!` line, which shares the parse). Parsing is pure;
+    /// everything that touches the world becomes an effect, and its result comes back as
+    /// another [`Input`]. The line is not sent anywhere.
     fn run_slash_command(&mut self, line: &str) -> UpdateResult {
         match command::parse(line, self.memory_enabled) {
             command::Outcome::Notices(notices) => {
@@ -3446,6 +3679,12 @@ impl App {
                 let steer = self.turn() == TurnState::Running;
                 UpdateResult::effect(Effect::ExpandSkill { name, args, steer })
             }
+            // `!`/`!!` (ADR 0033): executed by the loop in the sandbox. `!` also enqueues its
+            // `Ran \`cmd\`` message for the model, but only once it has run.
+            command::Outcome::Bash {
+                command,
+                exclude_from_context,
+            } => self.begin_bash(command, exclude_from_context),
             // `/skills`: the host lists the discovered skills as notices.
             command::Outcome::Skills => UpdateResult::effect(Effect::ListSkills),
             command::Outcome::Message => UpdateResult::none(),
@@ -3552,6 +3791,7 @@ impl App {
     /// Returns the effects the event implies (clearing an approval prompt abandons its reply
     /// channel, which the loop owns).
     pub fn apply_event(&mut self, event: &AgentEvent) -> Vec<Effect> {
+        let mut effects = Vec::new();
         match event {
             // ADR 0023 U5: the turn, budget, usage and tool facts are written to the session
             // projection by the event sink (`ProjectionSink`), never here. `App` handles only
@@ -3605,10 +3845,14 @@ impl App {
                 // from the queue alone is what makes "the waiter gave up" and "the turn ended"
                 // the same event.
                 self.note = None;
+                // ADR 0033: a `!` submitted behind the turn starts now.
+                if let Some((command, exclude_from_context)) = self.queued_bash.take() {
+                    effects.extend(self.begin_bash(command, exclude_from_context).effects);
+                }
             }
             _ => {}
         }
-        Vec::new()
+        effects
     }
 
     /// Sets the live entry of `kind` to `text` (creating it when it does not exist yet). The
@@ -3648,6 +3892,20 @@ impl App {
             self.live_count = 0;
             #[cfg(test)]
             LIVE_SCANS.with(|count| count.set(count.get() + scanned));
+        }
+        // ADR 0033: a `!` command's `Ran \`cmd\`` context message is a Bash block, not user
+        // prose. The one we already drew live is skipped so it is not shown twice; a resumed
+        // one (no pending text) is drawn as a block.
+        if let Message::User { .. } = message {
+            let text = message.text();
+            if self.bash_context_pending.as_deref() == Some(text.as_str()) {
+                self.bash_context_pending = None;
+                return;
+            }
+            if let Some(entry) = bash_entry_from_context(&text) {
+                self.entries.push(entry);
+                return;
+            }
         }
         match message {
             Message::User { content, .. } => {
@@ -3833,6 +4091,12 @@ impl App {
     /// The loop's current instant (ADR 0027): the timer never reads the clock.
     pub fn set_now(&mut self, now: Instant) {
         self.now = now;
+    }
+
+    /// Whether this session has a shell for `!` (ADR 0033): false on the `safe` tier, which
+    /// has no sandbox at all (ADR 0012).
+    pub fn set_bash_available(&mut self, available: bool) {
+        self.bash_available = available;
     }
 
     /// The contributor store the renderer reads (ADR 0027 C3).

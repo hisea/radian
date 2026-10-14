@@ -86,6 +86,13 @@ pub enum Outcome {
     Skill { name: String, args: String },
     /// `/skills`: list the discovered skills (name + description) as notices.
     Skills,
+    /// A user's `!`/`!!` shell command (ADR 0033). The command string runs in the sandbox
+    /// (the tier's shell); `exclude_from_context` (`!!`) keeps its output out of the model's
+    /// context. Execution is the loop's effect.
+    Bash {
+        command: String,
+        exclude_from_context: bool,
+    },
     /// Not a command after all (an empty token list); the caller sends the line.
     Message,
 }
@@ -759,6 +766,27 @@ fn skill_command(first: &str, line: &str) -> Outcome {
 /// has a memory root; without one `/memory` is refused with a notice. Pure: it never runs a
 /// command (ADR 0023 U3).
 pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
+    // ADR 0033: `!`/`!!` comes **before** the `/…` commands, so `!/bin/sh` is a command, not
+    // the unknown `/bin/sh`. The rest of the line is the shell command verbatim (never
+    // shlexed here: the shell its own quoting); only surrounding whitespace is trimmed.
+    if line.starts_with('!') {
+        let (exclude_from_context, rest) = match line.strip_prefix("!!") {
+            Some(rest) => (true, rest),
+            None => (false, &line[1..]),
+        };
+        let command = rest.trim();
+        if command.is_empty() {
+            return Outcome::Notices(vec![
+                "usage: !<command> runs it in the sandbox (!!<command> keeps its output out of \
+                 the model's context)"
+                    .to_owned(),
+            ]);
+        }
+        return Outcome::Bash {
+            command: command.to_owned(),
+            exclude_from_context,
+        };
+    }
     let tokens = match shlex::split(line) {
         Some(tokens) => tokens,
         None => return Outcome::Notices(vec![format!("unbalanced quotes in {line:?}")]),
