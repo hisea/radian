@@ -326,10 +326,16 @@ pub fn resolve_route(
             .or_else(|| auth_base_url.map(str::to_owned))
             .unwrap_or_else(|| descriptor.default_base_url.to_owned())
     } else {
-        // A per-model base URL when the descriptor lists one, else the descriptor default.
-        descriptor
-            .model(model)
-            .map(|entry| entry.base_url.to_owned())
+        // A credential-level override (the entry's `env.RADIAN_BASE_URL`) wins for tests and
+        // self-hosted endpoints; otherwise a per-model base URL when the descriptor lists one,
+        // else the descriptor default.
+        auth_base_url
+            .map(str::to_owned)
+            .or_else(|| {
+                descriptor
+                    .model(model)
+                    .map(|entry| entry.base_url.to_owned())
+            })
             .unwrap_or_else(|| descriptor.default_base_url.to_owned())
     };
     let mut headers = descriptor.request_headers(session_id);

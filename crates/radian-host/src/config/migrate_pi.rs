@@ -113,8 +113,8 @@ pub fn import_pi(dir: &Path) -> Result<PiDraft, PiMigrateError> {
     let mut draft = Draft::default();
     // The credential file is deliberately never opened — not even to check whether it exists.
     draft.note(
-        "credentials are not migrated: `auth.json` is never read. Put the key in the \
-         environment variable that `model.api_key` names.",
+        "credentials are not migrated: `auth.json` is never read. Add an entry to \
+         `~/.radian/credentials/auth.json` yourself (ADR 0026 D2).",
     );
 
     let settings = read_json(dir, "settings.json", &mut draft)?;
@@ -398,7 +398,7 @@ fn map_models(settings: Option<&Json>, models: Option<&Json>, draft: &mut Draft)
             None => {}
         }
         if let Some(value) = entry.get("apiKey") {
-            draft.api_key_env = secret_ref(value, name, draft);
+            secret_ref(value, name, draft);
         }
         if let Some(Json::Object(headers)) = entry.get("headers") {
             for (header, value) in headers {
@@ -533,41 +533,41 @@ fn contains_interpolation(text: &str) -> bool {
     false
 }
 
-/// Turns a Pi `apiKey` into the **name** of an environment variable for `model.api_key`. A
-/// literal value is never returned, copied or printed.
-fn secret_ref(value: &Json, provider: &str, draft: &mut Draft) -> Option<String> {
+/// Reports a Pi `apiKey` as a note: the key is **never** copied into the draft (ADR 0026 D2
+/// removed `model.api_key`; the key belongs in `auth.json`). A literal value is never shown.
+fn secret_ref(value: &Json, provider: &str, draft: &mut Draft) {
+    let auth_hint = |env: &str| {
+        format!(
+            "put it in `~/.radian/credentials/auth.json` as \
+             {{\"{provider}\": {{\"type\": \"api_key\", \"key\": \"${env}\"}}}}"
+        )
+    };
     let Some(text) = value.as_str() else {
         draft.note(format!(
             "`models.providers.{provider}.apiKey`: not a string, skipped"
         ));
-        return None;
+        return;
     };
     match classify(text) {
-        SecretShape::Env(name) => Some(name.to_owned()),
-        SecretShape::Command => {
-            draft.note(format!(
-                "`models.providers.{provider}.apiKey`: a `!command` value is not supported and \
-                 was not executed; set `model.api_key` to an environment reference yourself"
-            ));
-            None
-        }
-        SecretShape::Interpolated => {
-            draft.note(format!(
-                "`models.providers.{provider}.apiKey`: the value interpolates a variable \
-                 inside a longer string; Radian's `model.api_key` names one variable; not \
-                 migrated"
-            ));
-            None
-        }
-        SecretShape::Literal => {
-            let suggested = suggested_env(provider);
-            draft.note(format!(
-                "`models.providers.{provider}.apiKey`: a literal value was not migrated (its \
-                 value is never shown); put it in `${suggested}`, which is what the draft \
-                 references"
-            ));
-            Some(suggested)
-        }
+        SecretShape::Env(name) => draft.note(format!(
+            "`models.providers.{provider}.apiKey`: credentials are not migrated; {}",
+            auth_hint(name)
+        )),
+        SecretShape::Command => draft.note(format!(
+            "`models.providers.{provider}.apiKey`: a `!command` value is not supported and was \
+             not executed; {}",
+            auth_hint(&suggested_env(provider))
+        )),
+        SecretShape::Interpolated => draft.note(format!(
+            "`models.providers.{provider}.apiKey`: the value interpolates a variable inside a \
+             longer string and was not migrated; {}",
+            auth_hint(&suggested_env(provider))
+        )),
+        SecretShape::Literal => draft.note(format!(
+            "`models.providers.{provider}.apiKey`: a literal value was not migrated (its value \
+             is never shown); {}",
+            auth_hint(&suggested_env(provider))
+        )),
     }
 }
 
@@ -850,7 +850,6 @@ struct Draft {
     provider: Option<String>,
     base_url: Option<String>,
     model: Option<String>,
-    api_key_env: Option<String>,
     headers: Vec<(String, String)>,
     auto_compact: Option<bool>,
     theme: Option<String>,
@@ -880,12 +879,6 @@ impl Draft {
         }
         if let Some(name) = &self.model {
             model.insert("model".into(), Toml::String(name.clone()));
-        }
-        if let Some(env) = &self.api_key_env {
-            let mut secret = toml::map::Map::new();
-            secret.insert("from".into(), Toml::String("env".into()));
-            secret.insert("name".into(), Toml::String(env.clone()));
-            model.insert("api_key".into(), Toml::Table(secret));
         }
         if !self.headers.is_empty() {
             let mut headers = toml::map::Map::new();

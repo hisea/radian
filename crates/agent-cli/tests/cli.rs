@@ -128,7 +128,50 @@ fn fresh_session_dir() -> PathBuf {
     dir
 }
 
+/// Writes `credentials/auth.json` (0600) under `root` for the key env vars in `envs` (ADR
+/// 0026 D2: the key comes only from `auth.json`). `ANTHROPIC_API_KEY` maps to the `anthropic`
+/// descriptor; `OPENAI_API_KEY` and any other `*KEY` name to the default `openai-compatible`.
+fn write_auth_json(root: &Path, envs: &[(&str, &str)]) {
+    let base_url = envs
+        .iter()
+        .find(|(name, _)| *name == "RADIAN_BASE_URL")
+        .map(|(_, value)| *value);
+    let mut entries = serde_json::Map::new();
+    for (name, value) in envs {
+        let provider = if *name == "ANTHROPIC_API_KEY" {
+            "anthropic"
+        } else if name.ends_with("KEY") {
+            "openai-compatible"
+        } else {
+            continue;
+        };
+        let mut entry = serde_json::json!({"type": "api_key", "key": value});
+        if let Some(url) = base_url {
+            entry["env"] = serde_json::json!({ "RADIAN_BASE_URL": url });
+        }
+        entries.insert(provider.to_string(), entry);
+    }
+    if entries.is_empty() {
+        return;
+    }
+    let dir = root.join("credentials");
+    std::fs::create_dir_all(&dir).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let path = dir.join("auth.json");
+    std::fs::write(&path, serde_json::to_string(&entries).unwrap()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
 fn spawn_agent(args: &[&str], envs: &[(&str, &str)]) -> Child {
+    let home = fresh_session_dir();
+    write_auth_json(&home, envs);
     Command::new(agent_bin())
         .args(args)
         .env_remove("OPENAI_API_KEY")
@@ -141,7 +184,7 @@ fn spawn_agent(args: &[&str], envs: &[(&str, &str)]) -> Child {
         .env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json")
         // No test may read the user's real config file: pin the whole `~/.radian` root and
         // drop `RADIAN_CONFIG` (either could otherwise point at a real file).
-        .env("RADIAN_HOME", fresh_session_dir())
+        .env("RADIAN_HOME", &home)
         .env_remove("RADIAN_CONFIG")
         .envs(envs.iter().copied())
         .stdin(Stdio::piped())
@@ -576,16 +619,7 @@ async fn the_key_comes_from_the_named_env_and_never_leaks() {
 
     let (code, stdout, stderr) = feed_and_wait(
         spawn_agent(
-            &[
-                "--model",
-                "m",
-                "--base-url",
-                &server.base_url,
-                "-p",
-                "hi",
-                "--api-key-env",
-                "AGENT_CLI_TEST_KEY",
-            ],
+            &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
             &[("AGENT_CLI_TEST_KEY", KEY)],
         ),
         "",
@@ -622,7 +656,7 @@ async fn a_remote_base_url_without_a_key_fails_fast() {
     .await;
 
     assert_eq!(code, 2);
-    assert!(stderr.contains("OPENAI_API_KEY"), "{stderr}");
+    assert!(stderr.contains("auth.json"), "{stderr}");
     // No network round trip was attempted.
     assert!(
         start.elapsed() < Duration::from_secs(2),
@@ -757,7 +791,7 @@ async fn an_authorization_header_is_refused_so_the_key_has_one_source() {
 
     assert_eq!(code, 2);
     assert!(stdout.is_empty(), "{stdout}");
-    assert!(stderr.contains("--api-key-env"), "{stderr}");
+    assert!(stderr.contains("auth.json"), "{stderr}");
     assert!(!stderr.contains("sk-from-a-header"), "{stderr}");
     assert!(
         server.requests().is_empty(),
@@ -1815,8 +1849,6 @@ async fn the_session_file_contains_no_key_or_header_values() {
                 "s-secret",
                 "--session-dir",
                 sessions.to_str().unwrap(),
-                "--api-key-env",
-                "AGENT_CLI_FILE_KEY",
                 "--header",
                 "x-team-token=file-secret-value",
                 "-p",
@@ -2684,10 +2716,6 @@ async fn a_context_window_at_or_below_the_reservation_is_rejected() {
                 "claude-x",
                 "--provider",
                 "anthropic",
-                "--base-url",
-                &server.base_url,
-                "--api-key-env",
-                "ANTHROPIC_API_KEY",
                 "--workspace",
                 ws.to_str().unwrap(),
                 "--yes",
@@ -2696,7 +2724,10 @@ async fn a_context_window_at_or_below_the_reservation_is_rejected() {
                 "-p",
                 "go",
             ],
-            &[("ANTHROPIC_API_KEY", "sk-ant-test-key")],
+            &[
+                ("ANTHROPIC_API_KEY", "sk-ant-test-key"),
+                ("RADIAN_BASE_URL", &server.base_url),
+            ],
         ),
         "",
     )
@@ -2765,6 +2796,8 @@ async fn an_over_budget_turn_records_a_normal_outcome() {
 /// Like [`spawn_agent`], but uses a caller-owned session directory, so a test can assert
 /// that a failed start left it empty (dogfooding D2).
 fn spawn_agent_in(session_dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Child {
+    let home = fresh_session_dir();
+    write_auth_json(&home, envs);
     Command::new(agent_bin())
         .args(args)
         .env_remove("OPENAI_API_KEY")
@@ -2772,7 +2805,7 @@ fn spawn_agent_in(session_dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> C
         // Isolate the catalog cache, the `~/.radian` root and the network, like `spawn_agent`.
         .env("HOME", fresh_session_dir())
         .env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json")
-        .env("RADIAN_HOME", fresh_session_dir())
+        .env("RADIAN_HOME", &home)
         .env_remove("RADIAN_CONFIG")
         .envs(envs.iter().copied())
         .stdin(Stdio::piped())
@@ -3022,19 +3055,11 @@ async fn anthropic_provider_sends_a_messages_request_and_shows_the_reply() {
     let server = anth::MockServer::start(vec![anth_text_reply("ANTHROPIC-REPLY-OK")]).await;
     let (code, stdout, stderr) = feed_and_wait(
         spawn_agent(
+            &["--model", "claude-x", "--provider", "anthropic", "-p", "hi"],
             &[
-                "--model",
-                "claude-x",
-                "--provider",
-                "anthropic",
-                "--base-url",
-                &server.base_url,
-                "--api-key-env",
-                "ANTHROPIC_API_KEY",
-                "-p",
-                "hi",
+                ("ANTHROPIC_API_KEY", "sk-ant-test-key"),
+                ("RADIAN_BASE_URL", &server.base_url),
             ],
-            &[("ANTHROPIC_API_KEY", "sk-ant-test-key")],
         ),
         "",
     )
@@ -3069,14 +3094,15 @@ async fn anthropic_reads_anthropic_api_key_env_by_default_and_never_leaks_it() {
                 "claude",
                 "--provider",
                 "anthropic",
-                "--base-url",
-                &server.base_url,
                 "--session-id",
                 "anthro-env",
                 "-p",
                 "hi",
             ],
-            &[("ANTHROPIC_API_KEY", "sk-ant-default-env-key")],
+            &[
+                ("ANTHROPIC_API_KEY", "sk-ant-default-env-key"),
+                ("RADIAN_BASE_URL", &server.base_url),
+            ],
         ),
         "",
     )
@@ -3120,14 +3146,15 @@ async fn anthropic_thinking_modes_are_sent_in_the_body() {
                     "claude",
                     "--provider",
                     "anthropic",
-                    "--base-url",
-                    &server.base_url,
                     "--thinking",
                     mode,
                     "-p",
                     "hi",
                 ],
-                &[("ANTHROPIC_API_KEY", "sk-ant-thinking")],
+                &[
+                    ("ANTHROPIC_API_KEY", "sk-ant-thinking"),
+                    ("RADIAN_BASE_URL", &server.base_url),
+                ],
             ),
             "",
         )
@@ -3151,14 +3178,15 @@ async fn the_session_snapshot_names_the_real_provider() {
                 "claude",
                 "--provider",
                 "anthropic",
-                "--base-url",
-                &server.base_url,
                 "--session-id",
                 "snap-ant",
                 "-p",
                 "hi",
             ],
-            &[("ANTHROPIC_API_KEY", "sk-ant-snap")],
+            &[
+                ("ANTHROPIC_API_KEY", "sk-ant-snap"),
+                ("RADIAN_BASE_URL", &server.base_url),
+            ],
         ),
         "",
     )
@@ -3235,14 +3263,15 @@ async fn anthropic_rejects_a_thinking_budget_out_of_range_before_creating_a_sess
                     "claude",
                     "--provider",
                     "anthropic",
-                    "--base-url",
-                    &server.base_url,
                     "--thinking",
                     mode,
                     "-p",
                     "hi",
                 ],
-                &[("ANTHROPIC_API_KEY", "sk-ant-budget")],
+                &[
+                    ("ANTHROPIC_API_KEY", "sk-ant-budget"),
+                    ("RADIAN_BASE_URL", &server.base_url),
+                ],
             ),
             "",
         )
@@ -3945,10 +3974,6 @@ async fn anthropic_provider_accepts_thinking_and_max_tokens() {
                 "claude-x",
                 "--provider",
                 "anthropic",
-                "--base-url",
-                &server.base_url,
-                "--api-key-env",
-                "ANTHROPIC_API_KEY",
                 "--thinking",
                 "adaptive",
                 "--max-tokens",
@@ -3956,7 +3981,10 @@ async fn anthropic_provider_accepts_thinking_and_max_tokens() {
                 "-p",
                 "hi",
             ],
-            &[("ANTHROPIC_API_KEY", "sk-ant-test-key")],
+            &[
+                ("ANTHROPIC_API_KEY", "sk-ant-test-key"),
+                ("RADIAN_BASE_URL", &server.base_url),
+            ],
         ),
         "",
     )
@@ -4449,6 +4477,13 @@ async fn the_startup_line_names_the_catalog() {
 /// Like [`spawn_agent`], but without the default `RADIAN_SESSION_DIR`, so a test controls the
 /// session location (`RADIAN_HOME` / `RADIAN_SESSION_DIR` / `--session-dir`).
 fn spawn_agent_bare(args: &[&str], envs: &[(&str, &str)]) -> Child {
+    let home = fresh_session_dir();
+    let root = envs
+        .iter()
+        .find(|(name, _)| *name == "RADIAN_HOME")
+        .map(|(_, value)| PathBuf::from(value))
+        .unwrap_or_else(|| home.join(".radian"));
+    write_auth_json(&root, envs);
     Command::new(agent_bin())
         .args(args)
         .env_remove("OPENAI_API_KEY")
@@ -5767,7 +5802,9 @@ async fn config_import_pi_drafts_a_valid_configuration_and_never_shows_a_literal
         Some("https://api.openai.com/v1")
     );
     assert_eq!(config.model.model.as_deref(), Some("gpt-5"));
-    assert_eq!(config.model.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
+    // ADR 0026 D2: no `model.api_key` in the draft; the report points at auth.json.
+    assert!(!stdout.contains("api_key"), "{stdout}");
+    assert!(stderr.contains("auth.json"), "{stderr}");
     assert_eq!(config.tui.theme.as_deref(), Some("dark"));
     assert_eq!(config.compaction.auto, Some(false));
     assert_eq!(
@@ -5814,8 +5851,9 @@ async fn config_import_pi_drafts_a_valid_configuration_and_never_shows_a_literal
     )
     .await;
     assert_eq!(code, 0, "{stderr}");
-    let config = radian_host::parse_config(Path::new("/tmp/draft.toml"), &stdout).unwrap();
-    assert_eq!(config.model.api_key_env.as_deref(), Some("OLLAMA_API_KEY"));
+    let _ = radian_host::parse_config(Path::new("/tmp/draft.toml"), &stdout).unwrap();
+    assert!(!stdout.contains("api_key"), "{stdout}");
+    assert!(stderr.contains("OLLAMA_API_KEY"), "{stderr}");
     assert!(!stdout.contains("sk-live"), "{stdout}");
     assert!(!stderr.contains("sk-live"), "{stderr}");
 }

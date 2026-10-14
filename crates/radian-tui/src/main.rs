@@ -49,11 +49,6 @@ struct Cli {
     #[arg(long, value_name = "URL")]
     base_url: Option<String>,
 
-    /// Environment variable holding the API key. Never read from anywhere else, never
-    /// printed. Defaults to `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`.
-    #[arg(long, value_name = "VAR")]
-    api_key_env: Option<String>,
-
     /// The configuration file (ADR 0008). Overrides `RADIAN_CONFIG` and
     /// `~/.radian/config/config.toml`. Read-only: this slice never writes it.
     #[arg(long, value_name = "FILE")]
@@ -347,21 +342,25 @@ fn run(
         .clone()
         .or_else(|| config.permissions.profile.clone())
         .unwrap_or_else(|| "workspace".to_string());
-    let provider_name = cli
+    // ADR 0026 D0: `--provider`/config `model.provider` names a descriptor. The generic
+    // `openai-compatible` descriptor is the default (the pre-D0 behaviour); the model is
+    // never defaulted.
+    let provider_id = cli
         .provider
         .clone()
-        .or_else(|| config.model.provider.clone());
-    let provider = Provider::from_name(provider_name.as_deref().unwrap_or("openai-compatible"))?;
-    let base_url = cli
-        .base_url
-        .clone()
-        .or_else(|| config.model.base_url.clone())
-        .unwrap_or_else(|| provider.default_base_url().to_owned());
-    let api_key_env = cli
-        .api_key_env
-        .clone()
-        .or_else(|| config.model.api_key_env.clone())
-        .unwrap_or_else(|| provider.default_api_key_env().to_owned());
+        .or_else(|| config.model.provider.clone())
+        .unwrap_or_else(|| radian_host::GENERIC_ID.to_owned());
+    let descriptor = radian_host::descriptor(&provider_id).ok_or_else(|| {
+        format!(
+            "unknown provider {provider_id:?}: choose one of {}",
+            radian_host::descriptors()
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+    let provider = descriptor.protocol_for(&model_name).adapter();
     let thinking = match cli.thinking.as_deref() {
         Some(value) => value.parse::<Thinking>()?,
         None => Thinking::Off,
@@ -369,6 +368,31 @@ fn run(
     // `--thinking` and `--max-tokens` are Anthropic-only; under openai-compatible they would
     // be ignored, so this is an error before the session file exists (dogfooding D15).
     check_provider_flags(provider, thinking, cli.max_tokens)?;
+    // The generic descriptor's endpoint; a non-generic descriptor refuses it (`resolve_route`).
+    let base_url_override = cli
+        .base_url
+        .clone()
+        .or_else(|| config.model.base_url.clone());
+    // ADR 0026 D2: the key comes only from `auth.json`. A missing entry is a clear refusal with
+    // the JSON to add (the `/login` command arrives in the next slice).
+    let credential = match radian_host::auth::resolve_key(&provider_id)
+        .map_err(|e| e.to_string())?
+    {
+        Some(credential) => credential,
+        None => {
+            return Err(
+                match radian_host::auth::resolve_note(&provider_id).map_err(|e| e.to_string())? {
+                    Some(note) => note,
+                    None => format!(
+                        "no credential for `{provider_id}`: add an entry to \
+                         ~/.radian/credentials/auth.json, e.g.\n  {{\"{provider_id}\": {{\"type\": \
+                         \"api_key\", \"key\": \"$MY_KEY\"}}}}\n(or use `/login {provider_id}` in the next \
+                         release)"
+                    ),
+                },
+            );
+        }
+    };
     // The config's headers come first, so a `--header` of the same name wins.
     let mut header_args: Vec<String> = config
         .model
@@ -379,7 +403,13 @@ fn run(
     header_args.extend(cli.header.iter().cloned());
     let workspace_root = coding_root(&cli)?;
     let workspace_path = radian_host::resolve_workspace(Some(&workspace_root.path))?;
-    let catalog_base_url = base_url.clone();
+    // The window's base URL: the descriptor's per-model URL, then the generic override, then
+    // the descriptor default.
+    let catalog_base_url = descriptor
+        .model(&model_name)
+        .map(|entry| entry.base_url.to_owned())
+        .or_else(|| base_url_override.clone())
+        .unwrap_or_else(|| descriptor.default_base_url.to_owned());
     // The window comes from `--context-window` or the models.dev catalog (ADR 0018). A fetch
     // failure is not a startup failure: the window is then unknown and the budget stays off.
     // Still before the session file exists. `R` comes from the request's own output setting:
@@ -390,7 +420,11 @@ fn run(
     };
     let window = runtime.block_on(radian_host::resolve(&radian_host::WindowQuery::production(
         cli.context_window.or(config.model.context_window),
-        cli.catalog_provider.clone(),
+        cli.catalog_provider.clone().or_else(|| {
+            // `opencode-go`/`anthropic`/`openai` are catalog providers; the generic one is not,
+            // so its provider is derived from the base URL hostname.
+            (descriptor.id != radian_host::GENERIC_ID).then(|| descriptor.id.to_string())
+        }),
         &catalog_base_url,
         model_name.clone(),
         request_max_output,
@@ -520,22 +554,35 @@ fn run(
     };
     validate_session_id(&session_id)?;
     app.session_id = session_id.clone();
-    let headers = parse_headers(&header_args, &session_id)?;
+    let user_headers = parse_headers(&header_args, &session_id)?;
     // Header values and the key must not reach the panic log (dogfooding D4).
-    let mut secrets: Vec<String> = headers.iter().map(|(_, value)| value.clone()).collect();
-    let key = std::env::var(&api_key_env).ok().filter(|k| !k.is_empty());
-    if let Some(key) = &key {
-        secrets.push(key.clone());
-    }
+    let mut secrets: Vec<String> = user_headers
+        .iter()
+        .map(|(_, value)| value.clone())
+        .collect();
+    secrets.push(credential.key.clone());
+    // ADR 0026 D0: the descriptor decides the adapter, base URL and headers. `resolve_route`
+    // refuses `--base-url`/`--header` for a non-generic descriptor.
+    let route = radian_host::resolve_route(
+        &provider_id,
+        &model_name,
+        base_url_override.as_deref(),
+        credential
+            .env
+            .get(radian_host::RADIAN_BASE_URL)
+            .map(String::as_str),
+        &user_headers,
+        &session_id,
+    )?;
     // D1/D2: every check that can fail runs **before** the session file is created. The
     // workspace is validated first, so a typo is a workspace error and never reaches the
     // sandbox probe (dogfooding D1). `radian-host` owns the rule so both hosts share it.
     let model = build_model(ModelArgs {
-        provider,
-        base_url,
+        provider: route.adapter(),
+        base_url: route.base_url.clone(),
         model: model_name.clone(),
-        api_key: key,
-        headers,
+        api_key: Some(credential.key.clone()),
+        headers: route.headers.clone(),
         // The TUI has no `--include-usage` flag; the adapter's default policy applies.
         include_usage: None,
         max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),

@@ -71,12 +71,6 @@ struct Cli {
     #[arg(long, value_name = "URL")]
     base_url: Option<String>,
 
-    /// Environment variable holding the API key. The key is never read from anywhere else
-    /// and never appears on the command line. Defaults to `OPENAI_API_KEY`
-    /// (openai-compatible) or `ANTHROPIC_API_KEY` (anthropic).
-    #[arg(long, value_name = "VAR")]
-    api_key_env: Option<String>,
-
     /// The configuration file (ADR 0008). Overrides `RADIAN_CONFIG` and
     /// `~/.radian/config/config.toml`. Read-only: this slice never writes it.
     #[arg(long, value_name = "FILE")]
@@ -685,23 +679,29 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         ),
         _ => None,
     };
-    // The provider names the defaults; an explicit flag wins, then the config.
-    let provider_name = cli
+    // ADR 0026 D0: `--provider`/config `model.provider` names a descriptor. The generic
+    // `openai-compatible` descriptor is the default (the pre-D0 behaviour); the model is
+    // never defaulted.
+    let provider_id = cli
         .provider
         .clone()
-        .or_else(|| config.model.provider.clone());
-    let provider = Provider::from_name(provider_name.as_deref().unwrap_or("openai-compatible"))
-        .map_err(SetupError)?;
-    let base_url = cli
+        .or_else(|| config.model.provider.clone())
+        .unwrap_or_else(|| radian_host::GENERIC_ID.to_owned());
+    let descriptor = radian_host::descriptor(&provider_id).ok_or_else(|| {
+        SetupError(format!(
+            "unknown provider {provider_id:?}: choose one of {}",
+            radian_host::descriptors()
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    })?;
+    let provider = descriptor.protocol_for(&model_name).adapter();
+    let base_url_override = cli
         .base_url
         .clone()
-        .or_else(|| config.model.base_url.clone())
-        .unwrap_or_else(|| provider.default_base_url().to_owned());
-    let api_key_env = cli
-        .api_key_env
-        .clone()
-        .or_else(|| config.model.api_key_env.clone())
-        .unwrap_or_else(|| provider.default_api_key_env().to_owned());
+        .or_else(|| config.model.base_url.clone());
     let thinking = match cli.thinking.as_deref() {
         Some(value) => value.parse::<Thinking>().map_err(SetupError)?,
         None => Thinking::Off,
@@ -709,15 +709,30 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     // `--thinking` and `--max-tokens` are Anthropic-only; under openai-compatible they would
     // be ignored, so this is a usage error before the session file exists (dogfooding D15).
     check_provider_flags(provider, thinking, cli.max_tokens).map_err(SetupError)?;
-    let key = std::env::var(&api_key_env).ok().filter(|k| !k.is_empty());
-    if key.is_none() && !is_local_base_url(&base_url) {
-        // The endpoint can carry userinfo or a query token; redact it like any other error
-        // that names it (ADR 0013 T4).
-        return Err(SetupError(format!(
-            "no API key: set ${api_key_env} (or point --api-key-env at the right variable); \
-             refusing to continue because {} is not a local address",
-            radian_host::redact_base_url(&base_url)
-        )));
+    // The endpoint this run would talk to, before the session id (for the local-endpoint check).
+    let probe_base_url = descriptor
+        .model(&model_name)
+        .map(|entry| entry.base_url.to_owned())
+        .or_else(|| base_url_override.clone())
+        .unwrap_or_else(|| descriptor.default_base_url.to_owned());
+    // ADR 0026 D2: the key comes only from `auth.json`. A missing entry is a refusal unless the
+    // endpoint is local (a local server needs no key), with the JSON to add.
+    let credential =
+        radian_host::auth::resolve_key(&provider_id).map_err(|e| SetupError(e.to_string()))?;
+    if credential.is_none() && !is_local_base_url(&probe_base_url) {
+        let message = match radian_host::auth::resolve_note(&provider_id)
+            .map_err(|e| SetupError(e.to_string()))?
+        {
+            Some(note) => note,
+            None => format!(
+                "no credential for `{provider_id}`: add an entry to \
+                     ~/.radian/credentials/auth.json, e.g.\n  {{\"{provider_id}\": {{\"type\": \
+                     \"api_key\", \"key\": \"$MY_KEY\"}}}}\n(or use `/login {provider_id}` in the next \
+                     release); refusing to continue because {} is not a local address",
+                radian_host::redact_base_url(&probe_base_url)
+            ),
+        };
+        return Err(SetupError(message));
     }
     // Resolve the session id once per process. `--resume` names an existing session, so it
     // wins; otherwise `--session-id`, otherwise a generated one. The same value is the
@@ -749,15 +764,28 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         // reusable across processes.
         eprintln!("[session] {session_id} (pass --session-id to reuse it)");
     }
-    // The catalog matches on the hostname of the endpoint the model actually talks to, so
-    // the URL is captured before `build_model` consumes it (ADR 0018).
-    let catalog_base_url = base_url.clone();
+    // ADR 0026 D0: the descriptor decides the adapter, base URL and headers. `resolve_route`
+    // refuses `--base-url`/`--header` for a non-generic descriptor.
+    let route = radian_host::resolve_route(
+        &provider_id,
+        &model_name,
+        base_url_override.as_deref(),
+        credential
+            .as_ref()
+            .and_then(|key| key.env.get(radian_host::RADIAN_BASE_URL))
+            .map(String::as_str),
+        &headers,
+        &session_id,
+    )
+    .map_err(SetupError)?;
+    // The catalog matches on the hostname of the endpoint the model actually talks to (ADR 0018).
+    let catalog_base_url = route.base_url.clone();
     let model = build_model(ModelArgs {
-        provider,
-        base_url,
+        provider: route.adapter(),
+        base_url: route.base_url.clone(),
         model: model_name.clone(),
-        api_key: key.clone(),
-        headers: headers.clone(),
+        api_key: credential.as_ref().map(|key| key.key.clone()),
+        headers: route.headers.clone(),
         include_usage: cli.include_usage,
         max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         thinking,
@@ -769,8 +797,12 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     };
     // The key and every header value are secrets: no error this program prints may contain
     // any of them, and they are never written to the session file.
-    let mut secrets: Vec<String> = key.into_iter().collect();
-    secrets.extend(headers.into_iter().map(|(_, value)| value));
+    let mut secrets: Vec<String> = credential
+        .as_ref()
+        .map(|key| key.key.clone())
+        .into_iter()
+        .collect();
+    secrets.extend(route.headers.iter().map(|(_, value)| value.clone()));
     secrets.retain(|secret| !secret.is_empty());
     let context_window = cli.context_window.or(config.model.context_window);
     if context_window == Some(0) {
@@ -931,24 +963,18 @@ fn export_session(cli: &Cli, session_id: &str) -> Result<(), OutputError> {
     Ok(())
 }
 
-/// The values that must never appear in an export: the key `setup` would read and every
+/// The values that must never appear in an export: the keys in `auth.json` and every
 /// `--header` value. Redaction itself is not optional (ADR 0013 decision 3). An export does
-/// not know which provider wrote the session, so without `--api-key-env` both providers'
-/// default key variables are redacted.
+/// not know which provider wrote the session, so every usable key in the store is redacted.
 fn export_secrets(cli: &Cli) -> Vec<String> {
     let mut secrets = Vec::new();
-    let names: Vec<String> = match &cli.api_key_env {
-        Some(name) => vec![name.clone()],
-        None => [Provider::OpenAiCompatible, Provider::Anthropic]
-            .into_iter()
-            .map(|provider| provider.default_api_key_env().to_owned())
-            .collect(),
-    };
-    for name in names {
-        if let Ok(key) = std::env::var(&name)
-            && !key.is_empty()
-        {
-            secrets.push(key);
+    if let Ok(entries) = radian_host::auth::list() {
+        for entry in entries {
+            if let Ok(Some(key)) = radian_host::auth::resolve_key(&entry.provider_id)
+                && !key.key.is_empty()
+            {
+                secrets.push(key.key);
+            }
         }
     }
     for header in &cli.header {

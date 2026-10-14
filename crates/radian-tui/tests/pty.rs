@@ -63,6 +63,47 @@ impl Drop for KillOnDrop {
     }
 }
 
+/// Writes `credentials/auth.json` (0600) under `root` for the key env vars in `envs` (ADR
+/// 0026 D2: the key comes only from `auth.json`). `ANTHROPIC_API_KEY` maps to the `anthropic`
+/// descriptor; `OPENAI_API_KEY` and any other `*KEY` name to the default `openai-compatible`.
+fn write_auth_json(root: &Path, envs: &[(&str, &str)]) {
+    let base_url = envs
+        .iter()
+        .find(|(name, _)| *name == "RADIAN_BASE_URL")
+        .map(|(_, value)| *value);
+    let mut entries = serde_json::Map::new();
+    for (name, value) in envs {
+        let provider = if *name == "ANTHROPIC_API_KEY" {
+            "anthropic"
+        } else if name.ends_with("KEY") {
+            "openai-compatible"
+        } else {
+            continue;
+        };
+        let mut entry = serde_json::json!({"type": "api_key", "key": value});
+        if let Some(url) = base_url {
+            entry["env"] = serde_json::json!({ "RADIAN_BASE_URL": url });
+        }
+        entries.insert(provider.to_string(), entry);
+    }
+    if entries.is_empty() {
+        return;
+    }
+    let dir = root.join("credentials");
+    std::fs::create_dir_all(&dir).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let path = dir.join("auth.json");
+    std::fs::write(&path, serde_json::to_string(&entries).unwrap()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
 /// Spawns the binary directly on a plain pty: **no controlling terminal** (so closing the
 /// master is a pure EOF, no SIGHUP) and `FD_CLOEXEC` on the master (without it the child
 /// inherits the master and the pty never sees EOF). `home` is a private HOME the caller keeps
@@ -213,6 +254,12 @@ impl Pty {
         // overrides both through `envs`.
         let home = TempDir::new("home");
         cmd.env("HOME", home.path().as_os_str());
+        let auth_root = envs
+            .iter()
+            .find(|(name, _)| *name == "RADIAN_HOME")
+            .map(|(_, value)| PathBuf::from(value))
+            .unwrap_or_else(|| home.path().join(".radian"));
+        write_auth_json(&auth_root, envs);
         // `cmd.env_clear()` above is what makes this hermetic: neither `RADIAN_HOME` nor
         // `RADIAN_CONFIG` reaches the child, so a config can only come from this temp `HOME`.
         cmd.env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json");
@@ -2496,16 +2543,15 @@ async fn pty_anthropic_provider_sends_a_messages_request_and_renders_the_reply()
             "claude",
             "--provider",
             "anthropic",
-            "--base-url",
-            &server.base_url,
-            "--api-key-env",
-            "ANTHROPIC_API_KEY",
             "--session-dir",
             dir.path().to_str().unwrap(),
             "--session-id",
             "anthro",
         ],
-        &[("ANTHROPIC_API_KEY", "sk-ant-tui-key")],
+        &[
+            ("ANTHROPIC_API_KEY", "sk-ant-tui-key"),
+            ("RADIAN_BASE_URL", &server.base_url),
+        ],
         24,
         100,
     );
@@ -5563,8 +5609,6 @@ async fn pty_the_exit_line_is_a_copyable_resume_command() {
             "copyable",
             "--header",
             "x-trace=HEADER-VALUE",
-            "--api-key-env",
-            "MY_KEY",
         ],
         24,
         100,
@@ -5588,5 +5632,5 @@ async fn pty_the_exit_line_is_a_copyable_resume_command() {
     assert!(!line.contains("HEADER-VALUE"), "no header value: {line}");
     assert!(!line.contains("MY_KEY"), "no key: {line}");
     assert!(!line.contains("--header"), "{line}");
-    assert!(!line.contains("--api-key-env"), "{line}");
+    assert!(!line.contains("credentials"), "{line}");
 }
