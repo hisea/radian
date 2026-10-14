@@ -121,16 +121,18 @@ transcript: user >, assistant, ~ reasoning, -> tool, <- result
 The input area is a rule above and below with a `> ` prompt; a continuation
 line is indented two cells instead of repeating the prompt. `tui.input_style = "box"` is the
 owner's bordered shape (2026-10-14): **rounded** corners, the `❯` prompt, and the border in
-the theme's accent (`model`) color. It is a real composer either way (cursor editing,
-multi-line, history).
+the theme's accent role (`notice_label` — ADR 0029 reserves accent for labels and
+attention surfaces). It is a real composer either way (cursor editing, multi-line, history).
 
 The **startup screen** is the leading block of transcript entries: the
-wordmark (three rows; below its width it drops to one line, `㎭ radian <version>`, with the
-width measured by `unicode-width`), one collapsed information line, the safety lines in the
-`warning` kind that are never folded (a workspace boundary that was not your choice, every
-config-file warning), and one `Tip:` line. `Ctrl-P` (`toggle_startup`) folds and unfolds the
-information. `tui.banner = false` hides the wordmark, `tui.tips = false` the Tip. The
-transcript scrolls with PageUp/PageDown, Shift-Up/Shift-Down and Ctrl-Home/Ctrl-End; the
+wordmark (three rows at the primary `text` level; below its width it drops to one line,
+`㎭ radian <version>`, with the width measured by `unicode-width`), one collapsed information
+line, the safety lines in the `warning` kind that are never folded (a workspace boundary that
+was not your choice, every config-file and approval-policy warning), and one `Tip:` line. An
+information line's `label: value` split follows a notice's: the label uses `notice_label`, the
+value `notice_body` (ADR 0028 / ADR 0029). `Ctrl-P` (`toggle_startup`) folds and
+unfolds the information. `tui.banner = false` hides the wordmark, `tui.tips = false` the Tip.
+The transcript scrolls with PageUp/PageDown, Shift-Up/Shift-Down and Ctrl-Home/Ctrl-End; the
 bare arrow keys belong to the composer.
 
 | Key | Action |
@@ -195,10 +197,8 @@ find_next = ["ctrl-g", "shift-enter"]
   falls back to `lines`.
 - `tips` / `banner`: whether the startup screen shows the one Tip line and the wordmark. Both
   default to on; `false` hides them.
-- `theme`: `dark` is the original palette, `light` re-picks it for a light background, `mono`
-  uses no color at all (bold/underline/dim only). A non-empty `NO_COLOR` environment variable
-  forces `mono` (<https://no-color.org>). An unknown theme is ignored with a warning.
-  (the bordered input box). An unknown value is ignored with a warning and falls back to `lines`.
+- `tips` / `banner`: whether the startup screen shows the one Tip line and the wordmark. Both
+  default to on; `false` hides them.
 - `theme`: `dark` and `light` are **pi's own palettes**, read
   through the same ADR 0029 conversion a theme file uses: the three text levels are pi's
   brightness gradient (dark: `text` 89%, `muted` 67%, `dim` 56%), and every semantic color
