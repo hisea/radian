@@ -386,47 +386,233 @@ const OPENCODE_GO_ANTHROPIC_BASE: &str = "https://opencode.ai/zen/go";
 const ANTHROPIC_BASE: &str = "https://api.anthropic.com";
 const OPENAI_BASE: &str = "https://api.openai.com/v1";
 
-/// `opencode-go`'s built-in list, from `monotykamary/pi-opencode-go-provider@aec40ba`
-/// `models.json` (accessed 2026-10-13): `api: "anthropic-messages"` → [`Protocol::Anthropic`],
-/// everything else → [`Protocol::OpenAiCompatible`]. Six of the 31 models use Anthropic.
+/// The `thinkingLevelMap` shared by grok-4.7, grok-4.6 (upstream `models.json`,
+/// commit cdd8a70): **low, medium, high, xhigh** are supported, every other level is `null`.
+const THINKING_UP_TO_XHIGH: ThinkingMap = &[
+    ("off", None),
+    ("minimal", None),
+    ("low", Some("low")),
+    ("medium", Some("medium")),
+    ("high", Some("high")),
+    ("xhigh", Some("xhigh")),
+    ("max", None),
+];
+
+/// The `thinkingLevelMap` shared by glm-5.3-flash, deepseek-v4.1-flash, deepseek-v4-flash-vision-exp, glm-5.3, deepseek-v4-flash (upstream `models.json`,
+/// commit cdd8a70): **low, high, max** are supported, every other level is `null`.
+const THINKING_LOW_HIGH_MAX: ThinkingMap = &[
+    ("off", None),
+    ("minimal", None),
+    ("low", Some("low")),
+    ("medium", None),
+    ("high", Some("high")),
+    ("xhigh", None),
+    ("max", Some("max")),
+];
+
+/// The `thinkingLevelMap` shared by qwen3.8-max, qwen3.8-flash (upstream `models.json`,
+/// commit cdd8a70): **low, medium, xhigh** are supported, every other level is `null`.
+const THINKING_LOW_MED_XHIGH: ThinkingMap = &[
+    ("off", None),
+    ("minimal", None),
+    ("low", Some("low")),
+    ("medium", Some("medium")),
+    ("high", None),
+    ("xhigh", Some("xhigh")),
+    ("max", None),
+];
+
+/// The `thinkingLevelMap` shared by kimi-k3 (upstream `models.json`,
+/// commit cdd8a70): **max** are supported, every other level is `null`.
+const THINKING_MAX_ONLY: ThinkingMap = &[
+    ("off", None),
+    ("minimal", None),
+    ("low", None),
+    ("medium", None),
+    ("high", None),
+    ("xhigh", None),
+    ("max", Some("max")),
+];
+
+/// The `thinkingLevelMap` shared by cat-jam-free, space-bunny, gpt-5.6-luna, claude-haiku-5-5, gpt-6-luna (upstream `models.json`,
+/// commit cdd8a70): **low, medium, high, xhigh, max** are supported, every other level is `null`.
+const THINKING_LOW_TO_MAX: ThinkingMap = &[
+    ("off", None),
+    ("minimal", None),
+    ("low", Some("low")),
+    ("medium", Some("medium")),
+    ("high", Some("high")),
+    ("xhigh", Some("xhigh")),
+    ("max", Some("max")),
+];
+
+/// The `thinkingLevelMap` shared by glm-5.2, deepseek-v4-pro (upstream `models.json`,
+/// commit cdd8a70): **high, max** are supported, every other level is `null`.
+const THINKING_HIGH_MAX: ThinkingMap = &[
+    ("off", None),
+    ("minimal", None),
+    ("low", None),
+    ("medium", None),
+    ("high", Some("high")),
+    ("xhigh", None),
+    ("max", Some("max")),
+];
+
+/// The `thinkingLevelMap` shared by hy3 (upstream `models.json`,
+/// commit cdd8a70): **low, high** are supported, every other level is `null`.
+const THINKING_LOW_HIGH: ThinkingMap = &[
+    ("off", None),
+    ("minimal", None),
+    ("low", Some("low")),
+    ("medium", None),
+    ("high", Some("high")),
+    ("xhigh", None),
+    ("max", None),
+];
+
+/// The `thinkingLevelMap` shared by muse-spark-1.2-contributor, muse-spark-1.3-contributor (upstream `models.json`,
+/// commit cdd8a70): **minimal, low, medium, high, xhigh** are supported, every other level is `null`.
+const THINKING_MINIMAL_TO_XHIGH: ThinkingMap = &[
+    ("off", None),
+    ("minimal", Some("minimal")),
+    ("low", Some("low")),
+    ("medium", Some("medium")),
+    ("high", Some("high")),
+    ("xhigh", Some("xhigh")),
+    ("max", None),
+];
+
+/// The `thinkingLevelMap` shared by hy4-preview (upstream `models.json`,
+/// commit cdd8a70): **high** are supported, every other level is `null`.
+const THINKING_HIGH_ONLY: ThinkingMap = &[
+    ("off", None),
+    ("minimal", None),
+    ("low", None),
+    ("medium", None),
+    ("high", Some("high")),
+    ("xhigh", None),
+    ("max", None),
+];
+
+/// The `thinkingLevelMap` shared by step-5-preview-free (upstream `models.json`,
+/// commit cdd8a70): **low, medium, high** are supported, every other level is `null`.
+const THINKING_LOW_MED_HIGH: ThinkingMap = &[
+    ("off", None),
+    ("minimal", None),
+    ("low", Some("low")),
+    ("medium", Some("medium")),
+    ("high", Some("high")),
+    ("xhigh", None),
+    ("max", None),
+];
+
+/// `opencode-go`'s built-in list, from `monotykamary/pi-opencode-go-provider@cdd8a70`
+/// `models.json` (accessed 2026-10-14): `api: "anthropic-messages"` → [`Protocol::Anthropic`],
+/// everything else → [`Protocol::OpenAiCompatible`]. Six of the 32 models use Anthropic, and
+/// every `thinkingLevelMap` upstream carries is kept verbatim (ADR 0026 D11; the structural
+/// test `opencode_go_models_match_upstream` reads the same fields from the same commit).
 const OPENCODE_GO_MODELS: &[DescriptorModel] = &[
     go_openai("mimo-v2.6-pro", "MiMo-V2.6-Pro"),
     go_openai("mimo-v2.5", "MiMo V2.5"),
-    go_openai("grok-4.7", "Grok 4.7"),
-    go_openai("longcat-2.5-preview-free", "LongCat 2.5 Preview Free"),
-    go_openai("glm-5.3-flash", "GLM-5.3-Flash"),
-    go_anthropic("qwen3.8-max", "Qwen3.8 Max"),
-    go_openai("kimi-k3", "Kimi K3"),
     DescriptorModel {
-        thinking: DEEPSEEK_V41_FLASH_THINKING,
+        thinking: THINKING_UP_TO_XHIGH,
+        ..go_openai("grok-4.7", "Grok 4.7")
+    },
+    go_openai("longcat-2.5-preview-free", "LongCat 2.5 Preview Free"),
+    DescriptorModel {
+        thinking: THINKING_LOW_HIGH_MAX,
+        ..go_openai("glm-5.3-flash", "GLM-5.3-Flash")
+    },
+    DescriptorModel {
+        thinking: THINKING_LOW_MED_XHIGH,
+        ..go_anthropic("qwen3.8-max", "Qwen3.8 Max")
+    },
+    DescriptorModel {
+        thinking: THINKING_MAX_ONLY,
+        ..go_openai("kimi-k3", "Kimi K3")
+    },
+    DescriptorModel {
+        thinking: THINKING_LOW_HIGH_MAX,
         ..go_openai("deepseek-v4.1-flash", "DeepSeek V4.1 Flash")
     },
-    go_openai(
-        "deepseek-v4-flash-vision-exp",
-        "DeepSeek V4 Flash Vision Exp",
-    ),
+    DescriptorModel {
+        thinking: THINKING_LOW_HIGH_MAX,
+        ..go_openai(
+            "deepseek-v4-flash-vision-exp",
+            "DeepSeek V4 Flash Vision Exp",
+        )
+    },
     go_openai("longcat-2.0", "LongCat-2.0"),
-    go_openai("space-bunny", "Space Bunny"),
+    DescriptorModel {
+        thinking: THINKING_LOW_TO_MAX,
+        ..go_openai("cat-jam-free", "Cat Jam Free")
+    },
+    DescriptorModel {
+        thinking: THINKING_LOW_TO_MAX,
+        ..go_openai("space-bunny", "Space Bunny")
+    },
     go_anthropic("minimax-m2.7", "MiniMax-M2.7"),
     go_openai("mimo-v2.5-pro", "MiMo V2.5 Pro"),
     go_openai("mimo-v2.6-flash", "MiMo-V2.6-Flash"),
     go_anthropic("minimax-m3", "MiniMax-M3"),
-    go_openai("gpt-5.6-luna", "GPT-5.6 Luna"),
-    go_anthropic("qwen3.8-flash", "Qwen3.8 Flash"),
-    go_openai("glm-5.2", "GLM-5.2"),
-    go_openai("hy3", "Hy3"),
-    go_openai("muse-spark-1.2-contributor", "Muse Spark 1.2 Contributor"),
-    go_anthropic("claude-haiku-5-5", "Claude Haiku 5.5"),
-    go_openai("gpt-6-luna", "GPT-6 Luna"),
-    go_openai("deepseek-v4-pro", "DeepSeek V4 Pro (New)"),
-    go_openai("hy4-preview", "Hy4 preview"),
-    go_openai("muse-spark-1.3-contributor", "Muse Spark 1.3 Contributor"),
-    go_openai("step-5-preview-free", "Step 5 Preview Free"),
-    go_openai("glm-5.3", "GLM-5.3"),
+    DescriptorModel {
+        thinking: THINKING_LOW_TO_MAX,
+        ..go_openai("gpt-5.6-luna", "GPT-5.6 Luna")
+    },
+    DescriptorModel {
+        thinking: THINKING_LOW_MED_XHIGH,
+        ..go_anthropic("qwen3.8-flash", "Qwen3.8 Flash")
+    },
+    DescriptorModel {
+        thinking: THINKING_HIGH_MAX,
+        ..go_openai("glm-5.2", "GLM-5.2")
+    },
+    DescriptorModel {
+        thinking: THINKING_LOW_HIGH,
+        ..go_openai("hy3", "Hy3")
+    },
+    DescriptorModel {
+        thinking: THINKING_MINIMAL_TO_XHIGH,
+        ..go_openai("muse-spark-1.2-contributor", "Muse Spark 1.2 Contributor")
+    },
+    DescriptorModel {
+        thinking: THINKING_LOW_TO_MAX,
+        ..go_anthropic("claude-haiku-5-5", "Claude Haiku 5.5")
+    },
+    DescriptorModel {
+        thinking: THINKING_LOW_TO_MAX,
+        ..go_openai("gpt-6-luna", "GPT-6 Luna")
+    },
+    DescriptorModel {
+        thinking: THINKING_HIGH_MAX,
+        ..go_openai("deepseek-v4-pro", "DeepSeek V4 Pro (New)")
+    },
+    DescriptorModel {
+        thinking: THINKING_HIGH_ONLY,
+        ..go_openai("hy4-preview", "Hy4 preview")
+    },
+    DescriptorModel {
+        thinking: THINKING_MINIMAL_TO_XHIGH,
+        ..go_openai("muse-spark-1.3-contributor", "Muse Spark 1.3 Contributor")
+    },
+    DescriptorModel {
+        thinking: THINKING_LOW_MED_HIGH,
+        ..go_openai("step-5-preview-free", "Step 5 Preview Free")
+    },
+    DescriptorModel {
+        thinking: THINKING_LOW_HIGH_MAX,
+        ..go_openai("glm-5.3", "GLM-5.3")
+    },
     go_openai("kimi-k2.7-code", "Kimi K2.7 Code"),
-    go_openai("grok-4.6", "Grok 4.6"),
+    DescriptorModel {
+        thinking: THINKING_UP_TO_XHIGH,
+        ..go_openai("grok-4.6", "Grok 4.6")
+    },
     go_anthropic("qwen3.7-plus", "Qwen3.7 Plus"),
-    go_openai("deepseek-v4-flash", "DeepSeek V4 Flash"),
+    DescriptorModel {
+        thinking: THINKING_LOW_HIGH_MAX,
+        ..go_openai("deepseek-v4-flash", "DeepSeek V4 Flash")
+    },
 ];
 
 /// The models.dev cache's model names, kept as a small built-in fallback (the full list is
@@ -459,20 +645,6 @@ const fn model(
         thinking: &[],
     }
 }
-
-/// The verified `thinkingLevelMap` of `deepseek-v4.1-flash` (ADR 0026 D11; source:
-/// `monotykamary/pi-opencode-go-provider` `models.json`, local revision 6837adb). It supports
-/// **low/high/max** and cannot switch thinking off, so `off`/`minimal`/`medium`/`xhigh` are
-/// `null`. The clamp tests use this table.
-pub const DEEPSEEK_V41_FLASH_THINKING: ThinkingMap = &[
-    ("off", None),
-    ("minimal", None),
-    ("low", Some("low")),
-    ("medium", None),
-    ("high", Some("high")),
-    ("xhigh", None),
-    ("max", Some("max")),
-];
 
 /// The anthropic descriptor's provider-level map (ADR 0026 D11): every level gets a distinct
 /// wire value, so `/thinking low` and `/thinking max` are not the same request.
