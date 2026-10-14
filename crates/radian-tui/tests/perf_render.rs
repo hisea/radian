@@ -741,8 +741,8 @@ fn perf_idle_redraw() {
 ///
 /// `radian --resume`: process start to the first frame, then `Ctrl-Home` to the top. The
 /// history is rendered before the run loop, so the first frame is the one that shows the
-/// bottom (the `resumed session …` notice). The top of the generated transcript is the first
-/// unit's tool call (`read({"path":"file.txt"})`), which is not on screen at the bottom.
+/// bottom (the status bar). The top of the generated transcript is the first unit's tool card
+/// header (`-> read: file.txt`), which is not on screen at the bottom.
 #[test]
 #[ignore = "measurement, not an assertion; run with --ignored --nocapture"]
 fn perf_tui_resume() {
@@ -765,7 +765,14 @@ fn perf_tui_resume() {
             24,
             100,
         );
-        pty.wait_for("resumed session", pty.start, 120);
+        // The first-frame marker is the **status bar** ("context budget off"), not the
+        // "resumed session" line: ui-r2 (`ba7568d`, "Startup screen: collapsed info, Tip,
+        // wordmark") moved that line into the startup screen, which sits at the top of the
+        // transcript. A resume follows the bottom (the product behaviour), so the startup
+        // screen is scrolled off on the first frame and the old marker never appeared. The
+        // status bar is drawn in the same first frame, so the timing is still
+        // process-start-to-first-frame.
+        pty.wait_for("context budget off", pty.start, 120);
         pty.quit();
     }
     for n in [1_000usize, 10_000, 50_000] {
@@ -789,11 +796,13 @@ fn perf_tui_resume() {
                 24,
                 100,
             );
-            first.push(pty.wait_for("resumed session", pty.start, 120));
-            // Ctrl-Home is CSI 1;5 H (Home with the CONTROL modifier).
+            first.push(pty.wait_for("context budget off", pty.start, 120));
+            // Ctrl-Home is CSI 1;5 H (Home with the CONTROL modifier). The marker is the
+            // first unit's tool card header (`-> read: file.txt`); the raw JSON arguments the
+            // old marker used are no longer rendered since the tool-card slice.
             let start = Instant::now();
             pty.send(b"\x1b[1;5H");
-            home.push(pty.wait_for(r#"read({"path":"file.txt"})"#, start, 30));
+            home.push(pty.wait_for("read: file.txt", start, 30));
             pty.quit();
         }
         let (first50, first95, first_max) = percentiles(first);
