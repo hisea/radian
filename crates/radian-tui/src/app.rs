@@ -332,6 +332,14 @@ pub enum Input {
     MemoryCommandDone(MemoryResult),
     /// A manual `/compact` finished (the result of [`Effect::Compact`]).
     CompactDone(Result<CompactionOutcome, String>),
+    /// A `/thinking` level was clamped against the current model's map (D11): `applied` is the
+    /// level that will be used (`None` when the model supports no level at all) and
+    /// `supported` the levels the completion offered.
+    ThinkingChecked {
+        requested: String,
+        applied: Option<String>,
+        supported: Vec<String>,
+    },
     /// A `/model` target was vetted by the loop (ADR 0026 D5/D7). `tokens` is the current
     /// context estimate `T` (`None` = unknown, so it cannot exceed anything), `budget` the
     /// new model's `B'` (`None` = unknown, so no comparison is possible).
@@ -435,6 +443,11 @@ pub enum Effect {
     },
     /// Queue a model route for the next turn boundary (D5). The change is a route only.
     QueueModel { provider: String, model: String },
+    /// A `/thinking` level to clamp against the current route's map (ADR 0026 D11); the loop
+    /// reports back as `Input::ThinkingChecked`.
+    SetThinking { level: String },
+    /// Queue a thinking level for the next turn boundary (D11): a level name only.
+    QueueThinking { level: String },
     /// Run a `/sessions`, `/export` or `/fork` request.
     Session(command::SessionOutcome),
     /// Load this workspace's sessions and open the picker overlay (`/sessions`). The result is
@@ -604,6 +617,8 @@ pub struct App {
     pending_fetch: Option<command::Fetch>,
     /// The queued switch, shown as `next: <provider/model>` until the driver applies it.
     pub next_model: Option<String>,
+    /// The queued thinking level (D11), cleared when the driver applies it.
+    pub next_thinking: Option<String>,
     /// The color theme (config `tui.theme`, `NO_COLOR`).
     pub theme: Theme,
     /// The key bindings (config `tui.keybindings`), defaulting to the pre-config key table.
@@ -649,6 +664,7 @@ impl App {
             slash_completion: None,
             pending_fetch: None,
             next_model: None,
+            next_thinking: None,
             theme: Theme::default(),
             keymap: Keymap::default(),
             input_style: InputStyle::default(),
@@ -1278,6 +1294,11 @@ impl App {
             }
             Input::MemoryCommandDone(result) => self.memory_command_done(result),
             Input::CompactDone(result) => self.compact_done(result),
+            Input::ThinkingChecked {
+                requested,
+                applied,
+                supported,
+            } => self.thinking_checked(requested, applied, supported),
             Input::ModelChecked {
                 provider,
                 model,
@@ -1784,6 +1805,7 @@ impl App {
         if matches!(event, RuntimeEvent::ConfigChanged { .. }) {
             // The driver applied the queued change: the status bar's `next:` promise is done.
             self.next_model = None;
+            self.next_thinking = None;
         }
         if let RuntimeEvent::TurnFailed { message, .. } = event {
             self.entries.push(Entry::new(
@@ -2087,6 +2109,9 @@ impl App {
                 }
                 UpdateResult::effect(Effect::Session(command::SessionOutcome::Fork))
             }
+            command::Outcome::Thinking(level) => {
+                UpdateResult::effect(Effect::SetThinking { level })
+            }
             command::Outcome::Model(switch) => UpdateResult::effect(Effect::ModelSwitch {
                 provider: switch.provider,
                 model: switch.model,
@@ -2140,6 +2165,28 @@ impl App {
             "next turn: {provider}/{model}; the first turn after a switch will not hit the cache"
         ));
         UpdateResult::effect(Effect::QueueModel { provider, model })
+    }
+
+    /// The clamped `/thinking` (D11): queue it, and say so when the clamp moved the level.
+    fn thinking_checked(
+        &mut self,
+        requested: String,
+        applied: Option<String>,
+        supported: Vec<String>,
+    ) -> UpdateResult {
+        let Some(applied) = applied else {
+            self.push_notice("this model supports no thinking level; nothing changed");
+            return UpdateResult::dirty();
+        };
+        if applied != requested {
+            self.push_notice(format!(
+                "{requested} → {applied} (this model supports {})",
+                supported.join("/")
+            ));
+        }
+        self.next_thinking = Some(applied.clone());
+        self.push_notice(format!("next turn: thinking {applied}"));
+        UpdateResult::effect(Effect::QueueThinking { level: applied })
     }
 
     /// The pre-switch compaction finished (D7): only success queues the switch.

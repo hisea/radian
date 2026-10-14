@@ -18,6 +18,7 @@ pub const HELP: &str = "\
 /fork                 fork this session at its last turn boundary (ADR 0022)
 /model <provider>/<model>
                       switch the model at the next turn boundary (ADR 0026 D5)
+/thinking <level>     set the thinking level (off…max); unsupported levels clamp (ADR 0026 D11)
 /export [md|json] [path] [--force]
                       export this session (default md, default <workspace>/radian-<id>.<ext>)
 /memory <command>     durable memory: list, search, show, add, edit, archive, restore,
@@ -58,6 +59,8 @@ pub enum Outcome {
     /// `/model <provider>/<model>` (ADR 0026 D5): the loop resolves the credential and the
     /// new budget, then the app decides direct queue or confirm-first (D7).
     Model(ModelSwitch),
+    /// `/thinking <level>` (ADR 0026 D11): the loop clamps it against the current route's map.
+    Thinking(String),
     /// Not a command after all (an empty token list); the caller sends the line.
     Message,
 }
@@ -84,6 +87,8 @@ pub enum Fetch {
         provider: Option<String>,
         partial: String,
     },
+    /// `/thinking <level>`: only the levels the **current** model supports (ADR 0026 D11).
+    ThinkingLevels,
 }
 
 impl Fetch {
@@ -91,6 +96,7 @@ impl Fetch {
     pub fn partial(&self) -> &str {
         match self {
             Fetch::MemoryRecords { partial, .. } | Fetch::ModelRoute { partial, .. } => partial,
+            Fetch::ThinkingLevels => "",
         }
     }
 }
@@ -149,6 +155,11 @@ pub fn tree() -> &'static [Command] {
             name: "model",
             description: "switch the model at the next turn boundary (ADR 0026 D5)",
             levels: &[model_route_level],
+        },
+        Command {
+            name: "thinking",
+            description: "set the thinking level (off…max); unsupported levels clamp (ADR 0026 D11)",
+            levels: &[thinking_level_level],
         },
         Command {
             name: "export",
@@ -549,6 +560,12 @@ fn model_route_level(typed: &[&str], partial: &str) -> Level {
     })
 }
 
+/// `/thinking`'s one level: only the levels the current model supports are offered
+/// (ADR 0026 D11), which the loop resolves from the route's map.
+fn thinking_level_level(_typed: &[&str], _partial: &str) -> Level {
+    Level::Needs(Fetch::ThinkingLevels)
+}
+
 /// Interprets a trimmed line that starts with `/`. `memory_enabled` says whether this process
 /// has a memory root; without one `/memory` is refused with a notice. Pure: it never runs a
 /// command (ADR 0023 U3).
@@ -564,6 +581,10 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         Some("/sessions") => Outcome::Sessions(sessions_query(&tokens[1..])),
         Some("/export") => export_request(&tokens[1..]),
         Some("/fork") => Outcome::Fork,
+        Some("/thinking") => match tokens[1..].first() {
+            Some(level) => Outcome::Thinking(level.clone()),
+            None => Outcome::Notices(vec!["usage: /thinking <level>".to_owned()]),
+        },
         Some("/model") => match model_switch(&tokens[1..]) {
             Ok(switch) => Outcome::Model(switch),
             Err(usage) => Outcome::Notices(vec![usage]),

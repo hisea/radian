@@ -549,7 +549,14 @@ fn run(
             .as_mut()
             .expect("the terminal was entered for the picker");
         app.start_picking(picker);
-        let signal = ui_loop(terminal, &mut app, &rx, &tx, Phase::Picking)?;
+        let signal = ui_loop(
+            terminal,
+            &mut app,
+            &rx,
+            &tx,
+            Phase::Picking,
+            (provider_id.clone(), model_name.clone()),
+        )?;
         if let Some(signal) = signal {
             // A signal during the pre-session phase leaves exactly like the session phase —
             // restore the terminal, exit 128 + signal, print the reason — but there is no
@@ -1080,6 +1087,7 @@ fn run(
             host: &session_host,
             memory: &memory_service,
         },
+        (provider_id.clone(), model_name.clone()),
     );
     // Tell a pending signal task that the loop left on its own, so it does not force-exit.
     radian_tui::signals::confirm_exit();
@@ -1441,6 +1449,8 @@ fn apply_dirty(app: &mut App) -> bool {
 }
 
 struct LoopContext<'a> {
+    /// The startup route (ADR 0026 D11): the fallback when the session has no route yet.
+    startup_route: (String, String),
     workspace: &'a Path,
     runtime: &'a tokio::runtime::Runtime,
     /// The UI's one handle on the session (ADR 0023 U5): commands go through it, and it
@@ -1558,6 +1568,20 @@ impl LoopContext<'_> {
                     radian_tui::command::Fetch::ModelRoute { provider, .. } => {
                         model_route_candidates(provider.as_deref())
                     }
+                    radian_tui::command::Fetch::ThinkingLevels => {
+                        // D11: only the levels the current model supports.
+                        let (route_provider, route_model) = self
+                            .session
+                            .model_route()
+                            .unwrap_or_else(|| self.startup_route.clone());
+                        radian_host::supported_thinking_levels(&route_provider, &route_model)
+                            .into_iter()
+                            .map(|level| radian_tui::command::Candidate {
+                                insert: level.to_owned(),
+                                description: "thinking level".to_owned(),
+                            })
+                            .collect()
+                    }
                 };
                 self.send(AppInput::CompletionsReady { fetch, candidates });
                 Ok(())
@@ -1661,6 +1685,35 @@ impl LoopContext<'_> {
                 );
                 Ok(())
             }
+            Effect::SetThinking { level } => {
+                // D11: clamp the requested level against the **current** route's map; the
+                // route comes from the slot (a resumed change or a queued switch included).
+                let (route_provider, route_model) = self
+                    .session
+                    .model_route()
+                    .unwrap_or_else(|| self.startup_route.clone());
+                let supported: Vec<String> =
+                    radian_host::supported_thinking_levels(&route_provider, &route_model)
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect();
+                let map = radian_host::descriptor(&route_provider)
+                    .and_then(|descriptor| radian_host::thinking_map_for(descriptor, &route_model));
+                let applied =
+                    radian_host::clamp_thinking(map, &level).map(|(level, _)| level.to_string());
+                self.send(AppInput::ThinkingChecked {
+                    requested: level,
+                    applied,
+                    supported,
+                });
+                Ok(())
+            }
+            Effect::QueueThinking { level } => {
+                // D11: the change is the level name only — no key, no header values.
+                self.session
+                    .queue_config(serde_json::json!({ "thinking": level }));
+                Ok(())
+            }
             Effect::QueueModel { provider, model } => {
                 // D5: the route is the whole change — no key, no header values.
                 self.session
@@ -1761,12 +1814,14 @@ fn handle_picking(event: UiEvent, app: &mut App, signal: &mut Option<i32>) -> bo
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ui_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App,
     rx: &Receiver<UiEvent>,
     tx: &Sender<UiEvent>,
     phase: Phase<'_>,
+    startup_route: (String, String),
 ) -> Result<Option<i32>, String> {
     let mut picking_signal: Option<i32> = None;
     let mut ctx = match phase {
@@ -1778,6 +1833,7 @@ fn ui_loop(
             host,
             memory,
         } => Some(LoopContext {
+            startup_route: startup_route.clone(),
             workspace,
             runtime,
             session,

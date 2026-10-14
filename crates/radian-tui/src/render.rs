@@ -390,10 +390,17 @@ struct Segment {
 /// terminal drops the rightmost segments first, so the model, the turn state, the permission
 /// tier, the usage and the MCP state survive and only the long context/scroll text can go.
 fn status_segments(app: &App) -> Vec<Segment> {
-    // A queued `/model` switch (ADR 0026 D5): visible until the driver applies it.
+    // A queued `/model` switch (ADR 0026 D5) or `/thinking` level (D11): visible until the
+    // driver applies it.
     if let Some(next) = &app.next_model {
         return vec![Segment {
             text: format!("next: {next}"),
+            style: app.theme.turn_running,
+        }];
+    }
+    if let Some(next) = &app.next_thinking {
+        return vec![Segment {
+            text: format!("next: thinking {next}"),
             style: app.theme.turn_running,
         }];
     }
