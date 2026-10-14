@@ -425,14 +425,15 @@ fn run(
     // The catalog groups by provider id; the generic descriptor is not one, so its provider
     // is derived from the base URL hostname. A named provider is its own group only when its
     // name is a catalog provider; otherwise the hostname rule applies (the fallback below).
-    let catalog_provider = cli.catalog_provider.clone().or_else(|| {
-        match &provider_ref {
-            radian_host::ProviderRef::BuiltIn(descriptor) => (descriptor.id
-                != radian_host::GENERIC_ID)
-                .then(|| descriptor.id.to_string()),
+    let catalog_provider = cli
+        .catalog_provider
+        .clone()
+        .or_else(|| match &provider_ref {
+            radian_host::ProviderRef::BuiltIn(descriptor) => {
+                (descriptor.id != radian_host::GENERIC_ID).then(|| descriptor.id.to_string())
+            }
             radian_host::ProviderRef::Named(named) => Some(named.name.clone()),
-        }
-    });
+        });
     let window = runtime.block_on(radian_host::resolve(&radian_host::WindowQuery::production(
         cli.context_window.or(config.model.context_window),
         catalog_provider,
@@ -1430,6 +1431,28 @@ impl LoopContext<'_> {
                     radian_tui::command::Fetch::MemoryRecords { command, .. } => {
                         memory_record_candidates(self.memory, command)
                     }
+                    // `/logout`'s candidates: every stored credential (D3).
+                    radian_tui::command::Fetch::LoggedInProviders { .. } => {
+                        match radian_host::list_auth() {
+                            Ok(entries) => entries
+                                .into_iter()
+                                .map(|entry| radian_tui::command::Candidate {
+                                    insert: entry.provider_id,
+                                    description: match entry.kind.as_str() {
+                                        "api_key" if entry.usable => "stored api key".to_owned(),
+                                        "api_key" => "stored (unusable here)".to_owned(),
+                                        other => format!("stored {other} entry"),
+                                    },
+                                })
+                                .collect(),
+                            Err(error) => {
+                                vec![radian_tui::command::Candidate {
+                                    insert: String::new(),
+                                    description: format!("cannot read auth.json: {error}"),
+                                }]
+                            }
+                        }
+                    }
                 };
                 self.send(AppInput::CompletionsReady { fetch, candidates });
                 Ok(())
@@ -1479,6 +1502,42 @@ impl LoopContext<'_> {
             }
             Effect::OpenPicker { query } => {
                 self.send(load_picker(self.host, query));
+                Ok(())
+            }
+            // `/login`'s verification request (ADR 0026 D3): one GET, off the UI thread; the
+            // answer comes back as `Input::LoginVerified`. The key rides in the closure only —
+            // it is never logged here.
+            Effect::LoginVerify {
+                name,
+                protocol,
+                base_url,
+                key,
+            } => {
+                let protocol = radian_host::Protocol::from_kind(protocol)
+                    .unwrap_or(radian_host::Protocol::OpenAiCompatible);
+                let tx = self.tx.clone();
+                self.runtime.spawn(async move {
+                    let result = radian_host::login::verify(protocol, &base_url, &key).await;
+                    let _ = tx.send(UiEvent::Command(AppInput::LoginVerified { name, result }));
+                });
+                Ok(())
+            }
+            // The save: the only place `/login` writes, and it is `auth.json` (D3 — the
+            // config file stays read-only).
+            Effect::LoginSave { name, key, env } => {
+                let env: std::collections::BTreeMap<String, String> = env.into_iter().collect();
+                let result = radian_host::AuthStore::open()
+                    .and_then(|mut store| store.upsert_api_key(&name, &key, &env))
+                    .map_err(|error| error.to_string());
+                self.send(AppInput::LoginSaved { name, result });
+                Ok(())
+            }
+            // `/logout` after the `y`: remove the entry, everything else byte-for-byte (D3).
+            Effect::Logout { provider } => {
+                let result = radian_host::AuthStore::open()
+                    .and_then(|mut store| store.remove(&provider))
+                    .map_err(|error| error.to_string());
+                self.send(AppInput::LogoutDone(result));
                 Ok(())
             }
         }

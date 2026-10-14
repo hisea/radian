@@ -10,6 +10,7 @@ pub mod composer;
 pub mod events;
 pub mod find;
 pub mod keys;
+pub mod login;
 pub mod mention;
 pub mod picker;
 pub mod profile;

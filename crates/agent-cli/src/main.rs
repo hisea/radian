@@ -719,8 +719,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     .unwrap_or_else(|| provider_ref.base_url_for(&model_name, None));
     // ADR 0026 D2: the key comes only from `auth.json`. A missing entry is a refusal unless the
     // endpoint is local (a local server needs no key).
-    let credential =
-        radian_host::resolve_key(&key_id).map_err(|e| SetupError(e.to_string()))?;
+    let credential = radian_host::resolve_key(&key_id).map_err(|e| SetupError(e.to_string()))?;
     if credential.is_none() && !is_local_base_url(&probe_base_url) {
         let message = match radian_host::resolve_note(&key_id)
             .map_err(|e| SetupError(e.to_string()))?
