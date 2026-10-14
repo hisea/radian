@@ -1009,6 +1009,11 @@ fn run(
         Some(provider_name.clone()),
         Some(thinking_for_footer),
     );
+    // ADR 0027: the hostname, the model's catalog prices (`cost`) and whether
+    // automatic compaction is on (`context`'s `{auto}`). Each is a startup fact.
+    app.set_hostname(radian_host::hostname());
+    app.set_model_price(window.price);
+    app.set_auto_compact(!cli.no_auto_compact && config.compaction.auto.unwrap_or(true));
     // ADR 0027 C3: the contributors. Their changes wake the UI through the same dirty channel
     // (ADR 0023 U2), and a refresh failure becomes a notice; the UI never waits for one.
     let contributions = radian_host::ContributionStore::new();
@@ -1843,6 +1848,9 @@ impl LoopContext<'_> {
     /// Feeds one event to the app. Returns whether the frame is dirty; the effects it produced
     /// are appended to `effects`.
     fn handle(&mut self, event: UiEvent, app: &mut App, effects: &mut Vec<Effect>) -> bool {
+        // ADR 0027: the loop is the only place that reads the wall clock for the
+        // footer's `speed`/`elapsed`; the timer itself is pure.
+        app.set_now(std::time::Instant::now());
         let result = match event {
             UiEvent::Agent(event) => app.update(AppInput::Event(event)),
             UiEvent::Runtime(event) => app.update(AppInput::Runtime(event)),

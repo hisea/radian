@@ -312,7 +312,8 @@ pub struct TuiWidgetsConfig {
 /// is a bare id string or a table with `item` plus options.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TuiFooterConfig {
-    /// `preset`: `"pi"` (the default) or `"classic"`. Any other value is the TUI's warning.
+    /// `preset`: `"full"` (the default, ADR 0027), `"pi"` or `"classic"`. Any
+    /// other value is the TUI's warning.
     pub preset: Option<String>,
     /// `separator`: the glyph(s) between items; a row may override it.
     pub separator: Option<String>,

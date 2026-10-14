@@ -903,6 +903,17 @@ pub struct App {
     /// slice reads it once and exposes [`App::set_git_branch`] for the refresh).
     pub cwd: Option<PathBuf>,
     pub git_branch: Option<String>,
+    /// The machine's hostname (ADR 0027 `host`), read once at startup.
+    pub hostname: Option<String>,
+    /// The model's catalog unit prices (ADR 0027 `cost`), set once at startup.
+    pub model_price: Option<radian_host::ModelPrice>,
+    /// Whether automatic compaction is on (`context`'s `{auto}` marker), set once at startup.
+    pub auto_compact: bool,
+    /// The loop's current instant (ADR 0027). The timer never reads the wall clock;
+    /// the loop stamps `now` once per iteration and tests set it to inject time.
+    pub now: Instant,
+    /// The local turn timer behind `speed`/`elapsed`.
+    pub timer: crate::timing::TurnTimer,
     /// The applied thinking level (ADR 0026 D11), for the footer's `reasoning` item. A queued
     /// switch shows the queued level until the driver applies it.
     pub thinking_level: Option<String>,
@@ -1043,6 +1054,11 @@ impl App {
             provider: None,
             cwd: None,
             git_branch: None,
+            hostname: None,
+            model_price: None,
+            auto_compact: true,
+            now: Instant::now(),
+            timer: crate::timing::TurnTimer::default(),
             thinking_level: None,
             footer: crate::footer::Footer::default(),
             contributions: radian_host::ContributionStore::new(),
@@ -3443,7 +3459,14 @@ impl App {
             // ADR 0023 U5: the turn, budget, usage and tool facts are written to the session
             // projection by the event sink (`ProjectionSink`), never here. `App` handles only
             // the transcript, the note and the effects.
-            AgentEvent::TurnStarted | AgentEvent::ModelRequestStarted { .. } => {}
+            AgentEvent::TurnStarted => {}
+            // ADR 0027: the local turn timer starts with the model request and
+            // stops with its response. The token count is the model's reported output.
+            AgentEvent::ModelRequestStarted { .. } => self.timer.request_started(self.now),
+            AgentEvent::ModelResponseReceived { usage, .. } => {
+                self.timer
+                    .response_finished(self.now, usage.as_ref().and_then(|usage| usage.output));
+            }
             AgentEvent::ToolStarted { name, .. } => {
                 self.note = Some(format!("tool {name} running"));
             }
@@ -3693,6 +3716,26 @@ impl App {
     /// has a first value without the contributor.
     pub fn set_git_branch(&mut self, branch: Option<String>) {
         self.git_branch = branch;
+    }
+
+    /// The machine's hostname (ADR 0027), read once at startup.
+    pub fn set_hostname(&mut self, hostname: Option<String>) {
+        self.hostname = hostname;
+    }
+
+    /// The model's catalog unit prices (ADR 0027).
+    pub fn set_model_price(&mut self, price: Option<radian_host::ModelPrice>) {
+        self.model_price = price;
+    }
+
+    /// Whether automatic compaction is on (ADR 0027).
+    pub fn set_auto_compact(&mut self, on: bool) {
+        self.auto_compact = on;
+    }
+
+    /// The loop's current instant (ADR 0027): the timer never reads the clock.
+    pub fn set_now(&mut self, now: Instant) {
+        self.now = now;
     }
 
     /// The contributor store the renderer reads (ADR 0027 C3).

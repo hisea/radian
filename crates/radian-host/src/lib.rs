@@ -40,6 +40,25 @@ pub use auth::{
     list as list_auth, remove as remove_auth, resolve_key, resolve_note, resolved_keys,
     upsert_api_key as upsert_auth_api_key,
 };
+/// The machine's hostname (ADR 0027 `host`), read once at startup. `HOSTNAME` is
+/// set by most shells (and by BSD's `login`); the `hostname` command is the portable fallback.
+/// No network, no new dependency, and never called at draw time.
+pub fn hostname() -> Option<String> {
+    if let Ok(name) = std::env::var("HOSTNAME") {
+        let name = name.trim();
+        if !name.is_empty() {
+            return Some(name.to_owned());
+        }
+    }
+    let output = std::process::Command::new("hostname").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let name = String::from_utf8(output.stdout).ok()?;
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
 pub use catalog::{
     CACHE_TTL, CATALOG_URL, Catalog, FETCH_TIMEOUT, ModelEntry, ModelLimit, ModelPrice,
     OUTPUT_RESERVATION_CAP, ProviderInfo, ProviderModels, Window, WindowCheck, WindowQuery,

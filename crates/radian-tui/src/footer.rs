@@ -43,8 +43,10 @@ impl Glyphs {
 /// Which footer the session shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Preset {
-    /// pi's two rows: model/cwd/branch/context bar/reasoning, then tokens/cost.
+    /// The default (ADR 0027): two rows, the identity row and the numbers row.
     #[default]
+    Full,
+    /// The earlier two-row preset: model/cwd/branch/context bar/reasoning, then tokens/cost.
     Pi,
     /// Today's one status line, byte-for-byte (drawn by the renderer).
     Classic,
@@ -53,6 +55,7 @@ pub enum Preset {
 impl Preset {
     pub fn parse(name: &str) -> Option<Self> {
         match name {
+            "full" => Some(Self::Full),
             "pi" => Some(Self::Pi),
             "classic" => Some(Self::Classic),
             _ => None,
@@ -98,12 +101,12 @@ impl Footer {
     pub fn from_config(config: &TuiFooterConfig) -> (Self, Vec<String>) {
         let mut warnings = Vec::new();
         let preset = match config.preset.as_deref() {
-            None => Preset::Pi,
+            None => Preset::Full,
             Some(name) => Preset::parse(name).unwrap_or_else(|| {
                 warnings.push(format!(
-                    "tui.footer.preset = {name:?} is not one of pi|classic; using pi"
+                    "tui.footer.preset = {name:?} is not one of full|pi|classic; using full"
                 ));
-                Preset::Pi
+                Preset::Full
             }),
         };
         let glyphs = match config.glyphs.as_deref() {
@@ -158,7 +161,7 @@ impl Footer {
     /// pre-ADR one-line status bar); `pi` builds its rows here.
     pub fn lines(&self, app: &App, width: usize) -> Vec<Line<'static>> {
         let rows: Cow<'_, [Row]> = if self.rows.is_empty() {
-            Cow::Owned(default_rows())
+            Cow::Owned(preset_rows(self.preset))
         } else {
             Cow::Borrowed(&self.rows)
         };
@@ -166,8 +169,9 @@ impl Footer {
     }
 }
 
-/// The default two-row `pi` layout (ADR 0027 C2 / ).
-fn default_rows() -> Vec<Row> {
+/// The built-in rows for a preset (ADR 0027 C2 and revision 1; a configured `rows` overrides
+/// them entirely). `classic` is drawn by the renderer, so its rows are unused.
+fn preset_rows(preset: Preset) -> Vec<Row> {
     let item = |id: &str| Item {
         id: id.to_string(),
         icon: None,
@@ -178,23 +182,59 @@ fn default_rows() -> Vec<Row> {
         params: Vec::new(),
         known: true,
     };
-    vec![
-        Row {
-            left: vec![
-                item("model"),
-                item("cwd"),
-                item("git_branch"),
-                item("context_bar"),
-            ],
-            right: vec![item("reasoning")],
-            separator: " │ ".to_string(),
-        },
-        Row {
-            left: vec![item("tokens"), item("cost")],
-            right: Vec::new(),
-            separator: " │ ".to_string(),
-        },
-    ]
+    let with_format = |id: &str, format: &str| Item {
+        format: Some(format.to_string()),
+        ..item(id)
+    };
+    match preset {
+        Preset::Full => vec![
+            Row {
+                // The identity row (ADR 0027).
+                left: vec![
+                    item("brand"),
+                    item("host"),
+                    item("model"),
+                    item("reasoning"),
+                    with_format("cwd", "{repo}"),
+                    with_format("git_branch", "{branch}{dirty}"),
+                    item("session"),
+                ],
+                right: Vec::new(),
+                separator: " │ ".to_string(),
+            },
+            Row {
+                // The numbers row: tokens (in/out/cache), speed, cost, context (share/window
+                // with the auto-compaction marker), elapsed.
+                left: vec![
+                    with_format("tokens", "↑{in} ↓{out} {cache}"),
+                    item("speed"),
+                    item("cost"),
+                    with_format("context", "{percent}%/{budget}{auto}"),
+                    item("elapsed"),
+                ],
+                right: Vec::new(),
+                separator: " │ ".to_string(),
+            },
+        ],
+        Preset::Pi => vec![
+            Row {
+                left: vec![
+                    item("model"),
+                    item("cwd"),
+                    item("git_branch"),
+                    item("context_bar"),
+                ],
+                right: vec![item("reasoning")],
+                separator: " │ ".to_string(),
+            },
+            Row {
+                left: vec![item("tokens"), item("cost")],
+                right: Vec::new(),
+                separator: " │ ".to_string(),
+            },
+        ],
+        Preset::Classic => Vec::new(),
+    }
 }
 
 /// Resolves one configured item, recording its warnings.
@@ -278,17 +318,21 @@ fn item_is_known(id: &str) -> bool {
 /// The placeholders an item defines; empty for an unknown id.
 fn item_placeholders(id: &str) -> &'static [&'static str] {
     match id {
+        "brand" => &["brand"],
+        "host" => &["host"],
         "model" => &["display_name", "id", "provider"],
         "reasoning" => &["level"],
         "tier" => &["tier"],
-        "cwd" => &["path", "path_home", "basename"],
-        "git_branch" => &["branch", "dirty"],
+        "cwd" => &["path", "path_home", "basename", "repo", "worktree"],
+        "git_branch" => &["branch", "dirty", "modified", "untracked"],
         "worktree" => &["worktree"],
         "status" => &["status"],
         "session" => &["id"],
-        "context" => &["bar", "percent", "used", "budget"],
-        "context_bar" => &["bar", "percent", "used", "budget"],
+        "context" => &["bar", "percent", "used", "budget", "auto"],
+        "context_bar" => &["bar", "percent", "used", "budget", "auto"],
         "tokens" => &["in", "out", "cache"],
+        "speed" => &["speed"],
+        "elapsed" => &["elapsed"],
         "cost" => &["usd"],
         "pending" => &["count"],
         "mcp" => &["mcp"],
@@ -314,17 +358,21 @@ fn placeholders(format: &str) -> Vec<String> {
 /// The default truncation priority: higher survives a narrow terminal longer.
 fn item_priority(id: &str) -> i64 {
     match id {
+        "brand" => 92,
         "model" => 90,
         "context" | "context_bar" => 85,
         "cwd" => 80,
         "tier" => 75,
+        "host" => 78,
         "git_branch" | "worktree" | "pending" => 70,
         "status" => 45,
         "session" => 65,
         "reasoning" => 60,
         "mcp" => 55,
+        "speed" => 55,
         "tokens" => 50,
         "cost" => 40,
+        "elapsed" => 35,
         "scroll" => 20,
         _ => 50,
     }
@@ -334,7 +382,11 @@ fn item_priority(id: &str) -> i64 {
 /// footer reads the same way). `None` means the terminal's default style.
 fn default_role(id: &str) -> Option<Role> {
     Some(match id {
+        "brand" => Role::Text,
+        "host" => Role::NoticeBody,
         "model" => Role::Model,
+        "speed" => Role::Usage,
+        "elapsed" => Role::Truncation,
         "tier" => Role::Tier,
         "tokens" => Role::Usage,
         "mcp" => Role::Mcp,
@@ -537,21 +589,42 @@ fn contribution_item(app: &App, item: &Item) -> Option<Piece> {
         return None;
     }
     let (text, role, stale) = match item.id.as_str() {
-        "git_branch" => match contribution(app, "git_branch") {
-            Some(contribution) => contribution,
-            // The host's one-shot value, when no contributor is running.
-            None => (app.git_branch.clone()?, SegmentRole::Normal, false),
-        },
-        "worktree" => contribution(app, "worktree")?,
+        "git_branch" => {
+            let (branch, role, stale) = match contribution(app, "git_branch") {
+                Some(contribution) => contribution,
+                // The host's one-shot value, when no contributor is running.
+                None => (app.git_branch.clone()?, SegmentRole::Normal, false),
+            };
+            // ADR 0027: the change counts from the same background refresh.
+            let modified =
+                contribution_text(app, "git_modified").and_then(|text| text.parse::<u64>().ok());
+            let untracked =
+                contribution_text(app, "git_untracked").and_then(|text| text.parse::<u64>().ok());
+            let dirty = match (modified.unwrap_or(0), untracked.unwrap_or(0)) {
+                (0, 0) => String::new(),
+                (modified, untracked) => format!(" ?{}", modified + untracked),
+            };
+            let format = item.format.as_deref().unwrap_or("{branch}");
+            let text = format
+                .replace("{branch}", &branch)
+                .replace("{dirty}", &dirty)
+                .replace(
+                    "{modified}",
+                    &modified.map_or_else(String::new, |count| count.to_string()),
+                )
+                .replace(
+                    "{untracked}",
+                    &untracked.map_or_else(String::new, |count| count.to_string()),
+                );
+            (text, role, stale)
+        }
+        "worktree" => {
+            let (name, role, stale) = contribution(app, "worktree")?;
+            let format = item.format.as_deref().unwrap_or("worktree {worktree}");
+            (format.replace("{worktree}", &name), role, stale)
+        }
         "status" => status_contribution(app, item)?,
         _ => return None,
-    };
-    let text = match item.format.as_deref() {
-        None => text,
-        Some(format) => format
-            .replace("{worktree}", &text)
-            .replace("{branch}", &text)
-            .replace("{status}", &text),
     };
     let icon = item.icon.clone().unwrap_or_default();
     let role = if stale {
@@ -564,6 +637,11 @@ fn contribution_item(app: &App, item: &Item) -> Option<Piece> {
         style: role_style(app, role),
         priority: item.priority,
     })
+}
+
+/// One store item's joined text, for the items that only need the value (`cwd`'s `{repo}`).
+fn contribution_text(app: &App, item: &str) -> Option<String> {
+    contribution(app, item).map(|(text, _, _)| text)
 }
 
 /// One store item as (joined text, first role, stale).
@@ -633,6 +711,41 @@ struct ItemData<'a> {
 fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>> {
     let session = app.projection.read();
     match id {
+        // ADR 0027: the brand wordmark. `㎭` (SQUARE RAD) is the unit glyph; the
+        // ASCII set falls back to `rad` because its glyph may be missing from a font.
+        "brand" => Some(ItemData {
+            values: vec![(
+                "brand",
+                if app.footer_glyphs() == Glyphs::Ascii {
+                    "rad".to_string()
+                } else {
+                    "㎭".to_string()
+                },
+            )],
+            default_format: "{brand}",
+            numeric: None,
+        }),
+        "host" => Some(ItemData {
+            values: vec![("host", app.hostname.clone()?)],
+            default_format: "{host}",
+            numeric: None,
+        }),
+        "speed" => {
+            let speed = crate::timing::format_speed(app.timer.speed(app.now)?);
+            Some(ItemData {
+                values: vec![("speed", speed)],
+                default_format: "{speed}",
+                numeric: None,
+            })
+        }
+        "elapsed" => {
+            let elapsed = crate::timing::format_duration(app.timer.elapsed(app.now)?);
+            Some(ItemData {
+                values: vec![("elapsed", elapsed)],
+                default_format: "{elapsed}",
+                numeric: None,
+            })
+        }
         "model" => Some(ItemData {
             values: vec![
                 (
@@ -677,8 +790,20 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| text.clone());
+            // ADR 0027: `{repo}` and `{worktree}` come from the git contributor
+            // (background-refreshed, never a git call here). Empty when not in a repo/worktree.
+            // `{repo}` falls back to the directory's own name outside a repository, so the
+            // item still shows something useful (ADR 0027).
+            let repo = contribution_text(app, "git_root").unwrap_or_else(|| base.clone());
+            let worktree = contribution_text(app, "worktree").unwrap_or_default();
             Some(ItemData {
-                values: vec![("path", text), ("path_home", home_text), ("basename", base)],
+                values: vec![
+                    ("path", text),
+                    ("path_home", home_text),
+                    ("basename", base),
+                    ("repo", repo),
+                    ("worktree", worktree),
+                ],
                 default_format: "{path_home}",
                 numeric: None,
             })
@@ -710,9 +835,21 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
             } else {
                 String::new()
             };
+            // ADR 0027: `{auto}` is the auto-compaction marker, shown only while
+            // automatic compaction is on (the ASCII set uses a word, the others a glyph).
+            let auto = if app.auto_compact {
+                if app.footer_glyphs() == Glyphs::Ascii {
+                    " auto".to_string()
+                } else {
+                    " ⟲".to_string()
+                }
+            } else {
+                String::new()
+            };
             Some(ItemData {
                 values: vec![
                     ("bar", bar),
+                    ("auto", auto),
                     ("percent", percent.to_string()),
                     (
                         "used",
@@ -737,21 +874,43 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
                     "in",
                     session
                         .usage_input()
-                        .map_or_else(|| "-".to_string(), |value| value.to_string()),
+                        .map_or_else(|| "-".to_string(), crate::timing::format_tokens),
                 ),
                 (
                     "out",
                     session
                         .usage_output()
-                        .map_or_else(|| "-".to_string(), |value| value.to_string()),
+                        .map_or_else(|| "-".to_string(), crate::timing::format_tokens),
                 ),
-                ("cache", "-".to_string()),
+                // ADR 0027: the cache-read total (the provider's own report). `-`
+                // when the provider never reported one, never a fabricated 0.
+                (
+                    "cache",
+                    session
+                        .usage_cache_read()
+                        .map_or_else(|| "-".to_string(), crate::timing::format_tokens),
+                ),
             ],
-            default_format: "↑{in} ↓{out}",
+            default_format: "↑{in} ↓{out} ⛁{cache}",
             numeric: None,
         }),
-        // No cost is tracked yet: the item shows nothing rather than a fabricated number.
-        "cost" => None,
+        // ADR 0027: the cost from the model's catalog price and the session's
+        // token totals. No price (or no reported tokens) means the item hides; never `$0.00`
+        // for a model whose price we do not know (v5 §5).
+        "cost" => {
+            let micros = crate::timing::cost_micros(
+                app.model_price,
+                session.usage_input(),
+                session.usage_output(),
+                session.usage_cache_read(),
+                session.usage_cache_write(),
+            )?;
+            Some(ItemData {
+                values: vec![("usd", crate::timing::format_cost(micros))],
+                default_format: "{usd}",
+                numeric: Some(micros / 1_000_000),
+            })
+        }
         "pending" => (app.pending > 0).then(|| ItemData {
             values: vec![("count", app.pending.to_string())],
             default_format: "{count} pending",
@@ -832,6 +991,18 @@ fn render_bar(item: &Item, fraction: f64) -> String {
 /// icon carry one; the rest are plain text.
 fn glyph(id: &str, glyphs: Glyphs) -> &'static str {
     match (id, glyphs) {
+        ("host", Glyphs::Unicode) => "\u{2302} ",
+        ("host", Glyphs::Nerd) => "\u{f109} ",
+        ("host", Glyphs::Ascii) => "host ",
+        ("speed", Glyphs::Unicode) => "\u{bb} ",
+        ("speed", Glyphs::Nerd) => "\u{f0e7} ",
+        ("speed", Glyphs::Ascii) => "spd ",
+        ("elapsed", Glyphs::Unicode) => "\u{25f7} ",
+        ("elapsed", Glyphs::Nerd) => "\u{f017} ",
+        ("elapsed", Glyphs::Ascii) => "t ",
+        ("context", Glyphs::Unicode) => "\u{25eb} ",
+        ("context", Glyphs::Nerd) => "\u{f035b} ",
+        ("context", Glyphs::Ascii) => "[",
         ("reasoning", Glyphs::Unicode) => "◐ ",
         ("reasoning", Glyphs::Nerd) => "\u{f0eb} ",
         ("reasoning", Glyphs::Ascii) => "* ",

@@ -397,13 +397,11 @@ impl StatusContributor for GitContributor {
                 });
             }
             if let Some(name) = worktree {
-                // `worktree` shows a label (the accent) plus the name.
+                // The raw worktree name: the footer item adds its own label and the `cwd`
+                // item's `{worktree}` placeholder uses it as-is (ADR 0027).
                 contributions.push(Contribution {
                     item: "worktree".to_owned(),
-                    segments: vec![
-                        Segment::new("worktree ", SegmentRole::Accent),
-                        Segment::new(name, SegmentRole::Normal),
-                    ],
+                    segments: vec![Segment::new(name, SegmentRole::Normal)],
                     stale: false,
                 });
             }

@@ -95,6 +95,8 @@ struct Facts {
     /// The provider-reported cache **read** tokens (ADR 0027): the footer's
     /// `{cache}`. A provider that never reports it leaves it `None`, never 0.
     usage_cache_read: Option<u64>,
+    /// The provider-reported cache **write** tokens, for the same reason.
+    usage_cache_write: Option<u64>,
     budget: Option<BudgetReport>,
     /// The effective input budget `B` (ADR 0018), for the status bar's `T / B`.
     context_window: Option<u64>,
@@ -193,6 +195,14 @@ impl SessionProjection {
                         .saturating_add(cache_read),
                 );
             }
+            if let Some(cache_write) = usage.cache_write {
+                facts.usage_cache_write = Some(
+                    facts
+                        .usage_cache_write
+                        .unwrap_or(0)
+                        .saturating_add(cache_write),
+                );
+            }
         })
     }
 
@@ -289,6 +299,10 @@ impl ProjectionRead<'_> {
 
     pub fn usage_cache_read(&self) -> Option<u64> {
         self.facts.usage_cache_read
+    }
+
+    pub fn usage_cache_write(&self) -> Option<u64> {
+        self.facts.usage_cache_write
     }
 
     pub fn budget(&self) -> Option<&BudgetReport> {

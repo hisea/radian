@@ -1448,7 +1448,7 @@ fn status_height(app: &App, width: usize) -> u16 {
 fn status_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     match app.footer.preset() {
         crate::footer::Preset::Classic => vec![status_line(app, width)],
-        crate::footer::Preset::Pi => {
+        crate::footer::Preset::Full | crate::footer::Preset::Pi => {
             let mut lines = app.footer.lines(app, width);
             if let Some(chrome) = chrome_line(app, width) {
                 lines.push(chrome);
