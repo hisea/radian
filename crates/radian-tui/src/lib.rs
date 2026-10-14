@@ -21,8 +21,10 @@ pub mod question;
 pub mod render;
 pub mod select;
 pub mod signals;
+pub mod startup;
 pub mod terminal;
 pub mod theme;
+pub mod tools;
 pub mod workspace;
 
 pub use app::{
@@ -32,3 +34,4 @@ pub use app::{
 pub use clip::{ClipboardMode, MAX_CLIPBOARD_BYTES};
 pub use composer::Composer;
 pub use select::{Anchor, Selection};
+pub use startup::{StartupScreen, TIPS, tip_for};

@@ -40,6 +40,8 @@ pub enum Action {
     ScrollBottom,
     Escape,
     Cancel,
+    /// Fold or unfold the startup information. Default `Ctrl-P`.
+    ToggleStartup,
     /// Complete the `@` file reference at the cursor (Phase 4).
     Complete,
     /// Open the in-transcript search box (Phase 5); when the box is already open, the earlier
@@ -53,6 +55,8 @@ pub enum Action {
     FindClose,
     /// Collapse or expand the reasoning blocks (ADR 0028 R3, pi's Ctrl-T).
     ToggleReasoning,
+    /// Collapse or expand the tool card bodies (ADR 0028 R4, pi's Ctrl-O).
+    ToggleToolOutput,
     /// The question form (ADR 0024 Q7): the next question, or the overview from the last one.
     FormNext,
     /// The previous question.
@@ -111,12 +115,14 @@ impl Action {
             Action::ScrollBottom => "scroll_bottom",
             Action::Escape => "escape",
             Action::Cancel => "cancel",
+            Action::ToggleStartup => "toggle_startup",
             Action::Complete => "complete",
             Action::Find => "find",
             Action::FindPrev => "find_prev",
             Action::FindNext => "find_next",
             Action::FindClose => "find_close",
             Action::ToggleReasoning => "toggle_reasoning",
+            Action::ToggleToolOutput => "toggle_tool_output",
             Action::FormNext => "form_next",
             Action::FormPrev => "form_prev",
             Action::FormUp => "form_up",
@@ -175,6 +181,7 @@ const DEFAULT_BINDINGS: &[(&str, Action)] = &[
     ("scroll_bottom", Action::ScrollBottom),
     ("escape", Action::Escape),
     ("cancel", Action::Cancel),
+    ("toggle_startup", Action::ToggleStartup),
     ("complete", Action::Complete),
     ("find", Action::Find),
     ("find_prev", Action::FindPrev),
@@ -188,6 +195,7 @@ const DEFAULT_BINDINGS: &[(&str, Action)] = &[
     ("form_submit", Action::FormSubmit),
     ("form_decline", Action::FormDecline),
     ("toggle_reasoning", Action::ToggleReasoning),
+    ("toggle_tool_output", Action::ToggleToolOutput),
 ];
 
 /// The default key strings per action.
@@ -215,9 +223,11 @@ const DEFAULT_KEYS: &[(&str, &[&str])] = &[
     ("scroll_bottom", &["ctrl-end"]),
     ("escape", &["esc"]),
     ("cancel", &["ctrl-c"]),
+    ("toggle_startup", &["ctrl-p"]),
     ("complete", &["tab"]),
     ("find", &["ctrl-f"]),
     ("toggle_reasoning", &["ctrl-t"]),
+    ("toggle_tool_output", &["ctrl-o"]),
 ];
 
 /// The find box's default keys. These are looked up before the transcript layer while the box

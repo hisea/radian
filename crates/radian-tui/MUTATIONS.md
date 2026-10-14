@@ -627,6 +627,24 @@ HEAD，结束后删除）· 每个变异改完跑对应测试、`git checkout --
 （无按键移动 40 次、帧数不涨——SC1 的行为面）和
 `pty_quit_closes_button_motion_reporting`（退出序列精确为 `1006l 1002l 1000l`——SC3 的精确面）。
 
+## ui-r2：启动画面、Tip、圆角框、Ctrl-C（2026-10-14）
+
+Base `ba7568d` · 一次性检出 `/tmp/ui2-mut`（detached，跑完删除）· 独立 `CARGO_TARGET_DIR` ·
+变异后 `git checkout --` 还原，提交前 `git status --short` 为空。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| U2-1 | 安全提示折进启动块（`EntryKind::Warning` → `Startup`） | 安全提示不折叠、用 warning 类 | `startup.rs::safety_lines_stay_visible_while_collapsed` FAILED |
+| U2-2 | Tip 引用不存在的功能（`Ctrl-C twice quits` → `/warp jumps time`） | 每条 Tip 对应现有命令/按键 | `startup.rs::every_tip_names_a_real_feature` FAILED |
+| U2-3 | 去掉 `BorderType::Rounded`（直角框） | `box` 是圆角框 | `render.rs::the_box_input_style_draws_the_rounded_box_with_the_prompt` FAILED |
+| U2-4 | `cancel_or_quit_at` 的 arm 分支直接退出（一次就退） | 第一次只进入"待退出" | `quit.rs::idle_and_empty_the_first_ctrl_c_only_arms_the_window` FAILED |
+| U2-5 | 不检查 2 秒时限（`Some(_) => quit`） | 窗口过期只重新提示 | `quit.rs::a_second_ctrl_c_after_the_window_re_arms` FAILED |
+| U2-6 | 清空时不进历史 | 清掉的内容按 `Up` 找回 | `quit.rs::idle_with_text_the_first_ctrl_c_clears_it_into_the_history` FAILED |
+| U2-7 | 运行中按 Ctrl-C 走清空输入（把 Running 判定放到清空之后） | 运行中仍是取消 | `quit.rs::ctrl_c_while_running_cancels` FAILED |
+| U2-8 | `update_inner` 里直接 `std::fs::read_to_string` | `update` 保持纯（结构测试） | `purity.rs::app_rs_is_pure` FAILED |
+
+8/8 抓住。`/theme` 的两条变异（丢掉注释、高版本照样写）改的是 `radian-host`，记录在
+`crates/radian-host/MUTATIONS.md`（TW1/TW2）。
 ## Slice: ADR 0028 第 1 片（块模型、按块背景、thinking 折叠、代码块不折行）
 
 Base `82b07de` · 一次性 worktree `/tmp/blocks-mut`（`git worktree add` 自本片 HEAD，结束后删除）·
@@ -679,3 +697,19 @@ Base `a13dd6a` · 变异只在一次性 worktree 里做（`git worktree add --de
 诚实补充：M2 的第一版变异放在 `line_count_cached` 的新鲜度检查上，测试**没抓住**——那个检查与
 `diagram_outcome` 的查找宽度检查冗余，只去掉它时两条路径仍会重渲；改成变异查找（并让测试在 80
 渲染后立刻用不可变 `layout(16)` 断言）后抓住。
+## Slice: ADR 0028 第 2 片 a（工具卡片数据、渲染器注册表、Ctrl-O）
+
+Base `4208170` · 一次性 worktree `/tmp/tools-mut`（`git worktree add` 自本片 HEAD，结束后删除）·
+每个变异 `python3` 补丁（带 `assert`）、跑对应测试后 `git checkout -- .` 还原。
+
+| # | 需求 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| T1 | 折叠模式进布局缓存键 | 键去掉 `DisplayModes`（只留 reasoning） | `the_tool_fold_changes_the_line_count_and_ctrl_o_walks_it` | ✅ |
+| T2 | 错误卡片在任何模式下都展开 | 去掉 `is_error` 的强制展开（collapsed 下也折） | `an_error_card_stays_expanded_under_collapsed` | ✅ |
+| T3 | live/resume 都填工具名 | push 时工具名填空 | `a_tool_card_head_is_the_same_on_the_live_and_resume_paths` | ✅ |
+| T4 | 注册表找不到时回退通用渲染器 | 未知工具 `panic!` | `tools::tests::the_registry_falls_back_to_generic_for_an_unknown_tool`、`the_fold_modes_decide_the_body` | ✅ |
+
+4/4 抓住。**过程记录（T2 的两轮）**：第一轮"没抓住"有两个原因，都是测试太弱——(a) 错误正文只有
+两行，本来就短于预览行数，折与不折看起来一样；(b) 我改测试时 `.replace` 没命中（没加 `assert`），
+改动根本没落盘。修好后：正文 20 行、屏幕够高，变异立刻抓住；同时发现**实现本身也不对**——原来的
+`collapsed` 会把错误正文折起来（ADR 说"错误一律展开"），已一并修正（提交 `0e5315a`）。

@@ -119,8 +119,19 @@ transcript: user >, assistant, ~ reasoning, -> tool, <- result
 ```
 
 The input area is a rule above and below with a `> ` prompt; a continuation
-line is indented two cells instead of repeating the prompt. `tui.input_style = "box"` restores
-the older bordered box. It is a real composer either way (cursor editing, multi-line, history).
+line is indented two cells instead of repeating the prompt. `tui.input_style = "box"` is the
+owner's bordered shape (2026-10-14): **rounded** corners, the `❯` prompt, and the border in
+the theme's accent role (`notice_label` — ADR 0029 reserves accent for labels and
+attention surfaces). It is a real composer either way (cursor editing, multi-line, history).
+
+The **startup screen** is the leading block of transcript entries: the
+wordmark (three rows at the primary `text` level; below its width it drops to one line,
+`㎭ radian <version>`, with the width measured by `unicode-width`), one collapsed information
+line, the safety lines in the `warning` kind that are never folded (a workspace boundary that
+was not your choice, every config-file and approval-policy warning), and one `Tip:` line. An
+information line's `label: value` split follows a notice's: the label uses `notice_label`, the
+value `notice_body` (ADR 0028 / ADR 0029). `Ctrl-P` (`toggle_startup`) folds and
+unfolds the information. `tui.banner = false` hides the wordmark, `tui.tips = false` the Tip.
 The transcript scrolls with PageUp/PageDown, Shift-Up/Shift-Down and Ctrl-Home/Ctrl-End; the
 bare arrow keys belong to the composer.
 
@@ -140,7 +151,8 @@ bare arrow keys belong to the composer.
 | Shift-Up / Shift-Down | scroll the transcript one line |
 | Ctrl-Home / Ctrl-End | scroll the transcript to its top / bottom |
 | Esc | (`escape` in the transcript, `find_close` in the find box) close the find box or the `@` candidate list if one is up; otherwise clear a non-empty input first (the line stays in the history, so `Up` finds it); with an empty input, cancel the running turn / quit |
-| Ctrl-C | cancel the running turn; when idle, quit |
+| Ctrl-C | cancel the running turn; idle with a non-empty input, clear it (into the history); idle with an empty input, arm "press Ctrl-C again to quit" for 2 s (any other key, or the window closing, disarms it; the status bar shows `Press Ctrl-C again to quit`) |
+| Ctrl-P (`toggle_startup`) | fold or unfold the startup information block |
 | Ctrl-F (`find` in the transcript, `find_prev` in the find box) | open the in-transcript search box (`find: <query>`, replacing the input line; the message draft is kept). Type to search the displayed transcript case-insensitively; a second Ctrl-F or Enter is the earlier match, Shift-Enter or Ctrl-G the later one (no wrap); the status bar shows `match i/N`; Esc closes the box where the viewport is |
 | bracketed paste | inserts at the cursor, `\r\n` normalized to `\n`, and never sends |
 
@@ -181,7 +193,12 @@ find_next = ["ctrl-g", "shift-enter"]
 ```
 
 - `input_style`: `lines` (the default: a rule above and below, `> ` on the first line) or `box`
-  (the bordered input box). An unknown value is ignored with a warning and falls back to `lines`.
+  (the owner's rounded box with the `❯` prompt). An unknown value is ignored with a warning and
+  falls back to `lines`.
+- `tips` / `banner`: whether the startup screen shows the one Tip line and the wordmark. Both
+  default to on; `false` hides them.
+- `tips` / `banner`: whether the startup screen shows the one Tip line and the wordmark. Both
+  default to on; `false` hides them.
 - `theme`: `dark` and `light` are **pi's own palettes**, read
   through the same ADR 0029 conversion a theme file uses: the three text levels are pi's
   brightness gradient (dark: `text` 89%, `muted` 67%, `dim` 56%), and every semantic color
@@ -288,9 +305,11 @@ decision 3), so ADR 0027/0028 can wire them without re-reading the file.
 The history is this session's submitted lines (messages and `/…` commands). A resume rebuilds
 it from the journal's user messages. It is not persisted on its own.
 
-The **draft** is: on a clean exit (quit, Ctrl-C, SIGTERM/SIGHUP) a non-empty input is written to
+The **draft** is: on a clean exit (Esc/quit, SIGTERM/SIGHUP) a non-empty input is written to
 `<session-dir>/<session-id>.draft` (0600, atomic temp-file + rename); `--resume` restores it
-once and deletes the file. A panic writes nothing (the panic path does no file I/O). `--list`
+once and deletes the file. An idle Ctrl-C with a non-empty input clears it first (owner
+2026-10-14, see the key table), so a Ctrl-C exit saves the *cleared* input; a signal exit
+saves what was typed. A panic writes nothing (the panic path does no file I/O). `--list`
 and the index only read `*.jsonl`, so a draft is never a session.
 
 ## Slash commands (`/`)
@@ -317,6 +336,7 @@ the rest is sent as an ordinary message.
 | `/help` | list the commands |
 | `/compact [note]` | summarize the history now and keep the recent part (ADR 0018) |
 | `/fork` | fork this session at its last turn boundary (ADR 0022); idle only, and it does not switch to the child |
+| `/theme <name>` | switch the color theme immediately and write `tui.theme` back to the config file (ADR 0008 revision): a built-in (`dark`/`light`/`mono`) or a `*.json` file in `~/.radian/themes/`. `NO_COLOR` wins, so it does not switch; a read-only config (a newer `schema_version`) applies for the session but is never written |
 | `/sessions [query]` | open the session **picker overlay** for this workspace (the `--pick` screen); type to filter, `Tab` full-text search, Enter shows the copyable `--resume <id>` line |
 | `/export [md\|json] [path] [--force]` | export **this** session (default `md`, default `<workspace>/radian-<id>.<ext>`) |
 | `/memory <command> …` | the same durable-memory commands as `agent memory` (ADR 0021 D7): `list`, `search`, `show`, `add`, `edit`, `archive`, `restore`, `forget`, `purge`, `confirm`, `export`, `import`, `project` / `project new`, `relink`, `split`, `merge` |
@@ -386,6 +406,7 @@ The transcript owns its scrolling:
 | 17 | `--version` prints `<program> <CARGO_PKG_VERSION>` and exits 0 without entering the terminal | `tests/version.rs` |
 | 18 | an `@path` reference attaches the file to the request and the transcript folds it to `[file: P, N lines]`; a binary attachment is not sent and the input is kept | `tests/pty.rs`, `tests/render.rs`, `src/mention.rs` |
 | 19 | `--pick` lists this workspace's sessions, filters, full-text searches, resumes the choice (the next request carries its history), `n` starts new, `Esc` exits 0 with no session file; `/sessions` lists a copyable `--resume`; `/export` writes and refuses to overwrite without `--force` | `tests/pty.rs`, `tests/sessions.rs` (host) |
+| 20 | Ctrl-C: idle with text, the first press clears it into the history (not a quit); idle and empty, the first press only shows `Press Ctrl-C again to quit` and a second inside 2 s quits with the exit line; a key in between, or the window closing, disarms | `tests/quit.rs`, `tests/pty.rs` |
 | 20 | auto (ADR 0026 D9): `!` approves once and enables auto (the next ask never prompts, `AUTO` on the status bar); `Y` stays allow-once; `/auto on\|off`, `/yolo` alias; switch audited + `ConfigChanged` journaled; resume restores on `workspace`, not on `full` (with the hint); config `auto` honored on `workspace`, ignored with a warning on `full` | `tests/auto.rs`, `tests/pty.rs` |
 | — | Enter=followup idle / steer running; Ctrl-C cancel-then-quit | `tests/input.rs` |
 

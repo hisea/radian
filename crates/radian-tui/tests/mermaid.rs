@@ -6,11 +6,24 @@
 use radian_tui::app::{App, EntryKind};
 use radian_tui::blocks::{self, ReasoningMode};
 use radian_tui::render;
+use radian_tui::tools::{DisplayModes, ToolDisplay, ToolFold};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 /// A minimal flowchart the vendor renders well inside 80 columns.
 const FLOW: &str = "flowchart LR; A[Start] -- go --> B[End]";
+
+/// The modes the tests lay out with: both folds expanded, diagrams on.
+fn modes(reasoning: ReasoningMode, mermaid: bool) -> DisplayModes {
+    DisplayModes {
+        reasoning,
+        tools: ToolDisplay {
+            fold: ToolFold::Expanded,
+            preview_lines: 5,
+        },
+        mermaid,
+    }
+}
 
 fn assistant(app: &mut App, text: &str) {
     app.entries
@@ -162,8 +175,9 @@ fn a_width_change_recounts_and_redraws() {
     let entry = &app.entries[0];
     let blocks = blocks::parse_blocks(entry.text.as_str());
     for width in [80usize, 16] {
-        let count = blocks::line_count(entry, ReasoningMode::Expanded, width, true);
-        let laid_out = blocks::layout(entry, &blocks, ReasoningMode::Expanded, width, true).len();
+        let modes = modes(ReasoningMode::Expanded, true);
+        let count = blocks::line_count(entry, modes, width);
+        let laid_out = blocks::layout(entry, &blocks, modes, width).len();
         assert_eq!(count, laid_out, "width {width}: count == laid out");
     }
     // Wide: the diagram renders (box drawing).
@@ -172,7 +186,12 @@ fn a_width_change_recounts_and_redraws() {
     // The **immutable** layout path (selection, search, the reference renderer) reads the
     // cache; it must not reuse the 80-column diagram at 16 (the width is in the key). This
     // runs before any 16-column mutable pass, so the cache still holds the wide render.
-    let laid_out_16 = blocks::layout(&app.entries[0], &blocks, ReasoningMode::Expanded, 16, true);
+    let laid_out_16 = blocks::layout(
+        &app.entries[0],
+        &blocks,
+        modes(ReasoningMode::Expanded, true),
+        16,
+    );
     assert!(
         laid_out_16.iter().any(|line| line.reason),
         "a 16-column layout after an 80-column render is the fallback"
@@ -187,8 +206,9 @@ fn a_width_change_recounts_and_redraws() {
     // diagram cache, the 16-column count must be the narrow layout's, or virtualization
     // would count rows the renderer does not draw.
     let entry = &mut app.entries[0];
-    let cached_16 = blocks::line_count_cached(entry, ReasoningMode::Expanded, 16, true);
-    let laid_out_16 = blocks::layout(entry, &blocks, ReasoningMode::Expanded, 16, true).len();
+    let cached_16 = blocks::line_count_cached(entry, modes(ReasoningMode::Expanded, true), 16);
+    let laid_out_16 =
+        blocks::layout(entry, &blocks, modes(ReasoningMode::Expanded, true), 16).len();
     assert_eq!(
         cached_16, laid_out_16,
         "the cached count must be re-measured at the new width"

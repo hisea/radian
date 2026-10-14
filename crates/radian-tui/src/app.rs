@@ -12,6 +12,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use agent_core::{AgentEvent, BudgetReport, CompactionOutcome, ContentPart, Message, UsageSource};
 use radian_coding::PromptError;
@@ -35,6 +36,7 @@ use crate::projection::{SessionProjection, StreamSnapshot};
 use crate::question::{FormKey, FormOutcome, QuestionForm};
 use crate::render::InputStyle;
 use crate::select::{self, Anchor, Selection};
+use crate::startup::StartupScreen;
 use crate::theme::Theme;
 
 // ADR 0023 U5: the turn state is a **session fact**, so it lives in the projection
@@ -53,6 +55,20 @@ pub enum EntryKind {
     ToolCall,
     ToolResult,
     Notice,
+    /// The startup screen's wordmark (; ADR 0027 §标志: the primary text
+    /// color). It is the first entry in a session.
+    Banner,
+    /// The startup information's collapsed/expanded lines. Their `label: value` first lines
+    /// use the same accent label / secondary body levels as a notice (`split_label`, ADR
+    /// 0028 / ADR 0029).
+    Startup,
+    /// A startup safety line (an unavailable sandbox, an unsandboxed MCP, an unknown
+    /// window, a memory/config warning): it is **never** folded away, and it uses the
+    /// warning color.
+    Warning,
+    /// The one-line `Tip: …` under the startup block. Its `Tip:` prefix is dim, the body
+    /// muted.
+    Tip,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -67,13 +83,17 @@ pub struct Entry {
     /// A tool call's outcome, once its result has arrived: `None` while it is running,
     /// `Some(is_error)` after. The card's background follows it (ADR 0028 R4's states).
     pub result: Option<bool>,
+    /// The card's data (ADR 0028 R4): the tool name, the argument JSON, the structured result
+    /// and (no producer yet) the duration. `None` for every non-tool entry, and for a tool
+    /// entry whose message carried nothing to model.
+    pub tool: Option<Box<crate::tools::ToolCard>>,
     /// The parsed blocks (ADR 0028 R1), keyed by text length and the reasoning mode. Only
     /// filled for assistant prose (the only kind with fence grammar today).
     pub(crate) block_cache: Option<((usize, ReasoningMode), Vec<Block>)>,
     /// How many lines this entry laid out to, for the width, text length and mode it was
     /// last measured at. The renderer keeps it so a frame only re-lays out entries that
     /// changed or are on screen.
-    pub(crate) layout_cache: Option<((usize, usize, ReasoningMode, bool), usize)>,
+    pub(crate) layout_cache: Option<((usize, usize, crate::tools::DisplayModes), usize)>,
     /// Rendered Mermaid diagrams (ADR 0028 R8), keyed by `(width, text_len)`: the width is in
     /// the key because `TooWide` can succeed on a wider terminal. Filled by the mutable
     /// measure pass; the immutable layout paths render fresh on a miss.
@@ -89,6 +109,7 @@ impl Entry {
             interrupted: false,
             is_error: false,
             result: None,
+            tool: None,
             block_cache: None,
             layout_cache: None,
             diagram_cache: None,
@@ -220,6 +241,11 @@ pub const AUTO_SCROLL_TICK: std::time::Duration = std::time::Duration::from_mill
 /// is idle between clicks, so there is nothing else to measure with.
 pub const DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// How long the first idle Ctrl-C arms "press again to quit" (ADR 0023 U4, owner
+/// 2026-10-14). A second Ctrl-C inside the window quits; the window closing, or any other
+/// key, disarms it and the hint disappears.
+pub const QUIT_WINDOW: Duration = Duration::from_secs(2);
+
 /// The last press, for double/triple-click detection: where and when, and how many presses
 /// in a row landed on the same cell inside the window (1, 2 or 3; capped at 3).
 #[derive(Debug, Clone, Copy)]
@@ -322,6 +348,14 @@ pub fn mcp_text(configured: usize, open: Option<(usize, usize)>) -> String {
 pub enum Input {
     /// A semantic action, from the keymap or synthesized by the host.
     Action(Action),
+    /// The `cancel` action (Ctrl-C by default) with the wall clock it was read at. The only
+    /// action whose meaning depends on time: idle with an empty input, the first press arms
+    /// "press again to quit" and a second inside [`QUIT_WINDOW`] quits. `update` stays pure;
+    /// the loop (or a test) stamps the time.
+    Cancel { now: Instant },
+    /// The armed quit window closed: disarm and redraw, so the hint goes away. Sent by the
+    /// loop on its `recv_timeout` (ADR 0023 U2: a time-driven display takes the timeout).
+    QuitDeadline,
     /// A printable character typed into the focused text field.
     Char(char),
     /// The find box's backspace (not keymap-driven).
@@ -434,6 +468,13 @@ pub enum Input {
     /// The clipboard write finished (the result of [`Effect::Copy`]): the honest status-bar
     /// notice — what Radian did, never a claim about the clipboard it cannot verify.
     ClipboardDone(String),
+    /// `/theme` finished (the result of [`Effect::Theme`]): the loaded theme (`None` when the
+    /// switch did not happen, e.g. an unknown name or `NO_COLOR`) and the notices the loop
+    /// produced (warnings, and whether the write-back happened).
+    ThemeReady {
+        theme: Option<Box<crate::theme::Theme>>,
+        notices: Vec<String>,
+    },
 }
 
 /// What the loop loaded for a picker overlay: the rows to show, the index for full-text
@@ -546,6 +587,10 @@ pub enum Effect {
     /// transport). The loop runs it and answers with [`Input::ClipboardDone`]: OSC 52 has no
     /// receipt, and `pbcopy` can fail — the loop owns both facts, `update` only owns the text.
     Copy { text: String },
+    /// `/theme <name>` (ADR 0008 revision): load the theme and write `tui.theme` back to the
+    /// config file. Both are I/O, so the loop runs them and answers with
+    /// [`Input::ThemeReady`].
+    Theme { name: String },
 }
 
 /// Effects are compared by **meaning** in the tests. `MemoryCommand` (a clap enum) has no
@@ -620,6 +665,7 @@ impl PartialEq for Effect {
             ) => an == bn && ak == bk && ae == be,
             (Logout { provider: a }, Logout { provider: b }) => a == b,
             (Copy { text: a }, Copy { text: b }) => a == b,
+            (Theme { name: a }, Theme { name: b }) => a == b,
             _ => false,
         }
     }
@@ -718,6 +764,16 @@ pub struct App {
     pub note: Option<String>,
     /// How many requests the queue holds (ADR 0023 U7), for the status bar.
     pub pending: usize,
+    /// The startup screen: the leading block of entries (wordmark,
+    /// collapsed information, safety lines, Tip). `None` before the host sets it.
+    pub startup_screen: Option<StartupScreen>,
+    /// How many leading entries are the startup block, so a toggle replaces exactly it and
+    /// leaves the history alone.
+    startup_len: usize,
+    /// When the first idle Ctrl-C armed "press again to quit": the
+    /// deadline a second Ctrl-C must beat. `None` means not armed. Pure state; the wall clock
+    /// arrives on [`Input::Cancel`], so `update` never reads the clock.
+    pub quit_pending: Option<Instant>,
     /// The in-session auto-approval state (ADR 0026 D9). The status bar shows `AUTO` while
     /// it is on; the approval box's `!` key and `/auto` switch it. The live policy itself
     /// is the hooks' — the loop applies it through [`Effect::SetApprovalPolicy`] — this is
@@ -783,8 +839,12 @@ pub struct App {
     /// How the reasoning channel displays (ADR 0028 R3, `tui.display.reasoning`). Part of
     /// the block/layout cache keys: toggling re-lays the reasoning entries out.
     pub reasoning_mode: ReasoningMode,
+    /// How tool card bodies fold (ADR 0028 R4, `tui.display.tool_output` +
+    /// `tool_preview_lines`). Also part of the layout cache keys.
+    pub tool_display: crate::tools::ToolDisplay,
     /// `tui.display.mermaid` (ADR 0028 R8), default true: draw a closed ```mermaid block as a
-    /// diagram. `false` renders every code block as source.
+    /// diagram. `false` renders every code block as source. Part of `DisplayModes`, so it is
+    /// in the layout cache key.
     pub mermaid_enabled: bool,
 }
 
@@ -804,6 +864,9 @@ impl App {
             quit: false,
             note: None,
             pending: 0,
+            startup_screen: None,
+            startup_len: 0,
+            quit_pending: None,
             auto: false,
             last_answered: None,
             layers: vec![Layer::Surface],
@@ -830,6 +893,7 @@ impl App {
             clipboard: ClipboardMode::Osc52,
             // ADR 0028 R3's default: thinking collapsed to one line.
             reasoning_mode: ReasoningMode::Collapsed,
+            tool_display: crate::tools::ToolDisplay::default(),
             mermaid_enabled: true,
         }
     }
@@ -858,6 +922,16 @@ impl App {
     /// [`Startup::Session`].
     pub fn picking_resolved(&self) -> bool {
         self.picker_outcome.is_some()
+    }
+
+    /// The display modes a frame lays the transcript out with (ADR 0028 R1/R3/R4): the
+    /// reasoning fold and the tool fold together are the layout cache key.
+    pub fn display_modes(&self) -> crate::tools::DisplayModes {
+        crate::tools::DisplayModes {
+            reasoning: self.reasoning_mode,
+            tools: self.tool_display,
+            mermaid: self.mermaid_enabled,
+        }
     }
 
     /// Records the effective input budget `B` (no budget is configured when this is `None`).
@@ -915,14 +989,28 @@ impl App {
             .as_deref()
             .and_then(InputStyle::parse)
             .unwrap_or_default();
-        // `tui.display.reasoning` (ADR 0028 R3, default collapsed). An unknown spelling
-        // never reaches here (the host reader skips it with a warning).
+        // `tui.display.reasoning` (ADR 0028 R3, default collapsed) and
+        // `tui.display.tool_output` + `tool_preview_lines` (R4, default errors / 5). An
+        // unknown spelling never reaches here (the host reader skips it with a warning).
         self.reasoning_mode = config
             .tui
             .display_reasoning
             .as_deref()
             .and_then(ReasoningMode::parse)
             .unwrap_or_default();
+        self.tool_display = crate::tools::ToolDisplay {
+            fold: config
+                .tui
+                .display_tool_output
+                .as_deref()
+                .and_then(crate::tools::ToolFold::parse)
+                .unwrap_or_default(),
+            preview_lines: config
+                .tui
+                .display_tool_preview_lines
+                .map(|lines| lines as usize)
+                .unwrap_or(5),
+        };
         // `tui.display.mermaid` (ADR 0028 R8, default true).
         self.mermaid_enabled = config.tui.display_mermaid.unwrap_or(true);
         // `tui.clipboard` (default OSC 52). An unknown spelling never reaches here (the host
@@ -1066,11 +1154,10 @@ impl App {
         let press_line = self.scroll + row as usize;
         let Some(hit) = select::locate_hit(
             &self.entries,
-            self.reasoning_mode,
+            self.display_modes(),
             self.transcript_width,
             press_line,
             col as usize,
-            self.mermaid_enabled,
         ) else {
             return cleared
                 .then(UpdateResult::dirty)
@@ -1082,11 +1169,10 @@ impl App {
         let (anchor, anchor_on_char) = match count {
             2 => match select::run_at(
                 &self.entries,
-                self.reasoning_mode,
+                self.display_modes(),
                 self.transcript_width,
                 press_line,
                 col as usize,
-                self.mermaid_enabled,
             ) {
                 Some((start, end)) => {
                     self.selection = Some(Selection {
@@ -1254,11 +1340,10 @@ impl App {
         let head_line = self.scroll + row as usize;
         let Some(hit) = select::locate_hit(
             &self.entries,
-            self.reasoning_mode,
+            self.display_modes(),
             self.transcript_width,
             head_line,
             col as usize,
-            self.mermaid_enabled,
         ) else {
             return;
         };
@@ -1434,9 +1519,71 @@ impl App {
             return;
         }
         self.transcript_width = width;
+        // The wordmark drops to its one-line fallback below a width; rebuilding is cheap and
+        // only happens when the width actually changed.
+        if self.startup_screen.is_some() {
+            self.rebuild_startup_entries();
+        }
         if self.find_state().is_some() {
             self.find_recompute();
         }
+    }
+
+    /// Sets the startup screen and builds its leading entry block.
+    pub fn set_startup(&mut self, startup: StartupScreen) {
+        self.startup_screen = Some(startup);
+        self.rebuild_startup_entries();
+    }
+
+    /// `Ctrl-P` (the `toggle_startup` action): fold or unfold the startup information.
+    pub fn toggle_startup(&mut self) -> UpdateResult {
+        let Some(startup) = self.startup_screen.as_mut() else {
+            return UpdateResult::none();
+        };
+        startup.expanded = !startup.expanded;
+        self.rebuild_startup_entries();
+        UpdateResult::dirty()
+    }
+
+    /// The leading startup block, rebuilt from [`StartupScreen`]: the wordmark (the wide form
+    /// when it fits the current width), the collapsed line or the full lines, the safety
+    /// lines (always shown), and the Tip.
+    fn rebuild_startup_entries(&mut self) {
+        let Some(startup) = self.startup_screen.clone() else {
+            self.entries
+                .drain(0..self.startup_len.min(self.entries.len()));
+            self.startup_len = 0;
+            return;
+        };
+        let mut block: Vec<Entry> = startup
+            .banner_for_width(self.transcript_width)
+            .into_iter()
+            .map(|line| Entry::new(EntryKind::Banner, line))
+            .collect();
+        if startup.expanded {
+            block.push(Entry::new(
+                EntryKind::Startup,
+                "▼ startup information (Ctrl-P to fold)",
+            ));
+            for line in &startup.lines {
+                block.push(Entry::new(EntryKind::Startup, line.clone()));
+            }
+        } else {
+            block.push(Entry::new(
+                EntryKind::Startup,
+                format!("▶ {}   (Ctrl-P to expand)", startup.summary),
+            ));
+        }
+        for line in &startup.safety {
+            block.push(Entry::new(EntryKind::Warning, line.clone()));
+        }
+        if let Some(tip) = &startup.tip {
+            block.push(Entry::new(EntryKind::Tip, tip.clone()));
+        }
+        let block_len = block.len();
+        let replace = self.startup_len.min(self.entries.len());
+        self.entries.splice(0..replace, block);
+        self.startup_len = block_len;
     }
 
     /// The open find box, if any.
@@ -1489,8 +1636,7 @@ impl App {
         let width = self.transcript_width;
         // Split the borrow: the entries to match and the layer that holds the query are two
         // different fields of `self`.
-        let mode = self.reasoning_mode;
-        let mermaid = self.mermaid_enabled;
+        let modes = self.display_modes();
         let App {
             entries, layers, ..
         } = self;
@@ -1498,7 +1644,7 @@ impl App {
             Layer::Overlay(Overlay::Find(find)) => Some(find),
             _ => None,
         }) {
-            find.recompute(entries.as_slice(), mode, width, mermaid);
+            find.recompute(entries.as_slice(), modes, width);
         }
         self.find_jump();
     }
@@ -1708,7 +1854,22 @@ impl App {
     }
 
     fn update_inner(&mut self, input: Input) -> UpdateResult {
-        match input {
+        // A pending quit is disarmed by anything except the confirming Ctrl-C (or the
+        // deadline input itself): any other key means the user is still working.
+        let disarmed = self.quit_pending.is_some()
+            && !matches!(input, Input::Cancel { .. } | Input::QuitDeadline);
+        if disarmed {
+            self.quit_pending = None;
+        }
+        let mut result = match input {
+            // The two clock-aware inputs the loop (or a test) sends.
+            Input::Cancel { now } => self.cancel_or_quit_at(now),
+            Input::QuitDeadline => {
+                // The armed window closed: clear it here (the disarm rule below excludes this
+                // input, because this *is* the disarming event).
+                self.quit_pending = None;
+                UpdateResult::dirty()
+            }
             Input::Action(action) => {
                 // The `/…` list is accepted by `complete` (Tab) and by `send` (Enter — the
                 // owner's rule: Enter picks the candidate, it never executes). Every other
@@ -1900,7 +2061,20 @@ impl App {
                 self.note = Some(notice);
                 UpdateResult::dirty()
             }
+            Input::ThemeReady { theme, notices } => {
+                if let Some(theme) = theme {
+                    self.theme = *theme;
+                }
+                for notice in notices {
+                    self.push_notice(notice);
+                }
+                UpdateResult::dirty()
+            }
+        };
+        if disarmed {
+            result.dirty = true;
         }
+        result
     }
 
     /// Resolves one key event to an [`Input`] through the keymap and the layer stack
@@ -2148,7 +2322,16 @@ impl App {
     /// The terminal's entry point: resolve the key, then [`App::update`]. A thin wrapper —
     /// everything that changes state lives in `update`.
     pub fn on_key(&mut self, key: KeyEvent) -> UpdateResult {
+        self.on_key_at(key, Instant::now())
+    }
+
+    /// Like [`App::on_key`], with the wall clock supplied: only the Ctrl-C quit window
+    /// depends on it, so production passes the real clock and a test injects its own.
+    pub fn on_key_at(&mut self, key: KeyEvent, now: Instant) -> UpdateResult {
         match self.key_input(&key) {
+            // The cancel action (`Ctrl-C` by default) carries its timestamp: idle with an
+            // empty input it arms the quit window instead of quitting at once.
+            Some(Input::Action(Action::Cancel)) => self.update(Input::Cancel { now }),
             Some(input) => self.update(input),
             None => UpdateResult::none(),
         }
@@ -2160,13 +2343,49 @@ impl App {
         self.projection.read().turn()
     }
 
-    /// Cancels a running turn, or quits when idle.
-    fn cancel_or_quit(&mut self) -> UpdateResult {
+    /// `Esc`'s escalation (unchanged, ): cancel a running turn, otherwise
+    /// quit at once. Ctrl-C ([`Input::Cancel`]) is the one that asks twice.
+    fn cancel_or_quit_now(&mut self) -> UpdateResult {
         if self.turn() == TurnState::Running {
+            self.quit_pending = None;
             UpdateResult::quiet(Effect::Cancel)
         } else {
             self.quit = true;
             UpdateResult::quiet(Effect::Quit)
+        }
+    }
+
+    /// Ctrl-C (the `cancel` action), the one action whose meaning depends on the clock
+    ///:
+    /// - a turn is running: cancel it (unchanged);
+    /// - idle, the input has text: clear it into the history (the same clearing `Esc` does,
+    ///   so `Up` finds it);
+    /// - idle, the input is empty: the first press arms [`QUIT_WINDOW`]; a second press
+    ///   inside the window quits; a press after it re-arms.
+    fn cancel_or_quit_at(&mut self, now: Instant) -> UpdateResult {
+        if self.turn() == TurnState::Running {
+            self.quit_pending = None;
+            return UpdateResult::quiet(Effect::Cancel);
+        }
+        if !self.input.is_empty() {
+            let text = std::mem::take(&mut self.input).text();
+            self.history.push(text);
+            self.history_cursor = None;
+            self.history_stash.clear();
+            self.quit_pending = None;
+            return UpdateResult::dirty();
+        }
+        match self.quit_pending.take() {
+            Some(deadline) if now <= deadline => {
+                self.quit = true;
+                UpdateResult::quiet(Effect::Quit)
+            }
+            // The first press, or a second one after the window closed (re-arm, do not
+            // double-fire): arm the deadline and redraw the hint.
+            _ => {
+                self.quit_pending = Some(now + QUIT_WINDOW);
+                UpdateResult::dirty()
+            }
         }
     }
 
@@ -2298,6 +2517,16 @@ impl App {
                 self.reasoning_mode = self.reasoning_mode.toggled();
                 UpdateResult::dirty()
             }
+            // ADR 0028 R4: Ctrl-O steps the tool bodies through errors -> expanded ->
+            // collapsed -> errors, pi's three modes in one key.
+            Action::ToggleToolOutput => {
+                self.tool_display.fold = match self.tool_display.fold {
+                    crate::tools::ToolFold::Errors => crate::tools::ToolFold::Expanded,
+                    crate::tools::ToolFold::Expanded => crate::tools::ToolFold::Collapsed,
+                    crate::tools::ToolFold::Collapsed => crate::tools::ToolFold::Errors,
+                };
+                UpdateResult::dirty()
+            }
             Action::DeleteWord => {
                 self.input.delete_word();
                 UpdateResult::dirty()
@@ -2344,7 +2573,7 @@ impl App {
                     self.history_stash.clear();
                     UpdateResult::dirty()
                 } else {
-                    self.cancel_or_quit()
+                    self.cancel_or_quit_now()
                 }
             }
             // The form actions normally arrive as `Input::Form`; a main-layer binding to one
@@ -2356,7 +2585,9 @@ impl App {
             | Action::FormSelect
             | Action::FormSubmit
             | Action::FormDecline => self.form_key(FormKey::Action(action)),
-            Action::Cancel => self.cancel_or_quit(),
+            Action::Cancel => self.cancel_or_quit_at(Instant::now()),
+            // `Ctrl-P` folds the startup information.
+            Action::ToggleStartup => self.toggle_startup(),
         }
     }
 
@@ -2760,6 +2991,11 @@ impl App {
                 }
                 UpdateResult::effect(Effect::Session(command::SessionOutcome::Fork))
             }
+            command::Outcome::Theme(name) => {
+                // ADR 0008 revision: the loop loads the theme (I/O) and writes `tui.theme`
+                // back to the config file; the notice says which of those happened.
+                UpdateResult::effect(Effect::Theme { name })
+            }
             command::Outcome::Thinking(level) => {
                 UpdateResult::effect(Effect::SetThinking { level })
             }
@@ -3018,28 +3254,51 @@ impl App {
                 let mut entry = Entry::new(EntryKind::Assistant, text_of(content));
                 entry.interrupted = *interrupted;
                 self.entries.push(entry);
-                if !tool_calls.is_empty() {
-                    let calls = tool_calls
-                        .iter()
-                        .map(|call| format!("{}({})", call.name, call.arguments))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    self.entries.push(Entry::new(EntryKind::ToolCall, calls));
+                // One card per call (ADR 0028 R4): each carries its own name and arguments,
+                // and its text is the same header the renderer will show, so the head stays
+                // selectable and copyable character for character.
+                for call in tool_calls {
+                    let card = crate::tools::ToolCard::new(
+                        call.id.clone(),
+                        call.name.clone(),
+                        call.arguments.clone(),
+                    );
+                    let mut entry = Entry::new(EntryKind::ToolCall, crate::tools::head_text(&card));
+                    entry.tool = Some(Box::new(card));
+                    self.entries.push(entry);
                 }
             }
             Message::Tool { result, .. } => {
-                // The card's head entry learns its outcome from the result that just
-                // arrived: the last tool call still marked running is the one it answers.
-                if let Some(call) = self
+                // The result pairs with its call **by id** (the same key the live and the
+                // resume paths carry), so a batch of calls pairs correctly whatever order
+                // their results arrive in.
+                let paired = self
                     .entries
                     .iter_mut()
                     .rev()
-                    .find(|entry| entry.kind == EntryKind::ToolCall && entry.result.is_none())
-                {
-                    call.result = Some(result.is_error);
-                }
+                    .find(|entry| {
+                        entry.kind == EntryKind::ToolCall
+                            && entry
+                                .tool
+                                .as_ref()
+                                .is_some_and(|card| card.call_id == result.call_id)
+                    })
+                    .and_then(|entry| {
+                        entry.result = Some(result.is_error);
+                        let card = entry.tool.as_mut()?;
+                        card.structured = result.structured.clone();
+                        // The header can only be final now (the `shell` exit code comes from
+                        // the result), so the entry's text - what renders and copies - is
+                        // regenerated from the same function the layout uses.
+                        entry.text = crate::tools::head_text(card);
+                        Some((card.name.clone(), card.arguments.clone()))
+                    });
+                let (name, arguments) = paired.unwrap_or_default();
                 let mut entry = Entry::new(EntryKind::ToolResult, result.text());
                 entry.is_error = result.is_error;
+                let mut card = crate::tools::ToolCard::new(result.call_id.clone(), name, arguments);
+                card.structured = result.structured.clone();
+                entry.tool = Some(Box::new(card));
                 self.entries.push(entry);
             }
         }

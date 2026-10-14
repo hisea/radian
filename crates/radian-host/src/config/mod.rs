@@ -1,9 +1,9 @@
-//! The **read-only** configuration file reader (ADR 0008; its location is ADR 0020's
-//! `~/.radian/config/config.toml`).
+//! The configuration file (ADR 0008; its location is ADR 0020's `~/.radian/config/config.toml`).
 //!
-//! This slice only reads: there is no migration entry point and nothing is ever written back,
-//! so ADR 0008 §5.4's "write-back must be faithful or refused" cannot be violated here (the
-//! reader never writes).
+//! Reading is the main job; the reader never rewrites a file it read. The one writer is
+//! [`theme_write::write_theme`] (`/theme`, ADR 0008 revision): it edits **only** `tui.theme`
+//! through `toml_edit` and refuses when the result would differ in anything else (ADR 0008
+//! §5.4's "faithful or refused").
 //!
 //! The rules the reader enforces (each one is a test):
 //!
@@ -21,6 +21,7 @@
 //! errors name the key path and nothing else.
 
 pub mod migrate_pi;
+pub mod theme_write;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -256,9 +257,22 @@ pub struct TuiConfig {
     /// `"osc52"` (the default), `"pbcopy"` (macOS only; elsewhere a warning and OSC 52) or
     /// `"off"`. `None` means the default; an unknown value is ignored with a warning.
     pub clipboard: Option<String>,
+    /// `tui.tips`: whether the startup screen shows one Tip line. `None`
+    /// means the default, on.
+    pub tips: Option<bool>,
+    /// `tui.banner`: whether the startup screen shows the wordmark. `None`
+    /// means the default, on.
+    pub banner: Option<bool>,
     /// `tui.display.reasoning`: `"collapsed"` (the default), `"expanded"` or `"hidden"`
     /// (ADR 0028 R3). `None` means the default; an unknown value is ignored with a warning.
     pub display_reasoning: Option<String>,
+    /// `tui.display.tool_output`: `"collapsed"`, `"expanded"` or `"errors"` (the default,
+    /// ADR 0028 R4). `None` means the default; an unknown value is ignored with a warning.
+    pub display_tool_output: Option<String>,
+    /// `tui.display.tool_preview_lines`: how many body lines a collapsed tool card shows
+    /// (default 5). `None` means the default; a non-positive or non-integer value is skipped
+    /// with a warning.
+    pub display_tool_preview_lines: Option<u64>,
     /// `tui.display.mermaid` (ADR 0028 R8): draw a closed ```` ```mermaid ```` block as a
     /// Unicode diagram. `None` means the default (`true`); an unknown value is ignored with a
     /// warning.
@@ -321,6 +335,16 @@ pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
             }),
         },
     }
+}
+
+/// The path this process reads its configuration from (`--config` > `RADIAN_CONFIG` >
+/// `<root>/config/config.toml`), even when the file does not exist yet. [`Config::source`]
+/// is `None` in that case; the `/theme` write-back needs the path to create it (ADR 0008
+/// revision).
+pub fn resolved_path(explicit: Option<&Path>) -> Option<PathBuf> {
+    let env = std::env::var(RADIAN_CONFIG_ENV).ok();
+    let home = crate::home::radian_home();
+    resolve_path(explicit, env.as_deref(), home.as_deref())
 }
 
 /// Parses one configuration document. Split out so the fixture consistency test can feed the
@@ -702,6 +726,14 @@ fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
                         {
                             config.tui.display_reasoning = Some(mode.clone());
                         }
+                        ("tool_output", Value::String(mode))
+                            if matches!(mode.as_str(), "collapsed" | "expanded" | "errors") =>
+                        {
+                            config.tui.display_tool_output = Some(mode.clone());
+                        }
+                        ("tool_preview_lines", Value::Integer(lines)) if *lines > 0 => {
+                            config.tui.display_tool_preview_lines = Some(*lines as u64);
+                        }
                         ("mermaid", Value::Boolean(on)) => {
                             config.tui.display_mermaid = Some(*on);
                         }
@@ -723,6 +755,11 @@ fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
             // A non-boolean mouse is a display preference: ignore it (and say so), never
             // refuse the file.
             ("mouse", _) => config.skipped.push("tui.mouse".into()),
+            ("tips", Value::Boolean(tips)) => config.tui.tips = Some(*tips),
+            // A non-boolean tips flag is the same kind of display preference.
+            ("tips", _) => config.skipped.push("tui.tips".into()),
+            ("banner", Value::Boolean(banner)) => config.tui.banner = Some(*banner),
+            ("banner", _) => config.skipped.push("tui.banner".into()),
             (other, _) => config.skipped.push(format!("tui.{other}")),
         }
     }
@@ -1275,5 +1312,29 @@ future_option = "alpha"
             config.tui.keybindings,
             vec![("send".to_string(), vec!["ctrl-s".to_string()])]
         );
+    }
+}
+
+#[cfg(test)]
+mod startup_pref_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn parse_str(text: &str) -> Result<Config, ConfigError> {
+        parse(Path::new("/tmp/test/config.toml"), text)
+    }
+
+    /// ADR 0008: `tui.tips`/`tui.banner` are display booleans; a non-boolean is skipped with a
+    /// warning, never a refusal (the `tui.*` rule).
+    #[test]
+    fn tui_tips_and_banner_are_carried_and_non_booleans_are_skipped() {
+        let config =
+            parse_str("schema_version = 1\n[tui]\ntips = false\nbanner = false\n").unwrap();
+        assert_eq!(config.tui.tips, Some(false));
+        assert_eq!(config.tui.banner, Some(false));
+
+        let config = parse_str("schema_version = 1\n[tui]\ntips = \"yes\"\n").unwrap();
+        assert_eq!(config.tui.tips, None);
+        assert!(config.skipped.contains(&"tui.tips".to_string()));
     }
 }

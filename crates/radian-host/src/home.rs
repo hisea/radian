@@ -54,6 +54,9 @@ pub fn credentials_dir_for(root: &Path) -> PathBuf {
 pub fn themes_dir_for(root: &Path) -> PathBuf {
     root.join("themes")
 }
+pub fn skills_dir_for(root: &Path) -> PathBuf {
+    root.join("skills")
+}
 pub fn diagnostics_dir_for(root: &Path) -> PathBuf {
     cache_dir_for(root).join("diagnostics")
 }
@@ -98,6 +101,13 @@ pub fn credentials_dir() -> Option<PathBuf> {
 /// files are user UI data, like the config (ADR 0029 decision 1: `~/.radian/themes/<name>.json`).
 pub fn themes_dir() -> Option<PathBuf> {
     Some(private(themes_dir_for(&radian_home()?)))
+}
+
+/// The skills directory for this process, created 0700. **Sandbox-readable** (ADR 0020's
+/// revision for ADR 0025 ruling 1): a skill's body is read by the model and its scripts are run
+/// by shell inside the sandbox, so the directory is not on the deny-read list.
+pub fn skills_dir() -> Option<PathBuf> {
+    Some(private(skills_dir_for(&radian_home()?)))
 }
 
 /// The diagnostics directory for this process, created 0700. Sandbox-readable (ADR 0020).

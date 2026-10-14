@@ -5,7 +5,6 @@
 
 use agent_core::AgentEvent;
 use radian_tui::app::App;
-use radian_tui::blocks::ReasoningMode;
 use radian_tui::render::{self, transcript_lines, visible_lines};
 use radian_tui::theme::Theme;
 use radian_tui::{Entry, EntryKind};
@@ -13,7 +12,18 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::text::Line;
 
-const EXPANDED: ReasoningMode = ReasoningMode::Expanded;
+use radian_tui::blocks::ReasoningMode;
+use radian_tui::tools::{DisplayModes, ToolDisplay, ToolFold};
+
+/// Both folds expanded, so a test's geometry does not depend on the fold defaults.
+const EXPANDED: DisplayModes = DisplayModes {
+    reasoning: ReasoningMode::Expanded,
+    tools: ToolDisplay {
+        fold: ToolFold::Expanded,
+        preview_lines: 5,
+    },
+    mermaid: true,
+};
 
 fn text(lines: &[Line<'static>]) -> Vec<String> {
     lines
@@ -57,7 +67,6 @@ fn every_window_matches_the_full_wrap() {
             EXPANDED,
             width,
             &Theme::default(),
-            true,
         ));
         for height in [1usize, 5, 17] {
             for start in 0..=full.len() {
@@ -68,7 +77,6 @@ fn every_window_matches_the_full_wrap() {
                     start,
                     height,
                     &Theme::default(),
-                    true,
                 );
                 assert_eq!(total, full.len(), "width {width}");
                 let end = (start + height).min(full.len());
@@ -87,15 +95,7 @@ fn every_window_matches_the_full_wrap() {
 fn a_growing_entry_is_measured_again() {
     let width = 20;
     let mut entries = mixed_entries();
-    let _ = visible_lines(
-        &mut entries,
-        EXPANDED,
-        width,
-        0,
-        10,
-        &Theme::default(),
-        true,
-    );
+    let _ = visible_lines(&mut entries, EXPANDED, width, 0, 10, &Theme::default());
     let last = entries.len() - 1;
     entries[last].text.push_str(&" more words".repeat(30));
     let full = text(&transcript_lines(
@@ -103,7 +103,6 @@ fn a_growing_entry_is_measured_again() {
         EXPANDED,
         width,
         &Theme::default(),
-        true,
     ));
     let (total, window) = visible_lines(
         &mut entries,
@@ -112,7 +111,6 @@ fn a_growing_entry_is_measured_again() {
         full.len() - 10,
         10,
         &Theme::default(),
-        true,
     );
     assert_eq!(total, full.len(), "the total must include the growth");
     assert_eq!(text(&window), full[full.len() - 10..].to_vec());
@@ -122,11 +120,11 @@ fn a_growing_entry_is_measured_again() {
 #[test]
 fn a_resize_is_measured_again() {
     let mut entries = mixed_entries();
-    let _ = visible_lines(&mut entries, EXPANDED, 80, 0, 10, &Theme::default(), true);
-    let (total, _) = visible_lines(&mut entries, EXPANDED, 15, 0, 10, &Theme::default(), true);
+    let _ = visible_lines(&mut entries, EXPANDED, 80, 0, 10, &Theme::default());
+    let (total, _) = visible_lines(&mut entries, EXPANDED, 15, 0, 10, &Theme::default());
     assert_eq!(
         total,
-        transcript_lines(&entries, EXPANDED, 15, &Theme::default(), true).len()
+        transcript_lines(&entries, EXPANDED, 15, &Theme::default()).len()
     );
 }
 

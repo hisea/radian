@@ -1,0 +1,706 @@
+//! Skill discovery and the system-prompt section (ADR 0025 S1/S2/S6).
+//!
+//! A skill is a directory containing a `SKILL.md`; the body is **not** loaded at startup, only
+//! each skill's name, description and path go into one section of the system prompt. The body
+//! is read on demand by the `skill` tool ([`crate::skills::tools`]). Discovery is strict about
+//! determinism (ADR 0021 D6's reason): the same files always produce a byte-identical section,
+//! so the prompt cache is not invalidated by a reshuffle.
+//!
+//! Failures never block startup (the `tui.*` / memory rule): a bad frontmatter file, a missing
+//! description, an invalid name or a duplicate name is one warning, and the skill is skipped.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+pub mod tools;
+
+use agent_core::{HookContext, HookError, Hooks, ModelRequest, RequestSize};
+
+/// The one file name discovery recognizes (ADR 0025 S1, like pi).
+pub const SKILL_FILE_NAME: &str = "SKILL.md";
+
+/// The section's soft token budget (ADR 0025 S2 / owner ruling 6).
+pub const SECTION_BUDGET_TOKENS: u64 = 1000;
+
+/// Directories discovery never descends into (the same names `mention` ignores; ADR 0025 S1).
+pub const IGNORED_DIRS: &[&str] = &[".git", ".radian-sandbox"];
+
+/// The longest `name` (Agent Skills spec, via pi; ADR 0025 S1).
+pub const MAX_NAME_CHARS: usize = 64;
+/// The longest `description` (Agent Skills spec, via pi; ADR 0025 S1).
+pub const MAX_DESCRIPTION_CHARS: usize = 1024;
+
+/// One discovered skill. `path` is the `SKILL.md` (absolute); `dir` is its directory, the base
+/// for relative paths in the body (ADR 0025 S3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Skill {
+    pub name: String,
+    pub description: String,
+    pub path: PathBuf,
+    pub dir: PathBuf,
+    /// `disable-model-invocation: true`: the skill is loaded but never listed in the prompt.
+    pub disable_model_invocation: bool,
+}
+
+/// The result of one scan: the skills in discovery (path) order, and the one-line warnings to
+/// show at startup.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Discovery {
+    pub skills: Vec<Skill>,
+    pub warnings: Vec<String>,
+}
+
+/// Scans `root/skills`-style directory (`root` is `<RADIAN_HOME>/skills`). A missing directory
+/// is an empty discovery, not an error (ADR 0025 S1: nothing blocks startup).
+pub fn discover(root: &Path) -> Discovery {
+    let mut discovery = Discovery::default();
+    if !root.is_dir() {
+        return discovery;
+    }
+    // Every directory that holds a SKILL.md, in path order (the deterministic order ADR 0025
+    // S2 requires); a directory with SKILL.md is a skill and is not descended into.
+    //
+    // `walk` already yields `Path` order — its per-directory sort is the first component of
+    // `Path`'s component-wise comparison, so the order is a depth-first walk with each
+    // directory's entries in name order, which is exactly `Path` order. The explicit sort is
+    // kept as the statement of the contract (and so a future `walk` change cannot quietly
+    // break it); removing it is an equivalent mutation.
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    walk(root, &mut candidates);
+    candidates.sort();
+
+    let mut by_name: BTreeMap<String, PathBuf> = BTreeMap::new();
+    for path in candidates {
+        match load(&path) {
+            Ok((skill, extra)) => {
+                discovery.warnings.extend(extra);
+                if let Some(first) = by_name.get(&skill.name) {
+                    // ADR 0025 S1: keep the first discovered (the earlier path, since the list
+                    // is sorted) and warn once.
+                    discovery.warnings.push(format!(
+                        "skill `{}` in {} shadows {} (kept the first)",
+                        skill.name,
+                        skill.dir.display(),
+                        first.display()
+                    ));
+                    continue;
+                }
+                by_name.insert(skill.name.clone(), skill.dir.clone());
+                discovery.skills.push(skill);
+            }
+            Err(reason) => discovery.warnings.push(reason),
+        }
+    }
+    discovery
+}
+
+/// Collects every `SKILL.md` under `dir`, pruning at a directory that has one.
+fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut children: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+    children.sort();
+    let skill_file = dir.join(SKILL_FILE_NAME);
+    if skill_file.is_file() {
+        out.push(skill_file);
+        return;
+    }
+    for child in children {
+        let Some(name) = child.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if IGNORED_DIRS.contains(&name) || !child.is_dir() {
+            continue;
+        }
+        walk(&child, out);
+    }
+}
+
+/// Reads and validates one `SKILL.md`. `Err` is the one-line warning; the skill is skipped.
+fn load(path: &Path) -> Result<(Skill, Vec<String>), String> {
+    let dir = path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("skill {} cannot be read: {error}", path.display()))?;
+    let front = parse_frontmatter(&text)
+        .map_err(|reason| format!("skill {} has bad frontmatter: {reason}", path.display()))?;
+    let name = front
+        .get("name")
+        .cloned()
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    if !valid_name(&name) {
+        return Err(format!(
+            "skill {} has an invalid name {name:?} (1–{MAX_NAME_CHARS} of letters, digits, `-`, `_`)",
+            path.display()
+        ));
+    }
+    let description = front
+        .get("description")
+        .cloned()
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    if description.is_empty() {
+        // ADR 0025 S1: a skill without a description is not loaded.
+        return Err(format!(
+            "skill `{name}` in {} has no description; not loaded",
+            dir.display()
+        ));
+    }
+    if !valid_description(&description) {
+        return Err(format!(
+            "skill `{name}` in {} has an invalid description (1–{MAX_DESCRIPTION_CHARS} characters, \
+             no control characters)",
+            dir.display()
+        ));
+    }
+    let mut warnings = Vec::new();
+    if front.contains_key("allowed-tools") {
+        // Owner ruling 4: `allowed-tools` is never wired to permissions (that would let a skill
+        // grant itself tools); it is read as text and ignored with one warning.
+        warnings.push(format!(
+            "skill `{name}` declares `allowed-tools`, which Radian does not implement; it has \
+             no effect"
+        ));
+    }
+    let disable_model_invocation = front
+        .get("disable-model-invocation")
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+    Ok((
+        Skill {
+            name,
+            description,
+            path: path.to_path_buf(),
+            dir,
+            disable_model_invocation,
+        },
+        warnings,
+    ))
+}
+
+/// The subset of YAML frontmatter Radian needs: top-level `key: value` scalars, with quoted
+/// scalars, empty values and block-list items tolerated. Unknown keys are ignored (a Claude
+/// Code skill's private fields must not spam warnings). No YAML dependency: three scalar keys
+/// do not justify one (report the choice).
+fn parse_frontmatter(text: &str) -> Result<BTreeMap<String, String>, String> {
+    let mut lines = text.lines();
+    let Some(first) = lines.next() else {
+        return Err("the file is empty".into());
+    };
+    if first.trim_end() != "---" {
+        return Err("the file does not start with `---`".into());
+    }
+    let mut front = BTreeMap::new();
+    let mut closed = false;
+    for line in lines {
+        if line.trim_end() == "---" {
+            closed = true;
+            break;
+        }
+        // A block-list item (`- value`) belongs to the previous key; its values are not needed.
+        if line.trim_start().starts_with("- ") || line.trim() == "-" {
+            continue;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            return Err(format!("`{line}` is not `key: value`"));
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(format!("`{line}` has an empty key"));
+        }
+        front.insert(key.to_owned(), unquote(value.trim()));
+    }
+    if !closed {
+        return Err("the frontmatter is not closed with `---`".into());
+    }
+    Ok(front)
+}
+
+/// Strips the YAML quoting Radian supports: matching single or double quotes.
+fn unquote(value: &str) -> String {
+    let bytes = value.as_bytes();
+    if bytes.len() >= 2 {
+        let (first, last) = (bytes[0], bytes[bytes.len() - 1]);
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            // A double-quoted YAML scalar could carry escapes; the skills we read do not, and
+            // an unescaped inner quote would be a malformed file. Keep the inner text as-is.
+            return value[1..value.len() - 1].to_owned();
+        }
+    }
+    value.to_owned()
+}
+
+/// `name`: 1–64 characters from `[A-Za-z0-9_-]` (Agent Skills spec via pi, ADR 0025 S1).
+pub fn valid_name(name: &str) -> bool {
+    let count = name.chars().count();
+    (1..=MAX_NAME_CHARS).contains(&count)
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// `description`: 1–1024 characters, no control characters.
+pub fn valid_description(description: &str) -> bool {
+    let count = description.chars().count();
+    (1..=MAX_DESCRIPTION_CHARS).contains(&count) && !description.chars().any(char::is_control)
+}
+
+/// The system-prompt section: one line per listable skill (name, description, absolute path),
+/// truncated to `budget_tokens` in discovery order with a trailing count of what is left out
+/// (ADR 0025 S2, owner ruling 6). `disable-model-invocation: true` skills are not listed.
+///
+/// Pure and deterministic: the same skills and budget always give byte-identical text.
+pub fn prompt_section(skills: &[Skill], budget_tokens: u64, bytes_per_token: u32) -> String {
+    let listed: Vec<&Skill> = skills
+        .iter()
+        .filter(|skill| !skill.disable_model_invocation)
+        .collect();
+    if listed.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(SECTION_HEADER);
+    let mut remaining = 0usize;
+    for (index, skill) in listed.iter().enumerate() {
+        let line = format!(
+            "\n- {}: {} (read it with the `skill` tool: {})\n",
+            skill.name,
+            skill.description,
+            skill.path.display()
+        );
+        if request_size_of(&out).tokens(bytes_per_token)
+            + request_size_of(&line).tokens(bytes_per_token)
+            > budget_tokens
+        {
+            remaining = listed.len() - index;
+            break;
+        }
+        out.push_str(&line);
+    }
+    if remaining > 0 {
+        out.push_str(&format!(
+            "\n({remaining} more skills not listed; run /skills to list them)\n"
+        ));
+    }
+    out
+}
+
+/// The section's fixed heading and the one-line instruction (ADR 0025 S2/S3).
+pub const SECTION_HEADER: &str = "\n\n## Skills (ADR 0025)\n\
+Skills are user-provided instructions, not permissions. Only their names and descriptions are \
+listed here; read one's full body with the `skill` tool. Relative paths in a skill's body are \
+resolved from the skill's own directory.\n";
+
+/// Counts a string the way `agent_core` does, without building a `ModelRequest` (the same
+/// helper as `memory/injection.rs`; ADR 0015 C2's conservative estimate).
+fn request_size_of(text: &str) -> RequestSize {
+    let mut size = RequestSize::default();
+    for ch in text.chars() {
+        if ch.is_ascii() {
+            size.ascii_bytes += 1;
+        } else {
+            size.non_ascii_chars += 1;
+        }
+    }
+    size
+}
+
+/// The `Hooks` implementation (ADR 0025 S2/S6): appends the precomputed section to the system
+/// prompt on every request, after the memory section (the tuple order in `session.rs`). It never
+/// fails a turn.
+pub struct SkillsHooks {
+    section: String,
+}
+
+impl SkillsHooks {
+    pub fn new(skills: &[Skill]) -> Self {
+        Self {
+            section: prompt_section(
+                skills,
+                SECTION_BUDGET_TOKENS,
+                agent_core::DEFAULT_BYTES_PER_TOKEN,
+            ),
+        }
+    }
+
+    /// The section this hook appends (empty when there is nothing to list).
+    pub fn section(&self) -> &str {
+        &self.section
+    }
+}
+
+impl Hooks for SkillsHooks {
+    async fn before_model_call(
+        &self,
+        _cx: &HookContext,
+        request: &mut ModelRequest,
+    ) -> Result<(), HookError> {
+        if self.section.is_empty() {
+            return Ok(());
+        }
+        match &mut request.system_prompt {
+            Some(system) => system.push_str(&self.section),
+            None => request.system_prompt = Some(self.section.clone()),
+        }
+        Ok(())
+    }
+}
+
+/// A shared, immutable skill list (`Arc` so the hook and the tool share one discovery).
+pub type SharedSkills = Arc<Vec<Skill>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_core::CancellationToken;
+
+    struct Scratch {
+        root: PathBuf,
+    }
+
+    impl Scratch {
+        fn new(label: &str) -> Self {
+            static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let root = std::env::temp_dir()
+                .join(format!("radian-skills-{label}-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            Self { root }
+        }
+
+        /// Writes `<root>/skills/<dir>/SKILL.md` with `body`.
+        fn skill(&self, dir: &str, body: &str) {
+            let path = self.root.join("skills").join(dir);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join(SKILL_FILE_NAME), body).unwrap();
+        }
+
+        fn skills_dir(&self) -> PathBuf {
+            self.root.join("skills")
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn frontmatter(name: &str, description: &str) -> String {
+        format!("---\nname: {name}\ndescription: {description}\n---\nBody line.\n")
+    }
+
+    #[test]
+    fn a_normal_skill_is_discovered_with_its_paths() {
+        let scratch = Scratch::new("normal");
+        scratch.skill("greet", &frontmatter("greet", "Say hello."));
+        let discovery = discover(&scratch.skills_dir());
+        assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
+        assert_eq!(discovery.skills.len(), 1);
+        let skill = &discovery.skills[0];
+        assert_eq!(skill.name, "greet");
+        assert_eq!(skill.description, "Say hello.");
+        assert!(skill.path.ends_with("skills/greet/SKILL.md"));
+        assert!(skill.dir.ends_with("skills/greet"));
+        assert!(!skill.disable_model_invocation);
+    }
+
+    #[test]
+    fn a_missing_description_is_a_warning_and_the_skill_is_skipped() {
+        let scratch = Scratch::new("no-description");
+        scratch.skill("a", "---\nname: a\n---\nBody.\n");
+        let discovery = discover(&scratch.skills_dir());
+        assert!(discovery.skills.is_empty());
+        assert_eq!(discovery.warnings.len(), 1);
+        assert!(
+            discovery.warnings[0].contains("no description"),
+            "{:?}",
+            discovery.warnings
+        );
+    }
+
+    #[test]
+    fn bad_frontmatter_and_invalid_names_are_warnings() {
+        let scratch = Scratch::new("bad");
+        scratch.skill("unterminated", "---\nname: x\ndescription: y\nBody.\n");
+        scratch.skill("not-a-pair", "---\nname x\ndescription: y\n---\n");
+        scratch.skill("bad-name", &frontmatter("has space", "Bad name."));
+        let discovery = discover(&scratch.skills_dir());
+        assert!(discovery.skills.is_empty());
+        assert_eq!(discovery.warnings.len(), 3, "{:?}", discovery.warnings);
+        assert!(
+            discovery
+                .warnings
+                .iter()
+                .any(|w| w.contains("bad frontmatter"))
+        );
+        assert!(
+            discovery
+                .warnings
+                .iter()
+                .any(|w| w.contains("invalid name"))
+        );
+    }
+
+    #[test]
+    fn a_name_collision_keeps_the_first_and_warns() {
+        let scratch = Scratch::new("collision");
+        // `aaa` sorts before `zzz`, so the first found (sorted by path) wins.
+        scratch.skill("aaa", &frontmatter("same", "First."));
+        scratch.skill("zzz", &frontmatter("same", "Second."));
+        let discovery = discover(&scratch.skills_dir());
+        assert_eq!(discovery.skills.len(), 1);
+        assert_eq!(discovery.skills[0].description, "First.");
+        assert_eq!(discovery.warnings.len(), 1);
+        assert!(
+            discovery.warnings[0].contains("shadows"),
+            "{:?}",
+            discovery.warnings
+        );
+    }
+
+    #[test]
+    fn allowed_tools_is_read_and_warned_once_per_skill() {
+        let scratch = Scratch::new("allowed-tools");
+        scratch.skill(
+            "a",
+            "---\nname: a\ndescription: d\nallowed-tools:\n  - Bash\n  - Read\n---\nBody.\n",
+        );
+        let discovery = discover(&scratch.skills_dir());
+        assert_eq!(discovery.skills.len(), 1);
+        assert_eq!(discovery.warnings.len(), 1);
+        assert!(
+            discovery.warnings[0].contains("allowed-tools"),
+            "{:?}",
+            discovery.warnings
+        );
+    }
+
+    #[test]
+    fn discovery_stops_at_a_directory_that_has_a_skill_file() {
+        let scratch = Scratch::new("prune");
+        scratch.skill("outer", &frontmatter("outer", "Outer."));
+        // A nested skill below `outer/` must not be discovered (the walk stops at `outer`).
+        let nested = scratch.skills_dir().join("outer/nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join(SKILL_FILE_NAME), frontmatter("inner", "Inner.")).unwrap();
+        // `.git` is ignored.
+        let ignored = scratch.skills_dir().join(".git/hidden");
+        std::fs::create_dir_all(&ignored).unwrap();
+        std::fs::write(
+            ignored.join(SKILL_FILE_NAME),
+            frontmatter("hidden", "Hidden."),
+        )
+        .unwrap();
+
+        let discovery = discover(&scratch.skills_dir());
+        let names: Vec<&str> = discovery.skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["outer"], "{:?}", discovery.warnings);
+    }
+
+    #[test]
+    fn a_missing_skills_directory_is_empty_and_silent() {
+        let scratch = Scratch::new("missing");
+        let discovery = discover(&scratch.skills_dir());
+        assert_eq!(discovery, Discovery::default());
+        assert_eq!(prompt_section(&[], SECTION_BUDGET_TOKENS, 4), "");
+    }
+
+    #[test]
+    fn disable_model_invocation_skills_are_not_listed() {
+        let scratch = Scratch::new("disabled");
+        scratch.skill("a", &frontmatter("a", "Listed."));
+        scratch.skill(
+            "b",
+            "---\nname: b\ndescription: Hidden.\ndisable-model-invocation: true\n---\nBody.\n",
+        );
+        let discovery = discover(&scratch.skills_dir());
+        assert_eq!(discovery.skills.len(), 2);
+        assert!(discovery.skills[1].disable_model_invocation);
+        let section = prompt_section(&discovery.skills, SECTION_BUDGET_TOKENS, 4);
+        assert!(section.contains("a: Listed."));
+        assert!(!section.contains("Hidden."), "{section}");
+    }
+
+    #[test]
+    fn the_section_is_byte_identical_for_the_same_input() {
+        let scratch = Scratch::new("deterministic");
+        scratch.skill("a", &frontmatter("a", "One."));
+        scratch.skill("b", &frontmatter("b", "Two."));
+        scratch.skill("c", &frontmatter("c", "Three."));
+        let first = discover(&scratch.skills_dir());
+        let second = discover(&scratch.skills_dir());
+        assert_eq!(first.skills, second.skills);
+        let left = prompt_section(&first.skills, SECTION_BUDGET_TOKENS, 4);
+        let right = prompt_section(&second.skills, SECTION_BUDGET_TOKENS, 4);
+        assert_eq!(left.as_bytes(), right.as_bytes());
+        // The order is the discovery (path) order.
+        let a = left.find("- a:").unwrap();
+        let b = left.find("- b:").unwrap();
+        let c = left.find("- c:").unwrap();
+        assert!(a < b && b < c, "{left}");
+    }
+
+    #[test]
+    fn over_budget_entries_are_dropped_in_order_with_a_remaining_count() {
+        let skills = vec![
+            Skill {
+                name: "one".into(),
+                description: "d1".into(),
+                path: PathBuf::from("/s/one/SKILL.md"),
+                dir: PathBuf::from("/s/one"),
+                disable_model_invocation: false,
+            },
+            Skill {
+                name: "two".into(),
+                description: "d2".into(),
+                path: PathBuf::from("/s/two/SKILL.md"),
+                dir: PathBuf::from("/s/two"),
+                disable_model_invocation: false,
+            },
+            Skill {
+                name: "three".into(),
+                description: "d3".into(),
+                path: PathBuf::from("/s/three/SKILL.md"),
+                dir: PathBuf::from("/s/three"),
+                disable_model_invocation: false,
+            },
+        ];
+        // The header is long, so the budget is derived from the rendered text rather than
+        // guessed: the tokens of the prefix that ends exactly before the second entry fit one
+        // entry, not two.
+        let full = prompt_section(&skills, u64::MAX, 4);
+        let before_second = full.find("- two:").unwrap();
+        let budget = request_size_of(&full[..before_second]).tokens(4);
+        let section = prompt_section(&skills, budget, 4);
+        assert!(section.contains("- one:"), "{section}");
+        assert!(!section.contains("- two:"), "{section}");
+        assert!(section.contains("2 more skills not listed"), "{section}");
+
+        // The header alone fills the budget: nothing is listed, the remainder is counted.
+        let header_only = request_size_of(SECTION_HEADER).tokens(4);
+        let section = prompt_section(&skills, header_only, 4);
+        assert!(!section.contains("- one:"), "{section}");
+        assert!(section.contains("3 more skills not listed"), "{section}");
+    }
+
+    #[test]
+    fn quotes_and_extra_fields_are_tolerated() {
+        let scratch = Scratch::new("quotes");
+        scratch.skill(
+            "a",
+            "---\nname: \"a\"\ndescription: 'Quoted description.'\npreamble-tier: full\n---\n",
+        );
+        let discovery = discover(&scratch.skills_dir());
+        assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
+        assert_eq!(discovery.skills[0].name, "a");
+        assert_eq!(discovery.skills[0].description, "Quoted description.");
+    }
+
+    /// The exact tuple shape `session.rs` builds — `((perm, memory), skills)` — puts the skills
+    /// section **after** the memory section (ADR 0025 S6). A different nesting would reverse
+    /// them, so this pins the order rather than the hook alone.
+    #[tokio::test]
+    async fn the_memory_section_precedes_the_skills_section() {
+        struct Section(&'static str);
+        impl Hooks for Section {
+            async fn before_model_call(
+                &self,
+                _cx: &HookContext,
+                request: &mut ModelRequest,
+            ) -> Result<(), HookError> {
+                request
+                    .system_prompt
+                    .get_or_insert_with(String::new)
+                    .push_str(self.0);
+                Ok(())
+            }
+        }
+
+        let scratch = Scratch::new("order");
+        scratch.skill("a", &frontmatter("a", "One."));
+        let skills = discover(&scratch.skills_dir()).skills;
+        let hooks = (
+            ((), Section("\n\n## Memory\nmem\n")),
+            SkillsHooks::new(&skills),
+        );
+        let mut request = ModelRequest {
+            system_prompt: Some("base".to_owned()),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            settings: serde_json::Value::Null,
+        };
+        hooks
+            .before_model_call(
+                &HookContext {
+                    cancellation: CancellationToken::new(),
+                    model_calls: 1,
+                },
+                &mut request,
+            )
+            .await
+            .unwrap();
+        let prompt = request.system_prompt.unwrap();
+        let memory_at = prompt.find("## Memory").unwrap();
+        let skills_at = prompt.find("## Skills").unwrap();
+        assert!(memory_at < skills_at, "{prompt}");
+        assert!(prompt.starts_with("base"), "{prompt}");
+    }
+
+    #[tokio::test]
+    async fn the_hook_appends_the_section_to_the_system_prompt() {
+        use agent_core::HookContext;
+        let scratch = Scratch::new("hook");
+        scratch.skill("a", &frontmatter("a", "One."));
+        let skills = discover(&scratch.skills_dir()).skills;
+        let hooks = SkillsHooks::new(&skills);
+        assert!(hooks.section().contains("- a: One."));
+
+        let mut request = ModelRequest {
+            system_prompt: Some("base".to_owned()),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            settings: serde_json::Value::Null,
+        };
+        hooks
+            .before_model_call(
+                &HookContext {
+                    cancellation: CancellationToken::new(),
+                    model_calls: 1,
+                },
+                &mut request,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            request.system_prompt.as_deref(),
+            Some(format!("base{}", hooks.section()).as_str())
+        );
+
+        // With no skills the hook touches nothing.
+        let empty = SkillsHooks::new(&[]);
+        let mut untouched = ModelRequest {
+            system_prompt: None,
+            messages: Vec::new(),
+            tools: Vec::new(),
+            settings: serde_json::Value::Null,
+        };
+        empty
+            .before_model_call(
+                &HookContext {
+                    cancellation: CancellationToken::new(),
+                    model_calls: 1,
+                },
+                &mut untouched,
+            )
+            .await
+            .unwrap();
+        assert_eq!(untouched.system_prompt, None);
+    }
+}

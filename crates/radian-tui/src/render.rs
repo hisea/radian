@@ -15,10 +15,11 @@ use radian_permissions::ApprovalRequest;
 use crate::app::{
     App, Entry, EntryKind, Modal, TurnState, budget_status_text, mcp_text, usage_text,
 };
-use crate::blocks::{self, BodyLine, ReasoningMode};
+use crate::blocks::{self, BodyLine};
 use crate::login::LoginWizard;
 use crate::question::QuestionForm;
 use crate::theme::Theme;
+use crate::tools::DisplayModes;
 
 /// One wrapped line as [`wrap_char_offsets`] sees it: the chars on the line (as byte offsets
 /// into the wrapped text, each on a char boundary) and the **gap** just after the line.
@@ -181,6 +182,12 @@ pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
         EntryKind::ToolCall => "-> ",
         EntryKind::ToolResult => "<- ",
         EntryKind::Notice => "* ",
+        // The startup block has no marker of its own: its lines carry `▶`/`▼` (or none for
+        // the wordmark). The warning marker is its own; `Tip:` is styled separately.
+        EntryKind::Banner => "  ",
+        EntryKind::Startup => "  ",
+        EntryKind::Warning => "! ",
+        EntryKind::Tip => "Tip: ",
     }
 }
 
@@ -192,6 +199,11 @@ fn marker(kind: EntryKind, theme: &Theme) -> (&'static str, Style) {
         EntryKind::ToolCall => theme.tool_call,
         EntryKind::ToolResult => theme.tool_result,
         EntryKind::Notice => theme.notice,
+        EntryKind::Banner => theme.hint,
+        EntryKind::Startup => theme.hint,
+        EntryKind::Warning => theme.note,
+        // The `Tip:` label steps down (dim), the body is muted.
+        EntryKind::Tip => theme.truncation,
     };
     (marker_prefix(kind), style)
 }
@@ -203,6 +215,10 @@ fn body_style(entry: &Entry, theme: &Theme) -> Style {
         EntryKind::ToolResult if entry.is_error => theme.tool_result_error,
         EntryKind::ToolResult => theme.tool_result,
         EntryKind::Notice => theme.notice,
+        EntryKind::Banner => theme.text,
+        EntryKind::Startup => theme.notice_body,
+        EntryKind::Warning => theme.note,
+        EntryKind::Tip => theme.hint,
         EntryKind::User | EntryKind::Assistant => {
             if entry.interrupted {
                 Style::default().add_modifier(Modifier::ITALIC)
@@ -254,28 +270,22 @@ pub(crate) fn display_text(entry: &Entry) -> Cow<'_, str> {
 /// attachment is shown and searched as its `[file: path, N lines]` line, never as the hidden
 /// content. Padding rows (a user block's blank rows) come through as empty lines: they occupy
 /// transcript lines and occupy space in the geometry, they just never match a query.
-pub fn display_lines(
-    entry: &Entry,
-    mode: ReasoningMode,
-    width: usize,
-    mermaid: bool,
-) -> Vec<String> {
-    blocks::body_text_lines(entry, mode, width, mermaid)
+pub fn display_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<String> {
+    blocks::body_text_lines(entry, modes, width)
 }
 
 /// One entry's styled lines (ADR 0028 R1: the block layout, styled). An interrupted
 /// assistant entry gets an explicit marker on its last line.
 fn entry_lines(
     entry: &Entry,
-    mode: ReasoningMode,
+    modes: DisplayModes,
     width: usize,
     theme: &Theme,
-    mermaid: bool,
 ) -> Vec<Line<'static>> {
     let (prefix, prefix_style) = marker(entry.kind, theme);
     let band = card_band(entry, theme);
-    let blocks = blocks::parse_blocks_for(entry, mode);
-    let body = blocks::layout(entry, &blocks, mode, width, mermaid);
+    let blocks = blocks::parse_blocks_for(entry, modes.reasoning);
+    let body = blocks::layout(entry, &blocks, modes, width);
     let style = body_style(entry, theme);
     let text_rows: Vec<usize> = body
         .iter()
@@ -367,8 +377,12 @@ fn render_row(
     // only its label is 强调); the marker's own role stays `notice`.
     let body = if placeholder {
         theme.reasoning
-    } else if entry.kind == EntryKind::Notice {
+    } else if matches!(entry.kind, EntryKind::Notice | EntryKind::Startup) {
         theme.notice_body
+    } else if row.warn {
+        // A tool body line from the warning channel (stderr, per the tool's own section
+        // markers): pi's warning level (`theme.note` in the role mapping).
+        theme.note
     } else {
         style
     };
@@ -388,7 +402,7 @@ fn render_row(
     // decision). Only the first: a wrapped continuation that happens to contain a colon
     // (`https://…`, `12:30`, a `path:line`) is prose, not a label.
     if first_text
-        && entry.kind == EntryKind::Notice
+        && matches!(entry.kind, EntryKind::Notice | EntryKind::Startup)
         && let Some((label, rest)) = split_label(&row.text)
     {
         let label_style = match band {
@@ -434,8 +448,8 @@ fn render_row(
 
 /// How many lines `entry` lays out to at `width`, from its cache when the entry has not
 /// changed since it was last measured.
-fn entry_line_count(entry: &mut Entry, mode: ReasoningMode, width: usize, mermaid: bool) -> usize {
-    blocks::line_count_cached(entry, mode, width, mermaid)
+fn entry_line_count(entry: &mut Entry, modes: DisplayModes, width: usize) -> usize {
+    blocks::line_count_cached(entry, modes, width)
 }
 
 /// Lays the whole transcript out into styled lines. The frame does not use this (it lays out
@@ -443,14 +457,13 @@ fn entry_line_count(entry: &mut Entry, mode: ReasoningMode, width: usize, mermai
 /// is tested against.
 pub fn transcript_lines(
     entries: &[Entry],
-    mode: ReasoningMode,
+    modes: DisplayModes,
     width: usize,
     theme: &Theme,
-    mermaid: bool,
 ) -> Vec<Line<'static>> {
     entries
         .iter()
-        .flat_map(|entry| entry_lines(entry, mode, width, theme, mermaid))
+        .flat_map(|entry| entry_lines(entry, modes, width, theme))
         .collect()
 }
 
@@ -460,16 +473,15 @@ pub fn transcript_lines(
 /// instead of re-laying out every entry.
 pub fn visible_lines(
     entries: &mut [Entry],
-    mode: ReasoningMode,
+    modes: DisplayModes,
     width: usize,
     start: usize,
     height: usize,
     theme: &Theme,
-    mermaid: bool,
 ) -> (usize, Vec<Line<'static>>) {
     let counts: Vec<usize> = entries
         .iter_mut()
-        .map(|entry| entry_line_count(entry, mode, width, mermaid))
+        .map(|entry| entry_line_count(entry, modes, width))
         .collect();
     let total: usize = counts.iter().sum();
     let mut out = Vec::with_capacity(height);
@@ -481,8 +493,8 @@ pub fn visible_lines(
         let next = line + count;
         if next > start {
             let skip = start.saturating_sub(line);
-            let blocks = blocks::blocks_for(entry, mode);
-            let body = blocks::layout(entry, &blocks, mode, width, mermaid);
+            let blocks = blocks::blocks_for(entry, modes.reasoning);
+            let body = blocks::layout(entry, &blocks, modes, width);
             let prefix = marker_prefix(entry.kind);
             let prefix_style = marker(entry.kind, theme).1;
             let style = body_style(entry, theme);
@@ -554,6 +566,10 @@ impl InputStyle {
 /// lines indent by the same two cells, so the text stays aligned. Two cells of the width go to
 /// it, which is why `input_height` measures the text at `width - 2`.
 const INPUT_PROMPT: &str = "> ";
+
+/// The bordered style's prompt: the owner's `❯`, colored with the theme's
+/// accent role (`theme.model`, pi's `accent`). Two cells, like `> `.
+const BOX_PROMPT: &str = "❯ ";
 
 /// The placeholder shown while the input is empty.
 const INPUT_HINT: &str = "(type a message, Enter to send, Ctrl-J for a new line)";
@@ -661,9 +677,19 @@ fn login_lines(wizard: &LoginWizard, theme: &Theme, width: usize) -> Vec<Line<'s
 
 /// The error style for wizard problems (a note-colored line; no new theme role).
 fn input_height(app: &App, width: usize) -> u16 {
-    let inner = width.saturating_sub(INPUT_PROMPT.len()).max(1);
+    let inner = input_inner_width(app, width);
     let rows = crate::composer::rows(&app.input.text(), inner).len();
     (rows.clamp(1, MAX_INPUT_ROWS) as u16) + 2
+}
+
+/// The text width inside the input area: `> ` on the first line for `lines`, a border plus the
+/// `❯ ` prompt for `box`.
+fn input_inner_width(app: &App, width: usize) -> usize {
+    let reserved = match app.input_style {
+        InputStyle::Lines => INPUT_PROMPT.len(),
+        InputStyle::Box => 2 + BOX_PROMPT.len(),
+    };
+    width.saturating_sub(reserved).max(1)
 }
 
 /// The approval prompt's key line. It is drawn on its **own** row under the body, never part
@@ -909,6 +935,14 @@ fn status_segments(app: &App) -> Vec<Segment> {
             style: app.theme.find,
         });
     }
+    // The first idle Ctrl-C armed "press again to quit": the hint sits
+    // high, right after the turn state, because it is a mode the user just entered.
+    if app.quit_pending.is_some() {
+        segments.push(Segment {
+            text: "Press Ctrl-C again to quit".to_string(),
+            style: app.theme.note,
+        });
+    }
     if let Some(tier) = session.tier() {
         segments.push(Segment {
             text: tier.to_owned(),
@@ -1045,25 +1079,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let theme = app.theme.clone();
     // The find matcher wraps at the same width; a resize recomputes it (once, not per frame).
     app.set_transcript_width(width);
-    let (total, _) = visible_lines(
-        &mut app.entries,
-        app.reasoning_mode,
-        width,
-        0,
-        0,
-        &theme,
-        app.mermaid_enabled,
-    );
+    let modes = app.display_modes();
+    let (total, _) = visible_lines(&mut app.entries, modes, width, 0, 0, &theme);
     app.set_viewport(chunks[0].height, total);
-    let (_, visible) = visible_lines(
-        &mut app.entries,
-        app.reasoning_mode,
-        width,
-        app.scroll,
-        height,
-        &theme,
-        app.mermaid_enabled,
-    );
+    let (_, visible) = visible_lines(&mut app.entries, modes, width, app.scroll, height, &theme);
     let visible = match app.find_state() {
         Some(find) => visible
             .into_iter()
@@ -1078,12 +1097,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(selection) => {
             let ranges = crate::select::highlight_rows(
                 &app.entries,
-                app.reasoning_mode,
+                modes,
                 width,
                 app.scroll,
                 visible.len(),
                 &selection,
-                app.mermaid_enabled,
             );
             visible
                 .into_iter()
@@ -1233,10 +1251,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             // pi-style: a rule above and below instead of a box, and
             // `> ` on the first line. `input_height` already reserves the two rule rows, so the
             // layout of everything else is unchanged.
-            let inner_width = chunks[2]
-                .width
-                .saturating_sub(INPUT_PROMPT.len() as u16)
-                .max(1) as usize;
+            let inner_width = input_inner_width(app, chunks[2].width as usize);
             let visible = chunks[2].height.saturating_sub(2).max(1) as usize;
             let text = app.input.text();
             let rows = crate::composer::rows(&text, inner_width);
@@ -1278,15 +1293,33 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                     frame.render_widget(Paragraph::new(body).block(block), chunks[2]);
                 }
                 InputStyle::Box => {
-                    let shown = if empty {
-                        INPUT_HINT.to_string()
+                    // judged against ADR 0029: the accent level is
+                    // for labels and attention surfaces. `notice_label` is the theme's general
+                    // accent role (pi's `accent`), so the rounded border and the `❯` prompt use
+                    // it; the body stays on the ordinary text level. (`model` is the model's
+                    // own display color, not chrome.)
+                    let accent = app.theme.notice_label;
+                    let mut body: Vec<Line> = Vec::new();
+                    if empty {
+                        body.push(Line::from(vec![
+                            Span::styled(BOX_PROMPT, accent),
+                            Span::styled(INPUT_HINT, style),
+                        ]));
                     } else {
-                        rows[offset..].join("\n")
-                    };
-                    let input = Paragraph::new(Span::styled(shown, style))
-                        .block(Block::default().borders(Borders::ALL).title(" message "))
-                        .wrap(Wrap { trim: false });
-                    frame.render_widget(input, chunks[2]);
+                        for (index, row) in rows[offset..].iter().enumerate() {
+                            let lead = if index == 0 { BOX_PROMPT } else { "  " };
+                            body.push(Line::from(vec![
+                                Span::styled(lead, accent),
+                                Span::styled(row.clone(), style),
+                            ]));
+                        }
+                    }
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(ratatui::widgets::BorderType::Rounded)
+                        .border_style(accent)
+                        .title(" message ");
+                    frame.render_widget(Paragraph::new(body).block(block), chunks[2]);
                 }
             }
             if app.input_editable() {
@@ -1295,7 +1328,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 // rule or the border.
                 let lead = match app.input_style {
                     InputStyle::Lines => INPUT_PROMPT.len() as u16,
-                    InputStyle::Box => 1,
+                    // Border (1) + the `❯ ` prompt (2).
+                    InputStyle::Box => 1 + BOX_PROMPT.len() as u16,
                 };
                 let col = cursor_col.min(inner_width.saturating_sub(1)) as u16;
                 let row = (cursor_row - offset).min(visible.saturating_sub(1)) as u16;
