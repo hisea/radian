@@ -968,6 +968,25 @@ fn a_write_card_shows_the_content_without_markers() {
     );
 }
 
+/// A tab is four columns when the wrap decides where to break (ADR 0028 R9), not zero: a line
+/// that fits at six columns plus a tab does **not** fit in nine.
+#[test]
+fn a_tab_wraps_as_four_columns() {
+    // Six columns + a tab = 10 > 9: the tab moves to the next line (the wrap keeps the
+    // source char; the layout is what renders it as four spaces).
+    let wrapped = radian_tui::render::wrap("abcdef\t", 9);
+    assert_eq!(
+        wrapped,
+        vec!["abcdef".to_string(), "\t".to_string()],
+        "{wrapped:?}"
+    );
+    // At width 10 it fits on one line.
+    let wrapped = radian_tui::render::wrap("abcdef\t", 10);
+    assert_eq!(wrapped.len(), 1, "{wrapped:?}");
+    // The counting path agrees (the corpus test pins the rest).
+    assert_eq!(radian_tui::render::wrap_line_count("abcdef\t", 9), 2);
+}
+
 /// A `list` card shows an aligned table, not the tool's tab-separated text (owner hand test:
 /// `dir512crates` ran together because a tab occupies no column).
 #[test]
