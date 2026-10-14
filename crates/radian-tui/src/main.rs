@@ -1001,15 +1001,30 @@ fn run(
     app.set_auto(startup_approval.policy == radian_permissions::ApprovalPolicy::Auto);
     // The footer's startup facts (ADR 0027 C2): the working directory, the model's display
     // name (the id until a catalog name is known), the provider and the applied thinking
-    // level. The git branch is read once here — startup I/O is allowed; the draw path never
-    // runs git, and a later refresh goes through `App::set_git_branch`.
+    // level. The git branch is not read here: the `git` contributor refreshes it in the
+    // background (ADR 0027 C3), and the draw path never runs git.
     app.set_footer_facts(
         Some(workspace_path.clone()),
         None,
         Some(provider_name.clone()),
         Some(thinking_for_footer),
     );
-    app.set_git_branch(read_git_branch(&workspace_path));
+    // ADR 0027 C3: the contributors. Their changes wake the UI through the same dirty channel
+    // (ADR 0023 U2), and a refresh failure becomes a notice; the UI never waits for one.
+    let contributions = radian_host::ContributionStore::new();
+    let contrib_tx = tx.clone();
+    radian_host::spawn_contributor(
+        runtime.handle(),
+        Arc::new(radian_host::GitContributor::new(workspace_path.clone())),
+        Arc::clone(&contributions),
+        Arc::new(move |tick| {
+            let _ = contrib_tx.send(UiEvent::Dirty);
+            if let Some(notice) = tick.notice {
+                let _ = contrib_tx.send(UiEvent::Command(AppInput::SessionDone(vec![notice])));
+            }
+        }),
+    );
+    app.set_contributions(Arc::clone(&contributions));
     // A plain run enters the terminal only now: every fallible check above, and the session
     // itself, have already run. (`--pick` entered it before the picker and keeps it here.)
     let (mut guard, mut terminal) = match startup_terminal {
@@ -1368,25 +1383,6 @@ fn refresh_secrets(secrets: &radian_tui::terminal::SharedSecrets) {
             list.push(key);
         }
     }
-}
-
-/// The working directory's git branch, read once at startup (ADR 0027 C2). `None` when the
-/// directory is not a repository or git is unavailable; the draw path never calls git.
-fn read_git_branch(dir: &Path) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let name = String::from_utf8(output.stdout).ok()?;
-    let name = name.trim();
-    (!name.is_empty() && name != "HEAD").then(|| name.to_string())
 }
 
 /// One argument of the resume command, quoted when it would not survive a shell.

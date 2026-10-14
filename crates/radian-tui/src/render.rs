@@ -1117,6 +1117,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // ADR 0023 U4: the middle of the frame is drawn by the top modal (the approval box
     // replaces the input box), then the find overlay, then the ordinary input box.
     let completion = completion_rows(app, area.width as usize);
+    // `[tui.widgets]` (ADR 0027 C3): one line above and/or below the input box.
+    let above_widgets = crate::footer::widget_line(app, &app.widgets.above_input);
+    let below_widgets = crate::footer::widget_line(app, &app.widgets.below_input);
+    let widget_rows = u16::from(above_widgets.is_some()) + u16::from(below_widgets.is_some());
     let middle = match app.top_modal() {
         Some(Modal::Approval(prompt)) => approval_height(
             &prompt.request,
@@ -1129,6 +1133,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(Modal::ConfirmLogout(_)) => 4,
         _ => input_height(app, area.width as usize),
     };
+    // The widget lines are part of the middle block.
+    let middle = middle.saturating_add(widget_rows);
     // The `@` completion list sits just above the input box (and never over an approval
     // prompt). A zero-height chunk keeps the rest of the layout identical when there is none.
     // The status area's height follows the footer preset (ADR 0027 C2): one row for `classic`
@@ -1141,6 +1147,20 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Constraint::Length(status_height),
     ])
     .split(area);
+    // The middle block: the line above the input, the input/modal itself, the line below.
+    let middle_chunks = Layout::vertical([
+        Constraint::Length(u16::from(above_widgets.is_some())),
+        Constraint::Min(1),
+        Constraint::Length(u16::from(below_widgets.is_some())),
+    ])
+    .split(chunks[2]);
+    let input_area = middle_chunks[1];
+    if let Some(line) = &above_widgets {
+        frame.render_widget(Paragraph::new(line.clone()), middle_chunks[0]);
+    }
+    if let Some(line) = &below_widgets {
+        frame.render_widget(Paragraph::new(line.clone()), middle_chunks[2]);
+    }
 
     // Measure first (cached per entry), so the scroll position is clamped against the real
     // total before the visible window is cut.
@@ -1208,7 +1228,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(Modal::Approval(prompt)) => {
             // The body scrolls inside the box; the key line is the box's own last row, so a
             // long command can never push the answers off screen.
-            let inner_width = (chunks[2].width as usize).saturating_sub(2).max(1);
+            let inner_width = (input_area.width as usize).saturating_sub(2).max(1);
             let body = wrap(&approval_body(&prompt.request), inner_width);
             let total = body.len();
             let visible = (middle as usize).saturating_sub(3).max(1);
@@ -1241,8 +1261,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                         .right_aligned(),
                 );
             }
-            frame.render_widget(&block, chunks[2]);
-            let inner = block.inner(chunks[2]);
+            frame.render_widget(&block, input_area);
+            let inner = block.inner(input_area);
             let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner);
             frame.render_widget(Paragraph::new(lines), rows[0]);
             frame.render_widget(
@@ -1264,13 +1284,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 .borders(Borders::ALL)
                 .border_style(app.theme.approval_border)
                 .title(format!(" question {position} from {} ", form.origin));
-            let inner = chunks[2].height.saturating_sub(2) as usize;
-            let width = chunks[2].width.saturating_sub(2) as usize;
+            let inner = input_area.height.saturating_sub(2) as usize;
+            let width = input_area.width.saturating_sub(2) as usize;
             // The key line is the box's own last row, so a long option list can never push it
             // out (same fix as the approval box).
             let lines = question_lines(form, width, inner.saturating_sub(1));
-            frame.render_widget(&block, chunks[2]);
-            let inner_area = block.inner(chunks[2]);
+            frame.render_widget(&block, input_area);
+            let inner_area = block.inner(input_area);
             let rows =
                 Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner_area);
             frame.render_widget(Paragraph::new(lines), rows[0]);
@@ -1280,13 +1300,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             );
         }
         Some(Modal::Login(wizard)) => {
-            let lines = login_lines(wizard, &app.theme, chunks[2].width as usize);
+            let lines = login_lines(wizard, &app.theme, input_area.width as usize);
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(app.theme.approval_border)
                 .title(" /login ");
-            frame.render_widget(&block, chunks[2]);
-            let inner = block.inner(chunks[2]);
+            frame.render_widget(&block, input_area);
+            let inner = block.inner(input_area);
             frame.render_widget(Paragraph::new(lines), inner);
         }
         Some(Modal::ConfirmLogout(provider)) => {
@@ -1294,8 +1314,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 .borders(Borders::ALL)
                 .border_style(app.theme.approval_border)
                 .title(" /logout ");
-            frame.render_widget(&block, chunks[2]);
-            let inner = block.inner(chunks[2]);
+            frame.render_widget(&block, input_area);
+            let inner = block.inner(input_area);
             let lines = vec![
                 Line::from(format!("remove the stored credential for `{provider}`?")),
                 Line::from(Span::styled(
@@ -1313,7 +1333,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             let paragraph = Paragraph::new(text)
                 .block(Block::default().borders(Borders::ALL).title(" find "))
                 .wrap(Wrap { trim: false });
-            frame.render_widget(paragraph, chunks[2]);
+            frame.render_widget(paragraph, input_area);
         }
         // The `/memory` confirmation and the ordinary state draw the input area, exactly as
         // before (a confirmation only makes it non-editable).
@@ -1321,8 +1341,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             // pi-style: a rule above and below instead of a box, and
             // `> ` on the first line. `input_height` already reserves the two rule rows, so the
             // layout of everything else is unchanged.
-            let inner_width = input_inner_width(app, chunks[2].width as usize);
-            let visible = chunks[2].height.saturating_sub(2).max(1) as usize;
+            let inner_width = input_inner_width(app, input_area.width as usize);
+            let visible = input_area.height.saturating_sub(2).max(1) as usize;
             let text = app.input.text();
             let rows = crate::composer::rows(&text, inner_width);
             let (cursor_row, cursor_col) = app.input.cursor_cell(inner_width);
@@ -1360,7 +1380,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                     let block = Block::default()
                         .borders(Borders::TOP | Borders::BOTTOM)
                         .border_style(app.theme.hint);
-                    frame.render_widget(Paragraph::new(body).block(block), chunks[2]);
+                    frame.render_widget(Paragraph::new(body).block(block), input_area);
                 }
                 InputStyle::Box => {
                     // judged against ADR 0029: the accent level is
@@ -1389,7 +1409,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                         .border_type(ratatui::widgets::BorderType::Rounded)
                         .border_style(accent)
                         .title(" message ");
-                    frame.render_widget(Paragraph::new(body).block(block), chunks[2]);
+                    frame.render_widget(Paragraph::new(body).block(block), input_area);
                 }
             }
             if app.input_editable() {
@@ -1403,8 +1423,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 };
                 let col = cursor_col.min(inner_width.saturating_sub(1)) as u16;
                 let row = (cursor_row - offset).min(visible.saturating_sub(1)) as u16;
-                let x = chunks[2].x + lead + col;
-                let y = chunks[2].y + 1 + row;
+                let x = input_area.x + lead + col;
+                let y = input_area.y + 1 + row;
                 frame.set_cursor_position((x, y));
             }
         }

@@ -9,6 +9,7 @@
 
 use std::borrow::Cow;
 
+use radian_host::SegmentRole;
 use radian_host::config::{TuiFooterConfig, TuiFooterItemConfig};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -282,6 +283,8 @@ fn item_placeholders(id: &str) -> &'static [&'static str] {
         "tier" => &["tier"],
         "cwd" => &["path", "path_home", "basename"],
         "git_branch" => &["branch", "dirty"],
+        "worktree" => &["worktree"],
+        "status" => &["status"],
         "session" => &["id"],
         "context" => &["bar", "percent", "used", "budget"],
         "context_bar" => &["bar", "percent", "used", "budget"],
@@ -315,7 +318,8 @@ fn item_priority(id: &str) -> i64 {
         "context" | "context_bar" => 85,
         "cwd" => 80,
         "tier" => 75,
-        "git_branch" | "pending" => 70,
+        "git_branch" | "worktree" | "pending" => 70,
+        "status" => 45,
         "session" => 65,
         "reasoning" => 60,
         "mcp" => 55,
@@ -472,6 +476,9 @@ fn render_item(app: &App, item: &Item) -> Option<Piece> {
             priority: item.priority,
         });
     }
+    if let Some(piece) = contribution_item(app, item) {
+        return Some(piece);
+    }
     let data = item_data(app, &item.id, item)?;
     let format = item
         .format
@@ -518,6 +525,101 @@ fn render_item(app: &App, item: &Item) -> Option<Piece> {
 fn role_style(app: &App, role: Role) -> Style {
     let mut theme = app.theme.clone();
     *role.style_mut(&mut theme)
+}
+
+/// The items whose value comes from the contributor store (ADR 0027 C3).
+const CONTRIBUTION_ITEMS: [&str; 3] = ["git_branch", "worktree", "status"];
+
+/// One item whose data is a contribution: its text, its first segment's role and whether the
+/// last refresh failed (drawn dim). `None` when the contributor has no value (the item hides).
+fn contribution_item(app: &App, item: &Item) -> Option<Piece> {
+    if !CONTRIBUTION_ITEMS.contains(&item.id.as_str()) {
+        return None;
+    }
+    let (text, role, stale) = match item.id.as_str() {
+        "git_branch" => match contribution(app, "git_branch") {
+            Some(contribution) => contribution,
+            // The host's one-shot value, when no contributor is running.
+            None => (app.git_branch.clone()?, SegmentRole::Normal, false),
+        },
+        "worktree" => contribution(app, "worktree")?,
+        "status" => status_contribution(app, item)?,
+        _ => return None,
+    };
+    let text = match item.format.as_deref() {
+        None => text,
+        Some(format) => format
+            .replace("{worktree}", &text)
+            .replace("{branch}", &text)
+            .replace("{status}", &text),
+    };
+    let icon = item.icon.clone().unwrap_or_default();
+    let role = if stale {
+        Role::Truncation
+    } else {
+        contrib_role(role)
+    };
+    Some(Piece {
+        text: format!("{icon}{text}"),
+        style: role_style(app, role),
+        priority: item.priority,
+    })
+}
+
+/// One store item as (joined text, first role, stale).
+fn contribution(app: &App, item: &str) -> Option<(String, SegmentRole, bool)> {
+    let contribution = app.contributions.get(item)?;
+    if contribution.segments.is_empty() {
+        return None;
+    }
+    let text: String = contribution
+        .segments
+        .iter()
+        .map(|segment| segment.text.as_str())
+        .collect();
+    Some((text, contribution.segments[0].role, contribution.stale))
+}
+
+/// The `status` item (ADR 0027 C2/C3): the text of every `status.*` contribution, filtered by
+/// `keys = ["…"]` when the item has it. Nothing published means the item hides.
+fn status_contribution(app: &App, item: &Item) -> Option<(String, SegmentRole, bool)> {
+    let keys: Option<Vec<&str>> = item
+        .params
+        .iter()
+        .find(|(name, _)| name == "keys")
+        .map(|(_, value)| value.split(',').map(str::trim).collect());
+    let mut parts = Vec::new();
+    let mut stale = false;
+    for contribution in app.contributions.snapshot() {
+        let Some(key) = contribution.item.strip_prefix("status.") else {
+            continue;
+        };
+        if keys.as_ref().is_some_and(|keys| !keys.contains(&key)) {
+            continue;
+        }
+        let text: String = contribution
+            .segments
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect();
+        if !text.is_empty() {
+            parts.push(text);
+        }
+        stale |= contribution.stale;
+    }
+    (!parts.is_empty()).then(|| (parts.join(" "), SegmentRole::Normal, stale))
+}
+
+/// The theme role a contribution's segment role maps to (ADR 0029: colors from the theme).
+fn contrib_role(role: SegmentRole) -> Role {
+    match role {
+        SegmentRole::Normal => Role::Text,
+        SegmentRole::Dim => Role::Truncation,
+        SegmentRole::Warn => Role::BudgetOver,
+        SegmentRole::Ok => Role::TurnIdle,
+        SegmentRole::Error => Role::ToolResultError,
+        SegmentRole::Accent => Role::NoticeLabel,
+    }
 }
 
 /// The facts one item reads.
@@ -739,4 +841,44 @@ fn glyph(id: &str, glyphs: Glyphs) -> &'static str {
         ("tier", Glyphs::Unicode) => "⬡ ",
         _ => "",
     }
+}
+
+/// One `[tui.widgets]` slot as a line (ADR 0027 C3): the configured item ids in order, joined
+/// by the footer's separator. `None` when none of them has data, so the row takes no space.
+pub fn widget_line(app: &App, ids: &[String]) -> Option<Line<'static>> {
+    let separator = " │ ";
+    let mut pieces: Vec<Piece> = Vec::new();
+    let mut width = 0usize;
+    for id in ids {
+        let item = Item {
+            id: id.clone(),
+            icon: None,
+            format: None,
+            style: None,
+            priority: item_priority(id),
+            thresholds: default_thresholds(id),
+            params: Vec::new(),
+            known: item_is_known(id),
+        };
+        let Some(piece) = render_item(app, &item) else {
+            continue;
+        };
+        if !pieces.is_empty() {
+            width += width_of(separator);
+        }
+        width += width_of(&piece.text);
+        pieces.push(piece);
+    }
+    if pieces.is_empty() {
+        return None;
+    }
+    let _ = width;
+    let mut spans: Vec<Span> = Vec::new();
+    for (index, piece) in pieces.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw(separator));
+        }
+        spans.push(Span::styled(piece.text.clone(), piece.style));
+    }
+    Some(Line::from(spans))
 }

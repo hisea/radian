@@ -224,7 +224,12 @@ find_next = ["ctrl-g", "shift-enter"]
 | `mcp` | `{mcp}` | the configured/connected servers |
 | `scroll` | `{position}`, `{mode}` | `{position} {mode}` |
 
-`worktree` and `status` are slice 2 (they need the contributor mechanism).
+| `worktree` | `{worktree}` | 只在 git worktree 里显示（贡献者） |
+| `status` | `{status}` | `status.*` 贡献文本，`keys = ["…"]` 可过滤 |
+
+`worktree`/`status` 来自贡献者存储（ADR 0027 C3）：一个 `git` 贡献者每 5 s 在后台刷新
+`git_branch`/`worktree`（绘制路径从不跑 git），刷新失败保留旧值并画成暗色。`[tui.widgets]`
+的 `above_input`/`below_input` 把同样的条目 id 放到输入框上/下一行。
 - `theme`: `dark` and `light` are **pi's own palettes**, read
   through the same ADR 0029 conversion a theme file uses: the three text levels are pi's
   brightness gradient (dark: `text` 89%, `muted` 67%, `dim` 56%), and every semantic color

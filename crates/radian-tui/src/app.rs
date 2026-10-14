@@ -909,6 +909,11 @@ pub struct App {
     /// The footer (ADR 0027 C2): its preset, glyphs and rows. Set from `[tui.footer]` at
     /// startup; the default is the two-row `pi` preset.
     pub footer: crate::footer::Footer,
+    /// The contributor store (ADR 0027 C3). The background tasks write it; the renderer reads a
+    /// snapshot, and the `git_branch`/`worktree`/`status` items come from it.
+    pub contributions: std::sync::Arc<radian_host::ContributionStore>,
+    /// `[tui.widgets]`: contributor items on a line above/below the input box (ADR 0027 C3).
+    pub widgets: radian_host::config::TuiWidgetsConfig,
     pub session_id: String,
     pub entries: Vec<Entry>,
     /// How many entries are currently `live` (fed by stream deltas, not yet a committed
@@ -1040,6 +1045,8 @@ impl App {
             git_branch: None,
             thinking_level: None,
             footer: crate::footer::Footer::default(),
+            contributions: radian_host::ContributionStore::new(),
+            widgets: radian_host::config::TuiWidgetsConfig::default(),
             session_id: session_id.into(),
             entries: Vec::new(),
             live_count: 0,
@@ -1220,8 +1227,8 @@ impl App {
             self.clipboard = ClipboardMode::Osc52;
             warnings.push("tui.clipboard = \"pbcopy\" is macOS-only; using osc52".into());
         }
-        // `[tui.footer]` (ADR 0027 C2): the footer's own warnings (unknown item, placeholder,
-        // style) join the startup warnings; an unknown key is a skipped key above.
+        // `[tui.footer]` (ADR 0027 C2) and `[tui.widgets]` (C3).
+        self.widgets = config.tui.widgets.clone();
         warnings.extend(self.apply_footer(&config.tui.footer));
         warnings.extend(
             config
@@ -3682,9 +3689,18 @@ impl App {
     }
 
     /// The background-refreshed git branch (ADR 0027 C2: the draw path never runs git). The
-    /// host sets it once at startup and may refresh it later through this same setter.
+    /// host's `GitContributor` is the normal writer now; this setter remains for a host that
+    /// has a first value without the contributor.
     pub fn set_git_branch(&mut self, branch: Option<String>) {
         self.git_branch = branch;
+    }
+
+    /// The contributor store the renderer reads (ADR 0027 C3).
+    pub fn set_contributions(
+        &mut self,
+        contributions: std::sync::Arc<radian_host::ContributionStore>,
+    ) {
+        self.contributions = contributions;
     }
 
     /// The applied thinking level, once the driver reports it (ADR 0026 D11).

@@ -236,11 +236,12 @@ impl ContributorRunner {
 /// keeps the task alive; the store keeps the last value. The task is dropped when the runtime
 /// shuts down.
 pub fn spawn(
+    handle: &tokio::runtime::Handle,
     contributor: Arc<dyn StatusContributor>,
     store: Arc<ContributionStore>,
     on_tick: Arc<dyn Fn(Tick) + Send + Sync>,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    handle.spawn(async move {
         let mut runner = ContributorRunner::new(contributor, store);
         loop {
             let tick = runner.tick().await;
