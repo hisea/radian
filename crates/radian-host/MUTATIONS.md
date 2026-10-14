@@ -296,3 +296,10 @@ Base `deb583f` · 在本任务工作树内逐条施加后从副本还原（`--no
 变异 M23（静默忽略 `model.api_key`）、M24（漏掉 `x-opencode-session`）、M25（非通用描述符接受
 `--base-url`）改的是本 crate 的代码，但抓住它们的测试在 `agent-cli`；明细见
 `crates/agent-cli/MUTATIONS.md` 的 M22–M25。
+
+## ADR 0026 第 1 片(`/login`、具名 provider)交叉引用
+
+变异 L3（查 key 仍用通用描述符的槽位）、L4（同名时 auth.json 压过配置）、L5（验证请求的
+报错带出 key）、L6（`/logout` 清空整个 auth.json）改的是本 crate 的 `provider.rs`/`login.rs`/
+`auth.rs`，抓住它们的测试分别在 `agent-cli`（具名 provider 验收）、`radian-host`（`login::tests`）
+与 `radian-tui`（logout pty）；明细见 `crates/agent-cli/MUTATIONS.md` 的 L1–L7。
