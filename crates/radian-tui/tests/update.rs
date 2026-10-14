@@ -351,12 +351,11 @@ fn the_id_level_asks_the_host_and_shows_the_answer() {
     assert!(app.completion().is_none(), "a stale answer shows nothing");
 }
 
-/// ADR 0031 T3: the startup trust modal's **Esc** is the fail-safe answer — it must never
-/// trust. It maps to `UntrustHere`, the same choice as the default highlight, and that choice
-/// is **persistent**: the loop writes `false` for this directory to `trust.json` and journals
-/// one `ProjectTrustChanged` (the same as selecting "Do not trust this directory" with Enter).
+/// ADR 0031 T3: the startup trust modal's **Esc** is the fail-safe answer —
+/// it must never trust. It maps to `UntrustSession`: do not trust **this session only**, which
+/// is **not persistent**, so the loop writes no `trust.json` and the next start asks again.
 #[test]
-fn escaping_the_trust_modal_does_not_trust() {
+fn escaping_the_trust_modal_untrusts_this_session_only() {
     let mut app = App::new("m", "s");
     app.push_trust_modal(std::path::PathBuf::from("/work/example"));
     assert!(app.has_modal());
@@ -364,17 +363,17 @@ fn escaping_the_trust_modal_does_not_trust() {
     assert_eq!(
         effects,
         vec![Effect::SetTrust {
-            choice: radian_host::trust::Choice::UntrustHere
+            choice: radian_host::trust::Choice::UntrustSession
         }],
-        "Esc must choose `do not trust`, never a trust"
+        "Esc must choose `do not trust, this session only`, never a trust"
     );
     assert!(!app.has_modal(), "the modal is dismissed");
     assert!(
-        radian_host::trust::Choice::UntrustHere.persistent(),
-        "Esc records the decision: the loop writes trust.json"
+        !radian_host::trust::Choice::UntrustSession.persistent(),
+        "Esc writes no trust.json: the next start asks again"
     );
 
-    // Enter takes the highlighted default, which is the same fail-safe choice.
+    // Enter takes the highlighted default: the **persistent** "do not trust this directory".
     let mut app = App::new("m", "s");
     app.push_trust_modal(std::path::PathBuf::from("/work/example"));
     assert_eq!(
@@ -383,4 +382,5 @@ fn escaping_the_trust_modal_does_not_trust() {
             choice: radian_host::trust::Choice::UntrustHere
         }]
     );
+    assert!(radian_host::trust::Choice::UntrustHere.persistent());
 }
