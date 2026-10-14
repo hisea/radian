@@ -235,6 +235,8 @@ Every pi role maps onto a Radian role (`[tui.colors]` accepts both name families
 | `selection` | `selectedBg` (bg only — the text keeps its own foreground under the band) |
 | `tool_pending_bg` / `tool_success_bg` / `tool_error_bg` | `toolPendingBg` / `toolSuccessBg` / `toolErrorBg` (the tool card's band by state) |
 | `notice_label` / `notice_body` | `accent` / `muted` (a structured notice's label and the rest) |
+| `diff_added` / `diff_removed` / `diff_context` | `toolDiffAdded` / `toolDiffRemoved` / `toolDiffContext` (the unified-diff line kinds) |
+| `diff_hunk` | `accent` (pi has no hunk role; this covers the `@@` markers and the file headers) |
 | `reasoning` | `thinkingText` |
 | `tool_call` / `tool_result` / `tool_result_error` | `toolTitle` (= `text`) / `toolOutput` (= `muted`) / `error` |
 | `text` | `text` (the main level: answers, user words, tool titles) |
@@ -908,6 +910,24 @@ context text and the scroll position are the first to go. The last segment is ne
 
 ## Tool display
 
-A tool call shows as `-> name({…args…})`, its result as `<- <text>` (red on an error), and
-the status line carries a `tool <name> running` note while it runs. The call, the wait for
-approval, execution and the result are therefore distinguishable states.
+A tool call shows as `-> <the card's header>` and its result as `<- <the card's body>` (banded
+by state: pending / success / error). The header and the body come from a per-tool renderer,
+looked up by name in a compile-time registry with a generic fallback:
+
+| Tool | Header | Body |
+|---|---|---|
+| `shell` | the command and the exit code | the output (the `--- stderr ---` section on the warning level) |
+| `read` | the path and the line range | collapsed by default (`[read: N lines]`) |
+| `patch` | the path and `+N/-M` | the `-old` / `+new` replacement, no invented context |
+| `write` | the path, byte count and line count | the content written (no `+` markers: nothing to compare) |
+| `git_diff` | the file count and `+N/-M` | git's unified diff, colored by the `diff_*` roles |
+| `git_status` / `list` | the entry count | the tool's lines |
+| `ask_user` | the question count | one `prompt → answer` line per question |
+| `memory_search` / `_get` / `_save` / `_revise` | the operation and the record id | the tool's record summary |
+| anything else (MCP included) | the name and the arguments' JSON summary | the result text |
+
+`tui.display.tool_output = "expanded" | "errors" | "collapsed"` (default `errors`) and
+`tui.display.tool_preview_lines` (default 5) fold the bodies; `Ctrl-O` (`toggle_tool_output`)
+steps through them; a failed call's body is never hidden. The status line still carries the
+`tool <name> running` note, so the call, the wait for approval, execution and the result stay
+distinguishable states.
