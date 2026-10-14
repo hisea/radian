@@ -130,6 +130,12 @@ fn fg_source(role: Role) -> Option<&'static str> {
         // The main text level itself (Pi's `text`): the mapping is used by the file themes;
         // the built-ins take pi's values directly.
         Role::Text => Some("text"),
+        // ADR 0028 R4's diff lines, straight from pi's own roles; pi has no hunk role, so
+        // the file headers and `@@` markers take the accent.
+        Role::DiffAdded => Some("toolDiffAdded"),
+        Role::DiffRemoved => Some("toolDiffRemoved"),
+        Role::DiffContext => Some("toolDiffContext"),
+        Role::DiffHunk => Some("accent"),
         // pi has no auto role; the warning role is the closest "this needs attention" color.
         Role::Auto => Some("warning"),
     }
