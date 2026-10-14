@@ -243,7 +243,6 @@ const LOGIN_HEIGHT: u16 = 8;
 fn login_lines(wizard: &LoginWizard, width: usize) -> Vec<Line<'static>> {
     use crate::login::LoginStep;
     let error_style = app_theme_error();
-    let hint = |text: &str| Span::styled(text.to_owned(), crate::theme::Theme::default().hint);
     let _ = width;
     let mut lines: Vec<Line> = Vec::new();
     match &wizard.step {

@@ -120,6 +120,23 @@ impl Protocol {
     }
 }
 
+/// The `/login` choice for "not one of the built-ins" — a named provider is born there
+/// (ADR 0026 D10). The TUI wizard and `agent login` share it so they cannot drift.
+pub const CUSTOM_LOGIN: &str = "custom";
+
+/// The `/login` provider-choice candidates: the built-in descriptors, then [`CUSTOM_LOGIN`].
+pub fn login_choices() -> Vec<(String, String)> {
+    let mut choices: Vec<(String, String)> = descriptors()
+        .iter()
+        .map(|d| (d.id.to_owned(), d.display_name.to_owned()))
+        .collect();
+    choices.push((
+        CUSTOM_LOGIN.to_owned(),
+        "a custom endpoint: name, protocol, base URL and key (ADR 0026 D10)".to_owned(),
+    ));
+    choices
+}
+
 /// The characters a provider name may use (ADR 0026 D10: letters, digits, `-`, `_`).
 pub fn valid_name(name: &str) -> bool {
     !name.is_empty()

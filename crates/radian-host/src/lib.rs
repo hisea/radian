@@ -73,9 +73,10 @@ pub use projection::{
     LastToolCall, ProjectionRead, SessionProjection, StreamKind, StreamSnapshot, TurnState,
 };
 pub use provider::{
-    DESCRIPTORS, DescriptorModel, GENERIC_ID, LoginMethod, NamedProvider, NamedSource, Protocol,
-    ProviderDecl, ProviderDescriptor, ProviderRef, RADIAN_KIND, Route, descriptor, descriptors,
-    name_error, resolve_provider, resolve_route, resolve_route_for, valid_name,
+    DESCRIPTORS, DescriptorModel, GENERIC_ID, LoginMethod, NamedProvider, NamedSource,
+    ProviderDecl, ProviderDescriptor, ProviderRef, RADIAN_KIND, Route, CUSTOM_LOGIN, Protocol,
+    descriptor, descriptors, login_choices, name_error, resolve_provider, resolve_route,
+    resolve_route_for, valid_name,
 };
 pub use session::{
     ApprovalRouting, CommandRefused, DriverEnd, HostBindings, LocalSession, SessionCapability,

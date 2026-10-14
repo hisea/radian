@@ -7,6 +7,8 @@
 //! from everything it writes to disk.
 
 mod approval;
+/// `agent login` / `agent logout` (ADR 0026 D3).
+mod login;
 mod profile;
 mod tools;
 
@@ -366,6 +368,20 @@ enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Store an API key for a provider in ~/.radian/credentials/auth.json (ADR 0026 D3).
+    /// The key is not echoed; a verification request (`GET <base>/models`) runs first.
+    #[command(after_help = "Without a terminal the command refuses; edit                            credentials/auth.json directly instead.")]
+    Login {
+        /// A built-in provider id (`opencode-go`, `anthropic`, `openai`,
+        /// `openai-compatible`), or `custom` to name a new endpoint (name, protocol, base
+        /// URL, key). Omitted: a numbered list is shown.
+        provider: Option<String>,
+    },
+    /// Remove a stored credential (asks first; every other entry is untouched).
+    Logout {
+        /// The provider id the key is stored under (`agent login` printed it).
+        provider: String,
+    },
 }
 
 /// The `agent config` grammar. `import-pi` is the only entry point in this version, and it is
@@ -568,6 +584,10 @@ async fn run(mut cli: Cli) -> i32 {
         match cli.command.take() {
             Some(Command::Memory { command }) => return run_memory(&cli, command),
             Some(Command::Config { command }) => return run_config(&cli, command),
+            // D3: the credential commands are modes of their own — no model, no session
+            // file; `agent login` talks to the named endpoint once (the verification).
+            Some(Command::Login { provider }) => return login::run_login(provider).await,
+            Some(Command::Logout { provider }) => return login::run_logout(provider).await,
             None => unreachable!("checked just above"),
         }
     }
