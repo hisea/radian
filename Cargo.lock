@@ -2254,6 +2254,7 @@ version = "0.1.0"
 dependencies = [
  "agent-core",
  "agent-provider-anthropic",
+ "agent-provider-openai-compatible",
  "radian-runtime",
  "radian-session",
  "serde_json",
