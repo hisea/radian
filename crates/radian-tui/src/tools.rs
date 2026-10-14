@@ -700,6 +700,47 @@ mod tests {
         assert!(unknown.head(&card, "").contains("mcp__server__do_thing"));
     }
 
+    /// An MCP tool is aliased `server__tool` (verified in `agent-extensions`' `alias.rs`); a
+    /// server-provided `read`/`shell`/`list` is **not** the built-in tool, so it takes the
+    /// generic renderer - its arguments and output format are its server's own (ADR 0028 R4's
+    /// table: "MCP and other tools"). The reviewer's T3.
+    #[test]
+    fn an_mcp_alias_never_reaches_a_builtin_renderer() {
+        let generic = renderer_for("something_unknown");
+        for name in [
+            "fs__read",
+            "x__shell",
+            "mcp__github__list",
+            "server.read",
+            "srv__patch",
+        ] {
+            let card = card(name, json!({"path": "a"}));
+            let renderer = renderer_for(name);
+            assert_eq!(
+                renderer.head(&card, ""),
+                generic.head(&card, ""),
+                "{name} must be generic"
+            );
+            assert!(renderer.head(&card, "").starts_with(name), "{name}");
+        }
+        // The exact built-in names keep their renderers.
+        assert!(
+            renderer_for("read")
+                .head(&card("read", json!({"path": "a"})), "")
+                .starts_with("read: a")
+        );
+        assert!(
+            renderer_for("shell")
+                .head(&card("shell", json!({"command": "ls"})), "")
+                .starts_with("shell: ls")
+        );
+        assert!(
+            renderer_for("memory_get")
+                .head(&card("memory_get", json!({"id": "m1"})), "")
+                .starts_with("memory_get: m1")
+        );
+    }
+
     #[test]
     fn the_shell_head_carries_the_command_and_the_exit_code() {
         let mut card = card("shell", json!({"command": "ls -la /tmp"}));

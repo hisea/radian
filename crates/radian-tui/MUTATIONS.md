@@ -750,3 +750,11 @@ Base `eeadb11` · 一次性检出 `/tmp/ui2b-mut`（detached，跑完删除）·
 | R1-1 | 恢复"任何非 Cancel/QuitDeadline 输入都解除"（去掉 `is_user_input`） | 后台事件不解除待退出 | `quit.rs::background_events_do_not_disarm_the_quit_window` FAILED |
 
 1/1 抓住。
+
+### 审查 T3 的变异（tools2-review1，提交见 tools-b2 回报）
+
+| # | 需求 | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|---|
+| V1 | MCP 别名（`server__tool`）只走通用渲染器 | `renderer_for` 恢复"按 `__` 取后缀" | `an_mcp_alias_never_reaches_a_builtin_renderer`（单元）、`an_mcp_alias_renders_generic_and_the_builtin_keeps_its_card`（TestBackend） | ✅ |
+
+**说明**：T3 的代码与两条测试落在了 `Merge main into pi/tools2` 那个提交的树里（我先解冲突、后写 T3，提交时一起带上了）。为便于检索，T3 的变异记录与这两条测试的关键词都写在以 T3 命名的测试里；流程上这是本片的一个失误：合并提交应当先落盘，再做后续改动。

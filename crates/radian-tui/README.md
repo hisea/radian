@@ -926,6 +926,10 @@ looked up by name in a compile-time registry with a generic fallback:
 | `memory_search` / `_get` / `_save` / `_revise` | the operation and the record id | the tool's record summary |
 | anything else (MCP included) | the name and the arguments' JSON summary | the result text |
 
+The lookup is on the **exact** built-in name: an MCP tool is aliased `server__tool`
+(`agent-extensions`' `alias.rs`), so a server-provided `read` arrives as `fs__read` and takes
+the generic card — its arguments and output are that server's own, not the built-in's.
+
 `tui.display.tool_output = "expanded" | "errors" | "collapsed"` (default `errors`) and
 `tui.display.tool_preview_lines` (default 5) fold the bodies; `Ctrl-O` (`toggle_tool_output`)
 steps through them; a failed call's body is never hidden. The status line still carries the
