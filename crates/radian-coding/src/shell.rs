@@ -32,7 +32,9 @@ use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use agent_core::{ContentPart, ToolConcurrency, ToolContext, ToolFailure, ToolOutput, ToolSpec};
+use agent_core::{
+    CancellationToken, ContentPart, ToolConcurrency, ToolContext, ToolFailure, ToolOutput, ToolSpec,
+};
 use radian_sandbox::{Sandbox, SandboxMode};
 use serde::Deserialize;
 use serde_json::json;
@@ -124,6 +126,52 @@ pub(crate) fn spec(mode: SandboxMode) -> ToolSpec {
     }
 }
 
+/// The result of a user's `!`/`!!` command (ADR 0033), from the same sandboxed executor the
+/// `shell` tool uses. `stdout`/`stderr` already carry the truncation marker when capped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserBash {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+    pub signal: Option<i32>,
+    pub timed_out: bool,
+    pub cancelled: bool,
+}
+
+/// Runs a user's `!`/`!!` command through the **same sandboxed executor** as the `shell` tool
+/// (ADR 0033): the workspace root as cwd, the default timeout and per-stream output caps, the
+/// same process-group supervision, the same cancellation. It never builds a naked `Command`:
+/// the caller passes the sandbox it already built, and a `safe` tier (no sandbox) cannot reach
+/// here (the caller refuses it before). The child gets no controlling terminal (`setsid`), so
+/// ADR 0016's `TIOCSTI` rule is unchanged.
+pub async fn run_user_bash(
+    root: &Path,
+    sandbox: &Sandbox,
+    command: &str,
+    cancel: &CancellationToken,
+) -> Result<UserBash, String> {
+    let limits = Limits::default();
+    let workspace = WorkspaceRoot::new(root).map_err(|error| error.to_string())?;
+    let outcome = execute(
+        sandbox,
+        workspace.root(),
+        command,
+        limits.default_shell_timeout,
+        limits.default_shell_output_bytes,
+        cancel,
+    )
+    .await
+    .map_err(|failure| failure.message)?;
+    Ok(UserBash {
+        stdout: outcome.stdout.render(),
+        stderr: outcome.stderr.render(),
+        exit_code: outcome.status.and_then(|status| status.code()),
+        signal: status_signal(outcome.status),
+        timed_out: outcome.timed_out,
+        cancelled: outcome.cancelled,
+    })
+}
+
 #[derive(Deserialize)]
 struct ShellArgs {
     command: String,
@@ -160,7 +208,15 @@ pub(crate) async fn run(
     let (timeout, clamped) = clamp_timeout(args.timeout_secs, limits);
     let (output_cap, output_clamped) = clamp_output(args.max_output_bytes, limits);
 
-    let outcome = execute(sandbox, &cwd, &args.command, timeout, output_cap, cx).await?;
+    let outcome = execute(
+        sandbox,
+        &cwd,
+        &args.command,
+        timeout,
+        output_cap,
+        &cx.cancellation,
+    )
+    .await?;
     Ok(report(
         &args.command,
         root.root(),
@@ -201,7 +257,7 @@ async fn execute(
     command: &str,
     timeout: Duration,
     output_cap: usize,
-    cx: &ToolContext<'_>,
+    cancel: &CancellationToken,
 ) -> Result<Outcome, ToolFailure> {
     let mut process = sandbox
         .command_str("/bin/sh", &["-c", command])
@@ -241,7 +297,7 @@ async fn execute(
             timed_out = true;
             true
         }
-        () = cx.cancellation.cancelled() => {
+        () = cancel.cancelled() => {
             cancelled = true;
             true
         }

@@ -460,6 +460,8 @@ fn run(
             ),
             &config.providers,
             cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+            // The picker phase has no session and no sandbox yet.
+            None,
         )?;
         if let Some(signal) = signal {
             // A signal during the pre-session phase leaves exactly like the session phase —
@@ -767,6 +769,9 @@ fn run(
         sandbox_deny_read.push(trust);
     }
     let sandbox = radian_tui::profile::build_sandbox(tier, &workspace_path, &sandbox_deny_read)?;
+    // ADR 0033: the user's `!`/`!!` commands run in the **same** sandbox the coding tools use.
+    // `Sandbox` is cheap to clone; `None` (the `safe` tier) means `!` is unavailable.
+    let bash_sandbox = sandbox.clone();
     // The MCP config file is read and validated here: before any server process starts and
     // before a session file exists, so a bad file leaves nothing behind (dogfooding D2). The
     // MCP provider itself, the memory service and the coding tools are built by
@@ -1037,6 +1042,7 @@ fn run(
     // automatic compaction is on (`context`'s `{auto}`). Each is a startup fact.
     app.set_hostname(radian_host::hostname());
     app.set_model_price(window.price);
+    app.set_bash_available(bash_sandbox.is_some());
     app.set_auto_compact(!cli.no_auto_compact && config.compaction.auto.unwrap_or(true));
     // ADR 0027 C3: the contributors. Their changes wake the UI through the same dirty channel
     // (ADR 0023 U2), and a refresh failure becomes a notice; the UI never waits for one.
@@ -1324,6 +1330,7 @@ fn run(
         (provider_name.clone(), model_name.clone()),
         &config.providers,
         cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+        bash_sandbox,
     );
     exit_trace("loop-done");
     // Tell a pending signal task that the loop left on its own, so it does not force-exit.
@@ -1903,6 +1910,11 @@ struct LoopContext<'a> {
     /// How a selection copy reaches the clipboard (`tui.clipboard`), read once from the app
     /// when the context is built: the mode cannot change mid-run.
     clipboard: ClipboardMode,
+    /// The sandbox the user's `!`/`!!` commands run in (ADR 0033): the coding tools' own,
+    /// cloned. `None` on the `safe` tier (no shell).
+    bash_sandbox: Option<radian_sandbox::Sandbox>,
+    /// The running `!` command's cancellation token (Esc, ADR 0033).
+    bash_cancel: Option<agent_core::CancellationToken>,
 }
 
 impl LoopContext<'_> {
@@ -1980,8 +1992,67 @@ impl LoopContext<'_> {
                 self.command(radian_host::SessionCommand::SendFollowup(text))
             }
             Effect::Steer(text) => self.command(radian_host::SessionCommand::Steer(text)),
-            Effect::Cancel => self.command(radian_host::SessionCommand::Cancel),
+            Effect::Cancel => {
+                // Ctrl-C cancels the turn; it also stops a running `!` (ADR 0033) so there is
+                // no orphan process group.
+                if let Some(cancel) = self.bash_cancel.take() {
+                    cancel.cancel();
+                }
+                self.command(radian_host::SessionCommand::Cancel)
+            }
             Effect::Quit => Ok(()),
+            // ADR 0033: run the `!`/`!!` command through radian-coding's sandboxed executor
+            // (`run_user_bash`, the shell tool's own path), off the loop so Esc can cancel it.
+            Effect::RunBash {
+                command,
+                exclude_from_context,
+            } => {
+                let tx = self.tx.clone();
+                let sandbox = self.bash_sandbox.clone();
+                let workspace = self.workspace.to_path_buf();
+                let cancel = agent_core::CancellationToken::new();
+                self.bash_cancel = Some(cancel.clone());
+                self.runtime.spawn(async move {
+                    let result = match sandbox {
+                        Some(sandbox) => {
+                            radian_coding::run_user_bash(&workspace, &sandbox, &command, &cancel)
+                                .await
+                        }
+                        None => Err("the `safe` tier has no shell (ADR 0012); `!` needs a \
+                                     shell-capable tier"
+                            .to_owned()),
+                    };
+                    let _ = tx.send(UiEvent::Command(AppInput::BashDone {
+                        command,
+                        exclude_from_context,
+                        result,
+                    }));
+                });
+                Ok(())
+            }
+            // ADR 0033 + ADR 0011: the `!` message is injected without waking an idle driver.
+            Effect::Inject(message) => self.command(radian_host::SessionCommand::Inject(message)),
+            // ADR 0033: the durable audit record, for `!` and `!!` alike.
+            Effect::AuditUserBash {
+                command,
+                exclude_from_context,
+                exit_code,
+                cancelled,
+            } => {
+                self.session.record_user_bash(&radian_host::UserBashRecord {
+                    command,
+                    exclude_from_context,
+                    exit_code,
+                    cancelled,
+                });
+                Ok(())
+            }
+            Effect::CancelBash => {
+                if let Some(cancel) = self.bash_cancel.take() {
+                    cancel.cancel();
+                }
+                Ok(())
+            }
             // ADR 0008 revision: `/theme` loads the theme and writes `tui.theme` back. Both
             // are I/O, so they run here and the result comes back as `Input::ThemeReady`.
             Effect::Theme { name } => {
@@ -2452,6 +2523,7 @@ fn ui_loop(
     startup_route: (String, String),
     config_providers: &std::collections::BTreeMap<String, radian_host::ProviderDecl>,
     thinking_max_tokens: u32,
+    bash_sandbox: Option<radian_sandbox::Sandbox>,
 ) -> Result<Option<i32>, String> {
     let mut picking_signal: Option<i32> = None;
     let mut ctx = match phase {
@@ -2475,6 +2547,8 @@ fn ui_loop(
             queue: session.pending(),
             signal: None,
             clipboard: app.clipboard,
+            bash_sandbox: bash_sandbox.clone(),
+            bash_cancel: None,
         }),
     };
     // The first frame: the startup notices and the resumed history are already in the app, and

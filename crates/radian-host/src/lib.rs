@@ -123,7 +123,7 @@ pub use session::session_hooks;
 pub use session::{
     ApprovalRouting, CommandRefused, DriverEnd, HostBindings, LocalSession, SessionCapability,
     SessionCommand, SessionError, SessionFacade, SessionFacts, SessionId, SessionQueue,
-    SessionSetup, open_session, resumed_model_route,
+    SessionSetup, UserBashRecord, open_session, resumed_model_route,
 };
 pub use session_id::{generate_session_id, validate_session_id};
 pub use sessions::{

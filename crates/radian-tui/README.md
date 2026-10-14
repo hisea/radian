@@ -486,6 +486,11 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   right, and do the numbers row's `speed`/`cost`/`elapsed` read as expected? Does the context
   share/`⟲` marker read at your width, and does a narrow terminal drop the low priorities
   first? Try `tui.footer.preset = "pi"` and `"classic"` and compare.
+- **`!` and `!!`** (ADR 0033): type `!ls` — does the `$ ls` block and its color read right, and
+  does the output arrive without a perceptible stall? Type `!!ls` — is the dimmer block clearly
+  different? Does `!sleep 30` cancel with Esc, and does a second `!` while one runs say so? Is
+  the sandbox visible (a write outside the workspace fails with a readable line) and does the
+  command never open an approval box? On the `safe` tier `!` must refuse with one line.
 - **the `AUTO` status marker** (ADR 0026 D9): turn auto on with `/auto on` — does the reversed
   `AUTO` segment stand out as "this session behaves differently" in `dark`, `light` and `mono`,
   without reading as an error? pty automation asserts the text, not the prominence.

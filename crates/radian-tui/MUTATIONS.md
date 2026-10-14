@@ -994,6 +994,25 @@ Base `d483ec9` · 一次性 worktree `/tmp/radian-mut-s2c`（`git worktree add -
 
 2/2 抓住。两个都断言，是因为新 git 认参数、旧 git 只认环境变量：只留一个就是给旧版本留洞。
 
+## bang：输入框的 `!` 与 `!!`（ADR 0033，2026-10-16）
+
+Base `aec64f0` · 一次性 worktree `/tmp/radian-mut-bang`（`git worktree add --detach`，独立
+`CARGO_TARGET_DIR`，避免 build.rs 的 manifest 路径污染共享 target），每条跑完 `git checkout -- .`，
+`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| BANG-A | `!!` 也进上下文（`bash_done` 的 `if !exclude_from_context` 换成 `if true`） | `a_bang_done_injects_and_audits_and_a_bangbang_only_audits` | ✅ |
+| BANG-B | `safe` 档照样执行（`begin_bash` 的 `if !self.bash_available` 换成 `if false`） | `a_bang_on_the_safe_tier_does_not_run` | ✅ |
+| BANG-C | 不写 journal（删掉 `Effect::AuditUserBash` 的 push） | `a_bang_done_injects_and_audits_and_a_bangbang_only_audits`（audit 断言/索引） | ✅ |
+| BANG-D | 绕过沙箱（`main.rs` 的 RunBash 用 `std::process::Command::new("/bin/sh")` 直接跑，替换 `run_user_bash`） | `the_bang_command_runs_through_the_sandboxed_executor`（结构测试） | ✅ |
+| BANG-E | `!` 当普通 turn 发出去（`begin_bash` 发 `SendFollowup`，即走模型/工具/审批那条路） | `a_bang_routes_to_a_run_bash_effect` | ✅ |
+
+5/5 抓住。**过程记录**：BANG-D 第一次只把 `run_user_bash(...)` 换成 `Command::new(...).status()`，
+类型不匹配、根本没编译（不是"测试抓住"）——换成构造 `UserBash` 的完整裸跑后才由结构测试抓住。
+BANG-E 是"走审批"这一条的最近代理：真正的审批框需要把命令交给模型当工具调用，最便宜的等价变异
+就是把它发成 turn；ptytest `pty_bang_runs_and_enters_the_context` 另有一条断言"屏幕上不出现
+`approve tool call`"，两层一起把"`!` 不走审批"钉住。
 ## resize-fix：空闲时也要重新布局＼�2026-10-16）
 
 Base `ea67319` · 一次性 worktree `/tmp/radian-mut-resize`（`git worktree add --detach`，独立

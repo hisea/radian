@@ -107,13 +107,25 @@ pub enum SessionCommand {
     Steer(Message),
     /// Cancel the running turn.
     Cancel,
+    /// Enqueue a message that does **not** wake an idle driver (ADR 0033's `!` output, ADR
+    /// 0011's `inject`): it joins the next turn's context without starting one.
+    Inject(Message),
+}
+
+/// One `!`/`!!` command's audit record (ADR 0033): the durable `UserBash` journal entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserBashRecord {
+    pub command: String,
+    pub exclude_from_context: bool,
+    pub exit_code: Option<i32>,
+    pub cancelled: bool,
 }
 
 impl SessionCommand {
     /// The capability a session must declare to accept this command.
     pub fn capability(&self) -> SessionCapability {
         match self {
-            Self::SendFollowup(_) => SessionCapability::SendMessage,
+            Self::SendFollowup(_) | Self::Inject(_) => SessionCapability::SendMessage,
             Self::Steer(_) => SessionCapability::Steer,
             Self::Cancel => SessionCapability::Cancel,
         }
@@ -122,6 +134,7 @@ impl SessionCommand {
     pub fn name(&self) -> &'static str {
         match self {
             Self::SendFollowup(_) => "send",
+            Self::Inject(_) => "inject",
             Self::Steer(_) => "steer",
             Self::Cancel => "cancel",
         }
@@ -230,6 +243,10 @@ pub trait SessionFacade: Send + Sync {
     /// Applies a startup trust choice (ADR 0031 T3): writes `trust.json` for the persistent
     /// choices and journals `ProjectTrustChanged`, or changes only this session's state.
     fn record_trust(&self, choice: trust::Choice) -> Result<trust::Setup, String>;
+
+    /// Appends one durable `UserBash` audit record (ADR 0033). Both `!` and `!!` call it; the
+    /// record is audit-only and never replayed.
+    fn record_user_bash(&self, record: &UserBashRecord);
 }
 
 /// How the driver task ended.
@@ -694,6 +711,20 @@ impl SessionFacade for LocalSession {
         LocalSession::record_trust(self, choice)
     }
 
+    fn record_user_bash(&self, record: &UserBashRecord) {
+        // Audit only (ADR 0033): append the durable `UserBash` record. A write failure is not
+        // the user's problem here (the command already ran); it is dropped like the other
+        // best-effort audit writes.
+        let _ = self.runtime.block_on(self.journal.append_runtime_event(
+            radian_session::RuntimeEvent::UserBash {
+                command: record.command.clone(),
+                exclude_from_context: record.exclude_from_context,
+                exit_code: record.exit_code,
+                cancelled: record.cancelled,
+            },
+        ));
+    }
+
     /// Re-validates the capability, then runs the command. The check is here as well as in the
     /// UI: a facade whose list the UI ignored still refuses.
     fn command(&self, command: SessionCommand) -> Result<(), CommandRefused> {
@@ -718,6 +749,16 @@ impl SessionFacade for LocalSession {
                     .set_turn_source(Some(agent_core::InputSource::User));
                 self.runtime
                     .block_on(self.inbox.steer(text, agent_core::InputSource::User))
+                    .map(|_| ())
+                    .map_err(|error| CommandRefused::inbox(name, &error))
+            }
+            SessionCommand::Inject(message) => {
+                // ADR 0033 + ADR 0011: `inject` is the "no wake" lane, so a `!` output never
+                // starts a turn; the source is `User` (the human typed the command).
+                self.hooks
+                    .set_turn_source(Some(agent_core::InputSource::User));
+                self.runtime
+                    .block_on(self.inbox.inject(message, agent_core::InputSource::User))
                     .map(|_| ())
                     .map_err(|error| CommandRefused::inbox(name, &error))
             }

@@ -220,7 +220,8 @@ fn every_tip_names_a_real_feature() {
             );
         } else {
             assert!(
-                matches!(first, "@path" | "Shift+drag"),
+                // `!` is a real feature (ADR 0033): the input box's shell command.
+                matches!(first, "@path" | "Shift+drag" | "!<command>"),
                 "tip {tip:?} begins with {first:?}; add a real feature or allow it here"
             );
         }
