@@ -160,10 +160,19 @@ pub enum Role {
     MermaidNode,
     MermaidEdge,
     MermaidText,
+    /// Assistant-text Markdown roles (ADR 0028 R2, pi's same-named `md*` roles).
+    MdHeading,
+    MdLink,
+    MdLinkUrl,
+    MdCode,
+    MdQuote,
+    MdQuoteBorder,
+    MdHr,
+    MdListBullet,
 }
 
 impl Role {
-    pub const ALL: [Role; 33] = [
+    pub const ALL: [Role; 41] = [
         Role::Reasoning,
         Role::Interrupted,
         Role::User,
@@ -197,6 +206,14 @@ impl Role {
         Role::MermaidNode,
         Role::MermaidEdge,
         Role::MermaidText,
+        Role::MdHeading,
+        Role::MdLink,
+        Role::MdLinkUrl,
+        Role::MdCode,
+        Role::MdQuote,
+        Role::MdQuoteBorder,
+        Role::MdHr,
+        Role::MdListBullet,
     ];
 
     /// The `[tui.colors]` key for this role (ADR 0029 decision 5).
@@ -235,6 +252,14 @@ impl Role {
             Role::MermaidNode => "mermaid_node",
             Role::MermaidEdge => "mermaid_edge",
             Role::MermaidText => "mermaid_text",
+            Role::MdHeading => "md_heading",
+            Role::MdLink => "md_link",
+            Role::MdLinkUrl => "md_link_url",
+            Role::MdCode => "md_code",
+            Role::MdQuote => "md_quote",
+            Role::MdQuoteBorder => "md_quote_border",
+            Role::MdHr => "md_hr",
+            Role::MdListBullet => "md_list_bullet",
         }
     }
 
@@ -277,6 +302,14 @@ impl Role {
             Role::MermaidNode => &mut theme.mermaid_node,
             Role::MermaidEdge => &mut theme.mermaid_edge,
             Role::MermaidText => &mut theme.mermaid_text,
+            Role::MdHeading => &mut theme.md_heading,
+            Role::MdLink => &mut theme.md_link,
+            Role::MdLinkUrl => &mut theme.md_link_url,
+            Role::MdCode => &mut theme.md_code,
+            Role::MdQuote => &mut theme.md_quote,
+            Role::MdQuoteBorder => &mut theme.md_quote_border,
+            Role::MdHr => &mut theme.md_hr,
+            Role::MdListBullet => &mut theme.md_list_bullet,
         }
     }
 }
@@ -330,6 +363,16 @@ pub struct Theme {
     pub mermaid_edge: Style,
     /// A diagram's plain **text** (labels outside a node): pi's `text` (主).
     pub mermaid_text: Style,
+    /// Assistant-text Markdown roles (ADR 0028 R2): headings, links, inline code, quotes,
+    /// rules and list bullets.
+    pub md_heading: Style,
+    pub md_link: Style,
+    pub md_link_url: Style,
+    pub md_code: Style,
+    pub md_quote: Style,
+    pub md_quote_border: Style,
+    pub md_hr: Style,
+    pub md_list_bullet: Style,
     /// A structured notice's label (`profile:`, `[memory]`) — pi's `accent` (ADR 0028 owner
     /// decision: 强调 = 名字、标签).
     pub notice_label: Style,
@@ -473,6 +516,15 @@ impl Theme {
             mermaid_node: spec(pi::VIOLET, Modifier::empty(), truecolor),
             mermaid_edge: dim,
             mermaid_text: text,
+            // Markdown (ADR 0028 R2): pi's `md*` roles.
+            md_heading: spec(pi::TEXT, Modifier::BOLD, truecolor),
+            md_link: spec(pi::VIOLET, Modifier::UNDERLINED, truecolor),
+            md_link_url: muted,
+            md_code: spec(pi::YELLOW, Modifier::empty(), truecolor),
+            md_quote: muted,
+            md_quote_border: dim,
+            md_hr: dim,
+            md_list_bullet: spec(pi::VIOLET, Modifier::empty(), truecolor),
             turn_idle: spec(pi::GREEN, Modifier::empty(), truecolor),
             turn_running: spec(pi::YELLOW, Modifier::empty(), truecolor),
             turn_cancelled: spec(pi::RED, Modifier::empty(), truecolor),
@@ -527,6 +579,15 @@ impl Theme {
             mermaid_node: spec(pi::VIOLET, Modifier::empty(), truecolor),
             mermaid_edge: dim,
             mermaid_text: text,
+            // Markdown (ADR 0028 R2): pi's `md*` roles.
+            md_heading: spec(pi::TEXT, Modifier::BOLD, truecolor),
+            md_link: spec(pi::VIOLET, Modifier::UNDERLINED, truecolor),
+            md_link_url: muted,
+            md_code: spec(pi::YELLOW, Modifier::empty(), truecolor),
+            md_quote: muted,
+            md_quote_border: dim,
+            md_hr: dim,
+            md_list_bullet: spec(pi::VIOLET, Modifier::empty(), truecolor),
             turn_idle: spec(pi::GREEN, Modifier::empty(), truecolor),
             turn_running: spec(pi::YELLOW, Modifier::empty(), truecolor),
             turn_cancelled: spec(pi::RED, Modifier::empty(), truecolor),
@@ -596,6 +657,15 @@ impl Theme {
             mermaid_node: style(None, Modifier::BOLD),
             mermaid_edge: style(None, Modifier::DIM),
             mermaid_text: style(None, Modifier::empty()),
+            // `mono` uses modifiers only: bold headings and links, dim quotes/rules/urls.
+            md_heading: style(None, Modifier::BOLD),
+            md_link: style(None, Modifier::UNDERLINED),
+            md_link_url: style(None, Modifier::DIM),
+            md_code: style(None, Modifier::BOLD),
+            md_quote: style(None, Modifier::DIM),
+            md_quote_border: style(None, Modifier::DIM),
+            md_hr: style(None, Modifier::DIM),
+            md_list_bullet: style(None, Modifier::BOLD),
         }
     }
 

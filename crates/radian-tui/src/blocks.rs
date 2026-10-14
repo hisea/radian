@@ -285,6 +285,45 @@ pub struct BodyLine {
     /// A weak one-line explanation (a Mermaid block that could not be drawn): the renderer
     /// styles it with the theme's `truncation` (dim) role.
     pub reason: bool,
+    /// A Markdown line (ADR 0028 R2): per-piece text, role and source offset. `None` for
+    /// every other line; `text` still holds the concatenation, so search and the line count
+    /// agree with what is drawn.
+    pub md: Option<Vec<MdPiece>>,
+}
+
+/// One Markdown piece: its displayed text, its role, and its source offset (`None` when the
+/// renderer synthesized it — a bullet, a bar, a border, a link's URL).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MdPiece {
+    pub text: String,
+    pub style: MdStyle,
+    pub offset: Option<usize>,
+}
+
+/// A Markdown piece's render role (ADR 0028 R2, ADR 0029 decision 3: pi's `md*` roles).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MdStyle {
+    /// A heading's text (`mdHeading`).
+    Heading,
+    Bold,
+    Italic,
+    /// Inline code (`mdCode`).
+    Code,
+    /// A link's text (`mdLink`).
+    Link,
+    /// The synthesized ` (url)` (`mdLinkUrl`).
+    LinkUrl,
+    /// A quote's text (`mdQuote`).
+    Quote,
+    /// A quote's `│ ` bar (`mdQuoteBorder`).
+    QuoteBar,
+    /// A list bullet or number (`mdListBullet`).
+    Bullet,
+    /// A thematic break (`mdHr`).
+    Rule,
+    /// A table's `│`/`─`/`┌` borders (`mdCodeBlockBorder`).
+    TableBorder,
+    Plain,
 }
 
 impl BodyLine {
@@ -299,6 +338,7 @@ impl BodyLine {
             hint: false,
             diagram: None,
             reason: false,
+            md: None,
         }
     }
 
@@ -313,6 +353,7 @@ impl BodyLine {
             hint: false,
             diagram: None,
             reason: false,
+            md: None,
         }
     }
 
@@ -332,6 +373,24 @@ impl BodyLine {
             hint: false,
             diagram: Some(spans),
             reason: false,
+            md: None,
+        }
+    }
+
+    /// A Markdown line: its pieces, and the `chars` mapping derived from their offsets.
+    fn md(chars: Vec<usize>, end: usize, pieces: Vec<MdPiece>) -> Self {
+        let text: String = pieces.iter().map(|piece| piece.text.as_str()).collect();
+        Self {
+            chars,
+            end,
+            text,
+            code: false,
+            pad: false,
+            warn: false,
+            hint: false,
+            diagram: None,
+            reason: false,
+            md: Some(pieces),
         }
     }
 
@@ -346,6 +405,7 @@ impl BodyLine {
             hint: false,
             diagram: None,
             reason: true,
+            md: None,
         }
     }
 }
@@ -474,7 +534,7 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
                 .iter()
                 .map(|block| match block {
                     Block::Paragraph { start, end, .. } => {
-                        crate::render::wrap_line_count(&text[*start..*end], body_width)
+                        md_line_count(&text[*start..*end], *start, body_width)
                     }
                     Block::Code {
                         start,
@@ -675,7 +735,7 @@ pub fn layout(entry: &Entry, blocks: &[Block], modes: DisplayModes, width: usize
             for block in blocks {
                 match block {
                     Block::Paragraph { start, end, .. } => {
-                        lines.extend(prose_lines(&text[*start..*end], body_width));
+                        lines.extend(md_lines(&text[*start..*end], *start, body_width));
                     }
                     Block::Code {
                         start,
@@ -764,6 +824,7 @@ fn tool_line(text: &str, width: usize) -> Vec<BodyLine> {
         hint: false,
         diagram: None,
         reason: false,
+        md: None,
     }]
 }
 
@@ -790,6 +851,7 @@ fn body_plan_lines(plan: &[tools::BodyLine], text: &str, body_width: usize) -> V
                 hint: true,
                 diagram: None,
                 reason: false,
+                md: None,
             }),
         }
     }
@@ -946,7 +1008,11 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
             for block in parse_blocks_for(entry, mode) {
                 match block {
                     Block::Paragraph { start, end, .. } => {
-                        lines.extend(crate::render::wrap(&text[start..end], body_width));
+                        lines.extend(
+                            md_lines(&text[start..end], start, body_width)
+                                .into_iter()
+                                .map(|line| line.text),
+                        );
                     }
                     Block::Code {
                         start,
@@ -1046,6 +1112,7 @@ fn code_lines(raw: &str, offset: usize, closed: bool, width: usize) -> Vec<BodyL
             hint: false,
             diagram: None,
             reason: false,
+            md: None,
         });
     }
     if out.is_empty() {
@@ -1060,6 +1127,7 @@ fn code_lines(raw: &str, offset: usize, closed: bool, width: usize) -> Vec<BodyL
             hint: false,
             diagram: None,
             reason: false,
+            md: None,
         });
     }
     out
@@ -1078,6 +1146,506 @@ fn fence_run(trimmed: &str) -> Option<char> {
     } else {
         None
     }
+}
+
+// ---------- Markdown layout (ADR 0028 R2) ----------
+
+/// A piece to lay out: displayed text, role, and the source offset of its first character
+/// (`None` for synthesized text).
+type Cell = (char, MdStyle, Option<usize>);
+
+/// Lays an Assistant paragraph's Markdown out (ADR 0028 R2). `source` is the paragraph's
+/// source range (starting at `base` in the entry's display text). Every piece that exists in
+/// the source keeps its offset, so a selection copies the **source** it covers; a synthesized
+/// prefix (a bullet, a quote bar, a rule, a table border, a heading's `#`) selects the block.
+pub(crate) fn md_lines(source: &str, base: usize, width: usize) -> Vec<BodyLine> {
+    let blocks = crate::markdown::parse(source, base);
+    let mut out = Vec::new();
+    md_blocks(&blocks, width, base, 0, &mut out);
+    // A block range carries its trailing newline (the ranges tile the text), and the prose
+    // wrap showed it as one empty line; pulldown drops it, so restore it. The blank line
+    // between two paragraphs is what makes the transcript read as the author wrote it.
+    if source.ends_with('\n') && out.last().is_some_and(|line| !line.text.is_empty()) {
+        out.push(BodyLine::prose(
+            Vec::new(),
+            base + source.len(),
+            String::new(),
+        ));
+    }
+    if out.is_empty() {
+        out.push(BodyLine::prose(Vec::new(), base, String::new()));
+    }
+    out
+}
+
+/// The Markdown line count (the virtualized measure path lays the lines out too: a Markdown
+/// paragraph's row count depends on its inline pieces, and building them is the only exact
+/// way — the perf budget is checked by `perf_render`).
+pub(crate) fn md_line_count(source: &str, base: usize, width: usize) -> usize {
+    md_lines(source, base, width).len()
+}
+
+/// Appends the laid-out lines of `blocks`, indented by `indent` columns.
+fn md_blocks(
+    blocks: &[crate::markdown::MdBlock],
+    width: usize,
+    base: usize,
+    indent: usize,
+    out: &mut Vec<BodyLine>,
+) {
+    use crate::markdown::MdBlock;
+    for block in blocks {
+        match block {
+            MdBlock::Paragraph(pieces) => {
+                out.extend(md_wrap(md_pieces(pieces, MdStyle::Plain), width, indent));
+            }
+            MdBlock::Heading { level, pieces } => {
+                // The `#`s are markup; the level shows as a synthesized prefix.
+                let mut line = vec![MdPiece {
+                    text: format!("{} ", "#".repeat(*level as usize)),
+                    style: MdStyle::Heading,
+                    offset: None,
+                }];
+                line.extend(md_pieces(pieces, MdStyle::Heading));
+                out.extend(md_wrap(line, width, indent));
+            }
+            MdBlock::List { ordered, items } => {
+                for (index, item) in items.iter().enumerate() {
+                    let marker = match ordered {
+                        Some(first) => format!("{}. ", first + index as u64),
+                        None => "• ".to_owned(),
+                    };
+                    let mut item_lines = Vec::new();
+                    md_blocks(item, width, base, indent + 2, &mut item_lines);
+                    let mut first = true;
+                    for line in item_lines {
+                        if first {
+                            // The marker takes the first line's indent columns, so the text
+                            // starts right after it (`• one`, not `•   one`).
+                            let mut pieces = vec![MdPiece {
+                                text: marker.clone(),
+                                style: MdStyle::Bullet,
+                                offset: None,
+                            }];
+                            pieces.extend(
+                                line.md
+                                    .clone()
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    // Drop the line's leading pad: the marker replaces it.
+                                    .skip(1),
+                            );
+                            let chars = md_chars(&pieces, base);
+                            out.push(BodyLine::md(chars, line.end, pieces));
+                            first = false;
+                        } else {
+                            out.push(line);
+                        }
+                    }
+                    if first {
+                        out.push(BodyLine::md(
+                            vec![base],
+                            base,
+                            vec![MdPiece {
+                                text: marker,
+                                style: MdStyle::Bullet,
+                                offset: None,
+                            }],
+                        ));
+                    }
+                }
+            }
+            MdBlock::Quote(inner) => {
+                let mut inner_lines = Vec::new();
+                md_blocks(
+                    inner,
+                    width.saturating_sub(2).max(1),
+                    base,
+                    indent,
+                    &mut inner_lines,
+                );
+                for line in inner_lines {
+                    let mut pieces = vec![MdPiece {
+                        text: "│ ".to_owned(),
+                        style: MdStyle::QuoteBar,
+                        offset: None,
+                    }];
+                    pieces.extend(
+                        line.md
+                            .clone()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|piece| MdPiece {
+                                style: if piece.style == MdStyle::Plain {
+                                    MdStyle::Quote
+                                } else {
+                                    piece.style
+                                },
+                                ..piece
+                            }),
+                    );
+                    let chars = md_chars(&pieces, base);
+                    out.push(BodyLine::md(chars, line.end, pieces));
+                }
+            }
+            MdBlock::Rule => out.push(BodyLine::md(
+                vec![base],
+                base,
+                vec![MdPiece {
+                    text: "─".repeat(width.clamp(1, 40)),
+                    style: MdStyle::Rule,
+                    offset: None,
+                }],
+            )),
+            MdBlock::Table { head, rows } => out.extend(md_table(head, rows, base, width, indent)),
+        }
+    }
+}
+
+/// The Markdown pieces of a parsed block, in the given fallback role.
+fn md_pieces(pieces: &[crate::markdown::Piece], plain: MdStyle) -> Vec<MdPiece> {
+    pieces
+        .iter()
+        .map(|piece| MdPiece {
+            text: piece.text.clone(),
+            style: match piece.inline {
+                crate::markdown::Inline::Bold => MdStyle::Bold,
+                crate::markdown::Inline::Italic => MdStyle::Italic,
+                crate::markdown::Inline::Code => MdStyle::Code,
+                crate::markdown::Inline::LinkText => MdStyle::Link,
+                crate::markdown::Inline::LinkUrl => MdStyle::LinkUrl,
+                crate::markdown::Inline::Plain => plain,
+            },
+            offset: piece.offset,
+        })
+        .collect()
+}
+
+/// The `chars` mapping for a piece list: each cell maps to its piece's offset (or `fallback`
+/// for synthesized text).
+fn md_chars(pieces: &[MdPiece], fallback: usize) -> Vec<usize> {
+    let mut out = Vec::new();
+    for piece in pieces {
+        let start = piece.offset.unwrap_or(fallback);
+        for (index, ch) in piece.text.char_indices() {
+            if ch == '\n' {
+                continue;
+            }
+            out.push(start + index);
+        }
+    }
+    out
+}
+
+/// Wraps Markdown pieces to `width`, one body line per wrapped row, with `indent` leading
+/// spaces on every row.
+fn md_wrap(pieces: Vec<MdPiece>, width: usize, indent: usize) -> Vec<BodyLine> {
+    let width = width.saturating_sub(indent).max(1);
+    let pad = " ".repeat(indent);
+    // Flatten to cells so wrapping is per character; a newline forces a row break.
+    let mut cells: Vec<Cell> = Vec::new();
+    for piece in pieces {
+        for (index, ch) in piece.text.char_indices() {
+            if ch == '\n' {
+                cells.push(('\n', piece.style, None));
+            } else {
+                cells.push((ch, piece.style, piece.offset.map(|offset| offset + index)));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let mut row: Vec<Cell> = Vec::new();
+    let mut used = 0usize;
+    let flush = |row: &mut Vec<Cell>, out: &mut Vec<BodyLine>| {
+        let mut pieces: Vec<MdPiece> = Vec::new();
+        for (ch, style, offset) in row.iter() {
+            match pieces.last_mut() {
+                Some(piece)
+                    if piece.style == *style && piece.offset.is_some() == offset.is_some() =>
+                {
+                    // Extend a run only when its offsets stay contiguous.
+                    let contiguous = match (piece.offset, offset) {
+                        (Some(a), Some(b)) => a + piece.text.len() == *b,
+                        (None, None) => true,
+                        _ => false,
+                    };
+                    if contiguous {
+                        piece.text.push(*ch);
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+            pieces.push(MdPiece {
+                text: ch.to_string(),
+                style: *style,
+                offset: *offset,
+            });
+        }
+        let mut all = vec![MdPiece {
+            text: pad.clone(),
+            style: MdStyle::Plain,
+            offset: None,
+        }];
+        all.extend(pieces);
+        let chars = md_chars(&all, 0);
+        // `end` is the gap after the line's last source char, so the selection mapping lands
+        // between lines the way the prose wrap's does.
+        let end = row
+            .iter()
+            .filter_map(|(ch, _, offset)| offset.map(|offset| offset + ch.len_utf8()))
+            .max()
+            .unwrap_or(0);
+        out.push(BodyLine::md(chars, end, all));
+        row.clear();
+    };
+    let mut trailing_break = false;
+    for (ch, style, offset) in cells {
+        if ch == '\n' {
+            flush(&mut row, &mut out);
+            used = 0;
+            trailing_break = true;
+            continue;
+        }
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w > width && !row.is_empty() {
+            flush(&mut row, &mut out);
+            used = 0;
+            // A soft wrap drops the space it broke at (the prose wrap's rule): it must not
+            // start the next line.
+            if ch == ' ' {
+                trailing_break = false;
+                continue;
+            }
+        }
+        used += w;
+        row.push((ch, style, offset));
+        trailing_break = false;
+    }
+    if !row.is_empty() || out.is_empty() || trailing_break {
+        flush(&mut row, &mut out);
+    }
+    out
+}
+
+/// A table: column widths from the cells, wrapping a cell that does not fit; if even the
+/// minimum does not fit (too many columns), the raw `|` source comes back as plain text
+/// (ADR 0028 R2's fallback).
+fn md_table(
+    head: &[Vec<crate::markdown::Piece>],
+    rows: &[Vec<Vec<crate::markdown::Piece>>],
+    base: usize,
+    width: usize,
+    indent: usize,
+) -> Vec<BodyLine> {
+    let cell_text = |cell: &[crate::markdown::Piece]| -> String {
+        cell.iter().map(|piece| piece.text.as_str()).collect()
+    };
+    let columns = head.len().max(rows.iter().map(Vec::len).max().unwrap_or(0));
+    if columns == 0 {
+        return Vec::new();
+    }
+    let natural = |column: usize| -> usize {
+        let head_w = head
+            .get(column)
+            .map_or(0, |cell| UnicodeWidthStr::width(cell_text(cell).as_str()));
+        rows.iter()
+            .filter_map(|row| row.get(column))
+            .map(|cell| UnicodeWidthStr::width(cell_text(cell).as_str()))
+            .chain(std::iter::once(head_w))
+            .max()
+            .unwrap_or(0)
+    };
+    let mut widths: Vec<usize> = (0..columns).map(natural).collect();
+    // A bordered table costs `columns + 1` borders plus one space each side of every cell.
+    let overhead = columns + 1 + columns * 2;
+    let available = width.saturating_sub(indent);
+    let min_column = 3;
+    if overhead + columns * min_column > available {
+        return md_table_fallback(head, rows, base, width, indent);
+    }
+    while widths.iter().sum::<usize>() + overhead > available {
+        let Some((widest, _)) = widths.iter().enumerate().max_by_key(|(_, w)| **w) else {
+            break;
+        };
+        if widths[widest] <= min_column {
+            return md_table_fallback(head, rows, base, width, indent);
+        }
+        widths[widest] -= 1;
+    }
+    let border = |left: &str, mid: &str, right: &str| -> String {
+        let mut out = String::from(left);
+        for (index, w) in widths.iter().enumerate() {
+            out.push_str(&"─".repeat(w + 2));
+            out.push_str(if index + 1 == widths.len() {
+                right
+            } else {
+                mid
+            });
+        }
+        out
+    };
+    let pad = " ".repeat(indent);
+    let border_line = |text: String| -> BodyLine {
+        let mut pieces = vec![MdPiece {
+            text: pad.clone(),
+            style: MdStyle::Plain,
+            offset: None,
+        }];
+        pieces.push(MdPiece {
+            text,
+            style: MdStyle::TableBorder,
+            offset: None,
+        });
+        BodyLine::md(vec![base; indent + 1], base, pieces)
+    };
+    let mut out = vec![border_line(border("┌", "┬", "┐"))];
+    let row_cells: Vec<Vec<&[crate::markdown::Piece]>> = std::iter::once(head)
+        .chain(rows.iter().map(Vec::as_slice))
+        .map(|row| {
+            (0..columns)
+                .map(|column| row.get(column).map(Vec::as_slice).unwrap_or(&[]))
+                .collect()
+        })
+        .collect();
+    for (row_index, row) in row_cells.iter().enumerate() {
+        let wrapped: Vec<Vec<String>> = row
+            .iter()
+            .enumerate()
+            .map(|(column, cell)| crate::render::wrap(&cell_text(cell), widths[column].max(1)))
+            .collect();
+        let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
+        for line_index in 0..height {
+            let mut pieces = vec![
+                MdPiece {
+                    text: pad.clone(),
+                    style: MdStyle::Plain,
+                    offset: None,
+                },
+                MdPiece {
+                    text: "│".to_owned(),
+                    style: MdStyle::TableBorder,
+                    offset: None,
+                },
+            ];
+            for (column, column_lines) in wrapped.iter().enumerate() {
+                let cell = column_lines
+                    .get(line_index)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                pieces.push(MdPiece {
+                    text: format!(" {} ", pad_to(cell, widths[column])),
+                    style: MdStyle::Plain,
+                    offset: None,
+                });
+                pieces.push(MdPiece {
+                    text: "│".to_owned(),
+                    style: MdStyle::TableBorder,
+                    offset: None,
+                });
+            }
+            out.push(BodyLine::md(vec![base; indent + 1], base, pieces));
+        }
+        if row_index == 0 {
+            out.push(border_line(border("├", "┼", "┤")));
+        }
+    }
+    out.push(border_line(border("└", "┴", "┘")));
+    out
+}
+
+/// The raw `|` source of a table that cannot be drawn (ADR 0028 R2's fallback), as plain
+/// wrapped text with real offsets.
+fn md_table_fallback(
+    head: &[Vec<crate::markdown::Piece>],
+    rows: &[Vec<Vec<crate::markdown::Piece>>],
+    base: usize,
+    width: usize,
+    indent: usize,
+) -> Vec<BodyLine> {
+    let mut text = String::new();
+    let mut offsets: Vec<usize> = Vec::new();
+    let push = |text: &mut String, offsets: &mut Vec<usize>, cell: &[crate::markdown::Piece]| {
+        for piece in cell {
+            let start = piece.offset.unwrap_or(base);
+            for (index, ch) in piece.text.char_indices() {
+                text.push(ch);
+                offsets.push(start + index);
+            }
+        }
+    };
+    let mut first = true;
+    for row in std::iter::once(head).chain(rows.iter().map(Vec::as_slice)) {
+        if !first {
+            text.push('\n');
+            offsets.push(base);
+        }
+        first = false;
+        text.push_str("| ");
+        offsets.extend([base, base]);
+        for (column, cell) in row.iter().enumerate() {
+            if column > 0 {
+                text.push_str(" | ");
+                offsets.extend([base, base, base]);
+            }
+            push(&mut text, &mut offsets, cell);
+        }
+        text.push_str(" |");
+        offsets.extend([base, base]);
+    }
+    // Wrap, keeping each cell's offset.
+    let mut out = Vec::new();
+    let mut row_text = String::new();
+    let mut row_offsets: Vec<usize> = Vec::new();
+    let flush = |row_text: &mut String, row_offsets: &mut Vec<usize>, out: &mut Vec<BodyLine>| {
+        if row_text.is_empty() {
+            return;
+        }
+        let mut pieces = vec![MdPiece {
+            text: " ".repeat(indent),
+            style: MdStyle::Plain,
+            offset: None,
+        }];
+        for (index, ch) in row_text.char_indices() {
+            pieces.push(MdPiece {
+                text: ch.to_string(),
+                style: MdStyle::Plain,
+                offset: row_offsets.get(index).copied(),
+            });
+        }
+        out.push(BodyLine::md(
+            row_offsets.clone(),
+            row_offsets.last().copied().unwrap_or(base) + 1,
+            pieces,
+        ));
+        row_text.clear();
+        row_offsets.clear();
+    };
+    let limit = width.saturating_sub(indent).max(1);
+    let mut used = 0usize;
+    for (index, ch) in text.char_indices() {
+        if ch == '\n' {
+            flush(&mut row_text, &mut row_offsets, &mut out);
+            used = 0;
+            continue;
+        }
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w > limit && !row_text.is_empty() {
+            flush(&mut row_text, &mut row_offsets, &mut out);
+            used = 0;
+        }
+        used += w;
+        row_text.push(ch);
+        row_offsets.push(offsets.get(index).copied().unwrap_or(base));
+    }
+    flush(&mut row_text, &mut row_offsets, &mut out);
+    out
+}
+
+/// Right-pads `text` to `width` display columns.
+fn pad_to(text: &str, width: usize) -> String {
+    let used = UnicodeWidthStr::width(text);
+    format!("{text}{}", " ".repeat(width.saturating_sub(used)))
 }
 
 #[cfg(test)]

@@ -410,9 +410,11 @@ mod tests {
     fn an_empty_line_maps_to_its_paragraph_boundary() {
         let entries = [entry("a\n\nb")];
         let width = 10;
-        // Lines: "a", "", "b". The empty line's gap is the second '\n' (byte 2).
+        // Lines: "a", "", "b". Markdown lays the blank line at the paragraph block's end
+        // (ADR 0028 R2: the block ranges tile the text, so the trailing newline's gap is the
+        // block end), which is byte 3 here.
         let empty = locate(&entries, EXPANDED, width, 1, 4).expect("the empty line");
-        assert_eq!(empty.offset, 2);
+        assert_eq!(empty.offset, 3);
         let b = locate(&entries, EXPANDED, width, 2, 0).expect("'b'");
         assert_eq!(b.offset, 3);
     }
@@ -567,7 +569,7 @@ mod tests {
             head: locate(&entries, EXPANDED, width, 1, 4).expect("'c'"),
         };
         let rows = highlight_rows(&entries, EXPANDED, width, 0, 2, &sel);
-        assert_eq!(rows, vec![vec![(7, 11)], vec![(2, 4)]]);
+        assert_eq!(rows, vec![vec![(7, 12)], vec![(2, 4)]]);
         // A window scrolled past the selection reports no rows at all.
         assert!(highlight_rows(&entries, EXPANDED, width, 2, 3, &sel).is_empty());
         // And the row above it is simply not highlighted.
