@@ -629,10 +629,11 @@ impl InputStyle {
     }
 }
 
-/// The input prompt, in the style of pi: the first line starts with `> ` and the continuation
-/// lines indent by the same two cells, so the text stays aligned. Two cells of the width go to
-/// it, which is why `input_height` measures the text at `width - 2`.
-const INPUT_PROMPT: &str = "> ";
+/// The input prompt, in the style of pi: the first line starts with `❯ ` and the continuation
+/// lines indent by the same two cells, so the text stays aligned. The owner's 2026-10-14
+/// decision: **both** input styles use `❯`. Its display width (2 cells) is what the layout
+/// reserves — never its byte length (`❯` is three bytes, which used to shift the box cursor).
+const INPUT_PROMPT: &str = "❯ ";
 
 /// The bordered style's prompt: the owner's `❯`, colored with the theme's
 /// accent role (`theme.model`, pi's `accent`). Two cells, like `> `.
@@ -749,12 +750,19 @@ fn input_height(app: &App, width: usize) -> u16 {
     (rows.clamp(1, MAX_INPUT_ROWS) as u16) + 2
 }
 
-/// The text width inside the input area: `> ` on the first line for `lines`, a border plus the
+/// The display width of a prompt constant: the columns it occupies, **not** its byte length
+/// (`❯` is three bytes and one cell). Every layout use of a prompt goes through this.
+fn prompt_width(prompt: &str) -> usize {
+    UnicodeWidthStr::width(prompt)
+}
+
+/// The text width inside the input area: `❯ ` on the first line for `lines`, a border plus the
 /// `❯ ` prompt for `box`.
 fn input_inner_width(app: &App, width: usize) -> usize {
     let reserved = match app.input_style {
-        InputStyle::Lines => INPUT_PROMPT.len(),
-        InputStyle::Box => 2 + BOX_PROMPT.len(),
+        InputStyle::Lines => prompt_width(INPUT_PROMPT),
+        // Two border cells plus the prompt.
+        InputStyle::Box => 2 + prompt_width(BOX_PROMPT),
     };
     width.saturating_sub(reserved).max(1)
 }
@@ -1349,7 +1357,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                             .iter()
                             .enumerate()
                             .map(|(index, row)| {
-                                let lead = if index == 0 { INPUT_PROMPT } else { "  " };
+                                let lead = if index == 0 {
+                                    INPUT_PROMPT.to_string()
+                                } else {
+                                    " ".repeat(prompt_width(INPUT_PROMPT))
+                                };
                                 Line::from(vec![
                                     Span::styled(lead, app.theme.hint),
                                     Span::styled(row.clone(), style),
@@ -1377,7 +1389,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                         ]));
                     } else {
                         for (index, row) in rows[offset..].iter().enumerate() {
-                            let lead = if index == 0 { BOX_PROMPT } else { "  " };
+                            let lead = if index == 0 {
+                                BOX_PROMPT.to_string()
+                            } else {
+                                " ".repeat(prompt_width(BOX_PROMPT))
+                            };
                             body.push(Line::from(vec![
                                 Span::styled(lead, accent),
                                 Span::styled(row.clone(), style),
@@ -1397,9 +1413,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 // (one cell); a full row clamps the cursor to its last cell rather than onto the
                 // rule or the border.
                 let lead = match app.input_style {
-                    InputStyle::Lines => INPUT_PROMPT.len() as u16,
-                    // Border (1) + the `❯ ` prompt (2).
-                    InputStyle::Box => 1 + BOX_PROMPT.len() as u16,
+                    InputStyle::Lines => prompt_width(INPUT_PROMPT) as u16,
+                    // Border (1) + the `❯ ` prompt (2 cells).
+                    InputStyle::Box => 1 + prompt_width(BOX_PROMPT) as u16,
                 };
                 let col = cursor_col.min(inner_width.saturating_sub(1)) as u16;
                 let row = (cursor_row - offset).min(visible.saturating_sub(1)) as u16;

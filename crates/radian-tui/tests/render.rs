@@ -441,7 +441,7 @@ fn the_input_area_has_rules_and_a_prompt_instead_of_a_box() {
     assert_eq!(rules.len(), 2, "a rule above and below:\n{text}");
     // The two text rows sit between the rules, with the prompt on the first and the
     // continuation indented by the same two cells.
-    assert_eq!(lines[rules[0] + 1].trim_end(), "> first", "{text}");
+    assert_eq!(lines[rules[0] + 1].trim_end(), "❯ first", "{text}");
     assert_eq!(lines[rules[0] + 2].trim_end(), "  second", "{text}");
     assert_eq!(
         rules[1],
@@ -460,13 +460,13 @@ fn the_empty_input_shows_the_placeholder_after_the_prompt() {
     let mut app = App::new("m", "s");
     let text = screen(&render(&mut app, 80, 8));
     assert!(
-        text.contains("> (type a message, Enter to send, Ctrl-J for a new line)"),
+        text.contains("❯ (type a message, Enter to send, Ctrl-J for a new line)"),
         "{text}"
     );
 }
 
 /// `tui.input_style = "box"` is the owner's shape (2026-10-14): a **rounded** border and the
-/// `❯` prompt, not the old square box with `> `.
+/// `❯` prompt (which the `lines` style uses too, ).
 #[test]
 fn the_box_input_style_draws_the_rounded_box_with_the_prompt() {
     let mut app = App::new("m", "s");
@@ -480,7 +480,7 @@ fn the_box_input_style_draws_the_rounded_box_with_the_prompt() {
     );
     assert!(
         !text.contains("> first"),
-        "the lines prompt is not used:\n{text}"
+        "the old square prompt is gone:\n{text}"
     );
     assert!(
         text.contains('╭') && text.contains('╮') && text.contains('╰'),
