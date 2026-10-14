@@ -30,7 +30,7 @@ use crate::picker::{Outcome as PickerOutcome, Picker};
 use crate::projection::{SessionProjection, StreamSnapshot};
 use crate::question::{FormKey, FormOutcome, QuestionForm};
 use crate::render::InputStyle;
-use crate::theme::{Theme, ThemeName};
+use crate::theme::Theme;
 
 // ADR 0023 U5: the turn state is a **session fact**, so it lives in the projection
 // (`radian-host`) and `App` only reads it. Re-exported here so the existing `app::TurnState`
@@ -684,8 +684,21 @@ impl App {
         config: &radian_host::config::Config,
         no_color: bool,
     ) -> Result<Vec<String>, String> {
-        let name = config.tui.theme.as_deref().and_then(ThemeName::parse);
-        self.theme = Theme::resolve(name, no_color);
+        let keymap = Keymap::from_config(&config.tui.keybindings).map_err(|e| e.to_string())?;
+        let mut warnings = keymap.warnings.clone();
+        self.keymap = keymap;
+        // The theme: built-in names resolve directly, anything else is a file in
+        // `~/.radian/themes/` (ADR 0029). NO_COLOR wins over both the file and the
+        // `[tui.colors]` overrides (ADR 0029 decision 7); the theme module owns the rules.
+        let (theme, theme_warnings) = crate::theme::load(
+            config.tui.theme.as_deref(),
+            no_color,
+            crate::theme::truecolor_env(),
+            radian_host::themes_dir().as_deref(),
+            &config.tui.colors,
+        );
+        self.theme = theme;
+        warnings.extend(theme_warnings);
         // An unknown `tui.input_style` is a skipped key (the reader warns once); the TUI falls
         // back to the default.
         self.input_style = config
@@ -694,9 +707,6 @@ impl App {
             .as_deref()
             .and_then(InputStyle::parse)
             .unwrap_or_default();
-        let keymap = Keymap::from_config(&config.tui.keybindings).map_err(|e| e.to_string())?;
-        let mut warnings = keymap.warnings.clone();
-        self.keymap = keymap;
         warnings.extend(
             config
                 .skipped

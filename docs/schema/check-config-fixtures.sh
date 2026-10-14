@@ -24,6 +24,7 @@ EXPECT = {
     ),
     "schema-version-newer.toml": dict(outcome="readonly_or_refuse", version=99),
     "schema-version-lower.toml": dict(outcome="migration_required", version=0),
+    "tui-theme-colors.toml": dict(outcome="accept"),
     "api-key-removed.toml": dict(outcome="reject"),
     "plaintext-secret.toml": dict(outcome="reject"),
     "heuristic-secret.toml": dict(outcome="reject"),

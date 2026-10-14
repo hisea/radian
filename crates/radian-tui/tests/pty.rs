@@ -5804,3 +5804,82 @@ async fn pty_the_exit_line_is_a_copyable_resume_command() {
     assert!(!line.contains("--header"), "{line}");
     assert!(!line.contains("credentials"), "{line}");
 }
+
+// ---------- theme files (ADR 0029) ----------
+
+/// A pi theme file under `RADIAN_HOME/themes/` colors the real screen: the transcript's user
+/// line renders with the fixture's `userMessageText` RGB (via `userMessageText → var fg`).
+/// `COLORTERM=truecolor` makes the app emit RGB, which the vt100 model reports per cell.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_theme_file_colors_the_user_line() {
+    let _serial = pty_guard();
+    let home = TempDir::new("theme-home");
+    // `RADIAN_HOME` root with the theme file and a config selecting it by name.
+    let themes = home.path().join("themes");
+    std::fs::create_dir_all(&themes).unwrap();
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/data/themes/kanagawa-wave.json"
+    );
+    std::fs::copy(fixture, themes.join("kanagawa-wave.json")).unwrap();
+    let config = home.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "schema_version = 1\n[tui]\ntheme = \"kanagawa-wave\"\n",
+    )
+    .unwrap();
+
+    let server = MockServer::start(vec![text_reply("REPLY-DONE")]).await;
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--config",
+            config.to_str().unwrap(),
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            home.path().join("sessions").to_str().unwrap(),
+            "--session-id",
+            "theme",
+        ],
+        &[
+            ("RADIAN_HOME", home.path().to_str().unwrap()),
+            ("COLORTERM", "truecolor"),
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"COLOR-PROBE\r");
+    assert!(pty.wait_for_screen("REPLY-DONE", 15), "{}", pty.screen());
+
+    // The user entry's `> ` marker carries the theme's `user` style (the body text is the
+    // terminal default by design), so check the marker cell: three columns before the probe.
+    // The kanagawa fixture's `userMessageText` is `vars.fg = #DCD7BA`.
+    let expected = vt100::Color::Rgb(0xDC, 0xD7, 0xBA);
+    let screen = pty.parser.screen();
+    let mut matched = 0;
+    for (row, text) in screen.rows(0, 110).enumerate() {
+        for col in text.match_indices("COLOR-PROBE").map(|(i, _)| i) {
+            // The input line echoes the probe without a marker; only the transcript entry
+            // has "> " before it.
+            let Some(marker_col) = (col as u16).checked_sub(2) else {
+                continue;
+            };
+            if let Some(cell) = screen.cell(row as u16, marker_col) {
+                assert_eq!(cell.contents(), ">", "expected the user marker");
+                assert_eq!(
+                    cell.fgcolor(),
+                    expected,
+                    "the user marker must carry the theme color"
+                );
+                matched += 1;
+            }
+        }
+    }
+    assert!(matched > 0, "the probe was not found on screen");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}

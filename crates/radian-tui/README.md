@@ -161,9 +161,14 @@ The file is read the same way as the CLI's (`--config`, `RADIAN_CONFIG`,
 ```toml
 schema_version = 1
 [tui]
-theme = "dark"                 # dark | light | mono
+theme = "dark"                 # a built-in name, or a theme file name (see below)
 input_style = "lines"          # lines (default) | box
 mouse = true                   # the wheel scrolls the transcript (default true)
+
+[tui.colors]                   # per-role color overrides (ADR 0029 decision 5)
+user = "#0af"                  # a bare color: the foreground only
+notice = { fg = "oklch(62% 0.1 200)", bold = true }
+mdHeading = 203                # pi role names work too (kept, not drawn, until ADR 0028)
 
 [tui.keybindings]
 send = ["ctrl-s"]              # replaces the default `enter`
@@ -179,6 +184,47 @@ find_next = ["ctrl-g", "shift-enter"]
 - `theme`: `dark` is the original palette, `light` re-picks it for a light background, `mono`
   uses no color at all (bold/underline/dim only). A non-empty `NO_COLOR` environment variable
   forces `mono` (<https://no-color.org>). An unknown theme is ignored with a warning.
+
+#### Theme files (ADR 0029): any pi theme works as-is
+
+`tui.theme` accepts any name. The built-ins (`dark`, `light`, `mono`) resolve first; any other
+name is read from `~/.radian/themes/<name>.json` — and that file is **pi's theme JSON, read
+as-is**. Copy a pi theme over and it just works:
+
+```sh
+mkdir -p ~/.radian/themes && cp ~/.pi/agent/themes/kanagawa-wave.json ~/.radian/themes/
+```
+
+(set `theme = "kanagawa-wave"` in the config; the file's `name` field should match.) Colors
+come in six forms, all supported: `#rgb`/`#rrggbb`, `oklch(L C H)`, `okhsl(H S L)`, a 0–255
+palette index, a `vars` reference (chains allowed), and `""` (the terminal default). With
+truecolor (`COLORTERM` is `truecolor` or `24bit`) colors render as RGB; otherwise each is
+approximated to the nearest 256-color entry, with the same algorithm pi uses.
+
+Radian is more forgiving than pi on purpose (ADR 0029 decision 4): a missing variable, a
+circular reference or an unknown role only makes the *affected roles* fall back to the
+built-in palette (chosen by the file's `appearance`, `dark` by default), each problem warning
+once on the startup line; a broken file falls back as a whole. Nothing blocks startup. pi's
+reserved `system` theme (OSC terminal probing) is deliberately not implemented.
+
+Every pi role maps onto a Radian role (`[tui.colors]` accepts both name families):
+
+| Radian role | pi role(s) it takes |
+|---|---|
+| `user` | `userMessageText` (fg) + `userMessageBg` (bg) |
+| `reasoning` | `thinkingText` |
+| `tool_call` / `tool_result` / `tool_result_error` | `toolTitle` / `toolOutput` / `error` |
+| `notice` / `hint` / `completion` / `truncation` | `text` / `muted` / `dim` / `dim` |
+| `turn_idle` / `turn_running` / `turn_cancelled` | `success` / `warning` / `error` |
+| `interrupted` / `note` / `budget_over` | `warning` |
+| `model` / `mcp` / `find` | `accent` |
+| `tier` / `usage` / `budget` | `muted` |
+| `approval_border` | `borderAccent` |
+
+The pi roles nothing renders yet — the `md*`, `toolDiff*`, `syntax*` and `thinking*` families
+and the panel roles (`selectedBg`, `scrollbar*`, `searchMatch*`, `customMessage*`,
+`toolPendingBg`, `toolSuccessBg`, `toolErrorBg`, `bashMode`) — are parsed and kept on the
+theme (ADR 0029 decision 3), so ADR 0027/0028 can wire them without re-reading the file.
 - `mouse` (default `true`): the app enables button + wheel reporting (`CSI ?1000h`) with SGR
   coordinates (`CSI ?1006h`), so a wheel notch scrolls the transcript instead of the terminal
   translating it to arrow keys (dogfood p5: the wheel called the input history). Deliberately

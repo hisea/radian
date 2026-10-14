@@ -543,6 +543,23 @@ Base `613312c` · 一次性 worktree `/tmp/ui-r1-mut` · 独立 `CARGO_TARGET_DI
 （`/sessions` 在备用屏里打印 `[privacy]` 警告 → 渲染 diff 跳过那些 cell → picker 的标题/filter 行被糊掉）；
 它只在**全量套件**里稳定复现（单跑 10 次全过），所以那次变异跑的是整个 pty 套件。
 
+## Slice: theme files and per-role overrides (ADR 0029)
+
+Base `9ee35b4` · 一次性 worktree `/tmp/tui-mut` · 每个变异 `git checkout -- .` 还原后跑对应测试,
+`git status --short` 为空。变异用 `python3` 补丁 + `assert old in s`(吸取 U3/U4 的教训)。
+
+| # | 变异 | 应体现 | 抓住它的测试 |
+|---|---|---|---|
+| T1 | 变量不解析(所有 `vars` 引用一律报 missing) | 主题文件的变量链必须真的解析 | `theme::file::tests::chained_variables_resolve_and_a_loop_only_breaks_its_own_roles`、`the_kanagawa_wave_fixture_loads_with_all_roles_resolved` FAILED |
+| T2 | oklch→OKLab 换算 a/b 通道互换 | 换算与 pi 逐字节一致 | `theme::color::tests::oklch_matches_pis_conversion`、`oklch_out_of_gamut_is_clipped_not_rejected`、`functional_notation_follows_pis_grammar` FAILED |
+| T3 | 缺失的角色变无色(`Style::default()`),不回退内建 | 缺角色必须回退内建调色板 | `theme::file::tests::missing_roles_fall_back_by_appearance` 等 6 个 FAILED |
+| T4 | `[tui.colors]` 覆盖整体丢弃 | 覆盖必须生效、格式错误必须警告 | `theme::file::tests::overrides_accept_radian_and_pi_names_and_tables`、`malformed_overrides_warn_and_are_ignored` FAILED |
+| T5 | `NO_COLOR` 只在无主题名时强制 mono(配置了主题名就放行) | `NO_COLOR` 优先于主题文件与覆盖 | `theme::file::tests::no_color_beats_theme_files_and_overrides`、`config.rs::a_configured_theme_is_applied_and_no_color_forces_mono` FAILED |
+| T6 | 内建 dark 的 `user` 从 Cyan 改成 Green | `dark` 截图/调色板逐字节钉住 | `theme::tests::dark_keeps_the_original_palette`、`config.rs::the_dark_theme_keeps_the_original_colors` FAILED |
+| T7 | 256 色近似的灰阶分支被禁用(cube 永远赢) | 近似算法与 pi 一致(两个分支都有钉住值) | `theme::color::tests::ansi256_approximation_matches_pis_algorithm` FAILED |
+
+7/7 抓住,无等价变异。
+
 ## approval-fit：审批框在内容太长时看不到按键提示＼�2026-10-13）
 
 Base `d76df67` · 就地变异，每个变异 `git checkout -- crates/radian-tui/src/render.rs` 还原、
