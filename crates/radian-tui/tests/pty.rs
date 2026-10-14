@@ -7484,3 +7484,69 @@ async fn pty_slash_theme_switches_and_writes_the_config() {
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
 }
+
+/// review (small-fixes 1): a key `/login` saves **mid-session** joins this session's
+/// redaction list, so an export of the same session hides it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_login_key_is_redacted_from_an_export_in_the_same_session() {
+    let _serial = pty_guard();
+    const KEY: &str = "sk-PTY-LATE-SECRET-7";
+    let verify = login_verify_server("200 OK");
+    let dir = TempDir::new("login-redact");
+    let server = MockServer::start(vec![text_reply("DONE")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "login-redact",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+
+    pty.send(b"/login custom\r");
+    assert!(pty.wait_for_screen("provider name", 5), "{}", pty.screen());
+    pty.send(b"corp\r");
+    assert!(pty.wait_for_screen("wire protocol", 5), "{}", pty.screen());
+    pty.send(b"\r"); // openai-compatible
+    assert!(pty.wait_for_screen("base URL", 5), "{}", pty.screen());
+    pty.send(format!("{verify}\r").as_bytes());
+    assert!(pty.wait_for_screen("API key", 5), "{}", pty.screen());
+    pty.send(format!("{KEY}\r").as_bytes());
+    assert!(
+        pty.wait_for_screen("saved the key for `corp`", 10),
+        "{}",
+        pty.screen()
+    );
+
+    // Put the key into the transcript, then export this same session.
+    pty.send(format!("the key is {KEY}\r").as_bytes());
+    assert!(pty.wait_for_screen("DONE", 15), "{}", pty.screen());
+
+    let out = dir.path().join("export.json");
+    pty.send(format!("/export json {}\r", out.display()).as_bytes());
+    assert!(
+        pty.wait_for_screen("exported to", 10),
+        "the export notice is missing:\n{}",
+        pty.screen()
+    );
+
+    let text = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        text.contains("<redacted>"),
+        "the export did not redact the mid-session key: {text}"
+    );
+    assert!(
+        !text.contains(KEY),
+        "the mid-session key leaked into the export: {text}"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}

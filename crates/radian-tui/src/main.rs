@@ -627,9 +627,12 @@ fn run(
     // (dogfooding D4; ADR 0013 T4). The startup provider's key alone is not enough: a session
     // can mention another login, and `/model` can switch to one. `resolved_keys` reads and
     // resolves them all, the same list the CLI's export uses.
-    let mut secrets: Vec<String> = radian_host::resolved_keys();
-    secrets.extend(user_headers.iter().map(|(_, value)| value.clone()));
-    secrets.retain(|secret| !secret.is_empty());
+    let mut redactions: Vec<String> = radian_host::resolved_keys();
+    redactions.extend(user_headers.iter().map(|(_, value)| value.clone()));
+    redactions.retain(|secret| !secret.is_empty());
+    // Shared and append-only: `/login` adds a key mid-session, `/logout` never removes one.
+    let secrets: radian_tui::terminal::SharedSecrets =
+        std::sync::Arc::new(std::sync::RwLock::new(redactions));
     // ADR 0026 D0/D10: the provider decides the adapter, base URL and headers.
     // `resolve_route_for` refuses `--base-url`/`--header` for everything but the generic
     // descriptor (a named provider's endpoint is its declaration).
@@ -770,8 +773,7 @@ fn run(
             radian_host::now_millis(),
         ))
     });
-    let secrets_for_errors = Arc::new(secrets.clone());
-    radian_tui::terminal::set_panic_log(panic_log, secrets);
+    radian_tui::terminal::set_panic_log(panic_log, Arc::clone(&secrets));
 
     // The session facts the renderer reads, and the sink that writes them (ADR 0023 U2/U5).
     let projection = Arc::new(radian_host::SessionProjection::new());
@@ -797,13 +799,17 @@ fn run(
     };
     let runtime_events = {
         let tx = tx.clone();
-        let secrets = Arc::clone(&secrets_for_errors);
+        let secrets = Arc::clone(&secrets);
         Arc::new(move |event: &radian_session::RuntimeEvent| {
             let redacted = match event {
                 radian_session::RuntimeEvent::TurnFailed { turn_id, message } => {
+                    let current = secrets
+                        .read()
+                        .map(|secrets| secrets.clone())
+                        .unwrap_or_default();
                     radian_session::RuntimeEvent::TurnFailed {
                         turn_id: turn_id.clone(),
-                        message: radian_tui::terminal::redact(message, &secrets),
+                        message: radian_tui::terminal::redact(message, &current),
                     }
                 }
                 other => other.clone(),
@@ -1187,7 +1193,7 @@ fn run(
         dir: dir.clone(),
         workspace: workspace_path.to_string_lossy().into_owned(),
         session_id: session_id.clone(),
-        secrets: secrets_for_errors.as_ref().clone(),
+        secrets: Arc::clone(&secrets),
         journal: Arc::clone(session.journal()),
         config_snapshot: serde_json::json!({
             "provider": provider.as_str(),
@@ -1285,6 +1291,20 @@ fn program_name() -> String {
                 .unwrap_or_else(|| arg.to_string_lossy().into_owned())
         })
         .unwrap_or_else(|| "radian".to_string())
+}
+
+/// Adds every key now in `auth.json` to the session's redaction list. Called after `/login`
+/// saves one; `/logout` does **not** call it, because a value
+/// that has already appeared must stay redacted.
+fn refresh_secrets(secrets: &radian_tui::terminal::SharedSecrets) {
+    let Ok(mut list) = secrets.write() else {
+        return;
+    };
+    for key in radian_host::resolved_keys() {
+        if !key.is_empty() && !list.contains(&key) {
+            list.push(key);
+        }
+    }
 }
 
 /// One argument of the resume command, quoted when it would not survive a shell.
@@ -2035,6 +2055,11 @@ impl LoopContext<'_> {
                 let result = radian_host::AuthStore::open()
                     .and_then(|mut store| store.upsert_api_key(&name, &key, &env))
                     .map_err(|error| error.to_string());
+                if result.is_ok() {
+                    // The session's redaction list must know the new key from now on
+                    //: the panic log and an export read it live.
+                    refresh_secrets(&self.host.secrets);
+                }
                 self.send(AppInput::LoginSaved { name, result });
                 Ok(())
             }
@@ -2452,7 +2477,8 @@ struct SessionHost {
     dir: PathBuf,
     workspace: String,
     session_id: String,
-    secrets: Vec<String>,
+    /// Live redaction list (shared with the panic hook); snapshot it for a renderer.
+    secrets: radian_tui::terminal::SharedSecrets,
     /// The parent's writer, so `/fork` records the lineage through the same single-writer lock
     /// instead of opening a second one (ADR 0022 §1).
     journal: Arc<SessionJournal>,
@@ -2517,7 +2543,11 @@ fn load_picker(host: &SessionHost, query: Option<String>) -> AppInput {
                 index: Some(index),
                 workspace: host.workspace.clone(),
                 query,
-                secrets: host.secrets.clone(),
+                secrets: host
+                    .secrets
+                    .read()
+                    .map(|secrets| secrets.clone())
+                    .unwrap_or_default(),
             }),
             Err(message) => AppInput::SessionDone(vec![message]),
         },
@@ -2560,7 +2590,11 @@ fn export_current(
     let settings = radian_host::ExportSettings {
         include_reasoning: false,
         include_provider_payload: false,
-        secrets: host.secrets.clone(),
+        secrets: host
+            .secrets
+            .read()
+            .map(|secrets| secrets.clone())
+            .unwrap_or_default(),
     };
     let rendered = radian_host::sessions::export(
         &host.dir,

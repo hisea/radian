@@ -198,10 +198,16 @@ pub fn set_cursor_visible(visible: bool) {
 /// session id and directory are known (dogfooding D4).
 static PANIC_LOG: Mutex<Option<PanicLog>> = Mutex::new(None);
 
+/// The session's shared redaction list: header values and every key in `auth.json`. `/login`
+/// appends to it when it saves a key mid-session, and both the
+/// panic hook and an export read it live; nothing ever removes an entry, so a value that
+/// appeared stays redacted even after `/logout`.
+pub type SharedSecrets = std::sync::Arc<std::sync::RwLock<Vec<String>>>;
+
 struct PanicLog {
     path: PathBuf,
-    /// Header values and the API key: the panic text must not carry them into the log.
-    secrets: Vec<String>,
+    /// Header values and the API keys: the panic text must not carry them into the log.
+    secrets: SharedSecrets,
 }
 
 /// The message of the last panic, if any, collapsed to one line (the terminal gets one line;
@@ -215,7 +221,7 @@ pub fn last_panic() -> Option<String> {
 /// Records where a panic should also be written. Called once per session, before the
 /// terminal is entered. `secrets` (header values, the API key) are redacted out of both the
 /// stored summary and the log line. `None` (no diagnostics directory) disables the log.
-pub fn set_panic_log(path: Option<PathBuf>, secrets: Vec<String>) {
+pub fn set_panic_log(path: Option<PathBuf>, secrets: SharedSecrets) {
     if let Ok(mut slot) = PANIC_LOG.lock() {
         *slot = path.map(|path| PanicLog { path, secrets });
     }
@@ -252,7 +258,13 @@ fn record_panic(info: &std::panic::PanicHookInfo<'_>) -> String {
     let full = info.to_string();
     let (path, secrets) = match PANIC_LOG.lock() {
         Ok(slot) => match slot.as_ref() {
-            Some(log) => (Some(log.path.clone()), log.secrets.clone()),
+            Some(log) => (
+                Some(log.path.clone()),
+                log.secrets
+                    .read()
+                    .map(|secrets| secrets.clone())
+                    .unwrap_or_default(),
+            ),
             None => (None, Vec::new()),
         },
         Err(_) => (None, Vec::new()),
