@@ -50,8 +50,8 @@ pub use index::{
 };
 pub use reader::{EventData, Session, SessionEvent, UncommittedReplacement};
 pub use runtime::{
-    InboxLane, MemoryInjectedRecord, PermissionApprover, PermissionDecision, RuntimeEvent,
-    TurnOutcome, TurnReason,
+    ApprovalPolicyValue, InboxLane, MemoryInjectedRecord, PermissionApprover, PermissionDecision,
+    RuntimeEvent, TurnOutcome, TurnReason,
 };
 pub use tail::{JournalTail, TailUpdate};
 pub use writer::{ForkParent, SessionCreatedData, SessionJournal, WriteError, now_utc};

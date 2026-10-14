@@ -1901,7 +1901,7 @@ async fn pty_yes_runs_an_ask_without_a_prompt_and_still_audits_it() {
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
     assert!(
         pty.screen()
-            .contains("--yes: tool calls are approved without asking"),
+            .contains("auto: tool calls are approved without asking"),
         "the startup must say approvals are off:\n{}",
         pty.screen()
     );
@@ -6162,6 +6162,294 @@ async fn pty_logout_with_n_keeps_the_entry() {
     let saved: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&auth_path).unwrap()).unwrap();
     assert_eq!(saved["existing"]["type"], "api_key", "kept means kept");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+// ---------- ADR 0026 D9: the in-session auto-approval switch ----------
+
+/// The `!` key end to end: it approves the pending request once **and** turns auto on for
+/// the session, so the next ask never prompts; the status bar says `AUTO`, and both the
+/// audit record of the switch and the durable `ConfigChanged` land in the journal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_auto_key_approves_once_and_enables_auto() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("auto-key");
+    let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "write", r#"{"path":"a.txt","content":"first"}"#),
+        tool_reply("call_2", "write", r#"{"path":"b.txt","content":"second"}"#),
+        text_reply("SWITCH-DONE"),
+    ])
+    .await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "auto-key",
+            "--workspace",
+            ws.to_str().unwrap(),
+            // `always` asks on every call, so the second write proves the switch took.
+            "--approval",
+            "always",
+        ],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"please write\r");
+    assert!(
+        pty.wait_for_screen("approve tool call?", 20),
+        "no approval prompt:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("AUTO"),
+        "auto must be off before the switch:\n{}",
+        pty.screen()
+    );
+
+    // One press: approve this request and enable auto for the rest of the session.
+    pty.send(b"!");
+    assert!(
+        pty.wait_for_screen("SWITCH-DONE", 30),
+        "the turn did not finish after `!`:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.screen().contains("AUTO"),
+        "the status bar must say AUTO:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("approve tool call?"),
+        "the second write must not prompt under auto:\n{}",
+        pty.screen()
+    );
+    assert!(
+        ws.join("a.txt").exists() && ws.join("b.txt").exists(),
+        "both writes must have run: {}",
+        pty.screen()
+    );
+
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+    let session = std::fs::read_to_string(sessions.join("auto-key.jsonl")).unwrap();
+    assert!(
+        session.contains("ApprovalPolicyChanged") && session.contains("\"policy\":\"auto\""),
+        "the switch must be audited: {session}"
+    );
+    assert!(
+        session.contains("ConfigChanged") && session.contains("\"approval\":\"auto\""),
+        "the durable record must be journaled: {session}"
+    );
+}
+
+/// A journaled in-session switch restores auto on resume under `workspace` (D9).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_resume_restores_auto_on_workspace() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("auto-resume");
+    let path = dir.path().join("auto-resume.jsonl");
+    let journal = radian_session::SessionJournal::create(
+        &path,
+        "auto-resume",
+        radian_session::SessionCreatedData::new("/tmp", json!({})),
+    )
+    .expect("create the session file");
+    use agent_core::TranscriptJournal;
+    journal
+        .append(agent_core::JournalRecord::Message {
+            index: 0,
+            message: agent_core::Message::user("older turn"),
+        })
+        .await
+        .unwrap();
+    // What an in-session `/auto on` writes (the driver journals it at the turn boundary).
+    journal
+        .append_runtime_event(radian_session::RuntimeEvent::ConfigChanged {
+            revision: 1,
+            change: json!({"approval": "auto"}),
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--resume",
+            "auto-resume",
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("AUTO", 10),
+        "the resumed session must show AUTO:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.screen()
+            .contains("auto: tool calls are approved without asking"),
+        "the startup line must name the restored policy:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// `full` never restores auto (D9): the startup says how to get it back, and the status bar
+/// does not show AUTO.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_resume_does_not_restore_auto_on_full_and_hints() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("auto-resume-full");
+    let path = dir.path().join("auto-full.jsonl");
+    let journal = radian_session::SessionJournal::create(
+        &path,
+        "auto-full",
+        radian_session::SessionCreatedData::new("/tmp", json!({})),
+    )
+    .expect("create the session file");
+    journal
+        .append_runtime_event(radian_session::RuntimeEvent::ConfigChanged {
+            revision: 1,
+            change: json!({"approval": "auto"}),
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--resume",
+            "auto-full",
+            "--profile",
+            "full",
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen(
+            "auto was on in the previous run; run `/auto on` to re-enable",
+            10
+        ),
+        "the full-tier hint is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("AUTO"),
+        "full must not restore auto:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// Config `[permissions] approval = "auto"` is ignored under `full`, with a warning (D9).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_config_auto_is_ignored_under_full_with_a_warning() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("auto-config-full");
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "schema_version = 1\n[permissions]\napproval = \"auto\"\n",
+    )
+    .unwrap();
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--config",
+            config.to_str().unwrap(),
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "config-full",
+            "--profile",
+            "full",
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("ignored under the full tier", 10),
+        "the config warning is missing:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("AUTO"),
+        "the config value must not enable auto under full:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// The same config value holds under `workspace`: auto is on from the first frame.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_config_auto_enables_auto_on_workspace() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("auto-config-ws");
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "schema_version = 1\n[permissions]\napproval = \"auto\"\n",
+    )
+    .unwrap();
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--config",
+            config.to_str().unwrap(),
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "config-ws",
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("AUTO", 10),
+        "the status bar must show AUTO:\n{}",
+        pty.screen()
+    );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
 }

@@ -92,6 +92,12 @@ pub enum ConfigError {
         path: PathBuf,
         value: String,
     },
+    /// `[permissions] approval` has a value this build does not know (ADR 0008 §5.1:
+    /// `permissions` is fail-closed). Refused, never guessed at.
+    UnknownApproval {
+        path: PathBuf,
+        value: String,
+    },
     /// `model.api_key` is no longer a key source (ADR 0026 D2): the key comes only from
     /// `auth.json`.
     ApiKeyRemoved {
@@ -156,6 +162,12 @@ impl fmt::Display for ConfigError {
                  (or the aliases); refusing rather than guessing",
                 path.display()
             ),
+            ConfigError::UnknownApproval { path, value } => write!(
+                f,
+                "{}: permissions.approval = {value:?} is not one of on-ask|always|never|auto \
+                 (ADR 0026 D9); refusing rather than guessing",
+                path.display()
+            ),
             ConfigError::ApiKeyRemoved { path } => write!(
                 f,
                 "{}: `model.api_key` is no longer read (ADR 0026 D2); the API key comes only \
@@ -187,6 +199,10 @@ pub struct ModelConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PermissionsConfig {
     pub profile: Option<String>,
+    /// `[permissions] approval` (ADR 0012, ADR 0026 D9): how an `ask` resolves. The name
+    /// set is `ApprovalPolicy::parse`'s; an unknown value is refused (fail-closed, the
+    /// `permissions` rule).
+    pub approval: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -522,6 +538,27 @@ fn parse_permissions(
                     // them keeps the host's default (never widens permissions).
                     config.skipped.push("permissions.profile".into());
                 }
+            }
+            ("approval", Value::String(approval)) => {
+                if radian_permissions::ApprovalPolicy::parse(approval).is_none() {
+                    if read_only {
+                        // A higher schema_version may define a policy this version does not
+                        // know; read-only mode ignores it instead of refusing the file.
+                        config.skipped.push("permissions.approval".into());
+                    } else {
+                        // Fail-closed (ADR 0008 §5.1): a `permissions` value this build does
+                        // not know is refused, never guessed at.
+                        return Err(ConfigError::UnknownApproval {
+                            path: path.to_path_buf(),
+                            value: approval.clone(),
+                        });
+                    }
+                } else {
+                    config.permissions.approval = Some(approval.clone());
+                }
+            }
+            ("approval", _) => {
+                return Err(wrong_type(path, "permissions.approval", "a string"));
             }
             (other, _) => config.skipped.push(format!("permissions.{other}")),
         }
@@ -986,6 +1023,35 @@ theme = "light"
         let config = parse_str("schema_version = 1\n[tui]\ntheme = \"future\"\n").unwrap();
         assert_eq!(config.tui.theme.as_deref(), Some("future"));
         assert!(config.skipped.is_empty());
+    }
+
+    /// ADR 0026 D9: `[permissions] approval` carries the four known policy names; an
+    /// unknown value is refused (fail-closed), a non-string is a type error, and in
+    /// read-only mode an unknown future value is skipped instead.
+    #[test]
+    fn permissions_approval_carries_known_names_and_refuses_unknown_ones() {
+        for name in ["on-ask", "always", "never", "auto"] {
+            let config = parse_str(&format!(
+                "schema_version = 1\n[permissions]\napproval = \"{name}\"\n"
+            ))
+            .unwrap();
+            assert_eq!(config.permissions.approval.as_deref(), Some(name), "{name}");
+            assert!(config.skipped.is_empty(), "{name}");
+        }
+        let error =
+            parse_str("schema_version = 1\n[permissions]\napproval = \"yolo\"\n").unwrap_err();
+        assert!(
+            matches!(error, ConfigError::UnknownApproval { .. }),
+            "{error}"
+        );
+        assert!(error.to_string().contains("auto"), "{error}");
+        let error = parse_str("schema_version = 1\n[permissions]\napproval = true\n").unwrap_err();
+        assert!(error.to_string().contains("a string"), "{error}");
+        // Read-only mode (a higher schema_version): ignored, not refused.
+        let config =
+            parse_str("schema_version = 99\n[permissions]\napproval = \"future\"\n").unwrap();
+        assert_eq!(config.permissions.approval, None);
+        assert!(config.skipped.contains(&"permissions.approval".to_string()));
     }
 
     /// ADR 0029 decision 5: `[tui.colors]` entries are carried raw; the TUI validates names

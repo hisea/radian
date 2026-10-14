@@ -354,6 +354,9 @@ fn event_data_value(
         EventData::ConfigChanged { revision, change } => {
             json!({"revision": revision, "change": change})
         }
+        EventData::ApprovalPolicyChanged { policy } => {
+            json!({"policy": policy})
+        }
         EventData::ContextBudgetReached {
             turn_id,
             source,

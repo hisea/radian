@@ -7,6 +7,7 @@
 //! of a host that is the same whether the user is at a line prompt or a full-screen UI. The
 //! two binaries still decide their own flags, startup text and error wording.
 
+pub mod approval;
 pub mod auth;
 mod catalog;
 pub mod config;
@@ -29,6 +30,7 @@ pub mod sessions;
 mod tools;
 mod workspace;
 
+pub use approval::{StartupApproval, resolve_startup, restored_approval};
 pub use auth::{
     AUTH_FILE_NAME, AuthEntry, AuthError, AuthStore, RADIAN_BASE_URL, ResolvedKey, auth_path,
     list as list_auth, remove as remove_auth, resolve_key, resolve_note,

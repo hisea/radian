@@ -86,6 +86,22 @@ pub enum PermissionApprover {
     Unknown,
 }
 
+/// An approval policy value, named as `--approval` and `[permissions] approval` name them
+/// (ADR 0026 D9). Only the values the in-session switch can set appear in events today,
+/// but the enum is the full name set so a future producer never needs a second type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ApprovalPolicyValue {
+    OnAsk,
+    Never,
+    Always,
+    Auto,
+    /// A value this version does not know (ADR 0006 §7(d)).
+    #[serde(other)]
+    Unknown,
+}
+
 /// One record that was injected before a model request (ADR 0021 D6). It carries **only** the
 /// id, revision and scope — never the content (D6: the event cannot rebuild an old request).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -165,6 +181,11 @@ pub enum RuntimeEvent {
         approver: PermissionApprover,
         reason: Option<String>,
     },
+    /// The session's approval policy was switched in place (ADR 0026 D9). Audit only:
+    /// `critical = false`. The durable state a resume restores is the `ConfigChanged`
+    /// record the host writes alongside (`{"approval": …}`); this event is the permission
+    /// audit of the switch itself.
+    ApprovalPolicyChanged { policy: ApprovalPolicyValue },
     /// The memory set injected before a model request (ADR 0021 D6). Audit only:
     /// `critical = false`. The records are an ordered list of `{ id, revision, scope }` and
     /// carry no content; a reader uses them to see *which* records were injected, not to
@@ -193,6 +214,7 @@ impl RuntimeEvent {
             RuntimeEvent::ConfigChanged { .. } => "ConfigChanged",
             RuntimeEvent::ContextBudgetReached { .. } => "ContextBudgetReached",
             RuntimeEvent::PermissionResolved { .. } => "PermissionResolved",
+            RuntimeEvent::ApprovalPolicyChanged { .. } => "ApprovalPolicyChanged",
             RuntimeEvent::MemoryInjected { .. } => "MemoryInjected",
             RuntimeEvent::SessionForked { .. } => "SessionForked",
         }
@@ -211,6 +233,7 @@ impl RuntimeEvent {
             RuntimeEvent::TurnFailed { .. }
             | RuntimeEvent::ContextBudgetReached { .. }
             | RuntimeEvent::PermissionResolved { .. }
+            | RuntimeEvent::ApprovalPolicyChanged { .. }
             | RuntimeEvent::MemoryInjected { .. }
             | RuntimeEvent::SessionForked { .. } => false,
         }
@@ -307,6 +330,11 @@ pub(crate) struct PermissionResolvedData<'a> {
 }
 
 #[derive(Serialize)]
+pub(crate) struct ApprovalPolicyChangedData {
+    pub policy: ApprovalPolicyValue,
+}
+
+#[derive(Serialize)]
 pub(crate) struct SessionForkedData<'a> {
     pub child_session_id: &'a str,
     pub parent_seq: u64,
@@ -329,6 +357,7 @@ pub(crate) enum RuntimeData<'a> {
     ConfigChanged(ConfigChangedData<'a>),
     ContextBudgetReached(ContextBudgetReachedData<'a>),
     PermissionResolved(PermissionResolvedData<'a>),
+    ApprovalPolicyChanged(ApprovalPolicyChangedData),
     MemoryInjected(MemoryInjectedData<'a>),
     SessionForked(SessionForkedData<'a>),
 }
@@ -345,6 +374,7 @@ impl Serialize for RuntimeData<'_> {
             RuntimeData::ConfigChanged(d) => d.serialize(serializer),
             RuntimeData::ContextBudgetReached(d) => d.serialize(serializer),
             RuntimeData::PermissionResolved(d) => d.serialize(serializer),
+            RuntimeData::ApprovalPolicyChanged(d) => d.serialize(serializer),
             RuntimeData::MemoryInjected(d) => d.serialize(serializer),
             RuntimeData::SessionForked(d) => d.serialize(serializer),
         }
@@ -431,6 +461,9 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
             approver: *approver,
             reason: reason.as_deref(),
         }),
+        RuntimeEvent::ApprovalPolicyChanged { policy } => {
+            RuntimeData::ApprovalPolicyChanged(ApprovalPolicyChangedData { policy: *policy })
+        }
         RuntimeEvent::MemoryInjected { records } => {
             RuntimeData::MemoryInjected(MemoryInjectedData { records })
         }

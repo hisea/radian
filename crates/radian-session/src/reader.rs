@@ -18,8 +18,8 @@ use serde_json::Value;
 
 use crate::error::ReadError;
 use crate::runtime::{
-    InboxLane, MemoryInjectedRecord, PermissionApprover, PermissionDecision, TurnOutcome,
-    TurnReason,
+    ApprovalPolicyValue, InboxLane, MemoryInjectedRecord, PermissionApprover, PermissionDecision,
+    TurnOutcome, TurnReason,
 };
 use crate::writer::SCHEMA_VERSION;
 
@@ -29,7 +29,7 @@ pub(crate) const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 
 /// The v1 events known to a schema-v1 reader (ADR 0006 §4). Anything else is unknown and
 /// handled by the `critical` policy.
-pub(crate) const KNOWN_EVENTS: [&str; 22] = [
+pub(crate) const KNOWN_EVENTS: [&str; 23] = [
     "SessionCreated",
     "InboxEnqueued",
     "InputClaimed",
@@ -49,6 +49,7 @@ pub(crate) const KNOWN_EVENTS: [&str; 22] = [
     "Rewound",
     "ContextBudgetReached",
     "PermissionResolved",
+    "ApprovalPolicyChanged",
     "MemoryInjected",
     "ModelUsageRecorded",
     "SessionForked",
@@ -161,6 +162,11 @@ pub enum EventData {
         decision: PermissionDecision,
         approver: PermissionApprover,
         reason: Option<String>,
+    },
+    /// The approval policy was switched in place (ADR 0026 D9). Typed for an exact round
+    /// trip; audit only, never a transcript record.
+    ApprovalPolicyChanged {
+        policy: ApprovalPolicyValue,
     },
     /// The memory set injected before a model request (ADR 0021 D6). Typed for an exact round
     /// trip; audit only, never a transcript record. Ids, revisions and scopes only.
@@ -608,6 +614,10 @@ impl LineScanner {
                     reason: d.reason,
                 }
             }
+            "ApprovalPolicyChanged" => {
+                let d: ApprovalPolicyChangedData = data_of(raw, self.lineno, path)?;
+                EventData::ApprovalPolicyChanged { policy: d.policy }
+            }
             "MemoryInjected" => {
                 let d: MemoryInjectedData = data_of(raw, self.lineno, path)?;
                 EventData::MemoryInjected { records: d.records }
@@ -923,6 +933,7 @@ fn record_from_event(event: &SessionEvent) -> Option<JournalRecord> {
         | EventData::ConfigChanged { .. }
         | EventData::ContextBudgetReached { .. }
         | EventData::PermissionResolved { .. }
+        | EventData::ApprovalPolicyChanged { .. }
         | EventData::MemoryInjected { .. }
         | EventData::Other(_) => None,
     }
@@ -1086,6 +1097,11 @@ struct PermissionResolvedData {
     approver: PermissionApprover,
     #[serde(default)]
     reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ApprovalPolicyChangedData {
+    policy: ApprovalPolicyValue,
 }
 
 #[derive(Deserialize)]

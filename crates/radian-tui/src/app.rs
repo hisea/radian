@@ -349,6 +349,10 @@ pub enum Input {
     Resize { rows: u16, cols: u16 },
     /// The hardcoded answer to the approval prompt on screen (`y`/`a`/`n`/`Esc`).
     ApprovalAnswer(ApprovalOutcome),
+    /// The approval box's auto key `!` (ADR 0026 D9, a constant in `render.rs`): approve the
+    /// pending request once **and** turn auto on for the rest of the session. Hardcoded like
+    /// the answers (ADR 0023 U4, invariant 2).
+    ApprovalAuto,
     /// A scroll of the approval box's body (`↑`/`↓`/PgUp/PgDn). Hardcoded like the answers:
     /// scrolling must never depend on the keymap, and it must never collide with an answer key.
     ApprovalScroll(ApprovalScroll),
@@ -511,6 +515,10 @@ pub enum Effect {
     /// Remove one stored credential (`/logout`, after the confirmation). The answer is
     /// [`Input::LogoutDone`].
     Logout { provider: String },
+    /// Switch the session's auto-approval (ADR 0026 D9). The loop applies it through the
+    /// facade, which flips the hooks' live policy, audits the switch and queues the durable
+    /// `ConfigChanged` record for the next resume.
+    SetApprovalPolicy { on: bool },
     /// Write the transcript selection to the system clipboard (`tui.clipboard` picks the
     /// transport). The loop runs it and answers with [`Input::ClipboardDone`]: OSC 52 has no
     /// receipt, and `pbcopy` can fail — the loop owns both facts, `update` only owns the text.
@@ -525,6 +533,7 @@ impl PartialEq for Effect {
         match (self, other) {
             (SendFollowup(a), SendFollowup(b)) | (Steer(a), Steer(b)) => a == b,
             (Cancel, Cancel) | (Quit, Quit) => true,
+            (SetApprovalPolicy { on: a }, SetApprovalPolicy { on: b }) => a == b,
             (
                 AnswerRequest {
                     request_id: a,
@@ -686,6 +695,11 @@ pub struct App {
     pub note: Option<String>,
     /// How many requests the queue holds (ADR 0023 U7), for the status bar.
     pub pending: usize,
+    /// The in-session auto-approval state (ADR 0026 D9). The status bar shows `AUTO` while
+    /// it is on; the approval box's `!` key and `/auto` switch it. The live policy itself
+    /// is the hooks' — the loop applies it through [`Effect::SetApprovalPolicy`] — this is
+    /// the UI's mirror, so `update` stays pure.
+    pub auto: bool,
     /// The last request the UI answered: the queue's head stays that request for a moment, and
     /// re-showing it would flash a form the user just submitted.
     last_answered: Option<u64>,
@@ -757,6 +771,7 @@ impl App {
             quit: false,
             note: None,
             pending: 0,
+            auto: false,
             last_answered: None,
             layers: vec![Layer::Surface],
             memory_enabled: false,
@@ -824,6 +839,12 @@ impl App {
     /// itself stays on the loop's side (ADR 0023 U3).
     pub fn set_memory_enabled(&mut self, enabled: bool) {
         self.memory_enabled = enabled;
+    }
+
+    /// The session's in-session auto state (ADR 0026 D9), set at startup from the resolved
+    /// policy and afterwards only by the switch itself.
+    pub fn set_auto(&mut self, auto: bool) {
+        self.auto = auto;
     }
 
     /// Applies the wired `tui.*` configuration. A bad keymap (a key bound to two actions) is
@@ -1538,6 +1559,34 @@ impl App {
         }
     }
 
+    /// The approval box's `!` key (ADR 0026 D9): approve the pending request once **and**
+    /// turn auto on for the rest of the session, in one press, no confirmation (owner's
+    /// correction 2026-10-13: `!` had no meaning before, so it cannot be mistyped into one).
+    /// The effects run in order: the answer first, then the switch. The switch stands even
+    /// with nothing pending — it is the same switch `/auto on` makes.
+    fn approval_auto_key(&mut self) -> UpdateResult {
+        let mut effects = Vec::new();
+        if let Some(Modal::Approval(prompt)) =
+            self.remove_modal(|modal| matches!(modal, Modal::Approval(_)))
+        {
+            self.last_answered = Some(prompt.request_id);
+            effects.push(Effect::AnswerRequest {
+                request_id: prompt.request_id,
+                response: PendingResponse::Approval(ApprovalOutcome::AllowOnce),
+            });
+        }
+        self.auto = true;
+        self.push_notice(
+            "auto: tool calls are approved without asking for the rest of this session; \
+             deny rules and the sandbox still apply",
+        );
+        effects.push(Effect::SetApprovalPolicy { on: true });
+        UpdateResult {
+            dirty: true,
+            effects,
+        }
+    }
+
     /// One key inside the question form (ADR 0024 Q7).
     fn form_key(&mut self, key: FormKey) -> UpdateResult {
         let Some(index) = self
@@ -1653,6 +1702,7 @@ impl App {
             }
             Input::Resize { .. } => UpdateResult::dirty(),
             Input::ApprovalAnswer(outcome) => self.answer_approval(outcome),
+            Input::ApprovalAuto => self.approval_auto_key(),
             Input::ApprovalScroll(direction) => self.approval_scroll(direction),
             Input::ConfirmCommand(confirmed) => self.confirm_command(confirmed),
             Input::Stream(stream) => {
@@ -1906,6 +1956,12 @@ impl App {
     fn modal_hardcoded_key(&self, key: &KeyEvent) -> Option<Input> {
         match self.top_modal()? {
             Modal::Approval(_) => match key.code {
+                // The auto key `!` (ADR 0026 D9, the constant in `render.rs`): approve this
+                // request once and turn auto on for the session. It must not take a scroll
+                // key, and it is un-rebindable like every answer key (ADR 0023 U4).
+                KeyCode::Char('!') => Some(Input::ApprovalAuto),
+                // `Y` is `y` (allow once); it never switches auto on (correction
+                // 2026-10-13: a Caps-Lock `y` must not silently enable auto).
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     Some(Input::ApprovalAnswer(ApprovalOutcome::AllowOnce))
                 }
@@ -1918,8 +1974,8 @@ impl App {
                     }))
                 }
                 // The body's scroll keys (approval-fit). They are not answer keys, so they
-                // cannot be confused with one, and the answers stay un-rebindable. ADR 0026 D9
-                // will add `[Y] auto for this session`; it must not take a scroll key.
+                // cannot be confused with one, and the answers stay un-rebindable. The auto
+                // key `!` (ADR 0026 D9) shares this property: it is no scroll key either.
                 KeyCode::Up => Some(Input::ApprovalScroll(ApprovalScroll::LineUp)),
                 KeyCode::Down => Some(Input::ApprovalScroll(ApprovalScroll::LineDown)),
                 KeyCode::PageUp => Some(Input::ApprovalScroll(ApprovalScroll::PageUp)),
@@ -2632,6 +2688,21 @@ impl App {
                 }
                 self.push_modal(Modal::ConfirmLogout(provider));
                 UpdateResult::dirty()
+            }
+            command::Outcome::AutoToggle(on) => {
+                // ADR 0026 D9: the in-session switch. `/auto on` needs no confirmation (it is
+                // typed, not one keypress), and a no-op switch is still recorded — the audit
+                // line says who switched, so the journal keeps every command.
+                self.auto = on;
+                if on {
+                    self.push_notice(
+                        "auto: tool calls are approved without asking for the rest of this \
+                         session; deny rules and the sandbox still apply",
+                    );
+                } else {
+                    self.push_notice("auto off: tool asks prompt again");
+                }
+                UpdateResult::effect(Effect::SetApprovalPolicy { on })
             }
             command::Outcome::Message => UpdateResult::none(),
         }

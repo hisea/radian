@@ -403,9 +403,12 @@ fn input_height(app: &App, width: usize) -> u16 {
 
 /// The approval prompt's key line. It is drawn on its **own** row under the body, never part
 /// of the wrapped text, so a long command can never push the keys out of the box (owner
-/// acceptance, 2026-10-13). `[Y] auto for this session` (ADR 0026 D9) will join this line; it
-/// is deliberately not implemented here.
-pub const APPROVAL_KEYS: &str = "[y] allow once   [a] always this session   [n] deny";
+/// acceptance, 2026-10-13). The auto key is a constant like the line itself: if the owner
+/// changes the key, this string and [`crate::app::Input::ApprovalAuto`]'s `KeyCode` are the
+/// only two places (ADR 0026 D9, correction 2026-10-13: the key is `!`; `Y` stays
+/// `y` = allow once).
+pub const APPROVAL_KEYS: &str =
+    "[y] allow once   [a] always this session   [n] deny   [!] auto for this session";
 
 /// The approval prompt's body: everything above the key line. The **resolved** resource is what
 /// is shown: `a/../secret` must not read as if it stayed under `a/` (the permission layer
@@ -631,6 +634,14 @@ fn status_segments(app: &App) -> Vec<Segment> {
         segments.push(Segment {
             text: tier.to_owned(),
             style: app.theme.tier,
+        });
+    }
+    // ADR 0026 D9: while auto is on the status bar says so, prominently — the session is
+    // approving tool calls without asking.
+    if app.auto {
+        segments.push(Segment {
+            text: "AUTO".to_string(),
+            style: app.theme.auto,
         });
     }
     // ADR 0023 U7: how many requests are waiting. Shown only when there is one, so an idle
