@@ -6025,6 +6025,15 @@ async fn pty_login_custom_walk_saves_without_showing_the_key() {
     );
     assert_eq!(auth_json_mode(&auth_path), 0o600);
 
+    // The key reached neither the session journal nor any notice (D3: a key must never be
+    // persisted outside auth.json).
+    for entry in std::fs::read_dir(dir.path()).unwrap().flatten() {
+        if entry.path().extension().is_some_and(|ext| ext == "jsonl") {
+            let text = std::fs::read_to_string(entry.path()).unwrap();
+            assert!(!text.contains(KEY), "the key leaked into the journal");
+        }
+    }
+
     // The D3 "what next" line names the switch.
     assert!(pty.screen().contains("/model corp/"), "{}", pty.screen());
     pty.quit();

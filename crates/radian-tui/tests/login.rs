@@ -290,6 +290,38 @@ fn logout_confirms_then_removes_or_keeps() {
     );
 }
 
+/// `/login`'s first level completes the built-in descriptors plus `custom` — no host needed
+/// (D3/D10).
+#[test]
+fn login_completion_lists_the_builtins_and_custom() {
+    use radian_tui::command::{self, Level};
+    let tree = command::tree();
+    let level = tree
+        .iter()
+        .find(|command| command.name == "login")
+        .map(|command| command.levels[0])
+        .expect("login is in the tree");
+    match level(&[], "") {
+        Level::Ready(candidates) => {
+            let ids: Vec<&str> = candidates
+                .iter()
+                .map(|candidate| candidate.insert.as_str())
+                .collect();
+            assert_eq!(
+                ids,
+                [
+                    "opencode-go",
+                    "anthropic",
+                    "openai",
+                    "openai-compatible",
+                    "custom"
+                ]
+            );
+        }
+        other => panic!("expected Ready, got {other:?}"),
+    }
+}
+
 /// The completion fetch for `/logout` is a host fetch (the stored credentials live in
 /// `auth.json`, which `update` must not read).
 #[test]
