@@ -510,6 +510,109 @@ cargo run -p radian-tui -- --model <model> --base-url <...> --session-dir /tmp/r
 #    is clean (no `%`) and `stty -a` still shows `icanon`.
 ```
 
+### Owner hand test, 2026-10-14 (everything merged tonight)
+
+pty automation (`vt100` screen model, instant query answers, no glyph metrics) cannot judge
+the items below. Each one says what to do, what to expect, where to look, and what to record
+when it fails. **Record on every failure**: a screenshot, the terminal name and version,
+`echo $TERM $COLORTERM`, the font, and the smallest step that reproduces it. Run in a
+throwaway terminal, not your working one.
+
+1. **`/theme` switching and write-back** (`/theme <name>`, ADR 0008 revision + ADR 0029;
+   merge `22b2753`, `01177c2`). Put three themes in `~/.radian/themes/`
+   (`mkdir -p ~/.radian/themes`; `cp crates/radian-tui/tests/data/themes/{kanagawa-wave,gruvbox-light}.json ~/.radian/themes/`).
+   *Steps*: `/theme` + Tab → pick `kanagawa-wave`; `/theme` → `gruvbox-light` (a light
+   background); `/theme` → `mono`. Then `Ctrl-C` twice, reopen `radian` in the same directory.
+   *Expect*: the whole screen recolors **immediately**; `mono` has no color at all (only
+   bold/dim/underline); the reopened session starts in the theme you last chose; the config
+   file at `~/.radian/config/config.toml` has `tui.theme = "<name>"` and nothing else changed
+   (comments, key order, unknown fields). *Look*: the `user`/`assistant`/`reasoning` roles and
+   the status bar; the light theme must not have dark-on-dark text.
+   *Also*: `NO_COLOR=1 radian` must force `mono` and `/theme dark` must **not** switch (a
+   notice says so). *Fail*: the theme applies only after restart (not immediate), a
+   non-theme line changed in the config, or `NO_COLOR` still colors.
+2. **Startup wordmark, Tip, Ctrl-P** (ADR 0027; merge `22b2753`). *Steps*: open `radian` in a
+   wide terminal (≥80 cols); `Ctrl-P`; reopen at ~40 cols; open again at ~20 cols.
+   *Expect*: wide → the three-row wordmark plus one collapsed info line, one `Tip:` line, and
+   the safety/warning lines (never folded); `Ctrl-P` folds/unfolds only the info line; narrow
+   → the wordmark drops to the single line `㎭ radian <version>`; ≤ its width → no wordmark.
+   *Look*: **does `㎭` render, and does it occupy two columns?** A one-column or
+   double-drawn glyph shifts the whole line; try two fonts. *Fail*: record `unicode-width`'s
+   assumption vs what you see, font name, and the exact width where it breaks.
+3. **Rounded input box and `❯`** (`tui.input_style = "box"`; merge `22b2753`). *Steps*: set
+   `input_style = "box"` in `[tui]`, restart; type a multi-line draft (`Ctrl-J`); resize.
+   *Expect*: rounded corners, `❯` prompt, the border in the theme accent (`notice_label`); the
+   continuation line aligns under the text; no corner breaks at any width. Compare with the
+   default `lines` (`> `). *Fail*: record the width where a corner/glyph breaks.
+4. **Ctrl-C** (merge `22b2753`, `01177c2`). *Steps*: type text, `Ctrl-C` (clears; press `↑`
+   to find it); empty the input, `Ctrl-C` (status shows `Press Ctrl-C again to quit`), then
+   **resize the window** and `Ctrl-C` again inside 2 s; then `Ctrl-C` twice with no resize.
+   *Expect*: typing clears first; the quit window survives a **resize** (only a real key
+   press disarms it); two presses exit with the `session … saved; resume with …` line and a
+   clean shell prompt. *Fail*: record whether the resize disarmed the quit (the `01177c2` fix)
+   and whether the exit line is paste-ready.
+5. **Message and tool-card backgrounds, selection on top** (ADR 0028; merges `0f5a302`,
+   `608ce64`, `8456074`). *Steps*: send a message that calls a tool; drag-select across a user
+   message and a tool card; double-click a word, triple-click a message.
+   *Expect*: the user message and each tool card paint a **full-width** background band; the
+   selection highlight is visible **on top of** those bands (not hidden by them); the copied
+   text matches what you selected. *Look*: contrast in `dark`, `light`, `mono`. *Fail*: record
+   which role loses the selection and the theme.
+6. **Thinking fold `Ctrl-T` and tool output `Ctrl-O`** (ADR 0028 R3/R4; merges `0f5a302`,
+   `608ce64`). *Steps*: with a reasoning model (e.g. `--thinking adaptive`), get a reply with
+   reasoning; press `Ctrl-T`; then call a tool with long output and press `Ctrl-O` three times.
+   *Expect*: `Ctrl-T` toggles reasoning between collapsed and expanded (default collapsed;
+   `tui.display.reasoning` sets the start); `Ctrl-O` cycles tool output
+   `collapsed → expanded → errors` (default `errors`); the truncated body shows the `[N more
+   lines]` marker rather than silently cutting. *Fail*: record the fold state after each press
+   and the config value.
+7. **Mermaid** (ADR 0028 R8; merge `5628737`). *Steps*: ask for a small ` ```mermaid `
+   flowchart; widen then narrow the terminal past the `TooWide` threshold, then widen again.
+   *Expect*: wide → a Unicode diagram at the body width; narrow → the **source** plus one dim
+   `mermaid: <reason>` line (never half a diagram); widening re-renders it. *Look*: node/edge
+   colors from the theme (`mermaid_node`/`mermaid_edge`/`mermaid_text`), and `mono`.
+   *Fail*: record the reason line and the widths.
+8. **Code blocks** (ADR 0028; merge `0f5a302`). *Steps*: get a long single-line code block,
+   then a block with CJK characters.
+   *Expect*: code **never wraps**; a line wider than the body ends in `…`; CJK code lines
+   align on the character grid. *Fail*: record the terminal width and whether the `…` is
+   visible (not clipped).
+9. **`/model`, the confirm box, and `/thinking` completion** (ADR 0026 D5–D8, D11; merge
+   `1303db4`). *Steps*: `/model` + Tab (two levels: provider, then model); pick a model that
+   makes the context over budget (or use a small `--context-window`); `/thinking` + Tab.
+   *Expect*: the switch is queued for the next turn boundary (the status bar's `next:` shows
+   it); when over budget a confirm box asks whether to compact first (`y` compacts then
+   switches, `n` cancels); `/thinking` completion lists **only** the current model's supported
+   levels, and an unsupported level clamps with a notice. *Fail*: record the box text, the
+   candidate list, and the model.
+10. **`/login` wizard and `/logout`** (ADR 0026 D3/D10; merge `c120b0e`). *Steps*: `/login`
+    → `custom`; step through name, protocol, base URL, key; watch the key field; then
+    `/logout <provider>`.
+    *Expect*: the key is **never echoed** (masked while typing and absent from every
+    notice/error); the verification request runs before saving and a failure lets you cancel
+    or save anyway; `/logout` asks first, then says the provider was removed. *Look*: the
+    wizard's layout at your width. *Fail*: record any step that echoes the key, and the
+    verification error text (it must name a redacted URL, never the key).
+11. **`/skill:` and `/skills`** (ADR 0025 slices 3+4; merge `1a8c0e8`). *Steps*: put a skill
+    under `~/.radian/skills/<name>/SKILL.md` (or a `[skills] extra_paths` root); type
+    `/skill:` + Tab; run one with args; run `/skills`.
+    *Expect*: completion lists the discovered skill names; `/skill:<name> args` folds the body
+    into one user message containing the args; `/skills` lists name + description, with
+    `(model-invocation off)` for a `disable-model-invocation: true` skill; an unknown name is a
+    notice, not a message. *Fail*: record the completion list and the folded message.
+12. **auto mode `!` and the `AUTO` marker** (ADR 0026 D9; merge `8086b40`; also in the bullet
+    list above). *Steps*: trigger an approval; press `!`; trigger another. *Expect*: `!`
+    approves once **and** turns auto on for the session (the next ask never prompts), the
+    status bar shows the reversed `AUTO`; `Y` stays allow-once. *Look*: does `AUTO` stand out
+    in `dark`/`light`/`mono` without reading as an error? *Fail*: record the theme.
+13. **OSC 52 copy in herdr** (ADR 0029; merge `8456074`; a long-standing question).
+    *Steps*: select transcript text and copy (default `tui.clipboard = "osc52"`); paste into
+    another app. Then try `tui.clipboard = "pbcopy"` (macOS) and `"off"`.
+    *Expect*: `osc52` actually reaches the system clipboard **inside herdr** (a terminal
+    multiplexer may or may not forward OSC 52); the status bar says `copied N chars (via …)`;
+    `pbcopy` works on macOS; `off` writes nothing and says so. *Fail*: record herdr's version
+    and whether OSC 52 forwarding is enabled — this is the known-open question.
+
 ### Owner hand test, 2026-10-12: passed
 
 The owner ran the slice A and slice B checks above in a real terminal on macOS, against the
