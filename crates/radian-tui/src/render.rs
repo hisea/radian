@@ -254,8 +254,13 @@ pub(crate) fn display_text(entry: &Entry) -> Cow<'_, str> {
 /// attachment is shown and searched as its `[file: path, N lines]` line, never as the hidden
 /// content. Padding rows (a user block's blank rows) come through as empty lines: they occupy
 /// transcript lines and occupy space in the geometry, they just never match a query.
-pub fn display_lines(entry: &Entry, mode: ReasoningMode, width: usize) -> Vec<String> {
-    blocks::body_text_lines(entry, mode, width)
+pub fn display_lines(
+    entry: &Entry,
+    mode: ReasoningMode,
+    width: usize,
+    mermaid: bool,
+) -> Vec<String> {
+    blocks::body_text_lines(entry, mode, width, mermaid)
 }
 
 /// One entry's styled lines (ADR 0028 R1: the block layout, styled). An interrupted
@@ -265,11 +270,12 @@ fn entry_lines(
     mode: ReasoningMode,
     width: usize,
     theme: &Theme,
+    mermaid: bool,
 ) -> Vec<Line<'static>> {
     let (prefix, prefix_style) = marker(entry.kind, theme);
     let band = card_band(entry, theme);
     let blocks = blocks::parse_blocks_for(entry, mode);
-    let body = blocks::layout(entry, &blocks, mode, width);
+    let body = blocks::layout(entry, &blocks, mode, width, mermaid);
     let style = body_style(entry, theme);
     let text_rows: Vec<usize> = body
         .iter()
@@ -395,6 +401,23 @@ fn render_row(
         };
         spans.push(Span::styled(label.to_owned(), label_style));
         spans.push(Span::styled(rest.to_owned(), rest_style));
+    } else if let Some(diagram) = &row.diagram {
+        // A rendered diagram (ADR 0028 R8): each piece takes its own role's style.
+        for (piece, role) in diagram {
+            let style = match role {
+                blocks::DiagramRole::Node => theme.mermaid_node,
+                blocks::DiagramRole::Edge => theme.mermaid_edge,
+                blocks::DiagramRole::Text => theme.mermaid_text,
+            };
+            let style = match band {
+                Some(band) => style.patch(band),
+                None => style,
+            };
+            spans.push(Span::styled(piece.clone(), style));
+        }
+    } else if row.reason {
+        // A weak one-line reason (`mermaid: …`, ADR 0028 R8): the dim/truncation role.
+        spans.push(Span::styled(row.text.clone(), theme.truncation));
     } else {
         spans.push(Span::styled(row.text.clone(), body_style));
     }
@@ -411,8 +434,8 @@ fn render_row(
 
 /// How many lines `entry` lays out to at `width`, from its cache when the entry has not
 /// changed since it was last measured.
-fn entry_line_count(entry: &mut Entry, mode: ReasoningMode, width: usize) -> usize {
-    blocks::line_count_cached(entry, mode, width)
+fn entry_line_count(entry: &mut Entry, mode: ReasoningMode, width: usize, mermaid: bool) -> usize {
+    blocks::line_count_cached(entry, mode, width, mermaid)
 }
 
 /// Lays the whole transcript out into styled lines. The frame does not use this (it lays out
@@ -423,10 +446,11 @@ pub fn transcript_lines(
     mode: ReasoningMode,
     width: usize,
     theme: &Theme,
+    mermaid: bool,
 ) -> Vec<Line<'static>> {
     entries
         .iter()
-        .flat_map(|entry| entry_lines(entry, mode, width, theme))
+        .flat_map(|entry| entry_lines(entry, mode, width, theme, mermaid))
         .collect()
 }
 
@@ -441,10 +465,11 @@ pub fn visible_lines(
     start: usize,
     height: usize,
     theme: &Theme,
+    mermaid: bool,
 ) -> (usize, Vec<Line<'static>>) {
     let counts: Vec<usize> = entries
         .iter_mut()
-        .map(|entry| entry_line_count(entry, mode, width))
+        .map(|entry| entry_line_count(entry, mode, width, mermaid))
         .collect();
     let total: usize = counts.iter().sum();
     let mut out = Vec::with_capacity(height);
@@ -457,7 +482,7 @@ pub fn visible_lines(
         if next > start {
             let skip = start.saturating_sub(line);
             let blocks = blocks::blocks_for(entry, mode);
-            let body = blocks::layout(entry, &blocks, mode, width);
+            let body = blocks::layout(entry, &blocks, mode, width, mermaid);
             let prefix = marker_prefix(entry.kind);
             let prefix_style = marker(entry.kind, theme).1;
             let style = body_style(entry, theme);
@@ -1020,7 +1045,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let theme = app.theme.clone();
     // The find matcher wraps at the same width; a resize recomputes it (once, not per frame).
     app.set_transcript_width(width);
-    let (total, _) = visible_lines(&mut app.entries, app.reasoning_mode, width, 0, 0, &theme);
+    let (total, _) = visible_lines(
+        &mut app.entries,
+        app.reasoning_mode,
+        width,
+        0,
+        0,
+        &theme,
+        app.mermaid_enabled,
+    );
     app.set_viewport(chunks[0].height, total);
     let (_, visible) = visible_lines(
         &mut app.entries,
@@ -1029,6 +1062,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         app.scroll,
         height,
         &theme,
+        app.mermaid_enabled,
     );
     let visible = match app.find_state() {
         Some(find) => visible
@@ -1049,6 +1083,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 app.scroll,
                 visible.len(),
                 &selection,
+                app.mermaid_enabled,
             );
             visible
                 .into_iter()

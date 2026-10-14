@@ -242,6 +242,7 @@ fn an_oversized_selection_is_refused_with_the_reason() {
         0,
         0,
         &app.theme,
+        true,
     );
     app.set_viewport(1, total);
     app.scroll = 0;

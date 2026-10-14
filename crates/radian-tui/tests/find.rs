@@ -40,7 +40,7 @@ fn fill(app: &mut App, needle_entries: &[usize]) {
 fn entry_line(app: &App, entry: usize) -> usize {
     app.entries[..entry]
         .iter()
-        .map(|e| render::display_lines(e, ReasoningMode::Expanded, WIDTH).len())
+        .map(|e| render::display_lines(e, ReasoningMode::Expanded, WIDTH, true).len())
         .sum()
 }
 

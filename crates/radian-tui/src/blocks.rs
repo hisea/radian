@@ -272,6 +272,13 @@ pub struct BodyLine {
     pub code: bool,
     /// This line is a padding row around a user block.
     pub pad: bool,
+    /// A rendered Mermaid diagram line (ADR 0028 R8): per-piece text and role. `None` for
+    /// every other line; `text` still holds the concatenation, so search and the line count
+    /// agree with what is drawn.
+    pub diagram: Option<Vec<(String, DiagramRole)>>,
+    /// A weak one-line explanation (a Mermaid block that could not be drawn): the renderer
+    /// styles it with the theme's `truncation` (dim) role.
+    pub reason: bool,
 }
 
 impl BodyLine {
@@ -282,6 +289,8 @@ impl BodyLine {
             text,
             code: false,
             pad: false,
+            diagram: None,
+            reason: false,
         }
     }
 
@@ -292,15 +301,109 @@ impl BodyLine {
             text: String::new(),
             code: false,
             pad: true,
+            diagram: None,
+            reason: false,
         }
     }
+
+    /// A diagram line: every cell maps to the block's start (the diagram has no source
+    /// offsets of its own), so selecting it selects the block — a copy yields the Mermaid
+    /// source, the content that actually exists in the text.
+    fn diagram(end: usize, offset: usize, spans: Vec<(String, DiagramRole)>) -> Self {
+        let text: String = spans.iter().map(|(piece, _)| piece.as_str()).collect();
+        let cells = UnicodeWidthStr::width(text.as_str());
+        Self {
+            chars: vec![offset; cells],
+            end,
+            text,
+            code: true,
+            pad: false,
+            diagram: Some(spans),
+            reason: false,
+        }
+    }
+
+    fn reason(end: usize, offset: usize, text: String) -> Self {
+        Self {
+            chars: vec![offset],
+            end,
+            text,
+            code: false,
+            pad: false,
+            diagram: None,
+            reason: true,
+        }
+    }
+}
+
+/// A diagram piece's semantic role (ADR 0028 R8): the vendor's `Node`/`Edge`/`Text`, mapped
+/// so `radian-tui` does not expose the dependency's type in its own API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagramRole {
+    Node,
+    Edge,
+    Text,
+}
+
+/// One Mermaid block's render result. `Failed` keeps the reason for the dim line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DiagramOutcome {
+    Rendered(Vec<Vec<(String, DiagramRole)>>),
+    Failed(String),
+}
+
+/// Renders `source` at `width` (ADR 0028 R8): a pure function of the two, so the cache key is
+/// exactly that pair. No partial diagram: `render_spans` either returns every line or an error.
+pub(crate) fn diagram_for(source: &str, width: usize) -> DiagramOutcome {
+    match codex_mermaid::render_spans(source, width) {
+        Ok(lines) => DiagramOutcome::Rendered(
+            lines
+                .into_iter()
+                .map(|line| {
+                    line.into_iter()
+                        .map(|span| {
+                            let role = match span.role {
+                                codex_mermaid::Role::Node => DiagramRole::Node,
+                                codex_mermaid::Role::Edge => DiagramRole::Edge,
+                                codex_mermaid::Role::Text => DiagramRole::Text,
+                            };
+                            (span.text, role)
+                        })
+                        .collect()
+                })
+                .collect(),
+        ),
+        Err(error) => DiagramOutcome::Failed(error.to_string()),
+    }
+}
+
+/// Whether a code block is a Mermaid diagram this renderer should draw: the info string is
+/// `mermaid` (ASCII case-insensitive — CommonMark keeps info strings case-sensitive, but
+/// every fence a model writes is lowercase; accepting any case is more forgiving and never
+/// changes a non-mermaid block), the block is closed, and `tui.display.mermaid` is on.
+fn is_mermaid(lang: &str, closed: bool, mermaid: bool) -> bool {
+    mermaid && closed && lang.eq_ignore_ascii_case("mermaid")
+}
+
+/// The outcome for one Mermaid block, from the entry's cache when the `(width, text_len)` key
+/// matches, else rendered fresh (the immutable paths — selection, search, the reference
+/// renderer — may not have run the mutable measure pass).
+fn diagram_outcome(entry: &Entry, index: usize, source: &str, width: usize) -> DiagramOutcome {
+    if let Some((cached_width, cached_len, outcomes)) = &entry.diagram_cache
+        && *cached_width == width
+        && *cached_len == entry.text.len()
+        && let Some(outcome) = outcomes.get(index)
+    {
+        return outcome.clone();
+    }
+    diagram_for(source, width)
 }
 
 /// How many display lines an entry's body lays out to (including padding rows; a `Hidden`
 /// reasoning entry contributes zero). **Counts only**: no line is materialized, so the frame
 /// that measures every entry (the first one, or the first after a resize) does not allocate
 /// per entry — the virtualization budget (ADR 0028 R7) depends on this.
-pub fn line_count(entry: &Entry, mode: ReasoningMode, width: usize) -> usize {
+pub fn line_count(entry: &Entry, mode: ReasoningMode, width: usize, mermaid: bool) -> usize {
     if let Some(count) = cheap_count(entry, mode) {
         return count;
     }
@@ -312,19 +415,54 @@ pub fn line_count(entry: &Entry, mode: ReasoningMode, width: usize) -> usize {
             // pad + text + pad.
             crate::render::wrap_line_count(&text, body_width) + 2
         }
-        EntryKind::Assistant => parse_blocks_for(entry, mode)
-            .iter()
-            .map(|block| match block {
-                Block::Paragraph { start, end, .. } => {
-                    crate::render::wrap_line_count(&text[*start..*end], body_width)
-                }
-                Block::Code {
-                    start, end, closed, ..
-                } => code_line_count(&text[*start..*end], *closed),
-            })
-            .sum(),
+        EntryKind::Assistant => {
+            let mut diagram_index = 0;
+            parse_blocks_for(entry, mode)
+                .iter()
+                .map(|block| match block {
+                    Block::Paragraph { start, end, .. } => {
+                        crate::render::wrap_line_count(&text[*start..*end], body_width)
+                    }
+                    Block::Code {
+                        start,
+                        end,
+                        closed,
+                        lang,
+                    } => {
+                        let source = &text[*start..*end];
+                        if is_mermaid(lang, *closed, mermaid) {
+                            let index = diagram_index;
+                            diagram_index += 1;
+                            match diagram_outcome(entry, index, source, width) {
+                                DiagramOutcome::Rendered(lines) => lines.len(),
+                                DiagramOutcome::Failed(_) => 1 + code_line_count(source, *closed),
+                            }
+                        } else {
+                            code_line_count(source, *closed)
+                        }
+                    }
+                })
+                .sum()
+        }
         _ => crate::render::wrap_line_count(&text, body_width),
     }
+}
+
+/// The Mermaid block sources of an entry's parsed blocks, in order — the index a
+/// [`diagram_outcome`] lookup uses.
+fn mermaid_sources(blocks: &[Block], text: &str, mermaid: bool) -> Vec<String> {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            Block::Code {
+                start,
+                end,
+                closed,
+                lang,
+            } if is_mermaid(lang, *closed, mermaid) => Some(text[*start..*end].to_owned()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// How many display lines a fenced code block lays out to: its body's line count (the fence
@@ -350,9 +488,14 @@ fn code_line_count(raw: &str, closed: bool) -> usize {
 }
 
 /// The cached count (the renderer's per-frame path for **every** entry, on screen or not).
-pub fn line_count_cached(entry: &mut Entry, mode: ReasoningMode, width: usize) -> usize {
+pub fn line_count_cached(
+    entry: &mut Entry,
+    mode: ReasoningMode,
+    width: usize,
+    mermaid: bool,
+) -> usize {
     let text_len = entry.text.len();
-    let key = (width, text_len, mode);
+    let key = (width, text_len, mode, mermaid);
     if let Some(lines) = entry
         .layout_cache
         .as_ref()
@@ -361,7 +504,29 @@ pub fn line_count_cached(entry: &mut Entry, mode: ReasoningMode, width: usize) -
     {
         return lines;
     }
-    let lines = line_count(entry, mode, width);
+    // Render this width's diagrams once and keep them: the key is `(width, text_len)`, so a
+    // resize re-renders (a `TooWide` failure can succeed on a wider terminal) and an append
+    // re-renders (a longer source is a different diagram).
+    if mermaid && entry.kind == EntryKind::Assistant {
+        let blocks = blocks_for(entry, mode);
+        let text = crate::render::display_text(entry);
+        let sources = mermaid_sources(&blocks, &text, mermaid);
+        let fresh = entry
+            .diagram_cache
+            .as_ref()
+            .filter(|(cached_width, cached_len, _)| {
+                *cached_width == width && *cached_len == text_len
+            })
+            .is_none();
+        if fresh {
+            let outcomes = sources
+                .iter()
+                .map(|source| diagram_for(source, width))
+                .collect();
+            entry.diagram_cache = Some((width, text_len, outcomes));
+        }
+    }
+    let lines = line_count(entry, mode, width, mermaid);
     entry.layout_cache = Some((key, lines));
     lines
 }
@@ -414,7 +579,13 @@ pub(crate) fn parse_blocks_for(entry: &Entry, mode: ReasoningMode) -> Vec<Block>
 
 /// Lays the entry's body out at `width`. The renderer's spans and the selection's cell →
 /// offset mapping both read these lines.
-pub fn layout(entry: &Entry, blocks: &[Block], mode: ReasoningMode, width: usize) -> Vec<BodyLine> {
+pub fn layout(
+    entry: &Entry,
+    blocks: &[Block],
+    mode: ReasoningMode,
+    width: usize,
+    mermaid: bool,
+) -> Vec<BodyLine> {
     let prefix = crate::render::marker_prefix(entry.kind).width();
     let body_width = width.saturating_sub(prefix).max(1);
     let text = crate::render::display_text(entry);
@@ -432,15 +603,42 @@ pub fn layout(entry: &Entry, blocks: &[Block], mode: ReasoningMode, width: usize
         }
         (EntryKind::Assistant, _) => {
             let mut lines = Vec::new();
+            let mut diagram_index = 0;
             for block in blocks {
                 match block {
                     Block::Paragraph { start, end, .. } => {
                         lines.extend(prose_lines(&text[*start..*end], body_width));
                     }
                     Block::Code {
-                        start, end, closed, ..
+                        start,
+                        end,
+                        closed,
+                        lang,
                     } => {
-                        lines.extend(code_lines(&text[*start..*end], *start, *closed, width));
+                        let source = &text[*start..*end];
+                        if is_mermaid(lang, *closed, mermaid) {
+                            let index = diagram_index;
+                            diagram_index += 1;
+                            match diagram_outcome(entry, index, source, width) {
+                                DiagramOutcome::Rendered(rendered) => {
+                                    lines.extend(
+                                        rendered
+                                            .into_iter()
+                                            .map(|spans| BodyLine::diagram(*end, *start, spans)),
+                                    );
+                                }
+                                DiagramOutcome::Failed(reason) => {
+                                    lines.push(BodyLine::reason(
+                                        *start,
+                                        *start,
+                                        format!("mermaid: {reason}"),
+                                    ));
+                                    lines.extend(code_lines(source, *start, *closed, width));
+                                }
+                            }
+                        } else {
+                            lines.extend(code_lines(source, *start, *closed, width));
+                        }
                     }
                 }
             }
@@ -580,7 +778,12 @@ fn code_text_lines(raw: &str, closed: bool, width: usize) -> Vec<String> {
 /// The entry's **text** lines only (no per-char offsets): what the search matches against and
 /// what the renderer shows. Cheaper than [`layout`] because it never builds the selection
 /// mapping, and it takes the same branch structure so the two cannot disagree.
-pub fn body_text_lines(entry: &Entry, mode: ReasoningMode, width: usize) -> Vec<String> {
+pub fn body_text_lines(
+    entry: &Entry,
+    mode: ReasoningMode,
+    width: usize,
+    mermaid: bool,
+) -> Vec<String> {
     let prefix = crate::render::marker_prefix(entry.kind).width();
     let body_width = width.saturating_sub(prefix).max(1);
     let text = crate::render::display_text(entry);
@@ -595,15 +798,39 @@ pub fn body_text_lines(entry: &Entry, mode: ReasoningMode, width: usize) -> Vec<
         }
         (EntryKind::Assistant, _) => {
             let mut lines = Vec::new();
+            let mut diagram_index = 0;
             for block in parse_blocks_for(entry, mode) {
                 match block {
                     Block::Paragraph { start, end, .. } => {
                         lines.extend(crate::render::wrap(&text[start..end], body_width));
                     }
                     Block::Code {
-                        start, end, closed, ..
+                        start,
+                        end,
+                        closed,
+                        lang,
                     } => {
-                        lines.extend(code_text_lines(&text[start..end], closed, width));
+                        let source = &text[start..end];
+                        if is_mermaid(&lang, closed, mermaid) {
+                            let index = diagram_index;
+                            diagram_index += 1;
+                            match diagram_outcome(entry, index, source, width) {
+                                DiagramOutcome::Rendered(rendered) => {
+                                    lines.extend(rendered.into_iter().map(|spans| {
+                                        spans
+                                            .into_iter()
+                                            .map(|(piece, _)| piece)
+                                            .collect::<String>()
+                                    }));
+                                }
+                                DiagramOutcome::Failed(reason) => {
+                                    lines.push(format!("mermaid: {reason}"));
+                                    lines.extend(code_text_lines(source, closed, width));
+                                }
+                            }
+                        } else {
+                            lines.extend(code_text_lines(source, closed, width));
+                        }
                     }
                 }
             }
@@ -655,6 +882,8 @@ fn code_lines(raw: &str, offset: usize, closed: bool, width: usize) -> Vec<BodyL
             text,
             code: true,
             pad: false,
+            diagram: None,
+            reason: false,
         });
     }
     if out.is_empty() {
@@ -665,6 +894,8 @@ fn code_lines(raw: &str, offset: usize, closed: bool, width: usize) -> Vec<BodyL
             text: String::new(),
             code: true,
             pad: false,
+            diagram: None,
+            reason: false,
         });
     }
     out
@@ -765,7 +996,7 @@ mod tests {
     fn a_code_line_never_wraps_and_truncates_with_an_ellipsis() {
         let entry = assistant("```\nshort\nabc def gh ijk\n```");
         let blocks = parse_blocks(&entry.text);
-        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 10);
+        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 10, true);
         // Fence lines are markup: body = "short" / "abc def gh ijk" → two lines.
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].text, "short");
@@ -781,7 +1012,7 @@ mod tests {
     fn tabs_expand_to_four_spaces_and_map_to_the_tab_offset() {
         let entry = assistant("```\na\tb\n```");
         let blocks = parse_blocks(&entry.text);
-        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 20);
+        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 20, true);
         assert_eq!(lines[0].text, "a    b");
         let base = entry.text.find('a').expect("the line is in the text");
         assert_eq!(
@@ -795,13 +1026,13 @@ mod tests {
         // Exactly the width: it fits, so no ellipsis (the `…` costs a column).
         let entry = assistant(&format!("```\n{}\n```", "x".repeat(20)));
         let blocks = parse_blocks(&entry.text);
-        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 20);
+        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 20, true);
         assert_eq!(lines[0].text, "x".repeat(20));
         assert!(!lines[0].text.contains('…'));
         // One over: it does not fit; keep width-1 and mark the cut.
         let entry = assistant(&format!("```\n{}\n```", "x".repeat(21)));
         let blocks = parse_blocks(&entry.text);
-        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 20);
+        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 20, true);
         assert_eq!(lines[0].text, format!("{}…", "x".repeat(19)));
         // The mapping still reaches the source line's end either way (the offset is into the
         // entry text, which starts with the "```\n" fence line).
@@ -813,14 +1044,14 @@ mod tests {
         // 6 columns at width 6: as-is.
         let entry = assistant("```\n日本語\n```");
         let blocks = parse_blocks(&entry.text);
-        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 6);
+        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 6, true);
         assert_eq!(lines[0].text, "日本語");
         // 6 columns at width 5: keep 4 columns (2 wide chars) and the ellipsis.
-        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 5);
+        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 5, true);
         assert_eq!(lines[0].text, "日本…");
         assert_eq!(lines[0].chars.len(), lines[0].text.chars().count());
         // 6 columns at width 7: as-is.
-        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 7);
+        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 7, true);
         assert_eq!(lines[0].text, "日本語");
     }
 
@@ -829,14 +1060,14 @@ mod tests {
         let entry = assistant("```\n日本語テキスト\n```");
         let blocks = parse_blocks(&entry.text);
         // Width 7: 日(2)本(2)語(2) = 6, テ would exceed → cut after 語.
-        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 7);
+        let lines = layout(&entry, &blocks, ReasoningMode::Expanded, 7, true);
         assert_eq!(lines[0].text, "日本語…");
     }
 
     #[test]
     fn a_user_block_gets_padding_rows_and_they_map_to_gaps() {
         let entry = Entry::new(EntryKind::User, "hello");
-        let lines = layout(&entry, &[], ReasoningMode::Expanded, 30);
+        let lines = layout(&entry, &[], ReasoningMode::Expanded, 30, true);
         assert_eq!(lines.len(), 3);
         assert!(lines[0].pad && lines[2].pad);
         assert!(lines[0].chars.is_empty());
@@ -849,11 +1080,11 @@ mod tests {
     fn reasoning_modes_change_the_line_count() {
         let mut entry = Entry::new(EntryKind::Reasoning, "one\ntwo\nthree");
         entry.live = true;
-        assert_eq!(line_count(&entry, ReasoningMode::Collapsed, 40), 1);
-        assert_eq!(line_count(&entry, ReasoningMode::Hidden, 40), 0);
-        assert_eq!(line_count(&entry, ReasoningMode::Expanded, 40), 3);
+        assert_eq!(line_count(&entry, ReasoningMode::Collapsed, 40, true), 1);
+        assert_eq!(line_count(&entry, ReasoningMode::Hidden, 40, true), 0);
+        assert_eq!(line_count(&entry, ReasoningMode::Expanded, 40, true), 3);
         // The collapsed placeholder carries the spinner while streaming.
-        let lines = layout(&entry, &[], ReasoningMode::Collapsed, 40);
+        let lines = layout(&entry, &[], ReasoningMode::Collapsed, 40, true);
         assert!(lines[0].text.contains("▸ thinking (3 lines)"));
         assert!(
             lines[0]
@@ -863,7 +1094,7 @@ mod tests {
                 .is_some_and(|c| SPINNER.contains(&c))
         );
         entry.live = false;
-        let lines = layout(&entry, &[], ReasoningMode::Collapsed, 40);
+        let lines = layout(&entry, &[], ReasoningMode::Collapsed, 40, true);
         assert_eq!(lines[0].text, "▸ thinking (3 lines)");
     }
 }

@@ -487,13 +487,14 @@ fn a_selection_draws_the_selection_role_on_its_cells() {
         0,
         0,
         &app.theme,
+        true,
     );
     app.set_viewport(u16::try_from(total).unwrap(), total);
     // Select "selection" on the block's text line (a user block is pad / text / pad): body
     // columns 6..15 → screen columns 8..17.
     let selection = Selection {
-        anchor: locate(&app.entries, ReasoningMode::Expanded, 40, 1, 8).expect("anchor"),
-        head: locate(&app.entries, ReasoningMode::Expanded, 40, 1, 17).expect("head"),
+        anchor: locate(&app.entries, ReasoningMode::Expanded, 40, 1, 8, true).expect("anchor"),
+        head: locate(&app.entries, ReasoningMode::Expanded, 40, 1, 17, true).expect("head"),
     };
     app.selection = Some(selection);
     let terminal = render(&mut app, 40, 6);
@@ -530,11 +531,12 @@ fn the_mono_selection_is_reversed_not_colored() {
         0,
         0,
         &app.theme,
+        true,
     );
     app.set_viewport(u16::try_from(total).unwrap(), total);
     app.selection = Some(Selection {
-        anchor: locate(&app.entries, ReasoningMode::Expanded, 40, 1, 8).expect("anchor"),
-        head: locate(&app.entries, ReasoningMode::Expanded, 40, 1, 17).expect("head"),
+        anchor: locate(&app.entries, ReasoningMode::Expanded, 40, 1, 8, true).expect("anchor"),
+        head: locate(&app.entries, ReasoningMode::Expanded, 40, 1, 17, true).expect("head"),
     });
     let terminal = render(&mut app, 40, 6);
     let word = style_of(&terminal, "selection").expect("on screen");
@@ -560,9 +562,10 @@ fn an_empty_selection_draws_nothing() {
         0,
         0,
         &app.theme,
+        true,
     );
     app.set_viewport(u16::try_from(total).unwrap(), total);
-    let at = locate(&app.entries, ReasoningMode::Expanded, 40, 1, 8).expect("anchor");
+    let at = locate(&app.entries, ReasoningMode::Expanded, 40, 1, 8, true).expect("anchor");
     app.selection = Some(Selection {
         anchor: at,
         head: at,

@@ -73,7 +73,11 @@ pub struct Entry {
     /// How many lines this entry laid out to, for the width, text length and mode it was
     /// last measured at. The renderer keeps it so a frame only re-lays out entries that
     /// changed or are on screen.
-    pub(crate) layout_cache: Option<((usize, usize, ReasoningMode), usize)>,
+    pub(crate) layout_cache: Option<((usize, usize, ReasoningMode, bool), usize)>,
+    /// Rendered Mermaid diagrams (ADR 0028 R8), keyed by `(width, text_len)`: the width is in
+    /// the key because `TooWide` can succeed on a wider terminal. Filled by the mutable
+    /// measure pass; the immutable layout paths render fresh on a miss.
+    pub(crate) diagram_cache: Option<(usize, usize, Vec<crate::blocks::DiagramOutcome>)>,
 }
 
 impl Entry {
@@ -87,6 +91,7 @@ impl Entry {
             result: None,
             block_cache: None,
             layout_cache: None,
+            diagram_cache: None,
         }
     }
 }
@@ -778,6 +783,9 @@ pub struct App {
     /// How the reasoning channel displays (ADR 0028 R3, `tui.display.reasoning`). Part of
     /// the block/layout cache keys: toggling re-lays the reasoning entries out.
     pub reasoning_mode: ReasoningMode,
+    /// `tui.display.mermaid` (ADR 0028 R8), default true: draw a closed ```mermaid block as a
+    /// diagram. `false` renders every code block as source.
+    pub mermaid_enabled: bool,
 }
 
 impl App {
@@ -822,6 +830,7 @@ impl App {
             clipboard: ClipboardMode::Osc52,
             // ADR 0028 R3's default: thinking collapsed to one line.
             reasoning_mode: ReasoningMode::Collapsed,
+            mermaid_enabled: true,
         }
     }
 
@@ -914,6 +923,8 @@ impl App {
             .as_deref()
             .and_then(ReasoningMode::parse)
             .unwrap_or_default();
+        // `tui.display.mermaid` (ADR 0028 R8, default true).
+        self.mermaid_enabled = config.tui.display_mermaid.unwrap_or(true);
         // `tui.clipboard` (default OSC 52). An unknown spelling never reaches here (the host
         // config reader skips it with a warning); `pbcopy` off macOS does: warn once and fall
         // back, because the copy effect would have no program to run.
@@ -1059,6 +1070,7 @@ impl App {
             self.transcript_width,
             press_line,
             col as usize,
+            self.mermaid_enabled,
         ) else {
             return cleared
                 .then(UpdateResult::dirty)
@@ -1074,6 +1086,7 @@ impl App {
                 self.transcript_width,
                 press_line,
                 col as usize,
+                self.mermaid_enabled,
             ) {
                 Some((start, end)) => {
                     self.selection = Some(Selection {
@@ -1245,6 +1258,7 @@ impl App {
             self.transcript_width,
             head_line,
             col as usize,
+            self.mermaid_enabled,
         ) else {
             return;
         };
@@ -1476,6 +1490,7 @@ impl App {
         // Split the borrow: the entries to match and the layer that holds the query are two
         // different fields of `self`.
         let mode = self.reasoning_mode;
+        let mermaid = self.mermaid_enabled;
         let App {
             entries, layers, ..
         } = self;
@@ -1483,7 +1498,7 @@ impl App {
             Layer::Overlay(Overlay::Find(find)) => Some(find),
             _ => None,
         }) {
-            find.recompute(entries.as_slice(), mode, width);
+            find.recompute(entries.as_slice(), mode, width, mermaid);
         }
         self.find_jump();
     }
