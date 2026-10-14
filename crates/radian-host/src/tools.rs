@@ -14,6 +14,7 @@ use agent_extensions::{McpSession, McpToolProvider};
 use radian_coding::{AskSession, AskTools, CodingSession, CodingTools};
 
 use crate::memory::{MemorySession, MemoryTools};
+use crate::mermaid::{MermaidCheckSession, MermaidCheckTools};
 use crate::skills::tools::{SkillSession, SkillTools};
 
 pub struct HostTools {
@@ -24,6 +25,8 @@ pub struct HostTools {
     ask: Option<AskTools>,
     /// `skill` (ADR 0025 S3). Read-only, so it is mounted whenever skills were discovered.
     skills: Option<SkillTools>,
+    /// `mermaid_check` (ADR 0028 R8 / ADR 0025). Read-only and always mounted.
+    mermaid: MermaidCheckTools,
     mcp: McpToolProvider,
 }
 
@@ -38,6 +41,7 @@ impl HostTools {
             memory,
             ask: None,
             skills: None,
+            mermaid: MermaidCheckTools::new(),
             mcp,
         }
     }
@@ -62,12 +66,14 @@ pub struct HostSession {
     memory: Option<MemorySession>,
     ask: Option<AskSession>,
     skills: Option<SkillSession>,
+    mermaid: MermaidCheckSession,
     mcp: McpSession,
     specs: Vec<ToolSpec>,
     coding_names: HashSet<String>,
     memory_names: HashSet<String>,
     ask_names: HashSet<String>,
     skill_names: HashSet<String>,
+    mermaid_names: HashSet<String>,
 }
 
 impl ToolProvider for HostTools {
@@ -92,11 +98,13 @@ impl ToolProvider for HostTools {
             Some(skills) => Some(skills.open_session().await?),
             None => None,
         };
+        let mermaid = self.mermaid.open_session().await?;
 
         let mut coding_names = HashSet::new();
         let mut memory_names = HashSet::new();
         let mut ask_names = HashSet::new();
         let mut skill_names = HashSet::new();
+        let mut mermaid_names = HashSet::new();
         let mut built_in_specs: Vec<ToolSpec> = Vec::new();
         if let Some(coding) = &coding {
             for spec in coding.tool_specs() {
@@ -122,6 +130,10 @@ impl ToolProvider for HostTools {
                 built_in_specs.push(spec.clone());
             }
         }
+        for spec in mermaid.tool_specs() {
+            mermaid_names.insert(spec.name.clone());
+            built_in_specs.push(spec.clone());
+        }
         let specs = merge_tool_specs(built_in_specs, mcp.tool_specs().to_vec())?;
 
         Ok(HostSession {
@@ -129,12 +141,14 @@ impl ToolProvider for HostTools {
             memory,
             ask,
             skills,
+            mermaid,
             mcp,
             specs,
             coding_names,
             memory_names,
             ask_names,
             skill_names,
+            mermaid_names,
         })
     }
 }
@@ -149,7 +163,9 @@ impl ToolSession for HostSession {
         call: &ToolCall,
         cx: ToolContext<'_>,
     ) -> Result<ToolOutput, ToolFailure> {
-        if self.skill_names.contains(&call.name) {
+        if self.mermaid_names.contains(&call.name) {
+            self.mermaid.execute(call, cx).await
+        } else if self.skill_names.contains(&call.name) {
             match &self.skills {
                 Some(skills) => skills.execute(call, cx).await,
                 None => Err(ToolFailure::new(

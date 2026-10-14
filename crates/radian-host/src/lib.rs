@@ -20,6 +20,7 @@ mod home;
 pub mod login;
 mod mcp;
 pub mod memory;
+pub mod mermaid;
 mod model;
 mod output;
 pub mod pending;
@@ -69,6 +70,7 @@ pub use home::{
     skills_dir_for, themes_dir, themes_dir_for, trust_dir, trust_dir_for, user_home,
 };
 pub use mcp::load_mcp_config;
+pub use mermaid::{MermaidCheckSession, MermaidCheckTools, check};
 pub use model::{
     DEFAULT_MAX_TOKENS, HostModel, MIN_THINKING_BUDGET, ModelArgs, Provider, RouteContext,
     SwitchableModel, Thinking, build_model, check_provider_flags, redact_base_url,
@@ -104,9 +106,9 @@ pub use sessions::{
     ExportSettings, Format, SEARCH_LIMIT, SUMMARY_MAX_CHARS, SearchRow, SessionRow,
 };
 pub use skills::{
-    Discovery, SECTION_BUDGET_TOKENS, SKILL_FILE_NAME, Skill, SkillsHooks, completion_candidates,
-    discover, discover_with_extras, expand, has_skill_file, notices, prompt_section,
+    BUILTIN, Discovery, SECTION_BUDGET_TOKENS, SKILL_FILE_NAME, Skill, SkillSource, SkillsHooks,
+    completion_candidates, discover, discover_with_extras, expand, has_skill_file, notices,
+    prompt_section,
 };
 pub use tools::{HostSession, HostTools, merge_tool_specs};
-pub use trust::{Decision, ProjectTrustChanged, Resolved, Source};
 pub use workspace::resolve_workspace;

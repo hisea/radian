@@ -288,7 +288,11 @@ pub struct SessionSetup {
     /// host (`~` and paths relative to the config file). The user-level `~/.radian/skills` is
     /// discovered first, so it wins a name conflict.
     pub skills_extra_paths: Vec<PathBuf>,
-    /// `true` to resume an existing session file, `false` to create one.
+    /// `[skills] builtin` (ADR 0025): include the compiled-in skills. Default true.
+    pub skills_builtin: bool,
+    /// `[skills] disabled`: built-in skill names to leave out.
+    pub skills_disabled: Vec<String>,
+    /// `true` to resume
     pub resume: bool,
     /// The `SessionCreated` snapshot (a route reference: never a key or a header value).
     pub config_snapshot: serde_json::Value,
@@ -709,6 +713,8 @@ pub async fn open_session(
         profile,
         memory_root,
         skills_extra_paths,
+        skills_builtin,
+        skills_disabled,
         resume,
         config_snapshot,
         turn_options,
@@ -818,7 +824,12 @@ pub async fn open_session(
     let skills = {
         // The user level first, then `[skills] extra_paths` (ADR 0025 slice 4): the first
         // discovery of a name wins, so `~/.radian/skills` beats an extra root.
-        let discovery = skills::discover_with_extras(skills_dir().as_deref(), &skills_extra_paths);
+        let discovery = skills::discover_with_extras(
+            skills_dir().as_deref(),
+            &skills_extra_paths,
+            skills_builtin,
+            &skills_disabled,
+        );
         for warning in &discovery.warnings {
             memory_warning(warning);
         }

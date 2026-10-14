@@ -470,7 +470,9 @@ async fn one_shot_streams_text_to_stdout_only() {
     assert_eq!(code, 0);
     assert_eq!(stdout, "Hello there\n");
     assert!(!stderr.contains("Hello there"), "{stderr}");
-    assert_eq!(messages_of(&server, 0)[0]["content"], "hi");
+    // The first message is the system prompt (the built-in `diagrams` skill is in it); the
+    // user's words are the user message.
+    assert_eq!(last_user_text(&messages_of(&server, 0)), "hi");
 }
 
 #[tokio::test]
@@ -1334,10 +1336,14 @@ async fn system_prompt_is_sent() {
     .await;
 
     assert_eq!(code, 0);
-    assert_eq!(
-        messages_of(&server, 0)[0],
-        json!({"role": "system", "content": "Be brief."})
-    );
+    let messages = messages_of(&server, 0);
+    let system = &messages.as_array().expect("messages")[0];
+    assert_eq!(system["role"], "system");
+    let content = system["content"].as_str().unwrap_or_default();
+    // The user's system prompt is first; the host appends its sections (the built-in
+    // `diagrams` skill is one of them, ADR 0025).
+    assert!(content.starts_with("Be brief."), "{content}");
+    assert!(content.contains("## Skills (ADR 0025)"), "{content}");
 }
 
 #[tokio::test]
