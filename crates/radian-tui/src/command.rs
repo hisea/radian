@@ -31,7 +31,9 @@ pub const HELP: &str = "\
 /login [provider]     store an API key in credentials/auth.json (ADR 0026 D3); custom
                       names a new endpoint (name, protocol, base URL, key)
 /logout <provider>    remove a stored credential (asks first)
-//…                   send a message that starts with `/`";
+//…                   send a message that starts with `/`
+!<command>            run a shell command in the sandbox (ADR 0033); `!!` keeps its output
+                      out of the model's context";
 
 /// A memory command waiting for the user's confirmation. Only the destructive commands
 /// (`forget`, `purge`, `split`, `merge`) ask (ADR 0021 D7); the rest run immediately. `update`
@@ -938,6 +940,38 @@ pub fn output_notices(output: &CommandOutput) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR 0033: a leading `!` is a shell command, before the `/…` commands. `!!` keeps the
+    /// output out of the model's context; an empty command is a one-line usage notice.
+    #[test]
+    fn a_leading_bang_is_a_shell_command() {
+        assert!(matches!(
+            parse("!echo hi", false),
+            Outcome::Bash { command, exclude_from_context: false } if command == "echo hi"
+        ));
+        assert!(matches!(
+            parse("!!echo hi", false),
+            Outcome::Bash { command, exclude_from_context: true } if command == "echo hi"
+        ));
+        // `!/bin/sh` is the command `/bin/sh`, not the unknown `/bin/sh` command.
+        assert!(matches!(
+            parse("!/bin/echo x", false),
+            Outcome::Bash { command, .. } if command == "/bin/echo x"
+        ));
+        // The shell does its own quoting: the line is not shlexed here.
+        assert!(matches!(
+            parse("!echo 'a b' | grep a", false),
+            Outcome::Bash { command, .. } if command == "echo 'a b' | grep a"
+        ));
+        for empty in ["!", "!!", "!   "] {
+            match parse(empty, false) {
+                Outcome::Notices(notices) => {
+                    assert!(notices[0].contains("usage: !"), "{notices:?}")
+                }
+                other => panic!("expected usage for {empty:?}, got {other:?}"),
+            }
+        }
+    }
 
     #[test]
     fn help_and_unknown_commands_are_notices() {

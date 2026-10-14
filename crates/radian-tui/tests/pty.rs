@@ -8011,3 +8011,210 @@ fn short_workspace(label: &str) -> std::path::PathBuf {
     std::fs::create_dir_all(&path).unwrap();
     path
 }
+
+/// ADR 0033 acceptance: `!cmd` runs in the sandbox, shows a `$ cmd` block, and its `Ran \`cmd\``
+/// message reaches the next request's user messages.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_bang_runs_and_enters_the_context() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("AFTER-BANG")]).await;
+    let dir = TempDir::new("bang-session");
+    let config = format!(
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
+         base_url = \"{}\"\n",
+        server.base_url
+    );
+    let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"!printf BANG-OUTPUT\r");
+    assert!(
+        pty.wait_for_screen("BANG-OUTPUT", 20),
+        "the command output is not on screen:\n{}",
+        pty.screen()
+    );
+    // The block's first line is `$ cmd`.
+    assert!(
+        pty.wait_for_screen("$ printf BANG-OUTPUT", 10),
+        "the command line is not on screen:\n{}",
+        pty.screen()
+    );
+    pty.send(b"next\r");
+    assert!(
+        pty.wait_for_screen("AFTER-BANG", 20),
+        "the reply is missing:\n{}",
+        pty.screen()
+    );
+    let body = server.requests()[0].json();
+    let users = body["messages"]
+        .as_array()
+        .expect("messages is an array")
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .map(|message| message["content"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(users.contains("Ran `printf BANG-OUTPUT`"), "{users}");
+    assert!(users.contains("BANG-OUTPUT"), "{users}");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0033 acceptance: `!!cmd` runs and shows, but its output never enters the request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_bangbang_stays_out_of_the_context() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("AFTER-BANGBANG")]).await;
+    let dir = TempDir::new("bangbang-session");
+    let config = format!(
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
+         base_url = \"{}\"\n",
+        server.base_url
+    );
+    let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"!!printf BANG-SECRET\r");
+    assert!(
+        pty.wait_for_screen("BANG-SECRET", 20),
+        "the command output is not on screen:\n{}",
+        pty.screen()
+    );
+    pty.send(b"next\r");
+    assert!(
+        pty.wait_for_screen("AFTER-BANGBANG", 20),
+        "the reply is missing:\n{}",
+        pty.screen()
+    );
+    let body = server.requests()[0].json();
+    let users = body["messages"]
+        .as_array()
+        .expect("messages is an array")
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .map(|message| message["content"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !users.contains("BANG-SECRET"),
+        "!! output must not enter the context: {users}"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0033 + ADR 0012: a `!` command really is confined — a write outside the workspace
+/// fails (the default tier is `workspace-write`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_bang_is_confined_to_the_workspace() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let dir = TempDir::new("bang-sandbox");
+    let escape = format!("/tmp/radian-bang-escape-{}", std::process::id());
+    let _ = std::fs::remove_file(&escape);
+    let config = format!(
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
+         base_url = \"{}\"\n",
+        server.base_url
+    );
+    let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(format!("!echo x > {escape}\r").as_bytes());
+    assert!(
+        pty.wait_for_screen("[exit code:", 20),
+        "the block never appeared:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !std::path::Path::new(&escape).exists(),
+        "the sandbox must deny a write outside the workspace"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0033: every `!`/`!!` run is audited in the journal (`UserBash`), even when it does not
+/// enter the context.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_bang_is_audited_in_the_journal() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let dir = TempDir::new("bang-audit");
+    let config = format!(
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
+         base_url = \"{}\"\n",
+        server.base_url
+    );
+    let mut pty = Pty::spawn_with_config(
+        &["--session-dir", dir.path().to_str().unwrap()],
+        &[("OPENAI_API_KEY", "sk-test")],
+        &config,
+        24,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"!!printf AUDITED\r");
+    assert!(
+        pty.wait_for_screen("AUDITED", 20),
+        "the command output is not on screen:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+    let journal = std::fs::read_dir(dir.path())
+        .expect("the session dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+        .expect("a session file");
+    let text = std::fs::read_to_string(&journal).expect("the journal is readable");
+    assert!(
+        text.contains("\"event\":\"UserBash\""),
+        "no UserBash audit record:\n{text}"
+    );
+    assert!(
+        text.contains("\"command\":\"printf AUDITED\"")
+            && text.contains("\"exclude_from_context\":true"),
+        "the audit record is missing its fields:\n{text}"
+    );
+}
+
+/// ADR 0033: only one `!` at a time (a second is refused) and Esc cancels the running one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_bang_is_single_and_escapable() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let dir = TempDir::new("bang-cancel");
+    let config = format!(
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
+         base_url = \"{}\"\n",
+        server.base_url
+    );
+    let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"!sleep 30\r");
+    assert!(
+        pty.wait_for_screen("sleep 30", 10),
+        "the command block is not on screen:\n{}",
+        pty.screen()
+    );
+    // A second command while the first runs is refused, not queued or run.
+    pty.send(b"!echo SECOND\r");
+    assert!(
+        pty.wait_for_screen("already running", 10),
+        "the second command was not refused:\n{}",
+        pty.screen()
+    );
+    // Esc cancels the running one; its block says so.
+    pty.send(&[0x1b]);
+    assert!(
+        pty.wait_for_screen("[cancelled]", 20),
+        "the command was not cancelled:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}

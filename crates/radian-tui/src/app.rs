@@ -4175,6 +4175,166 @@ impl App {
 mod tests {
     use super::*;
 
+    fn a_run(exit_code: Option<i32>, stdout: &str) -> radian_coding::UserBash {
+        radian_coding::UserBash {
+            stdout: stdout.to_owned(),
+            stderr: String::new(),
+            exit_code,
+            signal: None,
+            timed_out: false,
+            cancelled: false,
+        }
+    }
+
+    /// ADR 0033: a `!` line parses to a `RunBash` effect, and the command is remembered so a
+    /// second one is refused while it runs.
+    #[test]
+    fn a_bang_routes_to_a_run_bash_effect() {
+        let mut app = App::new("m", "s");
+        let result = app.run_slash_command("!echo hi");
+        assert_eq!(
+            result.effects,
+            vec![Effect::RunBash {
+                command: "echo hi".to_owned(),
+                exclude_from_context: false,
+            }]
+        );
+        assert_eq!(app.bash_running.as_deref(), Some("echo hi"));
+        // A second one is refused (one at a time).
+        let second = app.run_slash_command("!echo again");
+        assert!(second.effects.is_empty());
+        assert!(app.entries.last().unwrap().text.contains("already running"));
+    }
+
+    /// ADR 0012: the `safe` tier has no shell, so `!` never runs there.
+    #[test]
+    fn a_bang_on_the_safe_tier_does_not_run() {
+        let mut app = App::new("m", "s");
+        app.set_bash_available(false);
+        let result = app.run_slash_command("!echo hi");
+        assert!(result.effects.is_empty());
+        assert!(app.bash_running.is_none());
+        assert!(
+            app.entries.last().unwrap().text.contains("safe"),
+            "{}",
+            app.entries.last().unwrap().text
+        );
+    }
+
+    /// ADR 0033: while a turn runs, `!` waits for it to end rather than racing it.
+    #[test]
+    fn a_bang_queues_behind_a_running_turn() {
+        let mut app = App::new("m", "s");
+        app.projection.set_turn(TurnState::Running);
+        let result = app.run_slash_command("!echo hi");
+        assert!(result.effects.is_empty());
+        assert_eq!(
+            app.queued_bash,
+            Some(("echo hi".to_owned(), false)),
+            "queued, not run"
+        );
+        // The event sink writes the Idle fact before the app sees the event; the test does
+        // the same.
+        app.projection.set_turn(TurnState::Idle);
+        let effects = app.apply_event(&AgentEvent::RunFinished {
+            status: agent_core::RunStatus::Completed,
+        });
+        assert!(
+            matches!(effects.as_slice(), [Effect::RunBash { command, .. }] if command == "echo hi"),
+            "{effects:?}"
+        );
+        assert_eq!(app.bash_running.as_deref(), Some("echo hi"));
+    }
+
+    /// `!` shows a block, injects the `Ran \`cmd\`` message and audits; `!!` only shows and
+    /// audits (ADR 0033).
+    #[test]
+    fn a_bang_done_injects_and_audits_and_a_bangbang_only_audits() {
+        let mut app = App::new("m", "s");
+        app.run_slash_command("!echo hi");
+        let result = app.update(Input::BashDone {
+            command: "echo hi".to_owned(),
+            exclude_from_context: false,
+            result: Ok(a_run(Some(0), "hi\n")),
+        });
+        assert!(
+            matches!(result.effects[0], Effect::Inject(_)),
+            "{:?}",
+            result.effects
+        );
+        assert!(matches!(
+            result.effects[1],
+            Effect::AuditUserBash {
+                exclude_from_context: false,
+                exit_code: Some(0),
+                ..
+            }
+        ));
+        let entry = app.entries.last().unwrap();
+        assert!(matches!(
+            entry.kind,
+            EntryKind::Bash {
+                exclude_from_context: false
+            }
+        ));
+        // The marker column carries the `$ `; the text is the command and output.
+        assert!(entry.text.starts_with("echo hi"), "{:?}", entry.text);
+        assert!(entry.text.contains("hi"), "{:?}", entry.text);
+
+        let mut app = App::new("m", "s");
+        app.run_slash_command("!!echo hi");
+        let result = app.update(Input::BashDone {
+            command: "echo hi".to_owned(),
+            exclude_from_context: true,
+            result: Ok(a_run(Some(0), "hi\n")),
+        });
+        assert!(
+            !result
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Inject(_))),
+            "!! must not enter the context: {:?}",
+            result.effects
+        );
+        assert!(matches!(
+            app.entries.last().unwrap().kind,
+            EntryKind::Bash {
+                exclude_from_context: true
+            }
+        ));
+    }
+
+    /// The `!` message is shown live as a block; when it comes back through the transcript it
+    /// is not drawn a second time (ADR 0033).
+    #[test]
+    fn the_injected_bang_message_is_not_drawn_twice() {
+        let mut app = App::new("m", "s");
+        app.run_slash_command("!echo hi");
+        app.update(Input::BashDone {
+            command: "echo hi".to_owned(),
+            exclude_from_context: false,
+            result: Ok(a_run(Some(0), "hi\n")),
+        });
+        let before = app.entries.len();
+        let text = bash_context_text("echo hi", &a_run(Some(0), "hi\n"));
+        app.push_message(&Message::user(text));
+        assert_eq!(app.entries.len(), before, "no duplicate block");
+    }
+
+    /// A resumed `!` context message (no live block) renders as a Bash block, not user prose.
+    #[test]
+    fn a_resumed_bang_context_message_renders_as_a_block() {
+        let mut app = App::new("m", "s");
+        let text = bash_context_text("echo hi", &a_run(Some(0), "hi\n"));
+        app.push_message(&Message::user(text));
+        assert!(matches!(
+            app.entries.last().unwrap().kind,
+            EntryKind::Bash {
+                exclude_from_context: false
+            }
+        ));
+    }
+
     fn filler(count: usize) -> Vec<agent_core::Message> {
         (0..count)
             .map(|i| agent_core::Message::user(format!("message {i}")))

@@ -33,6 +33,7 @@ pub const TIPS: &[&str] = &[
     "/compact summarizes the history now",
     "@path attaches a file to the request",
     "Shift+drag uses the terminal's own selection",
+    "!<command> runs a shell command in the sandbox",
 ];
 
 /// The tip for a session: a stable hash of the session id picks one, so the same session
