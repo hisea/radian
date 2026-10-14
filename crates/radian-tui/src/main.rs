@@ -376,7 +376,8 @@ fn run(
         .map(|(name, value)| format!("{name}={value}"))
         .collect();
     header_args.extend(cli.header.iter().cloned());
-    let workspace_path = radian_host::resolve_workspace(cli.workspace.as_deref())?;
+    let workspace_root = coding_root(&cli)?;
+    let workspace_path = radian_host::resolve_workspace(Some(&workspace_root.path))?;
     let catalog_base_url = base_url.clone();
     // The window comes from `--context-window` or the models.dev catalog (ADR 0018). A fetch
     // failure is not a startup failure: the window is then unknown and the budget stays off.
@@ -631,7 +632,9 @@ fn run(
                 session_id: radian_host::SessionId::new(session_id.clone()),
                 session_dir: dir.clone(),
                 workspace: workspace_path.clone(),
-                coding_root: cli.workspace.clone(),
+                // The tools are mounted by default now: the workspace is the current directory
+                // (or `$HOME/tmp`), not only an explicit `--workspace`.
+                coding_root: Some(workspace_path.clone()),
                 model,
                 servers,
                 system_prompt: cli.system.clone(),
@@ -790,6 +793,20 @@ fn run(
         radian_tui::EntryKind::Notice,
         format!("context: {}", window.describe()),
     ));
+    // Owner UI review: say so when the default workspace was adjusted, so the session's
+    // boundary is never a surprise.
+    if let Some(note) = &workspace_root.note {
+        let home = std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        app.entries.push(radian_tui::Entry::new(
+            radian_tui::EntryKind::Notice,
+            format!(
+                "workspace: {} ({note})",
+                radian_tui::workspace::display_coding_root(&workspace_root, home.as_deref())
+            ),
+        ));
+    }
     // ADR 0021 D2/D6: the project state and the injection budget.
     app.entries.push(radian_tui::Entry::new(
         radian_tui::EntryKind::Notice,
@@ -1705,9 +1722,26 @@ fn session_dir(cli: &Cli) -> Result<PathBuf, String> {
 /// value, so a session is only listed in the workspace it was created in, and a bad
 /// `--workspace` fails as a workspace error (dogfooding D1).
 fn session_workspace(cli: &Cli) -> Result<String, String> {
-    Ok(radian_host::resolve_workspace(cli.workspace.as_deref())?
-        .to_string_lossy()
-        .into_owned())
+    Ok(resolve_workspace(cli)?.to_string_lossy().into_owned())
+}
+
+/// The coding root: `--workspace` as given, else the current directory, with the TUI's two
+/// exceptions — `$HOME` becomes `$HOME/tmp` and the filesystem root
+/// is refused. The CLI (`agent`) does **not** do this: it is the unattended entry point and gets
+/// no write access by default.
+fn coding_root(cli: &Cli) -> Result<radian_tui::workspace::CodingRoot, String> {
+    let cwd = std::env::current_dir()
+        .map_err(|error| format!("cannot read the current directory: {error}"))?;
+    let home = std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    radian_tui::workspace::resolve_coding_root(cli.workspace.as_deref(), &cwd, home.as_deref())
+}
+
+/// The canonical, validated workspace path (the shared `radian-host` rule).
+fn resolve_workspace(cli: &Cli) -> Result<PathBuf, String> {
+    let root = coding_root(cli)?;
+    radian_host::resolve_workspace(Some(&root.path))
 }
 
 /// `--list`: this workspace's sessions, newest activity first. Same columns as `agent-cli`.

@@ -68,7 +68,17 @@ impl Drop for KillOnDrop {
 /// inherits the master and the pty never sees EOF). `home` is a private HOME the caller keeps
 /// alive. Returns the child (killed on drop) and the master for reading/closing.
 fn spawn_direct(args: &[&str], home: &std::path::Path) -> (KillOnDrop, std::fs::File) {
-    let (child, master, _slave) = spawn_direct_keeping_slave(args, home);
+    spawn_direct_in(args, home, None)
+}
+
+/// [`spawn_direct`], with the child's working directory set: the default-workspace tests need a
+/// session started *from* a particular directory.
+fn spawn_direct_in(
+    args: &[&str],
+    home: &std::path::Path,
+    cwd: Option<&std::path::Path>,
+) -> (KillOnDrop, std::fs::File) {
+    let (child, master, _slave) = spawn_direct_keeping_slave(args, home, cwd);
     (child, master)
 }
 
@@ -78,6 +88,7 @@ fn spawn_direct(args: &[&str], home: &std::path::Path) -> (KillOnDrop, std::fs::
 fn spawn_direct_keeping_slave(
     args: &[&str],
     home: &std::path::Path,
+    cwd: Option<&std::path::Path>,
 ) -> (KillOnDrop, std::fs::File, std::os::fd::OwnedFd) {
     use std::os::fd::FromRawFd;
     let mut master_fd: libc::c_int = -1;
@@ -116,6 +127,9 @@ fn spawn_direct_keeping_slave(
     }
     cmd.env("TERM", "xterm-256color");
     cmd.env("HOME", home.as_os_str());
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
     cmd.env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json");
     let keep_slave = slave.try_clone().unwrap();
     cmd.stdin(std::process::Stdio::from(slave.try_clone().unwrap()));
@@ -4860,6 +4874,7 @@ async fn pty_the_watchdog_restores_the_stdout_flags() {
             "10000",
         ],
         home.path(),
+        None,
     );
     // Wait for the mouse-on sequence: the app has entered the terminal and is now sleeping in
     // `draw_frame`, so the signal below reaches the watchdog.
@@ -5215,9 +5230,11 @@ async fn pty_ask_user_is_registered_without_a_workspace() {
         body.contains("ask_user"),
         "the request's tool list must offer ask_user without --workspace: {body}"
     );
+    // The owner's UI review changed this: the current directory is the coding root now, so a
+    // session without `--workspace` does have the file tools.
     assert!(
-        !body.contains("\"name\":\"read\""),
-        "no coding tools exist without --workspace: {body}"
+        body.contains("\"name\":\"read\""),
+        "the current directory is the coding root: {body}"
     );
 }
 
@@ -5276,4 +5293,140 @@ async fn pty_the_slash_completion_walks_the_command_tree() {
     );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+// ---------- the default workspace ----------
+
+/// Without `--workspace` the current directory is the coding root, so the first request carries
+/// the file tools (before this, a session without `--workspace` had none).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_without_a_workspace_the_current_directory_is_the_coding_root() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("default-workspace");
+    let server = MockServer::start(vec![text_reply("OK")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "default-workspace",
+        ],
+        24,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"hi\r");
+    assert!(pty.wait_for_screen("OK", 15), "{}", pty.screen());
+    let requests = server.requests();
+    let tools: Vec<String> = requests[0].json()["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .map(|tool| {
+            tool["function"]["name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect();
+    assert!(tools.iter().any(|name| name == "read"), "{tools:?}");
+    assert!(tools.iter().any(|name| name == "write"), "{tools:?}");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// `$HOME` itself is never the coding root: the session uses `$HOME/tmp`, creates it `0700`, and
+/// says so on the startup line.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_session_started_from_home_uses_home_tmp() {
+    use std::os::unix::fs::PermissionsExt;
+    let _serial = pty_guard();
+    let home = TempDir::new("home-workspace");
+    let sessions = TempDir::new("home-workspace-sessions");
+    let (mut child, mut master) = spawn_direct_in(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            sessions.path().to_str().unwrap(),
+            "--session-id",
+            "home-workspace",
+            "--offline-catalog",
+        ],
+        home.path(),
+        Some(home.path()),
+    );
+    let needle = "workspace: ~/tmp (cwd is $HOME)";
+    // A screen model, because the renderer writes each word at its own cursor position.
+    let mut parser = vt100::Parser::new(24, 100, 0);
+    let mut buf = [0u8; 65536];
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !parser.screen().contents().contains(needle) {
+        if let Ok(n) = master.read(&mut buf) {
+            parser.process(&buf[..n]);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the startup line is missing:\n{}",
+            parser.screen().contents()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let tmp = home.path().join("tmp");
+    assert!(tmp.is_dir(), "$HOME/tmp is created");
+    let mode = std::fs::metadata(&tmp).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o700, "owner only");
+    drop(master);
+    let _ = child.0.kill();
+    let _ = child.0.wait();
+}
+
+/// The filesystem root is refused, with the way out named.
+#[cfg(unix)]
+#[test]
+fn pty_a_session_started_from_the_filesystem_root_is_refused() {
+    let _serial = pty_guard();
+    let home = TempDir::new("root-workspace-home");
+    let sessions = TempDir::new("root-workspace-sessions");
+    let (mut child, mut master) = spawn_direct_in(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            sessions.path().to_str().unwrap(),
+            "--session-id",
+            "root-workspace",
+            "--offline-catalog",
+        ],
+        home.path(),
+        Some(std::path::Path::new("/")),
+    );
+    let mut drained = Vec::new();
+    let mut buf = [0u8; 65536];
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            break status;
+        }
+        if let Ok(n) = master.read(&mut buf) {
+            drained.extend_from_slice(&buf[..n]);
+        }
+        assert!(Instant::now() < deadline, "the app did not exit");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(1), "a startup refusal");
+    let text = String::from_utf8_lossy(&drained);
+    assert!(text.contains("filesystem root"), "{text}");
+    assert!(text.contains("--workspace"), "{text}");
 }
