@@ -1214,6 +1214,8 @@ pub struct App {
     /// `tui.brand` (ADR 0027): the brand text, or `None` for the glyph set's
     /// default. The footer's `brand` item and the startup banner both read it.
     pub brand: Option<String>,
+    /// `tui.spinner` (ADR 0027): the running indicator. `pulse` by default.
+    pub spinner_kind: crate::spinner::Kind,
     /// The key bindings (config `tui.keybindings`), defaulting to the pre-config key table.
     pub keymap: Keymap,
     /// How the input area is drawn (config `tui.input_style`), defaulting to `lines`.
@@ -1315,6 +1317,7 @@ impl App {
             bash_context_pending: None,
             theme: Theme::default(),
             brand: None,
+            spinner_kind: crate::spinner::Kind::default(),
             keymap: Keymap::default(),
             input_style: InputStyle::default(),
             total_lines: 0,
@@ -1425,6 +1428,16 @@ impl App {
         // `tui.brand` (ADR 0027): a configured short text, else `None` for the
         // glyph set's default. The reader already refused an over-wide value.
         self.brand = config.tui.brand.clone();
+        // `tui.spinner` (ADR 0027): an unknown name warns and uses `pulse`.
+        self.spinner_kind = match config.tui.spinner.as_deref() {
+            None => crate::spinner::Kind::default(),
+            Some(name) => crate::spinner::Kind::parse(name).unwrap_or_else(|| {
+                warnings.push(format!(
+                    "tui.spinner = {name:?} is not one of pulse|arc|quadrant|braille; using pulse"
+                ));
+                crate::spinner::Kind::default()
+            }),
+        };
         // An unknown `tui.input_style` is a skipped key (the reader warns once); the TUI falls
         // back to the default.
         self.input_style = config

@@ -291,6 +291,9 @@ pub struct TuiConfig {
     /// (`nerd` `󰰠`, `unicode` `R`, `ascii` `rad`). Any string at most 4 display columns wide;
     /// wider is a config error (it would break the footer and the banner).
     pub brand: Option<String>,
+    /// `tui.spinner`: `"pulse"` (the default), `"arc"`, `"quadrant"` or `"braille"`
+    /// (ADR 0027). The TUI validates it; an unknown value warns and uses `pulse`.
+    pub spinner: Option<String>,
     /// `tui.usage_period_secs`: the opencode-go usage refresh period (ADR 0027 C4). `None` means
     /// the default (60 s); `0` disables the contributor; other values are clamped to 15–600 s.
     pub usage_period_secs: Option<u64>,
@@ -1111,6 +1114,10 @@ fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
             }
             // A non-string brand is a display preference: skip it with a warning.
             ("brand", _) => config.skipped.push("tui.brand".into()),
+            // ADR 0027: the spinner kind is a display preference; the TUI
+            // validates the name and falls back with a warning.
+            ("spinner", Value::String(spinner)) => config.tui.spinner = Some(spinner.clone()),
+            ("spinner", _) => config.skipped.push("tui.spinner".into()),
             (other, _) => config.skipped.push(format!("tui.{other}")),
         }
     }
@@ -1990,6 +1997,18 @@ mod startup_pref_tests {
         assert!(parse_str("schema_version = 1\n[tui]\nbrand = \"㎭㎭\"\n").is_ok());
         let error = parse_str("schema_version = 1\n[tui]\nbrand = \"㎭㎭R\"\n").unwrap_err();
         assert!(matches!(error, ConfigError::WrongType { .. }), "{error}");
+    }
+
+    /// ADR 0027: `tui.spinner` is carried; a non-string is skipped (the `tui.*`
+    /// rule). The TUI validates the name and falls back to `pulse`.
+    #[test]
+    fn tui_spinner_is_carried_and_non_strings_are_skipped() {
+        let config = parse_str("schema_version = 1\n[tui]\nspinner = \"quadrant\"\n").unwrap();
+        assert_eq!(config.tui.spinner.as_deref(), Some("quadrant"));
+
+        let config = parse_str("schema_version = 1\n[tui]\nspinner = 3\n").unwrap();
+        assert_eq!(config.tui.spinner, None);
+        assert!(config.skipped.contains(&"tui.spinner".to_string()));
     }
 }
 
