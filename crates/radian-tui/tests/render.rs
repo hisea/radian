@@ -739,7 +739,8 @@ fn the_bar_status_row_never_moves_the_band_or_the_transcript() {
     app.input = "hello".into();
     app.push_message(&Message::user("a question"));
 
-    let idle = render(&mut app, 40, 10);
+    // Wide enough that the whole status row fits: it is asserted on, not clipped.
+    let idle = render(&mut app, 80, 10);
     let band_row = row_of(&idle, "▎ hello").expect("the band");
     let transcript_row = row_of(&idle, "a question").expect("the transcript");
     // Idle: the row above the band is blank (but there).
@@ -749,7 +750,7 @@ fn the_bar_status_row_never_moves_the_band_or_the_transcript() {
     app.projection.set_turn(radian_tui::TurnState::Running);
     app.timer.request_started(app.spinner_origin);
     app.set_now(app.spinner_origin + std::time::Duration::from_secs(12));
-    let running = render(&mut app, 40, 10);
+    let running = render(&mut app, 80, 10);
     assert_eq!(
         row_of(&running, "▎ hello"),
         Some(band_row),
@@ -768,10 +769,52 @@ fn the_bar_status_row_never_moves_the_band_or_the_transcript() {
 
     // The turn ends: the row is blank again and nothing moved.
     app.projection.set_turn(radian_tui::TurnState::Idle);
-    let after = render(&mut app, 40, 10);
+    let after = render(&mut app, 80, 10);
     assert_eq!(row_of(&after, "▎ hello"), Some(band_row));
     assert_eq!(row_of(&after, "a question"), Some(transcript_row));
     assert_eq!(row(&after, (band_row - 1) as u16).trim_end(), "");
+
+    // A running `!` is a status but not a **turn**: its row carries the state without the
+    // turn's interrupt hint (Esc does not cancel a `!` through this path).
+    app.bash_running = Some("sleep 1".to_string());
+    let terminal = render(&mut app, 80, 10);
+    let status = row(&terminal, (band_row - 1) as u16);
+    assert!(status.contains("Running a command"), "{status:?}");
+    assert!(
+        !status.contains("esc to interrupt"),
+        "no turn is running: {status:?}"
+    );
+    app.bash_running = None;
+}
+
+/// ADR 0035 V3: `bar` spends exactly one row on the status row and one per input row — no rule
+/// or border rows and no slack. The band is the input area's last row (the `classic` status bar
+/// is directly below it), and a two-row input grows the band by exactly one row.
+#[test]
+fn the_bar_input_takes_exactly_the_status_row_and_its_text_rows() {
+    use radian_tui::render::InputStyle;
+    let mut app = App::new("m", "s");
+    classic_footer(&mut app);
+    app.input_style = InputStyle::Bar;
+    app.input = "hello".into();
+    // Height 8, the one-row `classic` status bar at row 7: the status row is 5, the band 6.
+    let terminal = render(&mut app, 20, 8);
+    assert_eq!(
+        row_of(&terminal, "▎ hello"),
+        Some(6),
+        "the band is the input's last row:\n{}",
+        screen(&terminal)
+    );
+    assert_eq!(row(&terminal, 5).trim_end(), "", "the blank status row");
+
+    app.input = "one\ntwo".into();
+    let terminal = render(&mut app, 20, 8);
+    assert_eq!(
+        row_of(&terminal, "▎ one"),
+        Some(5),
+        "the status row moved up"
+    );
+    assert_eq!(row_of(&terminal, "▎ two"), Some(6));
 }
 
 /// `tui.footer.glyphs = "ascii"` reaches the rail and the status spinner too (ADR 0027
