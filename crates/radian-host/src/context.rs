@@ -315,6 +315,25 @@ mod tests {
         assert!(files.files[0].path.ends_with("AGENTS.md"));
     }
 
+    /// The same real file is read once (ADR 0036 C2): a workspace `AGENTS.md` that is a
+    /// symlink to the repository root's `AGENTS.md` contributes one section, not two.
+    #[test]
+    fn a_symlinked_context_file_is_read_once() {
+        let dir = TempDir::new("dedup");
+        dir.mkdir("repo/.git");
+        dir.write("repo/AGENTS.md", "ROOT-INSTRUCTIONS");
+        dir.mkdir("repo/sub");
+        std::os::unix::fs::symlink("../AGENTS.md", dir.path().join("repo/sub/AGENTS.md")).unwrap();
+        let files = load(&dir.path().join("repo/sub"), None);
+        assert_eq!(files.files.len(), 1, "{:?}", files.files);
+        assert_eq!(
+            files.section.matches("ROOT-INSTRUCTIONS").count(),
+            1,
+            "{}",
+            files.section
+        );
+    }
+
     /// Discovery stops at the repository root: a file above it is never read (ADR 0036 C2).
     #[test]
     fn discovery_stops_at_the_repository_root() {
