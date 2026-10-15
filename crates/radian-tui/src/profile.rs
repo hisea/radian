@@ -108,6 +108,7 @@ pub fn build_sandbox(
     tier: Tier,
     workspace: &Path,
     deny_read: &[std::path::PathBuf],
+    allow_unix_sockets: &[std::path::PathBuf],
 ) -> Result<Option<Sandbox>, String> {
     if tier == Tier::Safe {
         return Ok(None);
@@ -122,6 +123,11 @@ pub fn build_sandbox(
     // readable in the enforced tiers. `full` gets the list too, but its transparent backend ignores it.
     for path in deny_read {
         policy = policy.deny_read(path);
+    }
+    // ADR 0016: the sockets the user whitelisted (already `~`-expanded and
+    // canonicalized by the host). With the network off they are inert.
+    for path in allow_unix_sockets {
+        policy = policy.allow_unix_socket(path);
     }
     match Sandbox::from_policy(policy) {
         Ok(sandbox) => Ok(Some(sandbox)),

@@ -86,3 +86,17 @@ Base: `cd89c9d` · 一次性检出 `/tmp/sbxnest-mut2`（detached，跑完删除
 | N1 | `from_policy` 不做 `workspace inside deny_read` 检查 | `backend::a_workspace_inside_a_denied_directory_is_refused` | ✅ failed |
 
 1/1 抓住。
+
+## unix-socket：出站 Unix socket 白名单（ADR 0016）
+
+Base: `2d7cb90` · 一次性检出 `/tmp/radian-us-mut`（detached，跑完删除）· 每条改 `seatbelt.rs` 的
+`profile_text` 后跑 `escape_macos`。
+
+| # | 变异 | 抓住它的用例 | 结果 |
+|---|---|---|---|
+| M1 | 去掉 `(deny network-outbound (remote unix-socket))` | `unix_socket workspace_denied` 由 denied 变 **ok** | ✅ 1 例 FAILED |
+| M2 | 去掉 mDNSResponder 放行 | `unix_socket dns_resolves` 由 ok 变 **denied** | ✅ 1 例 FAILED |
+| M3 | 不放行白名单 | `unix_socket whitelisted_allowed` 由 ok 变 **denied** | ✅ 1 例 FAILED |
+| M4 | 放行写在 deny **之前**（SBPL 后写优先，deny 反而赢） | `whitelisted_allowed` 与 `dns_resolves` 都变 denied | ✅ 2 例 FAILED |
+
+4/4 抓住。

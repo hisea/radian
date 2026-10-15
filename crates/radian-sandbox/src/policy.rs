@@ -52,6 +52,10 @@ pub struct SandboxPolicy {
     /// Paths that must not be readable (ADR 0012 decision 3). Missing paths are
     /// dropped at build time; a backend never widens them.
     pub deny_read: Vec<PathBuf>,
+    /// Unix sockets the sandbox may connect to (ADR 0016), canonical. When the
+    /// network is on every other outbound Unix socket is denied; these are the exceptions
+    /// (mDNSResponder is always allowed on top, for DNS).
+    pub allow_unix_sockets: Vec<PathBuf>,
     /// Environment variable names passed through to the child. Everything else is dropped.
     pub allow_env: Vec<String>,
 }
@@ -112,6 +116,7 @@ impl SandboxPolicy {
             network: matches!(mode, SandboxMode::WorkspaceWrite),
             read_only,
             deny_read,
+            allow_unix_sockets: Vec::new(),
             allow_env: DEFAULT_ALLOW_ENV.iter().map(|s| (*s).to_owned()).collect(),
         })
     }
@@ -135,6 +140,19 @@ impl SandboxPolicy {
             && !self.read_only.contains(&p)
         {
             self.read_only.push(p);
+        }
+        self
+    }
+
+    /// Allows connecting to one Unix socket (ADR 0016). The path is canonicalized
+    /// (`/tmp` -> `/private/tmp`); a path that cannot be resolved is skipped, and the caller
+    /// reports it. Only meaningful when the network is on: with it off every outbound socket
+    /// is already denied.
+    pub fn allow_unix_socket(mut self, path: impl AsRef<Path>) -> Self {
+        if let Ok(p) = std::fs::canonicalize(path.as_ref())
+            && !self.allow_unix_sockets.contains(&p)
+        {
+            self.allow_unix_sockets.push(p);
         }
         self
     }
