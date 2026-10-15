@@ -1044,6 +1044,21 @@ RESIZE-B **如实记录**：直接跑 5/5 通过；按 brief 加 4×`yes` 负载
 RESIZE-A 的过程记录：第一轮把 `size_changed()` 的**诊断调用**和真实调用写成了两次，
 诊断那一次把变化吃掉了（trace 里 `changed=Some` 但 `detected` 为 0），改成只调用一次后才由
 `pty_a_bare_resize_re_lays_out` 抓住——变异要真的改变被测行为，不能只加观察。
+
+## completion-menu（可选补全菜单 + 生效思考等级，��
+
+Base `8789877` · 一次性 worktree `/tmp/radian-cm-mut`，每个变异跑完 `cp /tmp/cm-backup` 还原，最后 `git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| CM-M1 | 菜单打开时 `Action::Send` 不再被菜单接住（Enter 会发送） | `mention_tab::enter_accepts_the_highlighted_candidate_without_sending` | ✅ |
+| CM-M2 | 去掉菜单对 `HistoryPrev`/`HistoryNext` 的接管（Up/Down 落回历史/关闭菜单） | `mention_tab::the_menu_opens_on_the_first_row_and_up_down_wrap` | ✅ |
+| CM-M3 | `effective_thinking_level` 直接返回请求值（footer 显示配置值而非钳制值） | `command::the_footer_thinking_level_is_the_clamped_one` | ✅ |
+| CM-M4 | 去掉 `completion_set` 里的高亮重置（打字后高亮不回到第一行） | `update::typing_filters_the_slash_menu_and_resets_the_highlight` | ✅ |
+| CM-M5 | `accept_slash_candidate` 固定取第 0 行（忽略高亮） | `update::the_slash_menu_moves_its_highlight_and_enter_accepts_it` | ✅ |
+| CM-M6 | `thinking_candidates` 的 description 丢掉 wire 值与 `● current` | `command::thinking_candidates_name_the_wire_value_and_mark_the_current_level` | ✅ |
+
+6/6 抓住。
 ## trust-Esc：Esc 不得信任（2026-10-14）
 
 Base `f1993bb` · 一次性 worktree `/tmp/radian-esc-mut`，跑完 `git checkout -- .`，`git status --short` 为空。

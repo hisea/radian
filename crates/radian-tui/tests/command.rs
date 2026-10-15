@@ -346,3 +346,66 @@ fn a_skills_command_lists_through_the_host() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The footer's `reasoning` item shows the level that takes effect, not the configured one
+/// (ADR 0026 D11): `deepseek-v4.1-flash` supports low/high/max, so a configured `medium` shows
+/// `high`.
+#[test]
+fn the_footer_thinking_level_is_the_clamped_one() {
+    let provider = radian_host::ProviderRef::BuiltIn(
+        radian_host::descriptor("opencode-go").expect("the descriptor"),
+    );
+    let level = |requested: &str| {
+        radian_tui::command::effective_thinking_level(
+            &provider,
+            "deepseek-v4.1-flash",
+            requested,
+            4096,
+        )
+    };
+    assert_eq!(level("medium"), "high", "medium clamps up to high");
+    assert_eq!(level("low"), "low");
+    assert_eq!(
+        level("off"),
+        "low",
+        "off clamps up to the lowest supported level"
+    );
+    // A model the descriptor does not list falls back to the provider-level map; a route with
+    // no map at all keeps the requested level (nothing to clamp against).
+    assert_eq!(level("medium"), "high");
+}
+
+/// `/thinking`'s rows name the wire value each level sends and mark the applied level (ADR 0026
+/// D11). `deepseek-v4.1-flash` supports low/high/max; Anthropic sends `enabled:<budget>`.
+#[test]
+fn thinking_candidates_name_the_wire_value_and_mark_the_current_level() {
+    let opencode =
+        radian_host::ProviderRef::BuiltIn(radian_host::descriptor("opencode-go").unwrap());
+    let rows =
+        radian_tui::command::thinking_candidates(&opencode, "deepseek-v4.1-flash", 4096, "high");
+    let inserts: Vec<&str> = rows.iter().map(|row| row.insert.as_str()).collect();
+    assert_eq!(inserts, ["low", "high", "max"], "{rows:?}");
+    let high = rows.iter().find(|row| row.insert == "high").unwrap();
+    assert!(
+        high.description.contains("● current"),
+        "{}",
+        high.description
+    );
+    let low = rows.iter().find(|row| row.insert == "low").unwrap();
+    assert!(
+        !low.description.contains("● current"),
+        "{}",
+        low.description
+    );
+
+    let anthropic =
+        radian_host::ProviderRef::BuiltIn(radian_host::descriptor("anthropic").unwrap());
+    let model = radian_host::descriptor("anthropic").unwrap().models[0].id;
+    let rows = radian_tui::command::thinking_candidates(&anthropic, model, 16384, "high");
+    let high = rows.iter().find(|row| row.insert == "high").unwrap();
+    assert!(
+        high.description.contains("enabled:4096"),
+        "the Anthropic wire value is the budget: {}",
+        high.description
+    );
+}

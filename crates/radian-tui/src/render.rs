@@ -1262,10 +1262,19 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     if !completion.is_empty() {
-        let style = theme.completion;
+        // The highlighted row: the menu's cursor, styled with the theme's
+        // `selection` (reversed in `mono`), so it is clear which candidate Enter/Tab accepts.
         let lines: Vec<Line> = completion
             .into_iter()
-            .map(|row| Line::from(Span::styled(row, style)))
+            .enumerate()
+            .map(|(index, row)| {
+                let style = if index == app.completion_cursor {
+                    theme.selection
+                } else {
+                    theme.completion
+                };
+                Line::from(Span::styled(row, style))
+            })
             .collect();
         frame.render_widget(Paragraph::new(lines), chunks[1]);
     }

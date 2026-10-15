@@ -137,22 +137,23 @@ bare arrow keys belong to the composer.
 
 | Key | Action |
 |---|---|
-| Enter | send. Idle → `Inbox::followup`; while a turn runs → `Inbox::steer`. **While a completion list is up it accepts the best candidate instead** (it completes, it never executes) |
-| Tab | complete what is at the cursor. On a `/…` line: the command tree (below). Otherwise the `@` file reference: one candidate is inserted (a directory keeps its trailing `/`, a file gets a space); several complete to their longest common prefix, and a second Tab already at that prefix shows the candidate list above the input box; any other word does nothing (the key is reserved) |
+| Enter | send. Idle → `Inbox::followup`; while a turn runs → `Inbox::steer`. **While a completion menu is up it accepts the highlighted row instead** (it completes, it never executes, and it never sends) |
+| Tab | complete what is at the cursor. On a `/…` line: the command tree (below). Otherwise the `@` file reference: one candidate is inserted (a directory keeps its trailing `/`, a file gets a space); several complete to their longest common prefix, and a second Tab already at that prefix shows the menu above the input box; any other word does nothing (the key is reserved). **While the menu is up it accepts the highlighted row**, like Enter |
 | Ctrl-J (or Shift-Enter / Alt-Enter) | insert a newline in the input (Shift-Enter needs the keyboard-enhancement protocol; Ctrl-J works everywhere) |
 | Left / Right | move the cursor one character |
 | Ctrl-Left / Ctrl-Right (or Alt-Left / Alt-Right) | move by one word |
 | Home / End (or Ctrl-A / Ctrl-E) | the input **line's** start / end |
-| Up / Down | on the first / last input line: the previous / next history entry (Down past the newest returns to the draft); otherwise move between the input's lines, keeping the column |
+| Up / Down | **while a completion menu is up, move its highlight** (and wrap); otherwise on the first / last input line the previous / next history entry (Down past the newest returns to the draft), else move between the input's lines, keeping the column |
 | Backspace / Delete | delete before / under the cursor |
 | Ctrl-W | delete the previous word |
 | Ctrl-U / Ctrl-K | delete to the line's start / end |
 | PageUp / PageDown | scroll the transcript a page |
 | Shift-Up / Shift-Down | scroll the transcript one line |
 | Ctrl-Home / Ctrl-End | scroll the transcript to its top / bottom |
-| Esc | (`escape` in the transcript, `find_close` in the find box) close the find box or the `@` candidate list if one is up; otherwise clear a non-empty input first (the line stays in the history, so `Up` finds it); with an empty input, cancel the running turn / quit |
+| Esc | (`escape` in the transcript, `find_close` in the find box) close the find box or a completion menu if one is up (the input is kept); otherwise clear a non-empty input first (the line stays in the history, so `Up` finds it); with an empty input, cancel the running turn / quit |
 | Ctrl-C | cancel the running turn; idle with a non-empty input, clear it (into the history); idle with an empty input, arm "press Ctrl-C again to quit" for 2 s (any other key, or the window closing, disarms it; the status bar shows `Press Ctrl-C again to quit`) |
 | Ctrl-P (`toggle_startup`) | fold or unfold the startup information block |
+| Ctrl-N (`menu_next`) | while a completion menu is up, move its highlight down (Ctrl-P is taken, so Ctrl-N is the menu's other key; ) |
 | Ctrl-F (`find` in the transcript, `find_prev` in the find box) | open the in-transcript search box (`find: <query>`, replacing the input line; the message draft is kept). Type to search the displayed transcript case-insensitively; a second Ctrl-F or Enter is the earlier match, Shift-Enter or Ctrl-G the later one (no wrap); the status bar shows `match i/N`; Esc closes the box where the viewport is |
 | bracketed paste | inserts at the cursor, `\r\n` normalized to `\n`, and never sends |
 
@@ -170,8 +171,10 @@ everywhere and stay the fallback.
 inside the workspace like the `read` tool (no absolute path, no `..`, a symlink that leaves is
 refused), at most 100 KiB per file and 400 KiB in total, and a binary file makes the message
 unsendable with the input kept. The transcript folds each attachment to `[file: P, N lines]`.
-`Tab` completes the path; the candidate list is at most 10 rows plus `+N more`, clipped to the
-terminal width, and never covers an approval prompt.
+`Tab` completes the path; the menu is at most 10 rows plus `+N more`, clipped to the terminal
+width, and never covers an approval prompt. The first (best) row is highlighted with the theme's
+`selection` (reversed in `mono`); `Up`/`Down` (or `Ctrl-N`) move the highlight and wrap, `Enter`
+or `Tab` accepts the highlighted row, and `Esc` closes the menu keeping the input.
 
 ### Theme and keybindings (config `tui.*`)
 
@@ -196,6 +199,7 @@ send = ["ctrl-s"]              # replaces the default `enter`
 newline = ["ctrl-j", "alt-enter", "shift-enter"]
 history_prev = ["up"]
 complete = ["tab"]             # the `@` file-reference completion
+menu_next = ["ctrl-n"]         # move the completion menu's highlight down
 find = ["ctrl-f"]              # open the in-transcript search box
 find_next = ["ctrl-g", "shift-enter"]
 ```
@@ -354,9 +358,10 @@ decision 3), so ADR 0027/0028 can wire them without re-reading the file.
   (`form_next`, `form_prev`, `form_up`, `form_down`, `form_select`, `form_submit`,
   `form_decline`) is the third: it is the one modal whose keys are rebindable (ADR 0024 Q7),
   and `cancel` (Ctrl-C) still runs before it.
-- While the `@` completion list is showing, `escape` only closes the list (it does not clear
-  the input), and any key other than `complete` dismisses it. Both follow the keymap, so a
-  rebound `escape`/`complete` moves that behavior too. Likewise `find_close`'s `esc` closes the
+- While a completion menu is showing, `up`/`down` (and `menu_next`) move its highlight,
+  `escape` closes it (it does not clear the input), and `complete`/`send` accept the highlighted
+  row; any other key dismisses it. These follow the keymap, so a rebound `escape`/`complete`
+  moves that behavior too. Likewise `find_close`'s `esc` closes the
   box before `escape` would clear the input.
 - Note that rebinding `send` away from `enter` leaves `enter` a no-op unless `newline` is given
   it too (as in the example) — the keys are a total map, not layered.
@@ -376,8 +381,11 @@ and the index only read `*.jsonl`, so a draft is never a session.
 A `/…` line is a command: it never reaches the model, the transcript or the journal. Typing `/`
 shows the command tree's candidates above the input area; **every level completes**, with one
 fuzzy match (a subsequence, prefix matches first): `/mem` → `/memory`, then `/memory fo` →
-`forget`. Tab or Enter accepts the best candidate (it completes the line, it never runs it) and
-Esc closes the list. `/mem fo` completes both levels at once.
+`forget`. The menu highlights its first row; `Up`/`Down` move the highlight, `Tab` or `Enter`
+accepts the highlighted row (it completes the line, it never runs it) and `Esc` closes the menu
+keeping the line. `/mem fo` completes both levels at once. The `/theme`, `/model` and
+`/thinking` rows mark the value in effect with `● current`, and each `/thinking` row names the
+wire value it sends (`enabled:4096` for Anthropic, `high` for openai-compatible).
 
 The levels are data (`command.rs`): the command names from their `/help` lines, `/memory`'s
 subcommands, the record ids of `show`/`edit`/`archive`/`restore`/`forget`/`confirm` (listed by
