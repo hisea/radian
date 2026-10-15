@@ -118,7 +118,7 @@ fn the_default_footer_is_two_rows() {
         "the reasoning glyph is on the first row: {first:?}"
     );
     assert!(
-        second.contains('^'),
+        second.contains('↑'),
         "the tokens row is the second: {second:?}"
     );
     assert_eq!(app.footer.preset(), Preset::Deck);
@@ -1189,7 +1189,7 @@ fn the_brand_default_follows_the_glyph_set() {
 }
 
 /// ADR 0027's sample: the deck's third row, whole, is
-/// `^15M v2.6M R1962M $14.510 41.3%/1.0M` (compact tokens, a 3-decimal cost, the context
+/// `↑15M ↓2.6M R1962M $14.510 41.3%/1.0M` (compact tokens, a 3-decimal cost, the context
 /// share with one decimal and the window in `M`).
 #[test]
 fn the_deck_numbers_row_matches_the_sample() {
@@ -1223,6 +1223,6 @@ fn the_deck_numbers_row_matches_the_sample() {
     // The numbers row is right-aligned; the content itself is the sample.
     assert_eq!(
         row(&terminal, 11).trim(),
-        "^15M v2.6M R1962M $14.510 41.3%/1.0M"
+        "↑15M ↓2.6M R1962M $14.510 41.3%/1.0M"
     );
 }

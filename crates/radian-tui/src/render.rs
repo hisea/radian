@@ -348,6 +348,7 @@ fn entry_lines(
             band,
             width,
             spinner,
+            modes.glyphs,
         );
         if Some(i) == last && entry.interrupted {
             line.spans
@@ -397,6 +398,7 @@ fn render_row(
     band: Option<Style>,
     width: usize,
     spinner: crate::spinner::Frame,
+    glyphs: crate::footer::Glyphs,
 ) -> Line<'static> {
     if row.pad {
         return match band {
@@ -407,13 +409,13 @@ fn render_row(
     }
     // The collapsed reasoning placeholder is one synthetic line: its marker is the marker
     // column's own glyph (ADR 0028 rule 5), so the body column does not move
-    // between folded and expanded. `>` stands in for `▸` (ADR 0027: `▸` is not in
-    // all seven checked fonts).
+    // between folded and expanded. The marker is the tier's fold glyph (ADR 0027
+    // item 2: `›` for unicode, `>` for nerd/ascii; `▸` is not in all six checked fonts).
     let placeholder = entry.kind == EntryKind::Reasoning && row.hint;
     let lead = if row.code {
         String::new()
     } else if placeholder {
-        "> ".to_string()
+        format!("{} ", glyphs.fold_marker())
     } else if first_text {
         prefix.to_string()
     } else {
@@ -716,6 +718,7 @@ pub fn visible_lines_with(
                             band,
                             width,
                             spinner,
+                            modes.glyphs,
                         );
                         if Some(i) == last && entry.interrupted {
                             line.spans

@@ -275,8 +275,10 @@ find_next = ["ctrl-g", "shift-enter"]
 A glyph the font does not have is drawn by a system fallback font with different metrics, so it
 sits off the baseline. The `unicode` tier (the default, no Nerd Font needed) therefore only uses
 characters that **all** of Menlo, SF Mono, JetBrains Mono, Cascadia Code, Fira Code and
-Source Code Pro have (ADR 0027: Operator Mono left the reference set). The brand is `R` (bold accent) here, `󰰠` under `nerd`, `rad` under
-`ascii`; `㎭` (U+33AD) is gone (East-Asian-Wide, off-baseline fallback). The spinner's default
+Source Code Pro have (ADR 0027: Operator Mono left the reference set, and the tier's
+token arrows became `↑`/`↓`, its success `✓`, its fold marker `›` and its truncation `…`). The
+brand is `R` (bold accent) here, `󰰠` under `nerd`, `rad` under `ascii`; `㎭` (U+33AD) is gone
+(East-Asian-Wide, off-baseline fallback). The spinner's default
 is `pulse` (`⏺`, one cell); the covered optional kind is `quadrant` (`▖▘▝▗`). The arc
 (`◜◝◞◟`), the braille (`⠋⠙⠸⠴`) and `pulse` itself are the **documented exceptions** to this
 rule (ADR 0027/10: the owner picked them after seeing them), so a font without them
@@ -295,11 +297,12 @@ from slipping in unchecked.
 | `»` | U+00BB | speed | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `*` | U+002A | reasoning | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `#` | U+0023 | session | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `^` | U+005E | tokens in | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `v` | U+0076 | tokens out | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `↑` | U+2191 | tokens in | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `↓` | U+2193 | tokens out | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `~` | U+007E | auto-compaction marker | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `~` `+` `×` | U+007E/2B/D7 | tool status: running / success / failure | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `>` | U+003E | reasoning fold marker | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `~` `✓` `×` | U+007E/2713/D7 | tool status: running / success / failure | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `›` | U+203A | reasoning fold marker | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `…` | U+2026 | truncation | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `│` | U+2502 | footer separator | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `━` | U+2501 | context bar fill | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `─` | U+2500 | context bar empty | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -326,11 +329,11 @@ Replaced or dropped in the `unicode` tier (they were not in all six fonts):
 | `◐` reasoning | U+25D0 | `*` |
 | `⛁` session | U+26C1 | `#` |
 | `⬡` tier | U+2B21 | no icon (text only) |
-| `↑` `↓` tokens | U+2191/3 | `^` `v` |
+| `^` `v` tokens | U+005E/76 | `↑` `↓` |
 | `⟲` auto | U+27F2 | `~` |
 | `⠋⠙⠸⠴` spinner | U+280B… | `▖▘▝▗` |
-| `▸` thinking fold | U+25B8 | `>` |
-| `⟳` `✔` `✘` tool status | U+27F3/2714/2718 | `~` `+` `×` |
+| `▸` thinking fold | U+25B8 | `›` |
+| `⟳` `✔` `✘` tool status | U+27F3/2714/2718 | `~` `✓` `×` |
 | `▶` `▼` startup fold | U+25B6/BC | `+` `-` |
 | `㎭` brand | U+33AD | `R` / `󰰠` / `rad` |
 

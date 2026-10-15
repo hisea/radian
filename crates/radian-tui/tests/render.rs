@@ -1156,11 +1156,15 @@ fn the_block_layout_snapshot() {
             line.trim_end().to_string()
         })
         .collect();
+    // The status glyphs the app's footer draws (running, success, failure): the unicode tier
+    // is `~`/`✓`/`×`, so the golden never hardcodes one.
+    let status = app.footer_glyphs().tool_status();
+    let list_head = format!("->{} list: src (2 entries)", status[1]);
     let golden = vec![
         "",                              // the user block's top pad (banded)
         "> explain the failure",         // the user text
         "",                              // the user block's bottom pad (banded)
-        "> thinking (3 lines)",          // the folded channel: the marker column glyph
+        "› thinking (3 lines)",          // the folded channel: the marker column glyph
         "",                              // the container's gap
         "  Looking into it.",            // the assistant
         "",                              // the gap
@@ -1169,9 +1173,9 @@ fn the_block_layout_snapshot() {
         "   exit code: 2",
         "   --- stdout ---",
         "   boom",
-        "",                          // the gap
-        "->+ list: src (2 entries)", // the second call
-        " <-d 4.0K src",             // its result (the aligned table)
+        "",                 // the gap
+        list_head.as_str(), // the second call
+        " <-d 4.0K src",    // its result (the aligned table)
         "   f 512 B b.md",
         "", // the gap
         "* profile: workspace · sandbox macos-seatbelt",
@@ -1745,7 +1749,7 @@ fn thinking_folds_to_one_line_and_ctrl_t_expands_it() {
         message: assistant_with("THE ANSWER", "FIRST THOUGHT\nSECOND THOUGHT", false, vec![]),
     });
     let text = screen(&render(&mut app, 60, 10));
-    assert!(text.contains("> thinking (2 lines)"), "{text}");
+    assert!(text.contains("› thinking (2 lines)"), "{text}");
     assert!(
         !text.contains("FIRST THOUGHT"),
         "folded by default:
@@ -1761,11 +1765,11 @@ fn thinking_folds_to_one_line_and_ctrl_t_expands_it() {
 {text}"
     );
     assert!(text.contains("SECOND THOUGHT"), "{text}");
-    assert!(!text.contains("> thinking"), "{text}");
+    assert!(!text.contains("› thinking"), "{text}");
 
     app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
     let text = screen(&render(&mut app, 60, 10));
-    assert!(text.contains("> thinking (2 lines)"), "{text}");
+    assert!(text.contains("› thinking (2 lines)"), "{text}");
     assert!(!text.contains("FIRST THOUGHT"), "{text}");
 }
 

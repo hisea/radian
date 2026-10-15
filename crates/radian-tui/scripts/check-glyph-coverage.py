@@ -55,8 +55,8 @@ GLYPHS = [
     ("»", "speed"),
     ("*", "reasoning"),
     ("#", "session"),
-    ("^", "tokens in"),
-    ("v", "tokens out"),
+    ("↑", "tokens in"),
+    ("↓", "tokens out"),
     ("R", "tokens cache"),
     ("~", "auto-compaction marker"),
     ("│", "footer separator"),
@@ -73,9 +73,10 @@ GLYPHS = [
     ("◟", "spinner arc (documented exception)"),
     ("⠋", "spinner braille (documented exception)"),
     ("~", "tool status: running"),
-    ("+", "tool status: success"),
+    ("✓", "tool status: success"),
     ("×", "tool status: failure"),
-    (">", "reasoning fold marker"),
+    ("›", "reasoning fold marker"),
+    ("…", "truncation"),
 ]
 
 

@@ -53,13 +53,31 @@ impl Glyphs {
 
     /// The tool-call status glyphs (ADR 0028 rule 4): running, success, failure.
     /// The unicode set is covered by all six checked fonts (ADR 0027 and 6): omp's
-    /// `⟳`/`✔`/`✘` are not, so `~`/`+`/`×` stand in. The Nerd set uses the Font Awesome
+    /// `⟳`/`✔`/`✘` are not, so `~`/`✓`/`×` stand in. The Nerd set uses the Font Awesome
     /// codepoints; the ASCII set is plain.
     pub fn tool_status(self) -> [&'static str; 3] {
         match self {
-            Self::Unicode => ["~", "+", "×"],
+            Self::Unicode => ["~", "✓", "×"],
             Self::Nerd => ["\u{f110}", "\u{f00c}", "\u{f00d}"],
             Self::Ascii => ["*", "+", "x"],
+        }
+    }
+
+    /// The token arrows: the unicode tier uses `↑`/`↓` (revision 6 item 2; both are in all six
+    /// checked fonts), the other tiers keep `^`/`v`.
+    pub fn token_arrows(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Unicode => ("↑", "↓"),
+            Self::Nerd | Self::Ascii => ("^", "v"),
+        }
+    }
+
+    /// The folded-reasoning marker: `›` for the unicode tier (revision 6 item 2; `▸` is not in
+    /// all six fonts and `›` is), `>` for the other tiers.
+    pub fn fold_marker(self) -> &'static str {
+        match self {
+            Self::Unicode => "›",
+            Self::Nerd | Self::Ascii => ">",
         }
     }
 }
@@ -263,7 +281,7 @@ impl Footer {
         };
         let rows: Vec<Row> = if config.rows.is_empty() {
             // The built-in preset, then the per-field `items` config on top.
-            let mut rows = preset_rows(preset);
+            let mut rows = preset_rows(preset, glyphs);
             for row in &mut rows {
                 for item in row.left.iter_mut().chain(row.right.iter_mut()) {
                     if let Some(field) = config.items.get(&item.id) {
@@ -319,7 +337,7 @@ impl Footer {
     /// pre-ADR one-line status bar); `pi` builds its rows here.
     pub fn lines(&self, app: &App, width: usize) -> Vec<Line<'static>> {
         let rows: Cow<'_, [Row]> = if self.rows.is_empty() {
-            Cow::Owned(preset_rows(self.preset))
+            Cow::Owned(preset_rows(self.preset, self.glyphs))
         } else {
             Cow::Borrowed(&self.rows)
         };
@@ -334,7 +352,8 @@ impl Footer {
 
 /// The built-in rows for a preset (ADR 0027 C2 and revision 1; a configured `rows` overrides
 /// them entirely). `classic` is drawn by the renderer, so its rows are unused.
-fn preset_rows(preset: Preset) -> Vec<Row> {
+fn preset_rows(preset: Preset, glyphs: Glyphs) -> Vec<Row> {
+    let (token_in, token_out) = glyphs.token_arrows();
     let item = |id: &str| Item {
         id: id.to_string(),
         icon: None,
@@ -385,7 +404,10 @@ fn preset_rows(preset: Preset) -> Vec<Row> {
                 ..row(
                     Vec::new(),
                     vec![
-                        with_format("tokens", "^{in} v{out} R{cache}"),
+                        with_format(
+                            "tokens",
+                            &format!("{token_in}{{in}} {token_out}{{out}} R{{cache}}"),
+                        ),
                         item("cost"),
                         no_symbol("context", "{percent}%/{budget}"),
                     ],
@@ -412,7 +434,10 @@ fn preset_rows(preset: Preset) -> Vec<Row> {
                 // The numbers row: tokens (in/out/cache), speed, cost, context (share/window
                 // with the auto-compaction marker), elapsed.
                 left: vec![
-                    with_format("tokens", "^{in} v{out} {cache}"),
+                    with_format(
+                        "tokens",
+                        &format!("{token_in}{{in}} {token_out}{{out}} {{cache}}"),
+                    ),
                     item("speed"),
                     item("cost"),
                     with_format("context", "{percent}%/{budget}{auto}"),
@@ -1260,7 +1285,12 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
                         .map_or_else(|| "-".to_string(), crate::timing::format_tokens),
                 ),
             ],
-            default_format: "^{in} v{out} R{cache}",
+            // The default format is a tier default (ADR 0027 item 2): the unicode
+            // tier's arrows, or `^`/`v`. A user-configured format always wins.
+            default_format: match app.footer_glyphs() {
+                Glyphs::Unicode => "↑{in} ↓{out} R{cache}",
+                Glyphs::Nerd | Glyphs::Ascii => "^{in} v{out} R{cache}",
+            },
             numeric: None,
         }),
         // ADR 0027: the fee the session has accumulated, each call priced at the
@@ -1493,7 +1523,7 @@ mod tests {
     /// checked against the six fonts by `scripts/check-glyph-coverage.py` and listed in the
     /// README's coverage table. A new glyph makes this test fail until it is re-checked and
     /// added here.
-    const VERIFIED_COVERED: &str = "»│━─×▖▘▝▗";
+    const VERIFIED_COVERED: &str = "»│━─×▖▘▝▗↑↓✓›…";
 
     /// The documented exceptions to the coverage rule (ADR 0027/10): the owner
     /// picked the arc and the pulse after seeing them, and braille is an opt-in, so these may
@@ -1570,7 +1600,7 @@ mod tests {
     fn unicode_tier_glyphs_are_all_verified_covered() {
         let mut glyphs: Vec<char> = Vec::new();
         for preset in [Preset::Deck, Preset::Full, Preset::Pi] {
-            for row in preset_rows(preset) {
+            for row in preset_rows(preset, Glyphs::Unicode) {
                 for item in row.left.iter().chain(row.right.iter()) {
                     glyphs.extend(glyph(&item.id, Glyphs::Unicode).chars());
                     if let Some(format) = &item.format {
@@ -1594,6 +1624,8 @@ mod tests {
             }
         }
         glyphs.extend("━─".chars());
+        // The status line's truncation marker (ADR 0027 item 2: `…`).
+        glyphs.extend("…".chars());
         glyphs.extend(" ~".chars());
         for ch in glyphs {
             if ch.is_ascii() || ch == ' ' {
