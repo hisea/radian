@@ -8436,12 +8436,10 @@ async fn pty_bang_is_single_and_escapable() {
     );
     let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // A running `!` has no block yet (the block appears when it finishes), and the composer
+    // echo is gone as soon as Enter is handled, so there is nothing to wait for here: the two
+    // sends are processed in order, so the second sees the first already running.
     pty.send(b"!sleep 30\r");
-    assert!(
-        pty.wait_for_screen("sleep 30", 10),
-        "the command block is not on screen:\n{}",
-        pty.screen()
-    );
     // A second command while the first runs is refused, not queued or run.
     pty.send(b"!echo SECOND\r");
     assert!(
@@ -8476,12 +8474,9 @@ async fn pty_ctrl_c_stops_a_running_bang() {
     );
     let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // No block to wait for (it appears when the command finishes); the sends are ordered, so
+    // the `!` is running by the time the turn below starts.
     pty.send(b"!sleep 30\r");
-    assert!(
-        pty.wait_for_screen("sleep 30", 10),
-        "the command block is not on screen:\n{}",
-        pty.screen()
-    );
 
     // Start a turn so Ctrl-C is a cancel; the mock hangs, so it is still running.
     pty.send(b"hello\r");
