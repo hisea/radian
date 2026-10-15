@@ -533,10 +533,10 @@ fn split_nul(raw: &[u8]) -> Vec<String> {
 }
 
 /// Refuses any staged path whose `filter` attribute names a driver the host must not run
-/// (ADR 0030). `git check-attr -z` gives `(path, filter, value)` triples; `set`,
-/// `unset` and `unspecified` are not driver names. A driver must be in `allowed`; `lfs` is only
-/// allowed when its `clean`/`process` commands are unset or a `git-lfs` command. Any other
-/// allowed name is the user's opt-in and is not inspected further.
+/// (ADR 0030). `git check-attr --stdin -z` gives `(path, filter, value)` triples;
+/// `set`, `unset` and `unspecified` are not driver names. A driver must be in `allowed`; `lfs`
+/// is only allowed when its `clean`/`process` commands are unset or a `git-lfs` command. Any
+/// other allowed name is the user's opt-in and is not inspected further.
 fn check_filters(
     workspace: &Path,
     pin: &RepoPin,
@@ -546,33 +546,18 @@ fn check_filters(
     if paths.is_empty() {
         return Ok(());
     }
-    let mut args: Vec<String> = vec![
-        "check-attr".into(),
-        "-z".into(),
-        "filter".into(),
-        "--".into(),
-    ];
-    args.extend(paths.iter().cloned());
-    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-    let raw = git_raw(workspace, pin, &borrowed)?;
-    let text = String::from_utf8_lossy(&raw);
-    let mut fields = text.split('\0');
-    while let (Some(path), Some(_attr), Some(value)) = (fields.next(), fields.next(), fields.next())
-    {
-        if matches!(value, "set" | "unset" | "unspecified") {
-            continue;
-        }
-        if !allowed.iter().any(|name| name == value) {
+    for (path, driver) in filter_drivers(workspace, pin, paths)? {
+        if !allowed.iter().any(|name| name == &driver) {
             return Err(fail(
                 "filter_not_allowed",
                 format!(
                     "refusing to stage `{path}`: its `filter` attribute runs the git filter \
-                     driver `{value}`, which is not in `[git] allowed_filters`; add \
-                     `{value}` there if you trust it, or remove the attribute"
+                     driver `{driver}`, which is not in `[git] allowed_filters`; add \
+                     `{driver}` there if you trust it, or remove the attribute"
                 ),
             ));
         }
-        if value == "lfs" {
+        if driver == "lfs" {
             for key in ["clean", "process"] {
                 let setting = format!("filter.lfs.{key}");
                 if let Some(command) = git_config_opt(workspace, pin, &setting)?
@@ -590,6 +575,65 @@ fn check_filters(
         }
     }
     Ok(())
+}
+
+/// `git check-attr --stdin -z filter` over `paths`, as `(path, driver)` pairs for every path
+/// whose `filter` value is a driver name. The paths go through **stdin**, not argv: since the
+/// list is every tracked file, a large repository would otherwise hit `E2BIG` (ADR 0030
+/// revision 4). Stdin is written from its own thread so a full stdout pipe cannot deadlock the
+/// write.
+fn filter_drivers(
+    workspace: &Path,
+    pin: &RepoPin,
+    paths: &[String],
+) -> Result<Vec<(String, String)>, ToolFailure> {
+    let full = common_args(pin, &["check-attr", "--stdin", "-z", "filter"]);
+    let mut child = std::process::Command::new("git")
+        .current_dir(workspace)
+        .args(&full)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| fail("git_unavailable", format!("could not run git: {error}")))?;
+    let mut input = Vec::new();
+    for path in paths {
+        input.extend_from_slice(path.as_bytes());
+        input.push(0);
+    }
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let writer = std::thread::spawn(move || {
+        use std::io::Write;
+        // Dropping `stdin` at the end closes the pipe, so `git` sees EOF.
+        let _ = stdin.write_all(&input);
+    });
+    let output = child.wait_with_output().map_err(|error| {
+        fail(
+            "git_failed",
+            format!("git check-attr failed: {error}"),
+        )
+    })?;
+    let _ = writer.join();
+    if !output.status.success() {
+        return Err(fail(
+            "git_failed",
+            format!(
+                "git check-attr failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        ));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut fields = text.split('\0');
+    let mut drivers = Vec::new();
+    while let (Some(path), Some(_attr), Some(value)) =
+        (fields.next(), fields.next(), fields.next())
+    {
+        if !matches!(value, "set" | "unset" | "unspecified") {
+            drivers.push((path.to_owned(), value.to_owned()));
+        }
+    }
+    Ok(drivers)
 }
 
 /// The global arguments **every** git call carries (ADR 0030 R10): the pinned repository, and

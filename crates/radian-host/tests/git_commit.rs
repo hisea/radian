@@ -620,3 +620,40 @@ fn status_show_untracked_files_no_does_not_hide_the_check() {
         "status.showUntrackedFiles=no must not hide an untracked file"
     );
 }
+
+/// ADR 0030 (review fix): the path list the filter check reads is every tracked
+/// file, so it must go through stdin. With ~30k long names the argv list is well over the
+/// 1 MiB `ARG_MAX`, and `git check-attr` fails with `E2BIG`, which would make `git_commit`
+/// fail in any large repository. It must succeed here.
+#[test]
+fn a_large_repository_does_not_hit_the_argument_limit() {
+    let dir = repo("filter-large");
+    // `repo` wrote an untracked `a.txt`; drop it so the tree is just the many files.
+    let _ = std::fs::remove_file(dir.join("a.txt"));
+    for i in 0..30_000 {
+        let name = format!("{i:06}-{}.dat", "x".repeat(40));
+        std::fs::write(dir.join(name), "").unwrap();
+    }
+    assert!(git(&dir, &["add", "-A"]), "add the many files");
+    assert!(
+        git(
+            &dir,
+            &[
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "-m",
+                "many",
+            ],
+        ),
+        "commit the many files"
+    );
+    // One more change, then a normal commit: the check must not fail with E2BIG.
+    std::fs::write(dir.join("last.txt"), "last\n").unwrap();
+    let committed = commit_in(&dir, "m", &[], None, &[]).expect("a large repo commits");
+    assert!(committed.files >= 1, "{committed:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
