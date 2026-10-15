@@ -5,7 +5,7 @@ use std::time::Duration;
 use agent_core::{
     ToolContext, ToolError, ToolFailure, ToolOutput, ToolProvider, ToolSession, ToolSpec,
 };
-use radian_sandbox::{Sandbox, SandboxMode};
+use radian_sandbox::{Sandbox, SandboxMode, SandboxSlot};
 
 use crate::workspace::{WorkspaceError, WorkspaceRoot};
 use crate::{fail, git, jobs, list, patch, read, shell, write};
@@ -85,7 +85,10 @@ pub enum CodingToolsError {
 pub struct CodingTools {
     root: Arc<WorkspaceRoot>,
     limits: Limits,
-    sandbox: Option<Arc<Sandbox>>,
+    /// The sandbox `shell`/jobs read at the start of every call (ADR 0038 slice 2). The host
+    /// keeps a clone and swaps it when `/access` changes the tier; a call already running
+    /// holds the `Arc` it cloned and is unaffected.
+    sandbox: SandboxSlot,
     /// The background-job registry (ADR 0037). The host supplies one so it can subscribe to
     /// job lifecycle notices; when it does not, `open_session` creates one.
     jobs: Option<Arc<jobs::Jobs>>,
@@ -100,7 +103,7 @@ impl CodingTools {
         Ok(Self {
             root: Arc::new(WorkspaceRoot::new(root)?),
             limits: Limits::default(),
-            sandbox: None,
+            sandbox: SandboxSlot::empty(),
             jobs: None,
         })
     }
@@ -114,17 +117,31 @@ impl CodingTools {
         root: impl AsRef<std::path::Path>,
         sandbox: Sandbox,
     ) -> Result<Self, CodingToolsError> {
+        Self::with_sandbox_slot(root, SandboxSlot::with(sandbox))
+    }
+
+    /// The same tools over a **shared** sandbox slot (ADR 0038 slice 2): the host keeps a
+    /// clone and swaps it on `/access`, so `shell`/jobs read the current tier. `shell` is
+    /// advertised whenever the slot currently holds a sandbox; the tool set is fixed at
+    /// `open_session`, so a session that starts in `safe` does not gain `shell` mid-session
+    /// (switching to a *narrower* tier still denies it through the permission rules).
+    pub fn with_sandbox_slot(
+        root: impl AsRef<std::path::Path>,
+        sandbox: SandboxSlot,
+    ) -> Result<Self, CodingToolsError> {
         let root = WorkspaceRoot::new(root)?;
-        if sandbox.policy().workspace != root.root() {
+        if let Some(current) = sandbox.get()
+            && current.policy().workspace != root.root()
+        {
             return Err(CodingToolsError::SandboxWorkspace {
                 tools: root.root().to_path_buf(),
-                sandbox: sandbox.policy().workspace.clone(),
+                sandbox: current.policy().workspace.clone(),
             });
         }
         Ok(Self {
             root: Arc::new(root),
             limits: Limits::default(),
-            sandbox: Some(Arc::new(sandbox)),
+            sandbox,
             jobs: None,
         })
     }
@@ -147,7 +164,7 @@ impl CodingTools {
 
     /// The sandbox `shell` runs under, if the tool is present.
     pub fn sandbox_mode(&self) -> Option<SandboxMode> {
-        self.sandbox.as_deref().map(Sandbox::mode)
+        self.sandbox.mode()
     }
 }
 
@@ -163,7 +180,7 @@ impl ToolProvider for CodingTools {
             root: Arc::clone(&self.root),
             limits: self.limits,
             sandbox: self.sandbox.clone(),
-            specs: specs(self.sandbox.as_deref().map(Sandbox::mode)),
+            specs: specs(self.sandbox.mode()),
             jobs,
         })
     }
@@ -174,7 +191,7 @@ impl ToolProvider for CodingTools {
 pub struct CodingSession {
     root: Arc<WorkspaceRoot>,
     limits: Limits,
-    sandbox: Option<Arc<Sandbox>>,
+    sandbox: SandboxSlot,
     specs: Vec<ToolSpec>,
     jobs: Arc<jobs::Jobs>,
 }
@@ -229,11 +246,11 @@ impl ToolSession for CodingSession {
             "list" => list::run(&self.root, &self.limits, &call.arguments).await,
             "git_status" => git::status(&self.root, &self.limits, &call.arguments).await,
             "git_diff" => git::diff(&self.root, &self.limits, &call.arguments).await,
-            "shell" => match &self.sandbox {
+            "shell" => match self.sandbox.get() {
                 Some(sandbox) => {
                     shell::run(
                         &self.root,
-                        sandbox,
+                        &sandbox,
                         &self.limits,
                         &self.jobs,
                         &call.arguments,
