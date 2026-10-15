@@ -209,6 +209,12 @@ pub struct PermissionsConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CompactionConfig {
     pub auto: Option<bool>,
+    /// `[compaction] thinking` (ADR 0018, decision 1): the reasoning level the
+    /// **summary** call runs at, one of the seven unified levels, or `"current"` to use the
+    /// conversation's level (no override). `None` means the default, `low`. The host clamps it
+    /// against the route's map and converts it to the provider's wire value; the core only
+    /// sees the converted object.
+    pub thinking: Option<String>,
 }
 
 /// `[skills] extra_paths` (ADR 0025 slice 4, ruling 2): more skill roots, **as written** in the
@@ -822,6 +828,20 @@ fn parse_compaction(value: &Value, path: &Path, config: &mut Config) -> Result<(
         match (key.as_str(), value) {
             ("auto", Value::Boolean(auto)) => config.compaction.auto = Some(*auto),
             ("auto", _) => return Err(wrong_type(path, "compaction.auto", "a boolean")),
+            ("thinking", Value::String(level))
+                if level == crate::COMPACTION_THINKING_CURRENT
+                    || crate::THINKING_LEVELS.contains(&level.as_str()) =>
+            {
+                config.compaction.thinking = Some(level.clone());
+            }
+            ("thinking", Value::String(_)) => {
+                return Err(wrong_type(
+                    path,
+                    "compaction.thinking",
+                    "one of off|minimal|low|medium|high|xhigh|max, or \"current\"",
+                ));
+            }
+            ("thinking", _) => return Err(wrong_type(path, "compaction.thinking", "a string")),
             (other, _) => config.skipped.push(format!("compaction.{other}")),
         }
     }
@@ -1672,6 +1692,7 @@ x-a = "1"
 profile = "full"
 [compaction]
 auto = false
+thinking = "high"
 [tui]
 theme = "light"
 "#,
@@ -1690,7 +1711,26 @@ theme = "light"
         );
         assert_eq!(config.permissions.profile.as_deref(), Some("full"));
         assert_eq!(config.compaction.auto, Some(false));
+        assert_eq!(config.compaction.thinking.as_deref(), Some("high"));
         assert_eq!(config.tui.theme.as_deref(), Some("light"));
+    }
+
+    /// ADR 0018: `[compaction] thinking` accepts the seven levels or `"current"`;
+    /// anything else is a config error, never a silent clamp from the default.
+    #[test]
+    fn compaction_thinking_accepts_the_levels_and_current_and_refuses_anything_else() {
+        let config =
+            parse_str("schema_version = 1\n[compaction]\nthinking = \"current\"\n").unwrap();
+        assert_eq!(config.compaction.thinking.as_deref(), Some("current"));
+        for level in ["off", "minimal", "low", "medium", "high", "xhigh", "max"] {
+            let config = parse_str(&format!(
+                "schema_version = 1\n[compaction]\nthinking = \"{level}\"\n"
+            ))
+            .unwrap();
+            assert_eq!(config.compaction.thinking.as_deref(), Some(level));
+        }
+        assert!(parse_str("schema_version = 1\n[compaction]\nthinking = \"loud\"\n").is_err());
+        assert!(parse_str("schema_version = 1\n[compaction]\nthinking = 3\n").is_err());
     }
 
     /// `tui.input_style` is carried as a string; the TUI parses it, and an unknown value is a

@@ -1,0 +1,14 @@
+# ADR 0018，决定 1：`[compaction] thinking` 是**摘要调用**的推理档位，取 ADR 0026
+# D11 的七档之一，或 `"current"`（沿用对话的档位，不覆盖）。缺省 `low`。宿主用与
+# `/thinking` 相同的映射表把它夹到当前 provider/模型支持的最近一档，并换算成线上取值
+# （OpenAI 兼容：`reasoning_effort`；Anthropic：`thinking`），作为请求级设置交给 Core；
+# Core 不认识档位，只把它原样放进摘要请求与缩短重试请求。不会放进对话请求。
+schema_version = 1
+
+[model]
+provider = "example"
+base_url = "https://example.com/v1"
+model = "m-1"
+
+[compaction]
+thinking = "high"

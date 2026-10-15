@@ -912,6 +912,38 @@ fn run(
         route.adapter(),
         Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
     );
+    // ADR 0018, decision 1: the summary call's reasoning level, converted to this
+    // route's wire value with the same map `/thinking` uses. `low` by default; `"current"`
+    // keeps the conversation's level (carries no setting). A clamped level is said once.
+    let compaction_settings = {
+        let level = config.compaction.thinking.as_deref().unwrap_or("low");
+        let (settings, notice) = radian_host::compaction_settings_for(
+            &provider_ref,
+            &model_name,
+            level,
+            cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+        );
+        if let Some(notice) = notice {
+            eprintln!("radian: [compaction] {notice}");
+        }
+        settings
+    };
+    // ADR 0018: the same level, converted per route, so a `/model` switch never
+    // leaves the summary carrying the previous route's wire form.
+    let compaction_settings_for = {
+        let providers = config.providers.clone();
+        let level = config
+            .compaction
+            .thinking
+            .clone()
+            .unwrap_or_else(|| "low".to_owned());
+        let max_tokens = cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+        std::sync::Arc::new(move |provider: &str, model: &str| {
+            radian_host::compaction_settings_for_route(
+                &providers, provider, model, &level, max_tokens,
+            )
+        }) as radian_runtime::CompactionSettingsFor
+    };
     // ADR 0014 Q2: the catalog (or a `[providers.<id>]` override) decides whether
     // this route replays reasoning.
     let reasoning_replay = radian_host::resolve_reasoning_replay(&provider_ref, &model_name);
@@ -1180,6 +1212,8 @@ fn run(
                     .budget
                     .map(|tokens| ContextBudget::new(tokens).with_reasoning(replays_reasoning)),
                 auto_compact: !cli.no_auto_compact && config.compaction.auto.unwrap_or(true),
+                compaction_settings,
+                compaction_settings_for: Some(compaction_settings_for),
                 sandbox,
                 tier: tier.preset(),
                 profile,

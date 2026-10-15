@@ -157,3 +157,19 @@ Base `022afe9` · 一次性检出 `/tmp/vb-mut2`（detached，跑完删除）· 
 
 3/3 抓住。X1 是本节的"原话被算两遍"的根因（`request_size` 量 `meta.origin`），修好后兜底门槛
 回到约 76k；X2 与 X3 是两个行为 bug，各有具名测试。
+
+## 修订 8 决定 1：摘要调用的请求级推理设置（2026-10-15）
+
+Base `73975ae` · 在本任务工作树内逐条施加后从副本还原（`cmp` 确认两文件一致）·
+`--no-fail-fast`；每条各跑「抓住它的测试」一列的命令。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| T1 | 覆盖也作用于对话请求（压缩后重建的 `request.settings` 用 `compaction_settings` 而不是 `model_settings`） | `compaction_flow::the_compaction_setting_reaches_the_summary_and_the_shorten_requests_only` | ✅ failed |
+| T2 | 缩短重试不带设置（`shorten_request` 的 `settings` 实参改成 `Value::Null`） | 同上 | ✅ failed |
+| T3 | Anthropic 配置仍赢过请求（去掉 `!request_thinking` 守卫，无条件按配置插入 `thinking`） | `request::tests::the_request_thinking_wins_over_the_config`（同一行为也在 `contract_13_the_request_thinking_wins_over_the_config`） | ✅ failed |
+
+3/3 抓住。T1 断言对话请求的 `settings` 等于 `model_settings`（此处为 `{"temperature":0.2}`），
+压缩设置泄漏进对话请求即红；T2 断言缩短请求的 `settings` 与摘要请求的相同；T3 断言请求级
+`thinking` 覆盖配置的 `adaptive`。三个变异分别落在 Core 的对话路径、Core 的缩短重试路径与
+Anthropic 适配器的插入守卫上，覆盖了这次改动的三条边。

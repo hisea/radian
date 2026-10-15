@@ -341,6 +341,7 @@ async fn compact_now_commits_and_passes_the_instructions() {
             &CancellationToken::new(),
             &recorder,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -389,7 +390,7 @@ async fn compact_now_on_a_small_history_is_nothing_to_compact() {
         .unwrap();
     let recorder = Recorder::default();
     let outcome = session
-        .compact_now(None, &CancellationToken::new(), &recorder, None)
+        .compact_now(None, &CancellationToken::new(), &recorder, None, None)
         .await
         .unwrap();
     assert_eq!(outcome, CompactionOutcome::NothingToCompact);
@@ -415,7 +416,7 @@ async fn compact_now_only_requires_a_smaller_request() {
         .unwrap();
     let recorder = Recorder::default();
     let outcome = session
-        .compact_now(None, &CancellationToken::new(), &recorder, None)
+        .compact_now(None, &CancellationToken::new(), &recorder, None, None)
         .await
         .unwrap();
     let CompactionOutcome::Compacted {
@@ -444,7 +445,7 @@ async fn a_cancelled_compact_now_commits_nothing() {
     let token = CancellationToken::new();
     token.cancel();
     let error = session
-        .compact_now(None, &token, &recorder, None)
+        .compact_now(None, &token, &recorder, None, None)
         .await
         .unwrap_err();
     assert!(
@@ -489,7 +490,7 @@ async fn compact_now_shortens_an_overlong_summary() {
     let recorder = Recorder::default();
 
     let outcome = session
-        .compact_now(None, &CancellationToken::new(), &recorder, None)
+        .compact_now(None, &CancellationToken::new(), &recorder, None, None)
         .await
         .unwrap();
     assert!(
@@ -590,7 +591,7 @@ async fn compact_now_scales_the_summary_ceiling_with_the_window() {
         .unwrap();
     let recorder = Recorder::default();
     session
-        .compact_now(None, &CancellationToken::new(), &recorder, None)
+        .compact_now(None, &CancellationToken::new(), &recorder, None, None)
         .await
         .unwrap();
     let prompt = model.requests()[0]
@@ -609,7 +610,7 @@ async fn compact_now_scales_the_summary_ceiling_with_the_window() {
         .unwrap();
     let recorder = Recorder::default();
     session
-        .compact_now(None, &CancellationToken::new(), &recorder, None)
+        .compact_now(None, &CancellationToken::new(), &recorder, None, None)
         .await
         .unwrap();
     let prompt = model.requests()[0]
@@ -680,6 +681,7 @@ async fn compact_now_honours_the_budget_it_is_given() {
             &CancellationToken::new(),
             &Recorder::default(),
             Some(ContextBudget::new(500)),
+            None,
         )
         .await
         .unwrap();

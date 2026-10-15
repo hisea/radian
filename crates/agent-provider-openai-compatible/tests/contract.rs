@@ -383,3 +383,35 @@ async fn contract_12_attachment_parts_are_joined_by_blank_lines() {
         .expect("the user content is one string on this wire");
     assert_eq!(content, "look at @notes.txt\n\nalpha\nbeta");
 }
+
+/// ADR 0018, decision 1: the request's `settings` win over the adapter config, so
+/// the summary call can run at its own (lower) reasoning level. The adapter passes through the
+/// value it is given verbatim and invents nothing.
+#[tokio::test]
+async fn contract_13_the_request_reasoning_effort_wins_over_the_config() {
+    let server = MockServer::start(vec![Reply::sse(&[
+        chunk(json!({"role": "assistant", "content": "ok"}), None),
+        chunk(json!({}), Some("stop")),
+    ])])
+    .await;
+    let base = server.base_url.clone();
+    let mut config =
+        OpenAiCompatibleConfig::new(base, "contract-model").with_api_key(ApiKey::new(SECRET));
+    config.reasoning_effort = Some("high".into());
+    let model = OpenAiCompatible::new(config).expect("a local mock config is valid");
+    let request = ModelRequest {
+        system_prompt: None,
+        messages: vec![Message::user("hi")],
+        tools: Vec::new(),
+        settings: json!({"reasoning_effort": "low"}),
+    };
+    model
+        .complete(request, agent_provider_contract::context(&NoopSink))
+        .await
+        .unwrap();
+    let body = server.requests()[0].json();
+    assert_eq!(
+        body["reasoning_effort"], "low",
+        "the request setting must win over the configured `high`"
+    );
+}
