@@ -913,6 +913,7 @@ fn run(
                 config_slot: std::sync::Arc::clone(&config_slot),
                 config_queue: radian_runtime::ConfigQueue::new(),
                 budget_for: Some(budget_for),
+                price_for: Some(Arc::clone(&route_price)),
                 session_id: radian_host::SessionId::new(session_id.clone()),
                 session_dir: dir.clone(),
                 workspace: workspace_path.clone(),
@@ -1875,7 +1876,8 @@ fn apply_dirty(app: &mut App) -> bool {
 
 /// Looks up a route's catalog prices from the warm local cache (ADR 0026 D7, ADR 0027
 /// revision 1). Offline by construction: a switch never fetches, and a miss means "no price".
-type RoutePrice = Arc<dyn Fn(&str, &str) -> Option<radian_host::ModelPrice> + Send + Sync>;
+/// The host owns the type because the resume fold prices historical calls with the same rule.
+type RoutePrice = radian_host::cost::RoutePrice;
 
 /// The catalog prices of the route an **applied** `ConfigChanged` names (ADR 0026 D5/D7).
 ///

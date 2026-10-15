@@ -196,31 +196,41 @@ impl SessionProjection {
     /// models once `/model` switches, and one price cannot price a mixed total. A call that
     /// arrives with no known price contributes nothing to the fee (and nothing is invented).
     pub fn add_usage(&self, usage: &ModelUsage) -> bool {
-        self.write(|facts| {
-            if let Some(input) = usage.input {
-                facts.usage_input = Some(facts.usage_input.unwrap_or(0).saturating_add(input));
-            }
-            if let Some(output) = usage.output {
-                facts.usage_output = Some(facts.usage_output.unwrap_or(0).saturating_add(output));
-            }
-            if let Some(cache_read) = usage.cache_read {
-                facts.usage_cache_read = Some(
-                    facts
-                        .usage_cache_read
-                        .unwrap_or(0)
-                        .saturating_add(cache_read),
-                );
-            }
-            if let Some(cache_write) = usage.cache_write {
-                facts.usage_cache_write = Some(
-                    facts
-                        .usage_cache_write
-                        .unwrap_or(0)
-                        .saturating_add(cache_write),
-                );
-            }
-            facts.cost_micros = crate::cost::add_cost(facts.cost_micros, facts.price, usage);
-        })
+        self.write(|facts| Self::add_usage_locked(facts, facts.price, usage))
+    }
+
+    /// Like [`Self::add_usage`], but at an explicit price: the resume path folds a journal's
+    /// usage records, each of which belongs to the route that was in force **then**, not to the
+    /// route the process starts with (F3, ADR 0027). The live path uses
+    /// `add_usage`, which passes the price currently in force.
+    pub fn add_usage_at(&self, price: Option<ModelPrice>, usage: &ModelUsage) -> bool {
+        self.write(|facts| Self::add_usage_locked(facts, price, usage))
+    }
+
+    fn add_usage_locked(facts: &mut Facts, price: Option<ModelPrice>, usage: &ModelUsage) {
+        if let Some(input) = usage.input {
+            facts.usage_input = Some(facts.usage_input.unwrap_or(0).saturating_add(input));
+        }
+        if let Some(output) = usage.output {
+            facts.usage_output = Some(facts.usage_output.unwrap_or(0).saturating_add(output));
+        }
+        if let Some(cache_read) = usage.cache_read {
+            facts.usage_cache_read = Some(
+                facts
+                    .usage_cache_read
+                    .unwrap_or(0)
+                    .saturating_add(cache_read),
+            );
+        }
+        if let Some(cache_write) = usage.cache_write {
+            facts.usage_cache_write = Some(
+                facts
+                    .usage_cache_write
+                    .unwrap_or(0)
+                    .saturating_add(cache_write),
+            );
+        }
+        facts.cost_micros = crate::cost::add_cost(facts.cost_micros, price, usage);
     }
 
     /// Sets the unit prices of the route now in force (ADR 0027, ADR 0026 D5): the

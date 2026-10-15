@@ -27,6 +27,7 @@ use radian_runtime::{
 use radian_sandbox::Sandbox;
 use radian_session::{SessionCreatedData, SessionJournal};
 
+use crate::cost::RoutePrice;
 use crate::describe::{Wording, describe};
 use crate::home::skills_dir;
 use crate::memory::{InjectionConfig, MemoryHooks, MemoryService, MemoryTools, ProjectState};
@@ -281,6 +282,11 @@ pub struct SessionSetup {
     pub config_queue: Arc<ConfigQueue>,
     /// Computes `B` for a switched model from the local catalog (ADR 0026 D7).
     pub budget_for: Option<BudgetFor>,
+    /// Resolves a route's catalog prices from the warm local cache (ADR 0027). Used
+    /// for the **resume** fold (F3): the journal's usage records are priced at the route each
+    /// call ran under, which the host can only resolve offline. `None` means no price is
+    /// resolved, so a resumed session's tokens are restored but its fee stays hidden.
+    pub price_for: Option<RoutePrice>,
     pub servers: Vec<McpServerConfig>,
     pub system_prompt: Option<String>,
     pub context_budget: Option<ContextBudget>,
@@ -807,6 +813,7 @@ pub async fn open_session(
         config_slot,
         config_queue,
         budget_for,
+        price_for,
     } = setup;
 
     // The pending queue (ADR 0023 U7): approvals and questions share it. It exists before the
@@ -989,6 +996,17 @@ pub async fn open_session(
             .map(|budget| budget.input_budget_tokens),
     );
     projection.set_tier(Some(tier.as_str().to_string()));
+    // F3 (ADR 0027): a resumed session folds its journal's usage records back into
+    // the projection. The projection's only other writer is the live event sink, so without
+    // this `--resume` showed `-` for the tokens and hid `cost` until the next response — the
+    // session's earlier spending was simply gone. Both records count (a conversation request
+    // and a summarizer's call, ADR 0018), and each is priced at the route that was
+    // in force when it ran, not at whatever model this process starts with.
+    if let Some(price_for) = price_for.as_ref()
+        && let Some(parsed) = parsed.as_ref()
+    {
+        crate::cost::restore_usage(parsed, &projection, price_for);
+    }
 
     // The driver runs until the host asks it to stop; dropping its `run()` future releases the
     // borrow so `shutdown()` can be called. Its end is reported by the injected callback, and

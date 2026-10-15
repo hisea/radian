@@ -695,6 +695,8 @@ struct Setup {
     config_slot: std::sync::Arc<radian_runtime::ConfigSlot>,
     config_queue: std::sync::Arc<radian_runtime::ConfigQueue>,
     budget_for: radian_runtime::BudgetFor,
+    /// Resolves a route's catalog price from the warm cache, for the resume fold (F3).
+    price_for: Option<radian_host::cost::RoutePrice>,
     /// The provider actually chosen, for the session's config snapshot.
     provider: Provider,
     servers: Vec<McpServerConfig>,
@@ -980,14 +982,32 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         request_max_output,
         true,
     );
-    let budget_for = std::sync::Arc::new(move |provider: &str, switch_model: &str| {
-        radian_host::resolve_offline(&radian_host::WindowQuery {
-            catalog_provider: Some(provider.to_owned()),
-            model: switch_model.to_owned(),
-            ..window_query.clone()
-        })
-        .budget
-    }) as radian_runtime::BudgetFor;
+    let budget_for = {
+        let query = window_query.clone();
+        std::sync::Arc::new(move |provider: &str, switch_model: &str| {
+            radian_host::resolve_offline(&radian_host::WindowQuery {
+                catalog_provider: Some(provider.to_owned()),
+                model: switch_model.to_owned(),
+                ..query.clone()
+            })
+            .budget
+        }) as radian_runtime::BudgetFor
+    };
+    // The same lookup gives the **price** (ADR 0027), offline like the budget: the
+    // resume fold prices each historical call at the route it ran under (F3).
+    let price_for = {
+        let query = window_query.clone();
+        Some(
+            std::sync::Arc::new(move |provider: &str, switch_model: &str| {
+                radian_host::resolve_offline(&radian_host::WindowQuery {
+                    catalog_provider: Some(provider.to_owned()),
+                    model: switch_model.to_owned(),
+                    ..query.clone()
+                })
+                .price
+            }) as radian_host::cost::RoutePrice,
+        )
+    };
     let servers = match &cli.mcp_config {
         Some(path) => load_mcp_config(path).map_err(SetupError)?,
         None => Vec::new(),
@@ -1040,6 +1060,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         config_slot,
         config_queue,
         budget_for,
+        price_for,
         provider,
         servers,
         system_prompt,
@@ -1441,6 +1462,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             config_slot: setup.config_slot,
             config_queue: setup.config_queue,
             budget_for: Some(setup.budget_for),
+            price_for: setup.price_for,
             servers: setup.servers,
             system_prompt: setup.system_prompt.clone(),
             context_budget: setup.context_budget,

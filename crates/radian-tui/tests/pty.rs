@@ -7960,6 +7960,120 @@ async fn pty_the_shipped_default_footer_is_two_rows_without_a_config() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
+/// F3 (ADR 0027): `--resume` shows what the session already spent. Before this the
+/// tokens were `-` and `cost` was hidden until the next response, because the projection starts
+/// empty and only the live sink wrote to it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_resume_shows_the_sessions_earlier_tokens_and_fee() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("cost-resume");
+    let home = TempDir::new("cost-resume-home");
+    // A catalog cache with a price for the model the session ran on. `resolve_offline` reads
+    // it, so the resumed fee is resolved without any network (ADR 0026 D7).
+    let cache = home.path().join("cache/catalog");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(
+        cache.join("models.json"),
+        serde_json::json!({
+            "opencode-go": {
+                "id": "opencode-go",
+                "models": {
+                    "deepseek-v4.1-flash": {
+                        "id": "deepseek-v4.1-flash",
+                        "limit": {"context": 1000000, "input": 922000, "output": 128000},
+                        "cost": {"input": 0.15, "output": 0.6, "cache_read": 0.003}
+                    }
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    // The journal of a session that already ran: 1M input on the priced model = $0.15.
+    let path = dir.path().join("resumed.jsonl");
+    {
+        let journal = radian_session::SessionJournal::create(
+            &path,
+            "resumed",
+            radian_session::SessionCreatedData::new(
+                "/tmp",
+                serde_json::json!({"model": {"provider": "opencode-go", "model": "deepseek-v4.1-flash"}}),
+            ),
+        )
+        .unwrap();
+        use agent_core::TranscriptJournal;
+        journal
+            .append(agent_core::JournalRecord::Message {
+                index: 0,
+                message: agent_core::Message::user("earlier turn"),
+            })
+            .await
+            .unwrap();
+        journal
+            .append(agent_core::JournalRecord::Message {
+                index: 1,
+                message: agent_core::Message::assistant("earlier answer"),
+            })
+            .await
+            .unwrap();
+        journal
+            .append(agent_core::JournalRecord::ModelUsage {
+                usage: agent_core::ModelUsage {
+                    input: Some(1_000_000),
+                    output: Some(100_000),
+                    input_includes_cache: Some(true),
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap();
+        drop(journal);
+    }
+
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn_with_config(
+        &[
+            "--model",
+            "deepseek-v4.1-flash",
+            "--provider",
+            "opencode-go",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--resume",
+            "resumed",
+        ],
+        &[
+            ("RADIAN_HOME", home.path().to_str().unwrap()),
+            // The harness writes the `opencode-go` credential into `auth.json` from this env
+            // name (ADR 0026 D2: a key comes only from `auth.json`).
+            ("OPENCODE_GO_API_KEY", "test-key-not-a-secret"),
+        ],
+        // The numbers row, so `tokens` and `cost` are both on screen.
+        "schema_version = 1\n[tui.footer]\nrows = [{ left = [] }, { left = [\"tokens\", \"cost\"] }]\n",
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // The earlier turn's tokens are there (1M in, 100K out) ...
+    assert!(
+        pty.wait_for_screen("↑1M", 10),
+        "the resumed token total is missing:\n{}",
+        pty.screen()
+    );
+    assert!(pty.screen().contains("↓100K"), "{}", pty.screen());
+    // ... and its fee: 1M x $0.15 + 100K x $0.60 per Mtok = $0.21.
+    assert!(
+        pty.wait_for_screen("$0.21", 10),
+        "the resumed fee is missing:\n{}",
+        pty.screen()
+    );
+    let _ = server;
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
 /// The shipped default on a narrow terminal follows the drop order: the `right` group
 /// (reasoning) goes before the `left` group's end, and the model (highest priority) stays.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
