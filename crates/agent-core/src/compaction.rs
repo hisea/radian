@@ -358,6 +358,7 @@ pub fn summary_request(
     to_summarize: &[Message],
     instructions: Option<&str>,
     max_tokens: u64,
+    settings: Value,
 ) -> ModelRequest {
     let mut body = String::new();
     if let Some(previous) = previous_summary.map(str::trim).filter(|p| !p.is_empty()) {
@@ -379,7 +380,7 @@ pub fn summary_request(
         system_prompt: Some(summary_system_prompt(max_tokens)),
         messages: vec![Message::user(body)],
         tools: Vec::new(),
-        settings: Value::Null,
+        settings,
     }
 }
 
@@ -388,7 +389,11 @@ pub fn summary_request(
 /// seven sections. The original conversation is deliberately **not** resent, so the model is
 /// not tempted to write another 10k-token roll-up (dogfood7). `target_tokens` is
 /// [`shorten_target`], below the enforced limit to leave margin.
-pub fn shorten_request(overlong_summary: &str, target_tokens: u64) -> ModelRequest {
+///
+/// `settings` is the host's request-level compaction setting (ADR 0018), the same
+/// value the first summary request carried: the retry is the same kind of call and must run at
+/// the same reasoning level.
+pub fn shorten_request(overlong_summary: &str, target_tokens: u64, settings: Value) -> ModelRequest {
     let facts = verified_facts_max_tokens(target_tokens);
     let body = format!(
         "The summary below is over the length limit. Rewrite it shorter, keeping the same sections. \
@@ -407,7 +412,7 @@ pub fn shorten_request(overlong_summary: &str, target_tokens: u64) -> ModelReque
         system_prompt: Some(summary_system_prompt(target_tokens)),
         messages: vec![Message::user(body)],
         tools: Vec::new(),
-        settings: Value::Null,
+        settings,
     }
 }
 

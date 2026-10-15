@@ -453,6 +453,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
             &to_summarize,
             instructions.as_deref(),
             summary_max,
+            self.agent.config.compaction_settings.clone(),
         );
         for attempt in 0..2 {
             let noop = NoopSink;
@@ -513,6 +514,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
                         compaction::SummaryError::TooLong { .. } => compaction::shorten_request(
                             text.trim(),
                             compaction::shorten_target(summary_max),
+                            self.agent.config.compaction_settings.clone(),
                         ),
                         // Empty (and the only other variant) resends the original request.
                         compaction::SummaryError::Empty => compaction::summary_request(
@@ -520,6 +522,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
                             &to_summarize,
                             instructions.as_deref(),
                             summary_max,
+                            self.agent.config.compaction_settings.clone(),
                         ),
                     };
                 }

@@ -215,7 +215,13 @@ fn the_summary_request_serializes_text_and_truncates_tool_results() {
         tool_with_text("a", &long),
         assistant_with_reasoning("answer", "SECRET-REASONING"),
     ];
-    let request = summary_request(Some("PREVIOUS"), &history, Some("focus on the API"), 8_192);
+    let request = summary_request(
+        Some("PREVIOUS"),
+        &history,
+        Some("focus on the API"),
+        8_192,
+        Value::Null,
+    );
 
     assert!(request.tools.is_empty(), "the summarizer gets no tools");
     assert_eq!(request.settings, Value::Null);
@@ -272,7 +278,7 @@ fn the_summary_request_serializes_text_and_truncates_tool_results() {
 /// The system prompt now carries the same ceiling `check_summary` enforces.
 #[test]
 fn the_summary_request_states_the_length_ceiling() {
-    let request = summary_request(None, &[Message::user("only")], None, 8_192);
+    let request = summary_request(None, &[Message::user("only")], None, 8_192, Value::Null);
     let system = request.system_prompt.as_deref().unwrap();
     assert!(system.contains("8192 tokens"), "{system}");
     // 1 token ≈ 0.75 words, so 8192 tokens is about 6144 words; the prompt says it is
@@ -283,7 +289,7 @@ fn the_summary_request_states_the_length_ceiling() {
         "{system}"
     );
     // A different ceiling produces a different prompt.
-    let smaller = summary_request(None, &[Message::user("only")], None, 2_048);
+    let smaller = summary_request(None, &[Message::user("only")], None, 2_048, Value::Null);
     assert!(
         smaller
             .system_prompt
@@ -296,7 +302,7 @@ fn the_summary_request_states_the_length_ceiling() {
 #[test]
 fn the_shorten_request_carries_only_the_overlong_summary() {
     let target = shorten_target(8_192);
-    let request = shorten_request("OVERLONG SUMMARY BODY", target);
+    let request = shorten_request("OVERLONG SUMMARY BODY", target, Value::Null);
     let system = request.system_prompt.as_deref().unwrap();
     // 80% of 8192 is 6553.
     assert!(system.contains("6553 tokens"), "{system}");
@@ -317,6 +323,23 @@ fn the_shorten_request_carries_only_the_overlong_summary() {
         assert!(!text.contains("never delete"), "{text}");
     }
     assert!(!body.contains("Conversation to summarize"), "{body}");
+}
+
+/// ADR 0018, decision 1: the host's request-level compaction setting is copied
+/// verbatim into the summary request and the shorten-retry request. The pure builders are the
+/// one place both carry it, so both are pinned here.
+#[test]
+fn the_compaction_setting_is_copied_into_the_summary_and_the_shorten_requests() {
+    let settings = json!({"reasoning_effort": "low"});
+    let summary = summary_request(None, &[Message::user("only")], None, 8_192, settings.clone());
+    assert_eq!(summary.settings, settings);
+    let shorten = shorten_request("OVERLONG", shorten_target(8_192), settings.clone());
+    assert_eq!(shorten.settings, settings);
+    // `Null` (the default) stays `Null`: no setting is invented.
+    assert_eq!(
+        summary_request(None, &[Message::user("only")], None, 8_192, Value::Null).settings,
+        Value::Null
+    );
 }
 
 /// The `Verified facts` section has its own named ceiling (one third), stated with the same
@@ -350,7 +373,7 @@ fn the_summary_request_truncates_tool_call_arguments_too() {
         },
         tool_with_text("w", "ok"),
     ];
-    let body = summary_request(None, &history, None, 8_192).messages[0].text();
+    let body = summary_request(None, &history, None, 8_192, Value::Null).messages[0].text();
     assert!(body.contains("called write w with"), "{body}");
     assert!(body.contains("[truncated"), "{body}");
     assert!(body.matches('y').count() < 2_000, "{body}");
@@ -361,7 +384,7 @@ fn truncating_a_tool_result_never_splits_a_character() {
     // 2500 Han characters: a byte-based cut at 2000 would split one.
     let long = "中".repeat(2_500);
     let history = vec![assistant_calls(&["a"]), tool_with_text("a", &long)];
-    let request = summary_request(None, &history, None, 8_192);
+    let request = summary_request(None, &history, None, 8_192, Value::Null);
     let body = request.messages[0].text();
     assert!(body.contains("truncated 500 characters"), "{body}");
     assert_eq!(body.matches('中').count(), 2_000, "{body}");
@@ -369,7 +392,7 @@ fn truncating_a_tool_result_never_splits_a_character() {
 
 #[test]
 fn a_summary_request_without_previous_or_instructions_is_just_the_conversation() {
-    let request = summary_request(None, &[Message::user("only")], None, 8_192);
+    let request = summary_request(None, &[Message::user("only")], None, 8_192, Value::Null);
     let body = request.messages[0].text();
     assert!(body.contains("only"), "{body}");
     assert!(!body.contains("<previous-summary>"), "{body}");
