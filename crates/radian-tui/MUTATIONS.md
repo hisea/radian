@@ -994,6 +994,21 @@ Base `d483ec9` · 一次性 worktree `/tmp/radian-mut-s2c`（`git worktree add -
 
 2/2 抓住。两个都断言，是因为新 git 认参数、旧 git 只认环境变量：只留一个就是给旧版本留洞。
 
+## Slice: unified block layout (ADR 0028 rules 1/2/5, `blocks2`)
+
+Base: `f0f327a` · one-shot worktree `/tmp/b2-mut` (created from HEAD, deleted after) · each
+mutation applied by a patch that asserts its anchor is present, then `cargo test -p radian-tui
+--test <file> <filter>`; files restored after each; `git status --short` empty at the end.
+
+| # | Rule mutated | Mutation | Caught by |
+|---|---|---|---|
+| B1 | 1: the container owns the gap | `block_gap` returns 0 for ordinary blocks (no blank lines) | `render.rs::the_block_layout_snapshot` FAILED (the golden rows shift) |
+| B2 | 1: the strip spares the banded pads | the strip also eats a `pad` line | `render.rs::the_block_layout_snapshot` FAILED (the user block loses its pads) |
+| B3 | 4: the result hugs its call | the tool result is appended instead of inserted after its call | `render.rs::the_block_layout_snapshot` FAILED (call/result order) |
+| B4 | 1: the count includes the gaps | the total in `visible_lines` sums only the entry counts | `virtual.rs::every_window_matches_the_full_wrap` FAILED |
+
+4/4 caught; no misses. B3's rule was later superseded by ADR 0028 (the merged card,
+`blocks3`), which reuses the same pairing and the same status glyphs.
 ## footer-s3：opencode-go 用量、deck、逐字段配置（ADR 0027 C3/C4、修订 3，2026-10-16）
 
 Base `6cd0879` · 一次性 worktree `/tmp/radian-mut-f3`（`git worktree add --detach`，独立

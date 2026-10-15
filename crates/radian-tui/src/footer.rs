@@ -50,6 +50,18 @@ impl Glyphs {
             _ => None,
         }
     }
+
+    /// The tool-call status glyphs (ADR 0028 rule 4): running, success, failure.
+    /// The unicode set is covered by all seven checked fonts (ADR 0027): omp's
+    /// `⟳`/`✔`/`✘` are not, so `~`/`+`/`×` stand in. The Nerd set uses the Font Awesome
+    /// codepoints; the ASCII set is plain.
+    pub fn tool_status(self) -> [&'static str; 3] {
+        match self {
+            Self::Unicode => ["~", "+", "×"],
+            Self::Nerd => ["\u{f110}", "\u{f00c}", "\u{f00d}"],
+            Self::Ascii => ["*", "+", "x"],
+        }
+    }
 }
 
 /// Which footer the session shows.
@@ -1476,7 +1488,7 @@ mod tests {
     /// checked against the seven fonts by `scripts/check-glyph-coverage.py` and listed in the
     /// README's coverage table. A new glyph makes this test fail until it is re-checked and
     /// added here.
-    const VERIFIED_COVERED: &str = "»│━─▖▘▝▗";
+    const VERIFIED_COVERED: &str = "»│━─×▖▘▝▗";
 
     fn app_with_glyphs(name: &str) -> App {
         let mut app = App::new("mock", "s");
@@ -1541,6 +1553,7 @@ mod tests {
             }
         }
         glyphs.extend(brand_mark(Glyphs::Unicode).chars());
+        glyphs.extend(Glyphs::Unicode.tool_status().iter().flat_map(|s| s.chars()));
         glyphs.extend(crate::blocks::SPINNER);
         glyphs.extend("━─".chars());
         glyphs.extend(" ~".chars());

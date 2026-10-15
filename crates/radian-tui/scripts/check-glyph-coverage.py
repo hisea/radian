@@ -69,6 +69,10 @@ GLYPHS = [
     ("▘", "spinner frame 2"),
     ("▝", "spinner frame 3"),
     ("▗", "spinner frame 4"),
+    ("~", "tool status: running"),
+    ("+", "tool status: success"),
+    ("×", "tool status: failure"),
+    (">", "reasoning fold marker"),
 ]
 
 

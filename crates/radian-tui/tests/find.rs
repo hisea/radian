@@ -39,10 +39,19 @@ fn fill(app: &mut App, needle_entries: &[usize]) {
 
 /// The absolute transcript line `entry` starts at, computed independently of the finder.
 fn entry_line(app: &App, entry: usize) -> usize {
-    app.entries[..entry]
-        .iter()
-        .map(|e| render::display_lines(e, EXPANDED, WIDTH).len())
-        .sum()
+    // The container's gap lines are part of the transcript (ADR 0028 rule 1), so
+    // the geometry the finder uses includes them.
+    let mut line = 0usize;
+    for index in 0..=entry {
+        let Some(item) = app.entries.get(index) else {
+            break;
+        };
+        line += radian_tui::blocks::block_gap(app.entries.get(index.wrapping_sub(1)), item);
+        if index < entry {
+            line += render::display_lines(item, EXPANDED, WIDTH).len();
+        }
+    }
+    line
 }
 
 #[test]

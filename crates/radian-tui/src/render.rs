@@ -193,8 +193,10 @@ pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
         EntryKind::User => "> ",
         EntryKind::Assistant => "  ",
         EntryKind::Reasoning => "~ ",
-        EntryKind::ToolCall => "-> ",
-        EntryKind::ToolResult => "<- ",
+        // Rule 2: every marker is two cells; rule 4: a result's marker sits one cell further
+        // right, so a result reads as subordinate to its call.
+        EntryKind::ToolCall => "->",
+        EntryKind::ToolResult => " <-",
         EntryKind::Notice => "* ",
         // The compaction line has no marker of its own: it is a rule-like `── … ──` line.
         EntryKind::Compaction => "",
@@ -203,7 +205,8 @@ pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
         EntryKind::Banner => "  ",
         EntryKind::Startup => "  ",
         EntryKind::Warning => "! ",
-        EntryKind::Tip => "Tip: ",
+        // Rule 2: two cells like every other marker; the `Tip:` label is content now.
+        EntryKind::Tip => "  ",
         // ADR 0033: the command line; `!` (context) vs `!!` (not) differ in color, not marker.
         EntryKind::Bash { .. } => "$ ",
     }
@@ -399,16 +402,20 @@ fn render_row(
             None => Line::from(vec![Span::raw(String::new())]),
         };
     }
+    // The collapsed reasoning placeholder is one synthetic line: its marker is the marker
+    // column's own glyph (ADR 0028 rule 5), so the body column does not move
+    // between folded and expanded. `>` stands in for `▸` (ADR 0027: `▸` is not in
+    // all seven checked fonts).
+    let placeholder = entry.kind == EntryKind::Reasoning && row.hint;
     let lead = if row.code {
         String::new()
+    } else if placeholder {
+        "> ".to_string()
     } else if first_text {
         prefix.to_string()
     } else {
         " ".repeat(prefix.width())
     };
-    // The collapsed reasoning placeholder is one synthetic line: the reasoning role, not the
-    // body style.
-    let placeholder = entry.kind == EntryKind::Reasoning && row.chars.is_empty();
     // A notice's content is the secondary level (the owner's assignment: its value is 次,
     // only its label is 强调); the marker's own role stays `notice`.
     let body = if placeholder {
@@ -550,10 +557,16 @@ pub fn transcript_lines(
     width: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    entries
-        .iter()
-        .flat_map(|entry| entry_lines(entry, modes, width, theme))
-        .collect()
+    let mut out = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        // The container owns the blank line between blocks (ADR 0028 rule 1).
+        out.extend(std::iter::repeat_n(
+            Line::from(""),
+            blocks::block_gap(entries.get(index.wrapping_sub(1)), entry),
+        ));
+        out.extend(entry_lines(entry, modes, width, theme));
+    }
+    out
 }
 
 /// The transcript's total line count and the `height` lines starting at line `start`, laying
@@ -580,15 +593,38 @@ pub fn visible_lines(
             __t.elapsed().as_millis()
         );
     }
-    let total: usize = counts.iter().sum();
+    // The container's blank lines are part of the transcript (ADR 0028 rule 1):
+    // the total and the window include them, or the scroll position and the mapping would
+    // disagree with the drawing. The sum is computed without allocating a per-entry vector
+    // (this is the 50k-entry frame path).
+    let mut total: usize = counts.iter().sum::<usize>();
+    for index in 1..entries.len() {
+        total += blocks::block_gap(entries.get(index - 1), &entries[index]);
+    }
     let mut out = Vec::with_capacity(height);
     let mut line = 0usize;
-    for (entry, count) in entries.iter_mut().zip(&counts) {
+    for index in 0..entries.len() {
         if out.len() >= height {
             break;
         }
-        let next = line + count;
+        let gap = blocks::block_gap(entries.get(index.wrapping_sub(1)), &entries[index]);
+        let count = counts[index];
+        let entry = &mut entries[index];
+        let next = line + gap + count;
         if next > start {
+            // The gap lines first, then the entry's own lines.
+            for _ in 0..gap {
+                if out.len() >= height {
+                    break;
+                }
+                if line >= start {
+                    out.push(Line::from(""));
+                }
+                line += 1;
+            }
+            if out.len() >= height {
+                break;
+            }
             let skip = start.saturating_sub(line);
             let blocks = blocks::blocks_for(entry, modes.reasoning);
             let body = blocks::layout(entry, &blocks, modes, width);

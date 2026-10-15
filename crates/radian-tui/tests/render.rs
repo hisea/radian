@@ -968,6 +968,133 @@ fn a_write_card_shows_the_content_without_markers() {
     );
 }
 
+/// The block layout of a fixed transcript (ADR 0028): one snapshot of every line,
+/// plus the background bands. The transcript is a user block, an assistant with a folded
+/// thinking channel, a batch of two parallel calls whose results arrive in reverse order, a
+/// notice and a compaction summary.
+#[test]
+fn the_block_layout_snapshot() {
+    let mut app = App::new("m", "s");
+    app.apply_event(&AgentEvent::TranscriptAppended {
+        index: 0,
+        message: Message::user("explain the failure"),
+    });
+    app.apply_event(&AgentEvent::TranscriptAppended {
+        index: 1,
+        message: Message::Assistant {
+            content: vec![ContentPart::text("Looking into it.")],
+            reasoning: vec![ContentPart::text(
+                "the build broke after the refactor\nsecond thought\nthird thought",
+            )],
+            tool_calls: vec![
+                ToolCall {
+                    id: "c1".into(),
+                    name: "shell".into(),
+                    arguments: serde_json::json!({"command": "make test"}),
+                },
+                ToolCall {
+                    id: "c2".into(),
+                    name: "list".into(),
+                    arguments: serde_json::json!({"path": "src"}),
+                },
+            ],
+            provider_payload: None,
+            interrupted: false,
+            meta: Default::default(),
+        },
+    });
+    // The results arrive in reverse order; each still hugs its own call (rule 4).
+    app.apply_event(&AgentEvent::TranscriptAppended {
+        index: 2,
+        message: Message::Tool {
+            result: ToolResult {
+                call_id: "c2".into(),
+                content: vec![ContentPart::text("file\t512\tb.md\ndir\t4096\tsrc")],
+                structured: Some(
+                    serde_json::json!({"path": "src", "entries": 2, "total_entries": 2}),
+                ),
+                is_error: false,
+                error_code: None,
+            },
+            meta: Default::default(),
+        },
+    });
+    app.apply_event(&AgentEvent::TranscriptAppended {
+        index: 3,
+        message: Message::Tool {
+            result: ToolResult {
+                call_id: "c1".into(),
+                content: vec![ContentPart::text(
+                    "$ make test\nexit code: 2\n--- stdout ---\nboom",
+                )],
+                structured: Some(serde_json::json!({"command": "make test", "exit_code": 2})),
+                is_error: true,
+                error_code: None,
+            },
+            meta: Default::default(),
+        },
+    });
+    app.push_notice("profile: workspace · sandbox seatbelt");
+    let history =
+        agent_core::compaction::compacted_history("the earlier work, summarized", &[], &[])
+            .expect("a valid history");
+    app.push_message(&history[0]);
+
+    // Tall enough that the whole transcript is on screen (the view follows the bottom).
+    let terminal = render(&mut app, 80, 40);
+    let buffer = terminal.backend().buffer();
+    let rows: Vec<String> = (0..40u16)
+        .map(|y| {
+            let line: String = (0..80u16)
+                .map(|x| {
+                    buffer
+                        .cell((x, y))
+                        .map(|c| c.symbol())
+                        .unwrap_or(" ")
+                        .to_string()
+                })
+                .collect();
+            line.trim_end().to_string()
+        })
+        .collect();
+    let golden = vec![
+        "",                              // the user block's top pad (banded)
+        "> explain the failure",         // the user text
+        "",                              // the user block's bottom pad (banded)
+        "> thinking (3 lines)",          // the folded channel: the marker column glyph
+        "",                              // the container's gap
+        "  Looking into it.",            // the assistant
+        "",                              // the gap
+        "->× shell: make test (exit 2)", // the call, with its status glyph
+        " <-$ make test",                // its result, one cell further right
+        "   exit code: 2",
+        "   --- stdout ---",
+        "   boom",
+        "",                          // the gap
+        "->+ list: src (2 entries)", // the second call
+        " <-d 4.0K src",             // its result (the aligned table)
+        "   f 512 B b.md",
+        "", // the gap
+        "* profile: workspace · sandbox seatbelt",
+        "", // the gap above the rule line
+        "── context compacted ──",
+        "", // the gap below it
+    ];
+    assert_eq!(rows[..golden.len()], golden[..], "{rows:#?}");
+    // The bands: the user block's three rows, the failed card's five, the successful card's
+    // three; a gap row carries none.
+    let bg = |x: u16, y: u16| buffer.cell((x, y)).map(|c| c.bg);
+    let user_bg = bg(0, 1);
+    assert_eq!(bg(0, 0), user_bg, "the user pad carries the band");
+    assert_eq!(bg(79, 2), user_bg, "the bottom pad reaches the row's end");
+    let failed = bg(0, 7);
+    assert_eq!(bg(0, 8), failed, "the result's row carries the card's band");
+    assert_eq!(bg(0, 11), failed);
+    assert_ne!(failed, bg(0, 5), "the assistant row has no card band");
+    assert_eq!(bg(0, 6), bg(0, 5), "a gap row is not banded");
+    assert_ne!(bg(0, 13), failed, "the successful card's band differs");
+}
+
 /// A tab is four columns when the wrap decides where to break (ADR 0028 R9), not zero: a line
 /// that fits at six columns plus a tab does **not** fit in nine.
 #[test]
@@ -1394,8 +1521,10 @@ fn collapsed_and_errors_differ_for_a_successful_card() {
         let _ = render(&mut app, 60, 30);
         counts.push(app.total_lines);
     }
-    // The assistant's (empty) line + the card head + the body: 20 lines expanded, 5 preview
-    // lines + 1 hint under `errors`, a single `[20 lines]` hint under `collapsed`.
+    // The empty assistant entry contributes nothing (its blank line is stripped, rule 1) and
+    // the container's gap before the card is one line: the card head (1) + the body (20) = 22
+    // expanded, 1 + 5 preview + 1 hint = 8 under `errors`, 1 + a single `[20 lines]` hint = 3
+    // under `collapsed`.
     assert_eq!(counts, vec![22, 8, 3], "expanded / errors / collapsed");
     // A failure: the same count in all three, and the body really visible.
     for fold in [ToolFold::Expanded, ToolFold::Errors, ToolFold::Collapsed] {
@@ -1561,7 +1690,8 @@ fn folding_changes_the_transcript_line_count() {
         collapsed + 2,
         "three thinking lines become one placeholder"
     );
-    assert_eq!(collapsed, 2, "the placeholder plus the answer");
+    // The placeholder, the container's gap line, the answer (ADR 0028 rule 1).
+    assert_eq!(collapsed, 3, "placeholder + gap + answer");
 }
 
 /// `tui.display.reasoning = "hidden"` removes the reasoning lines entirely.
