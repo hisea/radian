@@ -252,12 +252,19 @@ fn a_user_file_attachment_is_folded_to_one_line() {
     );
 }
 
+fn candidate(label: &str) -> radian_tui::command::Candidate {
+    radian_tui::command::Candidate {
+        insert: label.into(),
+        description: String::new(),
+    }
+}
+
 /// The `@` completion list is drawn above the input box and is clipped to the terminal width.
 #[test]
 fn the_completion_list_sits_above_the_input_and_truncates() {
     let mut app = App::new("m", "s");
     app.input = "@no".into();
-    app.completion_set(vec!["notes.txt".into(), "notes.md".into()]);
+    app.completion_set(vec![candidate("notes.txt"), candidate("notes.md")]);
     let text = screen(&render(&mut app, 40, 12));
     assert!(text.contains("notes.txt"), "{text}");
     assert!(text.contains("notes.md"), "{text}");
@@ -273,7 +280,7 @@ fn the_completion_list_sits_above_the_input_and_truncates() {
 fn the_completion_list_truncates_on_a_narrow_terminal() {
     let mut app = App::new("m", "s");
     app.input = "@".into();
-    app.completion_set(vec!["a-very-long-candidate-name.txt".into()]);
+    app.completion_set(vec![candidate("a-very-long-candidate-name.txt")]);
     let text = screen(&render(&mut app, 12, 10));
     assert!(
         !text.contains("a-very-long-candidate-name.txt"),
@@ -289,7 +296,7 @@ fn the_completion_list_truncates_on_a_narrow_terminal() {
 #[test]
 fn completion_rows_truncates_to_the_width() {
     let mut app = App::new("m", "s");
-    app.completion_set(vec!["a-very-long-name.txt".into()]);
+    app.completion_set(vec![candidate("a-very-long-name.txt")]);
     let rows = render::completion_rows(&app, 6, 10);
     let text: String = rows[0].spans.iter().map(|s| s.content.as_ref()).collect();
     assert!(text.starts_with("❯ a-ve"), "{text:?}");
@@ -301,7 +308,11 @@ fn completion_rows_truncates_to_the_width() {
 #[test]
 fn the_completion_list_scrolls_instead_of_showing_more() {
     let mut app = App::new("m", "s");
-    app.completion_set((0..15).map(|i| format!("file{i:02}.txt")).collect());
+    app.completion_set(
+        (0..15)
+            .map(|i| candidate(&format!("file{i:02}.txt")))
+            .collect(),
+    );
     let text = screen(&render(&mut app, 40, 20));
     assert!(text.contains("file00.txt"), "{text}");
     assert!(!text.contains("file10.txt"), "{text}");

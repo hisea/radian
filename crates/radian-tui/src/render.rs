@@ -1809,12 +1809,15 @@ pub fn completion_rows(app: &App, width: usize, visible: usize) -> Vec<Line<'sta
     };
     let items: Vec<crate::select_list::Item> = candidates
         .iter()
-        .map(|candidate| crate::select_list::Item::new(candidate.clone()))
+        .map(|candidate| {
+            crate::select_list::Item::new(candidate.insert.clone())
+                .description(candidate.description.clone())
+        })
         .collect();
     crate::select_list::view(
         &app.theme,
         &items,
-        "",
+        &app.completion_filter(),
         app.completion_cursor,
         visible,
         width,

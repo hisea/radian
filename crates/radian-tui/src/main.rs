@@ -2208,25 +2208,28 @@ impl LoopContext<'_> {
                             })
                             .collect()
                     }
-                    radian_tui::command::Fetch::ModelRoute { provider, .. } => {
+                    radian_tui::command::Fetch::ModelRoute { .. } => {
                         // Mark the route in effect (the slot, or the startup route before it).
                         let (current_provider, current_model) = self
                             .session
                             .model_route()
                             .unwrap_or_else(|| self.startup_route.clone());
-                        model_route_candidates(provider.as_deref(), &self.config_providers)
-                            .into_iter()
-                            .map(|mut candidate| {
-                                let is_current = candidate.insert
-                                    == format!("{current_provider}/{current_model}")
-                                    || candidate.insert == format!("{current_provider}/");
-                                if is_current {
-                                    candidate.description =
-                                        format!("● current · {}", candidate.description);
-                                }
-                                candidate
-                            })
-                            .collect()
+                        model_route_candidates(
+                            Some(current_provider.as_str()),
+                            &self.config_providers,
+                        )
+                        .into_iter()
+                        .map(|mut candidate| {
+                            let is_current = candidate.insert
+                                == format!("{current_provider}/{current_model}")
+                                || candidate.insert == format!("{current_provider}/");
+                            if is_current {
+                                candidate.description =
+                                    format!("● current · {}", candidate.description);
+                            }
+                            candidate
+                        })
+                        .collect()
                     }
                     radian_tui::command::Fetch::ThinkingLevels { .. } => {
                         // D11: only the levels the current model supports. Each row names the
@@ -2814,69 +2817,78 @@ fn ui_loop(
 /// slash, or one provider's models after it — the descriptor's built-in list plus the cached
 /// `/v1/models` list. Reads local files only; the background refresh (D0) writes that cache.
 fn model_route_candidates(
-    provider: Option<&str>,
+    current_provider: Option<&str>,
     config_providers: &std::collections::BTreeMap<String, radian_host::ProviderDecl>,
 ) -> Vec<radian_tui::command::Candidate> {
-    let Some(provider) = provider else {
-        // Every provider a switch could name (ADR 0026 D5/D10): the built-in descriptors, the
-        // config's `[providers.<name>]` declarations, and the usable `auth.json` entries. Each
-        // is resolved with `resolve_provider` so the list matches what a switch would accept,
-        // and the description says which side declared it.
-        let auth_entries = radian_host::auth::list().unwrap_or_default();
-        let mut names: Vec<(String, &'static str)> = Vec::new();
-        for descriptor in radian_host::descriptors() {
-            names.push((descriptor.id.to_owned(), "built-in"));
-        }
-        for name in config_providers.keys() {
-            names.push((name.clone(), "config providers"));
-        }
-        for entry in &auth_entries {
-            if entry.usable {
-                names.push((entry.provider_id.clone(), "logged in"));
-            }
-        }
-        let mut seen = std::collections::HashSet::new();
-        let mut candidates = Vec::new();
-        for (name, source) in names {
-            if !seen.insert(name.clone()) {
-                continue;
-            }
-            let auth_env = auth_entries
-                .iter()
-                .find(|entry| entry.provider_id == name)
-                .and_then(|_| radian_host::AuthStore::open().ok())
-                .and_then(|store| store.entry_env(&name));
-            if radian_host::resolve_provider(&name, config_providers, auth_env.as_ref()).is_ok() {
-                candidates.push(radian_tui::command::Candidate {
-                    insert: format!("{name}/"),
-                    description: format!("switch to {name} ({source})"),
-                });
-            }
-        }
-        return candidates;
-    };
-    // Built-in list first, then the cached `/v1/models` ids (D0), merged by model id.
+    // Every provider a switch could name (ADR 0026 D5/D10): the built-in descriptors, the
+    // config's `[providers.<name>]` declarations, and the usable `auth.json` entries. Each is
+    // resolved with `resolve_provider` so the list matches what a switch would accept, then its
+    // models are flattened into one list (ADR 0035): the label is the model, the
+    // description the provider.
+    let auth_entries = radian_host::auth::list().unwrap_or_default();
+    let mut names: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    let mut candidates: Vec<radian_tui::command::Candidate> = Vec::new();
-    let push = |id: String,
-                description: String,
-                candidates: &mut Vec<radian_tui::command::Candidate>,
-                seen: &mut std::collections::HashSet<String>| {
-        if seen.insert(id.clone()) {
+    for descriptor in radian_host::descriptors() {
+        if seen.insert(descriptor.id.to_owned()) {
+            names.push(descriptor.id.to_owned());
+        }
+    }
+    for name in config_providers.keys() {
+        if seen.insert(name.clone()) {
+            names.push(name.clone());
+        }
+    }
+    for entry in &auth_entries {
+        if entry.usable && seen.insert(entry.provider_id.clone()) {
+            names.push(entry.provider_id.clone());
+        }
+    }
+    let mut candidates = Vec::new();
+    for name in &names {
+        let auth_env = auth_entries
+            .iter()
+            .find(|entry| &entry.provider_id == name)
+            .and_then(|_| radian_host::AuthStore::open().ok())
+            .and_then(|store| store.entry_env(name));
+        if radian_host::resolve_provider(name, config_providers, auth_env.as_ref()).is_err() {
+            continue;
+        }
+        for model in provider_models(name) {
             candidates.push(radian_tui::command::Candidate {
-                insert: format!("{provider}/{id}"),
-                description,
+                insert: format!("{name}/{model}"),
+                description: name.clone(),
             });
         }
+    }
+    // The current provider's models first, then by provider and model name (ADR 0035
+    // revision 2).
+    let is_current = |candidate: &radian_tui::command::Candidate| {
+        current_provider.is_some_and(|provider| {
+            candidate
+                .insert
+                .strip_prefix(provider)
+                .is_some_and(|rest| rest.starts_with('/'))
+        })
     };
+    candidates.sort_by(|left, right| {
+        is_current(right)
+            .cmp(&is_current(left))
+            .then_with(|| left.description.cmp(&right.description))
+            .then_with(|| left.insert.cmp(&right.insert))
+    });
+    candidates
+}
+
+/// One provider's model ids: the built-in descriptor's list, then the cached `/v1/models` ids
+/// (D0), merged by id.
+fn provider_models(provider: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
     if let Some(descriptor) = radian_host::descriptor(provider) {
         for model in descriptor.models {
-            push(
-                model.id.to_owned(),
-                model.name.to_owned(),
-                &mut candidates,
-                &mut seen,
-            );
+            if seen.insert(model.id.to_owned()) {
+                out.push(model.id.to_owned());
+            }
         }
     }
     if let Some(key) = radian_host::auth::resolve_key(provider)
@@ -2886,10 +2898,12 @@ fn model_route_candidates(
         && let Some(cache) = radian_host::read_provider_models(provider, &key)
     {
         for id in cache.models {
-            push(id, "from /v1/models".to_owned(), &mut candidates, &mut seen);
+            if seen.insert(id.clone()) {
+                out.push(id);
+            }
         }
     }
-    candidates
+    out
 }
 
 /// The [`ProviderRef`] a `/thinking` clamp/completion resolves against: the route's provider
