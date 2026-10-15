@@ -510,3 +510,16 @@ Base `a584b4b` · 一次性 worktree `/tmp/radian-mut-gitcommit`（`git worktree
 5/5 抓住。**过程记录**：GC-A/GC-B 第一轮**没抓住**——两者互为保险（只去一个，hook 仍然不会跑），
 所以加了 `commit_args` 的参数单测分别断言两者，才各自抓住。GC-E 第一轮变异写错（在 GitCommitted
 之前又插了一条 TurnStarted，没删掉 GitCommitted），改成真正删除后才由审计测试抓住。
+
+## git-commit-fix：钉住仓库 + `core.fsmonitor=false`（ADR 0030 R10 安全修订，2026-10-16）
+
+Base `60b1976` · 一次性 worktree `/tmp/radian-mut-gcfix` · 每条跑完 `git checkout -- .`，
+`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| GCF-A | 去掉钉住检查（`pin.still`） | `a_git_dir_created_in_a_subdirectory_workspace_is_refused` | ✅ |
+| GCF-B | 去掉 `-c core.fsmonitor=false` | `the_fsmonitor_defense_blocks_a_repo_config_script` | ✅ |
+
+2/2 抓住。威胁测试 `the_fsmonitor_threat_is_real_without_the_defense` 是 canary：裸 `git add`
+带 `core.fsmonitor` 会写标记（已在 git 2.53.0 上证明），证明这条防线不是多余的。
