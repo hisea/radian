@@ -79,6 +79,8 @@ impl HostTools {
             push("patch", "replace exact text in a file");
             push("write", "create or overwrite a file");
             push("list", "list a directory");
+            push("glob", "find files whose path matches a glob");
+            push("grep", "search file contents with a regex");
             push(
                 "shell",
                 "run a command in the workspace, foreground or background",
