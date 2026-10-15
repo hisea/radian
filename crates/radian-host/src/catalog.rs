@@ -70,9 +70,34 @@ pub struct ModelLimit {
 /// as dollars per million tokens (e.g. `input: 3` is $3/Mtok); a float would break `Eq`, so the
 /// parsed values are kept as integers rounded to a micro-dollar, enough for every price in the
 /// 2026-10-14 catalog. A missing field is "unknown", never 0.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ModelPrice {
     /// Micro-dollars per million input tokens (`3` → `3_000_000`).
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: Option<u64>,
+    pub cache_write: Option<u64>,
+    /// Context tiers (models.dev `cost.tiers`), ascending by `size`. Empty when the model has
+    /// none: the base rates above apply to every request then.
+    pub tiers: Vec<PriceTier>,
+}
+
+/// One context tier (models.dev `cost.tiers`, research F5): the rates that apply to a request
+/// whose prompt is **over** `size` tokens. The tier carries a full rate set (the same shape as
+/// the base), not an incremental rate: it replaces the base rates for the whole request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PriceTier {
+    /// The context threshold in tokens (`tier.size`).
+    pub size: u64,
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: Option<u64>,
+    pub cache_write: Option<u64>,
+}
+
+/// The rates one request is billed at, base or tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PriceRates {
     pub input: u64,
     pub output: u64,
     pub cache_read: Option<u64>,
@@ -84,23 +109,99 @@ impl ModelPrice {
     pub fn is_usable(&self) -> bool {
         self.input > 0 || self.output > 0
     }
+
+    /// The rates for a request whose prompt is `prompt` tokens: the highest tier the prompt
+    /// **exceeds** (`prompt > size`), else the base rates. A `None` prompt (the provider
+    /// reported no input counter) uses the base rates.
+    pub fn rates_for(&self, prompt: Option<u64>) -> PriceRates {
+        let tier =
+            prompt.and_then(|prompt| self.tiers.iter().rev().find(|tier| prompt > tier.size));
+        match tier {
+            Some(tier) => PriceRates {
+                input: tier.input,
+                output: tier.output,
+                cache_read: tier.cache_read,
+                cache_write: tier.cache_write,
+            },
+            None => PriceRates {
+                input: self.input,
+                output: self.output,
+                cache_read: self.cache_read,
+                cache_write: self.cache_write,
+            },
+        }
+    }
 }
 
-/// Parses a models.dev `cost` object (`dollars per million tokens`) into micro-dollars.
+/// Parses a models.dev `cost` object (`dollars per million tokens`) into micro-dollars,
+/// including its context tiers.
 fn parse_price(cost: &serde_json::Map<String, Value>) -> Option<ModelPrice> {
-    let rate = |key: &str| {
-        cost.get(key)
+    let rate = |object: &serde_json::Map<String, Value>, key: &str| {
+        object
+            .get(key)
             .and_then(Value::as_f64)
             .filter(|value| *value >= 0.0)
             .map(|value| (value * 1_000_000.0).round() as u64)
     };
-    let price = ModelPrice {
-        input: rate("input")?,
-        output: rate("output")?,
-        cache_read: rate("cache_read"),
-        cache_write: rate("cache_write"),
+    let mut price = ModelPrice {
+        input: rate(cost, "input")?,
+        output: rate(cost, "output")?,
+        cache_read: rate(cost, "cache_read"),
+        cache_write: rate(cost, "cache_write"),
+        tiers: Vec::new(),
     };
-    price.is_usable().then_some(price)
+    if !price.is_usable() {
+        return None;
+    }
+    price.tiers = parse_tiers(cost);
+    Some(price)
+}
+
+/// The context tiers. `tiers` is the current spelling; `context_over_200k` is the legacy one
+/// (the same rates at a fixed 200_000, models.dev `schema.ts`). A tier without its own
+/// input/output is skipped: the base rates stand for it.
+fn parse_tiers(cost: &serde_json::Map<String, Value>) -> Vec<PriceTier> {
+    let tier_of = |object: &serde_json::Map<String, Value>, size: u64| -> Option<PriceTier> {
+        let rate = |key: &str| {
+            object
+                .get(key)
+                .and_then(Value::as_f64)
+                .filter(|value| *value >= 0.0)
+                .map(|value| (value * 1_000_000.0).round() as u64)
+        };
+        Some(PriceTier {
+            size,
+            input: rate("input")?,
+            output: rate("output")?,
+            cache_read: rate("cache_read"),
+            cache_write: rate("cache_write"),
+        })
+    };
+    let mut tiers = Vec::new();
+    if let Some(list) = cost.get("tiers").and_then(Value::as_array) {
+        for entry in list {
+            let Some(object) = entry.as_object() else {
+                continue;
+            };
+            let Some(size) = object
+                .get("tier")
+                .and_then(|tier| tier.get("size"))
+                .and_then(Value::as_u64)
+            else {
+                continue;
+            };
+            if let Some(tier) = tier_of(object, size) {
+                tiers.push(tier);
+            }
+        }
+    } else if let Some(legacy) = cost.get("context_over_200k").and_then(Value::as_object)
+        && let Some(tier) = tier_of(legacy, 200_000)
+    {
+        tiers.push(tier);
+    }
+    // Ascending, so `rates_for` can take the last one the prompt exceeds.
+    tiers.sort_by_key(|tier| tier.size);
+    tiers
 }
 
 /// The **cap** on the output reservation `R` (ADR 0018): the reservation is a
@@ -298,7 +399,11 @@ impl Catalog {
 
     /// The model's unit prices (ADR 0027), or `None` when the catalog has none.
     pub fn price(&self, provider: &str, model: &str) -> Option<ModelPrice> {
-        self.providers.get(provider)?.models.get(model)?.price
+        self.providers
+            .get(provider)?
+            .models
+            .get(model)
+            .and_then(|entry| entry.price.clone())
     }
 
     /// The provider's catalog metadata (display name, `api`, `env`), if present.
@@ -887,12 +992,52 @@ mod tests {
                 output: 15_000_000,
                 cache_read: Some(300_000),
                 cache_write: Some(3_750_000),
+                tiers: Vec::new(),
             })
         );
         assert_eq!(catalog.price("anthropic", "no-cost"), None);
         // A zero rate is not usable, so the cost hides rather than showing `$0.00`.
         assert_eq!(catalog.price("anthropic", "zero"), None);
         assert_eq!(catalog.price("anthropic", "missing"), None);
+    }
+
+    /// Research F5: `cost.tiers` is parsed (ascending), and the legacy `context_over_200k`
+    /// is the same thing at a fixed 200_000 when `tiers` is absent.
+    #[test]
+    fn the_context_tiers_are_parsed() {
+        let text = r#"{
+            "anthropic": {"models": {
+                "tiered": {"limit": {"context": 200000}, "cost": {"input": 0.1, "output": 0.5, "cache_read": 0.01,
+                    "cache_write": 0.125,
+                    "tiers": [{"input": 0.5, "output": 2.5, "cache_read": 0.05,
+                        "cache_write": 0.625, "tier": {"type": "context", "size": 100000}}]}},
+                "legacy": {"limit": {"context": 200000}, "cost": {"input": 2, "output": 6,
+                    "context_over_200k": {"input": 4, "output": 12}}},
+                "plain": {"limit": {"context": 200000}, "cost": {"input": 3, "output": 15}}
+            }}
+        }"#;
+        let catalog = Catalog::parse(text).unwrap();
+        let tiered = catalog.price("anthropic", "tiered").unwrap();
+        assert_eq!(tiered.tiers.len(), 1);
+        assert_eq!(tiered.tiers[0].size, 100_000);
+        assert_eq!(tiered.tiers[0].input, 500_000);
+        assert_eq!(
+            tiered.rates_for(Some(100_000)).input,
+            100_000,
+            "at the size: base"
+        );
+        assert_eq!(tiered.rates_for(Some(100_001)).input, 500_000, "over: tier");
+        assert_eq!(tiered.rates_for(None).input, 100_000, "no prompt: base");
+
+        let legacy = catalog.price("anthropic", "legacy").unwrap();
+        assert_eq!(legacy.tiers.len(), 1);
+        assert_eq!(legacy.tiers[0].size, 200_000);
+        assert_eq!(legacy.rates_for(Some(200_001)).input, 4_000_000);
+        assert_eq!(legacy.rates_for(Some(200_000)).input, 2_000_000);
+
+        let plain = catalog.price("anthropic", "plain").unwrap();
+        assert!(plain.tiers.is_empty());
+        assert_eq!(plain.rates_for(Some(1_000_000)).input, 3_000_000);
     }
 
     #[test]
