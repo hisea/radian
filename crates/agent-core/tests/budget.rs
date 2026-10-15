@@ -23,6 +23,25 @@ fn text_with_usage(s: &str, input: u64) -> Reply {
     })
 }
 
+/// An Anthropic-shaped reply: `input` is the **uncached** part, with the cache fields beside
+/// it (ADR 0007). `prompt_total()` is all three added up.
+fn text_with_anthropic_usage(s: &str, input: u64, cache_read: u64, cache_write: u64) -> Reply {
+    Reply::Respond(ModelResponse {
+        reasoning: Vec::new(),
+        content: vec![ContentPart::text(s)],
+        tool_calls: vec![],
+        provider_payload: None,
+        stop_reason: StopReason::EndTurn,
+        usage: Some(ModelUsage {
+            input: Some(input),
+            cache_read: Some(cache_read),
+            cache_write: Some(cache_write),
+            input_includes_cache: Some(false),
+            ..Default::default()
+        }),
+    })
+}
+
 fn calls_with_usage(list: Vec<ToolCall>, input: u64) -> Reply {
     Reply::Respond(ModelResponse {
         reasoning: Vec::new(),
@@ -127,6 +146,107 @@ fn request_with(text: &str) -> ModelRequest {
         tools: vec![],
         settings: serde_json::Value::Null,
     }
+}
+
+/// ADR 0015 C1 + ADR 0007: the reported baseline is the **whole** prompt, cache
+/// reads and writes included. On an Anthropic-shaped record `input` alone is only the uncached
+/// part, so a baseline taken from it would understate the request (the guard acts late — the
+/// deviation ADR 0007 asks to check). The baseline is `input + cache_read +
+/// cache_write`, and the next projection carries exactly that number.
+#[tokio::test]
+async fn the_reported_baseline_includes_the_cache_read_and_write() {
+    // 10 000 uncached + 190 000 read + 1 000 written = 201 000 prompt tokens.
+    let model = ScriptedModel::new([
+        text_with_anthropic_usage("first", 10_000, 190_000, 1_000),
+        text("second"),
+    ]);
+    let mut chat = with_budget(model.clone(), NoTools, ContextBudget::new(500_000))
+        .open_session()
+        .await
+        .unwrap();
+    chat.run_turn("one", TurnOptions::default(), &NoopSink)
+        .await
+        .unwrap();
+    assert_eq!(
+        chat.testing_budget_baseline_input(),
+        Some(201_000),
+        "the baseline must be the prompt total, not the uncached `input`"
+    );
+
+    chat.run_turn("two", TurnOptions::default(), &NoopSink)
+        .await
+        .unwrap();
+    let BudgetStatus::Ok(report) = chat.context_budget_status().clone() else {
+        panic!("expected an under-budget report");
+    };
+    assert_eq!(report.source, UsageSource::ReportedPlusEstimate);
+    assert_eq!(report.baseline_input_tokens, Some(201_000));
+    assert_eq!(
+        report.projected_tokens,
+        201_000 + report.estimated_growth_tokens.unwrap()
+    );
+}
+
+/// The OpenAI-compatible shape is unaffected: `input` already contains the cache hit, so
+/// `prompt_total()` is that same number and the baseline does not move (ADR 0007).
+#[tokio::test]
+async fn the_openai_shaped_baseline_is_the_input_itself() {
+    let model = ScriptedModel::new([
+        Reply::Respond(ModelResponse {
+            reasoning: Vec::new(),
+            content: vec![ContentPart::text("first")],
+            tool_calls: vec![],
+            provider_payload: None,
+            stop_reason: StopReason::EndTurn,
+            usage: Some(ModelUsage {
+                input: Some(200_000),
+                cache_read: Some(190_000),
+                input_includes_cache: Some(true),
+                ..Default::default()
+            }),
+        }),
+        text("second"),
+    ]);
+    let mut chat = with_budget(model.clone(), NoTools, ContextBudget::new(500_000))
+        .open_session()
+        .await
+        .unwrap();
+    chat.run_turn("one", TurnOptions::default(), &NoopSink)
+        .await
+        .unwrap();
+    // 200 000, **not** 390 000: the cached 190K is inside `input`, so adding it would be the
+    // mirror-image error (counting the prompt twice).
+    assert_eq!(chat.testing_budget_baseline_input(), Some(200_000));
+}
+
+/// A record written before ADR 0007 (`input_includes_cache: None`) still gives a
+/// baseline, and it is the unmarked `input` taken at face value — adding the cache fields
+/// could double-count the very thing the flag exists to disambiguate.
+#[tokio::test]
+async fn an_unmarked_record_is_a_baseline_of_its_input_alone() {
+    let model = ScriptedModel::new([
+        Reply::Respond(ModelResponse {
+            reasoning: Vec::new(),
+            content: vec![ContentPart::text("first")],
+            tool_calls: vec![],
+            provider_payload: None,
+            stop_reason: StopReason::EndTurn,
+            usage: Some(ModelUsage {
+                input: Some(200_000),
+                cache_read: Some(190_000),
+                ..Default::default()
+            }),
+        }),
+        text("second"),
+    ]);
+    let mut chat = with_budget(model.clone(), NoTools, ContextBudget::new(500_000))
+        .open_session()
+        .await
+        .unwrap();
+    chat.run_turn("one", TurnOptions::default(), &NoopSink)
+        .await
+        .unwrap();
+    assert_eq!(chat.testing_budget_baseline_input(), Some(200_000));
 }
 
 /// The estimator must not undercount non-ASCII text. Chinese is ~3 UTF-8 bytes per

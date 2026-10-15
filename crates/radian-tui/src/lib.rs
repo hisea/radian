@@ -17,6 +17,7 @@ pub mod keys;
 pub mod login;
 pub mod markdown;
 pub mod mention;
+pub mod panel;
 pub mod picker;
 pub mod profile;
 pub mod projection;

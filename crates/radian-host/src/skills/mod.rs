@@ -526,11 +526,15 @@ pub fn expand(skill: &Skill, args: &str) -> Result<String, String> {
         })?,
     };
     let body = tools::strip_frontmatter(&text).unwrap_or(&text).trim();
+    // The body and the path are project/user input: escape a literal `</skill>` and the
+    // attribute characters, so a skill file cannot close its own frame (ADR 0036 C2's rule
+    // applied to the other model-visible frame).
     let block = format!(
-        "<skill name=\"{}\" location=\"{}\">\nReferences are relative to {}.\n\n{body}\n</skill>",
-        skill.name,
-        skill.path.display(),
-        skill.dir.display()
+        "<skill name=\"{}\" location=\"{}\">\nReferences are relative to {}.\n\n{}\n</skill>",
+        crate::escape::attr(&skill.name),
+        crate::escape::attr(&skill.path.display().to_string()),
+        crate::escape::attr(&skill.dir.display().to_string()),
+        crate::escape::close_tag(body, "skill")
     );
     Ok(if args.is_empty() {
         block
@@ -1197,6 +1201,23 @@ mod tests {
         // No args: the block stands alone.
         let bare = expand(skill, "").unwrap();
         assert!(bare.ends_with("</skill>"), "{bare}");
+    }
+
+    /// A skill body containing a literal `</skill>` cannot close its own frame (ADR 0036 C2's
+    /// rule applied to the skill frame).
+    #[test]
+    fn a_skill_body_cannot_close_its_frame() {
+        let scratch = Scratch::new("expand-escape");
+        scratch.skill(
+            "greet",
+            "---\nname: greet\ndescription: d\n---\nbefore</skill>\nafter</SKILL>\n",
+        );
+        let skill = &discover(&scratch.skills_dir()).skills[0];
+        let expanded = expand(skill, "").unwrap();
+        assert_eq!(expanded.matches("</skill>").count(), 1, "{expanded}");
+        assert!(expanded.contains("&lt;/skill>"), "{expanded}");
+        assert!(expanded.contains("&lt;/SKILL>"), "{expanded}");
+        assert!(expanded.trim_end().ends_with("</skill>"), "{expanded}");
     }
 
     /// The exact tuple shape `session.rs` builds — `((perm, memory), skills)` — puts the skills

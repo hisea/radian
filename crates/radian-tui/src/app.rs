@@ -1105,7 +1105,10 @@ pub struct App {
     pub git_branch: Option<String>,
     /// The machine's hostname (ADR 0027 `host`), read once at startup.
     pub hostname: Option<String>,
-    /// The model's catalog unit prices (ADR 0027 `cost`), set once at startup.
+    /// The model's catalog unit prices (ADR 0027). Kept for the host's startup
+    /// wiring and its own tests; the footer's `cost` reads the **projection's** accumulated
+    /// fee, because the fee is per call at the price in force then (a `/model` switch does not
+    /// re-price earlier calls). [`App::set_model_price`] records it in both places.
     pub model_price: Option<radian_host::ModelPrice>,
     /// Whether automatic compaction is on (`context`'s `{auto}` marker), set once at startup.
     pub auto_compact: bool,
@@ -1368,6 +1371,7 @@ impl App {
             tools: self.tool_display,
             mermaid: self.mermaid_enabled,
             highlight: self.highlight_enabled,
+            glyphs: self.footer_glyphs(),
         }
     }
 
@@ -2712,6 +2716,11 @@ impl App {
         // actions come from the `form` layer, and everything else that can edit text goes to
         // the focused field. A key the form does not want is swallowed, never passed down.
         if matches!(self.top_modal(), Some(Modal::Question(_))) {
+            // `alt-h` collapses the panel (ADR 0024 R3): it is the form's own key,
+            // not a rebindable `form` action.
+            if key.code == KeyCode::Char('h') && key.modifiers.contains(KeyModifiers::ALT) {
+                return Some(Input::Form(FormKey::Hide));
+            }
             if let Some(action) = self.keymap.form_action_for(key) {
                 return Some(Input::Form(FormKey::Action(action)));
             }
@@ -4206,9 +4215,12 @@ impl App {
         self.hostname = hostname;
     }
 
-    /// The model's catalog unit prices (ADR 0027).
+    /// The model's catalog unit prices (ADR 0027). Written through to the
+    /// projection, which is what prices each arriving call: the footer reads the accumulated
+    /// fee from there, because a call keeps the price it arrived under even after a switch.
     pub fn set_model_price(&mut self, price: Option<radian_host::ModelPrice>) {
         self.model_price = price;
+        self.projection.set_price(price);
     }
 
     /// Whether automatic compaction is on (ADR 0027).

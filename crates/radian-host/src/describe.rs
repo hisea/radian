@@ -83,13 +83,21 @@ fn workspace_sandbox_facts(wording: Wording) -> String {
     )
 }
 
-/// The startup summary's word for the sandbox. `workspace` names the **real** backend
-/// (`macos-seatbelt`, `linux-bwrap`), so it can never be read as "no sandbox"; `safe` has
-/// nothing to sandbox (`no exec`: no command execution at all); `full` is `no sandbox`.
+/// The startup summary's word for the sandbox. `workspace` names the **real** backend in
+/// plain words — `macOS sandbox` for `macos-seatbelt`, `Linux sandbox` for `linux-bwrap`, and
+/// the backend's own name for one it does not know — so it can never be read as "no sandbox".
+/// The exact backend name is still in the expanded `profile:` line. `safe` has nothing to
+/// sandbox (`no exec`: no command execution at all); `full` is `no sandbox`.
 pub fn sandbox_word(mode: SandboxMode, backend: Option<&str>) -> String {
     match mode {
         SandboxMode::Safe => "no exec".to_string(),
-        SandboxMode::WorkspaceWrite => backend.unwrap_or("sandbox missing").to_string(),
+        SandboxMode::WorkspaceWrite => match backend {
+            Some("macos-seatbelt") => "macOS sandbox".to_string(),
+            Some("linux-bwrap") => "Linux sandbox".to_string(),
+            // A backend this build does not know: say its real name, never "none".
+            Some(other) => other.to_string(),
+            None => "sandbox missing".to_string(),
+        },
         SandboxMode::FullAccess => "no sandbox".to_string(),
     }
 }
@@ -98,17 +106,23 @@ pub fn sandbox_word(mode: SandboxMode, backend: Option<&str>) -> String {
 mod tests {
     use super::*;
 
-    /// The summary word uses the backend name it is handed, whatever the platform. A name
-    /// hardcoded to `seatbelt` would pass on macOS and be wrong on Linux.
+    /// The summary word spells the backend in plain words on both platforms, and an unknown
+    /// backend keeps its own name. A word hardcoded to one platform would pass on that
+    /// platform and be wrong on the other.
     #[test]
-    fn the_summary_word_is_the_backend_it_is_given() {
-        assert_eq!(
-            sandbox_word(SandboxMode::WorkspaceWrite, Some("linux-bwrap")),
-            "linux-bwrap"
-        );
+    fn the_summary_word_names_the_backend_in_plain_words() {
         assert_eq!(
             sandbox_word(SandboxMode::WorkspaceWrite, Some("macos-seatbelt")),
-            "macos-seatbelt"
+            "macOS sandbox"
+        );
+        assert_eq!(
+            sandbox_word(SandboxMode::WorkspaceWrite, Some("linux-bwrap")),
+            "Linux sandbox"
+        );
+        // An unknown backend is shown by its real name, not hidden behind a generic word.
+        assert_eq!(
+            sandbox_word(SandboxMode::WorkspaceWrite, Some("freebsd-capsicum")),
+            "freebsd-capsicum"
         );
         // A missing backend in an enforced mode must not read as "no sandbox".
         assert_eq!(

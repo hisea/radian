@@ -312,6 +312,29 @@ async fn every_question_limit_is_an_invalid_arguments_failure() {
                 "id": "q", "prompt": "Pick one", "kind": "text", "extra": true
             })]),
         ),
+        // ADR 0024 R4.
+        (
+            "a 17-cell header",
+            args(vec![json!({
+                "id": "q", "header": "x".repeat(17), "prompt": "Pick one", "kind": "text"
+            })]),
+        ),
+        (
+            "a 9-CJK-cell header",
+            args(vec![json!({
+                "id": "q", "header": "一二三四五六七八九", "prompt": "Pick one", "kind": "text"
+            })]),
+        ),
+        (
+            "two recommended options on a single question",
+            args(vec![json!({
+                "id": "q", "prompt": "Pick one", "kind": "single",
+                "options": [
+                    {"id": "a", "label": "A", "recommended": true},
+                    {"id": "b", "label": "B", "recommended": true}
+                ]
+            })]),
+        ),
     ];
     let dir = TempDir::new("ask-limits");
     let ws = dir.file("ws");
@@ -330,6 +353,39 @@ async fn every_question_limit_is_an_invalid_arguments_failure() {
         prompter.seen().is_empty(),
         "an invalid request must not reach the prompter"
     );
+}
+
+/// ADR 0024 R4: a note over the limit is `invalid_answer`, and the header defaults
+/// to the id.
+#[tokio::test]
+async fn a_note_over_the_limit_is_rejected_and_the_header_defaults_to_the_id() {
+    let dir = TempDir::new("ask-note");
+    let ws = dir.file("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let answer = QuestionAnswer::new(
+        "q-1",
+        vec![QuestionReply {
+            id: "q".into(),
+            note: Some("x".repeat(501)),
+            ..QuestionReply::default()
+        }],
+    );
+    let prompter: Arc<dyn Prompter> = ScriptedPrompter::answering(answer);
+    let tools = AskTools::new(prompter);
+    let failure = ask(&tools, args(vec![question("q")]))
+        .await
+        .expect_err("a 501-character note");
+    assert_eq!(code(&failure), "invalid_answer", "{failure:?}");
+
+    // No header: the tab label is the id.
+    let request = QuestionRequest::parse(&args(vec![question("q")])).unwrap();
+    assert_eq!(request.questions[0].header(), "q");
+    // A header is used as given.
+    let request = QuestionRequest::parse(&args(vec![json!({
+        "id": "q", "header": "Pick", "prompt": "Pick one", "kind": "text"
+    })]))
+    .unwrap();
+    assert_eq!(request.questions[0].header(), "Pick");
 }
 
 /// ADR 0024 Q3: the answer's ids must match the questions one-to-one.

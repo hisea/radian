@@ -336,11 +336,22 @@ fn option(id: &str, label: &str) -> radian_coding::QuestionOption {
         id: id.into(),
         label: label.into(),
         description: None,
+        recommended: false,
     }
 }
 
 fn form(questions: Vec<radian_coding::Question>) -> radian_tui::question::QuestionForm {
     radian_tui::question::QuestionForm::new(7, "session".into(), questions)
+}
+
+fn panel_text(form: &radian_tui::question::QuestionForm, width: usize) -> String {
+    text_of(&render::question_panel(
+        form,
+        width,
+        usize::MAX,
+        &radian_tui::theme::Theme::dark(),
+        radian_tui::footer::Glyphs::Unicode,
+    ))
 }
 
 fn text_of(lines: &[ratatui::text::Line<'static>]) -> String {
@@ -364,30 +375,25 @@ fn a_long_option_list_scrolls_to_keep_the_cursor_visible() {
         .collect();
     let mut form = form(vec![radian_coding::Question {
         id: "q".into(),
+        header: None,
         prompt: "Pick one".into(),
         kind: radian_coding::QuestionKind::Single,
         options,
         allow_other: false,
         required: true,
     }]);
-    // Move the cursor to the last option, with only five visible rows.
+    // The panel lays the whole list out; the frame clips it to the modal height.
     form.answers[0].cursor = 11;
-    let shown = text_of(&render::question_lines(&form, 40, 5));
-    assert!(shown.contains("> ( ) Option 11"), "{shown}");
-    assert!(
-        shown.contains("above"),
-        "the clipped rows are counted: {shown}"
-    );
-    assert!(
-        !shown.contains("Option 0"),
-        "the top scrolled away: {shown}"
-    );
+    let shown = panel_text(&form, 40);
+    assert!(shown.contains("❯ ○ Option 11"), "{shown}");
+    assert!(shown.contains("Option 0"), "{shown}");
 }
 
 /// A narrow box clips its rows instead of wrapping them (ADR 0024 Q7).
 #[test]
 fn a_narrow_question_box_clips_instead_of_wrapping() {
     let form = form(vec![radian_coding::Question {
+        header: None,
         id: "q".into(),
         prompt: "a prompt that is far too long for the box".into(),
         kind: radian_coding::QuestionKind::Single,
@@ -395,7 +401,7 @@ fn a_narrow_question_box_clips_instead_of_wrapping() {
         allow_other: false,
         required: false,
     }]);
-    let shown = text_of(&render::question_lines(&form, 20, 10));
+    let shown = panel_text(&form, 20);
     for line in shown.lines() {
         assert!(
             line.chars().count() <= 20,
@@ -410,6 +416,7 @@ fn a_narrow_question_box_clips_instead_of_wrapping() {
 fn the_overview_lists_each_question_and_its_answer() {
     let mut form = form(vec![
         radian_coding::Question {
+            header: None,
             id: "one".into(),
             prompt: "Pick one".into(),
             kind: radian_coding::QuestionKind::Single,
@@ -418,6 +425,7 @@ fn the_overview_lists_each_question_and_its_answer() {
             required: false,
         },
         radian_coding::Question {
+            header: None,
             id: "two".into(),
             prompt: "Say something".into(),
             kind: radian_coding::QuestionKind::Text,
@@ -428,18 +436,17 @@ fn the_overview_lists_each_question_and_its_answer() {
     ]);
     form.current = None;
     form.answers[0].selected = vec!["a".into()];
-    let shown = text_of(&render::question_lines(&form, 60, 10));
-    assert!(shown.contains("1. Pick one → A"), "{shown}");
-    assert!(
-        shown.contains("2. Say something → (not answered)"),
-        "{shown}"
-    );
+    let shown = panel_text(&form, 60);
+    // The `Submit` tab lists each question by its header and answer.
+    assert!(shown.contains("✓ one — A"), "{shown}");
+    assert!(shown.contains("· two — (not answered)"), "{shown}");
 }
 
 /// The decline confirmation is shown, so the first `Esc` never looks like it did nothing.
 #[test]
 fn the_decline_confirmation_is_shown() {
     let mut form = form(vec![radian_coding::Question {
+        header: None,
         id: "one".into(),
         prompt: "Pick one".into(),
         kind: radian_coding::QuestionKind::Text,
@@ -448,7 +455,7 @@ fn the_decline_confirmation_is_shown() {
         required: false,
     }]);
     form.confirm_decline = true;
-    let shown = text_of(&render::question_lines(&form, 60, 10));
+    let shown = panel_text(&form, 60);
     assert!(shown.contains("press Esc again to decline"), "{shown}");
 }
 
@@ -1063,7 +1070,7 @@ fn the_block_layout_snapshot() {
             meta: Default::default(),
         },
     });
-    app.push_notice("profile: workspace · sandbox seatbelt");
+    app.push_notice("profile: workspace · sandbox macos-seatbelt");
     let history =
         agent_core::compaction::compacted_history("the earlier work, summarized", &[], &[])
             .expect("a valid history");
@@ -1104,7 +1111,7 @@ fn the_block_layout_snapshot() {
         " <-d 4.0K src",             // its result (the aligned table)
         "   f 512 B b.md",
         "", // the gap
-        "* profile: workspace · sandbox seatbelt",
+        "* profile: workspace · sandbox macos-seatbelt",
         "", // the gap above the rule line
         "── context compacted ──",
         "", // the gap below it
@@ -1208,7 +1215,8 @@ fn the_list_and_memory_cards_have_their_own_heads() {
             "ask_user",
             serde_json::json!({"questions": [{"id": "q1"}, {"id": "q2"}]}),
             serde_json::json!({"request_id": "r", "answers": []}),
-            "ask_user: 2 questions",
+            // ADR 0024 R1: the call is a boxed block, not the plain head.
+            "Ask 2 questions",
         ),
         (
             "memory_get",
@@ -1884,6 +1892,7 @@ fn the_login_wizard_uses_the_text_hierarchy() {
 /// not depend on the fold defaults.
 #[allow(dead_code)]
 const EXPANDED: DisplayModes = DisplayModes {
+    glyphs: radian_tui::footer::Glyphs::Unicode,
     reasoning: ReasoningMode::Expanded,
     tools: radian_tui::tools::ToolDisplay {
         fold: radian_tui::tools::ToolFold::Expanded,
@@ -1907,6 +1916,7 @@ fn the_question_keys_stay_visible_with_a_long_option_list() {
             origin: "session".into(),
             request: PendingRequest::Question(radian_coding::QuestionRequest {
                 questions: vec![radian_coding::Question {
+                    header: None,
                     id: "q".into(),
                     prompt: "Pick one".into(),
                     kind: QuestionKind::Single,
@@ -1920,12 +1930,11 @@ fn the_question_keys_stay_visible_with_a_long_option_list() {
     ));
     let text = screen(&render(&mut app, 60, 18));
     assert!(
-        text.contains("Tab next"),
-        "the keys must be on screen:\n{text}"
+        text.contains("⏎ select"),
+        "the keys are in the bottom border:\n{text}"
     );
-    assert!(text.contains("Esc decline"), "{text}");
-    // The box is on screen with its scrolled list.
-    assert!(text.contains("question 1/1"), "{text}");
+    assert!(text.contains("esc canc"), "{text}");
+    assert!(text.contains("Ask · session"), "{text}");
 }
 
 /// `wrap_line_count` (the counting-only path, used to measure every entry on the first frame

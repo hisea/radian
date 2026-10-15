@@ -105,6 +105,14 @@ pub enum LineRole {
     DiffRemoved,
     DiffContext,
     DiffHunk,
+    /// The `ask_user` block's prompt and title (ADR 0024 R1): the emphasis role.
+    Accent,
+    /// A weak line (an option description, a note).
+    Muted,
+    /// A structural line (the box borders, a labeled divider).
+    Dim,
+    /// A heading: the accent, bold.
+    Heading,
 }
 
 /// One display line of a card body.
@@ -768,6 +776,9 @@ pub struct DisplayModes {
     /// Code-block syntax highlighting (ADR 0028 R2, `tui.display.highlight`). In the layout
     /// cache key for the same reason as `mermaid`: highlighted lines are what is drawn.
     pub highlight: bool,
+    /// The footer's glyph set (ADR 0027 C2), for the `ask_user` block's box and marks (ADR 0024
+    /// revision 1 R1). In the layout cache key: the drawn glyphs differ.
+    pub glyphs: crate::footer::Glyphs,
 }
 
 impl Default for DisplayModes {
@@ -779,6 +790,7 @@ impl Default for DisplayModes {
             tools: ToolDisplay::default(),
             mermaid: true,
             highlight: true,
+            glyphs: crate::footer::Glyphs::Unicode,
         }
     }
 }

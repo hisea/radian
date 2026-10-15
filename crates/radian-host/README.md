@@ -164,6 +164,14 @@ MCP) and `TUI_WORDING` ("shell and the built-in tools"). Everything else — inc
 that must **not** be weakened, "MCP servers are NOT sandboxed" (ADR 0012 decision 4) — is
 written once here.
 
+`sandbox_word(mode, backend)` is the TUI startup summary's word for the sandbox (ADR 0027). For
+`workspace` it names the real backend in plain words — `macOS sandbox` for `macos-seatbelt`,
+`Linux sandbox` for `linux-bwrap`, and the backend's own name for one this build does not know —
+so a summary can never be read as "no sandbox"; the exact backend name stays in the expanded
+`profile:` line. `safe` is `no exec` (there is no command execution to sandbox) and `full` is
+`no sandbox` (chosen explicitly). A missing backend in an enforced mode is `sandbox missing`,
+never `none`.
+
 ## What it guarantees (each with the test that holds it)
 
 Tests live in the module they pin; there is no `tests/` directory in this crate.
