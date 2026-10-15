@@ -750,12 +750,15 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
                         lang,
                     } => {
                         let source = &text[*start..*end];
+                        // ADR 0035: the fence lines are counted too (the layout
+                        // shows them).
+                        let fences = if *closed { 2 } else { 1 };
                         if is_mermaid(lang, *closed, modes.mermaid) {
                             let index = diagram_index;
                             diagram_index += 1;
                             match diagram_outcome(entry, index, &code_body(source, *closed), width)
                             {
-                                DiagramOutcome::Rendered(lines) => lines.len(),
+                                DiagramOutcome::Rendered(lines) => lines.len() + fences,
                                 DiagramOutcome::Failed(_) => 1 + code_line_count(source, *closed),
                             }
                         } else {
