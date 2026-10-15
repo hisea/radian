@@ -1991,7 +1991,7 @@ fn md_wrap_marked(
     let mut row: Vec<Cell> = Vec::new();
     let mut used = 0usize;
     let mut first = true;
-    let mut flush = |row: &mut Vec<Cell>, out: &mut Vec<BodyLine>, first: &mut bool| {
+    let flush = |row: &mut Vec<Cell>, out: &mut Vec<BodyLine>, first: &mut bool| {
         let mut pieces: Vec<MdPiece> = Vec::new();
         for (ch, style, offset) in row.iter() {
             match pieces.last_mut() {
