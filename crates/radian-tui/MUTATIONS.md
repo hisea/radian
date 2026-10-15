@@ -1106,3 +1106,9 @@ Base `45723f6` · 一次性 worktree `/tmp/radian-glyphs-mut`，每个变异跑�
 | G-M4 | host 的 unicode 图标改回未覆盖的 `⌂` | 同上 | ✅ |
 
 4/4 抓住。
+
+（blocks2 合并后，在 `90dfd27` 重跑 G-M1..M4，并加 G-M5：unicode `tool_status` 改回未覆盖的 `⟳ ✔ ✘`；5/5 抓住。一次性 worktree `/tmp/radian-glyphs-mut2`，还原后 `git status --short` 为空。）
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| G-M5 | `Glyphs::Unicode.tool_status()` 改回 `⟳ ✔ ✘` | `footer::tests::unicode_tier_glyphs_are_all_verified_covered` | ✅ |
