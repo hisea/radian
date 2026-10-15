@@ -276,6 +276,9 @@ pub struct Footer {
     rows: Vec<Row>,
     /// The left/right gap fill (ADR 0027 item 4).
     context_line: ContextLine,
+    /// The footer inherits the terminal's background (ADR 0027 item 5): every
+    /// cell's background is cleared, a configured item style's included.
+    transparent: bool,
 }
 
 impl Footer {
@@ -321,6 +324,7 @@ impl Footer {
                 ContextLine::Off
             }),
         };
+        let transparent = config.transparent.unwrap_or(false);
         let rows: Vec<Row> = if config.rows.is_empty() {
             // The built-in preset, then the per-field `items` config on top.
             let mut rows = preset_rows(preset, glyphs);
@@ -362,6 +366,7 @@ impl Footer {
                 glyphs,
                 rows,
                 context_line,
+                transparent,
             },
             warnings,
         )
@@ -389,6 +394,16 @@ impl Footer {
         rows.iter()
             .map(|row| render_row(app, row, width, self.context_line))
             .filter(|line| !line.spans.is_empty())
+            .map(|mut line| {
+                if self.transparent {
+                    // ADR 0027 item 5: no background, so a transparent terminal
+                    // shows through. The gap's spaces and the gauge keep their own colors.
+                    for span in &mut line.spans {
+                        span.style.bg = None;
+                    }
+                }
+                line
+            })
             .collect()
     }
 }

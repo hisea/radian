@@ -1227,6 +1227,123 @@ fn the_deck_numbers_row_matches_the_sample() {
     );
 }
 
+/// ADR 0027: the default unicode footer at 80 and 120 columns - the tier's token
+/// arrows, the context gauge in the identity row's gap, and the ascii/nerd tiers keeping
+/// `^`/`v`.
+#[test]
+fn the_unicode_footer_snapshot_at_80_and_120_columns() {
+    for width in [80u16, 120] {
+        let mut app = App::new("mock", "s");
+        app.set_footer_facts(
+            Some(std::path::PathBuf::from("/tmp/ws")),
+            Some("Mock 5".to_string()),
+            Some("opencode-go".to_string()),
+            Some("high".to_string()),
+        );
+        app.set_git_branch(Some("main".to_string()));
+        app.apply_footer(&TuiFooterConfig {
+            context_line: Some("percentage".to_string()),
+            ..Default::default()
+        });
+        app.projection.set_context_window(Some(1_000_000));
+        app.projection.set_request_started(Some(BudgetReport {
+            source: UsageSource::Estimated,
+            projected_tokens: 413_000,
+            input_budget_tokens: 1_000_000,
+            request_bytes: 0,
+            baseline_input_tokens: None,
+            estimated_growth_tokens: None,
+        }));
+        let terminal = render(&mut app, width, 12);
+        let identity = row(&terminal, 10);
+        let numbers = row(&terminal, 11);
+        // The identity row: the gauge fills the gap (41.3% used).
+        assert!(
+            identity.contains('─'),
+            "the gauge at {width} columns: {identity:?}"
+        );
+        assert!(identity.contains('*'), "the reasoning glyph: {identity:?}");
+        // The numbers row: the unicode arrows and the compact numbers, never wider than the
+        // terminal.
+        assert!(numbers.contains('↑'), "the in arrow: {numbers:?}");
+        assert!(numbers.contains('↓'), "the out arrow: {numbers:?}");
+        assert!(
+            numbers.contains("41.3%"),
+            "the context percent: {numbers:?}"
+        );
+        assert!(numbers.trim_end().chars().count() <= width as usize);
+        assert!(
+            !numbers.contains('^') && !numbers.contains('v'),
+            "the unicode tier has no `^`/`v`: {numbers:?}"
+        );
+    }
+}
+
+/// The nerd and ascii tiers keep `^`/`v` (ADR 0027 item 2 changes unicode only).
+#[test]
+fn the_other_tiers_keep_the_ascii_token_arrows() {
+    for set in ["nerd", "ascii"] {
+        let mut app = App::new("mock", "s");
+        app.apply_footer(&TuiFooterConfig {
+            glyphs: Some(set.to_string()),
+            rows: vec![TuiFooterRowConfig {
+                left: vec![item("tokens")],
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        app.projection.add_usage(&agent_core::ModelUsage {
+            input: Some(15_000_000),
+            output: Some(2_600_000),
+            ..Default::default()
+        });
+        let terminal = render(&mut app, 60, 8);
+        let line = row(&terminal, 7);
+        assert!(line.contains('^'), "{set}: {line:?}");
+        assert!(line.contains('v'), "{set}: {line:?}");
+    }
+}
+
+/// ADR 0027 item 5 (omp's `statusLine.transparent`): the footer inherits the
+/// terminal's background - every footer cell's background is cleared, a configured item
+/// style's included.
+#[test]
+fn transparent_clears_the_footer_background() {
+    let config = |transparent: bool| TuiFooterConfig {
+        transparent: Some(transparent),
+        rows: vec![TuiFooterRowConfig {
+            left: vec![TuiFooterItemConfig {
+                id: "model".to_string(),
+                // A starship style: two space-separated colors, the second is the
+                // background (`red` alone is a role, which carries no background).
+                style: Some("red #112233".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let background = Color::Rgb(0x11, 0x22, 0x33);
+
+    let mut opaque = App::new("mock", "s");
+    opaque.apply_footer(&config(false));
+    let terminal = render(&mut opaque, 40, 8);
+    assert_eq!(
+        terminal.backend().buffer().cell((0, 7)).unwrap().bg,
+        background,
+        "the item's background is drawn by default"
+    );
+
+    let mut clear = App::new("mock", "s");
+    clear.apply_footer(&config(true));
+    let terminal = render(&mut clear, 40, 8);
+    assert_eq!(
+        terminal.backend().buffer().cell((0, 7)).unwrap().bg,
+        Color::Reset,
+        "transparent clears it"
+    );
+}
+
 /// ADR 0027 item 4 (omp's `contextLine = percentage`): the gap between a row's
 /// left and right groups is a `─` rule - the used fraction of the context window in the
 /// `budget` role, the rest in the `footer_separator` (border) role.

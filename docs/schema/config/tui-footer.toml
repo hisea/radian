@@ -15,6 +15,8 @@ glyphs = "unicode"
 # ADR 0027 item 4: `off` (default) or `percentage` (the left/right gap shows the
 # context usage).
 context_line = "percentage"
+# ADR 0027 item 5: the footer inherits the terminal's background.
+transparent = true
 
 [[tui.footer.rows]]
 left = [
