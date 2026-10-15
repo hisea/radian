@@ -171,6 +171,7 @@ mod tests {
 
     /// Both folds expanded, so a test's geometry does not depend on the fold defaults.
     const EXPANDED: DisplayModes = DisplayModes {
+        glyphs: crate::footer::Glyphs::Unicode,
         reasoning: ReasoningMode::Expanded,
         tools: crate::tools::ToolDisplay {
             fold: crate::tools::ToolFold::Expanded,

@@ -1371,6 +1371,7 @@ impl App {
             tools: self.tool_display,
             mermaid: self.mermaid_enabled,
             highlight: self.highlight_enabled,
+            glyphs: self.footer_glyphs(),
         }
     }
 
@@ -2715,6 +2716,11 @@ impl App {
         // actions come from the `form` layer, and everything else that can edit text goes to
         // the focused field. A key the form does not want is swallowed, never passed down.
         if matches!(self.top_modal(), Some(Modal::Question(_))) {
+            // `alt-h` collapses the panel (ADR 0024 R3): it is the form's own key,
+            // not a rebindable `form` action.
+            if key.code == KeyCode::Char('h') && key.modifiers.contains(KeyModifiers::ALT) {
+                return Some(Input::Form(FormKey::Hide));
+            }
             if let Some(action) = self.keymap.form_action_for(key) {
                 return Some(Input::Form(FormKey::Action(action)));
             }
