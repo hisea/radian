@@ -1560,6 +1560,8 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     // the session; the wording is the host's (ADR 0012 decision 4).
     eprintln!("[profile] {}", session.facts().profile_line);
     eprintln!("[sandbox] {}", session.facts().sandbox_facts);
+    // ADR 0036 C2: the loaded context files (paths and sizes), or `none`.
+    eprintln!("[context] {}", session.facts().context_line);
     // ADR 0026 D9: the startup line names the auto policy whichever way it was chosen, and
     // the warnings say when a config value was ignored or a restore refused.
     if setup.approval.policy == radian_permissions::ApprovalPolicy::Auto {

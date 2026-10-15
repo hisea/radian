@@ -10,27 +10,35 @@ fn parse(line: &str) -> Outcome {
     command::parse(line, false)
 }
 
+fn key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+}
+
 /// Two-level completion: the provider half, then the model half of the same word.
 #[test]
 fn the_completion_tree_offers_providers_then_models() {
-    // `/model ` completes the provider half (the candidates need the host: `Needs`).
+    // `/model ` offers the flat list of every logged-in provider's models (ADR 0035
+    // revision 2); the candidates need the host, so the level is `Needs`.
     let level = command::complete_in(command::tree(), "/model ", 7).expect("a completion");
     assert!(
         matches!(
             level.level_result,
             command::Level::Needs(command::Fetch::ModelRoute { provider: None, .. })
         ),
-        "the provider half needs the host: {:?}",
+        "the flat list needs the host: {:?}",
         level.level_result
     );
-    // After the slash, the same level is `Needs` **with** the provider named.
+    // The direct `provider/model` form is the same flat level; the typed word is the partial.
     let level =
         command::complete_in(command::tree(), "/model opencode-go/", 19).expect("a completion");
     match level.level_result {
-        command::Level::Needs(command::Fetch::ModelRoute { provider, .. }) => {
-            assert_eq!(provider.as_deref(), Some("opencode-go"));
+        command::Level::Needs(command::Fetch::ModelRoute {
+            provider: None,
+            partial,
+        }) => {
+            assert_eq!(partial, "opencode-go/");
         }
-        other => panic!("the model half needs the host with the provider: {other:?}"),
+        other => panic!("the flat list needs the host: {other:?}"),
     }
     // And the parse reads the same word.
     match parse("/model opencode-go/deepseek-v4.1-flash") {
@@ -320,4 +328,60 @@ fn the_provider_list_resolves_built_ins_config_and_auth() {
         radian_host::resolve_provider("nope", &providers, None).is_err(),
         "an unknown name must not be offered"
     );
+}
+
+/// ADR 0035: the flat `/model` list. Typing a provider name matches that provider's
+/// rows (the insert is `provider/model`, so both halves are searchable), and accepting inserts
+/// the pair.
+#[test]
+fn the_flat_model_list_filters_by_provider_and_accepts_the_pair() {
+    let flat = vec![
+        command::Candidate {
+            insert: "opencode-go/deepseek-v4.1-flash".into(),
+            description: "opencode-go".into(),
+        },
+        command::Candidate {
+            insert: "openai/gpt-5".into(),
+            description: "openai".into(),
+        },
+        command::Candidate {
+            insert: "anthropic/claude-4".into(),
+            description: "anthropic".into(),
+        },
+    ];
+    // Typing `opencode` keeps only that provider's rows; a model name still matches.
+    let ranked = command::rank(flat.clone(), "opencode");
+    assert_eq!(ranked.len(), 1);
+    assert_eq!(ranked[0].insert, "opencode-go/deepseek-v4.1-flash");
+    let ranked = command::rank(flat.clone(), "gpt");
+    assert_eq!(ranked[0].insert, "openai/gpt-5");
+
+    // The app menu shows the provider column and accepts the `provider/model` pair.
+    let mut app = App::new("m", "s");
+    for c in "/model ".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    app.update(Input::CompletionsReady {
+        fetch: command::Fetch::ModelRoute {
+            provider: None,
+            partial: String::new(),
+        },
+        candidates: flat,
+    });
+    let rows = radian_tui::render::completion_rows(&app, 80, 10);
+    let text: String = rows
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("deepseek-v4.1-flash"), "{text}");
+    assert!(text.contains("opencode-go"), "the provider column: {text}");
+    let result = app.on_key(key(KeyCode::Enter));
+    assert!(result.effects.is_empty(), "{:?}", result.effects);
+    assert_eq!(app.input, "/model opencode-go/deepseek-v4.1-flash ");
 }

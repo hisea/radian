@@ -138,6 +138,10 @@ config error). Without it the glyph set's default is used (`nerd` `󰰠`, `unico
 `ascii` `rad`). A user-written glyph is **not** covered by the font-coverage rule: a font that
 lacks it draws a fallback glyph, which may sit off the baseline. `[tui.footer.items.brand] style`
 still overrides the color.
+The collapsed summary names the sandbox in plain words: `workspace · macOS
+sandbox · context …` on macOS, `workspace · Linux sandbox · context …` on Linux, `no exec` for
+`safe` and `no sandbox` for `full`; the exact backend name (`macos-seatbelt`, `linux-bwrap`)
+stays in the expanded `profile:` line.
 The transcript scrolls with PageUp/PageDown, Shift-Up/Shift-Down and Ctrl-Home/Ctrl-End; the
 bare arrow keys belong to the composer.
 

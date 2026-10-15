@@ -28,7 +28,7 @@ use radian_sandbox::Sandbox;
 use radian_session::{SessionCreatedData, SessionJournal};
 
 use crate::describe::{Wording, describe, sandbox_word};
-use crate::home::skills_dir;
+use crate::home::{radian_home, skills_dir, user_home};
 use crate::memory::{InjectionConfig, MemoryHooks, MemoryService, MemoryTools, ProjectState};
 use crate::model::SwitchableModel;
 use crate::pending::{
@@ -381,8 +381,9 @@ pub struct SessionFacts {
     pub profile_line: String,
     /// The `[sandbox]` line.
     pub sandbox_facts: String,
-    /// The startup summary's word for the sandbox (ADR 0027): the real backend for
-    /// `workspace`, `no exec` for `safe`, `no sandbox` for `full`. The TUI prints it as-is.
+    /// The startup summary's word for the sandbox (ADR 0027): the real backend in plain
+    /// words for `workspace` (`macOS sandbox` / `Linux sandbox`), `no exec` for `safe`,
+    /// `no sandbox` for `full`. The TUI prints it as-is.
     pub sandbox_word: String,
     /// The `[memory]` line.
     pub memory_notice: String,
@@ -394,6 +395,11 @@ pub struct SessionFacts {
     pub mcp_open: Option<(usize, usize)>,
     /// Whether `ask_user` is advertised (ADR 0024 Q5), for the host's startup line.
     pub ask_user: bool,
+    /// The startup line for the loaded context files (ADR 0036 C2): `AGENTS.md (12.3 KB), …`
+    /// or `none`.
+    pub context_line: String,
+    /// The context files that were loaded, in prompt order.
+    pub context_files: Vec<crate::context::LoadedFile>,
 }
 
 impl SessionFacts {
@@ -868,6 +874,26 @@ pub async fn open_session(
     let queue: Arc<SessionQueue> = Arc::new(PendingQueue::new());
     let origin = session_id.as_str().to_string();
 
+    // ADR 0036 C2: read the project context files once, here. They are workspace input, so
+    // they never enter the journal; only the loaded paths and sizes go into the snapshot. The
+    // section is appended after the host's base prompt (layer 1) and before the skills/memory
+    // hooks (layer 3).
+    let context = crate::context::load(&workspace, radian_home().as_deref());
+    for warning in &context.warnings {
+        memory_warning(warning);
+    }
+    let system_prompt = match (&system_prompt, context.section.is_empty()) {
+        (_, true) => system_prompt,
+        (Some(base), false) => Some(format!("{base}\n\n{}", context.section)),
+        (None, false) => Some(context.section.clone()),
+    };
+    let mut config_snapshot = config_snapshot;
+    if !context.is_empty()
+        && let Some(object) = config_snapshot.as_object_mut()
+    {
+        object.insert("context".to_string(), context.snapshot());
+    }
+
     // The startup description, before the sandbox moves into the tools. The summary word
     // comes from the real backend name, not from searching the description text (which does
     // not name the backend in the `workspace` tier).
@@ -1108,6 +1134,8 @@ pub async fn open_session(
         // The **actual** registration, not the host's request: the startup line must not claim
         // a tool the model cannot see.
         ask_user: ask_registered,
+        context_line: context.line(&workspace, user_home().as_deref()),
+        context_files: context.files.clone(),
     };
     Ok(LocalSession {
         id: session_id,

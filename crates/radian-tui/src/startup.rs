@@ -54,7 +54,7 @@ pub struct StartupScreen {
     pub banner: Vec<String>,
     /// The one-line fallback the wordmark drops to when the terminal is too narrow.
     pub banner_narrow: String,
-    /// The collapsed summary (`workspace · seatbelt · context …`).
+    /// The collapsed summary (`workspace · macOS sandbox · context …`).
     pub summary: String,
     /// The full lines, shown when expanded.
     pub lines: Vec<String>,
