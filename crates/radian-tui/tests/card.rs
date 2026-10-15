@@ -300,6 +300,53 @@ fn other_tools_are_their_head_and_their_output_section() {
 }
 
 #[test]
+fn the_meta_writes_only_the_data_that_exists() {
+    // A measured duration is written; an unmeasured one is not (the shell card above has
+    // none and shows none).
+    let mut app = shell_app(Some(ok_result("done")));
+    if let Some(entry) = app.entries.iter_mut().find(|e| e.kind == radian_tui::app::EntryKind::ToolResult) {
+        entry.tool.as_mut().expect("the card").duration_ms = Some(50);
+    }
+    let terminal = render(&mut app, 80, 12);
+    assert!(
+        screen(&terminal).contains("⟦exit 0 | 0.05s | timeout 30s⟧"),
+        "{}",
+        screen(&terminal)
+    );
+    // A shell card with no timeout argument writes no timeout.
+    let mut app = App::new("m", "s");
+    app.push_message(&Message::Assistant {
+        content: vec![],
+        reasoning: vec![],
+        tool_calls: vec![ToolCall {
+            id: "c1".into(),
+            name: "shell".into(),
+            arguments: json!({"command": "true"}),
+        }],
+        provider_payload: None,
+        interrupted: false,
+        meta: Default::default(),
+    });
+    app.push_message(&Message::Tool {
+        result: ToolResult {
+            call_id: "c1".into(),
+            content: vec![ContentPart::text("")],
+            structured: Some(json!({"command": "true", "exit_code": 0})),
+            is_error: false,
+            error_code: None,
+        },
+        meta: Default::default(),
+    });
+    let terminal = render(&mut app, 80, 12);
+    assert!(
+        screen(&terminal).contains("⟦exit 0⟧"),
+        "only the exit code: {}",
+        screen(&terminal)
+    );
+    assert!(!screen(&terminal).contains("timeout"), "{}", screen(&terminal));
+}
+
+#[test]
 fn the_ascii_glyph_set_draws_ascii_borders_and_brackets() {
     let mut app = shell_app(Some(ok_result("done")));
     app.apply_footer(&radian_host::config::TuiFooterConfig {
