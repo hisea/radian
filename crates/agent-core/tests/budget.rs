@@ -521,6 +521,35 @@ fn a_large_host_meta_does_not_change_the_request_estimate() {
     assert_eq!(message_tokens(&with_meta), message_tokens(&plain));
 }
 
+/// ADR 0014 Q4: the assistant `reasoning` field is only sent when the model requires
+/// replay, so the estimator counts it only when the budget's `count_reasoning` is on. Off (the
+/// default), a history with reasoning and the same history without it estimate the same; on,
+/// the reasoning adds to the estimate.
+#[test]
+fn reasoning_is_counted_only_when_the_budget_asks_for_it() {
+    let request = |reasoning: Vec<ContentPart>| ModelRequest {
+        system_prompt: None,
+        messages: vec![Message::Assistant {
+            content: vec![ContentPart::text("answer")],
+            reasoning,
+            tool_calls: Vec::new(),
+            provider_payload: None,
+            interrupted: false,
+            meta: MessageMeta::default(),
+        }],
+        tools: Vec::new(),
+        settings: Value::Null,
+    };
+    let with = request(vec![ContentPart::text("x".repeat(400))]);
+    let without = request(Vec::new());
+    // Off: adding reasoning does not change the estimate — the provider does not receive it.
+    assert_eq!(estimate_tokens(&with, 4), estimate_tokens(&without, 4));
+    assert_eq!(estimate_tokens_with(&with, 4, false), estimate_tokens(&without, 4));
+    // On: the reasoning really is sent, so it really is counted.
+    assert!(estimate_tokens_with(&with, 4, true) > estimate_tokens(&with, 4));
+    assert!(estimate_tokens_with(&with, 4, true) > estimate_tokens_with(&without, 4, true));
+}
+
 /// ADR 0026 D7: `TurnOptions.context_budget` overrides the configured budget for one turn, and
 /// omitting it leaves the configured budget in force (the pre-D7 behaviour).
 #[tokio::test]
