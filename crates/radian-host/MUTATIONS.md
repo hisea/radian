@@ -673,3 +673,12 @@ after); each mutation restored with `git checkout --`, `git status --short` empt
 |---|---|---|---|
 | RF1-FA-D | back to `git status --porcelain -z` (a new directory shows as `newdir/`) | caught (rc=101) | `a_new_file_in_a_new_directory_is_checked`, `status_show_untracked_files_no_does_not_hide_the_check` |
 | RF1-FA-E | check the explicit directory path instead of expanding it (`ls-files`) | caught (rc=101) | `a_directory_argument_is_expanded_for_the_filter_check` |
+
+## review-fixes-1c (2026-10-15): check-attr reads paths from stdin
+
+One-shot detached worktree `.radian-worktrees/rf1c-mutations` (from the branch HEAD, deleted
+after); the mutation was restored with `git checkout --`, `git status --short` empty at the end.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| RF1-FA-F | pass the path list to `git check-attr` as argv again | caught (rc=101, `Argument list too long`) | `a_large_repository_does_not_hit_the_argument_limit` |
