@@ -29,6 +29,7 @@ pub mod opencode_go;
 mod output;
 pub mod pending;
 pub mod projection;
+pub mod prompt;
 pub mod provider;
 pub mod session;
 mod session_id;

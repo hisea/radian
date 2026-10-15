@@ -6,3 +6,6 @@ spikes/*/target/
 
 # The sandbox gives commands a TMPDIR (and on Linux a HOME) inside the workspace.
 .radian-sandbox/
+
+# The task agent progress notes (ADR 0036 D2); git_commit refuses the path too.
+.radian/

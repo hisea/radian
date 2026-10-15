@@ -1513,10 +1513,19 @@ async fn system_prompt_is_sent() {
     let system = &messages.as_array().expect("messages")[0];
     assert_eq!(system["role"], "system");
     let content = system["content"].as_str().unwrap_or_default();
-    // The user's system prompt is first; the host appends its sections (the built-in
-    // `diagrams` skill is one of them, ADR 0025).
-    assert!(content.starts_with("Be brief."), "{content}");
+    // ADR 0036: `--system` replaces the role layer only. Layer 0a `<runtime>` is
+    // first and layer 0b `<session>` is last; the skills section (ADR 0025) sits between them.
+    assert!(content.starts_with("<runtime>"), "{content}");
+    assert!(
+        content.contains("<role>\nBe brief.\n</role>"),
+        "the role layer is the --system text: {content}"
+    );
     assert!(content.contains("## Skills (ADR 0025)"), "{content}");
+    assert!(
+        content.trim_end().ends_with("</session>"),
+        "layer 0b is last: {content}"
+    );
+    assert!(content.contains("model: m"), "{content}");
 }
 
 #[tokio::test]

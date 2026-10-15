@@ -935,6 +935,8 @@ fn run(
                 coding_root: Some(workspace_path.clone()),
                 model,
                 servers,
+                // ADR 0036: an interactive session uses the `default` role.
+                role: None,
                 system_prompt: cli.system.clone(),
                 context_budget: window.budget.map(ContextBudget::new),
                 auto_compact: !cli.no_auto_compact && config.compaction.auto.unwrap_or(true),
