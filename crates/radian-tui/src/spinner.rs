@@ -93,7 +93,7 @@ pub fn frame(kind: Kind, glyphs: Glyphs, tick: Duration) -> Frame {
             },
             // Every rotating kind is `| / - \` in the ascii set.
             Kind::Arc | Kind::Quadrant | Kind::Braille => Frame {
-                glyph: ASCII[index(tick, ASCII.len())],
+                glyph: ASCII[index(tick, kind.interval(), ASCII.len())],
                 dim: false,
             },
         };
@@ -104,23 +104,22 @@ pub fn frame(kind: Kind, glyphs: Glyphs, tick: Duration) -> Frame {
             dim: (tick.as_millis() / Kind::Pulse.interval().as_millis()) % 2 == 1,
         },
         Kind::Arc => Frame {
-            glyph: ARC[index(tick, ARC.len())],
+            glyph: ARC[index(tick, kind.interval(), ARC.len())],
             dim: false,
         },
         Kind::Quadrant => Frame {
-            glyph: QUADRANT[index(tick, QUADRANT.len())],
+            glyph: QUADRANT[index(tick, kind.interval(), QUADRANT.len())],
             dim: false,
         },
         Kind::Braille => Frame {
-            glyph: BRAILLE[index(tick, BRAILLE.len())],
+            glyph: BRAILLE[index(tick, kind.interval(), BRAILLE.len())],
             dim: false,
         },
     }
 }
 
-fn index(tick: Duration, len: usize) -> usize {
-    // The rotating kinds all turn at 250 ms.
-    (tick.as_millis() / Duration::from_millis(250).as_millis()) as usize % len
+fn index(tick: Duration, interval: Duration, len: usize) -> usize {
+    (tick.as_millis() / interval.as_millis()) as usize % len
 }
 
 /// Every glyph a spinner can draw, for the coverage check (ADR 0027). `arc` and
