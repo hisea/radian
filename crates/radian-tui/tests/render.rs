@@ -1081,9 +1081,8 @@ fn the_block_layout_snapshot() {
         "".to_string(),                      // the gap
         top.clone(),                         // the shell card's frame (ADR 0028)
         row("✘ shell: make test"),           // the head status line
-        divider("Command"),                  // section 1's label
-        row("$ make test"),                  // the command
-        divider("Error"),                    // section 2's label (the call failed)
+        row("$ make test"),                  // the command (no divider: part of the call)
+        divider("Error"),                    // the output section's label (the call failed)
         row("$ make test"),                  // the output
         row("exit code: 2"),
         row("--- stdout ---"),
@@ -1111,7 +1110,7 @@ fn the_block_layout_snapshot() {
     assert_eq!(bg(0, 0), user_bg, "the user pad carries the band");
     assert_eq!(bg(79, 2), user_bg, "the bottom pad reaches the row's end");
     let failed = bg(0, 7);
-    for y in 7..=17u16 {
+    for y in 7..=16u16 {
         assert_eq!(
             bg(0, y),
             failed,
@@ -1121,7 +1120,7 @@ fn the_block_layout_snapshot() {
     }
     assert_ne!(failed, bg(0, 5), "the assistant row has no card band");
     assert_eq!(bg(0, 6), bg(0, 5), "a gap row is not banded");
-    assert_ne!(bg(0, 19), failed, "the successful card's band differs");
+    assert_ne!(bg(0, 18), failed, "the successful card's band differs");
 }
 
 /// A tab is four columns when the wrap decides where to break (ADR 0028 R9), not zero: a line

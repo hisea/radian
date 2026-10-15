@@ -817,10 +817,9 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
         // One header line, never wrapped - unless a shell command carries its own newlines
         // (ADR 0028 rule 3: a multi-line command wraps as-is, one row per line).
         EntryKind::ToolCall => {
-            let lines = text.lines().count().max(1);
-            // The head, plus a labeled divider and the command lines when there is a command
-            // section (ADR 0028).
-            let content = if lines > 1 { lines + 1 } else { 1 };
+            // The head line and the command lines: no divider between them (ADR 0028 revision
+            // 3; the command is part of the call).
+            let content = text.lines().count().max(1);
             content + frame_rows(frame_plan(entry.card, false, false))
         }
         EntryKind::ToolResult => {
@@ -1177,21 +1176,19 @@ fn layout_unstripped(
     }
 }
 
-/// The call entry's content rows (ADR 0028 rule 1): the head status line, then -
-/// when the text carries one - a labeled `Command` divider and the `$ <command>` lines (a
-/// multi-line command wraps as-is, one row per line).
+/// The call entry's content rows (ADR 0028 rule 1): the head status line, then the
+/// `$ <command>` lines (a multi-line command wraps as-is, one row per line). **No divider
+/// between them**: omp's first section carries no label, and the command is part of the call
+/// (the decision 2), so the two read as one unit - the `Output` divider is the only
+/// one, and the card is one row shorter.
 fn call_lines(text: &str, width: usize) -> Vec<BodyLine> {
     let mut lines = text.lines();
     let head = lines.next().unwrap_or("");
     let mut out = tool_line_at(head, 0, width);
-    let rest: Vec<&str> = lines.collect();
-    if !rest.is_empty() {
-        out.push(BodyLine::frame_row(Frame::Divider));
-        let mut offset = head.len() + 1;
-        for line in rest {
-            out.extend(tool_line_at(line, offset, width));
-            offset += line.len() + 1;
-        }
+    let mut offset = head.len() + 1;
+    for line in lines {
+        out.extend(tool_line_at(line, offset, width));
+        offset += line.len() + 1;
     }
     out
 }

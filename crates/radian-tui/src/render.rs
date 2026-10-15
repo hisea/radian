@@ -1861,16 +1861,10 @@ fn render_frame_row(
             border_style,
         )),
         blocks::Frame::Divider => {
-            // `├── Output ──…┤`: the label is a level weaker than the border. A call's
-            // divider labels its command section (ADR 0028), a result's its
-            // output (`Error` when the call failed).
-            let label = if entry.kind == EntryKind::ToolCall {
-                "Command"
-            } else if entry.is_error {
-                "Error"
-            } else {
-                "Output"
-            };
+            // `├── Output ──…┤`: the label is a level weaker than the border (`Error` when the
+            // call failed). Only the output section carries a divider (ADR 0028:
+            // the command is part of the call).
+            let label = if entry.is_error { "Error" } else { "Output" };
             let used = 2 + 1 + UnicodeWidthStr::width(label) + 1;
             let fill = content_width.saturating_sub(used);
             Line::from(vec![

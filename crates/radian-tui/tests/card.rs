@@ -1,6 +1,7 @@
 //! The merged tool card (ADR 0028): a call and its result draw one framed block
-//! with a head status line, a `Command` section and an `Output` section, `├── label ──┤`
-//! dividers, a `⟦…⟧` meta row, and frame characters that never enter the text a copy takes.
+//! with a head status line, the `$ <command>` section (no divider: it is part of the call)
+//! and an `Output` section behind a `├── Output ──┤` divider, a `⟦…⟧` meta row, and frame
+//! characters that never enter the text a copy takes.
 
 use agent_core::{ContentPart, Message, ToolCall, ToolResult};
 use radian_tui::app::{App, Effect, Input, UpdateResult};
@@ -109,27 +110,24 @@ fn the_card_has_three_sections_at_80_and_120_columns() {
         // The head status line: the glyph, `shell:` and the title (revision 3 rule 1).
         assert!(lines[2].starts_with("│ ✔ shell: make test"), "{}", lines[2]);
         assert!(lines[2].ends_with('│'), "{}", lines[2]);
+        // The command section carries no divider (omp's first section has no label, and the
+        // command is part of the call): the head and the command read as one unit.
+        assert!(lines[3].starts_with("│ $ make test"), "{}", lines[3]);
         assert_eq!(
-            lines[3],
-            format!("├── Command {}┤", "─".repeat(inner - 11)),
-            "the command divider"
-        );
-        assert!(lines[4].starts_with("│ $ make test"), "{}", lines[4]);
-        assert_eq!(
-            lines[5],
+            lines[4],
             format!("├── Output {}┤", "─".repeat(inner - 10)),
             "the output divider"
         );
-        assert!(lines[6].starts_with("│ all good"), "{}", lines[6]);
-        assert!(lines[7].starts_with("│ 12 passed"), "{}", lines[7]);
+        assert!(lines[5].starts_with("│ all good"), "{}", lines[5]);
+        assert!(lines[6].starts_with("│ 12 passed"), "{}", lines[6]);
         // The meta row: the brackets from the glyph set, the fields that exist.
         assert!(
-            lines[8].starts_with("│ ⟦exit 0 | timeout 30s⟧"),
+            lines[7].starts_with("│ ⟦exit 0 | timeout 30s⟧"),
             "{}",
-            lines[8]
+            lines[7]
         );
         assert_eq!(
-            lines[9],
+            lines[8],
             format!("└{}┘", "─".repeat(inner)),
             "the bottom border"
         );
@@ -162,11 +160,11 @@ fn a_call_with_no_output_draws_no_output_section() {
     let mut app = shell_app(Some(ok_result("")));
     let terminal = render(&mut app, 80, 12);
     let text = screen(&terminal);
-    assert!(text.contains("├── Command "), "the command section stays");
     assert!(
-        !text.contains("├── Output "),
-        "no output, no section: {text}"
+        text.contains("$ make test"),
+        "the command section stays: {text}"
     );
+    assert!(!text.contains("├── "), "no output, no divider: {text}");
 }
 
 #[test]
@@ -184,8 +182,8 @@ fn a_running_call_is_a_card_with_a_spinner_and_no_output_section() {
         ['⠋', '⠙', '⠸', '⠴'].iter().any(|c| head.contains(*c)),
         "the running spinner: {head}"
     );
-    assert!(text.contains("├── Command "), "{text}");
-    assert!(!text.contains("├── Output "), "{text}");
+    assert!(text.contains("$ make test"), "the command section: {text}");
+    assert!(!text.contains("├── "), "no output, no divider: {text}");
     assert!(text.contains('└'), "the card closes: {text}");
 }
 
@@ -219,11 +217,11 @@ fn a_folded_card_keeps_its_head_and_its_meta() {
     let text = screen(&terminal);
     assert!(text.contains("✔ shell: make test"), "{text}");
     assert!(
-        text.contains("├── Command "),
+        text.contains("$ make test"),
         "the command is the call: {text}"
     );
     assert!(
-        !text.contains("├── Output "),
+        !text.contains("├── "),
         "a folded hint is no section: {text}"
     );
     assert!(text.contains("[6 lines]"), "the folded hint: {text}");
@@ -374,7 +372,6 @@ fn the_ascii_glyph_set_draws_ascii_borders_and_brackets() {
         .map(|l| l.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("+-- Command "), "{text}");
     assert!(text.contains("| $ make test"), "{text}");
     assert!(text.contains("+-- Output "), "{text}");
     assert!(text.contains("[exit 0 | timeout 30s]"), "{text}");
