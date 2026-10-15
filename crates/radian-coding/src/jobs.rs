@@ -34,6 +34,7 @@ use radian_sandbox::Sandbox;
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::args;
 use crate::fail;
 use crate::shell::{lock_bool, sandboxed_command, signal_group, wait_for_exit_without_reaping};
 
@@ -740,6 +741,31 @@ fn first_line(command: &str) -> String {
 // ---------- tools ----------
 
 /// The `job_output` spec.
+pub(crate) fn output_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "job_id": {
+                "type": "string",
+                "description": "The id `shell` returned when the job started."
+            },
+            "wait": {
+                "type": "boolean",
+                "description": "Block until the job ends (or timeout_ms elapses). Default \
+                                false: return the output so far at once."
+            },
+            "timeout_ms": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "How long `wait` may block, in milliseconds (default 30000, \
+                                maximum 600000). On timeout the job keeps running."
+            }
+        },
+        "required": ["job_id"],
+        "additionalProperties": false
+    })
+}
+
 pub(crate) fn output_spec() -> ToolSpec {
     ToolSpec {
         name: "job_output".into(),
@@ -752,28 +778,7 @@ pub(crate) fn output_spec() -> ToolSpec {
                       file named when it started; read that with the `read` tool for anything \
                       the ring dropped."
             .into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "job_id": {
-                    "type": "string",
-                    "description": "The id `shell` returned when the job started."
-                },
-                "wait": {
-                    "type": "boolean",
-                    "description": "Block until the job ends (or timeout_ms elapses). Default \
-                                    false: return the output so far at once."
-                },
-                "timeout_ms": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "How long `wait` may block, in milliseconds (default 30000, \
-                                    maximum 600000). On timeout the job keeps running."
-                }
-            },
-            "required": ["job_id"],
-            "additionalProperties": false
-        }),
+        input_schema: output_schema(),
         concurrency: ToolConcurrency::Shared,
     }
 }
@@ -796,6 +801,20 @@ pub(crate) fn list_spec() -> ToolSpec {
     }
 }
 
+pub(crate) fn kill_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "job_id": {
+                "type": "string",
+                "description": "The id `shell` returned when the job started."
+            }
+        },
+        "required": ["job_id"],
+        "additionalProperties": false
+    })
+}
+
 /// The `job_kill` spec.
 pub(crate) fn kill_spec() -> ToolSpec {
     ToolSpec {
@@ -804,17 +823,7 @@ pub(crate) fn kill_spec() -> ToolSpec {
                       SIGKILL after 2 seconds. The job settles as killed. Killing a job that \
                       has already finished is a no-op that says so."
             .into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "job_id": {
-                    "type": "string",
-                    "description": "The id `shell` returned when the job started."
-                }
-            },
-            "required": ["job_id"],
-            "additionalProperties": false
-        }),
+        input_schema: kill_schema(),
         concurrency: ToolConcurrency::Shared,
     }
 }
@@ -836,8 +845,7 @@ pub(crate) async fn run_output(
     arguments: &serde_json::Value,
     cx: &ToolContext<'_>,
 ) -> Result<ToolOutput, ToolFailure> {
-    let args: OutputArgs = serde_json::from_value(arguments.clone())
-        .map_err(|e| fail("invalid_arguments", e.to_string()))?;
+    let args: OutputArgs = args::parse("job_output", &output_schema(), arguments)?;
     let timeout = Duration::from_millis(
         args.timeout_ms
             .unwrap_or(DEFAULT_WAIT_MS)
@@ -930,8 +938,7 @@ pub(crate) fn run_kill(
     jobs: &Jobs,
     arguments: &serde_json::Value,
 ) -> Result<ToolOutput, ToolFailure> {
-    let args: JobIdArgs = serde_json::from_value(arguments.clone())
-        .map_err(|e| fail("invalid_arguments", e.to_string()))?;
+    let args: JobIdArgs = args::parse("job_kill", &kill_schema(), arguments)?;
     let (text, state) = match jobs.kill(&args.job_id)? {
         KillResult::Requested => (
             format!(

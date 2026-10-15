@@ -4,6 +4,7 @@ use agent_core::{ContentPart, ToolConcurrency, ToolFailure, ToolOutput, ToolSpec
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::args;
 use crate::fail;
 use crate::provider::Limits;
 use crate::workspace::{WorkspaceRoot, io_failure};
@@ -14,6 +15,24 @@ struct WriteArgs {
     content: String,
 }
 
+pub(crate) fn schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Workspace-relative file path."
+            },
+            "content": {
+                "type": "string",
+                "description": "Exact bytes to write (UTF-8)."
+            }
+        },
+        "required": ["path", "content"],
+        "additionalProperties": false
+    })
+}
+
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec {
         name: "write".into(),
@@ -21,21 +40,7 @@ pub(crate) fn spec() -> ToolSpec {
                       newline is added). The parent directory must exist. The destination is \
                       opened without following a symlink and is refused if it is hard-linked."
             .into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Workspace-relative file path."
-                },
-                "content": {
-                    "type": "string",
-                    "description": "Exact bytes to write (UTF-8)."
-                }
-            },
-            "required": ["path", "content"],
-            "additionalProperties": false
-        }),
+        input_schema: schema(),
         concurrency: ToolConcurrency::Exclusive,
     }
 }
@@ -45,8 +50,7 @@ pub(crate) async fn run(
     limits: &Limits,
     arguments: &serde_json::Value,
 ) -> Result<ToolOutput, ToolFailure> {
-    let args: WriteArgs = serde_json::from_value(arguments.clone())
-        .map_err(|e| fail("invalid_arguments", e.to_string()))?;
+    let args: WriteArgs = args::parse("write", &schema(), arguments)?;
     if args.content.len() > limits.max_write_bytes {
         return Err(fail(
             "write_limit_exceeded",

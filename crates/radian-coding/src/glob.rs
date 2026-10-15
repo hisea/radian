@@ -4,6 +4,7 @@ use agent_core::{ContentPart, ToolConcurrency, ToolFailure, ToolOutput, ToolSpec
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::args;
 use crate::fail;
 use crate::provider::Limits;
 use crate::search;
@@ -16,6 +17,30 @@ struct GlobArgs {
     max_results: Option<u64>,
 }
 
+pub(crate) fn schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "pattern": {
+                "type": "string",
+                "description": "Glob matched against each workspace-relative path, e.g. `src/**/*.rs`."
+            },
+            "path": {
+                "type": "string",
+                "description": "Workspace-relative directory (or file) to search under; defaults to the workspace root."
+            },
+            "max_results": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5000,
+                "description": "Maximum paths to return; defaults to 500."
+            }
+        },
+        "required": ["pattern"],
+        "additionalProperties": false
+    })
+}
+
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec {
         name: "glob".into(),
@@ -26,27 +51,7 @@ pub(crate) fn spec() -> ToolSpec {
                       symlinked file is not a match). Truncated past max_results with a line \
                       naming what was cut."
             .into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "pattern": {
-                    "type": "string",
-                    "description": "Glob matched against each workspace-relative path, e.g. `src/**/*.rs`."
-                },
-                "path": {
-                    "type": "string",
-                    "description": "Workspace-relative directory (or file) to search under; defaults to the workspace root."
-                },
-                "max_results": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 5000,
-                    "description": "Maximum paths to return; defaults to 500."
-                }
-            },
-            "required": ["pattern"],
-            "additionalProperties": false
-        }),
+        input_schema: schema(),
         concurrency: ToolConcurrency::Shared,
     }
 }
@@ -56,8 +61,7 @@ pub(crate) async fn run(
     limits: &Limits,
     arguments: &serde_json::Value,
 ) -> Result<ToolOutput, ToolFailure> {
-    let args: GlobArgs = serde_json::from_value(arguments.clone())
-        .map_err(|e| fail("invalid_arguments", e.to_string()))?;
+    let args: GlobArgs = args::parse("glob", &schema(), arguments)?;
     let matcher = search::compile_glob(&args.pattern)?;
     let cap = match args.max_results {
         Some(0) => {
