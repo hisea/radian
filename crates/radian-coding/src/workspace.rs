@@ -100,6 +100,61 @@ impl WorkspaceRoot {
         Ok(parent_real.join(name))
     }
 
+    /// Up to `limit` workspace-relative names in the same directory as `user` that look like a
+    /// typo of its last component, closest first; a weak model that misspells a path gets the
+    /// real one back instead of a bare "not found".
+    ///
+    /// Only the requested file's directory is listed, and only after canonicalizing it, so a
+    /// suggestion can never point outside the workspace (a symlinked directory that escapes
+    /// yields nothing). A path that is absolute, holds `..`, or names something in a directory
+    /// that does not exist yields nothing.
+    pub(crate) fn suggest_similar(&self, user: &str, limit: usize) -> Vec<String> {
+        let Ok(joined) = self.joined(user) else {
+            return Vec::new();
+        };
+        let Some(name) = joined.file_name().and_then(|name| name.to_str()) else {
+            return Vec::new();
+        };
+        let parent = joined.parent().unwrap_or(self.root.as_path());
+        let Ok(parent_real) = std::fs::canonicalize(parent) else {
+            return Vec::new();
+        };
+        if !parent_real.starts_with(&self.root) {
+            return Vec::new();
+        }
+        let Ok(entries) = std::fs::read_dir(&parent_real) else {
+            return Vec::new();
+        };
+        let threshold = suggestion_threshold(name);
+        let mut scored: Vec<(usize, String)> = Vec::new();
+        for entry in entries.flatten() {
+            let Some(candidate) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if candidate == name {
+                continue;
+            }
+            let distance = edit_distance_ci(name, &candidate);
+            if distance <= threshold {
+                scored.push((distance, candidate));
+            }
+        }
+        scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        scored.truncate(limit);
+        let relative_parent = parent_real
+            .strip_prefix(&self.root)
+            .unwrap_or(Path::new(""));
+        scored
+            .into_iter()
+            .map(|(_, candidate)| {
+                relative_parent
+                    .join(candidate)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
+    }
+
     /// Refuses a `write`/`patch` target that is a symlink (never followed) or is
     /// hard-linked (nlink > 1; see the crate docs on why writes refuse that).
     pub(crate) fn guard_mutation_target(
@@ -153,6 +208,33 @@ impl WorkspaceRoot {
             ),
         )
     }
+}
+
+/// How far a name may differ (character edits, case-ignoring) and still be a suggestion.
+/// Short names allow one edit; longer names allow up to four. This bounds the noise: a
+/// `Cargo.toml` does not "suggest" an unrelated `LICENSE`.
+fn suggestion_threshold(name: &str) -> usize {
+    (name.chars().count() / 3).clamp(1, 4)
+}
+
+/// Levenshtein distance over characters, case-insensitive. Names are short, so the simple
+/// two-row dynamic program is enough.
+fn edit_distance_ci(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.to_lowercase().chars().collect();
+    let b: Vec<char> = b.to_lowercase().chars().collect();
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    let mut current = vec![0usize; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        current[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let substitution = if ca == cb { 0 } else { 1 };
+            current[j + 1] = (previous[j + 1] + 1)
+                .min(current[j] + 1)
+                .min(previous[j] + substitution);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[b.len()]
 }
 
 #[cfg(unix)]

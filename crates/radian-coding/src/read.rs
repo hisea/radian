@@ -107,6 +107,29 @@ impl ReadOutcome {
     }
 }
 
+/// How many similar names a missing-file error offers.
+const MAX_SUGGESTIONS: usize = 3;
+
+/// A missing file is the one place a typo is likelier than a wrong path: keep the `not_found`
+/// code, but when the requested directory holds names close to the one asked for, append
+/// `Did you mean …?` so the model can retry without another `list`/`glob`. Every suggestion is
+/// a workspace-relative name inside the requested directory (see
+/// [`WorkspaceRoot::suggest_similar`]).
+fn missing_file(root: &WorkspaceRoot, user: &str, failure: ToolFailure) -> ToolFailure {
+    if failure.code != "not_found" {
+        return failure;
+    }
+    let suggestions = root.suggest_similar(user, MAX_SUGGESTIONS);
+    if suggestions.is_empty() {
+        return failure;
+    }
+    let names: Vec<String> = suggestions.iter().map(|name| format!("`{name}`")).collect();
+    fail(
+        "not_found",
+        format!("{} Did you mean {}?", failure.message, names.join(", ")),
+    )
+}
+
 pub(crate) async fn run(
     root: &WorkspaceRoot,
     limits: &Limits,
@@ -138,7 +161,10 @@ pub(crate) async fn run(
         None => None,
     };
 
-    let path = root.resolve_existing(&args.path)?;
+    let path = match root.resolve_existing(&args.path) {
+        Ok(path) => path,
+        Err(failure) => return Err(missing_file(root, &args.path, failure)),
+    };
     let metadata = std::fs::metadata(&path).map_err(|e| io_failure(&args.path, e))?;
     if !metadata.is_file() {
         return Err(fail(

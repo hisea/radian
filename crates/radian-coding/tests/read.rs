@@ -99,6 +99,44 @@ async fn read_prefixes_each_line_with_its_file_line_number() {
 }
 
 #[tokio::test]
+async fn a_missing_read_suggests_a_similar_name_from_the_same_directory() {
+    let dir = TempDir::new("read-suggest");
+    let root = dir.file("ws");
+    // The requested directory has the close name; the workspace root has the *same* close
+    // name (`README.md`), which must NOT be offered: only the requested directory is listed.
+    dir.write("ws/deep/readme.md", "deep");
+    dir.write("ws/README.md", "root");
+    dir.write("ws/other/unrelated.txt", "x");
+    let tools = tools(&root);
+
+    let failure = call(&tools, "read", json!({"path": "deep/redme.md"}))
+        .await
+        .unwrap_err();
+    assert_eq!(failure.code, "not_found", "{failure:?}");
+    assert!(
+        failure.message.contains("Did you mean `deep/readme.md`"),
+        "the suggestion is in the requested directory: {}",
+        failure.message
+    );
+    assert!(
+        !failure.message.contains("`README.md`"),
+        "a name in another directory is never suggested: {}",
+        failure.message
+    );
+
+    // A name with nothing close keeps the plain not-found and offers nothing.
+    let failure = call(&tools, "read", json!({"path": "deep/zzzzzzzz.txt"}))
+        .await
+        .unwrap_err();
+    assert_eq!(failure.code, "not_found", "{failure:?}");
+    assert!(
+        !failure.message.contains("Did you mean"),
+        "{}",
+        failure.message
+    );
+}
+
+#[tokio::test]
 async fn read_starts_at_a_middle_line() {
     let dir = TempDir::new("read-offset");
     let root = dir.file("ws");
