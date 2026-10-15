@@ -986,6 +986,10 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         route.adapter(),
         Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
     );
+    // ADR 0014 Q2: the catalog (or a `[providers.<id>]` override) decides whether
+    // this route replays reasoning.
+    let reasoning_replay = radian_host::resolve_reasoning_replay(&provider_ref, &model_name);
+    let replays_reasoning = reasoning_replay.is_some();
     let initial = build_model(ModelArgs {
         provider: route.adapter(),
         base_url: route.base_url.clone(),
@@ -996,6 +1000,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         thinking: thinking_of,
         reasoning_effort,
+        reasoning_replay,
     })
     .map_err(SetupError)?;
     // ADR 0026 D5: switchable, like the TUI. The CLI has no `/model`, but the journal can
@@ -1030,13 +1035,20 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     );
     let budget_for = {
         let query = window_query.clone();
+        let providers = config.providers.clone();
         std::sync::Arc::new(move |provider: &str, switch_model: &str| {
-            radian_host::resolve_offline(&radian_host::WindowQuery {
+            let window = radian_host::resolve_offline(&radian_host::WindowQuery {
                 catalog_provider: Some(provider.to_owned()),
                 model: switch_model.to_owned(),
                 ..query.clone()
+            });
+            // ADR 0014 Q4: the estimate counts reasoning exactly when the route
+            // replays it, so the projection matches the request actually sent.
+            window.budget.map(|tokens| {
+                ContextBudget::new(tokens).with_reasoning(
+                    radian_host::route_replays_reasoning(provider, switch_model, &providers),
+                )
             })
-            .budget
         }) as radian_runtime::BudgetFor
     };
     // The same lookup gives the **price** (ADR 0027), offline like the budget: the
@@ -1099,7 +1111,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     let context_budget = window
         .budget
         .filter(|tokens| *tokens > 0)
-        .map(ContextBudget::new);
+        .map(|tokens| ContextBudget::new(tokens).with_reasoning(replays_reasoning));
     Ok(Setup {
         model,
         provider_id: provider_name.clone(),

@@ -31,8 +31,10 @@ use radian_session::{
 use crate::config::{ConfigQueue, ConfigSlot, ModelRoute};
 
 /// Computes `B` for a (provider, model) from the warm local catalog (ADR 0026 D7). The host
-/// supplies it; it must not touch the network.
-pub type BudgetFor = Arc<dyn Fn(&str, &str) -> Option<u64> + Send + Sync>;
+/// supplies it; it must not touch the network. It returns the whole [`ContextBudget`], not just
+/// the token count, so the host can also say whether the route replays reasoning and the
+/// estimate must count it (ADR 0014 Q4).
+pub type BudgetFor = Arc<dyn Fn(&str, &str) -> Option<ContextBudget> + Send + Sync>;
 use crate::inbox::{ControlRequest, Inbox, InboxEntry, Lane};
 
 /// Why the driver could not continue.
@@ -245,7 +247,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         if let Some(route) = ModelRoute::from_value(&self.slot.value())
             && let Some(resolver) = &self.budget_for
         {
-            self.turn_budget = resolver(&route.provider, &route.model).map(ContextBudget::new);
+            self.turn_budget = resolver(&route.provider, &route.model);
         }
     }
 
@@ -582,7 +584,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         if let Some(route) = ModelRoute::from_value(&change)
             && let Some(resolver) = &self.budget_for
         {
-            self.turn_budget = resolver(&route.provider, &route.model).map(ContextBudget::new);
+            self.turn_budget = resolver(&route.provider, &route.model);
         }
     }
 }

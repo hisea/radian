@@ -16,7 +16,7 @@
 | `tui-footer.toml` | ADR 0027 C2：`[tui.footer]` 的 preset/separator/glyphs 与 `[[tui.footer.rows]]` 的 left/right（字符串或表两种条目写法、icon/format/style/priority/thresholds 与条目专属参数）。 | **接受**，0 拒绝；未知条目 id 由 TUI 原样显示并警告，不拒绝文件。 | §2 / ADR 0027 |
 | `tui-footer-items.toml` | ADR 0027：`[tui.footer.items.<id>]` 的 symbol/style/symbol_style/format/disabled，`separator_style`（角色或 starship 颜色），`tui.usage_period_secs`。 | **接受**，0 拒绝。 | §2 / ADR 0027 |
 | `tui-widgets.toml` | ADR 0027 C3：`[tui.widgets]` 的 `above_input`/`below_input` 在输入框上/下放一行贡献者条目（条目 id）。 | **接受**，0 拒绝。 | §2 / ADR 0027 |
-| `providers.toml` | ADR 0026 D10:`[providers.<名字>]` 具名 provider(`kind` + `base_url`),`model.provider = "<名字>"` 选用。 | **接受**，0 拒绝；名字非法/与内建重名是另一个拒绝场景（读取器报 `providers.<name>` 错误）。 | §2 / ADR 0026 D10 |
+| `providers.toml` | ADR 0026 D10:`[providers.<名字>]` 具名 provider(`kind` + `base_url`),`model.provider = "<名字>"` 选用。ADR 0014 Q2:同名表下 `reasoning_replay` 可覆盖目录的推理回传字段(字段名串,或 `false` 关掉)。 | **接受**，0 拒绝；名字非法/与内建重名是另一个拒绝场景（读取器报 `providers.<name>` 错误）。 | §2 / ADR 0026 D10 / ADR 0014 Q2 |
 | `permissions-approval.toml` | ADR 0026 D9:`[permissions] approval = "auto"`(四个已知名字之一)。`full` 档位下这个值被忽略并警告;命令行 `--approval`/`--yes` 永远优先。 | **接受**,0 拒绝;无明文密钥样字符串。 | §2 / ADR 0026 D9 |
 | `skills-builtin.toml` | ADR 0025:`[skills] builtin = false` 关掉全部内建 skill,`disabled = ["<name>"]` 关掉单个(用户级/extra_paths 不受影响)。 | **接受**,0 拒绝;未知值/未知键是警告。 | §2 / ADR 0025 |
 | `sandbox-unix-sockets.toml` | ADR 0016:`[sandbox] allow_unix_sockets` 列出沙箱开网时允许连接的 Unix socket(其余出站 Unix socket 全拒;mDNSResponder 固定放行做 DNS)。只认绝对路径(宿主展开 `~`),canonicalize 失败只警告一次并跳过。**只能写在用户级配置**;今天没有项目级配置层。 | **接受**,0 拒绝;无明文密钥样字符串。 | §2 / ADR 0016 |
