@@ -2002,7 +2002,7 @@ impl App {
         if startup.expanded {
             block.push(Entry::new(
                 EntryKind::Startup,
-                "▼ startup information (Ctrl-P to fold)",
+                "- startup information (Ctrl-P to fold)",
             ));
             for line in &startup.lines {
                 block.push(Entry::new(EntryKind::Startup, line.clone()));
@@ -2010,7 +2010,7 @@ impl App {
         } else {
             block.push(Entry::new(
                 EntryKind::Startup,
-                format!("▶ {}   (Ctrl-P to expand)", startup.summary),
+                format!("+ {}   (Ctrl-P to expand)", startup.summary),
             ));
         }
         for line in &startup.safety {

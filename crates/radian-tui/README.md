@@ -126,7 +126,7 @@ attention surfaces). It is a real composer either way (cursor editing, multi-lin
 
 The **startup screen** is the leading block of transcript entries: the
 wordmark (three rows at the primary `text` level; below its width it drops to one line,
-`㎭ radian <version>`, with the width measured by `unicode-width`), one collapsed information
+`<brand> radian <version>` (ADR 0027: `R` unicode, `󰰠` nerd, `rad` ascii), with the width measured by `unicode-width`), one collapsed information
 line, the safety lines in the `warning` kind that are never folded (a workspace boundary that
 was not your choice, every config-file and approval-policy warning), and one `Tip:` line. An
 information line's `label: value` split follows a notice's: the label uses `notice_label`, the
@@ -230,7 +230,7 @@ find_next = ["ctrl-g", "shift-enter"]
 
 | item | placeholders | default |
 |---|---|---|
-| `brand` | `{brand}` | `㎭` (the unit glyph; `rad` under `glyphs = ascii`) |
+| `brand` | `{brand}` | `R` (bold accent, unicode) / `󰰠` (nerd) / `rad` (ascii); ADR 0027 |
 | `host` | `{host}` | the machine's hostname, read once at startup |
 | `model` | `{display_name}`, `{id}`, `{provider}` | the model's display name (or id) |
 | `reasoning` | `{level}` | the thinking level, one theme role per level |
@@ -238,9 +238,9 @@ find_next = ["ctrl-g", "shift-enter"]
 | `cwd` | `{path}`, `{path_home}`, `{basename}`, `{repo}`, `{worktree}` | `{path_home}` (`$HOME` → `~`); `{repo}` falls back to the directory name, `{worktree}` is the contributor's current worktree |
 | `git_branch` | `{branch}`, `{dirty}`, `{modified}`, `{untracked}` | `{branch}`; `{dirty}` is ` ?<total>` while the tree has changes (contributor) |
 | `session` | `{id}` | the session id |
-| `context` | `{bar}`, `{percent}`, `{used}`, `{budget}`, `{auto}` | `{used}/{budget}`; `{auto}` is `⟲` (`auto` under ascii) while auto-compaction is on |
+| `context` | `{bar}`, `{percent}`, `{used}`, `{budget}`, `{auto}` | `{used}/{budget}`; `{auto}` is `~` (`auto` under ascii) while auto-compaction is on |
 | `context_bar` | `{bar}`, `{percent}`, `{used}`, `{budget}`, `{auto}` | `{bar} {percent}%`, `width` 10, `fill` `━`, `empty` `─` |
-| `tokens` | `{in}`, `{out}`, `{cache}` | `↑{in} ↓{out} R{cache}`; compact K/M, `-` when a provider never reported one |
+| `tokens` | `{in}`, `{out}`, `{cache}` | `^{in} v{out} R{cache}`; compact K/M, `-` when a provider never reported one |
 | `cost` | `{usd}` | `$` from the model's catalog price (per million tokens) and the session totals; hidden when the catalog has no price (never a fabricated number) |
 | `speed` | `{speed}` | `42.1 tok/s`, the last finished generation's reported output over its measured time |
 | `elapsed` | `{elapsed}` | `16.2s`, live while a generation runs, the last one when idle, empty after a resume |
@@ -255,6 +255,61 @@ find_next = ["ctrl-g", "shift-enter"]
 `worktree`/`status` 来自贡献者存储（ADR 0027 C3）：一个 `git` 贡献者每 5 s 在后台刷新
 `git_branch`/`worktree`（绘制路径从不跑 git），刷新失败保留旧值并画成暗色。`[tui.widgets]`
 的 `above_input`/`below_input` 把同样的条目 id 放到输入框上/下一行。
+
+#### Glyph coverage (ADR 0027)
+
+A glyph the font does not have is drawn by a system fallback font with different metrics, so it
+sits off the baseline. The `unicode` tier (the default, no Nerd Font needed) therefore only uses
+characters that **all** of Menlo, SF Mono, JetBrains Mono, Cascadia Code, Fira Code, Operator
+Mono and Source Code Pro have. The brand is `R` (bold accent) here, `󰰠` under `nerd`, `rad` under
+`ascii`; `㎭` (U+33AD) is gone (East-Asian-Wide, off-baseline fallback). The spinner is the
+quadrant `▖▘▝▗` (the arc `◜◝◞◟` and the braille `⠋⠙⠸⠴` are missing from most of the fonts).
+
+Check a glyph with `crates/radian-tui/scripts/check-glyph-coverage.py` (needs `fonttools` in a
+throwaway venv; it is not a repository dependency and not part of `cargo test`). A font that is
+not installed is printed as `未查`, never guessed. The unit test
+`footer::tests::unicode_tier_glyphs_are_all_verified_covered` keeps a new unicode-tier glyph
+from slipping in unchecked.
+
+| glyph | codepoint | use | Menlo | SF Mono | JetBrains Mono | Cascadia Code | Fira Code | Operator Mono | Source Code Pro |
+|---|---|---|---|---|---|---|---|---|---|
+| `R` | U+0052 | brand (unicode) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `@` | U+0040 | host | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `»` | U+00BB | speed | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `*` | U+002A | reasoning | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `#` | U+0023 | session | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `^` | U+005E | tokens in | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `v` | U+0076 | tokens out | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `~` | U+007E | auto-compaction marker | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `│` | U+2502 | footer separator | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `━` | U+2501 | context bar fill | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `─` | U+2500 | context bar empty | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▖` | U+2596 | spinner frame 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▘` | U+2598 | spinner frame 2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▝` | U+259D | spinner frame 3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▗` | U+2597 | spinner frame 4 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+Replaced or dropped in the `unicode` tier (they were not in all seven fonts):
+
+| was | U+ | now |
+|---|---|---|
+| `⌂` host | U+2302 | `@` |
+| `◷` elapsed | U+25F7 | no icon (text only) |
+| `◫` context | U+25EB | no icon (text only) |
+| `◐` reasoning | U+25D0 | `*` |
+| `⛁` session | U+26C1 | `#` |
+| `⬡` tier | U+2B21 | no icon (text only) |
+| `↑` `↓` tokens | U+2191/3 | `^` `v` |
+| `⟲` auto | U+27F2 | `~` |
+| `⠋⠙⠸⠴` spinner | U+280B… | `▖▘▝▗` |
+| `▸` thinking fold | U+25B8 | `>` |
+| `▶` `▼` startup fold | U+25B6/BC | `+` `-` |
+| `㎭` brand | U+33AD | `R` / `󰰠` / `rad` |
+
+Not in the all-seven set but kept (they are not tier-gated icons): the `❯` input prompt (the
+owner's choice; `box` style only) and text arrows (`→`, `•` in the question UI — `•` is in all
+seven, `→` is not, but it is prose, not an icon). The banner wordmark and the box-drawing
+characters (`╭╮╯╰`, `┌┐└┘`, `─│`) are in all seven.
 - `theme`: `dark` and `light` are **pi's own palettes**, read
   through the same ADR 0029 conversion a theme file uses: the three text levels are pi's
   brightness gradient (dark: `text` 89%, `muted` 67%, `dim` 56%), and every semantic color
@@ -492,9 +547,9 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   and the reported-vs-estimated wording readable at your width, and does the over-budget
   highlight stand out without looking like an error?
 - **the footer** (ADR 0027 C2, revision 1): the default is the `full` two rows (identity, then
-  numbers). Are the brand `㎭`, the hostname, the repo/worktree name and the change counts
+  numbers). Are the brand `R`, the hostname, the repo/worktree name and the change counts
   right, and do the numbers row's `speed`/`cost`/`elapsed` read as expected? Does the context
-  share/`⟲` marker read at your width, and does a narrow terminal drop the low priorities
+  share/`~` marker read at your width, and does a narrow terminal drop the low priorities
   first? Try `tui.footer.preset = "pi"` and `"classic"` and compare.
 - **`!` and `!!`** (ADR 0033): type `!ls` — does the `$ ls` block and its color read right, and
   does the output arrive without a perceptible stall? Type `!!ls` — is the dimmer block clearly
@@ -605,10 +660,10 @@ throwaway terminal, not your working one.
    wide terminal (≥80 cols); `Ctrl-P`; reopen at ~40 cols; open again at ~20 cols.
    *Expect*: wide → the three-row wordmark plus one collapsed info line, one `Tip:` line, and
    the safety/warning lines (never folded); `Ctrl-P` folds/unfolds only the info line; narrow
-   → the wordmark drops to the single line `㎭ radian <version>`; ≤ its width → no wordmark.
-   *Look*: **does `㎭` render, and does it occupy two columns?** A one-column or
-   double-drawn glyph shifts the whole line; try two fonts. *Fail*: record `unicode-width`'s
-   assumption vs what you see, font name, and the exact width where it breaks.
+   → the wordmark drops to the single line `<brand> radian <version>` (`R` unicode, `󰰠` nerd,
+   `rad` ascii); ≤ its width → no wordmark. *Look*: **does the brand mark render?** The unicode
+   `R` is one column; the nerd mark needs a Nerd Font (a box means it is missing). *Fail*:
+   record the font name and what you see.
 3. **Rounded input box and `❯`** (`tui.input_style = "box"`; merge `22b2753`; the prompt and
    cursor fixes are `pi/ui-r3`). *Steps*: set `input_style = "box"` in `[tui]`, restart; type a
    multi-line draft (`Ctrl-J`); resize. *Expect*: rounded corners, the `❯` prompt **in both

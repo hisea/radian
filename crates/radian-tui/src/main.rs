@@ -1292,7 +1292,7 @@ fn run(
         banner,
         banner_narrow: format!(
             "{} radian {}",
-            radian_tui::startup::RAD_MARK,
+            radian_tui::footer::brand_mark(app.footer_glyphs()),
             env!("CARGO_PKG_VERSION")
         ),
         summary,

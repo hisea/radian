@@ -17,9 +17,8 @@ pub const BANNER_WIDE: [&str; 3] = [
     "╵╰╴ ╵ ╵ ┴─╯ ╵ ╵ ╵ ╵╰┴",
 ];
 
-/// The one-cell mark (U+33AD SQUARE RAD). It is usually two cells wide; every width here goes
-/// through `unicode-width` (ADR 0027).
-pub const RAD_MARK: &str = "㎭";
+// ADR 0027: the one-line fallback's brand mark comes from the footer's glyph set
+// (`radian_tui::footer::brand_mark`), not a fixed `㎭`.
 
 /// The gap between the wordmark and its right column.
 const BANNER_GAP: &str = "   ";
@@ -69,7 +68,7 @@ pub struct StartupScreen {
 
 impl StartupScreen {
     /// The banner rows for `width`: the three-row wordmark when every row fits, otherwise
-    /// the one-line `㎭ radian <version>` fallback.
+    /// the one-line `<brand> radian <version>` fallback.
     pub fn banner_for_width(&self, width: usize) -> Vec<String> {
         if self.banner.is_empty() {
             return Vec::new();

@@ -1037,8 +1037,10 @@ fn prose_lines(text: &str, width: usize) -> Vec<BodyLine> {
 }
 
 /// The streaming spinner: a deterministic function of the text's length, so a delta batch
-/// (which changes the length and dirties the frame) is the only thing that turns it.
-const SPINNER: [char; 4] = ['⠋', '⠙', '⠸', '⠴'];
+/// (which changes the length and dirties the frame) is the only thing that turns it. The
+/// quadrant blocks (ADR 0027) are in all seven checked fonts; the braille frames
+/// (`⠋⠙⠸⠴`) and the arc (`◜◝◞◟`) are not, so they are not used.
+pub(crate) const SPINNER: [char; 4] = ['▖', '▘', '▝', '▗'];
 
 /// The collapsed reasoning placeholder (ADR 0028 R3). `live` entries get the spinner; the
 /// line count stays 1 either way.
@@ -1046,11 +1048,11 @@ fn placeholder(entry: &Entry) -> String {
     let lines = entry.text.lines().count().max(1);
     if entry.live {
         format!(
-            "▸ thinking ({lines} lines) {}",
+            "> thinking ({lines} lines) {}",
             SPINNER[entry.text.len() % 4]
         )
     } else {
-        format!("▸ thinking ({lines} lines)")
+        format!("> thinking ({lines} lines)")
     }
 }
 
@@ -2182,7 +2184,7 @@ mod tests {
         assert_eq!(line_count(&entry, EXPANDED, 40), 3);
         // The collapsed placeholder carries the spinner while streaming.
         let lines = layout(&entry, &[], modes_with(ReasoningMode::Collapsed), 40);
-        assert!(lines[0].text.contains("▸ thinking (3 lines)"));
+        assert!(lines[0].text.contains("> thinking (3 lines)"));
         assert!(
             lines[0]
                 .text
@@ -2192,6 +2194,6 @@ mod tests {
         );
         entry.live = false;
         let lines = layout(&entry, &[], modes_with(ReasoningMode::Collapsed), 40);
-        assert_eq!(lines[0].text, "▸ thinking (3 lines)");
+        assert_eq!(lines[0].text, "> thinking (3 lines)");
     }
 }

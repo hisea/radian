@@ -114,11 +114,11 @@ fn the_default_footer_is_two_rows() {
         "the branch is on the first row: {first:?}"
     );
     assert!(
-        first.contains('◐'),
+        first.contains('*'),
         "the reasoning glyph is on the first row: {first:?}"
     );
     assert!(
-        second.contains('↑'),
+        second.contains('^'),
         "the tokens row is the second: {second:?}"
     );
     assert_eq!(app.footer.preset(), Preset::Deck);
@@ -149,7 +149,7 @@ fn classic_is_the_one_line_status_bar() {
 /// The three glyph sets differ, and the `reasoning` item's icon follows the set.
 #[test]
 fn the_glyph_sets_differ() {
-    for (name, glyph) in [("unicode", '◐'), ("ascii", '*')] {
+    for (name, glyph) in [("unicode", '*'), ("ascii", '*')] {
         let mut app = App::new("mock", "s");
         app.apply_footer(&with_glyphs(name));
         app.set_footer_facts(None, None, None, Some("high".to_string()));
@@ -259,7 +259,7 @@ fn truncation_drops_the_right_group_then_the_left_and_priority_wins() {
     let wide = render(&mut app, 120, 12);
     let wide_text = row(&wide, 11);
     assert!(
-        wide_text.contains("long-model-name") && wide_text.contains('◐'),
+        wide_text.contains("long-model-name") && wide_text.contains('*'),
         "{wide_text:?}"
     );
     let mid = render(&mut app, 20, 12);
@@ -269,7 +269,7 @@ fn truncation_drops_the_right_group_then_the_left_and_priority_wins() {
         "the left group stays: {mid_text:?}"
     );
     assert!(
-        !mid_text.contains('◐'),
+        !mid_text.contains('*'),
         "the right group drops first: {mid_text:?}"
     );
 
@@ -505,8 +505,8 @@ fn the_brand_and_host_items_show_their_values() {
     app.apply_footer(&rows(vec![item("brand"), item("host")]));
     let terminal = render(&mut app, 80, 12);
     let line = row(&terminal, 11);
-    assert!(line.contains('㎭'), "the brand glyph: {line:?}");
-    assert!(line.contains("Mac-mini"), "the hostname: {line:?}");
+    assert!(line.contains('R'), "the brand glyph: {line:?}");
+    assert!(line.contains("@ Mac-mini"), "the host glyph: {line:?}");
 
     // The ASCII glyph set falls back to `rad` (ADR 0027's 标志 section).
     let mut ascii = App::new("mock", "s");
@@ -522,7 +522,7 @@ fn the_brand_and_host_items_show_their_values() {
     let terminal = render(&mut ascii, 80, 12);
     let line = row(&terminal, 11);
     assert!(line.contains("rad"), "{line:?}");
-    assert!(!line.contains('㎭'), "ascii has no wide glyph: {line:?}");
+    assert!(!line.contains('R'), "ascii has no brand mark: {line:?}");
 }
 
 /// `speed` and `elapsed` come from the injected clock (ADR 0027): the last finished
@@ -678,19 +678,20 @@ fn the_context_auto_marker_follows_the_switch() {
     }));
     app.set_auto_compact(true);
     let on = render(&mut app, 80, 12);
-    assert!(row(&on, 11).contains('⟲'), "{}", row(&on, 11));
+    assert!(row(&on, 11).contains('~'), "{}", row(&on, 11));
     app.set_auto_compact(false);
     let off = render(&mut app, 80, 12);
-    assert!(!row(&off, 11).contains('⟲'), "{}", row(&off, 11));
+    assert!(!row(&off, 11).contains('~'), "{}", row(&off, 11));
 }
 
 /// Every new item carries a glyph in all three sets (ADR 0027), and the sets differ.
 #[test]
 fn the_new_items_have_glyphs_in_all_three_sets() {
+    // The unicode `elapsed` icon was dropped (ADR 0027: no covered glyph).
     for (set, host, speed, elapsed) in [
-        ("unicode", '⌂', '»', '◷'),
-        ("nerd", '\u{f109}', '\u{f0e7}', '\u{f017}'),
-        ("ascii", 'h', 's', 't'),
+        ("unicode", '@', '»', None),
+        ("nerd", '\u{f109}', '\u{f0e7}', Some('\u{f017}')),
+        ("ascii", 'h', 's', Some('t')),
     ] {
         let mut app = App::new("mock", "s");
         app.set_hostname(Some("box".to_string()));
@@ -713,7 +714,9 @@ fn the_new_items_have_glyphs_in_all_three_sets() {
         let line = row(&terminal, 11);
         assert!(line.contains(host), "{set} host glyph in {line:?}");
         assert!(line.contains(speed), "{set} speed glyph in {line:?}");
-        assert!(line.contains(elapsed), "{set} elapsed glyph in {line:?}");
+        if let Some(elapsed) = elapsed {
+            assert!(line.contains(elapsed), "{set} elapsed glyph in {line:?}");
+        }
     }
 }
 
@@ -936,13 +939,14 @@ fn starship_colors_parse() {
     parse("italic red");
 }
 
-/// The `brand` is `㎭` under the default unicode set (`rad` only under ascii).
+/// The `brand` is a bold accent `R` under the default unicode set (ADR 0027);
+/// `rad` only under ascii.
 #[test]
 fn the_brand_is_the_unicode_glyph_by_default() {
     let mut app = App::new("mock", "s");
     app.apply_footer(&rows(vec![item("brand")]));
     let terminal = render(&mut app, 40, 12);
-    assert!(row(&terminal, 11).contains('㎭'), "{}", row(&terminal, 11));
+    assert!(row(&terminal, 11).contains('R'), "{}", row(&terminal, 11));
 }
 
 /// ADR 0027's sample: the deck's third row, whole, is
@@ -977,6 +981,6 @@ fn the_deck_numbers_row_matches_the_sample() {
     // The numbers row is right-aligned; the content itself is the sample.
     assert_eq!(
         row(&terminal, 11).trim(),
-        "↑15M ↓2.6M R1962M $14.510 41.3%/1.0M"
+        "^15M v2.6M R1962M $14.510 41.3%/1.0M"
     );
 }
