@@ -272,7 +272,8 @@ fn scan_file(regex: &Regex, path: &Path, rel: &str, context: usize, budget: usiz
     loop {
         let state = match read_line_capped(&mut reader, &mut buf, MAX_LINE_BYTES) {
             Ok(state) => state,
-            Err(_) => return Scan::Skipped, // an io error mid-file: report nothing for it
+            // An io error mid-file: keep what was found so far rather than dropping the file.
+            Err(_) => break,
         };
         if matches!(state, LineRead::Eof) {
             break;
