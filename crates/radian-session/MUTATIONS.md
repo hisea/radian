@@ -220,6 +220,21 @@ Base: `3653071` · 在本任务工作树内逐条施加后从副本还原（`--n
 4/4 抓住。T1 的校验与一次性 `Session::open` 共用同一个 `LineScanner`，所以变异同时也会让
 `read_fixtures` 失败；这里记的是新增的 tail 侧测试。
 
+## writer lock: the fork-to-exec false `Locked` (retry)
+
+Base: `6aea27c` · worktree `.radian-worktrees/journal-lock` · each mutation applied, then
+`cargo test -p radian-session --test append -- --exact <test> --nocapture` run with
+`--no-fail-fast`, then `writer.rs` restored from a copy (`git status --short` clean after).
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| R1 | `open_locked` does not retry: a single `try_lock_exclusive`, exactly as before | `a_lock_inherited_by_a_forked_child_is_retried_and_succeeds` (its wait for a retry fails after the 5 s watchdog) | ✅ failed |
+| R2 | the retry is unbounded (the 200 ms deadline check removed) | `a_held_lock_is_still_refused_after_the_retry_budget` (no `Locked` within the 2 s bound) | ✅ failed |
+
+2/2 caught: R1 fails on the retry's absence, R2 on the budget's absence. The reproduction —
+8 threads closing and reopening a journal while 4 threads spawn `git --version` — saw `13966`
+false `Locked` in `24000` reopens before the fix and `0` in `72000` (3 × `24000`) after it.
+
 ## review-fixes-1 (2026-10-15): atomic fork child
 
 One-shot detached worktree `.radian-worktrees/rf1-mutations` (from the branch HEAD, deleted
