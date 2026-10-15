@@ -492,3 +492,14 @@ Base `e9397be` · 一次性 worktree `/tmp/radian-trustb2-mut`，跑完 `git che
 | T-B5 | `trust_interactive` 退回 `cli.prompt.is_none()`（无 `-p` 即提问，管道 stdin 也问） | cli `piped_stdin_is_never_read_as_the_trust_answer`（提问行出现、管道内容被当成回答、消息没到模型） | ✅ |
 
 1/1 抓住。
+
+## usage（用量行只跟着当前模型，ADR 0027）
+
+Base `45723f6` · 一次性 worktree `/tmp/radian-glyphs-mut`，还原后 `git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| U-M1 | `spawn_gated` 关掉闸门时仍刷新（切走后不停刷新） | `tests/usage_gate.rs::the_usage_row_follows_the_current_model` | ✅ |
+| U-M2 | `resetsAt` 改回 `Option<String>`（数字形式让整个响应解析失败、行消失） | `opencode_go::tests::resets_at_accepts_epoch_numbers` | ✅ |
+
+2/2 抓住（U-M2 先试过只改字段类型，会编译失败 E0308，改成完整还原旧的 `Option<String>` + `countdown` 用法后才算数）。
