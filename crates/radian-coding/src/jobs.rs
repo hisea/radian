@@ -436,6 +436,12 @@ impl Jobs {
 
     /// Session end: SIGKILL every running job's group. No file I/O (ADR 0037 decision 6), so
     /// it is safe on the panic path; the supervisor reaps each leader and settles the state.
+    /// Session end: SIGKILL every running job's group. No file I/O (ADR 0037 decision 6), so
+    /// it is safe on the panic path; the supervisor reaps each leader and settles the state.
+    ///
+    /// A session-exit cleanup is a **kill**: it marks `termination = Killed` so the settle is
+    /// `killed` and `notify: false` (ADR 0037 decision 4: a session-exit settle is not
+    /// notified). Without this the settle would read `signal 9` and notify.
     pub fn kill_all(&self) {
         let cells: Vec<Arc<Mutex<JobCell>>> = {
             let state = self.lock_state();
@@ -443,10 +449,11 @@ impl Jobs {
         };
         for cell in cells {
             let (pgid, reaped) = {
-                let cell = lock(&cell);
+                let mut cell = lock(&cell);
                 if !cell.state.is_running() {
                     continue;
                 }
+                cell.termination = Some(Termination::Killed);
                 (cell.pgid, Arc::clone(&cell.reaped))
             };
             signal_if_reserved(pgid, SIGKILL, &reaped);

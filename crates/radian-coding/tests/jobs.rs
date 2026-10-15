@@ -278,6 +278,87 @@ async fn a_waited_settle_is_not_notified() {
     );
 }
 
+// ---------- 2c. the notify flag per settle kind ----------
+
+/// The `notify` flag of the next settle on `events` (skipping the start), bounded.
+async fn next_settle_notify(events: &mut tokio::sync::broadcast::Receiver<JobEvent>) -> bool {
+    loop {
+        match tokio::time::timeout(Duration::from_secs(15), events.recv()).await {
+            Ok(Ok(JobEvent::Settled { notify, .. })) => return notify,
+            Ok(Ok(JobEvent::Started { .. })) => continue,
+            Ok(Err(error)) => panic!("no settle event: {error}"),
+            Err(_) => panic!("timed out waiting for a settle event"),
+        }
+    }
+}
+
+/// The registry computes `notify` itself, so each settle kind is pinned here rather than in a
+/// host test that builds the flag by hand (ADR 0037 decisions 2, 4 and 6).
+#[tokio::test]
+async fn the_notify_flag_follows_the_settle_kind() {
+    // A natural exit notifies.
+    let dir = TempDir::new("jobs-notify-natural");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+    let session = tools.open_session().await.expect("session");
+    let mut events = session.jobs().subscribe();
+    let (_id, _) = start(&session, "echo done", None).await;
+    assert!(
+        next_settle_notify(&mut events).await,
+        "a natural exit notifies"
+    );
+
+    // `job_kill` does not.
+    let mut events = session.jobs().subscribe();
+    let (id, _) = start(&session, "echo $$ > k.pid; sleep 600", None).await;
+    wait_for_pid(&root, "k.pid").await;
+    exec(&session, "job_kill", json!({"job_id": id}))
+        .await
+        .unwrap();
+    assert!(
+        !next_settle_notify(&mut events).await,
+        "job_kill must not notify"
+    );
+
+    // A timeout notifies (decision a: the model set it but did not ask to kill the job).
+    let mut events = session.jobs().subscribe();
+    let (_id, _) = start(&session, "echo $$ > t.pid; sleep 600", Some(1)).await;
+    assert!(next_settle_notify(&mut events).await, "a timeout notifies");
+}
+
+/// A session-end cleanup is a kill: the settle reads `killed` and `notify: false`
+/// (ADR 0037 decision 4). Without `kill_all` marking the termination the settle would be
+/// `signal 9` and notify.
+#[tokio::test]
+async fn a_session_cleanup_settle_is_not_notified() {
+    let dir = TempDir::new("jobs-notify-cleanup");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+    let session = tools.open_session().await.expect("session");
+    let mut events = session.jobs().subscribe();
+    let (_id, _) = start(&session, "echo $$ > s.pid; sleep 600", None).await;
+    wait_for_pid(&root, "s.pid").await;
+    session.shutdown_jobs();
+
+    let mut settled = false;
+    loop {
+        match tokio::time::timeout(Duration::from_secs(15), events.recv()).await {
+            Ok(Ok(JobEvent::Settled { state, notify, .. })) => {
+                assert_eq!(state.label(), "killed", "a cleanup settles as killed");
+                assert!(!notify, "a session-exit settle must not notify");
+                settled = true;
+                break;
+            }
+            Ok(Ok(JobEvent::Started { .. })) => continue,
+            Ok(Err(error)) => panic!("no settle event: {error}"),
+            Err(_) => panic!("timed out waiting for a settle event"),
+        }
+    }
+    assert!(settled);
+}
+
 // ---------- 2. wait timeout ----------
 
 /// `wait` with a short timeout returns `[status: running]` and does **not** kill the job.
