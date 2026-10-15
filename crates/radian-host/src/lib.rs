@@ -72,7 +72,7 @@ pub use config::theme_write::{ThemeWriteError, write_theme};
 pub use config::{
     CONFIG_FILE_NAME, CompactionConfig, Config, ConfigError, ModelConfig, PermissionsConfig,
     RADIAN_CONFIG_ENV, SUPPORTED_SCHEMA_VERSION, TuiConfig, load as load_config,
-    parse as parse_config, resolve_path as resolve_config_path,
+    parse as parse_config, resolve_allow_unix_sockets, resolve_path as resolve_config_path,
     resolved_path as resolved_config_path,
 };
 pub use contrib::{

@@ -352,6 +352,17 @@ pub struct TuiFooterItemConfig {
     pub params: Vec<(String, String)>,
 }
 
+/// `[sandbox]` (ADR 0016). Only the user-level configuration may set it: a
+/// cloned repository must not be able to open a socket for itself. There is no project-level
+/// configuration layer today, so that is documented rather than enforced here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SandboxConfig {
+    /// Unix sockets the sandbox may connect to, as written (`~` is expanded when the policy
+    /// is built; the path is canonicalized then). A path that does not resolve is skipped and
+    /// named on the startup line.
+    pub allow_unix_sockets: Vec<String>,
+}
+
 /// One parsed configuration file.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Config {
@@ -364,6 +375,7 @@ pub struct Config {
     pub read_only: bool,
     pub model: ModelConfig,
     pub permissions: PermissionsConfig,
+    pub sandbox: SandboxConfig,
     pub compaction: CompactionConfig,
     pub skills: SkillsConfig,
     pub tui: TuiConfig,
@@ -467,6 +479,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
             "schema_version" => {}
             "model" => parse_model(value, path, read_only, &mut config)?,
             "permissions" => parse_permissions(value, path, read_only, &mut config)?,
+            "sandbox" => parse_sandbox(value, path, &mut config)?,
             "compaction" => parse_compaction(value, path, &mut config)?,
             "skills" => parse_skills(value, path, &mut config)?,
             "tui" => parse_tui(value, path, &mut config)?,
@@ -672,6 +685,41 @@ fn parse_permissions(
     Ok(())
 }
 
+fn parse_sandbox(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
+    let Some(table) = value.as_table() else {
+        return Err(wrong_type(path, "sandbox", "a table"));
+    };
+    for (key, value) in table {
+        match (key.as_str(), value) {
+            ("allow_unix_sockets", Value::Array(items)) => {
+                for (index, item) in items.iter().enumerate() {
+                    match item {
+                        Value::String(entry) if !entry.trim().is_empty() => {
+                            config.sandbox.allow_unix_sockets.push(entry.clone())
+                        }
+                        _ => {
+                            return Err(wrong_type(
+                                path,
+                                &format!("sandbox.allow_unix_sockets[{index}]"),
+                                "a non-empty string",
+                            ));
+                        }
+                    }
+                }
+            }
+            ("allow_unix_sockets", _) => {
+                return Err(wrong_type(
+                    path,
+                    "sandbox.allow_unix_sockets",
+                    "an array of strings",
+                ));
+            }
+            (other, _) => config.skipped.push(format!("sandbox.{other}")),
+        }
+    }
+    Ok(())
+}
+
 fn parse_compaction(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
     let Some(table) = value.as_table() else {
         return Err(wrong_type(path, "compaction", "a table"));
@@ -789,6 +837,51 @@ fn resolve_extra_path(entry: &str, config_dir: Option<&Path>, home: Option<&Path
     } else {
         expanded
     }
+}
+
+/// Expands `~` and canonicalizes `[sandbox] allow_unix_sockets` (ADR 0016). Only
+/// absolute paths are accepted (a relative one is skipped, never joined to the config dir:
+/// the sandbox rule must name exactly one socket). Returns the canonical paths and one
+/// warning per entry that was skipped. Pure over `home`, so the rules are testable.
+pub fn resolve_allow_unix_sockets(
+    raw: &[String],
+    home: Option<&Path>,
+) -> (Vec<PathBuf>, Vec<String>) {
+    let mut paths = Vec::new();
+    let mut warnings = Vec::new();
+    for entry in raw {
+        let expanded = if entry == "~" {
+            home.map(Path::to_path_buf)
+        } else if let Some(rest) = entry.strip_prefix("~/") {
+            home.map(|home| home.join(rest))
+        } else if entry.starts_with('~') {
+            // `~user` is not expanded.
+            None
+        } else {
+            Some(PathBuf::from(entry))
+        };
+        let Some(expanded) = expanded else {
+            warnings.push(format!(
+                "sandbox.allow_unix_sockets: {entry}: cannot expand the home directory"
+            ));
+            continue;
+        };
+        if !expanded.is_absolute() {
+            warnings.push(format!(
+                "sandbox.allow_unix_sockets: {entry}: must be an absolute path"
+            ));
+            continue;
+        }
+        match std::fs::canonicalize(&expanded) {
+            Ok(path) => {
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+            Err(error) => warnings.push(format!("sandbox.allow_unix_sockets: {entry}: {error}")),
+        }
+    }
+    (paths, warnings)
 }
 
 fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
@@ -1240,6 +1333,47 @@ mod tests {
 
     fn parse_str(text: &str) -> Result<Config, ConfigError> {
         parse(Path::new("/tmp/test/config.toml"), text)
+    }
+
+    /// ADR 0016: `[sandbox] allow_unix_sockets` is an array of strings; a bad
+    /// shape is refused and an unknown key under `[sandbox]` is only skipped.
+    #[test]
+    fn sandbox_allow_unix_sockets_is_parsed_and_a_bad_shape_is_refused() {
+        let config = parse_str(
+            "schema_version = 1\n[sandbox]\nallow_unix_sockets = [\"~/.config/herdr/herdr.sock\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.sandbox.allow_unix_sockets,
+            vec!["~/.config/herdr/herdr.sock"]
+        );
+        assert!(
+            parse_str("schema_version = 1\n[sandbox]\nallow_unix_sockets = \"x\"\n").is_err(),
+            "a non-array is refused"
+        );
+        let config = parse_str("schema_version = 1\n[sandbox]\nfuture = true\n").unwrap();
+        assert!(config.sandbox.allow_unix_sockets.is_empty());
+        assert!(config.skipped.contains(&"sandbox.future".to_owned()));
+    }
+
+    /// The host expands `~`, canonicalizes, and skips (with a warning) a relative or missing
+    /// entry. Only absolute paths are accepted.
+    #[test]
+    fn resolve_allow_unix_sockets_expands_home_and_skips_bad_entries() {
+        let dir = std::env::temp_dir().join("radian-host-sandbox-sock-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("h.sock");
+        std::fs::write(&sock, b"").unwrap();
+        let raw = vec![
+            "~/.config/herdr/herdr.sock".to_owned(),
+            "relative.sock".to_owned(),
+            sock.to_string_lossy().into_owned(),
+        ];
+        let (paths, warnings) = resolve_allow_unix_sockets(&raw, Some(Path::new("/home/u")));
+        assert_eq!(paths.len(), 1, "only the existing absolute path resolves");
+        assert_eq!(paths[0], std::fs::canonicalize(&sock).unwrap());
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

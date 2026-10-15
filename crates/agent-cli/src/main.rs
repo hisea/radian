@@ -734,6 +734,8 @@ struct Setup {
     skills_builtin: bool,
     /// `[skills] disabled`: built-in skill names to leave out.
     skills_disabled: Vec<String>,
+    /// `[sandbox] allow_unix_sockets`, `~`-expanded and canonicalized (ADR 0016).
+    allow_unix_sockets: Vec<PathBuf>,
 }
 
 async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
@@ -1068,6 +1070,16 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         ),
         skills_builtin: config.skills.builtin.unwrap_or(true),
         skills_disabled: config.skills.disabled.clone(),
+        allow_unix_sockets: {
+            let (paths, warnings) = radian_host::resolve_allow_unix_sockets(
+                &config.sandbox.allow_unix_sockets,
+                radian_host::user_home().as_deref(),
+            );
+            for warning in &warnings {
+                eprintln!("[config] {warning}");
+            }
+            paths
+        },
     })
 }
 
@@ -1360,7 +1372,13 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     if let Some(trust) = radian_host::trust_dir() {
         sandbox_deny_read.push(trust);
     }
-    let sandbox = profile::build_sandbox(profile_arg, &workspace_path, &sandbox_deny_read)?;
+    // ADR 0016: the whitelisted Unix sockets (resolved in `setup`).
+    let sandbox = profile::build_sandbox(
+        profile_arg,
+        &workspace_path,
+        &sandbox_deny_read,
+        &setup.allow_unix_sockets,
+    )?;
 
     // The approver and the audit sink. An `auto` policy (ADR 0026 D9, from `--yes`/`--approval
     // auto`/config/resume) answers every `ask` before any approver is consulted, so the

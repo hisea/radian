@@ -416,9 +416,16 @@ fn run(
     let mut app = App::new(String::new(), String::new());
     // `Tab` (the `complete` action) completes `@` file references against the workspace.
     app.set_workspace(workspace_path.clone());
-    let config_warnings = app
+    let mut config_warnings = app
         .apply_config(&config, radian_tui::theme::Theme::no_color_env())
         .map_err(|error| format!("config: {error}"))?;
+    // ADR 0016: `[sandbox] allow_unix_sockets`, `~`-expanded and canonicalized
+    // before the sandbox is built. An entry that does not resolve is skipped and named here.
+    let (allow_unix_sockets, socket_warnings) = radian_host::resolve_allow_unix_sockets(
+        &config.sandbox.allow_unix_sockets,
+        radian_host::user_home().as_deref(),
+    );
+    config_warnings.extend(socket_warnings);
     match &config.source {
         Some(path) => eprintln!("[config] {}", path.display()),
         None => eprintln!("[config] none"),
@@ -766,7 +773,12 @@ fn run(
     if let Some(trust) = radian_host::trust_dir() {
         sandbox_deny_read.push(trust);
     }
-    let sandbox = radian_tui::profile::build_sandbox(tier, &workspace_path, &sandbox_deny_read)?;
+    let sandbox = radian_tui::profile::build_sandbox(
+        tier,
+        &workspace_path,
+        &sandbox_deny_read,
+        &allow_unix_sockets,
+    )?;
     // The MCP config file is read and validated here: before any server process starts and
     // before a session file exists, so a bad file leaves nothing behind (dogfooding D2). The
     // MCP provider itself, the memory service and the coding tools are built by

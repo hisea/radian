@@ -1,0 +1,14 @@
+# ADR 0016: `[sandbox] allow_unix_sockets` lists Unix sockets the sandbox may
+# connect to when the network is on. Every other outbound Unix socket is denied; the list is
+# the only exception (plus mDNSResponder, always, for DNS). Only the user-level config may
+# set it; paths must be absolute (`~` is expanded by the host), are canonicalized, and an
+# entry that does not resolve is skipped with a startup warning.
+schema_version = 1
+
+[model]
+provider = "example"
+base_url = "https://example.com/v1"
+model = "m-1"
+
+[sandbox]
+allow_unix_sockets = ["~/.config/herdr/herdr.sock", "/run/user/1000/docker.sock"]
