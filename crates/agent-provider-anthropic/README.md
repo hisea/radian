@@ -19,11 +19,13 @@ format.
 ## Config
 
 `AnthropicConfig::new(base_url, model)`, `with_api_key(ApiKey)`, `with_max_tokens(u32)`,
-`with_thinking(ThinkingConfig)`, `with_anthropic_version(impl Into<String>)`. Fields:
+`with_thinking(ThinkingConfig)`, `with_cache(CacheMode)`, `with_anthropic_version(impl
+Into<String>)`. Fields:
 `base_url` (everything before `/v1/messages`), `model`, `api_key`, `anthropic_version`
 (default `DEFAULT_ANTHROPIC_VERSION` = `"2023-06-01"`), `max_tokens` (default 4096; the adapter
 **always** sends it — the Messages API lists it without an `optional` qualifier and every
-official example carries it), `thinking: Option<ThinkingConfig>`, `headers`, `extra_body`
+official example carries it), `thinking: Option<ThinkingConfig>`, `cache: CacheMode`, `headers`,
+`extra_body`
 (`model`/`messages`/`max_tokens`/`stream`/`system`/`tools`/`tool_choice` cannot be set this
 way), `connect_timeout` (30 s), `idle_timeout` (120 s), `max_response_bytes` (32 MiB).
 
@@ -33,6 +35,15 @@ deprecated on Claude 4.6, rejected by 4.7+) or `Adaptive` (`{"type":"adaptive"}`
 adapter before extended thinking existed. The adapter never turns thinking on by itself, and it
 does **not** validate `budget_tokens` locally — the server is the authority (wire notes §2.3);
 `radian-host` checks the documented range before a session file is created.
+
+`CacheMode` is `Auto` (**default**) or `None` (wire notes §2.4). Under `Auto` the adapter places
+at most **three** explicit `cache_control: {"type":"ephemeral"}` breakpoints — one on the last
+tool definition, one on the end of the system prompt (sent as a one-block array), and one on the
+last cacheable block of the last message — of the four the API allows. Thinking/redacted_thinking
+blocks and empty blocks are never marked, and a part the request does not carry gets no
+breakpoint. `None` sends no `cache_control` at all, so the body is byte-identical to the adapter
+before prompt caching existed. The adapter never sends the top-level automatic-caching field and
+never sets a TTL.
 
 `ApiKey` never appears in `Debug` output, and the adapter masks it plus every custom header value
 in every error it returns, including text a server echoes back. `ConfigError` is `BaseUrl` /
@@ -56,6 +67,9 @@ in every error it returns, including text a server echoes back. `ConfigError` is
   accompanied, in the order it was streamed. Thinking text is never visible content and never a
   `ModelReasoningDelta` — mixing the two would either send provider-invisible reasoning to the
   provider or drop blocks the provider requires back (ADR 0014 R10).
+- **Prompt caching is on by default and changes the body only on the wire.** `CacheMode::Auto`
+  adds explicit `cache_control` breakpoints; `CacheMode::None` restores the exact pre-caching
+  bytes. The choice is the host's; the adapter never reads the environment.
 
 ## What it guarantees (each with the test that holds it)
 
@@ -92,6 +106,7 @@ Wire-level behaviour, over a real HTTP mock (`tests/http.rs`) and in unit tests:
 | A key is never sent over plain http to a remote host; bad configuration is reported | `a_key_is_never_sent_over_plain_http_to_a_remote_host`, `bad_configuration_is_reported` | `tests/http.rs` |
 | Request building: the required fields and `stream: true` are always sent; `meta` and `reasoning` are not sent; a tool conversation maps to Anthropic blocks; interrupted assistants are plain; images are base64 blocks; what the API cannot take becomes a placeholder; arguments that are not an object become `{}`; settings override the config and reserved keys are refused; `max_tokens` comes from the config | `the_required_fields_and_stream_flag_are_always_sent`, `host_message_meta_is_not_sent_to_the_provider`, `reasoning_is_not_sent_to_the_provider`, `a_tool_conversation_maps_to_anthropic_blocks`, `interrupted_assistants_are_sent_as_plain_assistants`, `images_are_sent_as_base64_blocks`, `what_the_api_cannot_take_becomes_a_placeholder_in_text`, `arguments_that_are_not_an_object_become_an_empty_input`, `settings_override_the_config_and_reserved_keys_are_refused`, `max_tokens_comes_from_the_config` | `src/request.rs` |
 | Thinking: off leaves the request body unchanged; `Enabled` and `Adaptive` send their objects; the configured thinking wins over `extra_body` | `thinking_off_leaves_the_request_body_unchanged`, `thinking_enabled_sends_the_manual_object`, `thinking_adaptive_sends_the_adaptive_object`, `configured_thinking_wins_over_extra_body` | `src/request.rs` |
+| Prompt caching: `Auto` (the default) puts one breakpoint each on the last tool definition, the end of the system prompt (as an array), and the last cacheable block of the last message — three of the four slots; no breakpoint for a part the request does not carry; never on a thinking/redacted/empty block; `None` is the byte-identical pre-caching body | `the_default_cache_mode_is_auto`, `auto_places_the_three_breakpoints_where_stated`, `breakpoints_follow_what_the_request_carries`, `none_sends_the_body_the_adapter_sent_before_prompt_caching`, `auto_leaves_an_empty_system_prompt_as_a_plain_string`, `auto_never_marks_a_thinking_block`, `auto_never_marks_a_string_content_message`, `auto_marks_a_trailing_tool_result_block` | `src/request.rs` |
 | Preserved thinking blocks are echoed before `tool_use`, in order, with signatures unchanged; a payload read back from JSON still echoes thinking; a payload that is not an array is refused; an empty payload array sends the plain assistant | `preserved_thinking_blocks_are_echoed_before_tool_use_in_order`, `a_payload_read_back_from_json_still_echoes_thinking`, `a_provider_payload_that_is_not_an_array_is_refused`, `an_empty_provider_payload_array_sends_the_plain_assistant` | `src/request.rs` |
 | SSE parsing: events split at blank lines; any split point gives the same events; a multi-byte character split across chunks survives; a bare `\r` ends a line; a final event without a blank line is still returned; other fields and comments are ignored; invalid UTF-8 is a protocol error; an endless line is cut off | `events_are_split_at_blank_lines`, `a_split_anywhere_gives_the_same_events`, `a_multibyte_character_split_across_chunks_survives`, `a_bare_carriage_return_ends_a_line`, `the_final_event_without_a_blank_line_is_still_returned`, `other_fields_and_comments_are_ignored`, `invalid_utf8_is_a_protocol_error`, `an_endless_line_is_cut_off` | `src/sse.rs` |
 | Assembly: text deltas become one part and stream as events; multiple text blocks stay separate parts; a `tool_use` with partial JSON is assembled; an input from the `content_block_start` is used without deltas; thinking blocks are preserved and never become content; redacted blocks round-trip verbatim; thinking blocks keep their streamed order; a response without thinking has no payload | `text_deltas_become_one_part_and_stream_as_events`, `multiple_text_blocks_stay_separate_parts`, `a_tool_use_block_with_partial_json_is_assembled`, `a_tool_use_input_from_the_start_block_is_used_without_deltas`, `thinking_blocks_are_preserved_and_never_become_content`, `redacted_thinking_blocks_round_trip_verbatim`, `thinking_blocks_keep_their_streamed_order`, `a_response_without_thinking_has_no_provider_payload` | `src/stream.rs` |
@@ -118,10 +133,22 @@ cases were not individually mutated.
 
 - **No OAuth, by policy** (see the top). API key only.
 - **Not implemented:** `stop_details` (the refusal detail), `container`, `citations`,
-  `tool_choice` on the request side, the `anthropic-beta` header, prompt caching's
-  `cache_control`, `metadata`, and server-side tool blocks (`server_tool_use`,
-  `web_search_tool_result`, `web_fetch_*`, `code_execution_*`) — those are ignored and never
-  become a `ToolCall`.
+  `tool_choice` on the request side, the `anthropic-beta` header, `metadata`, and server-side
+  tool blocks (`server_tool_use`, `web_search_tool_result`, `web_fetch_*`,
+  `code_execution_*`) — those are ignored and never become a `ToolCall`.
+- **Prompt caching covers only the explicit breakpoints, and only on this adapter's three
+  sites.** Not implemented: the top-level automatic-caching field, `ttl`, and any adaptive
+  placement (the adapter does not measure prompt length, so a prompt below the model's minimum
+  cacheable length is simply not cached by the server — no error, wire notes §2.4). `radian-host`
+  does **not** yet expose `CacheMode` (neither as a `[providers.<id>] cache` key nor a flag), so
+  a host today takes the `Auto` default and cannot turn it off without code; the config key was
+  left out of this slice because adding it needs the per-provider plumbing, a schema fixture and
+  a decision record (see `docs/adr/`).
+- **Hand test (not run here, unverified):** with an Anthropic key already available to radian,
+  send the same request with a long system prompt twice in one session: the second response's
+  `usage.cache_read_input_tokens` should be greater than 0 (the first reports
+  `cache_creation_input_tokens > 0`). This was **not** run in this worktree — no key is present
+  and none was written or printed.
 - **`thinking` sub-fields are not parsed**: `display`/`block_binding` can be passed through
   `extra_body`, but the adapter does not read them, and the wire notes record as **unverified**
   whether such extra fields can be merged once the adapter inserts the top-level `thinking` key.
