@@ -204,7 +204,6 @@ fn with_mouse_off_the_whole_feature_is_gone() {
 /// not depend on the fold defaults.
 #[allow(dead_code)]
 const EXPANDED: DisplayModes = DisplayModes {
-    glyphs: radian_tui::footer::Glyphs::Unicode,
     reasoning: ReasoningMode::Expanded,
     tools: radian_tui::tools::ToolDisplay {
         fold: radian_tui::tools::ToolFold::Expanded,
@@ -212,6 +211,7 @@ const EXPANDED: DisplayModes = DisplayModes {
     },
     mermaid: true,
     highlight: true,
+    glyphs: radian_tui::footer::Glyphs::Unicode,
 };
 
 #[test]
@@ -519,18 +519,16 @@ fn a_selection_over_a_tool_card_head_copies_its_text() {
     });
     app.set_viewport(6, 6);
     app.set_transcript_width(60);
-    // The assistant message is empty, so it contributes no line (its blank line is stripped);
-    // the container's gap line is line 0 and the card head is line 1. The marker is two cells
-    // (ADR 0028 rule 2), so the head's first character sits at column 2.
-    // The head carries the status glyph (rule 4): ✔ once the result is in.
-    let head = format!(
-        "{} shell: make test (exit 0)",
-        app.footer_glyphs().tool_status()[1]
-    );
+    // The assistant message is empty, so it contributes no line (its blank line is stripped).
+    // The container's gap line is line 0, the card's top border line 1, and the head status
+    // line line 2 (ADR 0028). The frame's left border sits in the marker column,
+    // so the head's first character is at column 2.
+    // The head carries the status glyph: ✔ once the result is in.
+    let head = format!("{} shell: make test", app.footer_glyphs().tool_status()[1]);
     let end_col = 2 + head.chars().count() as u16 - 1;
-    press(&mut app, 1, 2);
-    drag(&mut app, 1, end_col);
-    let result = release(&mut app, 1, end_col);
+    press(&mut app, 2, 2);
+    drag(&mut app, 2, end_col);
+    let result = release(&mut app, 2, end_col);
     assert_eq!(
         result.effects,
         vec![Effect::Copy { text: head.clone() }],

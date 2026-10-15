@@ -1009,6 +1009,22 @@ mutation applied by a patch that asserts its anchor is present, then `cargo test
 
 4/4 caught; no misses. B3's rule was later superseded by ADR 0028 (the merged card,
 `blocks3`), which reuses the same pairing and the same status glyphs.
+
+## Slice: the merged tool card (ADR 0028, `blocks3`)
+
+Base: `1a3b798` · one-shot worktree `/tmp/b3-mut` (created from HEAD, deleted after) · each
+mutation applied by a patch that asserts its anchor is present, then `cargo test -p radian-tui
+--test card`; files restored after each; `git status --short` empty at the end.
+
+| # | Rule mutated | Mutation | Caught by |
+|---|---|---|---|
+| C1 | 1: a call and its result are one card | the pairing marks both entries `Solo` (two cards) | `card.rs::the_ascii_glyph_set_draws_ascii_borders_and_brackets` FAILED |
+| C2 | 6: the meta writes only existing data | `duration_ms.or(Some(0))` invents a duration | `card.rs::other_tools_are_their_head_and_their_output_section` FAILED |
+| C3 | 2: the frame characters are not text | the body row's text gets a leading `│ ` | `card.rs::a_failed_call_labels_its_section_error` FAILED |
+| C4 | 4: a folded hint is not a section | `plan_has_output` returns true for any non-empty plan | `card.rs::a_call_with_no_output_draws_no_output_section` FAILED |
+
+4/4 caught; no misses. C3's assertion is the copy: `a_copy_of_a_card_has_no_border_characters`
+pins the clipboard directly.
 ## footer-s3：opencode-go 用量、deck、逐字段配置（ADR 0027 C3/C4、修订 3，2026-10-16）
 
 Base `6cd0879` · 一次性 worktree `/tmp/radian-mut-f3`（`git worktree add --detach`，独立
