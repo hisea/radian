@@ -605,3 +605,30 @@ fn a_single_question_selects_and_advances() {
     assert_eq!(form(&spaced).answers[0].selected, vec!["a"]);
     assert_eq!(form(&spaced).current, Some(0), "Space does not advance");
 }
+
+/// A tall question panel shrinks the transcript; when it closes the transcript must be back at
+/// the bottom (a live reply is visible), not stuck where the small viewport left it.
+#[test]
+fn the_transcript_follows_after_the_panel_closes() {
+    use agent_core::Message;
+    let mut app = App::new("m", "s");
+    for i in 0..40 {
+        app.push_message(&Message::user(format!("line {i}")));
+    }
+    show(
+        &mut app,
+        vec![question("q", QuestionKind::Text, Vec::new(), false)],
+    );
+    // The panel is up: the transcript viewport is small.
+    let _ = render(&mut app, 80, 24);
+    app.on_key(key(KeyCode::Char('x')));
+    app.on_key(key(KeyCode::Enter)); // -> Submit
+    let _ = effect(&mut app, key(KeyCode::Enter)); // submit, the panel closes
+    let _ = render(&mut app, 80, 40);
+    assert!(
+        app.is_following(),
+        "the transcript must follow after the panel closes (scroll={} max={})",
+        app.scroll,
+        app.max_scroll
+    );
+}

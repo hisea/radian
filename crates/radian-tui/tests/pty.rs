@@ -5775,7 +5775,7 @@ async fn pty_ask_user_answers_three_questions_and_the_turn_continues() {
             "--workspace",
             ws.to_str().unwrap(),
         ],
-        40,
+        60,
         100,
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
@@ -5793,31 +5793,208 @@ async fn pty_ask_user_answers_three_questions_and_the_turn_continues() {
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("question 1/3", 20),
-        "the title must name the position: {}",
+        pty.wait_for_screen("loader", 20),
+        "the tab row must show the question header: {}",
         pty.screen()
     );
-    // Question 1 (single): select the highlighted option.
+    // Question 1 (single): Space selects without advancing, `n` adds a note, Tab advances.
+    pty.send(b" ");
+    pty.send(b"n");
+    pty.send(b"note-one");
+    pty.send(b"\r"); // save the note
+    pty.send(b"\t");
+    // Question 2 (multi): Space toggles, Tab advances.
     pty.send(b" ");
     pty.send(b"\t");
-    // Question 2 (multi): select the highlighted option.
-    pty.send(b" ");
-    pty.send(b"\t");
-    // Question 3 (text): type.
+    // Question 3 (text): type, Enter -> the Submit tab.
     pty.send(b"radian");
-    // Enter -> the overview, Enter -> submit.
     pty.send(b"\r");
     assert!(
-        pty.wait_for_screen("overview", 20),
-        "the overview must be shown: {}",
+        pty.wait_for_screen("✓ loader", 20),
+        "the Submit tab lists the answers: {}",
         pty.screen()
     );
+    // Enter -> submit.
     pty.send(b"\r");
     assert!(
         pty.wait_for_screen("ASK-DONE", 30),
         "the turn must continue after the answers: {}",
         pty.screen()
     );
+    pty.quit();
+    // The journal carries the answers and the note (ADR 0024 Q3/R4).
+    let journal = std::fs::read_to_string(sessions.join("ask.jsonl")).expect("the journal");
+    assert!(
+        journal.contains("\"selected\":[\"builtin\"]") && journal.contains("\"note\":\"note-one\""),
+        "the answer and the note must be journaled:\n{journal}"
+    );
+}
+
+/// ADR 0024 R2/R3 end to end: `alt-h` collapses the panel to one line and shows it
+/// again without losing the answers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_ask_user_alt_h_hides_and_shows() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("ask-hide");
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(ask_reply("HIDE-DONE")).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "ask-hide",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        60,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"go\r");
+    assert!(
+        pty.wait_for_screen("How should it load?", 20),
+        "{}",
+        pty.screen()
+    );
+    // Answer the first question, then collapse.
+    pty.send(b" ");
+    assert!(pty.wait_for_screen("⏎ select", 10), "{}", pty.screen());
+    pty.send(b"\x1bh"); // alt-h
+    assert!(
+        pty.wait_for_screen("alt-h to show", 10),
+        "the panel must collapse: {}",
+        pty.screen()
+    );
+    pty.send(b"\x1bh"); // alt-h again
+    assert!(
+        pty.wait_for_screen("How should it load?", 10),
+        "the panel must come back with the answers: {}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0024 R3 + feedback: `esc` twice declines, and the turn continues.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_ask_user_esc_declines() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("ask-decline");
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(ask_reply("DECLINE-DONE")).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "ask-decline",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        60,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"go\r");
+    // Wait for the **panel** (its hint), not the transcript block (which shows the prompt too).
+    assert!(pty.wait_for_screen("⏎ select", 20), "{}", pty.screen());
+    pty.send(&[0x1b]); // the first Esc asks again
+    assert!(
+        pty.wait_for_screen("press Esc again", 10),
+        "the first Esc must confirm: {}",
+        pty.screen()
+    );
+    pty.send(&[0x1b]); // the second Esc declines
+    assert!(
+        pty.wait_for_screen("DECLINE-DONE", 20),
+        "the turn must continue after the decline: {}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0024 R2/R3 + feedback: the `Other` row keeps its text while Up/Down
+/// move between the options, and the answer carries it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_ask_user_other_keeps_its_text() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("ask-other");
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let questions = json!({"questions": [
+        {"id": "pick", "header": "Pick", "prompt": "Pick one", "kind": "single",
+         "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+         "allow_other": true, "required": true}
+    ]});
+    let server = MockServer::start(vec![
+        tool_reply("call_ask", "ask_user", &questions.to_string()),
+        text_reply("OTHER-DONE"),
+    ])
+    .await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "ask-other",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        60,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"go\r");
+    assert!(pty.wait_for_screen("Pick one", 20), "{}", pty.screen());
+    // Move to `Other` (A, B, Other) and type.
+    pty.send(b"\x1b[B"); // Down
+    pty.send(b"\x1b[B"); // Down
+    pty.send(b"custom");
+    assert!(
+        pty.wait_for_screen("Other: custom", 10),
+        "the typed text must be in the Other row: {}",
+        pty.screen()
+    );
+    // Up to B, Down back to Other: the text is still there.
+    pty.send(b"\x1b[A"); // Up
+    pty.send(b"\x1b[B"); // Down
+    assert!(
+        pty.wait_for_screen("Other: custom", 10),
+        "the text must survive the arrows: {}",
+        pty.screen()
+    );
+    // Enter confirms and advances to Submit; Enter submits.
+    pty.send(b"\r");
+    pty.send(b"\r");
+    assert!(
+        pty.wait_for_screen("OTHER-DONE", 20),
+        "the turn must continue with the Other answer: {}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
 }
 
 /// ADR 0024 Q4: Ctrl-C while a question is up cancels the turn, the form goes with the waiter
@@ -5877,8 +6054,8 @@ async fn pty_ctrl_c_during_a_question_cancels_without_an_answer() {
     // The form's own title, not the prompt: the transcript shows the tool call's arguments,
     // which contain the prompt text.
     assert!(
-        pty.wait_until_gone("question 1/3", 20),
-        "the form must go with the cancelled wait: {}",
+        pty.wait_until_gone("⏎ select", 20),
+        "the panel must go with the cancelled wait: {}",
         pty.screen()
     );
     // One request only: the tool never returned an answer, so the model was never asked again.
