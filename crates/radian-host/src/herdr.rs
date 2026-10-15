@@ -357,8 +357,12 @@ impl Reporter {
 }
 
 impl Drop for Reporter {
+    /// Signals the sender thread and returns without joining: a panic must not wait on an
+    /// in-flight send (ADR 0034 H5, the panic path does no I/O). The thread exits on its own
+    /// after its current timeout.
     fn drop(&mut self) {
-        self.shutdown();
+        self.shared.stop.store(true, Ordering::SeqCst);
+        self.shared.wake.notify_all();
     }
 }
 

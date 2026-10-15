@@ -384,6 +384,20 @@ pub struct SandboxConfig {
     pub allow_unix_sockets: Vec<String>,
 }
 
+/// `[integrations]` (ADR 0034 H6): which local integrations are on. `herdr` defaults to
+/// **true**: it only takes effect inside a herdr pane (ADR 0034 H1), and `RADIAN_HERDR=0`
+/// turns it off for one run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntegrationsConfig {
+    pub herdr: bool,
+}
+
+impl Default for IntegrationsConfig {
+    fn default() -> Self {
+        Self { herdr: true }
+    }
+}
+
 /// One parsed configuration file.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Config {
@@ -397,6 +411,7 @@ pub struct Config {
     pub model: ModelConfig,
     pub permissions: PermissionsConfig,
     pub sandbox: SandboxConfig,
+    pub integrations: IntegrationsConfig,
     pub compaction: CompactionConfig,
     pub skills: SkillsConfig,
     /// `[git]` (ADR 0030 R10): the branches `git_commit` refuses besides `main`/`master`.
@@ -503,6 +518,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
             "model" => parse_model(value, path, read_only, &mut config)?,
             "permissions" => parse_permissions(value, path, read_only, &mut config)?,
             "sandbox" => parse_sandbox(value, path, &mut config)?,
+            "integrations" => parse_integrations(value, path, &mut config)?,
             "compaction" => parse_compaction(value, path, &mut config)?,
             "skills" => parse_skills(value, path, &mut config)?,
             "git" => parse_git(value, &mut config)?,
@@ -704,6 +720,22 @@ fn parse_permissions(
                 return Err(wrong_type(path, "permissions.approval", "a string"));
             }
             (other, _) => config.skipped.push(format!("permissions.{other}")),
+        }
+    }
+    Ok(())
+}
+
+fn parse_integrations(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
+    let Some(table) = value.as_table() else {
+        return Err(wrong_type(path, "integrations", "a table"));
+    };
+    for (key, value) in table {
+        match (key.as_str(), value) {
+            ("herdr", Value::Boolean(on)) => config.integrations.herdr = *on,
+            ("herdr", _) => {
+                return Err(wrong_type(path, "integrations.herdr", "a boolean"));
+            }
+            (other, _) => config.skipped.push(format!("integrations.{other}")),
         }
     }
     Ok(())
@@ -1414,6 +1446,30 @@ mod tests {
 
     fn parse_str(text: &str) -> Result<Config, ConfigError> {
         parse(Path::new("/tmp/test/config.toml"), text)
+    }
+
+    /// ADR 0034 H6: `[integrations] herdr` defaults to true; `false` turns it off and a
+    /// non-boolean is refused.
+    #[test]
+    fn integrations_herdr_defaults_on_and_can_be_turned_off() {
+        assert!(
+            parse_str("schema_version = 1\n")
+                .unwrap()
+                .integrations
+                .herdr
+        );
+        assert!(
+            !parse_str("schema_version = 1\n[integrations]\nherdr = false\n")
+                .unwrap()
+                .integrations
+                .herdr
+        );
+        assert!(
+            parse_str("schema_version = 1\n[integrations]\nherdr = \"no\"\n").is_err(),
+            "a non-boolean is refused"
+        );
+        let config = parse_str("schema_version = 1\n[integrations]\nfuture = 1\n").unwrap();
+        assert!(config.skipped.contains(&"integrations.future".to_owned()));
     }
 
     /// ADR 0016: `[sandbox] allow_unix_sockets` is an array of strings; a bad
