@@ -21,8 +21,7 @@ const RESERVED: [&str; 7] = [
 
 /// The documented maximum number of explicit `cache_control` breakpoints in one request
 /// (wire notes §2.4). The adapter places at most three (last tool, end of system, last
-/// cacheable block of the last message), so it never approaches this; the constant is the
-/// invariant the tests hold it to.
+/// cacheable block of the last message), so it never approaches this; `build_body` asserts it.
 const MAX_CACHE_BREAKPOINTS: usize = 4;
 
 /// The only cache type Anthropic supports today: a 5-minute ephemeral entry.
@@ -63,12 +62,18 @@ pub(crate) fn build_body(
         );
     }
     let caching = config.cache == CacheMode::Auto;
+    // Count the breakpoints the adapter itself places. The documented limit governs these
+    // explicit marks, so a key that merely shares the name inside a tool's `input_schema` or a
+    // tool call's arguments is the caller's data and must not be mistaken for a breakpoint.
+    let mut breakpoints = 0usize;
     if let Some(system) = &request.system_prompt {
-        body.insert("system".into(), system_value(system, caching));
+        let marked = caching && !system.is_empty();
+        breakpoints += usize::from(marked);
+        body.insert("system".into(), system_value(system, marked));
     }
     let mut messages = messages(&request.messages)?;
-    if caching {
-        cache_last_message_block(&mut messages);
+    if caching && cache_last_message_block(&mut messages) {
+        breakpoints += 1;
     }
     body.insert("messages".into(), Value::Array(messages));
     if !request.tools.is_empty() {
@@ -88,21 +93,22 @@ pub(crate) fn build_body(
             // as they are (their prefix is covered by the breakpoint's cumulative hash).
             if let Some(last) = tools.last_mut().and_then(Value::as_object_mut) {
                 last.insert("cache_control".into(), cache_control());
+                breakpoints += 1;
             }
         }
         body.insert("tools".into(), Value::Array(tools));
     }
     let body = Value::Object(body);
-    debug_assert!(count_cache_breakpoints(&body) <= MAX_CACHE_BREAKPOINTS);
+    debug_assert!(breakpoints <= MAX_CACHE_BREAKPOINTS);
     Ok(body)
 }
 
-/// The `system` field. Under caching, a non-empty system prompt becomes the documented array
-/// form with the breakpoint on its last (only) block. An empty prompt stays the plain string it
-/// is today: `text` has `minLength 1`, so an empty block may not exist, let alone carry
-/// `cache_control` (wire notes §2.4).
-fn system_value(system: &str, caching: bool) -> Value {
-    if caching && !system.is_empty() {
+/// The `system` field. When [`mark_breakpoint`] is set (caching on and the prompt non-empty), it
+/// becomes the documented array form with the breakpoint on its last (only) block. Otherwise it
+/// stays the plain string it is today: `text` has `minLength 1`, so an empty block may not exist,
+/// let alone carry `cache_control` (wire notes §2.4).
+fn system_value(system: &str, mark_breakpoint: bool) -> Value {
+    if mark_breakpoint {
         json!([{
             "type": "text",
             "text": system,
@@ -116,23 +122,25 @@ fn system_value(system: &str, caching: bool) -> Value {
 /// Put one `cache_control` breakpoint on the last cacheable block of the last message, in
 /// place. Thinking and redacted_thinking blocks cannot be cached directly, and an empty block
 /// cannot either, so the scan walks back to the last eligible block. A final message whose
-/// content is a plain string (the empty-user fallback) has no block to mark.
-fn cache_last_message_block(messages: &mut [Value]) {
+/// content is a plain string (the empty-user fallback) has no block to mark. Returns whether a
+/// breakpoint was placed.
+fn cache_last_message_block(messages: &mut [Value]) -> bool {
     let Some(blocks) = messages
         .last_mut()
         .and_then(|message| message.get_mut("content"))
         .and_then(Value::as_array_mut)
     else {
-        return;
+        return false;
     };
     for block in blocks.iter_mut().rev() {
         if is_cacheable(block) {
             if let Some(map) = block.as_object_mut() {
                 map.insert("cache_control".into(), cache_control());
             }
-            return;
+            return true;
         }
     }
+    false
 }
 
 /// Whether a content block may carry `cache_control`: text, image, tool_use and tool_result
@@ -147,8 +155,12 @@ fn is_cacheable(block: &Value) -> bool {
     }
 }
 
-/// How many `cache_control` breakpoints the body carries. Used by the tests (and the
-/// `debug_assert` above) to hold the documented limit.
+/// How many `cache_control` keys a value carries, at any depth. The tests use it as an oracle
+/// over bodies they build themselves, where every occurrence is a real breakpoint; `build_body`
+/// checks its own documented limit with a counter instead, so a caller's lookalike key (see
+/// `auto_does_not_mistake_a_user_data_key_for_a_breakpoint`) cannot trip it. Test-only, so it is
+/// not compiled into the shipped adapter.
+#[cfg(test)]
 fn count_cache_breakpoints(value: &Value) -> usize {
     match value {
         Value::Object(map) => {
@@ -1118,5 +1130,65 @@ mod tests {
             json!({"type": "ephemeral"})
         );
         assert_eq!(count_cache_breakpoints(&body), 1);
+    }
+
+    /// A tool's `input_schema` and a tool call's arguments may legitimately contain a key named
+    /// `cache_control`; those are the caller's data, not breakpoints. The adapter's limit counts
+    /// only what it places, so such a request is built normally. (A whole-body scan would count
+    /// six keys here and trip the `debug_assert`.)
+    #[test]
+    fn auto_does_not_mistake_a_user_data_key_for_a_breakpoint() {
+        let mut req = request(vec![
+            Message::user("hi"),
+            Message::Assistant {
+                content: Vec::new(),
+                reasoning: Vec::new(),
+                tool_calls: vec![call(
+                    "toolu_1",
+                    "t",
+                    json!({"cache_control": 1, "nested": {"cache_control": 2}}),
+                )],
+                provider_payload: None,
+                interrupted: false,
+                meta: MessageMeta::default(),
+            },
+        ]);
+        req.system_prompt = Some("Be brief.".into());
+        req.tools = vec![ToolSpec {
+            name: "t".into(),
+            description: "t tool.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {"cache_control": {"type": "string"}},
+            }),
+            concurrency: ToolConcurrency::Shared,
+        }];
+
+        let body = build_body(&req, &config()).unwrap();
+
+        // The three real breakpoints are where they belong ...
+        assert_eq!(
+            body["system"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert_eq!(
+            body["tools"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        let last = body["messages"].as_array().unwrap().last().unwrap();
+        assert_eq!(last["content"][0]["type"], "tool_use");
+        assert_eq!(
+            last["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        // ... and the caller's lookalike keys are left untouched.
+        assert_eq!(last["content"][0]["input"]["cache_control"], json!(1));
+        assert_eq!(
+            last["content"][0]["input"]["nested"]["cache_control"],
+            json!(2)
+        );
+        // Six keys named `cache_control` in total: three breakpoints plus three lookalikes (two
+        // in the tool call's arguments, one in the tool's `input_schema`).
+        assert_eq!(count_cache_breakpoints(&body), 6);
     }
 }

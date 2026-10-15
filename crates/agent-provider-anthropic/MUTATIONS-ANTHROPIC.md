@@ -86,3 +86,24 @@ M24 与 M17–M23 不同：那些是 adapter 单测/直接 `complete` 层面，M
 **等价变异（记录，不是漏网）**：只把 `classify_overflow` 的门从 `400|413` 改成 `400|413|429`
 （不动 `is_overflow_signature`）不改变行为——`is_overflow_signature` 自己也按 status 配对，429
 仍返回 false。真正改变行为的是 M29。
+
+## 提示缓存（`cache_control`，2026-10-15）
+
+一次性检出 `/private/var/.../opencode/anthropic-cache-mut`（`git worktree add --detach HEAD`，
+HEAD = `1395e3e`），每个变异后 `git checkout -- .` 恢复、`git status --short` 为空，worktree 用完删除。
+跑 `cargo test -p agent-provider-anthropic --lib --no-fail-fast`（共享主 worktree 的 target）。
+
+| # | 变异 | 结果 | 抓住它的测试 |
+|---|---|---|---|
+| M32 | 去掉工具定义上的断点（`tools` 分支不再 `insert(cache_control)`） | 抓住 (rc=101) | `auto_places_the_three_breakpoints_where_stated`、`breakpoints_follow_what_the_request_carries` |
+| M33 | `None` 仍然放断点（`caching` 恒为 `true`） | 抓住 (rc=101) | `none_sends_the_body_the_adapter_sent_before_prompt_caching`（及 5 条断言旧字节形状的既有测试） |
+| M34 | 每条消息都放断点（三消息请求上出现第 5 个断点） | 抓住 (rc=101) | `auto_places_the_three_breakpoints_where_stated`（`count_cache_breakpoints == 3` 变 5），另 3 条 |
+| M35 | Auto 下 system 仍是纯字符串 | 抓住 (rc=101) | `auto_places_the_three_breakpoints_where_stated`、`breakpoints_follow_what_the_request_carries` |
+| M36（附加） | `thinking`/`redacted_thinking` 被当作可缓存 | 抓住 (rc=101) | `auto_never_marks_a_thinking_block` |
+| M37（附加） | 把限量断言退回「整份 body 深度扫描 `cache_control`」（并解掉该辅助函数的 `#[cfg(test)]`） | 抓住 (rc=101) | `auto_does_not_mistake_a_user_data_key_for_a_breakpoint` |
+
+M32/M35 的两条捕获都同时来自「放置位置」与「断点计数」测试；M34 证明计数测试能抓住超限（第 5 个）
+断点，而不是只在恰好 3 个时才成立。M37 单独覆盖新增行为：限量断言只数 adapter 自己放的断点，工具
+schema / 工具调用参数里同名的键是调用方数据，不能被误当成断点（M37 让它们被数进去，于是该请求触发
+`debug_assert` 而 panics）。
+

@@ -68,7 +68,7 @@
 - **`system` 的形状**：官方类型是 `string` **或** array of `TextBlockParam`。要把断点放在 system 上，就必须用 array 形式（断点在某个块上）。
 - **最小可缓存长度**：按模型不同为 512 / 1024 / 2048 / 4096 token；**短于**该长度时请求照常处理，但**不缓存**且**不报错**（此时 `cache_creation_input_tokens` 与 `cache_read_input_tokens` 都为 0）。官方还给了一条「缓存写入只在断点处发生、读取向前回看最多 20 个块」的规则，本 adapter 一次请求只关心当前请求，不受它影响。
 - **usage 口径**：`input_tokens` 是**最后一个断点之后**、既未读也未写缓存的 token 数；官方原文：`total_input_tokens = cache_read_input_tokens + cache_creation_input_tokens + input_tokens`。这再次印证 Anthropic 的 `input` **不含**缓存命中（ADR 0007 的前提），与 §3.1 的字段映射一致。
-- **本 adapter 的断点**（`CacheMode::Auto`，**默认**）：(1) **最后一 件**工具定义；(2) system 末尾（system 非空时把它发成带 `cache_control` 的单块 array）；(3) **最后一条消息**里**最后一个可缓存块**（跳过 `thinking`/`redacted_thinking` 与空文本）。对应部分为空时该断点不存在。`CacheMode::None` 完全不放 `cache_control`，请求体与实现本特性前**逐字节相同**。
+- **本 adapter 的断点**（`CacheMode::Auto`，**默认**）：(1) **最后一件**工具定义；(2) system 末尾（system 非空时把它发成带 `cache_control` 的单块 array）；(3) **最后一条消息**里**最后一个可缓存块**（跳过 `thinking`/`redacted_thinking` 与空文本）。对应部分为空时该断点不存在。`CacheMode::None` 完全不放 `cache_control`，请求体与实现本特性前**逐字节相同**。
 - **未验证**：本 adapter 只发显式断点、不发顶层自动缓存；也**没有**在真实端点上观察过缓存命中（本仓库不持有 Anthropic key，见 §6 的手测项）。
 
 ### 2.1 `MessageParam` 与内容块
