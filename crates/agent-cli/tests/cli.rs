@@ -1528,6 +1528,72 @@ async fn system_prompt_is_sent() {
     assert!(content.contains("model: m"), "{content}");
 }
 
+/// ADR 0036: without `--system` the built-in `default` role is layer 1, between the
+/// `<runtime>` layer and the context files, with the `<session>` layer last.
+#[tokio::test]
+async fn the_default_role_layers_are_sent() {
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let (code, _, _) = feed_and_wait(
+        spawn_agent(
+            &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0);
+    let messages = messages_of(&server, 0);
+    let system = &messages.as_array().expect("messages")[0];
+    let content = system["content"].as_str().unwrap_or_default();
+    assert!(content.starts_with("<runtime>"), "{content}");
+    let runtime_at = content.find("<runtime>").unwrap();
+    let role_at = content.find("<role>").unwrap();
+    let session_at = content.find("<session>").unwrap();
+    assert!(runtime_at < role_at && role_at < session_at, "{content}");
+    assert!(
+        content.contains("You are radian, a coding agent"),
+        "the default role: {content}"
+    );
+    assert!(
+        content.contains("- memory_search:"),
+        "the runtime tool list: {content}"
+    );
+    assert!(content.trim_end().ends_with("</session>"), "{content}");
+    assert!(content.contains("model: m"), "{content}");
+}
+
+/// ADR 0036: the `safe` tier mounts no `shell`, so layer 0a does not advertise one.
+#[tokio::test]
+async fn the_safe_tier_runtime_layer_has_no_shell() {
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let (code, _, _) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--profile",
+                "safe",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0);
+    let messages = messages_of(&server, 0);
+    let system = &messages.as_array().expect("messages")[0];
+    let content = system["content"].as_str().unwrap_or_default();
+    let runtime = content.split("</runtime>").next().unwrap_or(content);
+    assert!(
+        !runtime.contains("- shell:"),
+        "the safe tier has no shell tool:\n{runtime}"
+    );
+}
+
 #[tokio::test]
 async fn turn_timeout_ends_the_turn() {
     let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
