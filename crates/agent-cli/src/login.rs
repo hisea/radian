@@ -209,7 +209,7 @@ fn read_line(prompt: &str) -> Result<String, String> {
 /// The exit code of an aborted login (a refusal or a cancel): usage-shaped, not a model
 /// failure.
 fn aborted(message: String) -> i32 {
-    eprintln!("agent: {message}");
+    eprintln!("radian: {message}");
     USAGE_ERROR
 }
 
@@ -319,7 +319,7 @@ pub async fn run_login(provider: Option<String>) -> i32 {
         Ok(()) => println!("ok"),
         Err(reason) => {
             println!("failed");
-            eprintln!("agent: {reason}");
+            eprintln!("radian: {reason}");
             let answer = match read_line("save anyway? [y/N] ") {
                 Ok(answer) => answer.trim().to_ascii_lowercase(),
                 Err(error) => return aborted(error),

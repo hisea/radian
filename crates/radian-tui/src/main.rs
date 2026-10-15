@@ -304,8 +304,10 @@ fn run_subcommand(command: RadianCommand) -> ExitCode {
         RadianCommand::Exec { args } => {
             // The agent parser owns `--help`/`--version`/usage errors: `parse_from` exits
             // inside clap for those, exactly as the `agent` binary does.
+            // The program name clap shows in usage and errors: `radian exec`, the command
+            // the user ran.
             ExitCode::from(agent_cli::parse_and_run(
-                std::iter::once("agent".to_string()).chain(args),
+                std::iter::once("radian exec".to_string()).chain(args),
             ) as u8)
         }
         // The management commands build the same `Cli` the `agent` parser would and run the

@@ -26,10 +26,10 @@ fn version_prints_the_program_name_and_the_cargo_package_version() {
         "--version must print the package version {}: stdout {stdout:?} stderr {stderr:?}",
         env!("CARGO_PKG_VERSION")
     );
-    // The program name is the binary's, not the package's (`agent`, not `agent-cli`).
+    // The program name is the command the user ran (`radian`, not the `agent-cli` package).
     assert_eq!(
         stdout.trim_end(),
-        format!("agent {}", env!("CARGO_PKG_VERSION")),
+        format!("radian {}", env!("CARGO_PKG_VERSION")),
         "stdout {stdout:?} stderr {stderr:?}"
     );
     assert!(stderr.is_empty(), "stderr {stderr:?}");

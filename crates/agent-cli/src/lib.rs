@@ -51,7 +51,9 @@ const USAGE_ERROR: i32 = 2;
 
 #[derive(Parser, Default)]
 #[command(
-    name = "agent",
+    // The command is `radian exec` now: its help, usage and `--version` name the program the
+    // user actually ran (ADR 0032 direction; the `agent` binary is gone).
+    name = "radian",
     version,
     about = "Chat with a model, with optional MCP tools",
     // A subcommand (`agent memory …`) is a mode of its own, like `--list`: it must not need
@@ -337,9 +339,9 @@ impl OutputError {
     /// The line to print to stderr, if any. A broken pipe prints nothing.
     fn message(&self) -> Option<String> {
         match self {
-            OutputError::Failed { message, .. } => Some(format!("agent: {message}")),
+            OutputError::Failed { message, .. } => Some(format!("radian: {message}")),
             OutputError::BrokenPipe => None,
-            OutputError::Write(error) => Some(format!("agent: cannot write to stdout: {error}")),
+            OutputError::Write(error) => Some(format!("radian: cannot write to stdout: {error}")),
         }
     }
 }
@@ -670,7 +672,7 @@ pub async fn run(mut cli: Cli) -> i32 {
             || cli.prompt.is_some()
             || cli.resume.is_some()
         {
-            eprintln!("agent: a subcommand cannot be combined with a session command");
+            eprintln!("radian: a subcommand cannot be combined with a session command");
             return USAGE_ERROR;
         }
         match cli.command.take() {
@@ -698,7 +700,7 @@ pub async fn run(mut cli: Cli) -> i32 {
         return match fork_session(&cli, parent_id).await {
             Ok(()) => 0,
             Err((message, code)) => {
-                eprintln!("agent: {message}");
+                eprintln!("radian: {message}");
                 code
             }
         };
@@ -706,7 +708,7 @@ pub async fn run(mut cli: Cli) -> i32 {
     let setup = match setup(&cli).await {
         Ok(setup) => setup,
         Err(e) => {
-            eprintln!("agent: {}", e.0);
+            eprintln!("radian: {}", e.0);
             return USAGE_ERROR;
         }
     };
@@ -722,7 +724,7 @@ pub async fn run(mut cli: Cli) -> i32 {
     match chat(setup, cli).await {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("agent: {}", redact(&e.0, &redact_secrets));
+            eprintln!("radian: {}", redact(&e.0, &redact_secrets));
             USAGE_ERROR
         }
     }
@@ -1465,10 +1467,10 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         Arc::new(move |event: &radian_session::RuntimeEvent| {
             if let radian_session::RuntimeEvent::TurnFailed { message, .. } = event {
                 let message = redact(message, &secrets);
-                eprintln!("agent: {message}");
+                eprintln!("radian: {message}");
                 // ADR 0018's fallback: a recognizable context overflow gets one extra line.
                 if radian_host::is_context_overflow(&message) {
-                    eprintln!("agent: {}", radian_host::CONTEXT_OVERFLOW_HELP);
+                    eprintln!("radian: {}", radian_host::CONTEXT_OVERFLOW_HELP);
                 }
             }
         })
@@ -1577,7 +1579,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     if let Some(choice) = trust_choice
         && let Err(error) = session.record_trust_async(choice).await
     {
-        eprintln!("agent: cannot write trust.json: {error}");
+        eprintln!("radian: cannot write trust.json: {error}");
     }
 
     // ADR 0026 D8: an explicit `--model`/`--provider` wins over the resumed change, and the
@@ -1746,7 +1748,7 @@ async fn enqueue_input(
 async fn one_shot(run: &mut Run, prompt: String) -> i32 {
     if let Err(error) = enqueue_input(&run.inbox, &run.hooks, prompt, TERMINAL_SOURCE, false).await
     {
-        eprintln!("agent: {}", redact(&error.to_string(), &run.secrets));
+        eprintln!("radian: {}", redact(&error.to_string(), &run.secrets));
         let _ = shutdown(&run.inbox, &run.ui, &run.session).await;
         return 1;
     }
@@ -1773,7 +1775,7 @@ async fn one_shot(run: &mut Run, prompt: String) -> i32 {
     match run.ui.last_status() {
         Some(RunStatus::Completed) => 0,
         Some(status) => {
-            eprintln!("agent: the turn ended as {status:?}");
+            eprintln!("radian: the turn ended as {status:?}");
             1
         }
         None => 1,
@@ -1872,9 +1874,9 @@ async fn interactive_loop(run: &mut Run, lines: &LineHub) -> i32 {
                 if let Err(error) = result {
                     match &error {
                         InboxError::Full { .. } => eprintln!(
-                            "agent: the inbox is full; that input was not queued (try again)"
+                            "radian: the inbox is full; that input was not queued (try again)"
                         ),
-                        other => eprintln!("agent: {}", redact(&other.to_string(), &run.secrets)),
+                        other => eprintln!("radian: {}", redact(&other.to_string(), &run.secrets)),
                     }
                     continue;
                 }
@@ -1953,7 +1955,7 @@ fn on_signal(ui: &Ui, inbox: &Inbox, cancelling: &mut bool) -> Next {
     }
     *cancelling = true;
     inbox.cancel(CancelCause::Requested);
-    eprintln!("agent: cancelling (Ctrl-C again to quit)");
+    eprintln!("radian: cancelling (Ctrl-C again to quit)");
     Next::Again
 }
 
@@ -1991,11 +1993,11 @@ async fn report_task(session: &Arc<radian_host::LocalSession>, secrets: &[String
     match session.join().await {
         radian_host::DriverEnd::Ok => 0,
         radian_host::DriverEnd::Failed(error) => {
-            eprintln!("agent: {}", redact(&error, secrets));
+            eprintln!("radian: {}", redact(&error, secrets));
             1
         }
         radian_host::DriverEnd::Panicked(message) => {
-            eprintln!("agent: the driver task ended unexpectedly: {message}");
+            eprintln!("radian: the driver task ended unexpectedly: {message}");
             1
         }
     }
@@ -2005,7 +2007,7 @@ fn report_error(result: &Result<(), String>, secrets: &[String]) -> Option<i32> 
     match result {
         Ok(()) => None,
         Err(error) => {
-            eprintln!("agent: {}", redact(error, secrets));
+            eprintln!("radian: {}", redact(error, secrets));
             Some(1)
         }
     }
@@ -2031,7 +2033,7 @@ async fn wait_for_turn(
                 }
                 *cancelling = true;
                 inbox.cancel(CancelCause::Requested);
-                eprintln!("agent: cancelling (Ctrl-C again to quit)");
+                eprintln!("radian: cancelling (Ctrl-C again to quit)");
             }
             _ = driver_ended.notified() => return TurnEnd::DriverEnded,
             _ = ui.finished.notified() => return TurnEnd::Done,
@@ -2239,7 +2241,7 @@ impl EventSink for Ui {
                     RunStatus::Cancelled(_) => {
                         // Carries both the lowercase hint and the debug status: the tests
                         // wait for either.
-                        eprintln!("agent: cancelled ({status:?}); type another line or /exit")
+                        eprintln!("radian: cancelled ({status:?}); type another line or /exit")
                     }
                     other => eprintln!("[turn] ended as {other:?}"),
                 }
