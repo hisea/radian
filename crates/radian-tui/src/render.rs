@@ -719,108 +719,109 @@ const BOX_PROMPT: &str = "❯ ";
 /// The placeholder shown while the input is empty.
 const INPUT_HINT: &str = "(type a message, Enter to send, Ctrl-J for a new line)";
 
-/// The input area's height: one rule above, the text rows, one rule below.
-/// The `/login` box's height (rows in `login_lines`, plus the two border rows).
-const LOGIN_HEIGHT: u16 = 8;
-
-/// The wizard's lines, styled with the app theme's levels (ADR 0028): the prompt is main
-/// text, the selected choice is the emphasis (accent), the rest is secondary, and the
-/// key hints are weak. **The key is never among them** (D3): a filled field renders one `*`
-/// per character, an empty one its hint.
-fn login_lines(wizard: &LoginWizard, theme: &Theme, width: usize) -> Vec<Line<'static>> {
+/// The `/login` wizard's panel (ADR 0035): the shared [`crate::panel::Panel`] with
+/// the step's rows, the provider/protocol choices through [`crate::select_list`], and the
+/// step's key hints in the bottom border. Pure, so the layout is testable without a terminal.
+/// **The key is never among the rows** (D3): a filled field renders one `*` per character.
+pub fn login_panel(
+    wizard: &LoginWizard,
+    width: usize,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+) -> Vec<Line<'static>> {
     use crate::login::LoginStep;
-    let _ = width;
-    let prompt = |text: &str| Line::from(Span::styled(text.to_owned(), theme.text));
+    let ascii = glyphs == crate::footer::Glyphs::Ascii;
+    let inner = width.saturating_sub(4).max(1);
+    let label = |text: &str| Line::from(Span::styled(text.to_owned(), theme.text));
     let value = |text: String| Line::from(Span::styled(text, theme.text));
-    let hint = |text: &'static str| Span::styled(text.to_owned(), theme.hint);
-    let mut lines: Vec<Line> = Vec::new();
+    let mut panel = crate::panel::Panel::new("/login");
     match &wizard.step {
         LoginStep::ChooseProvider { cursor } => {
-            lines.push(Line::from(vec![
-                Span::styled("choose a provider ".to_owned(), theme.text),
-                hint("(↑/↓, Enter)"),
-                Span::styled(":".to_owned(), theme.text),
-            ]));
-            for (index, (id, description)) in LoginWizard::choices().into_iter().enumerate() {
-                let marker = if index == *cursor { "> " } else { "   " };
-                let style = if index == *cursor {
-                    theme.notice_label
-                } else {
-                    theme.notice_body
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(format!(" {marker} "), style),
-                    Span::styled(format!("{id:<20}"), style),
-                    Span::styled(description, theme.hint),
-                ]));
+            panel = panel.row(label("choose a provider"));
+            let items: Vec<crate::select_list::Item> = LoginWizard::choices()
+                .into_iter()
+                .map(|(id, description)| crate::select_list::Item::new(id).description(description))
+                .collect();
+            let list =
+                crate::select_list::view(theme, &items, "", *cursor, items.len(), inner, ascii);
+            for line in list.lines {
+                panel = panel.row(line);
             }
+            panel = panel
+                .hint("↑/↓", "choose")
+                .hint("⏎", "next")
+                .hint("esc", "cancel");
         }
         LoginStep::CustomName => {
-            lines.push(prompt("provider name (also its auth.json entry):"));
-            lines.push(value(format!(" {}", wizard.name)));
+            panel = panel
+                .row(label("provider name (also its auth.json entry):"))
+                .row(value(wizard.name.clone()));
+            panel = panel.hint("⏎", "next").hint("esc", "cancel");
         }
         LoginStep::CustomProtocol { cursor } => {
-            lines.push(Line::from(vec![
-                Span::styled("wire protocol ".to_owned(), theme.text),
-                hint("(↑/↓, Enter)"),
-                Span::styled(":".to_owned(), theme.text),
-            ]));
-            for (index, kind) in crate::login::PROTOCOLS.iter().enumerate() {
-                let marker = if index == *cursor { "> " } else { "   " };
-                let style = if index == *cursor {
-                    theme.notice_label
-                } else {
-                    theme.notice_body
-                };
-                lines.push(Line::from(Span::styled(format!(" {marker} {kind}"), style)));
+            panel = panel.row(label("wire protocol"));
+            let items: Vec<crate::select_list::Item> = crate::login::PROTOCOLS
+                .iter()
+                .map(|kind| crate::select_list::Item::new(*kind))
+                .collect();
+            let list =
+                crate::select_list::view(theme, &items, "", *cursor, items.len(), inner, ascii);
+            for line in list.lines {
+                panel = panel.row(line);
             }
+            panel = panel
+                .hint("↑/↓", "choose")
+                .hint("⏎", "next")
+                .hint("esc", "cancel");
         }
         LoginStep::CustomBaseUrl => {
-            lines.push(prompt("base URL:"));
-            lines.push(value(format!(" {}", wizard.base_url)));
+            panel = panel
+                .row(label("base URL:"))
+                .row(value(wizard.base_url.clone()));
+            panel = panel.hint("⏎", "next").hint("esc", "cancel");
         }
         LoginStep::KeyInput => {
-            lines.push(prompt("API key (hidden; paste works too):"));
-            let masked = crate::login::LoginWizard::masked(&wizard.key);
-            lines.push(value(if masked.is_empty() {
-                String::new()
-            } else {
-                masked
-            }));
+            panel = panel
+                .row(label("API key (hidden; paste works too):"))
+                .row(value(LoginWizard::masked(&wizard.key)));
+            panel = panel.hint("⏎", "next").hint("esc", "cancel");
         }
         LoginStep::Verifying => {
-            lines.push(Line::from(Span::styled(
-                format!("verifying {} … ", wizard.provider_name()),
-                theme.text,
-            )));
-            lines
-                .last_mut()
-                .expect("just pushed")
-                .spans
-                .push(hint("(Esc cancels)"));
+            panel = panel.row(label(&format!("verifying {} …", wizard.provider_name())));
+            panel = panel.hint("esc", "cancel");
         }
         LoginStep::VerifyFailed { reason } => {
-            lines.push(Line::from(Span::styled(
-                format!("verification failed: {reason}"),
-                theme.turn_cancelled,
-            )));
-            lines.push(Line::from(vec![
-                Span::styled("save anyway? ".to_owned(), theme.text),
-                Span::styled("[y] save   ".to_owned(), theme.hint),
-                Span::styled("[n/Esc] cancel".to_owned(), theme.hint),
-            ]));
+            panel = panel
+                .row(Line::from(Span::styled(
+                    format!("verification failed: {reason}"),
+                    theme.turn_cancelled,
+                )))
+                .row(label("save anyway?"));
+            panel = panel.hint("y", "save").hint("n/esc", "cancel");
         }
     }
     if let Some(error) = &wizard.error {
-        lines.push(Line::from(Span::styled(
+        panel = panel.row(Line::from(Span::styled(
             error.clone(),
             theme.turn_cancelled,
         )));
     }
-    lines
+    panel.lines(width, theme, glyphs)
+}
+
+/// The `/login` panel's height, measured from the panel itself so the frame and the layout
+/// agree.
+fn login_height(
+    wizard: &LoginWizard,
+    width: usize,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+) -> u16 {
+    login_panel(wizard, width, theme, glyphs).len() as u16
 }
 
 /// The error style for wizard problems (a note-colored line; no new theme role).
+/// The input area's height: one rule above, the text rows, one rule below.
 fn input_height(app: &App, width: usize) -> u16 {
     let inner = input_inner_width(app, width);
     let rows = crate::composer::rows(&app.input.text(), inner).len();
@@ -1231,7 +1232,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 app.footer_glyphs(),
             )
         }
-        Some(Modal::Login(_)) => LOGIN_HEIGHT,
+        Some(Modal::Login(wizard)) => {
+            login_height(wizard, area.width as usize, &app.theme, app.footer_glyphs())
+        }
         // The `/logout` confirmation is a two-line box like the `/memory` one.
         Some(Modal::ConfirmLogout(_)) => 4,
         // The trust prompt lists up to five options plus a header and a key line.
@@ -1390,14 +1393,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             frame.render_widget(Paragraph::new(lines), input_area);
         }
         Some(Modal::Login(wizard)) => {
-            let lines = login_lines(wizard, &app.theme, input_area.width as usize);
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(app.theme.approval_border)
-                .title(" /login ");
-            frame.render_widget(&block, input_area);
-            let inner = block.inner(input_area);
-            frame.render_widget(Paragraph::new(lines), inner);
+            let lines = login_panel(
+                wizard,
+                input_area.width as usize,
+                &app.theme,
+                app.footer_glyphs(),
+            );
+            frame.render_widget(Paragraph::new(lines), input_area);
         }
         Some(Modal::Trust(wizard)) => {
             let block = Block::default()

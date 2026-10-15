@@ -38,6 +38,50 @@ fn top_login(app: &App) -> &LoginWizard {
     }
 }
 
+/// A frame on `TestBackend` (the wizard has no rendering test otherwise).
+fn draw(app: &mut App, width: u16, height: u16) -> String {
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+        .expect("terminal");
+    terminal
+        .draw(|frame| radian_tui::render::draw(frame, app))
+        .expect("draw");
+    terminal.backend().to_string()
+}
+
+/// The shared panel shape (ADR 0035) for the wizard: the provider choice through
+/// the shared list, at 80 and 120 columns and in the ascii tier.
+#[test]
+fn the_login_panel_snapshot_at_80_120_and_ascii() {
+    let mut app = App::new("m", "s");
+    submit(&mut app, "/login");
+
+    let screen = draw(&mut app, 80, 24);
+    assert!(screen.contains("╭─ /login "), "{screen}");
+    assert!(screen.contains("choose a provider"), "{screen}");
+    assert!(
+        screen.contains("❯ opencode-go"),
+        "the cursor is on the first choice: {screen}"
+    );
+    assert!(
+        screen.contains("↑/↓ choose · ⏎ next · esc cancel"),
+        "{screen}"
+    );
+
+    // The description column only exists above 40 columns (ADR 0035).
+    let screen = draw(&mut app, 120, 24);
+    assert!(screen.contains("╭─ /login "), "{screen}");
+    assert!(screen.contains("OpenCode Go"), "{screen}");
+
+    app.apply_footer(&radian_host::config::TuiFooterConfig {
+        glyphs: Some("ascii".into()),
+        ..Default::default()
+    });
+    let screen = draw(&mut app, 80, 24);
+    assert!(screen.contains("+- /login "), "{screen}");
+    assert!(screen.contains("> opencode-go"), "{screen}");
+    assert!(!screen.contains('╭'), "{screen}");
+}
+
 /// `/login` opens the provider choice; `/login <builtin>` jumps to its key; an unknown name
 /// is a notice.
 #[test]
