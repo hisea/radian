@@ -1595,7 +1595,20 @@ impl MdGlyphs {
                 horizontal: "-",
                 vertical: "|",
             },
-            crate::footer::Glyphs::Unicode | crate::footer::Glyphs::Nerd => Self {
+            // ADR 0035: nerd uses the heavier `│`, unicode the lighter `▏`.
+            crate::footer::Glyphs::Nerd => Self {
+                bullet: "- ",
+                quote: "│ ",
+                task_unchecked: "☐ ",
+                task_checked: "☑ ",
+                rule: '─',
+                top: ("┌", "┬", "┐"),
+                mid: ("├", "┼", "┤"),
+                bottom: ("└", "┴", "┘"),
+                horizontal: "─",
+                vertical: "│",
+            },
+            crate::footer::Glyphs::Unicode => Self {
                 bullet: "- ",
                 quote: "▏ ",
                 task_unchecked: "☐ ",
@@ -2705,6 +2718,8 @@ mod tests {
         let ascii = md("> quoted\n\n---\n", 40, crate::footer::Glyphs::Ascii);
         assert!(ascii.iter().any(|t| t.contains("| quoted")), "{ascii:?}");
         assert!(ascii.iter().any(|t| t.contains('-')), "{ascii:?}");
+        let nerd = md("> quoted\n", 40, crate::footer::Glyphs::Nerd);
+        assert!(nerd.iter().any(|t| t.contains("│ quoted")), "{nerd:?}");
     }
 
     /// A table has a border between every two rows, not only under the header.
