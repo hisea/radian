@@ -260,3 +260,9 @@ Base `ea8d251` · 就地变异（改源码），每个变异前把文件复制�
 |---|---|---|---|
 | P3-1 | 第 2 层（排版字符归一化）只取第一个匹配（`take(1)`），非唯一也接受 | `patch::a_normalised_match_must_still_be_unique`（期望 `patch_ambiguous`，变异返回 Ok） | ✅ |
 | P3-2 | 写入前把结果里的 `\r\n` 全部换成 `\n`（CRLF 文件被改成 LF） | `patch::a_crlf_file_matches_an_lf_needle_and_stays_crlf`（期望字节含 `\r\n`） | ✅ |
+
+### patch 未命中时返回最近区域（piece 4）
+
+| # | 变异（行为） | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| P4-1 | `closest_region` 直接返回 `None`（错误里不再给出最近的行区间） | `patch::a_missing_needle_reports_the_closest_region_with_line_numbers`（期望含 `lines 2-3` 与 `2: beta`） | ✅ |

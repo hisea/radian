@@ -152,6 +152,41 @@ async fn replace_all_replaces_every_located_match() {
     );
 }
 
+/// A not-found needle names the closest region of the file with line numbers, so the model can
+/// fix the needle without another `read`.
+#[tokio::test]
+async fn a_missing_needle_reports_the_closest_region_with_line_numbers() {
+    let dir = TempDir::new("patch-closest");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("f.txt"), "alpha\nbeta\ngamma\ndelta\n").unwrap();
+    let tools = tools(&root);
+
+    // Case differs on the second line, so no layer matches.
+    let failure = call(
+        &tools,
+        "patch",
+        json!({"path": "f.txt", "old": "beta\nGAMMA", "new": "x"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failure.code, "patch_not_found", "{failure:?}");
+    assert!(
+        failure.message.contains("lines 2-3"),
+        "the closest region is named: {}",
+        failure.message
+    );
+    assert!(
+        failure.message.contains("2: beta") && failure.message.contains("3: gamma"),
+        "the region carries line numbers and the file's text: {}",
+        failure.message
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("f.txt")).unwrap(),
+        "alpha\nbeta\ngamma\ndelta\n"
+    );
+}
+
 /// A CRLF file is matched on an LF view: an LF needle locates the text, the offsets map back,
 /// and the file stays CRLF (the replacement's line endings are converted to CRLF too).
 #[tokio::test]

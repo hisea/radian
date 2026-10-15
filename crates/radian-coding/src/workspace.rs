@@ -219,7 +219,7 @@ fn suggestion_threshold(name: &str) -> usize {
 
 /// Levenshtein distance over characters, case-insensitive. Names are short, so the simple
 /// two-row dynamic program is enough.
-fn edit_distance_ci(a: &str, b: &str) -> usize {
+pub(crate) fn edit_distance_ci(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.to_lowercase().chars().collect();
     let b: Vec<char> = b.to_lowercase().chars().collect();
     let mut previous: Vec<usize> = (0..=b.len()).collect();

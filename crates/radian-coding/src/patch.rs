@@ -7,7 +7,7 @@ use serde_json::json;
 
 use crate::fail;
 use crate::provider::Limits;
-use crate::workspace::{WorkspaceRoot, io_failure};
+use crate::workspace::{WorkspaceRoot, edit_distance_ci, io_failure};
 use crate::write::write_error;
 
 #[derive(Deserialize)]
@@ -20,6 +20,9 @@ struct PatchArgs {
     replace_all: bool,
 }
 
+/// How many lines of the closest region a not-found result shows.
+const CLOSEST_REGION_LINES: usize = 8;
+
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec {
         name: "patch".into(),
@@ -30,7 +33,9 @@ pub(crate) fn spec() -> ToolSpec {
                       whitespace. A match at any layer must be unique, or the edit is refused \
                       and the file is unchanged; set replace_all: true to replace every \
                       located occurrence instead. A CRLF file is matched on an LF view, the \
-                      offsets are mapped back, and the file stays CRLF."
+                      offsets are mapped back, and the file stays CRLF. When nothing matches, \
+                      the error names the closest region of the file, with line numbers, so \
+                      you do not need another read."
             .into(),
         input_schema: json!({
             "type": "object",
@@ -100,7 +105,7 @@ pub(crate) async fn run(
     let (layer, ranges) = match locate(&view, &args.old) {
         Located::Found(layer, ranges) => (layer, ranges),
         // Nothing matched at any layer: say where the closest text is.
-        Located::None => return Err(not_found(&args.path)),
+        Located::None => return Err(not_found(&view, &args.path, &args.old)),
     };
     if ranges.len() > 1 && !args.replace_all {
         return Err(fail(
@@ -278,12 +283,59 @@ fn locate(view: &LfView, old: &str) -> Located {
     Located::None
 }
 
-/// The failure for a needle that no layer located.
-fn not_found(path: &str) -> ToolFailure {
-    fail(
-        "patch_not_found",
-        format!("`old` does not appear in `{path}`; the file is unchanged"),
-    )
+/// The failure for a needle that no layer located: it names the closest region of the file,
+/// with line numbers, so the model can fix the needle without another `read`.
+fn not_found(view: &LfView, path: &str, old: &str) -> ToolFailure {
+    let mut message = format!("`old` does not appear in `{path}`; the file is unchanged");
+    if let Some((first, lines)) = closest_region(&view.text, old) {
+        let last = first + lines.len() as i64 - 1;
+        message.push_str(&format!("\nThe closest region is lines {first}-{last}:"));
+        for (offset, line) in lines.iter().enumerate() {
+            message.push_str(&format!("\n{}: {}", first + offset as i64, line));
+        }
+    }
+    fail("patch_not_found", message)
+}
+
+/// The window of file lines closest to the needle, as `(first 1-based line number, lines)`.
+/// The window has the needle's line count (capped), and its score is the summed character
+/// edit distance, so the earliest window wins a tie.
+fn closest_region<'a>(view: &'a str, old: &str) -> Option<(i64, Vec<&'a str>)> {
+    let spans = line_spans(view);
+    if spans.is_empty() {
+        return None;
+    }
+    let needle = old.replace("\r\n", "\n");
+    let needle_lines = needle_lines(&needle);
+    let width = needle_lines
+        .len()
+        .clamp(1, CLOSEST_REGION_LINES)
+        .min(spans.len());
+    let mut best: Option<(usize, usize)> = None; // (distance, start line index)
+    for start in 0..=spans.len() - width {
+        let distance: usize = (0..width)
+            .map(|offset| {
+                let (line_start, line_end) = spans[start + offset];
+                let needle_line = needle_lines.get(offset).copied().unwrap_or("");
+                edit_distance_ci(
+                    view[line_start..line_end].trim_end(),
+                    needle_line.trim_end(),
+                )
+            })
+            .sum();
+        match best {
+            Some((best_distance, _)) if best_distance <= distance => {}
+            _ => best = Some((distance, start)),
+        }
+    }
+    let (_, start) = best?;
+    let lines = (0..width)
+        .map(|offset| {
+            let (line_start, line_end) = spans[start + offset];
+            &view[line_start..line_end]
+        })
+        .collect();
+    Some((start as i64 + 1, lines))
 }
 
 /// Every non-overlapping occurrence of `needle` in `hay`, as byte ranges.
