@@ -931,12 +931,12 @@ pub fn approval_cap(screen_height: usize, completion: usize) -> usize {
 /// The approval box's floor, border and key line included.
 pub const MIN_APPROVAL_HEIGHT: usize = 5;
 
-/// The height the approval box needs: the wrapped body rows (bounded by `cap`), the key line
-/// and the border. The body scrolls rather than growing past `cap`.
+/// The height the approval box needs: the wrapped body rows (bounded by `cap`) and the
+/// panel's two border rows. The body scrolls rather than growing past `cap`.
 fn approval_height(request: &ApprovalRequest, width: usize, cap: usize) -> u16 {
-    let rows = wrap(&approval_body(request), width.saturating_sub(2).max(1)).len();
-    let visible = rows.min(cap.saturating_sub(3).max(1));
-    (visible as u16 + 3).clamp(
+    let rows = wrap(&approval_body(request), width.saturating_sub(4).max(1)).len();
+    let visible = rows.min(cap.saturating_sub(2).max(1));
+    (visible as u16 + 2).clamp(
         MIN_APPROVAL_HEIGHT as u16,
         cap.max(MIN_APPROVAL_HEIGHT) as u16,
     )
@@ -1332,12 +1332,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     match app.top_modal() {
         Some(Modal::Approval(prompt)) => {
-            // The body scrolls inside the box; the key line is the box's own last row, so a
-            // long command can never push the answers off screen.
-            let inner_width = (input_area.width as usize).saturating_sub(2).max(1);
+            // ADR 0035: the shared panel draws the frame, the window indicator on
+            // the top border and the key hints in the bottom border, so a long command can
+            // never push the answers off screen.
+            let width = input_area.width as usize;
+            let inner_width = width.saturating_sub(4).max(1);
             let body = wrap(&approval_body(&prompt.request), inner_width);
             let total = body.len();
-            let visible = (middle as usize).saturating_sub(3).max(1);
+            // The panel's rows are the box height minus its two borders.
+            let visible = (input_area.height as usize).saturating_sub(2).max(1);
             // Feed the measurement back, the way the transcript's viewport is fed back, so the
             // scroll keys clamp against real rows.
             let (scroll, total, visible) = {
@@ -1351,32 +1354,23 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             };
             let first = scroll.min(total.saturating_sub(1));
             let last = (first + visible).min(total);
-            let lines: Vec<Line> = body[first..last]
-                .iter()
-                .map(|row| Line::from(row.clone()))
-                .collect();
-            let mut block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(app.theme.approval_border)
-                .title(" approve tool call? ");
+            let mut panel = crate::panel::Panel::new("approve tool call?");
             if total > visible {
-                // The window indicator goes in the top-right corner: the bottom row belongs to
-                // the keys.
-                block = block.title_top(
-                    Line::from(format!(" lines {}–{} of {total} ", first + 1, last))
-                        .right_aligned(),
-                );
+                // The window indicator sits on the top border, where it costs no body row.
+                panel = panel.right_title(format!("lines {}–{} of {total}", first + 1, last));
             }
-            frame.render_widget(&block, input_area);
-            let inner = block.inner(input_area);
-            let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner);
-            frame.render_widget(Paragraph::new(lines), rows[0]);
+            for row in &body[first..last] {
+                panel = panel.row(Line::from(row.clone()));
+            }
+            // The keys are hardcoded (ADR 0023 U4); the panel puts them in the bottom border.
+            panel = panel
+                .hint("[y]", "allow once")
+                .hint("[a]", "always this session")
+                .hint("[n]", "deny")
+                .hint("[!]", "auto for this session");
             frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    APPROVAL_KEYS,
-                    app.theme.approval_border,
-                ))),
-                rows[1],
+                Paragraph::new(panel.lines(width, &app.theme, app.footer_glyphs())),
+                input_area,
             );
         }
         Some(Modal::Question(form)) => {
