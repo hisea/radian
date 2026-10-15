@@ -5859,11 +5859,8 @@ async fn pty_ask_user_alt_h_hides_and_shows() {
     );
     assert!(pty.wait_for_screen("message", 40), "{}", pty.screen());
     pty.send(b"go\r");
-    assert!(
-        pty.wait_for_screen("How should it load?", 40),
-        "{}",
-        pty.screen()
-    );
+    // Wait for the **panel** (its hint), not the transcript block (which shows the prompt too).
+    assert!(pty.wait_for_screen("⏎ select", 40), "{}", pty.screen());
     // Answer the first question, then collapse.
     pty.send(b" ");
     assert!(pty.wait_for_screen("⏎ select", 40), "{}", pty.screen());
@@ -5967,7 +5964,8 @@ async fn pty_ask_user_other_keeps_its_text() {
     );
     assert!(pty.wait_for_screen("message", 40), "{}", pty.screen());
     pty.send(b"go\r");
-    assert!(pty.wait_for_screen("Pick one", 40), "{}", pty.screen());
+    // Wait for the **panel** (its hint), not the transcript block (which shows the prompt too).
+    assert!(pty.wait_for_screen("⏎ select", 40), "{}", pty.screen());
     // Move to `Other` (A, B, Other) and type.
     pty.send(b"\x1b[B"); // Down
     pty.send(b"\x1b[B"); // Down
