@@ -126,7 +126,7 @@ impl Protocol {
 }
 
 /// The `/login` choice for "not one of the built-ins" — a named provider is born there
-/// (ADR 0026 D10). The TUI wizard and `agent login` share it so they cannot drift.
+/// (ADR 0026 D10). The TUI wizard and `radian login` share it so they cannot drift.
 pub const CUSTOM_LOGIN: &str = "custom";
 
 /// The `/login` provider-choice candidates: the built-in descriptors, then [`CUSTOM_LOGIN`].

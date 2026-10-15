@@ -10,13 +10,19 @@
 //! cargo test --release -p agent-cli --test perf_agent -- --ignored --nocapture --test-threads=1
 //! ```
 
+mod common;
+
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const BIN: &str = env!("CARGO_BIN_EXE_agent");
+/// The `radian` binary (ADR 0032: the headless command is `radian exec`), refusing a stale
+/// build - `cargo test -p agent-cli` does not rebuild `radian-tui`.
+fn bin() -> PathBuf {
+    common::radian_bin()
+}
 const POLL: Duration = Duration::from_millis(1);
 
 struct TempDir(PathBuf);
@@ -64,7 +70,8 @@ impl Agent {
             std::time::Instant::now()
         ));
         std::fs::create_dir_all(&home).unwrap();
-        let mut child = Command::new(BIN)
+        let mut child = Command::new(bin())
+            .arg("exec")
             .args(args)
             .env_remove("RADIAN_CONFIG")
             .env("RADIAN_HOME", &home)
@@ -227,7 +234,7 @@ fn perf_agent_startup_and_resume() {
         }
         let (m, p) = median_p95(times);
         println!(
-            "agent --resume {n:>5} msgs to prompt: median {:.1} ms  p95 {:.1} ms",
+            "radian exec --resume {n:>5} msgs to prompt: median {:.1} ms  p95 {:.1} ms",
             ms(m),
             ms(p)
         );

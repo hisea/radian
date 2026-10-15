@@ -18,6 +18,8 @@ mod long_session;
 
 use std::io::Read;
 use std::net::TcpListener;
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
@@ -25,7 +27,11 @@ use std::time::{Duration, Instant};
 
 use long_session::write_long_session;
 
-const BIN: &str = env!("CARGO_BIN_EXE_agent");
+/// The `radian` binary (ADR 0032: the headless command is `radian exec`), refusing a stale
+/// build - `cargo test -p agent-cli` does not rebuild `radian-tui`.
+fn bin() -> PathBuf {
+    common::radian_bin()
+}
 const POLL: Duration = Duration::from_millis(1);
 
 struct TempDir(PathBuf);
@@ -88,12 +94,13 @@ fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.0
 }
 
-/// Spawns `agent --resume <id> -p x` against a header server and returns the time to the
+/// Spawns `radian exec --resume <id> -p x` against a header server and returns the time to the
 /// request headers. `None` if the listener never heard from it.
 async fn resume_to_first_request(dir: &Path, session_id: &str) -> Option<Duration> {
     let start = Instant::now();
     let (port, rx) = header_server(start);
-    let mut child: Child = Command::new(BIN)
+    let mut child: Child = Command::new(bin())
+        .arg("exec")
         .args([
             "--model",
             "m",
@@ -158,13 +165,13 @@ async fn perf_long_agent_resume() {
             );
             if times.len() != 5 {
                 println!(
-                    "agent --resume {context}: only {}/5 runs reached the request",
+                    "radian exec --resume {context}: only {}/5 runs reached the request",
                     times.len()
                 );
             }
             let (median, p95) = median_p95(times);
             println!(
-                "agent --resume {context} to first request: median {:.1} ms  p95 {:.1} ms",
+                "radian exec --resume {context} to first request: median {:.1} ms  p95 {:.1} ms",
                 ms(median),
                 ms(p95)
             );

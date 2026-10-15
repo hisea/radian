@@ -34,7 +34,7 @@ impl Format {
 }
 
 /// How an export is rendered: which optional payloads are included and which values are
-/// redacted. The flags mirror `agent --export`; redaction is not optional (ADR 0013
+/// redacted. The flags mirror `radian exec --export`; redaction is not optional (ADR 0013
 /// decision 3).
 #[derive(Clone, Debug, Default)]
 pub struct ExportSettings {
