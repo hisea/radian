@@ -272,6 +272,13 @@ enum RadianCommand {
         #[command(subcommand)]
         command: agent_cli::ConfigCommand,
     },
+
+    /// Reserved for ADR 0030's control port: a named agent serving its session over a local
+    /// endpoint. Not implemented yet - it refuses with a usage-class exit code.
+    Serve,
+    /// Reserved for ADR 0030's MCP server mode. Not implemented yet - it refuses with a
+    /// usage-class exit code.
+    Mcp,
 }
 
 /// Runs a non-TUI subcommand and returns its exit code (ADR 0032 A3: 0 ok, 1 the run failed,
@@ -308,7 +315,17 @@ fn run_subcommand(command: RadianCommand) -> ExitCode {
                 command,
             }))
         }
+        // Reserved names (ADR 0032): the shape is fixed now so scripts and docs can use it,
+        // the implementation is ADR 0030's. A usage-class refusal (2), never a silent no-op.
+        RadianCommand::Serve => reserved("serve"),
+        RadianCommand::Mcp => reserved("mcp"),
     }
+}
+
+/// Refuses a reserved subcommand: one line on stderr and the usage-class exit code.
+fn reserved(name: &str) -> ExitCode {
+    eprintln!("radian: `{name}` is reserved for ADR 0030's control port; not implemented yet");
+    ExitCode::from(2)
 }
 
 /// Runs one management command through the `agent-cli` dispatch and returns its exit code.
