@@ -592,3 +592,14 @@ Base `1d4f6e9` · 一次性 worktree `/tmp/radian-cf-mut`，还原后 `git statu
 2/2 抓住。SP-S2 在 macOS 上运行时 pty 用例抓不住（这台机器只会走 `macos-seatbelt` 分支），
 所以词组按平台分别断言在 `describe` 的单测里（同一测试也覆盖未知后端按真名显示）。
 
+## context-escape（上下文文件闭合标签/属性转义，ADR 0036 C2 补充，2026-10-15）
+
+Base `65ea1ed` · 一次性 worktree `/tmp/radian-ce-mut`，还原后 `git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| CE-M1 | 内容不转义（`close_tag` 直接返回原文） | `context::tests::a_content_closing_tag_is_escaped` | ✅ |
+| CE-M2 | `path` 属性不转义 | `context::tests::a_path_with_quotes_cannot_end_the_attribute` | ✅ |
+| CE-M3 | 转义大小写敏感（只查小写） | `context::tests::a_content_closing_tag_is_escaped`（大写变体未转义） | ✅ |
+
+3/3 抓住。

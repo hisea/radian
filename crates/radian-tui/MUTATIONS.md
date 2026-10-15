@@ -1190,3 +1190,13 @@ Base `c0ae44c` · 一次性 worktree `/tmp/radian-sp-mut2`，还原后 `git stat
 
 4/4 抓住。（SP-M1 第一次用「节拍改 50 ms」未被抓，因为 `index` 当时重复硬编码了 250 ms；
 改成 `index` 用 `kind.interval()` 后，100 ms 变异被抓住。）
+## effect-settle（超过 MAX_EFFECT_ROUNDS 时 carry，2026-10-15）
+
+Base `9cb727d` · 一次性 worktree `/tmp/radian-es-mut`，还原后 `git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| ES-M1 | `run_effect_rounds` 恢复 `return Err`（超过上限就退出） | `effect_rounds_carry_the_rest_in_order` | ✅ |
+| ES-M2 | 超过上限后 `effects.clear()`（丢掉剩余 effect） | 同上（顺序/完整性断言） | ✅ |
+
+2/2 抓住。

@@ -15,6 +15,9 @@ name = "rad"
 path = "src/main.rs"
 
 [dependencies]
+# The `radian exec` subcommand and the top-level management commands (ADR 0032 slice 1): the
+# `agent` command as a library, so both entries run the same parser and dispatch.
+agent-cli = { path = "../agent-cli" }
 agent-core = { path = "../agent-core" }
 agent-extensions = { path = "../agent-extensions" }
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible" }

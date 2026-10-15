@@ -359,6 +359,48 @@ fn the_compaction_fixtures_agree_with_the_reference_checker() {
     assert!(candidate.uncommitted_replacements().is_empty());
 }
 
+/// ADR 0007's `input_includes_cache`: the fixture carries a marked `true` (OpenAI
+/// shape), a marked `false` (Anthropic shape) and an **unmarked** old record. Rust half of the
+/// differential check with `docs/schema/check-fixtures.sh`.
+#[test]
+fn the_usage_cache_semantics_fixture_reads_back_field_for_field() {
+    let session = Session::open(fixture("usage-cache-semantics.jsonl")).unwrap();
+    assert!(session.skipped().is_empty());
+    assert_eq!(session.history().unwrap().len(), 4);
+
+    let usages: Vec<&agent_core::ModelUsage> = session
+        .events()
+        .iter()
+        .filter_map(|event| match &event.data {
+            EventData::ModelUsageRecorded { usage }
+            | EventData::CompactionUsageRecorded { usage, .. } => Some(usage),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(usages.len(), 3);
+    // The OpenAI shape: 190K of the 200K prompt is a cache hit, inside `input`.
+    assert_eq!(usages[0].input, Some(200_000));
+    assert_eq!(usages[0].cache_read, Some(190_000));
+    assert_eq!(usages[0].input_includes_cache, Some(true));
+    assert_eq!(usages[0].prompt_total(), Some(200_000));
+    assert_eq!(usages[0].uncached_input(), Some(10_000));
+    // The Anthropic shape: `input` is the uncached part, a sibling of the cache fields.
+    assert_eq!(usages[1].input, Some(472));
+    assert_eq!(usages[1].cache_write, Some(7));
+    assert_eq!(usages[1].input_includes_cache, Some(false));
+    assert_eq!(usages[1].prompt_total(), Some(482));
+    // An old record has no mark at all, and reads back as "not marked" (not `false`).
+    assert_eq!(usages[2].input, Some(12));
+    assert_eq!(usages[2].input_includes_cache, None);
+    assert_eq!(usages[2].prompt_total(), Some(12));
+
+    // Both usage records are audit-only: the transcript is the four messages, unchanged.
+    assert_eq!(
+        session.history().unwrap(),
+        recover(&session.journal_records()).unwrap()
+    );
+}
+
 /// ADR 0022 fixtures: the reader accepts a parent with `SessionForked` and a child with
 /// `SessionCreated.parent`; the two seqs agree. Rust half of the differential check with
 /// `docs/schema/check-fixtures.sh`.

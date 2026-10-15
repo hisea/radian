@@ -169,6 +169,18 @@ EXPECT = {
         repair={},
         parent=("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", 4),
     ),
+    "usage-cache-semantics.jsonl": dict(
+        outcome="accept",
+        events=10,
+        skips=[],
+        # (event, input_includes_cache) —— ADR 0007：标记是可选的，旧记录没有它。
+        usage_cache_marks=[
+            ("ModelUsageRecorded", True),
+            ("CompactionUsageRecorded", False),
+            ("ModelUsageRecorded", None),
+        ],
+        repair={},
+    ),
     "replace-resets-index.jsonl": dict(
         outcome="accept",
         events=11,
@@ -519,6 +531,42 @@ def check_fixture(name, exp):
         e["event"] == "ModelUsageRecorded" and "usage" in e["data"] for e in events
     ):
         raise Corruption(f"{name}: 期望带 usage 的 ModelUsageRecorded")
+    if "usage_cache_marks" in exp:
+        # ADR 0007：`input_includes_cache` 是 usage 对象里的**可选**字段——适配器必须写，
+        # 但旧记录没有它（`None` = 未标记），读取方照旧。这里逐条钉住两种标记与缺席，并把
+        # usage 的其余字段按「只出现报过的字段」检查（§5.10；`{}` 也合法）。
+        optional_usage = {"input", "output", "total", "cache_read", "cache_write", "details",
+                          "input_includes_cache"}
+        got = []
+        for e in events:
+            if e["event"] not in ("ModelUsageRecorded", "CompactionUsageRecorded"):
+                continue
+            usage = e["data"]["usage"]
+            if not isinstance(usage, dict):
+                raise Corruption(f"{name}: {e['event']} 的 usage 不是对象")
+            unknown = set(usage) - optional_usage
+            if unknown:
+                raise Corruption(f"{name}: {e['event']} 的 usage 有未知字段 {sorted(unknown)}")
+            for field in ("input", "output", "total", "cache_read", "cache_write"):
+                value = usage.get(field)
+                if value is not None and (
+                    not isinstance(value, int) or isinstance(value, bool) or value < 0
+                ):
+                    raise Corruption(f"{name}: {e['event']}.usage.{field} 不是非负整数")
+            mark = usage.get("input_includes_cache")
+            if mark is not None and not isinstance(mark, bool):
+                raise Corruption(f"{name}: {e['event']}.usage.input_includes_cache 不是布尔值")
+            if e["critical"]:
+                raise Corruption(f"{name}: {e['event']} 必须是 critical:false")
+            got.append((e["event"], mark))
+        if got != [tuple(x) for x in exp["usage_cache_marks"]]:
+            raise Corruption(
+                f"{name}: usage_cache_marks {got} != 期望 {exp['usage_cache_marks']}"
+            )
+        if not any(mark is None for _, mark in got):
+            raise Corruption(f"{name}: 期望至少一条未标记（旧）usage 记录")
+        if not any(isinstance(mark, bool) for _, mark in got):
+            raise Corruption(f"{name}: 期望至少一条带布尔标记的 usage 记录")
     if "memory_injected" in exp:
         got = []
         for e in events:
