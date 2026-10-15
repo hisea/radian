@@ -3683,24 +3683,25 @@ async fn pty_the_memory_notice_names_the_project_state_and_the_budget() {
         110,
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
-    // The memory notice is one of the folded startup lines.
+    // The memory notice is one of the folded startup lines. Wait for
+    // **that** line: `expand_startup` returns as soon as the block is expanded (its predicate
+    // accepts the header or `profile:`), so reading the screen right after can catch a frame
+    // whose tail is not on screen yet.
     pty.expand_startup();
-    let notice = pty
-        .screen()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
     assert!(
-        notice.contains("[memory]"),
-        "the memory startup notice is shown: {notice}"
+        pty.wait_for_screen("[memory]", 10),
+        "the memory startup notice is shown:\n{}",
+        pty.screen()
     );
     assert!(
-        notice.contains("no project linked"),
-        "the notice names the unlinked state: {notice}"
+        pty.wait_for_screen("no project linked", 10),
+        "the notice names the unlinked state:\n{}",
+        pty.screen()
     );
     assert!(
-        notice.contains("injection on, up to 2000 tokens"),
-        "the notice names the budget: {notice}"
+        pty.wait_for_screen("injection on, up to 2000 tokens", 10),
+        "the notice names the budget:\n{}",
+        pty.screen()
     );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
@@ -4652,8 +4653,9 @@ async fn pty_fork_creates_a_resumable_child_when_idle() {
     );
     assert!(
         child.wait_for_screen("hello parent", 10),
-        "the child history is not rendered:\n{}",
-        child.screen()
+        "the child history is not rendered:\n{}\njournal: {}",
+        child.screen(),
+        std::fs::read_to_string(sessions.join(format!("{child_id}.jsonl"))).unwrap_or_default()
     );
     child.send(b"continue\r");
     assert!(
