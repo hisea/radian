@@ -52,10 +52,15 @@ fn tool_reply(id: &str, name: &str, arguments: &str) -> Reply {
 }
 
 async fn chat<M: Model, P: ToolProvider>(model: M, tools: P) -> AgentSession<M, P, ()> {
-    Arc::new(Agent::new(model, tools))
-        .open_session()
-        .await
-        .unwrap()
+    Arc::new(Agent::new(model, tools).with_config(AgentConfig {
+        // These tests drive the real turn loop but pin the **adapter's** one-shot behaviour:
+        // ADR 0017's retry is exercised in agent-core's `retry` tests.
+        retries: 0,
+        ..Default::default()
+    }))
+    .open_session()
+    .await
+    .unwrap()
 }
 
 /// One tool, `add`, that sums two integers.
