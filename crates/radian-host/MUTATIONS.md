@@ -663,3 +663,13 @@ after); each mutation restored with `git checkout --`, `git status --short` empt
 | RF1-FC | `read_at(path).unwrap_or_default()` in `set_at` again | caught (rc=101) | `trust::tests::a_corrupt_record_is_not_overwritten` |
 | RR-D | treat `reasoning_details` as a replayable text field (add it to `REPLAYABLE_INTERLEAVED`) | caught (rc=101) | `catalog::tests::the_catalog_interleaved_field_decides_reasoning_replay` |
 | RR-F | ignore a named provider's `reasoning_replay` override (fall through to the catalog) | caught (rc=101) | `the_catalog_and_a_named_override_decide_reasoning_replay` |
+
+## review-fixes-1b (2026-10-15): the filter check must list files, not directories
+
+One-shot detached worktree `.radian-worktrees/rf1b-mutations` (from the branch HEAD, deleted
+after); each mutation restored with `git checkout --`, `git status --short` empty at the end.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| RF1-FA-D | back to `git status --porcelain -z` (a new directory shows as `newdir/`) | caught (rc=101) | `a_new_file_in_a_new_directory_is_checked`, `status_show_untracked_files_no_does_not_hide_the_check` |
+| RF1-FA-E | check the explicit directory path instead of expanding it (`ls-files`) | caught (rc=101) | `a_directory_argument_is_expanded_for_the_filter_check` |
