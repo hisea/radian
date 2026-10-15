@@ -16,7 +16,6 @@ use ratatui::style::Style;
 
 fn modes(highlight: bool) -> DisplayModes {
     DisplayModes {
-        glyphs: radian_tui::footer::Glyphs::Unicode,
         reasoning: ReasoningMode::Expanded,
         tools: ToolDisplay {
             fold: ToolFold::Expanded,
@@ -24,6 +23,7 @@ fn modes(highlight: bool) -> DisplayModes {
         },
         mermaid: true,
         highlight,
+        glyphs: radian_tui::footer::Glyphs::Unicode,
     }
 }
 

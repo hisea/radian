@@ -196,18 +196,21 @@ impl SessionProjection {
     /// models once `/model` switches, and one price cannot price a mixed total. A call that
     /// arrives with no known price contributes nothing to the fee (and nothing is invented).
     pub fn add_usage(&self, usage: &ModelUsage) -> bool {
-        self.write(|facts| Self::add_usage_locked(facts, facts.price, usage))
+        self.write(|facts| {
+            let price = facts.price.clone();
+            Self::add_usage_locked(facts, price.as_ref(), usage)
+        })
     }
 
     /// Like [`Self::add_usage`], but at an explicit price: the resume path folds a journal's
     /// usage records, each of which belongs to the route that was in force **then**, not to the
     /// route the process starts with (F3, ADR 0027). The live path uses
     /// `add_usage`, which passes the price currently in force.
-    pub fn add_usage_at(&self, price: Option<ModelPrice>, usage: &ModelUsage) -> bool {
+    pub fn add_usage_at(&self, price: Option<&ModelPrice>, usage: &ModelUsage) -> bool {
         self.write(|facts| Self::add_usage_locked(facts, price, usage))
     }
 
-    fn add_usage_locked(facts: &mut Facts, price: Option<ModelPrice>, usage: &ModelUsage) {
+    fn add_usage_locked(facts: &mut Facts, price: Option<&ModelPrice>, usage: &ModelUsage) {
         if let Some(input) = usage.input {
             facts.usage_input = Some(facts.usage_input.unwrap_or(0).saturating_add(input));
         }

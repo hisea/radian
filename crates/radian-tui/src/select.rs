@@ -460,7 +460,6 @@ mod tests {
 
     /// Both folds expanded, so a test's geometry does not depend on the fold defaults.
     const EXPANDED: DisplayModes = DisplayModes {
-        glyphs: crate::footer::Glyphs::Unicode,
         reasoning: ReasoningMode::Expanded,
         tools: ToolDisplay {
             fold: ToolFold::Expanded,
@@ -468,6 +467,7 @@ mod tests {
         },
         mermaid: true,
         highlight: true,
+        glyphs: crate::footer::Glyphs::Unicode,
     };
     use crate::app::{Entry, EntryKind};
     use agent_core::{ContentPart, Message, MessageMeta};
