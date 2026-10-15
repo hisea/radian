@@ -1292,3 +1292,16 @@ Base `d47e876` · 一次性 detached worktree `/tmp/pa-mut`（跑完 `git worktr
 | MS-M2 | 只给列表符号 `•` 这一个合成格子假偏移 1（落在「能」的 UTF-8 中间） | 同上 | ✅ |
 
 另记一个无效变异：「只给第 200 字节之后的第一个合成格子假偏移」——那一处的上一个字符是 ASCII，`+1` 正好是合法边界，不会 panic，不能说明覆盖缺口；MS-M2 用确定落在多字节中间的单格变异代替。
+
+## sandbox-unix-sockets：TUI 把 `allow_unix_sockets` 交给沙箱（ADR 0016，2026-10-15）
+
+Base `acbc455`（`origin/main`）· 就地变异：改前 `cp` 到 scratchpad，改后从副本写回并 `cmp` 逐字节相同。
+`cargo test -p radian-tui --test structure --no-fail-fast main_forwards_the_allowed_unix_sockets_to_the_sandbox`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| US-M1 | `build_sandbox` 调用的第四个实参改成 `&Vec::new()`（配置里的 socket 列表到不了沙箱） | `structure::main_forwards_the_allowed_unix_sockets_to_the_sandbox` | ✅ |
+
+1/1 抓住。这条是**接线**变异：白名单本身的行为由 `radian-sandbox` 的逃逸矩阵覆盖（`unix_socket` 组的
+`whitelisted_allowed` 对照），而「TUI 把解析后的列表交给 `build_sandbox`」只有源码结构能钉住
+（`run` 在 `main.rs` 里、测试够不到），所以按 `structure.rs` 的既有做法做结构断言。
