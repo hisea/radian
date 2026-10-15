@@ -8125,15 +8125,21 @@ async fn pty_the_shipped_default_footer_is_two_rows_without_a_config() {
         90,
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // Wait for the **footer** before reading its last two lines: `message` is the input hint,
+    // which is drawn in the same frame as the footer, but the hint can appear before the
+    // footer's items have data. `^- v- R-` is the numbers row with no usage yet.
+    assert!(
+        pty.wait_for_screen("^- v-", 10),
+        "the numbers row is on screen:\n{}",
+        pty.screen()
+    );
     let lines: Vec<String> = pty.screen().lines().map(str::to_owned).collect();
     let first = lines.get(lines.len() - 2).cloned().unwrap_or_default();
     let second = lines.last().cloned().unwrap_or_default();
-    // The shipped default is the `full` preset (ADR 0027): the identity row (brand,
-    // model, repo/worktree) and the numbers row (tokens, speed, cost, context, elapsed).
-    assert!(
-        first.contains('R') || first.contains("rad"),
-        "the brand is on the first row: {first:?}"
-    );
+    // The shipped default is the `deck` preset (ADR 0027): the identity row (model,
+    // cwd, branch, worktree) and the numbers row (tokens, cost, context). The `deck` identity
+    // row has no brand, so there is no brand assertion (the old one passed only because the
+    // temp workspace is named `radian-…`).
     assert!(
         first.contains("mock"),
         "the model is on the identity row: {first:?}"
