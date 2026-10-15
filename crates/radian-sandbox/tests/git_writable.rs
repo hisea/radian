@@ -33,10 +33,8 @@ impl Scratch {
     fn new() -> Self {
         static N: AtomicU64 = AtomicU64::new(0);
         let n = N.fetch_add(1, Ordering::SeqCst);
-        let root = std::env::temp_dir().join(format!(
-            "radian-git-writable-{}-{n}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("radian-git-writable-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let root = std::fs::canonicalize(&root).unwrap();
@@ -76,7 +74,14 @@ impl Scratch {
         let wtin = ws.join("wt-in");
         git(
             &host,
-            &["worktree", "add", "-q", wtin.to_str().unwrap(), "-b", "inner"],
+            &[
+                "worktree",
+                "add",
+                "-q",
+                wtin.to_str().unwrap(),
+                "-b",
+                "inner",
+            ],
         );
         let wtin_name = "wt-in".to_string();
 
@@ -195,7 +200,10 @@ fn writable_except_exec_allows_git_and_denies_the_exec_entries() {
         &control,
         "submodule_hook",
         false,
-        &format!("printf x > {}", q(&scratch.subgit.join("hooks/sbx-new-hook"))),
+        &format!(
+            "printf x > {}",
+            q(&scratch.subgit.join("hooks/sbx-new-hook"))
+        ),
     );
 
     // Denied: a worktree's shared common dir (inside the workspace) and its per-worktree git
@@ -222,7 +230,10 @@ fn writable_except_exec_allows_git_and_denies_the_exec_entries() {
         false,
         &format!(
             "printf x > {}",
-            q(&common.join("worktrees").join(&scratch.wtin_name).join("config.worktree"))
+            q(&common
+                .join("worktrees")
+                .join(&scratch.wtin_name)
+                .join("config.worktree"))
         ),
     );
 
@@ -258,7 +269,10 @@ fn writable_except_exec_allows_git_and_denies_the_exec_entries() {
         &control,
         "git_commit",
         true,
-        &format!("cd {p} && git {identity} commit --allow-empty -qm sandbox-writable", p = q(proj)),
+        &format!(
+            "cd {p} && git {identity} commit --allow-empty -qm sandbox-writable",
+            p = q(proj)
+        ),
     );
     expect(
         &git_writable,
@@ -275,14 +289,20 @@ fn writable_except_exec_allows_git_and_denies_the_exec_entries() {
         &control,
         "git_stash",
         true,
-        &format!("cd {p} && printf 'x\\n' >> readme.md && git stash", p = q(proj)),
+        &format!(
+            "cd {p} && printf 'x\\n' >> readme.md && git stash",
+            p = q(proj)
+        ),
     );
     expect(
         &git_writable,
         &control,
         "git_branch_delete",
         true,
-        &format!("cd {p} && git branch sbx-tmp && git branch -D sbx-tmp", p = q(proj)),
+        &format!(
+            "cd {p} && git branch sbx-tmp && git branch -D sbx-tmp",
+            p = q(proj)
+        ),
     );
 }
 
@@ -327,7 +347,10 @@ fn readonly_keeps_the_whole_git_read_only() {
         &control,
         "git_status_ok",
         true,
-        &format!("cd {} && git --no-optional-locks status --porcelain", q(&scratch.proj)),
+        &format!(
+            "cd {} && git --no-optional-locks status --porcelain",
+            q(&scratch.proj)
+        ),
     );
 }
 
