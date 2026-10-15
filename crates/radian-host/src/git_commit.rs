@@ -376,21 +376,23 @@ pub fn commit(
 
     // ADR 0030: a `filter=<driver>` attribute runs `filter.<driver>.clean`/`.process`
     // from git config when the path is staged, and the model can write `.gitattributes`. Work
-    // out exactly what will be staged, then refuse before any `git add` runs.
+    // out exactly what will be staged, then refuse before any `git add` runs. The pathspecs are
+    // the same ones `git add` gets, so a directory argument is expanded to its files.
+    let scope = workspace.to_string_lossy().into_owned();
     let to_stage: Vec<String> = if paths.is_empty() {
-        staged_paths(workspace, pin)?
+        staged_paths(workspace, pin, &[scope.clone()])?
     } else {
-        resolved
+        let resolved: Vec<String> = resolved
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
-            .collect()
+            .collect();
+        staged_paths(workspace, pin, &resolved)?
     };
     check_filters(workspace, pin, &to_stage, allowed_filters)?;
 
     if paths.is_empty() {
         // Scope `-A` to the workspace, not the whole repository: a subdirectory workspace must
         // not stage its siblings.
-        let scope = workspace.to_string_lossy().into_owned();
         run_git(workspace, pin, &["add", "-A", "--", &scope])?;
     } else {
         let mut args = vec!["add", "--"];
@@ -477,25 +479,57 @@ fn git_config_opt(
     ))
 }
 
-/// The workspace-relative paths `git add -A -- <scope>` would stage (ADR 0030): the
-/// status list, which already respects `.gitignore`. A rename/copy contributes its new path.
-fn staged_paths(workspace: &Path, pin: &RepoPin) -> Result<Vec<String>, ToolFailure> {
-    let raw = git_raw(workspace, pin, &["status", "--porcelain", "-z"])?;
-    let text = String::from_utf8_lossy(&raw);
-    let mut fields = text.split('\0');
-    let mut paths = Vec::new();
-    while let Some(entry) = fields.next() {
-        if entry.len() <= 3 {
-            continue;
-        }
-        let status = &entry[..2];
-        paths.push(entry[3..].to_owned());
-        // `-z` puts a rename/copy's original path in a second NUL field.
-        if status.contains('R') || status.contains('C') {
-            let _ = fields.next();
-        }
-    }
+/// The repo-relative files `git add` would stage (with content, so a clean filter runs) under
+/// `pathspecs` (ADR 0030). `--cached --others --modified --exclude-standard` lists
+/// every tracked file plus the untracked ones (`.gitignore` respected). `--cached` is required:
+/// `git add -A` re-cleans an **unchanged** tracked file when a filter attribute is added, so it
+/// must be checked too. `ls-files` expands a directory pathspec (unlike `status`, which reports
+/// the directory `newdir/`) and does not depend on `status.showUntrackedFiles`. Deletions are
+/// removed: they are staged without content, so no clean filter runs for them.
+fn staged_paths(
+    workspace: &Path,
+    pin: &RepoPin,
+    pathspecs: &[String],
+) -> Result<Vec<String>, ToolFailure> {
+    let mut paths = ls_files(
+        workspace,
+        pin,
+        &["--cached", "--others", "--modified", "--exclude-standard"],
+        pathspecs,
+    )?;
+    // `--deleted` must stand alone: combined with `--cached --others` it lists everything.
+    let deleted = ls_files(workspace, pin, &["--deleted"], pathspecs)?;
+    paths.retain(|path| !deleted.contains(path));
+    paths.sort();
+    paths.dedup();
     Ok(paths)
+}
+
+/// `git ls-files -z <flags> [-- <pathspecs>]`, as repo-relative paths.
+fn ls_files(
+    workspace: &Path,
+    pin: &RepoPin,
+    flags: &[&str],
+    pathspecs: &[String],
+) -> Result<Vec<String>, ToolFailure> {
+    let mut args: Vec<String> = vec!["ls-files".into(), "-z".into()];
+    args.extend(flags.iter().map(|flag| (*flag).to_owned()));
+    if !pathspecs.is_empty() {
+        args.push("--".into());
+        args.extend(pathspecs.iter().cloned());
+    }
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    let raw = git_raw(workspace, pin, &borrowed)?;
+    Ok(split_nul(&raw))
+}
+
+/// The NUL-separated fields of a `-z` output, dropping the empty trailing field.
+fn split_nul(raw: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(raw)
+        .split('\0')
+        .filter(|field| !field.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Refuses any staged path whose `filter` attribute names a driver the host must not run

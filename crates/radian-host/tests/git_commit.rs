@@ -552,3 +552,71 @@ fn lfs_is_allowed_only_with_a_git_lfs_command() {
     assert!(error.message.contains("filter.lfs.clean"), "{error:?}");
     assert!(!marker.exists(), "the non-git-lfs clean must not run");
 }
+
+/// A repo whose `.gitattributes` routes `*.txt` through `filter.evil`, whose `clean` touches
+/// `marker` outside the repo, with one `.txt` file at `path`. Returns `(dir, marker)`.
+fn evil_filter_repo(label: &str, path: &str) -> (PathBuf, PathBuf) {
+    let dir = repo(label);
+    // `repo` wrote an untracked `a.txt`; remove it so only the intended path triggers.
+    let _ = std::fs::remove_file(dir.join("a.txt"));
+    let outside = temp(&format!("{label}-outside"));
+    let marker = outside.join("FILTER-RAN");
+    let script = dir.join("evil-clean.sh");
+    write_executable(
+        &script,
+        &format!("#!/bin/sh\ntouch {}\ncat\n", marker.display()),
+    );
+    assert!(git(
+        &dir,
+        &["config", "filter.evil.clean", script.to_str().unwrap()]
+    ));
+    std::fs::write(dir.join(".gitattributes"), "*.txt filter=evil\n").unwrap();
+    if let Some(parent) = Path::new(path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(dir.join(parent)).unwrap();
+    }
+    std::fs::write(dir.join(path), "payload\n").unwrap();
+    (dir, marker)
+}
+
+/// ADR 0030 (review fix): `git status` reports a new directory as `newdir/`, whose
+/// `filter` attribute is `unspecified`, so the check must expand it to the files underneath.
+#[test]
+fn a_new_file_in_a_new_directory_is_checked() {
+    let (dir, marker) = evil_filter_repo("filter-newdir", "newdir/a.txt");
+    let error = commit_in(&dir, "m", &[], None, &[]).unwrap_err();
+    assert_eq!(error.code, "filter_not_allowed", "{error:?}");
+    assert!(error.message.contains("newdir/a.txt"), "{error:?}");
+    assert!(
+        !marker.exists(),
+        "a new directory must not hide its files from the check"
+    );
+}
+
+/// An explicit directory argument is expanded to its files for the check.
+#[test]
+fn a_directory_argument_is_expanded_for_the_filter_check() {
+    let (dir, marker) = evil_filter_repo("filter-dirarg", "newdir/a.txt");
+    let error = commit_in(&dir, "m", &["newdir".to_string()], None, &[]).unwrap_err();
+    assert_eq!(error.code, "filter_not_allowed", "{error:?}");
+    assert!(error.message.contains("newdir/a.txt"), "{error:?}");
+    assert!(
+        !marker.exists(),
+        "a directory argument must not bypass the check"
+    );
+}
+
+/// `status.showUntrackedFiles=no` hides untracked files from `git status`; the check must not
+/// depend on it.
+#[test]
+fn status_show_untracked_files_no_does_not_hide_the_check() {
+    let (dir, marker) = evil_filter_repo("filter-showuntracked", "newdir/a.txt");
+    assert!(git(&dir, &["config", "status.showUntrackedFiles", "no"]));
+    let error = commit_in(&dir, "m", &[], None, &[]).unwrap_err();
+    assert_eq!(error.code, "filter_not_allowed", "{error:?}");
+    assert!(
+        !marker.exists(),
+        "status.showUntrackedFiles=no must not hide an untracked file"
+    );
+}
