@@ -360,3 +360,46 @@ async fn a_non_repo_workspace_does_not_mount_git_commit() {
         .collect();
     assert!(!names.contains(&"git_commit"), "{names:?}");
 }
+
+/// The threat is real on `git add` too: a repository's `core.hooksPath` pointing at a directory
+/// in the writable worktree (husky's `.husky/`) runs `post-index-change` on the host's `git
+/// add`. A documented canary for the defense below (raw git, no override).
+#[test]
+fn the_post_index_change_threat_is_real_without_the_defense() {
+    let dir = repo("post-index-threat");
+    let marker = dir.join("THREAT-MARKER");
+    let husky = dir.join(".husky");
+    std::fs::create_dir_all(&husky).unwrap();
+    write_executable(
+        &husky.join("post-index-change"),
+        &format!("#!/bin/sh\ntouch {}\n", marker.display()),
+    );
+    assert!(git(&dir, &["config", "core.hooksPath", ".husky"]));
+    change(&dir);
+    assert!(git(&dir, &["add", "-A"]), "the raw add");
+    assert!(
+        marker.exists(),
+        "the threat is real: a raw `git add` ran the .husky post-index-change hook"
+    );
+}
+
+/// The defense: every git call (add included) points `core.hooksPath` away, so the hook never
+/// runs in the host.
+#[test]
+fn the_post_index_change_hook_does_not_run() {
+    let dir = repo("post-index-defense");
+    let marker = dir.join("DEFENSE-MARKER");
+    let husky = dir.join(".husky");
+    std::fs::create_dir_all(&husky).unwrap();
+    write_executable(
+        &husky.join("post-index-change"),
+        &format!("#!/bin/sh\ntouch {}\n", marker.display()),
+    );
+    assert!(git(&dir, &["config", "core.hooksPath", ".husky"]));
+    change(&dir);
+    commit_in(&dir, "m", &[], None, &[]).expect("the commit");
+    assert!(
+        !marker.exists(),
+        "core.hooksPath must not run on git add: a model-writable .husky/ would execute in the host"
+    );
+}

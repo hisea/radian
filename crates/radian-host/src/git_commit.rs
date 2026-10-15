@@ -91,6 +91,10 @@ pub struct RepoPin {
     git_dir: PathBuf,
     common_dir: PathBuf,
     work_tree: PathBuf,
+    /// Whether the workspace root had a `.git` when the pin was taken. A `.git` that appears
+    /// later is a repository swap; the filesystem check catches it **before** any `git` runs
+    /// (running `git rev-parse` on the swapped repository would read its config).
+    workspace_had_git: bool,
 }
 
 impl RepoPin {
@@ -108,12 +112,17 @@ impl RepoPin {
                 canonicalize(&workspace.join(&common))?
             },
             work_tree: canonicalize(Path::new(&work_tree))?,
+            workspace_had_git: workspace.join(".git").exists(),
         })
     }
 
-    /// Whether the repository is still the pinned one. A different git dir, common dir or work
-    /// tree means the model changed the repository under us.
+    /// Whether the repository is still the pinned one. First a **filesystem** check: a `.git`
+    /// that appeared in the workspace root after the pin is a swap, and we must not run `git
+    /// rev-parse` (which reads the swapped repository's config) on it. Only then re-resolve.
     fn still(&self, workspace: &Path) -> bool {
+        if !self.workspace_had_git && workspace.join(".git").exists() {
+            return false;
+        }
         Self::resolve(workspace).as_ref() == Some(self)
     }
 }
@@ -367,13 +376,7 @@ pub fn commit(
 /// model could write runs commands on `git add`). A non-zero exit is an error with the command
 /// (never a secret) and git's stderr.
 fn git(workspace: &Path, pin: &RepoPin, args: &[&str]) -> Result<String, ToolFailure> {
-    let mut full: Vec<String> = vec![
-        format!("--git-dir={}", pin.git_dir.display()),
-        format!("--work-tree={}", pin.work_tree.display()),
-        "-c".into(),
-        "core.fsmonitor=false".into(),
-    ];
-    full.extend(args.iter().map(|arg| (*arg).to_owned()));
+    let full = common_args(pin, args);
     let output = std::process::Command::new("git")
         .current_dir(workspace)
         .args(&full)
@@ -392,12 +395,27 @@ fn git(workspace: &Path, pin: &RepoPin, args: &[&str]) -> Result<String, ToolFai
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-/// The exact `git commit` arguments. `--no-verify` and `core.hooksPath=/dev/null` are both
-/// mandatory (ADR 0030): removing either would let a workspace hook run in the host.
-fn commit_args(message: &str) -> Vec<String> {
-    vec![
+/// The global arguments **every** git call carries (ADR 0030 R10): the pinned repository, and
+/// the two config overrides that keep a model-writable repository config from running commands
+/// in the host. `core.hooksPath` matters on `git add` too (`post-index-change`), not only on
+/// commit, so it is here and not in `commit_args`.
+fn common_args(pin: &RepoPin, args: &[&str]) -> Vec<String> {
+    let mut full: Vec<String> = vec![
+        format!("--git-dir={}", pin.git_dir.display()),
+        format!("--work-tree={}", pin.work_tree.display()),
+        "-c".into(),
+        "core.fsmonitor=false".into(),
         "-c".into(),
         "core.hooksPath=/dev/null".into(),
+    ];
+    full.extend(args.iter().map(|arg| (*arg).to_owned()));
+    full
+}
+
+/// The `git commit` subcommand arguments. `--no-verify` skips pre-commit/commit-msg; the
+/// `core.hooksPath` override is in [`common_args`].
+fn commit_args(message: &str) -> Vec<String> {
+    vec![
         "commit".into(),
         "--no-verify".into(),
         "-m".into(),
@@ -414,19 +432,28 @@ fn run_git(workspace: &Path, pin: &RepoPin, args: &[&str]) -> Result<(), ToolFai
 mod tests {
     use super::*;
 
-    /// ADR 0030: both guards are on every commit, so a project hook (in the writable
-    /// worktree) can never run in the host.
+    /// ADR 0030: both config guards are on **every** git call (not only commit:
+    /// `git add` runs `post-index-change`), so a project hook in the writable worktree can never
+    /// run in the host.
     #[test]
-    fn the_commit_command_never_runs_a_hook() {
-        let args = commit_args("message");
+    fn every_git_call_disables_the_dangerous_repo_config() {
+        let pin = RepoPin {
+            git_dir: PathBuf::from("/g"),
+            common_dir: PathBuf::from("/g"),
+            work_tree: PathBuf::from("/w"),
+            workspace_had_git: true,
+        };
+        let args = common_args(&pin, &["status"]);
         assert!(
-            args.iter().any(|arg| arg == "--no-verify"),
-            "the commit must skip hooks: {args:?}"
+            args.iter().any(|arg| arg == "core.fsmonitor=false"),
+            "every call must disable fsmonitor: {args:?}"
         );
         assert!(
             args.iter().any(|arg| arg == "core.hooksPath=/dev/null"),
-            "the commit must point hooks away: {args:?}"
+            "every call must point hooks away: {args:?}"
         );
+        // `--no-verify` stays on the commit itself.
+        assert!(commit_args("m").iter().any(|arg| arg == "--no-verify"));
     }
 
     #[test]
