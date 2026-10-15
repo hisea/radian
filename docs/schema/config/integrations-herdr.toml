@@ -1,0 +1,13 @@
+# ADR 0034 H6: `[integrations] herdr = true | false`, default true. The integration only takes
+# effect inside a herdr pane (`HERDR_ENV=1` plus a pane id and a socket path, ADR 0034 H1);
+# `RADIAN_HERDR=0` turns it off for one run. Reporting sends only the state, the session id and
+# journal path, and a resume command - never transcript, usage, model, cost or command text.
+schema_version = 1
+
+[model]
+provider = "example"
+base_url = "https://example.com/v1"
+model = "m-1"
+
+[integrations]
+herdr = false

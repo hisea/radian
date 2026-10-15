@@ -123,6 +123,9 @@ async fn opaque_json_round_trips_byte_for_byte_through_the_file() {
                 total: Some(12),
                 cache_read: None,
                 cache_write: None,
+                // An unmarked record: the shape a journal written before ADR 0007
+                // has, which must still round-trip byte for byte.
+                input_includes_cache: None,
                 details: Some(OpaqueJson::parse(details_raw).unwrap()),
             },
         })

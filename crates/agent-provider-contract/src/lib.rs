@@ -167,6 +167,20 @@ pub trait ContractHarness<M: Model>: Sync {
         &[]
     }
 
+    /// Whether this provider's reported input count **contains** the cache hit: `true` for the
+    /// OpenAI shape (`prompt_tokens` contains `prompt_tokens_details.cached_tokens`), `false`
+    /// for the Anthropic shape (`input_tokens` is the uncached part, a sibling of
+    /// `cache_read_input_tokens`). [`check_input_cache_semantics`] requires the adapter to
+    /// mark every usage it reports with this value (ADR 0007).
+    ///
+    /// **There is no "unset"**: a provider whose usage has no cache concept at all reports
+    /// `false`, which is the truthful answer for its shape (everything it counts is
+    /// uncached). The default here is `false`, so a new harness states the OpenAI shape
+    /// explicitly rather than inheriting it by accident.
+    fn input_includes_cache(&self) -> bool {
+        false
+    }
+
     /// The provider's **real** "the input is over the context window" error, as a
     /// [`Wire::Status`], or `None` when this provider has no recognizable one.
     ///
@@ -497,11 +511,17 @@ pub async fn check_finish_reasons<M: Model, H: ContractHarness<M>>(h: &H) {
 /// field the harness declares unreported must be `None`. This is deliberately **not** a skip:
 /// a declared field is still asserted, just asserted absent, so an adapter that invents a
 /// value for a field its provider never reports fails the check (ADR 0007 J2).
+///
+/// `input_includes_cache` is not a wire field: the harness's [`ContractHarness::script`]
+/// cannot carry it, and the adapter derives it from its own provider contract. So the
+/// expectation takes the harness's declaration, and the check still asserts the adapter's
+/// value (ADR 0007).
 pub fn expected_usage<M: Model, H: ContractHarness<M>>(h: &H, scripted: &ModelUsage) -> ModelUsage {
     let mut expected = scripted.clone();
     for field in h.unreported_usage_fields() {
         field.clear(&mut expected);
     }
+    expected.input_includes_cache = Some(h.input_includes_cache());
     expected
 }
 
@@ -580,6 +600,7 @@ pub async fn check_usage_shapes<M: Model, H: ContractHarness<M>>(h: &H) {
         total: Some(15),
         cache_read: Some(3),
         cache_write: None,
+        input_includes_cache: Some(false),
         details: Some(
             OpaqueJson::parse(
                 r#"{"prompt_tokens_details":{"cached_tokens":3},"completion_tokens_details":{"reasoning_tokens":30}}"#,
@@ -640,6 +661,53 @@ pub async fn check_total_not_computed<M: Model, H: ContractHarness<M>>(h: &H) {
         usage.total, None,
         "total must stay None, never input + output"
     );
+}
+
+/// 7c. The adapter **declares** whether `input` contains the cache hit (ADR 0007),
+/// and it declares the same thing for every response it produces.
+///
+/// The two spellings are both legitimate — OpenAI's `prompt_tokens` contains
+/// `prompt_tokens_details.cached_tokens` (`Some(true)`), Anthropic's `input_tokens` is a
+/// sibling of the cache fields (`Some(false)`) — so the contract does not pick one. What it
+/// refuses is silence: a `None` here would make every consumer guess, and guessing is exactly
+/// what priced the cached tokens twice. A harness states it with
+/// [`ContractHarness::input_includes_cache`]; a provider whose usage has no cache concept at
+/// all declares `Some(false)` (the `input` it reports is all uncached by construction).
+pub async fn check_input_cache_semantics<M: Model, H: ContractHarness<M>>(h: &H) {
+    let declared = h.input_includes_cache();
+    let usage = ModelUsage {
+        input: Some(11),
+        output: Some(4),
+        total: Some(15),
+        cache_read: Some(3),
+        cache_write: None,
+        details: None,
+        ..Default::default()
+    };
+    for wires in [
+        vec![Wire::UsageTrailing(usage.clone())],
+        vec![Wire::UsageEveryChunk(vec![
+            ModelUsage {
+                input: Some(1),
+                ..Default::default()
+            },
+            usage.clone(),
+        ])],
+        vec![Wire::NoUsage],
+    ] {
+        let model = h.script(&wires).await;
+        let resp = complete(&model, request(), &NoopSink).await.unwrap();
+        let Some(usage) = resp.usage else {
+            continue; // `Wire::NoUsage`: nothing to declare anything about.
+        };
+        assert_eq!(
+            usage.input_includes_cache,
+            Some(declared),
+            "the adapter must mark every reported usage with the declaration it made \
+             (`input_includes_cache = {declared}`); `None` leaves every consumer guessing \
+             (ADR 0007)"
+        );
+    }
 }
 
 /// Server errors are `Transport`, request errors are `Protocol`, and a stream cut before
@@ -842,6 +910,10 @@ mod tests {
         unreported_usage: &'static [UsageField],
         /// What the fake adapter actually leaves out when it builds a response.
         drop_usage: &'static [UsageField],
+        /// What the harness declares about the input's cache semantics.
+        input_includes_cache: bool,
+        /// Whether the fake adapter forgets to mark the usage it reports (a silent adapter).
+        forget_input_cache: bool,
         /// The provider's declared overflow wire (`None` = "no recognizable one").
         overflow: Option<Wire>,
         /// Whether the fake adapter wrongly classifies **every** 400/413 as an overflow.
@@ -856,6 +928,8 @@ mod tests {
                 unsupported: &[],
                 unreported_usage: &[],
                 drop_usage: &[],
+                input_includes_cache: false,
+                forget_input_cache: false,
                 overflow: None,
                 misclassify_all_4xx: false,
                 forget_overflow: false,
@@ -877,6 +951,9 @@ mod tests {
             if let Some(usage) = usage.as_mut() {
                 for field in self.drop_usage {
                     field.clear(usage);
+                }
+                if !self.forget_input_cache {
+                    usage.input_includes_cache = Some(self.input_includes_cache);
                 }
             }
             let (stop_reason, text) = match wires.first() {
@@ -922,6 +999,10 @@ mod tests {
 
         fn unreported_usage_fields(&self) -> &'static [UsageField] {
             self.unreported_usage
+        }
+
+        fn input_includes_cache(&self) -> bool {
+            self.input_includes_cache
         }
 
         fn context_overflow(&self) -> Option<Wire> {
@@ -988,6 +1069,7 @@ mod tests {
             total: Some(3),
             cache_read: Some(4),
             cache_write: Some(5),
+            input_includes_cache: Some(true),
             details: Some(OpaqueJson::parse(r#"{"x":1}"#).unwrap()),
         };
         let harness = FakeHarness {
@@ -1001,6 +1083,9 @@ mod tests {
         assert_eq!(expected.cache_read, Some(4));
         assert_eq!(expected.cache_write, Some(5));
         assert_eq!(expected.details, None, "a declared field is cleared");
+        // The mark is the harness's declaration, not the scripted value: the fake harness
+        // leaves it `false` and the expectation says so.
+        assert_eq!(expected.input_includes_cache, Some(false));
     }
 
     #[tokio::test]
@@ -1039,6 +1124,88 @@ mod tests {
             ..FakeHarness::new()
         };
         check_usage_shapes(&harness).await;
+    }
+
+    // ---------- `input_includes_cache` ----------
+
+    #[test]
+    fn the_default_declaration_is_input_without_the_cache_and_expected_usage_carries_it() {
+        // No "unset": an unstated harness is `false`, and the expectation carries it, so the
+        // check asserts a value rather than tolerating silence (ADR 0007).
+        let harness = FakeHarness::new();
+        assert!(!harness.input_includes_cache());
+        assert_eq!(
+            expected_usage(&harness, &ModelUsage::default()).input_includes_cache,
+            Some(false)
+        );
+        let openai = FakeHarness {
+            input_includes_cache: true,
+            ..FakeHarness::new()
+        };
+        assert_eq!(
+            expected_usage(&openai, &ModelUsage::default()).input_includes_cache,
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_marked_usage_passes_and_the_openai_shape_declares_true() {
+        for declared in [false, true] {
+            let harness = FakeHarness {
+                input_includes_cache: declared,
+                ..FakeHarness::new()
+            };
+            check_input_cache_semantics(&harness).await;
+        }
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "leaves every consumer guessing")]
+    async fn an_unmarked_usage_fails_the_cache_semantics_check() {
+        // The silent adapter: it parses the numbers but never says whether the cache hit is
+        // inside `input`. That is the state ADR 0007 exists to end.
+        let harness = FakeHarness {
+            forget_input_cache: true,
+            ..FakeHarness::new()
+        };
+        check_input_cache_semantics(&harness).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "leaves every consumer guessing")]
+    async fn a_marked_usage_that_contradicts_the_declaration_fails() {
+        // The adapter always marks `true` while the harness declares `false`: the two must
+        // agree, or a consumer is guessing which one to believe.
+        let harness = FakeHarness {
+            input_includes_cache: false,
+            ..FakeHarness::new()
+        };
+        let wrong = FakeHarness {
+            input_includes_cache: true,
+            ..FakeHarness::new()
+        };
+        // Sanity: the honest pair passes, so the failure below is the contradiction.
+        check_input_cache_semantics(&harness).await;
+        struct AlwaysTrue(FakeHarness);
+        impl ContractHarness<FakeModel> for AlwaysTrue {
+            fn secret(&self) -> &str {
+                self.0.secret()
+            }
+            async fn script(&self, wires: &[Wire]) -> FakeModel {
+                let model = self.0.script(wires).await;
+                FakeModel {
+                    usage: model.usage.map(|mut usage| {
+                        usage.input_includes_cache = Some(true);
+                        usage
+                    }),
+                    ..model
+                }
+            }
+            fn input_includes_cache(&self) -> bool {
+                false
+            }
+        }
+        check_input_cache_semantics(&AlwaysTrue(wrong)).await;
     }
 
     // ---------- the context-overflow hatch ----------

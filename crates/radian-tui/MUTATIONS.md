@@ -1094,6 +1094,19 @@ Base `edfa320` · 一次性 worktree `/tmp/radian-esc-mut2`，跑完 `git checko
 
 1/1 抓住。（早先 ESC-M1「Esc → `TrustHere`」见上一节。）
 
+## ask-ui：问答界面照 omp（ADR 0024/2，2026-10-16）
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| ASK-A | Other 编辑时吞掉 ↑↓（把 Other 行当多行字段） | `other_keeps_its_text_while_moving_with_arrows` | ✅ |
+| ASK-B | `⏎` 在单选时不前进 | `a_single_question_selects_and_advances` | ✅ |
+| ASK-C | 多选 `⏎` 变成单选 | `a_multi_question_toggles_and_other_is_its_own_answer` | ✅ |
+| ASK-D | 必答题未答也能提交 | `a_required_question_blocks_the_submit` | ✅ |
+| ASK-E | 备注不进答案（`note_of` 恒 `None`） | `n_opens_a_note_and_the_note_reaches_the_answer` | ✅ |
+| ASK-F | 两个 `recommended` 不报错 | `every_question_limit_is_an_invalid_arguments_failure` | ✅ |
+| ASK-G | 标签不截断（超 16 宽） | `a_long_tab_label_is_truncated` | ✅ |
+
+7/7 抓住。**过程记录**：ASK-G 第一轮 anchor 没对上（`cargo fmt` 折行），改成折行后的文本才变异成功。
 ## glyphs（品牌字形与 unicode 档字形覆盖，ADR 0027）
 
 Base `45723f6` · 一次性 worktree `/tmp/radian-glyphs-mut`，每个变异跑完 `cp /tmp/glyphs-backup` 还原，最后 `git status --short` 为空。
@@ -1132,6 +1145,17 @@ Base `62ae29e` · 一次性 worktree `/tmp/radian-sl-mut`。
 
 1/1 抓住。
 
+## brand-config（[tui] brand，ADR 0027，2026-10-15）
+
+Base `4772113` · 一次性 worktree `/tmp/radian-bc-mut`，还原后 `git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| B-M1 | footer 的 brand 条目忽略配置，用 glyphs 默认 | `footer::the_brand_config_replaces_the_glyph_default` | ✅ |
+| B-M2 | `App::brand_mark` 忽略配置（banner 用 glyphs 默认） | `pty::pty_the_brand_config_is_the_banner_fallback` | ✅ |
+| B-M4 | `App::brand_mark` 缺省不走 glyphs 档（返回固定值） | `footer::the_brand_default_follows_the_glyph_set` | ✅ |
+
+3/3 抓住。
 ## select-list：共享列表原语与 /model 平铺（ADR 0035）
 
 Base `3c1c579` · 一次性 worktree `/tmp/radian-sl-mut`（detached，跑完删除）。
@@ -1178,3 +1202,26 @@ Base `e157bfb` · 一次性 worktree `.radian-worktrees/sf2-mut`（detached，�
 SF2（高亮计数改线程局部）与 SF3（build.rs 用运行时 `CARGO_MANIFEST_DIR`）没有常规变异测试：
 SF2 是把测试自身的干扰源去掉，SF3 是编译期路径问题；两者的证据分别是「高亮测试单独跑 5/5」
 与「把 worktree 改名后 build script 仍找得到 `third_party/syntaxes`」。
+## spinner（运行指示一处定义 + 输入框上沿状态线，ADR 0027/9/10，2026-10-15）
+
+Base `c0ae44c` · 一次性 worktree `/tmp/radian-sp-mut2`，还原后 `git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SP-M1 | 旋转档节拍 250 ms 改 100 ms | `spinner::tests::the_frame_advances_with_time` | ✅ |
+| SP-M2 | 状态线的两个空格变一个 | `render::the_input_rule_shows_the_spinner_status_while_running` | ✅ |
+| SP-M3 | `spinner_tick` 不再判断 `spinner_visible`（空闲仍驱动重绘） | `pty::pty_an_idle_screen_is_not_redrawn` | ✅ |
+| SP-M4 | `glyphs = ascii` 时仍用弧字形 | `spinner::tests::the_ascii_set_falls_back` | ✅ |
+
+4/4 抓住。（SP-M1 第一次用「节拍改 50 ms」未被抓，因为 `index` 当时重复硬编码了 250 ms；
+改成 `index` 用 `kind.interval()` 后，100 ms 变异被抓住。）
+## effect-settle（超过 MAX_EFFECT_ROUNDS 时 carry，2026-10-15）
+
+Base `9cb727d` · 一次性 worktree `/tmp/radian-es-mut`，还原后 `git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| ES-M1 | `run_effect_rounds` 恢复 `return Err`（超过上限就退出） | `effect_rounds_carry_the_rest_in_order` | ✅ |
+| ES-M2 | 超过上限后 `effects.clear()`（丢掉剩余 effect） | 同上（顺序/完整性断言） | ✅ |
+
+2/2 抓住。

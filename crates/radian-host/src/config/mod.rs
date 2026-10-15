@@ -287,6 +287,13 @@ pub struct TuiConfig {
     /// `tui.banner`: whether the startup screen shows the wordmark. `None`
     /// means the default, on.
     pub banner: Option<bool>,
+    /// `tui.brand`: the brand text (ADR 0027). `None` means the glyph set's default
+    /// (`nerd` `󰰠`, `unicode` `R`, `ascii` `rad`). Any string at most 4 display columns wide;
+    /// wider is a config error (it would break the footer and the banner).
+    pub brand: Option<String>,
+    /// `tui.spinner`: `"pulse"` (the default), `"arc"`, `"quadrant"` or `"braille"`
+    /// (ADR 0027). The TUI validates it; an unknown value warns and uses `pulse`.
+    pub spinner: Option<String>,
     /// `tui.usage_period_secs`: the opencode-go usage refresh period (ADR 0027 C4). `None` means
     /// the default (60 s); `0` disables the contributor; other values are clamped to 15–600 s.
     pub usage_period_secs: Option<u64>,
@@ -384,6 +391,20 @@ pub struct SandboxConfig {
     pub allow_unix_sockets: Vec<String>,
 }
 
+/// `[integrations]` (ADR 0034 H6): which local integrations are on. `herdr` defaults to
+/// **true**: it only takes effect inside a herdr pane (ADR 0034 H1), and `RADIAN_HERDR=0`
+/// turns it off for one run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntegrationsConfig {
+    pub herdr: bool,
+}
+
+impl Default for IntegrationsConfig {
+    fn default() -> Self {
+        Self { herdr: true }
+    }
+}
+
 /// One parsed configuration file.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Config {
@@ -397,6 +418,7 @@ pub struct Config {
     pub model: ModelConfig,
     pub permissions: PermissionsConfig,
     pub sandbox: SandboxConfig,
+    pub integrations: IntegrationsConfig,
     pub compaction: CompactionConfig,
     pub skills: SkillsConfig,
     /// `[git]` (ADR 0030 R10): the branches `git_commit` refuses besides `main`/`master`.
@@ -503,6 +525,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
             "model" => parse_model(value, path, read_only, &mut config)?,
             "permissions" => parse_permissions(value, path, read_only, &mut config)?,
             "sandbox" => parse_sandbox(value, path, &mut config)?,
+            "integrations" => parse_integrations(value, path, &mut config)?,
             "compaction" => parse_compaction(value, path, &mut config)?,
             "skills" => parse_skills(value, path, &mut config)?,
             "git" => parse_git(value, &mut config)?,
@@ -704,6 +727,22 @@ fn parse_permissions(
                 return Err(wrong_type(path, "permissions.approval", "a string"));
             }
             (other, _) => config.skipped.push(format!("permissions.{other}")),
+        }
+    }
+    Ok(())
+}
+
+fn parse_integrations(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
+    let Some(table) = value.as_table() else {
+        return Err(wrong_type(path, "integrations", "a table"));
+    };
+    for (key, value) in table {
+        match (key.as_str(), value) {
+            ("herdr", Value::Boolean(on)) => config.integrations.herdr = *on,
+            ("herdr", _) => {
+                return Err(wrong_type(path, "integrations.herdr", "a boolean"));
+            }
+            (other, _) => config.skipped.push(format!("integrations.{other}")),
         }
     }
     Ok(())
@@ -1093,6 +1132,24 @@ fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
             ("tips", _) => config.skipped.push("tui.tips".into()),
             ("banner", Value::Boolean(banner)) => config.tui.banner = Some(*banner),
             ("banner", _) => config.skipped.push("tui.banner".into()),
+            // ADR 0027: the brand is any short text (≤ 4 display columns). Wider is
+            // a config error, not a skipped key: it would misalign the footer and the banner.
+            ("brand", Value::String(brand)) => {
+                if unicode_width::UnicodeWidthStr::width(brand.as_str()) > 4 {
+                    return Err(wrong_type(
+                        path,
+                        "tui.brand",
+                        "a string at most 4 display columns wide",
+                    ));
+                }
+                config.tui.brand = Some(brand.clone());
+            }
+            // A non-string brand is a display preference: skip it with a warning.
+            ("brand", _) => config.skipped.push("tui.brand".into()),
+            // ADR 0027: the spinner kind is a display preference; the TUI
+            // validates the name and falls back with a warning.
+            ("spinner", Value::String(spinner)) => config.tui.spinner = Some(spinner.clone()),
+            ("spinner", _) => config.skipped.push("tui.spinner".into()),
             (other, _) => config.skipped.push(format!("tui.{other}")),
         }
     }
@@ -1414,6 +1471,30 @@ mod tests {
 
     fn parse_str(text: &str) -> Result<Config, ConfigError> {
         parse(Path::new("/tmp/test/config.toml"), text)
+    }
+
+    /// ADR 0034 H6: `[integrations] herdr` defaults to true; `false` turns it off and a
+    /// non-boolean is refused.
+    #[test]
+    fn integrations_herdr_defaults_on_and_can_be_turned_off() {
+        assert!(
+            parse_str("schema_version = 1\n")
+                .unwrap()
+                .integrations
+                .herdr
+        );
+        assert!(
+            !parse_str("schema_version = 1\n[integrations]\nherdr = false\n")
+                .unwrap()
+                .integrations
+                .herdr
+        );
+        assert!(
+            parse_str("schema_version = 1\n[integrations]\nherdr = \"no\"\n").is_err(),
+            "a non-boolean is refused"
+        );
+        let config = parse_str("schema_version = 1\n[integrations]\nfuture = 1\n").unwrap();
+        assert!(config.skipped.contains(&"integrations.future".to_owned()));
     }
 
     /// ADR 0016: `[sandbox] allow_unix_sockets` is an array of strings; a bad
@@ -1953,6 +2034,37 @@ mod startup_pref_tests {
         let config = parse_str("schema_version = 1\n[tui]\ntips = \"yes\"\n").unwrap();
         assert_eq!(config.tui.tips, None);
         assert!(config.skipped.contains(&"tui.tips".to_string()));
+    }
+
+    /// ADR 0027: `tui.brand` is carried, a non-string is skipped (the `tui.*`
+    /// rule), and a value wider than 4 display columns is a config error (it would misalign
+    /// the footer and the banner).
+    #[test]
+    fn tui_brand_is_carried_and_over_wide_is_refused() {
+        let config = parse_str("schema_version = 1\n[tui]\nbrand = \"ʀ\"\n").unwrap();
+        assert_eq!(config.tui.brand.as_deref(), Some("ʀ"));
+
+        // A non-string is a display preference: skipped, never a refusal.
+        let config = parse_str("schema_version = 1\n[tui]\nbrand = 3\n").unwrap();
+        assert_eq!(config.tui.brand, None);
+        assert!(config.skipped.contains(&"tui.brand".to_string()));
+
+        // `㎭` is East-Asian-Wide (2 columns): two are 4 (fine), three are 5 (refused).
+        assert!(parse_str("schema_version = 1\n[tui]\nbrand = \"㎭㎭\"\n").is_ok());
+        let error = parse_str("schema_version = 1\n[tui]\nbrand = \"㎭㎭R\"\n").unwrap_err();
+        assert!(matches!(error, ConfigError::WrongType { .. }), "{error}");
+    }
+
+    /// ADR 0027: `tui.spinner` is carried; a non-string is skipped (the `tui.*`
+    /// rule). The TUI validates the name and falls back to `pulse`.
+    #[test]
+    fn tui_spinner_is_carried_and_non_strings_are_skipped() {
+        let config = parse_str("schema_version = 1\n[tui]\nspinner = \"quadrant\"\n").unwrap();
+        assert_eq!(config.tui.spinner.as_deref(), Some("quadrant"));
+
+        let config = parse_str("schema_version = 1\n[tui]\nspinner = 3\n").unwrap();
+        assert_eq!(config.tui.spinner, None);
+        assert!(config.skipped.contains(&"tui.spinner".to_string()));
     }
 }
 

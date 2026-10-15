@@ -328,10 +328,24 @@ pub fn commit(
         .map_err(|error| fail("workspace_unavailable", error.to_string()))?;
     let mut resolved = Vec::with_capacity(paths.len());
     for path in paths {
-        resolved.push(
-            root.resolve_in_workspace(path)
-                .map_err(|error| fail("outside_workspace", error))?,
-        );
+        let resolved_path = root
+            .resolve_in_workspace(path)
+            .map_err(|error| fail("outside_workspace", error))?;
+        // ADR 0036 D2: the task agent's progress note lives under `.radian/` (which
+        // is gitignored); refusing the path here is what keeps it out of a commit, not the
+        // prompt. The interactive session is covered too: the rule is structural.
+        let under_radian = resolved_path
+            .strip_prefix(workspace)
+            .ok()
+            .and_then(|relative| relative.components().next())
+            .is_some_and(|component| component.as_os_str() == ".radian");
+        if under_radian {
+            return Err(fail(
+                "radian_path",
+                "refusing to commit a path under .radian/ (the progress note lives there and is never committed)",
+            ));
+        }
+        resolved.push(resolved_path);
     }
 
     if paths.is_empty() {
@@ -454,6 +468,50 @@ mod tests {
         );
         // `--no-verify` stays on the commit itself.
         assert!(commit_args("m").iter().any(|arg| arg == "--no-verify"));
+    }
+
+    /// ADR 0036 D2: a path under `.radian/` is refused structurally, so the task
+    /// agent's progress note can never enter a commit (the interactive session too).
+    #[test]
+    fn a_path_under_dot_radian_is_refused() {
+        let dir = std::env::temp_dir().join(format!("radian-gitcommit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".radian/progress")).unwrap();
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .status()
+                .expect("git");
+            assert!(status.success(), "git {args:?}");
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "t@example.com"]);
+        run(&["config", "user.name", "t"]);
+        run(&["checkout", "-q", "-b", "feature"]);
+        // An initial commit, so the branch resolves (an unborn HEAD is a different refusal).
+        std::fs::write(dir.join("init.txt"), "init\n").unwrap();
+        run(&["add", "init.txt"]);
+        run(&["commit", "-q", "-m", "init"]);
+        std::fs::write(dir.join(".radian/progress/x.md"), "note\n").unwrap();
+        // The real caller passes the canonical workspace; `/var` -> `/private/var` here.
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let pin = RepoPin::resolve(&dir).expect("a repository");
+        let error = commit(
+            &dir,
+            &pin,
+            "note",
+            &[".radian/progress/x.md".to_owned()],
+            None,
+            &[],
+        )
+        .expect_err("a .radian path must be refused");
+        assert_eq!(error.code, "radian_path", "{error:?}");
+        // A normal path still commits.
+        std::fs::write(dir.join("ok.txt"), "ok\n").unwrap();
+        let committed = commit(&dir, &pin, "ok", &["ok.txt".to_owned()], None, &[]);
+        assert!(committed.is_ok(), "{committed:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

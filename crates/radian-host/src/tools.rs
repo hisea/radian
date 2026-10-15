@@ -65,6 +65,45 @@ impl HostTools {
         self.skills = Some(skills);
         self
     }
+
+    /// The mounted built-in tools as `(name, one-line purpose)`, for the system prompt's
+    /// `<runtime>` layer (ADR 0036 D1's 0a). The MCP tools are dynamic (they depend on the
+    /// server), so they are named by server in the same layer, not listed here.
+    pub fn builtin_tools(&self) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = Vec::new();
+        let mut push = |name: &str, purpose: &str| {
+            out.push((name.to_owned(), purpose.to_owned()));
+        };
+        if self.coding.is_some() {
+            push("read", "read a file, with offset and limit");
+            push("patch", "replace exact text in a file");
+            push("write", "create or overwrite a file");
+            push("list", "list a directory");
+            push("shell", "run a command in the workspace");
+            push("git_status", "the working tree status");
+            push("git_diff", "a diff of the working tree");
+        }
+        if self.memory.is_some() {
+            push("memory_search", "search durable memory");
+            push("memory_get", "read one memory record");
+            push("memory_save", "save a memory record");
+            push("memory_revise", "revise a memory record");
+        }
+        if self.ask.is_some() {
+            push("ask_user", "ask the user a structured question");
+        }
+        if self.skills.is_some() {
+            push("skill", "read one of the discovered skills");
+        }
+        push("mermaid_check", "validate a Mermaid diagram");
+        if self.git_commit.is_some() {
+            push(
+                "git_commit",
+                "commit inside the workspace; the only way to commit (.git is read-only in the sandbox)",
+            );
+        }
+        out
+    }
 }
 
 pub struct HostSession {

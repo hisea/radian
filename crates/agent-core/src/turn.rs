@@ -15,7 +15,9 @@ use crate::event::{AgentEvent, CompactionTrigger, EventSink};
 use crate::hooks::{HookContext, HookError, HookPoint, Hooks, ToolDecision};
 use crate::journal::{JournalError, JournalRecord, TranscriptJournal};
 use crate::message::{ContentPart, Message, MessageMeta, ToolCall, ToolResult};
-use crate::model::{Model, ModelContext, ModelError, ModelRequest, ModelResponse, StopReason};
+use crate::model::{
+    Model, ModelContext, ModelError, ModelRequest, ModelResponse, ModelUsage, StopReason,
+};
 use crate::outcome::{
     CancelReason, CompactionError, CompactionFailure, CompactionOutcome, IncompleteReason,
     RunError, RunOutcome, RunStatus, Step,
@@ -480,12 +482,23 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
                     .append(JournalRecord::CompactionUsage {
                         revision,
                         model: compaction::COMPACTION_MODEL_CURRENT.to_owned(),
-                        usage,
+                        usage: usage.clone(),
                     })
                     .await
             {
                 self.recovery_required = true;
                 return Err(CompactionFailure::Journal(error));
+            }
+            // The summarizer's call is not a conversation response (`ModelResponseReceived` is
+            // for those, and a host times it as this turn's generation), but it is billed: tell
+            // the host so its session total includes it (ADR 0018). Emitted per
+            // attempt — the controlled retry is a second real call and costs money too.
+            if let Some(usage) = response.usage.clone() {
+                events.emit(AgentEvent::CompactionUsage {
+                    revision,
+                    model: compaction::COMPACTION_MODEL_CURRENT.to_owned(),
+                    usage,
+                });
             }
             let text = text_of(&response.content);
             match compaction::check_summary(&text, summary_max) {
@@ -1254,10 +1267,13 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
             tool_calls: response.tool_calls.len(),
             usage: response.usage.clone(),
         });
-        // Remember the provider's own `input` as the next projection's baseline (ADR 0015
-        // C1). `None` means the provider did not report it; we never substitute zero.
+        // Remember the provider's own prompt size as the next projection's baseline (ADR 0015
+        // C1). `prompt_total()` is the whole input, cache reads and cache writes included
+        // (ADR 0007): for an Anthropic record `input` alone is only the *uncached*
+        // part, so taking it would make the projection too small and the guard would act too
+        // late. `None` means the provider did not report it; we never substitute zero.
         if let Some(size) = request_size
-            && let Some(input) = response.usage.as_ref().and_then(|usage| usage.input)
+            && let Some(input) = response.usage.as_ref().and_then(ModelUsage::prompt_total)
         {
             self.run.session.budget_baseline = Some((input, size));
         }

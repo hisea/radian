@@ -1513,10 +1513,85 @@ async fn system_prompt_is_sent() {
     let system = &messages.as_array().expect("messages")[0];
     assert_eq!(system["role"], "system");
     let content = system["content"].as_str().unwrap_or_default();
-    // The user's system prompt is first; the host appends its sections (the built-in
-    // `diagrams` skill is one of them, ADR 0025).
-    assert!(content.starts_with("Be brief."), "{content}");
+    // ADR 0036: `--system` replaces the role layer only. Layer 0a `<runtime>` is
+    // first and layer 0b `<session>` is last; the skills section (ADR 0025) sits between them.
+    assert!(content.starts_with("<runtime>"), "{content}");
+    assert!(
+        content.contains("<role>\nBe brief.\n</role>"),
+        "the role layer is the --system text: {content}"
+    );
     assert!(content.contains("## Skills (ADR 0025)"), "{content}");
+    assert!(
+        content.trim_end().ends_with("</session>"),
+        "layer 0b is last: {content}"
+    );
+    assert!(content.contains("model: m"), "{content}");
+}
+
+/// ADR 0036: without `--system` the built-in `default` role is layer 1, between the
+/// `<runtime>` layer and the context files, with the `<session>` layer last.
+#[tokio::test]
+async fn the_default_role_layers_are_sent() {
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let (code, _, _) = feed_and_wait(
+        spawn_agent(
+            &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0);
+    let messages = messages_of(&server, 0);
+    let system = &messages.as_array().expect("messages")[0];
+    let content = system["content"].as_str().unwrap_or_default();
+    assert!(content.starts_with("<runtime>"), "{content}");
+    let runtime_at = content.find("<runtime>").unwrap();
+    let role_at = content.find("<role>").unwrap();
+    let session_at = content.find("<session>").unwrap();
+    assert!(runtime_at < role_at && role_at < session_at, "{content}");
+    assert!(
+        content.contains("You are radian, a coding agent"),
+        "the default role: {content}"
+    );
+    assert!(
+        content.contains("- memory_search:"),
+        "the runtime tool list: {content}"
+    );
+    assert!(content.trim_end().ends_with("</session>"), "{content}");
+    assert!(content.contains("model: m"), "{content}");
+}
+
+/// ADR 0036: the `safe` tier mounts no `shell`, so layer 0a does not advertise one.
+#[tokio::test]
+async fn the_safe_tier_runtime_layer_has_no_shell() {
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let (code, _, _) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--profile",
+                "safe",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0);
+    let messages = messages_of(&server, 0);
+    let system = &messages.as_array().expect("messages")[0];
+    let content = system["content"].as_str().unwrap_or_default();
+    let runtime = content.split("</runtime>").next().unwrap_or(content);
+    assert!(
+        !runtime.contains("- shell:"),
+        "the safe tier has no shell tool:\n{runtime}"
+    );
 }
 
 #[tokio::test]
