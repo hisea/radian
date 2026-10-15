@@ -93,8 +93,8 @@ fn with_glyphs(name: &str) -> TuiFooterConfig {
     }
 }
 
-/// The default is the two-row `full` layout (ADR 0027): the identity row, then the
-/// numbers row.
+/// The default is the `deck` layout (ADR 0027): the usage row (dropped with no
+/// data), the identity row, then the numbers row.
 #[test]
 fn the_default_footer_is_two_rows() {
     let mut app = App::new("mock", "s");
@@ -121,7 +121,7 @@ fn the_default_footer_is_two_rows() {
         second.contains('↑'),
         "the tokens row is the second: {second:?}"
     );
-    assert_eq!(app.footer.preset(), Preset::Full);
+    assert_eq!(app.footer.preset(), Preset::Deck);
 }
 
 /// `preset = classic` is the pre-ADR one-line status bar: one row, the classic segments.
@@ -575,7 +575,7 @@ fn the_cost_item_uses_the_model_price() {
         cache_write: None,
     }));
     let terminal = render(&mut app, 80, 12);
-    assert_eq!(row(&terminal, 11).trim_end(), "$4.50");
+    assert_eq!(row(&terminal, 11).trim_end(), "$4.500");
 }
 
 /// The `tokens` item shows the cache-read total (ADR 0027), and `-` when the
@@ -715,4 +715,268 @@ fn the_new_items_have_glyphs_in_all_three_sets() {
         assert!(line.contains(speed), "{set} speed glyph in {line:?}");
         assert!(line.contains(elapsed), "{set} elapsed glyph in {line:?}");
     }
+}
+
+// ---- ADR 0027: deck, separator, per-field config, colors ----
+
+use std::collections::BTreeMap;
+
+fn items(pairs: &[(&str, TuiFooterItemConfig)]) -> TuiFooterConfig {
+    TuiFooterConfig {
+        items: pairs
+            .iter()
+            .map(|(id, config)| (id.to_string(), config.clone()))
+            .collect::<BTreeMap<_, _>>(),
+        ..Default::default()
+    }
+}
+
+/// The deck preset has a usage row that disappears entirely without data.
+#[test]
+fn the_deck_usage_row_appears_only_with_data() {
+    let mut app = App::new("mock", "s");
+    app.set_footer_facts(
+        Some(std::path::PathBuf::from("/tmp/ws")),
+        Some("Mock 5".to_string()),
+        Some("opencode-go".to_string()),
+        Some("high".to_string()),
+    );
+    // Without data the row is **dropped**, not left blank: two rows, not three.
+    assert_eq!(app.footer.lines(&app, 100).len(), 2, "no usage, no row");
+    let without = render(&mut app, 100, 12);
+    assert!(!screen(&without).contains("5h:"), "{}", screen(&without));
+    publish(&app, "opencode-go.usage", "5h: 98% · 7d: 81%");
+    assert_eq!(app.footer.lines(&app, 100).len(), 3, "usage adds a row");
+    let with = render(&mut app, 100, 12);
+    assert!(
+        row(&with, 9).contains("5h: 98%"),
+        "the usage row is the first of three:\n{}",
+        screen(&with)
+    );
+}
+
+/// The separator is configurable and uses the `footer_separator` role.
+#[test]
+fn the_separator_is_configurable_and_styled() {
+    let mut app = App::new("mock", "s");
+    let mut config = rows(vec![item("model"), item("session")]);
+    config.separator = Some(" · ".to_string());
+    app.apply_footer(&config);
+    let terminal = render(&mut app, 80, 12);
+    let line = row(&terminal, 11);
+    assert!(line.contains(" · "), "{line:?}");
+    assert_eq!(
+        fg_at(&terminal, 11, "·"),
+        app.theme.footer_separator.fg,
+        "the separator uses its own role"
+    );
+}
+
+/// `[tui.footer.items.<id>]` gives a bare id its symbol, style and format.
+#[test]
+fn items_config_sets_symbol_style_and_format() {
+    let mut app = App::new("mock", "s");
+    app.set_footer_facts(None, Some("Mock 5".to_string()), None, None);
+    let mut config = items(&[(
+        "model",
+        TuiFooterItemConfig {
+            id: "model".to_string(),
+            icon: Some(">> ".to_string()),
+            format: Some("[{display_name}](red)".to_string()),
+            ..Default::default()
+        },
+    )]);
+    config.rows = vec![TuiFooterRowConfig {
+        left: vec![item("model")],
+        ..Default::default()
+    }];
+    app.apply_footer(&config);
+    let terminal = render(&mut app, 80, 12);
+    let line = row(&terminal, 11);
+    assert!(line.contains(">> Mock 5"), "{line:?}");
+    // `[..](red)` is a fixed color.
+    assert_eq!(fg_at(&terminal, 11, "Mock 5"), Some(Color::Red));
+}
+
+/// An inline table wins over `[tui.footer.items.<id>]`.
+#[test]
+fn an_inline_table_wins_over_items() {
+    let mut app = App::new("mock", "s");
+    app.set_footer_facts(None, Some("Mock 5".to_string()), None, None);
+    let mut config = items(&[(
+        "model",
+        TuiFooterItemConfig {
+            id: "model".to_string(),
+            format: Some("{id}".to_string()),
+            ..Default::default()
+        },
+    )]);
+    config.rows = vec![TuiFooterRowConfig {
+        left: vec![TuiFooterItemConfig {
+            id: "model".to_string(),
+            format: Some("{display_name}".to_string()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }];
+    app.apply_footer(&config);
+    let terminal = render(&mut app, 80, 12);
+    assert_eq!(row(&terminal, 11).trim_end(), "Mock 5");
+}
+
+/// `disabled = true` hides an item everywhere it is named.
+#[test]
+fn disabled_hides_the_item() {
+    let mut app = App::new("mock", "s");
+    app.set_footer_facts(None, Some("Mock 5".to_string()), None, None);
+    let mut config = items(&[(
+        "model",
+        TuiFooterItemConfig {
+            id: "model".to_string(),
+            disabled: true,
+            ..Default::default()
+        },
+    )]);
+    config.rows = vec![TuiFooterRowConfig {
+        left: vec![item("model"), item("session")],
+        ..Default::default()
+    }];
+    app.apply_footer(&config);
+    let terminal = render(&mut app, 80, 12);
+    assert!(
+        !row(&terminal, 11).contains("Mock 5"),
+        "{}",
+        row(&terminal, 11)
+    );
+}
+
+/// A fixed color does not follow the theme; a role does.
+#[test]
+fn a_fixed_color_is_theme_independent_but_a_role_is_not() {
+    let mut app = App::new("mock", "s");
+    app.set_footer_facts(None, Some("Mock 5".to_string()), None, None);
+    let mut config = items(&[(
+        "model",
+        TuiFooterItemConfig {
+            id: "model".to_string(),
+            style: Some("red".to_string()),
+            ..Default::default()
+        },
+    )]);
+    config.rows = vec![TuiFooterRowConfig {
+        left: vec![item("model")],
+        ..Default::default()
+    }];
+    app.apply_footer(&config);
+    let dark = render(&mut app, 80, 12);
+    assert_eq!(fg_at(&dark, 11, "Mock 5"), Some(Color::Red));
+
+    let role = items(&[(
+        "model",
+        TuiFooterItemConfig {
+            id: "model".to_string(),
+            style: Some("model".to_string()),
+            ..Default::default()
+        },
+    )]);
+    let mut role_app = App::new("mock", "s");
+    role_app.set_footer_facts(None, Some("Mock 5".to_string()), None, None);
+    let mut role_config = role;
+    role_config.rows = vec![TuiFooterRowConfig {
+        left: vec![item("model")],
+        ..Default::default()
+    }];
+    role_app.apply_footer(&role_config);
+    let dark_role = render(&mut role_app, 80, 12);
+    assert_eq!(fg_at(&dark_role, 11, "Mock 5"), role_app.theme.model.fg);
+    role_app.update(radian_tui::app::Input::ThemeReady {
+        theme: Some(Box::new(radian_tui::theme::Theme::light())),
+        notices: Vec::new(),
+    });
+    let light_role = render(&mut role_app, 80, 12);
+    assert_eq!(fg_at(&light_role, 11, "Mock 5"), role_app.theme.model.fg);
+}
+
+/// A bad color is reported, not silently ignored.
+#[test]
+fn a_bad_color_is_a_warning() {
+    let config = items(&[(
+        "model",
+        TuiFooterItemConfig {
+            id: "model".to_string(),
+            style: Some("not_a_color".to_string()),
+            ..Default::default()
+        },
+    )]);
+    let (_, warnings) = Footer::from_config(&config);
+    assert!(
+        warnings.iter().any(|warning| warning.contains("bad style")),
+        "{warnings:?}"
+    );
+}
+
+/// `bold #7e9cd8`, a named color and a 256 index all parse.
+#[test]
+fn starship_colors_parse() {
+    let parse = |text: &str| {
+        let config = items(&[(
+            "model",
+            TuiFooterItemConfig {
+                id: "model".to_string(),
+                style: Some(text.to_string()),
+                ..Default::default()
+            },
+        )]);
+        let (_, warnings) = Footer::from_config(&config);
+        assert!(warnings.is_empty(), "{text:?}: {warnings:?}");
+    };
+    parse("bold #7e9cd8");
+    parse("bright_blue");
+    parse("196");
+    parse("italic red");
+}
+
+/// The `brand` is `㎭` under the default unicode set (`rad` only under ascii).
+#[test]
+fn the_brand_is_the_unicode_glyph_by_default() {
+    let mut app = App::new("mock", "s");
+    app.apply_footer(&rows(vec![item("brand")]));
+    let terminal = render(&mut app, 40, 12);
+    assert!(row(&terminal, 11).contains('㎭'), "{}", row(&terminal, 11));
+}
+
+/// ADR 0027's sample: the deck's third row, whole, is
+/// `↑15M ↓2.6M R1962M $14.510 41.3%/1.0M` (compact tokens, a 3-decimal cost, the context
+/// share with one decimal and the window in `M`).
+#[test]
+fn the_deck_numbers_row_matches_the_sample() {
+    let mut app = App::new("mock", "s");
+    app.projection.add_usage(&agent_core::ModelUsage {
+        input: Some(15_000_000),
+        output: Some(2_600_000),
+        cache_read: Some(1_962_000_000),
+        ..Default::default()
+    });
+    app.projection.set_context_window(Some(1_000_000));
+    app.projection.set_request_started(Some(BudgetReport {
+        source: UsageSource::Estimated,
+        projected_tokens: 413_000,
+        input_budget_tokens: 1_000_000,
+        request_bytes: 0,
+        baseline_input_tokens: None,
+        estimated_growth_tokens: None,
+    }));
+    // 15M input at 967_333 micro-dollars per million = 14_509_995 micros = $14.510.
+    app.set_model_price(Some(radian_host::ModelPrice {
+        input: 967_333,
+        output: 0,
+        cache_read: None,
+        cache_write: None,
+    }));
+    let terminal = render(&mut app, 100, 12);
+    // The numbers row is right-aligned; the content itself is the sample.
+    assert_eq!(
+        row(&terminal, 11).trim(),
+        "↑15M ↓2.6M R1962M $14.510 41.3%/1.0M"
+    );
 }

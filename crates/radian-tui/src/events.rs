@@ -92,7 +92,8 @@ pub fn input_event(event: Event) -> Option<InputEvent> {
         Event::Key(key) if key.kind == KeyEventKind::Release => None,
         Event::Key(key) => Some(InputEvent::Key(key)),
         Event::Paste(text) => Some(InputEvent::Paste(text)),
-        Event::Resize(rows, cols) => Some(InputEvent::Resize { rows, cols }),
+        // crossterm's order is `(cols, rows)`; the UI's own `InputEvent` is `{ rows, cols }`.
+        Event::Resize(cols, rows) => Some(InputEvent::Resize { rows, cols }),
         Event::Mouse(mouse) => {
             let shifted = mouse.modifiers.contains(KeyModifiers::SHIFT);
             let at = || (mouse.row, mouse.column);

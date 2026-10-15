@@ -29,6 +29,7 @@ EXPECT = {
     "tui-tips-banner.toml": dict(outcome="accept"),
     "tui-footer.toml": dict(outcome="accept"),
     "tui-widgets.toml": dict(outcome="accept"),
+    "tui-footer-items.toml": dict(outcome="accept"),
     "providers.toml": dict(outcome="accept"),
     "permissions-approval.toml": dict(outcome="accept"),
     "skills-extra-paths.toml": dict(outcome="accept"),

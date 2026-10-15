@@ -186,6 +186,55 @@ fn spec() -> ToolSpec {
 mod tests {
     use super::*;
 
+    /// ADR 0028 R8: a `width` over the cap is clamped to `MAX_WIDTH`, so a huge request still
+    /// gets the renderer's honest answer instead of an unbounded render. A node wider than the
+    /// cap makes the clamp observable: at `MAX_WIDTH` it is `too_wide`, at a million it would
+    /// render. Removing the clamp makes this test return `ok`.
+    #[tokio::test]
+    async fn a_width_over_the_cap_is_clamped() {
+        use agent_core::{
+            CancellationToken, ContentPart, NoopSink, ToolCall, ToolContext, ToolProvider,
+            ToolSession,
+        };
+        let session = MermaidCheckTools::new()
+            .open_session()
+            .await
+            .expect("a session");
+        // 16 nodes, each a 40-cell label (the label cap), in a chain: the natural width is
+        // well over MAX_WIDTH, so at 500 it is `too_wide` and at a million it would render.
+        let label = "x".repeat(40);
+        let mut source = String::from("flowchart LR\n");
+        for i in 0..16 {
+            source.push_str(&format!("    A{i}[{label}]\n"));
+        }
+        for i in 0..15 {
+            source.push_str(&format!("    A{i} --> A{}\n", i + 1));
+        }
+        let call = ToolCall {
+            id: "t".into(),
+            name: "mermaid_check".into(),
+            arguments: serde_json::json!({ "source": source, "width": 1_000_000 }),
+        };
+        let cx = ToolContext {
+            cancellation: CancellationToken::new(),
+            events: &NoopSink,
+            index: 0,
+        };
+        let out = session.execute(&call, cx).await.expect("a result");
+        let text: String = out
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            text.contains("too_wide"),
+            "a width over the cap must be clamped to {MAX_WIDTH}: {text}"
+        );
+    }
+
     #[test]
     fn a_small_flowchart_reports_ok_and_a_preview() {
         let out = check("flowchart TD\n    A[Start] --> B[Done]\n", DEFAULT_WIDTH);

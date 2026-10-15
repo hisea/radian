@@ -1051,17 +1051,32 @@ fn run(
     // (ADR 0023 U2), and a refresh failure becomes a notice; the UI never waits for one.
     let contributions = radian_host::ContributionStore::new();
     let contrib_tx = tx.clone();
+    let on_tick: Arc<dyn Fn(radian_host::Tick) + Send + Sync> = Arc::new(move |tick| {
+        let _ = contrib_tx.send(UiEvent::Dirty);
+        if let Some(notice) = tick.notice {
+            let _ = contrib_tx.send(UiEvent::Command(AppInput::SessionDone(vec![notice])));
+        }
+    });
     radian_host::spawn_contributor(
         runtime.handle(),
         Arc::new(radian_host::GitContributor::new(workspace_path.clone())),
         Arc::clone(&contributions),
-        Arc::new(move |tick| {
-            let _ = contrib_tx.send(UiEvent::Dirty);
-            if let Some(notice) = tick.notice {
-                let _ = contrib_tx.send(UiEvent::Command(AppInput::SessionDone(vec![notice])));
-            }
-        }),
+        Arc::clone(&on_tick),
     );
+    // ADR 0027 C4: the opencode-go usage contributor, enabled only when a key is stored (a
+    // logged-in provider is opencode-go). The key never leaves this spawn: only the display
+    // text enters the store. `usage_period_secs = 0` turns it off; the period is clamped to
+    // 15 s–10 min.
+    if let Some(period) = usage_period(config.tui.usage_period_secs)
+        && let Ok(Some(key)) = radian_host::auth::resolve_key("opencode-go")
+    {
+        radian_host::spawn_contributor(
+            runtime.handle(),
+            Arc::new(radian_host::OpencodeGoUsage::new(key.key.clone(), period)),
+            Arc::clone(&contributions),
+            Arc::clone(&on_tick),
+        );
+    }
     app.set_contributions(Arc::clone(&contributions));
     // A plain run enters the terminal only now: every fallible check above, and the session
     // itself, have already run. (`--pick` entered it before the picker and keeps it here.)
@@ -1842,7 +1857,8 @@ fn spawn_input_thread(tx: Sender<UiEvent>) {
                     // A resize burst coalesces to the last one; everything else goes through
                     // the one pure event map (which drops clicks, drags and moves).
                     let event = match event {
-                        Event::Resize(rows, cols) => coalesce_resize(rows, cols),
+                        // crossterm's order is `(cols, rows)`; `coalesce_resize` takes rows first.
+                        Event::Resize(cols, rows) => coalesce_resize(rows, cols),
                         other => match radian_tui::events::input_event(other) {
                             Some(event) => event,
                             None => continue,
@@ -1863,7 +1879,7 @@ fn spawn_input_thread(tx: Sender<UiEvent>) {
 /// handled on the next turn (it stays in crossterm's buffer).
 fn coalesce_resize(rows: u16, cols: u16) -> InputEvent {
     let (mut rows, mut cols) = (rows, cols);
-    while let Input::Event(Event::Resize(next_rows, next_cols)) = read_input(Duration::ZERO) {
+    while let Input::Event(Event::Resize(next_cols, next_rows)) = read_input(Duration::ZERO) {
         rows = next_rows;
         cols = next_cols;
     }
@@ -2519,6 +2535,16 @@ fn handle_picking(event: UiEvent, app: &mut App, signal: &mut Option<i32>) -> bo
         }
         // No session exists: these have no producer and are ignored if one somehow arrives.
         _ => false,
+    }
+}
+
+/// The opencode-go usage refresh period (ADR 0027 C4): `None` (off) for `0`, the default for
+/// an unset value, and the clamped configured value otherwise.
+fn usage_period(configured: Option<u64>) -> Option<std::time::Duration> {
+    match configured {
+        Some(0) => None,
+        Some(seconds) => Some(radian_host::clamp_opencode_go_period(seconds)),
+        None => Some(radian_host::OPENCODE_GO_DEFAULT_PERIOD),
     }
 }
 

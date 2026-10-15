@@ -994,6 +994,9 @@ Base `d483ec9` · 一次性 worktree `/tmp/radian-mut-s2c`（`git worktree add -
 
 2/2 抓住。两个都断言，是因为新 git 认参数、旧 git 只认环境变量：只留一个就是给旧版本留洞。
 
+## footer-s3：opencode-go 用量、deck、逐字段配置（ADR 0027 C3/C4、修订 3，2026-10-16）
+
+Base `6cd0879` · 一次性 worktree `/tmp/radian-mut-f3`（`git worktree add --detach`，独立
 ## bang：输入框的 `!` 与 `!!`（ADR 0033，2026-10-16）
 
 Base `aec64f0` · 一次性 worktree `/tmp/radian-mut-bang`（`git worktree add --detach`，独立
@@ -1020,6 +1023,16 @@ Base `ea67319` · 一次性 worktree `/tmp/radian-mut-resize`（`git worktree ad
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
+| F3-A | 显示已用 percent 而非剩余（`100 − percent` 换成 `percent`） | `the_display_is_the_remaining_share` | ✅ |
+| F3-B | `items` 覆盖不生效（`resolve_item` 忽略 items 表） | `items_config_sets_symbol_style_and_format` | ✅ |
+| F3-C | 分隔符用正文默认色（`row.separator_style` 换成 `Style::default()`） | `the_separator_is_configurable_and_styled` | ✅ |
+| F3-D | 没有用量数据时留空行（去掉空行过滤） | `the_deck_usage_row_appears_only_with_data`（行数断言） | ✅ |
+| F3-E | key 泄漏进展示文本（把 `self.key` 拼进 contribution） | `the_contributor_fetches_and_publishes`（假 key 搜索） | ✅ |
+| F3-F | 颜色写法被当成角色名忽略（`parse_item_style` 只认角色） | `starship_colors_parse` | ✅ |
+
+6/6 抓住。**过程记录**：F3-A 第一轮 anchor 没对上（`cargo fmt` 把 `remaining` 折成多行），
+改成折行后的文本才变异成功；F3-D 第一轮**没抓住**——测试只查文本，加一行空白文本测试照样过，
+把断言改成 `footer.lines(...).len()`（2 行 vs 3 行）后才抓住。
 | RESIZE-A | Idle 分支不做尺寸比较（`size_changed()` 恒 `None`） | `pty_a_bare_resize_re_lays_out` | ✅ |
 | RESIZE-B | 恢复无条件 `event::poll(0)`（去掉 flaky-master 的收窄） | `pty_a_closed_master_ends_the_app_cleanly` | ❌ 未抓住 |
 
