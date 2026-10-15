@@ -272,8 +272,17 @@ impl QuestionForm {
                 self.confirm_decline = false;
                 if let Some(note) = self.note_mut() {
                     note.insert_char(c);
-                } else if let Some(text) = self.text_mut() {
-                    text.insert_char(c);
+                } else if self.text_focused() {
+                    // Typing into the `Other` row chooses it, so the typed text survives a move
+                    // away and back and counts as the answer.
+                    if let Some(index) = self.current
+                        && self.questions[index].kind != QuestionKind::Text
+                    {
+                        self.answers[index].other = true;
+                    }
+                    if let Some(text) = self.text_mut() {
+                        text.insert_char(c);
+                    }
                 } else if c == 'n' {
                     // `n` opens a note for the current question (R3).
                     self.editing_note = self.current;
@@ -389,7 +398,7 @@ impl QuestionForm {
     fn move_tab(&mut self, delta: isize) {
         // The tabs are `0..len` then `Submit` (`None`).
         let count = self.questions.len() + 1;
-        let current = self.current.map_or(self.questions.len(), |index| index);
+        let current = self.current.unwrap_or(self.questions.len());
         let next = (current as isize + delta).rem_euclid(count as isize) as usize;
         self.editing_note = None;
         self.current = (next < self.questions.len()).then_some(next);
@@ -422,18 +431,9 @@ impl QuestionForm {
         if rows == 0 {
             return;
         }
-        let other_row = question.allow_other.then_some(question.options.len());
         let answer = &mut self.answers[index];
         let next = (answer.cursor as isize + delta).clamp(0, rows as isize - 1) as usize;
         answer.cursor = next;
-        // Landing on the `Other` row chooses it, so typing there is the answer and the typed
-        // text survives a move away and back.
-        if other_row == Some(next) {
-            answer.other = true;
-            if question.kind == QuestionKind::Single {
-                answer.selected.clear();
-            }
-        }
     }
 
     /// `Space`/`Enter`: choose the highlighted row (a `multi` toggles, a `single` selects).
