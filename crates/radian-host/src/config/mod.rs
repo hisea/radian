@@ -217,6 +217,14 @@ pub struct CompactionConfig {
 /// home, neither of which belongs in a TOML value). A directory that is not listed here is
 /// never scanned — in particular `~/.claude/skills` is read only when it appears in this list
 /// (ruling 2).
+/// `[git]` (ADR 0030 R10).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GitConfig {
+    /// `protected_branches = ["release"]`: branches `git_commit` refuses besides
+    /// `main`/`master`.
+    pub protected_branches: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SkillsConfig {
     pub extra_paths: Vec<String>,
@@ -279,6 +287,9 @@ pub struct TuiConfig {
     /// `tui.banner`: whether the startup screen shows the wordmark. `None`
     /// means the default, on.
     pub banner: Option<bool>,
+    /// `tui.usage_period_secs`: the opencode-go usage refresh period (ADR 0027 C4). `None` means
+    /// the default (60 s); `0` disables the contributor; other values are clamped to 15–600 s.
+    pub usage_period_secs: Option<u64>,
     /// `tui.display.reasoning`: `"collapsed"` (the default), `"expanded"` or `"hidden"`
     /// (ADR 0028 R3). `None` means the default; an unknown value is ignored with a warning.
     pub display_reasoning: Option<String>,
@@ -322,8 +333,14 @@ pub struct TuiFooterConfig {
     pub preset: Option<String>,
     /// `separator`: the glyph(s) between items; a row may override it.
     pub separator: Option<String>,
+    /// `separator_style`: the separator's style — a theme role or a color (ADR 0027 revision
+    /// 3). The TUI parses it; the default is the `footer_separator` role.
+    pub separator_style: Option<String>,
     /// `glyphs`: `"unicode"` (the default), `"nerd"` or `"ascii"`. The TUI validates it.
     pub glyphs: Option<String>,
+    /// `[tui.footer.items.<id>]`: per-field defaults for one item, applied when a row names the
+    /// item by bare id (ADR 0027). A row's inline table wins over this.
+    pub items: std::collections::BTreeMap<String, TuiFooterItemConfig>,
     pub rows: Vec<TuiFooterRowConfig>,
 }
 
@@ -342,6 +359,10 @@ pub struct TuiFooterRowConfig {
 pub struct TuiFooterItemConfig {
     pub id: String,
     pub icon: Option<String>,
+    /// `symbol_style`: the icon's own style, when it differs from the text's.
+    pub symbol_style: Option<String>,
+    /// `disabled = true` hides the item everywhere it is named (ADR 0027).
+    pub disabled: bool,
     pub format: Option<String>,
     pub style: Option<String>,
     /// The item's priority for narrow-terminal truncation (higher survives longer).
@@ -350,6 +371,17 @@ pub struct TuiFooterItemConfig {
     pub thresholds: Vec<(i64, String)>,
     /// The item's own parameters (`width`, `fill`, `empty`, …) as text.
     pub params: Vec<(String, String)>,
+}
+
+/// `[sandbox]` (ADR 0016). Only the user-level configuration may set it: a
+/// cloned repository must not be able to open a socket for itself. There is no project-level
+/// configuration layer today, so that is documented rather than enforced here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SandboxConfig {
+    /// Unix sockets the sandbox may connect to, as written (`~` is expanded when the policy
+    /// is built; the path is canonicalized then). A path that does not resolve is skipped and
+    /// named on the startup line.
+    pub allow_unix_sockets: Vec<String>,
 }
 
 /// One parsed configuration file.
@@ -364,8 +396,11 @@ pub struct Config {
     pub read_only: bool,
     pub model: ModelConfig,
     pub permissions: PermissionsConfig,
+    pub sandbox: SandboxConfig,
     pub compaction: CompactionConfig,
     pub skills: SkillsConfig,
+    /// `[git]` (ADR 0030 R10): the branches `git_commit` refuses besides `main`/`master`.
+    pub git: GitConfig,
     pub tui: TuiConfig,
     /// `[providers.<name>]`: named custom services (ADR 0026 D10). Carried raw; the hosts
     /// resolve them through `radian_host::provider::resolve_provider`.
@@ -467,8 +502,10 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
             "schema_version" => {}
             "model" => parse_model(value, path, read_only, &mut config)?,
             "permissions" => parse_permissions(value, path, read_only, &mut config)?,
+            "sandbox" => parse_sandbox(value, path, &mut config)?,
             "compaction" => parse_compaction(value, path, &mut config)?,
             "skills" => parse_skills(value, path, &mut config)?,
+            "git" => parse_git(value, &mut config)?,
             "tui" => parse_tui(value, path, &mut config)?,
             "providers" => parse_providers(value, path, &mut config)?,
             // Known by the ADR, not wired in this slice: the hosts take MCP servers from
@@ -672,6 +709,41 @@ fn parse_permissions(
     Ok(())
 }
 
+fn parse_sandbox(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
+    let Some(table) = value.as_table() else {
+        return Err(wrong_type(path, "sandbox", "a table"));
+    };
+    for (key, value) in table {
+        match (key.as_str(), value) {
+            ("allow_unix_sockets", Value::Array(items)) => {
+                for (index, item) in items.iter().enumerate() {
+                    match item {
+                        Value::String(entry) if !entry.trim().is_empty() => {
+                            config.sandbox.allow_unix_sockets.push(entry.clone())
+                        }
+                        _ => {
+                            return Err(wrong_type(
+                                path,
+                                &format!("sandbox.allow_unix_sockets[{index}]"),
+                                "a non-empty string",
+                            ));
+                        }
+                    }
+                }
+            }
+            ("allow_unix_sockets", _) => {
+                return Err(wrong_type(
+                    path,
+                    "sandbox.allow_unix_sockets",
+                    "an array of strings",
+                ));
+            }
+            (other, _) => config.skipped.push(format!("sandbox.{other}")),
+        }
+    }
+    Ok(())
+}
+
 fn parse_compaction(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
     let Some(table) = value.as_table() else {
         return Err(wrong_type(path, "compaction", "a table"));
@@ -690,6 +762,24 @@ fn parse_compaction(value: &Value, path: &Path, config: &mut Config) -> Result<(
 /// resolves them with [`resolve_extra_paths`]. A non-string or empty entry is a structural
 /// error (an empty path would silently resolve to the config directory); an unknown key under
 /// `[skills]` is skipped and named on the startup line, like every other unknown key.
+/// Parses `[git]` (ADR 0030 R10). An unknown key or a non-string entry is skipped, never a
+/// refusal (the `tui.*` rule's spirit: a preference never blocks startup).
+fn parse_git(value: &Value, config: &mut Config) -> Result<(), ConfigError> {
+    let Some(table) = value.as_table() else {
+        return Ok(());
+    };
+    for (key, value) in table {
+        if let ("protected_branches", Value::Array(branches)) = (key.as_str(), value) {
+            for branch in branches {
+                if let Value::String(branch) = branch {
+                    config.git.protected_branches.push(branch.clone());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn parse_skills(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
     let Some(table) = value.as_table() else {
         return Err(wrong_type(path, "skills", "a table"));
@@ -789,6 +879,51 @@ fn resolve_extra_path(entry: &str, config_dir: Option<&Path>, home: Option<&Path
     } else {
         expanded
     }
+}
+
+/// Expands `~` and canonicalizes `[sandbox] allow_unix_sockets` (ADR 0016). Only
+/// absolute paths are accepted (a relative one is skipped, never joined to the config dir:
+/// the sandbox rule must name exactly one socket). Returns the canonical paths and one
+/// warning per entry that was skipped. Pure over `home`, so the rules are testable.
+pub fn resolve_allow_unix_sockets(
+    raw: &[String],
+    home: Option<&Path>,
+) -> (Vec<PathBuf>, Vec<String>) {
+    let mut paths = Vec::new();
+    let mut warnings = Vec::new();
+    for entry in raw {
+        let expanded = if entry == "~" {
+            home.map(Path::to_path_buf)
+        } else if let Some(rest) = entry.strip_prefix("~/") {
+            home.map(|home| home.join(rest))
+        } else if entry.starts_with('~') {
+            // `~user` is not expanded.
+            None
+        } else {
+            Some(PathBuf::from(entry))
+        };
+        let Some(expanded) = expanded else {
+            warnings.push(format!(
+                "sandbox.allow_unix_sockets: {entry}: cannot expand the home directory"
+            ));
+            continue;
+        };
+        if !expanded.is_absolute() {
+            warnings.push(format!(
+                "sandbox.allow_unix_sockets: {entry}: must be an absolute path"
+            ));
+            continue;
+        }
+        match std::fs::canonicalize(&expanded) {
+            Ok(path) => {
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+            Err(error) => warnings.push(format!("sandbox.allow_unix_sockets: {entry}: {error}")),
+        }
+    }
+    (paths, warnings)
 }
 
 fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
@@ -910,6 +1045,9 @@ fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
                 }
             }
             ("widgets", _) => config.skipped.push("tui.widgets".into()),
+            ("usage_period_secs", Value::Integer(seconds)) => {
+                config.tui.usage_period_secs = Some(*seconds as u64);
+            }
             ("display", Value::Table(display)) => {
                 for (key, value) in display {
                     match (key.as_str(), value) {
@@ -992,7 +1130,19 @@ fn parse_footer(table: &toml::map::Map<String, Value>, config: &mut Config) -> R
         match (key.as_str(), value) {
             ("preset", Value::String(preset)) => footer.preset = Some(preset.clone()),
             ("separator", Value::String(separator)) => footer.separator = Some(separator.clone()),
+            ("separator_style", Value::String(style)) => {
+                footer.separator_style = Some(style.clone())
+            }
             ("glyphs", Value::String(glyphs)) => footer.glyphs = Some(glyphs.clone()),
+            ("items", Value::Table(items)) => {
+                for (id, value) in items {
+                    let Value::Table(table) = value else {
+                        return Err(format!("tui.footer.items.{id}"));
+                    };
+                    let item = parse_footer_item_table(table, id)?;
+                    footer.items.insert(id.clone(), item);
+                }
+            }
             ("rows", Value::Array(rows)) => {
                 for row in rows {
                     let Some(row) = row.as_table() else {
@@ -1031,54 +1181,78 @@ fn parse_footer_row(table: &toml::map::Map<String, Value>) -> Result<TuiFooterRo
 
 /// One item: a bare id string, or a table with `item` plus options. Anything else is skipped.
 fn parse_footer_item(value: &Value) -> Result<TuiFooterItemConfig, String> {
-    let mut item = TuiFooterItemConfig::default();
     match value {
-        Value::String(id) => {
-            item.id = id.clone();
-            return Ok(item);
-        }
+        Value::String(id) => Ok(TuiFooterItemConfig {
+            id: id.clone(),
+            ..Default::default()
+        }),
         Value::Table(table) => {
-            for (key, value) in table {
-                match (key.as_str(), value) {
-                    ("item", Value::String(id)) => item.id = id.clone(),
-                    ("icon", Value::String(icon)) => item.icon = Some(icon.clone()),
-                    ("format", Value::String(format)) => item.format = Some(format.clone()),
-                    ("style", Value::String(style)) => item.style = Some(style.clone()),
-                    ("priority", Value::Integer(priority)) => item.priority = Some(*priority),
-                    ("thresholds", Value::Array(thresholds)) => {
-                        for threshold in thresholds {
-                            let Some(threshold) = threshold.as_table() else {
-                                return Err("tui.footer.rows.thresholds".into());
-                            };
-                            let at = threshold.get("at").and_then(Value::as_integer);
-                            let style = threshold.get("style").and_then(Value::as_str);
-                            match (at, style) {
-                                (Some(at), Some(style)) => {
-                                    item.thresholds.push((at, style.to_owned()));
-                                }
-                                _ => return Err("tui.footer.rows.thresholds".into()),
-                            }
+            let id = table
+                .get("item")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            if id.is_empty() {
+                return Err("tui.footer.rows.item".into());
+            }
+            parse_footer_item_table(table, &id)
+        }
+        _ => Err("tui.footer.rows.item".into()),
+    }
+}
+
+/// The options of one item table. `id` is known already: from the `item` key in a row, or from
+/// the key of a `[tui.footer.items.<id>]` table. `icon` and `symbol` are the same field
+/// (ADR 0027 C2 used `icon`, revision 3 calls it `symbol`); a known option with the wrong type
+/// is skipped, not a refusal.
+fn parse_footer_item_table(
+    table: &toml::map::Map<String, Value>,
+    id: &str,
+) -> Result<TuiFooterItemConfig, String> {
+    let mut item = TuiFooterItemConfig {
+        id: id.to_owned(),
+        ..Default::default()
+    };
+    for (key, value) in table {
+        match (key.as_str(), value) {
+            ("item", Value::String(_)) => {}
+            ("icon" | "symbol", Value::String(symbol)) => item.icon = Some(symbol.clone()),
+            ("symbol_style", Value::String(style)) => item.symbol_style = Some(style.clone()),
+            ("format", Value::String(format)) => item.format = Some(format.clone()),
+            ("style", Value::String(style)) => item.style = Some(style.clone()),
+            ("disabled", Value::Boolean(disabled)) => item.disabled = *disabled,
+            ("priority", Value::Integer(priority)) => item.priority = Some(*priority),
+            ("thresholds", Value::Array(thresholds)) => {
+                for threshold in thresholds {
+                    let Some(threshold) = threshold.as_table() else {
+                        return Err("tui.footer.rows.thresholds".into());
+                    };
+                    let at = threshold.get("at").and_then(Value::as_integer);
+                    let style = threshold.get("style").and_then(Value::as_str);
+                    match (at, style) {
+                        (Some(at), Some(style)) => {
+                            item.thresholds.push((at, style.to_owned()));
                         }
-                    }
-                    // A known option with the wrong type is skipped, not a refusal.
-                    ("item" | "icon" | "format" | "style" | "priority", _) => {
-                        return Err("tui.footer.rows.item".into());
-                    }
-                    // Everything else is the item's own parameter, kept as text.
-                    (param, value) => {
-                        if let Some(text) = value_to_text(value) {
-                            item.params.push((param.to_owned(), text));
-                        } else {
-                            return Err(format!("tui.footer.rows.{param}"));
-                        }
+                        _ => return Err("tui.footer.rows.thresholds".into()),
                     }
                 }
             }
+            (
+                "item" | "icon" | "symbol" | "symbol_style" | "format" | "style" | "disabled"
+                | "priority",
+                _,
+            ) => {
+                return Err("tui.footer.rows.item".into());
+            }
+            // Everything else is the item's own parameter, kept as text.
+            (param, value) => {
+                if let Some(text) = value_to_text(value) {
+                    item.params.push((param.to_owned(), text));
+                } else {
+                    return Err(format!("tui.footer.rows.{param}"));
+                }
+            }
         }
-        _ => return Err("tui.footer.rows.item".into()),
-    }
-    if item.id.is_empty() {
-        return Err("tui.footer.rows.item".into());
     }
     Ok(item)
 }
@@ -1240,6 +1414,47 @@ mod tests {
 
     fn parse_str(text: &str) -> Result<Config, ConfigError> {
         parse(Path::new("/tmp/test/config.toml"), text)
+    }
+
+    /// ADR 0016: `[sandbox] allow_unix_sockets` is an array of strings; a bad
+    /// shape is refused and an unknown key under `[sandbox]` is only skipped.
+    #[test]
+    fn sandbox_allow_unix_sockets_is_parsed_and_a_bad_shape_is_refused() {
+        let config = parse_str(
+            "schema_version = 1\n[sandbox]\nallow_unix_sockets = [\"~/.config/herdr/herdr.sock\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.sandbox.allow_unix_sockets,
+            vec!["~/.config/herdr/herdr.sock"]
+        );
+        assert!(
+            parse_str("schema_version = 1\n[sandbox]\nallow_unix_sockets = \"x\"\n").is_err(),
+            "a non-array is refused"
+        );
+        let config = parse_str("schema_version = 1\n[sandbox]\nfuture = true\n").unwrap();
+        assert!(config.sandbox.allow_unix_sockets.is_empty());
+        assert!(config.skipped.contains(&"sandbox.future".to_owned()));
+    }
+
+    /// The host expands `~`, canonicalizes, and skips (with a warning) a relative or missing
+    /// entry. Only absolute paths are accepted.
+    #[test]
+    fn resolve_allow_unix_sockets_expands_home_and_skips_bad_entries() {
+        let dir = std::env::temp_dir().join("radian-host-sandbox-sock-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("h.sock");
+        std::fs::write(&sock, b"").unwrap();
+        let raw = vec![
+            "~/.config/herdr/herdr.sock".to_owned(),
+            "relative.sock".to_owned(),
+            sock.to_string_lossy().into_owned(),
+        ];
+        let (paths, warnings) = resolve_allow_unix_sockets(&raw, Some(Path::new("/home/u")));
+        assert_eq!(paths.len(), 1, "only the existing absolute path resolves");
+        assert_eq!(paths[0], std::fs::canonicalize(&sock).unwrap());
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

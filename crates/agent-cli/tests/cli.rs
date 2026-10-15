@@ -2514,6 +2514,37 @@ async fn the_startup_text_does_not_claim_credential_isolation() {
     );
 }
 
+/// ADR 0036 C2: `agent` reads the workspace's `AGENTS.md` and names it on the startup line.
+#[tokio::test]
+async fn the_context_file_is_reported_on_the_startup_line() {
+    let dir = scratch("context-line");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(ws.join(".git")).unwrap();
+    std::fs::write(ws.join("AGENTS.md"), "CONTEXT-LINE-MARKER\n").unwrap();
+    let server = MockServer::start(vec![text_reply("done")]).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_agent(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("[context] AGENTS.md"), "{stderr}");
+}
+
 /// Every tool result text in request `n` (a batch has more than one).
 fn tool_result_contents(server: &MockServer, n: usize) -> Vec<String> {
     messages_of(server, n)

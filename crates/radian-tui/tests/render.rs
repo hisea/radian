@@ -763,7 +763,11 @@ fn a_tool_card_head_is_the_same_on_the_live_and_resume_paths() {
     let resume_text = screen(&render(&mut resumed, 60, 12));
     // The card's head is the status line (ADR 0028): `shell: <title>`, with the
     // command and the output as its sections.
-    assert!(live_text.contains("✔ shell: make test"), "{live_text}");
+    let ok = live.footer_glyphs().tool_status()[1];
+    assert!(
+        live_text.contains(&format!("{ok} shell: make test")),
+        "{live_text}"
+    );
     assert!(live_text.contains("$ make test"), "{live_text}");
     assert!(
         !live_text.contains("Command"),
@@ -1063,6 +1067,8 @@ fn the_block_layout_snapshot() {
             line.trim_end().to_string()
         })
         .collect();
+    // The status glyphs main's footer draws (running, success, failure).
+    let status = app.footer_glyphs().tool_status();
     // The frame's rows are built, not typed out: an 80-column border is 78 cells wide.
     let top = format!("┌{}┐", "─".repeat(78));
     let bottom = format!("└{}┘", "─".repeat(78));
@@ -1075,18 +1081,18 @@ fn the_block_layout_snapshot() {
         )
     };
     let golden: Vec<String> = vec![
-        "".to_string(),                      // the user block's top pad (banded)
-        "> explain the failure".to_string(), // the user text
-        "".to_string(),                      // the user block's bottom pad (banded)
-        "▸ thinking (3 lines)".to_string(),  // the folded channel: ▸ in the marker column
-        "".to_string(),                      // the container's gap
-        "  Looking into it.".to_string(),    // the assistant
-        "".to_string(),                      // the gap
-        top.clone(),                         // the shell card's frame (ADR 0028)
-        row("✘ shell: make test"),           // the head status line
-        row("$ make test"),                  // the command (no divider: part of the call)
-        divider("Error"),                    // the output section's label (the call failed)
-        row("$ make test"),                  // the output
+        "".to_string(),                                  // the user block's top pad (banded)
+        "> explain the failure".to_string(),             // the user text
+        "".to_string(),                                  // the user block's bottom pad (banded)
+        "> thinking (3 lines)".to_string(), // the folded channel: the marker glyph (ADR 0027)
+        "".to_string(),                     // the container's gap
+        "  Looking into it.".to_string(),   // the assistant
+        "".to_string(),                     // the gap
+        top.clone(),                        // the shell card's frame (ADR 0028)
+        row(&format!("{} shell: make test", status[2])), // the head status line
+        row("$ make test"),                 // the command (no divider: part of the call)
+        divider("Error"),                   // the output section's label (the call failed)
+        row("$ make test"),                 // the output
         row("exit code: 2"),
         row("--- stdout ---"),
         row("boom"),
@@ -1094,7 +1100,7 @@ fn the_block_layout_snapshot() {
         bottom.clone(),  // the card's bottom border
         "".to_string(),  // the gap
         top.clone(),     // the list card
-        row("✔ list: src (2 entries)"),
+        row(&format!("{} list: src (2 entries)", status[1])),
         divider("Output"),
         row("d 4.0K src"), // the aligned table
         row("f 512 B b.md"),
@@ -1677,7 +1683,7 @@ fn thinking_folds_to_one_line_and_ctrl_t_expands_it() {
         message: assistant_with("THE ANSWER", "FIRST THOUGHT\nSECOND THOUGHT", false, vec![]),
     });
     let text = screen(&render(&mut app, 60, 10));
-    assert!(text.contains("▸ thinking (2 lines)"), "{text}");
+    assert!(text.contains("> thinking (2 lines)"), "{text}");
     assert!(
         !text.contains("FIRST THOUGHT"),
         "folded by default:
@@ -1693,11 +1699,11 @@ fn thinking_folds_to_one_line_and_ctrl_t_expands_it() {
 {text}"
     );
     assert!(text.contains("SECOND THOUGHT"), "{text}");
-    assert!(!text.contains("▸ thinking"), "{text}");
+    assert!(!text.contains("> thinking"), "{text}");
 
     app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
     let text = screen(&render(&mut app, 60, 10));
-    assert!(text.contains("▸ thinking (2 lines)"), "{text}");
+    assert!(text.contains("> thinking (2 lines)"), "{text}");
     assert!(!text.contains("FIRST THOUGHT"), "{text}");
 }
 

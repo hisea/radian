@@ -65,10 +65,33 @@ async fn open_with_resume(
     capabilities: Vec<SessionCapability>,
     resume: bool,
 ) -> (Scratch, Arc<radian_host::LocalSession>) {
+    let records = resume.then(|| {
+        vec![
+            agent_core::JournalRecord::Message {
+                index: 0,
+                message: agent_core::Message::user("go"),
+            },
+            agent_core::JournalRecord::Message {
+                index: 1,
+                message: agent_core::Message::assistant("ok"),
+            },
+        ]
+    });
+    open_with_records(label, capabilities, records).await
+}
+
+/// Opens a session whose file is the given records (`None` = a new session). A `Some` list is
+/// written first, so the session resumes it.
+async fn open_with_records(
+    label: &str,
+    capabilities: Vec<SessionCapability>,
+    records: Option<Vec<agent_core::JournalRecord>>,
+) -> (Scratch, Arc<radian_host::LocalSession>) {
     let scratch = Scratch::new(label);
     let workspace = scratch.0.join("ws");
     std::fs::create_dir_all(&workspace).unwrap();
-    if resume {
+    let resume = records.is_some();
+    if let Some(records) = records {
         let path = scratch.0.join(format!("{label}.jsonl"));
         let journal = radian_session::SessionJournal::create(
             &path,
@@ -76,16 +99,10 @@ async fn open_with_resume(
             radian_session::SessionCreatedData::new(workspace.to_string_lossy(), json!({})),
         )
         .unwrap();
-        for (index, message) in [
-            (0usize, agent_core::Message::user("go")),
-            (1, agent_core::Message::assistant("ok")),
-        ] {
-            agent_core::TranscriptJournal::append(
-                &journal,
-                agent_core::JournalRecord::Message { index, message },
-            )
-            .await
-            .unwrap();
+        for record in records {
+            agent_core::TranscriptJournal::append(&journal, record)
+                .await
+                .unwrap();
         }
         drop(journal);
     }
@@ -127,6 +144,7 @@ async fn open_with_resume(
             config_slot: config_slot.clone(),
             config_queue: radian_runtime::ConfigQueue::new(),
             budget_for: None,
+            protected_branches: Vec::new(),
             servers: Vec::new(),
             system_prompt: None,
             context_budget: None,
@@ -242,6 +260,7 @@ async fn a_local_session_accepts_a_declared_command() {
             config_slot: config_slot.clone(),
             config_queue: radian_runtime::ConfigQueue::new(),
             budget_for: None,
+            protected_branches: Vec::new(),
             servers: Vec::new(),
             system_prompt: None,
             context_budget: None,
@@ -425,6 +444,65 @@ async fn a_resume_parses_the_journal_once() {
         radian_session::testing::open_count(),
         1,
         "a resumed journal must be parsed exactly once"
+    );
+    session.stop();
+    let _ = session.join().await;
+    drop(scratch);
+}
+
+/// A session file that ends inside an uncommitted replacement segment is aborted when it is
+/// resumed (`SessionJournal::into_journal` reports `wrote_abort`). The driver must recover the
+/// transcript the **disk** fold has - it may not reuse the parse taken before the abort line
+/// was written. The pending segment's messages are dropped either way, so this also pins that
+/// the abort closes the segment the way the fold on disk does.
+#[tokio::test]
+async fn a_resume_aborts_a_pending_segment_and_the_driver_matches_the_disk_fold() {
+    use agent_core::{JournalRecord, Message};
+    let records = vec![
+        JournalRecord::Message {
+            index: 0,
+            message: Message::user("old zero"),
+        },
+        JournalRecord::Message {
+            index: 1,
+            message: Message::user("old one"),
+        },
+        JournalRecord::TranscriptReplaced {
+            revision: 7,
+            len: 4,
+        },
+        JournalRecord::Message {
+            index: 0,
+            message: Message::user("pending zero"),
+        },
+        JournalRecord::Message {
+            index: 1,
+            message: Message::user("pending one"),
+        },
+    ];
+    let (scratch, session) = open_with_records(
+        "resume-abort",
+        vec![SessionCapability::Observe],
+        Some(records),
+    )
+    .await;
+    // The resume wrote the abort line; the fold on disk is the authority.
+    let path = scratch.0.join("resume-abort.jsonl");
+    let disk = radian_session::Session::open(&path).unwrap();
+    assert_eq!(
+        disk.uncommitted_replacements().len(),
+        1,
+        "the pending segment is closed as aborted"
+    );
+    let disk = disk.history().unwrap();
+    assert_eq!(
+        disk,
+        vec![Message::user("old zero"), Message::user("old one")],
+        "the pending segment's messages are dropped"
+    );
+    assert_eq!(
+        session.history, disk,
+        "the driver's recovered transcript must match the disk fold"
     );
     session.stop();
     let _ = session.join().await;

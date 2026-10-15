@@ -350,3 +350,105 @@ fn the_id_level_asks_the_host_and_shows_the_answer() {
     assert!(!result.dirty);
     assert!(app.completion().is_none(), "a stale answer shows nothing");
 }
+
+/// The slash menu highlights its first row; Up/Down move the highlight (and wrap), and Enter
+/// accepts the highlighted row rather than the first. The command-name level offers one best
+/// completion, so the menu proper is the argument level.
+#[test]
+fn the_slash_menu_moves_its_highlight_and_enter_accepts_it() {
+    let mut app = App::new("m", "s");
+    for c in "/memory ".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    let rows = app.completion().expect("a list").to_vec();
+    assert!(rows.len() >= 2, "need at least two rows: {rows:?}");
+    assert_eq!(app.completion_cursor, 0, "the first row is highlighted");
+    let second = rows[1].split_whitespace().next().unwrap().to_owned();
+
+    app.on_key(key(KeyCode::Down));
+    assert_eq!(app.completion_cursor, 1);
+    let result = app.on_key(key(KeyCode::Enter));
+    assert!(result.effects.is_empty(), "{:?}", result.effects);
+    assert_eq!(
+        app.input,
+        format!("/memory {second} ").as_str(),
+        "Enter accepts the highlighted row"
+    );
+
+    // Up from the first row wraps to the last.
+    let mut app = App::new("m", "s");
+    for c in "/memory ".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    let last = app
+        .completion()
+        .unwrap()
+        .last()
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
+    app.on_key(key(KeyCode::Up));
+    let result = app.on_key(key(KeyCode::Tab));
+    assert!(result.effects.is_empty(), "{:?}", result.effects);
+    assert_eq!(
+        app.input,
+        format!("/memory {last} ").as_str(),
+        "up wraps to the last row"
+    );
+}
+
+/// Typing after the menu filters it and puts the highlight back on the first row.
+#[test]
+fn typing_filters_the_slash_menu_and_resets_the_highlight() {
+    let mut app = App::new("m", "s");
+    for c in "/memory ".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    assert!(app.completion().is_some());
+    app.on_key(key(KeyCode::Down));
+    assert_eq!(app.completion_cursor, 1);
+    // `f` narrows the level; the highlight is back on the first row.
+    app.on_key(key(KeyCode::Char('f')));
+    assert_eq!(app.completion_cursor, 0);
+    let rows = app.completion().expect("the filtered list").to_vec();
+    assert!(
+        rows.iter().any(|row| row.starts_with("forget")),
+        "the list follows the new text: {rows:?}"
+    );
+}
+
+/// ADR 0031 T3: the startup trust modal's **Esc** is the fail-safe answer —
+/// it must never trust. It maps to `UntrustSession`: do not trust **this session only**, which
+/// is **not persistent**, so the loop writes no `trust.json` and the next start asks again.
+#[test]
+fn escaping_the_trust_modal_untrusts_this_session_only() {
+    let mut app = App::new("m", "s");
+    app.push_trust_modal(std::path::PathBuf::from("/work/example"));
+    assert!(app.has_modal());
+    let effects = app.on_key(key(KeyCode::Esc)).effects;
+    assert_eq!(
+        effects,
+        vec![Effect::SetTrust {
+            choice: radian_host::trust::Choice::UntrustSession
+        }],
+        "Esc must choose `do not trust, this session only`, never a trust"
+    );
+    assert!(!app.has_modal(), "the modal is dismissed");
+    assert!(
+        !radian_host::trust::Choice::UntrustSession.persistent(),
+        "Esc writes no trust.json: the next start asks again"
+    );
+
+    // Enter takes the highlighted default: the **persistent** "do not trust this directory".
+    let mut app = App::new("m", "s");
+    app.push_trust_modal(std::path::PathBuf::from("/work/example"));
+    assert_eq!(
+        app.on_key(key(KeyCode::Enter)).effects,
+        vec![Effect::SetTrust {
+            choice: radian_host::trust::Choice::UntrustHere
+        }]
+    );
+    assert!(radian_host::trust::Choice::UntrustHere.persistent());
+}

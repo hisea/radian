@@ -203,6 +203,24 @@ pub enum RuntimeEvent {
     /// `critical = false`, never replayed — the store is the state, this is the record that a
     /// change happened. `path` is the canonical directory the decision is about.
     ProjectTrustChanged { path: String, decision: bool },
+    /// A user's `!`/`!!` command ran (ADR 0033). Audit only: `critical = false`. The command,
+    /// whether it entered the model's context, the exit status and whether it was cancelled —
+    /// who ran what and how it ended. `!!` is recorded too (staying out of the context is not
+    /// staying out of the audit). The `Ran \`cmd\`` user message, when one is injected, is a
+    /// separate `InboxEnqueued`/`MessageAppended` pair.
+    UserBash {
+        command: String,
+        exclude_from_context: bool,
+        exit_code: Option<i32>,
+        cancelled: bool,
+    },
+    /// The host-side `git_commit` tool committed (ADR 0030 R10). Audit only: `critical =
+    /// false`. The new commit id, the branch it landed on, and how many files it changed.
+    GitCommitted {
+        commit: String,
+        branch: String,
+        files: usize,
+    },
 }
 
 impl RuntimeEvent {
@@ -222,6 +240,8 @@ impl RuntimeEvent {
             RuntimeEvent::MemoryInjected { .. } => "MemoryInjected",
             RuntimeEvent::SessionForked { .. } => "SessionForked",
             RuntimeEvent::ProjectTrustChanged { .. } => "ProjectTrustChanged",
+            RuntimeEvent::UserBash { .. } => "UserBash",
+            RuntimeEvent::GitCommitted { .. } => "GitCommitted",
         }
     }
 
@@ -241,7 +261,9 @@ impl RuntimeEvent {
             | RuntimeEvent::ApprovalPolicyChanged { .. }
             | RuntimeEvent::MemoryInjected { .. }
             | RuntimeEvent::SessionForked { .. }
-            | RuntimeEvent::ProjectTrustChanged { .. } => false,
+            | RuntimeEvent::ProjectTrustChanged { .. }
+            | RuntimeEvent::UserBash { .. }
+            | RuntimeEvent::GitCommitted { .. } => false,
         }
     }
 
@@ -363,6 +385,21 @@ pub(crate) struct ProjectTrustChangedData {
     pub decision: bool,
 }
 
+#[derive(Serialize)]
+pub(crate) struct UserBashData<'a> {
+    pub command: &'a str,
+    pub exclude_from_context: bool,
+    pub exit_code: Option<i32>,
+    pub cancelled: bool,
+}
+
+#[derive(Serialize)]
+pub(crate) struct GitCommittedData<'a> {
+    pub commit: &'a str,
+    pub branch: &'a str,
+    pub files: usize,
+}
+
 /// The `data` view of one runtime event. A manual enum (like the transcript writer's
 /// `Render`) keeps the field order of the ADR and avoids an externally tagged wrapper.
 pub(crate) enum RuntimeData<'a> {
@@ -379,6 +416,8 @@ pub(crate) enum RuntimeData<'a> {
     MemoryInjected(MemoryInjectedData<'a>),
     SessionForked(SessionForkedData<'a>),
     ProjectTrustChanged(ProjectTrustChangedData),
+    UserBash(UserBashData<'a>),
+    GitCommitted(GitCommittedData<'a>),
 }
 
 impl Serialize for RuntimeData<'_> {
@@ -397,6 +436,8 @@ impl Serialize for RuntimeData<'_> {
             RuntimeData::MemoryInjected(d) => d.serialize(serializer),
             RuntimeData::SessionForked(d) => d.serialize(serializer),
             RuntimeData::ProjectTrustChanged(d) => d.serialize(serializer),
+            RuntimeData::UserBash(d) => d.serialize(serializer),
+            RuntimeData::GitCommitted(d) => d.serialize(serializer),
         }
     }
 }
@@ -500,5 +541,25 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
                 decision: *decision,
             })
         }
+        RuntimeEvent::UserBash {
+            command,
+            exclude_from_context,
+            exit_code,
+            cancelled,
+        } => RuntimeData::UserBash(UserBashData {
+            command,
+            exclude_from_context: *exclude_from_context,
+            exit_code: *exit_code,
+            cancelled: *cancelled,
+        }),
+        RuntimeEvent::GitCommitted {
+            commit,
+            branch,
+            files,
+        } => RuntimeData::GitCommitted(GitCommittedData {
+            commit,
+            branch,
+            files: *files,
+        }),
     }
 }

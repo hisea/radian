@@ -792,3 +792,69 @@ async fn the_sandbox_tmpdir_is_dot_radian_sandbox() {
         "the tmp directory must be inside the workspace"
     );
 }
+
+/// ADR 0033: a user's `!`/`!!` command runs through the **same** sandboxed executor as the
+/// `shell` tool (`run_user_bash`), reporting stdout and the exit code the same way.
+#[tokio::test]
+async fn a_user_bash_runs_through_the_sandbox_and_reports_output() {
+    let dir = TempDir::new("user-bash");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let sandbox = sandbox(SandboxMode::FullAccess, &root, &[]).expect("full access");
+    let out = radian_coding::run_user_bash(
+        &root,
+        &sandbox,
+        "printf 'hello'; printf 'oops' >&2; exit 3",
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("a full-access run");
+    assert_eq!(out.stdout, "hello");
+    assert_eq!(out.stderr, "oops");
+    assert_eq!(out.exit_code, Some(3));
+    assert!(!out.cancelled);
+    assert!(!out.timed_out);
+}
+
+/// ADR 0033 + ADR 0012: the command really is confined when the tier enforces a sandbox — a
+/// write outside the workspace fails. Skips when this machine has no working backend.
+#[tokio::test]
+async fn a_user_bash_is_confined_in_a_workspace_write_sandbox() {
+    let dir = TempDir::new("user-bash-confined");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let outside = sentinel_outside(&dir);
+    let Some(sandbox) = sandbox(SandboxMode::WorkspaceWrite, &root, &[]) else {
+        return; // no working backend here: skip rather than pretend
+    };
+    let target = outside.join("from-bang.txt");
+    let out = radian_coding::run_user_bash(
+        &root,
+        &sandbox,
+        &format!("echo x > {}", target.display()),
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("the command ran (and failed)");
+    assert_ne!(out.exit_code, Some(0), "the write must be denied");
+    assert!(
+        !target.exists(),
+        "nothing may be written outside the workspace"
+    );
+}
+
+/// ADR 0033: a `!` command honours the same cancellation the shell tool does: a pre-cancelled
+/// token kills its process group and the outcome says so.
+#[tokio::test]
+async fn a_user_bash_honours_cancellation() {
+    let dir = TempDir::new("user-bash-cancel");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let sandbox = sandbox(SandboxMode::FullAccess, &root, &[]).expect("full access");
+    let token = CancellationToken::new();
+    token.cancel();
+    let out = radian_coding::run_user_bash(&root, &sandbox, "sleep 30", &token)
+        .await
+        .expect("the run reported a cancellation");
+    assert!(out.cancelled, "{out:?}");
+}

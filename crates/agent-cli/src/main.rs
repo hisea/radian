@@ -734,6 +734,8 @@ struct Setup {
     skills_builtin: bool,
     /// `[skills] disabled`: built-in skill names to leave out.
     skills_disabled: Vec<String>,
+    /// `[sandbox] allow_unix_sockets`, `~`-expanded and canonicalized (ADR 0016).
+    allow_unix_sockets: Vec<PathBuf>,
 }
 
 async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
@@ -1068,6 +1070,16 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         ),
         skills_builtin: config.skills.builtin.unwrap_or(true),
         skills_disabled: config.skills.disabled.clone(),
+        allow_unix_sockets: {
+            let (paths, warnings) = radian_host::resolve_allow_unix_sockets(
+                &config.sandbox.allow_unix_sockets,
+                radian_host::user_home().as_deref(),
+            );
+            for warning in &warnings {
+                eprintln!("[config] {warning}");
+            }
+            paths
+        },
     })
 }
 
@@ -1360,7 +1372,13 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     if let Some(trust) = radian_host::trust_dir() {
         sandbox_deny_read.push(trust);
     }
-    let sandbox = profile::build_sandbox(profile_arg, &workspace_path, &sandbox_deny_read)?;
+    // ADR 0016: the whitelisted Unix sockets (resolved in `setup`).
+    let sandbox = profile::build_sandbox(
+        profile_arg,
+        &workspace_path,
+        &sandbox_deny_read,
+        &setup.allow_unix_sockets,
+    )?;
 
     // The approver and the audit sink. An `auto` policy (ADR 0026 D9, from `--yes`/`--approval
     // auto`/config/resume) answers every `ask` before any approver is consulted, so the
@@ -1447,6 +1465,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             config_slot: setup.config_slot,
             config_queue: setup.config_queue,
             budget_for: Some(setup.budget_for),
+            protected_branches: Vec::new(),
             servers: setup.servers,
             system_prompt: setup.system_prompt.clone(),
             context_budget: setup.context_budget,
@@ -1541,6 +1560,8 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     // the session; the wording is the host's (ADR 0012 decision 4).
     eprintln!("[profile] {}", session.facts().profile_line);
     eprintln!("[sandbox] {}", session.facts().sandbox_facts);
+    // ADR 0036 C2: the loaded context files (paths and sizes), or `none`.
+    eprintln!("[context] {}", session.facts().context_line);
     // ADR 0026 D9: the startup line names the auto policy whichever way it was chosen, and
     // the warnings say when a config value was ignored or a restore refused.
     if setup.approval.policy == radian_permissions::ApprovalPolicy::Auto {

@@ -207,6 +207,8 @@ pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
         EntryKind::Warning => "! ",
         // Rule 2: two cells like every other marker; the `Tip:` label is content now.
         EntryKind::Tip => "  ",
+        // ADR 0033: the command line; `!` (context) vs `!!` (not) differ in color, not marker.
+        EntryKind::Bash { .. } => "$ ",
     }
 }
 
@@ -225,6 +227,13 @@ fn marker(kind: EntryKind, theme: &Theme) -> (&'static str, Style) {
         EntryKind::Tip => theme.truncation,
         // The compaction one-liner is structural: the hunk/accent role.
         EntryKind::Compaction => theme.diff_hunk,
+        // ADR 0033: `!` uses the command color; `!!` steps down to the hint level.
+        EntryKind::Bash {
+            exclude_from_context: false,
+        } => theme.tool_call,
+        EntryKind::Bash {
+            exclude_from_context: true,
+        } => theme.hint,
     };
     (marker_prefix(kind), style)
 }
@@ -242,6 +251,13 @@ fn body_style(entry: &Entry, theme: &Theme) -> Style {
         EntryKind::Tip => theme.hint,
         // The expanded summary is body text; its one-liner is styled by `marker`.
         EntryKind::Compaction => theme.notice_body,
+        // ADR 0033: the same split as `marker`.
+        EntryKind::Bash {
+            exclude_from_context: false,
+        } => theme.tool_call,
+        EntryKind::Bash {
+            exclude_from_context: true,
+        } => theme.hint,
         EntryKind::User | EntryKind::Assistant => {
             if entry.interrupted {
                 Style::default().add_modifier(Modifier::ITALIC)
@@ -393,14 +409,15 @@ fn render_row(
     if row.frame != blocks::Frame::None {
         return render_frame_row(entry, row, style, theme, band, width, glyphs);
     }
-    // The collapsed reasoning placeholder is one synthetic line: its `▸` is the marker
+    // The collapsed reasoning placeholder is one synthetic line: its marker is the marker
     // column's own glyph (ADR 0028 rule 5), so the body column does not move
-    // between folded and expanded.
+    // between folded and expanded. `>` stands in for `▸` (ADR 0027: `▸` is not in
+    // all seven checked fonts).
     let placeholder = entry.kind == EntryKind::Reasoning && row.hint;
     let lead = if row.code {
         String::new()
     } else if placeholder {
-        "▸ ".to_string()
+        "> ".to_string()
     } else if first_text {
         prefix.to_string()
     } else {
@@ -1154,9 +1171,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // The find matcher wraps at the same width; a resize recomputes it (once, not per frame).
     app.set_transcript_width(width);
     let modes = app.display_modes();
+    let t_draw = std::time::Instant::now();
     let (total, _) = visible_lines(&mut app.entries, modes, width, 0, 0, &theme);
+    radian_session::trace::took("draw/measure", t_draw);
     app.set_viewport(chunks[0].height, total);
+    let t_window = std::time::Instant::now();
     let (_, visible) = visible_lines(&mut app.entries, modes, width, app.scroll, height, &theme);
+    radian_session::trace::took("draw/window", t_window);
     let visible = match app.find_state() {
         Some(find) => visible
             .into_iter()
@@ -1191,7 +1212,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
         None => visible,
     };
+    let t_render = std::time::Instant::now();
     frame.render_widget(Paragraph::new(visible), chunks[0]);
+    radian_session::trace::took("draw/render-transcript", t_render);
 
     // The picker overlay draws over the transcript; the input box and the status bar stay
     // visible below it (ADR 0023 U4).
@@ -1200,10 +1223,19 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     if !completion.is_empty() {
-        let style = theme.completion;
+        // The highlighted row: the menu's cursor, styled with the theme's
+        // `selection` (reversed in `mono`), so it is clear which candidate Enter/Tab accepts.
         let lines: Vec<Line> = completion
             .into_iter()
-            .map(|row| Line::from(Span::styled(row, style)))
+            .enumerate()
+            .map(|(index, row)| {
+                let style = if index == app.completion_cursor {
+                    theme.selection
+                } else {
+                    theme.completion
+                };
+                Line::from(Span::styled(row, style))
+            })
             .collect();
         frame.render_widget(Paragraph::new(lines), chunks[1]);
     }
@@ -1451,10 +1483,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
     }
 
-    frame.render_widget(
-        Paragraph::new(status_lines(app, chunks[3].width as usize)),
-        chunks[3],
-    );
+    let t_status = std::time::Instant::now();
+    let status = status_lines(app, chunks[3].width as usize);
+    radian_session::trace::took("draw/status-lines", t_status);
+    frame.render_widget(Paragraph::new(status), chunks[3]);
+    radian_session::trace::mark("draw/end");
 }
 
 /// The status area's height: one row for the `classic` preset, the footer's rows for `pi`.
@@ -1469,7 +1502,7 @@ fn status_height(app: &App, width: usize) -> u16 {
 fn status_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     match app.footer.preset() {
         crate::footer::Preset::Classic => vec![status_line(app, width)],
-        crate::footer::Preset::Full | crate::footer::Preset::Pi => {
+        crate::footer::Preset::Deck | crate::footer::Preset::Full | crate::footer::Preset::Pi => {
             let mut lines = app.footer.lines(app, width);
             if let Some(chrome) = chrome_line(app, width) {
                 lines.push(chrome);

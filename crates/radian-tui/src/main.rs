@@ -25,6 +25,7 @@ use radian_tui::events::{InputEvent, ProjectionSink, UiEvent};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{self, Event};
+use ratatui::crossterm::terminal;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -374,6 +375,7 @@ fn run(
     let resume_only = matches!(cli.resume, Some(None));
     let mut resume = cli.resume.clone().flatten();
     let startup_picker = if cli.pick || resume_only {
+        radian_session::trace::mark("picker/prepare-start");
         let workspace = workspace_path.to_string_lossy().into_owned();
         prepare_picker(&dir, &workspace)?.map(|picker| {
             if resume_only {
@@ -385,6 +387,7 @@ fn run(
     } else {
         None
     };
+    radian_session::trace::mark("picker/prepared");
     // Nothing to resume is a refusal, not a new session: `--resume` without a value never
     // creates a file.
     if resume_only && startup_picker.is_none() {
@@ -415,9 +418,16 @@ fn run(
     let mut app = App::new(String::new(), String::new());
     // `Tab` (the `complete` action) completes `@` file references against the workspace.
     app.set_workspace(workspace_path.clone());
-    let config_warnings = app
+    let mut config_warnings = app
         .apply_config(&config, radian_tui::theme::Theme::no_color_env())
         .map_err(|error| format!("config: {error}"))?;
+    // ADR 0016: `[sandbox] allow_unix_sockets`, `~`-expanded and canonicalized
+    // before the sandbox is built. An entry that does not resolve is skipped and named here.
+    let (allow_unix_sockets, socket_warnings) = radian_host::resolve_allow_unix_sockets(
+        &config.sandbox.allow_unix_sockets,
+        radian_host::user_home().as_deref(),
+    );
+    config_warnings.extend(socket_warnings);
     match &config.source {
         Some(path) => eprintln!("[config] {}", path.display()),
         None => eprintln!("[config] none"),
@@ -441,6 +451,7 @@ fn run(
     // the same terminal. No session file, journal, driver or MCP connection exists until the
     // choice is made (the session id and any `{session_id}` header are resolved after it).
     if let Some(picker) = startup_picker {
+        radian_session::trace::mark("picker/before-first-frame");
         let (guard, terminal) = startup_terminal
             .as_mut()
             .expect("the terminal was entered for the picker");
@@ -458,7 +469,11 @@ fn run(
                 cli.model.clone().unwrap_or_default(),
             ),
             &config.providers,
+            config.tui.theme.clone(),
             cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+            // The picker phase has no session and no sandbox yet.
+            None,
+            None,
         )?;
         if let Some(signal) = signal {
             // A signal during the pre-session phase leaves exactly like the session phase —
@@ -549,8 +564,16 @@ fn run(
         }
         None => (radian_host::DEFAULT_THINKING_LEVEL.to_owned(), None, false),
     };
-    // Kept for the footer's `reasoning` item: `thinking` is moved into the route below.
-    let thinking_for_footer = thinking.clone();
+    // The footer's `reasoning` item shows the level that actually takes effect (ADR 0026
+    // D11): the requested level clamped against this route's map, so a model that does not
+    // support `medium` shows `high` rather than the config value. `thinking` is moved into the
+    // route below.
+    let thinking_for_footer = radian_tui::command::effective_thinking_level(
+        &provider_ref,
+        &model_name,
+        &thinking,
+        cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+    );
     if legacy_thinking {
         eprintln!(
             "radian: [thinking] the legacy `--thinking {}` spelling is deprecated; use one of {}",
@@ -765,7 +788,16 @@ fn run(
     if let Some(trust) = radian_host::trust_dir() {
         sandbox_deny_read.push(trust);
     }
-    let sandbox = radian_tui::profile::build_sandbox(tier, &workspace_path, &sandbox_deny_read)?;
+    let sandbox = radian_tui::profile::build_sandbox(
+        tier,
+        &workspace_path,
+        &sandbox_deny_read,
+        &allow_unix_sockets,
+    )?;
+    // ADR 0033: the user's `!`/`!!` commands run in the **same** sandbox the coding tools use
+    // (including ADR 0016's Unix-socket rules). `Sandbox` is cheap to clone; `None`
+    // (the `safe` tier) means `!` is unavailable.
+    let bash_sandbox = sandbox.clone();
     // The MCP config file is read and validated here: before any server process starts and
     // before a session file exists, so a bad file leaves nothing behind (dogfooding D2). The
     // MCP provider itself, the memory service and the coding tools are built by
@@ -894,6 +926,7 @@ fn run(
                 config_slot: std::sync::Arc::clone(&config_slot),
                 config_queue: radian_runtime::ConfigQueue::new(),
                 budget_for: Some(budget_for),
+                protected_branches: config.git.protected_branches.clone(),
                 session_id: radian_host::SessionId::new(session_id.clone()),
                 session_dir: dir.clone(),
                 workspace: workspace_path.clone(),
@@ -1036,22 +1069,49 @@ fn run(
     // automatic compaction is on (`context`'s `{auto}`). Each is a startup fact.
     app.set_hostname(radian_host::hostname());
     app.set_model_price(window.price);
+    app.set_bash_available(bash_sandbox.is_some());
     app.set_auto_compact(!cli.no_auto_compact && config.compaction.auto.unwrap_or(true));
     // ADR 0027 C3: the contributors. Their changes wake the UI through the same dirty channel
     // (ADR 0023 U2), and a refresh failure becomes a notice; the UI never waits for one.
     let contributions = radian_host::ContributionStore::new();
     let contrib_tx = tx.clone();
+    let on_tick: Arc<dyn Fn(radian_host::Tick) + Send + Sync> = Arc::new(move |tick| {
+        let _ = contrib_tx.send(UiEvent::Dirty);
+        if let Some(notice) = tick.notice {
+            let _ = contrib_tx.send(UiEvent::Command(AppInput::SessionDone(vec![notice])));
+        }
+    });
     radian_host::spawn_contributor(
         runtime.handle(),
         Arc::new(radian_host::GitContributor::new(workspace_path.clone())),
         Arc::clone(&contributions),
-        Arc::new(move |tick| {
-            let _ = contrib_tx.send(UiEvent::Dirty);
-            if let Some(notice) = tick.notice {
-                let _ = contrib_tx.send(UiEvent::Command(AppInput::SessionDone(vec![notice])));
-            }
-        }),
+        Arc::clone(&on_tick),
     );
+    // ADR 0027 C4 + revision 5: the opencode-go usage contributor. It is spawned only when a
+    // key is stored, but it refreshes (and its row shows) only while the **current** model's
+    // provider is opencode-go. The watch channel is that gate: the UI flips it on a `/model`
+    // switch. The key never leaves this spawn: only the display text enters the store.
+    // `usage_period_secs = 0` turns it off; the period is clamped to 15 s–10 min.
+    let usage_gate = if let Some(period) = usage_period(config.tui.usage_period_secs)
+        && let Ok(Some(key)) = radian_host::auth::resolve_key("opencode-go")
+    {
+        // The startup model decides the first state (a resumed route wins over the CLI's).
+        let startup_provider = session
+            .model_route()
+            .map(|(provider, _)| provider)
+            .unwrap_or_else(|| provider_name.clone());
+        let (gate_tx, gate_rx) = tokio::sync::watch::channel(startup_provider == "opencode-go");
+        radian_host::spawn_contributor_gated(
+            runtime.handle(),
+            Arc::new(radian_host::OpencodeGoUsage::new(key.key.clone(), period)),
+            Arc::clone(&contributions),
+            Arc::clone(&on_tick),
+            gate_rx,
+        );
+        Some(gate_tx)
+    } else {
+        None
+    };
     app.set_contributions(Arc::clone(&contributions));
     // A plain run enters the terminal only now: every fallible check above, and the session
     // itself, have already run. (`--pick` entered it before the picker and keeps it here.)
@@ -1174,7 +1234,9 @@ fn run(
             radian_tui::workspace::display_coding_root(&workspace_root, home.as_deref())
         )
     });
-    let context_line = format!("context: {}", window.describe());
+    // The context window (ADR 0018) and the loaded context files (ADR 0036 C2) are separate
+    // lines; `context:` is the files, matching the ADR's wording.
+    let context_line = format!("context window: {}", window.describe());
     let session_line = match &resume {
         Some(id) => format!(
             "resumed session {id} ({} messages) · Enter sends · Ctrl-C cancels a turn · \
@@ -1186,10 +1248,9 @@ fn run(
         ),
     };
     let sandbox_facts = session.facts().sandbox_facts.clone();
-    let sandbox_word = ["seatbelt", "bwrap"]
-        .into_iter()
-        .find(|name| sandbox_facts.contains(name))
-        .unwrap_or("none");
+    // The host computed this from the real backend (ADR 0027): searching the description text
+    // reported `none` on macOS, because the `workspace` tier's sentence does not name it.
+    let sandbox_word = session.facts().sandbox_word.clone();
     let budget = window
         .budget
         .map_or_else(|| "unknown".to_string(), |b| b.to_string());
@@ -1215,6 +1276,7 @@ fn run(
         format!("profile: {}", session.facts().profile_line),
         sandbox_facts,
         context_line,
+        format!("context: {}", session.facts().context_line),
     ];
     if let Some(line) = &workspace_line {
         startup_lines.push(line.clone());
@@ -1267,7 +1329,7 @@ fn run(
         banner,
         banner_narrow: format!(
             "{} radian {}",
-            radian_tui::startup::RAD_MARK,
+            radian_tui::footer::brand_mark(app.footer_glyphs()),
             env!("CARGO_PKG_VERSION")
         ),
         summary,
@@ -1322,7 +1384,10 @@ fn run(
         },
         (provider_name.clone(), model_name.clone()),
         &config.providers,
+        config.tui.theme.clone(),
         cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+        bash_sandbox,
+        usage_gate,
     );
     exit_trace("loop-done");
     // Tell a pending signal task that the loop left on its own, so it does not force-exit.
@@ -1618,6 +1683,14 @@ fn read_input(timeout: Duration) -> Input {
         }
         Tty::Idle => {
             exit_trace_once(&TRACED_IDLE, "poll-idle");
+            // A window resize reaches crossterm only while it is reading stdin, which an idle
+            // app never does: its SIGWINCH pipe is drained inside `event::poll`/`read`. So an
+            // idle app stayed at the old width until the next key or wheel ("scroll once and
+            // it re-lays out"). Ask the kernel directly instead: `TIOCGWINSZ` does not read
+            // stdin, so it cannot hit the EOF spin guard 1 exists for.
+            if let Some((rows, cols)) = size_changed() {
+                return Input::Event(Event::Resize(rows, cols));
+            }
             // Guard 1: do not enter crossterm unless a previous read may have buffered
             // events. Its `poll(0)` reads the fd on an empty buffer and loops on a hung-up
             // tty (see the function docs); a plain Idle is safe.
@@ -1652,6 +1725,20 @@ fn read_input(timeout: Duration) -> Input {
 /// up to 1024 bytes and parses one event). Only then is it safe to ask crossterm's `poll(0)`;
 /// see [`read_input`]'s docs.
 static MAY_HAVE_BUFFERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The last terminal size this thread reported, as `rows << 16 | cols` (`0` = never). A window
+/// resize is detected by comparing it against a fresh `TIOCGWINSZ`, because crossterm only
+/// drains its SIGWINCH pipe while it is reading stdin (see [`read_input`]).
+static LAST_SIZE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// The current terminal size when it differs from the last one reported, else `None`. `TIOCGWINSZ`
+/// only; never a stdin read. The first call records the size without reporting a change.
+fn size_changed() -> Option<(u16, u16)> {
+    let (cols, rows) = terminal::size().ok()?;
+    let packed = (u32::from(rows) << 16) | u32::from(cols);
+    let previous = LAST_SIZE.swap(packed, std::sync::atomic::Ordering::SeqCst);
+    (previous != 0 && previous != packed).then_some((rows, cols))
+}
 
 /// One-per-site markers for the input thread's trace (test hook only).
 static TRACED_READABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -1727,7 +1814,13 @@ fn draw_frame(
     if FREEZE_DRAW.get().is_some_and(|path| path.exists()) {
         return Ok(true);
     }
-    match terminal.draw(|frame| radian_tui::render::draw(frame, app)) {
+    // `draw/end` is the end of the render closure; the gap to `draw/terminal-done` is
+    // ratatui's buffer diff plus the write and flush to the terminal (resume-perf-c: the
+    // owner's 1.2 s first-frame gap had no mark here).
+    radian_session::trace::mark("draw/terminal-start");
+    let drawn = terminal.draw(|frame| radian_tui::render::draw(frame, app));
+    radian_session::trace::mark("draw/terminal-done");
+    match drawn {
         Ok(_) => {
             if let Some(path) = FREEZE_DRAW.get() {
                 let _ = std::fs::write(path, "drawn\n");
@@ -1786,6 +1879,12 @@ fn run_pbcopy(text: &str) -> Result<(), String> {
 fn spawn_input_thread(tx: Sender<UiEvent>) {
     std::thread::spawn(move || {
         exit_trace("input-thread-start");
+        // Record the size the app is about to draw at, so a resize that lands before the
+        // first idle poll is still detected (the owner's bare-resize bug).
+        if let Ok((cols, rows)) = terminal::size() {
+            let packed = (u32::from(rows) << 16) | u32::from(cols);
+            LAST_SIZE.store(packed, std::sync::atomic::Ordering::SeqCst);
+        }
         loop {
             match read_input(INPUT_POLL) {
                 Input::Gone => {
@@ -1797,7 +1896,8 @@ fn spawn_input_thread(tx: Sender<UiEvent>) {
                     // A resize burst coalesces to the last one; everything else goes through
                     // the one pure event map (which drops clicks, drags and moves).
                     let event = match event {
-                        Event::Resize(rows, cols) => coalesce_resize(rows, cols),
+                        // crossterm's order is `(cols, rows)`; `coalesce_resize` takes rows first.
+                        Event::Resize(cols, rows) => coalesce_resize(rows, cols),
                         other => match radian_tui::events::input_event(other) {
                             Some(event) => event,
                             None => continue,
@@ -1818,7 +1918,13 @@ fn spawn_input_thread(tx: Sender<UiEvent>) {
 /// handled on the next turn (it stays in crossterm's buffer).
 fn coalesce_resize(rows: u16, cols: u16) -> InputEvent {
     let (mut rows, mut cols) = (rows, cols);
-    while let Input::Event(Event::Resize(next_rows, next_cols)) = read_input(Duration::ZERO) {
+    while let Input::Event(Event::Resize(next_cols, next_rows)) = read_input(Duration::ZERO) {
+        rows = next_rows;
+        cols = next_cols;
+    }
+    // A drag may have moved the window again since; the last size is the one that matters, so
+    // report it rather than an intermediate one.
+    if let Some((next_rows, next_cols)) = size_changed() {
         rows = next_rows;
         cols = next_cols;
     }
@@ -1848,6 +1954,11 @@ struct LoopContext<'a> {
     /// The config's `[providers.<name>]` declarations (ADR 0026 D10), for `/model`'s provider
     /// completion.
     config_providers: std::collections::BTreeMap<String, radian_host::ProviderDecl>,
+    /// The applied thinking level (ADR 0026 D11), kept in step with the app, for `/thinking`'s
+    /// current-value marker.
+    current_thinking: String,
+    /// The configured theme name, for `/theme`'s current-value marker.
+    current_theme: Option<String>,
     /// The request's `--max-tokens`: a level whose budget cannot fit is not offered and is
     /// clamped past (review B1).
     thinking_max_tokens: u32,
@@ -1868,6 +1979,14 @@ struct LoopContext<'a> {
     /// How a selection copy reaches the clipboard (`tui.clipboard`), read once from the app
     /// when the context is built: the mode cannot change mid-run.
     clipboard: ClipboardMode,
+    /// The sandbox the user's `!`/`!!` commands run in (ADR 0033): the coding tools' own,
+    /// cloned. `None` on the `safe` tier (no shell).
+    bash_sandbox: Option<radian_sandbox::Sandbox>,
+    /// The running `!` command's cancellation token (Esc, ADR 0033).
+    bash_cancel: Option<agent_core::CancellationToken>,
+    /// The opencode-go usage gate (ADR 0027): the UI flips it when `/model`
+    /// switches the current provider. `None` when there is no key or the period is off.
+    usage_gate: Option<tokio::sync::watch::Sender<bool>>,
 }
 
 impl LoopContext<'_> {
@@ -1877,6 +1996,15 @@ impl LoopContext<'_> {
         // ADR 0027: the loop is the only place that reads the wall clock for the
         // footer's `speed`/`elapsed`; the timer itself is pure.
         app.set_now(std::time::Instant::now());
+        // ADR 0027: a `/model` switch arrives as a model `ConfigChanged` at the turn
+        // boundary. Flip the usage gate then: away from opencode-go the contributor stops
+        // refreshing (no network) and its row hides; back to it, one immediate refresh.
+        if let UiEvent::Runtime(radian_session::RuntimeEvent::ConfigChanged { change, .. }) = &event
+            && let Some(route) = radian_host::ModelRoute::from_value(change)
+            && let Some(gate) = &self.usage_gate
+        {
+            let _ = gate.send(route.provider == "opencode-go");
+        }
         let result = match event {
             UiEvent::Agent(event) => app.update(AppInput::Event(event)),
             UiEvent::Runtime(event) => app.update(AppInput::Runtime(event)),
@@ -1931,6 +2059,11 @@ impl LoopContext<'_> {
                 return true;
             }
         };
+        // The completion menu's current-value markers read these; keep them in step with the
+        // app (the footer's `reasoning` item is the same value).
+        if let Some(level) = app.thinking_level.clone() {
+            self.current_thinking = level;
+        }
         effects.extend(result.effects);
         result.dirty
     }
@@ -1945,8 +2078,67 @@ impl LoopContext<'_> {
                 self.command(radian_host::SessionCommand::SendFollowup(text))
             }
             Effect::Steer(text) => self.command(radian_host::SessionCommand::Steer(text)),
-            Effect::Cancel => self.command(radian_host::SessionCommand::Cancel),
+            Effect::Cancel => {
+                // Ctrl-C cancels the turn; it also stops a running `!` (ADR 0033) so there is
+                // no orphan process group.
+                if let Some(cancel) = self.bash_cancel.take() {
+                    cancel.cancel();
+                }
+                self.command(radian_host::SessionCommand::Cancel)
+            }
             Effect::Quit => Ok(()),
+            // ADR 0033: run the `!`/`!!` command through radian-coding's sandboxed executor
+            // (`run_user_bash`, the shell tool's own path), off the loop so Esc can cancel it.
+            Effect::RunBash {
+                command,
+                exclude_from_context,
+            } => {
+                let tx = self.tx.clone();
+                let sandbox = self.bash_sandbox.clone();
+                let workspace = self.workspace.to_path_buf();
+                let cancel = agent_core::CancellationToken::new();
+                self.bash_cancel = Some(cancel.clone());
+                self.runtime.spawn(async move {
+                    let result = match sandbox {
+                        Some(sandbox) => {
+                            radian_coding::run_user_bash(&workspace, &sandbox, &command, &cancel)
+                                .await
+                        }
+                        None => Err("the `safe` tier has no shell (ADR 0012); `!` needs a \
+                                     shell-capable tier"
+                            .to_owned()),
+                    };
+                    let _ = tx.send(UiEvent::Command(AppInput::BashDone {
+                        command,
+                        exclude_from_context,
+                        result,
+                    }));
+                });
+                Ok(())
+            }
+            // ADR 0033 + ADR 0011: the `!` message is injected without waking an idle driver.
+            Effect::Inject(message) => self.command(radian_host::SessionCommand::Inject(message)),
+            // ADR 0033: the durable audit record, for `!` and `!!` alike.
+            Effect::AuditUserBash {
+                command,
+                exclude_from_context,
+                exit_code,
+                cancelled,
+            } => {
+                self.session.record_user_bash(&radian_host::UserBashRecord {
+                    command,
+                    exclude_from_context,
+                    exit_code,
+                    cancelled,
+                });
+                Ok(())
+            }
+            Effect::CancelBash => {
+                if let Some(cancel) = self.bash_cancel.take() {
+                    cancel.cancel();
+                }
+                Ok(())
+            }
             // ADR 0008 revision: `/theme` loads the theme and writes `tui.theme` back. Both
             // are I/O, so they run here and the result comes back as `Input::ThemeReady`.
             Effect::Theme { name } => {
@@ -1958,6 +2150,9 @@ impl LoopContext<'_> {
                     self.host.theme_write_path.as_deref(),
                     self.host.config_read_only,
                 );
+                if outcome.theme.is_some() {
+                    self.current_theme = Some(name);
+                }
                 self.send(AppInput::ThemeReady {
                     theme: outcome.theme.map(Box::new),
                     notices: outcome.notices,
@@ -2015,28 +2210,55 @@ impl LoopContext<'_> {
                         memory_record_candidates(self.memory, command)
                     }
                     radian_tui::command::Fetch::Themes { .. } => {
+                        // The current theme is marked, so the menu says what a pick changes.
+                        let current = self.current_theme.clone();
                         radian_tui::command::theme_candidates(radian_host::themes_dir().as_deref())
+                            .into_iter()
+                            .map(|mut candidate| {
+                                if Some(&candidate.insert) == current.as_ref() {
+                                    candidate.description =
+                                        format!("● current · {}", candidate.description);
+                                }
+                                candidate
+                            })
+                            .collect()
                     }
                     radian_tui::command::Fetch::ModelRoute { provider, .. } => {
+                        // Mark the route in effect (the slot, or the startup route before it).
+                        let (current_provider, current_model) = self
+                            .session
+                            .model_route()
+                            .unwrap_or_else(|| self.startup_route.clone());
                         model_route_candidates(provider.as_deref(), &self.config_providers)
+                            .into_iter()
+                            .map(|mut candidate| {
+                                let is_current = candidate.insert
+                                    == format!("{current_provider}/{current_model}")
+                                    || candidate.insert == format!("{current_provider}/");
+                                if is_current {
+                                    candidate.description =
+                                        format!("● current · {}", candidate.description);
+                                }
+                                candidate
+                            })
+                            .collect()
                     }
                     radian_tui::command::Fetch::ThinkingLevels { .. } => {
-                        // D11: only the levels the current model supports.
+                        // D11: only the levels the current model supports. Each row names the
+                        // wire value it sends (`enabled:4096` for Anthropic, `high` for
+                        // openai-compatible), and the applied level is marked.
                         let (route_provider, route_model) = self
                             .session
                             .model_route()
                             .unwrap_or_else(|| self.startup_route.clone());
-                        radian_host::supported_thinking_levels_ref_with(
-                            &provider_ref_for(&route_provider, &self.config_providers),
+                        let provider_ref =
+                            provider_ref_for(&route_provider, &self.config_providers);
+                        radian_tui::command::thinking_candidates(
+                            &provider_ref,
                             &route_model,
-                            Some(self.thinking_max_tokens),
+                            self.thinking_max_tokens,
+                            &self.current_thinking,
                         )
-                        .into_iter()
-                        .map(|level| radian_tui::command::Candidate {
-                            insert: level.to_owned(),
-                            description: "thinking level".to_owned(),
-                        })
-                        .collect()
                     }
                     // `/skill:`'s candidates: the discovered skill names, including the ones
                     // with `disable-model-invocation: true` — that flag hides a skill from the
@@ -2407,6 +2629,16 @@ fn handle_picking(event: UiEvent, app: &mut App, signal: &mut Option<i32>) -> bo
     }
 }
 
+/// The opencode-go usage refresh period (ADR 0027 C4): `None` (off) for `0`, the default for
+/// an unset value, and the clamped configured value otherwise.
+fn usage_period(configured: Option<u64>) -> Option<std::time::Duration> {
+    match configured {
+        Some(0) => None,
+        Some(seconds) => Some(radian_host::clamp_opencode_go_period(seconds)),
+        None => Some(radian_host::OPENCODE_GO_DEFAULT_PERIOD),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn ui_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
@@ -2416,7 +2648,12 @@ fn ui_loop(
     phase: Phase<'_>,
     startup_route: (String, String),
     config_providers: &std::collections::BTreeMap<String, radian_host::ProviderDecl>,
+    // The configured theme name (`tui.theme`), for `/theme`'s current-value marker.
+    current_theme: Option<String>,
     thinking_max_tokens: u32,
+    bash_sandbox: Option<radian_sandbox::Sandbox>,
+    // The opencode-go usage gate (ADR 0027), flipped on a `/model` switch.
+    usage_gate: Option<tokio::sync::watch::Sender<bool>>,
 ) -> Result<Option<i32>, String> {
     let mut picking_signal: Option<i32> = None;
     let mut ctx = match phase {
@@ -2430,6 +2667,8 @@ fn ui_loop(
         } => Some(LoopContext {
             startup_route: startup_route.clone(),
             config_providers: config_providers.clone(),
+            current_thinking: app.thinking_level.clone().unwrap_or_default(),
+            current_theme,
             thinking_max_tokens,
             workspace,
             runtime,
@@ -2440,6 +2679,9 @@ fn ui_loop(
             queue: session.pending(),
             signal: None,
             clipboard: app.clipboard,
+            bash_sandbox: bash_sandbox.clone(),
+            bash_cancel: None,
+            usage_gate,
         }),
     };
     // The first frame: the startup notices and the resumed history are already in the app, and

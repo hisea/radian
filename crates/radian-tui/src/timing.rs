@@ -117,32 +117,31 @@ pub fn format_speed(tokens_per_second: f64) -> String {
 }
 
 /// A token count: `760`, `19.0K`, `1.2M`. Kept short so the numbers row fits.
+/// A token or window count, compact (ADR 0027): raw below 1000, `K` below a
+/// million, `M` above; one decimal below ten of the unit, whole above it. `15_000_000` →
+/// `15M`, `1_962_000_000` → `1962M`, `9_500` → `9.5K`, `999` → `999`.
 pub fn format_tokens(tokens: u64) -> String {
     if tokens < 1_000 {
-        tokens.to_string()
-    } else if tokens < 1_000_000 {
-        compact(tokens, 1_000, "K")
-    } else {
-        compact(tokens, 1_000_000, "M")
+        return tokens.to_string();
     }
-}
-
-/// `n / unit` with one decimal, dropping a trailing `.0` (`19000` → `19K`).
-fn compact(tokens: u64, unit: u64, suffix: &str) -> String {
-    let value = tokens as f64 / unit as f64;
-    let text = format!("{value:.1}");
-    let text = text.strip_suffix(".0").unwrap_or(&text);
-    format!("{text}{suffix}")
+    let (unit, suffix) = if tokens < 1_000_000 {
+        (1_000.0, "K")
+    } else {
+        (1_000_000.0, "M")
+    };
+    let value = tokens as f64 / unit;
+    if value < 10.0 {
+        format!("{value:.1}{suffix}")
+    } else {
+        format!("{}{suffix}", value.round() as u64)
+    }
 }
 
 /// `$0.10`, `$1.23`. Sub-cent values keep more precision (`$0.0030`) rather than rounding to
 /// `$0.00`, which would read as "free".
 pub fn format_cost(micros: u64) -> String {
-    if micros > 0 && micros < 10_000 {
-        format!("${:.4}", micros as f64 / 1_000_000.0)
-    } else {
-        format!("${:.2}", micros as f64 / 1_000_000.0)
-    }
+    // Three decimals (ADR 0027's sample `$14.510`), so a sub-cent cost is visible.
+    format!("${:.3}", micros as f64 / 1_000_000.0)
 }
 
 #[cfg(test)]
@@ -227,10 +226,14 @@ mod tests {
         assert_eq!(format_duration(Duration::from_secs(62)), "1m02s");
         assert_eq!(format_duration(Duration::from_secs(3_720)), "1h02m");
         assert_eq!(format_speed(42.14), "42.1 tok/s");
-        assert_eq!(format_tokens(760), "760");
-        assert_eq!(format_tokens(19_000), "19K");
-        assert_eq!(format_tokens(1_200_000), "1.2M");
-        assert_eq!(format_cost(100_000), "$0.10");
-        assert_eq!(format_cost(3_000), "$0.0030");
+        assert_eq!(format_tokens(999), "999");
+        assert_eq!(format_tokens(1_000), "1.0K");
+        assert_eq!(format_tokens(9_500), "9.5K");
+        assert_eq!(format_tokens(10_000), "10K");
+        assert_eq!(format_tokens(15_000_000), "15M");
+        assert_eq!(format_tokens(1_962_000_000), "1962M");
+        assert_eq!(format_tokens(983_616), "984K"); // >=10 of the unit rounds (revision 3)
+        assert_eq!(format_cost(100_000), "$0.100");
+        assert_eq!(format_cost(14_510_000), "$14.510");
     }
 }

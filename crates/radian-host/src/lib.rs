@@ -12,10 +12,12 @@ pub mod atomic_write;
 pub mod auth;
 mod catalog;
 pub mod config;
+pub mod context;
 pub mod contrib;
 mod describe;
 mod diagnostics;
 mod errors;
+pub mod git_commit;
 mod headers;
 mod home;
 pub mod login;
@@ -23,6 +25,7 @@ mod mcp;
 pub mod memory;
 pub mod mermaid;
 mod model;
+pub mod opencode_go;
 mod output;
 pub mod pending;
 pub mod projection;
@@ -72,12 +75,13 @@ pub use config::theme_write::{ThemeWriteError, write_theme};
 pub use config::{
     CONFIG_FILE_NAME, CompactionConfig, Config, ConfigError, ModelConfig, PermissionsConfig,
     RADIAN_CONFIG_ENV, SUPPORTED_SCHEMA_VERSION, TuiConfig, load as load_config,
-    parse as parse_config, resolve_path as resolve_config_path,
+    parse as parse_config, resolve_allow_unix_sockets, resolve_path as resolve_config_path,
     resolved_path as resolved_config_path,
 };
+pub use context::{ContextFiles, LoadedFile, load as load_context_files};
 pub use contrib::{
     Contribution, ContributionStore, ContributorRunner, GitContributor, Segment, SegmentRole,
-    StatusContributor, Tick, spawn as spawn_contributor,
+    StatusContributor, Tick, spawn as spawn_contributor, spawn_gated as spawn_contributor_gated,
 };
 pub use describe::{CLI_WORDING, TUI_WORDING, Wording, describe};
 pub use diagnostics::{
@@ -99,6 +103,11 @@ pub use model::{
     DEFAULT_MAX_TOKENS, HostModel, MIN_THINKING_BUDGET, ModelArgs, Provider, RouteContext,
     SwitchableModel, Thinking, build_model, check_provider_flags, redact_base_url,
     resolve_thinking, resolve_thinking_ref,
+};
+pub use opencode_go::{
+    DEFAULT_PERIOD as OPENCODE_GO_DEFAULT_PERIOD, MAX_PERIOD as OPENCODE_GO_MAX_PERIOD,
+    MIN_PERIOD as OPENCODE_GO_MIN_PERIOD, OpencodeGoUsage, USAGE_URL as OPENCODE_GO_USAGE_URL,
+    clamp_period as clamp_opencode_go_period,
 };
 pub use output::{StdoutError, write_line, write_stdout};
 pub use pending::{
@@ -123,7 +132,7 @@ pub use session::session_hooks;
 pub use session::{
     ApprovalRouting, CommandRefused, DriverEnd, HostBindings, LocalSession, SessionCapability,
     SessionCommand, SessionError, SessionFacade, SessionFacts, SessionId, SessionQueue,
-    SessionSetup, open_session, resumed_model_route,
+    SessionSetup, UserBashRecord, open_session, resumed_model_route,
 };
 pub use session_id::{generate_session_id, validate_session_id};
 pub use sessions::{

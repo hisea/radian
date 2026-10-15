@@ -1025,3 +1025,125 @@ mutation applied by a patch that asserts its anchor is present, then `cargo test
 
 4/4 caught; no misses. C3's assertion is the copy: `a_copy_of_a_card_has_no_border_characters`
 pins the clipboard directly.
+## footer-s3：opencode-go 用量、deck、逐字段配置（ADR 0027 C3/C4、修订 3，2026-10-16）
+
+Base `6cd0879` · 一次性 worktree `/tmp/radian-mut-f3`（`git worktree add --detach`，独立
+## bang：输入框的 `!` 与 `!!`（ADR 0033，2026-10-16）
+
+Base `aec64f0` · 一次性 worktree `/tmp/radian-mut-bang`（`git worktree add --detach`，独立
+`CARGO_TARGET_DIR`，避免 build.rs 的 manifest 路径污染共享 target），每条跑完 `git checkout -- .`，
+`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| BANG-A | `!!` 也进上下文（`bash_done` 的 `if !exclude_from_context` 换成 `if true`） | `a_bang_done_injects_and_audits_and_a_bangbang_only_audits` | ✅ |
+| BANG-B | `safe` 档照样执行（`begin_bash` 的 `if !self.bash_available` 换成 `if false`） | `a_bang_on_the_safe_tier_does_not_run` | ✅ |
+| BANG-C | 不写 journal（删掉 `Effect::AuditUserBash` 的 push） | `a_bang_done_injects_and_audits_and_a_bangbang_only_audits`（audit 断言/索引） | ✅ |
+| BANG-D | 绕过沙箱（`main.rs` 的 RunBash 用 `std::process::Command::new("/bin/sh")` 直接跑，替换 `run_user_bash`） | `the_bang_command_runs_through_the_sandboxed_executor`（结构测试） | ✅ |
+| BANG-E | `!` 当普通 turn 发出去（`begin_bash` 发 `SendFollowup`，即走模型/工具/审批那条路） | `a_bang_routes_to_a_run_bash_effect` | ✅ |
+
+5/5 抓住。**过程记录**：BANG-D 第一次只把 `run_user_bash(...)` 换成 `Command::new(...).status()`，
+类型不匹配、根本没编译（不是"测试抓住"）——换成构造 `UserBash` 的完整裸跑后才由结构测试抓住。
+BANG-E 是"走审批"这一条的最近代理：真正的审批框需要把命令交给模型当工具调用，最便宜的等价变异
+就是把它发成 turn；ptytest `pty_bang_runs_and_enters_the_context` 另有一条断言"屏幕上不出现
+`approve tool call`"，两层一起把"`!` 不走审批"钉住。
+## resize-fix：空闲时也要重新布局＼�2026-10-16）
+
+Base `ea67319` · 一次性 worktree `/tmp/radian-mut-resize`（`git worktree add --detach`，独立
+`CARGO_TARGET_DIR`）· 每条跑完 `git checkout -- .`，`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| F3-A | 显示已用 percent 而非剩余（`100 − percent` 换成 `percent`） | `the_display_is_the_remaining_share` | ✅ |
+| F3-B | `items` 覆盖不生效（`resolve_item` 忽略 items 表） | `items_config_sets_symbol_style_and_format` | ✅ |
+| F3-C | 分隔符用正文默认色（`row.separator_style` 换成 `Style::default()`） | `the_separator_is_configurable_and_styled` | ✅ |
+| F3-D | 没有用量数据时留空行（去掉空行过滤） | `the_deck_usage_row_appears_only_with_data`（行数断言） | ✅ |
+| F3-E | key 泄漏进展示文本（把 `self.key` 拼进 contribution） | `the_contributor_fetches_and_publishes`（假 key 搜索） | ✅ |
+| F3-F | 颜色写法被当成角色名忽略（`parse_item_style` 只认角色） | `starship_colors_parse` | ✅ |
+
+6/6 抓住。**过程记录**：F3-A 第一轮 anchor 没对上（`cargo fmt` 把 `remaining` 折成多行），
+改成折行后的文本才变异成功；F3-D 第一轮**没抓住**——测试只查文本，加一行空白文本测试照样过，
+把断言改成 `footer.lines(...).len()`（2 行 vs 3 行）后才抓住。
+| RESIZE-A | Idle 分支不做尺寸比较（`size_changed()` 恒 `None`） | `pty_a_bare_resize_re_lays_out` | ✅ |
+| RESIZE-B | 恢复无条件 `event::poll(0)`（去掉 flaky-master 的收窄） | `pty_a_closed_master_ends_the_app_cleanly` | ❌ 未抓住 |
+
+RESIZE-B **如实记录**：直接跑 5/5 通过；按 brief 加 4×`yes` 负载再跑 5/5 仍通过。这与本文件
+`flaky-master-fix` 的 F2 结论一致——**兜底（主循环每 250 ms 的 `terminal_is_gone`）会救场**，
+把"输入线程卡在 crossterm"变成"仍在 250 ms 内干净退出"，所以 closed-master 测试抓不到收窄的缺失
+（收窄的价值是省 CPU，不是保证退出）。这次修复没有动收窄，两层防护保持原样。
+
+RESIZE-A 的过程记录：第一轮把 `size_changed()` 的**诊断调用**和真实调用写成了两次，
+诊断那一次把变化吃掉了（trace 里 `changed=Some` 但 `detected` 为 0），改成只调用一次后才由
+`pty_a_bare_resize_re_lays_out` 抓住——变异要真的改变被测行为，不能只加观察。
+
+## completion-menu（可选补全菜单 + 生效思考等级，��
+
+Base `8789877` · 一次性 worktree `/tmp/radian-cm-mut`，每个变异跑完 `cp /tmp/cm-backup` 还原，最后 `git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| CM-M1 | 菜单打开时 `Action::Send` 不再被菜单接住（Enter 会发送） | `mention_tab::enter_accepts_the_highlighted_candidate_without_sending` | ✅ |
+| CM-M2 | 去掉菜单对 `HistoryPrev`/`HistoryNext` 的接管（Up/Down 落回历史/关闭菜单） | `mention_tab::the_menu_opens_on_the_first_row_and_up_down_wrap` | ✅ |
+| CM-M3 | `effective_thinking_level` 直接返回请求值（footer 显示配置值而非钳制值） | `command::the_footer_thinking_level_is_the_clamped_one` | ✅ |
+| CM-M4 | 去掉 `completion_set` 里的高亮重置（打字后高亮不回到第一行） | `update::typing_filters_the_slash_menu_and_resets_the_highlight` | ✅ |
+| CM-M5 | `accept_slash_candidate` 固定取第 0 行（忽略高亮） | `update::the_slash_menu_moves_its_highlight_and_enter_accepts_it` | ✅ |
+| CM-M6 | `thinking_candidates` 的 description 丢掉 wire 值与 `● current` | `command::thinking_candidates_name_the_wire_value_and_mark_the_current_level` | ✅ |
+
+6/6 抓住。
+## trust-Esc：Esc 不得信任（2026-10-14）
+
+Base `f1993bb` · 一次性 worktree `/tmp/radian-esc-mut`，跑完 `git checkout -- .`，`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| ESC-M1 | 启动信任 modal 的 Esc 映射从 `UntrustHere` 改成 `TrustHere` | `update::tests::escaping_the_trust_modal_does_not_trust` | ✅ |
+
+1/1 抓住。
+
+## trust-Esc＼�2026-10-14）
+
+Base `edfa320` · 一次性 worktree `/tmp/radian-esc-mut2`，跑完 `git checkout -- .`，`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| ESC-M2 | Esc 映射回 `UntrustHere`（持久，会写 `trust.json`） | `update::tests::escaping_the_trust_modal_untrusts_this_session_only` | ✅ |
+
+1/1 抓住。（早先 ESC-M1「Esc → `TrustHere`」见上一节。）
+
+## glyphs（品牌字形与 unicode 档字形覆盖，ADR 0027）
+
+Base `45723f6` · 一次性 worktree `/tmp/radian-glyphs-mut`，每个变异跑完 `cp /tmp/glyphs-backup` 还原，最后 `git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| G-M1 | unicode 品牌改回 `㎭` | `footer::tests::the_brand_mark_is_per_glyph_set` | ✅ |
+| G-M2 | reasoning 的 unicode 图标改回未覆盖的 `◐` | `footer::tests::unicode_tier_glyphs_are_all_verified_covered` | ✅ |
+| G-M3 | spinner 改回未覆盖的 braille `⠋⠙⠸⠴` | 同上 | ✅ |
+| G-M4 | host 的 unicode 图标改回未覆盖的 `⌂` | 同上 | ✅ |
+
+4/4 抓住。
+
+（blocks2 合并后，在 `90dfd27` 重跑 G-M1..M4，并加 G-M5：unicode `tool_status` 改回未覆盖的 `⟳ ✔ ✘`；5/5 抓住。一次性 worktree `/tmp/radian-glyphs-mut2`，还原后 `git status --short` 为空。）
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| G-M5 | `Glyphs::Unicode.tool_status()` 改回 `⟳ ✔ ✘` | `footer::tests::unicode_tier_glyphs_are_all_verified_covered` | ✅ |
+## bang-cancel：Ctrl-C 停止运行中的 `!`（ADR 0033，2026-10-16）
+
+Base `3ccd4db` · 一次性 worktree `/tmp/radian-mut-bangcancel` · 跑完 `git checkout -- .`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| BC-A | 去掉 `Effect::Cancel` 分支里的 `bash_cancel.cancel()` | `pty_ctrl_c_stops_a_running_bang` | ✅ |
+
+Ctrl-C 只有在 turn 运行时才表示取消（否则是 arm quit），所以测试用一个永不结束的
+`Reply::SseThenHang` 起一个 turn，再发 0x03，断言 `!` 块显示 `[cancelled]`。
+## startup-line（摘要行写真实沙箱后端，2026-10-14）
+
+Base `62ae29e` · 一次性 worktree `/tmp/radian-sl-mut`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| S-M1 | TUI 摘要行改回搜索 `sandbox_facts` 文本（macOS 上写 `none`） | `pty::pty_the_startup_summary_names_the_real_sandbox_backend` | ✅ |
+
+1/1 抓住。

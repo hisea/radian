@@ -17,7 +17,7 @@ KNOWN_EVENTS = {
     "TurnFinished", "ConfigChanged", "ContextCompacted",
     "Rewound", "ContextBudgetReached", "PermissionResolved", "ApprovalPolicyChanged",
     "MemoryInjected", "ModelUsageRecorded", "CompactionUsageRecorded", "SessionForked",
-    "ProjectTrustChanged",
+    "ProjectTrustChanged", "UserBash", "GitCommitted",
 }
 # ADR 0005/0006 §5.5：InputSource 的 snake_case 全集。
 SOURCES = {
@@ -79,6 +79,26 @@ EXPECT = {
         events=6,
         skips=[],
         trust_changed=(5, "/work/example", True),
+        repair={},
+    ),
+    "user-bash.jsonl": dict(
+        outcome="accept",
+        events=7,
+        skips=[],
+        user_bash=[(5, "echo hi", False, 0), (6, "false", True, 1)],
+        repair={},
+    ),
+    "context-files.jsonl": dict(
+        outcome="accept",
+        events=1,
+        skips=[],
+        repair={},
+    ),
+    "git-committed.jsonl": dict(
+        outcome="accept",
+        events=6,
+        skips=[],
+        git_committed=(5, "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678", "feature/x", 3),
         repair={},
     ),
     "replace-committed.jsonl": dict(
@@ -539,6 +559,40 @@ def check_fixture(name, exp):
         for e in events:
             if e["event"] == "ProjectTrustChanged" and e["critical"]:
                 raise Corruption(f"{name}: ProjectTrustChanged 必须是 critical:false")
+    if "user_bash" in exp:
+        runs = [
+            (
+                e["seq"],
+                e["data"].get("command"),
+                e["data"].get("exclude_from_context"),
+                e["data"].get("exit_code"),
+            )
+            for e in events
+            if e["event"] == "UserBash"
+        ]
+        if runs != [tuple(run) for run in exp["user_bash"]]:
+            raise Corruption(f"{name}: user_bash {runs} != 期望 {exp['user_bash']}")
+        # ADR 0033：`!` 与 `!!` 的执行审计都是非 critical 事件。
+        for e in events:
+            if e["event"] == "UserBash" and e["critical"]:
+                raise Corruption(f"{name}: UserBash 必须是 critical:false")
+    if "git_committed" in exp:
+        runs = [
+            (
+                e["seq"],
+                e["data"].get("commit"),
+                e["data"].get("branch"),
+                e["data"].get("files"),
+            )
+            for e in events
+            if e["event"] == "GitCommitted"
+        ]
+        if runs != [tuple(exp["git_committed"])]:
+            raise Corruption(f"{name}: git_committed {runs} != 期望 {exp['git_committed']}")
+        # ADR 0030 R10：提交审计是非 critical 事件。
+        for e in events:
+            if e["event"] == "GitCommitted" and e["critical"]:
+                raise Corruption(f"{name}: GitCommitted 必须是 critical:false")
     if outcome == "accept_drop_tail":
         return f"PASS {name}: 接受，丢弃 torn tail {len(tail)} 字节，replay {len(events)} 个事件"
     if outcome == "accept_with_skips":

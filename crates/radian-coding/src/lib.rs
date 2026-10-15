@@ -61,7 +61,8 @@ pub use ask::{
     QuestionOption, QuestionReply, QuestionRequest,
 };
 pub use provider::{CodingSession, CodingTools, CodingToolsError, Limits};
-pub use workspace::WorkspaceError;
+pub use shell::{UserBash, run_user_bash};
+pub use workspace::{WorkspaceError, WorkspaceRoot};
 
 use agent_core::ToolFailure;
 

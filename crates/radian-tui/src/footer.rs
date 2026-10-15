@@ -11,11 +11,23 @@ use std::borrow::Cow;
 
 use radian_host::SegmentRole;
 use radian_host::config::{TuiFooterConfig, TuiFooterItemConfig};
-use ratatui::style::Style;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::app::App;
 use crate::theme::Role;
+
+/// The brand mark for a glyph set (ADR 0027): the Nerd Font `md-alpha_r_circle_
+/// outline`, the plain bold-accent `R` (the same font as the body, so it sits on the baseline),
+/// or the ASCII word `rad`. `㎭` (U+33AD) is East-Asian-Wide and its fallback glyph sits off the
+/// baseline, so it is no longer used.
+pub fn brand_mark(glyphs: Glyphs) -> &'static str {
+    match glyphs {
+        Glyphs::Nerd => "\u{f0c20}",
+        Glyphs::Unicode => "R",
+        Glyphs::Ascii => "rad",
+    }
+}
 
 /// How the built-in items draw their icons (ADR 0027 C2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -71,11 +83,12 @@ impl Glyphs {
     }
 
     /// The tool-call status glyphs (ADR 0028 rule 4): running, success, failure.
-    /// The unicode set is omp's (`⟳`/`✔`/`✘`); the other two sets exist because a terminal
-    /// without those code points needs something.
+    /// The unicode set is covered by all seven checked fonts (ADR 0027): omp's
+    /// `⟳`/`✔`/`✘` are not, so `~`/`+`/`×` stand in. The Nerd set uses the Font Awesome
+    /// codepoints; the ASCII set is plain.
     pub fn tool_status(self) -> [&'static str; 3] {
         match self {
-            Self::Unicode => ["⟳", "✔", "✘"],
+            Self::Unicode => ["~", "+", "×"],
             Self::Nerd => ["\u{f110}", "\u{f00c}", "\u{f00d}"],
             Self::Ascii => ["*", "+", "x"],
         }
@@ -101,8 +114,11 @@ pub struct FrameGlyphs {
 /// Which footer the session shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Preset {
-    /// The default (ADR 0027): two rows, the identity row and the numbers row.
+    /// The default (ADR 0027): three rows — the opencode-go usage widget (absent
+    /// without data), the identity row, and the numbers row.
     #[default]
+    Deck,
+    /// The revision-1 two-row preset: the identity row and the numbers row.
     Full,
     /// The earlier two-row preset: model/cwd/branch/context bar/reasoning, then tokens/cost.
     Pi,
@@ -113,10 +129,28 @@ pub enum Preset {
 impl Preset {
     pub fn parse(name: &str) -> Option<Self> {
         match name {
+            "deck" => Some(Self::Deck),
             "full" => Some(Self::Full),
             "pi" => Some(Self::Pi),
             "classic" => Some(Self::Classic),
             _ => None,
+        }
+    }
+}
+
+/// One item's style (ADR 0027): a theme role (follows the theme) or a fixed
+/// starship-style color (does not). The theme stays the only color source for a role.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ItemStyle {
+    Role(Role),
+    Fixed(Style),
+}
+
+impl ItemStyle {
+    fn resolve(&self, app: &App) -> Style {
+        match self {
+            ItemStyle::Role(role) => role_style(app, *role),
+            ItemStyle::Fixed(style) => *style,
         }
     }
 }
@@ -126,23 +160,110 @@ impl Preset {
 struct Item {
     /// The configured id as written (an unknown id is shown raw).
     id: String,
-    /// The item's own `icon`, else the built-in glyph for the id.
+    /// The item's own `icon`/`symbol`, else the built-in glyph for the id.
     icon: Option<String>,
+    /// The symbol's own style, when it differs from the text's (revision 3).
+    symbol_style: Option<ItemStyle>,
     format: Option<String>,
-    style: Option<Role>,
+    style: Option<ItemStyle>,
     priority: i64,
-    thresholds: Vec<(i64, Role)>,
+    thresholds: Vec<(i64, ItemStyle)>,
     params: Vec<(String, String)>,
+    /// `disabled = true` in `[tui.footer.items.<id>]` hides the item everywhere.
+    disabled: bool,
     /// `false` for an unknown id: the item shows its id text.
     known: bool,
 }
 
+/// A starship-style style (ADR 0027): space-separated modifiers and colors. A
+/// named color (`red`, `bright_blue`), `#rrggbb`, or a 0–255 number; `bold`/`italic`/`dimmed`
+/// (and `underline`). The first color is the foreground, a second the background. An empty
+/// string is the default style; an unknown token is an error (a config error, not ignored).
+fn parse_starship_style(text: &str) -> Result<Style, String> {
+    let mut style = Style::default();
+    let mut colors = 0;
+    for token in text.split_whitespace() {
+        match token {
+            "bold" => style = style.add_modifier(Modifier::BOLD),
+            "italic" => style = style.add_modifier(Modifier::ITALIC),
+            "dimmed" => style = style.add_modifier(Modifier::DIM),
+            "underline" => style = style.add_modifier(Modifier::UNDERLINED),
+            _ => {
+                let color = parse_color(token).ok_or_else(|| format!("unknown color {token:?}"))?;
+                colors += 1;
+                match colors {
+                    1 => style = style.fg(color),
+                    2 => style = style.bg(color),
+                    _ => return Err(format!("more than two colors in {text:?}")),
+                }
+            }
+        }
+    }
+    Ok(style)
+}
+
+/// A named ANSI color, `#rrggbb`, or a 0–255 index (starship's color vocabulary).
+fn parse_color(token: &str) -> Option<Color> {
+    if let Some(hex) = token.strip_prefix('#') {
+        if hex.len() != 6 {
+            return None;
+        }
+        let byte = |range: std::ops::Range<usize>| u8::from_str_radix(hex.get(range)?, 16).ok();
+        return Some(Color::Rgb(byte(0..2)?, byte(2..4)?, byte(4..6)?));
+    }
+    if let Ok(index) = token.parse::<u8>() {
+        return Some(Color::Indexed(index));
+    }
+    Some(match token {
+        "black" => Color::Black,
+        "red" => Color::Red,
+        "green" => Color::Green,
+        "yellow" => Color::Yellow,
+        "blue" => Color::Blue,
+        "purple" | "magenta" => Color::Magenta,
+        "cyan" => Color::Cyan,
+        "white" => Color::Gray,
+        "bright_black" => Color::DarkGray,
+        "bright_red" => Color::LightRed,
+        "bright_green" => Color::LightGreen,
+        "bright_yellow" => Color::LightYellow,
+        "bright_blue" => Color::LightBlue,
+        "bright_purple" | "bright_magenta" => Color::LightMagenta,
+        "bright_cyan" => Color::LightCyan,
+        "bright_white" => Color::White,
+        _ => return None,
+    })
+}
+
+/// A `style` value: a theme role (or pi alias) first, else a starship color. An error is the
+/// caller's warning.
+fn parse_item_style(text: &str) -> Result<ItemStyle, String> {
+    if let Some(role) = parse_style(text) {
+        return Ok(ItemStyle::Role(role));
+    }
+    parse_starship_style(text).map(ItemStyle::Fixed)
+}
+
 /// One configured row.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Row {
     left: Vec<Item>,
     right: Vec<Item>,
     separator: String,
+    /// The separator's style (ADR 0027): the `footer_separator` role by default,
+    /// `[tui.footer] separator_style` can make it a color.
+    separator_style: ItemStyle,
+}
+
+impl Default for Row {
+    fn default() -> Self {
+        Self {
+            left: Vec::new(),
+            right: Vec::new(),
+            separator: String::new(),
+            separator_style: ItemStyle::Role(Role::FooterSeparator),
+        }
+    }
 }
 
 /// The session's footer.
@@ -159,12 +280,12 @@ impl Footer {
     pub fn from_config(config: &TuiFooterConfig) -> (Self, Vec<String>) {
         let mut warnings = Vec::new();
         let preset = match config.preset.as_deref() {
-            None => Preset::Full,
+            None => Preset::Deck,
             Some(name) => Preset::parse(name).unwrap_or_else(|| {
                 warnings.push(format!(
-                    "tui.footer.preset = {name:?} is not one of full|pi|classic; using full"
+                    "tui.footer.preset = {name:?} is not one of deck|full|pi|classic; using deck"
                 ));
-                Preset::Full
+                Preset::Deck
             }),
         };
         let glyphs = match config.glyphs.as_deref() {
@@ -180,22 +301,48 @@ impl Footer {
             .separator
             .clone()
             .unwrap_or_else(|| " │ ".to_string());
-        let mut rows = Vec::new();
-        for row in &config.rows {
-            rows.push(Row {
-                left: row
-                    .left
-                    .iter()
-                    .map(|item| resolve_item(item, &mut warnings))
-                    .collect(),
-                right: row
-                    .right
-                    .iter()
-                    .map(|item| resolve_item(item, &mut warnings))
-                    .collect(),
-                separator: row.separator.clone().unwrap_or_else(|| separator.clone()),
-            });
-        }
+        let separator_style = match config.separator_style.as_deref() {
+            None => ItemStyle::Role(Role::FooterSeparator),
+            Some(name) => parse_item_style(name).unwrap_or_else(|error| {
+                warnings.push(format!("tui.footer: bad separator_style {name:?}: {error}"));
+                ItemStyle::Role(Role::FooterSeparator)
+            }),
+        };
+        let rows: Vec<Row> = if config.rows.is_empty() {
+            // The built-in preset, then the per-field `items` config on top.
+            let mut rows = preset_rows(preset);
+            for row in &mut rows {
+                for item in row.left.iter_mut().chain(row.right.iter_mut()) {
+                    if let Some(field) = config.items.get(&item.id) {
+                        merge_into_item(item, field, &mut warnings);
+                    }
+                }
+            }
+            for row in &mut rows {
+                row.left.retain(|item| !item.disabled);
+                row.right.retain(|item| !item.disabled);
+            }
+            rows
+        } else {
+            config
+                .rows
+                .iter()
+                .map(|row| Row {
+                    left: row
+                        .left
+                        .iter()
+                        .filter_map(|item| resolve_item(item, &config.items, &mut warnings))
+                        .collect(),
+                    right: row
+                        .right
+                        .iter()
+                        .filter_map(|item| resolve_item(item, &config.items, &mut warnings))
+                        .collect(),
+                    separator: row.separator.clone().unwrap_or_else(|| separator.clone()),
+                    separator_style: separator_style.clone(),
+                })
+                .collect()
+        };
         (
             Self {
                 preset,
@@ -223,7 +370,12 @@ impl Footer {
         } else {
             Cow::Borrowed(&self.rows)
         };
-        rows.iter().map(|row| render_row(app, row, width)).collect()
+        // A row with no data renders empty (the deck's usage row, revision 3): drop it so it
+        // never leaves a blank line.
+        rows.iter()
+            .map(|row| render_row(app, row, width))
+            .filter(|line| !line.spans.is_empty())
+            .collect()
     }
 }
 
@@ -233,18 +385,60 @@ fn preset_rows(preset: Preset) -> Vec<Row> {
     let item = |id: &str| Item {
         id: id.to_string(),
         icon: None,
+        symbol_style: None,
         format: None,
         style: None,
         priority: item_priority(id),
         thresholds: default_thresholds(id),
         params: Vec::new(),
+        disabled: false,
         known: true,
     };
     let with_format = |id: &str, format: &str| Item {
         format: Some(format.to_string()),
         ..item(id)
     };
+    // A preset row with no symbol at all (revision 3's numbers row has none).
+    let no_symbol = |id: &str, format: &str| Item {
+        icon: Some(String::new()),
+        format: Some(format.to_string()),
+        ..item(id)
+    };
+    let row = |left: Vec<Item>, right: Vec<Item>| Row {
+        left,
+        right,
+        separator: " │ ".to_string(),
+        separator_style: ItemStyle::Role(Role::FooterSeparator),
+    };
     match preset {
+        Preset::Deck => vec![
+            // Row 1: the opencode-go usage widget (ADR 0027 C4). With no data every item is
+            // empty and `lines` drops the whole row, so it never leaves a blank line.
+            row(vec![item("opencode-go.usage")], Vec::new()),
+            // Row 2: identity, with the context bar and reasoning on the right.
+            row(
+                vec![
+                    item("model"),
+                    with_format("cwd", "{repo}"),
+                    with_format("git_branch", "{branch}{dirty}"),
+                    item("worktree"),
+                ],
+                vec![item("context_bar"), item("reasoning")],
+            ),
+            // Row 3: the numbers, right-aligned, single spaces (revision 3's sample
+            // `↑15M ↓2.6M R1962M $14.510 41.3%/1.0M`).
+            Row {
+                separator: " ".to_string(),
+                ..row(
+                    Vec::new(),
+                    vec![
+                        with_format("tokens", "^{in} v{out} R{cache}"),
+                        item("cost"),
+                        no_symbol("context", "{percent}%/{budget}"),
+                    ],
+                )
+            },
+        ],
         Preset::Full => vec![
             Row {
                 // The identity row (ADR 0027).
@@ -259,12 +453,13 @@ fn preset_rows(preset: Preset) -> Vec<Row> {
                 ],
                 right: Vec::new(),
                 separator: " │ ".to_string(),
+                separator_style: ItemStyle::Role(Role::FooterSeparator),
             },
             Row {
                 // The numbers row: tokens (in/out/cache), speed, cost, context (share/window
                 // with the auto-compaction marker), elapsed.
                 left: vec![
-                    with_format("tokens", "↑{in} ↓{out} {cache}"),
+                    with_format("tokens", "^{in} v{out} {cache}"),
                     item("speed"),
                     item("cost"),
                     with_format("context", "{percent}%/{budget}{auto}"),
@@ -272,6 +467,7 @@ fn preset_rows(preset: Preset) -> Vec<Row> {
                 ],
                 right: Vec::new(),
                 separator: " │ ".to_string(),
+                separator_style: ItemStyle::Role(Role::FooterSeparator),
             },
         ],
         Preset::Pi => vec![
@@ -284,70 +480,166 @@ fn preset_rows(preset: Preset) -> Vec<Row> {
                 ],
                 right: vec![item("reasoning")],
                 separator: " │ ".to_string(),
+                separator_style: ItemStyle::Role(Role::FooterSeparator),
             },
             Row {
                 left: vec![item("tokens"), item("cost")],
                 right: Vec::new(),
                 separator: " │ ".to_string(),
+                separator_style: ItemStyle::Role(Role::FooterSeparator),
             },
         ],
         Preset::Classic => Vec::new(),
     }
 }
 
-/// Resolves one configured item, recording its warnings.
-fn resolve_item(config: &TuiFooterItemConfig, warnings: &mut Vec<String>) -> Item {
-    let known = item_is_known(&config.id);
+/// Whether a parsed item carries no options of its own (a bare id in a row). A bare id takes
+/// its options from `[tui.footer.items.<id>]`; an inline table does not (revision 3).
+fn is_bare(config: &TuiFooterItemConfig) -> bool {
+    config.icon.is_none()
+        && config.symbol_style.is_none()
+        && config.format.is_none()
+        && config.style.is_none()
+        && config.priority.is_none()
+        && config.thresholds.is_empty()
+        && config.params.is_empty()
+        && !config.disabled
+}
+
+/// Resolves one configured item, recording its warnings. `None` when it is disabled.
+fn resolve_item(
+    config: &TuiFooterItemConfig,
+    items: &std::collections::BTreeMap<String, TuiFooterItemConfig>,
+    warnings: &mut Vec<String>,
+) -> Option<Item> {
+    // A bare id takes the per-field `items` config; an inline table is used as written.
+    let effective = if is_bare(config) {
+        items.get(&config.id).unwrap_or(config)
+    } else {
+        config
+    };
+    if effective.disabled {
+        return None;
+    }
+    let id = effective.id.clone();
+    let known = item_is_known(&id);
     if !known {
         warnings.push(format!(
-            "tui.footer: unknown item {:?}; showing it as written",
-            config.id
+            "tui.footer: unknown item {id:?}; showing it as written"
         ));
     }
-    let style = config.style.as_deref().and_then(|name| {
-        parse_style(name).or_else(|| {
-            warnings.push(format!(
-                "tui.footer: item {:?} has unknown style {name:?}; using its default",
-                config.id
-            ));
-            None
-        })
-    });
+    let style = parse_style_or_warn(effective.style.as_deref(), &id, "style", warnings);
+    let symbol_style = parse_style_or_warn(
+        effective.symbol_style.as_deref(),
+        &id,
+        "symbol_style",
+        warnings,
+    );
     let mut thresholds = Vec::new();
-    if config.thresholds.is_empty() {
-        thresholds = default_thresholds(&config.id);
+    if effective.thresholds.is_empty() {
+        thresholds = default_thresholds(&id);
     } else {
-        for (at, name) in &config.thresholds {
-            match parse_style(name) {
-                Some(role) => thresholds.push((*at, role)),
-                None => warnings.push(format!(
-                    "tui.footer: item {:?} has unknown threshold style {name:?}; ignoring it",
-                    config.id
+        for (at, name) in &effective.thresholds {
+            match parse_item_style(name) {
+                Ok(style) => thresholds.push((*at, style)),
+                Err(error) => warnings.push(format!(
+                    "tui.footer: item {id:?} has a bad threshold style {name:?}: {error}"
                 )),
             }
         }
     }
-    // Validate the item's placeholders once, so the draw path never warns.
-    if let Some(format) = &config.format {
-        for placeholder in placeholders(format) {
-            if !item_placeholders(&config.id).contains(&placeholder.as_str()) {
-                warnings.push(format!(
-                    "tui.footer: item {:?} has unknown placeholder {{{placeholder}}}; showing \
-                     the format as written",
-                    config.id
-                ));
-            }
+    if let Some(format) = &effective.format {
+        validate_format(&id, format, warnings);
+    }
+    Some(Item {
+        id: id.clone(),
+        icon: effective.icon.clone(),
+        symbol_style,
+        format: effective.format.clone(),
+        style,
+        priority: effective.priority.unwrap_or_else(|| item_priority(&id)),
+        thresholds,
+        params: effective.params.clone(),
+        disabled: false,
+        known,
+    })
+}
+
+/// Parses a `style`/`symbol_style` value, warning (not failing) on a bad one.
+fn parse_style_or_warn(
+    value: Option<&str>,
+    id: &str,
+    field: &str,
+    warnings: &mut Vec<String>,
+) -> Option<ItemStyle> {
+    let name = value?;
+    match parse_item_style(name) {
+        Ok(style) => Some(style),
+        Err(error) => {
+            warnings.push(format!(
+                "tui.footer: item {id:?} has a bad {field} {name:?}: {error}"
+            ));
+            None
         }
     }
-    Item {
-        id: config.id.clone(),
-        icon: config.icon.clone(),
-        format: config.format.clone(),
-        style,
-        priority: config.priority.unwrap_or_else(|| item_priority(&config.id)),
-        thresholds,
-        params: config.params.clone(),
-        known,
+}
+
+/// Merges `[tui.footer.items.<id>]` into a preset row's item (revision 3): a configured field
+/// overrides the preset's.
+fn merge_into_item(item: &mut Item, config: &TuiFooterItemConfig, warnings: &mut Vec<String>) {
+    if config.disabled {
+        item.disabled = true;
+    }
+    if let Some(icon) = &config.icon {
+        item.icon = Some(icon.clone());
+    }
+    if let Some(symbol_style) = parse_style_or_warn(
+        config.symbol_style.as_deref(),
+        &item.id,
+        "symbol_style",
+        warnings,
+    ) {
+        item.symbol_style = Some(symbol_style);
+    }
+    if let Some(format) = &config.format {
+        validate_format(&item.id, format, warnings);
+        item.format = Some(format.clone());
+    }
+    if let Some(style) = parse_style_or_warn(config.style.as_deref(), &item.id, "style", warnings) {
+        item.style = Some(style);
+    }
+    if let Some(priority) = config.priority {
+        item.priority = priority;
+    }
+    if !config.thresholds.is_empty() {
+        item.thresholds = config
+            .thresholds
+            .iter()
+            .filter_map(|(at, name)| parse_item_style(name).ok().map(|style| (*at, style)))
+            .collect();
+    }
+    for (key, value) in &config.params {
+        item.params.retain(|(name, _)| name != key);
+        item.params.push((key.clone(), value.clone()));
+    }
+}
+
+/// Warns about an unknown placeholder or a bad inline style in a format, once at parse time.
+fn validate_format(id: &str, format: &str, warnings: &mut Vec<String>) {
+    for placeholder in placeholders(format) {
+        if !item_placeholders(id).contains(&placeholder.as_str()) {
+            warnings.push(format!(
+                "tui.footer: item {id:?} has unknown placeholder {{{placeholder}}}; showing \
+                 the format as written"
+            ));
+        }
+    }
+    for style in inline_styles(format) {
+        if let Err(error) = parse_item_style(&style) {
+            warnings.push(format!(
+                "tui.footer: item {id:?} has a bad inline style ({style:?}): {error}"
+            ));
+        }
     }
 }
 
@@ -469,20 +761,20 @@ fn reasoning_role(level: &str) -> Role {
 }
 
 /// The default 70/90 thresholds for the numeric items (ADR 0027 C2).
-fn default_thresholds(id: &str) -> Vec<(i64, Role)> {
+fn default_thresholds(id: &str) -> Vec<(i64, ItemStyle)> {
     match id {
-        "context" | "context_bar" | "cost" => {
-            vec![(70, Role::BudgetOver), (90, Role::ToolResultError)]
-        }
+        "context" | "context_bar" | "cost" => vec![
+            (70, ItemStyle::Role(Role::BudgetOver)),
+            (90, ItemStyle::Role(Role::ToolResultError)),
+        ],
         _ => Vec::new(),
     }
 }
 
-/// One styled piece of a row.
+/// One rendered item: its styled spans (symbol + text) and its truncation priority.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Piece {
-    text: String,
-    style: Style,
+    spans: Vec<(String, Style)>,
     priority: i64,
 }
 
@@ -498,6 +790,7 @@ fn render_row(app: &App, row: &Row, width: usize) -> Line<'static> {
         .filter_map(|item| render_item(app, item))
         .collect();
     let separator = row.separator.as_str();
+    let separator_style = row.separator_style.resolve(app);
 
     // Narrow terminals drop the right group first, then the left group from its end; the
     // lowest priority goes first (ties: the rightmost of its group).
@@ -514,8 +807,8 @@ fn render_row(app: &App, row: &Row, width: usize) -> Line<'static> {
         break;
     }
 
-    let left_text = join_group(&left, separator);
-    let right_text = join_group(&right, separator);
+    let left_text = join_group(&left, separator, separator_style);
+    let right_text = join_group(&right, separator, separator_style);
     let mut spans: Vec<Span> = left_text
         .iter()
         .map(|(text, style)| Span::styled(text.clone(), *style))
@@ -553,19 +846,28 @@ fn drop_lowest(pieces: &mut Vec<Piece>) -> bool {
 
 /// The width of one group's text plus its separators.
 fn group_width(pieces: &[Piece], separator: &str) -> usize {
-    let text: usize = pieces.iter().map(|piece| width_of(&piece.text)).sum();
+    let text: usize = pieces
+        .iter()
+        .map(|piece| {
+            piece
+                .spans
+                .iter()
+                .map(|(text, _)| width_of(text))
+                .sum::<usize>()
+        })
+        .sum();
     let separators = width_of(separator) * pieces.len().saturating_sub(1);
     text + separators
 }
 
 /// One group as (text, style) pairs, its items joined by `separator`.
-fn join_group(pieces: &[Piece], separator: &str) -> Vec<(String, Style)> {
+fn join_group(pieces: &[Piece], separator: &str, separator_style: Style) -> Vec<(String, Style)> {
     let mut out = Vec::new();
     for (i, piece) in pieces.iter().enumerate() {
         if i > 0 {
-            out.push((separator.to_string(), Style::default()));
+            out.push((separator.to_string(), separator_style));
         }
-        out.push((piece.text.clone(), piece.style));
+        out.extend(piece.spans.iter().cloned());
     }
     out
 }
@@ -574,62 +876,111 @@ fn width_of(text: &str) -> usize {
     unicode_width::UnicodeWidthStr::width(text)
 }
 
-/// One item's text and style, or `None` when it has no data (never a fabricated number).
+/// One item's styled spans, or `None` when it has no data (never a fabricated number).
 fn render_item(app: &App, item: &Item) -> Option<Piece> {
     if !item.known {
+        let style = item
+            .style
+            .as_ref()
+            .map(|s| s.resolve(app))
+            .unwrap_or_default();
         return Some(Piece {
-            text: item.id.clone(),
-            style: item
-                .style
-                .map(|role| role_style(app, role))
-                .unwrap_or_default(),
+            spans: vec![(item.id.clone(), style)],
             priority: item.priority,
         });
     }
-    if let Some(piece) = contribution_item(app, item) {
-        return Some(piece);
+    if let Some((text, style)) = contribution_item(app, item) {
+        return Some(with_symbol(app, item, text, style));
     }
     let data = item_data(app, &item.id, item)?;
     let format = item
         .format
         .clone()
         .unwrap_or_else(|| data.default_format.to_string());
-    let text = match expand(&format, &data) {
-        Ok(text) => text,
-        // An unknown placeholder was already warned about at parse time: show it raw.
-        Err(_) => format,
-    };
-    let icon = item
-        .icon
-        .clone()
-        .unwrap_or_else(|| glyph(&item.id, app.footer_glyphs()).to_string());
-    let text = if icon.is_empty() {
-        text
-    } else {
-        format!("{icon}{text}")
-    };
-    let role = if item.id == "reasoning" {
-        Some(
-            app.next_thinking
-                .as_deref()
-                .or(app.thinking_level.as_deref())
-                .map(reasoning_role)
-                .unwrap_or(Role::ReasoningMedium),
-        )
-    } else {
-        item.thresholds
-            .iter()
-            .rev()
-            .find(|(at, _)| data.numeric.is_some_and(|value| value as i64 >= *at))
-            .map(|(_, role)| *role)
-            .or(item.style)
-            .or_else(|| default_role(&item.id))
-    };
+    // An unknown placeholder or inline style was warned about at parse time: show it raw.
+    let segments = expand_spans(&format, &data).unwrap_or_else(|_| vec![(format.clone(), None)]);
+    let default_style = item_default_style(app, item, &data);
+    let mut spans: Vec<(String, Style)> = Vec::new();
+    let symbol = symbol_for(app, item);
+    if !symbol.is_empty() {
+        let style = item
+            .symbol_style
+            .as_ref()
+            .map(|s| s.resolve(app))
+            .unwrap_or(default_style);
+        spans.push((symbol, style));
+    }
+    for (text, inline) in segments {
+        let style = inline
+            .as_ref()
+            .map(|s| s.resolve(app))
+            .unwrap_or(default_style);
+        spans.push((text, style));
+    }
     Some(Piece {
-        text,
-        style: role.map(|role| role_style(app, role)).unwrap_or_default(),
+        spans,
         priority: item.priority,
     })
+}
+
+/// The item's own `symbol`/`icon`, else the built-in glyph for its id under the footer's set.
+fn symbol_for(app: &App, item: &Item) -> String {
+    item.icon
+        .clone()
+        .unwrap_or_else(|| glyph(&item.id, app.footer_glyphs()).to_string())
+}
+
+/// A contribution's text with the item's symbol prepended (ADR 0027's `symbol`).
+fn with_symbol(app: &App, item: &Item, text: String, style: Style) -> Piece {
+    let mut spans = Vec::new();
+    let symbol = symbol_for(app, item);
+    if !symbol.is_empty() {
+        let symbol_style = item
+            .symbol_style
+            .as_ref()
+            .map(|s| s.resolve(app))
+            .unwrap_or(style);
+        spans.push((symbol, symbol_style));
+    }
+    spans.push((text, style));
+    Piece {
+        spans,
+        priority: item.priority,
+    }
+}
+
+/// The item's default style: the reasoning level's role, a threshold, the configured style, or
+/// the item's built-in role.
+fn item_default_style(app: &App, item: &Item, data: &ItemData) -> Style {
+    if item.id == "reasoning" {
+        let level = app
+            .next_thinking
+            .as_deref()
+            .or(app.thinking_level.as_deref());
+        return role_style(
+            app,
+            level.map(reasoning_role).unwrap_or(Role::ReasoningMedium),
+        );
+    }
+    if let Some((_, style)) = item
+        .thresholds
+        .iter()
+        .rev()
+        .find(|(at, _)| data.numeric.is_some_and(|value| value as i64 >= *at))
+    {
+        return style.resolve(app);
+    }
+    if let Some(style) = &item.style {
+        return style.resolve(app);
+    }
+    // ADR 0027: the unicode brand is a bold accent `R`. The theme's accent role is
+    // `notice_label` (the `accent` style alias maps to it), so the mark follows a theme switch.
+    if item.id == "brand" && app.footer_glyphs() == Glyphs::Unicode {
+        return role_style(app, Role::NoticeLabel);
+    }
+    default_role(&item.id)
+        .map(|role| role_style(app, role))
+        .unwrap_or_default()
 }
 
 fn role_style(app: &App, role: Role) -> Style {
@@ -640,11 +991,18 @@ fn role_style(app: &App, role: Role) -> Style {
 /// The items whose value comes from the contributor store (ADR 0027 C3).
 const CONTRIBUTION_ITEMS: [&str; 3] = ["git_branch", "worktree", "status"];
 
-/// One item whose data is a contribution: its text, its first segment's role and whether the
-/// last refresh failed (drawn dim). `None` when the contributor has no value (the item hides).
-fn contribution_item(app: &App, item: &Item) -> Option<Piece> {
+/// One item whose data is a contribution: its text and its style, or `None` when the
+/// contributor has no value (the item hides). The symbol is prepended by `render_item`.
+fn contribution_item(app: &App, item: &Item) -> Option<(String, Style)> {
     if !CONTRIBUTION_ITEMS.contains(&item.id.as_str()) {
-        return None;
+        // Any other id a contributor publishes (C3/C4): its store text, stale drawn dim.
+        let (text, role, stale) = contribution(app, &item.id)?;
+        let role = if stale {
+            Role::Truncation
+        } else {
+            contrib_role(role)
+        };
+        return Some((text, role_style(app, role)));
     }
     let (text, role, stale) = match item.id.as_str() {
         "git_branch" => {
@@ -684,17 +1042,12 @@ fn contribution_item(app: &App, item: &Item) -> Option<Piece> {
         "status" => status_contribution(app, item)?,
         _ => return None,
     };
-    let icon = item.icon.clone().unwrap_or_default();
     let role = if stale {
         Role::Truncation
     } else {
         contrib_role(role)
     };
-    Some(Piece {
-        text: format!("{icon}{text}"),
-        style: role_style(app, role),
-        priority: item.priority,
-    })
+    Some((text, role_style(app, role)))
 }
 
 /// One store item's joined text, for the items that only need the value (`cwd`'s `{repo}`).
@@ -769,17 +1122,9 @@ struct ItemData<'a> {
 fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>> {
     let session = app.projection.read();
     match id {
-        // ADR 0027: the brand wordmark. `㎭` (SQUARE RAD) is the unit glyph; the
-        // ASCII set falls back to `rad` because its glyph may be missing from a font.
+        // ADR 0027: the brand mark per glyph set (see [`brand_mark`]).
         "brand" => Some(ItemData {
-            values: vec![(
-                "brand",
-                if app.footer_glyphs() == Glyphs::Ascii {
-                    "rad".to_string()
-                } else {
-                    "㎭".to_string()
-                },
-            )],
+            values: vec![("brand", brand_mark(app.footer_glyphs()).to_string())],
             default_format: "{brand}",
             numeric: None,
         }),
@@ -887,7 +1232,8 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
                 (Some(used), Some(budget)) if budget > 0 => used as f64 / budget as f64,
                 _ => 0.0,
             };
-            let percent = (fraction * 100.0).round() as u64;
+            // One decimal (ADR 0027): `41.3%`.
+            let percent = format!("{:.1}", fraction * 100.0);
             let bar = if id == "context_bar" {
                 render_bar(item, fraction)
             } else {
@@ -899,7 +1245,8 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
                 if app.footer_glyphs() == Glyphs::Ascii {
                     " auto".to_string()
                 } else {
-                    " ⟲".to_string()
+                    // `⟲` (U+27F2) is missing from six of the seven fonts (revision 4): `~`.
+                    " ~".to_string()
                 }
             } else {
                 String::new()
@@ -908,14 +1255,14 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
                 values: vec![
                     ("bar", bar),
                     ("auto", auto),
-                    ("percent", percent.to_string()),
+                    ("percent", percent.clone()),
                     (
                         "used",
-                        used.map_or_else(|| "-".to_string(), |used| used.to_string()),
+                        used.map_or_else(|| "-".to_string(), crate::timing::format_tokens),
                     ),
                     (
                         "budget",
-                        budget.map_or_else(|| "-".to_string(), |budget| budget.to_string()),
+                        budget.map_or_else(|| "-".to_string(), crate::timing::format_tokens),
                     ),
                 ],
                 default_format: if id == "context_bar" {
@@ -923,7 +1270,7 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
                 } else {
                     "{used}/{budget}"
                 },
-                numeric: report.map(|_| percent),
+                numeric: report.map(|_| (fraction * 100.0).round() as u64),
             })
         }
         "tokens" => Some(ItemData {
@@ -949,7 +1296,7 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
                         .map_or_else(|| "-".to_string(), crate::timing::format_tokens),
                 ),
             ],
-            default_format: "↑{in} ↓{out} ⛁{cache}",
+            default_format: "^{in} v{out} R{cache}",
             numeric: None,
         }),
         // ADR 0027: the cost from the model's catalog price and the session's
@@ -1004,17 +1351,17 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
     }
 }
 
-/// Expands `{placeholders}`; an unknown placeholder is an error (the caller shows the raw
-/// format; the warning was recorded at parse time).
-fn expand(format: &str, data: &ItemData<'_>) -> Result<String, String> {
+/// Expands the `{placeholder}`s in a plain string (used inside a `[text]` segment).
+fn expand_placeholders(text: &str, data: &ItemData<'_>) -> Result<String, String> {
     let mut out = String::new();
-    let mut rest = format;
+    let mut rest = text;
     while let Some(open) = rest.find('{') {
         out.push_str(&rest[..open]);
         let after = &rest[open + 1..];
         let Some(close) = after.find('}') else {
-            out.push_str(&rest[open..]);
-            return Ok(out);
+            out.push('{');
+            rest = &rest[open + 1..];
+            continue;
         };
         let name = &after[..close];
         match data.values.iter().find(|(key, _)| *key == name) {
@@ -1025,6 +1372,73 @@ fn expand(format: &str, data: &ItemData<'_>) -> Result<String, String> {
     }
     out.push_str(rest);
     Ok(out)
+}
+
+/// Expands a format into styled segments: `{placeholder}` from the item's data, and
+/// `[text](style)` with an inline style (ADR 0027). An unknown placeholder or a bad
+/// inline style is an error; the caller warned at parse time and shows the format raw.
+fn expand_spans(
+    format: &str,
+    data: &ItemData<'_>,
+) -> Result<Vec<(String, Option<ItemStyle>)>, String> {
+    let mut out: Vec<(String, Option<ItemStyle>)> = Vec::new();
+    let mut plain = String::new();
+    let mut i = 0;
+    while i < format.len() {
+        let rest = &format[i..];
+        if let Some(stripped) = rest.strip_prefix('[') {
+            if let Some(close) = stripped.find("](") {
+                let after = &stripped[close + 2..];
+                if let Some(end) = after.find(')') {
+                    let style = parse_item_style(&after[..end])?;
+                    if !plain.is_empty() {
+                        out.push((std::mem::take(&mut plain), None));
+                    }
+                    // The `[text]` may carry `{placeholder}`s too.
+                    out.push((expand_placeholders(&stripped[..close], data)?, Some(style)));
+                    i += 1 + close + 2 + end + 1;
+                    continue;
+                }
+            }
+            plain.push('[');
+            i += 1;
+        } else if let Some(stripped) = rest.strip_prefix('{') {
+            if let Some(close) = stripped.find('}') {
+                let name = &stripped[..close];
+                match data.values.iter().find(|(key, _)| *key == name) {
+                    Some((_, value)) => plain.push_str(value),
+                    None => return Err(name.to_string()),
+                }
+                i += 1 + close + 1;
+                continue;
+            }
+            plain.push('{');
+            i += 1;
+        } else {
+            let c = rest.chars().next().expect("a non-empty rest");
+            plain.push(c);
+            i += c.len_utf8();
+        }
+    }
+    if !plain.is_empty() {
+        out.push((plain, None));
+    }
+    Ok(out)
+}
+
+/// The inline styles in a format's `[text](style)` segments, for parse-time validation.
+fn inline_styles(format: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = format;
+    while let Some(open) = rest.find("](") {
+        let after = &rest[open + 2..];
+        let Some(close) = after.find(')') else {
+            break;
+        };
+        out.push(after[..close].to_string());
+        rest = &after[close + 1..];
+    }
+    out
 }
 
 /// The context bar: `width` cells, `fill` for the used part and `empty` for the rest.
@@ -1049,25 +1463,28 @@ fn render_bar(item: &Item, fraction: f64) -> String {
 /// icon carry one; the rest are plain text.
 fn glyph(id: &str, glyphs: Glyphs) -> &'static str {
     match (id, glyphs) {
-        ("host", Glyphs::Unicode) => "\u{2302} ",
+        // ADR 0027: the unicode icons must exist in all seven mainstream coding
+        // fonts (see the README's coverage table), so `⌂ ◷ ◫ ◐ ⛁ ⬡` are replaced or dropped.
+        // `@ # *` and `»` are in every one; the rest are text-only.
+        ("host", Glyphs::Unicode) => "@ ",
         ("host", Glyphs::Nerd) => "\u{f109} ",
         ("host", Glyphs::Ascii) => "host ",
         ("speed", Glyphs::Unicode) => "\u{bb} ",
         ("speed", Glyphs::Nerd) => "\u{f0e7} ",
         ("speed", Glyphs::Ascii) => "spd ",
-        ("elapsed", Glyphs::Unicode) => "\u{25f7} ",
+        ("elapsed", Glyphs::Unicode) => "",
         ("elapsed", Glyphs::Nerd) => "\u{f017} ",
         ("elapsed", Glyphs::Ascii) => "t ",
-        ("context", Glyphs::Unicode) => "\u{25eb} ",
+        ("context", Glyphs::Unicode) => "",
         ("context", Glyphs::Nerd) => "\u{f035b} ",
         ("context", Glyphs::Ascii) => "[",
-        ("reasoning", Glyphs::Unicode) => "◐ ",
+        ("reasoning", Glyphs::Unicode) => "* ",
         ("reasoning", Glyphs::Nerd) => "\u{f0eb} ",
         ("reasoning", Glyphs::Ascii) => "* ",
         ("git_branch", Glyphs::Nerd) => "\u{e0a0} ",
-        ("session", Glyphs::Unicode) => "⛁ ",
+        ("session", Glyphs::Unicode) => "# ",
         ("session", Glyphs::Ascii) => "# ",
-        ("tier", Glyphs::Unicode) => "⬡ ",
+        ("tier", Glyphs::Unicode) => "",
         _ => "",
     }
 }
@@ -1076,38 +1493,127 @@ fn glyph(id: &str, glyphs: Glyphs) -> &'static str {
 /// by the footer's separator. `None` when none of them has data, so the row takes no space.
 pub fn widget_line(app: &App, ids: &[String]) -> Option<Line<'static>> {
     let separator = " │ ";
+    let separator_style = ItemStyle::Role(Role::FooterSeparator).resolve(app);
     let mut pieces: Vec<Piece> = Vec::new();
-    let mut width = 0usize;
     for id in ids {
         let item = Item {
             id: id.clone(),
             icon: None,
+            symbol_style: None,
             format: None,
             style: None,
             priority: item_priority(id),
             thresholds: default_thresholds(id),
             params: Vec::new(),
+            disabled: false,
             known: item_is_known(id),
         };
-        let Some(piece) = render_item(app, &item) else {
-            continue;
-        };
-        if !pieces.is_empty() {
-            width += width_of(separator);
+        if let Some(piece) = render_item(app, &item) {
+            pieces.push(piece);
         }
-        width += width_of(&piece.text);
-        pieces.push(piece);
     }
     if pieces.is_empty() {
         return None;
     }
-    let _ = width;
     let mut spans: Vec<Span> = Vec::new();
     for (index, piece) in pieces.iter().enumerate() {
         if index > 0 {
-            spans.push(Span::raw(separator));
+            spans.push(Span::styled(separator.to_string(), separator_style));
         }
-        spans.push(Span::styled(piece.text.clone(), piece.style));
+        for (text, style) in &piece.spans {
+            spans.push(Span::styled(text.clone(), *style));
+        }
     }
     Some(Line::from(spans))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every non-ASCII glyph the `unicode` tier can draw (ADR 0027). Each one is
+    /// checked against the seven fonts by `scripts/check-glyph-coverage.py` and listed in the
+    /// README's coverage table. A new glyph makes this test fail until it is re-checked and
+    /// added here.
+    const VERIFIED_COVERED: &str = "»│━─×▖▘▝▗";
+
+    fn app_with_glyphs(name: &str) -> App {
+        let mut app = App::new("mock", "s");
+        let config = radian_host::config::TuiFooterConfig {
+            glyphs: Some(name.to_string()),
+            ..Default::default()
+        };
+        app.apply_footer(&config);
+        app
+    }
+
+    fn bare_item(id: &str) -> Item {
+        Item {
+            id: id.to_string(),
+            icon: None,
+            symbol_style: None,
+            format: None,
+            style: None,
+            priority: item_priority(id),
+            thresholds: Vec::new(),
+            params: Vec::new(),
+            disabled: false,
+            known: true,
+        }
+    }
+
+    /// The brand mark is per glyph set (ADR 0027): Nerd Font, unicode `R`, ascii
+    /// `rad`; `㎭` is gone.
+    #[test]
+    fn the_brand_mark_is_per_glyph_set() {
+        for (name, expected) in [("unicode", "R"), ("nerd", "\u{f0c20}"), ("ascii", "rad")] {
+            let app = app_with_glyphs(name);
+            let item = bare_item("brand");
+            let data = item_data(&app, "brand", &item).expect("brand data");
+            let value = data
+                .values
+                .iter()
+                .find(|(key, _)| *key == "brand")
+                .expect("the brand value")
+                .1
+                .clone();
+            assert_eq!(value, expected, "the {name} brand mark");
+        }
+    }
+
+    /// The unicode tier only draws glyphs the seven checked fonts all have. Every item glyph
+    /// (from the built-in presets), the spinner frames, the separators, the context bar and
+    /// the auto marker are checked.
+    #[test]
+    fn unicode_tier_glyphs_are_all_verified_covered() {
+        let mut glyphs: Vec<char> = Vec::new();
+        for preset in [Preset::Deck, Preset::Full, Preset::Pi] {
+            for row in preset_rows(preset) {
+                for item in row.left.iter().chain(row.right.iter()) {
+                    glyphs.extend(glyph(&item.id, Glyphs::Unicode).chars());
+                    if let Some(format) = &item.format {
+                        // The default formats carry no glyph beyond ASCII; keep them honest.
+                        glyphs.extend(format.chars());
+                    }
+                }
+                glyphs.extend(row.separator.chars());
+            }
+        }
+        glyphs.extend(brand_mark(Glyphs::Unicode).chars());
+        glyphs.extend(Glyphs::Unicode.tool_status().iter().flat_map(|s| s.chars()));
+        glyphs.extend(crate::blocks::SPINNER);
+        glyphs.extend("━─".chars());
+        glyphs.extend(" ~".chars());
+        for ch in glyphs {
+            if ch.is_ascii() || ch == ' ' {
+                continue;
+            }
+            assert!(
+                VERIFIED_COVERED.contains(ch),
+                "{ch:?} (U+{:04X}) is not in the verified-covered set; re-run \
+                 scripts/check-glyph-coverage.py and update the README",
+                ch as u32
+            );
+        }
+    }
 }

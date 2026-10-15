@@ -525,7 +525,10 @@ pub(crate) enum DiagramOutcome {
 /// Renders `source` at `width` (ADR 0028 R8): a pure function of the two, so the cache key is
 /// exactly that pair. No partial diagram: `render_spans` either returns every line or an error.
 pub(crate) fn diagram_for(source: &str, width: usize) -> DiagramOutcome {
-    match codex_mermaid::render_spans(source, width) {
+    let t = std::time::Instant::now();
+    let rendered = codex_mermaid::render_spans(source, width);
+    radian_session::trace::took("first-frame/mermaid", t);
+    match rendered {
         Ok(lines) => DiagramOutcome::Rendered(
             lines
                 .into_iter()
@@ -1483,8 +1486,10 @@ fn prose_lines(text: &str, width: usize) -> Vec<BodyLine> {
 }
 
 /// The streaming spinner: a deterministic function of the text's length, so a delta batch
-/// (which changes the length and dirties the frame) is the only thing that turns it.
-const SPINNER: [char; 4] = ['⠋', '⠙', '⠸', '⠴'];
+/// (which changes the length and dirties the frame) is the only thing that turns it. The
+/// quadrant blocks (ADR 0027) are in all seven checked fonts; the braille frames
+/// (`⠋⠙⠸⠴`) and the arc (`◜◝◞◟`) are not, so they are not used.
+pub(crate) const SPINNER: [char; 4] = ['▖', '▘', '▝', '▗'];
 
 /// The collapsed reasoning placeholder (ADR 0028 R3). `live` entries get the spinner; the
 /// line count stays 1 either way.
@@ -1941,6 +1946,7 @@ fn syntax_lines_cached(
     highlight: bool,
 ) -> Option<std::sync::Arc<Vec<crate::highlight::HighlightedLine>>> {
     if !highlight || !closed {
+        radian_session::trace::took("first-frame/no-highlight", std::time::Instant::now());
         return None;
     }
     let body = code_body(&text[start..end], closed);
@@ -2725,7 +2731,7 @@ mod tests {
         assert_eq!(line_count(&entry, EXPANDED, 40), 3);
         // The collapsed placeholder carries the spinner while streaming.
         let lines = layout(&entry, &[], modes_with(ReasoningMode::Collapsed), 40);
-        // The `▸` is the marker column's glyph (rule 5), not part of the placeholder text.
+        // The marker column carries the fold glyph (rule 5), not the placeholder text.
         assert!(lines[0].text.contains("thinking (3 lines)"));
         assert!(lines[0].hint, "the placeholder is a synthesized line");
         assert!(

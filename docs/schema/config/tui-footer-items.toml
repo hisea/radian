@@ -1,0 +1,33 @@
+# ADR 0027: per-field footer config — `[tui.footer.items.<id>]` gives a bare id its
+# symbol/style/symbol_style/format/disabled; `separator_style` styles the separator (a role or
+# a starship color); `usage_period_secs` sets the opencode-go usage period (0 = off).
+schema_version = 1
+
+[model]
+provider = "example"
+base_url = "https://example.com/v1"
+model = "m-1"
+
+[tui]
+usage_period_secs = 120
+
+[tui.footer]
+preset = "deck"
+separator = " · "
+separator_style = "footer_separator"
+glyphs = "unicode"
+
+[tui.footer.items.git_branch]
+symbol = " "
+style = "accent"
+format = "{branch}[ {dirty}](muted)"
+
+[tui.footer.items.model]
+symbol_style = "bold #7e9cd8"
+
+[[tui.footer.rows]]
+left = ["model", "git_branch"]
+right = ["context_bar", "reasoning"]
+
+[[tui.footer.rows]]
+left = ["tokens", "cost", "context"]
