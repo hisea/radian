@@ -568,3 +568,18 @@ Base `1d4f6e9` · 一次性 worktree `/tmp/radian-cf-mut`，还原后 `git statu
 | CF-M4b | 全局文件放到工作区之后（顺序错） | 同上 | ✅ |
 
 5/5 抓住。
+
+## 系统提示词分层与三份角色（ADR 0036/2，切片 ②）
+
+Base `658b882` · 一次性 worktree `/tmp/radian-pl-mut`（detached，跑完删除）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| PL1 | 排序去掉 `is_current`（当前 provider 不再在前） | `radian-tui` 的 `tests::the_flat_model_list_puts_the_current_provider_first` | ✅ |
+| PL2 | `<session>`（0b）放到最前 | `skills_order::the_production_hook_chain_puts_memory_before_skills`（断言 session 在 skills 之后） | ✅ |
+| PL3 | `assemble` 丢掉 `<runtime>`（0a） | `cli::system_prompt_is_sent`（`--system` 时 0a 仍在） | ✅ |
+| PL4 | `default.md` 少一条规则（无每轮预算那条） | `prompt::tests::the_three_builtin_roles_are_distinct_and_carry_their_rules` | ✅ |
+| PL5 | 超预算先丢**内层**（`raw.pop` 代替 `remove(0)`） | `context::tests::the_file_and_total_limits_truncate` | ✅ |
+| PL6 | `git_commit` 放行 `.radian/` | `git_commit::tests::a_path_under_dot_radian_is_refused` | ✅ |
+
+6/6 抓住。
