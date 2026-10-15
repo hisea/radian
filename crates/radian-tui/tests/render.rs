@@ -11,6 +11,7 @@ use radian_tui::render;
 use radian_tui::tools::DisplayModes;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Color;
 
 /// One streaming chunk the way the loop does it: the projection accumulates the delta, then the
@@ -251,12 +252,19 @@ fn a_user_file_attachment_is_folded_to_one_line() {
     );
 }
 
+fn candidate(label: &str) -> radian_tui::command::Candidate {
+    radian_tui::command::Candidate {
+        insert: label.into(),
+        description: String::new(),
+    }
+}
+
 /// The `@` completion list is drawn above the input box and is clipped to the terminal width.
 #[test]
 fn the_completion_list_sits_above_the_input_and_truncates() {
     let mut app = App::new("m", "s");
     app.input = "@no".into();
-    app.completion_set(vec!["notes.txt".into(), "notes.md".into()]);
+    app.completion_set(vec![candidate("notes.txt"), candidate("notes.md")]);
     let text = screen(&render(&mut app, 40, 12));
     assert!(text.contains("notes.txt"), "{text}");
     assert!(text.contains("notes.md"), "{text}");
@@ -272,32 +280,53 @@ fn the_completion_list_sits_above_the_input_and_truncates() {
 fn the_completion_list_truncates_on_a_narrow_terminal() {
     let mut app = App::new("m", "s");
     app.input = "@".into();
-    app.completion_set(vec!["a-very-long-candidate-name.txt".into()]);
+    app.completion_set(vec![candidate("a-very-long-candidate-name.txt")]);
     let text = screen(&render(&mut app, 12, 10));
     assert!(
         !text.contains("a-very-long-candidate-name.txt"),
         "the row must be clipped, not wrapped:\n{text}"
     );
-    assert!(text.contains("a-very-long"), "{text}");
+    // The `❯ ` cursor takes two of the twelve columns.
+    assert!(text.contains("a-very-lon"), "{text}");
+    assert!(!text.contains("candidate"), "{text}");
 }
 
-/// `completion_rows` itself truncates, so the rule is testable without a terminal that
-/// clips: a row longer than the width is cut to exactly the width.
+/// The list cuts a row to the width (the cursor is 2 columns), so the rule is testable
+/// without a terminal that clips.
 #[test]
 fn completion_rows_truncates_to_the_width() {
     let mut app = App::new("m", "s");
-    app.completion_set(vec!["a-very-long-name.txt".into()]);
-    assert_eq!(render::completion_rows(&app, 6), vec!["a-very".to_string()]);
+    app.completion_set(vec![candidate("a-very-long-name.txt")]);
+    let rows = render::completion_rows(&app, 6, 10);
+    let text: String = rows[0].spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(text.starts_with("❯ a-ve"), "{text:?}");
+    assert_eq!(unicode_width::UnicodeWidthStr::width(text.as_str()), 6);
 }
 
+/// ADR 0035: the menu scrolls instead of a `+N more` line, and the window follows
+/// the highlight.
 #[test]
-fn the_completion_list_shows_ten_then_more() {
+fn the_completion_list_scrolls_instead_of_showing_more() {
     let mut app = App::new("m", "s");
-    app.completion_set((0..15).map(|i| format!("file{i:02}.txt")).collect());
+    app.completion_set(
+        (0..15)
+            .map(|i| candidate(&format!("file{i:02}.txt")))
+            .collect(),
+    );
     let text = screen(&render(&mut app, 40, 20));
-    assert!(text.contains("file09.txt"), "{text}");
+    assert!(text.contains("file00.txt"), "{text}");
     assert!(!text.contains("file10.txt"), "{text}");
-    assert!(text.contains("+5 more"), "{text}");
+    assert!(!text.contains("more"), "no +N more line: {text}");
+    // Move the highlight past the window: the list scrolls to keep it visible.
+    for _ in 0..11 {
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+    let text = screen(&render(&mut app, 40, 20));
+    assert!(
+        text.contains("file11.txt"),
+        "the window follows the highlight: {text}"
+    );
+    assert!(!text.contains("file00.txt"), "{text}");
 }
 
 // ---------- the question form (ADR 0024 Q7) ----------
@@ -1041,7 +1070,7 @@ fn the_block_layout_snapshot() {
             meta: Default::default(),
         },
     });
-    app.push_notice("profile: workspace · sandbox seatbelt");
+    app.push_notice("profile: workspace · sandbox macos-seatbelt");
     let history =
         agent_core::compaction::compacted_history("the earlier work, summarized", &[], &[])
             .expect("a valid history");
@@ -1068,21 +1097,21 @@ fn the_block_layout_snapshot() {
         "",                              // the user block's top pad (banded)
         "> explain the failure",         // the user text
         "",                              // the user block's bottom pad (banded)
-        "▸ thinking (3 lines)",          // the folded channel: ▸ in the marker column
+        "> thinking (3 lines)",          // the folded channel: the marker column glyph
         "",                              // the container's gap
         "  Looking into it.",            // the assistant
         "",                              // the gap
-        "->✘ shell: make test (exit 2)", // the call, with its status glyph
+        "->× shell: make test (exit 2)", // the call, with its status glyph
         " <-$ make test",                // its result, one cell further right
         "   exit code: 2",
         "   --- stdout ---",
         "   boom",
         "",                          // the gap
-        "->✔ list: src (2 entries)", // the second call
+        "->+ list: src (2 entries)", // the second call
         " <-d 4.0K src",             // its result (the aligned table)
         "   f 512 B b.md",
         "", // the gap
-        "* profile: workspace · sandbox seatbelt",
+        "* profile: workspace · sandbox macos-seatbelt",
         "", // the gap above the rule line
         "── context compacted ──",
         "", // the gap below it
@@ -1653,7 +1682,7 @@ fn thinking_folds_to_one_line_and_ctrl_t_expands_it() {
         message: assistant_with("THE ANSWER", "FIRST THOUGHT\nSECOND THOUGHT", false, vec![]),
     });
     let text = screen(&render(&mut app, 60, 10));
-    assert!(text.contains("▸ thinking (2 lines)"), "{text}");
+    assert!(text.contains("> thinking (2 lines)"), "{text}");
     assert!(
         !text.contains("FIRST THOUGHT"),
         "folded by default:
@@ -1669,11 +1698,11 @@ fn thinking_folds_to_one_line_and_ctrl_t_expands_it() {
 {text}"
     );
     assert!(text.contains("SECOND THOUGHT"), "{text}");
-    assert!(!text.contains("▸ thinking"), "{text}");
+    assert!(!text.contains("> thinking"), "{text}");
 
     app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
     let text = screen(&render(&mut app, 60, 10));
-    assert!(text.contains("▸ thinking (2 lines)"), "{text}");
+    assert!(text.contains("> thinking (2 lines)"), "{text}");
     assert!(!text.contains("FIRST THOUGHT"), "{text}");
 }
 

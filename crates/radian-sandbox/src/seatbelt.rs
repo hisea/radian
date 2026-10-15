@@ -48,6 +48,7 @@ impl SandboxBackend for Seatbelt {
             network: false,
             read_only: Vec::new(),
             deny_read: Vec::new(),
+            allow_unix_sockets: Vec::new(),
             allow_env: vec!["PATH".into()],
         };
         let inside_file = ws.join("ok.txt");
@@ -148,6 +149,21 @@ pub(crate) fn profile_text(policy: &SandboxPolicy) -> String {
     profile.push_str("(allow sysctl-read)\n");
     if policy.network {
         profile.push_str("(allow network*)\n");
+        // ADR 0016: `(allow network*)` also allows connecting to **any** same-user
+        // Unix socket (herdr, ssh-agent, docker.sock). Deny outbound Unix sockets, then allow
+        // the exceptions. SBPL: a later rule wins, so this order is the whole fix.
+        profile.push_str("(deny network-outbound (remote unix-socket))\n");
+        // macOS resolves names through mDNSResponder; without this DNS fails.
+        profile.push_str(&format!(
+            "(allow network-outbound (remote unix-socket (path-literal {})))\n",
+            sbpl_string(MDNS_RESPONDER)
+        ));
+        for path in &policy.allow_unix_sockets {
+            profile.push_str(&format!(
+                "(allow network-outbound (remote unix-socket (path-literal {})))\n",
+                sbpl_string(&path.to_string_lossy())
+            ));
+        }
     }
     // Sensitive reads: a deeper deny overrides the broad `file-read*` above.
     for path in &policy.deny_read {
@@ -175,6 +191,9 @@ pub(crate) fn profile_text(policy: &SandboxPolicy) -> String {
     }
     profile
 }
+
+/// macOS's DNS resolver socket (ADR 0016): always allowed when the network is on.
+const MDNS_RESPONDER: &str = "/private/var/run/mDNSResponder";
 
 /// The pty rules for the `workspace` tier. `file-ioctl` is filtered to exactly the pty
 /// devices, so it cannot be used to ioctl anything else (TIOCSTI is then blocked by the
@@ -224,6 +243,7 @@ mod tests {
             network: false,
             read_only: vec![std::path::PathBuf::from("/tmp/ws/.git")],
             deny_read: vec![std::path::PathBuf::from("/Users/x/.ssh")],
+            allow_unix_sockets: Vec::new(),
             allow_env: vec!["PATH".into()],
         }
     }
@@ -272,6 +292,32 @@ mod tests {
         let mut p = policy();
         p.network = true;
         assert!(profile_text(&p).contains("(allow network*)"));
+    }
+
+    /// ADR 0016: with the network on, outbound Unix sockets are denied, DNS
+    /// (mDNSResponder) is always allowed, and each whitelisted socket follows the deny. The
+    /// order is the fix (a later SBPL rule wins).
+    #[test]
+    fn unix_sockets_are_denied_with_the_dns_exception_and_the_whitelist() {
+        let mut p = policy();
+        p.network = true;
+        p.allow_unix_sockets = vec![std::path::PathBuf::from("/Users/x/herdr.sock")];
+        let profile = profile_text(&p);
+        let deny = profile
+            .find("(deny network-outbound (remote unix-socket))")
+            .unwrap_or_else(|| panic!("no deny rule:\n{profile}"));
+        let dns = profile
+            .find("(remote unix-socket (path-literal \"/private/var/run/mDNSResponder\"))")
+            .unwrap_or_else(|| panic!("no mDNSResponder allow:\n{profile}"));
+        let allowed = profile
+            .find("(remote unix-socket (path-literal \"/Users/x/herdr.sock\"))")
+            .unwrap_or_else(|| panic!("no whitelist allow:\n{profile}"));
+        assert!(deny < dns, "the deny must come first");
+        assert!(dns < allowed, "the whitelist must follow the deny");
+
+        // With the network off there is no rule at all (everything is already denied).
+        let off = profile_text(&policy());
+        assert!(!off.contains("network-outbound"), "{off}");
     }
 
     #[test]

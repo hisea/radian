@@ -766,23 +766,15 @@ pub fn model_switch(args: &[String]) -> Result<ModelSwitch, String> {
     }
 }
 
-/// `/model`'s one argument level completes both halves of `<provider>/<model>`: the provider
-/// before the slash, the model after it (ADR 0026 D5). The candidates need the host's
-/// credential store and the model lists, so the level is `Needs` and the loop resolves it.
-fn model_route_level(typed: &[&str], partial: &str) -> Level {
-    let typed = typed.last().copied().unwrap_or_default();
-    let word = if partial.is_empty() { typed } else { partial };
-    let (provider, model_partial) = match word.split_once('/') {
-        Some((provider, model)) => (Some(provider.to_owned()), model.to_owned()),
-        None => (None, String::new()),
-    };
+/// `/model`'s one argument level: the flat list of every logged-in provider's models
+/// (ADR 0035). The candidates need the host's credential store and the model
+/// lists, so the level is `Needs` and the loop resolves it. The direct `/model
+/// <provider>/<model>` form still works: the typed word is passed as the partial, so a full
+/// `provider/model` is the one exact candidate and is not armed.
+fn model_route_level(_typed: &[&str], partial: &str) -> Level {
     Level::Needs(Fetch::ModelRoute {
-        provider,
-        partial: if model_partial.is_empty() {
-            word.to_owned()
-        } else {
-            model_partial
-        },
+        provider: None,
+        partial: partial.to_owned(),
     })
 }
 

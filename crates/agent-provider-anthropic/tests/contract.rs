@@ -61,6 +61,12 @@ impl agent_provider_contract::ContractHarness<Anthropic> for AnthropicHarness {
         &[UsageField::Total]
     }
 
+    fn input_includes_cache(&self) -> bool {
+        // Anthropic's `input_tokens` is the **uncached** part; `cache_read_input_tokens` and
+        // `cache_creation_input_tokens` are its siblings (ADR 0007).
+        false
+    }
+
     fn context_overflow(&self) -> Option<Wire> {
         // Anthropic's real 400 shape for an over-length prompt: `invalid_request_error` with
         // the "prompt is too long" message.
@@ -296,6 +302,14 @@ async fn contract_7a_usage_shapes() {
 #[tokio::test]
 async fn contract_7b_total_not_computed() {
     contract::check_total_not_computed(&harness()).await
+}
+
+/// ADR 0007: the adapter says whether `input` contains the cache hit. This one
+/// declares `false` — Anthropic's `input_tokens` is the uncached part, a sibling of
+/// `cache_read_input_tokens`.
+#[tokio::test]
+async fn contract_7c_input_cache_semantics() {
+    contract::check_input_cache_semantics(&harness()).await
 }
 
 #[tokio::test]

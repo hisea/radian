@@ -1450,8 +1450,10 @@ fn prose_lines(text: &str, width: usize) -> Vec<BodyLine> {
 }
 
 /// The streaming spinner: a deterministic function of the text's length, so a delta batch
-/// (which changes the length and dirties the frame) is the only thing that turns it.
-const SPINNER: [char; 4] = ['⠋', '⠙', '⠸', '⠴'];
+/// (which changes the length and dirties the frame) is the only thing that turns it. The
+/// quadrant blocks (ADR 0027) are in all seven checked fonts; the braille frames
+/// (`⠋⠙⠸⠴`) and the arc (`◜◝◞◟`) are not, so they are not used.
+pub(crate) const SPINNER: [char; 4] = ['▖', '▘', '▝', '▗'];
 
 /// The collapsed reasoning placeholder (ADR 0028 R3). `live` entries get the spinner; the
 /// line count stays 1 either way.
@@ -2672,7 +2674,7 @@ mod tests {
         assert_eq!(line_count(&entry, EXPANDED, 40), 3);
         // The collapsed placeholder carries the spinner while streaming.
         let lines = layout(&entry, &[], modes_with(ReasoningMode::Collapsed), 40);
-        // The `▸` is the marker column's glyph (rule 5), not part of the placeholder text.
+        // The marker column carries the fold glyph (rule 5), not the placeholder text.
         assert!(lines[0].text.contains("thinking (3 lines)"));
         assert!(lines[0].hint, "the placeholder is a synthesized line");
         assert!(

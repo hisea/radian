@@ -695,6 +695,8 @@ struct Setup {
     config_slot: std::sync::Arc<radian_runtime::ConfigSlot>,
     config_queue: std::sync::Arc<radian_runtime::ConfigQueue>,
     budget_for: radian_runtime::BudgetFor,
+    /// Resolves a route's catalog price from the warm cache, for the resume fold (F3).
+    price_for: Option<radian_host::cost::RoutePrice>,
     /// The provider actually chosen, for the session's config snapshot.
     provider: Provider,
     servers: Vec<McpServerConfig>,
@@ -734,6 +736,8 @@ struct Setup {
     skills_builtin: bool,
     /// `[skills] disabled`: built-in skill names to leave out.
     skills_disabled: Vec<String>,
+    /// `[sandbox] allow_unix_sockets`, `~`-expanded and canonicalized (ADR 0016).
+    allow_unix_sockets: Vec<PathBuf>,
 }
 
 async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
@@ -984,14 +988,32 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         request_max_output,
         true,
     );
-    let budget_for = std::sync::Arc::new(move |provider: &str, switch_model: &str| {
-        radian_host::resolve_offline(&radian_host::WindowQuery {
-            catalog_provider: Some(provider.to_owned()),
-            model: switch_model.to_owned(),
-            ..window_query.clone()
-        })
-        .budget
-    }) as radian_runtime::BudgetFor;
+    let budget_for = {
+        let query = window_query.clone();
+        std::sync::Arc::new(move |provider: &str, switch_model: &str| {
+            radian_host::resolve_offline(&radian_host::WindowQuery {
+                catalog_provider: Some(provider.to_owned()),
+                model: switch_model.to_owned(),
+                ..query.clone()
+            })
+            .budget
+        }) as radian_runtime::BudgetFor
+    };
+    // The same lookup gives the **price** (ADR 0027), offline like the budget: the
+    // resume fold prices each historical call at the route it ran under (F3).
+    let price_for = {
+        let query = window_query.clone();
+        Some(
+            std::sync::Arc::new(move |provider: &str, switch_model: &str| {
+                radian_host::resolve_offline(&radian_host::WindowQuery {
+                    catalog_provider: Some(provider.to_owned()),
+                    model: switch_model.to_owned(),
+                    ..query.clone()
+                })
+                .price
+            }) as radian_host::cost::RoutePrice,
+        )
+    };
     let servers = match &cli.mcp_config {
         Some(path) => load_mcp_config(path).map_err(SetupError)?,
         None => Vec::new(),
@@ -1044,6 +1066,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         config_slot,
         config_queue,
         budget_for,
+        price_for,
         provider,
         servers,
         system_prompt,
@@ -1068,6 +1091,16 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         ),
         skills_builtin: config.skills.builtin.unwrap_or(true),
         skills_disabled: config.skills.disabled.clone(),
+        allow_unix_sockets: {
+            let (paths, warnings) = radian_host::resolve_allow_unix_sockets(
+                &config.sandbox.allow_unix_sockets,
+                radian_host::user_home().as_deref(),
+            );
+            for warning in &warnings {
+                eprintln!("[config] {warning}");
+            }
+            paths
+        },
     })
 }
 
@@ -1360,7 +1393,13 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     if let Some(trust) = radian_host::trust_dir() {
         sandbox_deny_read.push(trust);
     }
-    let sandbox = profile::build_sandbox(profile_arg, &workspace_path, &sandbox_deny_read)?;
+    // ADR 0016: the whitelisted Unix sockets (resolved in `setup`).
+    let sandbox = profile::build_sandbox(
+        profile_arg,
+        &workspace_path,
+        &sandbox_deny_read,
+        &setup.allow_unix_sockets,
+    )?;
 
     // The approver and the audit sink. An `auto` policy (ADR 0026 D9, from `--yes`/`--approval
     // auto`/config/resume) answers every `ask` before any approver is consulted, so the
@@ -1447,6 +1486,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             config_slot: setup.config_slot,
             config_queue: setup.config_queue,
             budget_for: Some(setup.budget_for),
+            price_for: setup.price_for,
             protected_branches: Vec::new(),
             servers: setup.servers,
             system_prompt: setup.system_prompt.clone(),
@@ -1542,6 +1582,8 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     // the session; the wording is the host's (ADR 0012 decision 4).
     eprintln!("[profile] {}", session.facts().profile_line);
     eprintln!("[sandbox] {}", session.facts().sandbox_facts);
+    // ADR 0036 C2: the loaded context files (paths and sizes), or `none`.
+    eprintln!("[context] {}", session.facts().context_line);
     // ADR 0026 D9: the startup line names the auto policy whichever way it was chosen, and
     // the warnings say when a config value was ignored or a restore refused.
     if setup.approval.policy == radian_permissions::ApprovalPolicy::Auto {

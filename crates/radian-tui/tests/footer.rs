@@ -2,7 +2,7 @@
 //! preset, glyphs, thresholds, truncation and the warnings. Pure `App` state on a
 //! `TestBackend`, so no pty is needed.
 
-use agent_core::{BudgetReport, UsageSource};
+use agent_core::{BudgetReport, EventSink, UsageSource};
 use radian_host::config::{TuiFooterConfig, TuiFooterItemConfig, TuiFooterRowConfig};
 use radian_tui::App;
 use radian_tui::footer::{Footer, Preset};
@@ -114,11 +114,11 @@ fn the_default_footer_is_two_rows() {
         "the branch is on the first row: {first:?}"
     );
     assert!(
-        first.contains('◐'),
+        first.contains('*'),
         "the reasoning glyph is on the first row: {first:?}"
     );
     assert!(
-        second.contains('↑'),
+        second.contains('^'),
         "the tokens row is the second: {second:?}"
     );
     assert_eq!(app.footer.preset(), Preset::Deck);
@@ -149,7 +149,7 @@ fn classic_is_the_one_line_status_bar() {
 /// The three glyph sets differ, and the `reasoning` item's icon follows the set.
 #[test]
 fn the_glyph_sets_differ() {
-    for (name, glyph) in [("unicode", '◐'), ("ascii", '*')] {
+    for (name, glyph) in [("unicode", '*'), ("ascii", '*')] {
         let mut app = App::new("mock", "s");
         app.apply_footer(&with_glyphs(name));
         app.set_footer_facts(None, None, None, Some("high".to_string()));
@@ -259,7 +259,7 @@ fn truncation_drops_the_right_group_then_the_left_and_priority_wins() {
     let wide = render(&mut app, 120, 12);
     let wide_text = row(&wide, 11);
     assert!(
-        wide_text.contains("long-model-name") && wide_text.contains('◐'),
+        wide_text.contains("long-model-name") && wide_text.contains('*'),
         "{wide_text:?}"
     );
     let mid = render(&mut app, 20, 12);
@@ -269,7 +269,7 @@ fn truncation_drops_the_right_group_then_the_left_and_priority_wins() {
         "the left group stays: {mid_text:?}"
     );
     assert!(
-        !mid_text.contains('◐'),
+        !mid_text.contains('*'),
         "the right group drops first: {mid_text:?}"
     );
 
@@ -505,8 +505,8 @@ fn the_brand_and_host_items_show_their_values() {
     app.apply_footer(&rows(vec![item("brand"), item("host")]));
     let terminal = render(&mut app, 80, 12);
     let line = row(&terminal, 11);
-    assert!(line.contains('㎭'), "the brand glyph: {line:?}");
-    assert!(line.contains("Mac-mini"), "the hostname: {line:?}");
+    assert!(line.contains('R'), "the brand glyph: {line:?}");
+    assert!(line.contains("@ Mac-mini"), "the host glyph: {line:?}");
 
     // The ASCII glyph set falls back to `rad` (ADR 0027's 标志 section).
     let mut ascii = App::new("mock", "s");
@@ -522,7 +522,7 @@ fn the_brand_and_host_items_show_their_values() {
     let terminal = render(&mut ascii, 80, 12);
     let line = row(&terminal, 11);
     assert!(line.contains("rad"), "{line:?}");
-    assert!(!line.contains('㎭'), "ascii has no wide glyph: {line:?}");
+    assert!(!line.contains('R'), "ascii has no brand mark: {line:?}");
 }
 
 /// `speed` and `elapsed` come from the injected clock (ADR 0027): the last finished
@@ -552,21 +552,63 @@ fn the_speed_and_elapsed_items_use_the_injected_clock() {
     assert!(line.contains("50.0 tok/s"), "the speed stays: {line:?}");
 }
 
-/// The `cost` item uses the model's catalog price and the session's totals; without a price it
-/// hides rather than showing `$0.00` (ADR 0027).
+/// F2 (ADR 0018): a summarization call's usage reaches the footer's totals and fee
+/// through the **real sink** (the one the driver emits into), not just by calling the
+/// projection directly. Before this slice the compaction's spending never appeared at all.
+#[test]
+fn a_compaction_usage_reaches_the_footer_totals() {
+    use std::sync::mpsc::channel;
+    let mut app = App::new("mock", "s");
+    app.apply_footer(&rows(vec![item("tokens"), item("cost")]));
+    app.set_model_price(Some(radian_host::ModelPrice {
+        input: 3_000_000, // $3 / Mtok
+        output: 15_000_000,
+        cache_read: None,
+        cache_write: None,
+    }));
+    let (tx, _rx) = channel();
+    let sink = radian_tui::events::ProjectionSink::new(tx, std::sync::Arc::clone(&app.projection));
+    sink.emit(agent_core::AgentEvent::CompactionUsage {
+        revision: 1,
+        model: "current".into(),
+        usage: agent_core::ModelUsage {
+            input: Some(50_000),
+            output: Some(2_000),
+            input_includes_cache: Some(false),
+            ..Default::default()
+        },
+    });
+
+    // The projection holds the exact micro-dollars: 50000 x $3 + 2000 x $15 per Mtok = $0.18.
+    assert_eq!(app.projection.read().cost_micros(), Some(180_000));
+    let terminal = render(&mut app, 120, 12);
+    let line = row(&terminal, 11);
+    // The summary's tokens are in the totals (50K in, 2K out) ...
+    assert!(line.contains("50K"), "the summary's input: {line:?}");
+    // `format_tokens` keeps one decimal under 10 (ADR 0027): 2 000 is `2.0K`.
+    assert!(line.contains("2.0K"), "the summary's output: {line:?}");
+    // ... and in the fee.
+    assert!(line.contains("$0.180"), "the summary's fee: {line:?}");
+
+    // A conversation response then adds to the same totals through the same sink.
+    sink.emit(agent_core::AgentEvent::ModelResponseReceived {
+        stop_reason: agent_core::StopReason::EndTurn,
+        tool_calls: 0,
+        usage: Some(agent_core::ModelUsage {
+            input: Some(50_000),
+            input_includes_cache: Some(false),
+            ..Default::default()
+        }),
+    });
+    assert_eq!(app.projection.read().usage_input(), Some(100_000));
+    assert_eq!(app.projection.read().cost_micros(), Some(330_000), "$0.33");
+}
+
+/// The `cost` item shows the fee accumulated **per call, at the price in force when the call
+/// arrived** (ADR 0027). Without a price it hides rather than showing `$0.00`.
 #[test]
 fn the_cost_item_uses_the_model_price() {
     let mut app = App::new("mock", "s");
-    app.projection.add_usage(&agent_core::ModelUsage {
-        input: Some(1_000_000),
-        output: Some(100_000),
-        ..Default::default()
-    });
-    app.apply_footer(&rows(vec![item("cost")]));
-    // No price: hidden.
-    let terminal = render(&mut app, 80, 12);
-    assert!(!row(&terminal, 11).contains('$'), "{}", row(&terminal, 11));
-
     // $3/Mtok in, $15/Mtok out: $3.00 + $1.50 = $4.50.
     app.set_model_price(Some(radian_host::ModelPrice {
         input: 3_000_000,
@@ -574,12 +616,128 @@ fn the_cost_item_uses_the_model_price() {
         cache_read: Some(300_000),
         cache_write: None,
     }));
+    app.apply_footer(&rows(vec![item("cost")]));
+
+    // No usage yet: hidden.
+    let terminal = render(&mut app, 80, 12);
+    assert!(!row(&terminal, 11).contains('$'), "{}", row(&terminal, 11));
+
+    app.projection.add_usage(&agent_core::ModelUsage {
+        input: Some(1_000_000),
+        output: Some(100_000),
+        input_includes_cache: Some(false),
+        ..Default::default()
+    });
     let terminal = render(&mut app, 80, 12);
     assert_eq!(row(&terminal, 11).trim_end(), "$4.500");
+
+    // A session with no price at all hides, even with tokens counted.
+    let mut unpriced = App::new("mock", "s");
+    unpriced.apply_footer(&rows(vec![item("cost")]));
+    unpriced.projection.add_usage(&agent_core::ModelUsage {
+        input: Some(1_000_000),
+        ..Default::default()
+    });
+    let terminal = render(&mut unpriced, 80, 12);
+    assert!(!row(&terminal, 11).contains('$'), "{}", row(&terminal, 11));
 }
 
-/// The `tokens` item shows the cache-read total (ADR 0027), and `-` when the
-/// provider never reported one (never a fabricated 0).
+/// F1 (the research's §3.2 numbers): on an OpenAI-compatible endpoint, 190 000 of a 200 000
+/// token prompt are a cache hit. The hit must be billed **once, at the cache rate** — reading
+/// `input` as reported charged it again at full price ($0.03177 instead of $0.00327, 9.7x).
+#[test]
+fn a_cache_hit_is_billed_once_at_the_cache_rate() {
+    let mut app = App::new("mock", "s");
+    // opencode-go / deepseek-v4.1-flash: $0.15 in, $0.60 out, $0.003 cache read.
+    app.set_model_price(Some(radian_host::ModelPrice {
+        input: 150_000,
+        output: 600_000,
+        cache_read: Some(3_000),
+        cache_write: None,
+    }));
+    app.apply_footer(&rows(vec![item("cost")]));
+    app.projection.add_usage(&agent_core::ModelUsage {
+        input: Some(200_000),
+        output: Some(2_000),
+        cache_read: Some(190_000),
+        input_includes_cache: Some(true),
+        ..Default::default()
+    });
+    let terminal = render(&mut app, 80, 12);
+    // (200000-190000) x $0.15 + 2000 x $0.60 + 190000 x $0.003 = $0.00327.
+    assert_eq!(row(&terminal, 11).trim_end(), "$0.003");
+}
+
+/// F4 (ADR 0026 D5): each call is priced at the rate it arrived under, so a `/model` switch
+/// prices the calls after it with the new model and leaves the earlier ones alone.
+#[test]
+fn a_model_switch_prices_only_the_calls_after_it() {
+    let mut app = App::new("mock", "s");
+    app.apply_footer(&rows(vec![item("cost")]));
+    app.set_model_price(Some(radian_host::ModelPrice {
+        input: 150_000, // the cheap model: $0.15 / Mtok
+        output: 600_000,
+        cache_read: None,
+        cache_write: None,
+    }));
+    let cheap = agent_core::ModelUsage {
+        input: Some(1_000_000),
+        input_includes_cache: Some(false),
+        ..Default::default()
+    };
+    app.projection.add_usage(&cheap);
+    app.set_model_price(Some(radian_host::ModelPrice {
+        input: 3_000_000, // the expensive one: $3 / Mtok
+        output: 15_000_000,
+        cache_read: None,
+        cache_write: None,
+    }));
+    app.projection.add_usage(&cheap);
+
+    let terminal = render(&mut app, 80, 12);
+    // $0.15 (at the old price) + $3.00 (at the new one) — not 2M x $3 = $6.00.
+    assert_eq!(row(&terminal, 11).trim_end(), "$3.150");
+}
+
+/// F7 (ADR 0027: never `$0.00`): a response that reports all zeros — an empty or
+/// refused answer — has nothing to bill, so the item hides.
+#[test]
+fn an_all_zero_response_hides_the_cost() {
+    let mut app = App::new("mock", "s");
+    app.set_model_price(Some(radian_host::ModelPrice {
+        input: 3_000_000,
+        output: 15_000_000,
+        cache_read: Some(300_000),
+        cache_write: None,
+    }));
+    app.apply_footer(&rows(vec![item("cost")]));
+    app.projection.add_usage(&agent_core::ModelUsage {
+        input: Some(0),
+        output: Some(0),
+        cache_read: Some(0),
+        cache_write: Some(0),
+        input_includes_cache: Some(true),
+        ..Default::default()
+    });
+    let terminal = render(&mut app, 80, 12);
+    let line = row(&terminal, 11);
+    assert!(
+        !line.contains('$'),
+        "no $0.00 for a zero response: {line:?}"
+    );
+
+    // Once a real call lands, the fee appears (and the earlier zero added nothing).
+    app.projection.add_usage(&agent_core::ModelUsage {
+        input: Some(1_000_000),
+        input_includes_cache: Some(false),
+        ..Default::default()
+    });
+    let terminal = render(&mut app, 80, 12);
+    assert_eq!(row(&terminal, 11).trim_end(), "$3.000");
+}
+
+/// ADR 0027: the cache-read total (ADR 0027 adds `{cache_write}`, off by
+/// default), and `-` when the provider never reported one (never a fabricated 0).
 #[test]
 fn the_cache_tokens_are_shown() {
     let mut app = App::new("mock", "s");
@@ -604,6 +762,61 @@ fn the_cache_tokens_are_shown() {
     none.apply_footer(&rows(vec![item("tokens")]));
     let terminal = render(&mut none, 80, 12);
     assert!(row(&terminal, 11).contains('-'), "{}", row(&terminal, 11));
+}
+
+/// F8 (ADR 0027): the `tokens` item has a `{cache_write}` placeholder, because a
+/// cache write is billed at its own (often higher) rate and the `{cache}` total does not show
+/// it. It is available but **not** in the default format: the numbers row must not get wider by
+/// default.
+#[test]
+fn the_cache_write_tokens_show_only_when_the_format_asks_for_them() {
+    let mut app = App::new("mock", "s");
+    app.projection.add_usage(&agent_core::ModelUsage {
+        input: Some(10_000),
+        output: Some(760),
+        cache_read: Some(33_000),
+        cache_write: Some(12_000),
+        ..Default::default()
+    });
+
+    // The default format: the cache write is nowhere on the line.
+    app.apply_footer(&rows(vec![item("tokens")]));
+    let terminal = render(&mut app, 80, 12);
+    let line = row(&terminal, 11);
+    assert!(line.contains("33K"), "the cache read: {line:?}");
+    assert!(
+        !line.contains("12K"),
+        "the default format must not grow a cache-write field: {line:?}"
+    );
+
+    // A format that asks for it gets the number, and the config parses **without a warning**
+    // (the placeholder list is what validates a format at startup).
+    let warnings = app.apply_footer(&rows(vec![TuiFooterItemConfig {
+        id: "tokens".to_string(),
+        format: Some("{cache}/{cache_write}".to_string()),
+        ..Default::default()
+    }]));
+    assert!(
+        warnings.is_empty(),
+        "`{{cache_write}}` is a known placeholder for `tokens`: {warnings:?}"
+    );
+    let terminal = render(&mut app, 80, 12);
+    assert_eq!(row(&terminal, 11).trim_end(), "33K/12K");
+
+    // A provider that never reported a write shows `-`, never a fabricated 0.
+    let mut none = App::new("mock", "s");
+    none.projection.add_usage(&agent_core::ModelUsage {
+        input: Some(10_000),
+        cache_read: Some(33_000),
+        ..Default::default()
+    });
+    none.apply_footer(&rows(vec![TuiFooterItemConfig {
+        id: "tokens".to_string(),
+        format: Some("{cache_write}".to_string()),
+        ..Default::default()
+    }]));
+    let terminal = render(&mut none, 80, 12);
+    assert_eq!(row(&terminal, 11).trim_end(), "-");
 }
 
 /// The `git_branch` item shows the change counts from the contributor store: `{dirty}` is the
@@ -678,19 +891,20 @@ fn the_context_auto_marker_follows_the_switch() {
     }));
     app.set_auto_compact(true);
     let on = render(&mut app, 80, 12);
-    assert!(row(&on, 11).contains('⟲'), "{}", row(&on, 11));
+    assert!(row(&on, 11).contains('~'), "{}", row(&on, 11));
     app.set_auto_compact(false);
     let off = render(&mut app, 80, 12);
-    assert!(!row(&off, 11).contains('⟲'), "{}", row(&off, 11));
+    assert!(!row(&off, 11).contains('~'), "{}", row(&off, 11));
 }
 
 /// Every new item carries a glyph in all three sets (ADR 0027), and the sets differ.
 #[test]
 fn the_new_items_have_glyphs_in_all_three_sets() {
+    // The unicode `elapsed` icon was dropped (ADR 0027: no covered glyph).
     for (set, host, speed, elapsed) in [
-        ("unicode", '⌂', '»', '◷'),
-        ("nerd", '\u{f109}', '\u{f0e7}', '\u{f017}'),
-        ("ascii", 'h', 's', 't'),
+        ("unicode", '@', '»', None),
+        ("nerd", '\u{f109}', '\u{f0e7}', Some('\u{f017}')),
+        ("ascii", 'h', 's', Some('t')),
     ] {
         let mut app = App::new("mock", "s");
         app.set_hostname(Some("box".to_string()));
@@ -713,7 +927,9 @@ fn the_new_items_have_glyphs_in_all_three_sets() {
         let line = row(&terminal, 11);
         assert!(line.contains(host), "{set} host glyph in {line:?}");
         assert!(line.contains(speed), "{set} speed glyph in {line:?}");
-        assert!(line.contains(elapsed), "{set} elapsed glyph in {line:?}");
+        if let Some(elapsed) = elapsed {
+            assert!(line.contains(elapsed), "{set} elapsed glyph in {line:?}");
+        }
     }
 }
 
@@ -936,21 +1152,32 @@ fn starship_colors_parse() {
     parse("italic red");
 }
 
-/// The `brand` is `㎭` under the default unicode set (`rad` only under ascii).
+/// The `brand` is a bold accent `R` under the default unicode set (ADR 0027);
+/// `rad` only under ascii.
 #[test]
 fn the_brand_is_the_unicode_glyph_by_default() {
     let mut app = App::new("mock", "s");
     app.apply_footer(&rows(vec![item("brand")]));
     let terminal = render(&mut app, 40, 12);
-    assert!(row(&terminal, 11).contains('㎭'), "{}", row(&terminal, 11));
+    assert!(row(&terminal, 11).contains('R'), "{}", row(&terminal, 11));
 }
 
 /// ADR 0027's sample: the deck's third row, whole, is
-/// `↑15M ↓2.6M R1962M $14.510 41.3%/1.0M` (compact tokens, a 3-decimal cost, the context
+/// `^15M v2.6M R1962M $14.510 41.3%/1.0M` (compact tokens, a 3-decimal cost, the context
 /// share with one decimal and the window in `M`).
 #[test]
 fn the_deck_numbers_row_matches_the_sample() {
     let mut app = App::new("mock", "s");
+    // The price first: the fee is accumulated **per call at the price in force then**
+    // (ADR 0027), so a call arriving before the price is known contributes no fee
+    // at all — unlike the old "session totals × the current price at draw time" formula.
+    // 15M input at 967_333 micro-dollars per million = 14_509_995 micros = $14.510.
+    app.set_model_price(Some(radian_host::ModelPrice {
+        input: 967_333,
+        output: 0,
+        cache_read: None,
+        cache_write: None,
+    }));
     app.projection.add_usage(&agent_core::ModelUsage {
         input: Some(15_000_000),
         output: Some(2_600_000),
@@ -966,17 +1193,10 @@ fn the_deck_numbers_row_matches_the_sample() {
         baseline_input_tokens: None,
         estimated_growth_tokens: None,
     }));
-    // 15M input at 967_333 micro-dollars per million = 14_509_995 micros = $14.510.
-    app.set_model_price(Some(radian_host::ModelPrice {
-        input: 967_333,
-        output: 0,
-        cache_read: None,
-        cache_write: None,
-    }));
     let terminal = render(&mut app, 100, 12);
     // The numbers row is right-aligned; the content itself is the sample.
     assert_eq!(
         row(&terminal, 11).trim(),
-        "↑15M ↓2.6M R1962M $14.510 41.3%/1.0M"
+        "^15M v2.6M R1962M $14.510 41.3%/1.0M"
     );
 }

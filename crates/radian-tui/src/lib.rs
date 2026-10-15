@@ -24,6 +24,7 @@ pub mod projection;
 pub mod question;
 pub mod render;
 pub mod select;
+pub mod select_list;
 pub mod signals;
 pub mod startup;
 pub mod terminal;

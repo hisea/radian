@@ -458,7 +458,7 @@ impl Pty {
                 // The expanded header and the first info line are at the **top** of the block;
                 // with the trust line the block can be taller than a 24-row pty, so accept a
                 // later info line that stays visible when the view is pinned to the bottom.
-                screen.contains("▼ startup information")
+                screen.contains("- startup information")
                     || screen.contains("profile:")
                     || screen.contains("ask_user:")
             }) {
@@ -687,6 +687,69 @@ async fn pty_launches_with_no_arguments_from_the_config_and_auth_json() {
 /// ADR 0025 slice 3 acceptance: `/skill:<name> [args]` puts the skill's body in one user
 /// message, `/skills` lists the discovered skills, `/skill:nope` is a notice and not a message,
 /// and `//skill:x` is an ordinary message. A `disable-model-invocation: true` skill is listed for
+/// ADR 0036 C2: the host reads `AGENTS.md` at session start, the startup line names it, and
+/// the model's system prompt carries its content and the untrusted note.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_the_context_file_reaches_the_model_and_the_startup_line() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("context-session");
+    let home = TempDir::new("context-home");
+    // The workspace is a **sibling** of the session directory (ADR 0020: the sandbox hides the
+    // session directory, so a workspace inside it could not be used).
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    // A repository root (the walk stops here) with one context file.
+    std::fs::create_dir_all(ws.join(".git")).unwrap();
+    std::fs::write(
+        ws.join("AGENTS.md"),
+        "CONTEXT-FILE-MARKER: commits go through git_commit.\n",
+    )
+    .unwrap();
+    let server = MockServer::start(vec![text_reply("OK")]).await;
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "context",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[("RADIAN_HOME", home.path().to_str().unwrap())],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // The information block is folded; expand it to see the context line.
+    pty.expand_startup();
+    assert!(
+        pty.wait_for_screen("context: AGENTS.md", 10),
+        "the startup line must name the context file:\n{}",
+        pty.screen()
+    );
+    pty.send(b"hello\r");
+    assert!(pty.wait_for_screen("OK", 20), "{}", pty.screen());
+    let body = server.requests()[0].json();
+    let system = body["messages"]
+        .as_array()
+        .expect("messages is an array")
+        .iter()
+        .find(|message| message["role"] == "system")
+        .and_then(|message| message["content"].as_str())
+        .unwrap_or_default();
+    assert!(system.contains("CONTEXT-FILE-MARKER"), "{system}");
+    assert!(system.contains("may be untrusted"), "{system}");
+    assert!(system.contains("<project_instructions path="), "{system}");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
 /// the user but never reaches the prompt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
@@ -2021,6 +2084,50 @@ async fn pty_multiline_paste_reaches_the_input_box() {
     pty.quit();
 }
 
+/// An IME commits a whole word in one burst; every character must reach the input in one
+/// frame, not one poll period apart (11 CJK characters appeared ~50 ms
+/// apart, because `read_input` waited the full `INPUT_POLL` before draining crossterm's
+/// buffer).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_committed_ime_string_reaches_the_input_in_one_frame() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let dir = TempDir::new("ime");
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+        ],
+        24,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10));
+    // A mixed CJK/ASCII run written as one burst (what an IME commit produces).
+    let text = "你好世界abc测试中文输入法";
+    let start = std::time::Instant::now();
+    pty.send(text.as_bytes());
+    assert!(
+        pty.wait_for_screen(text, 2),
+        "the whole string must reach the input:\n{}",
+        pty.screen()
+    );
+    let elapsed = start.elapsed();
+    // The pre-fix behavior was one 50 ms poll period per buffered character (~550 ms here).
+    // 150 ms is well above the one-frame latency (a frame renders in a few ms, and the state
+    // wait polls every 20 ms) and far below the pre-fix time, so it fails on the regression,
+    // not on a loaded machine.
+    assert!(
+        elapsed < std::time::Duration::from_millis(150),
+        "the string took {elapsed:?}; the pre-fix behavior was ~50 ms per character"
+    );
+    pty.quit();
+}
+
 /// The second request must not carry the first response's reasoning (ADR 0014 R4), verified
 /// on the real UI path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2372,6 +2479,72 @@ async fn pty_the_workspace_write_notice_names_the_mcp_sandbox_gap() {
     assert!(
         notice.contains("not a complete credential boundary"),
         "the notice must not claim credential isolation: {notice}"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0027: the startup summary's sandbox word is the **real** sandbox, never `none`. The
+/// bug was searching the `workspace` tier's description text, which does not name the backend,
+/// so macOS showed `workspace · none`. the summary says the plain words
+/// ("macOS sandbox" / "Linux sandbox") and the expanded `profile:` line keeps the exact
+/// backend name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_the_startup_summary_names_the_real_sandbox_backend() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("summary-sandbox");
+    let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "summary-sandbox",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        30,
+        120,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    let screen = pty.screen();
+    // The collapsed summary line carries the tier, the sandbox word and the rest.
+    let summary = screen
+        .lines()
+        .find(|line| line.contains("context ") && line.contains("ask_user"))
+        .unwrap_or_else(|| panic!("no summary line:\n{screen}"));
+    assert!(
+        !summary.contains("· none ·"),
+        "the workspace tier has a sandbox; it must not read as none: {summary:?}"
+    );
+    let expected = if cfg!(target_os = "macos") {
+        "macOS sandbox"
+    } else {
+        "Linux sandbox"
+    };
+    assert!(
+        summary.contains(expected),
+        "the summary must name the sandbox in plain words ({expected}): {summary:?}"
+    );
+    // The exact backend name stays in the expanded `profile:` line.
+    pty.expand_startup();
+    let expanded = pty.screen();
+    let backend = if cfg!(target_os = "macos") {
+        "macos-seatbelt"
+    } else {
+        "linux-bwrap"
+    };
+    assert!(
+        expanded.contains(backend),
+        "the expanded profile line keeps the real backend name ({backend}): {expanded}"
     );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
@@ -8093,7 +8266,7 @@ async fn pty_the_pi_footer_is_two_rows() {
     // The model item is on the footer's first row; the tokens item on the second. The screen
     // text is one string, so both must be present, and the tokens glyph marks the second row.
     assert!(
-        pty.wait_for_screen("↑-", 10),
+        pty.wait_for_screen("^-", 10),
         "the tokens row is missing:\n{}",
         pty.screen()
     );
@@ -8137,7 +8310,7 @@ async fn pty_the_shipped_default_footer_is_two_rows_without_a_config() {
     // The shipped default is the `full` preset (ADR 0027): the identity row (brand,
     // model, repo/worktree) and the numbers row (tokens, speed, cost, context, elapsed).
     assert!(
-        first.contains('㎭') || first.contains("rad"),
+        first.contains('R') || first.contains("rad"),
         "the brand is on the first row: {first:?}"
     );
     assert!(
@@ -8149,7 +8322,7 @@ async fn pty_the_shipped_default_footer_is_two_rows_without_a_config() {
         "the repo/worktree name is on the identity row: {first:?}"
     );
     assert!(
-        second.contains('↑'),
+        second.contains('^'),
         "the numbers row shows the tokens: {second:?}"
     );
     assert!(
@@ -8160,6 +8333,123 @@ async fn pty_the_shipped_default_footer_is_two_rows_without_a_config() {
         !second.contains("mock"),
         "the model is not on the numbers row: {second:?}"
     );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// F3 (ADR 0027): `--resume` shows what the session already spent. Before this the
+/// tokens were `-` and `cost` was hidden until the next response, because the projection starts
+/// empty and only the live sink wrote to it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_resume_shows_the_sessions_earlier_tokens_and_fee() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("cost-resume");
+    let home = TempDir::new("cost-resume-home");
+    // A catalog cache with a price for the model the session ran on. `resolve_offline` reads
+    // it, so the resumed fee is resolved without any network (ADR 0026 D7).
+    let cache = home.path().join("cache/catalog");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(
+        cache.join("models.json"),
+        serde_json::json!({
+            "opencode-go": {
+                "id": "opencode-go",
+                "models": {
+                    "deepseek-v4.1-flash": {
+                        "id": "deepseek-v4.1-flash",
+                        "limit": {"context": 1000000, "input": 922000, "output": 128000},
+                        "cost": {"input": 0.15, "output": 0.6, "cache_read": 0.003}
+                    }
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    // The journal of a session that already ran: 1M input on the priced model = $0.15.
+    let path = dir.path().join("resumed.jsonl");
+    {
+        let journal = radian_session::SessionJournal::create(
+            &path,
+            "resumed",
+            radian_session::SessionCreatedData::new(
+                "/tmp",
+                serde_json::json!({"model": {"provider": "opencode-go", "model": "deepseek-v4.1-flash"}}),
+            ),
+        )
+        .unwrap();
+        use agent_core::TranscriptJournal;
+        journal
+            .append(agent_core::JournalRecord::Message {
+                index: 0,
+                message: agent_core::Message::user("earlier turn"),
+            })
+            .await
+            .unwrap();
+        journal
+            .append(agent_core::JournalRecord::Message {
+                index: 1,
+                message: agent_core::Message::assistant("earlier answer"),
+            })
+            .await
+            .unwrap();
+        journal
+            .append(agent_core::JournalRecord::ModelUsage {
+                usage: agent_core::ModelUsage {
+                    input: Some(1_000_000),
+                    output: Some(100_000),
+                    input_includes_cache: Some(true),
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap();
+        drop(journal);
+    }
+
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn_with_config(
+        &[
+            "--model",
+            "deepseek-v4.1-flash",
+            "--provider",
+            "opencode-go",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--resume",
+            "resumed",
+        ],
+        &[
+            ("RADIAN_HOME", home.path().to_str().unwrap()),
+            // The harness writes the `opencode-go` credential into `auth.json` from this env
+            // name (ADR 0026 D2: a key comes only from `auth.json`).
+            ("OPENCODE_GO_API_KEY", "test-key-not-a-secret"),
+        ],
+        // The numbers row, so `tokens` and `cost` are both on screen.
+        "schema_version = 1\n[tui.footer]\nrows = [{ left = [] }, { left = [\"tokens\", \"cost\"] }]\n",
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // The earlier turn's tokens are there (1M in, 100K out). The default `tokens` format is
+    // `^{in} v{out} R{cache}` (ADR 0027's ASCII-default icons), and `format_tokens`
+    // keeps one decimal under 10 (so 1 000 000 is `1.0M`) and rounds above it (`100K`).
+    assert!(
+        pty.wait_for_screen("^1.0M", 10),
+        "the resumed token total is missing:\n{}",
+        pty.screen()
+    );
+    assert!(pty.screen().contains("v100K"), "{}", pty.screen());
+    // ... and its fee: 1M x $0.15 + 100K x $0.60 per Mtok = $0.21, three decimals
+    // (ADR 0027).
+    assert!(
+        pty.wait_for_screen("$0.210", 10),
+        "the resumed fee is missing:\n{}",
+        pty.screen()
+    );
+    let _ = server;
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
 }
@@ -8197,7 +8487,7 @@ async fn pty_the_default_footer_drops_the_right_group_on_a_narrow_terminal() {
     let second = lines.last().cloned().unwrap_or_default();
     assert!(first.contains("mock"), "the model survives: {first:?}");
     assert!(
-        !first.contains('◐'),
+        !first.contains('*'),
         "the right group drops first: {first:?}"
     );
     assert!(
@@ -8343,7 +8633,9 @@ async fn pty_bang_runs_and_enters_the_context() {
     );
     let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
-    pty.send(b"!printf BANG-OUTPUT\r");
+    // The output must not be a substring of the command text: `wait_for_screen` would
+    // otherwise match the echoed input line and race the command (the audit-test flake).
+    pty.send(b"!printf 'BANG-%s' OUTPUT\r");
     assert!(
         pty.wait_for_screen("BANG-OUTPUT", 20),
         "the command output is not on screen:\n{}",
@@ -8351,7 +8643,7 @@ async fn pty_bang_runs_and_enters_the_context() {
     );
     // The block's first line is `$ cmd`.
     assert!(
-        pty.wait_for_screen("$ printf BANG-OUTPUT", 10),
+        pty.wait_for_screen("$ printf 'BANG-%s' OUTPUT", 10),
         "the command line is not on screen:\n{}",
         pty.screen()
     );
@@ -8376,7 +8668,7 @@ async fn pty_bang_runs_and_enters_the_context() {
         .map(|message| message["content"].as_str().unwrap_or_default())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(users.contains("Ran `printf BANG-OUTPUT`"), "{users}");
+    assert!(users.contains("Ran `printf 'BANG-%s' OUTPUT`"), "{users}");
     assert!(users.contains("BANG-OUTPUT"), "{users}");
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
@@ -8395,7 +8687,9 @@ async fn pty_bangbang_stays_out_of_the_context() {
     );
     let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
-    pty.send(b"!!printf BANG-SECRET\r");
+    // Distinct output (the command text has no `BANG-SECRET`), so the wait cannot match the
+    // echoed input line.
+    pty.send(b"!!printf 'BANG-%s' SECRET\r");
     assert!(
         pty.wait_for_screen("BANG-SECRET", 20),
         "the command output is not on screen:\n{}",
@@ -8475,9 +8769,12 @@ async fn pty_bang_is_audited_in_the_journal() {
         100,
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
-    pty.send(b"!!printf AUDITED\r");
+    // The output must not appear in the command text: `wait_for_screen("AUDITED")` used to
+    // match the echoed `!!printf AUDITED` and quit before the command (and its `UserBash`
+    // record) ran. `printf 'A%sB' Z` prints `AZB`, which the command text does not contain.
+    pty.send(b"!!printf 'A%sB' Z\r");
     assert!(
-        pty.wait_for_screen("AUDITED", 20),
+        pty.wait_for_screen("AZB", 20),
         "the command output is not on screen:\n{}",
         pty.screen()
     );
@@ -8495,7 +8792,7 @@ async fn pty_bang_is_audited_in_the_journal() {
         "no UserBash audit record:\n{text}"
     );
     assert!(
-        text.contains("\"command\":\"printf AUDITED\"")
+        text.contains("\"command\":\"printf 'A%sB' Z\"")
             && text.contains("\"exclude_from_context\":true"),
         "the audit record is missing its fields:\n{text}"
     );
@@ -8514,12 +8811,10 @@ async fn pty_bang_is_single_and_escapable() {
     );
     let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // A running `!` has no block yet (the block appears when it finishes), and the composer
+    // echo is gone as soon as Enter is handled, so there is nothing to wait for here: the two
+    // sends are processed in order, so the second sees the first already running.
     pty.send(b"!sleep 30\r");
-    assert!(
-        pty.wait_for_screen("sleep 30", 10),
-        "the command block is not on screen:\n{}",
-        pty.screen()
-    );
     // A second command while the first runs is refused, not queued or run.
     pty.send(b"!echo SECOND\r");
     assert!(
@@ -8532,6 +8827,49 @@ async fn pty_bang_is_single_and_escapable() {
     assert!(
         pty.wait_for_screen("[cancelled]", 20),
         "the command was not cancelled:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0033: Ctrl-C (`Effect::Cancel`) also stops a running `!`, so there is no orphan process
+/// group. A turn must be running for Ctrl-C to mean "cancel" (otherwise it arms quit), so this
+/// starts one with a reply that never finishes and then cancels both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_ctrl_c_stops_a_running_bang() {
+    let _serial = pty_guard();
+    // A reply that never finishes: the turn stays running while the bash does.
+    let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
+    let config = format!(
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
+         base_url = \"{}\"\n",
+        server.base_url
+    );
+    let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // No block to wait for (it appears when the command finishes); the sends are ordered, so
+    // the `!` is running by the time the turn below starts.
+    pty.send(b"!sleep 30\r");
+
+    // Start a turn so Ctrl-C is a cancel; the mock hangs, so it is still running.
+    pty.send(b"hello\r");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while server.requests().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !server.requests().is_empty(),
+        "the turn never started:\n{}",
+        pty.screen()
+    );
+
+    // Ctrl-C cancels the turn AND the running `!`.
+    pty.send(&[0x03]);
+    assert!(
+        pty.wait_for_screen("[cancelled]", 20),
+        "Ctrl-C did not cancel the running !:\n{}",
         pty.screen()
     );
     pty.quit();

@@ -14,6 +14,7 @@ use std::pin::Pin;
 use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::contrib::{Contribution, Segment, SegmentRole, StatusContributor};
 
@@ -45,8 +46,10 @@ struct UsageWindows {
 #[derive(Debug, Deserialize)]
 struct Window {
     percent: Option<f64>,
+    /// A string or a number (ADR 0027). Kept as a raw [`Value`] so one window's bad
+    /// `resetsAt` drops only that window's countdown, never the whole response.
     #[serde(rename = "resetsAt")]
-    resets_at: Option<String>,
+    resets_at: Option<Value>,
 }
 
 /// The remaining percentage for a window: `100 − percent` (the API reports **used**),
@@ -86,8 +89,8 @@ fn display(response: &UsageResponse, now: SystemTime) -> Option<String> {
         }
         if let Some(reset) = window
             .resets_at
-            .as_deref()
-            .and_then(|at| countdown(at, now))
+            .as_ref()
+            .and_then(|at| countdown_value(at, now))
         {
             resets.push(format!("{} ↺{reset}", label(name)));
         }
@@ -105,10 +108,34 @@ fn display(response: &UsageResponse, now: SystemTime) -> Option<String> {
     Some(out)
 }
 
+/// `↺4h19m`-style countdown from a `resetsAt` that is either an RFC 3339 string or an epoch
+/// number (ADR 0027). `None` when it does not parse or is already past.
+fn countdown_value(resets_at: &Value, now: SystemTime) -> Option<String> {
+    match resets_at {
+        Value::String(text) => countdown(text, now),
+        Value::Number(number) => {
+            let value = number.as_i64()?;
+            // Epoch seconds (~1.7e9) vs milliseconds (~1.7e12): a magnitude test, so both the
+            // upstream client's forms are accepted.
+            let seconds = if value >= 100_000_000_000 {
+                value / 1000
+            } else {
+                value
+            };
+            countdown_from_epoch(u64::try_from(seconds).ok()?, now)
+        }
+        _ => None,
+    }
+}
+
 /// `↺4h19m`-style countdown from an RFC 3339 `resetsAt`. `None` when it does not parse or is
 /// already past. The contributor's own clock is fine here (a background task, ADR 0023 U3).
 fn countdown(resets_at: &str, now: SystemTime) -> Option<String> {
-    let reset = parse_rfc3339_utc(resets_at)?;
+    countdown_from_epoch(parse_rfc3339_utc(resets_at)?, now)
+}
+
+/// The countdown text from a reset timestamp (Unix seconds).
+fn countdown_from_epoch(reset: u64, now: SystemTime) -> Option<String> {
     let now = now.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_secs();
     let secs = reset.checked_sub(now)?;
     Some(if secs >= 86_400 {
@@ -244,6 +271,42 @@ mod tests {
         assert!(text.contains("↺"), "the reset countdown is shown: {text}");
         // 2030-01-01 is far from the epoch: days remain.
         assert!(text.contains("5h ↺"), "{text}");
+    }
+
+    /// `resetsAt` accepts epoch seconds and milliseconds (ADR 0027).
+    #[test]
+    fn resets_at_accepts_epoch_numbers() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        let seconds = parse(r#"{"usage":{"rolling":{"percent":2,"resetsAt":1000003600}}}"#);
+        let text = display(&seconds, now).expect("a display");
+        assert!(text.contains("5h ↺1h0m"), "{text}");
+        let millis = parse(r#"{"usage":{"rolling":{"percent":2,"resetsAt":1000003600000}}}"#);
+        let text = display(&millis, now).expect("a display");
+        assert!(text.contains("5h ↺1h0m"), "{text}");
+    }
+
+    /// One window's bad `resetsAt` drops only that window's countdown; its share and the other
+    /// windows are unaffected (ADR 0027).
+    #[test]
+    fn one_bad_window_does_not_drop_the_row() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        let response = parse(
+            r#"{"usage":{"rolling":{"percent":2,"resetsAt":{"bad":true}},
+                         "weekly":{"percent":19,"resetsAt":1000003600},
+                         "monthly":{"percent":9}}}"#,
+        );
+        let text = display(&response, now).expect("a display");
+        assert!(
+            text.contains("5h: 98%"),
+            "the bad window's share stays: {text}"
+        );
+        assert!(text.contains("7d: 81%"), "{text}");
+        assert!(text.contains("30d: 91%"), "{text}");
+        assert!(text.contains("7d ↺1h0m"), "{text}");
+        assert!(
+            !text.contains("5h ↺"),
+            "the bad countdown is dropped: {text}"
+        );
     }
 
     /// No windows at all is no display (the row disappears), and the period is clamped.

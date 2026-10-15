@@ -228,10 +228,18 @@ const TUI_DEFAULT_MAX_MODEL_CALLS: u32 = 1000;
 /// pre-refactor 50 ms tick (~50 deltas) while staying far below a frame budget.
 const MAX_FACTS_PER_TURN: usize = 64;
 
-/// How many effect rounds one turn may take. An effect's result is another event, and a result
-/// can ask for one more effect (`@` expansion → send), so the chain is short; the bound turns a
-/// bug into an error instead of a hang.
+/// How many effect rounds one turn may take before the rest carry to the next turn. An
+/// effect's result is another event, and a result can ask for one more effect (`@` expansion →
+/// send), so the chain is short; the bound keeps one turn's work near a frame budget and hands
+/// the rest to the next turn (never dropped, order kept). It is **draw fairness**, not an
+/// error: a busy machine with many unrelated events in the channel can legitimately exceed it.
 const MAX_EFFECT_ROUNDS: usize = 8;
+
+/// How many consecutive turns a carried effect batch may run before a one-time notice. A
+/// genuine infinite effect loop (an effect whose result always produces another effect) would
+/// otherwise run every frame; the notice says so and the loop keeps running — a TUI must not
+/// exit on it. 1000 turns is far above any real chain (the longest is `@` expansion → send).
+const MAX_CARRIED_FRAMES: u64 = 1000;
 
 /// The input thread's poll interval: a wake-up granularity for the hang-up check, not a
 /// synchronization device.
@@ -418,9 +426,16 @@ fn run(
     let mut app = App::new(String::new(), String::new());
     // `Tab` (the `complete` action) completes `@` file references against the workspace.
     app.set_workspace(workspace_path.clone());
-    let config_warnings = app
+    let mut config_warnings = app
         .apply_config(&config, radian_tui::theme::Theme::no_color_env())
         .map_err(|error| format!("config: {error}"))?;
+    // ADR 0016: `[sandbox] allow_unix_sockets`, `~`-expanded and canonicalized
+    // before the sandbox is built. An entry that does not resolve is skipped and named here.
+    let (allow_unix_sockets, socket_warnings) = radian_host::resolve_allow_unix_sockets(
+        &config.sandbox.allow_unix_sockets,
+        radian_host::user_home().as_deref(),
+    );
+    config_warnings.extend(socket_warnings);
     match &config.source {
         Some(path) => eprintln!("[config] {}", path.display()),
         None => eprintln!("[config] none"),
@@ -456,15 +471,18 @@ fn run(
             &tx,
             Phase::Picking,
             // The picking phase has no resolved model yet (review M1): the route is only a
-            // fallback for the `/thinking` clamp, which the picker overlay cannot reach.
+            // fallback for the `/thinking` clamp, which the picker overlay cannot reach. No
+            // session exists, so nothing is billed: the price resolver answers "no price".
             (
                 cli.provider.clone().unwrap_or_default(),
                 cli.model.clone().unwrap_or_default(),
             ),
+            Arc::new(|_: &str, _: &str| None),
             &config.providers,
             config.tui.theme.clone(),
             cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             // The picker phase has no session and no sandbox yet.
+            None,
             None,
         )?;
         if let Some(signal) = signal {
@@ -748,16 +766,33 @@ fn run(
         request_max_output,
         true,
     );
-    let budget_for = std::sync::Arc::new(move |provider: &str, switch_model: &str| {
-        // The switched route carries its own provider id, so the resolver uses it directly
-        // instead of deriving one from the startup base URL.
-        radian_host::resolve_offline(&radian_host::WindowQuery {
-            catalog_provider: Some(provider.to_owned()),
-            model: switch_model.to_owned(),
-            ..window_query.clone()
-        })
-        .budget
-    }) as radian_runtime::BudgetFor;
+    let budget_for = {
+        let query = window_query.clone();
+        std::sync::Arc::new(move |provider: &str, switch_model: &str| {
+            // The switched route carries its own provider id, so the resolver uses it directly
+            // instead of deriving one from the startup base URL.
+            radian_host::resolve_offline(&radian_host::WindowQuery {
+                catalog_provider: Some(provider.to_owned()),
+                model: switch_model.to_owned(),
+                ..query.clone()
+            })
+            .budget
+        }) as radian_runtime::BudgetFor
+    };
+    // ADR 0027 + ADR 0026 D5/D7: the same warm-cache lookup gives the **price**, so
+    // a switch bills later calls at the new model's rate. Offline like `budget_for`: a switch
+    // never fetches, and a cache miss means "no price" (the fee stays hidden), not a guess.
+    let route_price = {
+        let query = window_query.clone();
+        std::sync::Arc::new(move |provider: &str, switch_model: &str| {
+            radian_host::resolve_offline(&radian_host::WindowQuery {
+                catalog_provider: Some(provider.to_owned()),
+                model: switch_model.to_owned(),
+                ..query.clone()
+            })
+            .price
+        }) as RoutePrice
+    };
     // The permission tier and the sandbox. For an enforced tier a probe failure is an error
     // here, never a fallback to an unsandboxed run (ADR 0012 decision 2). Still before
     // the session file exists, so a refusal leaves nothing behind (dogfooding D2).
@@ -780,9 +815,15 @@ fn run(
     if let Some(trust) = radian_host::trust_dir() {
         sandbox_deny_read.push(trust);
     }
-    let sandbox = radian_tui::profile::build_sandbox(tier, &workspace_path, &sandbox_deny_read)?;
-    // ADR 0033: the user's `!`/`!!` commands run in the **same** sandbox the coding tools use.
-    // `Sandbox` is cheap to clone; `None` (the `safe` tier) means `!` is unavailable.
+    let sandbox = radian_tui::profile::build_sandbox(
+        tier,
+        &workspace_path,
+        &sandbox_deny_read,
+        &allow_unix_sockets,
+    )?;
+    // ADR 0033: the user's `!`/`!!` commands run in the **same** sandbox the coding tools use
+    // (including ADR 0016's Unix-socket rules). `Sandbox` is cheap to clone; `None`
+    // (the `safe` tier) means `!` is unavailable.
     let bash_sandbox = sandbox.clone();
     // The MCP config file is read and validated here: before any server process starts and
     // before a session file exists, so a bad file leaves nothing behind (dogfooding D2). The
@@ -912,6 +953,7 @@ fn run(
                 config_slot: std::sync::Arc::clone(&config_slot),
                 config_queue: radian_runtime::ConfigQueue::new(),
                 budget_for: Some(budget_for),
+                price_for: Some(Arc::clone(&route_price)),
                 protected_branches: config.git.protected_branches.clone(),
                 session_id: radian_host::SessionId::new(session_id.clone()),
                 session_dir: dir.clone(),
@@ -1054,7 +1096,20 @@ fn run(
     // ADR 0027: the hostname, the model's catalog prices (`cost`) and whether
     // automatic compaction is on (`context`'s `{auto}`). Each is a startup fact.
     app.set_hostname(radian_host::hostname());
-    app.set_model_price(window.price);
+    // The price must be the one for the route actually in force: a resume where the journal
+    // recorded a different model uses **that** model's rate, not the command line's (ADR 0026
+    // D8). `window.price` is the startup route's (possibly freshly fetched); a differing
+    // resumed route is resolved from the warm cache only, like any other switch.
+    let startup_price = match session.model_route() {
+        Some((route_provider, route_model))
+            if (route_provider.as_str(), route_model.as_str())
+                != (provider_name.as_str(), model_name.as_str()) =>
+        {
+            route_price(&route_provider, &route_model)
+        }
+        _ => window.price,
+    };
+    app.set_model_price(startup_price);
     app.set_bash_available(bash_sandbox.is_some());
     app.set_auto_compact(!cli.no_auto_compact && config.compaction.auto.unwrap_or(true));
     // ADR 0027 C3: the contributors. Their changes wake the UI through the same dirty channel
@@ -1073,20 +1128,31 @@ fn run(
         Arc::clone(&contributions),
         Arc::clone(&on_tick),
     );
-    // ADR 0027 C4: the opencode-go usage contributor, enabled only when a key is stored (a
-    // logged-in provider is opencode-go). The key never leaves this spawn: only the display
-    // text enters the store. `usage_period_secs = 0` turns it off; the period is clamped to
-    // 15 s–10 min.
-    if let Some(period) = usage_period(config.tui.usage_period_secs)
+    // ADR 0027 C4 + revision 5: the opencode-go usage contributor. It is spawned only when a
+    // key is stored, but it refreshes (and its row shows) only while the **current** model's
+    // provider is opencode-go. The watch channel is that gate: the UI flips it on a `/model`
+    // switch. The key never leaves this spawn: only the display text enters the store.
+    // `usage_period_secs = 0` turns it off; the period is clamped to 15 s–10 min.
+    let usage_gate = if let Some(period) = usage_period(config.tui.usage_period_secs)
         && let Ok(Some(key)) = radian_host::auth::resolve_key("opencode-go")
     {
-        radian_host::spawn_contributor(
+        // The startup model decides the first state (a resumed route wins over the CLI's).
+        let startup_provider = session
+            .model_route()
+            .map(|(provider, _)| provider)
+            .unwrap_or_else(|| provider_name.clone());
+        let (gate_tx, gate_rx) = tokio::sync::watch::channel(startup_provider == "opencode-go");
+        radian_host::spawn_contributor_gated(
             runtime.handle(),
             Arc::new(radian_host::OpencodeGoUsage::new(key.key.clone(), period)),
             Arc::clone(&contributions),
             Arc::clone(&on_tick),
+            gate_rx,
         );
-    }
+        Some(gate_tx)
+    } else {
+        None
+    };
     app.set_contributions(Arc::clone(&contributions));
     // A plain run enters the terminal only now: every fallible check above, and the session
     // itself, have already run. (`--pick` entered it before the picker and keeps it here.)
@@ -1209,7 +1275,9 @@ fn run(
             radian_tui::workspace::display_coding_root(&workspace_root, home.as_deref())
         )
     });
-    let context_line = format!("context: {}", window.describe());
+    // The context window (ADR 0018) and the loaded context files (ADR 0036 C2) are separate
+    // lines; `context:` is the files, matching the ADR's wording.
+    let context_line = format!("context window: {}", window.describe());
     let session_line = match &resume {
         Some(id) => format!(
             "resumed session {id} ({} messages) · Enter sends · Ctrl-C cancels a turn · \
@@ -1221,10 +1289,9 @@ fn run(
         ),
     };
     let sandbox_facts = session.facts().sandbox_facts.clone();
-    let sandbox_word = ["seatbelt", "bwrap"]
-        .into_iter()
-        .find(|name| sandbox_facts.contains(name))
-        .unwrap_or("none");
+    // The host computed this from the real backend (ADR 0027): searching the description text
+    // reported `none` on macOS, because the `workspace` tier's sentence does not name it.
+    let sandbox_word = session.facts().sandbox_word.clone();
     let budget = window
         .budget
         .map_or_else(|| "unknown".to_string(), |b| b.to_string());
@@ -1250,6 +1317,7 @@ fn run(
         format!("profile: {}", session.facts().profile_line),
         sandbox_facts,
         context_line,
+        format!("context: {}", session.facts().context_line),
     ];
     if let Some(line) = &workspace_line {
         startup_lines.push(line.clone());
@@ -1302,7 +1370,7 @@ fn run(
         banner,
         banner_narrow: format!(
             "{} radian {}",
-            radian_tui::startup::RAD_MARK,
+            radian_tui::footer::brand_mark(app.footer_glyphs()),
             env!("CARGO_PKG_VERSION")
         ),
         summary,
@@ -1356,10 +1424,12 @@ fn run(
             memory: &memory_service,
         },
         (provider_name.clone(), model_name.clone()),
+        Arc::clone(&route_price),
         &config.providers,
         config.tui.theme.clone(),
         cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         bash_sandbox,
+        usage_gate,
     );
     exit_trace("loop-done");
     // Tell a pending signal task that the loop left on its own, so it does not force-exit.
@@ -1640,9 +1710,20 @@ fn crossterm_event() -> Input {
 /// 2. **Fallback**: the main loop calls [`terminal_is_gone`] (a non-consuming `poll(2)`) on a
 ///    periodic tick, so even a thread stuck inside crossterm ends the process through the
 ///    ordinary [`UiEvent::TerminalGone`] path.
+///
+/// When guard 1 applies (a previous read may have buffered events) the readiness wait is
+/// **zero**: the buffered events are already in hand, so there is nothing to wait for on the
+/// fd. Waiting the full `timeout` there added one poll period (~50 ms) per buffered event; an
+/// IME commits a whole word at once, so its characters appeared one at a time, ~50 ms apart.
+/// The zero-timeout poll still reports a hang-up, so the safety semantics do not change.
 #[cfg(unix)]
 fn read_input(timeout: Duration) -> Input {
     block_input_if_asked();
+    let timeout = if MAY_HAVE_BUFFERED.load(std::sync::atomic::Ordering::SeqCst) {
+        Duration::ZERO
+    } else {
+        timeout
+    };
     match tty_readiness(timeout) {
         Tty::Gone => Input::Gone,
         Tty::Readable => {
@@ -1920,9 +2001,37 @@ fn apply_dirty(app: &mut App) -> bool {
     }
 }
 
+/// Looks up a route's catalog prices from the warm local cache (ADR 0026 D7, ADR 0027
+/// revision 1). Offline by construction: a switch never fetches, and a miss means "no price".
+/// The host owns the type because the resume fold prices historical calls with the same rule.
+type RoutePrice = radian_host::cost::RoutePrice;
+
+/// The catalog prices of the route an **applied** `ConfigChanged` names (ADR 0026 D5/D7).
+///
+/// Pure and total: every other runtime event, every non-model change (`{"approval": …}`,
+/// `{"thinking": …}`) and every change whose route is not resolvable yields `None`, so a
+/// caller can call it unconditionally. Extraction is what makes the loop's rule unit-testable
+/// without a pty: "a switch re-prices the calls **after** it, and only those".
+fn price_for_applied_change(
+    event: &radian_session::RuntimeEvent,
+    route_price: &RoutePrice,
+) -> Option<Option<radian_host::ModelPrice>> {
+    let radian_session::RuntimeEvent::ConfigChanged { change, .. } = event else {
+        return None;
+    };
+    let route = radian_host::ModelRoute::from_value(change)?;
+    // `Some(None)` is "the route changed but the catalog has no price for it": the caller must
+    // still clear the old price, or later calls would be billed at the previous model's rate.
+    Some(route_price(&route.provider, &route.model))
+}
+
 struct LoopContext<'a> {
     /// The startup route (ADR 0026 D11): the fallback when the session has no route yet.
     startup_route: (String, String),
+    /// The catalog prices of a route, from the **warm local cache only** (ADR 0026 D7: a
+    /// switch never fetches). Resolved on startup and again whenever a route change is
+    /// applied, so every later call is billed at its own model's price (ADR 0027).
+    route_price: RoutePrice,
     /// The config's `[providers.<name>]` declarations (ADR 0026 D10), for `/model`'s provider
     /// completion.
     config_providers: std::collections::BTreeMap<String, radian_host::ProviderDecl>,
@@ -1956,6 +2065,9 @@ struct LoopContext<'a> {
     bash_sandbox: Option<radian_sandbox::Sandbox>,
     /// The running `!` command's cancellation token (Esc, ADR 0033).
     bash_cancel: Option<agent_core::CancellationToken>,
+    /// The opencode-go usage gate (ADR 0027): the UI flips it when `/model`
+    /// switches the current provider. `None` when there is no key or the period is off.
+    usage_gate: Option<tokio::sync::watch::Sender<bool>>,
 }
 
 impl LoopContext<'_> {
@@ -1965,9 +2077,27 @@ impl LoopContext<'_> {
         // ADR 0027: the loop is the only place that reads the wall clock for the
         // footer's `speed`/`elapsed`; the timer itself is pure.
         app.set_now(std::time::Instant::now());
+        // ADR 0027: a `/model` switch arrives as a model `ConfigChanged` at the turn
+        // boundary. Flip the usage gate then: away from opencode-go the contributor stops
+        // refreshing (no network) and its row hides; back to it, one immediate refresh.
+        if let UiEvent::Runtime(radian_session::RuntimeEvent::ConfigChanged { change, .. }) = &event
+            && let Some(route) = radian_host::ModelRoute::from_value(change)
+            && let Some(gate) = &self.usage_gate
+        {
+            let _ = gate.send(route.provider == "opencode-go");
+        }
         let result = match event {
             UiEvent::Agent(event) => app.update(AppInput::Event(event)),
-            UiEvent::Runtime(event) => app.update(AppInput::Runtime(event)),
+            UiEvent::Runtime(event) => {
+                // ADR 0027 + ADR 0026 D5: the driver applies a queued route at a
+                // turn boundary and tells us through `ConfigChanged`. From now on every call
+                // is the new model's, so the price that prices it changes here — earlier
+                // calls keep the fee they already accumulated.
+                if let Some(price) = price_for_applied_change(&event, &self.route_price) {
+                    app.set_model_price(price);
+                }
+                app.update(AppInput::Runtime(event))
+            }
             UiEvent::Pending => {
                 // ADR 0023 U7: the UI shows the queue's head. Reading it here is what makes a
                 // waiter that gave up (a cancelled turn) disappear immediately.
@@ -2183,25 +2313,28 @@ impl LoopContext<'_> {
                             })
                             .collect()
                     }
-                    radian_tui::command::Fetch::ModelRoute { provider, .. } => {
+                    radian_tui::command::Fetch::ModelRoute { .. } => {
                         // Mark the route in effect (the slot, or the startup route before it).
                         let (current_provider, current_model) = self
                             .session
                             .model_route()
                             .unwrap_or_else(|| self.startup_route.clone());
-                        model_route_candidates(provider.as_deref(), &self.config_providers)
-                            .into_iter()
-                            .map(|mut candidate| {
-                                let is_current = candidate.insert
-                                    == format!("{current_provider}/{current_model}")
-                                    || candidate.insert == format!("{current_provider}/");
-                                if is_current {
-                                    candidate.description =
-                                        format!("● current · {}", candidate.description);
-                                }
-                                candidate
-                            })
-                            .collect()
+                        model_route_candidates(
+                            Some(current_provider.as_str()),
+                            &self.config_providers,
+                        )
+                        .into_iter()
+                        .map(|mut candidate| {
+                            let is_current = candidate.insert
+                                == format!("{current_provider}/{current_model}")
+                                || candidate.insert == format!("{current_provider}/");
+                            if is_current {
+                                candidate.description =
+                                    format!("● current · {}", candidate.description);
+                            }
+                            candidate
+                        })
+                        .collect()
                     }
                     radian_tui::command::Fetch::ThinkingLevels { .. } => {
                         // D11: only the levels the current model supports. Each row names the
@@ -2599,6 +2732,37 @@ fn usage_period(configured: Option<u64>) -> Option<std::time::Duration> {
     }
 }
 
+/// One step of [`run_effect_rounds`]: run one effect, or take the result events the last
+/// batch produced.
+enum RoundStep<'a, T> {
+    Execute(T),
+    Drain(&'a mut Vec<T>, usize),
+}
+
+/// Runs at most [`MAX_EFFECT_ROUNDS`] effect rounds (ADR 0023 U2's draw fairness). `step` runs
+/// one effect or takes the result events the last batch produced (returning whether it handled
+/// any). Whatever is left in `effects` stays there for the next turn — never dropped, order
+/// kept; the loop draws a frame and continues. A genuine infinite chain keeps running and warns
+/// once (see [`MAX_CARRIED_FRAMES`]), it never exits. Returns the rounds run.
+fn run_effect_rounds<T>(
+    effects: &mut Vec<T>,
+    mut step: impl FnMut(RoundStep<'_, T>) -> Result<bool, String>,
+) -> Result<usize, String> {
+    let mut rounds = 0;
+    while !effects.is_empty() && rounds < MAX_EFFECT_ROUNDS {
+        rounds += 1;
+        let batch = std::mem::take(effects);
+        let produced = batch.len();
+        for effect in batch {
+            step(RoundStep::Execute(effect))?;
+        }
+        if !step(RoundStep::Drain(effects, produced))? {
+            break;
+        }
+    }
+    Ok(rounds)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn ui_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
@@ -2607,11 +2771,14 @@ fn ui_loop(
     tx: &Sender<UiEvent>,
     phase: Phase<'_>,
     startup_route: (String, String),
+    route_price: RoutePrice,
     config_providers: &std::collections::BTreeMap<String, radian_host::ProviderDecl>,
     // The configured theme name (`tui.theme`), for `/theme`'s current-value marker.
     current_theme: Option<String>,
     thinking_max_tokens: u32,
     bash_sandbox: Option<radian_sandbox::Sandbox>,
+    // The opencode-go usage gate (ADR 0027), flipped on a `/model` switch.
+    usage_gate: Option<tokio::sync::watch::Sender<bool>>,
 ) -> Result<Option<i32>, String> {
     let mut picking_signal: Option<i32> = None;
     let mut ctx = match phase {
@@ -2624,6 +2791,7 @@ fn ui_loop(
             memory,
         } => Some(LoopContext {
             startup_route: startup_route.clone(),
+            route_price: Arc::clone(&route_price),
             config_providers: config_providers.clone(),
             current_thinking: app.thinking_level.clone().unwrap_or_default(),
             current_theme,
@@ -2639,6 +2807,7 @@ fn ui_loop(
             clipboard: app.clipboard,
             bash_sandbox: bash_sandbox.clone(),
             bash_cancel: None,
+            usage_gate,
         }),
     };
     // The first frame: the startup notices and the resumed history are already in the app, and
@@ -2650,9 +2819,16 @@ fn ui_loop(
         return Ok(None);
     }
     radian_tui::terminal::set_cursor_visible(app.input_editable());
+    // An effect batch the draw-fairness cap did not finish: declared outside the loop so the
+    // rest survives to the next turn (never dropped, order kept).
+    let mut effects: Vec<Effect> = Vec::new();
+    let mut carried_frames: u64 = 0;
     // The pre-session phase ends when the picker resolves; otherwise only `quit` leaves.
     while !app.quit && !app.picking_resolved() {
-        // Block until there is something to do. No display in this build changes with time (the
+        let mut dirty = false;
+        // A carried batch runs first, without a blocking wait: the effects must not wait for a
+        // new event. Otherwise block until there is something to do. No display in this build
+        // changes with time (the
         // status bar, the notes, the find box and the budget line are static text), so there is
         // no `recv_timeout` here: an idle app is not redrawn at all (ADR 0023 U2). A clock-like
         // display would take the timeout branch at this line. The one exception is a live
@@ -2661,110 +2837,124 @@ fn ui_loop(
         // and goes straight back to blocking `recv` when it ends. The armed Ctrl-C quit
         // window is the other time-driven display (ADR 0023 U2): while it is armed the loop
         // wakes at its deadline to drop the hint.
-        let quit_remaining = app
-            .quit_pending
-            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()));
-        let first = if app.is_selecting() || quit_remaining.is_some() {
-            // The nearer of the two deadlines; `AUTO_SCROLL_TICK` is the drag's own tick.
-            let timeout = match (app.is_selecting(), quit_remaining) {
-                (true, Some(quit)) => quit.min(AUTO_SCROLL_TICK),
-                (true, None) => AUTO_SCROLL_TICK,
-                (false, Some(quit)) => quit.max(std::time::Duration::ZERO),
-                (false, None) => unreachable!("the branch requires selection or a quit window"),
-            }
-            // Also wake for the hang-up check, so a drag or an armed quit window never
-            // postpones it for longer than one tick.
-            .min(TTY_CHECK_TICK);
-            match rx.recv_timeout(timeout) {
-                Ok(event) => Some(event),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    // Guard 2: the input thread may be stuck inside crossterm's reader; a
-                    // non-consuming `poll(2)` on stdin still reports the hang-up.
-                    if terminal_is_gone() {
-                        app.quit = true;
-                        break;
-                    }
-                    // The quit window closed: disarm and redraw, so the hint disappears. A
-                    // drag at an edge (or both) still ticks its scroll on the same wake.
-                    if app
-                        .quit_pending
-                        .is_some_and(|d| std::time::Instant::now() >= d)
-                        && app.update(AppInput::QuitDeadline).dirty
-                        && !draw_frame(terminal, app)?
-                    {
-                        app.quit = true;
-                        break;
-                    }
-                    if app.is_selecting() && app.mouse_autoscroll() && !draw_frame(terminal, app)? {
-                        app.quit = true;
-                        break;
-                    }
-                    continue;
+        if effects.is_empty() {
+            let quit_remaining = app
+                .quit_pending
+                .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()));
+            let first = if app.is_selecting() || quit_remaining.is_some() {
+                // The nearer of the two deadlines; `AUTO_SCROLL_TICK` is the drag's own tick.
+                let timeout = match (app.is_selecting(), quit_remaining) {
+                    (true, Some(quit)) => quit.min(AUTO_SCROLL_TICK),
+                    (true, None) => AUTO_SCROLL_TICK,
+                    (false, Some(quit)) => quit.max(std::time::Duration::ZERO),
+                    (false, None) => unreachable!("the branch requires selection or a quit window"),
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => None,
+                // Also wake for the hang-up check, so a drag or an armed quit window never
+                // postpones it for longer than one tick.
+                .min(TTY_CHECK_TICK);
+                match rx.recv_timeout(timeout) {
+                    Ok(event) => Some(event),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        // Guard 2: the input thread may be stuck inside crossterm's reader; a
+                        // non-consuming `poll(2)` on stdin still reports the hang-up.
+                        if terminal_is_gone() {
+                            app.quit = true;
+                            break;
+                        }
+                        // The quit window closed: disarm and redraw, so the hint disappears. A
+                        // drag at an edge (or both) still ticks its scroll on the same wake.
+                        if app
+                            .quit_pending
+                            .is_some_and(|d| std::time::Instant::now() >= d)
+                            && app.update(AppInput::QuitDeadline).dirty
+                            && !draw_frame(terminal, app)?
+                        {
+                            app.quit = true;
+                            break;
+                        }
+                        if app.is_selecting()
+                            && app.mouse_autoscroll()
+                            && !draw_frame(terminal, app)?
+                        {
+                            app.quit = true;
+                            break;
+                        }
+                        continue;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => None,
+                }
+            } else {
+                // A bounded wait, not a blocking one: guard 2's hang-up check runs every tick even
+                // while the app is idle. A timeout with the tty alive loops without drawing.
+                match rx.recv_timeout(TTY_CHECK_TICK) {
+                    Ok(event) => Some(event),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        if terminal_is_gone() {
+                            app.quit = true;
+                            break;
+                        }
+                        continue;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => None,
+                }
+            };
+            let Some(first) = first else {
+                // Every sender is gone: nothing left to drive the UI.
+                break;
+            };
+            let mut facts = 1;
+            dirty |= match ctx.as_mut() {
+                Some(ctx) => ctx.handle(first, app, &mut effects),
+                None => handle_picking(first, app, &mut picking_signal),
+            };
+            // At most `MAX_FACTS_PER_TURN` facts before a frame (draw fairness).
+            while facts < MAX_FACTS_PER_TURN {
+                match rx.try_recv() {
+                    Ok(event) => {
+                        dirty |= match ctx.as_mut() {
+                            Some(ctx) => ctx.handle(event, app, &mut effects),
+                            None => handle_picking(event, app, &mut picking_signal),
+                        };
+                        facts += 1;
+                    }
+                    Err(_) => break,
+                }
             }
         } else {
-            // A bounded wait, not a blocking one: guard 2's hang-up check runs every tick even
-            // while the app is idle. A timeout with the tty alive loops without drawing.
-            match rx.recv_timeout(TTY_CHECK_TICK) {
-                Ok(event) => Some(event),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    if terminal_is_gone() {
-                        app.quit = true;
-                        break;
-                    }
-                    continue;
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => None,
-            }
-        };
-        let Some(first) = first else {
-            // Every sender is gone: nothing left to drive the UI.
-            break;
-        };
-        let mut dirty = false;
-        let mut effects: Vec<Effect> = Vec::new();
-        let mut facts = 1;
-        dirty |= match ctx.as_mut() {
-            Some(ctx) => ctx.handle(first, app, &mut effects),
-            None => handle_picking(first, app, &mut picking_signal),
-        };
-        // At most `MAX_FACTS_PER_TURN` facts before a frame (draw fairness).
-        while facts < MAX_FACTS_PER_TURN {
-            match rx.try_recv() {
-                Ok(event) => {
-                    dirty |= match ctx.as_mut() {
-                        Some(ctx) => ctx.handle(event, app, &mut effects),
-                        None => handle_picking(event, app, &mut picking_signal),
-                    };
-                    facts += 1;
-                }
-                Err(_) => break,
-            }
+            // A carried batch draws a frame before the rest runs: the cap is about drawing
+            // fairly, not about failing.
+            dirty = true;
         }
         // Run the effects (session phase only: the picker produces none). Their results are
         // events, so they are handled by the same code; a result can ask for one more effect
-        // (`@` expansion → send), so this repeats until nothing is pending.
+        // (`@` expansion → send), so this repeats until the cap hands the rest to the next
+        // turn.
         if let Some(ctx) = ctx.as_mut() {
-            let mut rounds = 0;
-            while !effects.is_empty() {
-                rounds += 1;
-                if rounds > MAX_EFFECT_ROUNDS {
-                    return Err("the effect worklist did not settle".into());
-                }
-                let batch = std::mem::take(&mut effects);
-                let produced = batch.len();
-                for effect in batch {
-                    ctx.execute(effect)?;
-                }
-                // Each effect produces at most one result event; take that many (plus whatever
-                // else was already queued behind them).
-                for _ in 0..produced {
-                    match rx.try_recv() {
-                        Ok(event) => dirty |= ctx.handle(event, app, &mut effects),
-                        Err(_) => break,
+            run_effect_rounds(&mut effects, |step| match step {
+                RoundStep::Execute(effect) => ctx.execute(effect).map(|()| true),
+                RoundStep::Drain(effects, produced) => {
+                    // Each effect produces at most one result event; take that many (plus
+                    // whatever else was already queued behind them).
+                    for _ in 0..produced {
+                        match rx.try_recv() {
+                            Ok(event) => dirty |= ctx.handle(event, app, effects),
+                            Err(_) => return Ok(false),
+                        }
                     }
+                    Ok(true)
                 }
+            })?;
+            if !effects.is_empty() {
+                // The cap was hit: the rest carries to the next turn (draw fairness). A chain
+                // that never clears is a bug, but the TUI keeps running and says so once.
+                carried_frames += 1;
+                mark("effect-carry");
+                if carried_frames == MAX_CARRIED_FRAMES {
+                    app.push_notice("the effect worklist is not settling; continuing anyway");
+                }
+                dirty = true;
+            } else {
+                carried_frames = 0;
             }
         }
         if dirty {
@@ -2786,69 +2976,78 @@ fn ui_loop(
 /// slash, or one provider's models after it — the descriptor's built-in list plus the cached
 /// `/v1/models` list. Reads local files only; the background refresh (D0) writes that cache.
 fn model_route_candidates(
-    provider: Option<&str>,
+    current_provider: Option<&str>,
     config_providers: &std::collections::BTreeMap<String, radian_host::ProviderDecl>,
 ) -> Vec<radian_tui::command::Candidate> {
-    let Some(provider) = provider else {
-        // Every provider a switch could name (ADR 0026 D5/D10): the built-in descriptors, the
-        // config's `[providers.<name>]` declarations, and the usable `auth.json` entries. Each
-        // is resolved with `resolve_provider` so the list matches what a switch would accept,
-        // and the description says which side declared it.
-        let auth_entries = radian_host::auth::list().unwrap_or_default();
-        let mut names: Vec<(String, &'static str)> = Vec::new();
-        for descriptor in radian_host::descriptors() {
-            names.push((descriptor.id.to_owned(), "built-in"));
-        }
-        for name in config_providers.keys() {
-            names.push((name.clone(), "config providers"));
-        }
-        for entry in &auth_entries {
-            if entry.usable {
-                names.push((entry.provider_id.clone(), "logged in"));
-            }
-        }
-        let mut seen = std::collections::HashSet::new();
-        let mut candidates = Vec::new();
-        for (name, source) in names {
-            if !seen.insert(name.clone()) {
-                continue;
-            }
-            let auth_env = auth_entries
-                .iter()
-                .find(|entry| entry.provider_id == name)
-                .and_then(|_| radian_host::AuthStore::open().ok())
-                .and_then(|store| store.entry_env(&name));
-            if radian_host::resolve_provider(&name, config_providers, auth_env.as_ref()).is_ok() {
-                candidates.push(radian_tui::command::Candidate {
-                    insert: format!("{name}/"),
-                    description: format!("switch to {name} ({source})"),
-                });
-            }
-        }
-        return candidates;
-    };
-    // Built-in list first, then the cached `/v1/models` ids (D0), merged by model id.
+    // Every provider a switch could name (ADR 0026 D5/D10): the built-in descriptors, the
+    // config's `[providers.<name>]` declarations, and the usable `auth.json` entries. Each is
+    // resolved with `resolve_provider` so the list matches what a switch would accept, then its
+    // models are flattened into one list (ADR 0035): the label is the model, the
+    // description the provider.
+    let auth_entries = radian_host::auth::list().unwrap_or_default();
+    let mut names: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    let mut candidates: Vec<radian_tui::command::Candidate> = Vec::new();
-    let push = |id: String,
-                description: String,
-                candidates: &mut Vec<radian_tui::command::Candidate>,
-                seen: &mut std::collections::HashSet<String>| {
-        if seen.insert(id.clone()) {
+    for descriptor in radian_host::descriptors() {
+        if seen.insert(descriptor.id.to_owned()) {
+            names.push(descriptor.id.to_owned());
+        }
+    }
+    for name in config_providers.keys() {
+        if seen.insert(name.clone()) {
+            names.push(name.clone());
+        }
+    }
+    for entry in &auth_entries {
+        if entry.usable && seen.insert(entry.provider_id.clone()) {
+            names.push(entry.provider_id.clone());
+        }
+    }
+    let mut candidates = Vec::new();
+    for name in &names {
+        let auth_env = auth_entries
+            .iter()
+            .find(|entry| &entry.provider_id == name)
+            .and_then(|_| radian_host::AuthStore::open().ok())
+            .and_then(|store| store.entry_env(name));
+        if radian_host::resolve_provider(name, config_providers, auth_env.as_ref()).is_err() {
+            continue;
+        }
+        for model in provider_models(name) {
             candidates.push(radian_tui::command::Candidate {
-                insert: format!("{provider}/{id}"),
-                description,
+                insert: format!("{name}/{model}"),
+                description: name.clone(),
             });
         }
+    }
+    // The current provider's models first, then by provider and model name (ADR 0035
+    // revision 2).
+    let is_current = |candidate: &radian_tui::command::Candidate| {
+        current_provider.is_some_and(|provider| {
+            candidate
+                .insert
+                .strip_prefix(provider)
+                .is_some_and(|rest| rest.starts_with('/'))
+        })
     };
+    candidates.sort_by(|left, right| {
+        is_current(right)
+            .cmp(&is_current(left))
+            .then_with(|| left.description.cmp(&right.description))
+            .then_with(|| left.insert.cmp(&right.insert))
+    });
+    candidates
+}
+
+/// One provider's model ids: the built-in descriptor's list, then the cached `/v1/models` ids
+/// (D0), merged by id.
+fn provider_models(provider: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
     if let Some(descriptor) = radian_host::descriptor(provider) {
         for model in descriptor.models {
-            push(
-                model.id.to_owned(),
-                model.name.to_owned(),
-                &mut candidates,
-                &mut seen,
-            );
+            if seen.insert(model.id.to_owned()) {
+                out.push(model.id.to_owned());
+            }
         }
     }
     if let Some(key) = radian_host::auth::resolve_key(provider)
@@ -2858,10 +3057,12 @@ fn model_route_candidates(
         && let Some(cache) = radian_host::read_provider_models(provider, &key)
     {
         for id in cache.models {
-            push(id, "from /v1/models".to_owned(), &mut candidates, &mut seen);
+            if seen.insert(id.clone()) {
+                out.push(id);
+            }
         }
     }
-    candidates
+    out
 }
 
 /// The [`ProviderRef`] a `/thinking` clamp/completion resolves against: the route's provider
@@ -3242,6 +3443,49 @@ impl AuditSink for JournalAudit {
 mod tests {
     use super::*;
 
+    /// ADR 0023 U2's draw fairness: a chain longer than `MAX_EFFECT_ROUNDS` carries the rest to
+    /// the next turn — never dropped, order kept — instead of failing the whole TUI. This is
+    /// the `the effect worklist did not settle` bug: under load the loop's drain consumes
+    /// unrelated events whose handlers produce more effects, so a real chain can exceed the cap.
+    #[test]
+    fn effect_rounds_carry_the_rest_in_order() {
+        let mut pending: Vec<u32> = vec![19];
+        let mut executed: Vec<u32> = Vec::new();
+        let mut next: Vec<u32> = Vec::new();
+        let mut calls = 0;
+        while !pending.is_empty() {
+            calls += 1;
+            assert!(calls < 100, "the carry must terminate");
+            let rounds = run_effect_rounds(&mut pending, |step| match step {
+                RoundStep::Execute(n) => {
+                    executed.push(n);
+                    if n > 0 {
+                        next.push(n - 1);
+                    }
+                    Ok(true)
+                }
+                RoundStep::Drain(pending, produced) => {
+                    // Each executed effect produces one result event; handling it produces the
+                    // next effect.
+                    for _ in 0..produced {
+                        if next.is_empty() {
+                            return Ok(false);
+                        }
+                        pending.push(next.remove(0));
+                    }
+                    Ok(true)
+                }
+            })
+            .unwrap();
+            assert!(rounds <= MAX_EFFECT_ROUNDS, "each call is capped");
+        }
+        assert_eq!(
+            executed,
+            (0..20).rev().collect::<Vec<_>>(),
+            "every effect ran, in order"
+        );
+    }
+
     /// ADR 0023 U5: a fact-only update (usage, budget, tier, MCP) wakes the UI with a `Dirty`
     /// and the buffer is empty. The loop must still draw a frame, or the status bar would stay
     /// stale until some unrelated event arrived.
@@ -3268,5 +3512,84 @@ mod tests {
         let cli =
             Cli::try_parse_from(["radian", "--model", "m", "--max-model-calls", "5"]).unwrap();
         assert_eq!(cli.max_model_calls, 5);
+    }
+
+    /// The loop's `/model` rule (F4, ADR 0027): an **applied route change** carries
+    /// the new model's price forward, a change of some other kind leaves it alone, and a route
+    /// the catalog cannot price clears it (so later calls are not billed at the old rate).
+    #[test]
+    fn an_applied_route_change_moves_the_price_and_other_changes_do_not() {
+        use radian_session::RuntimeEvent;
+        let lookup = |provider: &str, model: &str| match (provider, model) {
+            ("opencode-go", "cheap") => Some(radian_host::ModelPrice {
+                input: 150_000,
+                output: 600_000,
+                cache_read: None,
+                cache_write: None,
+            }),
+            ("anthropic", "expensive") => Some(radian_host::ModelPrice {
+                input: 3_000_000,
+                output: 15_000_000,
+                cache_read: Some(300_000),
+                cache_write: Some(3_750_000),
+            }),
+            // A model the warm cache does not know.
+            _ => None,
+        };
+        let route_price: RoutePrice = Arc::new(lookup);
+        let changed = |change: serde_json::Value| RuntimeEvent::ConfigChanged {
+            revision: 1,
+            change,
+        };
+
+        // A model switch names the new route, so its price is looked up.
+        let got = price_for_applied_change(
+            &changed(radian_host::ModelRoute::new("opencode-go", "cheap").to_value()),
+            &route_price,
+        );
+        assert_eq!(
+            got,
+            Some(Some(radian_host::ModelPrice {
+                input: 150_000,
+                output: 600_000,
+                cache_read: None,
+                cache_write: None,
+            })),
+            "the switched route's price"
+        );
+        // A route the cache cannot price is **cleared**, not left at the old model's rate.
+        assert_eq!(
+            price_for_applied_change(
+                &changed(radian_host::ModelRoute::new("opencode-go", "unknown").to_value()),
+                &route_price
+            ),
+            Some(None)
+        );
+        // A non-route change (`/auto`, `/thinking`) is not a price fact at all.
+        assert_eq!(
+            price_for_applied_change(
+                &changed(serde_json::json!({"approval": "auto"})),
+                &route_price
+            ),
+            None
+        );
+        assert_eq!(
+            price_for_applied_change(
+                &changed(serde_json::json!({"thinking": "high"})),
+                &route_price
+            ),
+            None
+        );
+        // Any other runtime event is not either.
+        assert_eq!(
+            price_for_applied_change(
+                &RuntimeEvent::TurnFailed {
+                    turn_id: "t-1".into(),
+                    message: "boom".into(),
+                },
+                &route_price
+            ),
+            None
+        );
     }
 }

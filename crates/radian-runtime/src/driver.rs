@@ -951,16 +951,22 @@ async fn recover(
     })
 }
 
-/// The last provider-reported `input` in the **current** transcript revision, with the length
-/// of the transcript that produced it (ADR 0015 C1).
+/// The last provider-reported **prompt size** in the **current** transcript revision, with the
+/// length of the transcript that produced it (ADR 0015 C1).
+///
+/// The number is `ModelUsage::prompt_total()`, not `input`: the whole prompt the provider saw,
+/// cache reads and writes included (ADR 0007). For an Anthropic record `input` is
+/// only the *uncached* part, so a baseline taken from it would understate the request and make
+/// the budget act too late; for an OpenAI-compatible record `input` already contains the cache
+/// hit, and `prompt_total()` is that same number.
 ///
 /// `ModelUsageRecorded` follows the assistant `MessageAppended` of the response it priced
 /// (ADR 0007 J5), and a request's `messages` is exactly the transcript before that assistant
 /// message. So the request prefix length is the preceding assistant message's `index`. A
 /// `TranscriptReplaced` starts a new revision whose indexes restart at zero; an earlier
 /// revision's usage must not be paired with the new transcript, so both trackers reset there.
-/// A usage event without a preceding assistant message, or without `input` (ADR 0007: not
-/// reported, not zero), is skipped; an earlier report that does have `input` stays usable.
+/// A usage event without a preceding assistant message, or with no prompt size (ADR 0007: not
+/// reported, not zero), is skipped; an earlier report that does have one stays usable.
 fn reported_baseline(session: &Session) -> Option<(usize, u64)> {
     let mut last_assistant: Option<usize> = None;
     let mut baseline = None;
@@ -977,7 +983,7 @@ fn reported_baseline(session: &Session) -> Option<(usize, u64)> {
                 };
             }
             EventData::ModelUsageRecorded { usage } => {
-                if let (Some(input), Some(prefix_len)) = (usage.input, last_assistant) {
+                if let (Some(input), Some(prefix_len)) = (usage.prompt_total(), last_assistant) {
                     baseline = Some((prefix_len, input));
                 }
             }
@@ -1116,6 +1122,128 @@ mod tests {
             "the pre-replacement usage and the compaction usage are not baselines"
         );
         assert_eq!(session.last_committed_revision(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// ADR 0007 + ADR 0015 C1: the restored baseline is the **prompt total**, so an
+    /// Anthropic-shaped record (where `input` is only the uncached part) yields
+    /// `input + cache_read + cache_write`; an OpenAI-shaped one yields `input` itself, because
+    /// there the cache hit is already inside it. An unmarked old record is taken at face value.
+    #[tokio::test]
+    async fn the_restored_baseline_is_the_prompt_total_not_the_uncached_input() {
+        use agent_core::{JournalRecord, TranscriptJournal};
+        use radian_session::{SessionCreatedData, SessionJournal};
+
+        let dir = std::env::temp_dir().join(format!("radian-prompt-total-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+        let journal = SessionJournal::create(
+            &path,
+            "s",
+            SessionCreatedData::new("/w", serde_json::json!({})),
+        )
+        .unwrap();
+        let record = |index: usize, usage: ModelUsage| {
+            let journal = &journal;
+            async move {
+                journal
+                    .append(JournalRecord::Message {
+                        index: index * 2,
+                        message: Message::user("u"),
+                    })
+                    .await
+                    .unwrap();
+                journal
+                    .append(JournalRecord::Message {
+                        index: index * 2 + 1,
+                        message: Message::assistant("a"),
+                    })
+                    .await
+                    .unwrap();
+                journal
+                    .append(JournalRecord::ModelUsage { usage })
+                    .await
+                    .unwrap();
+            }
+        };
+        // The Anthropic shape: 10 000 uncached + 190 000 read + 1 000 written.
+        record(
+            0,
+            ModelUsage {
+                input: Some(10_000),
+                cache_read: Some(190_000),
+                cache_write: Some(1_000),
+                input_includes_cache: Some(false),
+                ..Default::default()
+            },
+        )
+        .await;
+        // The OpenAI shape: `input` already contains the 190 000 cached tokens.
+        record(
+            1,
+            ModelUsage {
+                input: Some(200_000),
+                cache_read: Some(190_000),
+                input_includes_cache: Some(true),
+                ..Default::default()
+            },
+        )
+        .await;
+        drop(journal);
+
+        // The **last** report in the revision wins, and it is the OpenAI one: 200 000, not
+        // 390 000 (the cache hit is inside `input`).
+        let session = Session::open(&path).unwrap();
+        assert_eq!(reported_baseline(&session), Some((3, 200_000)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The same, with only the Anthropic-shaped record: the baseline must be 201 000, not the
+    /// 10 000 that `input` alone would give (the deviation ADR 0007 asks to fix).
+    #[tokio::test]
+    async fn an_anthropic_shaped_report_restores_the_whole_prompt_as_its_baseline() {
+        use agent_core::{JournalRecord, TranscriptJournal};
+        use radian_session::{SessionCreatedData, SessionJournal};
+
+        let dir = std::env::temp_dir().join(format!("radian-prompt-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+        let journal = SessionJournal::create(
+            &path,
+            "s",
+            SessionCreatedData::new("/w", serde_json::json!({})),
+        )
+        .unwrap();
+        journal
+            .append(JournalRecord::Message {
+                index: 0,
+                message: Message::user("u"),
+            })
+            .await
+            .unwrap();
+        journal
+            .append(JournalRecord::Message {
+                index: 1,
+                message: Message::assistant("a"),
+            })
+            .await
+            .unwrap();
+        journal
+            .append(JournalRecord::ModelUsage {
+                usage: ModelUsage {
+                    input: Some(10_000),
+                    cache_read: Some(190_000),
+                    cache_write: Some(1_000),
+                    input_includes_cache: Some(false),
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap();
+        drop(journal);
+
+        let session = Session::open(&path).unwrap();
+        assert_eq!(reported_baseline(&session), Some((1, 201_000)));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

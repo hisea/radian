@@ -12,10 +12,13 @@ pub mod atomic_write;
 pub mod auth;
 mod catalog;
 pub mod config;
+pub mod context;
 pub mod contrib;
+pub mod cost;
 mod describe;
 mod diagnostics;
 mod errors;
+mod escape;
 pub mod git_commit;
 mod headers;
 mod home;
@@ -74,12 +77,13 @@ pub use config::theme_write::{ThemeWriteError, write_theme};
 pub use config::{
     CONFIG_FILE_NAME, CompactionConfig, Config, ConfigError, ModelConfig, PermissionsConfig,
     RADIAN_CONFIG_ENV, SUPPORTED_SCHEMA_VERSION, TuiConfig, load as load_config,
-    parse as parse_config, resolve_path as resolve_config_path,
+    parse as parse_config, resolve_allow_unix_sockets, resolve_path as resolve_config_path,
     resolved_path as resolved_config_path,
 };
+pub use context::{ContextFiles, LoadedFile, load as load_context_files};
 pub use contrib::{
     Contribution, ContributionStore, ContributorRunner, GitContributor, Segment, SegmentRole,
-    StatusContributor, Tick, spawn as spawn_contributor,
+    StatusContributor, Tick, spawn as spawn_contributor, spawn_gated as spawn_contributor_gated,
 };
 pub use describe::{CLI_WORDING, TUI_WORDING, Wording, describe};
 pub use diagnostics::{

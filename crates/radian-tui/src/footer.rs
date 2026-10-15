@@ -17,6 +17,18 @@ use ratatui::text::{Line, Span};
 use crate::app::App;
 use crate::theme::Role;
 
+/// The brand mark for a glyph set (ADR 0027): the Nerd Font `md-alpha_r_circle_
+/// outline`, the plain bold-accent `R` (the same font as the body, so it sits on the baseline),
+/// or the ASCII word `rad`. `㎭` (U+33AD) is East-Asian-Wide and its fallback glyph sits off the
+/// baseline, so it is no longer used.
+pub fn brand_mark(glyphs: Glyphs) -> &'static str {
+    match glyphs {
+        Glyphs::Nerd => "\u{f0c20}",
+        Glyphs::Unicode => "R",
+        Glyphs::Ascii => "rad",
+    }
+}
+
 /// How the built-in items draw their icons (ADR 0027 C2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Glyphs {
@@ -40,11 +52,12 @@ impl Glyphs {
     }
 
     /// The tool-call status glyphs (ADR 0028 rule 4): running, success, failure.
-    /// The unicode set is omp's (`⟳`/`✔`/`✘`); the other two sets exist because a terminal
-    /// without those code points needs something.
+    /// The unicode set is covered by all seven checked fonts (ADR 0027): omp's
+    /// `⟳`/`✔`/`✘` are not, so `~`/`+`/`×` stand in. The Nerd set uses the Font Awesome
+    /// codepoints; the ASCII set is plain.
     pub fn tool_status(self) -> [&'static str; 3] {
         match self {
-            Self::Unicode => ["⟳", "✔", "✘"],
+            Self::Unicode => ["~", "+", "×"],
             Self::Nerd => ["\u{f110}", "\u{f00c}", "\u{f00d}"],
             Self::Ascii => ["*", "+", "x"],
         }
@@ -372,7 +385,7 @@ fn preset_rows(preset: Preset) -> Vec<Row> {
                 ..row(
                     Vec::new(),
                     vec![
-                        with_format("tokens", "↑{in} ↓{out} R{cache}"),
+                        with_format("tokens", "^{in} v{out} R{cache}"),
                         item("cost"),
                         no_symbol("context", "{percent}%/{budget}"),
                     ],
@@ -399,7 +412,7 @@ fn preset_rows(preset: Preset) -> Vec<Row> {
                 // The numbers row: tokens (in/out/cache), speed, cost, context (share/window
                 // with the auto-compaction marker), elapsed.
                 left: vec![
-                    with_format("tokens", "↑{in} ↓{out} {cache}"),
+                    with_format("tokens", "^{in} v{out} {cache}"),
                     item("speed"),
                     item("cost"),
                     with_format("context", "{percent}%/{budget}{auto}"),
@@ -620,7 +633,7 @@ fn item_placeholders(id: &str) -> &'static [&'static str] {
         "session" => &["id"],
         "context" => &["bar", "percent", "used", "budget", "auto"],
         "context_bar" => &["bar", "percent", "used", "budget", "auto"],
-        "tokens" => &["in", "out", "cache"],
+        "tokens" => &["in", "out", "cache", "cache_write"],
         "speed" => &["speed"],
         "elapsed" => &["elapsed"],
         "cost" => &["usd"],
@@ -913,6 +926,11 @@ fn item_default_style(app: &App, item: &Item, data: &ItemData) -> Style {
     if let Some(style) = &item.style {
         return style.resolve(app);
     }
+    // ADR 0027: the unicode brand is a bold accent `R`. The theme's accent role is
+    // `notice_label` (the `accent` style alias maps to it), so the mark follows a theme switch.
+    if item.id == "brand" && app.footer_glyphs() == Glyphs::Unicode {
+        return role_style(app, Role::NoticeLabel);
+    }
     default_role(&item.id)
         .map(|role| role_style(app, role))
         .unwrap_or_default()
@@ -1057,17 +1075,9 @@ struct ItemData<'a> {
 fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>> {
     let session = app.projection.read();
     match id {
-        // ADR 0027: the brand wordmark. `㎭` (SQUARE RAD) is the unit glyph; the
-        // ASCII set falls back to `rad` because its glyph may be missing from a font.
+        // ADR 0027: the brand mark per glyph set (see [`brand_mark`]).
         "brand" => Some(ItemData {
-            values: vec![(
-                "brand",
-                if app.footer_glyphs() == Glyphs::Ascii {
-                    "rad".to_string()
-                } else {
-                    "㎭".to_string()
-                },
-            )],
+            values: vec![("brand", brand_mark(app.footer_glyphs()).to_string())],
             default_format: "{brand}",
             numeric: None,
         }),
@@ -1188,7 +1198,8 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
                 if app.footer_glyphs() == Glyphs::Ascii {
                     " auto".to_string()
                 } else {
-                    " ⟲".to_string()
+                    // `⟲` (U+27F2) is missing from six of the seven fonts (revision 4): `~`.
+                    " ~".to_string()
                 }
             } else {
                 String::new()
@@ -1237,21 +1248,25 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
                         .usage_cache_read()
                         .map_or_else(|| "-".to_string(), crate::timing::format_tokens),
                 ),
+                // F8 (ADR 0027): the cache-**write** total. It is billed at its own
+                // (often higher) rate, so it is available to a format that wants to show it —
+                // but it is deliberately **not** in the default format, which stays as narrow
+                // as it was (see the "cache_write shows only when asked for" test).
+                (
+                    "cache_write",
+                    session
+                        .usage_cache_write()
+                        .map_or_else(|| "-".to_string(), crate::timing::format_tokens),
+                ),
             ],
-            default_format: "↑{in} ↓{out} ⛁{cache}",
+            default_format: "^{in} v{out} R{cache}",
             numeric: None,
         }),
-        // ADR 0027: the cost from the model's catalog price and the session's
-        // token totals. No price (or no reported tokens) means the item hides; never `$0.00`
-        // for a model whose price we do not know (v5 §5).
+        // ADR 0027: the fee the session has accumulated, each call priced at the
+        // rate in force when it arrived (`radian_host::cost`). Nothing billed yet means the
+        // item hides; never `$0.00` for a model whose price we do not know (v5 §5).
         "cost" => {
-            let micros = crate::timing::cost_micros(
-                app.model_price,
-                session.usage_input(),
-                session.usage_output(),
-                session.usage_cache_read(),
-                session.usage_cache_write(),
-            )?;
+            let micros = session.cost_micros()?;
             Some(ItemData {
                 values: vec![("usd", crate::timing::format_cost(micros))],
                 default_format: "{usd}",
@@ -1405,25 +1420,28 @@ fn render_bar(item: &Item, fraction: f64) -> String {
 /// icon carry one; the rest are plain text.
 fn glyph(id: &str, glyphs: Glyphs) -> &'static str {
     match (id, glyphs) {
-        ("host", Glyphs::Unicode) => "\u{2302} ",
+        // ADR 0027: the unicode icons must exist in all seven mainstream coding
+        // fonts (see the README's coverage table), so `⌂ ◷ ◫ ◐ ⛁ ⬡` are replaced or dropped.
+        // `@ # *` and `»` are in every one; the rest are text-only.
+        ("host", Glyphs::Unicode) => "@ ",
         ("host", Glyphs::Nerd) => "\u{f109} ",
         ("host", Glyphs::Ascii) => "host ",
         ("speed", Glyphs::Unicode) => "\u{bb} ",
         ("speed", Glyphs::Nerd) => "\u{f0e7} ",
         ("speed", Glyphs::Ascii) => "spd ",
-        ("elapsed", Glyphs::Unicode) => "\u{25f7} ",
+        ("elapsed", Glyphs::Unicode) => "",
         ("elapsed", Glyphs::Nerd) => "\u{f017} ",
         ("elapsed", Glyphs::Ascii) => "t ",
-        ("context", Glyphs::Unicode) => "\u{25eb} ",
+        ("context", Glyphs::Unicode) => "",
         ("context", Glyphs::Nerd) => "\u{f035b} ",
         ("context", Glyphs::Ascii) => "[",
-        ("reasoning", Glyphs::Unicode) => "◐ ",
+        ("reasoning", Glyphs::Unicode) => "* ",
         ("reasoning", Glyphs::Nerd) => "\u{f0eb} ",
         ("reasoning", Glyphs::Ascii) => "* ",
         ("git_branch", Glyphs::Nerd) => "\u{e0a0} ",
-        ("session", Glyphs::Unicode) => "⛁ ",
+        ("session", Glyphs::Unicode) => "# ",
         ("session", Glyphs::Ascii) => "# ",
-        ("tier", Glyphs::Unicode) => "⬡ ",
+        ("tier", Glyphs::Unicode) => "",
         _ => "",
     }
 }
@@ -1464,4 +1482,95 @@ pub fn widget_line(app: &App, ids: &[String]) -> Option<Line<'static>> {
         }
     }
     Some(Line::from(spans))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every non-ASCII glyph the `unicode` tier can draw (ADR 0027). Each one is
+    /// checked against the seven fonts by `scripts/check-glyph-coverage.py` and listed in the
+    /// README's coverage table. A new glyph makes this test fail until it is re-checked and
+    /// added here.
+    const VERIFIED_COVERED: &str = "»│━─×▖▘▝▗";
+
+    fn app_with_glyphs(name: &str) -> App {
+        let mut app = App::new("mock", "s");
+        let config = radian_host::config::TuiFooterConfig {
+            glyphs: Some(name.to_string()),
+            ..Default::default()
+        };
+        app.apply_footer(&config);
+        app
+    }
+
+    fn bare_item(id: &str) -> Item {
+        Item {
+            id: id.to_string(),
+            icon: None,
+            symbol_style: None,
+            format: None,
+            style: None,
+            priority: item_priority(id),
+            thresholds: Vec::new(),
+            params: Vec::new(),
+            disabled: false,
+            known: true,
+        }
+    }
+
+    /// The brand mark is per glyph set (ADR 0027): Nerd Font, unicode `R`, ascii
+    /// `rad`; `㎭` is gone.
+    #[test]
+    fn the_brand_mark_is_per_glyph_set() {
+        for (name, expected) in [("unicode", "R"), ("nerd", "\u{f0c20}"), ("ascii", "rad")] {
+            let app = app_with_glyphs(name);
+            let item = bare_item("brand");
+            let data = item_data(&app, "brand", &item).expect("brand data");
+            let value = data
+                .values
+                .iter()
+                .find(|(key, _)| *key == "brand")
+                .expect("the brand value")
+                .1
+                .clone();
+            assert_eq!(value, expected, "the {name} brand mark");
+        }
+    }
+
+    /// The unicode tier only draws glyphs the seven checked fonts all have. Every item glyph
+    /// (from the built-in presets), the spinner frames, the separators, the context bar and
+    /// the auto marker are checked.
+    #[test]
+    fn unicode_tier_glyphs_are_all_verified_covered() {
+        let mut glyphs: Vec<char> = Vec::new();
+        for preset in [Preset::Deck, Preset::Full, Preset::Pi] {
+            for row in preset_rows(preset) {
+                for item in row.left.iter().chain(row.right.iter()) {
+                    glyphs.extend(glyph(&item.id, Glyphs::Unicode).chars());
+                    if let Some(format) = &item.format {
+                        // The default formats carry no glyph beyond ASCII; keep them honest.
+                        glyphs.extend(format.chars());
+                    }
+                }
+                glyphs.extend(row.separator.chars());
+            }
+        }
+        glyphs.extend(brand_mark(Glyphs::Unicode).chars());
+        glyphs.extend(Glyphs::Unicode.tool_status().iter().flat_map(|s| s.chars()));
+        glyphs.extend(crate::blocks::SPINNER);
+        glyphs.extend("━─".chars());
+        glyphs.extend(" ~".chars());
+        for ch in glyphs {
+            if ch.is_ascii() || ch == ' ' {
+                continue;
+            }
+            assert!(
+                VERIFIED_COVERED.contains(ch),
+                "{ch:?} (U+{:04X}) is not in the verified-covered set; re-run \
+                 scripts/check-glyph-coverage.py and update the README",
+                ch as u32
+            );
+        }
+    }
 }

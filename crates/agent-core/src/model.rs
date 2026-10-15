@@ -50,10 +50,27 @@ pub struct ModelResponse {
 
 /// Provider-reported token usage of one model call, self-contained and provider-neutral
 /// (AC-S-6). Every field is optional and serialized only when present.
+///
+/// **The numbers are the provider's own, unmodified** (ADR 0007 J1). What "input" *means*
+/// differs between providers, so the adapter says which it is: see
+/// [`ModelUsage::input_includes_cache`] and use [`ModelUsage::prompt_total`] /
+/// [`ModelUsage::uncached_input`] instead of adding the fields up by hand (ADR 0007
+/// revision 1).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelUsage {
+    /// The provider's own input count, **exactly as reported**.
+    ///
+    /// Whether it already contains the cache hit is what [`Self::input_includes_cache`] says:
+    /// OpenAI-compatible `prompt_tokens` **does** contain `prompt_tokens_details.cached_tokens`
+    /// (`total_tokens = prompt_tokens + completion_tokens`), while Anthropic's `input_tokens`
+    /// is the *uncached* part, a sibling of `cache_read_input_tokens` and
+    /// `cache_creation_input_tokens`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<u64>,
+    /// The provider's own output count. It **contains** the provider's reasoning tokens when
+    /// it reports any (OpenAI's `completion_tokens_details.reasoning_tokens`, Anthropic's
+    /// `output_tokens_details.thinking_tokens`), which are billed at the output rate: those
+    /// sub-objects live in [`Self::details`] and must never be added to this number.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<u64>,
     /// The provider's own total. **Never computed** from `input + output`: the definition of
@@ -65,10 +82,86 @@ pub struct ModelUsage {
     pub cache_read: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write: Option<u64>,
+    /// Whether [`Self::input`] **already contains** the cache hit (`cache_read`, and
+    /// `cache_write` where the provider reports it), filled by the adapter from its own wire
+    /// contract and never computed here (ADR 0007):
+    ///
+    /// - `Some(true)`: `input` is the whole prompt, cache included (OpenAI-compatible:
+    ///   `prompt_tokens` contains `prompt_tokens_details.cached_tokens`). Charging `input`
+    ///   **and** `cache_read` at their own rates would bill the cached tokens twice, once at
+    ///   the full input price — the long-session overcharge the research recorded;
+    /// - `Some(false)`: `input` is the uncached part, a sibling of the cache fields
+    ///   (Anthropic);
+    /// - `None`: not marked. Records written before ADR 0007 are like this; a
+    ///   consumer may infer the meaning from the session's provider protocol, and must not
+    ///   invent a fee it cannot derive (ADR 0007). The field is a *semantics* flag,
+    ///   not a number: it is always written by an adapter that knows, and `None` never means
+    ///   "zero".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_includes_cache: Option<bool>,
     /// The provider's own usage sub-object (e.g. OpenAI's `prompt_tokens_details`), kept
     /// exactly as received: the core does not interpret, reorder or reformat it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<OpaqueJson>,
+}
+
+impl ModelUsage {
+    /// The whole input of the call: the prompt the provider saw, cache reads and cache writes
+    /// included. This is what "how big was this request" means, so the context budget (ADR
+    /// 0015) uses it.
+    ///
+    /// - `input_includes_cache == Some(true)`: `input` *is* the prompt.
+    /// - `Some(false)`: `input` plus the cache fields it is a sibling of.
+    /// - `None` (an old record): `input` alone. Adding the cache fields could double-count
+    ///   (that is exactly what the flag exists to disambiguate), so the unmarked number is
+    ///   taken at face value; it is then a **lower bound** on the prompt.
+    ///
+    /// `None` when the provider reported no input count at all: never zero (ADR 0007 J1).
+    pub fn prompt_total(&self) -> Option<u64> {
+        let cache = add(self.cache_read, self.cache_write);
+        match self.input_includes_cache {
+            Some(false) => add(self.input, cache),
+            // `Some(true)` and the unmarked case: `input` stands alone.
+            _ => self.input.or(cache),
+        }
+    }
+
+    /// The input billed at the **full input rate**: [`Self::input`] minus the cache hit when
+    /// the provider counts the hit inside `input` (ADR 0007). The cache fields are
+    /// then billed at their own rates, each once.
+    ///
+    /// - `Some(true)`: `input − cache_read − cache_write` (saturating: a provider that reports
+    ///   more cache than input is inconsistent, and the subtraction must not wrap).
+    /// - `Some(false)` and `None`: `input` is already the uncached part.
+    pub fn uncached_input(&self) -> Option<u64> {
+        match self.input_includes_cache {
+            Some(true) => self.input.map(|input| {
+                let cache = self.cache_read.unwrap_or(0) + self.cache_write.unwrap_or(0);
+                input.saturating_sub(cache)
+            }),
+            _ => self.input,
+        }
+    }
+
+    /// Whether the provider reported any **billable** counter (input, output, cache read or
+    /// cache write). An empty report (`total` alone, or nothing) has nothing to price, which is
+    /// how a zero response stays hidden instead of showing `$0.00` (ADR 0027).
+    pub fn has_billable_counters(&self) -> bool {
+        [self.input, self.output, self.cache_read, self.cache_write]
+            .into_iter()
+            .flatten()
+            .any(|count| count > 0)
+    }
+}
+
+/// `a + b` over optional counts: `None` only when both are `None` (a missing field is "not
+/// reported", never a zero).
+fn add(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.saturating_add(b)),
+        (Some(one), None) | (None, Some(one)) => Some(one),
+        (None, None) => None,
+    }
 }
 
 /// The `Display` prefix of [`ModelError::ContextOverflow`]. A host that only receives the

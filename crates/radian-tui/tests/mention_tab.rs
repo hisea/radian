@@ -99,10 +99,13 @@ fn several_candidates_complete_to_the_common_prefix_then_list() {
     // A second Tab, already at the prefix, shows the list instead of changing the text.
     tab_complete(&mut app, dir.path());
     assert_eq!(app.input, "@notes.");
-    assert_eq!(
-        app.completion(),
-        Some(["notes.md".to_string(), "notes.txt".to_string()].as_slice())
-    );
+    let inserts: Vec<&str> = app
+        .completion()
+        .expect("the list")
+        .iter()
+        .map(|candidate| candidate.insert.as_str())
+        .collect();
+    assert_eq!(inserts, ["notes.md", "notes.txt"]);
 }
 
 #[test]
