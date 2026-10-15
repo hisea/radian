@@ -189,6 +189,57 @@ fn the_approval_box_is_rendered_over_the_input() {
     );
 }
 
+/// The shared panel shape (ADR 0035): a rounded frame, the title on the top border,
+/// the hardcoded key hints in the bottom border — at 80 and 120 columns, and in the ascii tier.
+#[test]
+fn the_approval_panel_snapshot_at_80_120_and_ascii() {
+    let mut app = App::new("mock", "s");
+    prompt(&mut app);
+
+    let screen = draw(&mut app, 80, 24);
+    let top = panel_line(&screen, '╭').expect("a top border");
+    let bottom = panel_line(&screen, '╰').expect("a bottom border");
+    assert!(top.starts_with("╭─ approve tool call? "), "{top:?}");
+    assert!(top.ends_with('╮'), "{top:?}");
+    assert_eq!(top.chars().count(), 80, "{top:?}");
+    assert!(
+        bottom.starts_with("╰─ [y] allow once · [a] always this session · [n] deny"),
+        "{bottom:?}"
+    );
+    assert_eq!(bottom.chars().count(), 80, "{bottom:?}");
+
+    let screen = draw(&mut app, 120, 24);
+    let bottom = panel_line(&screen, '╰').expect("a bottom border");
+    assert!(
+        bottom.starts_with(
+            "╰─ [y] allow once · [a] always this session · [n] deny · [!] auto for this session"
+        ),
+        "{bottom:?}"
+    );
+    assert!(bottom.ends_with("─╯"), "{bottom:?}");
+    assert_eq!(bottom.chars().count(), 120, "{bottom:?}");
+
+    // The ascii tier falls back to `+ - |` (ADR 0035).
+    app.apply_footer(&radian_host::config::TuiFooterConfig {
+        glyphs: Some("ascii".into()),
+        ..Default::default()
+    });
+    let screen = draw(&mut app, 80, 24);
+    let top = panel_line(&screen, '+').expect("an ascii top border");
+    assert!(top.starts_with("+- approve tool call? "), "{top:?}");
+    assert!(top.ends_with('+'), "{top:?}");
+    assert!(!screen.contains('╭'), "{screen}");
+}
+
+/// The first screen line whose first cell is `lead` (the panel's own line). `TestBackend`'s
+/// `Display` wraps every row in quotes, so they are stripped first.
+fn panel_line(screen: &str, lead: char) -> Option<String> {
+    screen
+        .lines()
+        .map(|line| line.trim_matches('"').to_string())
+        .find(|line| line.starts_with(lead))
+}
+
 // ---------- the box fits: keys always visible, long bodies scroll (approval-fit) ----------
 
 /// A shell call whose command is `lines` lines long: the case the owner hit (a multi-line
@@ -249,13 +300,13 @@ fn the_window_indicator_moves_with_down() {
     let width = 80u16;
     let total = render::wrap(
         &render::approval_body(&shell_request(&long_command(60))),
-        78,
+        76,
     )
     .len();
     let screen = draw(&mut app, width, 24);
-    // `approval_cap(24, 0)` is 14 rows, so the body shows 14 - 3 = 11 of them.
+    // `approval_cap(24, 0)` is 14 rows, so the panel shows 14 - 2 = 12 body rows.
     assert!(
-        screen.contains(&format!("lines 1–11 of {total}")),
+        screen.contains(&format!("lines 1–12 of {total}")),
         "{screen}"
     );
     assert!(screen.contains("tool: shell"), "{screen}");
@@ -263,7 +314,7 @@ fn the_window_indicator_moves_with_down() {
     app.on_key(key(KeyCode::Down));
     let screen = draw(&mut app, width, 24);
     assert!(
-        screen.contains(&format!("lines 2–12 of {total}")),
+        screen.contains(&format!("lines 2–13 of {total}")),
         "the first visible line moved: {screen}"
     );
     assert!(
@@ -283,11 +334,11 @@ fn page_keys_move_a_page_and_clamp() {
     let screen = draw(&mut app, 80, 24);
     let total = render::wrap(
         &render::approval_body(&shell_request(&long_command(60))),
-        78,
+        76,
     )
     .len();
     assert!(
-        screen.contains(&format!("lines 12–22 of {total}")),
+        screen.contains(&format!("lines 13–24 of {total}")),
         "a page is the visible height: {screen}"
     );
     // Far past the end clamps to the last window.
@@ -296,14 +347,14 @@ fn page_keys_move_a_page_and_clamp() {
     }
     let screen = draw(&mut app, 80, 24);
     assert!(
-        screen.contains(&format!("lines {}–{total} of {total}", total - 10)),
+        screen.contains(&format!("lines {}–{total} of {total}", total - 11)),
         "the last window is complete: {screen}"
     );
     // And back up one page from the end.
     app.on_key(key(KeyCode::PageUp));
     let screen = draw(&mut app, 80, 24);
     assert!(
-        screen.contains(&format!("lines {}–{} of {total}", total - 21, total - 11)),
+        screen.contains(&format!("lines {}–{} of {total}", total - 23, total - 12)),
         "a page back from the end: {screen}"
     );
 }
@@ -420,11 +471,11 @@ fn a_new_pending_request_resets_the_scroll() {
     let screen = draw(&mut app, 80, 24);
     let total = render::wrap(
         &render::approval_body(&shell_request(&long_command(60))),
-        78,
+        76,
     )
     .len();
     assert!(
-        screen.contains(&format!("lines 1–11 of {total}")),
+        screen.contains(&format!("lines 1–12 of {total}")),
         "the next question starts at the top: {screen}"
     );
     assert!(screen.contains("tool: shell"), "{screen}");

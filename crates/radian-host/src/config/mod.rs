@@ -223,6 +223,18 @@ pub struct GitConfig {
     /// `protected_branches = ["release"]`: branches `git_commit` refuses besides
     /// `main`/`master`.
     pub protected_branches: Vec<String>,
+    /// `allowed_filters = ["lfs"]` (ADR 0030): the `filter.<name>` drivers `git add`
+    /// may run. `None` means the default (`["lfs"]`); an empty list allows none.
+    pub allowed_filters: Option<Vec<String>>,
+}
+
+impl GitConfig {
+    /// The effective `allowed_filters`: the configured list, or the default (`["lfs"]`).
+    pub fn allowed_filters(&self) -> Vec<String> {
+        self.allowed_filters
+            .clone()
+            .unwrap_or_else(crate::git_commit::default_allowed_filters)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -273,9 +285,10 @@ pub struct TuiConfig {
     /// `None` means the default, **on**; the TUI reads `unwrap_or(true)`. `false` sends no
     /// mouse sequence at all and leaves the terminal's native selection/copy alone.
     pub mouse: Option<bool>,
-    /// `tui.input_style`: `"lines"` (the default: a rule above and below, `> ` on the first
-    /// line) or `"box"` (the bordered input box). `None` means the default; an unknown value is
-    /// ignored with a warning (the `tui.*` rule), and the TUI falls back to `lines`.
+    /// `tui.input_style`: `"bar"` (the default: the banded input with a left rail and the status
+    /// row above it), `"lines"` (a rule above and below, `> ` on the first line) or `"box"`
+    /// (the bordered input box). `None` means the default; an unknown value is
+    /// ignored with a warning (the `tui.*` rule), and the TUI falls back to `bar`.
     pub input_style: Option<String>,
     /// `tui.clipboard`: how a transcript-selection copy reaches the system clipboard —
     /// `"osc52"` (the default), `"pbcopy"` (macOS only; elsewhere a warning and OSC 52) or
@@ -564,6 +577,7 @@ fn parse_providers(value: &Value, path: &Path, config: &mut Config) -> Result<()
         let mut decl = crate::provider::ProviderDecl {
             kind: String::new(),
             base_url: String::new(),
+            reasoning_replay: None,
         };
         for (field, value) in spec {
             match (field.as_str(), value) {
@@ -596,6 +610,23 @@ fn parse_providers(value: &Value, path: &Path, config: &mut Config) -> Result<()
                         path,
                         &format!("providers.{name}.base_url"),
                         "a string",
+                    ));
+                }
+                // ADR 0014 Q2: a field name overrides the catalog, `false` turns
+                // replay off. `true` names no field, so it is refused rather than guessed.
+                ("reasoning_replay", Value::String(field)) if !field.is_empty() => {
+                    decl.reasoning_replay = Some(crate::provider::ReasoningReplayOverride::Field(
+                        field.clone(),
+                    ));
+                }
+                ("reasoning_replay", Value::Boolean(false)) => {
+                    decl.reasoning_replay = Some(crate::provider::ReasoningReplayOverride::Off);
+                }
+                ("reasoning_replay", _) => {
+                    return Err(wrong_type(
+                        path,
+                        &format!("providers.{name}.reasoning_replay"),
+                        "a non-empty string or false",
                     ));
                 }
                 (other, _) => config.skipped.push(format!("providers.{name}.{other}")),
@@ -814,6 +845,16 @@ fn parse_git(value: &Value, config: &mut Config) -> Result<(), ConfigError> {
                     config.git.protected_branches.push(branch.clone());
                 }
             }
+        }
+        // ADR 0030: the filter drivers `git_commit` may run. `[]` allows none.
+        if let ("allowed_filters", Value::Array(filters)) = (key.as_str(), value) {
+            let mut names = Vec::with_capacity(filters.len());
+            for filter in filters {
+                if let Value::String(filter) = filter {
+                    names.push(filter.clone());
+                }
+            }
+            config.git.allowed_filters = Some(names);
         }
     }
     Ok(())
@@ -1066,7 +1107,9 @@ fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
             }
             ("keybindings", _) => return Err(wrong_type(path, "tui.keybindings", "a table")),
             ("mouse", Value::Boolean(mouse)) => config.tui.mouse = Some(*mouse),
-            ("input_style", Value::String(style)) if matches!(style.as_str(), "lines" | "box") => {
+            ("input_style", Value::String(style))
+                if matches!(style.as_str(), "bar" | "lines" | "box") =>
+            {
                 config.tui.input_style = Some(style.clone());
             }
             // An unknown input style is a display preference: ignore it (and say so), never
@@ -1654,9 +1697,15 @@ theme = "light"
     /// skipped key (the `tui.*` rule), not a refusal.
     #[test]
     fn the_tui_input_style_is_carried_and_an_unknown_value_is_skipped() {
-        let config = parse_str("schema_version = 1\n[tui]\ninput_style = \"box\"\n").unwrap();
-        assert_eq!(config.tui.input_style.as_deref(), Some("box"));
-        assert!(config.skipped.is_empty());
+        // ADR 0035 V3: `bar` is the third accepted value (and the default).
+        for style in ["bar", "lines", "box"] {
+            let config = parse_str(&format!(
+                "schema_version = 1\n[tui]\ninput_style = \"{style}\"\n"
+            ))
+            .unwrap();
+            assert_eq!(config.tui.input_style.as_deref(), Some(style));
+            assert!(config.skipped.is_empty(), "{style}");
+        }
 
         let config = parse_str("schema_version = 1\n[tui]\ninput_style = \"future\"\n").unwrap();
         assert_eq!(config.tui.input_style, None);
@@ -1974,6 +2023,81 @@ theme = "light"
             error.to_string().contains("openai-compatible|anthropic"),
             "{error}"
         );
+    }
+
+    /// ADR 0030: `[git] allowed_filters` is carried; the default (`["lfs"]`) applies
+    /// when it is absent, and `[]` allows none.
+    #[test]
+    fn the_git_allowed_filters_are_carried_with_an_lfs_default() {
+        let config = parse_str(concat!(
+            "schema_version = 1\n",
+            "[git]\n",
+            "protected_branches = [\"release\"]\n",
+            "allowed_filters = [\"lfs\", \"custom\"]\n",
+        ))
+        .unwrap();
+        assert_eq!(config.git.protected_branches, vec!["release".to_string()]);
+        assert_eq!(
+            config.git.allowed_filters(),
+            vec!["lfs".to_string(), "custom".to_string()]
+        );
+        // Absent: the default.
+        let config =
+            parse_str("schema_version = 1\n[git]\nprotected_branches = [\"release\"]\n").unwrap();
+        assert_eq!(config.git.allowed_filters(), vec!["lfs".to_string()]);
+        // An empty list allows none.
+        let config = parse_str("schema_version = 1\n[git]\nallowed_filters = []\n").unwrap();
+        assert!(config.git.allowed_filters().is_empty());
+    }
+
+    /// ADR 0014 Q2: `[providers.<id>] reasoning_replay` overrides the catalog — a
+    /// non-empty field name, or `false` to switch replay off. `true` names no field and is
+    /// refused rather than guessed.
+    #[test]
+    fn a_named_providers_reasoning_replay_override_is_carried() {
+        let config = parse_str(concat!(
+            "schema_version = 1\n",
+            "[providers.corp]\n",
+            "kind = \"openai-compatible\"\n",
+            "base_url = \"https://llm.example.com/v1\"\n",
+            "reasoning_replay = \"reasoning_content\"\n",
+            "[providers.relay]\n",
+            "kind = \"openai-compatible\"\n",
+            "base_url = \"https://relay.example/v1\"\n",
+            "reasoning_replay = false\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            config.providers["corp"].reasoning_replay,
+            Some(crate::provider::ReasoningReplayOverride::Field(
+                "reasoning_content".into()
+            ))
+        );
+        assert_eq!(
+            config.providers["relay"].reasoning_replay,
+            Some(crate::provider::ReasoningReplayOverride::Off)
+        );
+        // Absent: the catalog decides.
+        let config = parse_str(concat!(
+            "schema_version = 1\n",
+            "[providers.corp]\n",
+            "kind = \"openai-compatible\"\n",
+            "base_url = \"https://llm.example.com/v1\"\n",
+        ))
+        .unwrap();
+        assert_eq!(config.providers["corp"].reasoning_replay, None);
+
+        // `true` is not a field name.
+        let error = parse_str(concat!(
+            "schema_version = 1\n",
+            "[providers.corp]\n",
+            "kind = \"openai-compatible\"\n",
+            "base_url = \"https://llm.example.com/v1\"\n",
+            "reasoning_replay = true\n",
+        ))
+        .unwrap_err();
+        assert!(matches!(error, ConfigError::WrongType { .. }), "{error}");
+        assert!(error.to_string().contains("reasoning_replay"), "{error}");
     }
 
     #[test]

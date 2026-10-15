@@ -79,7 +79,26 @@ fn commit_in(
     protected: &[String],
 ) -> Result<Committed, agent_core::ToolFailure> {
     let pin = RepoPin::resolve(dir).expect("a git repository");
-    commit(dir, &pin, message, paths, allowed, protected)
+    commit(
+        dir,
+        &pin,
+        message,
+        paths,
+        allowed,
+        protected,
+        &radian_host::git_commit::default_allowed_filters(),
+    )
+}
+
+/// [`commit_in`] with a custom filter allowlist (ADR 0030).
+fn commit_with_filters(
+    dir: &Path,
+    message: &str,
+    paths: &[String],
+    allowed_filters: &[String],
+) -> Result<Committed, agent_core::ToolFailure> {
+    let pin = RepoPin::resolve(dir).expect("a git repository");
+    commit(dir, &pin, message, paths, None, &[], allowed_filters)
 }
 
 fn write_executable(path: &Path, body: &str) {
@@ -333,7 +352,16 @@ fn a_git_dir_created_in_a_subdirectory_workspace_is_refused() {
         &["config", "core.fsmonitor", script.to_str().unwrap()]
     ));
 
-    let error = commit(&ws, &pin, "m", &[], None, &[]).unwrap_err();
+    let error = commit(
+        &ws,
+        &pin,
+        "m",
+        &[],
+        None,
+        &[],
+        &radian_host::git_commit::default_allowed_filters(),
+    )
+    .unwrap_err();
     assert_eq!(error.code, "repository_changed", "{error:?}");
     assert!(
         !marker.exists(),
@@ -402,4 +430,230 @@ fn the_post_index_change_hook_does_not_run() {
         !marker.exists(),
         "core.hooksPath must not run on git add: a model-writable .husky/ would execute in the host"
     );
+}
+
+/// ADR 0030: a `filter=<driver>` attribute runs `filter.<driver>.clean` when the path
+/// is staged, and the model can write `.gitattributes`. A driver outside `[git] allowed_filters`
+/// refuses the commit before anything is staged, so the script never runs.
+#[test]
+fn a_filter_driver_not_in_allowed_filters_is_refused() {
+    let dir = repo("filter-refused");
+    let outside = temp("filter-outside");
+    let marker = outside.join("FILTER-RAN");
+    let script = dir.join("evil-clean.sh");
+    write_executable(
+        &script,
+        &format!("#!/bin/sh\ntouch {}\ncat\n", marker.display()),
+    );
+    assert!(git(
+        &dir,
+        &["config", "filter.evil.clean", script.to_str().unwrap()]
+    ));
+    std::fs::write(dir.join(".gitattributes"), "*.txt filter=evil\n").unwrap();
+    change(&dir);
+
+    // With no explicit paths (`git add -A`) the status list is what gets checked.
+    let error = commit_in(&dir, "m", &[], None, &[]).unwrap_err();
+    assert_eq!(error.code, "filter_not_allowed", "{error:?}");
+    assert!(error.message.contains("a.txt"), "{error:?}");
+    assert!(error.message.contains("evil"), "{error:?}");
+    assert!(
+        !marker.exists(),
+        "the disallowed filter must not run in the host"
+    );
+    // Nothing was staged.
+    assert!(
+        git(&dir, &["diff", "--cached", "--quiet"]),
+        "the refusal stages nothing"
+    );
+
+    // The explicit-path branch checks the resolved paths the same way.
+    let error = commit_in(&dir, "m", &["a.txt".to_string()], None, &[]).unwrap_err();
+    assert_eq!(error.code, "filter_not_allowed", "{error:?}");
+    assert!(!marker.exists());
+}
+
+/// The opt-in: a driver the user named in `allowed_filters` runs (its command is not inspected).
+#[test]
+fn a_driver_named_in_allowed_filters_is_allowed() {
+    let dir = repo("filter-allowed");
+    let marker = dir.join("FILTER-RAN");
+    let script = dir.join("custom-clean.sh");
+    write_executable(
+        &script,
+        &format!("#!/bin/sh\ntouch {}\ncat\n", marker.display()),
+    );
+    assert!(git(
+        &dir,
+        &["config", "filter.custom.clean", script.to_str().unwrap()]
+    ));
+    std::fs::write(dir.join(".gitattributes"), "*.txt filter=custom\n").unwrap();
+    change(&dir);
+
+    let allowed = vec!["custom".to_owned()];
+    let committed = commit_with_filters(&dir, "m", &[], &allowed).expect("allowed by name");
+    assert!(
+        committed.files >= 2,
+        "a.txt and .gitattributes: {committed:?}"
+    );
+    assert!(
+        marker.exists(),
+        "an allowed driver runs: the user opted in by name"
+    );
+}
+
+/// `lfs` is the default allowed driver, but only when its commands are a `git-lfs` command.
+#[test]
+fn lfs_is_allowed_only_with_a_git_lfs_command() {
+    let dir = repo("filter-lfs");
+    assert!(git(
+        &dir,
+        &["config", "filter.lfs.clean", "git-lfs clean -- %f"]
+    ));
+    assert!(git(
+        &dir,
+        &["config", "filter.lfs.process", "git-lfs filter-process"]
+    ));
+    std::fs::write(dir.join(".gitattributes"), "*.bin filter=lfs\n").unwrap();
+    std::fs::write(dir.join("b.bin"), "binary\n").unwrap();
+
+    // The check passes and `git add` is attempted. Whether `git-lfs` is installed decides the
+    // outcome; the filter check itself must not refuse.
+    match commit_in(&dir, "m", &[], None, &[]) {
+        Ok(committed) => assert!(committed.files >= 1),
+        Err(error) => {
+            assert_ne!(
+                error.code, "filter_not_allowed",
+                "a git-lfs command must be allowed: {error:?}"
+            );
+            assert_eq!(
+                error.code, "git_failed",
+                "staging must have been attempted: {error:?}"
+            );
+        }
+    }
+
+    // A non-git-lfs `clean` for the `lfs` driver is refused.
+    let other = repo("filter-lfs-other");
+    let marker = other.join("LFS-FILTER-RAN");
+    let script = other.join("lfs-clean.sh");
+    write_executable(
+        &script,
+        &format!("#!/bin/sh\ntouch {}\ncat\n", marker.display()),
+    );
+    assert!(git(
+        &other,
+        &["config", "filter.lfs.clean", script.to_str().unwrap()]
+    ));
+    std::fs::write(other.join(".gitattributes"), "*.bin filter=lfs\n").unwrap();
+    std::fs::write(other.join("b.bin"), "binary\n").unwrap();
+    let error = commit_in(&other, "m", &[], None, &[]).unwrap_err();
+    assert_eq!(error.code, "filter_not_allowed", "{error:?}");
+    assert!(error.message.contains("filter.lfs.clean"), "{error:?}");
+    assert!(!marker.exists(), "the non-git-lfs clean must not run");
+}
+
+/// A repo whose `.gitattributes` routes `*.txt` through `filter.evil`, whose `clean` touches
+/// `marker` outside the repo, with one `.txt` file at `path`. Returns `(dir, marker)`.
+fn evil_filter_repo(label: &str, path: &str) -> (PathBuf, PathBuf) {
+    let dir = repo(label);
+    // `repo` wrote an untracked `a.txt`; remove it so only the intended path triggers.
+    let _ = std::fs::remove_file(dir.join("a.txt"));
+    let outside = temp(&format!("{label}-outside"));
+    let marker = outside.join("FILTER-RAN");
+    let script = dir.join("evil-clean.sh");
+    write_executable(
+        &script,
+        &format!("#!/bin/sh\ntouch {}\ncat\n", marker.display()),
+    );
+    assert!(git(
+        &dir,
+        &["config", "filter.evil.clean", script.to_str().unwrap()]
+    ));
+    std::fs::write(dir.join(".gitattributes"), "*.txt filter=evil\n").unwrap();
+    if let Some(parent) = Path::new(path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(dir.join(parent)).unwrap();
+    }
+    std::fs::write(dir.join(path), "payload\n").unwrap();
+    (dir, marker)
+}
+
+/// ADR 0030 (review fix): `git status` reports a new directory as `newdir/`, whose
+/// `filter` attribute is `unspecified`, so the check must expand it to the files underneath.
+#[test]
+fn a_new_file_in_a_new_directory_is_checked() {
+    let (dir, marker) = evil_filter_repo("filter-newdir", "newdir/a.txt");
+    let error = commit_in(&dir, "m", &[], None, &[]).unwrap_err();
+    assert_eq!(error.code, "filter_not_allowed", "{error:?}");
+    assert!(error.message.contains("newdir/a.txt"), "{error:?}");
+    assert!(
+        !marker.exists(),
+        "a new directory must not hide its files from the check"
+    );
+}
+
+/// An explicit directory argument is expanded to its files for the check.
+#[test]
+fn a_directory_argument_is_expanded_for_the_filter_check() {
+    let (dir, marker) = evil_filter_repo("filter-dirarg", "newdir/a.txt");
+    let error = commit_in(&dir, "m", &["newdir".to_string()], None, &[]).unwrap_err();
+    assert_eq!(error.code, "filter_not_allowed", "{error:?}");
+    assert!(error.message.contains("newdir/a.txt"), "{error:?}");
+    assert!(
+        !marker.exists(),
+        "a directory argument must not bypass the check"
+    );
+}
+
+/// `status.showUntrackedFiles=no` hides untracked files from `git status`; the check must not
+/// depend on it.
+#[test]
+fn status_show_untracked_files_no_does_not_hide_the_check() {
+    let (dir, marker) = evil_filter_repo("filter-showuntracked", "newdir/a.txt");
+    assert!(git(&dir, &["config", "status.showUntrackedFiles", "no"]));
+    let error = commit_in(&dir, "m", &[], None, &[]).unwrap_err();
+    assert_eq!(error.code, "filter_not_allowed", "{error:?}");
+    assert!(
+        !marker.exists(),
+        "status.showUntrackedFiles=no must not hide an untracked file"
+    );
+}
+
+/// ADR 0030 (review fix): the path list the filter check reads is every tracked
+/// file, so it must go through stdin. With ~30k long names the argv list is well over the
+/// 1 MiB `ARG_MAX`, and `git check-attr` fails with `E2BIG`, which would make `git_commit`
+/// fail in any large repository. It must succeed here.
+#[test]
+fn a_large_repository_does_not_hit_the_argument_limit() {
+    let dir = repo("filter-large");
+    // `repo` wrote an untracked `a.txt`; drop it so the tree is just the many files.
+    let _ = std::fs::remove_file(dir.join("a.txt"));
+    for i in 0..30_000 {
+        let name = format!("{i:06}-{}.dat", "x".repeat(40));
+        std::fs::write(dir.join(name), "").unwrap();
+    }
+    assert!(git(&dir, &["add", "-A"]), "add the many files");
+    assert!(
+        git(
+            &dir,
+            &[
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "-m",
+                "many",
+            ],
+        ),
+        "commit the many files"
+    );
+    // One more change, then a normal commit: the check must not fail with E2BIG.
+    std::fs::write(dir.join("last.txt"), "last\n").unwrap();
+    let committed = commit_in(&dir, "m", &[], None, &[]).expect("a large repo commits");
+    assert!(committed.files >= 1, "{committed:?}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -1,0 +1,9 @@
+# ADR 0030 R10 / 修订 4：`[git]` 是 `git_commit` 的规则。`protected_branches` 列出除
+# `main`/`master` 外同样拒绝提交的分支；`allowed_filters` 列出 `git add` 允许运行的
+# `filter.<名字>` 驱动（默认 `["lfs"]`，空表 `[]` 表示一个都不允许）。宿主在暂存前用
+# `git check-attr filter` 读出每个待暂存路径的驱动；不在名单里的驱动拒绝提交且什么都不暂存。
+schema_version = 1
+
+[git]
+protected_branches = ["release"]
+allowed_filters = ["lfs"]

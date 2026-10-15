@@ -1225,3 +1225,42 @@ Base `9cb727d` · 一次性 worktree `/tmp/radian-es-mut`，还原后 `git statu
 | ES-M2 | 超过上限后 `effects.clear()`（丢掉剩余 effect） | 同上（顺序/完整性断言） | ✅ |
 
 2/2 抓住。
+
+## bar-input（ADR 0035 片 C：bar 输入框 + 上方状态行，2026-10-15）
+
+Base `d72d17c`（本片三个提交的最后一块）· 就地变异：改前 `cp` 到 `/tmp`，改后跑测试，
+再从副本写回，逐个 `diff` 确认与副本逐字节相同；`git status --short` 只留本片的新测试。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| BI-M1 | `bar` 的高度空闲时不带状态行（`rows + u16::from(spinner_status().is_some())`） | `render::the_bar_status_row_never_moves_the_band_or_the_transcript`、`render::the_bar_input_takes_exactly_the_status_row_and_its_text_rows` | ✅ |
+| BI-M2 | `bar` 高度按 `rows + 2`（多一个空行） | `render::the_bar_input_takes_exactly_the_status_row_and_its_text_rows` | ✅ |
+| BI-M3 | 缺省回到 `lines`（`#[default]` 挪回 `Lines`） | `config::the_input_style_is_applied_and_an_unknown_value_falls_back_to_bar`、`render::the_empty_input_shows_the_placeholder_after_the_prompt` | ✅ |
+| BI-M4 | 竖条不是强调色（`rail_style = band`） | `render::the_bar_input_style_draws_a_full_width_band_with_the_rail`（竖条的 fg 断言） | ✅ |
+| BI-M5 | 背景带不到整行宽（去掉尾部补白） | `render::the_bar_band_fills_the_terminal_width`、`the_bar_input_style_draws_a_full_width_band_with_the_rail` | ✅ |
+| BI-M6 | spinner 后只留一个空格 | `render::the_bar_status_row_never_moves_the_band_or_the_transcript` | ✅ |
+| BI-M7 | `esc to interrupt` 对任何状态都显示（不只 turn 运行中） | 同上（`Running a command` 那一段） | ✅ |
+| BI-M8 | 状态行的时间保留一位小数（`12.0s` 而不是 `12s`） | `timing::tests::the_numbers_format_short` | ✅ |
+
+8/8 抓住。两处过程记录：
+
+- BI-M7 第一次（测试在 40 列下渲染）**没抓住**：整行状态在 40 列被裁到
+  `… · esc to`，`!contains("esc to interrupt")` 因截断而成立。把该用例的三次渲染改成 80 列后
+  M7 被抓住——**断言前先确认被断言的字串真的完整落在屏幕上**。
+- 与 bar 无关但同片验证的一条：去掉 `signals.rs` 里信号任务的强制退出（不再
+  `std::process::exit(128 + signal)`）后 `pty::pty_a_hung_main_loop_still_exits_on_a_signal`
+  FAILED（该用例的挂起机制本片改成了 `--slow-draw`，见下），还原后逐字节相同、
+  测试重新通过。这证明改用 `--slow-draw` 没有削弱该用例对看门狗的检查。
+## panels-adopt：其余弹出层改用共享面板与列表（ADR 0035/2，2026-10-16）
+
+Base `d47e876` · 一次性 detached worktree `/tmp/pa-mut`（跑完 `git worktree remove --force`）。
+每个变异用 `--no-fail-fast`，还原后 `git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| PA-M1 | 审批框 `y` 答 `Deny` 而不是 `AllowOnce` | `approval::keys_answer_the_prompt_with_the_queue_id` | ✅（left `Deny`、right `AllowOnce`） |
+| PA-M2 | 信任弹窗 Esc 选持久的 `UntrustHere`（会写盘） | `update::escaping_the_trust_modal_untrusts_this_session_only` | ✅（left `UntrustHere`、right `UntrustSession`） |
+| PA-M3 | 会话选择器过滤只看 id（不看 summary） | `picker::tests::filtering_narrows_by_id_and_summary_and_escape_quits` | ✅（可见行 0，期望 1） |
+
+3/3 抓住。三个变异都是**原有行为测试**，证明这次外观迁移没有削弱它们（审批的 `y`、信任 Esc
+只限本次不写盘、选择器按 id 或 summary 过滤）。外观本身由新的 TestBackend 快照覆盖。

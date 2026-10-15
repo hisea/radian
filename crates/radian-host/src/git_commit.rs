@@ -7,10 +7,16 @@
 //! What it refuses, by construction:
 //!
 //! - It never runs a shell: every argument is argv.
-//! - It never runs a workspace hook or filter: `--no-verify` and `-c core.hooksPath=/dev/null`
-//!   are on every call. A project's `core.hooksPath` (e.g. husky's `.husky/`) lives in the
-//!   worktree the model can write, so running it in the host would execute agent-written
-//!   scripts as the user (ADR 0030).
+//! - It never runs a workspace **hook**: `--no-verify` and `-c core.hooksPath=/dev/null` are on
+//!   every call. A project's `core.hooksPath` (e.g. husky's `.husky/`) lives in the worktree the
+//!   model can write, so running it in the host would execute agent-written scripts as the user
+//!   (ADR 0030).
+//! - It never runs a workspace **filter driver** it was not told to allow (ADR 0030):
+//!   a `filter=<driver>` attribute in the writable `.gitattributes` makes `git add` run
+//!   `filter.<driver>.clean`/`.process` from git config (repo or global). Before staging, the
+//!   paths are read with `git check-attr filter`, and every driver must be in `[git]
+//!   allowed_filters` (default `["lfs"]`); `lfs` is only allowed when its `clean`/`process`
+//!   commands are unset or a `git-lfs` command. Anything else refuses and stages nothing.
 //! - `paths` must resolve inside the workspace (the file tools' own boundary: absolute paths,
 //!   `..` and symlinks out are refused).
 //! - It refuses `main`/`master`, a configured protected branch, a detached HEAD, and — when a
@@ -29,6 +35,12 @@ use radian_session::{RuntimeEvent, SessionJournal};
 use serde::Deserialize;
 use serde_json::json;
 
+/// The `[git] allowed_filters` default (ADR 0030): only Git LFS may run a
+/// clean/process driver in the host.
+pub fn default_allowed_filters() -> Vec<String> {
+    vec!["lfs".to_owned()]
+}
+
 fn fail(code: &str, message: impl Into<String>) -> ToolFailure {
     ToolFailure::new(code, message)
 }
@@ -42,7 +54,9 @@ pub fn spec() -> ToolSpec {
                       there fails by design). It stages with `git add` and commits with \
                       `git commit --no-verify`; it never runs workspace hooks (a project's \
                       `core.hooksPath` lives in the worktree you can write, so the host would \
-                      be running your scripts as the user). It refuses a detached HEAD, \
+                      be running your scripts as the user), and it refuses a path whose \
+                      `.gitattributes` `filter` names a driver outside `[git] allowed_filters`. \
+                      It refuses a detached HEAD, \
                       `main`/`master` and configured protected branches, and never pushes, \
                       branches, amends or rebases. `paths` are workspace-relative; with none, \
                       every change is staged (`git add -A`, so `.gitignore` still applies)."
@@ -154,6 +168,8 @@ pub struct GitCommitTools {
     allowed_branch: Option<String>,
     /// Branch names that are refused besides `main`/`master` (`[git] protected_branches`).
     protected_branches: Vec<String>,
+    /// The filter drivers `git add` may run (`[git] allowed_filters`, ADR 0030).
+    allowed_filters: Vec<String>,
     /// The repository pinned at session open (ADR 0030 R10).
     pin: RepoPin,
 }
@@ -167,6 +183,7 @@ impl GitCommitTools {
             journal,
             allowed_branch: None,
             protected_branches: Vec::new(),
+            allowed_filters: default_allowed_filters(),
             pin,
         }
     }
@@ -180,6 +197,12 @@ impl GitCommitTools {
 
     pub fn with_protected_branches(mut self, branches: Vec<String>) -> Self {
         self.protected_branches = branches;
+        self
+    }
+
+    /// The filter drivers `git add` may run (`[git] allowed_filters`, ADR 0030).
+    pub fn with_allowed_filters(mut self, filters: Vec<String>) -> Self {
+        self.allowed_filters = filters;
         self
     }
 }
@@ -231,6 +254,7 @@ pub async fn run(tools: &GitCommitTools, call: &ToolCall) -> Result<ToolOutput, 
     let pin = tools.pin.clone();
     let allowed = tools.allowed_branch.clone();
     let protected = tools.protected_branches.clone();
+    let allowed_filters = tools.allowed_filters.clone();
     let message = args.message;
     let paths = args.paths.unwrap_or_default();
     let committed = tokio::task::spawn_blocking(move || {
@@ -241,6 +265,7 @@ pub async fn run(tools: &GitCommitTools, call: &ToolCall) -> Result<ToolOutput, 
             &paths,
             allowed.as_deref(),
             &protected,
+            &allowed_filters,
         )
     })
     .await
@@ -287,6 +312,7 @@ pub fn commit(
     paths: &[String],
     allowed_branch: Option<&str>,
     protected: &[String],
+    allowed_filters: &[String],
 ) -> Result<Committed, ToolFailure> {
     // The repository must still be the one pinned at session open: a `.git/` the model created
     // in the workspace (when there was none, or when the real one is above it) would otherwise
@@ -348,10 +374,25 @@ pub fn commit(
         resolved.push(resolved_path);
     }
 
+    // ADR 0030: a `filter=<driver>` attribute runs `filter.<driver>.clean`/`.process`
+    // from git config when the path is staged, and the model can write `.gitattributes`. Work
+    // out exactly what will be staged, then refuse before any `git add` runs. The pathspecs are
+    // the same ones `git add` gets, so a directory argument is expanded to its files.
+    let scope = workspace.to_string_lossy().into_owned();
+    let to_stage: Vec<String> = if paths.is_empty() {
+        staged_paths(workspace, pin, std::slice::from_ref(&scope))?
+    } else {
+        let resolved: Vec<String> = resolved
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+        staged_paths(workspace, pin, &resolved)?
+    };
+    check_filters(workspace, pin, &to_stage, allowed_filters)?;
+
     if paths.is_empty() {
         // Scope `-A` to the workspace, not the whole repository: a subdirectory workspace must
         // not stage its siblings.
-        let scope = workspace.to_string_lossy().into_owned();
         run_git(workspace, pin, &["add", "-A", "--", &scope])?;
     } else {
         let mut args = vec!["add", "--"];
@@ -390,6 +431,13 @@ pub fn commit(
 /// model could write runs commands on `git add`). A non-zero exit is an error with the command
 /// (never a secret) and git's stderr.
 fn git(workspace: &Path, pin: &RepoPin, args: &[&str]) -> Result<String, ToolFailure> {
+    Ok(String::from_utf8_lossy(&git_raw(workspace, pin, args)?)
+        .trim()
+        .to_owned())
+}
+
+/// [`git`] without trimming, for the NUL-separated `-z` output (`check-attr`, `status`).
+fn git_raw(workspace: &Path, pin: &RepoPin, args: &[&str]) -> Result<Vec<u8>, ToolFailure> {
     let full = common_args(pin, args);
     let output = std::process::Command::new("git")
         .current_dir(workspace)
@@ -406,7 +454,182 @@ fn git(workspace: &Path, pin: &RepoPin, args: &[&str]) -> Result<String, ToolFai
             ),
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    Ok(output.stdout)
+}
+
+/// `git config --get <key>` under the pinned repository, or `None` when the key is unset (exit
+/// 1). `git config` reads the repo, global and system levels, so a driver configured anywhere is
+/// seen (ADR 0030).
+fn git_config_opt(
+    workspace: &Path,
+    pin: &RepoPin,
+    key: &str,
+) -> Result<Option<String>, ToolFailure> {
+    let full = common_args(pin, &["config", "--get", key]);
+    let output = std::process::Command::new("git")
+        .current_dir(workspace)
+        .args(&full)
+        .output()
+        .map_err(|error| fail("git_unavailable", format!("could not run git: {error}")))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    Ok(Some(
+        String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+    ))
+}
+
+/// The repo-relative files `git add` would stage (with content, so a clean filter runs) under
+/// `pathspecs` (ADR 0030). `--cached --others --modified --exclude-standard` lists
+/// every tracked file plus the untracked ones (`.gitignore` respected). `--cached` is required:
+/// `git add -A` re-cleans an **unchanged** tracked file when a filter attribute is added, so it
+/// must be checked too. `ls-files` expands a directory pathspec (unlike `status`, which reports
+/// the directory `newdir/`) and does not depend on `status.showUntrackedFiles`. Deletions are
+/// removed: they are staged without content, so no clean filter runs for them.
+fn staged_paths(
+    workspace: &Path,
+    pin: &RepoPin,
+    pathspecs: &[String],
+) -> Result<Vec<String>, ToolFailure> {
+    let mut paths = ls_files(
+        workspace,
+        pin,
+        &["--cached", "--others", "--modified", "--exclude-standard"],
+        pathspecs,
+    )?;
+    // `--deleted` must stand alone: combined with `--cached --others` it lists everything.
+    let deleted = ls_files(workspace, pin, &["--deleted"], pathspecs)?;
+    paths.retain(|path| !deleted.contains(path));
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+/// `git ls-files -z <flags> [-- <pathspecs>]`, as repo-relative paths.
+fn ls_files(
+    workspace: &Path,
+    pin: &RepoPin,
+    flags: &[&str],
+    pathspecs: &[String],
+) -> Result<Vec<String>, ToolFailure> {
+    let mut args: Vec<String> = vec!["ls-files".into(), "-z".into()];
+    args.extend(flags.iter().map(|flag| (*flag).to_owned()));
+    if !pathspecs.is_empty() {
+        args.push("--".into());
+        args.extend(pathspecs.iter().cloned());
+    }
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    let raw = git_raw(workspace, pin, &borrowed)?;
+    Ok(split_nul(&raw))
+}
+
+/// The NUL-separated fields of a `-z` output, dropping the empty trailing field.
+fn split_nul(raw: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(raw)
+        .split('\0')
+        .filter(|field| !field.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Refuses any staged path whose `filter` attribute names a driver the host must not run
+/// (ADR 0030). `git check-attr --stdin -z` gives `(path, filter, value)` triples;
+/// `set`, `unset` and `unspecified` are not driver names. A driver must be in `allowed`; `lfs`
+/// is only allowed when its `clean`/`process` commands are unset or a `git-lfs` command. Any
+/// other allowed name is the user's opt-in and is not inspected further.
+fn check_filters(
+    workspace: &Path,
+    pin: &RepoPin,
+    paths: &[String],
+    allowed: &[String],
+) -> Result<(), ToolFailure> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    for (path, driver) in filter_drivers(workspace, pin, paths)? {
+        if !allowed.iter().any(|name| name == &driver) {
+            return Err(fail(
+                "filter_not_allowed",
+                format!(
+                    "refusing to stage `{path}`: its `filter` attribute runs the git filter \
+                     driver `{driver}`, which is not in `[git] allowed_filters`; add \
+                     `{driver}` there if you trust it, or remove the attribute"
+                ),
+            ));
+        }
+        if driver == "lfs" {
+            for key in ["clean", "process"] {
+                let setting = format!("filter.lfs.{key}");
+                if let Some(command) = git_config_opt(workspace, pin, &setting)?
+                    && !command.starts_with("git-lfs ")
+                {
+                    return Err(fail(
+                        "filter_not_allowed",
+                        format!(
+                            "refusing to stage `{path}`: `{setting}` is `{command}`, not a \
+                             `git-lfs` command"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `git check-attr --stdin -z filter` over `paths`, as `(path, driver)` pairs for every path
+/// whose `filter` value is a driver name. The paths go through **stdin**, not argv: since the
+/// list is every tracked file, a large repository would otherwise hit `E2BIG` (ADR 0030
+/// revision 4). Stdin is written from its own thread so a full stdout pipe cannot deadlock the
+/// write.
+fn filter_drivers(
+    workspace: &Path,
+    pin: &RepoPin,
+    paths: &[String],
+) -> Result<Vec<(String, String)>, ToolFailure> {
+    let full = common_args(pin, &["check-attr", "--stdin", "-z", "filter"]);
+    let mut child = std::process::Command::new("git")
+        .current_dir(workspace)
+        .args(&full)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| fail("git_unavailable", format!("could not run git: {error}")))?;
+    let mut input = Vec::new();
+    for path in paths {
+        input.extend_from_slice(path.as_bytes());
+        input.push(0);
+    }
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let writer = std::thread::spawn(move || {
+        use std::io::Write;
+        // Dropping `stdin` at the end closes the pipe, so `git` sees EOF.
+        let _ = stdin.write_all(&input);
+    });
+    let output = child
+        .wait_with_output()
+        .map_err(|error| fail("git_failed", format!("git check-attr failed: {error}")))?;
+    let _ = writer.join();
+    if !output.status.success() {
+        return Err(fail(
+            "git_failed",
+            format!(
+                "git check-attr failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        ));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut fields = text.split('\0');
+    let mut drivers = Vec::new();
+    while let (Some(path), Some(_attr), Some(value)) = (fields.next(), fields.next(), fields.next())
+    {
+        if !matches!(value, "set" | "unset" | "unspecified") {
+            drivers.push((path.to_owned(), value.to_owned()));
+        }
+    }
+    Ok(drivers)
 }
 
 /// The global arguments **every** git call carries (ADR 0030 R10): the pinned repository, and
@@ -504,12 +727,21 @@ mod tests {
             &[".radian/progress/x.md".to_owned()],
             None,
             &[],
+            &default_allowed_filters(),
         )
         .expect_err("a .radian path must be refused");
         assert_eq!(error.code, "radian_path", "{error:?}");
         // A normal path still commits.
         std::fs::write(dir.join("ok.txt"), "ok\n").unwrap();
-        let committed = commit(&dir, &pin, "ok", &["ok.txt".to_owned()], None, &[]);
+        let committed = commit(
+            &dir,
+            &pin,
+            "ok",
+            &["ok.txt".to_owned()],
+            None,
+            &[],
+            &default_allowed_filters(),
+        );
         assert!(committed.is_ok(), "{committed:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }

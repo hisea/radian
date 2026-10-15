@@ -47,7 +47,8 @@ pub(crate) fn build_body(
     if let Some(system) = &request.system_prompt {
         messages.push(json!({"role": "system", "content": system}));
     }
-    messages.extend(request.messages.iter().map(message));
+    let replay = config.reasoning_replay.as_deref();
+    messages.extend(request.messages.iter().map(|item| message(item, replay)));
     body.insert("messages".into(), Value::Array(messages));
 
     if !request.tools.is_empty() {
@@ -80,14 +81,15 @@ fn settings_object(settings: &Value) -> Result<Map<String, Value>, ModelError> {
     }
 }
 
-fn message(message: &Message) -> Value {
+fn message(message: &Message, replay: Option<&str>) -> Value {
     match message {
         Message::User { content, .. } => user(content),
         Message::Assistant {
             content,
+            reasoning,
             tool_calls,
             ..
-        } => assistant(content, tool_calls),
+        } => assistant(content, reasoning, tool_calls, replay),
         Message::Tool { result, .. } => tool_result(result),
     }
 }
@@ -120,7 +122,12 @@ fn user(content: &[ContentPart]) -> Value {
     json!({"role": "user", "content": parts})
 }
 
-fn assistant(content: &[ContentPart], tool_calls: &[ToolCall]) -> Value {
+fn assistant(
+    content: &[ContentPart],
+    reasoning: &[ContentPart],
+    tool_calls: &[ToolCall],
+    replay: Option<&str>,
+) -> Value {
     let text = plain_text(content);
     let mut message = Map::new();
     message.insert("role".into(), json!("assistant"));
@@ -131,6 +138,13 @@ fn assistant(content: &[ContentPart], tool_calls: &[ToolCall]) -> Value {
         Value::String(text)
     };
     message.insert("content".into(), content);
+    // ADR 0014 Q1/Q3: when the model requires it, the reasoning is replayed under
+    // the field the model named. Every assistant message carries the key, an empty string when
+    // the message has no reasoning, so a history mixing reasoning and non-reasoning replies is
+    // still accepted (DeepSeek's "all subsequent requests" rule).
+    if let Some(field) = replay {
+        message.insert(field.into(), json!(reasoning_text(reasoning)));
+    }
     if !tool_calls.is_empty() {
         let calls: Vec<Value> = tool_calls
             .iter()
@@ -162,6 +176,20 @@ fn tool_result(result: &ToolResult) -> Value {
         text = format!("Error: {text}");
     }
     json!({"role": "tool", "tool_call_id": result.call_id, "content": text})
+}
+
+/// The reasoning the model wants back (ADR 0014 Q1): the text parts only, joined
+/// by newlines, matching pi. Non-text parts are dropped rather than placeheld — a signature or
+/// structured reason belongs to `provider_payload`, not this channel (ADR 0014 R3/R10).
+fn reasoning_text(parts: &[ContentPart]) -> String {
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Text of every part, joined by blank lines. Parts the API cannot take as text become short
@@ -272,6 +300,80 @@ mod tests {
         assert_eq!(with_body, plain_body);
         let body = String::from_utf8(with_body).unwrap();
         assert!(!body.contains("reasoning"), "{body}");
+    }
+
+    #[test]
+    fn reasoning_is_replayed_only_when_the_model_asks_for_it() {
+        // ADR 0014 Q1/Q3: with a replay field, an assistant message's reasoning is
+        // written under that key, and a message with none carries an empty string.
+        let mut cfg = config();
+        cfg.reasoning_replay = Some("reasoning_content".into());
+        let req = request(vec![
+            Message::user("what?"),
+            Message::Assistant {
+                content: vec![ContentPart::text("answer")],
+                reasoning: vec![
+                    ContentPart::text("first thought"),
+                    ContentPart::text("second thought"),
+                ],
+                tool_calls: Vec::new(),
+                provider_payload: None,
+                interrupted: false,
+                meta: MessageMeta::default(),
+            },
+            Message::assistant("plain reply"),
+        ]);
+        let body = build_body(&req, &cfg, false).unwrap();
+        assert_eq!(
+            body["messages"][1]["reasoning_content"],
+            "first thought\nsecond thought"
+        );
+        assert_eq!(body["messages"][2]["reasoning_content"], "");
+        // The reasoning never leaks into the visible content.
+        assert_eq!(body["messages"][1]["content"], "answer");
+    }
+
+    #[test]
+    fn the_replay_field_name_follows_the_config() {
+        let mut cfg = config();
+        cfg.reasoning_replay = Some("reasoning".into());
+        let req = request(vec![Message::Assistant {
+            content: vec![ContentPart::text("answer")],
+            reasoning: vec![ContentPart::text("thought")],
+            tool_calls: Vec::new(),
+            provider_payload: None,
+            interrupted: false,
+            meta: MessageMeta::default(),
+        }]);
+        let body = build_body(&req, &cfg, false).unwrap();
+        assert_eq!(body["messages"][0]["reasoning"], "thought");
+        assert!(body["messages"][0].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn a_non_text_reasoning_part_is_not_replayed() {
+        // R3/R10: a signature or other non-text block is not this channel's payload, so the
+        // replay keeps only the text parts.
+        let mut cfg = config();
+        cfg.reasoning_replay = Some("reasoning_content".into());
+        let req = request(vec![Message::Assistant {
+            content: vec![ContentPart::text("answer")],
+            reasoning: vec![
+                ContentPart::text("visible thought"),
+                ContentPart::Image {
+                    mime_type: "image/png".into(),
+                    data: "AAAA".into(),
+                    annotations: None,
+                    meta: None,
+                },
+            ],
+            tool_calls: Vec::new(),
+            provider_payload: None,
+            interrupted: false,
+            meta: MessageMeta::default(),
+        }]);
+        let body = build_body(&req, &cfg, false).unwrap();
+        assert_eq!(body["messages"][0]["reasoning_content"], "visible thought");
     }
 
     #[test]

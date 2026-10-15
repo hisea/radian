@@ -310,6 +310,7 @@ fn the_provider_list_resolves_built_ins_config_and_auth() {
         radian_host::ProviderDecl {
             kind: "openai-compatible".to_owned(),
             base_url: "https://acme.example/v1".to_owned(),
+            reasoning_replay: None,
         },
     );
     for name in [

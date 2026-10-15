@@ -45,8 +45,8 @@ p95 取排序后的第 95 百分位（小样本下即接近最大值，故 p95 �
 | `radian --resume` 1k 条 | 109.2 / 113.4 ms | 89.7 / 96.2 ms | 5 |
 | `radian --resume` 10k 条 | 529.9 / 561.8 ms | 161.0 / 170.8 ms | 5 |
 | `agent` 启动到提示符 | 32.3 / 39.2 ms | 54.9 / 80.4 ms | 10 |
-| `agent --resume` 1k 条 | 38.5 / 51.7 ms | 41.5 / 76.6 ms | 5 |
-| `agent --resume` 10k 条 | 171.2 / 196.5 ms | 54.4 / 59.7 ms | 5 |
+| `radian exec --resume` 1k 条 | 38.5 / 51.7 ms | 41.5 / 76.6 ms | 5 |
+| `radian exec --resume` 10k 条 | 171.2 / 196.5 ms | 54.4 / 59.7 ms | 5 |
 | `workspace-write` 沙箱探针 | 23.7 / 48.6 ms | 26.6 / 52.7 ms | 20 |
 
 启动在 debug 与 release 差别不大（~100 ms），说明它由**进程启动 + 终端初始化 + 沙箱探针**
@@ -141,8 +141,8 @@ release 构建。
 | 进程 | 会话 | 峰值 RSS |
 |---|---|---|
 | `agent` | 全新（空会话） | 11.3 MB |
-| `agent --resume` | 1 000 条 | 14.6 MB |
-| `agent --resume` | 10 000 条 | 34.6 MB |
+| `radian exec --resume` | 1 000 条 | 14.6 MB |
+| `radian exec --resume` | 10 000 条 | 34.6 MB |
 | `radian-tui` | 全新 | 11.5 MB |
 | `radian --resume` | 1 000 条 | 14.1 MB |
 | `radian --resume` | 10 000 条 | 38.1 MB |
@@ -249,7 +249,7 @@ cargo test --release -p radian-session --test perf_long_session -- --ignored --n
 单文件：1k 5.5 ms · 10k 64.6 ms · 50k 823 ms · 100k **1877 ms**（5.5 → 18.8 µs/消息，
 这条曲线上翘，可能是 SQLite/WAL 与负载；未单独求证）。
 
-### `agent --resume <id> -p x`：启动到第一个请求
+### `radian exec --resume <id> -p x`：启动到第一个请求
 
 ```sh
 cargo test --release -p agent-cli --test perf_long_resume -- --ignored --nocapture --test-threads=1

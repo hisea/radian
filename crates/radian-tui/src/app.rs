@@ -875,6 +875,9 @@ pub enum Effect {
     /// List the discovered skills (`/skills`, ADR 0025 S3) as notices. The answer is
     /// [`Input::SessionDone`].
     ListSkills,
+    /// `/jobs` (ADR 0037 decision 4): list the session's background jobs, or stop one/all. The
+    /// loop runs it (the registry lives in the host) and answers with [`Input::SessionDone`].
+    Jobs(command::JobsRequest),
     /// Write the transcript selection to the system clipboard (`tui.clipboard` picks the
     /// transport). The loop runs it and answers with [`Input::ClipboardDone`]: OSC 52 has no
     /// receipt, and `pbcopy` can fail — the loop owns both facts, `update` only owns the text.
@@ -993,6 +996,7 @@ impl PartialEq for Effect {
                 },
             ) => an == bn && aa == ba && as_ == bs,
             (ListSkills, ListSkills) => true,
+            (Jobs(a), Jobs(b)) => a == b,
             (Theme { name: a }, Theme { name: b }) => a == b,
             (Inject(a), Inject(b)) => a == b,
             (CancelBash, CancelBash) => true,
@@ -1232,7 +1236,7 @@ pub struct App {
     pub spinner_kind: crate::spinner::Kind,
     /// The key bindings (config `tui.keybindings`), defaulting to the pre-config key table.
     pub keymap: Keymap,
-    /// How the input area is drawn (config `tui.input_style`), defaulting to `lines`.
+    /// How the input area is drawn (config `tui.input_style`), defaulting to `bar`.
     pub input_style: InputStyle,
     pub total_lines: usize,
     pub view_height: u16,
@@ -3851,6 +3855,7 @@ impl App {
             } => self.begin_bash(command, exclude_from_context),
             // `/skills`: the host lists the discovered skills as notices.
             command::Outcome::Skills => UpdateResult::effect(Effect::ListSkills),
+            command::Outcome::Jobs(request) => UpdateResult::effect(Effect::Jobs(request)),
             command::Outcome::Message => UpdateResult::none(),
         }
     }
@@ -4335,13 +4340,19 @@ impl App {
         if self.compacting {
             return Some("Compacting");
         }
-        if self.turn() == TurnState::Running {
+        if self.turn_running() {
             return Some("Working");
         }
         if self.bash_running.is_some() {
             return Some("Running a command");
         }
         None
+    }
+
+    /// Whether a turn is running (the projection's own state, ADR 0023 U5). The `bar` status
+    /// row shows `esc to interrupt` exactly then: Esc cancels a running turn (ADR 0009).
+    pub fn turn_running(&self) -> bool {
+        self.turn() == TurnState::Running
     }
 
     /// Whether any spinner is on screen (ADR 0027): the input rule's status line,

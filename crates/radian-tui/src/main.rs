@@ -130,7 +130,7 @@ struct Cli {
     #[arg(help_heading = "Permissions", long, value_name = "POLICY")]
     approval: Option<String>,
 
-    /// Approve every tool call without asking, like `agent --yes`. Not "allow everything":
+    /// Approve every tool call without asking, like `radian exec --yes`. Not "allow everything":
     /// `deny` rules still deny and the sandbox still applies; only the question is removed.
     #[arg(help_heading = "Permissions", long)]
     yes: bool,
@@ -194,6 +194,12 @@ struct Cli {
     /// `<session-dir>/child.pid`, then panic. The pty test asserts the child is not orphaned.
     #[arg(long, hide = true, value_name = "SECS")]
     panic_with_child: Option<u64>,
+
+    /// Test hook: start this command as a background job (its own process group), wait for it
+    /// to write `job.pid` in the workspace, then panic. The panic path must kill the group
+    /// (ADR 0037 decision 6: `Jobs::drop` -> `kill_all`, killpg only).
+    #[arg(long, hide = true, value_name = "COMMAND")]
+    panic_with_background_job: Option<String>,
 
     /// Test hook: make the driver task panic instead of running, so the UI's watch on it can
     /// be exercised.
@@ -275,7 +281,7 @@ enum RadianCommand {
     /// Manage durable memory (ADR 0021 D7): the same grammar as `radian exec memory` and the
     /// TUI's `/memory`.
     Memory {
-        /// The workspace project memory is resolved against, like `agent --workspace`.
+        /// The workspace project memory is resolved against, like `radian exec --workspace`.
         #[arg(long, value_name = "DIR")]
         workspace: Option<PathBuf>,
         #[command(subcommand)]
@@ -304,8 +310,10 @@ fn run_subcommand(command: RadianCommand) -> ExitCode {
         RadianCommand::Exec { args } => {
             // The agent parser owns `--help`/`--version`/usage errors: `parse_from` exits
             // inside clap for those, exactly as the `agent` binary does.
+            // The program name clap shows in usage and errors: `radian exec`, the command
+            // the user ran.
             ExitCode::from(agent_cli::parse_and_run(
-                std::iter::once("agent".to_string()).chain(args),
+                std::iter::once("radian exec".to_string()).chain(args),
             ) as u8)
         }
         // The management commands build the same `Cli` the `agent` parser would and run the
@@ -798,7 +806,7 @@ fn run(
                 match radian_host::resolve_note(&key_id).map_err(|e| e.to_string())? {
                     Some(note) => note,
                     None => format!(
-                        "no credential for `{key_id}`: run `agent login {key_id}`, or \
+                        "no credential for `{key_id}`: run `radian login {key_id}`, or \
                          `/login {key_id}` in the TUI; refusing to continue because {} is not a \
                          local address",
                         radian_host::redact_base_url(&probe_base_url)
@@ -904,6 +912,10 @@ fn run(
         route.adapter(),
         Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
     );
+    // ADR 0014 Q2: the catalog (or a `[providers.<id>]` override) decides whether
+    // this route replays reasoning.
+    let reasoning_replay = radian_host::resolve_reasoning_replay(&provider_ref, &model_name);
+    let replays_reasoning = reasoning_replay.is_some();
     let initial = build_model(ModelArgs {
         provider: route.adapter(),
         base_url: route.base_url.clone(),
@@ -915,6 +927,7 @@ fn run(
         max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         thinking: thinking_of,
         reasoning_effort,
+        reasoning_replay,
     })?;
     // ADR 0026 D5: the model is switchable. The slot is shared with the driver (open_session
     // wires it), so a `/model` change reaches the next request without touching the key.
@@ -944,15 +957,24 @@ fn run(
     );
     let budget_for = {
         let query = window_query.clone();
+        let providers = config.providers.clone();
         std::sync::Arc::new(move |provider: &str, switch_model: &str| {
             // The switched route carries its own provider id, so the resolver uses it directly
             // instead of deriving one from the startup base URL.
-            radian_host::resolve_offline(&radian_host::WindowQuery {
+            let window = radian_host::resolve_offline(&radian_host::WindowQuery {
                 catalog_provider: Some(provider.to_owned()),
                 model: switch_model.to_owned(),
                 ..query.clone()
+            });
+            // ADR 0014 Q4: the estimate counts reasoning exactly when the route
+            // replays it, so the projection matches the request actually sent.
+            window.budget.map(|tokens| {
+                ContextBudget::new(tokens).with_reasoning(radian_host::route_replays_reasoning(
+                    provider,
+                    switch_model,
+                    &providers,
+                ))
             })
-            .budget
         }) as radian_runtime::BudgetFor
     };
     // ADR 0027 + ADR 0026 D5/D7: the same warm-cache lookup gives the **price**, so
@@ -1131,6 +1153,7 @@ fn run(
                 budget_for: Some(budget_for),
                 price_for: Some(Arc::clone(&route_price)),
                 protected_branches: config.git.protected_branches.clone(),
+                allowed_filters: Some(config.git.allowed_filters()),
                 session_id: radian_host::SessionId::new(session_id.clone()),
                 session_dir: dir.clone(),
                 workspace: workspace_path.clone(),
@@ -1142,7 +1165,9 @@ fn run(
                 // ADR 0036: an interactive session uses the `default` role.
                 role: None,
                 system_prompt: cli.system.clone(),
-                context_budget: window.budget.map(ContextBudget::new),
+                context_budget: window
+                    .budget
+                    .map(|tokens| ContextBudget::new(tokens).with_reasoning(replays_reasoning)),
                 auto_compact: !cli.no_auto_compact && config.compaction.auto.unwrap_or(true),
                 sandbox,
                 tier: tier.preset(),
@@ -1387,6 +1412,32 @@ fn run(
         std::fs::write(dir.join("child.pid"), pid.to_string())
             .map_err(|e| format!("child.pid: {e}"))?;
         panic!("radian: panic path test with a child in flight");
+    }
+    if let Some(command) = &cli.panic_with_background_job {
+        // Test hook: a background job is running when the panic happens. The panic path must
+        // kill its whole process group (ADR 0037 decision 6). The registry is reached through
+        // the host facade; the command runs under a `full` sandbox (this is a test hook).
+        let jobs = session
+            .jobs_registry()
+            .expect("the session has coding tools");
+        let workspace = session.workspace().to_path_buf();
+        let policy =
+            radian_sandbox::SandboxPolicy::new(radian_sandbox::SandboxMode::FullAccess, &workspace)
+                .expect("a full-access policy");
+        let sandbox = radian_sandbox::Sandbox::from_policy(policy).expect("a full-access sandbox");
+        jobs.start(&sandbox, &workspace, command, None)
+            .expect("start the test job");
+        // The command writes its pid (and its child's) before it sleeps; wait for it, bounded.
+        let marker = workspace.join("job.pid");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::fs::read_to_string(&marker).is_err() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the test job never wrote job.pid"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("radian: panic path test with a background job in flight");
     }
     let memory_service = session.memory().cloned();
     // The history of a resumed session is rendered before the first frame, so the transcript
@@ -2723,6 +2774,51 @@ impl LoopContext<'_> {
             // `/skills` (ADR 0025 S3): the discovered skills as notices.
             Effect::ListSkills => {
                 let notices = radian_host::notices(self.session.skills());
+                self.send(AppInput::SessionDone(notices));
+                Ok(())
+            }
+            // ADR 0037 decision 4: `/jobs` lists or stops the session's background jobs. The
+            // registry lives in the host, so the loop reads it here and shows notices.
+            Effect::Jobs(request) => {
+                let notices = match request {
+                    radian_tui::command::JobsRequest::List => {
+                        let jobs = self.session.jobs();
+                        if jobs.is_empty() {
+                            vec!["no background jobs in this session".to_owned()]
+                        } else {
+                            jobs.iter()
+                                .map(|job| {
+                                    format!(
+                                        "{}  {}  {}s  {}  {}",
+                                        job.id,
+                                        job.state.label(),
+                                        job.elapsed.as_secs(),
+                                        job.command,
+                                        job.output
+                                    )
+                                })
+                                .collect()
+                        }
+                    }
+                    radian_tui::command::JobsRequest::Kill(id) => {
+                        match self.session.kill_job(&id) {
+                            Ok(()) => {
+                                vec![format!("stopping {id} (SIGTERM, then SIGKILL after 2s)")]
+                            }
+                            Err(error) => vec![error],
+                        }
+                    }
+                    radian_tui::command::JobsRequest::KillAll => {
+                        let running = self
+                            .session
+                            .jobs()
+                            .iter()
+                            .filter(|job| job.state.is_running())
+                            .count();
+                        self.session.kill_all_jobs();
+                        vec![format!("stopping {running} background job(s)")]
+                    }
+                };
                 self.send(AppInput::SessionDone(notices));
                 Ok(())
             }

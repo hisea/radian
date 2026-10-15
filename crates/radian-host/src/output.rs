@@ -1,7 +1,8 @@
 //! Writing a command's stdout, where a closed reader is a normal stop, not a crash
 //! (dogfooding D21).
 //!
-//! `agent --export <id> | head -1` closes stdout after one line. A `println!` then panics
+//! `radian exec --export <id> | head -1` closes stdout after one line. A `println!` then
+//! panics
 //! ("failed printing to stdout: Broken pipe") and the process exits 101. Restoring the
 //! process's default `SIGPIPE` disposition is deliberately **not** done: writing to an MCP
 //! child's pipe after the child exited would then kill the whole agent with a signal. So
