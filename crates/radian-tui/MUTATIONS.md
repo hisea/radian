@@ -1165,3 +1165,17 @@ Base `e2a0392` · 一次性 worktree `/tmp/radian-ime-mut*`，还原后 `git sta
 IM-M2 与既有记录一致（见上文 `RESIZE-B`：closed-master 测试抓不到收窄的缺失——收窄省的是 CPU，
 不是保证退出；退出由第一次 `tty_readiness` 的 Gone 与主循环兜底覆盖，两者都用同一个
 `tty_readiness`）。IM-M3 证明这次改动没有削弱该测试对 POLLHUP 的检查。
+
+## markdown-b：间距与 Markdown 各元素（ADR 0035，2026-10-16）
+
+Base `2ecb02b` · 一次性 worktree `/tmp/radian-mut-mdb` · 每条跑完 `git checkout -- .`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| MD-A | 某元素自己多加一行空白（块间补两行） | `markdown_elements_have_one_blank_line_between_them` | ✅ |
+| MD-B | 续行固定 2 格（`marker_width` 恒 2） | `lists_use_a_dash_and_align_continuations_to_the_marker` | ✅ |
+| MD-C | 表格只画表头线（`row_index == 0`） | `a_table_has_a_border_between_every_row` | ✅ |
+| MD-D | 不画围栏行 | `a_code_block_shows_its_fence` | ✅ |
+| MD-E | `<br>` 不换行 | `html_br_hr_and_blockquote_render` | ✅ |
+
+5/5 抓住。
