@@ -1,9 +1,10 @@
 //! The write side: a real, fsyncing [`agent_core::TranscriptJournal`] on a JSONL file.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use agent_core::{JournalError, JournalRecord, Message, ModelUsage, ToolResult, TranscriptJournal};
 use fs2::FileExt;
@@ -18,6 +19,14 @@ use crate::runtime::{RuntimeEvent, runtime_data};
 
 /// The schema version this crate writes and accepts.
 pub(crate) const SCHEMA_VERSION: u64 = 1;
+
+/// How long [`SessionJournal::open_locked`] keeps retrying a contended writer lock before it
+/// reports the existing [`WriteError::Locked`]. Long enough to ride out the `[fork, exec)`
+/// window of a child another thread is spawning; far shorter than any genuine second writer
+/// holds the lock.
+const LOCK_RETRY_BUDGET: Duration = Duration::from_millis(200);
+/// The first retry delay; each retry doubles it (`1, 2, 4, …` ms) until the budget is spent.
+const LOCK_RETRY_FIRST: Duration = Duration::from_millis(1);
 
 /// The parent a forked session came from (ADR 0022). `seq` is the parent's fork point: the
 /// seq of a `TurnFinished` (or 0 for "the session start"), which is also what the parent's
@@ -295,11 +304,50 @@ impl SessionJournal {
             source: e,
         })?;
         crate::fs::warn_if_wide(path);
-        match file.try_lock_exclusive() {
-            Ok(()) => Ok(file),
-            Err(_) => Err(WriteError::Locked {
-                path: path.to_path_buf(),
-            }),
+        Self::lock_exclusive(&file, path)?;
+        Ok(file)
+    }
+
+    /// Takes the exclusive writer lock, retrying a contended `flock` for [`LOCK_RETRY_BUDGET`].
+    ///
+    /// # Why a false `Locked` is possible
+    ///
+    /// `flock` follows the **open file description**, not the process. On macOS and Linux a
+    /// `fork` copies the parent's descriptor table, so a child shares the parent's open file
+    /// description — and therefore its lock — for the whole `[fork, exec)` window, only
+    /// releasing it at `exec` (when the descriptor's `FD_CLOEXEC` closes it). A host that has
+    /// a session journal open, forks a child in another thread (a `git` helper, a tool
+    /// subprocess), and closes then reopens the journal inside that window sees the child's
+    /// inherited descriptor still holding the lock, though no second writer exists.
+    ///
+    /// The retry turns that transient window back into success. The numbers, on this machine:
+    /// 8 threads closing and reopening a journal while 4 threads spawn `git --version` saw
+    /// 13966 false `Locked` in 24000 reopens before this retry, and 0 after. A real second
+    /// writer holds the lock for as long as it lives, far beyond the budget, and is still
+    /// refused with [`WriteError::Locked`].
+    fn lock_exclusive(file: &File, path: &Path) -> Result<(), WriteError> {
+        let locked = || WriteError::Locked {
+            path: path.to_path_buf(),
+        };
+        let deadline = Instant::now() + LOCK_RETRY_BUDGET;
+        let mut wait = LOCK_RETRY_FIRST;
+        loop {
+            match file.try_lock_exclusive() {
+                Ok(()) => return Ok(()),
+                // `fs2` surfaces the raw `flock` errno, so contention is `EWOULDBLOCK`.
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    #[cfg(feature = "testing")]
+                    LOCK_RETRY_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(locked());
+                    }
+                    std::thread::sleep(wait.min(deadline - now));
+                    wait = wait.saturating_mul(2);
+                }
+                // Any other failure is not a transient window; refuse immediately.
+                Err(_) => return Err(locked()),
+            }
         }
     }
 
@@ -562,6 +610,20 @@ fn take_write_failure(session_id: &str, event: &str) -> bool {
         }
         None => false,
     }
+}
+
+/// Test-only observability (feature `testing`): how many times the writer lock has been
+/// retried because it was contended. A test that deliberately leaves the lock held (e.g. by
+/// a forked child that inherited the descriptor) waits for this to advance before it frees
+/// the lock, so it knows `open_locked` is provably in its retry loop rather than racing the
+/// first attempt.
+#[cfg(feature = "testing")]
+static LOCK_RETRY_ATTEMPTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Test-only seam: the value of [`LOCK_RETRY_ATTEMPTS`]. See [`SessionJournal::open_locked`].
+#[cfg(feature = "testing")]
+pub fn lock_retry_attempts() -> u64 {
+    LOCK_RETRY_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 fn invalid_data(path: &Path, e: serde_json::Error) -> WriteError {
