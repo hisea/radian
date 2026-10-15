@@ -4,6 +4,7 @@ use agent_core::{ContentPart, ToolConcurrency, ToolFailure, ToolOutput, ToolSpec
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::args;
 use crate::fail;
 use crate::provider::Limits;
 use crate::workspace::{WorkspaceRoot, io_failure};
@@ -16,6 +17,36 @@ struct ReadArgs {
     offset: Option<i64>,
     /// Maximum number of lines to read.
     limit: Option<i64>,
+}
+
+pub(crate) fn schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Workspace-relative file path."
+            },
+            "max_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1048576,
+                "description": "Byte budget for this read; defaults to 65536."
+            },
+            "offset": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "1-based line to start reading at; defaults to 1."
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Maximum number of lines to read; no line limit if omitted."
+            }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+    })
 }
 
 pub(crate) fn spec() -> ToolSpec {
@@ -34,33 +65,7 @@ pub(crate) fn spec() -> ToolSpec {
                       returned as a prefix with line_truncated. Binary (non-UTF-8) content is \
                       refused."
             .into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Workspace-relative file path."
-                },
-                "max_bytes": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 1048576,
-                    "description": "Byte budget for this read; defaults to 65536."
-                },
-                "offset": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "1-based line to start reading at; defaults to 1."
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Maximum number of lines to read; no line limit if omitted."
-                }
-            },
-            "required": ["path"],
-            "additionalProperties": false
-        }),
+        input_schema: schema(),
         concurrency: ToolConcurrency::Shared,
     }
 }
@@ -135,8 +140,7 @@ pub(crate) async fn run(
     limits: &Limits,
     arguments: &serde_json::Value,
 ) -> Result<ToolOutput, ToolFailure> {
-    let args: ReadArgs = serde_json::from_value(arguments.clone())
-        .map_err(|e| fail("invalid_arguments", e.to_string()))?;
+    let args: ReadArgs = args::parse("read", &schema(), arguments)?;
     let budget = match args.max_bytes {
         Some(0) => return Err(fail("read_limit_exceeded", "max_bytes must be at least 1")),
         Some(n) if n as usize > limits.max_read_bytes => {
@@ -153,10 +157,20 @@ pub(crate) async fn run(
     };
     let offset = args.offset.unwrap_or(1);
     if offset < 1 {
-        return Err(fail("invalid_arguments", "offset must be at least 1"));
+        return Err(args::invalid(
+            "read",
+            arguments,
+            ["`offset` must be at least 1"],
+        ));
     }
     let limit = match args.limit {
-        Some(n) if n < 1 => return Err(fail("invalid_arguments", "limit must be at least 1")),
+        Some(n) if n < 1 => {
+            return Err(args::invalid(
+                "read",
+                arguments,
+                ["`limit` must be at least 1"],
+            ));
+        }
         Some(n) => Some(n as usize),
         None => None,
     };

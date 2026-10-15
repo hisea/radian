@@ -266,3 +266,12 @@ Base `ea8d251` · 就地变异（改源码），每个变异前把文件复制�
 | # | 变异（行为） | 抓住它的测试 | 结果 |
 |---|---|---|---|
 | P4-1 | `closest_region` 直接返回 `None`（错误里不再给出最近的行区间） | `patch::a_missing_needle_reports_the_closest_region_with_line_numbers`（期望含 `lines 2-3` 与 `2: beta`） | ✅ |
+
+### 参数错误：列出全部问题、回显参数、空字符串可选参数视为缺省（piece 5）
+
+每个变异用 `cargo test -p radian-coding --test args --no-fail-fast -- <test>`，跑完从副本还原并逐字节比较。
+
+| # | 变异（行为） | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| A1 | `clean` 不再删除值为 `""` 的可选参数（把 `""` 当成一个值） | `args::an_empty_optional_argument_is_treated_as_absent`（`offset: ""` 变成类型错误） | ✅ |
+| A2 | `invalid` 只打印第一个问题（`.take(1)`） | `args::an_argument_error_lists_every_problem_and_echoes_the_arguments`（三个问题只出现一个） | ✅ |

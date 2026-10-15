@@ -5,6 +5,7 @@ use agent_core::{ContentPart, ToolConcurrency, ToolFailure, ToolOutput, ToolSpec
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::args;
 use crate::fail;
 use crate::provider::Limits;
 use crate::workspace::{WorkspaceRoot, edit_distance_ci, io_failure};
@@ -23,6 +24,32 @@ struct PatchArgs {
 /// How many lines of the closest region a not-found result shows.
 const CLOSEST_REGION_LINES: usize = 8;
 
+pub(crate) fn schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Workspace-relative file path."
+            },
+            "old": {
+                "type": "string",
+                "description": "Text to find; must locate exactly one occurrence unless replace_all is true."
+            },
+            "new": {
+                "type": "string",
+                "description": "Replacement text."
+            },
+            "replace_all": {
+                "type": "boolean",
+                "description": "Replace every located occurrence instead of refusing when there is more than one; defaults to false."
+            }
+        },
+        "required": ["path", "old", "new"],
+        "additionalProperties": false
+    })
+}
+
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec {
         name: "patch".into(),
@@ -37,29 +64,7 @@ pub(crate) fn spec() -> ToolSpec {
                       the error names the closest region of the file, with line numbers, so \
                       you do not need another read."
             .into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Workspace-relative file path."
-                },
-                "old": {
-                    "type": "string",
-                    "description": "Text to find; must locate exactly one occurrence unless replace_all is true."
-                },
-                "new": {
-                    "type": "string",
-                    "description": "Replacement text."
-                },
-                "replace_all": {
-                    "type": "boolean",
-                    "description": "Replace every located occurrence instead of refusing when there is more than one; defaults to false."
-                }
-            },
-            "required": ["path", "old", "new"],
-            "additionalProperties": false
-        }),
+        input_schema: schema(),
         concurrency: ToolConcurrency::Exclusive,
     }
 }
@@ -69,8 +74,7 @@ pub(crate) async fn run(
     limits: &Limits,
     arguments: &serde_json::Value,
 ) -> Result<ToolOutput, ToolFailure> {
-    let args: PatchArgs = serde_json::from_value(arguments.clone())
-        .map_err(|e| fail("invalid_arguments", e.to_string()))?;
+    let args: PatchArgs = args::parse("patch", &schema(), arguments)?;
     if args.old.is_empty() {
         return Err(fail(
             "patch_invalid",
