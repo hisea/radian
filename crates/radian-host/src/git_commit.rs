@@ -607,12 +607,9 @@ fn filter_drivers(
         // Dropping `stdin` at the end closes the pipe, so `git` sees EOF.
         let _ = stdin.write_all(&input);
     });
-    let output = child.wait_with_output().map_err(|error| {
-        fail(
-            "git_failed",
-            format!("git check-attr failed: {error}"),
-        )
-    })?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| fail("git_failed", format!("git check-attr failed: {error}")))?;
     let _ = writer.join();
     if !output.status.success() {
         return Err(fail(
@@ -626,8 +623,7 @@ fn filter_drivers(
     let text = String::from_utf8_lossy(&output.stdout);
     let mut fields = text.split('\0');
     let mut drivers = Vec::new();
-    while let (Some(path), Some(_attr), Some(value)) =
-        (fields.next(), fields.next(), fields.next())
+    while let (Some(path), Some(_attr), Some(value)) = (fields.next(), fields.next(), fields.next())
     {
         if !matches!(value, "set" | "unset" | "unspecified") {
             drivers.push((path.to_owned(), value.to_owned()));
