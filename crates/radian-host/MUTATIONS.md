@@ -647,6 +647,13 @@ Base `65ea1ed` · 一次性 worktree `/tmp/radian-ce-mut`，还原后 `git statu
 
 3/3 抓住。
 
+## small-fixes-2：上下文文件去重
+
+Base `e157bfb` · 一次性 worktree `.radian-worktrees/sf2-mut`（detached，跑完删除）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SF1 | `load` 去掉 `seen` 去重 | `context::tests::a_symlinked_context_file_is_read_once` | ✅ |
 ## review-fixes-1 (2026-10-15): git filters + corrupt trust
 
 One-shot detached worktree `.radian-worktrees/rf1-mutations` (from the branch HEAD, deleted

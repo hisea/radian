@@ -1171,6 +1171,10 @@ pub struct App {
     pub projection: Arc<SessionProjection>,
     pub quit: bool,
     pub note: Option<String>,
+    /// The call ids of the tools running right now (ADR 0027's status note). A
+    /// batch can run several; the note clears only when the last one finishes, so the footer
+    /// does not say "tool shell running" while the next model request is already in flight.
+    running_tools: std::collections::HashSet<String>,
     /// A compaction is running (ADR 0018): the input rule's status line shows `Compacting`
     /// (ADR 0027). Set on `CompactionStarted`, cleared when it finishes, fails or
     /// is skipped.
@@ -1319,6 +1323,7 @@ impl App {
             projection: Arc::new(SessionProjection::new()),
             quit: false,
             note: None,
+            running_tools: std::collections::HashSet::new(),
             compacting: false,
             pending: 0,
             startup_screen: None,
@@ -3976,8 +3981,17 @@ impl App {
                 self.timer
                     .response_finished(self.now, usage.as_ref().and_then(|usage| usage.output));
             }
-            AgentEvent::ToolStarted { name, .. } => {
+            AgentEvent::ToolStarted { call_id, name, .. } => {
+                self.running_tools.insert(call_id.clone());
                 self.note = Some(format!("tool {name} running"));
+            }
+            AgentEvent::ToolFinished { call_id, .. } => {
+                // The tool is done. Clear the note only when no other tool in the batch is
+                // still running; otherwise the footer keeps naming a running one.
+                self.running_tools.remove(call_id);
+                if self.running_tools.is_empty() {
+                    self.note = None;
+                }
             }
             AgentEvent::TranscriptAppended { message, .. } => self.push_message(message),
             // ADR 0018: compaction is visible to the user as it happens.
@@ -4024,6 +4038,7 @@ impl App {
                 // from the queue alone is what makes "the waiter gave up" and "the turn ended"
                 // the same event.
                 self.note = None;
+                self.running_tools.clear();
                 self.compacting = false;
                 // ADR 0033: a `!` submitted behind the turn starts now.
                 if let Some((command, exclude_from_context)) = self.queued_bash.take() {

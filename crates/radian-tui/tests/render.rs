@@ -194,6 +194,53 @@ fn tool_calls_and_results_are_shown() {
     assert!(text.contains("file contents"), "{text}");
 }
 
+/// The footer's note must not stay at "tool X running" after the tool finished: the next
+/// model request is in flight then, and the note would be stale for the rest of the turn.
+#[test]
+fn the_note_clears_when_the_tools_finish() {
+    let mut app = App::new("m", "s");
+    app.apply_event(&AgentEvent::ToolStarted {
+        index: 0,
+        call_id: "c1".into(),
+        name: "shell".into(),
+    });
+    assert_eq!(app.note.as_deref(), Some("tool shell running"));
+    app.apply_event(&AgentEvent::ToolFinished {
+        index: 0,
+        call_id: "c1".into(),
+        is_error: false,
+    });
+    assert_eq!(app.note, None, "the tool finished");
+
+    // A batch: the note stays until the last tool of the batch finishes.
+    for (index, (call_id, name)) in [("c2", "shell"), ("c3", "read")].into_iter().enumerate() {
+        app.apply_event(&AgentEvent::ToolStarted {
+            index,
+            call_id: call_id.into(),
+            name: name.into(),
+        });
+    }
+    app.apply_event(&AgentEvent::ToolFinished {
+        index: 0,
+        call_id: "c2".into(),
+        is_error: false,
+    });
+    assert!(app.note.is_some(), "one tool is still running");
+    app.apply_event(&AgentEvent::ToolFinished {
+        index: 1,
+        call_id: "c3".into(),
+        is_error: false,
+    });
+    assert_eq!(app.note, None, "the last tool finished");
+
+    // The next model request starts with the note cleared.
+    app.apply_event(&AgentEvent::ModelRequestStarted {
+        model_call: 1,
+        budget: None,
+    });
+    assert_eq!(app.note, None);
+}
+
 #[test]
 fn the_status_line_shows_model_and_turn_state() {
     let mut app = App::new("my-model", "s");

@@ -453,3 +453,16 @@ fn escaping_the_trust_modal_untrusts_this_session_only() {
     );
     assert!(radian_host::trust::Choice::UntrustHere.persistent());
 }
+
+/// Esc with an empty input and a running turn cancels it (README): the app-level effect.
+#[test]
+fn esc_with_an_empty_input_and_a_running_turn_cancels() {
+    let mut app = App::new("m", "s");
+    app.projection.set_turn(TurnState::Running);
+    let result = app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(
+        matches!(result.effects.as_slice(), [Effect::Cancel]),
+        "{:?}",
+        result.effects
+    );
+}
