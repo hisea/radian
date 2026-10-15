@@ -715,3 +715,18 @@ without it 11 tests fail on "mcp-fixture is not built", which is unrelated to th
 they were re-run green after the fixture was built.) SR-S2 was already caught by
 `reasoning_replay.rs`; the two new tests pin the same decision on the switch path, where
 `args_for` and the budget resolver are two separate resolutions that must agree.
+
+## access-cmd：`set_access` 的沙箱与探测失败（ADR 0038 切片 ②，2026-10-15）
+
+Base `d8b7688`（worktree `.radian-worktrees/access-cmd`）· 就地变异后跑
+`cargo test -p radian-host --test access_switch --no-fail-fast`，再从 `/tmp/access-mut/session.rs.bak`
+还原并用 `diff -q` 确认逐字节相同。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| AS-M2 | `set_access` 只换 profile、不 `sandbox_slot.set(parts.sandbox)`（权限变了、沙箱没变） | `access_switch::set_access_swaps_the_profile_and_queues_the_change`（`sandbox_mode()` 断言：切换后仍是旧沙箱） | ✅ |
+| AS-M5 | `set_access` 忽略 builder 的 `Err`（`let Ok(parts) = … else { return Ok(()) }`，探测失败静默不切而不是拒绝） | `access_switch::a_failed_probe_refuses_and_changes_nothing`（`expect_err` 失败） | ✅ |
+
+2/2 抓住。AS-M2 是"切换只作用于权限、不作用于沙箱"的最近可测变异；沙箱本身的行为由
+`radian-coding` 的 `shell::a_swapped_slot_changes_the_next_call` 与
+`jobs::a_running_background_job_keeps_the_sandbox_it_started_with` 覆盖。

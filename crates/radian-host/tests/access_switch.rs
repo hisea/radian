@@ -173,6 +173,11 @@ async fn set_access_swaps_the_profile_and_queues_the_change() {
     assert_eq!(session.hooks().profile().preset, Preset::FullAccess);
     assert_eq!(session.projection().read().tier(), Some("full"));
     assert_eq!(
+        session.sandbox_mode(),
+        Some(radian_sandbox::SandboxMode::FullAccess),
+        "the switch must reach the sandbox the tools read"
+    );
+    assert_eq!(
         session.config_queue().len(),
         1,
         "one ConfigChanged per switch"
@@ -182,6 +187,7 @@ async fn set_access_swaps_the_profile_and_queues_the_change() {
     session.set_access(Preset::Safe).expect("safe is allowed");
     assert_eq!(session.hooks().profile().preset, Preset::Safe);
     assert_eq!(session.projection().read().tier(), Some("safe"));
+    assert_eq!(session.sandbox_mode(), None, "safe has no sandbox");
     assert_eq!(session.config_queue().len(), 2);
 
     session.stop();

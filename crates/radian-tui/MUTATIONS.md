@@ -1264,3 +1264,18 @@ Base `d47e876` · 一次性 detached worktree `/tmp/pa-mut`（跑完 `git worktr
 | MS-M2 | 只给列表符号 `•` 这一个合成格子假偏移 1（落在「能」的 UTF-8 中间） | 同上 | ✅ |
 
 另记一个无效变异：「只给第 200 字节之后的第一个合成格子假偏移」——那一处的上一个字符是 ASCII，`+1` 正好是合法边界，不会 panic，不能说明覆盖缺口；MS-M2 用确定落在多字节中间的单格变异代替。
+
+## access-cmd：`/access` 确认、按项目记住、resume（ADR 0038 切片 ②，2026-10-15）
+
+Base `d8b7688`（worktree `.radian-worktrees/access-cmd`）· 每个变异在就地改完后跑
+`cargo test -p radian-tui --test <file> --no-fail-fast`，再从 `/tmp/access-mut/` 的副本还原并用
+`diff -q` 确认逐字节相同。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| AC-M1 | `run_slash_command` 的 `/access full` 不再弹确认（条件改 `false && …`，直接切） | `access::access_full_asks_first_and_the_default_is_cancel`、`esc_cancels_the_full_confirmation`、`access_full_choices_switch_with_the_right_remember_flag` | ✅（3 条 FAILED） |
+| AC-M3 | `radian_host::access::remembered_for` 从**工作区**读 `access.json`（而不是 `~/.radian/access/`） | `pty::pty_a_remembered_full_applies_at_start_with_the_project_marker` | ✅（home 里记住的 full 不再生效，首屏是 `workspace`） |
+| AC-M4 | `resumed_access` 直接返回 `None`（resume 忽略 journal 里的档位） | `pty::pty_resume_restores_the_access_tier`、`radian_host::access_switch::resumed_access_reads_the_last_change` | ✅ |
+
+3/3 抓住。AC-M3 的两半都在同一个 pty 用例里：写 `~/.radian/access/access.json` 时必须生效并带
+`(project)` 标记；把同样内容写进工作区文件、用干净 HOME 启动时**必须不生效**。
