@@ -555,6 +555,36 @@ Base `62ae29e` · 一次性 worktree `/tmp/radian-sl-mut`，还原后 `git statu
 | S-M3 | 说明句改回 `**on**` | `describe::tests::the_workspace_facts_have_no_markdown` | ✅ |
 
 2/2 抓住。
+
+## herdr 上报（ADR 0034 切片 ①②）
+
+Base `1b188c1` · 一次性 worktree `/tmp/radian-hd-mut`（detached，跑完删除）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| HD1 | `state()` 去掉 `blocked` 优先（turn 先判） | `herdr::tests::blocked_wins_over_working` | ✅ |
+| HD2 | `Seq::next` 直接返回 `now`（不保证递增） | `herdr::tests::seq_is_strictly_increasing` | ✅ |
+| HD3 | `env_from` 去掉 `HERDR_ENV=1` 判定 | `pty_herdr_is_silent_without_the_env` | ✅ |
+| HD4 | `Reporter::report` 在调用线程上同步发送 | `herdr::tests::a_silent_listener_does_not_block_the_caller` | ✅ |
+
+4/4 抓住。切片 ② 的 pty 测试另用假 socket 断言 idle→working→idle→release、审批时 `blocked`
+且 `message` 只有 `approval: shell`（不含命令原文）、无 `HERDR_ENV` 与 `RADIAN_HERDR=0` 时一条
+都收不到。
+
+## herdr 上报：shutdown 的丢唤醒（2026-10-15）
+
+Base `f673ed7` · 一次性 detached worktree `/tmp/herdr-hang-mut`（跑完 `git worktree remove --force`）。
+变异用 `--no-fail-fast`；HD6 是竞态，用负载循环判定（10 个 CPU burner + 25 s 超时，输出写文件）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| HD5 | `report` 只在 slot 为空时写入（保留最旧的一条） | `herdr::tests::the_slot_keeps_only_the_latest` | ✅ 抓住（断言 `the working report must have been replaced`：left `working`、right `blocked`） |
+| HD6 | `stop_and_wake` 还原成不持 slot 锁的版本（原来的丢唤醒） | 负载下 herdr 测试循环 200 次 | ✅ 抓住：200 次里 **8 次挂起**（第 3/43/93/98/113/142/170/197 次，25 s 超时）；修复后 200 次 **0 挂起** |
+
+HD6 不是单个测试能确定性抓住的（丢唤醒是竞态，窗口在「sender 检查 `stop`」与「进入
+`Condvar::wait`」之间）；用 `sample` 抓到现场：测试线程停在 `Reporter::shutdown` 的 `join`
+（herdr.rs:354），sender 线程停在 `Condvar::wait`（herdr.rs:374）。修复是 `stop_and_wake` 持
+slot 锁设置 `stop` 并 `notify_all`，`shutdown` 与 `Drop` 都走它。
 ## context-files（ADR 0036 切片 ①，2026-10-14）
 
 Base `1d4f6e9` · 一次性 worktree `/tmp/radian-cf-mut`，还原后 `git status --short` 为空。

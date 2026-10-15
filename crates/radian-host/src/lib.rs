@@ -21,6 +21,7 @@ mod errors;
 mod escape;
 pub mod git_commit;
 mod headers;
+pub mod herdr;
 mod home;
 pub mod login;
 mod mcp;
