@@ -107,12 +107,15 @@ async fn a_retry_after_is_honoured_exactly() {
 }
 
 /// The waits of one model call add up to at most 60 s, even when every `Retry-After` asks for
-/// more: 40 s, then 20 s, then 0 (the budget is spent).
+/// more: 40 s, then 20 s, and then the budget is spent, so the turn stops (no 0 s retry).
 #[tokio::test(start_paused = true)]
 async fn the_total_wait_is_capped_at_sixty_seconds() {
     let busy = || Reply::Unavailable("HTTP 503: busy".into(), Some(Duration::from_secs(40)));
-    let model = ScriptedModel::new([busy(), busy(), busy(), busy()]);
-    let mut chat = agent_with_retries(model, 3).open_session().await.unwrap();
+    let model = ScriptedModel::new([busy(), busy(), busy()]);
+    let mut chat = agent_with_retries(Arc::clone(&model), 3)
+        .open_session()
+        .await
+        .unwrap();
     let rec = Recorder::default();
     let mut run = chat.start_turn("go").unwrap();
 
@@ -125,13 +128,40 @@ async fn the_total_wait_is_capped_at_sixty_seconds() {
     assert_eq!(run.outcome().unwrap().status, RunStatus::Failed);
     assert_eq!(
         delays(&rec),
-        [
-            Duration::from_secs(40),
-            Duration::from_secs(20),
-            Duration::ZERO
-        ]
+        [Duration::from_secs(40), Duration::from_secs(20)],
+        "40 + 20 fills the 60 s budget; the third would be a 0 s wait, so it never happens"
     );
     assert!(delays(&rec).iter().sum::<Duration>() <= Duration::from_secs(60));
+    assert_eq!(model.requests().len(), 3, "one try plus two retries");
+}
+
+/// Once the 60 s wait budget is spent the core must stop retrying, not fire the remaining
+/// attempts back to back: the provider just said it is busy, so hammering it is worse than
+/// failing. `Retry-After: 60` leaves room for exactly one retry.
+#[tokio::test(start_paused = true)]
+async fn a_spent_wait_budget_stops_retrying_instead_of_firing_back_to_back() {
+    let busy = || Reply::Unavailable("HTTP 503: busy".into(), Some(Duration::from_secs(60)));
+    let model = ScriptedModel::new([busy(), busy(), busy(), busy()]);
+    let mut chat = agent_with_retries(Arc::clone(&model), 3)
+        .open_session()
+        .await
+        .unwrap();
+    let rec = Recorder::default();
+    let mut run = chat.start_turn("go").unwrap();
+
+    let err = run.run(&rec).await.unwrap_err();
+
+    let RunError::Model(ModelError::Unavailable { message, .. }) = &err else {
+        panic!("expected an unavailable error: {err}");
+    };
+    assert!(message.contains("(after 1 retry)"), "{message}");
+    assert_eq!(run.outcome().unwrap().status, RunStatus::Failed);
+    assert_eq!(
+        delays(&rec),
+        [Duration::from_secs(60)],
+        "exactly one retry; the 60 s budget is then spent"
+    );
+    assert_eq!(model.requests().len(), 2, "one try plus one retry");
 }
 
 /// Without a `Retry-After` the backoff is 2 s, 4 s, 8 s (plus a little jitter), and the

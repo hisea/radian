@@ -14,8 +14,9 @@ with `cargo test -p agent-core --locked --no-fail-fast <test>`.
 | M4 | The backoff wait is not raced against the interrupt (`tokio::time::sleep(delay).await; continue`) | caught (rc 101) | `retry::cancelling_during_the_backoff_ends_the_turn_without_another_request` (2.217 s of paused-clock time passed before the turn ended) |
 | M5 | The failed attempt's streamed text is committed as an interrupted assistant message before the retry | caught (rc 101) | `retry::two_dropped_streams_are_retried_and_the_turn_succeeds` (assistants were `["halfway", "lost", "done"]`, expected `["done"]`) |
 | M6 | `is_transient()` treats every `Transport` as transient (`ModelError::Transport(_) => true`), so cancellation would be retried | caught (rc 101) | `model::tests::only_temporary_errors_are_transient` |
+| M7 | The retry branch drops the spent-budget stop (`&& waited < MAX_RETRY_WAIT`), so once the 60 s are used up the remaining attempts fire back to back | caught (rc 101) | `retry::a_spent_wait_budget_stops_retrying_instead_of_firing_back_to_back` (the error read `after 3 retries`, expected `after 1 retry`) |
 
-6/6 caught; none was equivalent.
+7/7 caught; none was equivalent.
 
 ## Notes on two of the mutations
 
@@ -32,6 +33,14 @@ with `cargo test -p agent-core --locked --no-fail-fast <test>`.
   interrupted-stream path uses) before `continue`. The successful response's own content is what
   the transcript gets on the happy path, so only a *commit* of the tap can make the failed
   attempt's text survive — the mutation adds exactly that.
+- **M7** is a review fix. The first implementation capped each wait by what
+  was left of the 60 s, so a spent budget made `retry_delay` return 0 and the remaining retries
+  fired back to back — for `Retry-After: 60` on every attempt, retries 2 and 3 hit the provider
+  immediately after it said it was busy. The retry branch now also requires `waited <
+  MAX_RETRY_WAIT`; a spent budget fails the turn with the retries really made. Removing the guard
+  is M7, caught by the new `a_spent_wait_budget_stops_retrying_instead_of_firing_back_to_back`
+  (one retry then failed, not three). The old total-cap test's `[40, 20, 0]` expectation became
+  `[40, 20]` (the 0 was the bug).
 
 `journal-selfcheck` (`cargo test -p agent-core --locked --features journal-selfcheck`, one of the
 seven Verify commands) replays every journal against its transcript and therefore also catches an

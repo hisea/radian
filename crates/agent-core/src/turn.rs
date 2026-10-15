@@ -155,7 +155,9 @@ const MAX_RETRY_WAIT: Duration = Duration::from_secs(60);
 
 /// The wait before retry `attempt` (1-based), given the provider's `Retry-After` (if any) and
 /// how long this model call has already waited. Capping by what is left of the 60 s total also
-/// caps a single `Retry-After` request, since the total is itself at most 60 s.
+/// caps a single `Retry-After` request, since the total is itself at most 60 s. The caller must
+/// not retry once `waited` has reached [`MAX_RETRY_WAIT`] (this returns 0 there, which would be
+/// a back-to-back retry, not a wait).
 fn retry_delay(attempt: u32, retry_after: Option<Duration>, waited: Duration) -> Duration {
     let desired = match retry_after {
         // The provider knows its own load better than our backoff does; honour it exactly,
@@ -1268,7 +1270,13 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
                     // ADR 0017: a transient failure is retried here, inside the one
                     // model call and before anything is committed. The failed attempt's live
                     // text and reasoning stay in its (dropped) tap, never in the transcript.
-                    if error.is_transient() && retries_used < max_retries {
+                    //
+                    // `waited < MAX_RETRY_WAIT` is the spent-budget stop: once the 60 s of one
+                    // model call are used up, `retry_delay` can only return 0, and retrying then
+                    // would hammer a provider that just said it is busy. The turn fails instead,
+                    // with the "after N retries" count of the retries that were really made.
+                    if error.is_transient() && retries_used < max_retries && waited < MAX_RETRY_WAIT
+                    {
                         retries_used += 1;
                         let delay = retry_delay(retries_used, error.retry_after(), waited);
                         waited += delay;
