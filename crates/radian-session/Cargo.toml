@@ -32,3 +32,8 @@ radian-session = { path = ".", features = ["testing"] }
 # `rt-multi-thread` lets the seq-ordering regression test run appends on real parallel
 # threads; with the current-thread runtime the race it guards against cannot happen.
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+# `dup`/`fcntl` so the inherited-lock test can hand a forked child the exact writer-lock
+# descriptor with `FD_CLOEXEC` cleared, and prove the retry rides out the `[fork, exec)` window.
+libc = "0.2"
