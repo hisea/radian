@@ -500,6 +500,12 @@ impl LocalSession {
         &self.journal
     }
 
+    /// The background-job registry (ADR 0037). The panic-path test hook starts a job through
+    /// it; `/jobs` uses the facade's `jobs()`/`kill_job()` instead.
+    pub fn jobs_registry(&self) -> Option<Arc<radian_coding::Jobs>> {
+        self.jobs.clone()
+    }
+
     pub fn projection(&self) -> &Arc<SessionProjection> {
         &self.projection
     }

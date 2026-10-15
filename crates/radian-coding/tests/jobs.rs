@@ -522,6 +522,28 @@ async fn session_end_cleanup_kills_every_running_group() {
     assert!(!group_alive(b), "group {b} still has members");
 }
 
+/// Dropping the registry (the panic-path net, ADR 0037 decision 6) kills every running group.
+/// The pty test `pty_panic_path_does_not_orphan_a_background_job` covers the whole app; this
+/// pins the mechanism directly.
+#[tokio::test]
+async fn dropping_the_registry_kills_every_running_group() {
+    let dir = TempDir::new("jobs-drop");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+    let session = tools.open_session().await.expect("session");
+
+    let (_, _) = start(&session, "echo $$ > drop.pid; sleep 600", None).await;
+    let pid = wait_for_pid(&root, "drop.pid").await;
+
+    drop(session);
+    assert!(
+        gone_within(pid, Duration::from_secs(10)).await,
+        "the job (pid {pid}) survived the registry drop"
+    );
+    assert!(!group_alive(pid), "group {pid} still has members");
+}
+
 // ---------- 7. job_list ----------
 
 /// `job_list` reports each job's id, state, command and output path.

@@ -209,7 +209,7 @@ impl Jobs {
     /// Starts `command` in the background under `sandbox`. One approval covers its whole life
     /// (the caller has already been approved for this tool call). `timeout` is the optional
     /// `timeout_secs`; without it a background job has **no** timeout.
-    pub(crate) fn start(
+    pub fn start(
         &self,
         sandbox: &Sandbox,
         cwd: &Path,
@@ -483,7 +483,7 @@ impl Drop for Jobs {
 }
 
 /// What `start` returns.
-pub(crate) struct StartInfo {
+pub struct StartInfo {
     pub id: String,
     pub output: PathBuf,
 }

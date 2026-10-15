@@ -1372,6 +1372,60 @@ fn pty_panic_path_does_not_orphan_a_child() {
     );
 }
 
+/// The panic path must not orphan a **background job**: its whole process group is killed
+/// (ADR 0037 decision 6, `Jobs::drop` -> `kill_all`, killpg only). The job writes its pid
+/// before the app panics.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_panic_path_does_not_orphan_a_background_job() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("panic-job");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--panic-with-background-job",
+            "echo $$ > job.pid; sleep 600",
+        ],
+        20,
+        80,
+    );
+    assert!(
+        pty.wait_for_exit(15).is_some(),
+        "the app did not exit after the panic"
+    );
+    assert_eq!(
+        pty.app_exit_code(),
+        Some(101),
+        "panic must exit 101: {}",
+        String::from_utf8_lossy(&pty.raw())
+    );
+
+    let pid: i32 = std::fs::read_to_string(ws.join("job.pid"))
+        .expect("the app wrote job.pid before panicking")
+        .trim()
+        .parse()
+        .expect("a pid");
+    assert!(
+        gone_within(pid, Duration::from_secs(10)),
+        "the background job (pid {pid}) outlived the panic"
+    );
+    assert!(
+        !group_alive(pid),
+        "the background job's process group {pid} still has members"
+    );
+}
+
 /// `--resume` renders the stored history before the first frame. The session file is written
 /// with the same storage API the app uses, so the test also pins the on-disk convention.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
