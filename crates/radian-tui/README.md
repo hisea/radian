@@ -226,6 +226,11 @@ find_next = ["ctrl-g", "shift-enter"]
   rows) or `classic` (today's one line, byte-for-byte). `separator` joins items (default
   `" │ "`, any string), each row may override it, and `separator_style` styles it (default the
   `footer_separator` role, dim). `glyphs` is `unicode` (default), `nerd` or `ascii`.
+  `context_line` is `off` (default; the gap between a row's left and right groups is spaces) or
+  `percentage` (ADR 0027 item 4, following omp's `statusLine.contextLine`: the gap
+  becomes a `─` rule, the used fraction of the context window in the `budget` role and the rest
+  in the `footer_separator` role; with no known budget the gap stays spaces, never a fabricated
+  percentage).
   `[tui.footer.items.<id>]` gives one item its `symbol`/`style`/`symbol_style`/`format`/
   `disabled`; a bare id in a row takes it, an inline table wins. Each `[[tui.footer.rows]]` has
   a `left` and a `right` group; an item is a bare id or a table with `item`, `icon`/`symbol`,

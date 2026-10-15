@@ -1226,3 +1226,105 @@ fn the_deck_numbers_row_matches_the_sample() {
         "↑15M ↓2.6M R1962M $14.510 41.3%/1.0M"
     );
 }
+
+/// ADR 0027 item 4 (omp's `contextLine = percentage`): the gap between a row's
+/// left and right groups is a `─` rule - the used fraction of the context window in the
+/// `budget` role, the rest in the `footer_separator` (border) role.
+#[test]
+fn the_context_fill_draws_the_usage_in_the_gap() {
+    let mut app = App::new("mock", "s");
+    app.apply_footer(&TuiFooterConfig {
+        context_line: Some("percentage".to_string()),
+        rows: vec![TuiFooterRowConfig {
+            left: vec![item("model")],
+            // A right group that always has data: `reasoning` hides without a thinking level.
+            right: vec![item("context")],
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    // 250 of 1000 tokens: a quarter of the gap is the used part.
+    app.projection.set_context_window(Some(1_000));
+    app.projection.set_request_started(Some(BudgetReport {
+        source: UsageSource::Estimated,
+        projected_tokens: 250,
+        input_budget_tokens: 1_000,
+        request_bytes: 0,
+        baseline_input_tokens: None,
+        estimated_growth_tokens: None,
+    }));
+    let terminal = render(&mut app, 60, 8);
+    let buffer = terminal.backend().buffer();
+    // The footer is the layout's last row (the input box's own rule is `─` too).
+    let gauge_row = 7u16;
+    let columns: Vec<u16> = (0..60u16)
+        .filter(|x| buffer.cell((*x, gauge_row)).unwrap().symbol() == "─")
+        .collect();
+    assert!(columns.len() > 4, "the gap is filled: {columns:?}");
+    let first = columns[0];
+    let last = *columns.last().unwrap();
+    assert_eq!(
+        Some(buffer.cell((first, gauge_row)).unwrap().fg),
+        app.theme.budget.fg,
+        "the used part is the budget role"
+    );
+    assert_eq!(
+        Some(buffer.cell((last, gauge_row)).unwrap().fg),
+        app.theme.footer_separator.fg,
+        "the remaining part is the border role"
+    );
+    // The boundary: round(gap * 0.25) used cells.
+    let used = ((columns.len() as f64) * 0.25).round() as u16;
+    assert!(used > 0 && used < columns.len() as u16, "used={used}");
+    assert_eq!(
+        Some(buffer.cell((first + used - 1, gauge_row)).unwrap().fg),
+        app.theme.budget.fg
+    );
+    assert_eq!(
+        Some(buffer.cell((first + used, gauge_row)).unwrap().fg),
+        app.theme.footer_separator.fg
+    );
+}
+
+/// The default is `off`: the gap stays spaces (ADR 0027 item 4).
+#[test]
+fn the_context_fill_is_off_by_default() {
+    let mut app = App::new("mock", "s");
+    app.apply_footer(&TuiFooterConfig {
+        rows: vec![TuiFooterRowConfig {
+            left: vec![item("model")],
+            right: vec![item("context")],
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    app.projection.set_context_window(Some(1_000));
+    app.projection.set_request_started(Some(BudgetReport {
+        source: UsageSource::Estimated,
+        projected_tokens: 250,
+        input_budget_tokens: 1_000,
+        request_bytes: 0,
+        baseline_input_tokens: None,
+        estimated_growth_tokens: None,
+    }));
+    let terminal = render(&mut app, 60, 8);
+    assert!(!row(&terminal, 7).contains('─'), "no fill by default");
+}
+
+/// With no known budget the gap stays spaces: never a fabricated percentage (ADR 0027
+/// revision 6 item 4).
+#[test]
+fn the_context_fill_without_a_budget_is_spaces() {
+    let mut app = App::new("mock", "s");
+    app.apply_footer(&TuiFooterConfig {
+        context_line: Some("percentage".to_string()),
+        rows: vec![TuiFooterRowConfig {
+            left: vec![item("model")],
+            right: vec![item("context")],
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let terminal = render(&mut app, 60, 8);
+    assert!(!row(&terminal, 7).contains('─'), "no budget, no gauge");
+}

@@ -82,6 +82,37 @@ impl Glyphs {
     }
 }
 
+/// How the gap between a row's left and right groups is drawn (ADR 0027 item 4,
+/// following omp's `statusLine.contextLine`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ContextLine {
+    /// The gap is spaces (the default; Radian's footer has no background fill, so a line by
+    /// default would be noise - omp's `off` still draws a solid accent line).
+    #[default]
+    Off,
+    /// The gap is a `─` rule: the used fraction of the context window in the `budget` role,
+    /// the rest in the `footer_separator` role (omp's `percentage`). With no known budget the
+    /// gap stays spaces: never a fabricated percentage.
+    Percentage,
+}
+
+impl ContextLine {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "off" => Some(Self::Off),
+            "percentage" => Some(Self::Percentage),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Percentage => "percentage",
+        }
+    }
+}
+
 /// Which footer the session shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Preset {
@@ -243,6 +274,8 @@ pub struct Footer {
     preset: Preset,
     glyphs: Glyphs,
     rows: Vec<Row>,
+    /// The left/right gap fill (ADR 0027 item 4).
+    context_line: ContextLine,
 }
 
 impl Footer {
@@ -277,6 +310,15 @@ impl Footer {
             Some(name) => parse_item_style(name).unwrap_or_else(|error| {
                 warnings.push(format!("tui.footer: bad separator_style {name:?}: {error}"));
                 ItemStyle::Role(Role::FooterSeparator)
+            }),
+        };
+        let context_line = match config.context_line.as_deref() {
+            None => ContextLine::Off,
+            Some(name) => ContextLine::parse(name).unwrap_or_else(|| {
+                warnings.push(format!(
+                    "tui.footer.context_line = {name:?} is not one of off|percentage; using off"
+                ));
+                ContextLine::Off
             }),
         };
         let rows: Vec<Row> = if config.rows.is_empty() {
@@ -319,6 +361,7 @@ impl Footer {
                 preset,
                 glyphs,
                 rows,
+                context_line,
             },
             warnings,
         )
@@ -344,7 +387,7 @@ impl Footer {
         // A row with no data renders empty (the deck's usage row, revision 3): drop it so it
         // never leaves a blank line.
         rows.iter()
-            .map(|row| render_row(app, row, width))
+            .map(|row| render_row(app, row, width, self.context_line))
             .filter(|line| !line.spans.is_empty())
             .collect()
     }
@@ -706,6 +749,14 @@ fn item_priority(id: &str) -> i64 {
     }
 }
 
+/// The used fraction of the context window, `None` when either the budget or the usage report
+/// is unknown (ADR 0027 item 4: the gap gauge and the `context` item share it).
+fn context_fraction(session: &radian_host::ProjectionRead<'_>) -> Option<f64> {
+    let budget = session.context_window()?;
+    let used = session.budget()?.projected_tokens;
+    (budget > 0).then(|| used as f64 / budget as f64)
+}
+
 /// An item's default theme role (the classic status bar's assignments, kept so a default
 /// footer reads the same way). `None` means the terminal's default style.
 fn default_role(id: &str) -> Option<Role> {
@@ -756,7 +807,7 @@ struct Piece {
     priority: i64,
 }
 
-fn render_row(app: &App, row: &Row, width: usize) -> Line<'static> {
+fn render_row(app: &App, row: &Row, width: usize, context_line: ContextLine) -> Line<'static> {
     let mut left: Vec<Piece> = row
         .left
         .iter()
@@ -798,7 +849,37 @@ fn render_row(app: &App, row: &Row, width: usize) -> Line<'static> {
             .sum();
         let gap = width.saturating_sub(used + group_width(&right, separator));
         if gap > 0 {
-            spans.push(Span::raw(" ".repeat(gap)));
+            // ADR 0027 item 4: the gap can show the context usage (omp's
+            // `contextLine = percentage`): the used fraction in the budget role, the rest in
+            // the separator (border) role. No known budget: spaces, never a fabricated number.
+            // The read is taken only when the fill is on: the projection Mutex is not
+            // reentrant, so a call from a path that already holds it would deadlock.
+            let fraction = match context_line {
+                ContextLine::Percentage => {
+                    let session = app.projection.read();
+                    context_fraction(&session)
+                }
+                ContextLine::Off => None,
+            };
+            match fraction {
+                Some(fraction) => {
+                    let used_cells = ((fraction.clamp(0.0, 1.0)) * gap as f64).round() as usize;
+                    let used_cells = used_cells.min(gap);
+                    if used_cells > 0 {
+                        spans.push(Span::styled(
+                            "─".repeat(used_cells),
+                            role_style(app, Role::Budget),
+                        ));
+                    }
+                    if gap > used_cells {
+                        spans.push(Span::styled(
+                            "─".repeat(gap - used_cells),
+                            role_style(app, Role::FooterSeparator),
+                        ));
+                    }
+                }
+                None => spans.push(Span::raw(" ".repeat(gap))),
+            }
         }
         for (text, style) in &right_text {
             spans.push(Span::styled(text.clone(), *style));
@@ -1207,10 +1288,7 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
             let budget = session.context_window();
             let report = session.budget();
             let used = report.map(|report| report.projected_tokens);
-            let fraction = match (used, budget) {
-                (Some(used), Some(budget)) if budget > 0 => used as f64 / budget as f64,
-                _ => 0.0,
-            };
+            let fraction = context_fraction(&session).unwrap_or(0.0);
             // One decimal (ADR 0027): `41.3%`.
             let percent = format!("{:.1}", fraction * 100.0);
             let bar = if id == "context_bar" {

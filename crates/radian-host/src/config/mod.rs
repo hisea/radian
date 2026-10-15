@@ -345,6 +345,10 @@ pub struct TuiFooterConfig {
     pub separator_style: Option<String>,
     /// `glyphs`: `"unicode"` (the default), `"nerd"` or `"ascii"`. The TUI validates it.
     pub glyphs: Option<String>,
+    /// `context_line`: `"off"` (the default) or `"percentage"`. ADR 0027 item 4:
+    /// `percentage` fills the gap between a row's left and right groups with the context
+    /// usage (the used fraction in the budget role, the rest in the border role).
+    pub context_line: Option<String>,
     /// `[tui.footer.items.<id>]`: per-field defaults for one item, applied when a row names the
     /// item by bare id (ADR 0027). A row's inline table wins over this.
     pub items: std::collections::BTreeMap<String, TuiFooterItemConfig>,
@@ -1209,6 +1213,8 @@ fn parse_footer(table: &toml::map::Map<String, Value>, config: &mut Config) -> R
                 footer.separator_style = Some(style.clone())
             }
             ("glyphs", Value::String(glyphs)) => footer.glyphs = Some(glyphs.clone()),
+            // ADR 0027 item 4: the left/right gap fill.
+            ("context_line", Value::String(mode)) => footer.context_line = Some(mode.clone()),
             ("items", Value::Table(items)) => {
                 for (id, value) in items {
                     let Value::Table(table) = value else {
@@ -2155,6 +2161,7 @@ mod footer_tests {
             "preset = \"pi\"\n",
             "separator = \" | \"\n",
             "glyphs = \"unicode\"\n",
+            "context_line = \"percentage\"\n",
             "[[tui.footer.rows]]\n",
             "left = [\n",
             "  { item = \"model\", format = \"{display_name}\" },\n",
@@ -2172,6 +2179,7 @@ mod footer_tests {
         assert_eq!(footer.preset.as_deref(), Some("pi"));
         assert_eq!(footer.separator.as_deref(), Some(" | "));
         assert_eq!(footer.glyphs.as_deref(), Some("unicode"));
+        assert_eq!(footer.context_line.as_deref(), Some("percentage"));
         assert_eq!(footer.rows.len(), 3);
         assert_eq!(footer.rows[0].left.len(), 2);
         assert_eq!(footer.rows[0].left[0].id, "model");
