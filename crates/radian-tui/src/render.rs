@@ -2181,6 +2181,7 @@ fn body_spans(
 /// A framed content row (ADR 0028): `│ ` in the marker column, the body from
 /// column 2, the right border at the last column. The row's text never contains a border
 /// character.
+#[allow(clippy::too_many_arguments)]
 fn render_frame_row(
     entry: &Entry,
     row: &BodyLine,
@@ -2259,7 +2260,9 @@ fn render_frame_row(
                 ));
                 spans.push(Span::styled(command.to_owned(), patch_band(body, band)));
             } else {
-                spans.extend(body_spans(entry, row, body, theme, band, first_text, spinner));
+                spans.extend(body_spans(
+                    entry, row, body, theme, band, first_text, spinner,
+                ));
             }
             let used = 2 + UnicodeWidthStr::width(row.text.as_str()) + if meta { 2 } else { 0 };
             if used < content_width + 2 {
