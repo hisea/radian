@@ -125,6 +125,15 @@ pub fn view(
     let two_columns = width > 40;
     let track_width = usize::from(overflow);
     let content_width = width.saturating_sub(track_width);
+    // The label column fits the longest filtered label (cursor, label, one space), so the
+    // description column is the same for every row and does not move while scrolling. A
+    // longer label is cut at omp's 32 columns, or at half the width when that is wider.
+    let longest = indices
+        .iter()
+        .map(|&index| UnicodeWidthStr::width(items[index].label.as_str()))
+        .max()
+        .unwrap_or(0);
+    let label_column = (longest + 3).min(PRIMARY_COLUMN.max(content_width / 2));
     let mut lines = Vec::new();
     for row in 0..visible {
         let position = start + row;
@@ -138,6 +147,7 @@ pub fn view(
             item,
             is_selected,
             content_width,
+            label_column,
             two_columns,
             ascii,
         ));
@@ -145,6 +155,12 @@ pub fn view(
     if overflow {
         let thumb = scrollbar_thumb(total, visible, start, lines.len());
         for (row, line) in lines.iter_mut().enumerate() {
+            // The track sits in one column for every row, whatever the row's own width.
+            let drawn = line.width();
+            if drawn < content_width {
+                line.spans
+                    .push(Span::raw(" ".repeat(content_width - drawn)));
+            }
             let cell = if row == thumb { '█' } else { '│' };
             let cell = if ascii {
                 if row == thumb { '#' } else { '|' }
@@ -175,6 +191,7 @@ fn row_line(
     item: &Item,
     is_selected: bool,
     width: usize,
+    label_column: usize,
     two_columns: bool,
     ascii: bool,
 ) -> Line<'static> {
@@ -194,10 +211,15 @@ fn row_line(
     let marker_width = UnicodeWidthStr::width(marker);
     let description = item.description.as_deref().unwrap_or("");
     if two_columns && !description.is_empty() && width > 2 {
-        let label = truncate(&item.label, PRIMARY_COLUMN.min(width - used));
+        // The label ends one column before the description column, so a long label cannot
+        // push the description out of line.
+        let label = truncate(
+            &item.label,
+            label_column.saturating_sub(used + 1).min(width - used),
+        );
         used += UnicodeWidthStr::width(label.as_str());
         spans.push(Span::styled(label, selected_style));
-        let pad = PRIMARY_COLUMN
+        let pad = label_column
             .saturating_sub(used)
             .max(1)
             .min(width.saturating_sub(used + marker_width));
@@ -333,6 +355,42 @@ mod tests {
         // The thumb is at the top (row 0), the rest is the ascii track.
         assert!(text(&many.lines[0]).ends_with('#'), "ascii thumb");
         assert!(text(&many.lines[1]).ends_with('|'), "ascii track");
+    }
+
+    /// The scrollbar is one column for every row, and a long label leaves the description
+    /// column where it is.
+    #[test]
+    fn the_track_and_the_description_column_line_up() {
+        let theme = Theme::default();
+        let mut entries: Vec<Item> = (0..12)
+            .map(|i| Item::new(format!("opencode-go/m{i}")).description("opencode-go"))
+            .collect();
+        entries[1] =
+            Item::new("opencode-go/deepseek-v4-flash-vision-exp").description("opencode-go");
+        entries[2] =
+            Item::new("opencode-go/deepseek-v4.1-flash").description("● current · opencode-go");
+        let list = view(&theme, &entries, "", 0, 10, 80, false);
+        assert!(list.overflow);
+        let rows: Vec<String> = list.lines.iter().map(text).collect();
+        for row in &rows {
+            assert_eq!(UnicodeWidthStr::width(row.as_str()), 80, "{row:?}");
+        }
+        // The display column where the description starts (after the label's own text).
+        let column = |row: &str| {
+            let at = row.find(" ●").or(row.rfind(" opencode-go")).unwrap() + 1;
+            UnicodeWidthStr::width(&row[..at])
+        };
+        let first = column(&rows[0]);
+        assert_eq!(
+            column(&rows[1]),
+            first,
+            "a long label moved the description: {rows:?}"
+        );
+        assert_eq!(column(&rows[2]), first, "{rows:?}");
+        assert!(
+            rows[2].contains("opencode-go/deepseek-v4.1-flash "),
+            "a label that fits half the width is not cut: {rows:?}"
+        );
     }
 
     #[test]

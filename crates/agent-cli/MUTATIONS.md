@@ -311,3 +311,37 @@ Base `3d014a5` · 一次性 worktree `/tmp/radian-pi-priv-mut2`，跑完 `git ch
 | P3 | CLI `setup.secrets` 退回"只用启动路由的 `credential.key` + route headers" | `a_runtime_error_redacts_every_auth_key_not_only_the_route_key`（401 错误体回显另一个 provider 的 key 原样进 stderr） | ✅ |
 
 1/1 抓住。
+
+## ADR 0032 片 1：`radian exec` 与顶层管理命令（2026-10-15）
+
+Base `ce5dfa2` · 一次性 worktree `/tmp/exec-mut`（从 HEAD 建，跑完删）· 每个变异先打补丁
+（补丁自带锚点断言），再 `cargo build -p radian-tui --bin radian`（测试用的是**新编的**
+radian，不是上一次构建的），然后 `cargo test -p agent-cli --test exec`；跑完 `git checkout -- .`，
+`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| E1 | `radian exec` 不分派给库，直接返回 0（等于"分派到 TUI/什么都不做"） | `radian_exec_one_shot_is_byte_identical_to_agent`、`radian_exec_list_matches_agent_list`、`radian_exec_memory_is_the_same_as_the_top_level_memory` | ✅ |
+| E2 | 顶层 `radian memory` 不走同一段代码，自己打印一行（改一个输出字） | `radian_memory_matches_agent_memory`、`radian_exec_memory_is_the_same_as_the_top_level_memory` | ✅ |
+| E3 | TUI 启动被拒仍返回 1（`RunError::Startup` 的码改回 1） | `a_tui_startup_refusal_is_a_usage_error` | ✅ |
+
+3/3 抓住。**教训**：第一次跑变异时忘了在新 worktree 里先编 `radian`，测试里的
+`radian_bin()` 断言"文件不存在"而失败——那不是"被抓住"，是环境没准备好；变异脚本必须
+先构建被测二进制。
+
+## ADR 0032 片 2：测试迁到 `radian exec`、删 `agent` 二进制、全仓改名（2026-10-15）
+
+Base `bf6ccf8` · 一次性 worktree `/tmp/e2-mut`（从 HEAD 建，跑完删）· 每个变异先打补丁
+（补丁自带锚点断言），再 `cargo build -p radian-tui --bin radian` 与
+`cargo build -p agent-extensions --bin mcp-fixture`（测试用的是新编的二进制；陈旧检测会
+拒绝旧二进制），然后按**单个**测试过滤跑（cargo 只接受一个位置参数）；跑完
+`git checkout -- .`，`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| X1 | 库的诊断前缀改回 `agent: ` | `diagnostics_carry_the_radian_prefix`（cli.rs） | ✅ |
+| X2 | TUI 的缺凭据提示改回 `run agent login …` | `the_missing_credential_hint_names_radian_login`（exec.rs） | ✅ |
+
+2/2 抓住。**教训**：变异脚本必须在**新 worktree 里**先编 `radian`（陈旧检测会直接拒绝旧
+二进制，这是它该做的）；另外 MCP 相关测试需要先编 `mcp-fixture`，否则它们会以环境错误
+失败、把"被抓住"的假象混进来——所以最后是按目标测试逐个过滤确认的。

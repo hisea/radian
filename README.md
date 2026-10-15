@@ -4,7 +4,8 @@
 top of it. The core (`agent-core`) runs a turn loop over an injected model, tools and hooks; the
 `radian-*` crates add durable sessions, a permission layer, an OS sandbox, built-in coding
 tools, durable memory and the host plumbing, and two hosts ship as binaries: the line-prompt CLI
-`agent` and the full-screen TUI `radian`. Everything the runtime does is journalled to a
+`radian` (its headless command is `radian exec`) and the full-screen TUI `radian`. Everything
+the runtime does is journalled to a
 per-session JSONL file, so a session can be resumed by either host.
 
 The design of record is `docs/minimal-headless-rust-agent-runtime-design.md`. Decisions that
@@ -26,8 +27,8 @@ constrain the code are ADRs under `docs/adr/` (see the index at the end of this 
 | `radian-sandbox` | OS sandbox backends (macOS `sandbox-exec`, Linux `bubblewrap`) that build a command under a policy and **refuse to run** without a proven backend. | `docs/sandbox.md`, ADR 0012, ADR 0016 |
 | `radian-coding` | Built-in coding tools — `read`, `write`, `patch`, `list`, `git_status`, `git_diff`, and `shell` only when the host supplies a sandbox — with workspace path confinement. | `crates/radian-coding/README.md` |
 | `radian-memory` | The memory storage layer (ADR 0021 M1): Global/Project scope logs with replay, the source rules (an agent cannot touch a user record), Forget/Purge, the `projects.jsonl` registry and the Markdown import/export view. Host-free: the caller passes `~/.radian/memory/`. | `crates/radian-memory/README.md`, ADR 0021 |
-| `radian-host` | Host plumbing shared by both binaries so they cannot drift: `--header` parsing, session ids, the `--mcp-config` file, model construction, the startup description, the "built-in tools + MCP" provider, the `~/.radian/` layout and diagnostics, the model catalog, and the memory layer (`MemoryService`, project identity, the agent memory tools, injection, and the shared `agent memory` / `/memory` commands). | `crates/radian-host/README.md` |
-| `agent-cli` | The `agent` binary: a line-prompt chat client with optional built-in tools, MCP servers, session-management commands and the `agent memory` commands. | `crates/agent-cli/README.md` |
+| `radian-host` | Host plumbing shared by the TUI and the headless command so they cannot drift: `--header` parsing, session ids, the `--mcp-config` file, model construction, the startup description, the "built-in tools + MCP" provider, the `~/.radian/` layout and diagnostics, the model catalog, and the memory layer (`MemoryService`, project identity, the agent memory tools, injection, and the shared `radian memory` / `/memory` commands). | `crates/radian-host/README.md` |
+| `agent-cli` | The library behind `radian exec`: the line-prompt chat client with optional built-in tools, MCP servers, session-management commands and the `radian memory` commands. | `crates/agent-cli/README.md` |
 | `radian-tui` | The `radian` binary: a full-screen TUI (ADR 0009: full screen only, no inline mode) over `radian-runtime`, with a slash-command layer (`/help`, `/memory …`) and its own transcript scrolling. | `crates/radian-tui/README.md`, ADR 0009 |
 
 Two more binaries exist but are not part of the product surface: `agent-extensions`'s
@@ -39,19 +40,19 @@ Two more binaries exist but are not part of the product surface: `agent-extensio
 - **The `~/.radian/` layout (ADR 0020)** is implemented: `config/` and `cache/` are readable
   by the sandbox; `sessions/` and `memory/` are denied. `RADIAN_HOME` overrides the
   root. (`--session-dir` / `RADIAN_SESSION_DIR` still override only the sessions directory.)
-- **Memory M1 (ADR 0021)** is implemented: the `agent memory` CLI commands, the TUI `/memory`
+- **Memory M1 (ADR 0021)** is implemented: the `radian memory` CLI commands, the TUI `/memory`
   slash command (same commands), the agent's `memory_search` / `memory_get` / `memory_save` /
   `memory_revise` tools (writes always ask), and deterministic injection with the
   `MemoryInjected` audit event.
 - **The configuration file (ADR 0008)** is implemented read-only: `--config`/`RADIAN_CONFIG`/
   `~/.radian/config/config.toml`, with `model.*`, `permissions.profile` and `compaction.auto`
   wired as defaults (the command line wins). It never contains a secret value.
-- **Pi configuration migration (Phase 5)** is implemented: `agent config import-pi --from
+- **Pi configuration migration (Phase 5)** is implemented: `radian config import-pi --from
   <pi-agent-dir>` drafts a Radian configuration (stdout) plus a mapping report (stderr). It
   reads only the directory you name, never `auth.json`, never a secret value, and writes
   nothing without `--write` (which refuses an existing file). Radian does **not** promise
   compatibility with Pi's file format: see [`docs/pi-migration.md`](docs/pi-migration.md).
-- **Session fork (ADR 0022)** is implemented: `agent --fork <parent> [--at <seq>]
+- **Session fork (ADR 0022)** is implemented: `radian exec --fork <parent> [--at <seq>]
   [--session-id <child>]` and the TUI `/fork`. The fork point is a parent turn boundary; the
   child materializes the parent's effective history there (a committed compaction in effect, an
   uncommitted replacement dropped), is written before the parent records it, and can resume or
@@ -75,7 +76,8 @@ Release build:
 cargo build --workspace --locked --release
 ```
 
-The two binaries land in `target/debug/` (or `target/release/`) as `agent` and `radian` (with a `rad` alias).
+The binary lands in `target/debug/` (or `target/release/`) as `radian` (with a `rad` alias);
+`radian exec` is its headless command (ADR 0032: the `agent` binary is gone).
 The full verification suite an agent must run before calling a change done is in `AGENTS.md`.
 
 ## Run
@@ -88,13 +90,13 @@ Both hosts read the API key **only** from an environment variable — never from
 when `RADIAN_HOME` is set, ADR 0020). The same `~/.radian/` root also holds `config/`,
 `cache/` and `memory/`; the sandbox denies read on `sessions/` and `memory/`.
 
-### `agent` (line prompt)
+### `radian exec` (line prompt)
 
 ```sh
 export OPENAI_API_KEY=sk-...
 
 # One turn, a new session named `demo`, provider and tier named explicitly.
-./target/debug/agent \
+./target/debug/radian exec \
   --provider openai-compatible \
   --model gpt-5 \
   --base-url https://api.openai.com/v1 \
@@ -113,7 +115,7 @@ controls extended thinking (default `off`).
 Resume that saved session — `--resume` replaces `--session-id` (the two conflict):
 
 ```sh
-./target/debug/agent \
+./target/debug/radian exec \
   --provider openai-compatible \
   --model gpt-5 \
   --profile safe \
@@ -243,9 +245,13 @@ never reached by forgetting a flag.
   PREFIX` allows one *simple* command prefix without asking; a compound command always asks.
   Write these at the subcommand level, never at a bare program name.
 
-Common exit codes: `agent` uses 0 (turn completed), 1 (turn failed), 2 (usage/setup error,
-including a failed sandbox probe) and 130 (forced exit after a second Ctrl-C). `radian` uses 0 (clean quit), 1 (startup refusal or a
-driver error), 101 (the app panicked), and 128 + the signal number on SIGTERM/SIGHUP.
+Common exit codes (ADR 0032 A3, unified): 0 success, 1 this turn/run failed, 2 a usage, setup
+or startup refusal (clap's own errors, a bad config, an unknown keybinding, a refused startup,
+a failed sandbox probe), 101 the app panicked, 128 + the signal number on SIGTERM/SIGHUP, and
+130 for a forced exit after a second Ctrl-C. `radian exec` and the TUI share the codes;
+`radian`'s TUI used to return 1 for a startup refusal and now returns 2, which is the one
+behavior change. `radian exec --list | head` (and every print-and-exit mode) still exits 0
+silently on a broken pipe.
 
 ## Docs
 

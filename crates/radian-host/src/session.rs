@@ -307,6 +307,9 @@ pub struct SessionSetup {
     /// Branch names the `git_commit` tool refuses besides `main`/`master` (ADR 0030 R10).
     pub protected_branches: Vec<String>,
     pub servers: Vec<McpServerConfig>,
+    /// The role prompt's name (ADR 0036): `default`, `task` or `lead`. `None` is
+    /// `default`. `--system` replaces this layer only.
+    pub role: Option<String>,
     pub system_prompt: Option<String>,
     pub context_budget: Option<ContextBudget>,
     pub auto_compact: bool,
@@ -673,7 +676,7 @@ impl SessionFacade for LocalSession {
     }
 
     fn budget_for_route(&self, provider: &str, model: &str) -> Option<u64> {
-        (self.budget_for.as_ref())?(provider, model)
+        (self.budget_for.as_ref())?(provider, model).map(|budget| budget.input_budget_tokens)
     }
 
     fn answer(&self, request_id: u64, response: PendingResponse) -> Result<(), CommandRefused> {
@@ -852,6 +855,7 @@ pub async fn open_session(
         coding_root,
         model,
         servers,
+        role,
         system_prompt,
         context_budget,
         auto_compact,
@@ -889,11 +893,6 @@ pub async fn open_session(
     for warning in &context.warnings {
         memory_warning(warning);
     }
-    let system_prompt = match (&system_prompt, context.section.is_empty()) {
-        (_, true) => system_prompt,
-        (Some(base), false) => Some(format!("{base}\n\n{}", context.section)),
-        (None, false) => Some(context.section.clone()),
-    };
     let mut config_snapshot = config_snapshot;
     if !context.is_empty()
         && let Some(object) = config_snapshot.as_object_mut()
@@ -975,12 +974,6 @@ pub async fn open_session(
     radian_session::trace::took("open/journal", t0);
     let inbox = Inbox::durable(64, Arc::clone(&journal));
 
-    let agent_config = AgentConfig {
-        system_prompt,
-        context_budget,
-        auto_compact,
-        ..AgentConfig::default()
-    };
     // ADR 0023 U7: a UI host routes approvals through the pending queue; the CLI's line
     // prompt answers them directly.
     let approver: Arc<dyn Approver> = match approvals {
@@ -1034,6 +1027,42 @@ pub async fn open_session(
     if !shared_skills.is_empty() {
         tools = tools.with_skills(SkillTools::new(Arc::clone(&shared_skills)));
     }
+    // ADR 0036/2: the system prompt is assembled from layers. 0a <runtime> lists
+    // the tools this host actually mounted and the tier/sandbox facts; 1 <role> is the role
+    // prompt (or `--system`); 2 is the context files; 3 is appended by the skills/memory hooks;
+    // 0b <session> is appended last by its own hook, so the static prefix stays cacheable.
+    let model_name = config_snapshot
+        .get("model")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown")
+        .to_owned();
+    let mounted = tools.builtin_tools();
+    let workspace_mode = tier.sandbox_mode() == radian_sandbox::SandboxMode::WorkspaceWrite;
+    let runtime_layer = crate::prompt::runtime_layer(&crate::prompt::Runtime {
+        tools: &mounted,
+        tier: tier.as_str(),
+        sandbox: &sandbox_facts,
+        network: workspace_mode,
+        unix_sockets_restricted: workspace_mode,
+    });
+    let role_layer = match &system_prompt {
+        Some(system) => system.clone(),
+        None => crate::prompt::role_prompt(role.as_deref(), radian_home().as_deref()),
+    };
+    let system_prompt = Some(crate::prompt::assemble(
+        &runtime_layer,
+        &role_layer,
+        &context.section,
+    ));
+    let agent_config = AgentConfig {
+        system_prompt,
+        context_budget,
+        auto_compact,
+        ..AgentConfig::default()
+    };
+    let facts_hooks = Arc::new(crate::prompt::SessionFactsHooks::new(
+        crate::prompt::session_layer(&workspace, &model_name),
+    ));
     let agent = Arc::new(
         Agent::new(model, tools)
             .with_config(agent_config)
@@ -1041,6 +1070,7 @@ pub async fn open_session(
                 Arc::clone(&hooks),
                 Arc::clone(&memory_hooks),
                 Arc::clone(&skills_hooks),
+                facts_hooks,
             )),
     );
 
@@ -1201,8 +1231,11 @@ pub fn session_hooks(
     permissions: Arc<PermissionHooks>,
     memory: Arc<MemoryHooks>,
     skills: Arc<SkillsHooks>,
+    facts: Arc<crate::prompt::SessionFactsHooks>,
 ) -> impl Hooks {
-    ((permissions, memory), skills)
+    // The order is the promise: permissions, memory, skills, then the volatile <session> facts
+    // (ADR 0025 S6, ADR 0036 D1).
+    (((permissions, memory), skills), facts)
 }
 
 /// The durable audit event for one trust write (ADR 0031 T2).
@@ -1270,8 +1303,8 @@ fn memory_notice(memory: &Option<MemoryService>, config: &InjectionConfig) -> St
                 config.max_tokens
             ),
             Ok(ProjectState::Unlinked { .. }) => format!(
-                "[memory] no project linked; global memory only (run `agent memory project new` \
-                 or `agent memory relink <ProjectId>`); injection on, up to {} tokens",
+                "[memory] no project linked; global memory only (run `radian memory project new` \
+                 or `radian memory relink <ProjectId>`); injection on, up to {} tokens",
                 config.max_tokens
             ),
             Err(error) => format!("[memory] unavailable: {error}"),

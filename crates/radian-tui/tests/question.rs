@@ -14,6 +14,7 @@ fn option(id: &str, label: &str) -> QuestionOption {
         id: id.into(),
         label: label.into(),
         description: None,
+        recommended: false,
     }
 }
 
@@ -25,6 +26,7 @@ fn question(
 ) -> Question {
     Question {
         id: id.into(),
+        header: None,
         prompt: format!("question {id}?"),
         kind,
         options,
@@ -164,12 +166,13 @@ fn a_required_question_blocks_the_submit() {
         "the block is explained: {:?}",
         app.entries.last().map(|entry| &entry.text)
     );
-    // Answer it, and the submit works: `Tab` back to it, type, `Enter` to the overview,
-    // `Enter` to submit.
-    app.on_key(tab());
+    // Answer it, and the submit works: `Tab` back to it, type, then `Enter` through the tabs
+    // to `Submit` (revision 1: each tab is a question, the last is `Submit`).
+    app.on_key(tab()); // Submit -> question 0
+    app.on_key(tab()); // question 0 -> question 1 (the required text)
     app.on_key(key(KeyCode::Char('x')));
-    app.on_key(key(KeyCode::Enter));
-    assert_eq!(form(&app).current, None, "the overview again");
+    app.on_key(key(KeyCode::Enter)); // -> Submit
+    assert_eq!(form(&app).current, None, "the Submit tab");
     assert!(answer_of(effect(&mut app, key(KeyCode::Enter))).is_some());
 }
 
@@ -328,7 +331,8 @@ fn a_multi_question_toggles_and_other_is_its_own_answer() {
     for c in "custom".chars() {
         app.on_key(key(KeyCode::Char(c)));
     }
-    app.on_key(key(KeyCode::Enter));
+    // `Tab` to the `Submit` tab, then `Enter` (revision 1: `Enter` on a `multi` toggles).
+    app.on_key(tab());
     let answer = answer_of(effect(&mut app, key(KeyCode::Enter))).expect("a submit");
     assert_eq!(answer.answers[0].selected, vec!["safe"]);
     assert_eq!(answer.answers[0].other.as_deref(), Some("custom"));
@@ -404,5 +408,227 @@ fn the_builtin_form_keys_are_the_ads() {
     assert_eq!(
         map.action_for(&key(KeyCode::Enter)),
         Some(radian_tui::keys::Action::Send)
+    );
+}
+
+// ---- ADR 0024 R2/R3: the panel, the tabs, the hints and the new keys ----
+
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
+
+/// The whole screen as text.
+fn render(app: &mut App, width: u16, height: u16) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal
+        .draw(|frame| radian_tui::render::draw(frame, app))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let area = *buffer.area();
+    let mut out = String::new();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            out.push_str(buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// The panel: a titled box, a tab row (`header` + `Submit`), the options with `❯`/`○`/`☐`, a
+/// `↳` description, and the context-dependent key hints in the bottom border.
+#[test]
+fn the_panel_shows_the_tabs_the_options_and_the_hints() {
+    let mut app = App::new("m", "s");
+    let mut q = question(
+        "pick",
+        QuestionKind::Single,
+        vec![option("a", "A"), option("b", "B")],
+        false,
+    );
+    q.header = Some("Pick".to_string());
+    q.options[0].recommended = true;
+    q.options[1].description = Some("the second".to_string());
+    q.allow_other = true;
+    show(&mut app, vec![q]);
+    let text = render(&mut app, 80, 24);
+    assert!(text.contains("Ask"), "{text}");
+    assert!(text.contains("Pick"), "{text}");
+    assert!(text.contains("Submit"), "{text}");
+    assert!(text.contains("❯ ○ A (Recommended)"), "{text}");
+    assert!(text.contains("↳ the second"), "{text}");
+    assert!(text.contains("Other (type your own)"), "{text}");
+    assert!(
+        text.contains("⏎ select"),
+        "the single-question hint: {text}"
+    );
+    assert!(text.contains("alt-h"), "{text}");
+
+    // A multi question changes the hints.
+    let mut multi = App::new("m", "s");
+    let mut q = question(
+        "tiers",
+        QuestionKind::Multi,
+        vec![option("safe", "Safe")],
+        false,
+    );
+    q.header = Some("Tiers".to_string());
+    show(&mut multi, vec![q]);
+    let text = render(&mut multi, 80, 16);
+    assert!(text.contains("space toggle"), "{text}");
+    assert!(text.contains("☐ Safe"), "{text}");
+}
+
+/// `n` opens a note for the current question; the note reaches the answer (R3/R4).
+#[test]
+fn n_opens_a_note_and_the_note_reaches_the_answer() {
+    let mut app = App::new("m", "s");
+    show(
+        &mut app,
+        vec![question(
+            "pick",
+            QuestionKind::Single,
+            vec![option("a", "A")],
+            false,
+        )],
+    );
+    app.on_key(key(KeyCode::Char('n')));
+    assert!(form(&app).note_focused(), "`n` opens the note");
+    for c in "because".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    app.on_key(key(KeyCode::Enter)); // save the note
+    app.on_key(key(KeyCode::Char(' '))); // select A
+    app.on_key(tab()); // -> Submit
+    let answer = answer_of(effect(&mut app, key(KeyCode::Enter))).expect("a submit");
+    assert_eq!(answer.answers[0].note.as_deref(), Some("because"));
+}
+
+/// `alt-h` collapses the panel to one line and shows it again (R3).
+#[test]
+fn alt_h_hides_and_shows_the_panel() {
+    let mut app = App::new("m", "s");
+    show(
+        &mut app,
+        vec![question(
+            "pick",
+            QuestionKind::Single,
+            vec![option("a", "A")],
+            false,
+        )],
+    );
+    let alt_h = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT);
+    app.on_key(alt_h);
+    assert!(form(&app).hidden, "`alt-h` hides");
+    let text = render(&mut app, 80, 24);
+    assert!(text.contains("0/1 answered"), "{text}");
+    assert!(text.contains("alt-h to show"), "{text}");
+    app.on_key(alt_h);
+    assert!(!form(&app).hidden, "`alt-h` shows again");
+}
+
+/// A long tab label is truncated to 16 display cells (revision 2: no scrolling).
+#[test]
+fn a_long_tab_label_is_truncated() {
+    let mut app = App::new("m", "s");
+    let mut q = question("pick", QuestionKind::Single, vec![option("a", "A")], false);
+    q.header = Some("一二三四五六七八九十".to_string());
+    show(&mut app, vec![q]);
+    let labels = form(&app).tab_labels();
+    assert_eq!(labels[0].0, "一二三四五六七…", "{labels:?}");
+    assert!(labels[1].0 == "Submit", "{labels:?}");
+}
+
+/// feedback 2026-10-16: with the cursor on `Other`, Up/Down still move between the
+/// options and the typed text is kept; typing goes into `Other`, and `Enter` confirms.
+#[test]
+fn other_keeps_its_text_while_moving_with_arrows() {
+    let mut app = App::new("m", "s");
+    let mut q = question(
+        "pick",
+        QuestionKind::Single,
+        vec![option("a", "A"), option("b", "B")],
+        false,
+    );
+    q.allow_other = true;
+    show(&mut app, vec![q]);
+    // Move to the `Other` row (A, B, Other).
+    app.on_key(key(KeyCode::Down));
+    app.on_key(key(KeyCode::Down));
+    assert_eq!(form(&app).answers[0].cursor, 2, "the Other row");
+    for c in "custom".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    assert_eq!(form(&app).answers[0].text.text(), "custom");
+
+    // Up moves to the previous option; Down comes back to `Other`; the text survives.
+    app.on_key(key(KeyCode::Up));
+    assert_eq!(form(&app).answers[0].cursor, 1, "the previous option");
+    app.on_key(key(KeyCode::Down));
+    assert_eq!(form(&app).answers[0].cursor, 2, "back on Other");
+    assert_eq!(
+        form(&app).answers[0].text.text(),
+        "custom",
+        "the typed text is kept"
+    );
+
+    // `Enter` confirms the Other choice and advances; the answer carries the text.
+    app.on_key(key(KeyCode::Enter));
+    let answer = answer_of(effect(&mut app, key(KeyCode::Enter))).expect("a submit");
+    assert_eq!(answer.answers[0].other.as_deref(), Some("custom"));
+}
+
+/// R3: `⏎` on a `single` question selects the highlighted option **and advances**; `Space`
+/// selects without advancing.
+#[test]
+fn a_single_question_selects_and_advances() {
+    let questions = || {
+        vec![
+            question(
+                "one",
+                QuestionKind::Single,
+                vec![option("a", "A"), option("b", "B")],
+                false,
+            ),
+            question("two", QuestionKind::Text, Vec::new(), false),
+        ]
+    };
+    let mut app = App::new("m", "s");
+    show(&mut app, questions());
+    app.on_key(key(KeyCode::Down)); // B
+    app.on_key(key(KeyCode::Enter));
+    assert_eq!(form(&app).answers[0].selected, vec!["b"]);
+    assert_eq!(form(&app).current, Some(1), "Enter advances");
+
+    let mut spaced = App::new("m", "s");
+    show(&mut spaced, questions());
+    spaced.on_key(key(KeyCode::Char(' '))); // select A, stay
+    assert_eq!(form(&spaced).answers[0].selected, vec!["a"]);
+    assert_eq!(form(&spaced).current, Some(0), "Space does not advance");
+}
+
+/// A tall question panel shrinks the transcript; when it closes the transcript must be back at
+/// the bottom (a live reply is visible), not stuck where the small viewport left it.
+#[test]
+fn the_transcript_follows_after_the_panel_closes() {
+    use agent_core::Message;
+    let mut app = App::new("m", "s");
+    for i in 0..40 {
+        app.push_message(&Message::user(format!("line {i}")));
+    }
+    show(
+        &mut app,
+        vec![question("q", QuestionKind::Text, Vec::new(), false)],
+    );
+    // The panel is up: the transcript viewport is small.
+    let _ = render(&mut app, 80, 24);
+    app.on_key(key(KeyCode::Char('x')));
+    app.on_key(key(KeyCode::Enter)); // -> Submit
+    let _ = effect(&mut app, key(KeyCode::Enter)); // submit, the panel closes
+    let _ = render(&mut app, 80, 40);
+    assert!(
+        app.is_following(),
+        "the transcript must follow after the panel closes (scroll={} max={})",
+        app.scroll,
+        app.max_scroll
     );
 }

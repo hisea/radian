@@ -5,8 +5,8 @@
 //! its own tokio task that awaits [`ContributorRunner::tick`], writes the shared
 //! [`ContributionStore`], and wakes the UI through the host's callback. The UI never waits for
 //! a contributor: it reads a snapshot on the next frame. A failed refresh keeps the last value,
-//! marks it stale (the TUI draws it dim), and only the **first** failure of a run produces a
-//! notice.
+//! marks it stale (the TUI draws it dim). A run of failures produces one notice, at the
+//! [`NOTICE_AFTER`]th in a row: a single network blip (a laptop waking up) only dims the value.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -194,6 +194,10 @@ pub struct ContributorRunner {
     failures: u32,
 }
 
+/// How many refreshes in a row must fail before the failure is a notice. Before that the
+/// value is only drawn stale.
+pub const NOTICE_AFTER: u32 = 3;
+
 impl ContributorRunner {
     pub fn new(contributor: Arc<dyn StatusContributor>, store: Arc<ContributionStore>) -> Self {
         Self {
@@ -208,8 +212,8 @@ impl ContributorRunner {
     }
 
     /// One refresh: writes every contribution on success (an unchanged value writes nothing),
-    /// and on failure keeps the values and marks them stale. Only the first failure of a
-    /// consecutive run yields a notice.
+    /// and on failure keeps the values and marks them stale. Only the [`NOTICE_AFTER`]th
+    /// failure of a consecutive run yields a notice.
     pub async fn tick(&mut self) -> Tick {
         match self.contributor.refresh().await {
             Ok(contributions) => {
@@ -231,7 +235,7 @@ impl ContributorRunner {
                 }
                 Tick {
                     changed,
-                    notice: (self.failures == 1)
+                    notice: (self.failures == NOTICE_AFTER)
                         .then(|| format!("{}: {error}", self.contributor.id())),
                 }
             }
@@ -594,24 +598,36 @@ mod tests {
         let store = ContributionStore::new();
         let contributor = Scripted::new(vec![
             Ok(value("one")),
-            Err("boom".to_string()),
-            Err("boom again".to_string()),
+            Err("boom 1".to_string()),
+            Err("boom 2".to_string()),
+            Err("boom 3".to_string()),
+            Err("boom 4".to_string()),
             Ok(value("two")),
         ]);
         let mut runner = ContributorRunner::new(contributor, Arc::clone(&store));
         runner.tick().await;
         let tick = runner.tick().await;
         assert!(tick.changed, "becoming stale is a redraw");
-        assert!(tick.notice.as_deref().unwrap_or("").contains("boom"));
+        assert!(tick.notice.is_none(), "one failure only dims the value");
         let held = store.get("thing").unwrap();
         assert_eq!(held.segments[0].text, "one", "the last value is kept");
         assert!(held.stale);
+        assert!(
+            runner.tick().await.notice.is_none(),
+            "two failures still only dim it"
+        );
+        let tick = runner.tick().await;
+        assert!(
+            tick.notice.as_deref().unwrap_or("").contains("boom 3"),
+            "the third failure in a row is a notice with its error: {:?}",
+            tick.notice
+        );
         let tick = runner.tick().await;
         assert!(
             tick.notice.is_none(),
             "a consecutive failure does not repeat the notice"
         );
-        assert_eq!(runner.failures(), 2);
+        assert_eq!(runner.failures(), 4);
         let tick = runner.tick().await;
         assert!(tick.changed);
         assert!(!store.get("thing").unwrap().stale, "a success clears stale");

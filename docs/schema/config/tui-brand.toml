@@ -1,0 +1,13 @@
+# ADR 0027：`tui.brand` 是品牌文字，footer 的 `brand` 条目与启动画面的一行回退
+# （`<brand> radian <version>`）共用一个来源。任意短文字，最多 4 个显示宽度；超出是配置
+# 错误（会让 footer 与字标错位）。不写时用 glyphs 档的默认（nerd 󰰠 / unicode R / ascii rad）。
+# 用户写的字形不受覆盖规则检查：字体里没有的字形由回退字体画，可能偏离基线。
+schema_version = 1
+
+[model]
+provider = "example"
+base_url = "https://example.com/v1"
+model = "m-1"
+
+[tui]
+brand = "ʀ"

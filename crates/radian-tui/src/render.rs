@@ -13,7 +13,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use radian_permissions::ApprovalRequest;
 
 use crate::app::{
-    App, Entry, EntryKind, Modal, TurnState, budget_status_text, mcp_text, usage_text,
+    App, Entry, EntryKind, Modal, TrustWizard, TurnState, budget_status_text, mcp_text, usage_text,
 };
 use crate::blocks::{self, BodyLine};
 use crate::login::LoginWizard;
@@ -320,11 +320,12 @@ fn entry_lines(
     modes: DisplayModes,
     width: usize,
     theme: &Theme,
+    spinner: crate::spinner::Frame,
 ) -> Vec<Line<'static>> {
     let (prefix, prefix_style) = marker(entry.kind, theme);
     let band = card_band(entry, theme);
     let blocks = blocks::parse_blocks_for(entry, modes.reasoning);
-    let body = blocks::layout(entry, &blocks, modes, width);
+    let body = blocks::layout_with(entry, &blocks, modes, width, spinner);
     let style = body_style(entry, theme);
     let text_rows: Vec<usize> = body
         .iter()
@@ -346,6 +347,7 @@ fn entry_lines(
             Some(i) == first_text,
             band,
             width,
+            spinner,
         );
         if Some(i) == last && entry.interrupted {
             line.spans
@@ -394,6 +396,7 @@ fn render_row(
     first_text: bool,
     band: Option<Style>,
     width: usize,
+    spinner: crate::spinner::Frame,
 ) -> Line<'static> {
     if row.pad {
         return match band {
@@ -431,6 +434,14 @@ fn render_row(
             crate::tools::LineRole::DiffRemoved => theme.diff_removed,
             crate::tools::LineRole::DiffContext => theme.diff_context,
             crate::tools::LineRole::DiffHunk => theme.diff_hunk,
+            // The `ask_user` block (ADR 0024 R1): the prompt is the emphasis, a
+            // description/note is weak, the box is structural.
+            crate::tools::LineRole::Accent => theme.notice_label,
+            crate::tools::LineRole::Muted => theme.notice_body,
+            crate::tools::LineRole::Dim => theme.truncation,
+            crate::tools::LineRole::Heading => theme
+                .notice_label
+                .add_modifier(ratatui::style::Modifier::BOLD),
             crate::tools::LineRole::Normal => style,
         }
     } else {
@@ -479,6 +490,9 @@ fn render_row(
                 blocks::MdStyle::QuoteBar => theme.md_quote_border,
                 blocks::MdStyle::Bullet => theme.md_list_bullet,
                 blocks::MdStyle::Rule => theme.md_hr,
+                blocks::MdStyle::Accent => theme.notice_label,
+                blocks::MdStyle::Muted => theme.notice_body,
+                blocks::MdStyle::Dim => theme.truncation,
                 blocks::MdStyle::TableBorder => theme.md_hr,
                 blocks::MdStyle::Plain => body_style,
             };
@@ -528,6 +542,12 @@ fn render_row(
     } else if row.reason {
         // A weak one-line reason (`mermaid: …`, ADR 0028 R8): the dim/truncation role.
         spans.push(Span::styled(row.text.clone(), theme.truncation));
+    } else if entry.kind == EntryKind::ToolCall && entry.result.is_none() && first_text {
+        // A running tool card's leading status glyph is the live spinner (ADR 0027 revision
+        // 10): strip the glyph baked at call time and prepend the current frame. Every frame
+        // is one cell wide, like the glyph it replaces, so the layout does not move.
+        let rest: String = row.text.chars().skip(1).collect();
+        spans.push(Span::styled(format!("{}{rest}", spinner.glyph), body_style));
     } else {
         spans.push(Span::styled(row.text.clone(), body_style));
     }
@@ -557,6 +577,23 @@ pub fn transcript_lines(
     width: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
+    transcript_lines_with(
+        entries,
+        modes,
+        width,
+        theme,
+        crate::spinner::Frame::default(),
+    )
+}
+
+/// [`transcript_lines`] with the live spinner frame (ADR 0027).
+pub fn transcript_lines_with(
+    entries: &[Entry],
+    modes: DisplayModes,
+    width: usize,
+    theme: &Theme,
+    spinner: crate::spinner::Frame,
+) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
         // The container owns the blank line between blocks (ADR 0028 rule 1).
@@ -564,7 +601,7 @@ pub fn transcript_lines(
             Line::from(""),
             blocks::block_gap(entries.get(index.wrapping_sub(1)), entry),
         ));
-        out.extend(entry_lines(entry, modes, width, theme));
+        out.extend(entry_lines(entry, modes, width, theme, spinner));
     }
     out
 }
@@ -580,6 +617,28 @@ pub fn visible_lines(
     start: usize,
     height: usize,
     theme: &Theme,
+) -> (usize, Vec<Line<'static>>) {
+    visible_lines_with(
+        entries,
+        modes,
+        width,
+        start,
+        height,
+        theme,
+        crate::spinner::Frame::default(),
+    )
+}
+
+/// [`visible_lines`] with the live spinner frame (ADR 0027): the frame lays out
+/// only the visible entries, so the spinner is what makes it redraw every tick.
+pub fn visible_lines_with(
+    entries: &mut [Entry],
+    modes: DisplayModes,
+    width: usize,
+    start: usize,
+    height: usize,
+    theme: &Theme,
+    spinner: crate::spinner::Frame,
 ) -> (usize, Vec<Line<'static>>) {
     let __t = std::time::Instant::now();
     let counts: Vec<usize> = entries
@@ -627,7 +686,7 @@ pub fn visible_lines(
             }
             let skip = start.saturating_sub(line);
             let blocks = blocks::blocks_for(entry, modes.reasoning);
-            let body = blocks::layout(entry, &blocks, modes, width);
+            let body = blocks::layout_with(entry, &blocks, modes, width, spinner);
             let prefix = marker_prefix(entry.kind);
             let prefix_style = marker(entry.kind, theme).1;
             let style = body_style(entry, theme);
@@ -656,6 +715,7 @@ pub fn visible_lines(
                             Some(i) == first_text,
                             band,
                             width,
+                            spinner,
                         );
                         if Some(i) == last && entry.interrupted {
                             line.spans
@@ -708,108 +768,169 @@ const BOX_PROMPT: &str = "❯ ";
 /// The placeholder shown while the input is empty.
 const INPUT_HINT: &str = "(type a message, Enter to send, Ctrl-J for a new line)";
 
-/// The input area's height: one rule above, the text rows, one rule below.
-/// The `/login` box's height (rows in `login_lines`, plus the two border rows).
-const LOGIN_HEIGHT: u16 = 8;
-
-/// The wizard's lines, styled with the app theme's levels (ADR 0028): the prompt is main
-/// text, the selected choice is the emphasis (accent), the rest is secondary, and the
-/// key hints are weak. **The key is never among them** (D3): a filled field renders one `*`
-/// per character, an empty one its hint.
-fn login_lines(wizard: &LoginWizard, theme: &Theme, width: usize) -> Vec<Line<'static>> {
+/// The `/login` wizard's panel (ADR 0035): the shared [`crate::panel::Panel`] with
+/// the step's rows, the provider/protocol choices through [`crate::select_list`], and the
+/// step's key hints in the bottom border. Pure, so the layout is testable without a terminal.
+/// **The key is never among the rows** (D3): a filled field renders one `*` per character.
+pub fn login_panel(
+    wizard: &LoginWizard,
+    width: usize,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+) -> Vec<Line<'static>> {
     use crate::login::LoginStep;
-    let _ = width;
-    let prompt = |text: &str| Line::from(Span::styled(text.to_owned(), theme.text));
+    let ascii = glyphs == crate::footer::Glyphs::Ascii;
+    let inner = width.saturating_sub(4).max(1);
+    let label = |text: &str| Line::from(Span::styled(text.to_owned(), theme.text));
     let value = |text: String| Line::from(Span::styled(text, theme.text));
-    let hint = |text: &'static str| Span::styled(text.to_owned(), theme.hint);
-    let mut lines: Vec<Line> = Vec::new();
+    let mut panel = crate::panel::Panel::new("/login");
     match &wizard.step {
         LoginStep::ChooseProvider { cursor } => {
-            lines.push(Line::from(vec![
-                Span::styled("choose a provider ".to_owned(), theme.text),
-                hint("(↑/↓, Enter)"),
-                Span::styled(":".to_owned(), theme.text),
-            ]));
-            for (index, (id, description)) in LoginWizard::choices().into_iter().enumerate() {
-                let marker = if index == *cursor { "> " } else { "   " };
-                let style = if index == *cursor {
-                    theme.notice_label
-                } else {
-                    theme.notice_body
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(format!(" {marker} "), style),
-                    Span::styled(format!("{id:<20}"), style),
-                    Span::styled(description, theme.hint),
-                ]));
+            panel = panel.row(label("choose a provider"));
+            let items: Vec<crate::select_list::Item> = LoginWizard::choices()
+                .into_iter()
+                .map(|(id, description)| crate::select_list::Item::new(id).description(description))
+                .collect();
+            let list =
+                crate::select_list::view(theme, &items, "", *cursor, items.len(), inner, ascii);
+            for line in list.lines {
+                panel = panel.row(line);
             }
+            panel = panel
+                .hint("↑/↓", "choose")
+                .hint("⏎", "next")
+                .hint("esc", "cancel");
         }
         LoginStep::CustomName => {
-            lines.push(prompt("provider name (also its auth.json entry):"));
-            lines.push(value(format!(" {}", wizard.name)));
+            panel = panel
+                .row(label("provider name (also its auth.json entry):"))
+                .row(value(wizard.name.clone()));
+            panel = panel.hint("⏎", "next").hint("esc", "cancel");
         }
         LoginStep::CustomProtocol { cursor } => {
-            lines.push(Line::from(vec![
-                Span::styled("wire protocol ".to_owned(), theme.text),
-                hint("(↑/↓, Enter)"),
-                Span::styled(":".to_owned(), theme.text),
-            ]));
-            for (index, kind) in crate::login::PROTOCOLS.iter().enumerate() {
-                let marker = if index == *cursor { "> " } else { "   " };
-                let style = if index == *cursor {
-                    theme.notice_label
-                } else {
-                    theme.notice_body
-                };
-                lines.push(Line::from(Span::styled(format!(" {marker} {kind}"), style)));
+            panel = panel.row(label("wire protocol"));
+            let items: Vec<crate::select_list::Item> = crate::login::PROTOCOLS
+                .iter()
+                .map(|kind| crate::select_list::Item::new(*kind))
+                .collect();
+            let list =
+                crate::select_list::view(theme, &items, "", *cursor, items.len(), inner, ascii);
+            for line in list.lines {
+                panel = panel.row(line);
             }
+            panel = panel
+                .hint("↑/↓", "choose")
+                .hint("⏎", "next")
+                .hint("esc", "cancel");
         }
         LoginStep::CustomBaseUrl => {
-            lines.push(prompt("base URL:"));
-            lines.push(value(format!(" {}", wizard.base_url)));
+            panel = panel
+                .row(label("base URL:"))
+                .row(value(wizard.base_url.clone()));
+            panel = panel.hint("⏎", "next").hint("esc", "cancel");
         }
         LoginStep::KeyInput => {
-            lines.push(prompt("API key (hidden; paste works too):"));
-            let masked = crate::login::LoginWizard::masked(&wizard.key);
-            lines.push(value(if masked.is_empty() {
-                String::new()
-            } else {
-                masked
-            }));
+            panel = panel
+                .row(label("API key (hidden; paste works too):"))
+                .row(value(LoginWizard::masked(&wizard.key)));
+            panel = panel.hint("⏎", "next").hint("esc", "cancel");
         }
         LoginStep::Verifying => {
-            lines.push(Line::from(Span::styled(
-                format!("verifying {} … ", wizard.provider_name()),
-                theme.text,
-            )));
-            lines
-                .last_mut()
-                .expect("just pushed")
-                .spans
-                .push(hint("(Esc cancels)"));
+            panel = panel.row(label(&format!("verifying {} …", wizard.provider_name())));
+            panel = panel.hint("esc", "cancel");
         }
         LoginStep::VerifyFailed { reason } => {
-            lines.push(Line::from(Span::styled(
-                format!("verification failed: {reason}"),
-                theme.turn_cancelled,
-            )));
-            lines.push(Line::from(vec![
-                Span::styled("save anyway? ".to_owned(), theme.text),
-                Span::styled("[y] save   ".to_owned(), theme.hint),
-                Span::styled("[n/Esc] cancel".to_owned(), theme.hint),
-            ]));
+            panel = panel
+                .row(Line::from(Span::styled(
+                    format!("verification failed: {reason}"),
+                    theme.turn_cancelled,
+                )))
+                .row(label("save anyway?"));
+            panel = panel.hint("y", "save").hint("n/esc", "cancel");
         }
     }
     if let Some(error) = &wizard.error {
-        lines.push(Line::from(Span::styled(
+        panel = panel.row(Line::from(Span::styled(
             error.clone(),
             theme.turn_cancelled,
         )));
     }
-    lines
+    panel.lines(width, theme, glyphs)
+}
+
+/// The `/login` panel's height, measured from the panel itself so the frame and the layout
+/// agree.
+fn login_height(
+    wizard: &LoginWizard,
+    width: usize,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+) -> u16 {
+    login_panel(wizard, width, theme, glyphs).len() as u16
+}
+
+/// The startup project-trust panel (ADR 0031 T3, ADR 0035): the shared panel with
+/// the workspace line, the choices through [`crate::select_list`], and the hardcoded key
+/// hints. The cursor's default is the fail-safe `UntrustHere`.
+pub fn trust_panel(
+    wizard: &TrustWizard,
+    width: usize,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+) -> Vec<Line<'static>> {
+    let ascii = glyphs == crate::footer::Glyphs::Ascii;
+    let inner = width.saturating_sub(4).max(1);
+    let items: Vec<crate::select_list::Item> = wizard
+        .choices
+        .iter()
+        .map(|choice| crate::select_list::Item::new(wizard.label(*choice)))
+        .collect();
+    let list =
+        crate::select_list::view(theme, &items, "", wizard.cursor, items.len(), inner, ascii);
+    let mut panel = crate::panel::Panel::new("project trust").row(Line::from(Span::styled(
+        format!("project resources found in {}", wizard.workspace.display()),
+        theme.text,
+    )));
+    for line in list.lines {
+        panel = panel.row(line);
+    }
+    panel = panel
+        .hint("↑/↓", "choose")
+        .hint("⏎", "select")
+        .hint("esc", "do not trust");
+    panel.lines(width, theme, glyphs)
+}
+
+/// The trust panel's height, measured from the panel itself.
+fn trust_height(
+    wizard: &TrustWizard,
+    width: usize,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+) -> u16 {
+    trust_panel(wizard, width, theme, glyphs).len() as u16
+}
+
+/// The `/logout` confirmation (ADR 0035): the shared panel with the provider and
+/// the hardcoded `y`/`n` hints in the bottom border.
+pub fn logout_panel(
+    provider: &str,
+    width: usize,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+) -> Vec<Line<'static>> {
+    crate::panel::Panel::new("/logout")
+        .row(Line::from(Span::styled(
+            format!("remove the stored credential for `{provider}`?"),
+            theme.text,
+        )))
+        .hint("[y]", "remove")
+        .hint("[n/esc]", "keep")
+        .lines(width, theme, glyphs)
 }
 
 /// The error style for wizard problems (a note-colored line; no new theme role).
+/// The input area's height: one rule above, the text rows, one rule below.
 fn input_height(app: &App, width: usize) -> u16 {
     let inner = input_inner_width(app, width);
     let rows = crate::composer::rows(&app.input.text(), inner).len();
@@ -920,12 +1041,12 @@ pub fn approval_cap(screen_height: usize, completion: usize) -> usize {
 /// The approval box's floor, border and key line included.
 pub const MIN_APPROVAL_HEIGHT: usize = 5;
 
-/// The height the approval box needs: the wrapped body rows (bounded by `cap`), the key line
-/// and the border. The body scrolls rather than growing past `cap`.
+/// The height the approval box needs: the wrapped body rows (bounded by `cap`) and the
+/// panel's two border rows. The body scrolls rather than growing past `cap`.
 fn approval_height(request: &ApprovalRequest, width: usize, cap: usize) -> u16 {
-    let rows = wrap(&approval_body(request), width.saturating_sub(2).max(1)).len();
-    let visible = rows.min(cap.saturating_sub(3).max(1));
-    (visible as u16 + 3).clamp(
+    let rows = wrap(&approval_body(request), width.saturating_sub(4).max(1)).len();
+    let visible = rows.min(cap.saturating_sub(2).max(1));
+    (visible as u16 + 2).clamp(
         MIN_APPROVAL_HEIGHT as u16,
         cap.max(MIN_APPROVAL_HEIGHT) as u16,
     )
@@ -1208,12 +1329,33 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             area.width as usize,
             approval_cap(area.height as usize, completion_visible),
         ),
-        Some(Modal::Question(form)) => question_height(form, area.width as usize),
-        Some(Modal::Login(_)) => LOGIN_HEIGHT,
-        // The `/logout` confirmation is a two-line box like the `/memory` one.
-        Some(Modal::ConfirmLogout(_)) => 4,
-        // The trust prompt lists up to five options plus a header and a key line.
-        Some(Modal::Trust(wizard)) => wizard.choices.len() as u16 + 3,
+        Some(Modal::Question(form)) => {
+            // The budget leaves room for the transcript and the footer; the panel windows its
+            // option list to it, so the bottom border (the hints) is never clipped.
+            let budget = (area.height as usize).saturating_sub(6);
+            question_height(
+                form,
+                area.width as usize,
+                budget,
+                &app.theme,
+                app.footer_glyphs(),
+            )
+        }
+        Some(Modal::Login(wizard)) => {
+            login_height(wizard, area.width as usize, &app.theme, app.footer_glyphs())
+        }
+        // The `/logout` confirmation is the shared panel with one row and the hints.
+        Some(Modal::ConfirmLogout(provider)) => logout_panel(
+            provider,
+            area.width as usize,
+            &app.theme,
+            app.footer_glyphs(),
+        )
+        .len() as u16,
+        // The trust prompt lists up to five options plus a header and the two borders.
+        Some(Modal::Trust(wizard)) => {
+            trust_height(wizard, area.width as usize, &app.theme, app.footer_glyphs())
+        }
         _ => input_height(app, area.width as usize),
     };
     // The widget lines are part of the middle block.
@@ -1254,11 +1396,22 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     app.set_transcript_width(width);
     let modes = app.display_modes();
     let t_draw = std::time::Instant::now();
-    let (total, _) = visible_lines(&mut app.entries, modes, width, 0, 0, &theme);
+    // The live spinner frame (ADR 0027): computed once per frame from the loop's
+    // clock, so a live reasoning line and the input rule animate.
+    let spinner = app.spinner_frame();
+    let (total, _) = visible_lines_with(&mut app.entries, modes, width, 0, 0, &theme, spinner);
     radian_session::trace::took("draw/measure", t_draw);
     app.set_viewport(chunks[0].height, total);
     let t_window = std::time::Instant::now();
-    let (_, visible) = visible_lines(&mut app.entries, modes, width, app.scroll, height, &theme);
+    let (_, visible) = visible_lines_with(
+        &mut app.entries,
+        modes,
+        width,
+        app.scroll,
+        height,
+        &theme,
+        spinner,
+    );
     radian_session::trace::took("draw/window", t_window);
     let visible = match app.find_state() {
         Some(find) => visible
@@ -1301,7 +1454,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // The picker overlay draws over the transcript; the input box and the status bar stay
     // visible below it (ADR 0023 U4).
     if let Some(picker) = app.picker() {
-        crate::picker::draw(frame, chunks[0], picker);
+        crate::picker::draw(frame, chunks[0], picker, &app.theme, app.footer_glyphs());
     }
 
     if !completion.is_empty() {
@@ -1310,12 +1463,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     match app.top_modal() {
         Some(Modal::Approval(prompt)) => {
-            // The body scrolls inside the box; the key line is the box's own last row, so a
-            // long command can never push the answers off screen.
-            let inner_width = (input_area.width as usize).saturating_sub(2).max(1);
+            // ADR 0035: the shared panel draws the frame, the window indicator on
+            // the top border and the key hints in the bottom border, so a long command can
+            // never push the answers off screen.
+            let width = input_area.width as usize;
+            let inner_width = width.saturating_sub(4).max(1);
             let body = wrap(&approval_body(&prompt.request), inner_width);
             let total = body.len();
-            let visible = (middle as usize).saturating_sub(3).max(1);
+            // The panel's rows are the box height minus its two borders.
+            let visible = (input_area.height as usize).saturating_sub(2).max(1);
             // Feed the measurement back, the way the transcript's viewport is fed back, so the
             // scroll keys clamp against real rows.
             let (scroll, total, visible) = {
@@ -1329,114 +1485,67 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             };
             let first = scroll.min(total.saturating_sub(1));
             let last = (first + visible).min(total);
-            let lines: Vec<Line> = body[first..last]
-                .iter()
-                .map(|row| Line::from(row.clone()))
-                .collect();
-            let mut block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(app.theme.approval_border)
-                .title(" approve tool call? ");
+            let mut panel = crate::panel::Panel::new("approve tool call?");
             if total > visible {
-                // The window indicator goes in the top-right corner: the bottom row belongs to
-                // the keys.
-                block = block.title_top(
-                    Line::from(format!(" lines {}–{} of {total} ", first + 1, last))
-                        .right_aligned(),
-                );
+                // The window indicator sits on the top border, where it costs no body row.
+                panel = panel.right_title(format!("lines {}–{} of {total}", first + 1, last));
             }
-            frame.render_widget(&block, input_area);
-            let inner = block.inner(input_area);
-            let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner);
-            frame.render_widget(Paragraph::new(lines), rows[0]);
+            for row in &body[first..last] {
+                panel = panel.row(Line::from(row.clone()));
+            }
+            // The keys are hardcoded (ADR 0023 U4); the panel puts them in the bottom border.
+            panel = panel
+                .hint("[y]", "allow once")
+                .hint("[a]", "always this session")
+                .hint("[n]", "deny")
+                .hint("[!]", "auto for this session");
             frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    APPROVAL_KEYS,
-                    app.theme.approval_border,
-                ))),
-                rows[1],
+                Paragraph::new(panel.lines(width, &app.theme, app.footer_glyphs())),
+                input_area,
             );
         }
         Some(Modal::Question(form)) => {
-            // ADR 0024 Q7: the title names the source and the position; the box scrolls its
-            // option list rather than growing.
-            let position = match form.current {
-                Some(index) => format!("{}/{}", index + 1, form.len()),
-                None => "overview".to_string(),
-            };
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(app.theme.approval_border)
-                .title(format!(" question {position} from {} ", form.origin));
-            let inner = input_area.height.saturating_sub(2) as usize;
-            let width = input_area.width.saturating_sub(2) as usize;
-            // The key line is the box's own last row, so a long option list can never push it
-            // out (same fix as the approval box).
-            let lines = question_lines(form, width, inner.saturating_sub(1));
-            frame.render_widget(&block, input_area);
-            let inner_area = block.inner(input_area);
-            let rows =
-                Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner_area);
-            frame.render_widget(Paragraph::new(lines), rows[0]);
-            frame.render_widget(
-                Paragraph::new(Line::from(clip_columns(QUESTION_KEYS, width))),
-                rows[1],
+            // ADR 0024 R2: the shared panel primitive draws the box, the tab row,
+            // the current question and the key hints (the bottom border). The panel is
+            // height-aware; a long option list scrolls to the cursor.
+            // The same budget the height was measured with, so the window and the frame agree
+            // and the bottom border (the hints) stays on screen.
+            let budget = (area.height as usize).saturating_sub(6);
+            let lines = question_panel(
+                form,
+                input_area.width as usize,
+                budget,
+                &app.theme,
+                app.footer_glyphs(),
             );
+            frame.render_widget(Paragraph::new(lines), input_area);
         }
         Some(Modal::Login(wizard)) => {
-            let lines = login_lines(wizard, &app.theme, input_area.width as usize);
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(app.theme.approval_border)
-                .title(" /login ");
-            frame.render_widget(&block, input_area);
-            let inner = block.inner(input_area);
-            frame.render_widget(Paragraph::new(lines), inner);
+            let lines = login_panel(
+                wizard,
+                input_area.width as usize,
+                &app.theme,
+                app.footer_glyphs(),
+            );
+            frame.render_widget(Paragraph::new(lines), input_area);
         }
         Some(Modal::Trust(wizard)) => {
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(app.theme.approval_border)
-                .title(" project trust ");
-            frame.render_widget(&block, chunks[2]);
-            let inner = block.inner(chunks[2]);
-            let mut lines = vec![Line::from(format!(
-                "project resources found in {}",
-                wizard.workspace.display()
-            ))];
-            for (index, choice) in wizard.choices.iter().enumerate() {
-                let marker = if index == wizard.cursor { "> " } else { "  " };
-                let style = if index == wizard.cursor {
-                    app.theme.approval_border
-                } else {
-                    Style::default()
-                };
-                lines.push(Line::from(Span::styled(
-                    format!("{marker}{}", wizard.label(*choice)),
-                    style,
-                )));
-            }
-            lines.push(Line::from(Span::styled(
-                "Up/Down choose   Enter select   Esc = do not trust",
-                app.theme.hint,
-            )));
-            frame.render_widget(Paragraph::new(lines), inner);
+            let lines = trust_panel(
+                wizard,
+                chunks[2].width as usize,
+                &app.theme,
+                app.footer_glyphs(),
+            );
+            frame.render_widget(Paragraph::new(lines), chunks[2]);
         }
         Some(Modal::ConfirmLogout(provider)) => {
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(app.theme.approval_border)
-                .title(" /logout ");
-            frame.render_widget(&block, input_area);
-            let inner = block.inner(input_area);
-            let lines = vec![
-                Line::from(format!("remove the stored credential for `{provider}`?")),
-                Line::from(Span::styled(
-                    "[y] remove   [n/Esc] keep",
-                    app.theme.approval_border,
-                )),
-            ];
-            frame.render_widget(Paragraph::new(lines), inner);
+            let lines = logout_panel(
+                provider,
+                input_area.width as usize,
+                &app.theme,
+                app.footer_glyphs(),
+            );
+            frame.render_widget(Paragraph::new(lines), input_area);
         }
         _ if app.find_state().is_some() => {
             // The find box replaces the input box's line; the input text itself is untouched
@@ -1468,6 +1577,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             } else {
                 Style::default()
             };
+            // The input rule's running status (ADR 0027): the spinner frame and
+            // the state text on the top rule; idle has neither.
+            let status = app.spinner_status();
+            let spin = app.spinner_frame();
             // Both styles reserve the same two rows (rules / borders), so the rest of the
             // layout does not depend on the choice.
             match app.input_style {
@@ -1494,9 +1607,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                             })
                             .collect()
                     };
-                    let block = Block::default()
+                    let mut block = Block::default()
                         .borders(Borders::TOP | Borders::BOTTOM)
                         .border_style(app.theme.hint);
+                    if let Some(status) = status {
+                        // `── ◜  Working ` over the top rule (two spaces between the spinner
+                        // and the text, ADR 0027).
+                        block = block.title(Line::from(vec![
+                            Span::styled("── ", app.theme.hint),
+                            Span::styled(spin.glyph, app.spinner_style(spin)),
+                            Span::styled(format!("  {status} "), app.theme.turn_running),
+                        ]));
+                    }
                     frame.render_widget(Paragraph::new(body).block(block), input_area);
                 }
                 InputStyle::Box => {
@@ -1525,11 +1647,21 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                             ]));
                         }
                     }
+                    let title: Line = match status {
+                        // The status replaces the box's ` message ` title while running
+                        // (ADR 0027: the same content on the border's top edge).
+                        Some(status) => Line::from(vec![
+                            Span::styled(" ", accent),
+                            Span::styled(spin.glyph, app.spinner_style(spin)),
+                            Span::styled(format!("  {status} "), app.theme.turn_running),
+                        ]),
+                        None => Line::from(" message "),
+                    };
                     let block = Block::default()
                         .borders(Borders::ALL)
                         .border_type(ratatui::widgets::BorderType::Rounded)
                         .border_style(accent)
-                        .title(" message ");
+                        .title(title);
                     frame.render_widget(Paragraph::new(body).block(block), input_area);
                 }
             }
@@ -1631,113 +1763,281 @@ const MAX_QUESTION_ROWS: u16 = 18;
 pub const QUESTION_KEYS: &str = "Tab next · Space select · Enter next/submit · Esc decline";
 
 /// The height the question form's box needs: its content plus the key line, bounded.
-fn question_height(form: &QuestionForm, width: usize) -> u16 {
-    let rows = question_lines(form, width, usize::MAX).len() + 1;
-    (rows as u16 + 2).clamp(5, MAX_QUESTION_ROWS)
+fn question_height(
+    form: &QuestionForm,
+    width: usize,
+    max_rows: usize,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+) -> u16 {
+    let rows = question_panel(form, width, max_rows, theme, glyphs).len();
+    (rows as u16).clamp(5, MAX_QUESTION_ROWS)
 }
 
-/// The question form's content lines, scrolled so the cursor stays visible (ADR 0024 Q7).
-///
-/// Pure: the layout is testable without a terminal. `max_rows` is the visible budget (the box's
-/// inner height **minus the key line**, which `draw` renders separately so it is always
-/// visible); `usize::MAX` means "no clipping", which is how the height is measured.
-pub fn question_lines(form: &QuestionForm, width: usize, max_rows: usize) -> Vec<Line<'static>> {
-    let mut out: Vec<Line<'static>> = Vec::new();
+/// The `ask_user` panel (ADR 0024 R2): the shared [`crate::panel::Panel`] with the
+/// tab row, the current question's options (or its text field), the `Submit` list, and the
+/// key hints in the bottom border. Pure, so the layout is testable without a terminal.
+pub fn question_panel(
+    form: &QuestionForm,
+    width: usize,
+    max_rows: usize,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+) -> Vec<Line<'static>> {
+    // `alt-h`: one line, so the transcript is readable.
+    if form.hidden {
+        let answered = form
+            .questions
+            .iter()
+            .zip(&form.answers)
+            .filter(|(question, answer)| QuestionForm::is_answered(question, answer))
+            .count();
+        return vec![Line::from(vec![
+            Span::styled("Ask", theme.notice_label),
+            Span::styled(
+                format!(" · {answered}/{} answered · ", form.len()),
+                theme.notice_body,
+            ),
+            Span::styled("alt-h", theme.hint),
+            Span::styled(" to show", theme.notice_body),
+        ])];
+    }
+    let inner = width.saturating_sub(4).max(1);
+    let title = if form.origin.is_empty() {
+        "Ask".to_string()
+    } else {
+        format!("Ask · {}", form.origin)
+    };
+    let mut panel = crate::panel::Panel::new(title)
+        .row(tab_row(form, inner, theme))
+        .divider();
     match form.current_question() {
-        // The overview: one line per question, with the answer or `(not answered)`.
+        Some(question) => {
+            let answer = form
+                .current_answer()
+                .expect("a current question has an answer");
+            for line in wrap_char_offsets(&question.prompt, inner) {
+                let text: String = line
+                    .chars
+                    .into_iter()
+                    .filter_map(|i| {
+                        question
+                            .prompt
+                            .get(i..)
+                            .and_then(|rest| rest.chars().next())
+                    })
+                    .collect();
+                panel = panel.row(Line::from(Span::styled(text, theme.notice_label)));
+            }
+            panel = panel.divider();
+            if question.kind == radian_coding::QuestionKind::Text {
+                panel = panel.row(composer_line(&answer.text, theme));
+            } else {
+                // The option rows (a description is its own row), then a window that keeps the
+                // cursor visible and the bottom border (the hints) on screen.
+                let mut rows: Vec<(Line<'static>, bool)> = Vec::new();
+                for (row, option) in question.options.iter().enumerate() {
+                    rows.push((
+                        option_line(question, answer, row, theme, glyphs),
+                        row == answer.cursor,
+                    ));
+                    if let Some(description) = &option.description {
+                        let prefix = match glyphs {
+                            crate::footer::Glyphs::Ascii => "->",
+                            _ => "↳",
+                        };
+                        rows.push((
+                            Line::from(Span::styled(
+                                clip_columns(&format!("   {prefix} {description}"), inner),
+                                theme.notice_body,
+                            )),
+                            false,
+                        ));
+                    }
+                }
+                if question.allow_other {
+                    rows.push((
+                        other_line(question, answer, theme, glyphs),
+                        answer.cursor == question.options.len(),
+                    ));
+                }
+                // The fixed rows: the top border, the tab row, two dividers, the prompt, the
+                // note (when open), the decline row, and the bottom border.
+                let note_rows = if form.note_focused() { 3 } else { 0 };
+                let fixed = 1
+                    + 1
+                    + 1
+                    + question.prompt.lines().count().max(1)
+                    + 1
+                    + note_rows
+                    + usize::from(form.confirm_decline)
+                    + 1
+                    + 1;
+                let budget = max_rows.saturating_sub(fixed).max(1);
+                let cursor = rows.iter().position(|(_, cursor)| *cursor).unwrap_or(0);
+                let first = cursor
+                    .saturating_sub(budget.saturating_sub(1))
+                    .min(rows.len().saturating_sub(budget));
+                if first > 0 {
+                    panel = panel.row(Line::from(Span::styled(
+                        format!("  … {first} above"),
+                        theme.hint,
+                    )));
+                }
+                let last = (first + budget).min(rows.len());
+                for (line, _) in rows.drain(first..last) {
+                    panel = panel.row(line);
+                }
+                if rows.len() > last {
+                    panel = panel.row(Line::from(Span::styled(
+                        format!("  … {} more", rows.len() - last),
+                        theme.hint,
+                    )));
+                }
+            }
+            if form.note_focused() {
+                panel = panel.divider();
+                panel = panel.row(Line::from(Span::styled("note", theme.hint)));
+                panel = panel.row(composer_line(&answer.note, theme));
+            }
+        }
+        // The `Submit` tab: one line per question, the header and the answer summary.
         None => {
             for (index, question) in form.questions.iter().enumerate() {
                 let answer = &form.answers[index];
-                let shown = if QuestionForm::is_answered(question, answer) {
+                let answered = QuestionForm::is_answered(question, answer);
+                let summary = if answered {
                     answer_text(question, answer)
                 } else {
                     "(not answered)".to_string()
                 };
-                out.push(Line::from(clip_columns(
-                    &format!("{}. {} → {}", index + 1, question.prompt, shown),
-                    width,
+                let style = if !answered && question.required {
+                    theme.tool_result_error
+                } else {
+                    theme.notice_body
+                };
+                let mark = if answered { "✓" } else { "·" };
+                panel = panel.row(Line::from(Span::styled(
+                    clip_columns(&format!("{mark} {} — {summary}", question.header()), inner),
+                    style,
                 )));
-            }
-        }
-        Some(question) => {
-            out.push(Line::from(clip_columns(&question.prompt, width)));
-            let answer = form
-                .current_answer()
-                .expect("a current question has an answer");
-            let rows = QuestionForm::row_count(question);
-            // The window over the option rows: the prompt, the two clip markers and the decline
-            // note each take a row when present.
-            let visible = max_rows.saturating_sub(4).max(1);
-            let first = if rows <= visible {
-                0
-            } else {
-                (answer.cursor + 1)
-                    .saturating_sub(visible)
-                    .min(rows.saturating_sub(visible))
-            };
-            let last = (first + visible).min(rows);
-            // A marker above, so a clipped list never looks complete.
-            if first > 0 {
-                out.push(Line::from(format!("  … {first} above")));
-            }
-            for row in first..last {
-                out.push(Line::from(clip_columns(
-                    &row_text(form, question, row),
-                    width,
-                )));
-            }
-            let hidden = rows.saturating_sub(last);
-            if hidden > 0 {
-                out.push(Line::from(format!("  … {hidden} more")));
             }
         }
     }
+    // The first Esc asks again, so it never looks like it did nothing (ADR 0024 Q7).
     if form.confirm_decline {
-        out.push(Line::from(clip_columns(
-            "press Esc again to decline this question (Enter keeps it)",
-            width,
+        panel = panel.row(Line::from(Span::styled(
+            clip_columns(
+                "press Esc again to decline this question (Enter keeps it)",
+                inner,
+            ),
+            theme.note,
         )));
     }
-    if out.len() > max_rows && max_rows != usize::MAX {
-        out.truncate(max_rows);
+    for hint in form.hints() {
+        panel = panel.hint(hint.keys, hint.description);
     }
-    out
+    panel.lines(width, theme, glyphs)
 }
 
-/// One option row of the current question: the cursor, the mark and the label. The last row is
-/// the `Other` row when the question allows one.
-fn row_text(form: &QuestionForm, question: &radian_coding::Question, row: usize) -> String {
-    let answer = form
-        .current_answer()
-        .expect("a current question has an answer");
-    let cursor = if row == answer.cursor { ">" } else { " " };
-    match question.options.get(row) {
-        Some(option) => {
-            let mark = if answer.selected.contains(&option.id) {
-                match question.kind {
-                    radian_coding::QuestionKind::Multi => "[x]",
-                    _ => "(•)",
-                }
-            } else {
-                match question.kind {
-                    radian_coding::QuestionKind::Multi => "[ ]",
-                    _ => "( )",
-                }
-            };
-            let description = option
-                .description
-                .as_deref()
-                .map(|text| format!(" — {text}"))
-                .unwrap_or_default();
-            format!("{cursor} {mark} {}{description}", option.label)
+/// The tab row (ADR 0024 R2): one tab per question plus `Submit`, the current one
+/// reversed. Each label is capped at [`crate::question::MAX_TAB_WIDTH`] and the row is clipped
+/// (revision 2: no horizontal scrolling).
+fn tab_row(form: &QuestionForm, width: usize, theme: &Theme) -> Line<'static> {
+    let current = form.current.unwrap_or(form.questions.len());
+    let mut spans = Vec::new();
+    let mut used = 0;
+    for (index, (label, _)) in form.tab_labels().iter().enumerate() {
+        let text = format!(" {label} ");
+        let text_width = UnicodeWidthStr::width(text.as_str());
+        if used + text_width > width {
+            break;
         }
-        // The `Other` row: its text is the composer's, which may be empty.
-        None => {
-            let mark = if answer.other { "(•)" } else { "( )" };
-            let text = answer.text.text();
-            format!("{cursor} {mark} Other: {text}")
-        }
+        used += text_width;
+        let style = if index == current {
+            theme.notice_label.add_modifier(Modifier::REVERSED)
+        } else {
+            theme.notice_body
+        };
+        spans.push(Span::styled(text, style));
     }
+    Line::from(spans)
+}
+
+/// One option row: the cursor, the mark and the label.
+fn option_line(
+    question: &radian_coding::Question,
+    answer: &crate::question::FormAnswer,
+    row: usize,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+) -> Line<'static> {
+    let option = &question.options[row];
+    let cursor = if row == answer.cursor { "❯ " } else { "  " };
+    let chosen = answer.selected.contains(&option.id);
+    let mark = match (question.kind, chosen, glyphs) {
+        (radian_coding::QuestionKind::Multi, true, crate::footer::Glyphs::Ascii) => "[x]",
+        (radian_coding::QuestionKind::Multi, false, crate::footer::Glyphs::Ascii) => "[ ]",
+        (radian_coding::QuestionKind::Multi, true, _) => "☑",
+        (radian_coding::QuestionKind::Multi, false, _) => "☐",
+        (_, true, crate::footer::Glyphs::Ascii) => "(*)",
+        (_, false, crate::footer::Glyphs::Ascii) => "( )",
+        (_, true, _) => "◉",
+        (_, false, _) => "○",
+    };
+    let recommended = if option.recommended {
+        " (Recommended)"
+    } else {
+        ""
+    };
+    Line::from(vec![
+        Span::styled(cursor, theme.notice_label),
+        Span::styled(
+            format!("{mark} {}{recommended}", option.label),
+            if chosen {
+                theme.notice_label
+            } else {
+                theme.notice_body
+            },
+        ),
+    ])
+}
+
+/// The `Other` row: `Other (type your own)`, with the typed text when chosen.
+fn other_line(
+    question: &radian_coding::Question,
+    answer: &crate::question::FormAnswer,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+) -> Line<'static> {
+    let cursor = if answer.cursor == question.options.len() {
+        "❯ "
+    } else {
+        "  "
+    };
+    let mark = match (answer.other, glyphs) {
+        (true, crate::footer::Glyphs::Ascii) => "(*)",
+        (false, crate::footer::Glyphs::Ascii) => "( )",
+        (true, _) => "◉",
+        (false, _) => "○",
+    };
+    let text = if answer.other && !answer.text.is_empty() {
+        format!("Other: {}", answer.text.text())
+    } else {
+        "Other (type your own)".to_string()
+    };
+    Line::from(vec![
+        Span::styled(cursor, theme.notice_label),
+        Span::styled(format!("{mark} {text}"), theme.notice_body),
+    ])
+}
+
+/// A free-text field (`text`, `Other`, a note): `> ` and the text.
+fn composer_line(composer: &crate::composer::Composer, theme: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("> ", theme.notice_label),
+        Span::styled(composer.text(), theme.text),
+    ])
 }
 
 /// One answer as readable text, using option labels.
@@ -1766,6 +2066,11 @@ fn answer_text(question: &radian_coding::Question, answer: &crate::question::For
 
 /// Cuts `text` to `width` display columns, never splitting a wide character (ADR 0024 Q7: a
 /// narrow terminal clips instead of wrapping).
+/// Cuts `text` to `width` display cells (the question form's tab labels use it).
+pub(crate) fn clip_display(text: &str, width: usize) -> String {
+    clip_columns(text, width)
+}
+
 fn clip_columns(text: &str, width: usize) -> String {
     if width == 0 || UnicodeWidthStr::width(text) <= width {
         return text.to_string();

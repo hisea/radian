@@ -31,140 +31,155 @@ use ratatui::crossterm::terminal;
 #[command(
     name = "radian",
     version,
-    about = "Full-screen TUI for the radian agent runtime"
+    about = "Full-screen TUI for the radian agent runtime",
+    // ADR 0032 A6: the joined surface is longer than either binary's, so the commands and
+    // the flags are grouped.
+    subcommand_help_heading = "Commands"
 )]
 struct Cli {
+    // The TUI's own setup flags come first: the default mode is the full-screen TUI, and the
+    // `--help` groups read in the order the owner asked for (TUI, session, model, mcp,
+    // permissions).
+    /// The configuration file (ADR 0008). Overrides `RADIAN_CONFIG` and
+    /// `~/.radian/config/config.toml`. Read-only: this slice never writes it.
+    #[arg(help_heading = "TUI", long, value_name = "FILE")]
+    config: Option<PathBuf>,
+
+    /// Expose the built-in file and read-only git tools rooted at this directory
+    /// (read/write/patch/list, git_status/git_diff). No shell is provided.
+    #[arg(help_heading = "TUI", long, value_name = "DIR")]
+    workspace: Option<PathBuf>,
+
+    #[arg(help_heading = "TUI", long)]
+    system: Option<String>,
+
     /// Model name sent to the API. Required unless the config file's `model.model` provides
     /// it.
-    #[arg(long)]
+    #[arg(help_heading = "Model", long)]
     model: Option<String>,
 
     /// Provider wire protocol: `openai-compatible` (the default, unchanged) or `anthropic`.
-    #[arg(long, value_name = "PROVIDER")]
+    #[arg(help_heading = "Model", long, value_name = "PROVIDER")]
     provider: Option<String>,
 
     /// Everything before the provider's path (`/chat/completions` for openai-compatible,
     /// `/v1/messages` for anthropic). Defaults to the provider's public endpoint.
-    #[arg(long, value_name = "URL")]
+    #[arg(help_heading = "Model", long, value_name = "URL")]
     base_url: Option<String>,
-
-    /// The configuration file (ADR 0008). Overrides `RADIAN_CONFIG` and
-    /// `~/.radian/config/config.toml`. Read-only: this slice never writes it.
-    #[arg(long, value_name = "FILE")]
-    config: Option<PathBuf>,
 
     /// `max_tokens` for anthropic (the Messages API requires it). Ignored for
     /// openai-compatible. Defaults to 16384.
-    #[arg(long, value_name = "N")]
+    #[arg(help_heading = "Model", long, value_name = "N")]
     max_tokens: Option<u32>,
 
     /// Extended thinking for anthropic: `off` (default), `adaptive`, or `enabled:<budget>`.
     /// Ignored for openai-compatible.
-    #[arg(long, value_name = "MODE")]
+    #[arg(help_heading = "Model", long, value_name = "MODE")]
     thinking: Option<String>,
 
     /// Extra request header, repeatable: `--header NAME=VALUE`.
-    #[arg(long = "header", value_name = "NAME=VALUE")]
+    #[arg(help_heading = "Model", long = "header", value_name = "NAME=VALUE")]
     header: Vec<String>,
 
     /// Where session files live. Defaults to `RADIAN_SESSION_DIR`, then `~/.radian/sessions`
     /// (`$RADIAN_HOME/sessions` when that is set, ADR 0020). The same rule as `agent-cli`.
-    #[arg(long, value_name = "DIR")]
+    #[arg(help_heading = "Session", long, value_name = "DIR")]
     session_dir: Option<PathBuf>,
 
     /// A stable session identifier: the session file's name. Generated once per process when
     /// omitted.
-    #[arg(long, value_name = "VALUE", conflicts_with = "resume")]
+    #[arg(
+        help_heading = "Session",
+        long,
+        value_name = "VALUE",
+        conflicts_with = "resume"
+    )]
     session_id: Option<String>,
 
     /// Resume an existing session by id, rendering its history into the transcript. Without a
     /// value it shows the session picker (resuming only: no "new" entry).
-    #[arg(long, value_name = "SESSION_ID", num_args = 0..=1, conflicts_with = "list")]
+    #[arg(help_heading = "Session", long, value_name = "SESSION_ID", num_args = 0..=1, conflicts_with = "list")]
     resume: Option<Option<String>>,
 
     /// List this workspace's sessions and exit.
-    #[arg(long)]
+    #[arg(help_heading = "Session", long)]
     list: bool,
 
     /// Show a full-screen picker for this workspace's sessions before opening one (Phase 4):
     /// Up/Down select, type to filter, Tab full-text search, Enter resume, n new, Esc quit.
     /// Conflicts with `--resume`/`--session-id`; it does not create a session file.
-    #[arg(long, conflicts_with_all = ["resume", "session_id"])]
+    #[arg(help_heading = "Session", long, conflicts_with_all = ["resume", "session_id"])]
     pick: bool,
-
-    /// Expose the built-in file and read-only git tools rooted at this directory
-    /// (read/write/patch/list, git_status/git_diff). No shell is provided.
-    #[arg(long, value_name = "DIR")]
-    workspace: Option<PathBuf>,
 
     /// A JSON file listing MCP stdio servers to start (`{"servers": [...]}`), the same format
     /// `agent-cli` reads. Under `workspace` their tools ask before running and the
     /// servers themselves are **not** sandboxed (ADR 0012 option B).
-    #[arg(long, value_name = "FILE")]
+    #[arg(help_heading = "MCP", long, value_name = "FILE")]
     mcp_config: Option<String>,
 
     /// The permission tier (ADR 0016): `safe` denies file modification, `workspace`
     /// allows writes that resolve inside the workspace, `full` also allows MCP. Defaults to
     /// the config file's `permissions.profile`, then `workspace`.
-    #[arg(long, value_name = "TIER")]
+    #[arg(help_heading = "Permissions", long, value_name = "TIER")]
     profile: Option<String>,
 
     /// How `ask` is resolved (ADR 0012's ApprovalPolicy): `on-ask` asks when a rule says so,
     /// `always` asks for every call a rule does not deny, `never` turns `ask` into a denial,
     /// `auto` answers every `ask` with "allow" (ADR 0026 D9). Omit to fall back to the
     /// config's `[permissions] approval`, then the session's journaled state, then `on-ask`.
-    #[arg(long, value_name = "POLICY")]
+    #[arg(help_heading = "Permissions", long, value_name = "POLICY")]
     approval: Option<String>,
 
-    /// Approve every tool call without asking, like `agent --yes`. Not "allow everything":
+    /// Approve every tool call without asking, like `radian exec --yes`. Not "allow everything":
     /// `deny` rules still deny and the sandbox still applies; only the question is removed.
-    #[arg(long)]
+    #[arg(help_heading = "Permissions", long)]
     yes: bool,
 
     /// The per-turn model call limit. The core's default (`DEFAULT_MAX_MODEL_CALLS`, 32) is a
     /// fuse for unattended runs; an interactive coding session reads many files per turn and
     /// a human can cancel, so the TUI defaults much higher. It is still a fuse: a loop of
     /// small calls is not stopped by the context budget (which only triggers compaction).
-    #[arg(long, value_name = "N", default_value_t = TUI_DEFAULT_MAX_MODEL_CALLS)]
+    #[arg(help_heading = "Model", long, value_name = "N", default_value_t = TUI_DEFAULT_MAX_MODEL_CALLS)]
     max_model_calls: u32,
 
     /// Allow a shell command prefix without asking, repeatable (e.g. `--allow-shell-command
     /// "git status"`). Only a *simple* command matches: any shell metacharacter keeps the
     /// call at `ask`. Write these at the subcommand level, never at a bare program name.
-    #[arg(long = "allow-shell-command", value_name = "PREFIX")]
+    #[arg(
+        help_heading = "Permissions",
+        long = "allow-shell-command",
+        value_name = "PREFIX"
+    )]
     allow_shell_command: Vec<String>,
 
     /// The model's context window in tokens (ADR 0015). Omitted, the models.dev catalog is
     /// consulted for `(provider, model)` (ADR 0018); an explicit value always wins. With
     /// neither, the budget is off and the status bar says so.
-    #[arg(long, value_name = "TOKENS")]
+    #[arg(help_heading = "Model", long, value_name = "TOKENS")]
     context_window: Option<u64>,
 
     /// Never fetch the models.dev catalog; use only the local cache.
-    #[arg(long)]
+    #[arg(help_heading = "Model", long)]
     offline_catalog: bool,
 
     /// The models.dev provider id to look the model up under (default: derived from the
     /// `--base-url` hostname; e.g. `opencode.ai` → `opencode`).
-    #[arg(long, value_name = "PROVIDER")]
+    #[arg(help_heading = "Model", long, value_name = "PROVIDER")]
     catalog_provider: Option<String>,
 
     /// Turn automatic compaction off. Over the input budget `B` the request is then sent
     /// unchanged (ADR 0018).
-    #[arg(long)]
+    #[arg(help_heading = "Model", long)]
     no_auto_compact: bool,
 
     /// Trust this workspace's project resources for **this process only** (never written to
     /// `trust.json`; ADR 0031 T3).
-    #[arg(long, conflicts_with = "no_trust")]
+    #[arg(help_heading = "Permissions", long, conflicts_with = "no_trust")]
     trust: bool,
 
     /// Do not trust this workspace's project resources for this process only (ADR 0031 T3).
-    #[arg(long)]
+    #[arg(help_heading = "Permissions", long)]
     no_trust: bool,
-
-    #[arg(long)]
-    system: Option<String>,
 
     /// Test hook: enter the terminal, then panic, so the restore hook can be exercised.
     #[arg(long, hide = true)]
@@ -208,6 +223,12 @@ struct Cli {
     #[arg(long, hide = true, value_name = "COUNT")]
     flood_facts: Option<u64>,
 
+    /// A non-TUI mode (ADR 0032): `radian exec …` is today's `agent` command, the management
+    /// commands (`radian memory`/`login`/`config`) run the same library dispatch. Absent: the
+    /// full-screen TUI, which is what `radian` has always been.
+    #[command(subcommand)]
+    command: Option<RadianCommand>,
+
     /// Test hook, **kept** as a diagnostic: append
     /// `<point> <unix-nanos>` to this file at each step of the terminal-gone exit path. It
     /// tells "the exit path ran but slowly" from "the POLLHUP path never fired" (and, with
@@ -216,6 +237,117 @@ struct Cli {
     /// per-site counters are not even touched (`exit_trace_once` returns on an unset `OnceLock`).
     #[arg(long, hide = true, value_name = "FILE")]
     exit_trace: Option<PathBuf>,
+}
+
+/// The subcommands that are not the TUI (ADR 0032). `exec` is today's `agent` command, run
+/// through the `agent-cli` library so the two entries cannot drift; the management commands
+/// follow in the same shape.
+#[derive(clap::Subcommand, Debug)]
+enum RadianCommand {
+    /// Run one turn or an interactive line session: today's `agent` command, unchanged.
+    /// `radian exec -p "…"` prints only the model's text; `radian exec` is the line REPL.
+    ///
+    /// The `agent` parser owns this mode's flags, help and usage errors (`radian exec --help`
+    /// shows them, and a bad flag exits 2 through clap, exactly as `agent` does), so clap's
+    /// own help for this variant is off and everything after `exec` is passed through.
+    #[command(disable_help_flag = true, disable_version_flag = true)]
+    Exec {
+        /// Everything `agent` accepts, passed through unchanged.
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "ARGS"
+        )]
+        args: Vec<String>,
+    },
+
+    /// Store an API key for a provider (ADR 0026 D3). The same code `radian exec login` runs.
+    Login {
+        /// A built-in provider id, or `custom` to name a new endpoint. Omitted: a numbered
+        /// list is shown.
+        provider: Option<String>,
+    },
+    /// Remove a stored credential (asks first). The same code `radian exec logout` runs.
+    Logout {
+        /// The provider id the key is stored under.
+        provider: String,
+    },
+    /// Manage durable memory (ADR 0021 D7): the same grammar as `radian exec memory` and the
+    /// TUI's `/memory`.
+    Memory {
+        /// The workspace project memory is resolved against, like `radian exec --workspace`.
+        #[arg(long, value_name = "DIR")]
+        workspace: Option<PathBuf>,
+        #[command(subcommand)]
+        command: radian_host::memory::commands::MemoryCommand,
+    },
+    /// Configuration tools (ADR 0008): `radian config import-pi …`, the same code
+    /// `radian exec config` runs.
+    Config {
+        #[command(subcommand)]
+        command: agent_cli::ConfigCommand,
+    },
+
+    /// Reserved for ADR 0030's control port: a named agent serving its session over a local
+    /// endpoint. Not implemented yet - it refuses with a usage-class exit code.
+    Serve,
+    /// Reserved for ADR 0030's MCP server mode. Not implemented yet - it refuses with a
+    /// usage-class exit code.
+    Mcp,
+}
+
+/// Runs a non-TUI subcommand and returns its exit code (ADR 0032 A3: 0 ok, 1 the run failed,
+/// 2 usage/setup, 101 panic, 128+signal - the same codes the `agent` binary returns, because
+/// it is the same dispatch).
+fn run_subcommand(command: RadianCommand) -> ExitCode {
+    match command {
+        RadianCommand::Exec { args } => {
+            // The agent parser owns `--help`/`--version`/usage errors: `parse_from` exits
+            // inside clap for those, exactly as the `agent` binary does.
+            // The program name clap shows in usage and errors: `radian exec`, the command
+            // the user ran.
+            ExitCode::from(agent_cli::parse_and_run(
+                std::iter::once("radian exec".to_string()).chain(args),
+            ) as u8)
+        }
+        // The management commands build the same `Cli` the `agent` parser would and run the
+        // same dispatch (ADR 0032 direction): `radian login` and `radian exec login` are
+        // one code path, not two.
+        RadianCommand::Login { provider } => {
+            run_agent_cli(agent_cli::Cli::for_command(agent_cli::Command::Login {
+                provider,
+            }))
+        }
+        RadianCommand::Logout { provider } => {
+            run_agent_cli(agent_cli::Cli::for_command(agent_cli::Command::Logout {
+                provider,
+            }))
+        }
+        RadianCommand::Memory { workspace, command } => run_agent_cli(agent_cli::Cli::for_memory(
+            workspace.map(|path| path.to_string_lossy().into_owned()),
+            command,
+        )),
+        RadianCommand::Config { command } => {
+            run_agent_cli(agent_cli::Cli::for_command(agent_cli::Command::Config {
+                command,
+            }))
+        }
+        // Reserved names (ADR 0032): the shape is fixed now so scripts and docs can use it,
+        // the implementation is ADR 0030's. A usage-class refusal (2), never a silent no-op.
+        RadianCommand::Serve => reserved("serve"),
+        RadianCommand::Mcp => reserved("mcp"),
+    }
+}
+
+/// Refuses a reserved subcommand: one line on stderr and the usage-class exit code.
+fn reserved(name: &str) -> ExitCode {
+    eprintln!("radian: `{name}` is reserved for ADR 0030's control port; not implemented yet");
+    ExitCode::from(2)
+}
+
+/// Runs one management command through the `agent-cli` dispatch and returns its exit code.
+fn run_agent_cli(cli: agent_cli::Cli) -> ExitCode {
+    ExitCode::from(agent_cli::run_blocking(cli) as u8)
 }
 
 /// The TUI's per-turn model call limit when `--max-model-calls` is not given (decision
@@ -228,10 +360,18 @@ const TUI_DEFAULT_MAX_MODEL_CALLS: u32 = 1000;
 /// pre-refactor 50 ms tick (~50 deltas) while staying far below a frame budget.
 const MAX_FACTS_PER_TURN: usize = 64;
 
-/// How many effect rounds one turn may take. An effect's result is another event, and a result
-/// can ask for one more effect (`@` expansion → send), so the chain is short; the bound turns a
-/// bug into an error instead of a hang.
+/// How many effect rounds one turn may take before the rest carry to the next turn. An
+/// effect's result is another event, and a result can ask for one more effect (`@` expansion →
+/// send), so the chain is short; the bound keeps one turn's work near a frame budget and hands
+/// the rest to the next turn (never dropped, order kept). It is **draw fairness**, not an
+/// error: a busy machine with many unrelated events in the channel can legitimately exceed it.
 const MAX_EFFECT_ROUNDS: usize = 8;
+
+/// How many consecutive turns a carried effect batch may run before a one-time notice. A
+/// genuine infinite effect loop (an effect whose result always produces another effect) would
+/// otherwise run every frame; the notice says so and the loop keeps running — a TUI must not
+/// exit on it. 1000 turns is far above any real chain (the longest is `@` expansion → send).
+const MAX_CARRIED_FRAMES: u64 = 1000;
 
 /// The input thread's poll interval: a wake-up granularity for the hang-up check, not a
 /// synchronization device.
@@ -249,7 +389,12 @@ fn mark(label: &str) {
 fn main() -> ExitCode {
     radian_session::trace::start();
     radian_tui::terminal::install_panic_hook();
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    // A subcommand is a mode of its own: it never enters the TUI, never reads the TUI's
+    // flags, and returns its own exit code (ADR 0032).
+    if let Some(command) = cli.command.take() {
+        return run_subcommand(command);
+    }
     if let Some(path) = &cli.exit_trace {
         let _ = EXIT_TRACE.set(path.clone());
     }
@@ -299,9 +444,9 @@ fn main() -> ExitCode {
             exit_trace("exit");
             code
         }
-        Ok(Err(message)) => {
-            print_exit_line(&message);
-            ExitCode::from(1)
+        Ok(Err(error)) => {
+            print_exit_line(error.message());
+            ExitCode::from(error.code())
         }
         Err(_) => {
             let mut message = "the app panicked".to_string();
@@ -319,6 +464,43 @@ fn main() -> ExitCode {
     }
 }
 
+/// Why the TUI stopped. ADR 0032 A3 unifies the codes: a **startup refusal** is a
+/// usage/setup error and exits 2 (it was 1 before), everything that fails once the run began
+/// (the driver, the input, `--list`) exits 1.
+enum RunError {
+    /// A startup/setup refusal: a bad config, an unknown keybinding, a `--resume` with
+    /// nothing to resume, the window check. Exit 2, like clap's own usage errors.
+    Startup(String),
+    /// The run itself failed. Exit 1.
+    Failed(String),
+}
+
+/// Every `?` in the startup phase converts a plain message into a [`RunError::Startup`] - the
+/// default, because that phase is where nearly every refusal happens. The few failures that
+/// can only happen after the run began name [`RunError::Failed`] explicitly.
+impl From<String> for RunError {
+    fn from(message: String) -> Self {
+        Self::Startup(message)
+    }
+}
+
+impl RunError {
+    /// The process exit code (ADR 0032 A3).
+    fn code(&self) -> u8 {
+        match self {
+            Self::Startup(_) => 2,
+            Self::Failed(_) => 1,
+        }
+    }
+
+    /// The one line the normal screen gets.
+    fn message(&self) -> &str {
+        match self {
+            Self::Startup(message) | Self::Failed(message) => message,
+        }
+    }
+}
+
 /// Prints the exit reason on the normal screen. `eprintln!` panics when the terminal is
 /// already gone (a closed pty makes the write fail), which would turn a clean exit into 101;
 /// a failure to print the line is not a failure to exit.
@@ -332,12 +514,14 @@ fn run(
     runtime: &tokio::runtime::Runtime,
     rx: Receiver<UiEvent>,
     tx: Sender<UiEvent>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, RunError> {
     mark("run-start");
     if cli.list {
         return match list_sessions(&cli) {
             Ok(()) | Err(ListError::BrokenPipe) => Ok(None),
-            Err(ListError::Failed(message)) => Err(message),
+            // `--list` failing is a real error of this run, not a startup refusal (ADR 0032
+            // A3's table: print-and-exit modes return 1 for a real error).
+            Err(ListError::Failed(message)) => Err(RunError::Failed(message)),
         };
     }
     // ADR 0013 decision 4: diagnostics live in the user cache directory, and cleanup runs at
@@ -366,7 +550,7 @@ fn run(
     }
     // A keymap conflict refuses startup before the terminal is entered.
     if let Err(error) = radian_tui::keys::Keymap::from_config(&config.tui.keybindings) {
-        return Err(format!("config: {error}"));
+        return Err(RunError::Startup(format!("config: {error}")));
     }
     // ADR 0026 D8: on a resume the journal's last model change outranks the config file (the
     // command line still outranks both). `--resume`'s id is known by here (`dir` too).
@@ -391,10 +575,10 @@ fn run(
     // Nothing to resume is a refusal, not a new session: `--resume` without a value never
     // creates a file.
     if resume_only && startup_picker.is_none() {
-        return Err(
+        return Err(RunError::Startup(
             "no sessions for this workspace to resume; run without --resume to start one"
                 .to_string(),
-        );
+        ));
     }
     let pick_notice = cli.pick && startup_picker.is_none();
 
@@ -475,6 +659,8 @@ fn run(
             cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             // The picker phase has no session and no sandbox yet.
             None,
+            None,
+            // The picker phase has no session to report (ADR 0034 H1).
             None,
         )?;
         if let Some(signal) = signal {
@@ -610,17 +796,17 @@ fn run(
         Some(credential) => Some(credential),
         None if is_local_base_url(&probe_base_url) => None,
         None => {
-            return Err(
+            return Err(RunError::Startup(
                 match radian_host::resolve_note(&key_id).map_err(|e| e.to_string())? {
                     Some(note) => note,
                     None => format!(
-                        "no credential for `{key_id}`: run `agent login {key_id}`, or \
+                        "no credential for `{key_id}`: run `radian login {key_id}`, or \
                          `/login {key_id}` in the TUI; refusing to continue because {} is not a \
                          local address",
                         radian_host::redact_base_url(&probe_base_url)
                     ),
                 },
-            );
+            ));
         }
     };
     // The config's headers come first, so a `--header` of the same name wins.
@@ -666,7 +852,7 @@ fn run(
     // window (the budget is then off).
     match window.startup_check() {
         radian_host::WindowCheck::Ok => {}
-        radian_host::WindowCheck::Refuse(message) => return Err(message),
+        radian_host::WindowCheck::Refuse(message) => return Err(RunError::Startup(message)),
         radian_host::WindowCheck::Warn(message) => eprintln!("{message}"),
     }
     if let Some(warning) = radian_host::output_ceiling_warning(request_max_output, window.output) {
@@ -720,6 +906,10 @@ fn run(
         route.adapter(),
         Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
     );
+    // ADR 0014 Q2: the catalog (or a `[providers.<id>]` override) decides whether
+    // this route replays reasoning.
+    let reasoning_replay = radian_host::resolve_reasoning_replay(&provider_ref, &model_name);
+    let replays_reasoning = reasoning_replay.is_some();
     let initial = build_model(ModelArgs {
         provider: route.adapter(),
         base_url: route.base_url.clone(),
@@ -731,6 +921,7 @@ fn run(
         max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         thinking: thinking_of,
         reasoning_effort,
+        reasoning_replay,
     })?;
     // ADR 0026 D5: the model is switchable. The slot is shared with the driver (open_session
     // wires it), so a `/model` change reaches the next request without touching the key.
@@ -760,15 +951,24 @@ fn run(
     );
     let budget_for = {
         let query = window_query.clone();
+        let providers = config.providers.clone();
         std::sync::Arc::new(move |provider: &str, switch_model: &str| {
             // The switched route carries its own provider id, so the resolver uses it directly
             // instead of deriving one from the startup base URL.
-            radian_host::resolve_offline(&radian_host::WindowQuery {
+            let window = radian_host::resolve_offline(&radian_host::WindowQuery {
                 catalog_provider: Some(provider.to_owned()),
                 model: switch_model.to_owned(),
                 ..query.clone()
+            });
+            // ADR 0014 Q4: the estimate counts reasoning exactly when the route
+            // replays it, so the projection matches the request actually sent.
+            window.budget.map(|tokens| {
+                ContextBudget::new(tokens).with_reasoning(radian_host::route_replays_reasoning(
+                    provider,
+                    switch_model,
+                    &providers,
+                ))
             })
-            .budget
         }) as radian_runtime::BudgetFor
     };
     // ADR 0027 + ADR 0026 D5/D7: the same warm-cache lookup gives the **price**, so
@@ -955,8 +1155,12 @@ fn run(
                 coding_root: Some(workspace_path.clone()),
                 model,
                 servers,
+                // ADR 0036: an interactive session uses the `default` role.
+                role: None,
                 system_prompt: cli.system.clone(),
-                context_budget: window.budget.map(ContextBudget::new),
+                context_budget: window
+                    .budget
+                    .map(|tokens| ContextBudget::new(tokens).with_reasoning(replays_reasoning)),
                 auto_compact: !cli.no_auto_compact && config.compaction.auto.unwrap_or(true),
                 sandbox,
                 tier: tier.preset(),
@@ -1305,12 +1509,32 @@ fn run(
         summary.push_str(" · ");
         summary.push_str(note);
     }
+    // ADR 0034: report to herdr when this process runs inside a herdr pane. The first report
+    // is the current state (idle, or blocked while the trust prompt waits) with the session
+    // identity and the resume command.
+    let mut herdr = herdr_reporter(
+        &config,
+        &session_id,
+        session.journal_path(),
+        &resume_extra_args(&cli, &workspace_path),
+    );
+    let herdr_note = herdr.as_ref().and_then(|(_, note)| note.clone());
+    if let Some((reporter, _)) = herdr.as_mut() {
+        reporter.maybe_report(&app);
+    }
     let mut startup_lines = vec![
         format!("profile: {}", session.facts().profile_line),
         sandbox_facts,
         context_line,
         format!("context: {}", session.facts().context_line),
     ];
+    // ADR 0034 H1: the startup line says reporting is on, and names a rejected resume command.
+    if herdr.is_some() {
+        startup_lines.push(match &herdr_note {
+            Some(reason) => format!("herdr: reporting (no resume: {reason})"),
+            None => "herdr: reporting".to_owned(),
+        });
+    }
     if let Some(line) = &workspace_line {
         startup_lines.push(line.clone());
     }
@@ -1360,11 +1584,7 @@ fn run(
     mark("before-startup");
     app.set_startup(radian_tui::startup::StartupScreen {
         banner,
-        banner_narrow: format!(
-            "{} radian {}",
-            radian_tui::footer::brand_mark(app.footer_glyphs()),
-            env!("CARGO_PKG_VERSION")
-        ),
+        banner_narrow: format!("{} radian {}", app.brand_mark(), env!("CARGO_PKG_VERSION")),
         summary,
         lines: startup_lines,
         safety,
@@ -1422,6 +1642,7 @@ fn run(
         cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         bash_sandbox,
         usage_gate,
+        herdr.map(|(reporter, _)| reporter),
     );
     exit_trace("loop-done");
     // Tell a pending signal task that the loop left on its own, so it does not force-exit.
@@ -1443,7 +1664,9 @@ fn run(
     exit_trace("stopped");
     match joined {
         radian_host::DriverEnd::Ok => {}
-        radian_host::DriverEnd::Failed(error) => return Err(format!("driver: {error}")),
+        radian_host::DriverEnd::Failed(error) => {
+            return Err(RunError::Failed(format!("driver: {error}")));
+        }
         radian_host::DriverEnd::Panicked(message) => {
             let mut message = format!("the driver task ended unexpectedly: {message}");
             if let Some(panic) = radian_tui::terminal::last_panic() {
@@ -1451,7 +1674,7 @@ fn run(
                 message.push_str(": ");
                 message.push_str(&panic);
             }
-            return Err(message);
+            return Err(RunError::Failed(message));
         }
     }
     // A failure in the UI loop is the app's failure too; the terminal is already restored.
@@ -1536,24 +1759,101 @@ fn resume_command(program: &str, session_id: &str, cli: &Cli, workspace: &Path) 
         "--resume".to_owned(),
         session_id.to_owned(),
     ];
+    parts.extend(
+        resume_extra_args(cli, workspace)
+            .iter()
+            .map(|arg| shell_arg(arg)),
+    );
+    format!("resume: {}", parts.join(" "))
+}
+
+/// The extra `--resume` arguments after `--resume <id>`: `--session-dir`, `--workspace` (only
+/// when it is not the current directory) and `--config`, as **raw** values. The printed resume
+/// command shell-quotes them; herdr's `resume_argv` carries them verbatim (ADR 0034 H3).
+fn resume_extra_args(cli: &Cli, workspace: &Path) -> Vec<String> {
+    let mut parts = Vec::new();
     if let Some(dir) = &cli.session_dir {
         parts.push("--session-dir".to_owned());
-        parts.push(shell_arg(&dir.display().to_string()));
+        parts.push(dir.display().to_string());
     }
-    // Only when the workspace is not the current directory: the default is the cwd, so the
-    // command works from wherever the user runs it.
     let cwd = std::env::current_dir()
         .ok()
         .and_then(|cwd| std::fs::canonicalize(cwd).ok());
     if cli.workspace.is_some() || cwd.as_deref() != Some(workspace) {
         parts.push("--workspace".to_owned());
-        parts.push(shell_arg(&workspace.display().to_string()));
+        parts.push(workspace.display().to_string());
     }
     if let Some(config) = &cli.config {
         parts.push("--config".to_owned());
-        parts.push(shell_arg(&config.display().to_string()));
+        parts.push(config.display().to_string());
     }
-    format!("resume: {}", parts.join(" "))
+    parts
+}
+
+/// The TUI's herdr reporter (ADR 0034): the sender thread, the monotonic `seq`, the session
+/// identity, the resume command and the last reported state. `maybe_report` recomputes the
+/// state and queues a report only when it changed; the UI thread never waits on I/O.
+struct HerdrReporter {
+    reporter: radian_host::herdr::Reporter,
+    seq: radian_host::herdr::Seq,
+    session: radian_host::herdr::SessionIdentity,
+    resume: Option<Vec<String>>,
+    last: Option<(radian_host::herdr::State, Option<String>)>,
+}
+
+impl HerdrReporter {
+    fn maybe_report(&mut self, app: &App) {
+        let (turn, pending, trust) = app.herdr_state_inputs();
+        let state = radian_host::herdr::state(turn, pending, trust);
+        let message = (state == radian_host::herdr::State::Blocked)
+            .then(|| radian_host::herdr::blocked_message(app.herdr_blocked().as_ref(), trust));
+        if self.last.as_ref() == Some(&(state, message.clone())) {
+            return;
+        }
+        self.last = Some((state, message.clone()));
+        let mut report = radian_host::herdr::Report::new(state);
+        if let Some(message) = message {
+            report = report.message(message);
+        }
+        report = report.session(self.session.id.clone(), self.session.path.clone());
+        if let Some(argv) = &self.resume {
+            report = report.resume(Some(argv.clone()));
+        }
+        self.reporter.report(&report, self.seq.next());
+    }
+
+    fn release(&self) {
+        self.reporter.release(self.seq.next());
+    }
+}
+
+/// Builds the reporter when the environment says we are in a herdr pane (ADR 0034 H1). The
+/// returned `Option<String>` is the reason the resume command was left out, for the startup
+/// line.
+fn herdr_reporter(
+    config: &radian_host::config::Config,
+    session_id: &str,
+    journal: &Path,
+    extra: &[String],
+) -> Option<(HerdrReporter, Option<String>)> {
+    let env = radian_host::herdr::detect(config.integrations.herdr)?;
+    let (resume, note) = match radian_host::herdr::resume_argv(session_id, extra) {
+        Ok(argv) => (Some(argv), None),
+        Err(reason) => (None, Some(reason)),
+    };
+    Some((
+        HerdrReporter {
+            reporter: radian_host::herdr::Reporter::spawn(env),
+            seq: radian_host::herdr::Seq::new(),
+            session: radian_host::herdr::SessionIdentity {
+                id: session_id.to_owned(),
+                path: journal.to_path_buf(),
+            },
+            resume,
+            last: None,
+        },
+        note,
+    ))
 }
 
 /// Test hook (`--block-input`): a path whose creation marks "the read is now blocked forever".
@@ -1826,6 +2126,25 @@ fn terminal_gone(error: &std::io::Error) -> bool {
 /// Whether the tty is already hung up, as `poll(2)` sees it right now. A draw failure carries
 /// crossterm's own "failed to write the buffered data" (no errno), so the tty's own state is
 /// the reliable test.
+/// Advances the spinner's clock and returns the new frame when a spinner is visible and the
+/// frame changed since `last` (ADR 0027). The idle tick calls this, so an idle app
+/// still makes no frame and a visible spinner redraws on its interval.
+fn spinner_tick(
+    app: &mut App,
+    last: &mut Option<radian_tui::spinner::Frame>,
+) -> Option<radian_tui::spinner::Frame> {
+    if !app.spinner_visible() {
+        return None;
+    }
+    app.set_now(std::time::Instant::now());
+    let frame = app.spinner_frame();
+    if *last == Some(frame) {
+        return None;
+    }
+    *last = Some(frame);
+    Some(frame)
+}
+
 fn terminal_is_gone() -> bool {
     #[cfg(unix)]
     {
@@ -2052,6 +2371,8 @@ struct LoopContext<'a> {
     /// How a selection copy reaches the clipboard (`tui.clipboard`), read once from the app
     /// when the context is built: the mode cannot change mid-run.
     clipboard: ClipboardMode,
+    /// The herdr reporter (ADR 0034), when running inside a herdr pane.
+    herdr: Option<HerdrReporter>,
     /// The sandbox the user's `!`/`!!` commands run in (ADR 0033): the coding tools' own,
     /// cloned. `None` on the `safe` tier (no shell).
     bash_sandbox: Option<radian_sandbox::Sandbox>,
@@ -2736,6 +3057,37 @@ fn usage_period(configured: Option<u64>) -> Option<std::time::Duration> {
     }
 }
 
+/// One step of [`run_effect_rounds`]: run one effect, or take the result events the last
+/// batch produced.
+enum RoundStep<'a, T> {
+    Execute(T),
+    Drain(&'a mut Vec<T>, usize),
+}
+
+/// Runs at most [`MAX_EFFECT_ROUNDS`] effect rounds (ADR 0023 U2's draw fairness). `step` runs
+/// one effect or takes the result events the last batch produced (returning whether it handled
+/// any). Whatever is left in `effects` stays there for the next turn — never dropped, order
+/// kept; the loop draws a frame and continues. A genuine infinite chain keeps running and warns
+/// once (see [`MAX_CARRIED_FRAMES`]), it never exits. Returns the rounds run.
+fn run_effect_rounds<T>(
+    effects: &mut Vec<T>,
+    mut step: impl FnMut(RoundStep<'_, T>) -> Result<bool, String>,
+) -> Result<usize, String> {
+    let mut rounds = 0;
+    while !effects.is_empty() && rounds < MAX_EFFECT_ROUNDS {
+        rounds += 1;
+        let batch = std::mem::take(effects);
+        let produced = batch.len();
+        for effect in batch {
+            step(RoundStep::Execute(effect))?;
+        }
+        if !step(RoundStep::Drain(effects, produced))? {
+            break;
+        }
+    }
+    Ok(rounds)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn ui_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
@@ -2752,6 +3104,8 @@ fn ui_loop(
     bash_sandbox: Option<radian_sandbox::Sandbox>,
     // The opencode-go usage gate (ADR 0027), flipped on a `/model` switch.
     usage_gate: Option<tokio::sync::watch::Sender<bool>>,
+    // The herdr reporter (ADR 0034), when running inside a herdr pane.
+    mut herdr: Option<HerdrReporter>,
 ) -> Result<Option<i32>, String> {
     let mut picking_signal: Option<i32> = None;
     let mut ctx = match phase {
@@ -2781,6 +3135,7 @@ fn ui_loop(
             bash_sandbox: bash_sandbox.clone(),
             bash_cancel: None,
             usage_gate,
+            herdr: herdr.take(),
         }),
     };
     // The first frame: the startup notices and the resumed history are already in the app, and
@@ -2792,9 +3147,19 @@ fn ui_loop(
         return Ok(None);
     }
     radian_tui::terminal::set_cursor_visible(app.input_editable());
+    // The last spinner frame drawn (ADR 0027): the idle tick redraws only when the
+    // frame changes, so the pulse (500 ms) does not draw on every 250 ms wake.
+    let mut last_spinner: Option<radian_tui::spinner::Frame> = None;
+    // An effect batch the draw-fairness cap did not finish: declared outside the loop so the
+    // rest survives to the next turn (never dropped, order kept).
+    let mut effects: Vec<Effect> = Vec::new();
+    let mut carried_frames: u64 = 0;
     // The pre-session phase ends when the picker resolves; otherwise only `quit` leaves.
     while !app.quit && !app.picking_resolved() {
-        // Block until there is something to do. No display in this build changes with time (the
+        let mut dirty = false;
+        // A carried batch runs first, without a blocking wait: the effects must not wait for a
+        // new event. Otherwise block until there is something to do. No display in this build
+        // changes with time (the
         // status bar, the notes, the find box and the budget line are static text), so there is
         // no `recv_timeout` here: an idle app is not redrawn at all (ADR 0023 U2). A clock-like
         // display would take the timeout branch at this line. The one exception is a live
@@ -2803,133 +3168,164 @@ fn ui_loop(
         // and goes straight back to blocking `recv` when it ends. The armed Ctrl-C quit
         // window is the other time-driven display (ADR 0023 U2): while it is armed the loop
         // wakes at its deadline to drop the hint.
-        let now = std::time::Instant::now();
-        let quit_remaining = app
-            .quit_pending
-            .map(|deadline| deadline.saturating_duration_since(now));
-        // A `/fork` waiting for the turn boundary has its own deadline (FORK_COMMIT_WAIT).
-        let fork_remaining = app
-            .pending_fork
-            .map(|deadline| deadline.saturating_duration_since(now));
-        let wait_remaining = match (quit_remaining, fork_remaining) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
-        };
-        let first = if app.is_selecting() || wait_remaining.is_some() {
-            // The nearer of the deadlines; `AUTO_SCROLL_TICK` is the drag's own tick.
-            let timeout = match (app.is_selecting(), wait_remaining) {
-                (true, Some(wait)) => wait.min(AUTO_SCROLL_TICK),
-                (true, None) => AUTO_SCROLL_TICK,
-                (false, Some(wait)) => wait.max(std::time::Duration::ZERO),
-                (false, None) => unreachable!("the branch requires selection or a deadline"),
-            }
-            // Also wake for the hang-up check, so a drag or a deadline never postpones it for
-            // longer than one tick.
-            .min(TTY_CHECK_TICK);
-            match rx.recv_timeout(timeout) {
-                Ok(event) => Some(event),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    // Guard 2: the input thread may be stuck inside crossterm's reader; a
-                    // non-consuming `poll(2)` on stdin still reports the hang-up.
-                    if terminal_is_gone() {
-                        app.quit = true;
-                        break;
-                    }
-                    // A `/fork` waiting for the journaled turn boundary: give up at its
-                    // deadline with a notice, never an empty child session.
-                    if app
-                        .pending_fork
-                        .is_some_and(|d| std::time::Instant::now() >= d)
-                        && app.update(AppInput::ForkDeadline).dirty
-                        && !draw_frame(terminal, app)?
-                    {
-                        app.quit = true;
-                        break;
-                    }
-                    // The quit window closed: disarm and redraw, so the hint disappears. A
-                    // drag at an edge (or both) still ticks its scroll on the same wake.
-                    if app
-                        .quit_pending
-                        .is_some_and(|d| std::time::Instant::now() >= d)
-                        && app.update(AppInput::QuitDeadline).dirty
-                        && !draw_frame(terminal, app)?
-                    {
-                        app.quit = true;
-                        break;
-                    }
-                    if app.is_selecting() && app.mouse_autoscroll() && !draw_frame(terminal, app)? {
-                        app.quit = true;
-                        break;
-                    }
-                    continue;
+        if effects.is_empty() {
+            let now = std::time::Instant::now();
+            let quit_remaining = app
+                .quit_pending
+                .map(|deadline| deadline.saturating_duration_since(now));
+            // A `/fork` waiting for the turn boundary has its own deadline (FORK_COMMIT_WAIT).
+            let fork_remaining = app
+                .pending_fork
+                .map(|deadline| deadline.saturating_duration_since(now));
+            let wait_remaining = match (quit_remaining, fork_remaining) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+            let first = if app.is_selecting() || wait_remaining.is_some() {
+                // The nearer of the deadlines; `AUTO_SCROLL_TICK` is the drag's own tick.
+                let timeout = match (app.is_selecting(), wait_remaining) {
+                    (true, Some(wait)) => wait.min(AUTO_SCROLL_TICK),
+                    (true, None) => AUTO_SCROLL_TICK,
+                    (false, Some(wait)) => wait.max(std::time::Duration::ZERO),
+                    (false, None) => unreachable!("the branch requires selection or a deadline"),
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => None,
+                // Also wake for the hang-up check, so a drag or a deadline never postpones it
+                // for longer than one tick.
+                .min(TTY_CHECK_TICK);
+                match rx.recv_timeout(timeout) {
+                    Ok(event) => Some(event),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        // Guard 2: the input thread may be stuck inside crossterm's reader; a
+                        // non-consuming `poll(2)` on stdin still reports the hang-up.
+                        if terminal_is_gone() {
+                            app.quit = true;
+                            break;
+                        }
+                        // A `/fork` waiting for the journaled turn boundary: give up at its
+                        // deadline with a notice, never an empty child session.
+                        if app
+                            .pending_fork
+                            .is_some_and(|d| std::time::Instant::now() >= d)
+                            && app.update(AppInput::ForkDeadline).dirty
+                            && !draw_frame(terminal, app)?
+                        {
+                            app.quit = true;
+                            break;
+                        }
+                        // The quit window closed: disarm and redraw, so the hint disappears. A
+                        // drag at an edge (or both) still ticks its scroll on the same wake.
+                        if app
+                            .quit_pending
+                            .is_some_and(|d| std::time::Instant::now() >= d)
+                            && app.update(AppInput::QuitDeadline).dirty
+                            && !draw_frame(terminal, app)?
+                        {
+                            app.quit = true;
+                            break;
+                        }
+                        if app.is_selecting()
+                            && app.mouse_autoscroll()
+                            && !draw_frame(terminal, app)?
+                        {
+                            app.quit = true;
+                            break;
+                        }
+                        if spinner_tick(app, &mut last_spinner).is_some()
+                            && !draw_frame(terminal, app)?
+                        {
+                            app.quit = true;
+                            break;
+                        }
+                        continue;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => None,
+                }
+            } else {
+                // A bounded wait, not a blocking one: guard 2's hang-up check runs every tick even
+                // while the app is idle. A timeout with the tty alive loops without drawing.
+                match rx.recv_timeout(TTY_CHECK_TICK) {
+                    Ok(event) => Some(event),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        if terminal_is_gone() {
+                            app.quit = true;
+                            break;
+                        }
+                        if spinner_tick(app, &mut last_spinner).is_some()
+                            && !draw_frame(terminal, app)?
+                        {
+                            app.quit = true;
+                            break;
+                        }
+                        continue;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => None,
+                }
+            };
+            let Some(first) = first else {
+                // Every sender is gone: nothing left to drive the UI.
+                break;
+            };
+            let mut facts = 1;
+            dirty |= match ctx.as_mut() {
+                Some(ctx) => ctx.handle(first, app, &mut effects),
+                None => handle_picking(first, app, &mut picking_signal),
+            };
+            // At most `MAX_FACTS_PER_TURN` facts before a frame (draw fairness).
+            while facts < MAX_FACTS_PER_TURN {
+                match rx.try_recv() {
+                    Ok(event) => {
+                        dirty |= match ctx.as_mut() {
+                            Some(ctx) => ctx.handle(event, app, &mut effects),
+                            None => handle_picking(event, app, &mut picking_signal),
+                        };
+                        facts += 1;
+                    }
+                    Err(_) => break,
+                }
             }
         } else {
-            // A bounded wait, not a blocking one: guard 2's hang-up check runs every tick even
-            // while the app is idle. A timeout with the tty alive loops without drawing.
-            match rx.recv_timeout(TTY_CHECK_TICK) {
-                Ok(event) => Some(event),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    if terminal_is_gone() {
-                        app.quit = true;
-                        break;
-                    }
-                    continue;
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => None,
-            }
-        };
-        let Some(first) = first else {
-            // Every sender is gone: nothing left to drive the UI.
-            break;
-        };
-        let mut dirty = false;
-        let mut effects: Vec<Effect> = Vec::new();
-        let mut facts = 1;
-        dirty |= match ctx.as_mut() {
-            Some(ctx) => ctx.handle(first, app, &mut effects),
-            None => handle_picking(first, app, &mut picking_signal),
-        };
-        // At most `MAX_FACTS_PER_TURN` facts before a frame (draw fairness).
-        while facts < MAX_FACTS_PER_TURN {
-            match rx.try_recv() {
-                Ok(event) => {
-                    dirty |= match ctx.as_mut() {
-                        Some(ctx) => ctx.handle(event, app, &mut effects),
-                        None => handle_picking(event, app, &mut picking_signal),
-                    };
-                    facts += 1;
-                }
-                Err(_) => break,
-            }
+            // A carried batch draws a frame before the rest runs: the cap is about drawing
+            // fairly, not about failing.
+            dirty = true;
         }
         // Run the effects (session phase only: the picker produces none). Their results are
         // events, so they are handled by the same code; a result can ask for one more effect
-        // (`@` expansion → send), so this repeats until nothing is pending.
+        // (`@` expansion → send), so this repeats until the cap hands the rest to the next
+        // turn.
         if let Some(ctx) = ctx.as_mut() {
-            let mut rounds = 0;
-            while !effects.is_empty() {
-                rounds += 1;
-                if rounds > MAX_EFFECT_ROUNDS {
-                    return Err("the effect worklist did not settle".into());
-                }
-                let batch = std::mem::take(&mut effects);
-                let produced = batch.len();
-                for effect in batch {
-                    ctx.execute(effect)?;
-                }
-                // Each effect produces at most one result event; take that many (plus whatever
-                // else was already queued behind them).
-                for _ in 0..produced {
-                    match rx.try_recv() {
-                        Ok(event) => dirty |= ctx.handle(event, app, &mut effects),
-                        Err(_) => break,
+            run_effect_rounds(&mut effects, |step| match step {
+                RoundStep::Execute(effect) => ctx.execute(effect).map(|()| true),
+                RoundStep::Drain(effects, produced) => {
+                    // Each effect produces at most one result event; take that many (plus
+                    // whatever else was already queued behind them).
+                    for _ in 0..produced {
+                        match rx.try_recv() {
+                            Ok(event) => dirty |= ctx.handle(event, app, effects),
+                            Err(_) => return Ok(false),
+                        }
                     }
+                    Ok(true)
                 }
+            })?;
+            if !effects.is_empty() {
+                // The cap was hit: the rest carries to the next turn (draw fairness). A chain
+                // that never clears is a bug, but the TUI keeps running and says so once.
+                carried_frames += 1;
+                mark("effect-carry");
+                if carried_frames == MAX_CARRIED_FRAMES {
+                    app.push_notice("the effect worklist is not settling; continuing anyway");
+                }
+                dirty = true;
+            } else {
+                carried_frames = 0;
             }
+        }
+        if let Some(ctx) = ctx.as_mut()
+            && let Some(herdr) = ctx.herdr.as_mut()
+        {
+            herdr.maybe_report(app);
         }
         if dirty {
             if !draw_frame(terminal, app)? {
@@ -2937,9 +3333,17 @@ fn ui_loop(
                 app.quit = true;
                 break;
             }
+            last_spinner = Some(app.spinner_frame());
             // The cursor is visible only while the input box is editable.
             radian_tui::terminal::set_cursor_visible(app.input_editable());
         }
+    }
+    // ADR 0034 H5: a normal exit releases the pane (500 ms). A panic or a kill does not: herdr
+    // clears the pane itself once the shell prompt returns.
+    if let Some(ctx) = ctx.as_ref()
+        && let Some(herdr) = ctx.herdr.as_ref()
+    {
+        herdr.release();
     }
     Ok(ctx.and_then(|ctx| ctx.signal).or(picking_signal))
 }
@@ -2993,8 +3397,16 @@ fn model_route_candidates(
             });
         }
     }
-    // The current provider's models first, then by provider and model name (ADR 0035
-    // revision 2).
+    sort_model_candidates(&mut candidates, current_provider);
+    candidates
+}
+
+/// The flat `/model` list's order (ADR 0035): the current provider's models first,
+/// then by provider and model name.
+fn sort_model_candidates(
+    candidates: &mut [radian_tui::command::Candidate],
+    current_provider: Option<&str>,
+) {
     let is_current = |candidate: &radian_tui::command::Candidate| {
         current_provider.is_some_and(|provider| {
             candidate
@@ -3009,7 +3421,6 @@ fn model_route_candidates(
             .then_with(|| left.description.cmp(&right.description))
             .then_with(|| left.insert.cmp(&right.insert))
     });
-    candidates
 }
 
 /// One provider's model ids: the built-in descriptor's list, then the cached `/v1/models` ids
@@ -3417,6 +3828,49 @@ impl AuditSink for JournalAudit {
 mod tests {
     use super::*;
 
+    /// ADR 0023 U2's draw fairness: a chain longer than `MAX_EFFECT_ROUNDS` carries the rest to
+    /// the next turn — never dropped, order kept — instead of failing the whole TUI. This is
+    /// the `the effect worklist did not settle` bug: under load the loop's drain consumes
+    /// unrelated events whose handlers produce more effects, so a real chain can exceed the cap.
+    #[test]
+    fn effect_rounds_carry_the_rest_in_order() {
+        let mut pending: Vec<u32> = vec![19];
+        let mut executed: Vec<u32> = Vec::new();
+        let mut next: Vec<u32> = Vec::new();
+        let mut calls = 0;
+        while !pending.is_empty() {
+            calls += 1;
+            assert!(calls < 100, "the carry must terminate");
+            let rounds = run_effect_rounds(&mut pending, |step| match step {
+                RoundStep::Execute(n) => {
+                    executed.push(n);
+                    if n > 0 {
+                        next.push(n - 1);
+                    }
+                    Ok(true)
+                }
+                RoundStep::Drain(pending, produced) => {
+                    // Each executed effect produces one result event; handling it produces the
+                    // next effect.
+                    for _ in 0..produced {
+                        if next.is_empty() {
+                            return Ok(false);
+                        }
+                        pending.push(next.remove(0));
+                    }
+                    Ok(true)
+                }
+            })
+            .unwrap();
+            assert!(rounds <= MAX_EFFECT_ROUNDS, "each call is capped");
+        }
+        assert_eq!(
+            executed,
+            (0..20).rev().collect::<Vec<_>>(),
+            "every effect ran, in order"
+        );
+    }
+
     /// ADR 0023 U5: a fact-only update (usage, budget, tier, MCP) wakes the UI with a `Dirty`
     /// and the buffer is empty. The loop must still draw a frame, or the status bar would stay
     /// stale until some unrelated event arrived.
@@ -3433,6 +3887,46 @@ mod tests {
         );
         // And a second `Dirty` that finds the flag already cleared is coalesced away.
         assert!(!apply_dirty(&mut app));
+    }
+
+    /// ADR 0035: the current provider's models come first in the flat `/model`
+    /// list, then the rest by provider and model name.
+    #[test]
+    fn the_flat_model_list_puts_the_current_provider_first() {
+        let candidate = |insert: &str, provider: &str| radian_tui::command::Candidate {
+            insert: insert.to_owned(),
+            description: provider.to_owned(),
+        };
+        let mut candidates = vec![
+            candidate("openai/gpt-5", "openai"),
+            candidate("opencode-go/zeta", "opencode-go"),
+            candidate("anthropic/claude-4", "anthropic"),
+            candidate("opencode-go/alpha", "opencode-go"),
+        ];
+        sort_model_candidates(&mut candidates, Some("opencode-go"));
+        let order: Vec<&str> = candidates.iter().map(|c| c.insert.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "opencode-go/alpha",
+                "opencode-go/zeta",
+                "anthropic/claude-4",
+                "openai/gpt-5"
+            ],
+            "the current provider's models first, then by provider and model"
+        );
+        // Without a current provider, only the name order applies.
+        sort_model_candidates(&mut candidates, None);
+        let order: Vec<&str> = candidates.iter().map(|c| c.insert.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "anthropic/claude-4",
+                "openai/gpt-5",
+                "opencode-go/alpha",
+                "opencode-go/zeta"
+            ]
+        );
     }
 
     #[test]

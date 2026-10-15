@@ -103,6 +103,22 @@ fn parse_price(cost: &serde_json::Map<String, Value>) -> Option<ModelPrice> {
     price.is_usable().then_some(price)
 }
 
+/// The plain-text `interleaved` field names Radian knows how to replay (ADR 0014
+/// Q2). `reasoning_details` is a structured array with a different shape, so it is deliberately
+/// not replayed: that is unsupported, not supported. A bare `true` names no field at all and is
+/// likewise not replayed.
+const REPLAYABLE_INTERLEAVED: [&str; 3] = ["reasoning_content", "reasoning", "reasoning_text"];
+
+/// The `interleaved` catalog value as a replay field name: `{"field": "reasoning_content"}`
+/// and the other plain-text names are replayed; `reasoning_details`, a bare `true`, and a
+/// missing entry are not (ADR 0014 Q2).
+fn parse_interleaved(value: &Value) -> Option<String> {
+    let field = value.get("field").and_then(Value::as_str)?;
+    REPLAYABLE_INTERLEAVED
+        .contains(&field)
+        .then(|| field.to_owned())
+}
+
 /// The **cap** on the output reservation `R` (ADR 0018): the reservation is a
 /// quarter of the window, never more than this. A fixed 16384 made any window at or below 16K
 /// have no budget at all.
@@ -206,6 +222,10 @@ struct CatalogModel {
     name: Option<String>,
     limit: ModelLimit,
     price: Option<ModelPrice>,
+    /// The `interleaved` field the model requires its reasoning replayed under, when the
+    /// catalog names a plain-text field (ADR 0014 Q2). `None` for a missing entry,
+    /// a bare `true`, or a structured field Radian does not replay (`reasoning_details`).
+    reasoning_replay: Option<String>,
 }
 
 /// One catalog provider as parsed.
@@ -249,6 +269,7 @@ impl Catalog {
                             .get("cost")
                             .and_then(Value::as_object)
                             .and_then(parse_price),
+                        reasoning_replay: model.get("interleaved").and_then(parse_interleaved),
                         limit: ModelLimit {
                             context: limit.get("context").and_then(Value::as_u64),
                             output: limit.get("output").and_then(Value::as_u64),
@@ -299,6 +320,17 @@ impl Catalog {
     /// The model's unit prices (ADR 0027), or `None` when the catalog has none.
     pub fn price(&self, provider: &str, model: &str) -> Option<ModelPrice> {
         self.providers.get(provider)?.models.get(model)?.price
+    }
+
+    /// The reasoning-replay field the catalog declares for a model (ADR 0014 Q2),
+    /// or `None` when the entry is missing or names a field Radian does not replay.
+    pub fn reasoning_replay(&self, provider: &str, model: &str) -> Option<String> {
+        self.providers
+            .get(provider)?
+            .models
+            .get(model)?
+            .reasoning_replay
+            .clone()
     }
 
     /// The provider's catalog metadata (display name, `api`, `env`), if present.
@@ -705,6 +737,15 @@ fn read_cache(path: &Path) -> Option<(Catalog, Duration)> {
     Some((catalog, age))
 }
 
+/// The catalog's reasoning-replay field for `(provider, model)`, read from the local cache
+/// (ADR 0014 Q2). `None` when the cache is missing, the entry is absent, or the
+/// entry declares a field Radian does not replay. Offline, like the budget resolver: a switch
+/// never fetches.
+pub fn catalog_reasoning_replay(provider: &str, model: &str) -> Option<String> {
+    let (catalog, _) = read_cache(&cache_path())?;
+    catalog.reasoning_replay(provider, model)
+}
+
 /// Writes the cache atomically (temp file + rename) with owner-only permissions.
 fn write_cache(path: &Path, text: &str) -> io::Result<()> {
     let dir = path.parent().ok_or_else(|| {
@@ -893,6 +934,42 @@ mod tests {
         // A zero rate is not usable, so the cost hides rather than showing `$0.00`.
         assert_eq!(catalog.price("anthropic", "zero"), None);
         assert_eq!(catalog.price("anthropic", "missing"), None);
+    }
+
+    /// ADR 0014 Q2: the catalog's `interleaved` value decides reasoning replay. A
+    /// plain-text field name opens it; `reasoning_details` (a structured array), a bare `true`,
+    /// and a missing entry do not.
+    #[test]
+    fn the_catalog_interleaved_field_decides_reasoning_replay() {
+        let text = r#"{
+            "opencode-go": {"models": {
+                "deepseek-v4.1-flash": {"limit": {"context": 1000000}, "interleaved": {"field": "reasoning_content"}},
+                "alt": {"limit": {"context": 5}, "interleaved": {"field": "reasoning"}},
+                "text": {"limit": {"context": 5}, "interleaved": {"field": "reasoning_text"}},
+                "details": {"limit": {"context": 5}, "interleaved": {"field": "reasoning_details"}},
+                "bare": {"limit": {"context": 5}, "interleaved": true},
+                "none": {"limit": {"context": 5}}
+            }}
+        }"#;
+        let catalog = Catalog::parse(text).unwrap();
+        assert_eq!(
+            catalog
+                .reasoning_replay("opencode-go", "deepseek-v4.1-flash")
+                .as_deref(),
+            Some("reasoning_content")
+        );
+        assert_eq!(
+            catalog.reasoning_replay("opencode-go", "alt").as_deref(),
+            Some("reasoning")
+        );
+        assert_eq!(
+            catalog.reasoning_replay("opencode-go", "text").as_deref(),
+            Some("reasoning_text")
+        );
+        assert_eq!(catalog.reasoning_replay("opencode-go", "details"), None);
+        assert_eq!(catalog.reasoning_replay("opencode-go", "bare"), None);
+        assert_eq!(catalog.reasoning_replay("opencode-go", "none"), None);
+        assert_eq!(catalog.reasoning_replay("missing", "x"), None);
     }
 
     #[test]

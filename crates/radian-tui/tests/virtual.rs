@@ -17,6 +17,7 @@ use radian_tui::tools::{DisplayModes, ToolDisplay, ToolFold};
 
 /// Both folds expanded, so a test's geometry does not depend on the fold defaults.
 const EXPANDED: DisplayModes = DisplayModes {
+    glyphs: radian_tui::footer::Glyphs::Unicode,
     reasoning: ReasoningMode::Expanded,
     tools: ToolDisplay {
         fold: ToolFold::Expanded,

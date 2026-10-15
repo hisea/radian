@@ -36,6 +36,10 @@ pub const MAX_LABEL_CHARS: usize = 80;
 pub const MAX_DESCRIPTION_CHARS: usize = 200;
 /// Longest id (a question's or an option's), in characters.
 pub const MAX_ID_CHARS: usize = 32;
+/// Longest question `header`, in **display** cells (ADR 0024 R4): the tab label.
+pub const MAX_HEADER_WIDTH: usize = 16;
+/// Longest answer `note`, in characters (ADR 0024 R4).
+pub const MAX_NOTE_CHARS: usize = 500;
 
 /// The three question shapes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +61,14 @@ pub struct QuestionOption {
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The option the model recommends (ADR 0024 R4): shown as ` (Recommended)`.
+    /// A `single` question may carry at most one.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub recommended: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// One question the model asks.
@@ -64,6 +76,10 @@ pub struct QuestionOption {
 #[serde(deny_unknown_fields)]
 pub struct Question {
     pub id: String,
+    /// The short name for the tab label (ADR 0024 R4): at most
+    /// [`MAX_HEADER_WIDTH`] display cells; the `id` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
     pub prompt: String,
     pub kind: QuestionKind,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -124,6 +140,17 @@ impl QuestionRequest {
                 ));
             }
             check_chars(&question.prompt, MAX_PROMPT_CHARS, "prompt")?;
+            if let Some(header) = &question.header
+                && unicode_width::UnicodeWidthStr::width(header.as_str()) > MAX_HEADER_WIDTH
+            {
+                return Err(fail(
+                    "invalid_arguments",
+                    format!(
+                        "question `{}` header is over {MAX_HEADER_WIDTH} display cells",
+                        question.id
+                    ),
+                ));
+            }
             if question.kind == QuestionKind::Text {
                 if !question.options.is_empty() {
                     return Err(fail(
@@ -162,6 +189,21 @@ impl QuestionRequest {
                 if let Some(description) = &option.description {
                     check_chars(description, MAX_DESCRIPTION_CHARS, "description")?;
                 }
+            }
+            // ADR 0024 R4: a single-choice question may recommend at most one option.
+            let recommended = question
+                .options
+                .iter()
+                .filter(|option| option.recommended)
+                .count();
+            if question.kind == QuestionKind::Single && recommended > 1 {
+                return Err(fail(
+                    "invalid_arguments",
+                    format!(
+                        "question `{}` is `single` and recommends {recommended} options; at most one",
+                        question.id
+                    ),
+                ));
             }
         }
         Ok(())
@@ -218,6 +260,17 @@ pub struct QuestionReply {
     /// The free text the user typed in `Other`, when `allow_other` was set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub other: Option<String>,
+    /// An optional free-text note the user attached (ADR 0024 R4): at most
+    /// [`MAX_NOTE_CHARS`] characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl Question {
+    /// The tab label: the `header`, or the `id`.
+    pub fn header(&self) -> &str {
+        self.header.as_deref().unwrap_or(&self.id)
+    }
 }
 
 /// The host's answer to a [`QuestionRequest`]. `request_id` is the host's process-unique id
@@ -269,7 +322,9 @@ pub(crate) fn spec() -> ToolSpec {
                       Use it when a decision needs the human: one choice, several choices, or \
                       free text. The turn pauses until the user answers or declines; the user \
                       may also cancel the turn. Only available when an interactive user is \
-                      present."
+                      present. Give each question a short `header` (two or three words; it \
+                      becomes the tab label) and mark `recommended: true` only on the option \
+                      you actually recommend (at most one for a `single` question)."
             .into(),
         input_schema: json!({
             "type": "object",
@@ -286,6 +341,12 @@ pub(crate) fn spec() -> ToolSpec {
                                 "type": "string",
                                 "pattern": "^[a-z0-9_-]{1,32}$",
                                 "description": "Answer key for this question; unique in the request."
+                            },
+                            "header": {
+                                "type": "string",
+                                "maxLength": MAX_HEADER_WIDTH,
+                                "description": "A short tab label, two or three words (at most \
+                                                16 display cells); the `id` when absent."
                             },
                             "prompt": {
                                 "type": "string",
@@ -306,7 +367,11 @@ pub(crate) fn spec() -> ToolSpec {
                                     "properties": {
                                         "id": { "type": "string", "pattern": "^[a-z0-9_-]{1,32}$" },
                                         "label": { "type": "string", "maxLength": MAX_LABEL_CHARS },
-                                        "description": { "type": "string", "maxLength": MAX_DESCRIPTION_CHARS }
+                                        "description": { "type": "string", "maxLength": MAX_DESCRIPTION_CHARS },
+                                        "recommended": {
+                                            "type": "boolean",
+                                            "description": "The option you recommend; at most one for `single`."
+                                        }
                                     },
                                     "required": ["id", "label"],
                                     "additionalProperties": false
@@ -381,6 +446,17 @@ fn validate_answer(request: &QuestionRequest, answer: &QuestionAnswer) -> Result
                 format!("more than one answer for question `{}`", reply.id),
             ));
         }
+        if let Some(note) = &reply.note
+            && note.chars().count() > MAX_NOTE_CHARS
+        {
+            return Err(fail(
+                "invalid_answer",
+                format!(
+                    "the note for `{}` is over {MAX_NOTE_CHARS} characters",
+                    reply.id
+                ),
+            ));
+        }
         if !request.questions.iter().any(|q| q.id == reply.id) {
             return Err(fail(
                 "invalid_answer",
@@ -444,6 +520,11 @@ fn render_reply(question: &Question, reply: Option<&QuestionReply>) -> String {
         && !other.is_empty()
     {
         parts.push(format!("other: {other}"));
+    }
+    if let Some(note) = &reply.note
+        && !note.is_empty()
+    {
+        parts.push(format!("note: {note}"));
     }
     if parts.is_empty() {
         "(no answer)".into()
