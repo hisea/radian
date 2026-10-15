@@ -1165,3 +1165,16 @@ Base `e2a0392` · 一次性 worktree `/tmp/radian-ime-mut*`，还原后 `git sta
 IM-M2 与既有记录一致（见上文 `RESIZE-B`：closed-master 测试抓不到收窄的缺失——收窄省的是 CPU，
 不是保证退出；退出由第一次 `tty_readiness` 的 Gone 与主循环兜底覆盖，两者都用同一个
 `tty_readiness`）。IM-M3 证明这次改动没有削弱该测试对 POLLHUP 的检查。
+
+## small-fixes-2：footer 状态与 Esc 取消
+
+Base `e157bfb` · 一次性 worktree `.radian-worktrees/sf2-mut`（detached，跑完删除）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SF4 | 去掉 `ToolFinished` 清 note 的分支 | `tests/render.rs::the_note_clears_when_the_tools_finish` | ✅ |
+| SF5 | `Action::Escape` 在回合运行时直接返回（不取消） | `pty_escape_cancels_a_running_turn` | ✅ |
+
+SF2（高亮计数改线程局部）与 SF3（build.rs 用运行时 `CARGO_MANIFEST_DIR`）没有常规变异测试：
+SF2 是把测试自身的干扰源去掉，SF3 是编译期路径问题；两者的证据分别是「高亮测试单独跑 5/5」
+与「把 worktree 改名后 build script 仍找得到 `third_party/syntaxes`」。

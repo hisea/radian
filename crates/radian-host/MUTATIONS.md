@@ -593,3 +593,11 @@ Base `65ea1ed` · 一次性 worktree `/tmp/radian-ce-mut`，还原后 `git statu
 | CE-M3 | 转义大小写敏感（只查小写） | `context::tests::a_content_closing_tag_is_escaped`（大写变体未转义） | ✅ |
 
 3/3 抓住。
+
+## small-fixes-2：上下文文件去重
+
+Base `e157bfb` · 一次性 worktree `.radian-worktrees/sf2-mut`（detached，跑完删除）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SF1 | `load` 去掉 `seen` 去重 | `context::tests::a_symlinked_context_file_is_read_once` | ✅ |
