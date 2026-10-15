@@ -676,7 +676,7 @@ impl SessionFacade for LocalSession {
     }
 
     fn budget_for_route(&self, provider: &str, model: &str) -> Option<u64> {
-        (self.budget_for.as_ref())?(provider, model)
+        (self.budget_for.as_ref())?(provider, model).map(|budget| budget.input_budget_tokens)
     }
 
     fn answer(&self, request_id: u64, response: PendingResponse) -> Result<(), CommandRefused> {

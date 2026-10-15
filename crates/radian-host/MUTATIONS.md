@@ -646,3 +646,13 @@ Base `65ea1ed` · 一次性 worktree `/tmp/radian-ce-mut`，还原后 `git statu
 | CE-M3 | 转义大小写敏感（只查小写） | `context::tests::a_content_closing_tag_is_escaped`（大写变体未转义） | ✅ |
 
 3/3 抓住。
+
+## ADR 0014 reasoning replay (2026-10-15)
+
+One-shot detached worktree `.radian-worktrees/rr-mutations` (from the branch HEAD, deleted
+after); each mutation restored with `git checkout --`, `git status --short` empty at the end.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| RR-D | treat `reasoning_details` as a replayable text field (add it to `REPLAYABLE_INTERLEAVED`) | caught (rc=101) | `catalog::tests::the_catalog_interleaved_field_decides_reasoning_replay` |
+| RR-F | ignore a named provider's `reasoning_replay` override (fall through to the catalog) | caught (rc=101) | `the_catalog_and_a_named_override_decide_reasoning_replay` |

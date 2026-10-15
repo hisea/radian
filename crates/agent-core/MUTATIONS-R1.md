@@ -23,3 +23,13 @@
 - **M-R9**：`ModelReasoningDelta` 是同步事件出口，本身无法写 journal；「给推理写了 journal 记录」的可执行等价物是在**完成路径**上为推理额外 `commit` 一条 `Message`（即让推理成为独立的 durable 记录）。AC-R1-9 断言完成一轮后 journal 恰好只有 user + assistant 两条 `Message`，因此失败。
 
 `journal-selfcheck`（AC-R1-9 的另一半）由 7 条 Verify 中的 `cargo test -p agent-core --locked --features journal-selfcheck` 覆盖，未单独变异（它断言的是 journal 回放与内存 transcript 相等，M-R1/M-R9 等都会连带触发）。
+
+## 修订 1（2026-10-15）：按模型回传推理
+
+一次性 detached worktree `.radian-worktrees/rr-mutations`（从分支 HEAD 创建，用完删除）；每个变异后 `git checkout --`，结束时 `git status --short` 为空。
+
+| 变异 | 目标测试 | 结果 |
+|---|---|---|
+| RR-E `count_reasoning` 不计推理（无视开关，永远减去 `reasoning`） | `reasoning_is_counted_only_when_the_budget_asks_for_it`（Q4） | 抓住（rc=101） |
+
+RR-A/B/C（适配器请求体）、RR-D/F（目录解析与 `[providers.<id>]` 覆盖）分别记在 `crates/agent-provider-openai-compatible/MUTATIONS.md` 与 `crates/radian-host/MUTATIONS.md`。

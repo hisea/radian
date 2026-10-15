@@ -13,7 +13,11 @@ model = "m-1"
 [providers.corp]
 kind = "openai-compatible"
 base_url = "https://llm.example.com/v1"
+# ADR 0014 Q2:覆盖目录的 reasoning 回传字段。模型声明要回传时(目录 `interleaved`
+# 是纯文本字段)推理按此字段写回;`false` 则即使目录要求也不回传。
+reasoning_replay = "reasoning_content"
 
 [providers.relay]
 kind = "anthropic"
 base_url = "https://relay.example.com"
+reasoning_replay = false
