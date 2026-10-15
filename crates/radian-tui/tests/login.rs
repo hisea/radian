@@ -82,6 +82,36 @@ fn the_login_panel_snapshot_at_80_120_and_ascii() {
     assert!(!screen.contains('╭'), "{screen}");
 }
 
+/// The shared panel shape (ADR 0035) for the `/logout` confirmation.
+#[test]
+fn the_logout_panel_snapshot_at_80_120_and_ascii() {
+    let mut app = App::new("m", "s");
+    submit(&mut app, "/logout corp");
+
+    let screen = draw(&mut app, 80, 24);
+    assert!(screen.contains("╭─ /logout "), "{screen}");
+    assert!(
+        screen.contains("remove the stored credential for `corp`?"),
+        "{screen}"
+    );
+    assert!(screen.contains("╰─ [y] remove · [n/esc] keep"), "{screen}");
+
+    let screen = draw(&mut app, 120, 24);
+    assert!(screen.contains("╭─ /logout "), "{screen}");
+
+    app.apply_footer(&radian_host::config::TuiFooterConfig {
+        glyphs: Some("ascii".into()),
+        ..Default::default()
+    });
+    let screen = draw(&mut app, 80, 24);
+    assert!(screen.contains("+- /logout "), "{screen}");
+    assert!(
+        screen.contains("| remove the stored credential"),
+        "{screen}"
+    );
+    assert!(!screen.contains('╭'), "{screen}");
+}
+
 /// `/login` opens the provider choice; `/login <builtin>` jumps to its key; an unknown name
 /// is a notice.
 #[test]

@@ -862,6 +862,24 @@ fn trust_height(
     trust_panel(wizard, width, theme, glyphs).len() as u16
 }
 
+/// The `/logout` confirmation (ADR 0035): the shared panel with the provider and
+/// the hardcoded `y`/`n` hints in the bottom border.
+pub fn logout_panel(
+    provider: &str,
+    width: usize,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+) -> Vec<Line<'static>> {
+    crate::panel::Panel::new("/logout")
+        .row(Line::from(Span::styled(
+            format!("remove the stored credential for `{provider}`?"),
+            theme.text,
+        )))
+        .hint("[y]", "remove")
+        .hint("[n/esc]", "keep")
+        .lines(width, theme, glyphs)
+}
+
 /// The error style for wizard problems (a note-colored line; no new theme role).
 /// The input area's height: one rule above, the text rows, one rule below.
 fn input_height(app: &App, width: usize) -> u16 {
@@ -1277,8 +1295,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(Modal::Login(wizard)) => {
             login_height(wizard, area.width as usize, &app.theme, app.footer_glyphs())
         }
-        // The `/logout` confirmation is a two-line box like the `/memory` one.
-        Some(Modal::ConfirmLogout(_)) => 4,
+        // The `/logout` confirmation is the shared panel with one row and the hints.
+        Some(Modal::ConfirmLogout(provider)) => logout_panel(
+            provider,
+            area.width as usize,
+            &app.theme,
+            app.footer_glyphs(),
+        )
+        .len() as u16,
         // The trust prompt lists up to five options plus a header and the two borders.
         Some(Modal::Trust(wizard)) => {
             trust_height(wizard, area.width as usize, &app.theme, app.footer_glyphs())
@@ -1455,20 +1479,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             frame.render_widget(Paragraph::new(lines), chunks[2]);
         }
         Some(Modal::ConfirmLogout(provider)) => {
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(app.theme.approval_border)
-                .title(" /logout ");
-            frame.render_widget(&block, input_area);
-            let inner = block.inner(input_area);
-            let lines = vec![
-                Line::from(format!("remove the stored credential for `{provider}`?")),
-                Line::from(Span::styled(
-                    "[y] remove   [n/Esc] keep",
-                    app.theme.approval_border,
-                )),
-            ];
-            frame.render_widget(Paragraph::new(lines), inner);
+            let lines = logout_panel(
+                provider,
+                input_area.width as usize,
+                &app.theme,
+                app.footer_glyphs(),
+            );
+            frame.render_widget(Paragraph::new(lines), input_area);
         }
         _ if app.find_state().is_some() => {
             // The find box replaces the input box's line; the input text itself is untouched
