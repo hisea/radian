@@ -267,6 +267,24 @@ impl MemoryService {
             .ok_or_else(|| MemoryError::NotFound { id: id.clone() }.into())
     }
 
+    /// The scope that actually holds `id`, searching in the default read order: Project when
+    /// this workspace is linked, then Global. `None` when no visible scope holds it. Record
+    /// ids are unique across scopes, so an id command can find a record without the user
+    /// naming its scope (ADR 0021 D1); an unlinked workspace still finds a Global record.
+    pub fn locate(&self, id: &MemoryId) -> Result<Option<Scope>, MemoryServiceError> {
+        for scope in self.read_scopes(ScopeSelection::Default)? {
+            let holds_it = self
+                .store
+                .records(&scope)?
+                .iter()
+                .any(|record| record.id == *id);
+            if holds_it {
+                return Ok(Some(scope));
+            }
+        }
+        Ok(None)
+    }
+
     // ---- writes. Every one is `Source::User` (ADR 0021 D7: user commands). ----
 
     pub fn add(

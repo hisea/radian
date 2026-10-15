@@ -282,6 +282,54 @@ fn write_scope(global: bool) -> WriteScope {
     }
 }
 
+/// The not-found error for an id command whose auto-detected scope is asked for the record:
+/// ids are unique across scopes, so "not found" means no scope this workspace can see holds
+/// it (ADR 0021 D1).
+fn unknown_id(id: &str) -> CommandError {
+    CommandError::failure(format!("no memory record {id}"))
+}
+
+/// The read scope for a single-record read (`show`). An explicit `--global`/`--project`
+/// keeps today's meaning (that scope only); otherwise the record's own scope is found, so an
+/// unlinked workspace still reads a Global record by id (ADR 0021 D1).
+fn resolve_read_scope(
+    service: &MemoryService,
+    global: bool,
+    project: bool,
+    id: &str,
+) -> Result<ScopeSelection, CommandError> {
+    if global {
+        return Ok(ScopeSelection::GlobalOnly);
+    }
+    if project {
+        return Ok(ScopeSelection::ProjectOnly);
+    }
+    match service.locate(&MemoryId(id.to_owned()))? {
+        Some(Scope::Global) => Ok(ScopeSelection::GlobalOnly),
+        Some(Scope::Project(_)) => Ok(ScopeSelection::ProjectOnly),
+        None => Err(unknown_id(id)),
+    }
+}
+
+/// The write scope for a single-record write (`edit`/`archive`/`restore`/`confirm`/`forget`).
+/// An explicit `--global` keeps today's meaning (Global only); otherwise the record's own
+/// scope is found, so an unlinked workspace still edits, archives, restores, confirms or
+/// forgets a Global record by id (ADR 0021 D1).
+fn resolve_write_scope(
+    service: &MemoryService,
+    global: bool,
+    id: &str,
+) -> Result<WriteScope, CommandError> {
+    if global {
+        return Ok(WriteScope::Global);
+    }
+    match service.locate(&MemoryId(id.to_owned()))? {
+        Some(Scope::Global) => Ok(WriteScope::Global),
+        Some(Scope::Project(_)) => Ok(WriteScope::Project),
+        None => Err(unknown_id(id)),
+    }
+}
+
 /// Runs one command against `service`. Never prints and never reads stdin. `confirmed` is the
 /// user's consent for a write command; `json` selects machine-readable output where offered.
 pub fn execute(
@@ -331,7 +379,8 @@ pub fn execute(
             id,
             ..
         } => {
-            let record = service.get(selection(global, project), &MemoryId(id))?;
+            let selection = resolve_read_scope(service, global, project, &id)?;
+            let record = service.get(selection, &MemoryId(id))?;
             output.text = if json {
                 json_line(&record)?
             } else {
@@ -358,8 +407,9 @@ pub fn execute(
             id,
             content,
         } => {
+            let scope = resolve_write_scope(service, global, &id)?;
             let record = service.edit(
-                write_scope(global),
+                scope,
                 &MemoryId(id),
                 revision,
                 trim_trailing_newlines(content),
@@ -371,7 +421,8 @@ pub fn execute(
             revision,
             id,
         } => {
-            let record = service.archive(write_scope(global), &MemoryId(id), revision)?;
+            let scope = resolve_write_scope(service, global, &id)?;
+            let record = service.archive(scope, &MemoryId(id), revision)?;
             output.text = format!("archived {} (revision {})\n", record.id, record.revision);
         }
         MemoryCommand::Restore {
@@ -379,14 +430,16 @@ pub fn execute(
             revision,
             id,
         } => {
-            let record = service.restore(write_scope(global), &MemoryId(id), revision)?;
+            let scope = resolve_write_scope(service, global, &id)?;
+            let record = service.restore(scope, &MemoryId(id), revision)?;
             output.text = format!("restored {} (revision {})\n", record.id, record.revision);
         }
         MemoryCommand::Forget { global, id, .. } => {
             match confirm(confirmed, format!("forget {id}")) {
                 Some(prompt) => output.needs_confirmation = Some(prompt),
                 None => {
-                    service.forget(write_scope(global), &MemoryId(id.clone()))?;
+                    let scope = resolve_write_scope(service, global, &id)?;
+                    service.forget(scope, &MemoryId(id.clone()))?;
                     output.text = format!("forgot {id}\n");
                 }
             }
@@ -406,7 +459,8 @@ pub fn execute(
             revision,
             id,
         } => {
-            let record = service.confirm(write_scope(global), &MemoryId(id), revision)?;
+            let scope = resolve_write_scope(service, global, &id)?;
+            let record = service.confirm(scope, &MemoryId(id), revision)?;
             output.text = format!("confirmed {} (revision {})\n", record.id, record.revision);
         }
         MemoryCommand::Export { global, .. } => {
@@ -690,6 +744,7 @@ pub fn parse_args(args: &[String]) -> Result<MemoryCommand, clap::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use radian_memory::Source;
     use std::path::PathBuf;
 
     fn scratch(label: &str) -> PathBuf {
@@ -757,6 +812,270 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unlinked workspace still finds a Global record by id: `show` needs no `--global`
+    /// (ADR 0021 D1; record ids are unique across scopes).
+    #[test]
+    fn show_finds_a_global_record_in_an_unlinked_workspace() {
+        let (dir, service) = service("show-global");
+        let record = service
+            .add(WriteScope::Global, Kind::Fact, None, "global body".into())
+            .unwrap();
+        let output = execute(
+            &service,
+            MemoryCommand::Show {
+                global: false,
+                project: false,
+                json: false,
+                id: record.id.to_string(),
+            },
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(output.text.contains("global body"), "{output:?}");
+        assert!(output.text.contains("scope: global"), "{output:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unlinked workspace still revises a Global record by id: `edit` needs no `--global`.
+    #[test]
+    fn edit_finds_a_global_record_in_an_unlinked_workspace() {
+        let (dir, service) = service("edit-global");
+        let record = service
+            .add(WriteScope::Global, Kind::Fact, None, "v1".into())
+            .unwrap();
+        let output = execute(
+            &service,
+            MemoryCommand::Edit {
+                global: false,
+                revision: record.revision,
+                id: record.id.to_string(),
+                content: "v2".into(),
+            },
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(output.text.contains("revised"), "{output:?}");
+        let found = service.get(ScopeSelection::GlobalOnly, &record.id).unwrap();
+        assert_eq!(found.content, "v2");
+        assert!(found.scope.is_global());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unlinked workspace still archives and restores a Global record by id.
+    #[test]
+    fn archive_and_restore_find_a_global_record_in_an_unlinked_workspace() {
+        let (dir, service) = service("archive-global");
+        let record = service
+            .add(WriteScope::Global, Kind::Fact, None, "body".into())
+            .unwrap();
+        let archived = execute(
+            &service,
+            MemoryCommand::Archive {
+                global: false,
+                revision: record.revision,
+                id: record.id.to_string(),
+            },
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(archived.text.contains("archived"), "{archived:?}");
+        assert!(
+            service
+                .list(ScopeSelection::GlobalOnly, false)
+                .unwrap()
+                .is_empty()
+        );
+
+        let restored = execute(
+            &service,
+            MemoryCommand::Restore {
+                global: false,
+                revision: record.revision + 1,
+                id: record.id.to_string(),
+            },
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(restored.text.contains("restored"), "{restored:?}");
+        assert_eq!(
+            service
+                .list(ScopeSelection::GlobalOnly, false)
+                .unwrap()
+                .len(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unlinked workspace still confirms a Global record by id, and the source is kept.
+    #[test]
+    fn confirm_finds_a_global_record_in_an_unlinked_workspace() {
+        let (dir, service) = service("confirm-global");
+        let record = service
+            .save_as_agent(WriteScope::Global, Kind::Fact, None, "body".into())
+            .unwrap();
+        assert!(!record.verification.is_confirmed());
+        let output = execute(
+            &service,
+            MemoryCommand::Confirm {
+                global: false,
+                revision: record.revision,
+                id: record.id.to_string(),
+            },
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(output.text.contains("confirmed"), "{output:?}");
+        let found = service.get(ScopeSelection::GlobalOnly, &record.id).unwrap();
+        assert!(found.verification.is_confirmed());
+        assert_eq!(found.source, Source::Agent, "confirm keeps the source");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unlinked workspace still forgets a Global record by id: `forget` needs no `--global`.
+    #[test]
+    fn forget_finds_a_global_record_in_an_unlinked_workspace() {
+        let (dir, service) = service("forget-global");
+        let record = service
+            .add(WriteScope::Global, Kind::Fact, None, "gone".into())
+            .unwrap();
+        let output = execute(
+            &service,
+            MemoryCommand::Forget {
+                global: false,
+                yes: false,
+                id: record.id.to_string(),
+            },
+            true,
+            false,
+        )
+        .unwrap();
+        assert!(output.text.contains("forgot"), "{output:?}");
+        assert!(
+            service
+                .list(ScopeSelection::GlobalOnly, true)
+                .unwrap()
+                .is_empty()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A linked workspace acts on the Project record the id names, without `--project`.
+    #[test]
+    fn a_linked_workspace_acts_on_the_project_record() {
+        let (dir, service) = service("linked-project");
+        service.create_project().unwrap();
+        let record = service
+            .add(WriteScope::Project, Kind::Fact, None, "project body".into())
+            .unwrap();
+        let output = execute(
+            &service,
+            MemoryCommand::Edit {
+                global: false,
+                revision: record.revision,
+                id: record.id.to_string(),
+                content: "edited".into(),
+            },
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(output.text.contains("revised"), "{output:?}");
+        let found = service
+            .get(ScopeSelection::ProjectOnly, &record.id)
+            .unwrap();
+        assert_eq!(found.content, "edited");
+        assert!(!found.scope.is_global());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An explicit scope keeps today's meaning: it never reaches the other scope, even by id.
+    #[test]
+    fn an_explicit_scope_never_crosses_to_the_other_scope() {
+        let (dir, service) = service("explicit");
+        service.create_project().unwrap();
+        let global = service
+            .add(WriteScope::Global, Kind::Fact, None, "global body".into())
+            .unwrap();
+        let project = service
+            .add(WriteScope::Project, Kind::Fact, None, "project body".into())
+            .unwrap();
+
+        // `show --project` does not see the Global record.
+        let error = execute(
+            &service,
+            MemoryCommand::Show {
+                global: false,
+                project: true,
+                json: false,
+                id: global.id.to_string(),
+            },
+            false,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, 1, "{error:?}");
+        assert!(error.message.contains(&global.id.to_string()), "{error:?}");
+
+        // `edit --global` does not see the Project record.
+        let error = execute(
+            &service,
+            MemoryCommand::Edit {
+                global: true,
+                revision: project.revision,
+                id: project.id.to_string(),
+                content: "nope".into(),
+            },
+            false,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, 1, "{error:?}");
+        assert!(error.message.contains(&project.id.to_string()), "{error:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An id in no visible scope is a clear error, never the unlinked-workspace refusal.
+    #[test]
+    fn an_unknown_id_is_a_clear_error() {
+        let (dir, service) = service("unknown-id");
+        let missing = "mem-00000000000000000000000000000000";
+        let error = execute(
+            &service,
+            MemoryCommand::Show {
+                global: false,
+                project: false,
+                json: false,
+                id: missing.into(),
+            },
+            false,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, 1, "{error:?}");
+        assert_eq!(error.message, format!("no memory record {missing}"));
+
+        let error = execute(
+            &service,
+            MemoryCommand::Forget {
+                global: false,
+                yes: false,
+                id: missing.into(),
+            },
+            true,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, 1, "{error:?}");
+        assert_eq!(error.message, format!("no memory record {missing}"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -715,3 +715,20 @@ without it 11 tests fail on "mcp-fixture is not built", which is unrelated to th
 they were re-run green after the fixture was built.) SR-S2 was already caught by
 `reasoning_replay.rs`; the two new tests pin the same decision on the switch path, where
 `args_for` and the budget resolver are two separate resolutions that must agree.
+## memory-scope: id commands find the record's scope themselves (ADR 0021 D1)
+
+Base `21bf74b` · in-place in this worktree, each mutation applied from a copy and restored from
+it afterwards (`md5` compared); `cargo test -p radian-host --lib --no-fail-fast memory::commands`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| M1 | `resolve_write_scope` auto branch returns `WriteScope::Project` (the old behaviour) | ✅ caught | `memory::commands::tests::{forget_finds_a_global_record_in_an_unlinked_workspace, edit_finds_a_global_record_in_an_unlinked_workspace, archive_and_restore_find_a_global_record_in_an_unlinked_workspace, confirm_finds_a_global_record_in_an_unlinked_workspace, an_unknown_id_is_a_clear_error}` |
+| M2 | `resolve_read_scope` auto branch returns `ScopeSelection::ProjectOnly` | ✅ caught | `memory::commands::tests::{show_finds_a_global_record_in_an_unlinked_workspace, an_unknown_id_is_a_clear_error}` |
+| M3 | `MemoryService::locate` only searches Global (skips Project) | ✅ caught | `memory::commands::tests::{a_linked_workspace_acts_on_the_project_record, an_unconfirmed_forget_writes_nothing}` |
+| M4 | the auto not-found path returns the store message (`no record <id>`) instead of `no memory record <id>` | ✅ caught | `memory::commands::tests::an_unknown_id_is_a_clear_error` |
+| M5 | `resolve_write_scope` ignores an explicit `--global` (always locates) | ✅ caught | `memory::commands::tests::an_explicit_scope_never_crosses_to_the_other_scope` |
+| M6 | `resolve_read_scope` ignores explicit `--global`/`--project` (always locates) | ✅ caught | `memory::commands::tests::an_explicit_scope_never_crosses_to_the_other_scope` |
+
+6/6 caught. `show` already read Global through the default Project→Global view before this change,
+so its test (`show_finds_a_global_record_in_an_unlinked_workspace`) is a regression guard, not a
+red-on-old-code test; the new not-found wording is what M4 reds on the old code for `show`.
