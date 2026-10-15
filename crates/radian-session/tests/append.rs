@@ -18,8 +18,10 @@
 //!
 //! Serializing the tests that spawn a child with the ones that hold or reopen a journal
 //! closes the window: a victim can no longer be between `close` and `try_lock` while a
-//! sibling is forking. Production is unaffected: a host locks the session file once at
-//! startup, before any child process exists.
+//! sibling is forking. A host that does reopen a journal while a child it forked is between
+//! `fork` and `exec` is covered instead by the writer lock's bounded retry
+//! ([`SessionJournal::open_locked`]): the false `Locked` is transient, so `open_locked`
+//! retries it for ~200 ms before reporting a genuine second writer.
 //!
 //! Only tests in **this** binary can interfere: each integration-test file is its own
 //! process, and a child inherits only its own parent's descriptors. Only this file spawns
@@ -28,12 +30,16 @@
 mod common;
 
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use agent_core::{JournalRecord, Message, TranscriptJournal};
 use common::{TempDir, created};
-use radian_session::{Session, SessionJournal, WriteError};
+use radian_session::{Session, SessionJournal, WriteError, lock_retry_attempts};
 
 fn session_id() -> &'static str {
     "sid-crash"
@@ -251,4 +257,167 @@ fn child_lock_probe() {
         Ok(_) => println!("ACQUIRED"),
         Err(other) => println!("OTHER {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------------------
+// The writer lock's bounded retry (the transient false `Locked` from fork inheritance)
+// ---------------------------------------------------------------------------------------
+
+/// Waits until the writer lock has been retried more than `base` times, so a test can prove
+/// `open_locked` is in its retry loop before it frees a deliberately held lock. Bounded by a
+/// watchdog: if no retry ever happens the test fails instead of hanging.
+#[cfg(unix)]
+fn wait_for_lock_retry(base: u64) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while lock_retry_attempts() <= base {
+        assert!(
+            Instant::now() < deadline,
+            "the writer lock was never retried: the inherited lock was not held, or the retry is gone"
+        );
+        std::thread::yield_now();
+    }
+}
+
+/// The lock a forked child inherited is **transient**: the child shares the parent's open
+/// file description and releases the `flock` only when that descriptor closes (at `exec`, or
+/// when the child exits). This hands a child the *exact* writer-lock descriptor — a `dup`
+/// with `FD_CLOEXEC` cleared, so it survives the child's `exec` — drops the parent's own
+/// handles, starts `resume`, and only then lets the child exit. `resume` must ride out the
+/// window and succeed; without the retry it sees a false `Locked` and fails.
+#[cfg(unix)]
+#[test]
+fn a_lock_inherited_by_a_forked_child_is_retried_and_succeeds() {
+    use std::os::fd::{FromRawFd, OwnedFd};
+
+    let _serial = serial();
+    let dir = TempDir::new("lock-inherit");
+    let path = dir.file("s.jsonl");
+    let sid = "sid-inherit";
+    {
+        let journal = SessionJournal::create(&path, sid, created()).unwrap();
+        drop(journal);
+    }
+
+    // Take the writer lock, then `dup` it with `FD_CLOEXEC` cleared so the forked child
+    // inherits this exact open file description and keeps the lock across its `exec`.
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .append(true)
+        .open(&path)
+        .unwrap();
+    assert_eq!(
+        unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    let dup = unsafe { libc::dup(held.as_raw_fd()) };
+    assert!(dup >= 0, "dup of the writer-lock descriptor failed");
+    let flags = unsafe { libc::fcntl(dup, libc::F_GETFD) };
+    assert!(flags >= 0, "fcntl(F_GETFD) failed");
+    unsafe { libc::fcntl(dup, libc::F_SETFD, flags & !libc::FD_CLOEXEC) };
+    let inherited = unsafe { OwnedFd::from_raw_fd(dup) };
+
+    // The child parks on its stdin holding the inherited descriptor; it prints `HELD` once it
+    // has `exec`ed, so the parent knows the lock now outlives the parent's own handles.
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .env("RADIAN_HOLD_INHERITED_LOCK", "1")
+        .args(["--exact", "child_holds_inherited_lock", "--nocapture"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    // The harness prints a leading blank line and its banner before the helper's output.
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = stdout.read_line(&mut line).unwrap();
+        assert!(read > 0, "the helper exited before reporting HELD");
+        if line.trim() == "HELD" {
+            break;
+        }
+    }
+
+    // From here the parent holds nothing: only the child's inherited descriptor keeps the
+    // lock, exactly as if another thread's `git` subprocess were between fork and exec.
+    drop(inherited);
+    drop(held);
+
+    let base = lock_retry_attempts();
+    let resume_path = path.clone();
+    let resumed = std::thread::spawn(move || SessionJournal::resume(&resume_path, sid));
+    // Prove `resume` is retrying before releasing the child: no race against its first try.
+    wait_for_lock_retry(base);
+    // Release the child inside the window. It exits, the inherited descriptor closes, and the
+    // lock is free for `resume`'s next attempt.
+    child.stdin.take().unwrap().write_all(b"x").unwrap();
+    match resumed.join().unwrap() {
+        Ok(journal) => assert_eq!(journal.next_seq(), 1),
+        Err(other) => panic!("resume must succeed once the inherited lock is released: {other:?}"),
+    }
+    let _ = child.wait();
+}
+
+/// Child for `a_lock_inherited_by_a_forked_child_is_retried_and_succeeds`. No-op unless
+/// spawned. It inherits the parent's writer-lock descriptor (with `FD_CLOEXEC` cleared) and
+/// holds it until the parent writes a byte to its stdin.
+#[cfg(unix)]
+#[test]
+fn child_holds_inherited_lock() {
+    use std::io::Read;
+
+    if std::env::var_os("RADIAN_HOLD_INHERITED_LOCK").is_none() {
+        return;
+    }
+    println!("HELD");
+    std::io::stdout().flush().unwrap();
+    let mut byte = [0u8; 1];
+    let _ = std::io::stdin().read_exact(&mut byte);
+}
+
+/// A genuine second writer holds the lock for as long as it lives — far past the retry
+/// budget — so it is still refused, and the refusal arrives within a bounded time instead of
+/// the retry becoming unbounded.
+#[cfg(unix)]
+#[test]
+fn a_held_lock_is_still_refused_after_the_retry_budget() {
+    let _serial = serial();
+    let dir = TempDir::new("lock-budget");
+    let path = dir.file("s.jsonl");
+    let sid = "sid-budget";
+    {
+        let journal = SessionJournal::create(&path, sid, created()).unwrap();
+        drop(journal);
+    }
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .append(true)
+        .open(&path)
+        .unwrap();
+    assert_eq!(
+        unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+
+    let (tx, rx) = mpsc::channel();
+    let resume_path = path.clone();
+    let worker = std::thread::spawn(move || {
+        let _ = tx.send(SessionJournal::resume(&resume_path, sid));
+    });
+    let started = Instant::now();
+    let result = rx.recv_timeout(Duration::from_secs(2));
+    let elapsed = started.elapsed();
+    // Free the lock before asserting so a still-retrying worker can finish either way.
+    drop(held);
+    let result = result.expect("a second writer must be refused within the budget, not hang");
+    match result {
+        Err(WriteError::Locked { .. }) => {}
+        Err(other) => panic!("the second writer must be refused, got {other:?}"),
+        Ok(_) => panic!("the second writer acquired the lock"),
+    }
+    assert!(
+        elapsed < Duration::from_millis(1500),
+        "the refusal must come from the bounded retry budget, took {elapsed:?}"
+    );
+    let _ = worker.join();
 }
