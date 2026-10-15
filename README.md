@@ -243,9 +243,13 @@ never reached by forgetting a flag.
   PREFIX` allows one *simple* command prefix without asking; a compound command always asks.
   Write these at the subcommand level, never at a bare program name.
 
-Common exit codes: `agent` uses 0 (turn completed), 1 (turn failed), 2 (usage/setup error,
-including a failed sandbox probe) and 130 (forced exit after a second Ctrl-C). `radian` uses 0 (clean quit), 1 (startup refusal or a
-driver error), 101 (the app panicked), and 128 + the signal number on SIGTERM/SIGHUP.
+Common exit codes (ADR 0032 A3, unified): 0 success, 1 this turn/run failed, 2 a usage, setup
+or startup refusal (clap's own errors, a bad config, an unknown keybinding, a refused startup,
+a failed sandbox probe), 101 the app panicked, 128 + the signal number on SIGTERM/SIGHUP, and
+130 for a forced exit after a second Ctrl-C. `agent` and `radian exec` share the 0/1/2/101/
+128+signal codes; `radian`'s TUI used to return 1 for a startup refusal and now returns 2,
+which is the one behavior change. `radian --list | head` (and every print-and-exit mode) still
+exits 0 silently on a broken pipe.
 
 ## Docs
 

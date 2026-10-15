@@ -1115,6 +1115,9 @@ pub struct App {
     /// The loop's current instant (ADR 0027). The timer never reads the wall clock;
     /// the loop stamps `now` once per iteration and tests set it to inject time.
     pub now: Instant,
+    /// The spinner's origin (ADR 0027): `now - started` is the tick the spinner
+    /// frame is a function of. Set at construction; tests set it to inject time.
+    pub spinner_origin: Instant,
     /// The local turn timer behind `speed`/`elapsed`.
     pub timer: crate::timing::TurnTimer,
     /// The applied thinking level (ADR 0026 D11), for the footer's `reasoning` item. A queued
@@ -1156,6 +1159,10 @@ pub struct App {
     pub projection: Arc<SessionProjection>,
     pub quit: bool,
     pub note: Option<String>,
+    /// A compaction is running (ADR 0018): the input rule's status line shows `Compacting`
+    /// (ADR 0027). Set on `CompactionStarted`, cleared when it finishes, fails or
+    /// is skipped.
+    pub compacting: bool,
     /// How many requests the queue holds (ADR 0023 U7), for the status bar.
     pub pending: usize,
     /// The startup screen: the leading block of entries (wordmark,
@@ -1214,6 +1221,11 @@ pub struct App {
     bash_context_pending: Option<String>,
     /// The color theme (config `tui.theme`, `NO_COLOR`).
     pub theme: Theme,
+    /// `tui.brand` (ADR 0027): the brand text, or `None` for the glyph set's
+    /// default. The footer's `brand` item and the startup banner both read it.
+    pub brand: Option<String>,
+    /// `tui.spinner` (ADR 0027): the running indicator. `pulse` by default.
+    pub spinner_kind: crate::spinner::Kind,
     /// The key bindings (config `tui.keybindings`), defaulting to the pre-config key table.
     pub keymap: Keymap,
     /// How the input area is drawn (config `tui.input_style`), defaulting to `lines`.
@@ -1277,6 +1289,7 @@ impl App {
             model_price: None,
             auto_compact: true,
             now: Instant::now(),
+            spinner_origin: Instant::now(),
             timer: crate::timing::TurnTimer::default(),
             thinking_level: None,
             footer: crate::footer::Footer::default(),
@@ -1294,6 +1307,7 @@ impl App {
             projection: Arc::new(SessionProjection::new()),
             quit: false,
             note: None,
+            compacting: false,
             pending: 0,
             startup_screen: None,
             startup_len: 0,
@@ -1314,6 +1328,8 @@ impl App {
             bash_available: true,
             bash_context_pending: None,
             theme: Theme::default(),
+            brand: None,
+            spinner_kind: crate::spinner::Kind::default(),
             keymap: Keymap::default(),
             input_style: InputStyle::default(),
             total_lines: 0,
@@ -1371,6 +1387,7 @@ impl App {
             tools: self.tool_display,
             mermaid: self.mermaid_enabled,
             highlight: self.highlight_enabled,
+            glyphs: self.footer_glyphs(),
         }
     }
 
@@ -1421,6 +1438,19 @@ impl App {
         );
         self.theme = theme;
         warnings.extend(theme_warnings);
+        // `tui.brand` (ADR 0027): a configured short text, else `None` for the
+        // glyph set's default. The reader already refused an over-wide value.
+        self.brand = config.tui.brand.clone();
+        // `tui.spinner` (ADR 0027): an unknown name warns and uses `pulse`.
+        self.spinner_kind = match config.tui.spinner.as_deref() {
+            None => crate::spinner::Kind::default(),
+            Some(name) => crate::spinner::Kind::parse(name).unwrap_or_else(|| {
+                warnings.push(format!(
+                    "tui.spinner = {name:?} is not one of pulse|arc|quadrant|braille; using pulse"
+                ));
+                crate::spinner::Kind::default()
+            }),
+        };
         // An unknown `tui.input_style` is a skipped key (the reader warns once); the TUI falls
         // back to the default.
         self.input_style = config
@@ -1488,6 +1518,25 @@ impl App {
 
     /// Replaces the read handle with the host's projection, so the renderer reads the same
     /// facts the facade owns.
+    /// The inputs to the herdr state function (ADR 0034 H2): the turn state, the pending
+    /// queue's length, and whether the startup trust prompt is waiting.
+    pub fn herdr_state_inputs(&self) -> (TurnState, usize, bool) {
+        let trust = matches!(self.top_modal(), Some(Modal::Trust(_)));
+        (self.projection.read().turn(), self.pending, trust)
+    }
+
+    /// What is blocking, for herdr's category-only message (ADR 0034 H2). The approval's tool
+    /// name only - never the command, path or question body.
+    pub fn herdr_blocked(&self) -> Option<radian_host::herdr::Blocked> {
+        match self.top_modal() {
+            Some(Modal::Approval(prompt)) => Some(radian_host::herdr::Blocked::Approval(
+                prompt.request.tool.clone(),
+            )),
+            Some(Modal::Question(_)) => Some(radian_host::herdr::Blocked::Question),
+            _ => None,
+        }
+    }
+
     pub fn set_projection(&mut self, projection: Arc<SessionProjection>) {
         self.projection = projection;
     }
@@ -2715,6 +2764,11 @@ impl App {
         // actions come from the `form` layer, and everything else that can edit text goes to
         // the focused field. A key the form does not want is swallowed, never passed down.
         if matches!(self.top_modal(), Some(Modal::Question(_))) {
+            // `alt-h` collapses the panel (ADR 0024 R3): it is the form's own key,
+            // not a rebindable `form` action.
+            if key.code == KeyCode::Char('h') && key.modifiers.contains(KeyModifiers::ALT) {
+                return Some(Input::Form(FormKey::Hide));
+            }
             if let Some(action) = self.keymap.form_action_for(key) {
                 return Some(Input::Form(FormKey::Action(action)));
             }
@@ -3916,6 +3970,7 @@ impl App {
             // ADR 0018: compaction is visible to the user as it happens.
             AgentEvent::CompactionStarted { tokens_before, .. } => {
                 self.note = Some("compacting context".to_string());
+                self.compacting = true;
                 self.entries.push(Entry::new(
                     EntryKind::Notice,
                     format!("context over the budget ({tokens_before} tokens); compacting…"),
@@ -3928,6 +3983,7 @@ impl App {
                 ..
             } => {
                 self.note = None;
+                self.compacting = false;
                 self.entries.push(Entry::new(
                     EntryKind::Notice,
                     format!("context compacted ({tokens_before} → {tokens_after} tokens)"),
@@ -3938,10 +3994,15 @@ impl App {
             }
             AgentEvent::CompactionFailed { reason } => {
                 self.note = None;
+                self.compacting = false;
                 self.entries.push(Entry::new(
                     EntryKind::Notice,
                     format!("compaction failed: {reason}"),
                 ));
+            }
+            // A skip means nothing was summarized (ADR 0018): the flag must not stick.
+            AgentEvent::CompactionSkipped { .. } => {
+                self.compacting = false;
             }
             AgentEvent::RunFinished { status: _ } => {
                 // The turn is over. A pending approval is not cleared here: the permission
@@ -3950,6 +4011,7 @@ impl App {
                 // from the queue alone is what makes "the waiter gave up" and "the turn ended"
                 // the same event.
                 self.note = None;
+                self.compacting = false;
                 // ADR 0033: a `!` submitted behind the turn starts now.
                 if let Some((command, exclude_from_context)) = self.queued_bash.take() {
                     effects.extend(self.begin_bash(command, exclude_from_context).effects);
@@ -4227,6 +4289,57 @@ impl App {
         self.now = now;
     }
 
+    /// The spinner's current frame (ADR 0027): a function of the injected clock,
+    /// so a test advances it with `set_now`.
+    pub fn spinner_frame(&self) -> crate::spinner::Frame {
+        let tick = self.now.saturating_duration_since(self.spinner_origin);
+        crate::spinner::frame(self.spinner_kind, self.footer_glyphs(), tick)
+    }
+
+    /// The style for a spinner frame: the pulse alternates between the accent and the weak
+    /// level; the rotating frames stay on the accent.
+    pub fn spinner_style(&self, frame: crate::spinner::Frame) -> ratatui::style::Style {
+        if frame.dim {
+            self.theme.truncation
+        } else {
+            self.theme.notice_label
+        }
+    }
+
+    /// The input rule's status text (ADR 0027): the most specific running state, or
+    /// `None` when the app is idle (the rule is then plain). The states are the ones the UI
+    /// already has: a modal waiting for the user, a running turn, a running `!`.
+    pub fn spinner_status(&self) -> Option<&'static str> {
+        if matches!(self.top_modal(), Some(Modal::Approval(_))) {
+            return Some("Waiting for approval");
+        }
+        if matches!(self.top_modal(), Some(Modal::Question(_))) {
+            return Some("Waiting for your answer");
+        }
+        // A running compaction is the most specific state (ADR 0018).
+        if self.compacting {
+            return Some("Compacting");
+        }
+        if self.turn() == TurnState::Running {
+            return Some("Working");
+        }
+        if self.bash_running.is_some() {
+            return Some("Running a command");
+        }
+        None
+    }
+
+    /// Whether any spinner is on screen (ADR 0027): the input rule's status line,
+    /// a live reasoning line, or a running tool card. Only then does the loop animate.
+    pub fn spinner_visible(&self) -> bool {
+        self.spinner_status().is_some()
+            || self.entries.iter().any(|entry| entry.live)
+            || self
+                .entries
+                .iter()
+                .any(|entry| entry.kind == EntryKind::ToolCall && entry.result.is_none())
+    }
+
     /// Whether this session has a shell for `!` (ADR 0033): false on the `safe` tier, which
     /// has no sandbox at all (ADR 0012).
     pub fn set_bash_available(&mut self, available: bool) {
@@ -4249,6 +4362,15 @@ impl App {
     /// The footer's glyph set, for the items that draw an icon.
     pub fn footer_glyphs(&self) -> crate::footer::Glyphs {
         self.footer.glyphs()
+    }
+
+    /// The brand mark (ADR 0027): `tui.brand` when set, else the glyph set's
+    /// default. The footer's `brand` item and the startup banner's one-line fallback share it,
+    /// so the two can never disagree.
+    pub fn brand_mark(&self) -> &str {
+        self.brand
+            .as_deref()
+            .unwrap_or_else(|| crate::footer::brand_mark(self.footer_glyphs()))
     }
 
     /// Applies `[tui.footer]` (ADR 0027 C2). Returns the footer's warnings (unknown item,
@@ -4321,6 +4443,74 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR 0027: the spinner frame follows the injected clock, not the text, and
+    /// the configured kind decides the glyphs.
+    #[test]
+    fn the_spinner_frame_follows_the_injected_clock() {
+        let mut app = App::new("m", "s");
+        app.spinner_kind = crate::spinner::Kind::Arc;
+        let base = app.spinner_origin;
+        app.set_now(base);
+        assert_eq!(app.spinner_frame().glyph, "◜");
+        app.set_now(base + std::time::Duration::from_millis(250));
+        assert_eq!(app.spinner_frame().glyph, "◝");
+        app.set_now(base + std::time::Duration::from_millis(500));
+        assert_eq!(app.spinner_frame().glyph, "◞");
+
+        // The default pulse keeps its glyph and only changes the phase every 500 ms.
+        app.spinner_kind = crate::spinner::Kind::Pulse;
+        app.set_now(base);
+        assert!(!app.spinner_frame().dim);
+        app.set_now(base + std::time::Duration::from_millis(500));
+        assert!(app.spinner_frame().dim);
+    }
+
+    /// ADR 0018 + ADR 0027: the compaction events drive the `Compacting` status.
+    #[test]
+    fn the_compacting_status_follows_the_compaction_events() {
+        let mut app = App::new("m", "s");
+        app.projection.set_turn(TurnState::Running);
+        assert_eq!(app.spinner_status(), Some("Working"));
+
+        app.apply_event(&AgentEvent::CompactionStarted {
+            revision: 1,
+            tokens_before: 100,
+            keep_target: 50,
+            trigger: agent_core::CompactionTrigger::Budget,
+        });
+        assert_eq!(app.spinner_status(), Some("Compacting"));
+
+        app.apply_event(&AgentEvent::CompactionFinished {
+            revision: 1,
+            tokens_before: 100,
+            tokens_after: 40,
+            below_target: false,
+        });
+        assert_eq!(app.spinner_status(), Some("Working"));
+
+        // A failed or skipped compaction clears it too.
+        app.apply_event(&AgentEvent::CompactionStarted {
+            revision: 2,
+            tokens_before: 100,
+            keep_target: 50,
+            trigger: agent_core::CompactionTrigger::Manual,
+        });
+        app.apply_event(&AgentEvent::CompactionFailed {
+            reason: "boom".to_string(),
+        });
+        assert_eq!(app.spinner_status(), Some("Working"));
+        app.apply_event(&AgentEvent::CompactionStarted {
+            revision: 3,
+            tokens_before: 100,
+            keep_target: 50,
+            trigger: agent_core::CompactionTrigger::Manual,
+        });
+        app.apply_event(&AgentEvent::CompactionSkipped {
+            reason: "already fits".to_string(),
+        });
+        assert_eq!(app.spinner_status(), Some("Working"));
+    }
 
     fn a_run(exit_code: Option<i32>, stdout: &str) -> radian_coding::UserBash {
         radian_coding::UserBash {

@@ -132,6 +132,12 @@ was not your choice, every config-file and approval-policy warning), and one `Ti
 information line's `label: value` split follows a notice's: the label uses `notice_label`, the
 value `notice_body` (ADR 0028 / ADR 0029). `Ctrl-P` (`toggle_startup`) folds and
 unfolds the information. `tui.banner = false` hides the wordmark, `tui.tips = false` the Tip.
+`tui.brand = "<text>"` (ADR 0027) replaces the brand mark in **both** the footer's
+`brand` item and the one-line banner fallback (one source; ≤ 4 display columns, wider is a
+config error). Without it the glyph set's default is used (`nerd` `󰰠`, `unicode` bold accent `R`,
+`ascii` `rad`). A user-written glyph is **not** covered by the font-coverage rule: a font that
+lacks it draws a fallback glyph, which may sit off the baseline. `[tui.footer.items.brand] style`
+still overrides the color.
 The collapsed summary names the sandbox in plain words: `workspace · macOS
 sandbox · context …` on macOS, `workspace · Linux sandbox · context …` on Linux, `no exec` for
 `safe` and `no sandbox` for `full`; the exact backend name (`macos-seatbelt`, `linux-bwrap`)
@@ -270,8 +276,11 @@ A glyph the font does not have is drawn by a system fallback font with different
 sits off the baseline. The `unicode` tier (the default, no Nerd Font needed) therefore only uses
 characters that **all** of Menlo, SF Mono, JetBrains Mono, Cascadia Code, Fira Code, Operator
 Mono and Source Code Pro have. The brand is `R` (bold accent) here, `󰰠` under `nerd`, `rad` under
-`ascii`; `㎭` (U+33AD) is gone (East-Asian-Wide, off-baseline fallback). The spinner is the
-quadrant `▖▘▝▗` (the arc `◜◝◞◟` and the braille `⠋⠙⠸⠴` are missing from most of the fonts).
+`ascii`; `㎭` (U+33AD) is gone (East-Asian-Wide, off-baseline fallback). The spinner's default
+is `pulse` (`⏺`, one cell); the covered optional kind is `quadrant` (`▖▘▝▗`). The arc
+(`◜◝◞◟`), the braille (`⠋⠙⠸⠴`) and `pulse` itself are the **documented exceptions** to this
+rule (ADR 0027/10: the owner picked them after seeing them), so a font without them
+draws a fallback glyph; `tui.spinner = "quadrant"` switches to the covered set.
 
 Check a glyph with `crates/radian-tui/scripts/check-glyph-coverage.py` (needs `fonttools` in a
 throwaway venv; it is not a repository dependency and not part of `cargo test`). A font that is
@@ -297,7 +306,15 @@ from slipping in unchecked.
 | `▖` | U+2596 | spinner frame 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `▘` | U+2598 | spinner frame 2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `▝` | U+259D | spinner frame 3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `▗` | U+2597 | spinner frame 4 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▗` | U+2597 | spinner frame 4 (`quadrant`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+Documented exceptions (allowed to fall back; the test keeps them in a separate set):
+
+| glyph | codepoint | use | Menlo | SF Mono | JetBrains Mono | Cascadia Code | Fira Code | Operator Mono | Source Code Pro |
+|---|---|---|---|---|---|---|---|---|---|
+| `⏺` | U+23FA | spinner default (`pulse`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `◜` `◝` `◞` `◟` | U+25DC…DF | spinner `arc` | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ |
+| `⠋` `⠙` `⠹` `⠸` `⠼` `⠴` `⠦` `⠧` `⠇` `⠏` | U+280B… | spinner `braille` | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
 
 Replaced or dropped in the `unicode` tier (they were not in all seven fonts):
 
@@ -555,6 +572,11 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   terminal width? does a long argument (a large patch, say) make the box unusable? do the
   `y`/`a`/`n` keys feel right, and is it obvious which one you are about to press? pty
   automation asserts the text and the keys, not the readability or the feel (ADR 0009).
+- **the `ask_user` panel** (ADR 0024): does the tab row read at your width, is the
+  current tab obvious, and do the bottom-border hints (which change per tab) make the keys
+  findable without `/help`? On the `Other` row, do Up/Down still move between the options while
+  the typed text stays? Does `alt-h` collapse to one line and back without losing answers?
+  pty automation asserts the text, not the feel (ADR 0009).
 - **the shell approval box with a long command**: a real command line is often longer than a
   file path. Does the `command:` line stay readable at your width, or does the wrapped preview
   become a wall of text? The pty test only asserts that the whole command is present.
@@ -691,6 +713,15 @@ throwaway terminal, not your working one.
    `Ctrl-J`. *Expect*: Shift+Enter inserts a newline where the terminal reports it (herdr and
    kitty-protocol terminals), and `Ctrl-J` always does; a terminal that cannot report it sends
    instead - record which of the three did what. *Fail*: a newline that also sends.
+3c. **Spinner** (`tui.spinner`; ADR 0027/9/10). *Steps*: start a turn (send a
+   message) with `tui.spinner = "pulse"` (the default), then `"arc"`, then `"quadrant"`, then
+   `"braille"`, then `glyphs = "ascii"`. *Expect*: the input rule shows
+   `── <spinner>  Working ` (two spaces) while the turn runs, a plain rule when idle; `pulse`
+   is a `⏺` that only changes color (500 ms); `arc`/`quadrant`/`braille` turn every 250 ms;
+   `ascii` is `*` (pulse) or `| / - \`. *Look*: **does the spinner render in your terminal
+   font?** `pulse` (`⏺`) and `arc` are the documented exceptions (no checked font has `⏺`; a
+   box means the fallback font lacks it); `quadrant` is the covered alternative. *Fail*:
+   record the font and what you see.
 4. **Ctrl-C** (merge `22b2753`, `01177c2`). *Steps*: type text, `Ctrl-C` (clears; press `↑`
    to find it); empty the input, `Ctrl-C` (status shows `Press Ctrl-C again to quit`), then
    **resize the window** and `Ctrl-C` again inside 2 s; then `Ctrl-C` twice with no resize.
@@ -1051,25 +1082,40 @@ so a facade without it refuses with a notice rather than resolving a request.
 says `ask_user: off (no interactive user)`. The tool is fixed `allow` in every tier (ADR 0024
 Q6): it writes nothing and runs nothing, and the answer is data, not a permission.
 
-A question request is one `Modal::Question` with a form (ADR 0024 Q7):
+A question request is one `Modal::Question`, drawn with the shared panel primitive (ADR 0035
+revision 1, ADR 0024 R2): a titled rounded box, a **tab row** (each question's
+`header`, capped at 16 display cells, a `✓` on an answered one, then `Submit`), the current
+question's options (a `❯` cursor, `○`/`◉` single, `☐`/`☑` multi, ` (Recommended)`, a `↳`
+description), the `Other` row with inline editing, and the key hints in the bottom border
+(they change with the tab). `alt-h` collapses the panel to one line.
 
 ```
-┌ question 1/3 from <session> ────────────────────────────────┐
+╭─ Ask · <session> ───────────────────────────────────────────╮
+│  Load  Scope  Submit                                        │
+├─────────────────────────────────────────────────────────────┤
 │ How should the UI extension be loaded?                      │
-│ > (•) Built-in Rust components                              │
-│   ( ) External process plugins                              │
-│ Tab next · Space select · Enter next/submit · Esc decline   │
-└─────────────────────────────────────────────────────────────┘
+├─────────────────────────────────────────────────────────────┤
+│ ❯ ○ Built-in Rust components                                │
+│   ○ External process plugins                                │
+│      ↳ a separate program, JSON-RPC over stdio              │
+│   ○ Other (type your own)                                   │
+╰─ ⏎ select · n note · ↑/↓ move · ⇥/←/→ question · esc cancel…╯
 ```
 
 | Key | Action |
 |---|---|
-| `Tab` / `Shift-Tab` (`form_next`/`form_prev`) | the next/previous question, wrapping |
-| `Up` / `Down` (`form_up`/`form_down`) | the option cursor; the list scrolls to keep it visible |
-| `Space` (`form_select`) | choose the highlighted option (toggle it for a `multi` question) |
-| `Enter` (`form_submit`) | the next question, then the overview; in the overview, submit |
+| `Tab`/`→` / `Shift-Tab`/`←` (`form_next`/`form_prev`) | the next/previous tab (a question or `Submit`), wrapping |
+| `Up` / `Down` (`form_up`/`form_down`) | the option cursor; on the `Other` row it still moves between options and keeps the typed text (a `text` question and a note are multi-line, so there it moves the composer's cursor) |
+| `Space` (`form_select`) | choose the highlighted option without advancing (toggle it for a `multi` question) |
+| `Enter` (`form_submit`) | save a note; a `single` selects **and advances**; a `multi` toggles; on `Submit`, submit |
+| `n` | a note for the current question (type, `Enter` saves, `Esc` cancels) |
 | `Esc` (`form_decline`) | ask once; a second `Esc` declines (`user_declined`) |
-| typing | the focused free-text field (a `text` question, or the `Other` row), with the composer's editing keys |
+| `alt-h` | collapse the panel to one line (`Ask · 2/3 answered · alt-h to show`) |
+| typing | the focused free-text field (a `text` question, the `Other` row, or a note), with the composer's editing keys |
+
+The transcript also shows the `ask_user` call and result as a boxed block (ADR 0024
+R1): the same questions, the chosen options marked `◉`/`☑`, a `↳` description, and the
+declined/cancelled status; `glyphs = ascii` falls back to `+ - |`, `(*)`/`[x]` and `->`.
 
 A `required` question with no answer blocks the submit with a notice. The drafts live in the
 form, so moving between questions keeps them. These are the **only** rebindable modal keys; the

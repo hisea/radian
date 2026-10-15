@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 fn question(id: &str) -> Question {
     Question {
+        header: None,
         id: id.into(),
         prompt: format!("question {id}?"),
         kind: QuestionKind::Text,
