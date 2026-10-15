@@ -246,7 +246,7 @@ fn memory_rules() -> Vec<Rule> {
 /// The read-only built-ins, allowed regardless of path: `radian-coding` enforces the
 /// workspace boundary itself for these tools, so the permission layer does not need to.
 fn read_only() -> Vec<Rule> {
-    ["read", "list", "git_status", "git_diff"]
+    ["read", "list", "glob", "grep", "git_status", "git_diff"]
         .into_iter()
         .map(|name| {
             Rule::new(
@@ -349,6 +349,22 @@ mod tests {
         ] {
             let tier = profile.preset.as_str();
             assert_eq!(action(&profile, "ask_user"), Action::Allow, "{tier}");
+        }
+    }
+
+    /// The built-in search tools read the workspace and write nothing, so every tier allows
+    /// them and they never prompt (they enforce the workspace boundary in `radian-coding`).
+    #[test]
+    fn the_search_tools_are_allowed_in_every_tier() {
+        let ws = std::env::temp_dir();
+        for profile in [
+            Profile::safe(&ws).unwrap(),
+            Profile::workspace_write(&ws).unwrap(),
+            Profile::full_access(&ws).unwrap(),
+        ] {
+            let tier = profile.preset.as_str();
+            assert_eq!(action(&profile, "glob"), Action::Allow, "{tier}");
+            assert_eq!(action(&profile, "grep"), Action::Allow, "{tier}");
         }
     }
 

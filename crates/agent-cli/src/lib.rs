@@ -106,8 +106,8 @@ pub struct Cli {
     #[arg(long)]
     mcp_config: Option<String>,
 
-    /// Expose the built-in file and read-only git tools rooted at this directory
-    /// (read/write/patch/list, git_status/git_diff). Under `workspace` this also
+    /// Expose the built-in file and read-only tools rooted at this directory
+    /// (read/write/patch/list, glob/grep, git_status/git_diff). Under `workspace` this also
     /// exposes `shell`, which runs only inside the sandbox.
     #[arg(long)]
     workspace: Option<String>,

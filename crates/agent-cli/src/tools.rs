@@ -34,6 +34,8 @@ mod tests {
                 "write",
                 "patch",
                 "list",
+                "glob",
+                "grep",
                 "git_status",
                 "git_diff",
                 "mermaid_check"

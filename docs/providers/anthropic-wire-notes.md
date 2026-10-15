@@ -4,6 +4,8 @@
 
 **扩展思考（extended thinking）补充访问：2026-10-13（UTC 2026-10-13T02:30Z–02:45Z）**，见 §2.3、§4.2、§6；那一批事实来自 `extended-thinking`、`thinking`、`thinking-tool-workflows` 与 `streaming` 页。
 
+**提示缓存（prompt caching）补充访问：2026-10-15**，见 §2.4、§6；那一批事实只来自官方 `prompt-caching` 页。
+
 官方文档提供 markdown 版本：把文档页 URL 加上 `.md` 即可（例如
 `https://platform.claude.com/docs/en/build-with-claude/streaming.md`）。下列访问用的是该形式；括号里是页面 frontmatter 声明的规范 URL。
 
@@ -34,7 +36,7 @@
 | `max_tokens` | number（minimum 0） | 是（配置；必需字段，见下） |
 | `messages` | array of `MessageParam` | 是 |
 | `stream` | boolean | 是（恒为 `true`） |
-| `system` | `string` 或 array of `TextBlockParam`（**optional**） | 有 system prompt 时发送（用 string 形式） |
+| `system` | `string` 或 array of `TextBlockParam`（**optional**） | 有 system prompt 时发送；默认用 string 形式，开启提示缓存（`CacheMode::Auto`）且非空时用单块 array 并在该块上带 `cache_control`（§2.4） |
 | `tools` | array of `Tool`（optional） | 有工具时发送 |
 | `tool_choice` | `ToolChoice`（optional） | 不发送（Core 的 `ModelRequest` 没有该字段；可由 `extra_body`/`settings` 提供） |
 | `thinking` | `ThinkingConfig`（`{"type":"enabled","budget_tokens":N}` 或 `{"type":"adaptive"}`） | 有配置才发送；默认关闭（不发送该键）。见 §2.3 |
@@ -52,6 +54,22 @@
 - **文档未说明**：本 adapter 不解析、不依赖 `display`（`summarized`/`omitted`/`updates`）——它是 `thinking` 对象里的另一个可选字段；只想开 thinking 时手册示例可以只给 `type`，所以本 adapter 只发 `type`（`Enabled` 时另发 `budget_tokens`），不发 `display`。若要 `display` 或 `block_binding` 等新字段，经 `extra_body` 传入。**未验证**：这些附加字段在 `thinking` 被 adapter 顶层插入后能否再经 `extra_body` 合并（两个来源都是 `thinking` 键，后者整体覆盖前者，文档未说明应否合并）。
 
 `max_tokens` 是否为必需：Body parameters 一节把它列为 `- max_tokens: number`（未标 `optional`），而同一节里 `system`/`tools`/`tool_choice` 都标了 `optional`；且**每一个**官方示例（streaming 页、api/messages Example、errors 页）都带 `max_tokens`。本 adapter 因此**总是**发送 `max_tokens`（配置默认 4096，可改）。**未验证**：官方未用「required」字样明写，此处依据的是「未标 optional + 所有示例都带」这一文档证据。
+
+### 2.4 提示缓存（`cache_control`）（新增，访问 2026-10-15）
+
+来源：`https://platform.claude.com/docs/en/build-with-claude/prompt-caching.md`（规范 URL `https://platform.claude.com/docs/en/build-with-claude/prompt-caching`）。访问 2026-10-15。提示缓存的全部事实只取这一页官方文档；下面每条都能在该页找到原文。
+
+- **两种方式**：(1) **自动缓存（automatic caching）**：在请求体**顶层**放一个 `cache_control` 字段（`{"type":"ephemeral"}`），系统自动把断点放在最后一个可缓存块上，并随对话增长前移；(2) **显式断点（explicit cache breakpoints）**：把 `cache_control` 直接放在**单个内容块**上。两者可以混用，但**自动缓存也占 4 个断点槽位之一**。本 adapter 用**显式断点**（顶层自动缓存会引入一个新的顶层键，且本 adapter 要在固定三处放断点）。
+- **断点上限**：一次请求**最多 4 个** `cache_control` 断点。官方原文：「You can define up to 4 cache breakpoints」；「If 4 explicit block-level breakpoints already exist, the API returns a 400 error (no slots left for automatic caching)」。本 adapter 最多放 **3** 个（见下），不碰第 4 个。
+- **缓存前缀顺序**：`tools` → `system` → `messages`。某一级的改动使该级及其后**所有**级失效（官方 §What invalidates the cache）。
+- **可缓存的内容**：`tools` 数组里的工具定义；`system` 数组里的内容块；`messages.content` 里的文本、图片、`tool_use`、`tool_result` 块。
+- **不可直接缓存**：`thinking`/`redacted_thinking` 块**不能**直接带 `cache_control`（它们可以在后续轮次随其它内容一起被缓存，且被读到时计入输入 token）；**空文本块**不能缓存（`text` 有 `minLength 1`）；引用等**子内容块**不能，要缓存其顶层块。
+- **`cache_control` 形状**：`{"type":"ephemeral"}`。目前 `ephemeral` 是**唯一**支持的 `type`，默认 5 分钟 TTL；`{"type":"ephemeral","ttl":"1h"}` 是 1 小时（2 倍价）。本 adapter 只发 `{"type":"ephemeral"}`，不发 `ttl`。
+- **`system` 的形状**：官方类型是 `string` **或** array of `TextBlockParam`。要把断点放在 system 上，就必须用 array 形式（断点在某个块上）。
+- **最小可缓存长度**：按模型不同为 512 / 1024 / 2048 / 4096 token；**短于**该长度时请求照常处理，但**不缓存**且**不报错**（此时 `cache_creation_input_tokens` 与 `cache_read_input_tokens` 都为 0）。官方还给了一条「缓存写入只在断点处发生、读取向前回看最多 20 个块」的规则，本 adapter 一次请求只关心当前请求，不受它影响。
+- **usage 口径**：`input_tokens` 是**最后一个断点之后**、既未读也未写缓存的 token 数；官方原文：`total_input_tokens = cache_read_input_tokens + cache_creation_input_tokens + input_tokens`。这再次印证 Anthropic 的 `input` **不含**缓存命中（ADR 0007 的前提），与 §3.1 的字段映射一致。
+- **本 adapter 的断点**（`CacheMode::Auto`，**默认**）：(1) **最后一件**工具定义；(2) system 末尾（system 非空时把它发成带 `cache_control` 的单块 array）；(3) **最后一条消息**里**最后一个可缓存块**（跳过 `thinking`/`redacted_thinking` 与空文本）。对应部分为空时该断点不存在。`CacheMode::None` 完全不放 `cache_control`，请求体与实现本特性前**逐字节相同**。
+- **未验证**：本 adapter 只发显式断点、不发顶层自动缓存；也**没有**在真实端点上观察过缓存命中（本仓库不持有 Anthropic key，见 §6 的手测项）。
 
 ### 2.1 `MessageParam` 与内容块
 
@@ -176,12 +194,14 @@ Anthropic 的 `ContentBlockParam` 文档列出的输入块类型里**没有**音
 - **未验证**：`redacted_thinking` 块是否可能带 delta（官方示例只在 `content_block_start` 给 `data`；本 adapter 对其 delta 视同无）。
 - **未验证**：`thinking` 块在流里能否穿插在文本/工具块之间（官方示例总是思考在前；本 adapter 按块下标保序，不论位置，回传时统一前置。**若**官方允许思考块出现在 `tool_use` 之后且要求同样保持相对位置，本 adapter 的前置策略会不满足——官方文档未说明这种顺序，记此风险）。
 - **未实现**：服务器工具块（`server_tool_use`、`web_search_tool_result`、`web_fetch_*`、`code_execution_*` 等）——一律忽略，不作为 `ToolCall`（Core 规定「provider 自己执行的工具绝不表示为 `ToolCall`」）。
-- **未实现**：`stop_details`、`container`、`citations`、`tool_choice`（请求侧）、`anthropic-beta` 头、prompt caching 的 `cache_control`、`metadata`。
+- **已实现（2026-10-15）**：提示缓存（请求侧）。`AnthropicConfig::cache`（`CacheMode::Auto` 默认 / `None`）控制。Auto 在**三处**放显式断点（最后一件工具、system 末尾、最后一条消息的最后一个可缓存块），最多 3 个；None 不放，请求体与实现前逐字节相同（§2.4）。**未实现的部分**：顶层自动缓存字段、`ttl`、按最小长度或对话增长动态调整断点（官方自己会在短于阈值时静默不缓存，本 adapter 不做本地长度判断）。
+- **未实现**：`stop_details`、`container`、`citations`、`tool_choice`（请求侧）、`anthropic-beta` 头、`metadata`。
 - **未验证**：官方 API 的真实网络行为（本 adapter 只在进程内 mock 上测试，未访问真实 API，未使用任何真实 key）。
 - **未验证**：`Message Delta Usage` 的 `input_tokens` 在实际流里是否总是出现（官方类型允许 `null`）；本 adapter 的逐字段合并对两种情形都成立。
 
 ## 7. 官方文档页面清单（访问 2026-10-12）
 
+- `https://platform.claude.com/docs/en/build-with-claude/prompt-caching`（显式断点、自动缓存、4 断点上限、缓存顺序、可缓存/不可缓存块、最小长度、usage 口径；访问 2026-10-15）
 - `https://platform.claude.com/docs/en/build-with-claude/thinking`（思考概念、`display`、流式、工具轮回传、加密、`redacted_thinking`；访问 2026-10-13）
 - `https://platform.claude.com/docs/en/build-with-claude/extended-thinking`（`thinking: {type:"enabled",budget_tokens}`、约束、adaptive 迁移；访问 2026-10-13）
 - `https://platform.claude.com/docs/en/build-with-claude/thinking-tool-workflows`（两轮工具往返的逐字示例；访问 2026-10-13）
