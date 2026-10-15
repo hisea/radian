@@ -43,8 +43,8 @@ pub use message::{
     ToolCall, ToolResult,
 };
 pub use model::{
-    CONTEXT_OVERFLOW_PREFIX, Model, ModelContext, ModelError, ModelRequest, ModelResponse,
-    ModelUsage, StopReason,
+    CANCELLATION_MESSAGE, CONTEXT_OVERFLOW_PREFIX, Model, ModelContext, ModelError, ModelRequest,
+    ModelResponse, ModelUsage, StopReason,
 };
 pub use outcome::{
     CancelReason, CompactionError, CompactionFailure, CompactionOutcome, IncompleteReason,
