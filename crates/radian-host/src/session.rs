@@ -1189,7 +1189,9 @@ pub async fn open_session(
     driver.set_runtime_events(runtime_events);
     // ADR 0021: the per-turn memory addition, placed in the inject lane
     // after the user's turn is claimed and before its first model call.
-    driver.set_turn_additions(crate::memory::injection::addition_seam(Arc::clone(&injection)));
+    driver.set_turn_additions(crate::memory::injection::addition_seam(Arc::clone(
+        &injection,
+    )));
     if let Some(budget_for) = budget_for.clone() {
         driver.set_budget_for(budget_for);
     }

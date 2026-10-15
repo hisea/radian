@@ -413,7 +413,9 @@ mod tests {
     /// only thing that recomputes it is a change to the model route (or the thinking level).
     #[tokio::test]
     async fn the_session_layer_changes_only_when_the_model_route_does() {
-        let slot = Arc::new(Mutex::new(json!({"model": {"provider": "p", "model": "m-1"}})));
+        let slot = Arc::new(Mutex::new(
+            json!({"model": {"provider": "p", "model": "m-1"}}),
+        ));
         let source = {
             let slot = Arc::clone(&slot);
             Arc::new(move || SessionKey::of(&slot.lock().unwrap(), "m-1"))

@@ -179,10 +179,17 @@ fn the_memory_injection_keys_are_read_and_the_rest_is_reported() {
         "memory.injection.project_budget",
         "memory.injection.overflow",
     ] {
-        assert!(config.skipped.contains(&key.to_string()), "{:?}", config.skipped);
+        assert!(
+            config.skipped.contains(&key.to_string()),
+            "{:?}",
+            config.skipped
+        );
     }
     assert!(
-        !config.skipped.iter().any(|key| key.starts_with("memory.injection.additions")),
+        !config
+            .skipped
+            .iter()
+            .any(|key| key.starts_with("memory.injection.additions")),
         "{:?}",
         config.skipped
     );

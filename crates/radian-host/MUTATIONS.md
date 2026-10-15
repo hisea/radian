@@ -765,3 +765,31 @@ cli -- memory` after `cargo build -p radian-tui --bin radian`, and `cargo test -
 6/6 caught. In each run only the tests listed above failed (the rest of the `memory::` filter
 stayed green); AC-1 also reds the three CLI tests and the pty test above, which is what the two
 end-to-end tests are for.
+
+## ADR 0021 + ADR 0036：固定段、追加消息、`<session>`（2026-10-15）
+
+Base `b63ac20`（本 worktree，dogfood/memory-r2）· 变异直接做在本 worktree，每个变异前把文件
+复制到 `/tmp/r2-mut-backups/`，跑完后从副本还原并 `diff -q` 确认一致（脚本
+`.radian/progress/mutate.sh`，不在提交里）；`git status --short` 在跑完后只剩本片的正常改动。
+每个变异用 `--no-fail-fast`；需要重编 `radian` 二进制的那几条先 `cargo build -p radian-tui --bin
+radian`（agent-cli 的测试会拒绝过期的二进制）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| M1 | 固定段的查询文本改回**最后一条**用户消息（`first_user_text(&request.messages)` → 反向找 `is_user`） | `agent_cli::cli::a_resumed_session_ranks_the_block_by_its_first_user_message` | ✅ caught |
+| M2 | 驱动器用 `InputSource::User` 注入追加消息 | `radian_runtime::tests/driver.rs::a_host_addition_lands_after_the_user_message_and_before_the_first_call`（`InboxEnqueued.source` 不是 system） | ✅ caught |
+| M3 | 追加消息改到 `drain_steering` **之后**注入（晚一步到） | 同上（transcript 顺序：追加消息不再紧跟用户消息） | ✅ caught |
+| M4 | 追加候选忽略去重账本（`exclude` 为空） | `radian_host/tests/memory_injection.rs::a_later_turn_appends_its_new_hits_as_one_system_message` | ✅ caught |
+| M5 | 固定段每次调用重算（去掉 `fixed` 的缓存短路） | `radian_host/tests/memory_injection.rs::{the_block_reaches_the_system_prompt_and_the_event_is_written_once, a_later_turn_appends_its_new_hits_as_one_system_message, an_addition_budget_drops_whole_records_and_additions_can_be_off}`；`agent_cli::cli::the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once`（第 4 次请求的系统提示词带上了 mid-session 存的记录） | ✅ caught |
+| M6 | `<session>` 每次请求重算（去掉 key 比较） | `agent_cli::cli::the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once`（write 之后 `git:` 行从 `(clean)` 变成未提交） | ✅ caught |
+| M7 | `/model` 后 `<session>` 不重算（重算分支改成 `let _ = key;`） | `radian_host::prompt::tests::the_session_layer_changes_only_when_the_model_route_does` | ✅ caught |
+
+7/7 caught，每条都有具名测试。两条**等价变异**（改掉也不会被任何测试区分）如实记录：
+
+- **追加消息自身的 `meta.source = System`**：`Inbox::inject` 会用它自己的 `source` 参数覆盖
+  `meta.source`（ADR 0011），所以把 `addition_for_turn` 里那行改成 `User` 没有任何可观察差异。
+  可观察的那一半在驱动器的 `inject(message, InputSource::System)`，即 M2。
+- **`fixed()` 的 key-source 回退**（用户轮次开始时用本轮文本当回退）：在 CLI 端到端与单元测试里，
+  第一条用户消息总是在 transcript 里（resume）或就是本轮消息（首轮），两条路给出同一个查询文本，
+  所以把回退值改成 `String::new()` 只有在一个「transcript 里根本没有用户消息、而且这是新会话」的
+  构造下才可区分，本片没有这样的用例。

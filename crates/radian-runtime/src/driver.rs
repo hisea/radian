@@ -22,8 +22,8 @@ use std::sync::{Arc, Mutex};
 use agent_core::{
     Agent, AgentEvent, AgentSession, CancelReason, CancellationToken, CompactionFailure,
     ContextBudget, EventSink, Hooks, IncompleteReason, InputSource, JournalError, JournalRecord,
-    Message, MessageId, Model, RunError, RunOutcome, RunStatus, SessionError, SteeringHandle,
-    Step, ToolProvider, TranscriptJournal, TurnOptions,
+    Message, MessageId, Model, RunError, RunOutcome, RunStatus, SessionError, SteeringHandle, Step,
+    ToolProvider, TranscriptJournal, TurnOptions,
 };
 use radian_session::{
     EventData, InboxLane, ReadError, RuntimeEvent, Session, SessionJournal, TurnOutcome, TurnReason,
@@ -421,6 +421,11 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         let runtime_events = self.runtime_events.clone();
         let turn_additions = self.turn_additions.clone();
         let mut options = self.options.clone();
+        // ADR 0036: the tool definitions are never withdrawn mid-session.
+        // This driver has no step ceiling (the request carries every mounted tool on every
+        // call); if a per-agent step limit ever lands (ADR 0030), reaching it must
+        // keep the definitions and set `tool_choice: none` instead, so the provider's cached
+        // prefix survives.
         // ADR 0026 D7: a `/model` switch moves the budget with the model. `None` keeps the
         // configured budget, so a session that never switches behaves exactly as before.
         options.context_budget = self.turn_budget;

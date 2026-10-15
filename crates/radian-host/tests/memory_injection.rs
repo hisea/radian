@@ -247,6 +247,26 @@ async fn a_later_turn_appends_its_new_hits_as_one_system_message() {
         "an addition already in the transcript is never appended twice"
     );
 
+    // A compaction that folds the addition into the summary removes it from the transcript, so
+    // its ids leave the ledger with it and the same turn text appends it again (decision 3).
+    let after_compaction = vec![
+        Message::User {
+            content: vec![agent_core::ContentPart::text("This is a summary.")],
+            meta: agent_core::MessageMeta {
+                id: None,
+                source: Some(agent_core::InputSource::System),
+                origin: Some(
+                    agent_core::OpaqueJson::parse(r#"{"kind":"compaction_summary"}"#).unwrap(),
+                ),
+            },
+        },
+        Message::user("second"),
+    ];
+    let again = injection
+        .addition_for_turn("parser", &after_compaction)
+        .expect("the id left the ledger with the compacted message");
+    assert!(again.text().contains("src/parse.rs"), "{}", again.text());
+
     // The hook's set is the fixed block plus the transcript's additions, so the addition joins
     // it and the fixed block's bytes do not move.
     let mut req = request("parser");
@@ -257,7 +277,11 @@ async fn a_later_turn_appends_its_new_hits_as_one_system_message() {
     let sets = injected_sets(&session);
     assert_eq!(sets.len(), 2, "the addition joined the set: {sets:?}");
     assert_eq!(sets[0].len(), 1, "the first set is the fixed block alone");
-    assert_eq!(sets[1].len(), 2, "the second set adds the addition: {sets:?}");
+    assert_eq!(
+        sets[1].len(),
+        2,
+        "the second set adds the addition: {sets:?}"
+    );
     assert!(
         sets[1].iter().any(|(_, id)| id == later.id.0.as_str()),
         "the addition is recorded with its own id: {sets:?}"
@@ -345,9 +369,7 @@ async fn an_addition_budget_drops_whole_records_and_additions_can_be_off() {
     };
     let injection = MemoryInjection::new(Some(service), Arc::clone(&journal), off, warn);
     assert!(
-        injection
-            .addition_for_turn("parser", &transcript)
-            .is_none(),
+        injection.addition_for_turn("parser", &transcript).is_none(),
         "additions = false sends nothing"
     );
 

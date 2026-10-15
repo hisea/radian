@@ -575,12 +575,17 @@ async fn a_host_addition_lands_after_the_user_message_and_before_the_first_call(
     driver.set_turn_additions(Arc::new(move |text: &str, transcript: &[Message]| {
         // The seam sees the transcript **before** the turn's input is committed, which is the
         // dedup ledger (ADR 0021).
-        seen.lock().unwrap().push((text.to_owned(), transcript.len()));
+        seen.lock()
+            .unwrap()
+            .push((text.to_owned(), transcript.len()));
         Some(addition_message(text))
     }));
     let handle = tokio::spawn(async move { driver.run().await });
 
-    env.inbox.followup("first", InputSource::User).await.unwrap();
+    env.inbox
+        .followup("first", InputSource::User)
+        .await
+        .unwrap();
     env.recorder.wait_finished().await;
     // A job completion notification while idle: a `followup`, so it starts a turn, and its
     // source is System (ADR 0037 decision 3).
@@ -589,7 +594,10 @@ async fn a_host_addition_lands_after_the_user_message_and_before_the_first_call(
         .await
         .unwrap();
     env.recorder.wait_finished().await;
-    env.inbox.followup("second", InputSource::User).await.unwrap();
+    env.inbox
+        .followup("second", InputSource::User)
+        .await
+        .unwrap();
     env.recorder.wait_finished().await;
     handle.abort();
 
@@ -650,7 +658,8 @@ fn addition_message(text: &str) -> Message {
             id: None,
             source: Some(InputSource::System),
             origin: Some(
-                agent_core::OpaqueJson::parse(r#"{"kind":"memory_addition","records":[]}"#).unwrap(),
+                agent_core::OpaqueJson::parse(r#"{"kind":"memory_addition","records":[]}"#)
+                    .unwrap(),
             ),
         },
     }

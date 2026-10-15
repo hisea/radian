@@ -1328,10 +1328,12 @@ match`; the other entries stay folded. The override is dropped by the next globa
 (`Ctrl-T` / `Ctrl-O`); closing the search box keeps it, so the text the user searched for does
 not disappear again. The jump centers the match's **display** line, not its expanded one.
 
-Already a Notice-style one-liner (verified, R5): a memory injection never enters the transcript
-(the hook appends to the system prompt) and its only transcript trace is the startup
-`[memory] …` notice; an approval is a modal, not a transcript entry (the call and its result are
-the card). A pending question's result arrives as the `ask_user` card.
+Already a Notice-style one-liner (verified, R5): the memory **fixed block** never enters the
+transcript (the hook appends to the system prompt) and its only transcript trace is the startup
+`[memory] …` notice. A later turn's addition **does** enter it, as a `System`-source message
+(ADR 0021), which the TUI renders like any other `System` message (the same shape as
+ADR 0037's completion notice); an approval is a modal, not a transcript entry (the call and its
+result are the card). A pending question's result arrives as the `ask_user` card.
 
 ## Mermaid blocks (ADR 0028 R8)
 

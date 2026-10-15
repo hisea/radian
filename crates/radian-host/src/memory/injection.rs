@@ -417,10 +417,7 @@ impl MemoryInjection {
         }
         let view = self.view()?;
         let injection = plan(&view, &query(), &self.config);
-        self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .fixed = Some(injection.clone());
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).fixed = Some(injection.clone());
         Ok(injection)
     }
 
@@ -436,17 +433,16 @@ impl MemoryInjection {
             return None;
         }
         // The fixed block first: the two must never carry the same record.
-        let fixed = match self.fixed(|| {
-            first_user_text(transcript).unwrap_or_else(|| text.to_owned())
-        }) {
-            Ok(fixed) => fixed,
-            Err(error) => {
-                (self.warn)(&format!(
-                    "memory read failed; nothing appended this turn: {error}"
-                ));
-                return None;
-            }
-        };
+        let fixed =
+            match self.fixed(|| first_user_text(transcript).unwrap_or_else(|| text.to_owned())) {
+                Ok(fixed) => fixed,
+                Err(error) => {
+                    (self.warn)(&format!(
+                        "memory read failed; nothing appended this turn: {error}"
+                    ));
+                    return None;
+                }
+            };
         let view = match self.view() {
             Ok(view) => view,
             Err(error) => {
@@ -492,10 +488,7 @@ impl MemoryInjection {
         {
             (self.warn)(&format!("could not record MemoryInjected: {error}"));
         }
-        self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .last = records;
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).last = records;
     }
 }
 
@@ -651,6 +644,29 @@ mod tests {
         assert_eq!(one_line("a\nb"), "a\\nb");
         assert_eq!(one_line("a\\nb"), "a\\\\nb");
         assert_eq!(one_line("a\r\nb"), "a\\r\\nb");
+    }
+
+    /// ADR 0021: the query is the session's **first** user message, and a
+    /// System-source user-role message (a job notification, an addition, a compaction summary)
+    /// is not one.
+    #[test]
+    fn the_query_is_the_first_user_message() {
+        let summary = Message::User {
+            content: vec![agent_core::ContentPart::text("This is a summary.")],
+            meta: agent_core::MessageMeta {
+                id: None,
+                source: Some(InputSource::System),
+                origin: Some(OpaqueJson::parse(r#"{"kind":"compaction_summary"}"#).unwrap()),
+            },
+        };
+        let transcript = vec![
+            summary,
+            Message::user("first"),
+            Message::user("second"),
+            Message::user("third"),
+        ];
+        assert_eq!(first_user_text(&transcript).as_deref(), Some("first"));
+        assert_eq!(first_user_text(&[]), None);
     }
 
     fn project(id: &str) -> Scope {
@@ -863,6 +879,45 @@ mod tests {
         )];
         let text = plan(&view, "", &InjectionConfig::default()).text;
         assert!(text.contains(&content), "the whole content is present");
+    }
+
+    /// A record the request's text does not mention is injected after the ones that match
+    /// (D6: the score orders, it does not filter) — and the query a *process* uses is the first
+    /// user message, so the two orderings differ.
+    #[test]
+    fn the_fixed_block_orders_by_the_first_user_message_not_the_last() {
+        let view = vec![
+            record(
+                "parser",
+                project("p1"),
+                Source::User,
+                Kind::Fact,
+                None,
+                "about parsers",
+                "2026-01-01T00:00:00Z",
+            ),
+            record(
+                "style",
+                project("p1"),
+                Source::User,
+                Kind::Fact,
+                None,
+                "about styles",
+                "2026-01-01T00:00:00Z",
+            ),
+        ];
+        let transcript = vec![Message::user("parsers"), Message::user("styles")];
+        let query = first_user_text(&transcript).unwrap();
+        assert_eq!(
+            ids(&plan(&view, &query, &InjectionConfig::default())),
+            ["parser", "style"]
+        );
+        // The last user message — what the pre-revision code used — orders them the other way,
+        // so this pins the change (ADR 0021).
+        assert_eq!(
+            ids(&plan(&view, "styles", &InjectionConfig::default())),
+            ["style", "parser"]
+        );
     }
 
     #[test]

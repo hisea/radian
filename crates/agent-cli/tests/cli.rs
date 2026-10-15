@@ -5903,14 +5903,26 @@ async fn memory_injection_reaches_the_system_prompt() {
     );
 }
 
-/// ADR 0021, end to end in one process: two user turns with a
-/// `memory_save` in between. Every request carries the **same** system prompt bytes (the fixed
-/// block is ranked by the session's first user message and computed once), the agent's new
-/// record reaches the model as one System-source message right after the second user message,
-/// the tool definitions never move, and `MemoryInjected` gains the new id.
+/// ADR 0021 and ADR 0036, end to end in one
+/// process: two user turns with a `write` and a `memory_save` in between. Every request
+/// carries the **same** system prompt bytes — the fixed block is ranked by the session's first
+/// user message and computed once, and the `<session>` layer's git state is **not** refreshed
+/// when the write makes the tree dirty — the agent's new record reaches the model as one
+/// System-source message right after the second user message, the tool definitions never move,
+/// and `MemoryInjected` gains the new id.
 #[tokio::test]
 async fn the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once() {
+    if !git_available() {
+        eprintln!("skipping: git is not on PATH");
+        return;
+    }
     let env = MemoryEnv::new("mem-fixed");
+    git(&env.ws, &["init", "-q"]);
+    git(&env.ws, &["config", "user.email", "t@example.invalid"]);
+    git(&env.ws, &["config", "user.name", "t"]);
+    std::fs::write(env.ws.join("a.txt"), "hi\n").unwrap();
+    git(&env.ws, &["add", "."]);
+    git(&env.ws, &["commit", "-qm", "init"]);
     let (code, _, stderr) = env.run(&["project", "new"]).await;
     assert_eq!(code, 0, "{stderr}");
     let (code, _, stderr) = env
@@ -5919,8 +5931,11 @@ async fn the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once
     assert_eq!(code, 0, "{stderr}");
 
     let server = MockServer::start(vec![
+        // The write makes the working tree dirty; the `<session>` line must not follow it
+        // (ADR 0036: the git state is not refreshed between turns).
+        tool_reply("call_1", "write", r#"{"path":"x.txt","content":"y"}"#),
         tool_reply(
-            "call_1",
+            "call_2",
             "memory_save",
             r#"{"content":"second: the parser lives in src/parse.rs"}"#,
         ),
@@ -5946,15 +5961,21 @@ async fn the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once
                 ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
             ],
         ),
-        // Turn 1 saves the record; turn 2's text hits it.
+        // Turn 1 writes and saves the record; turn 2's text hits it.
         "first\nsecond\n",
     )
     .await;
     assert_eq!(code, 0, "{stderr}");
+    assert!(env.ws.join("x.txt").exists(), "the write ran");
 
-    // Turn 1 takes two model calls (the tool call and the answer), turn 2 one.
-    assert_eq!(server.requests().len(), 3, "{}", server.requests().len());
-    let system = |n: usize| messages_of(&server, n)[0]["content"].as_str().unwrap().to_owned();
+    // Turn 1 takes three model calls (write, memory_save, answer), turn 2 one.
+    assert_eq!(server.requests().len(), 4, "{}", server.requests().len());
+    let system = |n: usize| {
+        messages_of(&server, n)[0]["content"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
     let first = system(0);
     assert!(
         first.contains("tabs over spaces"),
@@ -5964,16 +5985,29 @@ async fn the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once
         !first.contains("src/parse.rs"),
         "the block must not be recomputed from the memory saved mid-session: {first}"
     );
-    assert_eq!(system(1), first, "the same turn's second call");
-    assert_eq!(system(2), first, "the next turn's system prompt is byte-identical");
+    assert!(
+        first.contains("git: "),
+        "the session layer names the git state: {first}"
+    );
+    assert!(
+        first.contains("(clean)"),
+        "the tree was clean when the process started: {first}"
+    );
+    for n in 1..4 {
+        assert_eq!(
+            system(n),
+            first,
+            "request {n} must carry the same system prompt bytes"
+        );
+    }
     assert_eq!(
         advertised_tools(&server, 0),
-        advertised_tools(&server, 2),
+        advertised_tools(&server, 3),
         "tool definitions are never withdrawn mid-session (ADR 0036)"
     );
 
     // The second turn's first request carries the addition right after its user message.
-    let messages = messages_of(&server, 2);
+    let messages = messages_of(&server, 3);
     let messages = messages.as_array().unwrap();
     let user_at = messages
         .iter()
@@ -6040,7 +6074,95 @@ async fn the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once
     // The addition's content is in the session file (decision 3's accepted cost); the
     // `MemoryInjected` records still carry ids only.
     let raw = std::fs::read_to_string(env.sessions.join("fixed.jsonl")).unwrap();
-    assert!(raw.contains("src/parse.rs"), "the addition is in the transcript");
+    assert!(
+        raw.contains("src/parse.rs"),
+        "the addition is in the transcript"
+    );
+}
+
+/// The memory block from a system prompt (the `## Memory (ADR 0021)` section only), so a
+/// comparison across processes does not depend on the date or the cwd.
+fn memory_block(system: &str) -> String {
+    let start = system
+        .find("## Memory (ADR 0021)")
+        .unwrap_or_else(|| panic!("no memory block in {system}"));
+    let end = system[start..]
+        .find("<session>")
+        .map(|offset| start + offset)
+        .unwrap_or(system.len());
+    system[start..end].to_owned()
+}
+
+/// ADR 0021, across a resume: a new process ranks the block by the
+/// session's **first** user message, not by the prompt it is resumed with.
+#[tokio::test]
+async fn a_resumed_session_ranks_the_block_by_its_first_user_message() {
+    let env = MemoryEnv::new("mem-resume-first");
+    let (code, _, stderr) = env.run(&["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    for (key, content) in [("parsers", "about parsers"), ("styles", "about styles")] {
+        let (code, _, stderr) = env.run(&["add", "--key", key, content]).await;
+        assert_eq!(code, 0, "{stderr}");
+    }
+    let envs = [
+        ("RADIAN_HOME", env.home.to_str().unwrap()),
+        ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
+    ];
+
+    // The first process opens the session with the text the block is ranked by.
+    let server = MockServer::start(vec![text_reply("one")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                env.ws.to_str().unwrap(),
+                "--session-id",
+                "resumed",
+                "-p",
+                "parsers",
+            ],
+            &envs,
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let opened = memory_block(messages_of(&server, 0)[0]["content"].as_str().unwrap());
+    let parsers_at = opened
+        .find("about parsers")
+        .expect("the record is injected");
+    let styles_at = opened.find("about styles").expect("the record is injected");
+    assert!(parsers_at < styles_at, "ranked by its own prompt: {opened}");
+
+    // The resume asks about styles instead: the block is still ranked by the session's first
+    // user message, and the memory did not change, so the bytes are the same.
+    let server = MockServer::start(vec![text_reply("two")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                env.ws.to_str().unwrap(),
+                "--resume",
+                "resumed",
+                "-p",
+                "styles",
+            ],
+            &envs,
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let resumed = memory_block(messages_of(&server, 0)[0]["content"].as_str().unwrap());
+    assert_eq!(resumed, opened, "the same query and the same memory");
 }
 
 /// ADR 0021: the fixed block is ranked by the session's **first** user
@@ -6146,7 +6268,12 @@ async fn memory_additions_can_be_turned_off_in_the_config() {
     )
     .await;
     assert_eq!(code, 0, "{stderr}");
-    let system = |n: usize| messages_of(&server, n)[0]["content"].as_str().unwrap().to_owned();
+    let system = |n: usize| {
+        messages_of(&server, n)[0]["content"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
     assert_eq!(system(0), system(2));
 
     let session = radian_session::Session::open(env.sessions.join("off.jsonl")).unwrap();

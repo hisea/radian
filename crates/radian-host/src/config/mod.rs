@@ -906,7 +906,11 @@ fn parse_memory(value: &Value, path: &Path, config: &mut Config) -> Result<(), C
                             config.memory.additions = Some(*on);
                         }
                         ("additions", _) => {
-                            return Err(wrong_type(path, "memory.injection.additions", "a boolean"));
+                            return Err(wrong_type(
+                                path,
+                                "memory.injection.additions",
+                                "a boolean",
+                            ));
                         }
                         ("addition_budget", Value::Integer(budget)) if *budget > 0 => {
                             config.memory.addition_budget = Some(*budget as u64);
