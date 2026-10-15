@@ -978,10 +978,13 @@ pub async fn open_session(
         memory_warning,
     ));
     radian_session::trace::took("open/hooks+skills", t0);
-    let git_commit =
-        crate::git_commit::GitCommitTools::new(workspace.clone(), Arc::clone(&journal))
-            .with_protected_branches(protected_branches);
-    let mut tools = HostTools::new(coding, memory_tools, mcp.clone(), Some(git_commit));
+    // ADR 0030 R10: pin the repository now, before the model runs. A workspace that is not a
+    // git repository does not mount `git_commit` at all.
+    let git_commit = crate::git_commit::RepoPin::resolve(&workspace).map(|pin| {
+        crate::git_commit::GitCommitTools::new(workspace.clone(), Arc::clone(&journal), pin)
+            .with_protected_branches(protected_branches)
+    });
+    let mut tools = HostTools::new(coding, memory_tools, mcp.clone(), git_commit);
     let ask_registered = ask.is_some();
     if let Some(ask) = ask {
         tools = tools.with_ask(ask);

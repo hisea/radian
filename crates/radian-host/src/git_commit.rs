@@ -82,6 +82,60 @@ pub struct Committed {
     pub files: usize,
 }
 
+/// The repository pinned when the session opened, **before** the model ran (ADR 0030
+/// R10). Every `git` call uses these paths explicitly, and every call re-resolves them and
+/// refuses when they changed: a model that creates a `.git/` in a workspace that was not one
+/// (or is a subdirectory of one) cannot redirect the host's git.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoPin {
+    git_dir: PathBuf,
+    common_dir: PathBuf,
+    work_tree: PathBuf,
+}
+
+impl RepoPin {
+    /// Resolves the repository from `workspace`, or `None` when it is not a git repository (the
+    /// session then does not mount `git_commit` at all).
+    pub fn resolve(workspace: &Path) -> Option<Self> {
+        let git_dir = rev_parse(workspace, "--absolute-git-dir")?;
+        let common = rev_parse(workspace, "--git-common-dir")?;
+        let work_tree = rev_parse(workspace, "--show-toplevel")?;
+        Some(Self {
+            git_dir: canonicalize(Path::new(&git_dir))?,
+            common_dir: if Path::new(&common).is_absolute() {
+                canonicalize(Path::new(&common))?
+            } else {
+                canonicalize(&workspace.join(&common))?
+            },
+            work_tree: canonicalize(Path::new(&work_tree))?,
+        })
+    }
+
+    /// Whether the repository is still the pinned one. A different git dir, common dir or work
+    /// tree means the model changed the repository under us.
+    fn still(&self, workspace: &Path) -> bool {
+        Self::resolve(workspace).as_ref() == Some(self)
+    }
+}
+
+fn canonicalize(path: &Path) -> Option<PathBuf> {
+    std::fs::canonicalize(path).ok()
+}
+
+/// `git rev-parse <arg>` in `workspace`, trimmed, or `None` on failure.
+fn rev_parse(workspace: &Path, arg: &str) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .current_dir(workspace)
+        .args(["rev-parse", arg])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!text.is_empty()).then_some(text)
+}
+
 /// The `git_commit` tool. `workspace` is the session's root; `journal` receives the audit event.
 #[derive(Clone)]
 pub struct GitCommitTools {
@@ -91,15 +145,20 @@ pub struct GitCommitTools {
     allowed_branch: Option<String>,
     /// Branch names that are refused besides `main`/`master` (`[git] protected_branches`).
     protected_branches: Vec<String>,
+    /// The repository pinned at session open (ADR 0030 R10).
+    pin: RepoPin,
 }
 
 impl GitCommitTools {
-    pub fn new(workspace: impl Into<PathBuf>, journal: Arc<SessionJournal>) -> Self {
+    /// Builds the tool for a workspace **that is a git repository** (the caller resolves the
+    /// pin with [`RepoPin::resolve`] first and does not mount the tool when it is `None`).
+    pub fn new(workspace: impl Into<PathBuf>, journal: Arc<SessionJournal>, pin: RepoPin) -> Self {
         Self {
             workspace: workspace.into(),
             journal,
             allowed_branch: None,
             protected_branches: Vec::new(),
+            pin,
         }
     }
 
@@ -160,12 +219,20 @@ pub async fn run(tools: &GitCommitTools, call: &ToolCall) -> Result<ToolOutput, 
         return Err(fail("invalid_arguments", "`message` must not be empty"));
     }
     let workspace = tools.workspace.clone();
+    let pin = tools.pin.clone();
     let allowed = tools.allowed_branch.clone();
     let protected = tools.protected_branches.clone();
     let message = args.message;
     let paths = args.paths.unwrap_or_default();
     let committed = tokio::task::spawn_blocking(move || {
-        commit(&workspace, &message, &paths, allowed.as_deref(), &protected)
+        commit(
+            &workspace,
+            &pin,
+            &message,
+            &paths,
+            allowed.as_deref(),
+            &protected,
+        )
     })
     .await
     .map_err(|error| {
@@ -206,12 +273,22 @@ pub async fn run(tools: &GitCommitTools, call: &ToolCall) -> Result<ToolOutput, 
 /// the integration tests exercise the exact code the tool runs.
 pub fn commit(
     workspace: &Path,
+    pin: &RepoPin,
     message: &str,
     paths: &[String],
     allowed_branch: Option<&str>,
     protected: &[String],
 ) -> Result<Committed, ToolFailure> {
-    let branch = git(workspace, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    // The repository must still be the one pinned at session open: a `.git/` the model created
+    // in the workspace (when there was none, or when the real one is above it) would otherwise
+    // redirect every git call below (ADR 0030 R10).
+    if !pin.still(workspace) {
+        return Err(fail(
+            "repository_changed",
+            "the repository changed since the session opened; refusing to commit",
+        ));
+    }
+    let branch = git(workspace, pin, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     if branch == "HEAD" {
         return Err(fail(
             "detached_head",
@@ -249,9 +326,12 @@ pub fn commit(
     }
 
     if paths.is_empty() {
-        run_git(workspace, &["-c", "core.hooksPath=/dev/null", "add", "-A"])?;
+        // Scope `-A` to the workspace, not the whole repository: a subdirectory workspace must
+        // not stage its siblings.
+        let scope = workspace.to_string_lossy().into_owned();
+        run_git(workspace, pin, &["add", "-A", "--", &scope])?;
     } else {
-        let mut args = vec!["-c", "core.hooksPath=/dev/null", "add", "--"];
+        let mut args = vec!["add", "--"];
         let owned: Vec<String> = resolved
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
@@ -259,18 +339,19 @@ pub fn commit(
         for path in &owned {
             args.push(path.as_str());
         }
-        run_git(workspace, &args)?;
+        run_git(workspace, pin, &args)?;
     }
 
     // `--no-verify` skips pre-commit/commit-msg; `core.hooksPath=/dev/null` is belt and
     // braces (a hook could still be found by another path). Both are mandatory.
     let args = commit_args(message);
     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_git(workspace, &borrowed)?;
+    run_git(workspace, pin, &borrowed)?;
 
-    let commit = git(workspace, &["rev-parse", "HEAD"])?;
+    let commit = git(workspace, pin, &["rev-parse", "HEAD"])?;
     let changed = git(
         workspace,
+        pin,
         &["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
     )?;
     let files = changed.lines().filter(|line| !line.is_empty()).count();
@@ -281,12 +362,21 @@ pub fn commit(
     })
 }
 
-/// Runs `git` in `workspace` and returns its trimmed stdout. A non-zero exit is an error with
-/// the command (never a secret) and git's stderr.
-fn git(workspace: &Path, args: &[&str]) -> Result<String, ToolFailure> {
+/// Runs `git` in `workspace` and returns its trimmed stdout. Every call pins the repository
+/// (`--git-dir`/`--work-tree`, no upward search) and disables `core.fsmonitor` (a repo config a
+/// model could write runs commands on `git add`). A non-zero exit is an error with the command
+/// (never a secret) and git's stderr.
+fn git(workspace: &Path, pin: &RepoPin, args: &[&str]) -> Result<String, ToolFailure> {
+    let mut full: Vec<String> = vec![
+        format!("--git-dir={}", pin.git_dir.display()),
+        format!("--work-tree={}", pin.work_tree.display()),
+        "-c".into(),
+        "core.fsmonitor=false".into(),
+    ];
+    full.extend(args.iter().map(|arg| (*arg).to_owned()));
     let output = std::process::Command::new("git")
         .current_dir(workspace)
-        .args(args)
+        .args(&full)
         .output()
         .map_err(|error| fail("git_unavailable", format!("could not run git: {error}")))?;
     if !output.status.success() {
@@ -294,7 +384,7 @@ fn git(workspace: &Path, args: &[&str]) -> Result<String, ToolFailure> {
             "git_failed",
             format!(
                 "git {} failed: {}",
-                args.join(" "),
+                full.join(" "),
                 String::from_utf8_lossy(&output.stderr).trim()
             ),
         ));
@@ -316,8 +406,8 @@ fn commit_args(message: &str) -> Vec<String> {
 }
 
 /// Runs `git` for its side effect.
-fn run_git(workspace: &Path, args: &[&str]) -> Result<(), ToolFailure> {
-    git(workspace, args).map(|_| ())
+fn run_git(workspace: &Path, pin: &RepoPin, args: &[&str]) -> Result<(), ToolFailure> {
+    git(workspace, pin, args).map(|_| ())
 }
 
 #[cfg(test)]

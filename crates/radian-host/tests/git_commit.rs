@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
-use agent_core::ToolCall;
-use radian_host::git_commit::{GitCommitTools, commit, run};
+use agent_core::{ToolCall, ToolProvider, ToolSession};
+use radian_host::git_commit::{Committed, GitCommitTools, RepoPin, commit, run};
 use radian_session::{SessionCreatedData, SessionJournal};
 use serde_json::json;
 
@@ -70,6 +70,18 @@ fn change(dir: &Path) {
     .unwrap();
 }
 
+/// Resolves the pin the way `open_session` does, then commits — the exact path the tool runs.
+fn commit_in(
+    dir: &Path,
+    message: &str,
+    paths: &[String],
+    allowed: Option<&str>,
+    protected: &[String],
+) -> Result<Committed, agent_core::ToolFailure> {
+    let pin = RepoPin::resolve(dir).expect("a git repository");
+    commit(dir, &pin, message, paths, allowed, protected)
+}
+
 fn write_executable(path: &Path, body: &str) {
     std::fs::write(path, body).unwrap();
     #[cfg(unix)]
@@ -101,7 +113,7 @@ fn workspace_hooks_do_not_run() {
     write_executable(&custom_dir.join("pre-commit"), custom);
     assert!(git(&dir, &["config", "core.hooksPath", "custom-hooks"]));
 
-    let committed = commit(&dir, "message", &[], None, &[]).expect("the commit");
+    let committed = commit_in(&dir, "message", &[], None, &[]).expect("the commit");
     assert_eq!(committed.branch, "feature/x");
     assert!(
         !marker.exists(),
@@ -121,14 +133,14 @@ fn outside_paths_are_refused() {
     let file = outside.join("x.txt");
     std::fs::write(&file, "x").unwrap();
 
-    let absolute = commit(&dir, "m", &[file.to_string_lossy().into_owned()], None, &[]);
+    let absolute = commit_in(&dir, "m", &[file.to_string_lossy().into_owned()], None, &[]);
     assert_eq!(absolute.unwrap_err().code, "outside_workspace");
 
-    let dotdot = commit(&dir, "m", &["../x.txt".to_string()], None, &[]);
+    let dotdot = commit_in(&dir, "m", &["../x.txt".to_string()], None, &[]);
     assert_eq!(dotdot.unwrap_err().code, "outside_workspace");
 
     // A path inside the workspace is fine.
-    let inside = commit(&dir, "m", &["a.txt".to_string()], None, &[]).expect("inside");
+    let inside = commit_in(&dir, "m", &["a.txt".to_string()], None, &[]).expect("inside");
     assert_eq!(inside.files, 1);
 }
 
@@ -139,14 +151,14 @@ fn branch_rules_are_enforced() {
     let dir = repo("branches");
     assert!(git(&dir, &["checkout", "-q", "-b", "main"]));
     assert_eq!(
-        commit(&dir, "m", &[], None, &[]).unwrap_err().code,
+        commit_in(&dir, "m", &[], None, &[]).unwrap_err().code,
         "protected_branch"
     );
 
     assert!(git(&dir, &["checkout", "-q", "-b", "release"]));
     change(&dir);
     assert_eq!(
-        commit(&dir, "m", &[], None, &["release".to_string()])
+        commit_in(&dir, "m", &[], None, &["release".to_string()])
             .unwrap_err()
             .code,
         "protected_branch"
@@ -155,14 +167,14 @@ fn branch_rules_are_enforced() {
     assert!(git(&dir, &["checkout", "-q", "-b", "radian/t1"]));
     change(&dir);
     assert_eq!(
-        commit(&dir, "m", &[], Some("radian/t1"), &[])
+        commit_in(&dir, "m", &[], Some("radian/t1"), &[])
             .unwrap()
             .branch,
         "radian/t1"
     );
     change(&dir);
     assert_eq!(
-        commit(&dir, "m", &[], Some("radian/other"), &[])
+        commit_in(&dir, "m", &[], Some("radian/other"), &[])
             .unwrap_err()
             .code,
         "wrong_branch"
@@ -171,7 +183,7 @@ fn branch_rules_are_enforced() {
     change(&dir);
     assert!(git(&dir, &["checkout", "-q", "--detach"]));
     assert_eq!(
-        commit(&dir, "m", &[], None, &[]).unwrap_err().code,
+        commit_in(&dir, "m", &[], None, &[]).unwrap_err().code,
         "detached_head"
     );
 }
@@ -190,7 +202,8 @@ async fn the_commit_is_audited() {
         )
         .expect("a journal"),
     );
-    let tools = GitCommitTools::new(dir.clone(), journal);
+    let pin = RepoPin::resolve(&dir).expect("a git repository");
+    let tools = GitCommitTools::new(dir.clone(), journal, pin);
     let call = ToolCall {
         id: "t".into(),
         name: "git_commit".into(),
@@ -235,7 +248,115 @@ async fn the_sandbox_blocks_shell_commit_but_git_commit_succeeds() {
         shell.stderr
     );
 
-    let committed = commit(&dir, "from the host", &[], None, &[]).expect("the host commit");
+    let committed = commit_in(&dir, "from the host", &[], None, &[]).expect("the host commit");
     assert_eq!(committed.branch, "feature/x");
     assert_eq!(committed.files, 1);
+}
+
+/// The threat is real: `core.fsmonitor` (a repo config the model can write when the workspace
+/// is not a repo, or is a subdirectory of one) runs a command on `git add`. This is a
+/// documented canary for the defense below — it runs raw git, exactly what the host would do
+/// without `-c core.fsmonitor=false`.
+#[test]
+fn the_fsmonitor_threat_is_real_without_the_defense() {
+    let dir = repo("fsmonitor-threat");
+    let marker = dir.join("THREAT-MARKER");
+    let script = dir.join("fsmon.sh");
+    write_executable(&script, &format!("#!/bin/sh\ntouch {}\n", marker.display()));
+    assert!(git(
+        &dir,
+        &["config", "core.fsmonitor", script.to_str().unwrap()]
+    ));
+    change(&dir);
+    assert!(git(&dir, &["add", "-A"]), "the raw add");
+    assert!(
+        marker.exists(),
+        "the threat is real: a raw `git add` ran core.fsmonitor"
+    );
+}
+
+/// The defense: the host's every git call disables `core.fsmonitor`, so a repo config script
+/// never runs.
+#[test]
+fn the_fsmonitor_defense_blocks_a_repo_config_script() {
+    let dir = repo("fsmonitor-defense");
+    let marker = dir.join("DEFENSE-MARKER");
+    let script = dir.join("fsmon.sh");
+    write_executable(&script, &format!("#!/bin/sh\ntouch {}\n", marker.display()));
+    assert!(git(
+        &dir,
+        &["config", "core.fsmonitor", script.to_str().unwrap()]
+    ));
+    change(&dir);
+    commit_in(&dir, "m", &[], None, &[]).expect("the commit");
+    assert!(
+        !marker.exists(),
+        "core.fsmonitor must not run: a model-writable config would execute in the host"
+    );
+}
+
+/// A workspace that is a subdirectory of a repository: the model creates a `.git/` in the
+/// workspace root (with a marker fsmonitor); the pinned repository differs, so the commit is
+/// refused and the script never runs.
+#[test]
+fn a_git_dir_created_in_a_subdirectory_workspace_is_refused() {
+    let repo = temp("subdir-repo");
+    assert!(git(&repo, &["init", "-q", "-b", "feature/x"]));
+    assert!(git(
+        &repo,
+        &[
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ],
+    ));
+    let ws = repo.join("sub");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::write(ws.join("a.txt"), "hi").unwrap();
+
+    // The pin is taken at "session open", before the model runs: it is the upper repository.
+    let pin = RepoPin::resolve(&ws).expect("the upper repository");
+
+    // The model builds its own repository in the workspace.
+    assert!(git(&ws, &["init", "-q", "-b", "feature/x"]));
+    let marker = ws.join("ESCAPE-MARKER");
+    let script = ws.join("fsmon.sh");
+    write_executable(&script, &format!("#!/bin/sh\ntouch {}\n", marker.display()));
+    assert!(git(
+        &ws,
+        &["config", "core.fsmonitor", script.to_str().unwrap()]
+    ));
+
+    let error = commit(&ws, &pin, "m", &[], None, &[]).unwrap_err();
+    assert_eq!(error.code, "repository_changed", "{error:?}");
+    assert!(
+        !marker.exists(),
+        "the model's repository config must never run"
+    );
+}
+
+/// A workspace that is not a git repository does not mount `git_commit` at all.
+#[tokio::test]
+async fn a_non_repo_workspace_does_not_mount_git_commit() {
+    let dir = temp("non-repo");
+    assert!(RepoPin::resolve(&dir).is_none(), "not a repository");
+    let tools = radian_host::HostTools::new(
+        None,
+        None,
+        agent_extensions::McpToolProvider::new(Vec::new()),
+        None,
+    );
+    let session = tools.open_session().await.expect("a session");
+    let names: Vec<&str> = session
+        .tool_specs()
+        .iter()
+        .map(|spec| spec.name.as_str())
+        .collect();
+    assert!(!names.contains(&"git_commit"), "{names:?}");
 }
