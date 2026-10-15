@@ -347,12 +347,6 @@ impl AccessWizard {
     }
 }
 
-impl Default for AccessWizard {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// The startup trust modal's state (ADR 0031 T3): the workspace and the highlighted option.
 /// The default highlight is "do not trust this directory", so Enter is the
 /// fail-safe answer.
