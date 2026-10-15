@@ -2021,6 +2021,50 @@ async fn pty_multiline_paste_reaches_the_input_box() {
     pty.quit();
 }
 
+/// An IME commits a whole word in one burst; every character must reach the input in one
+/// frame, not one poll period apart (11 CJK characters appeared ~50 ms
+/// apart, because `read_input` waited the full `INPUT_POLL` before draining crossterm's
+/// buffer).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_committed_ime_string_reaches_the_input_in_one_frame() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let dir = TempDir::new("ime");
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+        ],
+        24,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10));
+    // A mixed CJK/ASCII run written as one burst (what an IME commit produces).
+    let text = "你好世界abc测试中文输入法";
+    let start = std::time::Instant::now();
+    pty.send(text.as_bytes());
+    assert!(
+        pty.wait_for_screen(text, 2),
+        "the whole string must reach the input:\n{}",
+        pty.screen()
+    );
+    let elapsed = start.elapsed();
+    // The pre-fix behavior was one 50 ms poll period per buffered character (~550 ms here).
+    // 150 ms is well above the one-frame latency (a frame renders in a few ms, and the state
+    // wait polls every 20 ms) and far below the pre-fix time, so it fails on the regression,
+    // not on a loaded machine.
+    assert!(
+        elapsed < std::time::Duration::from_millis(150),
+        "the string took {elapsed:?}; the pre-fix behavior was ~50 ms per character"
+    );
+    pty.quit();
+}
+
 /// The second request must not carry the first response's reasoning (ADR 0014 R4), verified
 /// on the real UI path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
