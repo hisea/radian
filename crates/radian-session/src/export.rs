@@ -402,6 +402,15 @@ fn event_data_value(
             "exit_code": exit_code,
             "cancelled": cancelled,
         }),
+        EventData::GitCommitted {
+            commit,
+            branch,
+            files,
+        } => json!({
+            "commit": commit,
+            "branch": branch,
+            "files": files,
+        }),
         EventData::Other(value) => value.clone(),
     };
     Ok(value)

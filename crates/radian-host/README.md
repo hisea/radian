@@ -43,12 +43,25 @@ redact identically in an error that names the configured endpoint (ADR 0013 T4).
 
 ## The combined tool provider
 
-`HostTools::new(coding: Option<CodingTools>, mcp: McpToolProvider)` is one `ToolProvider`, so
+`HostTools::new(coding: Option<CodingTools>, mcp: McpToolProvider, git_commit:
+Option<GitCommitTools>)` is one `ToolProvider`, so
 `Agent` still has a single provider type. `open_session()` opens the MCP servers **first** (if
 that fails, no built-in state needs unwinding), then the built-in tools, then merges the specs
 with `merge_tool_specs(built_in, mcp)`. `HostSession::execute` routes a call to the built-in
 session when the name is a built-in one, else to MCP; `close()` closes the MCP session (the
 built-in session has nothing to release, so it uses the trait's default `close`).
+
+### `git_commit` (ADR 0030 R10)
+
+`git_commit { message, paths? }` runs in the **host process**, outside the sandbox (the
+`workspace` tier keeps `.git` read-only, so a sandboxed `git commit` fails by design). It
+stages with `git add` and commits with `git commit --no-verify`, always with
+`-c core.hooksPath=/dev/null`: a project's `core.hooksPath` lives in the worktree the model can
+write, so running it in the host would execute agent-written scripts as the user. `paths` must
+resolve inside the workspace (the file tools' boundary). It refuses a detached HEAD,
+`main`/`master`, `[git] protected_branches`, and any branch but an allowed one (the
+orchestration slices pass `radian/<id>`). It never pushes, branches, amends or rebases, and it
+appends the non-critical `GitCommitted { commit, branch, files }` audit event.
 
 ## Headers, session ids, MCP config, workspace
 

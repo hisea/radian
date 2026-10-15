@@ -16,6 +16,7 @@ pub mod contrib;
 mod describe;
 mod diagnostics;
 mod errors;
+pub mod git_commit;
 mod headers;
 mod home;
 pub mod login;

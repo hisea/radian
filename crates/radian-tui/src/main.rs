@@ -912,6 +912,7 @@ fn run(
                 config_slot: std::sync::Arc::clone(&config_slot),
                 config_queue: radian_runtime::ConfigQueue::new(),
                 budget_for: Some(budget_for),
+                protected_branches: config.git.protected_branches.clone(),
                 session_id: radian_host::SessionId::new(session_id.clone()),
                 session_dir: dir.clone(),
                 workspace: workspace_path.clone(),

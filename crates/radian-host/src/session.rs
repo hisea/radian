@@ -298,6 +298,8 @@ pub struct SessionSetup {
     pub config_queue: Arc<ConfigQueue>,
     /// Computes `B` for a switched model from the local catalog (ADR 0026 D7).
     pub budget_for: Option<BudgetFor>,
+    /// Branch names the `git_commit` tool refuses besides `main`/`master` (ADR 0030 R10).
+    pub protected_branches: Vec<String>,
     pub servers: Vec<McpServerConfig>,
     pub system_prompt: Option<String>,
     pub context_budget: Option<ContextBudget>,
@@ -855,6 +857,7 @@ pub async fn open_session(
         config_slot,
         config_queue,
         budget_for,
+        protected_branches,
     } = setup;
 
     // The pending queue (ADR 0023 U7): approvals and questions share it. It exists before the
@@ -975,7 +978,13 @@ pub async fn open_session(
         memory_warning,
     ));
     radian_session::trace::took("open/hooks+skills", t0);
-    let mut tools = HostTools::new(coding, memory_tools, mcp.clone());
+    // ADR 0030 R10: pin the repository now, before the model runs. A workspace that is not a
+    // git repository does not mount `git_commit` at all.
+    let git_commit = crate::git_commit::RepoPin::resolve(&workspace).map(|pin| {
+        crate::git_commit::GitCommitTools::new(workspace.clone(), Arc::clone(&journal), pin)
+            .with_protected_branches(protected_branches)
+    });
+    let mut tools = HostTools::new(coding, memory_tools, mcp.clone(), git_commit);
     let ask_registered = ask.is_some();
     if let Some(ask) = ask {
         tools = tools.with_ask(ask);
