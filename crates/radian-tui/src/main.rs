@@ -245,6 +245,33 @@ enum RadianCommand {
         )]
         args: Vec<String>,
     },
+
+    /// Store an API key for a provider (ADR 0026 D3). The same code `radian exec login` runs.
+    Login {
+        /// A built-in provider id, or `custom` to name a new endpoint. Omitted: a numbered
+        /// list is shown.
+        provider: Option<String>,
+    },
+    /// Remove a stored credential (asks first). The same code `radian exec logout` runs.
+    Logout {
+        /// The provider id the key is stored under.
+        provider: String,
+    },
+    /// Manage durable memory (ADR 0021 D7): the same grammar as `radian exec memory` and the
+    /// TUI's `/memory`.
+    Memory {
+        /// The workspace project memory is resolved against, like `agent --workspace`.
+        #[arg(long, value_name = "DIR")]
+        workspace: Option<PathBuf>,
+        #[command(subcommand)]
+        command: radian_host::memory::commands::MemoryCommand,
+    },
+    /// Configuration tools (ADR 0008): `radian config import-pi …`, the same code
+    /// `radian exec config` runs.
+    Config {
+        #[command(subcommand)]
+        command: agent_cli::ConfigCommand,
+    },
 }
 
 /// Runs a non-TUI subcommand and returns its exit code (ADR 0032 A3: 0 ok, 1 the run failed,
@@ -259,7 +286,34 @@ fn run_subcommand(command: RadianCommand) -> ExitCode {
                 std::iter::once("agent".to_string()).chain(args),
             ) as u8)
         }
+        // The management commands build the same `Cli` the `agent` parser would and run the
+        // same dispatch (ADR 0032 direction): `radian login` and `radian exec login` are
+        // one code path, not two.
+        RadianCommand::Login { provider } => {
+            run_agent_cli(agent_cli::Cli::for_command(agent_cli::Command::Login {
+                provider,
+            }))
+        }
+        RadianCommand::Logout { provider } => {
+            run_agent_cli(agent_cli::Cli::for_command(agent_cli::Command::Logout {
+                provider,
+            }))
+        }
+        RadianCommand::Memory { workspace, command } => run_agent_cli(agent_cli::Cli::for_memory(
+            workspace.map(|path| path.to_string_lossy().into_owned()),
+            command,
+        )),
+        RadianCommand::Config { command } => {
+            run_agent_cli(agent_cli::Cli::for_command(agent_cli::Command::Config {
+                command,
+            }))
+        }
     }
+}
+
+/// Runs one management command through the `agent-cli` dispatch and returns its exit code.
+fn run_agent_cli(cli: agent_cli::Cli) -> ExitCode {
+    ExitCode::from(agent_cli::run_blocking(cli) as u8)
 }
 
 /// The TUI's per-turn model call limit when `--max-model-calls` is not given (decision
