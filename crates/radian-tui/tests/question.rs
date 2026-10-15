@@ -450,7 +450,7 @@ fn the_panel_shows_the_tabs_the_options_and_the_hints() {
     q.options[1].description = Some("the second".to_string());
     q.allow_other = true;
     show(&mut app, vec![q]);
-    let text = render(&mut app, 80, 16);
+    let text = render(&mut app, 80, 24);
     assert!(text.contains("Ask"), "{text}");
     assert!(text.contains("Pick"), "{text}");
     assert!(text.contains("Submit"), "{text}");
@@ -519,7 +519,7 @@ fn alt_h_hides_and_shows_the_panel() {
     let alt_h = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT);
     app.on_key(alt_h);
     assert!(form(&app).hidden, "`alt-h` hides");
-    let text = render(&mut app, 80, 16);
+    let text = render(&mut app, 80, 24);
     assert!(text.contains("0/1 answered"), "{text}");
     assert!(text.contains("alt-h to show"), "{text}");
     app.on_key(alt_h);

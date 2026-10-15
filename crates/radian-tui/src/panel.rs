@@ -103,7 +103,9 @@ impl Panel {
             }
         }
         out.push(self.bottom_border(width, theme, &box_chars));
-        out
+        // Every line is exactly `width` cells: a narrow panel clips its hints (the bottom
+        // border's) rather than overflowing.
+        out.into_iter().map(|line| truncate(line, width)).collect()
     }
 
     fn top_border(&self, width: usize, theme: &Theme, box_chars: &BoxChars) -> Line<'static> {

@@ -1212,7 +1212,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             approval_cap(area.height as usize, completion.len()),
         ),
         Some(Modal::Question(form)) => {
-            question_height(form, area.width as usize, &app.theme, app.footer_glyphs())
+            // The budget leaves room for the transcript and the footer; the panel windows its
+            // option list to it, so the bottom border (the hints) is never clipped.
+            let budget = (area.height as usize).saturating_sub(6);
+            question_height(
+                form,
+                area.width as usize,
+                budget,
+                &app.theme,
+                app.footer_glyphs(),
+            )
         }
         Some(Modal::Login(_)) => LOGIN_HEIGHT,
         // The `/logout` confirmation is a two-line box like the `/memory` one.
@@ -1380,9 +1389,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             // ADR 0024 R2: the shared panel primitive draws the box, the tab row,
             // the current question and the key hints (the bottom border). The panel is
             // height-aware; a long option list scrolls to the cursor.
+            // The same budget the height was measured with, so the window and the frame agree
+            // and the bottom border (the hints) stays on screen.
+            let budget = (area.height as usize).saturating_sub(6);
             let lines = question_panel(
                 form,
                 input_area.width as usize,
+                budget,
                 &app.theme,
                 app.footer_glyphs(),
             );
@@ -1639,10 +1652,11 @@ pub const QUESTION_KEYS: &str = "Tab next · Space select · Enter next/submit �
 fn question_height(
     form: &QuestionForm,
     width: usize,
+    max_rows: usize,
     theme: &Theme,
     glyphs: crate::footer::Glyphs,
 ) -> u16 {
-    let rows = question_panel(form, width, theme, glyphs).len() + 1;
+    let rows = question_panel(form, width, max_rows, theme, glyphs).len();
     (rows as u16).clamp(5, MAX_QUESTION_ROWS)
 }
 
@@ -1652,6 +1666,7 @@ fn question_height(
 pub fn question_panel(
     form: &QuestionForm,
     width: usize,
+    max_rows: usize,
     theme: &Theme,
     glyphs: crate::footer::Glyphs,
 ) -> Vec<Line<'static>> {
@@ -1704,21 +1719,66 @@ pub fn question_panel(
             if question.kind == radian_coding::QuestionKind::Text {
                 panel = panel.row(composer_line(&answer.text, theme));
             } else {
+                // The option rows (a description is its own row), then a window that keeps the
+                // cursor visible and the bottom border (the hints) on screen.
+                let mut rows: Vec<(Line<'static>, bool)> = Vec::new();
                 for (row, option) in question.options.iter().enumerate() {
-                    panel = panel.row(option_line(question, answer, row, theme, glyphs));
+                    rows.push((
+                        option_line(question, answer, row, theme, glyphs),
+                        row == answer.cursor,
+                    ));
                     if let Some(description) = &option.description {
                         let prefix = match glyphs {
                             crate::footer::Glyphs::Ascii => "->",
                             _ => "↳",
                         };
-                        panel = panel.row(Line::from(Span::styled(
-                            clip_columns(&format!("   {prefix} {description}"), inner),
-                            theme.notice_body,
-                        )));
+                        rows.push((
+                            Line::from(Span::styled(
+                                clip_columns(&format!("   {prefix} {description}"), inner),
+                                theme.notice_body,
+                            )),
+                            false,
+                        ));
                     }
                 }
                 if question.allow_other {
-                    panel = panel.row(other_line(question, answer, theme, glyphs));
+                    rows.push((
+                        other_line(question, answer, theme, glyphs),
+                        answer.cursor == question.options.len(),
+                    ));
+                }
+                // The fixed rows: the top border, the tab row, two dividers, the prompt, the
+                // note (when open), the decline row, and the bottom border.
+                let note_rows = if form.note_focused() { 3 } else { 0 };
+                let fixed = 1
+                    + 1
+                    + 1
+                    + question.prompt.lines().count().max(1)
+                    + 1
+                    + note_rows
+                    + usize::from(form.confirm_decline)
+                    + 1
+                    + 1;
+                let budget = max_rows.saturating_sub(fixed).max(1);
+                let cursor = rows.iter().position(|(_, cursor)| *cursor).unwrap_or(0);
+                let first = cursor
+                    .saturating_sub(budget.saturating_sub(1))
+                    .min(rows.len().saturating_sub(budget));
+                if first > 0 {
+                    panel = panel.row(Line::from(Span::styled(
+                        format!("  … {first} above"),
+                        theme.hint,
+                    )));
+                }
+                let last = (first + budget).min(rows.len());
+                for (line, _) in rows.drain(first..last) {
+                    panel = panel.row(line);
+                }
+                if rows.len() > last {
+                    panel = panel.row(Line::from(Span::styled(
+                        format!("  … {} more", rows.len() - last),
+                        theme.hint,
+                    )));
                 }
             }
             if form.note_focused() {
@@ -1749,6 +1809,16 @@ pub fn question_panel(
                 )));
             }
         }
+    }
+    // The first Esc asks again, so it never looks like it did nothing (ADR 0024 Q7).
+    if form.confirm_decline {
+        panel = panel.row(Line::from(Span::styled(
+            clip_columns(
+                "press Esc again to decline this question (Enter keeps it)",
+                inner,
+            ),
+            theme.note,
+        )));
     }
     for hint in form.hints() {
         panel = panel.hint(hint.keys, hint.description);

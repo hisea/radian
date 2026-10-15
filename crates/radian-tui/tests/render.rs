@@ -315,6 +315,16 @@ fn form(questions: Vec<radian_coding::Question>) -> radian_tui::question::Questi
     radian_tui::question::QuestionForm::new(7, "session".into(), questions)
 }
 
+fn panel_text(form: &radian_tui::question::QuestionForm, width: usize) -> String {
+    text_of(&render::question_panel(
+        form,
+        width,
+        usize::MAX,
+        &radian_tui::theme::Theme::dark(),
+        radian_tui::footer::Glyphs::Unicode,
+    ))
+}
+
 fn text_of(lines: &[ratatui::text::Line<'static>]) -> String {
     lines
         .iter()
@@ -343,18 +353,11 @@ fn a_long_option_list_scrolls_to_keep_the_cursor_visible() {
         allow_other: false,
         required: true,
     }]);
-    // Move the cursor to the last option, with only five visible rows.
+    // The panel lays the whole list out; the frame clips it to the modal height.
     form.answers[0].cursor = 11;
-    let shown = text_of(&render::question_lines(&form, 40, 5));
-    assert!(shown.contains("> ( ) Option 11"), "{shown}");
-    assert!(
-        shown.contains("above"),
-        "the clipped rows are counted: {shown}"
-    );
-    assert!(
-        !shown.contains("Option 0"),
-        "the top scrolled away: {shown}"
-    );
+    let shown = panel_text(&form, 40);
+    assert!(shown.contains("❯ ○ Option 11"), "{shown}");
+    assert!(shown.contains("Option 0"), "{shown}");
 }
 
 /// A narrow box clips its rows instead of wrapping them (ADR 0024 Q7).
@@ -369,7 +372,7 @@ fn a_narrow_question_box_clips_instead_of_wrapping() {
         allow_other: false,
         required: false,
     }]);
-    let shown = text_of(&render::question_lines(&form, 20, 10));
+    let shown = panel_text(&form, 20);
     for line in shown.lines() {
         assert!(
             line.chars().count() <= 20,
@@ -404,12 +407,10 @@ fn the_overview_lists_each_question_and_its_answer() {
     ]);
     form.current = None;
     form.answers[0].selected = vec!["a".into()];
-    let shown = text_of(&render::question_lines(&form, 60, 10));
-    assert!(shown.contains("1. Pick one → A"), "{shown}");
-    assert!(
-        shown.contains("2. Say something → (not answered)"),
-        "{shown}"
-    );
+    let shown = panel_text(&form, 60);
+    // The `Submit` tab lists each question by its header and answer.
+    assert!(shown.contains("✓ one — A"), "{shown}");
+    assert!(shown.contains("· two — (not answered)"), "{shown}");
 }
 
 /// The decline confirmation is shown, so the first `Esc` never looks like it did nothing.
@@ -425,7 +426,7 @@ fn the_decline_confirmation_is_shown() {
         required: false,
     }]);
     form.confirm_decline = true;
-    let shown = text_of(&render::question_lines(&form, 60, 10));
+    let shown = panel_text(&form, 60);
     assert!(shown.contains("press Esc again to decline"), "{shown}");
 }
 
@@ -1900,12 +1901,11 @@ fn the_question_keys_stay_visible_with_a_long_option_list() {
     ));
     let text = screen(&render(&mut app, 60, 18));
     assert!(
-        text.contains("Tab next"),
-        "the keys must be on screen:\n{text}"
+        text.contains("⏎ select"),
+        "the keys are in the bottom border:\n{text}"
     );
-    assert!(text.contains("Esc decline"), "{text}");
-    // The box is on screen with its scrolled list.
-    assert!(text.contains("question 1/1"), "{text}");
+    assert!(text.contains("esc canc"), "{text}");
+    assert!(text.contains("Ask · session"), "{text}");
 }
 
 /// `wrap_line_count` (the counting-only path, used to measure every entry on the first frame
