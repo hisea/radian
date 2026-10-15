@@ -4320,13 +4320,19 @@ impl App {
         if self.compacting {
             return Some("Compacting");
         }
-        if self.turn() == TurnState::Running {
+        if self.turn_running() {
             return Some("Working");
         }
         if self.bash_running.is_some() {
             return Some("Running a command");
         }
         None
+    }
+
+    /// Whether a turn is running (the projection's own state, ADR 0023 U5). The `bar` status
+    /// row shows `esc to interrupt` exactly then: Esc cancels a running turn (ADR 0009).
+    pub fn turn_running(&self) -> bool {
+        self.turn() == TurnState::Running
     }
 
     /// Whether any spinner is on screen (ADR 0027): the input rule's status line,

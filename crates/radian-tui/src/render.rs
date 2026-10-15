@@ -733,6 +733,9 @@ pub fn visible_lines_with(
 /// The tallest the input area grows before it scrolls internally instead.
 const MAX_INPUT_ROWS: usize = 10;
 
+/// The rows the find box needs: its top border, the query, its bottom border (`Borders::ALL`).
+const FIND_BOX_HEIGHT: u16 = 3;
+
 /// How the input area is drawn (config `tui.input_style`, owner UI review 2026-10-13).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InputStyle {
@@ -742,6 +745,9 @@ pub enum InputStyle {
     Lines,
     /// The bordered box with a ` message ` title (the pre-review shape).
     Box,
+    /// The banded input (ADR 0035 V3, the omp `rail`): one background band per row with a left
+    /// accent rail, no border and no rules, and a fixed status row above the band.
+    Bar,
 }
 
 impl InputStyle {
@@ -750,6 +756,7 @@ impl InputStyle {
         match name {
             "lines" => Some(Self::Lines),
             "box" => Some(Self::Box),
+            "bar" => Some(Self::Bar),
             _ => None,
         }
     }
@@ -869,11 +876,38 @@ fn login_lines(wizard: &LoginWizard, theme: &Theme, width: usize) -> Vec<Line<'s
     lines
 }
 
-/// The error style for wizard problems (a note-colored line; no new theme role).
+/// The `bar` style's left rail (ADR 0035 V3): the accent vertical bar on every input row
+/// (omp's `ACCENT_RAIL`). The `ascii` glyph set uses `|` (ADR 0027's rule: the
+/// unicode glyphs are only used when the font set has them).
+const BAR_RAIL: &str = "▎";
+/// The `bar` rail in the `ascii` glyph set.
+const BAR_RAIL_ASCII: &str = "|";
+/// The cells before the `bar` style's text: the rail plus one cell of padding (omp's rail
+/// `defaultPaddingX = 1`). The status row's spinner starts at the same column — the text
+/// column (ADR 0035, 正文列起) — so the two read as one block.
+const BAR_LEAD: usize = 2;
+
+/// The input area's height: the text rows plus the style's chrome — two rule/border rows for
+/// `lines`/`box`, the one fixed status row for `bar` (ADR 0035 V3: `bar` has no rules).
 fn input_height(app: &App, width: usize) -> u16 {
     let inner = input_inner_width(app, width);
-    let rows = crate::composer::rows(&app.input.text(), inner).len();
-    (rows.clamp(1, MAX_INPUT_ROWS) as u16) + 2
+    let rows = crate::composer::rows(&app.input.text(), inner)
+        .len()
+        .clamp(1, MAX_INPUT_ROWS);
+    match app.input_style {
+        InputStyle::Lines | InputStyle::Box => rows as u16 + 2,
+        InputStyle::Bar => rows as u16 + 1,
+    }
+}
+
+/// The input's visible text rows (`input_area.height` minus the same chrome `input_height`
+/// reserves for the style), at least one.
+fn input_visible_rows(app: &App, height: u16) -> usize {
+    let chrome = match app.input_style {
+        InputStyle::Lines | InputStyle::Box => 2,
+        InputStyle::Bar => 1,
+    };
+    height.saturating_sub(chrome).max(1) as usize
 }
 
 /// The display width of a prompt constant: the columns it occupies, **not** its byte length
@@ -883,14 +917,57 @@ fn prompt_width(prompt: &str) -> usize {
 }
 
 /// The text width inside the input area: `❯ ` on the first line for `lines`, a border plus the
-/// `❯ ` prompt for `box`.
+/// `❯ ` prompt for `box`, the rail plus its one cell of padding for `bar`.
 fn input_inner_width(app: &App, width: usize) -> usize {
     let reserved = match app.input_style {
         InputStyle::Lines => prompt_width(INPUT_PROMPT),
         // Two border cells plus the prompt.
         InputStyle::Box => 2 + prompt_width(BOX_PROMPT),
+        InputStyle::Bar => BAR_LEAD,
     };
     width.saturating_sub(reserved).max(1)
+}
+
+/// The `bar` style's rail glyph for the terminal's glyph set.
+fn bar_rail(app: &App) -> &'static str {
+    match app.footer_glyphs() {
+        crate::footer::Glyphs::Ascii => BAR_RAIL_ASCII,
+        _ => BAR_RAIL,
+    }
+}
+
+/// The status row a `bar` input carries **above** its band (ADR 0035 V3 / decision 1):
+/// `<spinner>  Working · 12s · esc to interrupt` while a turn runs, and a blank row — which
+/// still occupies its line — when idle, so the band and the transcript never move when a turn
+/// starts or ends.
+///
+/// The spinner and the state word are the ones the `lines`/`box` rule line shows (ADR 0027
+/// revision 2, `App::spinner_status`), with ADR 0027's two spaces after the
+/// spinner; the spinner takes the accent and the rest is one level weaker. The clock is the
+/// footer's `elapsed` (`TurnTimer`: the running generation, else the last one), written in
+/// whole seconds as the ADR's `12s`; `esc to interrupt` is shown exactly while a turn runs,
+/// because that is when Esc cancels it.
+pub fn bar_status_line(app: &App) -> Line<'static> {
+    let Some(status) = app.spinner_status() else {
+        return Line::from("");
+    };
+    let spin = app.spinner_frame();
+    let mut spans = vec![
+        Span::styled(" ".repeat(BAR_LEAD), app.theme.hint),
+        Span::styled(spin.glyph, app.spinner_style(spin)),
+        Span::styled("  ", app.theme.hint),
+        Span::styled(status.to_string(), app.theme.hint),
+    ];
+    if let Some(elapsed) = app.timer.elapsed(app.now) {
+        spans.push(Span::styled(
+            format!(" · {}", crate::timing::format_seconds(elapsed)),
+            app.theme.hint,
+        ));
+    }
+    if app.turn_running() {
+        spans.push(Span::styled(" · esc to interrupt", app.theme.hint));
+    }
+    Line::from(spans)
 }
 
 /// The approval prompt's key line. It is drawn on its **own** row under the body, never part
@@ -1285,6 +1362,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(Modal::ConfirmLogout(_)) => 4,
         // The trust prompt lists up to five options plus a header and a key line.
         Some(Modal::Trust(wizard)) => wizard.choices.len() as u16 + 3,
+        // The find box replaces the input with a **bordered** box: three rows (top border, the
+        // query, bottom border). `bar`'s input (its status row plus one text row) can be
+        // shorter than that, so the height is raised for the box, never lowered for the others.
+        _ if app.find_state().is_some() => {
+            input_height(app, area.width as usize).max(FIND_BOX_HEIGHT)
+        }
         _ => input_height(app, area.width as usize),
     };
     // The widget lines are part of the middle block.
@@ -1524,10 +1607,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         // before (a confirmation only makes it non-editable).
         _ => {
             // pi-style: a rule above and below instead of a box, and
-            // `> ` on the first line. `input_height` already reserves the two rule rows, so the
-            // layout of everything else is unchanged.
+            // `> ` on the first line. `input_height` already reserves the style's chrome (the
+            // two rules, the box border or `bar`'s status row), so the layout of everything
+            // else is unchanged.
             let inner_width = input_inner_width(app, input_area.width as usize);
-            let visible = input_area.height.saturating_sub(2).max(1) as usize;
+            let visible = input_visible_rows(app, input_area.height);
             let text = app.input.text();
             let rows = crate::composer::rows(&text, inner_width);
             let (cursor_row, cursor_col) = app.input.cursor_cell(inner_width);
@@ -1544,8 +1628,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             // the state text on the top rule; idle has neither.
             let status = app.spinner_status();
             let spin = app.spinner_frame();
-            // Both styles reserve the same two rows (rules / borders), so the rest of the
-            // layout does not depend on the choice.
             match app.input_style {
                 InputStyle::Lines => {
                     let body: Vec<Line> = if empty {
@@ -1627,15 +1709,55 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                         .title(title);
                     frame.render_widget(Paragraph::new(body).block(block), input_area);
                 }
+                InputStyle::Bar => {
+                    // ADR 0035 V3 (omp's `rail`): one background band per row with the accent
+                    // rail on the left, no border and no rules. The status row is the area's
+                    // first row **always**, so the band's own rows start one below it and a
+                    // turn starting or ending never moves anything.
+                    let band = app.theme.input_bar;
+                    // The rail is the accent (pi's `accent`, the same role the `box` border
+                    // uses); the text keeps its own level (main, or weak for the placeholder),
+                    // patched onto the band.
+                    let rail_style = band.patch(app.theme.notice_label);
+                    // The text keeps its own level (main, or the weak placeholder), and the
+                    // band only supplies the background behind it: `band.patch(style)` lets the
+                    // text's own color win while the band's fills the rest.
+                    let text_style = band.patch(style);
+                    let area_width = input_area.width as usize;
+                    let mut body: Vec<Line> = vec![bar_status_line(app)];
+                    let text_rows: Vec<String> = if empty {
+                        vec![INPUT_HINT.to_string()]
+                    } else {
+                        rows[offset..].to_vec()
+                    };
+                    for row in &text_rows {
+                        let mut spans = vec![
+                            Span::styled(bar_rail(app).to_string(), rail_style),
+                            // The one cell of padding after the rail carries the band, never
+                            // the text's own style.
+                            Span::styled(" ".to_string(), band),
+                            Span::styled(row.clone(), text_style),
+                        ];
+                        // Fill the rest of the row with the band, so it covers the whole width
+                        // (a band that stops at the text reads as a highlight, not a surface).
+                        let used = BAR_LEAD + UnicodeWidthStr::width(row.as_str());
+                        if used < area_width {
+                            spans.push(Span::styled(" ".repeat(area_width - used), band));
+                        }
+                        body.push(Line::from(spans));
+                    }
+                    frame.render_widget(Paragraph::new(body), input_area);
+                }
             }
             if app.input_editable() {
-                // The text starts after the prompt (`> `, two cells) or after the box border
-                // (one cell); a full row clamps the cursor to its last cell rather than onto the
-                // rule or the border.
+                // The text starts after the prompt (`> `, two cells), after the box border plus
+                // the `❯ ` prompt, or after `bar`'s rail plus its one cell of padding; a full
+                // row clamps the cursor to its last cell rather than onto the rule or border.
                 let lead = match app.input_style {
                     InputStyle::Lines => prompt_width(INPUT_PROMPT) as u16,
                     // Border (1) + the `❯ ` prompt (2 cells).
                     InputStyle::Box => 1 + prompt_width(BOX_PROMPT) as u16,
+                    InputStyle::Bar => BAR_LEAD as u16,
                 };
                 let col = cursor_col.min(inner_width.saturating_sub(1)) as u16;
                 let row = (cursor_row - offset).min(visible.saturating_sub(1)) as u16;

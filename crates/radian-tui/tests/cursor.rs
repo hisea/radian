@@ -106,6 +106,39 @@ fn the_lines_cursor_counts_the_prompts_display_width() {
     assert_eq!(terminal.backend().cursor_position().x, 4, "CJK");
 }
 
+/// The `bar` style's cursor: the rail plus its one cell of padding (two display cells), with no
+/// rule or border row above the text — the status row takes that row instead (ADR 0035 V3).
+#[test]
+fn the_bar_cursor_counts_the_rails_display_width() {
+    use radian_tui::render::InputStyle;
+    let mut app = App::new("m", "s");
+    classic_footer(&mut app);
+    app.input_style = InputStyle::Bar;
+    let terminal = render(&mut app, 20, 8);
+    assert_eq!(terminal.backend().cursor_position().x, 2, "empty");
+    app.input.set_text("f");
+    let terminal = render(&mut app, 20, 8);
+    assert_eq!(terminal.backend().cursor_position().x, 3, "ASCII");
+    // A CJK character is two cells, and the cursor respects the rail's display width.
+    app.input.set_text("你");
+    let terminal = render(&mut app, 20, 8);
+    assert_eq!(terminal.backend().cursor_position().x, 4, "CJK");
+    app.input.set_text("你好");
+    let terminal = render(&mut app, 20, 8);
+    assert_eq!(
+        terminal.backend().cursor_position().x,
+        6,
+        "two CJK characters"
+    );
+    // The text sits on the band row, one below the status row (the status row takes the row
+    // the `lines` style spends on its top rule, so the band is one row lower).
+    assert_eq!(
+        terminal.backend().cursor_position().y,
+        6,
+        "on the band, below the status row"
+    );
+}
+
 /// A continuation line aligns with the first line's text in **both** styles: the indent is the
 /// prompt's display width, not its byte length.
 #[test]
