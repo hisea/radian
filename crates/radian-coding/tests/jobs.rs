@@ -367,6 +367,45 @@ async fn a_background_timeout_kills_the_whole_process_group() {
     assert!(!group_alive(leader), "group {leader} still has members");
 }
 
+// ---------- 3b. a natural exit kills the group too ----------
+
+/// A command that exits on its own but leaves a background grandchild: the supervisor kills
+/// the whole process group when the leader exits, so the grandchild does not outlive it. This
+/// is the group-cleanup path that `job_kill` and the timeout do **not** exercise (they signal
+/// the group themselves).
+#[tokio::test]
+async fn a_natural_exit_kills_a_background_grandchild() {
+    let dir = TempDir::new("jobs-grandchild");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+    let session = tools.open_session().await.expect("session");
+
+    // The leader backgrounds a long sleep (same process group) and exits 0 at once.
+    let (id, _) = start(
+        &session,
+        "sleep 300 & echo $! > grandchild.pid; exit 0",
+        None,
+    )
+    .await;
+    let text = output_text(
+        &exec(
+            &session,
+            "job_output",
+            json!({"job_id": id, "wait": true, "timeout_ms": 15_000}),
+        )
+        .await
+        .unwrap(),
+    );
+    assert!(text.contains("[status: exited 0]"), "{text}");
+
+    let grandchild = wait_for_pid(&root, "grandchild.pid").await;
+    assert!(
+        gone_within(grandchild, Duration::from_secs(10)).await,
+        "the grandchild (pid {grandchild}) survived the leader's exit"
+    );
+}
+
 // ---------- 4. the concurrency limit ----------
 
 /// The fifth running job is refused with the limit and the three tools named; after one
