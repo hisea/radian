@@ -2744,6 +2744,51 @@ impl LoopContext<'_> {
                 self.send(AppInput::SessionDone(notices));
                 Ok(())
             }
+            // ADR 0037 decision 4: `/jobs` lists or stops the session's background jobs. The
+            // registry lives in the host, so the loop reads it here and shows notices.
+            Effect::Jobs(request) => {
+                let notices = match request {
+                    radian_tui::command::JobsRequest::List => {
+                        let jobs = self.session.jobs();
+                        if jobs.is_empty() {
+                            vec!["no background jobs in this session".to_owned()]
+                        } else {
+                            jobs.iter()
+                                .map(|job| {
+                                    format!(
+                                        "{}  {}  {}s  {}  {}",
+                                        job.id,
+                                        job.state.label(),
+                                        job.elapsed.as_secs(),
+                                        job.command,
+                                        job.output
+                                    )
+                                })
+                                .collect()
+                        }
+                    }
+                    radian_tui::command::JobsRequest::Kill(id) => {
+                        match self.session.kill_job(&id) {
+                            Ok(()) => {
+                                vec![format!("stopping {id} (SIGTERM, then SIGKILL after 2s)")]
+                            }
+                            Err(error) => vec![error],
+                        }
+                    }
+                    radian_tui::command::JobsRequest::KillAll => {
+                        let running = self
+                            .session
+                            .jobs()
+                            .iter()
+                            .filter(|job| job.state.is_running())
+                            .count();
+                        self.session.kill_all_jobs();
+                        vec![format!("stopping {running} background job(s)")]
+                    }
+                };
+                self.send(AppInput::SessionDone(notices));
+                Ok(())
+            }
             // ADR 0031 T3: apply the startup trust choice through the facade (it writes
             // `trust.json` and journals `ProjectTrustChanged`), then show the new state.
             Effect::SetTrust { choice } => {

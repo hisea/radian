@@ -374,7 +374,7 @@ impl Jobs {
     }
 
     /// `job_list`: every job of this session, in start order.
-    pub(crate) fn list(&self) -> Vec<JobSummary> {
+    pub fn list(&self) -> Vec<JobSummary> {
         let state = self.lock_state();
         state
             .order
@@ -391,6 +391,15 @@ impl Jobs {
                 })
             })
             .collect()
+    }
+
+    /// Stop one job by id for the `/jobs` command (ADR 0037 decision 4). `Ok(None)` means it
+    /// was running and the kill was requested; `Ok(Some(state))` means it had already settled.
+    pub fn stop(&self, id: &str) -> Result<Option<String>, ToolFailure> {
+        match self.kill(id)? {
+            KillResult::Requested => Ok(None),
+            KillResult::AlreadySettled(state) => Ok(Some(state.label())),
+        }
     }
 
     /// `job_kill`: SIGTERM the group, SIGKILL after the grace. A settled job is a no-op.

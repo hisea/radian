@@ -248,6 +248,17 @@ pub trait SessionFacade: Send + Sync {
     /// Appends one durable `UserBash` audit record (ADR 0033). Both `!` and `!!` call it; the
     /// record is audit-only and never replayed.
     fn record_user_bash(&self, record: &UserBashRecord);
+
+    /// The session's background jobs (`/jobs`, ADR 0037 decision 4). Empty for a host with no
+    /// coding tools.
+    fn jobs(&self) -> Vec<radian_coding::JobSummary>;
+
+    /// Stop one background job (`/jobs kill <id>`). `Err` is a notice (an unknown id, or a
+    /// host with no jobs).
+    fn kill_job(&self, id: &str) -> Result<(), String>;
+
+    /// Stop every running background job (`/jobs kill all`).
+    fn kill_all_jobs(&self);
 }
 
 /// How the driver task ended.
@@ -450,6 +461,8 @@ pub struct LocalSession {
     /// The background-job notifier (ADR 0037 slices 3-4). `None` for a host with no coding
     /// tools. The host calls [`JobNotifier::reset_wakes`] when a user message arrives.
     job_notifier: Option<Arc<crate::job_notify::JobNotifier>>,
+    /// The background-job registry, for `/jobs` (ADR 0037 decision 4).
+    jobs: Option<Arc<radian_coding::Jobs>>,
     /// The project-trust state (ADR 0031 T3). Interior mutability: the startup prompt resolves
     /// it after `open_session` and the startup line reads it.
     trust: Mutex<trust::Setup>,
@@ -746,6 +759,26 @@ impl SessionFacade for LocalSession {
                 cancelled: record.cancelled,
             },
         ));
+    }
+
+    fn jobs(&self) -> Vec<radian_coding::JobSummary> {
+        self.jobs
+            .as_ref()
+            .map(|jobs| jobs.list())
+            .unwrap_or_default()
+    }
+
+    fn kill_job(&self, id: &str) -> Result<(), String> {
+        match &self.jobs {
+            Some(jobs) => jobs.stop(id).map(|_| ()).map_err(|error| error.message),
+            None => Err("this session has no background jobs".to_owned()),
+        }
+    }
+
+    fn kill_all_jobs(&self) {
+        if let Some(jobs) = &self.jobs {
+            jobs.kill_all();
+        }
     }
 
     /// Re-validates the capability, then runs the command. The check is here as well as in the
@@ -1241,6 +1274,7 @@ pub async fn open_session(
         memory,
         skills: shared_skills,
         job_notifier,
+        jobs,
         trust: Mutex::new(trust),
         runtime,
         driver: DriverTask {
