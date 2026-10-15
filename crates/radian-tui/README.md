@@ -276,8 +276,11 @@ A glyph the font does not have is drawn by a system fallback font with different
 sits off the baseline. The `unicode` tier (the default, no Nerd Font needed) therefore only uses
 characters that **all** of Menlo, SF Mono, JetBrains Mono, Cascadia Code, Fira Code, Operator
 Mono and Source Code Pro have. The brand is `R` (bold accent) here, `󰰠` under `nerd`, `rad` under
-`ascii`; `㎭` (U+33AD) is gone (East-Asian-Wide, off-baseline fallback). The spinner is the
-quadrant `▖▘▝▗` (the arc `◜◝◞◟` and the braille `⠋⠙⠸⠴` are missing from most of the fonts).
+`ascii`; `㎭` (U+33AD) is gone (East-Asian-Wide, off-baseline fallback). The spinner's default
+is `pulse` (`⏺`, one cell); the covered optional kind is `quadrant` (`▖▘▝▗`). The arc
+(`◜◝◞◟`), the braille (`⠋⠙⠸⠴`) and `pulse` itself are the **documented exceptions** to this
+rule (ADR 0027/10: the owner picked them after seeing them), so a font without them
+draws a fallback glyph; `tui.spinner = "quadrant"` switches to the covered set.
 
 Check a glyph with `crates/radian-tui/scripts/check-glyph-coverage.py` (needs `fonttools` in a
 throwaway venv; it is not a repository dependency and not part of `cargo test`). A font that is
@@ -303,7 +306,15 @@ from slipping in unchecked.
 | `▖` | U+2596 | spinner frame 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `▘` | U+2598 | spinner frame 2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `▝` | U+259D | spinner frame 3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `▗` | U+2597 | spinner frame 4 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▗` | U+2597 | spinner frame 4 (`quadrant`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+Documented exceptions (allowed to fall back; the test keeps them in a separate set):
+
+| glyph | codepoint | use | Menlo | SF Mono | JetBrains Mono | Cascadia Code | Fira Code | Operator Mono | Source Code Pro |
+|---|---|---|---|---|---|---|---|---|---|
+| `⏺` | U+23FA | spinner default (`pulse`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `◜` `◝` `◞` `◟` | U+25DC…DF | spinner `arc` | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ |
+| `⠋` `⠙` `⠹` `⠸` `⠼` `⠴` `⠦` `⠧` `⠇` `⠏` | U+280B… | spinner `braille` | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
 
 Replaced or dropped in the `unicode` tier (they were not in all seven fonts):
 
@@ -697,6 +708,15 @@ throwaway terminal, not your working one.
    `Ctrl-J`. *Expect*: Shift+Enter inserts a newline where the terminal reports it (herdr and
    kitty-protocol terminals), and `Ctrl-J` always does; a terminal that cannot report it sends
    instead - record which of the three did what. *Fail*: a newline that also sends.
+3c. **Spinner** (`tui.spinner`; ADR 0027/9/10). *Steps*: start a turn (send a
+   message) with `tui.spinner = "pulse"` (the default), then `"arc"`, then `"quadrant"`, then
+   `"braille"`, then `glyphs = "ascii"`. *Expect*: the input rule shows
+   `── <spinner>  Working ` (two spaces) while the turn runs, a plain rule when idle; `pulse`
+   is a `⏺` that only changes color (500 ms); `arc`/`quadrant`/`braille` turn every 250 ms;
+   `ascii` is `*` (pulse) or `| / - \`. *Look*: **does the spinner render in your terminal
+   font?** `pulse` (`⏺`) and `arc` are the documented exceptions (no checked font has `⏺`; a
+   box means the fallback font lacks it); `quadrant` is the covered alternative. *Fail*:
+   record the font and what you see.
 4. **Ctrl-C** (merge `22b2753`, `01177c2`). *Steps*: type text, `Ctrl-C` (clears; press `↑`
    to find it); empty the input, `Ctrl-C` (status shows `Press Ctrl-C again to quit`), then
    **resize the window** and `Ctrl-C` again inside 2 s; then `Ctrl-C` twice with no resize.
