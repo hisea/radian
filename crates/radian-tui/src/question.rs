@@ -395,10 +395,18 @@ impl QuestionForm {
         self.current = (next < self.questions.len()).then_some(next);
     }
 
-    /// Up/Down: the option cursor of the current question (or the composer's own cursor in a
-    /// free-text field or a note).
+    /// Up/Down: the option cursor of the current question, or the composer's own cursor in a
+    /// **multi-line** field.
+    ///
+    /// The `Other` row is single-line: with the cursor on it (even while typing), Up/Down move
+    /// between the options and the typed text is kept. A `text`
+    /// question and a note are multi-line, so there Up/Down move the composer's cursor.
     fn move_cursor(&mut self, delta: isize) {
-        if self.note_focused() || self.text_focused() {
+        let multiline_field = self.note_focused()
+            || self
+                .current_question()
+                .is_some_and(|question| question.kind == QuestionKind::Text);
+        if multiline_field {
             if let Some(text) = self.composer_mut() {
                 if delta < 0 {
                     text.up();
@@ -409,13 +417,23 @@ impl QuestionForm {
             return;
         }
         let Some(index) = self.current else { return };
-        let rows = Self::row_count(&self.questions[index]);
+        let question = &self.questions[index];
+        let rows = Self::row_count(question);
         if rows == 0 {
             return;
         }
+        let other_row = question.allow_other.then_some(question.options.len());
         let answer = &mut self.answers[index];
         let next = (answer.cursor as isize + delta).clamp(0, rows as isize - 1) as usize;
         answer.cursor = next;
+        // Landing on the `Other` row chooses it, so typing there is the answer and the typed
+        // text survives a move away and back.
+        if other_row == Some(next) {
+            answer.other = true;
+            if question.kind == QuestionKind::Single {
+                answer.selected.clear();
+            }
+        }
     }
 
     /// `Space`/`Enter`: choose the highlighted row (a `multi` toggles, a `single` selects).

@@ -537,3 +537,42 @@ fn a_long_tab_label_is_truncated() {
     assert_eq!(labels[0].0, "一二三四五六七…", "{labels:?}");
     assert!(labels[1].0 == "Submit", "{labels:?}");
 }
+
+/// feedback 2026-10-16: with the cursor on `Other`, Up/Down still move between the
+/// options and the typed text is kept; typing goes into `Other`, and `Enter` confirms.
+#[test]
+fn other_keeps_its_text_while_moving_with_arrows() {
+    let mut app = App::new("m", "s");
+    let mut q = question(
+        "pick",
+        QuestionKind::Single,
+        vec![option("a", "A"), option("b", "B")],
+        false,
+    );
+    q.allow_other = true;
+    show(&mut app, vec![q]);
+    // Move to the `Other` row (A, B, Other).
+    app.on_key(key(KeyCode::Down));
+    app.on_key(key(KeyCode::Down));
+    assert_eq!(form(&app).answers[0].cursor, 2, "the Other row");
+    for c in "custom".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    assert_eq!(form(&app).answers[0].text.text(), "custom");
+
+    // Up moves to the previous option; Down comes back to `Other`; the text survives.
+    app.on_key(key(KeyCode::Up));
+    assert_eq!(form(&app).answers[0].cursor, 1, "the previous option");
+    app.on_key(key(KeyCode::Down));
+    assert_eq!(form(&app).answers[0].cursor, 2, "back on Other");
+    assert_eq!(
+        form(&app).answers[0].text.text(),
+        "custom",
+        "the typed text is kept"
+    );
+
+    // `Enter` confirms the Other choice and advances; the answer carries the text.
+    app.on_key(key(KeyCode::Enter));
+    let answer = answer_of(effect(&mut app, key(KeyCode::Enter))).expect("a submit");
+    assert_eq!(answer.answers[0].other.as_deref(), Some("custom"));
+}
