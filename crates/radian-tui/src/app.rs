@@ -296,6 +296,69 @@ pub enum Modal {
     /// like the approval's: a startup decision must not depend on the keymap. Boxed, like the
     /// other payload modals.
     Trust(Box<TrustWizard>),
+    /// The `/access full` confirmation (ADR 0038 slice 2): switching to `full` means no
+    /// sandbox, so a human must confirm. A small list whose keys are hardcoded; the default
+    /// focus is `cancel`, so Enter does not open the sandbox. Boxed like the trust prompt.
+    AccessFull(Box<AccessWizard>),
+}
+
+/// What the `/access full` confirmation offers (ADR 0038 decision 2/3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessChoice {
+    /// Switch to `full` for this session only (still journaled).
+    Session,
+    /// Switch to `full` and remember it for this project (`~/.radian/access/`).
+    Remember,
+    /// Leave the tier unchanged.
+    Cancel,
+}
+
+impl AccessChoice {
+    /// The three options in display order; `cancel` last so the default focus is fail-safe.
+    pub const ALL: [AccessChoice; 3] = [
+        AccessChoice::Session,
+        AccessChoice::Remember,
+        AccessChoice::Cancel,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Session => "this session only",
+            Self::Remember => "remember for this project",
+            Self::Cancel => "cancel",
+        }
+    }
+}
+
+/// The `/access full` confirmation's state: the highlighted option. The default is `cancel`
+///.
+pub struct AccessWizard {
+    pub cursor: usize,
+}
+
+impl AccessWizard {
+    pub fn new() -> Self {
+        let cursor = AccessChoice::ALL
+            .iter()
+            .position(|choice| *choice == AccessChoice::Cancel)
+            .unwrap_or(AccessChoice::ALL.len() - 1);
+        Self { cursor }
+    }
+
+    pub fn selected(&self) -> AccessChoice {
+        AccessChoice::ALL[self.cursor]
+    }
+
+    pub fn move_cursor(&mut self, delta: i32) {
+        let len = AccessChoice::ALL.len() as i32;
+        self.cursor = (self.cursor as i32 + delta).rem_euclid(len) as usize;
+    }
+}
+
+impl Default for AccessWizard {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// The startup trust modal's state (ADR 0031 T3): the workspace and the highlighted option.
@@ -485,6 +548,8 @@ fn is_user_input(input: &Input) -> bool {
         | Input::ConfirmLogout(_)
         | Input::TrustMove(_)
         | Input::TrustChosen(_)
+        | Input::AccessMove(_)
+        | Input::AccessChosen(_)
         | Input::MouseDown { .. }
         | Input::MouseDrag { .. }
         | Input::MouseUp { .. } => true,
@@ -505,6 +570,7 @@ fn is_user_input(input: &Input) -> bool {
         | Input::SwitchCompacted { .. }
         | Input::SessionDone(_)
         | Input::TrustResolved(_)
+        | Input::AccessApplied { .. }
         | Input::CommandRefused(_)
         | Input::PickerOpened(_)
         | Input::LoginVerified { .. }
@@ -747,6 +813,17 @@ pub enum Input {
     TrustChosen(radian_host::trust::Choice),
     /// The trust choice was applied: the session's new state, for the startup notice.
     TrustResolved(radian_host::trust::Setup),
+    /// The `/access full` confirmation's cursor moved (ADR 0038 slice 2).
+    AccessMove(i32),
+    /// The `/access full` confirmation chose an option.
+    AccessChosen(AccessChoice),
+    /// A tier switch finished (the result of [`Effect::SetAccess`]): the tier, whether it was
+    /// remembered, and the outcome (a failed sandbox probe is a refusal that changes nothing).
+    AccessApplied {
+        tier: crate::profile::Tier,
+        remember: bool,
+        result: Result<(), String>,
+    },
     /// The left button went down at a screen cell: the press that may start a transcript
     /// selection (and that clears the previous one). Only arrives when mouse reporting is on.
     MouseDown { row: u16, col: u16 },
@@ -872,6 +949,14 @@ pub enum Effect {
     /// facade, which flips the hooks' live policy, audits the switch and queues the durable
     /// `ConfigChanged` record for the next resume.
     SetApprovalPolicy { on: bool },
+    /// Switch the session's permission tier (ADR 0038 slice 2). The loop calls the facade
+    /// (`set_access`), which rebuilds the profile and the sandbox through the host's builder;
+    /// a failed probe is a refusal. `remember` also writes the per-project record. The answer
+    /// is [`Input::AccessApplied`].
+    SetAccess {
+        tier: crate::profile::Tier,
+        remember: bool,
+    },
     /// Expand `/skill:<name> [args]` (ADR 0025 S3): the host reads the body and the loop sends
     /// the folded `<skill …>` text as one user message (`steer` picks steer vs follow-up). The
     /// answer is [`Input::SkillExpanded`].
@@ -927,6 +1012,16 @@ impl PartialEq for Effect {
             (SendFollowup(a), SendFollowup(b)) | (Steer(a), Steer(b)) => a == b,
             (Cancel, Cancel) | (Quit, Quit) => true,
             (SetApprovalPolicy { on: a }, SetApprovalPolicy { on: b }) => a == b,
+            (
+                SetAccess {
+                    tier: at,
+                    remember: ar,
+                },
+                SetAccess {
+                    tier: bt,
+                    remember: br,
+                },
+            ) => at == bt && ar == br,
             (
                 AnswerRequest {
                     request_id: a,
@@ -1196,6 +1291,11 @@ pub struct App {
     /// is the hooks' — the loop applies it through [`Effect::SetApprovalPolicy`] — this is
     /// the UI's mirror, so `update` stays pure.
     pub auto: bool,
+    /// Where the tier in force came from (ADR 0038 decision 3), for `/access` with no argument
+    /// and the footer's `(project)` marker. Set at startup from the resolution, and updated by
+    /// a run-time switch. A UI/startup label, not a session fact (the tier itself is in the
+    /// projection).
+    pub access_source: crate::profile::AccessSource,
     /// The last request the UI answered: the queue's head stays that request for a moment, and
     /// re-showing it would flash a form the user just submitted.
     last_answered: Option<u64>,
@@ -1330,6 +1430,7 @@ impl App {
             startup_len: 0,
             quit_pending: None,
             auto: false,
+            access_source: crate::profile::AccessSource::Default,
             last_answered: None,
             layers: vec![Layer::Surface],
             memory_enabled: false,
@@ -1431,6 +1532,12 @@ impl App {
     /// policy and afterwards only by the switch itself.
     pub fn set_auto(&mut self, auto: bool) {
         self.auto = auto;
+    }
+
+    /// Where the tier in force came from (ADR 0038 decision 3): the startup resolution, or the
+    /// run-time switch's own record. `/access` with no argument prints it.
+    pub fn set_access_source(&mut self, source: crate::profile::AccessSource) {
+        self.access_source = source;
     }
 
     /// Applies the wired `tui.*` configuration. A bad keymap (a key bound to two actions) is
@@ -2656,6 +2763,65 @@ impl App {
                 self.push_notice(radian_host::trust::status_line(&setup));
                 UpdateResult::dirty()
             }
+            Input::AccessMove(delta) => {
+                if let Some(Modal::AccessFull(wizard)) =
+                    self.layers.iter_mut().rev().find_map(|layer| match layer {
+                        Layer::Modal(modal) => Some(modal),
+                        _ => None,
+                    })
+                {
+                    wizard.move_cursor(delta);
+                }
+                UpdateResult::dirty()
+            }
+            Input::AccessChosen(choice) => {
+                self.remove_modal(|modal| matches!(modal, Modal::AccessFull(_)));
+                match choice {
+                    AccessChoice::Cancel => {
+                        self.push_notice("access unchanged");
+                        UpdateResult::dirty()
+                    }
+                    AccessChoice::Session => UpdateResult::effect(Effect::SetAccess {
+                        tier: crate::profile::Tier::FullAccess,
+                        remember: false,
+                    }),
+                    AccessChoice::Remember => UpdateResult::effect(Effect::SetAccess {
+                        tier: crate::profile::Tier::FullAccess,
+                        remember: true,
+                    }),
+                }
+            }
+            Input::AccessApplied {
+                tier,
+                remember,
+                result,
+            } => {
+                match result {
+                    Ok(()) => {
+                        // The startup source is spent: this is a run-time switch, remembered or
+                        // not. The footer's tier item reads the projection, so re-mark it.
+                        self.access_source = if remember {
+                            crate::profile::AccessSource::Project
+                        } else {
+                            crate::profile::AccessSource::Session
+                        };
+                        self.set_tier(format!("{}{}", tier.as_str(), self.access_source.suffix()));
+                        // `!`/`!!` exist whenever the new tier has a sandbox (`full` and
+                        // `workspace`; not `safe`).
+                        self.set_bash_available(tier != crate::profile::Tier::Safe);
+                        if remember {
+                            self.push_notice(format!(
+                                "access: {} for this session, and remembered for this project",
+                                tier.as_str()
+                            ));
+                        } else {
+                            self.push_notice(format!("access: {} for this session", tier.as_str()));
+                        }
+                    }
+                    Err(reason) => self.push_notice(format!("cannot switch access: {reason}")),
+                }
+                UpdateResult::dirty()
+            }
             Input::SkillExpanded { result, steer } => self.skill_expanded(result, steer),
             Input::CommandRefused(refused) => {
                 self.push_notice(format!(
@@ -2943,6 +3109,16 @@ impl App {
                 KeyCode::Esc => Some(Input::TrustChosen(
                     radian_host::trust::Choice::UntrustSession,
                 )),
+                _ => None,
+            },
+            // The `/access full` confirmation's keys are hardcoded (ADR 0038 slice 2): a tier
+            // switch to "no sandbox" must not depend on the keymap. Enter takes the highlighted
+            // option (default `cancel`); Esc is `cancel`.
+            Modal::AccessFull(wizard) => match key.code {
+                KeyCode::Up => Some(Input::AccessMove(-1)),
+                KeyCode::Down => Some(Input::AccessMove(1)),
+                KeyCode::Enter => Some(Input::AccessChosen(wizard.selected())),
+                KeyCode::Esc => Some(Input::AccessChosen(AccessChoice::Cancel)),
                 _ => None,
             },
             // The `/login` wizard's keys are hardcoded too: a login prompt is sensitive, and
@@ -3849,6 +4025,55 @@ impl App {
                 }
                 UpdateResult::effect(Effect::SetApprovalPolicy { on })
             }
+            // `/access` (ADR 0038 slice 2): a query with no argument, otherwise a switch. Only
+            // `full` needs confirmation (it is "no sandbox"); the model has no tool for this.
+            command::Outcome::Access(name) => match name {
+                None => {
+                    let current = self
+                        .projection
+                        .read()
+                        .tier()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| "unknown".to_owned());
+                    self.push_notice(format!(
+                        "access: {current} (from {})",
+                        self.access_source.label()
+                    ));
+                    UpdateResult::dirty()
+                }
+                Some(name) => {
+                    let tier = match crate::profile::parse_tier(&name) {
+                        Ok(tier) => tier,
+                        Err(message) => {
+                            self.push_notice(message);
+                            return UpdateResult::dirty();
+                        }
+                    };
+                    // The projection's tier may carry a source suffix (`full (project)`); the
+                    // tier name is the first word.
+                    let current = self
+                        .projection
+                        .read()
+                        .tier()
+                        .map(str::to_owned)
+                        .unwrap_or_default();
+                    let current_tier = current.split_whitespace().next().unwrap_or("");
+                    if current_tier == tier.as_str() {
+                        self.push_notice(format!("access is already {}", tier.as_str()));
+                        return UpdateResult::dirty();
+                    }
+                    if tier == crate::profile::Tier::FullAccess {
+                        // `full` means no sandbox: confirm before opening it (ADR 0038
+                        // decision 2). The panel's default focus is `cancel`.
+                        self.push_modal(Modal::AccessFull(Box::default()));
+                        return UpdateResult::dirty();
+                    }
+                    UpdateResult::effect(Effect::SetAccess {
+                        tier,
+                        remember: false,
+                    })
+                }
+            },
             // `/skill:` (ADR 0025 S3): the host reads the body and the expanded text becomes a
             // user message. Whether it steers is decided here, like a typed send.
             command::Outcome::Skill { name, args } => {

@@ -7,6 +7,7 @@
 //! of a host that is the same whether the user is at a line prompt or a full-screen UI. The
 //! two binaries still decide their own flags, startup text and error wording.
 
+pub mod access;
 pub mod approval;
 pub mod atomic_write;
 pub mod auth;
@@ -97,8 +98,8 @@ pub use diagnostics::{
 pub use errors::{CONTEXT_OVERFLOW_HELP, CONTEXT_OVERFLOW_PREFIX, is_context_overflow};
 pub use headers::{SESSION_PLACEHOLDER, parse_headers};
 pub use home::{
-    RADIAN_HOME_ENV, cache_dir_for, catalog_cache, catalog_cache_for, config_dir, config_dir_for,
-    credentials_dir, credentials_dir_for, diagnostics_dir_for, ensure_private_dir,
+    RADIAN_HOME_ENV, access_dir_for, cache_dir_for, catalog_cache, catalog_cache_for, config_dir,
+    config_dir_for, credentials_dir, credentials_dir_for, diagnostics_dir_for, ensure_private_dir,
     legacy_sessions_dirs_for, legacy_sessions_hint, legacy_sessions_hint_for, memory_dir,
     memory_dir_for, radian_home, radian_home_for, sessions_dir, sessions_dir_for, skills_dir,
     skills_dir_for, themes_dir, themes_dir_for, trust_dir, trust_dir_for, user_home,
@@ -140,9 +141,10 @@ pub use provider::{
 pub use radian_runtime::ModelRoute;
 pub use session::session_hooks;
 pub use session::{
-    ApprovalRouting, CommandRefused, DriverEnd, HostBindings, LocalSession, SessionCapability,
-    SessionCommand, SessionError, SessionFacade, SessionFacts, SessionId, SessionQueue,
-    SessionSetup, UserBashRecord, open_session, resumed_model_route,
+    AccessBuilder, AccessParts, ApprovalRouting, CommandRefused, DriverEnd, HostBindings,
+    LocalSession, SessionCapability, SessionCommand, SessionError, SessionFacade, SessionFacts,
+    SessionId, SessionQueue, SessionSetup, UserBashRecord, open_session, resumed_access,
+    resumed_model_route,
 };
 pub use session_id::{generate_session_id, validate_session_id};
 pub use sessions::{

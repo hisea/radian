@@ -9529,3 +9529,212 @@ fn the_bang_command_runs_through_the_sandboxed_executor() {
         "the RunBash arm must not build a command directly (that would bypass the sandbox):\n{arm}"
     );
 }
+
+/// ADR 0038 slice 2: switching to `full` (no sandbox) opens a confirmation; Esc cancels and
+/// leaves the tier unchanged. The model has no tool for this, so it is a user-only command.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_access_full_requires_confirmation_and_esc_cancels() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("access-confirm");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().join("sessions").to_str().unwrap(),
+            "--session-id",
+            "access-confirm",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--profile",
+            "workspace",
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("workspace", 15),
+        "the startup must show the tier:\n{}",
+        pty.screen()
+    );
+
+    // `/access full` opens the confirmation; nothing has switched yet.
+    pty.send(b"/access full\r");
+    assert!(
+        pty.wait_for_screen("full means no sandbox", 10),
+        "the confirmation must be up:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("access: full"),
+        "the tier must not switch before confirmation:\n{}",
+        pty.screen()
+    );
+
+    // Esc cancels.
+    pty.send(&[0x1b]);
+    assert!(
+        pty.wait_for_screen("access unchanged", 10),
+        "Esc must cancel:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("access: full"),
+        "the tier must be unchanged after Esc:\n{}",
+        pty.screen()
+    );
+
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0038 decision 3: a remembered per-project `full` applies at the next start, and the
+/// startup line and the footer mark it `(project)`. A file **in the workspace** cannot cause
+/// it — only the user's `~/.radian/access/access.json` can.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_remembered_full_applies_at_start_with_the_project_marker() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("access-remembered");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    // The store is keyed by the ADR 0021 project identity, and `RADIAN_HOME` is the root the
+    // app reads (not `<root>/.radian`): `$RADIAN_HOME/access/access.json`.
+    let key = radian_host::memory::project_identity_key(&ws)
+        .to_string_lossy()
+        .into_owned();
+    let home = dir.path().join("home");
+    let store_dir = home.join("access");
+    std::fs::create_dir_all(&store_dir).unwrap();
+    std::fs::write(
+        store_dir.join("access.json"),
+        format!("{{\"{key}\": \"full\"}}\n"),
+    )
+    .unwrap();
+
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().join("sessions").to_str().unwrap(),
+            "--session-id",
+            "access-remembered",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[("RADIAN_HOME", home.to_str().unwrap())],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("full (project)", 15),
+        "the remembered tier must apply and be marked:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+
+    // A workspace file with the same content, and a fresh HOME with no store, must not set the
+    // tier: a cloned repository cannot ship a line that opens the sandbox.
+    let home2 = dir.path().join("home2");
+    std::fs::create_dir_all(&home2).unwrap();
+    std::fs::create_dir_all(ws.join(".radian")).unwrap();
+    std::fs::write(
+        ws.join(".radian/access.json"),
+        format!("{{\"{key}\": \"full\"}}\n"),
+    )
+    .unwrap();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().join("sessions2").to_str().unwrap(),
+            "--session-id",
+            "access-wsfile",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[("RADIAN_HOME", home2.to_str().unwrap())],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("workspace", 15),
+        "the workspace file must be ignored:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("full (project)"),
+        "a workspace file must not set the tier:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0038 decision 2: a journaled access change restores the tier on resume, the same way
+/// `/model` restores the route.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_resume_restores_the_access_tier() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("access-resume");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let path = sessions.join("access-resume.jsonl");
+    let journal = radian_session::SessionJournal::create(
+        &path,
+        "access-resume",
+        radian_session::SessionCreatedData::new(ws.to_string_lossy(), json!({})),
+    )
+    .expect("create the session file");
+    journal
+        .append_runtime_event(radian_session::RuntimeEvent::ConfigChanged {
+            revision: 1,
+            change: json!({"access": "full"}),
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--resume",
+            "access-resume",
+        ],
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("full (session)", 15),
+        "the resumed tier must apply and be marked:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}

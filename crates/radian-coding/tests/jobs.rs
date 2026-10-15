@@ -15,8 +15,8 @@ use agent_core::{
     ToolProvider, ToolSession,
 };
 use common::TempDir;
-use radian_coding::{CodingSession, CodingTools, JobEvent};
-use radian_sandbox::{Sandbox, SandboxMode, SandboxPolicy};
+use radian_coding::{CodingSession, CodingTools, JobEvent, JobState};
+use radian_sandbox::{Sandbox, SandboxMode, SandboxPolicy, SandboxSlot};
 use serde_json::{Value, json};
 
 // ---------- helpers ----------
@@ -716,4 +716,59 @@ async fn an_unknown_job_is_refused() {
         .await
         .expect_err("unknown job");
     assert_eq!(failure.code, "unknown_job");
+}
+
+// ---------- 9. a background job keeps the sandbox it started with (ADR 0038 slice 2) ----------
+
+/// The sandbox is read from the shared slot when a call starts, so a job is spawned with the
+/// sandbox in force at that moment. Swapping the slot afterwards cannot reach the running job:
+/// a job started confined stays confined, and its outside write never lands.
+#[tokio::test]
+async fn a_running_background_job_keeps_the_sandbox_it_started_with() {
+    let dir = TempDir::new("jobs-slot");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let outside = common::sentinel_outside(&dir);
+    let marker = outside.join("job.txt");
+
+    let policy = match SandboxPolicy::new(SandboxMode::WorkspaceWrite, &root) {
+        Ok(policy) => policy,
+        Err(_) => return,
+    };
+    let confined = match Sandbox::from_policy(policy) {
+        Ok(sandbox) => sandbox,
+        Err(e) => {
+            eprintln!("skipping: no working workspace-write backend: {e}");
+            return;
+        }
+    };
+    let slot = SandboxSlot::with(confined);
+    let tools = CodingTools::with_sandbox_slot(&root, slot.clone()).expect("matching workspaces");
+    let session = tools.open_session().await.expect("session");
+
+    // Start the job confined. It writes the marker outside the workspace, which the confined
+    // sandbox denies.
+    let (job_id, _) = start(&session, &format!("echo job > {}", marker.display()), None).await;
+
+    // Swap the slot to `full` while the job is (or may still be) running.
+    let full = Sandbox::from_policy(
+        SandboxPolicy::new(SandboxMode::FullAccess, &root).expect("full-access policy"),
+    )
+    .expect("full-access needs no backend");
+    slot.set(Some(full));
+
+    // Wait for the job to settle, then assert the outside write never landed: the job kept the
+    // sandbox it started with.
+    wait_until("the job settled", || {
+        session
+            .jobs()
+            .list()
+            .iter()
+            .all(|job| !matches!(job.state, JobState::Running))
+    })
+    .await;
+    assert!(
+        !marker.exists(),
+        "the running job's confined sandbox must have denied the outside write (job {job_id})"
+    );
 }

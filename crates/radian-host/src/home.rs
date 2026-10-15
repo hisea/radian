@@ -67,6 +67,9 @@ pub fn skills_dir_for(root: &Path) -> PathBuf {
 pub fn trust_dir_for(root: &Path) -> PathBuf {
     root.join("trust")
 }
+pub fn access_dir_for(root: &Path) -> PathBuf {
+    root.join("access")
+}
 pub fn diagnostics_dir_for(root: &Path) -> PathBuf {
     cache_dir_for(root).join("diagnostics")
 }
@@ -243,6 +246,11 @@ mod tests {
         assert_eq!(
             credentials_dir_for(root),
             PathBuf::from("/home/u/.radian/credentials")
+        );
+        assert_eq!(trust_dir_for(root), PathBuf::from("/home/u/.radian/trust"));
+        assert_eq!(
+            access_dir_for(root),
+            PathBuf::from("/home/u/.radian/access")
         );
         assert_eq!(
             themes_dir_for(root),
