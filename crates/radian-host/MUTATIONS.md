@@ -744,3 +744,24 @@ afterwards (`md5` compared, `git status --short` empty), `cargo test -p radian-h
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | W1 | `MemoryError::NotFound`'s wording goes back to `no record <id>` | ✅ caught | `memory::commands::tests::an_unknown_id_is_a_clear_error`, `memory::tools::tests::an_unknown_memory_get_uses_the_stores_not_found_wording` |
+
+## memory-project-auto-create: ADR 0021 (decisions 1 and 2)
+
+Base `6f2a08b` · in-place in this worktree, each mutation applied with `python3` from a copy and
+restored from it afterwards (`md5` compared, `git status --short` empty), `cargo test -p
+radian-host --lib --no-fail-fast memory::` (AC-1 additionally: `cargo test -p agent-cli --test
+cli -- memory` after `cargo build -p radian-tui --bin radian`, and `cargo test -p radian-tui
+--test pty -- pty_a_memory_add`).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| AC-1 | `project_for_write` never registers: a git workspace with an unknown key gets the `Unlinked` error (the pre-revision behaviour) | ✅ caught | `memory::service::tests::{a_write_registers_a_git_workspace_and_a_read_never_does, a_write_outside_a_repository_is_refused_and_creates_nothing, a_write_still_creates_when_a_candidate_previous_project_exists}`, `memory::tools::tests::{a_save_in_a_git_workspace_registers_the_project_and_notices_once, a_save_outside_a_project_workspace_is_refused_without_suggesting_global}`, and end to end `agent_cli::cli::{memory_add_registers_a_git_workspace_and_prints_one_notice, memory_save_in_a_git_workspace_creates_the_project_and_exec_shows_the_notice, memory_unlinked_workspace_refuses_project_writes_and_lists_global}`, `radian_tui::pty::pty_a_memory_add_shows_the_created_project_notice` |
+| AC-2 | `MemoryService::state` registers a git workspace itself, so every **read** creates a project | ✅ caught | `memory::tools::tests::a_read_never_registers_a_project`, `memory::service::tests::{a_write_registers_a_git_workspace_and_a_read_never_does, a_write_still_creates_when_a_candidate_previous_project_exists}`, `memory::tools::tests::a_save_in_a_git_workspace_registers_the_project_and_notices_once` |
+| AC-3 | `project_for_write` drops the git check (registers any unregistered directory, `/tmp` included) | ✅ caught | `memory::service::tests::a_write_outside_a_repository_is_refused_and_creates_nothing`, `memory::tools::tests::a_save_outside_a_project_workspace_is_refused_without_suggesting_global` |
+| AC-4 | the `memory_unlinked` tool error says "Save to the global scope instead" again | ✅ caught | `memory::tools::tests::the_unlinked_tool_error_never_suggests_global` |
+| AC-5 | the `memory_save` description drops the global rule | ✅ caught | `memory::tools::tests::the_save_description_states_when_global_is_right` |
+| AC-6 | the not-a-project-workspace refusal suggests the global scope | ✅ caught | `memory::tools::tests::a_save_outside_a_project_workspace_is_refused_without_suggesting_global` |
+
+6/6 caught. In each run only the tests listed above failed (the rest of the `memory::` filter
+stayed green); AC-1 also reds the three CLI tests and the pty test above, which is what the two
+end-to-end tests are for.

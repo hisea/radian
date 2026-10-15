@@ -17,7 +17,10 @@ pub use commands::{
 };
 pub use identity::{candidate_name, project_identity_key};
 pub use injection::{Injection, InjectionConfig, MemoryHooks, plan};
-pub use service::{MemoryService, MemoryServiceError, ProjectState, ScopeSelection, WriteScope};
+pub use service::{
+    CreatedProject, MemoryService, MemoryServiceError, ProjectForWrite, ProjectState,
+    ScopeSelection, WriteScope,
+};
 pub use tools::{
     DEFAULT_SEARCH_LIMIT, LOW_TRUST_NOTE, MAX_SEARCH_LIMIT, MemorySession, MemoryTools,
 };

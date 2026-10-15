@@ -24,7 +24,9 @@ pub enum ProjectState {
     /// It is not. A Project-scoped operation fails; the user chooses `create_project` or
     /// [`MemoryService::relink`]. `candidates` lists the projects whose identity key has the
     /// same [`candidate_name`](super::identity::candidate_name) ("同名仓库"); the rule is
-    /// deliberately a hint, not a match.
+    /// deliberately a hint, not a match. (A **write** in the default scope does not fail:
+    /// [`MemoryService::project_for_write`] registers a git workspace itself, ADR 0021
+    /// revision 1.)
     Unlinked {
         identity_key: String,
         candidates: Vec<ProjectId>,
@@ -50,14 +52,66 @@ pub enum WriteScope {
     Global,
 }
 
-/// A memory operation failure, with the host's own case: a workspace that is not linked to a
-/// project.
+/// What [`MemoryService::project_for_write`] resolved for a **write** in the default scope
+/// (ADR 0021).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectForWrite {
+    /// The identity key was already registered: the write goes to this project, and nothing
+    /// is shown.
+    Linked(ProjectId),
+    /// The identity key comes from a git repository and was not registered: it was registered
+    /// now, and the host shows [`CreatedProject::notice`].
+    Created(CreatedProject),
+}
+
+/// A project a default-scope write just registered for this workspace (ADR 0021).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedProject {
+    pub project: ProjectId,
+    /// The identity key the project was registered under (the git common dir).
+    pub identity_key: String,
+    /// The projects whose identity key is named like this workspace's (ADR 0021 D2's
+    /// "同名仓库" candidate rule). A moved or re-cloned repository leaves a likely previous
+    /// project here; the notice points at `relink`/`merge` so the user can join them.
+    pub candidates: Vec<ProjectId>,
+}
+
+impl CreatedProject {
+    /// The one notice line the hosts show (ADR 0021): which project was created,
+    /// for which identity key, and — when a likely previous project exists — how to join them.
+    pub fn notice(&self) -> String {
+        let mut line = format!(
+            "created project {} for identity key {} (project memory goes there now)",
+            self.project, self.identity_key
+        );
+        if let Some(previous) = self.candidates.first() {
+            let list: Vec<&str> = self.candidates.iter().map(ProjectId::as_str).collect();
+            line.push_str(&format!(
+                "; a previous project ({}) already had this repository name — run `radian \
+                 memory relink {previous}` to attach this workspace to it, or `radian memory \
+                 merge {} {previous}` to move its records into the new project",
+                list.join(", "),
+                self.project,
+            ));
+        }
+        line
+    }
+}
+
+/// A memory operation failure, with the host's own cases: a workspace that is not linked to a
+/// project, and a directory that is not a project workspace at all.
 #[derive(Debug)]
 pub enum MemoryServiceError {
     Storage(MemoryError),
     Unlinked {
         identity_key: String,
         candidates: Vec<ProjectId>,
+    },
+    /// This directory's identity key does not come from a git repository, so it is not a
+    /// project workspace (ADR 0021): a write in the default scope has no project to
+    /// go to and writes nothing. `radian memory project new` still registers it by hand.
+    NotAProjectWorkspace {
+        identity_key: String,
     },
 }
 
@@ -81,10 +135,15 @@ impl fmt::Display for MemoryServiceError {
                 }
                 write!(
                     f,
-                    ". Run `radian memory relink <ProjectId>` or `radian memory project new`, \
-                     or pass --global"
+                    ". Run `radian memory relink <ProjectId>` or `radian memory project new`"
                 )
             }
+            MemoryServiceError::NotAProjectWorkspace { identity_key } => write!(
+                f,
+                "this directory is not a project workspace: its identity key ({identity_key}) \
+                 does not come from a git repository, so the memory was not saved. Run \
+                 `radian memory project new` to register this directory as a project"
+            ),
         }
     }
 }
@@ -104,6 +163,9 @@ pub struct MemoryService {
     registry: ProjectRegistry,
     workspace: PathBuf,
     identity_key: String,
+    /// Whether `identity_key` came from a git repository (ADR 0021: the condition
+    /// for a write to register this workspace as a project).
+    git_identity: bool,
 }
 
 impl MemoryService {
@@ -116,12 +178,14 @@ impl MemoryService {
         let identity_key = project_identity_key(&workspace)
             .to_string_lossy()
             .into_owned();
+        let git_identity = super::identity::is_git_identity(&workspace);
         let root = root.into();
         Self {
             store: MemoryStore::open(root.clone()),
             registry: ProjectRegistry::open(root),
             workspace,
             identity_key,
+            git_identity,
         }
     }
 
@@ -143,7 +207,8 @@ impl MemoryService {
     }
 
     /// Whether the identity key is registered, and the candidates if it is not. Resolving
-    /// never registers (ADR 0021 D2: no silent project identity).
+    /// itself never registers: a write goes through [`MemoryService::project_for_write`], which
+    /// **may** register a git workspace (ADR 0021), and reads never do.
     pub fn state(&self) -> Result<ProjectState, MemoryServiceError> {
         match self.registry.resolve(&self.identity_key)? {
             Some(project) => Ok(ProjectState::Known(project)),
@@ -168,10 +233,43 @@ impl MemoryService {
         }
     }
 
-    /// Registers this identity key as a new project. Only the explicit `radian memory project
-    /// new` command calls it.
+    /// Registers this identity key as a new project. `radian memory project new` calls it, and
+    /// so does [`MemoryService::project_for_write`] — the registration a default-scope write
+    /// performs in a git workspace (ADR 0021).
     pub fn create_project(&self) -> Result<ProjectId, MemoryServiceError> {
         Ok(self.registry.register(&self.identity_key)?)
+    }
+
+    /// Resolves the Project scope for a **write** in the default scope (ADR 0021).
+    ///
+    /// A registered identity key resolves as before ([`ProjectForWrite::Linked`]). An
+    /// unregistered key that comes from a git repository **is registered now**
+    /// ([`ProjectForWrite::Created`]), which is what makes project memory work at all for a
+    /// workspace the user never registered; the caller shows the notice. A directory whose key
+    /// is not a git common dir is [`MemoryServiceError::NotAProjectWorkspace`]: it is not a
+    /// project workspace, so nothing is created and nothing is written; `radian memory project
+    /// new` still registers it by hand.
+    ///
+    /// **Only a write calls this.** Reads and injection never create a project (revision 1):
+    /// an unregistered workspace reads and injects Global only, exactly as before.
+    pub fn project_for_write(&self) -> Result<ProjectForWrite, MemoryServiceError> {
+        match self.state()? {
+            ProjectState::Known(project) => Ok(ProjectForWrite::Linked(project)),
+            ProjectState::Unlinked {
+                identity_key,
+                candidates,
+            } => {
+                if !self.git_identity {
+                    return Err(MemoryServiceError::NotAProjectWorkspace { identity_key });
+                }
+                let project = self.registry.register(&identity_key)?;
+                Ok(ProjectForWrite::Created(CreatedProject {
+                    project,
+                    identity_key,
+                    candidates,
+                }))
+            }
+        }
     }
 
     /// Attaches this identity key to an existing project (ADR 0021 D2).
@@ -456,6 +554,134 @@ mod tests {
         let root = dir.join("memory");
         let service = MemoryService::open(&ws, &root);
         (dir, ws, service)
+    }
+
+    /// `/tmp/…/<label>/ws` with a `.git` **directory**, which is what makes the workspace's
+    /// identity key come from a repository (`identity::project_identity_key`), without running
+    /// `git`.
+    fn git_service(label: &str) -> (PathBuf, PathBuf, MemoryService) {
+        let dir = scratch(label);
+        let ws = dir.join("ws");
+        std::fs::create_dir_all(ws.join(".git")).unwrap();
+        let root = dir.join("memory");
+        let service = MemoryService::open(&ws, &root);
+        (dir, ws, service)
+    }
+
+    /// ADR 0021: a **write** in the default scope registers an unregistered git
+    /// workspace; a read before it registers nothing.
+    #[test]
+    fn a_write_registers_a_git_workspace_and_a_read_never_does() {
+        let (dir, _ws, service) = git_service("auto-create");
+        assert!(
+            matches!(service.state().unwrap(), ProjectState::Unlinked { .. }),
+            "nothing is registered at open"
+        );
+        // Reads (and injection) do not register: the view is Global only and the registry file
+        // stays absent.
+        assert!(
+            service
+                .list(ScopeSelection::Default, false)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(service.projects().unwrap().is_empty());
+
+        let created = match service.project_for_write().unwrap() {
+            ProjectForWrite::Created(created) => created,
+            other => panic!("expected Created, got {other:?}"),
+        };
+        assert_eq!(created.identity_key, service.identity_key().to_string());
+        assert!(created.candidates.is_empty(), "{created:?}");
+        assert_eq!(service.projects().unwrap(), vec![created.project.clone()]);
+        let notice = created.notice();
+        assert!(notice.contains(&created.project.to_string()), "{notice}");
+        assert!(notice.contains(&created.identity_key), "{notice}");
+
+        // The write now lands in the new project, and a second resolution is `Linked`.
+        let record = service
+            .add(WriteScope::Project, Kind::Fact, None, "p".into())
+            .unwrap();
+        assert_eq!(record.scope, Scope::Project(created.project.clone()));
+        assert_eq!(
+            service.project_for_write().unwrap(),
+            ProjectForWrite::Linked(created.project)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0021: a directory that is not a git repository is **not** a project
+    /// workspace, so a write creates nothing and says so (and never suggests another scope).
+    #[test]
+    fn a_write_outside_a_repository_is_refused_and_creates_nothing() {
+        let (dir, _ws, service) = service("not-a-workspace");
+        let error = service.project_for_write().unwrap_err();
+        let memory_not_saved = error.to_string();
+        assert!(
+            matches!(error, MemoryServiceError::NotAProjectWorkspace { .. }),
+            "{memory_not_saved}"
+        );
+        assert!(
+            memory_not_saved.contains("not a project workspace"),
+            "{memory_not_saved}"
+        );
+        assert!(memory_not_saved.contains("not saved"), "{memory_not_saved}");
+        assert!(
+            !memory_not_saved.contains("global"),
+            "the refusal must not suggest another scope: {memory_not_saved}"
+        );
+        assert!(
+            !service.store().root().join("projects").exists(),
+            "a refused write registered a project"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0021: a likely previous project (a repository of the same name, from
+    /// before a move) does not block the write. The new project is created anyway, and the
+    /// notice points at `relink`/`merge`.
+    #[test]
+    fn a_write_still_creates_when_a_candidate_previous_project_exists() {
+        let dir = scratch("moved-candidate");
+        let root = dir.join("memory");
+        let before = dir.join("here").join("radian");
+        std::fs::create_dir_all(before.join(".git")).unwrap();
+        let previous = MemoryService::open(&before, &root);
+        let old_project = previous.project_for_write().unwrap();
+        let ProjectForWrite::Created(old_project) = old_project else {
+            panic!("the old workspace is a git workspace");
+        };
+        previous
+            .add(WriteScope::Project, Kind::Fact, None, "old".into())
+            .unwrap();
+
+        // The same repository, moved: a new identity key, the same repository name.
+        let after_dir = dir.join("moved").join("radian");
+        std::fs::create_dir_all(after_dir.join(".git")).unwrap();
+        let after = MemoryService::open(&after_dir, &root);
+        let ProjectForWrite::Created(created) = after.project_for_write().unwrap() else {
+            panic!("a moved repository is created anew");
+        };
+        assert_eq!(created.candidates, vec![old_project.project.clone()]);
+        assert_ne!(created.project, old_project.project);
+        let notice = created.notice();
+        assert!(notice.contains(&created.project.to_string()), "{notice}");
+        assert!(
+            notice.contains(&old_project.project.to_string()),
+            "{notice}"
+        );
+        assert!(notice.contains("relink"), "{notice}");
+        assert!(notice.contains("merge"), "{notice}");
+        // Both projects exist, and the old records stayed with the old project: nothing was
+        // moved or merged behind the user's back.
+        assert_eq!(after.projects().unwrap().len(), 2);
+        assert!(
+            after
+                .list(ScopeSelection::ProjectOnly, false)
+                .unwrap()
+                .is_empty()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A new workspace: the registry has no entry, so Project writes fail and **register

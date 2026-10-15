@@ -19,7 +19,9 @@ use radian_memory::{
     SearchQuery,
 };
 
-use super::service::{MemoryService, MemoryServiceError, ProjectState, ScopeSelection, WriteScope};
+use super::service::{
+    MemoryService, MemoryServiceError, ProjectForWrite, ProjectState, ScopeSelection, WriteScope,
+};
 
 /// The exit code for a usage or refusal error, matching the CLI's `USAGE_ERROR` and clap.
 pub const USAGE_ERROR: i32 = 2;
@@ -398,12 +400,17 @@ pub fn execute(
             key,
             content,
         } => {
-            let record = service.add(
-                write_scope(global),
-                kind,
-                key,
-                trim_trailing_newlines(content),
-            )?;
+            let scope = write_scope(global);
+            // ADR 0021: a user's default-scope `add` registers a git workspace the
+            // same way the agent's `memory_save` does, and shows the notice through the host's
+            // note channel. Reads (`list`/`search`/`show`) never create anything.
+            if scope == WriteScope::Project
+                && let ProjectForWrite::Created(created) = service.project_for_write()?
+            {
+                // The `[memory]` prefix matches `unlinked_note`: a host prints a note as it is.
+                output.note = Some(format!("[memory] {}", created.notice()));
+            }
+            let record = service.add(scope, kind, key, trim_trailing_newlines(content))?;
             output.text = format!("added {} (revision {})\n", record.id, record.revision);
         }
         MemoryCommand::Edit {
