@@ -835,9 +835,8 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
                     tools::BodyLine::Hint(_) => 1,
                 })
                 .sum();
-            let meta = card_meta(entry);
             let has_output = plan_has_output(&plan, &text);
-            content + frame_rows(frame_plan(entry.card, has_output, meta.is_some()))
+            content + frame_rows(frame_plan(entry.card, has_output, has_meta(entry)))
         }
         _ => crate::render::wrap_line_count(&text, body_width),
     }
@@ -1355,6 +1354,29 @@ fn frame_tail(
         out.push(BodyLine::frame_row(Frame::Bottom));
     }
     out
+}
+
+/// Whether a card has any meta at all, without building the row: the count-only path needs
+/// only the presence, and it runs for every entry on a resize.
+fn has_meta(entry: &Entry) -> bool {
+    let Some(card) = entry.tool.as_deref() else {
+        return false;
+    };
+    let structured = card.structured.as_ref();
+    let flag = |key: &str| {
+        structured
+            .and_then(|value| value.get(key))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    };
+    flag("cancelled")
+        || entry.error_code.as_deref() == Some("interrupted")
+        || (card.name == "shell"
+            && (crate::tools::exit_code_of(card).is_some() || flag("timed_out")))
+        || card.duration_ms.is_some()
+        || structured
+            .and_then(|value| value.get("timeout_secs"))
+            .is_some()
 }
 
 /// The card's meta row (ADR 0028 rule 6): weak, `[` `]`-wrapped, `|`-separated,
