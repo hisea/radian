@@ -604,6 +604,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn id_nonce_consumes_the_counter() {
+        // The injected case above only pins the composition; this pins the wiring: if
+        // `id_nonce` ever stops calling `fetch_add` (a constant seq), two nonces can share a
+        // clock reading again and the injected test would not notice.
+        let before = NONCE_SEQ.load(Ordering::Relaxed);
+        let _ = id_nonce();
+        let after = NONCE_SEQ.load(Ordering::Relaxed);
+        assert!(after > before, "id_nonce must consume NONCE_SEQ");
+    }
+
     #[tokio::test]
     async fn a_caller_supplied_id_is_kept() {
         let inbox = Inbox::new(4);
