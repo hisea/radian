@@ -164,11 +164,25 @@ fn a_failed_call_labels_its_section_error() {
     );
     assert!(text.contains("├── Error "), "{text}");
     assert!(!text.contains("├── Output "), "{text}");
-    // The error band covers the whole card (ADR 0028 rule 3).
+    // The error band covers the whole card (ADR 0028 rule 3). The card starts
+    // below the container's gap and its row indices move with the input style's height
+    // (ADR 0035 V3), so find its top and bottom borders instead of hardcoding rows.
     let buffer = terminal.backend().buffer();
-    let band = buffer.cell((0, 0)).map(|c| c.bg);
+    let symbol = |y: u16| buffer.cell((0, y)).map(|c| c.symbol().to_string());
+    let top = (0..12)
+        .find(|&y| symbol(y).as_deref() == Some("┌"))
+        .expect("top border");
+    let bottom = (0..12)
+        .rev()
+        .find(|&y| symbol(y).as_deref() == Some("└"))
+        .expect("bottom border");
+    let band = buffer.cell((0, top)).map(|c| c.bg);
     assert!(band.is_some(), "the card carries a band");
-    assert_eq!(buffer.cell((0, 6)).map(|c| c.bg), band, "…to the last row");
+    assert_eq!(
+        buffer.cell((0, bottom)).map(|c| c.bg),
+        band,
+        "…to the last row"
+    );
 }
 
 #[test]
