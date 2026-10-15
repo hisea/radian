@@ -1165,3 +1165,14 @@ Base `e2a0392` · 一次性 worktree `/tmp/radian-ime-mut*`，还原后 `git sta
 IM-M2 与既有记录一致（见上文 `RESIZE-B`：closed-master 测试抓不到收窄的缺失——收窄省的是 CPU，
 不是保证退出；退出由第一次 `tty_readiness` 的 Gone 与主循环兜底覆盖，两者都用同一个
 `tty_readiness`）。IM-M3 证明这次改动没有削弱该测试对 POLLHUP 的检查。
+
+## effect-settle（超过 MAX_EFFECT_ROUNDS 时 carry，2026-10-15）
+
+Base `9cb727d` · 一次性 worktree `/tmp/radian-es-mut`，还原后 `git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| ES-M1 | `run_effect_rounds` 恢复 `return Err`（超过上限就退出） | `effect_rounds_carry_the_rest_in_order` | ✅ |
+| ES-M2 | 超过上限后 `effects.clear()`（丢掉剩余 effect） | 同上（顺序/完整性断言） | ✅ |
+
+2/2 抓住。
