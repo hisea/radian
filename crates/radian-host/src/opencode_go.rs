@@ -174,6 +174,25 @@ fn parse_rfc3339_utc(text: &str) -> Option<u64> {
     Some((days * 86_400 + hour * 3_600 + minute * 60 + second).max(0) as u64)
 }
 
+/// One request's limit, well under the refresh period.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// An error and its sources, joined with `: `. reqwest's own message is only "error sending
+/// request for url (…)"; the cause (DNS, connect, TLS, timeout) is in the source chain.
+fn chain(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let cause_text = cause.to_string();
+        if !text.contains(&cause_text) {
+            text.push_str(": ");
+            text.push_str(&cause_text);
+        }
+        source = cause.source();
+    }
+    text
+}
+
 /// The opencode-go usage contributor.
 pub struct OpencodeGoUsage {
     key: String,
@@ -193,7 +212,11 @@ impl OpencodeGoUsage {
             key: key.into(),
             url: url.into(),
             period,
-            client: reqwest::Client::new(),
+            // A refresh that hangs would hold the runner's task; the period is a minute.
+            client: reqwest::Client::builder()
+                .timeout(REQUEST_TIMEOUT)
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
         }
     }
 
@@ -204,7 +227,7 @@ impl OpencodeGoUsage {
             .bearer_auth(&self.key)
             .send()
             .await
-            .map_err(|error| format!("opencode-go usage request failed: {error}"))?;
+            .map_err(|error| format!("opencode-go usage request failed: {}", chain(&error)))?;
         if !response.status().is_success() {
             // Never echo the body: it is the provider's, and the key is a header, not a body.
             return Err(format!(
@@ -370,6 +393,22 @@ mod tests {
         let contributor =
             OpencodeGoUsage::with_url("sk-secret", format!("http://{addr}/usage"), DEFAULT_PERIOD);
         let error = contributor.refresh().await.expect_err("an error");
+        assert!(!error.contains("sk-secret"), "{error}");
+    }
+
+    /// A request that cannot connect names the cause, not only reqwest's "error sending
+    /// request".
+    #[tokio::test]
+    async fn a_failed_request_names_its_cause() {
+        let addr = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap()
+        };
+        let contributor =
+            OpencodeGoUsage::with_url("sk-secret", format!("http://{addr}/usage"), DEFAULT_PERIOD);
+        let error = contributor.refresh().await.expect_err("nothing listens");
+        assert!(error.contains("error sending request"), "{error}");
+        assert!(error.to_lowercase().contains("refused"), "{error}");
         assert!(!error.contains("sk-secret"), "{error}");
     }
 
