@@ -2875,8 +2875,16 @@ fn model_route_candidates(
             });
         }
     }
-    // The current provider's models first, then by provider and model name (ADR 0035
-    // revision 2).
+    sort_model_candidates(&mut candidates, current_provider);
+    candidates
+}
+
+/// The flat `/model` list's order (ADR 0035): the current provider's models first,
+/// then by provider and model name.
+fn sort_model_candidates(
+    candidates: &mut [radian_tui::command::Candidate],
+    current_provider: Option<&str>,
+) {
     let is_current = |candidate: &radian_tui::command::Candidate| {
         current_provider.is_some_and(|provider| {
             candidate
@@ -2891,7 +2899,6 @@ fn model_route_candidates(
             .then_with(|| left.description.cmp(&right.description))
             .then_with(|| left.insert.cmp(&right.insert))
     });
-    candidates
 }
 
 /// One provider's model ids: the built-in descriptor's list, then the cached `/v1/models` ids
@@ -3315,6 +3322,46 @@ mod tests {
         );
         // And a second `Dirty` that finds the flag already cleared is coalesced away.
         assert!(!apply_dirty(&mut app));
+    }
+
+    /// ADR 0035: the current provider's models come first in the flat `/model`
+    /// list, then the rest by provider and model name.
+    #[test]
+    fn the_flat_model_list_puts_the_current_provider_first() {
+        let candidate = |insert: &str, provider: &str| radian_tui::command::Candidate {
+            insert: insert.to_owned(),
+            description: provider.to_owned(),
+        };
+        let mut candidates = vec![
+            candidate("openai/gpt-5", "openai"),
+            candidate("opencode-go/zeta", "opencode-go"),
+            candidate("anthropic/claude-4", "anthropic"),
+            candidate("opencode-go/alpha", "opencode-go"),
+        ];
+        sort_model_candidates(&mut candidates, Some("opencode-go"));
+        let order: Vec<&str> = candidates.iter().map(|c| c.insert.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "opencode-go/alpha",
+                "opencode-go/zeta",
+                "anthropic/claude-4",
+                "openai/gpt-5"
+            ],
+            "the current provider's models first, then by provider and model"
+        );
+        // Without a current provider, only the name order applies.
+        sort_model_candidates(&mut candidates, None);
+        let order: Vec<&str> = candidates.iter().map(|c| c.insert.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "anthropic/claude-4",
+                "openai/gpt-5",
+                "opencode-go/alpha",
+                "opencode-go/zeta"
+            ]
+        );
     }
 
     #[test]
