@@ -31,140 +31,155 @@ use ratatui::crossterm::terminal;
 #[command(
     name = "radian",
     version,
-    about = "Full-screen TUI for the radian agent runtime"
+    about = "Full-screen TUI for the radian agent runtime",
+    // ADR 0032 A6: the joined surface is longer than either binary's, so the commands and
+    // the flags are grouped.
+    subcommand_help_heading = "Commands"
 )]
 struct Cli {
+    // The TUI's own setup flags come first: the default mode is the full-screen TUI, and the
+    // `--help` groups read in the order the owner asked for (TUI, session, model, mcp,
+    // permissions).
+    /// The configuration file (ADR 0008). Overrides `RADIAN_CONFIG` and
+    /// `~/.radian/config/config.toml`. Read-only: this slice never writes it.
+    #[arg(help_heading = "TUI", long, value_name = "FILE")]
+    config: Option<PathBuf>,
+
+    /// Expose the built-in file and read-only git tools rooted at this directory
+    /// (read/write/patch/list, git_status/git_diff). No shell is provided.
+    #[arg(help_heading = "TUI", long, value_name = "DIR")]
+    workspace: Option<PathBuf>,
+
+    #[arg(help_heading = "TUI", long)]
+    system: Option<String>,
+
     /// Model name sent to the API. Required unless the config file's `model.model` provides
     /// it.
-    #[arg(long)]
+    #[arg(help_heading = "Model", long)]
     model: Option<String>,
 
     /// Provider wire protocol: `openai-compatible` (the default, unchanged) or `anthropic`.
-    #[arg(long, value_name = "PROVIDER")]
+    #[arg(help_heading = "Model", long, value_name = "PROVIDER")]
     provider: Option<String>,
 
     /// Everything before the provider's path (`/chat/completions` for openai-compatible,
     /// `/v1/messages` for anthropic). Defaults to the provider's public endpoint.
-    #[arg(long, value_name = "URL")]
+    #[arg(help_heading = "Model", long, value_name = "URL")]
     base_url: Option<String>,
-
-    /// The configuration file (ADR 0008). Overrides `RADIAN_CONFIG` and
-    /// `~/.radian/config/config.toml`. Read-only: this slice never writes it.
-    #[arg(long, value_name = "FILE")]
-    config: Option<PathBuf>,
 
     /// `max_tokens` for anthropic (the Messages API requires it). Ignored for
     /// openai-compatible. Defaults to 16384.
-    #[arg(long, value_name = "N")]
+    #[arg(help_heading = "Model", long, value_name = "N")]
     max_tokens: Option<u32>,
 
     /// Extended thinking for anthropic: `off` (default), `adaptive`, or `enabled:<budget>`.
     /// Ignored for openai-compatible.
-    #[arg(long, value_name = "MODE")]
+    #[arg(help_heading = "Model", long, value_name = "MODE")]
     thinking: Option<String>,
 
     /// Extra request header, repeatable: `--header NAME=VALUE`.
-    #[arg(long = "header", value_name = "NAME=VALUE")]
+    #[arg(help_heading = "Model", long = "header", value_name = "NAME=VALUE")]
     header: Vec<String>,
 
     /// Where session files live. Defaults to `RADIAN_SESSION_DIR`, then `~/.radian/sessions`
     /// (`$RADIAN_HOME/sessions` when that is set, ADR 0020). The same rule as `agent-cli`.
-    #[arg(long, value_name = "DIR")]
+    #[arg(help_heading = "Session", long, value_name = "DIR")]
     session_dir: Option<PathBuf>,
 
     /// A stable session identifier: the session file's name. Generated once per process when
     /// omitted.
-    #[arg(long, value_name = "VALUE", conflicts_with = "resume")]
+    #[arg(
+        help_heading = "Session",
+        long,
+        value_name = "VALUE",
+        conflicts_with = "resume"
+    )]
     session_id: Option<String>,
 
     /// Resume an existing session by id, rendering its history into the transcript. Without a
     /// value it shows the session picker (resuming only: no "new" entry).
-    #[arg(long, value_name = "SESSION_ID", num_args = 0..=1, conflicts_with = "list")]
+    #[arg(help_heading = "Session", long, value_name = "SESSION_ID", num_args = 0..=1, conflicts_with = "list")]
     resume: Option<Option<String>>,
 
     /// List this workspace's sessions and exit.
-    #[arg(long)]
+    #[arg(help_heading = "Session", long)]
     list: bool,
 
     /// Show a full-screen picker for this workspace's sessions before opening one (Phase 4):
     /// Up/Down select, type to filter, Tab full-text search, Enter resume, n new, Esc quit.
     /// Conflicts with `--resume`/`--session-id`; it does not create a session file.
-    #[arg(long, conflicts_with_all = ["resume", "session_id"])]
+    #[arg(help_heading = "Session", long, conflicts_with_all = ["resume", "session_id"])]
     pick: bool,
-
-    /// Expose the built-in file and read-only git tools rooted at this directory
-    /// (read/write/patch/list, git_status/git_diff). No shell is provided.
-    #[arg(long, value_name = "DIR")]
-    workspace: Option<PathBuf>,
 
     /// A JSON file listing MCP stdio servers to start (`{"servers": [...]}`), the same format
     /// `agent-cli` reads. Under `workspace` their tools ask before running and the
     /// servers themselves are **not** sandboxed (ADR 0012 option B).
-    #[arg(long, value_name = "FILE")]
+    #[arg(help_heading = "MCP", long, value_name = "FILE")]
     mcp_config: Option<String>,
 
     /// The permission tier (ADR 0016): `safe` denies file modification, `workspace`
     /// allows writes that resolve inside the workspace, `full` also allows MCP. Defaults to
     /// the config file's `permissions.profile`, then `workspace`.
-    #[arg(long, value_name = "TIER")]
+    #[arg(help_heading = "Permissions", long, value_name = "TIER")]
     profile: Option<String>,
 
     /// How `ask` is resolved (ADR 0012's ApprovalPolicy): `on-ask` asks when a rule says so,
     /// `always` asks for every call a rule does not deny, `never` turns `ask` into a denial,
     /// `auto` answers every `ask` with "allow" (ADR 0026 D9). Omit to fall back to the
     /// config's `[permissions] approval`, then the session's journaled state, then `on-ask`.
-    #[arg(long, value_name = "POLICY")]
+    #[arg(help_heading = "Permissions", long, value_name = "POLICY")]
     approval: Option<String>,
 
     /// Approve every tool call without asking, like `agent --yes`. Not "allow everything":
     /// `deny` rules still deny and the sandbox still applies; only the question is removed.
-    #[arg(long)]
+    #[arg(help_heading = "Permissions", long)]
     yes: bool,
 
     /// The per-turn model call limit. The core's default (`DEFAULT_MAX_MODEL_CALLS`, 32) is a
     /// fuse for unattended runs; an interactive coding session reads many files per turn and
     /// a human can cancel, so the TUI defaults much higher. It is still a fuse: a loop of
     /// small calls is not stopped by the context budget (which only triggers compaction).
-    #[arg(long, value_name = "N", default_value_t = TUI_DEFAULT_MAX_MODEL_CALLS)]
+    #[arg(help_heading = "Model", long, value_name = "N", default_value_t = TUI_DEFAULT_MAX_MODEL_CALLS)]
     max_model_calls: u32,
 
     /// Allow a shell command prefix without asking, repeatable (e.g. `--allow-shell-command
     /// "git status"`). Only a *simple* command matches: any shell metacharacter keeps the
     /// call at `ask`. Write these at the subcommand level, never at a bare program name.
-    #[arg(long = "allow-shell-command", value_name = "PREFIX")]
+    #[arg(
+        help_heading = "Permissions",
+        long = "allow-shell-command",
+        value_name = "PREFIX"
+    )]
     allow_shell_command: Vec<String>,
 
     /// The model's context window in tokens (ADR 0015). Omitted, the models.dev catalog is
     /// consulted for `(provider, model)` (ADR 0018); an explicit value always wins. With
     /// neither, the budget is off and the status bar says so.
-    #[arg(long, value_name = "TOKENS")]
+    #[arg(help_heading = "Model", long, value_name = "TOKENS")]
     context_window: Option<u64>,
 
     /// Never fetch the models.dev catalog; use only the local cache.
-    #[arg(long)]
+    #[arg(help_heading = "Model", long)]
     offline_catalog: bool,
 
     /// The models.dev provider id to look the model up under (default: derived from the
     /// `--base-url` hostname; e.g. `opencode.ai` → `opencode`).
-    #[arg(long, value_name = "PROVIDER")]
+    #[arg(help_heading = "Model", long, value_name = "PROVIDER")]
     catalog_provider: Option<String>,
 
     /// Turn automatic compaction off. Over the input budget `B` the request is then sent
     /// unchanged (ADR 0018).
-    #[arg(long)]
+    #[arg(help_heading = "Model", long)]
     no_auto_compact: bool,
 
     /// Trust this workspace's project resources for **this process only** (never written to
     /// `trust.json`; ADR 0031 T3).
-    #[arg(long, conflicts_with = "no_trust")]
+    #[arg(help_heading = "Permissions", long, conflicts_with = "no_trust")]
     trust: bool,
 
     /// Do not trust this workspace's project resources for this process only (ADR 0031 T3).
-    #[arg(long)]
+    #[arg(help_heading = "Permissions", long)]
     no_trust: bool,
-
-    #[arg(long)]
-    system: Option<String>,
 
     /// Test hook: enter the terminal, then panic, so the restore hook can be exercised.
     #[arg(long, hide = true)]
@@ -208,6 +223,12 @@ struct Cli {
     #[arg(long, hide = true, value_name = "COUNT")]
     flood_facts: Option<u64>,
 
+    /// A non-TUI mode (ADR 0032): `radian exec …` is today's `agent` command, the management
+    /// commands (`radian memory`/`login`/`config`) run the same library dispatch. Absent: the
+    /// full-screen TUI, which is what `radian` has always been.
+    #[command(subcommand)]
+    command: Option<RadianCommand>,
+
     /// Test hook, **kept** as a diagnostic: append
     /// `<point> <unix-nanos>` to this file at each step of the terminal-gone exit path. It
     /// tells "the exit path ran but slowly" from "the POLLHUP path never fired" (and, with
@@ -216,6 +237,115 @@ struct Cli {
     /// per-site counters are not even touched (`exit_trace_once` returns on an unset `OnceLock`).
     #[arg(long, hide = true, value_name = "FILE")]
     exit_trace: Option<PathBuf>,
+}
+
+/// The subcommands that are not the TUI (ADR 0032). `exec` is today's `agent` command, run
+/// through the `agent-cli` library so the two entries cannot drift; the management commands
+/// follow in the same shape.
+#[derive(clap::Subcommand, Debug)]
+enum RadianCommand {
+    /// Run one turn or an interactive line session: today's `agent` command, unchanged.
+    /// `radian exec -p "…"` prints only the model's text; `radian exec` is the line REPL.
+    ///
+    /// The `agent` parser owns this mode's flags, help and usage errors (`radian exec --help`
+    /// shows them, and a bad flag exits 2 through clap, exactly as `agent` does), so clap's
+    /// own help for this variant is off and everything after `exec` is passed through.
+    #[command(disable_help_flag = true, disable_version_flag = true)]
+    Exec {
+        /// Everything `agent` accepts, passed through unchanged.
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "ARGS"
+        )]
+        args: Vec<String>,
+    },
+
+    /// Store an API key for a provider (ADR 0026 D3). The same code `radian exec login` runs.
+    Login {
+        /// A built-in provider id, or `custom` to name a new endpoint. Omitted: a numbered
+        /// list is shown.
+        provider: Option<String>,
+    },
+    /// Remove a stored credential (asks first). The same code `radian exec logout` runs.
+    Logout {
+        /// The provider id the key is stored under.
+        provider: String,
+    },
+    /// Manage durable memory (ADR 0021 D7): the same grammar as `radian exec memory` and the
+    /// TUI's `/memory`.
+    Memory {
+        /// The workspace project memory is resolved against, like `agent --workspace`.
+        #[arg(long, value_name = "DIR")]
+        workspace: Option<PathBuf>,
+        #[command(subcommand)]
+        command: radian_host::memory::commands::MemoryCommand,
+    },
+    /// Configuration tools (ADR 0008): `radian config import-pi …`, the same code
+    /// `radian exec config` runs.
+    Config {
+        #[command(subcommand)]
+        command: agent_cli::ConfigCommand,
+    },
+
+    /// Reserved for ADR 0030's control port: a named agent serving its session over a local
+    /// endpoint. Not implemented yet - it refuses with a usage-class exit code.
+    Serve,
+    /// Reserved for ADR 0030's MCP server mode. Not implemented yet - it refuses with a
+    /// usage-class exit code.
+    Mcp,
+}
+
+/// Runs a non-TUI subcommand and returns its exit code (ADR 0032 A3: 0 ok, 1 the run failed,
+/// 2 usage/setup, 101 panic, 128+signal - the same codes the `agent` binary returns, because
+/// it is the same dispatch).
+fn run_subcommand(command: RadianCommand) -> ExitCode {
+    match command {
+        RadianCommand::Exec { args } => {
+            // The agent parser owns `--help`/`--version`/usage errors: `parse_from` exits
+            // inside clap for those, exactly as the `agent` binary does.
+            ExitCode::from(agent_cli::parse_and_run(
+                std::iter::once("agent".to_string()).chain(args),
+            ) as u8)
+        }
+        // The management commands build the same `Cli` the `agent` parser would and run the
+        // same dispatch (ADR 0032 direction): `radian login` and `radian exec login` are
+        // one code path, not two.
+        RadianCommand::Login { provider } => {
+            run_agent_cli(agent_cli::Cli::for_command(agent_cli::Command::Login {
+                provider,
+            }))
+        }
+        RadianCommand::Logout { provider } => {
+            run_agent_cli(agent_cli::Cli::for_command(agent_cli::Command::Logout {
+                provider,
+            }))
+        }
+        RadianCommand::Memory { workspace, command } => run_agent_cli(agent_cli::Cli::for_memory(
+            workspace.map(|path| path.to_string_lossy().into_owned()),
+            command,
+        )),
+        RadianCommand::Config { command } => {
+            run_agent_cli(agent_cli::Cli::for_command(agent_cli::Command::Config {
+                command,
+            }))
+        }
+        // Reserved names (ADR 0032): the shape is fixed now so scripts and docs can use it,
+        // the implementation is ADR 0030's. A usage-class refusal (2), never a silent no-op.
+        RadianCommand::Serve => reserved("serve"),
+        RadianCommand::Mcp => reserved("mcp"),
+    }
+}
+
+/// Refuses a reserved subcommand: one line on stderr and the usage-class exit code.
+fn reserved(name: &str) -> ExitCode {
+    eprintln!("radian: `{name}` is reserved for ADR 0030's control port; not implemented yet");
+    ExitCode::from(2)
+}
+
+/// Runs one management command through the `agent-cli` dispatch and returns its exit code.
+fn run_agent_cli(cli: agent_cli::Cli) -> ExitCode {
+    ExitCode::from(agent_cli::run_blocking(cli) as u8)
 }
 
 /// The TUI's per-turn model call limit when `--max-model-calls` is not given (decision
@@ -257,7 +387,12 @@ fn mark(label: &str) {
 fn main() -> ExitCode {
     radian_session::trace::start();
     radian_tui::terminal::install_panic_hook();
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    // A subcommand is a mode of its own: it never enters the TUI, never reads the TUI's
+    // flags, and returns its own exit code (ADR 0032).
+    if let Some(command) = cli.command.take() {
+        return run_subcommand(command);
+    }
     if let Some(path) = &cli.exit_trace {
         let _ = EXIT_TRACE.set(path.clone());
     }
@@ -307,9 +442,9 @@ fn main() -> ExitCode {
             exit_trace("exit");
             code
         }
-        Ok(Err(message)) => {
-            print_exit_line(&message);
-            ExitCode::from(1)
+        Ok(Err(error)) => {
+            print_exit_line(error.message());
+            ExitCode::from(error.code())
         }
         Err(_) => {
             let mut message = "the app panicked".to_string();
@@ -327,6 +462,43 @@ fn main() -> ExitCode {
     }
 }
 
+/// Why the TUI stopped. ADR 0032 A3 unifies the codes: a **startup refusal** is a
+/// usage/setup error and exits 2 (it was 1 before), everything that fails once the run began
+/// (the driver, the input, `--list`) exits 1.
+enum RunError {
+    /// A startup/setup refusal: a bad config, an unknown keybinding, a `--resume` with
+    /// nothing to resume, the window check. Exit 2, like clap's own usage errors.
+    Startup(String),
+    /// The run itself failed. Exit 1.
+    Failed(String),
+}
+
+/// Every `?` in the startup phase converts a plain message into a [`RunError::Startup`] - the
+/// default, because that phase is where nearly every refusal happens. The few failures that
+/// can only happen after the run began name [`RunError::Failed`] explicitly.
+impl From<String> for RunError {
+    fn from(message: String) -> Self {
+        Self::Startup(message)
+    }
+}
+
+impl RunError {
+    /// The process exit code (ADR 0032 A3).
+    fn code(&self) -> u8 {
+        match self {
+            Self::Startup(_) => 2,
+            Self::Failed(_) => 1,
+        }
+    }
+
+    /// The one line the normal screen gets.
+    fn message(&self) -> &str {
+        match self {
+            Self::Startup(message) | Self::Failed(message) => message,
+        }
+    }
+}
+
 /// Prints the exit reason on the normal screen. `eprintln!` panics when the terminal is
 /// already gone (a closed pty makes the write fail), which would turn a clean exit into 101;
 /// a failure to print the line is not a failure to exit.
@@ -340,12 +512,14 @@ fn run(
     runtime: &tokio::runtime::Runtime,
     rx: Receiver<UiEvent>,
     tx: Sender<UiEvent>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, RunError> {
     mark("run-start");
     if cli.list {
         return match list_sessions(&cli) {
             Ok(()) | Err(ListError::BrokenPipe) => Ok(None),
-            Err(ListError::Failed(message)) => Err(message),
+            // `--list` failing is a real error of this run, not a startup refusal (ADR 0032
+            // A3's table: print-and-exit modes return 1 for a real error).
+            Err(ListError::Failed(message)) => Err(RunError::Failed(message)),
         };
     }
     // ADR 0013 decision 4: diagnostics live in the user cache directory, and cleanup runs at
@@ -374,7 +548,7 @@ fn run(
     }
     // A keymap conflict refuses startup before the terminal is entered.
     if let Err(error) = radian_tui::keys::Keymap::from_config(&config.tui.keybindings) {
-        return Err(format!("config: {error}"));
+        return Err(RunError::Startup(format!("config: {error}")));
     }
     // ADR 0026 D8: on a resume the journal's last model change outranks the config file (the
     // command line still outranks both). `--resume`'s id is known by here (`dir` too).
@@ -399,10 +573,10 @@ fn run(
     // Nothing to resume is a refusal, not a new session: `--resume` without a value never
     // creates a file.
     if resume_only && startup_picker.is_none() {
-        return Err(
+        return Err(RunError::Startup(
             "no sessions for this workspace to resume; run without --resume to start one"
                 .to_string(),
-        );
+        ));
     }
     let pick_notice = cli.pick && startup_picker.is_none();
 
@@ -618,7 +792,7 @@ fn run(
         Some(credential) => Some(credential),
         None if is_local_base_url(&probe_base_url) => None,
         None => {
-            return Err(
+            return Err(RunError::Startup(
                 match radian_host::resolve_note(&key_id).map_err(|e| e.to_string())? {
                     Some(note) => note,
                     None => format!(
@@ -628,7 +802,7 @@ fn run(
                         radian_host::redact_base_url(&probe_base_url)
                     ),
                 },
-            );
+            ));
         }
     };
     // The config's headers come first, so a `--header` of the same name wins.
@@ -674,7 +848,7 @@ fn run(
     // window (the budget is then off).
     match window.startup_check() {
         radian_host::WindowCheck::Ok => {}
-        radian_host::WindowCheck::Refuse(message) => return Err(message),
+        radian_host::WindowCheck::Refuse(message) => return Err(RunError::Startup(message)),
         radian_host::WindowCheck::Warn(message) => eprintln!("{message}"),
     }
     if let Some(warning) = radian_host::output_ceiling_warning(request_max_output, window.output) {
@@ -1451,7 +1625,9 @@ fn run(
     exit_trace("stopped");
     match joined {
         radian_host::DriverEnd::Ok => {}
-        radian_host::DriverEnd::Failed(error) => return Err(format!("driver: {error}")),
+        radian_host::DriverEnd::Failed(error) => {
+            return Err(RunError::Failed(format!("driver: {error}")));
+        }
         radian_host::DriverEnd::Panicked(message) => {
             let mut message = format!("the driver task ended unexpectedly: {message}");
             if let Some(panic) = radian_tui::terminal::last_panic() {
@@ -1459,7 +1635,7 @@ fn run(
                 message.push_str(": ");
                 message.push_str(&panic);
             }
-            return Err(message);
+            return Err(RunError::Failed(message));
         }
     }
     // A failure in the UI loop is the app's failure too; the terminal is already restored.

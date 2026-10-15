@@ -1831,7 +1831,11 @@ async fn pty_a_failed_sandbox_probe_refuses_instead_of_running_unsandboxed() {
         pty.wait_for_exit(15).is_some(),
         "the app did not exit after the probe failed"
     );
-    assert_eq!(pty.app_exit_code(), Some(1), "a refusal is a failure exit");
+    assert_eq!(
+        pty.app_exit_code(),
+        Some(2),
+        "a startup refusal is a usage/setup error (ADR 0032 A3)"
+    );
     let raw_text = String::from_utf8_lossy(&pty.raw()).to_string();
     assert!(
         raw_text.contains("sandbox backend is unavailable")
@@ -2312,7 +2316,7 @@ async fn pty_an_authorization_header_is_refused_without_echoing_its_value() {
         "the header value leaked into the error: {raw}"
     );
     assert!(server.requests().is_empty(), "no request may be sent");
-    assert_eq!(pty.app_exit_code(), Some(1));
+    assert_eq!(pty.app_exit_code(), Some(2));
 }
 
 /// A `--header` with no `=` is a usage error whose message does not echo the argument: the
@@ -2903,7 +2907,7 @@ fn pty_a_missing_workspace_is_a_workspace_error_and_leaves_no_session() {
         pty.wait_for_exit(15).is_some(),
         "the app did not exit on a bad workspace"
     );
-    assert_eq!(pty.app_exit_code(), Some(1));
+    assert_eq!(pty.app_exit_code(), Some(2));
     let raw = String::from_utf8_lossy(&pty.raw()).to_string();
     assert!(raw.contains(missing.to_str().unwrap()), "{raw}");
     assert!(raw.contains("workspace"), "{raw}");
@@ -2951,7 +2955,7 @@ fn pty_a_session_dir_above_the_workspace_is_refused_and_leaves_no_session() {
         pty.wait_for_exit(15).is_some(),
         "the app did not exit on a nested workspace"
     );
-    assert_eq!(pty.app_exit_code(), Some(1));
+    assert_eq!(pty.app_exit_code(), Some(2));
     let raw = String::from_utf8_lossy(&pty.raw()).to_string();
     assert!(raw.contains("workspace is inside"), "{raw}");
     assert!(
@@ -2999,7 +3003,7 @@ fn pty_a_failed_probe_leaves_no_session_and_the_retry_creates_one() {
         100,
     );
     assert!(pty.wait_for_exit(15).is_some(), "the refusal did not exit");
-    assert_eq!(pty.app_exit_code(), Some(1));
+    assert_eq!(pty.app_exit_code(), Some(2));
     let raw = String::from_utf8_lossy(&pty.raw()).to_string();
     assert!(
         raw.contains("sandbox backend is unavailable") || raw.contains("failed its probe"),
@@ -3067,7 +3071,7 @@ fn pty_a_bad_mcp_config_creates_no_session() {
         100,
     );
     assert!(pty.wait_for_exit(15).is_some(), "the refusal did not exit");
-    assert_eq!(pty.app_exit_code(), Some(1));
+    assert_eq!(pty.app_exit_code(), Some(2));
     let raw = String::from_utf8_lossy(&pty.raw()).to_string();
     assert!(raw.contains(bad.to_str().unwrap()), "{raw}");
     assert!(
@@ -3466,7 +3470,7 @@ fn pty_session_id_already_exists_points_at_resume() {
         second.wait_for_exit(15).is_some(),
         "the second run did not exit"
     );
-    assert_eq!(second.app_exit_code(), Some(1));
+    assert_eq!(second.app_exit_code(), Some(2));
     let raw = String::from_utf8_lossy(&second.raw()).to_string();
     assert!(raw.contains("already exists"), "{raw}");
     assert!(raw.contains("--resume dup"), "{raw}");
@@ -3509,7 +3513,7 @@ fn pty_anthropic_only_flags_are_refused_under_openai_compatible() {
             pty.wait_for_exit(15).is_some(),
             "{label}: the refusal did not exit"
         );
-        assert_eq!(pty.app_exit_code(), Some(1), "{label}");
+        assert_eq!(pty.app_exit_code(), Some(2), "{label}");
         let raw = String::from_utf8_lossy(&pty.raw()).to_string();
         assert!(raw.contains("anthropic"), "{label}: {raw}");
         assert!(
@@ -6817,7 +6821,11 @@ fn pty_a_session_started_from_the_filesystem_root_is_refused() {
         assert!(Instant::now() < deadline, "the app did not exit");
         std::thread::sleep(Duration::from_millis(20));
     };
-    assert_eq!(status.code(), Some(1), "a startup refusal");
+    assert_eq!(
+        status.code(),
+        Some(2),
+        "a startup refusal is a usage/setup error (ADR 0032 A3)"
+    );
     let text = String::from_utf8_lossy(&drained);
     assert!(text.contains("filesystem root"), "{text}");
     assert!(text.contains("--workspace"), "{text}");
