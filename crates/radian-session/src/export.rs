@@ -282,15 +282,20 @@ fn event_data_value(
         EventData::ToolExecutionSettled { call_id, result } => {
             json!({"call_id": call_id, "result": serde_json::to_value(result)?})
         }
-        EventData::ModelUsageRecorded { usage } => json!({"usage": serde_json::to_value(usage)?}),
+        EventData::ModelUsageRecorded { usage, fee } => json!({
+            "usage": serde_json::to_value(usage)?,
+            "fee": serde_json::to_value(fee)?,
+        }),
         EventData::CompactionUsageRecorded {
             revision,
             model,
             usage,
+            fee,
         } => json!({
             "revision": revision,
             "model": model,
             "usage": serde_json::to_value(usage)?,
+            "fee": serde_json::to_value(fee)?,
         }),
         EventData::ContextCompacted {
             revision,

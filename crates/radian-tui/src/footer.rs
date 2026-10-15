@@ -1315,8 +1315,22 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
         // item hides; never `$0.00` for a model whose price we do not know (v5 §5).
         "cost" => {
             let micros = session.cost_micros()?;
+            // ADR 0027 and 3: a total with a missing rate is incomplete
+            // (`≥`), and a total re-priced from old records is an estimate (`~`). The estimate
+            // wins when both hold (`~≥` would be unreadable). A recorded, complete total has no
+            // marker.
+            let marker = if session.cost_estimated() {
+                "~"
+            } else if session.cost_incomplete() {
+                "≥"
+            } else {
+                ""
+            };
             Some(ItemData {
-                values: vec![("usd", crate::timing::format_cost(micros))],
+                values: vec![(
+                    "usd",
+                    format!("{marker}{}", crate::timing::format_cost(micros)),
+                )],
                 default_format: "{usd}",
                 numeric: Some(micros / 1_000_000),
             })

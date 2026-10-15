@@ -196,6 +196,19 @@ EXPECT = {
         ],
         repair={},
     ),
+    "usage-fee-recorded.jsonl": dict(
+        outcome="accept",
+        events=9,
+        skips=[],
+        # (event, fee) —— ADR 0027：费用是可选字段，缺省即旧记录（恢复时估算）。
+        usage_fees=[
+            ("ModelUsageRecorded", {"micros": 3270}),
+            ("ModelUsageRecorded", {"micros": 1000, "incomplete": True}),
+            ("CompactionUsageRecorded", {"micros": 450}),
+            ("ModelUsageRecorded", None),
+        ],
+        repair={},
+    ),
     "replace-resets-index.jsonl": dict(
         outcome="accept",
         events=11,
@@ -582,6 +595,32 @@ def check_fixture(name, exp):
             raise Corruption(f"{name}: 期望至少一条未标记（旧）usage 记录")
         if not any(isinstance(mark, bool) for _, mark in got):
             raise Corruption(f"{name}: 期望至少一条带布尔标记的 usage 记录")
+    if "usage_fees" in exp:
+        # ADR 0027 / ADR 0007：`fee` 是 usage 记录里**可选**的兄弟字段
+        # （micro-dollars 与 incomplete），缺省即旧记录（恢复方按当前目录重算并标估算）。
+        got = []
+        for e in events:
+            if e["event"] not in ("ModelUsageRecorded", "CompactionUsageRecorded"):
+                continue
+            if e["critical"]:
+                raise Corruption(f"{name}: {e['event']} 必须是 critical:false")
+            fee = e["data"].get("fee")
+            if fee is not None:
+                if not isinstance(fee, dict) or set(fee) - {"micros", "incomplete"}:
+                    raise Corruption(f"{name}: {e['event']} 的 fee 形状错误 {fee!r}")
+                if "micros" not in fee or not isinstance(fee["micros"], int) or isinstance(
+                    fee["micros"], bool
+                ) or fee["micros"] < 0:
+                    raise Corruption(f"{name}: {e['event']}.fee.micros 不是非负整数")
+                if "incomplete" in fee and not isinstance(fee["incomplete"], bool):
+                    raise Corruption(f"{name}: {e['event']}.fee.incomplete 不是布尔值")
+            got.append((e["event"], fee))
+        if got != [(ev, fee) for ev, fee in exp["usage_fees"]]:
+            raise Corruption(f"{name}: usage_fees {got} != 期望 {exp['usage_fees']}")
+        if not any(fee is None for _, fee in got):
+            raise Corruption(f"{name}: 期望至少一条没有 fee 的旧记录")
+        if not any(fee is not None and fee.get("incomplete") for _, fee in got):
+            raise Corruption(f"{name}: 期望至少一条标不完整的 fee")
     if "memory_injected" in exp:
         got = []
         for e in events:
