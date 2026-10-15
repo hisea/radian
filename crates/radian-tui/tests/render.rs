@@ -764,8 +764,11 @@ fn a_tool_card_head_is_the_same_on_the_live_and_resume_paths() {
     // The card's head is the status line (ADR 0028): `shell: <title>`, with the
     // command and the output as its sections.
     assert!(live_text.contains("✔ shell: make test"), "{live_text}");
-    assert!(live_text.contains("├── Command"), "{live_text}");
     assert!(live_text.contains("$ make test"), "{live_text}");
+    assert!(
+        !live_text.contains("Command"),
+        "no command divider (ADR 0028): {live_text}"
+    );
     assert!(live_text.contains("├── Output"), "{live_text}");
     assert_eq!(live_text, resume_text, "live and resume render identically");
 }
