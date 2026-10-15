@@ -228,10 +228,18 @@ const TUI_DEFAULT_MAX_MODEL_CALLS: u32 = 1000;
 /// pre-refactor 50 ms tick (~50 deltas) while staying far below a frame budget.
 const MAX_FACTS_PER_TURN: usize = 64;
 
-/// How many effect rounds one turn may take. An effect's result is another event, and a result
-/// can ask for one more effect (`@` expansion → send), so the chain is short; the bound turns a
-/// bug into an error instead of a hang.
+/// How many effect rounds one turn may take before the rest carry to the next turn. An
+/// effect's result is another event, and a result can ask for one more effect (`@` expansion →
+/// send), so the chain is short; the bound keeps one turn's work near a frame budget and hands
+/// the rest to the next turn (never dropped, order kept). It is **draw fairness**, not an
+/// error: a busy machine with many unrelated events in the channel can legitimately exceed it.
 const MAX_EFFECT_ROUNDS: usize = 8;
+
+/// How many consecutive turns a carried effect batch may run before a one-time notice. A
+/// genuine infinite effect loop (an effect whose result always produces another effect) would
+/// otherwise run every frame; the notice says so and the loop keeps running — a TUI must not
+/// exit on it. 1000 turns is far above any real chain (the longest is `@` expansion → send).
+const MAX_CARRIED_FRAMES: u64 = 1000;
 
 /// The input thread's poll interval: a wake-up granularity for the hang-up check, not a
 /// synchronization device.
@@ -2724,6 +2732,37 @@ fn usage_period(configured: Option<u64>) -> Option<std::time::Duration> {
     }
 }
 
+/// One step of [`run_effect_rounds`]: run one effect, or take the result events the last
+/// batch produced.
+enum RoundStep<'a, T> {
+    Execute(T),
+    Drain(&'a mut Vec<T>, usize),
+}
+
+/// Runs at most [`MAX_EFFECT_ROUNDS`] effect rounds (ADR 0023 U2's draw fairness). `step` runs
+/// one effect or takes the result events the last batch produced (returning whether it handled
+/// any). Whatever is left in `effects` stays there for the next turn — never dropped, order
+/// kept; the loop draws a frame and continues. A genuine infinite chain keeps running and warns
+/// once (see [`MAX_CARRIED_FRAMES`]), it never exits. Returns the rounds run.
+fn run_effect_rounds<T>(
+    effects: &mut Vec<T>,
+    mut step: impl FnMut(RoundStep<'_, T>) -> Result<bool, String>,
+) -> Result<usize, String> {
+    let mut rounds = 0;
+    while !effects.is_empty() && rounds < MAX_EFFECT_ROUNDS {
+        rounds += 1;
+        let batch = std::mem::take(effects);
+        let produced = batch.len();
+        for effect in batch {
+            step(RoundStep::Execute(effect))?;
+        }
+        if !step(RoundStep::Drain(effects, produced))? {
+            break;
+        }
+    }
+    Ok(rounds)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn ui_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
@@ -2780,9 +2819,16 @@ fn ui_loop(
         return Ok(None);
     }
     radian_tui::terminal::set_cursor_visible(app.input_editable());
+    // An effect batch the draw-fairness cap did not finish: declared outside the loop so the
+    // rest survives to the next turn (never dropped, order kept).
+    let mut effects: Vec<Effect> = Vec::new();
+    let mut carried_frames: u64 = 0;
     // The pre-session phase ends when the picker resolves; otherwise only `quit` leaves.
     while !app.quit && !app.picking_resolved() {
-        // Block until there is something to do. No display in this build changes with time (the
+        let mut dirty = false;
+        // A carried batch runs first, without a blocking wait: the effects must not wait for a
+        // new event. Otherwise block until there is something to do. No display in this build
+        // changes with time (the
         // status bar, the notes, the find box and the budget line are static text), so there is
         // no `recv_timeout` here: an idle app is not redrawn at all (ADR 0023 U2). A clock-like
         // display would take the timeout branch at this line. The one exception is a live
@@ -2791,110 +2837,124 @@ fn ui_loop(
         // and goes straight back to blocking `recv` when it ends. The armed Ctrl-C quit
         // window is the other time-driven display (ADR 0023 U2): while it is armed the loop
         // wakes at its deadline to drop the hint.
-        let quit_remaining = app
-            .quit_pending
-            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()));
-        let first = if app.is_selecting() || quit_remaining.is_some() {
-            // The nearer of the two deadlines; `AUTO_SCROLL_TICK` is the drag's own tick.
-            let timeout = match (app.is_selecting(), quit_remaining) {
-                (true, Some(quit)) => quit.min(AUTO_SCROLL_TICK),
-                (true, None) => AUTO_SCROLL_TICK,
-                (false, Some(quit)) => quit.max(std::time::Duration::ZERO),
-                (false, None) => unreachable!("the branch requires selection or a quit window"),
-            }
-            // Also wake for the hang-up check, so a drag or an armed quit window never
-            // postpones it for longer than one tick.
-            .min(TTY_CHECK_TICK);
-            match rx.recv_timeout(timeout) {
-                Ok(event) => Some(event),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    // Guard 2: the input thread may be stuck inside crossterm's reader; a
-                    // non-consuming `poll(2)` on stdin still reports the hang-up.
-                    if terminal_is_gone() {
-                        app.quit = true;
-                        break;
-                    }
-                    // The quit window closed: disarm and redraw, so the hint disappears. A
-                    // drag at an edge (or both) still ticks its scroll on the same wake.
-                    if app
-                        .quit_pending
-                        .is_some_and(|d| std::time::Instant::now() >= d)
-                        && app.update(AppInput::QuitDeadline).dirty
-                        && !draw_frame(terminal, app)?
-                    {
-                        app.quit = true;
-                        break;
-                    }
-                    if app.is_selecting() && app.mouse_autoscroll() && !draw_frame(terminal, app)? {
-                        app.quit = true;
-                        break;
-                    }
-                    continue;
+        if effects.is_empty() {
+            let quit_remaining = app
+                .quit_pending
+                .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()));
+            let first = if app.is_selecting() || quit_remaining.is_some() {
+                // The nearer of the two deadlines; `AUTO_SCROLL_TICK` is the drag's own tick.
+                let timeout = match (app.is_selecting(), quit_remaining) {
+                    (true, Some(quit)) => quit.min(AUTO_SCROLL_TICK),
+                    (true, None) => AUTO_SCROLL_TICK,
+                    (false, Some(quit)) => quit.max(std::time::Duration::ZERO),
+                    (false, None) => unreachable!("the branch requires selection or a quit window"),
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => None,
+                // Also wake for the hang-up check, so a drag or an armed quit window never
+                // postpones it for longer than one tick.
+                .min(TTY_CHECK_TICK);
+                match rx.recv_timeout(timeout) {
+                    Ok(event) => Some(event),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        // Guard 2: the input thread may be stuck inside crossterm's reader; a
+                        // non-consuming `poll(2)` on stdin still reports the hang-up.
+                        if terminal_is_gone() {
+                            app.quit = true;
+                            break;
+                        }
+                        // The quit window closed: disarm and redraw, so the hint disappears. A
+                        // drag at an edge (or both) still ticks its scroll on the same wake.
+                        if app
+                            .quit_pending
+                            .is_some_and(|d| std::time::Instant::now() >= d)
+                            && app.update(AppInput::QuitDeadline).dirty
+                            && !draw_frame(terminal, app)?
+                        {
+                            app.quit = true;
+                            break;
+                        }
+                        if app.is_selecting()
+                            && app.mouse_autoscroll()
+                            && !draw_frame(terminal, app)?
+                        {
+                            app.quit = true;
+                            break;
+                        }
+                        continue;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => None,
+                }
+            } else {
+                // A bounded wait, not a blocking one: guard 2's hang-up check runs every tick even
+                // while the app is idle. A timeout with the tty alive loops without drawing.
+                match rx.recv_timeout(TTY_CHECK_TICK) {
+                    Ok(event) => Some(event),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        if terminal_is_gone() {
+                            app.quit = true;
+                            break;
+                        }
+                        continue;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => None,
+                }
+            };
+            let Some(first) = first else {
+                // Every sender is gone: nothing left to drive the UI.
+                break;
+            };
+            let mut facts = 1;
+            dirty |= match ctx.as_mut() {
+                Some(ctx) => ctx.handle(first, app, &mut effects),
+                None => handle_picking(first, app, &mut picking_signal),
+            };
+            // At most `MAX_FACTS_PER_TURN` facts before a frame (draw fairness).
+            while facts < MAX_FACTS_PER_TURN {
+                match rx.try_recv() {
+                    Ok(event) => {
+                        dirty |= match ctx.as_mut() {
+                            Some(ctx) => ctx.handle(event, app, &mut effects),
+                            None => handle_picking(event, app, &mut picking_signal),
+                        };
+                        facts += 1;
+                    }
+                    Err(_) => break,
+                }
             }
         } else {
-            // A bounded wait, not a blocking one: guard 2's hang-up check runs every tick even
-            // while the app is idle. A timeout with the tty alive loops without drawing.
-            match rx.recv_timeout(TTY_CHECK_TICK) {
-                Ok(event) => Some(event),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    if terminal_is_gone() {
-                        app.quit = true;
-                        break;
-                    }
-                    continue;
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => None,
-            }
-        };
-        let Some(first) = first else {
-            // Every sender is gone: nothing left to drive the UI.
-            break;
-        };
-        let mut dirty = false;
-        let mut effects: Vec<Effect> = Vec::new();
-        let mut facts = 1;
-        dirty |= match ctx.as_mut() {
-            Some(ctx) => ctx.handle(first, app, &mut effects),
-            None => handle_picking(first, app, &mut picking_signal),
-        };
-        // At most `MAX_FACTS_PER_TURN` facts before a frame (draw fairness).
-        while facts < MAX_FACTS_PER_TURN {
-            match rx.try_recv() {
-                Ok(event) => {
-                    dirty |= match ctx.as_mut() {
-                        Some(ctx) => ctx.handle(event, app, &mut effects),
-                        None => handle_picking(event, app, &mut picking_signal),
-                    };
-                    facts += 1;
-                }
-                Err(_) => break,
-            }
+            // A carried batch draws a frame before the rest runs: the cap is about drawing
+            // fairly, not about failing.
+            dirty = true;
         }
         // Run the effects (session phase only: the picker produces none). Their results are
         // events, so they are handled by the same code; a result can ask for one more effect
-        // (`@` expansion → send), so this repeats until nothing is pending.
+        // (`@` expansion → send), so this repeats until the cap hands the rest to the next
+        // turn.
         if let Some(ctx) = ctx.as_mut() {
-            let mut rounds = 0;
-            while !effects.is_empty() {
-                rounds += 1;
-                if rounds > MAX_EFFECT_ROUNDS {
-                    return Err("the effect worklist did not settle".into());
-                }
-                let batch = std::mem::take(&mut effects);
-                let produced = batch.len();
-                for effect in batch {
-                    ctx.execute(effect)?;
-                }
-                // Each effect produces at most one result event; take that many (plus whatever
-                // else was already queued behind them).
-                for _ in 0..produced {
-                    match rx.try_recv() {
-                        Ok(event) => dirty |= ctx.handle(event, app, &mut effects),
-                        Err(_) => break,
+            run_effect_rounds(&mut effects, |step| match step {
+                RoundStep::Execute(effect) => ctx.execute(effect).map(|()| true),
+                RoundStep::Drain(effects, produced) => {
+                    // Each effect produces at most one result event; take that many (plus
+                    // whatever else was already queued behind them).
+                    for _ in 0..produced {
+                        match rx.try_recv() {
+                            Ok(event) => dirty |= ctx.handle(event, app, effects),
+                            Err(_) => return Ok(false),
+                        }
                     }
+                    Ok(true)
                 }
+            })?;
+            if !effects.is_empty() {
+                // The cap was hit: the rest carries to the next turn (draw fairness). A chain
+                // that never clears is a bug, but the TUI keeps running and says so once.
+                carried_frames += 1;
+                mark("effect-carry");
+                if carried_frames == MAX_CARRIED_FRAMES {
+                    app.push_notice("the effect worklist is not settling; continuing anyway");
+                }
+                dirty = true;
+            } else {
+                carried_frames = 0;
             }
         }
         if dirty {
@@ -3382,6 +3442,49 @@ impl AuditSink for JournalAudit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR 0023 U2's draw fairness: a chain longer than `MAX_EFFECT_ROUNDS` carries the rest to
+    /// the next turn — never dropped, order kept — instead of failing the whole TUI. This is
+    /// the `the effect worklist did not settle` bug: under load the loop's drain consumes
+    /// unrelated events whose handlers produce more effects, so a real chain can exceed the cap.
+    #[test]
+    fn effect_rounds_carry_the_rest_in_order() {
+        let mut pending: Vec<u32> = vec![19];
+        let mut executed: Vec<u32> = Vec::new();
+        let mut next: Vec<u32> = Vec::new();
+        let mut calls = 0;
+        while !pending.is_empty() {
+            calls += 1;
+            assert!(calls < 100, "the carry must terminate");
+            let rounds = run_effect_rounds(&mut pending, |step| match step {
+                RoundStep::Execute(n) => {
+                    executed.push(n);
+                    if n > 0 {
+                        next.push(n - 1);
+                    }
+                    Ok(true)
+                }
+                RoundStep::Drain(pending, produced) => {
+                    // Each executed effect produces one result event; handling it produces the
+                    // next effect.
+                    for _ in 0..produced {
+                        if next.is_empty() {
+                            return Ok(false);
+                        }
+                        pending.push(next.remove(0));
+                    }
+                    Ok(true)
+                }
+            })
+            .unwrap();
+            assert!(rounds <= MAX_EFFECT_ROUNDS, "each call is capped");
+        }
+        assert_eq!(
+            executed,
+            (0..20).rev().collect::<Vec<_>>(),
+            "every effect ran, in order"
+        );
+    }
 
     /// ADR 0023 U5: a fact-only update (usage, budget, tier, MCP) wakes the UI with a `Dirty`
     /// and the buffer is empty. The loop must still draw a frame, or the status bar would stay
