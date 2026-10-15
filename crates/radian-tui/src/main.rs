@@ -658,6 +658,8 @@ fn run(
             // The picker phase has no session and no sandbox yet.
             None,
             None,
+            // The picker phase has no session to report (ADR 0034 H1).
+            None,
         )?;
         if let Some(signal) = signal {
             // A signal during the pre-session phase leaves exactly like the session phase —
@@ -1137,6 +1139,8 @@ fn run(
                 coding_root: Some(workspace_path.clone()),
                 model,
                 servers,
+                // ADR 0036: an interactive session uses the `default` role.
+                role: None,
                 system_prompt: cli.system.clone(),
                 context_budget: window.budget.map(ContextBudget::new),
                 auto_compact: !cli.no_auto_compact && config.compaction.auto.unwrap_or(true),
@@ -1487,12 +1491,32 @@ fn run(
         summary.push_str(" · ");
         summary.push_str(note);
     }
+    // ADR 0034: report to herdr when this process runs inside a herdr pane. The first report
+    // is the current state (idle, or blocked while the trust prompt waits) with the session
+    // identity and the resume command.
+    let mut herdr = herdr_reporter(
+        &config,
+        &session_id,
+        session.journal_path(),
+        &resume_extra_args(&cli, &workspace_path),
+    );
+    let herdr_note = herdr.as_ref().and_then(|(_, note)| note.clone());
+    if let Some((reporter, _)) = herdr.as_mut() {
+        reporter.maybe_report(&app);
+    }
     let mut startup_lines = vec![
         format!("profile: {}", session.facts().profile_line),
         sandbox_facts,
         context_line,
         format!("context: {}", session.facts().context_line),
     ];
+    // ADR 0034 H1: the startup line says reporting is on, and names a rejected resume command.
+    if herdr.is_some() {
+        startup_lines.push(match &herdr_note {
+            Some(reason) => format!("herdr: reporting (no resume: {reason})"),
+            None => "herdr: reporting".to_owned(),
+        });
+    }
     if let Some(line) = &workspace_line {
         startup_lines.push(line.clone());
     }
@@ -1542,11 +1566,7 @@ fn run(
     mark("before-startup");
     app.set_startup(radian_tui::startup::StartupScreen {
         banner,
-        banner_narrow: format!(
-            "{} radian {}",
-            radian_tui::footer::brand_mark(app.footer_glyphs()),
-            env!("CARGO_PKG_VERSION")
-        ),
+        banner_narrow: format!("{} radian {}", app.brand_mark(), env!("CARGO_PKG_VERSION")),
         summary,
         lines: startup_lines,
         safety,
@@ -1604,6 +1624,7 @@ fn run(
         cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         bash_sandbox,
         usage_gate,
+        herdr.map(|(reporter, _)| reporter),
     );
     exit_trace("loop-done");
     // Tell a pending signal task that the loop left on its own, so it does not force-exit.
@@ -1720,24 +1741,101 @@ fn resume_command(program: &str, session_id: &str, cli: &Cli, workspace: &Path) 
         "--resume".to_owned(),
         session_id.to_owned(),
     ];
+    parts.extend(
+        resume_extra_args(cli, workspace)
+            .iter()
+            .map(|arg| shell_arg(arg)),
+    );
+    format!("resume: {}", parts.join(" "))
+}
+
+/// The extra `--resume` arguments after `--resume <id>`: `--session-dir`, `--workspace` (only
+/// when it is not the current directory) and `--config`, as **raw** values. The printed resume
+/// command shell-quotes them; herdr's `resume_argv` carries them verbatim (ADR 0034 H3).
+fn resume_extra_args(cli: &Cli, workspace: &Path) -> Vec<String> {
+    let mut parts = Vec::new();
     if let Some(dir) = &cli.session_dir {
         parts.push("--session-dir".to_owned());
-        parts.push(shell_arg(&dir.display().to_string()));
+        parts.push(dir.display().to_string());
     }
-    // Only when the workspace is not the current directory: the default is the cwd, so the
-    // command works from wherever the user runs it.
     let cwd = std::env::current_dir()
         .ok()
         .and_then(|cwd| std::fs::canonicalize(cwd).ok());
     if cli.workspace.is_some() || cwd.as_deref() != Some(workspace) {
         parts.push("--workspace".to_owned());
-        parts.push(shell_arg(&workspace.display().to_string()));
+        parts.push(workspace.display().to_string());
     }
     if let Some(config) = &cli.config {
         parts.push("--config".to_owned());
-        parts.push(shell_arg(&config.display().to_string()));
+        parts.push(config.display().to_string());
     }
-    format!("resume: {}", parts.join(" "))
+    parts
+}
+
+/// The TUI's herdr reporter (ADR 0034): the sender thread, the monotonic `seq`, the session
+/// identity, the resume command and the last reported state. `maybe_report` recomputes the
+/// state and queues a report only when it changed; the UI thread never waits on I/O.
+struct HerdrReporter {
+    reporter: radian_host::herdr::Reporter,
+    seq: radian_host::herdr::Seq,
+    session: radian_host::herdr::SessionIdentity,
+    resume: Option<Vec<String>>,
+    last: Option<(radian_host::herdr::State, Option<String>)>,
+}
+
+impl HerdrReporter {
+    fn maybe_report(&mut self, app: &App) {
+        let (turn, pending, trust) = app.herdr_state_inputs();
+        let state = radian_host::herdr::state(turn, pending, trust);
+        let message = (state == radian_host::herdr::State::Blocked)
+            .then(|| radian_host::herdr::blocked_message(app.herdr_blocked().as_ref(), trust));
+        if self.last.as_ref() == Some(&(state, message.clone())) {
+            return;
+        }
+        self.last = Some((state, message.clone()));
+        let mut report = radian_host::herdr::Report::new(state);
+        if let Some(message) = message {
+            report = report.message(message);
+        }
+        report = report.session(self.session.id.clone(), self.session.path.clone());
+        if let Some(argv) = &self.resume {
+            report = report.resume(Some(argv.clone()));
+        }
+        self.reporter.report(&report, self.seq.next());
+    }
+
+    fn release(&self) {
+        self.reporter.release(self.seq.next());
+    }
+}
+
+/// Builds the reporter when the environment says we are in a herdr pane (ADR 0034 H1). The
+/// returned `Option<String>` is the reason the resume command was left out, for the startup
+/// line.
+fn herdr_reporter(
+    config: &radian_host::config::Config,
+    session_id: &str,
+    journal: &Path,
+    extra: &[String],
+) -> Option<(HerdrReporter, Option<String>)> {
+    let env = radian_host::herdr::detect(config.integrations.herdr)?;
+    let (resume, note) = match radian_host::herdr::resume_argv(session_id, extra) {
+        Ok(argv) => (Some(argv), None),
+        Err(reason) => (None, Some(reason)),
+    };
+    Some((
+        HerdrReporter {
+            reporter: radian_host::herdr::Reporter::spawn(env),
+            seq: radian_host::herdr::Seq::new(),
+            session: radian_host::herdr::SessionIdentity {
+                id: session_id.to_owned(),
+                path: journal.to_path_buf(),
+            },
+            resume,
+            last: None,
+        },
+        note,
+    ))
 }
 
 /// Test hook (`--block-input`): a path whose creation marks "the read is now blocked forever".
@@ -2010,6 +2108,25 @@ fn terminal_gone(error: &std::io::Error) -> bool {
 /// Whether the tty is already hung up, as `poll(2)` sees it right now. A draw failure carries
 /// crossterm's own "failed to write the buffered data" (no errno), so the tty's own state is
 /// the reliable test.
+/// Advances the spinner's clock and returns the new frame when a spinner is visible and the
+/// frame changed since `last` (ADR 0027). The idle tick calls this, so an idle app
+/// still makes no frame and a visible spinner redraws on its interval.
+fn spinner_tick(
+    app: &mut App,
+    last: &mut Option<radian_tui::spinner::Frame>,
+) -> Option<radian_tui::spinner::Frame> {
+    if !app.spinner_visible() {
+        return None;
+    }
+    app.set_now(std::time::Instant::now());
+    let frame = app.spinner_frame();
+    if *last == Some(frame) {
+        return None;
+    }
+    *last = Some(frame);
+    Some(frame)
+}
+
 fn terminal_is_gone() -> bool {
     #[cfg(unix)]
     {
@@ -2236,6 +2353,8 @@ struct LoopContext<'a> {
     /// How a selection copy reaches the clipboard (`tui.clipboard`), read once from the app
     /// when the context is built: the mode cannot change mid-run.
     clipboard: ClipboardMode,
+    /// The herdr reporter (ADR 0034), when running inside a herdr pane.
+    herdr: Option<HerdrReporter>,
     /// The sandbox the user's `!`/`!!` commands run in (ADR 0033): the coding tools' own,
     /// cloned. `None` on the `safe` tier (no shell).
     bash_sandbox: Option<radian_sandbox::Sandbox>,
@@ -2955,6 +3074,8 @@ fn ui_loop(
     bash_sandbox: Option<radian_sandbox::Sandbox>,
     // The opencode-go usage gate (ADR 0027), flipped on a `/model` switch.
     usage_gate: Option<tokio::sync::watch::Sender<bool>>,
+    // The herdr reporter (ADR 0034), when running inside a herdr pane.
+    mut herdr: Option<HerdrReporter>,
 ) -> Result<Option<i32>, String> {
     let mut picking_signal: Option<i32> = None;
     let mut ctx = match phase {
@@ -2984,6 +3105,7 @@ fn ui_loop(
             bash_sandbox: bash_sandbox.clone(),
             bash_cancel: None,
             usage_gate,
+            herdr: herdr.take(),
         }),
     };
     // The first frame: the startup notices and the resumed history are already in the app, and
@@ -2995,6 +3117,9 @@ fn ui_loop(
         return Ok(None);
     }
     radian_tui::terminal::set_cursor_visible(app.input_editable());
+    // The last spinner frame drawn (ADR 0027): the idle tick redraws only when the
+    // frame changes, so the pulse (500 ms) does not draw on every 250 ms wake.
+    let mut last_spinner: Option<radian_tui::spinner::Frame> = None;
     // An effect batch the draw-fairness cap did not finish: declared outside the loop so the
     // rest survives to the next turn (never dropped, order kept).
     let mut effects: Vec<Effect> = Vec::new();
@@ -3055,6 +3180,12 @@ fn ui_loop(
                             app.quit = true;
                             break;
                         }
+                        if spinner_tick(app, &mut last_spinner).is_some()
+                            && !draw_frame(terminal, app)?
+                        {
+                            app.quit = true;
+                            break;
+                        }
                         continue;
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => None,
@@ -3066,6 +3197,12 @@ fn ui_loop(
                     Ok(event) => Some(event),
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                         if terminal_is_gone() {
+                            app.quit = true;
+                            break;
+                        }
+                        if spinner_tick(app, &mut last_spinner).is_some()
+                            && !draw_frame(terminal, app)?
+                        {
                             app.quit = true;
                             break;
                         }
@@ -3133,15 +3270,28 @@ fn ui_loop(
                 carried_frames = 0;
             }
         }
+        if let Some(ctx) = ctx.as_mut()
+            && let Some(herdr) = ctx.herdr.as_mut()
+        {
+            herdr.maybe_report(app);
+        }
         if dirty {
             if !draw_frame(terminal, app)? {
                 // The terminal went away between the input poll and the frame: leave cleanly.
                 app.quit = true;
                 break;
             }
+            last_spinner = Some(app.spinner_frame());
             // The cursor is visible only while the input box is editable.
             radian_tui::terminal::set_cursor_visible(app.input_editable());
         }
+    }
+    // ADR 0034 H5: a normal exit releases the pane (500 ms). A panic or a kill does not: herdr
+    // clears the pane itself once the shell prompt returns.
+    if let Some(ctx) = ctx.as_ref()
+        && let Some(herdr) = ctx.herdr.as_ref()
+    {
+        herdr.release();
     }
     Ok(ctx.and_then(|ctx| ctx.signal).or(picking_signal))
 }
@@ -3195,8 +3345,16 @@ fn model_route_candidates(
             });
         }
     }
-    // The current provider's models first, then by provider and model name (ADR 0035
-    // revision 2).
+    sort_model_candidates(&mut candidates, current_provider);
+    candidates
+}
+
+/// The flat `/model` list's order (ADR 0035): the current provider's models first,
+/// then by provider and model name.
+fn sort_model_candidates(
+    candidates: &mut [radian_tui::command::Candidate],
+    current_provider: Option<&str>,
+) {
     let is_current = |candidate: &radian_tui::command::Candidate| {
         current_provider.is_some_and(|provider| {
             candidate
@@ -3211,7 +3369,6 @@ fn model_route_candidates(
             .then_with(|| left.description.cmp(&right.description))
             .then_with(|| left.insert.cmp(&right.insert))
     });
-    candidates
 }
 
 /// One provider's model ids: the built-in descriptor's list, then the cached `/v1/models` ids
@@ -3678,6 +3835,46 @@ mod tests {
         );
         // And a second `Dirty` that finds the flag already cleared is coalesced away.
         assert!(!apply_dirty(&mut app));
+    }
+
+    /// ADR 0035: the current provider's models come first in the flat `/model`
+    /// list, then the rest by provider and model name.
+    #[test]
+    fn the_flat_model_list_puts_the_current_provider_first() {
+        let candidate = |insert: &str, provider: &str| radian_tui::command::Candidate {
+            insert: insert.to_owned(),
+            description: provider.to_owned(),
+        };
+        let mut candidates = vec![
+            candidate("openai/gpt-5", "openai"),
+            candidate("opencode-go/zeta", "opencode-go"),
+            candidate("anthropic/claude-4", "anthropic"),
+            candidate("opencode-go/alpha", "opencode-go"),
+        ];
+        sort_model_candidates(&mut candidates, Some("opencode-go"));
+        let order: Vec<&str> = candidates.iter().map(|c| c.insert.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "opencode-go/alpha",
+                "opencode-go/zeta",
+                "anthropic/claude-4",
+                "openai/gpt-5"
+            ],
+            "the current provider's models first, then by provider and model"
+        );
+        // Without a current provider, only the name order applies.
+        sort_model_candidates(&mut candidates, None);
+        let order: Vec<&str> = candidates.iter().map(|c| c.insert.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "anthropic/claude-4",
+                "openai/gpt-5",
+                "opencode-go/alpha",
+                "opencode-go/zeta"
+            ]
+        );
     }
 
     #[test]

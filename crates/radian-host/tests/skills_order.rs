@@ -93,8 +93,13 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
         Arc::new(NoopAudit),
     ));
 
+    // The volatile `<session>` facts (ADR 0036 D1): appended last.
+    let facts = Arc::new(radian_host::prompt::SessionFactsHooks::new(
+        radian_host::prompt::session_layer(&ws, "m-1"),
+    ));
+
     // The production function, called exactly as `open_session` calls it.
-    let hooks = session_hooks(permissions, memory, skills_hooks);
+    let hooks = session_hooks(permissions, memory, skills_hooks, facts);
     let mut request = ModelRequest {
         system_prompt: Some("base prompt".into()),
         messages: vec![Message::user("what style?")],
@@ -119,4 +124,14 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
     );
     assert!(prompt.contains("tabs over spaces"), "{prompt}");
     assert!(prompt.contains("Say hello."), "{prompt}");
+    // The `<session>` layer is last, after skills (ADR 0036 D1: the static prefix stays
+    // cacheable).
+    let session_at = prompt
+        .find("<session>")
+        .unwrap_or_else(|| panic!("no session layer in {prompt}"));
+    assert!(
+        skills_at < session_at,
+        "the <session> layer must come after the skills section:\n{prompt}"
+    );
+    assert!(prompt.trim_end().ends_with("</session>"), "{prompt}");
 }

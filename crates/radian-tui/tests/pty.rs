@@ -2439,6 +2439,28 @@ async fn pty_mcp_tools_run_through_approval_and_the_status_bar_shows_them() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
+/// ADR 0027: `tui.brand` is the one source for the footer's `brand` item and the
+/// startup banner's one-line fallback. At a width below the wordmark the fallback shows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_the_brand_config_is_the_banner_fallback() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let config = format!(
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
+         base_url = \"{}\"\n[tui]\nbrand = \"ʀ\"\n",
+        server.base_url
+    );
+    let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 20);
+    assert!(
+        pty.wait_for_screen("ʀ radian", 10),
+        "the configured brand is not in the fallback banner:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
 /// ADR 0012 option B keeps MCP servers running outside the sandbox under `workspace-write`,
 /// so the startup notice is the only thing that tells the user. A test holds it in place.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -5122,6 +5144,42 @@ fn pty_an_idle_screen_is_not_redrawn() {
     assert_eq!(
         after, before,
         "an idle screen must not be redrawn (ADR 0023 U2)"
+    );
+}
+
+/// ADR 0027: a **visible** spinner redraws on its interval (the test above pins
+/// the idle case). `arc` turns every 250 ms, so a ~1.2 s window must show several frames.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_visible_spinner_redraws_on_its_interval() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
+    let config = format!(
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
+         base_url = \"{}\"\n[tui]\nspinner = \"arc\"\n",
+        server.base_url
+    );
+    let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 20, 100);
+    assert!(
+        pty.wait_for_screen("type a message", 10),
+        "{}",
+        pty.screen()
+    );
+    let _ = settled_frame_count(&mut pty);
+    // A turn that never finishes keeps the spinner visible.
+    pty.send(b"hello\r");
+    assert!(
+        pty.wait_for_screen("Working", 10),
+        "the input rule must show the running state: {}",
+        pty.screen()
+    );
+    let start = frame_count(&pty);
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    let after = frame_count(&pty);
+    pty.quit();
+    assert!(
+        after >= start + 3,
+        "the arc spinner must redraw about every 250 ms: {start} -> {after}"
     );
 }
 
@@ -7992,6 +8050,318 @@ fn pty_quit_closes_button_motion_reporting() {
         raw.contains("\u{1b}[?1006l\u{1b}[?1002l\u{1b}[?1000l"),
         "the restore must close 1006, 1002 and 1000 together: {raw:?}"
     );
+}
+
+// ---------- herdr reporting (ADR 0034) ----------
+
+/// A fake herdr socket: accepts connections, records each request line, and replies so the
+/// sender finishes. Reporting never touches the real herdr in these tests.
+struct HerdrSocket {
+    path: PathBuf,
+    lines: Arc<Mutex<Vec<serde_json::Value>>>,
+    _dir: TempDir,
+}
+
+impl HerdrSocket {
+    fn start(label: &str) -> Self {
+        use std::io::BufRead as _;
+        use std::os::unix::net::UnixListener;
+        let dir = TempDir::new(label);
+        // The AF_UNIX path limit: a short `/tmp` name, not the (long) temp dir.
+        let path = PathBuf::from(format!(
+            "/tmp/radian-herdr-pty-{}-{label}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).expect("bind the fake herdr socket");
+        let lines: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&lines);
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(mut conn) = conn else { break };
+                let mut line = String::new();
+                let mut reader = std::io::BufReader::new(conn.try_clone().unwrap());
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    continue;
+                }
+                if let Ok(value) = serde_json::from_str(line.trim()) {
+                    log.lock().unwrap().push(value);
+                }
+                let _ = conn.write_all(b"{\"id\":\"x\",\"result\":{}}\n");
+            }
+        });
+        Self {
+            path,
+            lines,
+            _dir: dir,
+        }
+    }
+
+    fn env(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("HERDR_ENV", "1".to_owned()),
+            ("HERDR_PANE_ID", "w1:p1".to_owned()),
+            (
+                "HERDR_SOCKET_PATH",
+                self.path.to_string_lossy().into_owned(),
+            ),
+        ]
+    }
+
+    fn snapshot(&self) -> Vec<serde_json::Value> {
+        self.lines.lock().unwrap().clone()
+    }
+
+    /// Waits for a `pane.report_agent` with `state`.
+    fn wait_for_state(&self, state: &str, secs: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        loop {
+            if self.snapshot().iter().any(|value| {
+                value["method"] == "pane.report_agent" && value["params"]["state"] == state
+            }) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn wait_for_release(&self, secs: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        loop {
+            if self
+                .snapshot()
+                .iter()
+                .any(|value| value["method"] == "pane.release_agent")
+            {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+fn herdr_env(envs: &[(&'static str, String)]) -> Vec<(&'static str, String)> {
+    envs.to_vec()
+}
+
+/// One mock turn: the fake socket must see idle (startup), working (TurnStarted), idle
+/// (RunFinished) and a release on exit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_herdr_reports_the_turn_states_and_releases() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("HERDR-REPLY-OK")]).await;
+    let dir = TempDir::new("herdr-turn");
+    let sock = HerdrSocket::start("turn");
+    let envs = herdr_env(&sock.env());
+    let env_refs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "herdr-turn",
+        ],
+        &env_refs,
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("message", 10),
+        "screen:\n{}",
+        pty.screen()
+    );
+    assert!(sock.wait_for_state("idle", 5), "the startup idle report");
+    pty.send(b"hello\r");
+    assert!(
+        sock.wait_for_state("working", 10),
+        "working on TurnStarted: {:?}",
+        sock.snapshot()
+    );
+    assert!(
+        pty.wait_for_screen("HERDR-REPLY-OK", 15),
+        "screen:\n{}",
+        pty.screen()
+    );
+    assert!(
+        sock.wait_for_state("idle", 10),
+        "idle on RunFinished: {:?}",
+        sock.snapshot()
+    );
+    pty.quit();
+    assert!(
+        sock.wait_for_release(5),
+        "a normal exit releases: {:?}",
+        sock.snapshot()
+    );
+    // The first report carries the session identity and the resume command.
+    let first = sock
+        .snapshot()
+        .into_iter()
+        .find(|value| value["method"] == "pane.report_agent")
+        .expect("a report");
+    assert_eq!(first["params"]["source"], "radian");
+    assert_eq!(first["params"]["agent"], "radian");
+    assert_eq!(first["params"]["agent_session_id"], "herdr-turn");
+    assert!(first["params"]["agent_session_path"].is_string());
+    assert_eq!(first["params"]["resume_argv"][0], "radian");
+    assert_eq!(first["params"]["resume_argv"][1], "--resume");
+    assert_eq!(first["params"]["resume_argv"][2], "herdr-turn");
+}
+
+/// An approval is `blocked` with the tool name only; the command text is never sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_herdr_reports_blocked_without_the_command_text() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("herdr-approval");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let sessions = dir.path().join("sessions");
+    let command = "echo HERDR-SECRET-COMMAND";
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "shell", &json!({"command": command}).to_string()),
+        text_reply("HERDR-DONE"),
+    ])
+    .await;
+    let sock = HerdrSocket::start("approval");
+    let envs = herdr_env(&sock.env());
+    let env_refs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "herdr-approval",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &env_refs,
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"go\r");
+    assert!(
+        pty.wait_for_screen("approve tool call?", 20),
+        "the approval box:\n{}",
+        pty.screen()
+    );
+    assert!(
+        sock.wait_for_state("blocked", 10),
+        "blocked while the approval waits: {:?}",
+        sock.snapshot()
+    );
+    let blocked = sock
+        .snapshot()
+        .into_iter()
+        .find(|value| value["params"]["state"] == "blocked")
+        .expect("a blocked report");
+    assert_eq!(blocked["params"]["message"], "approval: shell");
+    let all = serde_json::to_string(&sock.snapshot()).unwrap();
+    assert!(
+        !all.contains("HERDR-SECRET-COMMAND"),
+        "the command text must never be sent: {all}"
+    );
+    pty.quit();
+}
+
+/// Without `HERDR_ENV=1` nothing is sent at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_herdr_is_silent_without_the_env() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("HERDR-SILENT-OK")]).await;
+    let dir = TempDir::new("herdr-off");
+    let sock = HerdrSocket::start("off");
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "herdr-off",
+        ],
+        &[
+            ("HERDR_PANE_ID", "w1:p1"),
+            ("HERDR_SOCKET_PATH", sock.path.to_str().unwrap()),
+        ],
+        24,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"hello\r");
+    assert!(
+        pty.wait_for_screen("HERDR-SILENT-OK", 15),
+        "{}",
+        pty.screen()
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        sock.snapshot().is_empty(),
+        "no HERDR_ENV means no reports: {:?}",
+        sock.snapshot()
+    );
+    pty.quit();
+}
+
+/// `RADIAN_HERDR=0` turns it off for one run even inside a herdr pane.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_herdr_is_silent_when_disabled() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("HERDR-DISABLED-OK")]).await;
+    let dir = TempDir::new("herdr-disabled");
+    let sock = HerdrSocket::start("disabled");
+    let envs = herdr_env(&sock.env());
+    let mut env_refs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    env_refs.push(("RADIAN_HERDR", "0"));
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "herdr-disabled",
+        ],
+        &env_refs,
+        24,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"hello\r");
+    assert!(
+        pty.wait_for_screen("HERDR-DISABLED-OK", 15),
+        "{}",
+        pty.screen()
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        sock.snapshot().is_empty(),
+        "RADIAN_HERDR=0 means no reports: {:?}",
+        sock.snapshot()
+    );
+    pty.quit();
 }
 
 // ---------- Ctrl-C: clear first, then press twice to quit ----------
