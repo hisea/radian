@@ -16,10 +16,11 @@
 use radian_host::sessions::{self, SearchRow, SessionRow};
 use radian_session::Index;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::Paragraph;
+
+use crate::theme::Theme;
 
 /// What the user chose.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,95 +229,76 @@ impl Picker {
 
 /// Draws the picker into `area`. The startup screen passes the whole frame; the in-session
 /// overlay passes the transcript area, so the input box and status bar stay visible.
-pub fn draw(frame: &mut ratatui::Frame, area: Rect, picker: &Picker) {
+///
+/// ADR 0035/2: the shared [`crate::panel::Panel`] draws the frame, the filter row
+/// and the key hints in the bottom border; the rows go through [`crate::select_list`] (the ❯
+/// cursor, two columns above 40 columns, a window and a scrollbar when they overflow). The
+/// selected session's `--resume <id>` rides on the top border, so it stays copyable.
+pub fn draw(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    picker: &Picker,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+) {
     // The in-session overlay draws over the transcript; clear first so no transcript cell
     // shows through the picker's rows.
     frame.render_widget(ratatui::widgets::Clear, area);
-    let chunks = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(1),
-        Constraint::Length(1),
-    ])
-    .split(area);
-
+    let ascii = glyphs == crate::footer::Glyphs::Ascii;
+    let width = area.width as usize;
+    let inner = width.saturating_sub(4).max(1);
     let title = if picker.search {
-        " sessions · full-text search "
+        "sessions · full-text search"
     } else {
-        " sessions "
+        "sessions"
     };
-    frame.render_widget(
-        Paragraph::new(title).style(Style::default().add_modifier(Modifier::BOLD)),
-        chunks[0],
-    );
-
+    let mut panel = crate::panel::Panel::new(title);
+    if let Some(hint) = picker.resume_hint() {
+        panel = panel.right_title(hint);
+    }
     let prompt = if picker.search { "search" } else { "filter" };
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::raw(format!("{prompt}: ")),
-            Span::raw(picker.query.clone()),
-            Span::styled("▏", Style::default().add_modifier(Modifier::DIM)),
-        ])),
-        chunks[1],
-    );
-
-    let visible = picker.visible();
-    let height = chunks[2].height as usize;
-    // Keep the selection visible.
-    let start = picker.selected.saturating_sub(height.saturating_sub(1));
-    let mut lines = Vec::new();
-    for (index, row) in visible.iter().enumerate().skip(start).take(height) {
-        let selected = index == picker.selected;
-        let style = if selected {
-            Style::default().fg(Color::Black).bg(Color::Cyan)
-        } else {
-            Style::default()
-        };
-        lines.push(Line::from(Span::styled(
-            format!(" {} ", row.id),
-            style.add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(Span::styled(
-            format!("   {}", row.detail),
-            style,
-        )));
+    panel = panel.row(Line::from(vec![
+        Span::styled(format!("{prompt}: "), theme.text),
+        Span::raw(picker.query.clone()),
+        Span::styled("▏", theme.hint),
+    ]));
+    panel = panel.divider();
+    let rows = picker.visible();
+    let items: Vec<crate::select_list::Item> = rows
+        .iter()
+        .map(|row| crate::select_list::Item::new(row.id.clone()).description(row.detail.clone()))
+        .collect();
+    // The list's budget: the area minus the panel's two borders, the filter row and the
+    // divider.
+    let budget = (area.height as usize).saturating_sub(4).max(1);
+    let list = crate::select_list::view(theme, &items, "", picker.selected, budget, inner, ascii);
+    for line in list.lines {
+        panel = panel.row(line);
     }
-    if visible.is_empty() {
-        let message = if picker.rows.is_empty() {
-            if picker.allow_new {
-                "no sessions yet — press n for a new one"
-            } else {
-                "no sessions for this workspace"
-            }
-        } else if picker.search && picker.query.is_empty() {
-            "type a query to search the message text"
-        } else {
-            "no match"
-        };
-        lines.push(Line::from(Span::styled(
-            message,
-            Style::default().add_modifier(Modifier::DIM),
-        )));
+    if list.empty {
+        panel = panel.row(Line::from(Span::styled(empty_message(picker), theme.hint)));
     }
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL))
-            .wrap(Wrap { trim: true }),
-        chunks[2],
-    );
+    panel = panel.hint("↑/↓", "select").hint("⏎", "resume");
+    if picker.allow_new {
+        panel = panel.hint("n", "new");
+    }
+    panel = panel.hint("tab", "search").hint("esc", "close");
+    frame.render_widget(Paragraph::new(panel.lines(width, theme, glyphs)), area);
+}
 
-    // The hint names the selected id, so a user (and a test) can read the `--resume` line.
-    let hint = picker
-        .resume_hint()
-        .unwrap_or_else(|| "no selection".to_string());
-    let new_hint = if picker.allow_new { " n new ·" } else { "" };
-    frame.render_widget(
-        Paragraph::new(format!(
-            "↑/↓ select · type to filter · Tab search · Enter resume ·{new_hint} Esc close   {hint}"
-        ))
-        .style(Style::default().add_modifier(Modifier::DIM)),
-        chunks[3],
-    );
+/// The message shown when the list has no rows (the empty index, an empty search, no match).
+fn empty_message(picker: &Picker) -> &'static str {
+    if picker.rows.is_empty() {
+        if picker.allow_new {
+            "no sessions yet — press n for a new one"
+        } else {
+            "no sessions for this workspace"
+        }
+    } else if picker.search && picker.query.is_empty() {
+        "type a query to search the message text"
+    } else {
+        "no match"
+    }
 }
 
 #[cfg(test)]

@@ -28,6 +28,11 @@ pub struct ContextBudget {
     pub input_budget_tokens: u64,
     /// ASCII bytes per token for the local estimate.
     pub bytes_per_token: u32,
+    /// Whether the local estimate counts the assistant `reasoning` field (ADR 0014
+    /// Q4). The provider only receives that field when the model requires replay, so the
+    /// default is `false`: the estimate matches the request actually sent. The host turns it
+    /// on when the route's `reasoning_replay` is set.
+    pub count_reasoning: bool,
 }
 
 /// A rough ASCII bytes-per-token for English and code. It is a warning ruler, not an audited
@@ -40,11 +45,20 @@ impl ContextBudget {
         Self {
             input_budget_tokens,
             bytes_per_token: DEFAULT_BYTES_PER_TOKEN,
+            count_reasoning: false,
         }
     }
 
     pub fn with_bytes_per_token(mut self, bytes: u32) -> Self {
         self.bytes_per_token = bytes.max(1);
+        self
+    }
+
+    /// Count the assistant `reasoning` field in the estimate (ADR 0014 Q4): the host
+    /// sets this when the route's `reasoning_replay` is on, because the field is then really
+    /// sent and really occupies input tokens.
+    pub fn with_reasoning(mut self, count: bool) -> Self {
+        self.count_reasoning = count;
         self
     }
 }
@@ -129,7 +143,17 @@ impl RequestSize {
 /// `meta` is host-owned and never sent (ADR 0005), so each non-empty `meta` is subtracted here.
 /// Before this, a host that put a large `origin` on a message (ADR 0018's verbatim
 /// user messages) inflated the estimate for content the provider never saw.
+///
+/// **Revision (ADR 0014 Q4)**: an assistant message's `reasoning` is likewise
+/// subtracted unless the caller passes `count_reasoning` — the provider only receives it when
+/// the model requires replay. `request_size` is the default (do not count); the host uses
+/// [`request_size_with`] with the route's setting.
 pub fn request_size(request: &ModelRequest) -> RequestSize {
+    request_size_with(request, false)
+}
+
+/// [`request_size`] with the reasoning-count switch (ADR 0014 Q4).
+pub fn request_size_with(request: &ModelRequest, count_reasoning: bool) -> RequestSize {
     let mut size = RequestSize::default();
     if let Some(system) = &request.system_prompt {
         size.add_str(system);
@@ -137,15 +161,26 @@ pub fn request_size(request: &ModelRequest) -> RequestSize {
     size.add_json(&request.messages);
     for message in &request.messages {
         let meta = message.meta();
-        if meta.is_empty() {
-            continue;
+        if !meta.is_empty() {
+            // `serde` emits `"meta":<json>` last among the message's fields, so its
+            // contribution to the serialized message is `,"meta":<json>`.
+            let field = serde_json::json!({ "meta": meta }).to_string();
+            if let Some(inner) = field.strip_prefix('{').and_then(|f| f.strip_suffix('}')) {
+                size.remove_str(",");
+                size.remove_str(inner);
+            }
         }
-        // `serde` emits `"meta":<json>` last among the message's fields, so its contribution
-        // to the serialized message is `,"meta":<json>`.
-        let field = serde_json::json!({ "meta": meta }).to_string();
-        if let Some(inner) = field.strip_prefix('{').and_then(|f| f.strip_suffix('}')) {
-            size.remove_str(",");
-            size.remove_str(inner);
+        // ADR 0014 Q4: the provider only sees `reasoning` when the model requires it
+        // replayed, so subtract the field unless the caller says the model does.
+        if !count_reasoning
+            && let crate::message::Message::Assistant { reasoning, .. } = message
+            && !reasoning.is_empty()
+        {
+            let field = serde_json::json!({ "reasoning": reasoning }).to_string();
+            if let Some(inner) = field.strip_prefix('{').and_then(|f| f.strip_suffix('}')) {
+                size.remove_str(",");
+                size.remove_str(inner);
+            }
         }
     }
     size.add_json(&request.tools);
@@ -157,6 +192,15 @@ pub fn request_size(request: &ModelRequest) -> RequestSize {
 /// show the status bar number and so the bound is testable on its own.
 pub fn estimate_tokens(request: &ModelRequest, bytes_per_token: u32) -> u64 {
     request_size(request).tokens(bytes_per_token)
+}
+
+/// [`estimate_tokens`] with the reasoning-count switch (ADR 0014 Q4).
+pub fn estimate_tokens_with(
+    request: &ModelRequest,
+    bytes_per_token: u32,
+    count_reasoning: bool,
+) -> u64 {
+    request_size_with(request, count_reasoning).tokens(bytes_per_token)
 }
 
 /// What the guard computed for one request. Host-visible, so it is honest about its source.

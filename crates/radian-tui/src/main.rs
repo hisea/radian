@@ -904,6 +904,10 @@ fn run(
         route.adapter(),
         Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
     );
+    // ADR 0014 Q2: the catalog (or a `[providers.<id>]` override) decides whether
+    // this route replays reasoning.
+    let reasoning_replay = radian_host::resolve_reasoning_replay(&provider_ref, &model_name);
+    let replays_reasoning = reasoning_replay.is_some();
     let initial = build_model(ModelArgs {
         provider: route.adapter(),
         base_url: route.base_url.clone(),
@@ -915,6 +919,7 @@ fn run(
         max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         thinking: thinking_of,
         reasoning_effort,
+        reasoning_replay,
     })?;
     // ADR 0026 D5: the model is switchable. The slot is shared with the driver (open_session
     // wires it), so a `/model` change reaches the next request without touching the key.
@@ -944,15 +949,24 @@ fn run(
     );
     let budget_for = {
         let query = window_query.clone();
+        let providers = config.providers.clone();
         std::sync::Arc::new(move |provider: &str, switch_model: &str| {
             // The switched route carries its own provider id, so the resolver uses it directly
             // instead of deriving one from the startup base URL.
-            radian_host::resolve_offline(&radian_host::WindowQuery {
+            let window = radian_host::resolve_offline(&radian_host::WindowQuery {
                 catalog_provider: Some(provider.to_owned()),
                 model: switch_model.to_owned(),
                 ..query.clone()
+            });
+            // ADR 0014 Q4: the estimate counts reasoning exactly when the route
+            // replays it, so the projection matches the request actually sent.
+            window.budget.map(|tokens| {
+                ContextBudget::new(tokens).with_reasoning(radian_host::route_replays_reasoning(
+                    provider,
+                    switch_model,
+                    &providers,
+                ))
             })
-            .budget
         }) as radian_runtime::BudgetFor
     };
     // ADR 0027 + ADR 0026 D5/D7: the same warm-cache lookup gives the **price**, so
@@ -1143,7 +1157,9 @@ fn run(
                 // ADR 0036: an interactive session uses the `default` role.
                 role: None,
                 system_prompt: cli.system.clone(),
-                context_budget: window.budget.map(ContextBudget::new),
+                context_budget: window
+                    .budget
+                    .map(|tokens| ContextBudget::new(tokens).with_reasoning(replays_reasoning)),
                 auto_compact: !cli.no_auto_compact && config.compaction.auto.unwrap_or(true),
                 sandbox,
                 tier: tier.preset(),

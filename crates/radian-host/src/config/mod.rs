@@ -576,6 +576,7 @@ fn parse_providers(value: &Value, path: &Path, config: &mut Config) -> Result<()
         let mut decl = crate::provider::ProviderDecl {
             kind: String::new(),
             base_url: String::new(),
+            reasoning_replay: None,
         };
         for (field, value) in spec {
             match (field.as_str(), value) {
@@ -608,6 +609,23 @@ fn parse_providers(value: &Value, path: &Path, config: &mut Config) -> Result<()
                         path,
                         &format!("providers.{name}.base_url"),
                         "a string",
+                    ));
+                }
+                // ADR 0014 Q2: a field name overrides the catalog, `false` turns
+                // replay off. `true` names no field, so it is refused rather than guessed.
+                ("reasoning_replay", Value::String(field)) if !field.is_empty() => {
+                    decl.reasoning_replay = Some(crate::provider::ReasoningReplayOverride::Field(
+                        field.clone(),
+                    ));
+                }
+                ("reasoning_replay", Value::Boolean(false)) => {
+                    decl.reasoning_replay = Some(crate::provider::ReasoningReplayOverride::Off);
+                }
+                ("reasoning_replay", _) => {
+                    return Err(wrong_type(
+                        path,
+                        &format!("providers.{name}.reasoning_replay"),
+                        "a non-empty string or false",
                     ));
                 }
                 (other, _) => config.skipped.push(format!("providers.{name}.{other}")),
@@ -2021,6 +2039,56 @@ theme = "light"
         // An empty list allows none.
         let config = parse_str("schema_version = 1\n[git]\nallowed_filters = []\n").unwrap();
         assert!(config.git.allowed_filters().is_empty());
+    }
+
+    /// ADR 0014 Q2: `[providers.<id>] reasoning_replay` overrides the catalog — a
+    /// non-empty field name, or `false` to switch replay off. `true` names no field and is
+    /// refused rather than guessed.
+    #[test]
+    fn a_named_providers_reasoning_replay_override_is_carried() {
+        let config = parse_str(concat!(
+            "schema_version = 1\n",
+            "[providers.corp]\n",
+            "kind = \"openai-compatible\"\n",
+            "base_url = \"https://llm.example.com/v1\"\n",
+            "reasoning_replay = \"reasoning_content\"\n",
+            "[providers.relay]\n",
+            "kind = \"openai-compatible\"\n",
+            "base_url = \"https://relay.example/v1\"\n",
+            "reasoning_replay = false\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            config.providers["corp"].reasoning_replay,
+            Some(crate::provider::ReasoningReplayOverride::Field(
+                "reasoning_content".into()
+            ))
+        );
+        assert_eq!(
+            config.providers["relay"].reasoning_replay,
+            Some(crate::provider::ReasoningReplayOverride::Off)
+        );
+        // Absent: the catalog decides.
+        let config = parse_str(concat!(
+            "schema_version = 1\n",
+            "[providers.corp]\n",
+            "kind = \"openai-compatible\"\n",
+            "base_url = \"https://llm.example.com/v1\"\n",
+        ))
+        .unwrap();
+        assert_eq!(config.providers["corp"].reasoning_replay, None);
+
+        // `true` is not a field name.
+        let error = parse_str(concat!(
+            "schema_version = 1\n",
+            "[providers.corp]\n",
+            "kind = \"openai-compatible\"\n",
+            "base_url = \"https://llm.example.com/v1\"\n",
+            "reasoning_replay = true\n",
+        ))
+        .unwrap_err();
+        assert!(matches!(error, ConfigError::WrongType { .. }), "{error}");
+        assert!(error.to_string().contains("reasoning_replay"), "{error}");
     }
 
     #[test]
