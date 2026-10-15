@@ -273,9 +273,10 @@ pub struct TuiConfig {
     /// `None` means the default, **on**; the TUI reads `unwrap_or(true)`. `false` sends no
     /// mouse sequence at all and leaves the terminal's native selection/copy alone.
     pub mouse: Option<bool>,
-    /// `tui.input_style`: `"lines"` (the default: a rule above and below, `> ` on the first
-    /// line) or `"box"` (the bordered input box). `None` means the default; an unknown value is
-    /// ignored with a warning (the `tui.*` rule), and the TUI falls back to `lines`.
+    /// `tui.input_style`: `"bar"` (the default: the banded input with a left rail and the status
+    /// row above it), `"lines"` (a rule above and below, `> ` on the first line) or `"box"`
+    /// (the bordered input box). `None` means the default; an unknown value is
+    /// ignored with a warning (the `tui.*` rule), and the TUI falls back to `bar`.
     pub input_style: Option<String>,
     /// `tui.clipboard`: how a transcript-selection copy reaches the system clipboard —
     /// `"osc52"` (the default), `"pbcopy"` (macOS only; elsewhere a warning and OSC 52) or
@@ -1084,7 +1085,9 @@ fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
             }
             ("keybindings", _) => return Err(wrong_type(path, "tui.keybindings", "a table")),
             ("mouse", Value::Boolean(mouse)) => config.tui.mouse = Some(*mouse),
-            ("input_style", Value::String(style)) if matches!(style.as_str(), "lines" | "box") => {
+            ("input_style", Value::String(style))
+                if matches!(style.as_str(), "bar" | "lines" | "box") =>
+            {
                 config.tui.input_style = Some(style.clone());
             }
             // An unknown input style is a display preference: ignore it (and say so), never
@@ -1672,9 +1675,15 @@ theme = "light"
     /// skipped key (the `tui.*` rule), not a refusal.
     #[test]
     fn the_tui_input_style_is_carried_and_an_unknown_value_is_skipped() {
-        let config = parse_str("schema_version = 1\n[tui]\ninput_style = \"box\"\n").unwrap();
-        assert_eq!(config.tui.input_style.as_deref(), Some("box"));
-        assert!(config.skipped.is_empty());
+        // ADR 0035 V3: `bar` is the third accepted value (and the default).
+        for style in ["bar", "lines", "box"] {
+            let config = parse_str(&format!(
+                "schema_version = 1\n[tui]\ninput_style = \"{style}\"\n"
+            ))
+            .unwrap();
+            assert_eq!(config.tui.input_style.as_deref(), Some(style));
+            assert!(config.skipped.is_empty(), "{style}");
+        }
 
         let config = parse_str("schema_version = 1\n[tui]\ninput_style = \"future\"\n").unwrap();
         assert_eq!(config.tui.input_style, None);
