@@ -17,7 +17,10 @@ verifies `schema_version`/`session_id` **from the file**, and continues `seq` af
 complete line. `append_runtime_event(RuntimeEvent)` writes a runtime-owned event through the
 same lock, `seq` counter and fsync; `next_seq()`, `session_id()`, `path()`.
 
-- One writer per file, enforced by a kernel `flock` (`WriteError::Locked`).
+- One writer per file, enforced by a kernel `flock` (`WriteError::Locked`). A contended
+  `flock` is retried with backoff for ~200 ms before `Locked` is reported, so the transient
+  false conflict caused by a child that inherited the lock in another thread's `[fork, exec)`
+  window (released at the child's `exec`) is not mistaken for a second writer.
 - The line's `seq` is chosen, rendered, written and fsynced **while the lock is held**, and the
   counter only advances once the write succeeded — so `seq` order is file order even when the
   core's journal records and the runtime's events are appended concurrently.
@@ -97,6 +100,7 @@ set on purpose would be a surprise; telling them is not.
 | A torn tail is truncated before the next append (and `O_APPEND` means no sparse hole) | `a_torn_tail_is_truncated_before_appending` | `tests/append.rs` |
 | A killed writer leaves only a torn tail | `a_killed_writer_leaves_only_a_torn_tail` | `tests/append.rs` |
 | A second writer is refused — in this process and in another one | `a_second_writer_in_this_process_is_refused`, `a_second_writer_in_another_process_is_refused` | `tests/append.rs` |
+| A lock a forked child inherited is retried until the child releases it; a real second writer is still refused after the budget | `a_lock_inherited_by_a_forked_child_is_retried_and_succeeds`, `a_held_lock_is_still_refused_after_the_retry_budget` | `tests/append.rs` |
 | Every partial line length is truncated before the next append | `every_partial_line_is_truncated_before_the_next_append` | `tests/crash_inject.rs` |
 | A full turn round-trips through the file and continues; the fold agrees with an independent line scan | `a_full_turn_round_trips_through_the_file_and_continues`, `the_fold_agrees_with_an_independent_line_scan` | `tests/e2e.rs` |
 | Repair write-back appends normally and keeps `seq` continuous | `repair_write_back_appends_normally_and_keeps_seq_continuous` | `tests/e2e.rs` |
