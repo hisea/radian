@@ -347,6 +347,35 @@ fn a_skills_command_lists_through_the_host() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `/jobs` (ADR 0037 decision 4) is an effect: the registry lives in the host, so listing and
+/// stopping are the loop's job. The parser maps the three forms.
+#[test]
+fn a_jobs_command_lists_or_kills_through_the_host() {
+    let (dir, mut app, service) = app_with_memory("jobs");
+    assert_eq!(
+        submit(&mut app, &service, "/jobs"),
+        vec![Effect::Jobs(radian_tui::command::JobsRequest::List)]
+    );
+    assert_eq!(
+        submit(&mut app, &service, "/jobs kill job-1"),
+        vec![Effect::Jobs(radian_tui::command::JobsRequest::Kill(
+            "job-1".into()
+        ))]
+    );
+    assert_eq!(
+        submit(&mut app, &service, "/jobs kill all"),
+        vec![Effect::Jobs(radian_tui::command::JobsRequest::KillAll)]
+    );
+    // Anything else is a usage notice, not an effect.
+    assert!(submit(&mut app, &service, "/jobs nope").is_empty());
+    assert!(
+        notices(&app).iter().any(|n| n.contains("usage: /jobs")),
+        "{:?}",
+        notices(&app)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The footer's `reasoning` item shows the level that takes effect, not the configured one
 /// (ADR 0026 D11): `deepseek-v4.1-flash` supports low/high/max, so a configured `medium` shows
 /// `high`.

@@ -498,6 +498,7 @@ the rest is sent as an ordinary message.
 | `/sessions [query]` | open the session **picker overlay** for this workspace (the `--pick` screen); type to filter, `Tab` full-text search, Enter shows the copyable `--resume <id>` line |
 | `/export [md\|json] [path] [--force]` | export **this** session (default `md`, default `<workspace>/radian-<id>.<ext>`) |
 | `/memory <command> …` | the same durable-memory commands as `radian memory` (ADR 0021 D7): `list`, `search`, `show`, `add`, `edit`, `archive`, `restore`, `forget`, `purge`, `confirm`, `export`, `import`, `project` / `project new`, `relink`, `split`, `merge` |
+| `/jobs [kill <id\|all>]` | list this session's background `shell` jobs (id, state, elapsed, command, output file) as notices, or stop one/all (ADR 0037 decision 4). `kill` sends SIGTERM to the process group, then SIGKILL after 2 s; the model gets a completion message on the busy/idle lane |
 
 - Arguments are split with shell quoting, so `/memory add "two words"` is one argument.
   Unbalanced quotes are an error notice.
@@ -510,6 +511,7 @@ the rest is sent as an ordinary message.
   it between turns, so a running turn finishes first, and the result is a notice. Ctrl-C/Esc
   cancels an in-flight compaction without committing.
 - `/sessions` opens the session picker overlay (the same one `--pick` runs); the event loop loads the rows, because that reads the session directory. It never switches sessions in place — selecting shows `--resume <id>`, and the composer keeps typing until you navigate into the picker. `/export` uses the same
+- `/jobs` lists the session's background `shell` jobs as notices; `/jobs kill <id>` and `/jobs kill all` stop them. A settle the model has not seen arrives as a System message (busy: injected into the running turn; idle: a follow-up turn that wakes it), and after three wake-started turns with no user input it is injected only (ADR 0037 decision 3).
   `radian-host` renderer as `radian exec --export` (redacted, read-only JSONL), writes atomically,
   and refuses to overwrite without `--force`; a relative path is resolved against the
   workspace, an absolute one may point anywhere the user named.
@@ -568,6 +570,7 @@ The transcript owns its scrolling:
 | 20 | auto (ADR 0026 D9): `!` approves once and enables auto (the next ask never prompts, `AUTO` on the status bar); `Y` stays allow-once; `/auto on\|off`, `/yolo` alias; switch audited + `ConfigChanged` journaled; resume restores on `workspace`, not on `full` (with the hint); config `auto` honored on `workspace`, ignored with a warning on `full` | `tests/auto.rs`, `tests/pty.rs` |
 | 21 | syntax highlighting (ADR 0028 R2): keyword/string/comment take the theme's `syntax*` colors, a theme file's value reaches the cells, an unclosed or unknown-language block stays plain, `highlight = false` disables it, a truncated line keeps its colors, and the text is unchanged (copy/search) | `tests/highlight.rs` |
 | — | Enter=followup idle / steer running; Ctrl-C cancel-then-quit | `tests/input.rs` |
+| — | background jobs (ADR 0037): `shell` `background:true` returns at once, `job_output wait=true` returns the increment and the settle, `job_list`/`job_kill` work, `/jobs` lists and `/jobs kill all` stops them, a settle arrives as a System message, and a crash reports an orphan | `tests/jobs.rs` (coding), `tests/job_notify.rs` (host), `tests/pty.rs` |
 
 ## Must be hand-tested in a real terminal
 
