@@ -36,6 +36,13 @@ fn rows(terminal: &Terminal<TestBackend>, width: u16, height: u16) -> Vec<String
         .collect()
 }
 
+/// The status glyphs the app's footer draws (running, success, failure). main's glyph set
+/// (ADR 0027/10 + the glyphs branch) is `~`/`+`/`×`, so the tests never hardcode
+/// them.
+fn status(app: &App) -> [&'static str; 3] {
+    app.footer_glyphs().tool_status()
+}
+
 fn screen(terminal: &Terminal<TestBackend>) -> String {
     let buffer = terminal.backend().buffer();
     let area = *buffer.area();
@@ -97,6 +104,7 @@ fn ok_result(text: &str) -> ToolResult {
 fn the_card_has_three_sections_at_80_and_120_columns() {
     for width in [80u16, 120] {
         let mut app = shell_app(Some(ok_result("all good\n12 passed")));
+        let ok = status(&app)[1];
         let terminal = render(&mut app, width, 16);
         let lines = rows(&terminal, width, 16);
         let w = width as usize;
@@ -108,7 +116,11 @@ fn the_card_has_three_sections_at_80_and_120_columns() {
             "the top border at {width} columns"
         );
         // The head status line: the glyph, `shell:` and the title (revision 3 rule 1).
-        assert!(lines[2].starts_with("│ ✔ shell: make test"), "{}", lines[2]);
+        assert!(
+            lines[2].starts_with(&format!("│ {ok} shell: make test")),
+            "{}",
+            lines[2]
+        );
         assert!(lines[2].ends_with('│'), "{}", lines[2]);
         // The command section carries no divider (omp's first section has no label, and the
         // command is part of the call): the head and the command read as one unit.
@@ -143,9 +155,13 @@ fn a_failed_call_labels_its_section_error() {
         is_error: true,
         error_code: None,
     }));
+    let failed = status(&app)[2];
     let terminal = render(&mut app, 80, 12);
     let text = screen(&terminal);
-    assert!(text.contains("✘ shell: make test"), "{text}");
+    assert!(
+        text.contains(&format!("{failed} shell: make test")),
+        "{text}"
+    );
     assert!(text.contains("├── Error "), "{text}");
     assert!(!text.contains("├── Output "), "{text}");
     // The error band covers the whole card (ADR 0028 rule 3).
@@ -172,14 +188,17 @@ fn a_running_call_is_a_card_with_a_spinner_and_no_output_section() {
     let mut app = shell_app(None);
     let terminal = render(&mut app, 80, 12);
     let text = screen(&terminal);
-    // The running glyph is the existing spinner frame (the shared one lands later).
+    // The running glyph is the existing spinner frame (ADR 0027/10's frames; the
+    // shared time-driven one lands later).
     let head = text
         .lines()
         .find(|l| l.contains("shell: make test"))
         .unwrap();
     assert!(head.starts_with("│ "), "{head}");
     assert!(
-        ['⠋', '⠙', '⠸', '⠴'].iter().any(|c| head.contains(*c)),
+        radian_tui::blocks::SPINNER
+            .iter()
+            .any(|c| head.contains(*c)),
         "the running spinner: {head}"
     );
     assert!(text.contains("$ make test"), "the command section: {text}");
@@ -213,9 +232,10 @@ fn a_folded_card_keeps_its_head_and_its_meta() {
         fold: ToolFold::Collapsed,
         preview_lines: 2,
     };
+    let ok = status(&app)[1];
     let terminal = render(&mut app, 80, 12);
     let text = screen(&terminal);
-    assert!(text.contains("✔ shell: make test"), "{text}");
+    assert!(text.contains(&format!("{ok} shell: make test")), "{text}");
     assert!(
         text.contains("$ make test"),
         "the command is the call: {text}"
@@ -283,8 +303,9 @@ fn other_tools_are_their_head_and_their_output_section() {
         meta: Default::default(),
     });
     let terminal = render(&mut app, 80, 12);
+    let ok = status(&app)[1];
     let text = screen(&terminal);
-    assert!(text.contains("✔ read: a.rs"), "{text}");
+    assert!(text.contains(&format!("{ok} read: a.rs")), "{text}");
     assert!(
         !text.contains("Command"),
         "no shell command section: {text}"
@@ -372,6 +393,8 @@ fn the_ascii_glyph_set_draws_ascii_borders_and_brackets() {
         .map(|l| l.as_str())
         .collect::<Vec<_>>()
         .join("\n");
+    let ok = status(&app)[1];
+    assert!(text.contains(&format!("| {ok} shell: make test")), "{text}");
     assert!(text.contains("| $ make test"), "{text}");
     assert!(text.contains("+-- Output "), "{text}");
     assert!(text.contains("[exit 0 | timeout 30s]"), "{text}");

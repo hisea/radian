@@ -1489,7 +1489,7 @@ fn prose_lines(text: &str, width: usize) -> Vec<BodyLine> {
 /// (which changes the length and dirties the frame) is the only thing that turns it. The
 /// quadrant blocks (ADR 0027) are in all seven checked fonts; the braille frames
 /// (`⠋⠙⠸⠴`) and the arc (`◜◝◞◟`) are not, so they are not used.
-pub(crate) const SPINNER: [char; 4] = ['▖', '▘', '▝', '▗'];
+pub const SPINNER: [char; 4] = ['▖', '▘', '▝', '▗'];
 
 /// The collapsed reasoning placeholder (ADR 0028 R3). `live` entries get the spinner; the
 /// line count stays 1 either way.
