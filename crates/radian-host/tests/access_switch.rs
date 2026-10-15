@@ -111,6 +111,10 @@ async fn open_switchable(label: &str) -> (Scratch, Arc<radian_host::LocalSession
             system_prompt: None,
             context_budget: None,
             auto_compact: false,
+
+            compaction_settings: serde_json::Value::Null,
+
+            compaction_settings_for: None,
             sandbox: None,
             tier: Preset::Safe,
             profile: Profile::safe(&workspace).unwrap(),
@@ -236,6 +240,10 @@ async fn a_session_without_a_builder_refuses_set_access() {
             system_prompt: None,
             context_budget: None,
             auto_compact: false,
+
+            compaction_settings: serde_json::Value::Null,
+
+            compaction_settings_for: None,
             sandbox: None,
             tier: Preset::Safe,
             profile: Profile::safe(&workspace).unwrap(),
