@@ -207,7 +207,7 @@ pub enum Role {
 }
 
 impl Role {
-    pub const ALL: [Role; 63] = [
+    pub const ALL: [Role; 64] = [
         Role::Reasoning,
         Role::ReasoningOff,
         Role::ReasoningMinimal,
