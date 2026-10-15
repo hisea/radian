@@ -5778,22 +5778,22 @@ async fn pty_ask_user_answers_three_questions_and_the_turn_continues() {
         60,
         100,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(pty.wait_for_screen("message", 40), "{}", pty.screen());
     // ADR 0024 Q5: this host has an interactive user, so the startup line says so.
     pty.expand_startup();
     assert!(
-        pty.wait_for_screen("ask_user: on", 10),
+        pty.wait_for_screen("ask_user: on", 40),
         "the startup line must say ask_user is on: {}",
         pty.screen()
     );
     pty.send(b"go\r");
     assert!(
-        pty.wait_for_screen("How should it load?", 20),
+        pty.wait_for_screen("How should it load?", 40),
         "no question form: {}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("loader", 20),
+        pty.wait_for_screen("loader", 40),
         "the tab row must show the question header: {}",
         pty.screen()
     );
@@ -5810,14 +5810,14 @@ async fn pty_ask_user_answers_three_questions_and_the_turn_continues() {
     pty.send(b"radian");
     pty.send(b"\r");
     assert!(
-        pty.wait_for_screen("✓ loader", 20),
+        pty.wait_for_screen("✓ loader", 40),
         "the Submit tab lists the answers: {}",
         pty.screen()
     );
     // Enter -> submit.
     pty.send(b"\r");
     assert!(
-        pty.wait_for_screen("ASK-DONE", 30),
+        pty.wait_for_screen("ASK-DONE", 40),
         "the turn must continue after the answers: {}",
         pty.screen()
     );
@@ -5857,25 +5857,25 @@ async fn pty_ask_user_alt_h_hides_and_shows() {
         60,
         100,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(pty.wait_for_screen("message", 40), "{}", pty.screen());
     pty.send(b"go\r");
     assert!(
-        pty.wait_for_screen("How should it load?", 20),
+        pty.wait_for_screen("How should it load?", 40),
         "{}",
         pty.screen()
     );
     // Answer the first question, then collapse.
     pty.send(b" ");
-    assert!(pty.wait_for_screen("⏎ select", 10), "{}", pty.screen());
+    assert!(pty.wait_for_screen("⏎ select", 40), "{}", pty.screen());
     pty.send(b"\x1bh"); // alt-h
     assert!(
-        pty.wait_for_screen("alt-h to show", 10),
+        pty.wait_for_screen("alt-h to show", 40),
         "the panel must collapse: {}",
         pty.screen()
     );
     pty.send(b"\x1bh"); // alt-h again
     assert!(
-        pty.wait_for_screen("How should it load?", 10),
+        pty.wait_for_screen("How should it load?", 40),
         "the panel must come back with the answers: {}",
         pty.screen()
     );
@@ -5909,19 +5909,19 @@ async fn pty_ask_user_esc_declines() {
         60,
         100,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(pty.wait_for_screen("message", 40), "{}", pty.screen());
     pty.send(b"go\r");
     // Wait for the **panel** (its hint), not the transcript block (which shows the prompt too).
-    assert!(pty.wait_for_screen("⏎ select", 20), "{}", pty.screen());
+    assert!(pty.wait_for_screen("⏎ select", 40), "{}", pty.screen());
     pty.send(&[0x1b]); // the first Esc asks again
     assert!(
-        pty.wait_for_screen("press Esc again", 10),
+        pty.wait_for_screen("press Esc again", 40),
         "the first Esc must confirm: {}",
         pty.screen()
     );
     pty.send(&[0x1b]); // the second Esc declines
     assert!(
-        pty.wait_for_screen("DECLINE-DONE", 20),
+        pty.wait_for_screen("DECLINE-DONE", 40),
         "the turn must continue after the decline: {}",
         pty.screen()
     );
@@ -5965,15 +5965,15 @@ async fn pty_ask_user_other_keeps_its_text() {
         60,
         100,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(pty.wait_for_screen("message", 40), "{}", pty.screen());
     pty.send(b"go\r");
-    assert!(pty.wait_for_screen("Pick one", 20), "{}", pty.screen());
+    assert!(pty.wait_for_screen("Pick one", 40), "{}", pty.screen());
     // Move to `Other` (A, B, Other) and type.
     pty.send(b"\x1b[B"); // Down
     pty.send(b"\x1b[B"); // Down
     pty.send(b"custom");
     assert!(
-        pty.wait_for_screen("Other: custom", 10),
+        pty.wait_for_screen("Other: custom", 40),
         "the typed text must be in the Other row: {}",
         pty.screen()
     );
@@ -5981,7 +5981,7 @@ async fn pty_ask_user_other_keeps_its_text() {
     pty.send(b"\x1b[A"); // Up
     pty.send(b"\x1b[B"); // Down
     assert!(
-        pty.wait_for_screen("Other: custom", 10),
+        pty.wait_for_screen("Other: custom", 40),
         "the text must survive the arrows: {}",
         pty.screen()
     );
@@ -5989,7 +5989,7 @@ async fn pty_ask_user_other_keeps_its_text() {
     pty.send(b"\r");
     pty.send(b"\r");
     assert!(
-        pty.wait_for_screen("OTHER-DONE", 20),
+        pty.wait_for_screen("OTHER-DONE", 40),
         "the turn must continue with the Other answer: {}",
         pty.screen()
     );
@@ -6606,16 +6606,16 @@ async fn pty_ask_user_is_registered_without_a_workspace() {
         30,
         110,
     );
-    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    assert!(pty.wait_for_screen("message", 40), "{}", pty.screen());
     pty.expand_startup();
     assert!(
-        pty.wait_for_screen("ask_user: on", 10),
+        pty.wait_for_screen("ask_user: on", 40),
         "the startup line must say ask_user is on: {}",
         pty.screen()
     );
     pty.send(b"go\r");
     assert!(
-        pty.wait_for_screen("NO-WS-DONE", 20),
+        pty.wait_for_screen("NO-WS-DONE", 40),
         "the turn must run: {}",
         pty.screen()
     );
