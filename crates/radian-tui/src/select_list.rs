@@ -4,7 +4,7 @@
 //! out. The completion menu, `/model`, `/theme`, `/thinking` and the resume picker draw
 //! through it.
 
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
