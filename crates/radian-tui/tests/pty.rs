@@ -8162,7 +8162,9 @@ async fn pty_bang_runs_and_enters_the_context() {
     );
     let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
-    pty.send(b"!printf BANG-OUTPUT\r");
+    // The output must not be a substring of the command text: `wait_for_screen` would
+    // otherwise match the echoed input line and race the command (the audit-test flake).
+    pty.send(b"!printf 'BANG-%s' OUTPUT\r");
     assert!(
         pty.wait_for_screen("BANG-OUTPUT", 20),
         "the command output is not on screen:\n{}",
@@ -8170,7 +8172,7 @@ async fn pty_bang_runs_and_enters_the_context() {
     );
     // The block's first line is `$ cmd`.
     assert!(
-        pty.wait_for_screen("$ printf BANG-OUTPUT", 10),
+        pty.wait_for_screen("$ printf 'BANG-%s' OUTPUT", 10),
         "the command line is not on screen:\n{}",
         pty.screen()
     );
@@ -8195,7 +8197,7 @@ async fn pty_bang_runs_and_enters_the_context() {
         .map(|message| message["content"].as_str().unwrap_or_default())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(users.contains("Ran `printf BANG-OUTPUT`"), "{users}");
+    assert!(users.contains("Ran `printf 'BANG-%s' OUTPUT`"), "{users}");
     assert!(users.contains("BANG-OUTPUT"), "{users}");
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
@@ -8214,7 +8216,9 @@ async fn pty_bangbang_stays_out_of_the_context() {
     );
     let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
-    pty.send(b"!!printf BANG-SECRET\r");
+    // Distinct output (the command text has no `BANG-SECRET`), so the wait cannot match the
+    // echoed input line.
+    pty.send(b"!!printf 'BANG-%s' SECRET\r");
     assert!(
         pty.wait_for_screen("BANG-SECRET", 20),
         "the command output is not on screen:\n{}",
@@ -8294,9 +8298,12 @@ async fn pty_bang_is_audited_in_the_journal() {
         100,
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
-    pty.send(b"!!printf AUDITED\r");
+    // The output must not appear in the command text: `wait_for_screen("AUDITED")` used to
+    // match the echoed `!!printf AUDITED` and quit before the command (and its `UserBash`
+    // record) ran. `printf 'A%sB' Z` prints `AZB`, which the command text does not contain.
+    pty.send(b"!!printf 'A%sB' Z\r");
     assert!(
-        pty.wait_for_screen("AUDITED", 20),
+        pty.wait_for_screen("AZB", 20),
         "the command output is not on screen:\n{}",
         pty.screen()
     );
@@ -8314,7 +8321,7 @@ async fn pty_bang_is_audited_in_the_journal() {
         "no UserBash audit record:\n{text}"
     );
     assert!(
-        text.contains("\"command\":\"printf AUDITED\"")
+        text.contains("\"command\":\"printf 'A%sB' Z\"")
             && text.contains("\"exclude_from_context\":true"),
         "the audit record is missing its fields:\n{text}"
     );
