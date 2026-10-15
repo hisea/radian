@@ -1642,6 +1642,99 @@ async fn pty_approval_always_skips_the_next_prompt() {
     pty.quit();
 }
 
+/// The owner's exact report: a tool is running (the input is empty), Esc must cancel the
+/// turn. The command runs long, so the turn is still running when Esc arrives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_escape_cancels_a_running_tool_turn() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("escape-tool");
+    let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![tool_reply(
+        "call_1",
+        "shell",
+        &json!({"command": "sleep 120"}).to_string(),
+    )])
+    .await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "escape-tool",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--approval",
+            "auto",
+        ],
+        30,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"go\r");
+    assert!(
+        pty.wait_for_screen("sleep 120", 20),
+        "the tool did not start:\n{}",
+        pty.screen()
+    );
+    pty.send(&[0x1b]);
+    assert!(
+        pty.wait_for_screen("cancelled", 20),
+        "Esc did not cancel the turn:\n{}",
+        pty.screen()
+    );
+}
+
+/// with an empty input and a turn running, Esc must cancel the turn (the
+/// README says so). The dogfood build (2b55c50) did not; this pins the behaviour. The reply
+/// never finishes, so the turn stays running until the cancel.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_escape_cancels_a_running_turn() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
+    let dir = TempDir::new("escape-cancel");
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "escape-cancel",
+        ],
+        24,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"hello\r");
+    // Wait until the request reached the mock: the turn is running now.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while server.requests().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !server.requests().is_empty(),
+        "the turn never started:\n{}",
+        pty.screen()
+    );
+    // The input is empty (the message was sent): Esc cancels the running turn.
+    pty.send(&[0x1b]);
+    assert!(
+        pty.wait_for_screen("cancelled", 20),
+        "Esc did not cancel the turn:\n{}",
+        pty.screen()
+    );
+}
+
 /// Ctrl-C while the prompt is up cancels the turn: the prompt goes away, the tool never runs,
 /// and the app is still usable (a second Ctrl-C quits).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
