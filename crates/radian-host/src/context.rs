@@ -105,7 +105,6 @@ pub fn load(workspace: &Path, radian_home: Option<&Path>) -> ContextFiles {
     let mut result = ContextFiles::default();
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut raw: Vec<(LoadedFile, String)> = Vec::new();
-    let mut remaining = MAX_TOTAL_BYTES;
 
     // The global file lives in the radian home root (ADR 0020's layout).
     let mut candidates: Vec<PathBuf> = Vec::new();
@@ -140,14 +139,6 @@ pub fn load(workspace: &Path, radian_home: Option<&Path>) -> ContextFiles {
         if !seen.insert(key) {
             continue;
         }
-        if remaining == 0 {
-            result.warnings.push(format!(
-                "context files exceed {} KiB; {} not loaded",
-                MAX_TOTAL_BYTES / 1024,
-                path.display()
-            ));
-            continue;
-        }
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -157,10 +148,11 @@ pub fn load(workspace: &Path, radian_home: Option<&Path>) -> ContextFiles {
                 continue;
             }
         };
-        let limit = MAX_FILE_BYTES.min(remaining);
-        let truncated = bytes.len() > limit;
-        let loaded = bytes.len().min(limit);
-        remaining -= loaded;
+        // The per-file limit applies first; the total budget is applied after every file is
+        // read, so the outermost whole file is dropped before the innermost is truncated
+        // (ADR 0036 D3.2).
+        let truncated = bytes.len() > MAX_FILE_BYTES;
+        let loaded = bytes.len().min(MAX_FILE_BYTES);
         let content = String::from_utf8_lossy(&bytes[..loaded]).into_owned();
         let content = if truncated {
             format!(
@@ -181,6 +173,20 @@ pub fn load(workspace: &Path, radian_home: Option<&Path>) -> ContextFiles {
         ));
     }
 
+    // The total budget: drop the outermost whole files (global, repository root) until the
+    // rest fits. Every file is already capped at `MAX_FILE_BYTES`, so a single file can never
+    // exceed the total and the file nearest the workspace is never the one dropped
+    // (ADR 0036 D3.2).
+    let mut total: usize = raw.iter().map(|(file, _)| file.bytes).sum();
+    while total > MAX_TOTAL_BYTES && raw.len() > 1 {
+        let (file, _) = raw.remove(0);
+        total -= file.bytes;
+        result.warnings.push(format!(
+            "context files exceed {} KiB; dropped {}",
+            MAX_TOTAL_BYTES / 1024,
+            file.path.display()
+        ));
+    }
     result.section = build_section(&raw);
     result.files = raw.into_iter().map(|(file, _)| file).collect();
     result
@@ -418,7 +424,8 @@ mod tests {
         assert_eq!(files.files[0].bytes, MAX_FILE_BYTES);
         assert!(files.section.contains("[truncated:"), "{}", files.section);
 
-        // Three files at 64 KiB each: the third is cut to the remaining 0 bytes.
+        // Three files at 64 KiB each: the **outermost** (the repository root) is dropped
+        // whole and the file nearest the workspace is kept (ADR 0036 D3.2).
         let dir = TempDir::new("total");
         dir.mkdir("repo/.git");
         let chunk = "y".repeat(MAX_FILE_BYTES);
@@ -427,7 +434,45 @@ mod tests {
         dir.write("repo/sub/sub/AGENTS.md", &chunk);
         let files = load(&dir.path().join("repo/sub/sub"), None);
         let total: usize = files.files.iter().map(|file| file.bytes).sum();
-        assert!(total <= MAX_TOTAL_BYTES, "{total}");
+        assert_eq!(total, MAX_TOTAL_BYTES, "{total}");
+        assert_eq!(files.files.len(), 2, "{:?}", files.files);
+        assert!(
+            !files
+                .files
+                .iter()
+                .any(|file| file.path.ends_with("repo/AGENTS.md")),
+            "the outermost file is dropped: {:?}",
+            files.files
+        );
+        assert!(
+            files
+                .files
+                .iter()
+                .any(|file| file.path.ends_with("repo/sub/sub/AGENTS.md")),
+            "the file nearest the workspace is kept: {:?}",
+            files.files
+        );
+        assert!(
+            files.warnings.iter().any(|w| w.contains("dropped")),
+            "{:?}",
+            files.warnings
+        );
+
+        // The file nearest the workspace is never dropped: with two files it is the only one
+        // kept (the outer one is dropped whole).
+        let dir = TempDir::new("innermost");
+        dir.mkdir("repo/.git");
+        let chunk = "w".repeat(MAX_FILE_BYTES);
+        dir.write("repo/AGENTS.md", &chunk);
+        dir.write("repo/sub/AGENTS.md", &chunk);
+        let files = load(&dir.path().join("repo/sub"), None);
+        assert_eq!(files.files.len(), 2, "{:?}", files.files);
+        assert!(
+            files
+                .files
+                .iter()
+                .any(|file| file.path.ends_with("repo/sub/AGENTS.md"))
+        );
     }
 
     /// A directory named like a candidate is skipped (not a file), and a file that cannot be

@@ -19,7 +19,7 @@ mod turn;
 pub use agent::{Agent, AgentConfig, AgentSession, DEFAULT_MAX_MODEL_CALLS, ReplaceError};
 pub use budget::{
     BudgetReport, BudgetStatus, ContextBudget, DEFAULT_BYTES_PER_TOKEN, RequestSize, UsageSource,
-    estimate_tokens, over_budget,
+    estimate_tokens, estimate_tokens_with, over_budget,
 };
 pub use compaction::{
     DEFAULT_SUMMARY_MAX_TOKENS, FIRST_USER_MESSAGE_MAX, MAX_KEEP_TARGET, MAX_USER_MESSAGE_BUDGET,

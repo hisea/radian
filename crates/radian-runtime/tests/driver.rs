@@ -326,7 +326,8 @@ async fn a_model_switch_writes_a_route_and_never_a_key() {
     let tools = MemTools::new();
     let (mut driver, env) = open_env("switch-route", Arc::clone(&model), tools.clone()).await;
     driver.set_budget_for(Arc::new(|provider, model| {
-        (provider == "anthropic" && model == "claude").then_some(4321)
+        (provider == "anthropic" && model == "claude")
+            .then_some(agent_core::ContextBudget::new(4321))
     }));
     let slot = Arc::clone(driver.config_slot());
     let queue = Arc::clone(driver.config_queue());
@@ -443,7 +444,8 @@ async fn a_switch_moves_the_next_turns_budget() {
     let tools = MemTools::new();
     let (mut driver, _env) = open_env("switch-budget", Arc::clone(&model), tools).await;
     driver.set_budget_for(Arc::new(|provider, model| {
-        (provider == "anthropic" && model == "claude").then_some(1234)
+        (provider == "anthropic" && model == "claude")
+            .then_some(agent_core::ContextBudget::new(1234))
     }));
     assert_eq!(driver.test_turn_budget(), None, "nothing switched yet");
     driver
@@ -548,7 +550,8 @@ async fn the_resumed_model_gets_its_budget_when_the_resolver_arrives() {
     // The replay put the model in the slot; the resolver arrives now (the host's order).
     assert_eq!(driver2.test_turn_budget(), None, "no resolver yet");
     driver2.set_budget_for(Arc::new(|provider, model| {
-        (provider == "anthropic" && model == "claude").then_some(4321)
+        (provider == "anthropic" && model == "claude")
+            .then_some(agent_core::ContextBudget::new(4321))
     }));
     assert_eq!(
         driver2.test_turn_budget(),

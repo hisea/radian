@@ -15,7 +15,9 @@ use crate::event::{AgentEvent, CompactionTrigger, EventSink};
 use crate::hooks::{HookContext, HookError, HookPoint, Hooks, ToolDecision};
 use crate::journal::{JournalError, JournalRecord, TranscriptJournal};
 use crate::message::{ContentPart, Message, MessageMeta, ToolCall, ToolResult};
-use crate::model::{Model, ModelContext, ModelError, ModelRequest, ModelResponse, StopReason};
+use crate::model::{
+    Model, ModelContext, ModelError, ModelRequest, ModelResponse, ModelUsage, StopReason,
+};
 use crate::outcome::{
     CancelReason, CompactionError, CompactionFailure, CompactionOutcome, IncompleteReason,
     RunError, RunOutcome, RunStatus, Step,
@@ -333,7 +335,9 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         let bytes_per_token = budget
             .map(|config| config.bytes_per_token)
             .unwrap_or(crate::budget::DEFAULT_BYTES_PER_TOKEN);
-        let tokens_before = budget::request_size(&request).tokens(bytes_per_token);
+        let count_reasoning = budget.is_some_and(|config| config.count_reasoning);
+        let tokens_before =
+            budget::request_size_with(&request, count_reasoning).tokens(bytes_per_token);
         match self
             .compact_transcript(CompactionRun {
                 interrupt: &interrupt,
@@ -480,12 +484,23 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
                     .append(JournalRecord::CompactionUsage {
                         revision,
                         model: compaction::COMPACTION_MODEL_CURRENT.to_owned(),
-                        usage,
+                        usage: usage.clone(),
                     })
                     .await
             {
                 self.recovery_required = true;
                 return Err(CompactionFailure::Journal(error));
+            }
+            // The summarizer's call is not a conversation response (`ModelResponseReceived` is
+            // for those, and a host times it as this turn's generation), but it is billed: tell
+            // the host so its session total includes it (ADR 0018). Emitted per
+            // attempt — the controlled retry is a second real call and costs money too.
+            if let Some(usage) = response.usage.clone() {
+                events.emit(AgentEvent::CompactionUsage {
+                    revision,
+                    model: compaction::COMPACTION_MODEL_CURRENT.to_owned(),
+                    usage,
+                });
             }
             let text = text_of(&response.content);
             match compaction::check_summary(&text, summary_max) {
@@ -557,7 +572,12 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
                 Raced::Done(Ok(())) => {}
             }
         }
-        let size_after = budget::request_size(request);
+        let count_reasoning = self
+            .agent
+            .config
+            .context_budget
+            .is_some_and(|config| config.count_reasoning);
+        let size_after = budget::request_size_with(request, count_reasoning);
 
         let bytes_per_token = self
             .agent
@@ -1065,11 +1085,10 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
         // this is the request that would be sent. A provider-reported `input` from an earlier
         // request in this session is the baseline; without one the projection is a local
         // estimate. No configured budget means nothing is claimed.
-        let mut request_size = if self.run.context_budget().is_some() {
-            Some(budget::request_size(&request))
-        } else {
-            None
-        };
+        let mut request_size = self
+            .run
+            .context_budget()
+            .map(|config| budget::request_size_with(&request, config.count_reasoning));
         if let Some((config, size)) = self.run.context_budget().zip(request_size) {
             let report = budget::project(&config, self.run.session.budget_baseline, size);
             let over = budget::over_budget(&report);
@@ -1133,7 +1152,10 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
         let response = loop {
             // `T_before`: the projection of the request about to be sent. The fallback needs
             // it even with no configured budget — the window-unknown path is exactly this one.
-            let size = budget::request_size(&request);
+            let size = budget::request_size_with(
+                &request,
+                self.run.context_budget().is_some_and(|c| c.count_reasoning),
+            );
             let bytes_per_token = agent
                 .config
                 .context_budget
@@ -1254,10 +1276,13 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
             tool_calls: response.tool_calls.len(),
             usage: response.usage.clone(),
         });
-        // Remember the provider's own `input` as the next projection's baseline (ADR 0015
-        // C1). `None` means the provider did not report it; we never substitute zero.
+        // Remember the provider's own prompt size as the next projection's baseline (ADR 0015
+        // C1). `prompt_total()` is the whole input, cache reads and cache writes included
+        // (ADR 0007): for an Anthropic record `input` alone is only the *uncached*
+        // part, so taking it would make the projection too small and the guard would act too
+        // late. `None` means the provider did not report it; we never substitute zero.
         if let Some(size) = request_size
-            && let Some(input) = response.usage.as_ref().and_then(|usage| usage.input)
+            && let Some(input) = response.usage.as_ref().and_then(ModelUsage::prompt_total)
         {
             self.run.session.budget_baseline = Some((input, size));
         }

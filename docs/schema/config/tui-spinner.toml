@@ -1,0 +1,13 @@
+# ADR 0027：`tui.spinner` 是运行指示的字形档。默认 `pulse`（⏺ 每 500 ms 在强调色与
+# 弱一级之间切换，只换颜色）；`arc`（◜◝◞◟，250 ms）、`quadrant`（▖▘▝▗，参考字体都有）、
+# `braille` 可选。`glyphs = "ascii"` 时 pulse 是 `*`，旋转档是 `| / - \`。未知值是启动警告，
+# 回退 pulse（展示偏好，不拒绝文件）。
+schema_version = 1
+
+[model]
+provider = "example"
+base_url = "https://example.com/v1"
+model = "m-1"
+
+[tui]
+spinner = "quadrant"

@@ -130,6 +130,9 @@ pub struct ModelArgs {
     /// `openai-compatible` only: the thinking level's wire value (ADR 0026 D11), sent as
     /// `reasoning_effort`. `None` sends no key.
     pub reasoning_effort: Option<String>,
+    /// `openai-compatible` only: the assistant-message field the model requires its reasoning
+    /// replayed under (ADR 0014 Q1). `None` sends no reasoning.
+    pub reasoning_replay: Option<String>,
 }
 
 /// Either provider behind one `Model`. `Model` is not object safe, so this is an enum and not
@@ -284,6 +287,38 @@ pub fn resolve_thinking_ref(
     )
 }
 
+/// The reasoning-replay field for a route (ADR 0014 Q2): the `[providers.<id>]`
+/// override when the provider is named, else the catalog's `interleaved` field. `None` means
+/// the model does not require replay, or declares a field Radian does not replay (e.g.
+/// `reasoning_details`).
+pub fn resolve_reasoning_replay(provider: &crate::ProviderRef, model: &str) -> Option<String> {
+    if let crate::ProviderRef::Named(named) = provider
+        && let Some(override_) = &named.reasoning_replay
+    {
+        return match override_ {
+            crate::provider::ReasoningReplayOverride::Field(field) => Some(field.clone()),
+            crate::provider::ReasoningReplayOverride::Off => None,
+        };
+    }
+    crate::catalog::catalog_reasoning_replay(provider.id(), model)
+}
+
+/// Whether a route replays reasoning, resolved by provider **name** (ADR 0014 Q2):
+/// the `[providers.<name>]` override, else the catalog's `interleaved` field. This is what the
+/// per-route budget resolver uses, so the estimate counts the reasoning the request really
+/// carries. A name reachable only through `auth.json`'s `env` has no declaration here and no
+/// catalog entry, so it does not replay.
+pub fn route_replays_reasoning(
+    provider_name: &str,
+    model: &str,
+    providers: &std::collections::BTreeMap<String, crate::ProviderDecl>,
+) -> bool {
+    match crate::resolve_provider(provider_name, providers, None) {
+        Ok((provider_ref, _)) => resolve_reasoning_replay(&provider_ref, model).is_some(),
+        Err(_) => crate::catalog::catalog_reasoning_replay(provider_name, model).is_some(),
+    }
+}
+
 /// Builds the provider adapter named by `args.provider`. The error is the same shape the
 /// hosts already printed for a bad `--base-url`.
 pub fn build_model(args: ModelArgs) -> Result<HostModel, String> {
@@ -300,6 +335,7 @@ pub fn build_model(args: ModelArgs) -> Result<HostModel, String> {
             config.headers = args.headers;
             config.include_usage = args.include_usage;
             config.reasoning_effort = args.reasoning_effort;
+            config.reasoning_replay = args.reasoning_replay;
             OpenAiCompatible::new(config)
                 .map(HostModel::OpenAi)
                 .map_err(|e| format!("--base-url {shown_url}: {e}"))
@@ -441,6 +477,7 @@ impl RouteContext {
             route.adapter(),
             Some(self.max_tokens),
         );
+        let reasoning_replay = resolve_reasoning_replay(&provider_ref, model);
         Ok(ModelArgs {
             provider: route.adapter(),
             base_url: route.base_url,
@@ -451,6 +488,7 @@ impl RouteContext {
             max_tokens: self.max_tokens,
             thinking,
             reasoning_effort,
+            reasoning_replay,
         })
     }
 }

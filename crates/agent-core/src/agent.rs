@@ -251,7 +251,15 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
             tools: self.registry.specs().to_vec(),
             settings: self.agent.config.model_settings.clone(),
         };
-        self.budget_baseline = Some((input_tokens, crate::budget::request_size(&request)));
+        let count_reasoning = self
+            .agent
+            .config
+            .context_budget
+            .is_some_and(|budget| budget.count_reasoning);
+        self.budget_baseline = Some((
+            input_tokens,
+            crate::budget::request_size_with(&request, count_reasoning),
+        ));
         true
     }
 

@@ -57,6 +57,13 @@ impl agent_provider_contract::ContractHarness<OpenAiCompatible> for OpenAiHarnes
             .to_string(),
         })
     }
+
+    fn input_includes_cache(&self) -> bool {
+        // OpenAI's `prompt_tokens` contains `prompt_tokens_details.cached_tokens`
+        // (`total_tokens = prompt_tokens + completion_tokens`), so the cached tokens are
+        // already inside the input count (ADR 0007).
+        true
+    }
 }
 
 impl OpenAiHarness {
@@ -309,6 +316,14 @@ async fn contract_7a_usage_shapes() {
 #[tokio::test]
 async fn contract_7b_total_not_computed() {
     contract::check_total_not_computed(&harness()).await
+}
+
+/// ADR 0007: the adapter says whether `input` contains the cache hit. This one
+/// declares `true` — OpenAI's `prompt_tokens` contains
+/// `prompt_tokens_details.cached_tokens`.
+#[tokio::test]
+async fn contract_7c_input_cache_semantics() {
+    contract::check_input_cache_semantics(&harness()).await
 }
 
 #[tokio::test]

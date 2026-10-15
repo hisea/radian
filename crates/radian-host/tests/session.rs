@@ -117,6 +117,7 @@ async fn open_with_records(
         max_tokens: 1024,
         thinking: radian_host::Thinking::Off,
         reasoning_effort: None,
+        reasoning_replay: None,
     })
     .unwrap();
     let model = radian_host::SwitchableModel::new(
@@ -144,8 +145,10 @@ async fn open_with_records(
             config_slot: config_slot.clone(),
             config_queue: radian_runtime::ConfigQueue::new(),
             budget_for: None,
+            price_for: None,
             protected_branches: Vec::new(),
             servers: Vec::new(),
+            role: None,
             system_prompt: None,
             context_budget: None,
             auto_compact: false,
@@ -233,6 +236,7 @@ async fn a_local_session_accepts_a_declared_command() {
         max_tokens: 1024,
         thinking: radian_host::Thinking::Off,
         reasoning_effort: None,
+        reasoning_replay: None,
     })
     .unwrap();
     let model = radian_host::SwitchableModel::new(
@@ -260,8 +264,10 @@ async fn a_local_session_accepts_a_declared_command() {
             config_slot: config_slot.clone(),
             config_queue: radian_runtime::ConfigQueue::new(),
             budget_for: None,
+            price_for: None,
             protected_branches: Vec::new(),
             servers: Vec::new(),
+            role: None,
             system_prompt: None,
             context_budget: None,
             auto_compact: false,

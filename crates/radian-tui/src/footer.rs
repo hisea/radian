@@ -633,7 +633,7 @@ fn item_placeholders(id: &str) -> &'static [&'static str] {
         "session" => &["id"],
         "context" => &["bar", "percent", "used", "budget", "auto"],
         "context_bar" => &["bar", "percent", "used", "budget", "auto"],
-        "tokens" => &["in", "out", "cache"],
+        "tokens" => &["in", "out", "cache", "cache_write"],
         "speed" => &["speed"],
         "elapsed" => &["elapsed"],
         "cost" => &["usd"],
@@ -926,9 +926,10 @@ fn item_default_style(app: &App, item: &Item, data: &ItemData) -> Style {
     if let Some(style) = &item.style {
         return style.resolve(app);
     }
-    // ADR 0027: the unicode brand is a bold accent `R`. The theme's accent role is
+    // ADR 0027/8: the brand is a bold accent mark. The theme's accent role is
     // `notice_label` (the `accent` style alias maps to it), so the mark follows a theme switch.
-    if item.id == "brand" && app.footer_glyphs() == Glyphs::Unicode {
+    // A configured `tui.brand` keeps this style in every glyph set.
+    if item.id == "brand" && (app.footer_glyphs() == Glyphs::Unicode || app.brand.is_some()) {
         return role_style(app, Role::NoticeLabel);
     }
     default_role(&item.id)
@@ -1075,9 +1076,9 @@ struct ItemData<'a> {
 fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>> {
     let session = app.projection.read();
     match id {
-        // ADR 0027: the brand mark per glyph set (see [`brand_mark`]).
+        // ADR 0027/8: `tui.brand` when set, else the brand mark per glyph set.
         "brand" => Some(ItemData {
-            values: vec![("brand", brand_mark(app.footer_glyphs()).to_string())],
+            values: vec![("brand", app.brand_mark().to_string())],
             default_format: "{brand}",
             numeric: None,
         }),
@@ -1248,21 +1249,25 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
                         .usage_cache_read()
                         .map_or_else(|| "-".to_string(), crate::timing::format_tokens),
                 ),
+                // F8 (ADR 0027): the cache-**write** total. It is billed at its own
+                // (often higher) rate, so it is available to a format that wants to show it —
+                // but it is deliberately **not** in the default format, which stays as narrow
+                // as it was (see the "cache_write shows only when asked for" test).
+                (
+                    "cache_write",
+                    session
+                        .usage_cache_write()
+                        .map_or_else(|| "-".to_string(), crate::timing::format_tokens),
+                ),
             ],
             default_format: "^{in} v{out} R{cache}",
             numeric: None,
         }),
-        // ADR 0027: the cost from the model's catalog price and the session's
-        // token totals. No price (or no reported tokens) means the item hides; never `$0.00`
-        // for a model whose price we do not know (v5 §5).
+        // ADR 0027: the fee the session has accumulated, each call priced at the
+        // rate in force when it arrived (`radian_host::cost`). Nothing billed yet means the
+        // item hides; never `$0.00` for a model whose price we do not know (v5 §5).
         "cost" => {
-            let micros = crate::timing::cost_micros(
-                app.model_price,
-                session.usage_input(),
-                session.usage_output(),
-                session.usage_cache_read(),
-                session.usage_cache_write(),
-            )?;
+            let micros = session.cost_micros()?;
             Some(ItemData {
                 values: vec![("usd", crate::timing::format_cost(micros))],
                 default_format: "{usd}",
@@ -1490,6 +1495,11 @@ mod tests {
     /// added here.
     const VERIFIED_COVERED: &str = "»│━─×▖▘▝▗";
 
+    /// The documented exceptions to the coverage rule (ADR 0027/10): the owner
+    /// picked the arc and the pulse after seeing them, and braille is an opt-in, so these may
+    /// fall back to another font. Kept separate so the rest of the check is not loosened.
+    const DOCUMENTED_EXCEPTIONS: &str = "◜◝◞◟⏺⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
+
     fn app_with_glyphs(name: &str) -> App {
         let mut app = App::new("mock", "s");
         let config = radian_host::config::TuiFooterConfig {
@@ -1534,6 +1544,25 @@ mod tests {
         }
     }
 
+    /// The arc frames and the pulse glyph are the only coverage exceptions, and they are
+    /// exactly the ones the ADR documents (revisions 9/10).
+    #[test]
+    fn the_spinner_exceptions_are_documented() {
+        for glyph in crate::spinner::ARC
+            .iter()
+            .chain(crate::spinner::BRAILLE.iter())
+        {
+            for ch in glyph.chars() {
+                assert!(DOCUMENTED_EXCEPTIONS.contains(ch), "{glyph}");
+            }
+        }
+        assert!(DOCUMENTED_EXCEPTIONS.contains('⏺'));
+        // The quadrant frames are the covered optional set.
+        for glyph in crate::spinner::QUADRANT {
+            assert!(VERIFIED_COVERED.contains(glyph), "{glyph}");
+        }
+    }
+
     /// The unicode tier only draws glyphs the seven checked fonts all have. Every item glyph
     /// (from the built-in presets), the spinner frames, the separators, the context bar and
     /// the auto marker are checked.
@@ -1554,7 +1583,16 @@ mod tests {
         }
         glyphs.extend(brand_mark(Glyphs::Unicode).chars());
         glyphs.extend(Glyphs::Unicode.tool_status().iter().flat_map(|s| s.chars()));
-        glyphs.extend(crate::blocks::SPINNER);
+        // The spinner's covered sets (quadrant/braille/ascii); `arc` and `pulse` are the
+        // documented exceptions, checked separately below.
+        for glyph in crate::spinner::glyphs() {
+            for ch in glyph.chars() {
+                if DOCUMENTED_EXCEPTIONS.contains(ch) {
+                    continue;
+                }
+                glyphs.push(ch);
+            }
+        }
         glyphs.extend("━─".chars());
         glyphs.extend(" ~".chars());
         for ch in glyphs {
