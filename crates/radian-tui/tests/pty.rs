@@ -4653,9 +4653,8 @@ async fn pty_fork_creates_a_resumable_child_when_idle() {
     );
     assert!(
         child.wait_for_screen("hello parent", 10),
-        "the child history is not rendered:\n{}\njournal: {}",
-        child.screen(),
-        std::fs::read_to_string(sessions.join(format!("{child_id}.jsonl"))).unwrap_or_default()
+        "the child history is not rendered:\n{}",
+        child.screen()
     );
     child.send(b"continue\r");
     assert!(
