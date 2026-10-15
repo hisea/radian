@@ -1214,6 +1214,10 @@ fn run(
                 auto_compact: !cli.no_auto_compact && config.compaction.auto.unwrap_or(true),
                 compaction_settings,
                 compaction_settings_for: Some(compaction_settings_for),
+                retries: config
+                    .model
+                    .retries
+                    .unwrap_or(agent_core::DEFAULT_MODEL_RETRIES),
                 sandbox,
                 tier: tier.preset(),
                 profile,

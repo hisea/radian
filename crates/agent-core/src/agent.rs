@@ -16,6 +16,11 @@ use crate::turn::{ActiveRun, TurnOptions};
 /// Default cap on model requests per turn.
 pub const DEFAULT_MAX_MODEL_CALLS: u32 = 32;
 
+/// Default number of times a transient model failure is retried inside one model call before
+/// the turn is failed (ADR 0017). `0` disables retrying, which is the pre-revision
+/// behaviour.
+pub const DEFAULT_MODEL_RETRIES: u32 = 3;
+
 /// Why a host-requested transcript replacement was rejected.
 #[derive(Debug, thiserror::Error)]
 pub enum ReplaceError {
@@ -50,6 +55,11 @@ pub struct AgentConfig {
     /// the summarizer can run at a lower reasoning level than the conversation. `Null` (the
     /// default) sends no setting, which is the behavior before this field existed.
     pub compaction_settings: Value,
+    /// How many times a **transient** model failure (ADR 0017: connection failure,
+    /// dropped stream, idle timeout, HTTP 408/429/5xx/529) is retried inside one model call
+    /// before the turn is failed. The retry happens before anything is committed, so a failed
+    /// attempt's streamed text is not part of the transcript. `0` disables retrying.
+    pub retries: u32,
 }
 
 impl Default for AgentConfig {
@@ -61,6 +71,7 @@ impl Default for AgentConfig {
             context_budget: None,
             auto_compact: true,
             compaction_settings: Value::Null,
+            retries: DEFAULT_MODEL_RETRIES,
         }
     }
 }

@@ -3981,6 +3981,20 @@ impl App {
                 self.timer
                     .response_finished(self.now, usage.as_ref().and_then(|usage| usage.output));
             }
+            // ADR 0017: a transient failure is being retried. The failed attempt's
+            // streamed text is discarded (it was live-only), and the status line names the retry.
+            AgentEvent::ModelRetrying {
+                attempt,
+                max,
+                delay,
+                reason,
+            } => {
+                self.drop_live();
+                self.note = Some(format!(
+                    "retrying {attempt}/{max} in {}s: {reason}",
+                    delay.as_secs()
+                ));
+            }
             AgentEvent::ToolStarted { call_id, name, .. } => {
                 self.running_tools.insert(call_id.clone());
                 self.note = Some(format!("tool {name} running"));
@@ -4069,15 +4083,10 @@ impl App {
         }
     }
 
-    /// Appends a committed message as transcript entries. Used for live commits and for the
-    /// history of a resumed session.
-    pub fn push_message(&mut self, message: &Message) {
-        // The committed message is the truth; discard the partial live view of it. The scan
-        // runs **only when a live entry exists**: a resume pushes every message before any
-        // stream has started, and an unconditional `retain` over a 66k-entry transcript per
-        // message was O(n^2) (resume-perf A). The count is the number of live entries, so a
-        // live entry is dropped wherever it sits - the stream can leave one behind a
-        // compaction notice (they are not always a suffix of `entries`).
+    /// Discards every live (streaming) entry. A committed message replaces them
+    /// (`push_message`), and so does a retry: the failed attempt's deltas are live-only
+    /// (ADR 0010/0017 revision 1). The scan runs only when one exists (resume-perf A).
+    fn drop_live(&mut self) {
         if self.live_count > 0 {
             let mut scanned = 0u64;
             self.entries.retain(|entry| {
@@ -4088,6 +4097,18 @@ impl App {
             #[cfg(test)]
             LIVE_SCANS.with(|count| count.set(count.get() + scanned));
         }
+    }
+
+    /// Appends a committed message as transcript entries. Used for live commits and for the
+    /// history of a resumed session.
+    pub fn push_message(&mut self, message: &Message) {
+        // The committed message is the truth; discard the partial live view of it. The scan
+        // runs **only when a live entry exists**: a resume pushes every message before any
+        // stream has started, and an unconditional `retain` over a 66k-entry transcript per
+        // message was O(n^2) (resume-perf A). The count is the number of live entries, so a
+        // live entry is dropped wherever it sits - the stream can leave one behind a
+        // compaction notice (they are not always a suffix of `entries`).
+        self.drop_live();
         // ADR 0033: a `!` command's `Ran \`cmd\`` context message is a Bash block, not user
         // prose. The one we already drew live is skipped so it is not shown twice; a resumed
         // one (no pending text) is drawn as a block.
@@ -4555,6 +4576,32 @@ mod tests {
             reason: "already fits".to_string(),
         });
         assert_eq!(app.spinner_status(), Some("Working"));
+    }
+
+    /// ADR 0017: a retry names the attempt on the status line and discards the
+    /// failed attempt's partial stream.
+    #[test]
+    fn a_retrying_event_drops_the_live_block_and_names_the_attempt() {
+        let mut app = App::new("m", "s");
+        app.set_live(EntryKind::Assistant, "half an answer");
+        assert_eq!(app.live_count, 1);
+
+        app.apply_event(&AgentEvent::ModelRetrying {
+            attempt: 1,
+            max: 3,
+            delay: std::time::Duration::from_secs(4),
+            reason: "the stream ended before the response was complete".into(),
+        });
+
+        assert_eq!(
+            app.live_count, 0,
+            "the failed attempt's partial text must be gone"
+        );
+        assert!(app.entries.iter().all(|entry| !entry.live));
+        assert_eq!(
+            app.note.as_deref(),
+            Some("retrying 1/3 in 4s: the stream ended before the response was complete")
+        );
     }
 
     fn a_run(exit_code: Option<i32>, stdout: &str) -> radian_coding::UserBash {

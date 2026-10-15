@@ -104,7 +104,15 @@ async fn run_scenario(
     if let Some(timeout) = idle_timeout {
         config.idle_timeout = timeout;
     }
-    let agent = Arc::new(Agent::new(Anthropic::new(config).unwrap(), tools));
+    let agent = Arc::new(
+        Agent::new(Anthropic::new(config).unwrap(), tools).with_config(agent_core::AgentConfig {
+            // The scenario drives a failing turn (a transient idle timeout); pin the
+            // pre-revision one-shot behaviour so the retry does not consume the next scripted
+            // reply (ADR 0017's retry is covered in agent-core's `retry` tests).
+            retries: 0,
+            ..Default::default()
+        }),
+    );
     let mut driver = Driver::open(
         &agent,
         journal,

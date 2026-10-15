@@ -20,6 +20,7 @@
 | `tui-footer-items.toml` | ADR 0027：`[tui.footer.items.<id>]` 的 symbol/style/symbol_style/format/disabled，`separator_style`（角色或 starship 颜色），`tui.usage_period_secs`。 | **接受**，0 拒绝。 | §2 / ADR 0027 |
 | `tui-widgets.toml` | ADR 0027 C3：`[tui.widgets]` 的 `above_input`/`below_input` 在输入框上/下放一行贡献者条目（条目 id）。 | **接受**，0 拒绝。 | §2 / ADR 0027 |
 | `providers.toml` | ADR 0026 D10:`[providers.<名字>]` 具名 provider(`kind` + `base_url`),`model.provider = "<名字>"` 选用。ADR 0014 Q2:同名表下 `reasoning_replay` 可覆盖目录的推理回传字段(字段名串,或 `false` 关掉)。 | **接受**，0 拒绝；名字非法/与内建重名是另一个拒绝场景（读取器报 `providers.<name>` 错误）。 | §2 / ADR 0026 D10 / ADR 0014 Q2 |
+| `model-retries.toml` | ADR 0017:`[model] retries = 3` 是暂时性模型错误在一次模型调用内部(提交前)的重试上限;默认 3,`0` 关闭。非负整数,负数/非整数拒绝。 | **接受**,0 拒绝;无明文密钥样字符串。 | §2 / ADR 0017 |
 | `git.toml` | ADR 0030 R10 / 修订 4:`[git] protected_branches` 列出 `git_commit` 额外拒绝的分支;`allowed_filters` 列出 `git add` 允许运行的 `filter.<名字>` 驱动(默认 `["lfs"]`,`[]` 表示一个都不允许)。 | **接受**,0 拒绝;无明文密钥样字符串。 | §2 / ADR 0030 R10 / 修订 4 |
 | `permissions-approval.toml` | ADR 0026 D9:`[permissions] approval = "auto"`(四个已知名字之一)。`full` 档位下这个值被忽略并警告;命令行 `--approval`/`--yes` 永远优先。 | **接受**,0 拒绝;无明文密钥样字符串。 | §2 / ADR 0026 D9 |
 | `compaction-thinking.toml` | ADR 0018:`[compaction] thinking` 是摘要调用的推理档位(ADR 0026 D11 的七档之一,或 `"current"` 沿用对话档位;缺省 `low`)。宿主按与 `/thinking` 相同的映射夹到最近的支持档并换算成线上取值(`reasoning_effort` 或 `thinking`),作为请求级设置只发给摘要与缩短重试请求。未知档位名是配置错误。 | **接受**,0 拒绝;无明文密钥样字符串。 | §2 / ADR 0018 |

@@ -52,10 +52,15 @@ fn tool_reply(id: &str, name: &str, arguments: &str) -> Reply {
 }
 
 async fn chat<M: Model, P: ToolProvider>(model: M, tools: P) -> AgentSession<M, P, ()> {
-    Arc::new(Agent::new(model, tools))
-        .open_session()
-        .await
-        .unwrap()
+    Arc::new(Agent::new(model, tools).with_config(AgentConfig {
+        // These tests drive the real turn loop but pin the **adapter's** one-shot behaviour:
+        // ADR 0017's retry is exercised in agent-core's `retry` tests.
+        retries: 0,
+        ..Default::default()
+    }))
+    .open_session()
+    .await
+    .unwrap()
 }
 
 /// One tool, `add`, that sums two integers.
@@ -767,8 +772,8 @@ async fn a_response_over_the_size_limit_is_refused() {
 
 #[tokio::test]
 async fn http_errors_are_classified_and_never_show_the_key() {
-    // 401 is a request error; 500 and 529 are the provider's.
-    for (code, transport) in [(401, false), (500, true), (529, true)] {
+    // 401 is a request error; 500 and 529 are the provider's (transient).
+    for (code, transient) in [(401, false), (500, true), (529, true)] {
         let server = MockServer::start(vec![Reply::status(code, "nope")]).await;
         let model = model(&server);
         let cx = ModelContext {
@@ -791,12 +796,100 @@ async fn http_errors_are_classified_and_never_show_the_key() {
         assert!(message.contains(&format!("HTTP {code}")), "{message}");
         assert!(message.contains("nope"), "{message}");
         assert!(!message.contains("sk-ant-secret-key"), "{message}");
+        assert_eq!(error.is_transient(), transient, "{code}");
         assert_eq!(
-            matches!(error, ModelError::Transport(_)),
-            transport,
+            matches!(error, ModelError::Unavailable { .. }),
+            transient,
             "{code}"
         );
     }
+}
+
+/// ADR 0017: a `Retry-After` header is parsed and carried on the error, both as a
+/// number of seconds and (further down) as an HTTP date; anything else is ignored.
+#[tokio::test]
+async fn a_retry_after_header_is_carried_on_the_error() {
+    for (header, expected) in [
+        ("2", Some(Duration::from_secs(2))),
+        ("0", Some(Duration::ZERO)),
+    ] {
+        let server = MockServer::start(vec![Reply::Status {
+            code: 429,
+            headers: vec![("retry-after".into(), header.into())],
+            body: "slow down".into(),
+        }])
+        .await;
+        let error = complete_error(&server).await;
+        assert_eq!(error.retry_after(), expected, "Retry-After: {header}");
+        assert!(error.is_transient(), "{error}");
+    }
+
+    // An unparseable value is ignored: the core falls back to its own backoff.
+    let server = MockServer::start(vec![Reply::Status {
+        code: 429,
+        headers: vec![("retry-after".into(), "later".into())],
+        body: "slow down".into(),
+    }])
+    .await;
+    assert_eq!(complete_error(&server).await.retry_after(), None);
+
+    // A date in the past means "now", which is still a `Some`.
+    let server = MockServer::start(vec![Reply::Status {
+        code: 503,
+        headers: vec![("retry-after".into(), "Sun, 06 Nov 1994 08:49:37 GMT".into())],
+        body: "down".into(),
+    }])
+    .await;
+    assert_eq!(
+        complete_error(&server).await.retry_after(),
+        Some(Duration::ZERO)
+    );
+}
+
+/// ADR 0017: the provider's temporary failures are transient (so the core retries
+/// them); a request error and a cancellation are not.
+#[tokio::test]
+async fn only_temporary_failures_are_transient() {
+    for code in [408, 429, 500, 529] {
+        let server = MockServer::start(vec![Reply::status(code, "down")]).await;
+        let error = complete_error(&server).await;
+        assert!(error.is_transient(), "HTTP {code}: {error}");
+    }
+    for code in [400, 401, 403, 404] {
+        let server = MockServer::start(vec![Reply::status(code, "bad")]).await;
+        let error = complete_error(&server).await;
+        assert!(!error.is_transient(), "HTTP {code}: {error}");
+    }
+
+    // A stream that stops before the response is complete is a connection failure: transient.
+    let server = MockServer::start(vec![Reply::SseThenCut { pieces: Vec::new() }]).await;
+    let error = complete_error(&server).await;
+    assert!(error.is_transient(), "{error}");
+
+    // A cancellation is a `Transport` error that must never be retried.
+    let server = MockServer::start(vec![text_reply("never arrives")]).await;
+    let model = model(&server);
+    let token = CancellationToken::new();
+    token.cancel();
+    let error = model
+        .complete(
+            ModelRequest {
+                system_prompt: None,
+                messages: vec![Message::user("hi")],
+                tools: Vec::new(),
+                settings: Value::Null,
+            },
+            ModelContext {
+                cancellation: token,
+                events: &NoopSink,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        !error.is_transient(),
+        "a cancellation must never retry: {error}"
+    );
 }
 
 #[tokio::test]

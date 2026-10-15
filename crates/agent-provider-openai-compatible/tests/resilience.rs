@@ -102,7 +102,9 @@ impl Recorder {
 
 #[tokio::test]
 async fn http_status_matrix_is_classified_and_never_shows_a_secret() {
-    for (code, transport) in [
+    // 5xx, 408 and 429 are the provider's (`Unavailable`, transient); the rest are the
+    // request's (`Protocol`, never retried).
+    for (code, transient) in [
         (400, false),
         (401, false),
         (403, false),
@@ -128,11 +130,18 @@ async fn http_status_matrix_is_classified_and_never_shows_a_secret() {
             !message.contains(HEADER_VALUE),
             "{code} leaked a header value: {message}"
         );
-        assert_eq!(
-            matches!(error, ModelError::Transport(_)),
-            transport,
-            "{code}"
-        );
+        assert_eq!(error.is_transient(), transient, "{code}");
+        if transient {
+            assert!(
+                matches!(error, ModelError::Unavailable { .. }),
+                "{code} must be Unavailable: {error}"
+            );
+        } else {
+            assert!(
+                matches!(error, ModelError::Protocol(_)),
+                "{code} must be Protocol: {error}"
+            );
+        }
     }
 }
 

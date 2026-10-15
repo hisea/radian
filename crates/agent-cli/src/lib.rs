@@ -760,6 +760,9 @@ struct Setup {
     compaction_settings: serde_json::Value,
     /// Recomputes the summary call's settings for a switched route (ADR 0018).
     compaction_settings_for: radian_runtime::CompactionSettingsFor,
+    /// `[model] retries` (ADR 0017): how many times a transient model failure is
+    /// retried inside one model call; `0` disables.
+    retries: u32,
     /// The session id this process uses: the file name, and the `{session_id}` header value.
     session_id: String,
     /// The validated, canonical workspace (dogfooding D1). Resolved in `setup`, before any
@@ -1174,6 +1177,10 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         auto_compact: !cli.no_auto_compact && config.compaction.auto.unwrap_or(true),
         compaction_settings,
         compaction_settings_for,
+        retries: config
+            .model
+            .retries
+            .unwrap_or(agent_core::DEFAULT_MODEL_RETRIES),
         session_id,
         workspace,
         secrets,
@@ -1595,6 +1602,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             auto_compact: setup.auto_compact,
             compaction_settings: setup.compaction_settings,
             compaction_settings_for: Some(setup.compaction_settings_for),
+            retries: setup.retries,
             sandbox,
             tier: profile_arg.preset(),
             profile: permission_profile,
@@ -2250,6 +2258,18 @@ impl EventSink for Ui {
             }
             AgentEvent::ToolStarted { index, name, .. } => {
                 eprintln!("[tool {index}] {name}: started");
+            }
+            AgentEvent::ModelRetrying {
+                attempt,
+                max,
+                delay,
+                reason,
+            } => {
+                // ADR 0017: the same line the TUI shows, on stderr, before the wait.
+                // The failed attempt's streamed text went to stdout and cannot be unwritten, so
+                // this only closes its line before the retry notice and the next attempt.
+                self.end_of_turn();
+                eprintln!("retrying {attempt}/{max} in {}s: {reason}", delay.as_secs());
             }
             AgentEvent::ToolFinished {
                 index, is_error, ..

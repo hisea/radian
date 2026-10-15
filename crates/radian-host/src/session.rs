@@ -337,6 +337,9 @@ pub struct SessionSetup {
     /// revision 8, ADR 0026 D7). `None` means a switch cannot move the settings (they stay at
     /// the startup value).
     pub compaction_settings_for: Option<CompactionSettingsFor>,
+    /// `[model] retries` (ADR 0017), the host already resolved against the default:
+    /// how many times a transient model failure is retried inside one model call; `0` disables.
+    pub retries: u32,
     /// The sandbox `shell` runs under; `None` for the safe tier.
     pub sandbox: Option<Sandbox>,
     /// The tier, for the startup description.
@@ -931,6 +934,7 @@ pub async fn open_session(
         auto_compact,
         compaction_settings,
         compaction_settings_for,
+        retries,
         sandbox,
         tier,
         profile,
@@ -1135,6 +1139,7 @@ pub async fn open_session(
         context_budget,
         auto_compact,
         compaction_settings,
+        retries,
         ..AgentConfig::default()
     };
     let facts_hooks = Arc::new(crate::prompt::SessionFactsHooks::new(

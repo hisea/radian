@@ -1,5 +1,7 @@
 mod common;
 
+use std::sync::Arc;
+
 use agent_core::*;
 use common::*;
 use serde_json::json;
@@ -186,7 +188,12 @@ async fn max_calls_tool_request_is_not_executed() {
 #[tokio::test]
 async fn model_error_finishes_once() {
     let model = ScriptedModel::new([Reply::Fail("network down".into())]);
-    let mut chat = agent(model, NoTools).open_session().await.unwrap();
+    // Retries are off (ADR 0017): this pins the "one failure ends the turn" path.
+    let chat_agent = Arc::new(Agent::new(model, NoTools).with_config(AgentConfig {
+        retries: 0,
+        ..Default::default()
+    }));
+    let mut chat = chat_agent.open_session().await.unwrap();
     let rec = Recorder::default();
     let mut run = chat.start_turn("go").unwrap();
 

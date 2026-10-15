@@ -33,6 +33,7 @@ fn the_reader_matches_the_reference_checker() {
         ("minimal.toml", "accept"),
         ("tui-theme-colors.toml", "accept"),
         ("providers.toml", "accept"),
+        ("model-retries.toml", "accept"),
         ("skills-extra-paths.toml", "accept"),
         ("skills-builtin.toml", "accept"),
         ("v1-unknown-fields.toml", "accept"),
@@ -92,6 +93,19 @@ fn skills_builtin_and_disabled_are_carried() {
     assert_eq!(config.skills.disabled, vec!["diagrams".to_owned()]);
     assert!(
         !config.skipped.iter().any(|key| key.starts_with("skills")),
+        "{:?}",
+        config.skipped
+    );
+}
+
+/// `model-retries.toml` (ADR 0017): `[model] retries` is carried, not skipped.
+#[test]
+fn model_retries_is_carried() {
+    let (path, text) = fixture("model-retries.toml");
+    let config = config::parse(&path, &text).unwrap();
+    assert_eq!(config.model.retries, Some(3));
+    assert!(
+        !config.skipped.iter().any(|key| key == "model.retries"),
         "{:?}",
         config.skipped
     );
