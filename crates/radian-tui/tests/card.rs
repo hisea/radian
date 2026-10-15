@@ -293,6 +293,10 @@ fn other_tools_are_their_head_and_their_output_section() {
     );
     assert!(text.contains("├── Output "), "{text}");
     assert!(text.contains("fn main() {}"), "{text}");
+    // The meta row only writes the data that exists: `read` has no exit code, no duration, no
+    // timeout, so there is no meta row at all (ADR 0028 rule 3).
+    assert!(!text.contains("exit"), "no invented exit code: {text}");
+    assert!(!text.contains('⟦'), "no empty meta row: {text}");
 }
 
 #[test]
