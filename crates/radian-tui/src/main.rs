@@ -1221,10 +1221,9 @@ fn run(
         ),
     };
     let sandbox_facts = session.facts().sandbox_facts.clone();
-    let sandbox_word = ["seatbelt", "bwrap"]
-        .into_iter()
-        .find(|name| sandbox_facts.contains(name))
-        .unwrap_or("none");
+    // The host computed this from the real backend (ADR 0027): searching the description text
+    // reported `none` on macOS, because the `workspace` tier's sentence does not name it.
+    let sandbox_word = session.facts().sandbox_word.clone();
     let budget = window
         .budget
         .map_or_else(|| "unknown".to_string(), |b| b.to_string());
