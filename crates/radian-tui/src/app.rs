@@ -1112,6 +1112,9 @@ pub struct App {
     /// The loop's current instant (ADR 0027). The timer never reads the wall clock;
     /// the loop stamps `now` once per iteration and tests set it to inject time.
     pub now: Instant,
+    /// The spinner's origin (ADR 0027): `now - started` is the tick the spinner
+    /// frame is a function of. Set at construction; tests set it to inject time.
+    pub spinner_origin: Instant,
     /// The local turn timer behind `speed`/`elapsed`.
     pub timer: crate::timing::TurnTimer,
     /// The applied thinking level (ADR 0026 D11), for the footer's `reasoning` item. A queued
@@ -1279,6 +1282,7 @@ impl App {
             model_price: None,
             auto_compact: true,
             now: Instant::now(),
+            spinner_origin: Instant::now(),
             timer: crate::timing::TurnTimer::default(),
             thinking_level: None,
             footer: crate::footer::Footer::default(),
@@ -4241,6 +4245,53 @@ impl App {
         self.now = now;
     }
 
+    /// The spinner's current frame (ADR 0027): a function of the injected clock,
+    /// so a test advances it with `set_now`.
+    pub fn spinner_frame(&self) -> crate::spinner::Frame {
+        let tick = self.now.saturating_duration_since(self.spinner_origin);
+        crate::spinner::frame(self.spinner_kind, self.footer_glyphs(), tick)
+    }
+
+    /// The style for a spinner frame: the pulse alternates between the accent and the weak
+    /// level; the rotating frames stay on the accent.
+    pub fn spinner_style(&self, frame: crate::spinner::Frame) -> ratatui::style::Style {
+        if frame.dim {
+            self.theme.truncation
+        } else {
+            self.theme.notice_label
+        }
+    }
+
+    /// The input rule's status text (ADR 0027): the most specific running state, or
+    /// `None` when the app is idle (the rule is then plain). The states are the ones the UI
+    /// already has: a modal waiting for the user, a running turn, a running `!`.
+    pub fn spinner_status(&self) -> Option<&'static str> {
+        if matches!(self.top_modal(), Some(Modal::Approval(_))) {
+            return Some("Waiting for approval");
+        }
+        if matches!(self.top_modal(), Some(Modal::Question(_))) {
+            return Some("Waiting for your answer");
+        }
+        if self.turn() == TurnState::Running {
+            return Some("Working");
+        }
+        if self.bash_running.is_some() {
+            return Some("Running a command");
+        }
+        None
+    }
+
+    /// Whether any spinner is on screen (ADR 0027): the input rule's status line,
+    /// a live reasoning line, or a running tool card. Only then does the loop animate.
+    pub fn spinner_visible(&self) -> bool {
+        self.spinner_status().is_some()
+            || self.entries.iter().any(|entry| entry.live)
+            || self
+                .entries
+                .iter()
+                .any(|entry| entry.kind == EntryKind::ToolCall && entry.result.is_none())
+    }
+
     /// Whether this session has a shell for `!` (ADR 0033): false on the `safe` tier, which
     /// has no sandbox at all (ADR 0012).
     pub fn set_bash_available(&mut self, available: bool) {
@@ -4344,6 +4395,28 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR 0027: the spinner frame follows the injected clock, not the text, and
+    /// the configured kind decides the glyphs.
+    #[test]
+    fn the_spinner_frame_follows_the_injected_clock() {
+        let mut app = App::new("m", "s");
+        app.spinner_kind = crate::spinner::Kind::Arc;
+        let base = app.spinner_origin;
+        app.set_now(base);
+        assert_eq!(app.spinner_frame().glyph, "◜");
+        app.set_now(base + std::time::Duration::from_millis(250));
+        assert_eq!(app.spinner_frame().glyph, "◝");
+        app.set_now(base + std::time::Duration::from_millis(500));
+        assert_eq!(app.spinner_frame().glyph, "◞");
+
+        // The default pulse keeps its glyph and only changes the phase every 500 ms.
+        app.spinner_kind = crate::spinner::Kind::Pulse;
+        app.set_now(base);
+        assert!(!app.spinner_frame().dim);
+        app.set_now(base + std::time::Duration::from_millis(500));
+        assert!(app.spinner_frame().dim);
+    }
 
     fn a_run(exit_code: Option<i32>, stdout: &str) -> radian_coding::UserBash {
         radian_coding::UserBash {

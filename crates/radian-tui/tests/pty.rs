@@ -5143,6 +5143,42 @@ fn pty_an_idle_screen_is_not_redrawn() {
     );
 }
 
+/// ADR 0027: a **visible** spinner redraws on its interval (the test above pins
+/// the idle case). `arc` turns every 250 ms, so a ~1.2 s window must show several frames.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_visible_spinner_redraws_on_its_interval() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
+    let config = format!(
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
+         base_url = \"{}\"\n[tui]\nspinner = \"arc\"\n",
+        server.base_url
+    );
+    let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 20, 100);
+    assert!(
+        pty.wait_for_screen("type a message", 10),
+        "{}",
+        pty.screen()
+    );
+    let _ = settled_frame_count(&mut pty);
+    // A turn that never finishes keeps the spinner visible.
+    pty.send(b"hello\r");
+    assert!(
+        pty.wait_for_screen("Working", 10),
+        "the input rule must show the running state: {}",
+        pty.screen()
+    );
+    let start = frame_count(&pty);
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    let after = frame_count(&pty);
+    pty.quit();
+    assert!(
+        after >= start + 3,
+        "the arc spinner must redraw about every 250 ms: {start} -> {after}"
+    );
+}
+
 /// ADR 0023 U2: a signal is an event, not a poll. The loop is blocked on its channel while the
 /// app is idle; SIGTERM must take the ordinary exit path at once — far inside the signal task's
 /// 3 s watchdog, which is what would fire if the loop still had to poll for the flag.

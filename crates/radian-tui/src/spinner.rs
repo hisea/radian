@@ -62,6 +62,17 @@ pub struct Frame {
     pub dim: bool,
 }
 
+impl Default for Frame {
+    /// The frame for a non-animated path (line counting, search, copy): the glyph is
+    /// decoration there, so the default is the pulse's first frame.
+    fn default() -> Self {
+        Self {
+            glyph: "⏺",
+            dim: false,
+        }
+    }
+}
+
 /// The `arc` frames (revision 2). Not every checked font has them (ADR 0027's
 /// documented exception), so `quadrant` is the covered alternative.
 pub const ARC: [&str; 4] = ["◜", "◝", "◞", "◟"];

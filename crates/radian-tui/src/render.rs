@@ -320,11 +320,12 @@ fn entry_lines(
     modes: DisplayModes,
     width: usize,
     theme: &Theme,
+    spinner: crate::spinner::Frame,
 ) -> Vec<Line<'static>> {
     let (prefix, prefix_style) = marker(entry.kind, theme);
     let band = card_band(entry, theme);
     let blocks = blocks::parse_blocks_for(entry, modes.reasoning);
-    let body = blocks::layout(entry, &blocks, modes, width);
+    let body = blocks::layout_with(entry, &blocks, modes, width, spinner);
     let style = body_style(entry, theme);
     let text_rows: Vec<usize> = body
         .iter()
@@ -346,6 +347,7 @@ fn entry_lines(
             Some(i) == first_text,
             band,
             width,
+            spinner,
         );
         if Some(i) == last && entry.interrupted {
             line.spans
@@ -394,6 +396,7 @@ fn render_row(
     first_text: bool,
     band: Option<Style>,
     width: usize,
+    spinner: crate::spinner::Frame,
 ) -> Line<'static> {
     if row.pad {
         return match band {
@@ -528,6 +531,12 @@ fn render_row(
     } else if row.reason {
         // A weak one-line reason (`mermaid: …`, ADR 0028 R8): the dim/truncation role.
         spans.push(Span::styled(row.text.clone(), theme.truncation));
+    } else if entry.kind == EntryKind::ToolCall && entry.result.is_none() && first_text {
+        // A running tool card's leading status glyph is the live spinner (ADR 0027 revision
+        // 10): strip the glyph baked at call time and prepend the current frame. Every frame
+        // is one cell wide, like the glyph it replaces, so the layout does not move.
+        let rest: String = row.text.chars().skip(1).collect();
+        spans.push(Span::styled(format!("{}{rest}", spinner.glyph), body_style));
     } else {
         spans.push(Span::styled(row.text.clone(), body_style));
     }
@@ -557,6 +566,23 @@ pub fn transcript_lines(
     width: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
+    transcript_lines_with(
+        entries,
+        modes,
+        width,
+        theme,
+        crate::spinner::Frame::default(),
+    )
+}
+
+/// [`transcript_lines`] with the live spinner frame (ADR 0027).
+pub fn transcript_lines_with(
+    entries: &[Entry],
+    modes: DisplayModes,
+    width: usize,
+    theme: &Theme,
+    spinner: crate::spinner::Frame,
+) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
         // The container owns the blank line between blocks (ADR 0028 rule 1).
@@ -564,7 +590,7 @@ pub fn transcript_lines(
             Line::from(""),
             blocks::block_gap(entries.get(index.wrapping_sub(1)), entry),
         ));
-        out.extend(entry_lines(entry, modes, width, theme));
+        out.extend(entry_lines(entry, modes, width, theme, spinner));
     }
     out
 }
@@ -580,6 +606,28 @@ pub fn visible_lines(
     start: usize,
     height: usize,
     theme: &Theme,
+) -> (usize, Vec<Line<'static>>) {
+    visible_lines_with(
+        entries,
+        modes,
+        width,
+        start,
+        height,
+        theme,
+        crate::spinner::Frame::default(),
+    )
+}
+
+/// [`visible_lines`] with the live spinner frame (ADR 0027): the frame lays out
+/// only the visible entries, so the spinner is what makes it redraw every tick.
+pub fn visible_lines_with(
+    entries: &mut [Entry],
+    modes: DisplayModes,
+    width: usize,
+    start: usize,
+    height: usize,
+    theme: &Theme,
+    spinner: crate::spinner::Frame,
 ) -> (usize, Vec<Line<'static>>) {
     let __t = std::time::Instant::now();
     let counts: Vec<usize> = entries
@@ -627,7 +675,7 @@ pub fn visible_lines(
             }
             let skip = start.saturating_sub(line);
             let blocks = blocks::blocks_for(entry, modes.reasoning);
-            let body = blocks::layout(entry, &blocks, modes, width);
+            let body = blocks::layout_with(entry, &blocks, modes, width, spinner);
             let prefix = marker_prefix(entry.kind);
             let prefix_style = marker(entry.kind, theme).1;
             let style = body_style(entry, theme);
@@ -656,6 +704,7 @@ pub fn visible_lines(
                             Some(i) == first_text,
                             band,
                             width,
+                            spinner,
                         );
                         if Some(i) == last && entry.interrupted {
                             line.spans
@@ -1254,11 +1303,22 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     app.set_transcript_width(width);
     let modes = app.display_modes();
     let t_draw = std::time::Instant::now();
-    let (total, _) = visible_lines(&mut app.entries, modes, width, 0, 0, &theme);
+    // The live spinner frame (ADR 0027): computed once per frame from the loop's
+    // clock, so a live reasoning line and the input rule animate.
+    let spinner = app.spinner_frame();
+    let (total, _) = visible_lines_with(&mut app.entries, modes, width, 0, 0, &theme, spinner);
     radian_session::trace::took("draw/measure", t_draw);
     app.set_viewport(chunks[0].height, total);
     let t_window = std::time::Instant::now();
-    let (_, visible) = visible_lines(&mut app.entries, modes, width, app.scroll, height, &theme);
+    let (_, visible) = visible_lines_with(
+        &mut app.entries,
+        modes,
+        width,
+        app.scroll,
+        height,
+        &theme,
+        spinner,
+    );
     radian_session::trace::took("draw/window", t_window);
     let visible = match app.find_state() {
         Some(find) => visible
@@ -1468,6 +1528,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             } else {
                 Style::default()
             };
+            // The input rule's running status (ADR 0027): the spinner frame and
+            // the state text on the top rule; idle has neither.
+            let status = app.spinner_status();
+            let spin = app.spinner_frame();
             // Both styles reserve the same two rows (rules / borders), so the rest of the
             // layout does not depend on the choice.
             match app.input_style {
@@ -1494,9 +1558,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                             })
                             .collect()
                     };
-                    let block = Block::default()
+                    let mut block = Block::default()
                         .borders(Borders::TOP | Borders::BOTTOM)
                         .border_style(app.theme.hint);
+                    if let Some(status) = status {
+                        // `── ◜  Working ` over the top rule (two spaces between the spinner
+                        // and the text, ADR 0027).
+                        block = block.title(Line::from(vec![
+                            Span::styled("── ", app.theme.hint),
+                            Span::styled(spin.glyph, app.spinner_style(spin)),
+                            Span::styled(format!("  {status} "), app.theme.turn_running),
+                        ]));
+                    }
                     frame.render_widget(Paragraph::new(body).block(block), input_area);
                 }
                 InputStyle::Box => {
@@ -1525,11 +1598,21 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                             ]));
                         }
                     }
+                    let title: Line = match status {
+                        // The status replaces the box's ` message ` title while running
+                        // (ADR 0027: the same content on the border's top edge).
+                        Some(status) => Line::from(vec![
+                            Span::styled(" ", accent),
+                            Span::styled(spin.glyph, app.spinner_style(spin)),
+                            Span::styled(format!("  {status} "), app.theme.turn_running),
+                        ]),
+                        None => Line::from(" message "),
+                    };
                     let block = Block::default()
                         .borders(Borders::ALL)
                         .border_type(ratatui::widgets::BorderType::Rounded)
                         .border_style(accent)
-                        .title(" message ");
+                        .title(title);
                     frame.render_widget(Paragraph::new(body).block(block), input_area);
                 }
             }

@@ -1491,6 +1491,11 @@ mod tests {
     /// added here.
     const VERIFIED_COVERED: &str = "»│━─×▖▘▝▗";
 
+    /// The documented exceptions to the coverage rule (ADR 0027/10): the owner
+    /// picked the arc and the pulse after seeing them, and braille is an opt-in, so these may
+    /// fall back to another font. Kept separate so the rest of the check is not loosened.
+    const DOCUMENTED_EXCEPTIONS: &str = "◜◝◞◟⏺⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
+
     fn app_with_glyphs(name: &str) -> App {
         let mut app = App::new("mock", "s");
         let config = radian_host::config::TuiFooterConfig {
@@ -1535,6 +1540,25 @@ mod tests {
         }
     }
 
+    /// The arc frames and the pulse glyph are the only coverage exceptions, and they are
+    /// exactly the ones the ADR documents (revisions 9/10).
+    #[test]
+    fn the_spinner_exceptions_are_documented() {
+        for glyph in crate::spinner::ARC
+            .iter()
+            .chain(crate::spinner::BRAILLE.iter())
+        {
+            for ch in glyph.chars() {
+                assert!(DOCUMENTED_EXCEPTIONS.contains(ch), "{glyph}");
+            }
+        }
+        assert!(DOCUMENTED_EXCEPTIONS.contains('⏺'));
+        // The quadrant frames are the covered optional set.
+        for glyph in crate::spinner::QUADRANT {
+            assert!(VERIFIED_COVERED.contains(glyph), "{glyph}");
+        }
+    }
+
     /// The unicode tier only draws glyphs the seven checked fonts all have. Every item glyph
     /// (from the built-in presets), the spinner frames, the separators, the context bar and
     /// the auto marker are checked.
@@ -1555,7 +1579,16 @@ mod tests {
         }
         glyphs.extend(brand_mark(Glyphs::Unicode).chars());
         glyphs.extend(Glyphs::Unicode.tool_status().iter().flat_map(|s| s.chars()));
-        glyphs.extend(crate::blocks::SPINNER);
+        // The spinner's covered sets (quadrant/braille/ascii); `arc` and `pulse` are the
+        // documented exceptions, checked separately below.
+        for glyph in crate::spinner::glyphs() {
+            for ch in glyph.chars() {
+                if DOCUMENTED_EXCEPTIONS.contains(ch) {
+                    continue;
+                }
+                glyphs.push(ch);
+            }
+        }
         glyphs.extend("━─".chars());
         glyphs.extend(" ~".chars());
         for ch in glyphs {
