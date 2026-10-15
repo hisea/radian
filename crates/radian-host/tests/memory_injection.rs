@@ -294,6 +294,11 @@ async fn a_later_turn_appends_its_new_hits_as_one_system_message() {
             .is_none(),
         "a turn with no hit sends nothing"
     );
+    // A record the fixed block already carries is never appended, even when the turn hits it.
+    assert!(
+        injection.addition_for_turn("style", &transcript).is_none(),
+        "a record in the fixed block is not appended again"
+    );
     assert_eq!(
         injected_sets(&Session::open(dir.join("s.jsonl")).unwrap()).len(),
         2
@@ -371,6 +376,48 @@ async fn an_addition_budget_drops_whole_records_and_additions_can_be_off() {
     assert!(
         injection.addition_for_turn("parser", &transcript).is_none(),
         "additions = false sends nothing"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn the_hook_orders_the_block_by_the_first_user_message() {
+    let dir = scratch("hook-first");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let service = MemoryService::open(&ws, dir.join("memory"));
+    service.create_project().unwrap();
+    for content in ["about parsers", "about styles"] {
+        service
+            .add(WriteScope::Project, Kind::Fact, None, content.into())
+            .unwrap();
+    }
+    let (warn, _) = warn_sink();
+    let hooks = MemoryHooks::new(
+        Some(service),
+        journal(&dir),
+        InjectionConfig::default(),
+        warn,
+    );
+
+    // The request is a later turn of a session: the first user message is the session's first,
+    // and the last is this turn's. Only the first may decide the order (decision 1). In a
+    // normal turn the addition seam computes the block first, so this is the hook's own path —
+    // the one a process with `additions = false` takes.
+    let mut req = request("styles");
+    req.messages = vec![
+        Message::user("parsers"),
+        Message::assistant("ok"),
+        Message::user("styles"),
+    ];
+    hooks.before_model_call(&context(), &mut req).await.unwrap();
+    let system = req.system_prompt.unwrap();
+    let parsers = system.find("about parsers").expect("injected");
+    let styles = system.find("about styles").expect("injected");
+    assert!(
+        parsers < styles,
+        "the block is ranked by the first user message, not the last:\n{system}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

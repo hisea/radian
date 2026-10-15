@@ -6109,8 +6109,9 @@ async fn a_resumed_session_ranks_the_block_by_its_first_user_message() {
         ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
     ];
 
-    // The first process opens the session with the text the block is ranked by.
-    let server = MockServer::start(vec![text_reply("one")]).await;
+    // The first process opens the session with the text the block is ranked by, then takes a
+    // second turn whose text would order the records the other way round.
+    let server = MockServer::start(vec![text_reply("one"), text_reply("two")]).await;
     let (code, _, stderr) = feed_and_wait(
         spawn_radian(
             &[
@@ -6122,12 +6123,10 @@ async fn a_resumed_session_ranks_the_block_by_its_first_user_message() {
                 env.ws.to_str().unwrap(),
                 "--session-id",
                 "resumed",
-                "-p",
-                "parsers",
             ],
             &envs,
         ),
-        "",
+        "parsers\nstyles\n",
     )
     .await;
     assert_eq!(code, 0, "{stderr}");
@@ -6137,10 +6136,16 @@ async fn a_resumed_session_ranks_the_block_by_its_first_user_message() {
         .expect("the record is injected");
     let styles_at = opened.find("about styles").expect("the record is injected");
     assert!(parsers_at < styles_at, "ranked by its own prompt: {opened}");
+    assert_eq!(
+        memory_block(messages_of(&server, 1)[0]["content"].as_str().unwrap()),
+        opened,
+        "the block does not move between turns"
+    );
 
     // The resume asks about styles instead: the block is still ranked by the session's first
-    // user message, and the memory did not change, so the bytes are the same.
-    let server = MockServer::start(vec![text_reply("two")]).await;
+    // user message (not by the previous turn's, and not by this one), and the memory did not
+    // change, so the bytes are the same.
+    let server = MockServer::start(vec![text_reply("three")]).await;
     let (code, _, stderr) = feed_and_wait(
         spawn_radian(
             &[
@@ -6163,6 +6168,88 @@ async fn a_resumed_session_ranks_the_block_by_its_first_user_message() {
     assert_eq!(code, 0, "{stderr}");
     let resumed = memory_block(messages_of(&server, 0)[0]["content"].as_str().unwrap());
     assert_eq!(resumed, opened, "the same query and the same memory");
+}
+
+/// ADR 0021, across a **fork**: the child inherits the parent's
+/// transcript, so its block is ranked by the parent's first user message, not by the prompt the
+/// child is resumed with.
+#[tokio::test]
+async fn a_forked_child_ranks_the_block_by_the_parents_first_user_message() {
+    let env = MemoryEnv::new("mem-fork-first");
+    let (code, _, stderr) = env.run(&["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    for (key, content) in [("parsers", "about parsers"), ("styles", "about styles")] {
+        let (code, _, stderr) = env.run(&["add", "--key", key, content]).await;
+        assert_eq!(code, 0, "{stderr}");
+    }
+    let envs = [
+        ("RADIAN_HOME", env.home.to_str().unwrap()),
+        ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
+    ];
+
+    // The parent opens with the text its block is ranked by, then takes a second turn whose
+    // text would order the records the other way round.
+    let server = MockServer::start(vec![text_reply("one"), text_reply("two")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                env.ws.to_str().unwrap(),
+                "--session-id",
+                "parent",
+            ],
+            &envs,
+        ),
+        "parsers\nstyles\n",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let parent = memory_block(messages_of(&server, 0)[0]["content"].as_str().unwrap());
+    assert!(
+        parent.find("about parsers").unwrap() < parent.find("about styles").unwrap(),
+        "{parent}"
+    );
+    assert_eq!(
+        memory_block(messages_of(&server, 1)[0]["content"].as_str().unwrap()),
+        parent,
+        "the block does not move between the parent's turns"
+    );
+
+    // The fork copies the parent's history; the child's own prompt is about styles.
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_radian(&["--fork", "parent", "--session-id", "child"], &envs),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("forked parent"), "{stdout}");
+    let server = MockServer::start(vec![text_reply("two")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                env.ws.to_str().unwrap(),
+                "--resume",
+                "child",
+                "-p",
+                "styles",
+            ],
+            &envs,
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let child = memory_block(messages_of(&server, 0)[0]["content"].as_str().unwrap());
+    assert_eq!(child, parent, "the inherited first user message decides");
 }
 
 /// ADR 0021: the fixed block is ranked by the session's **first** user
