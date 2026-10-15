@@ -169,6 +169,7 @@ pub fn view(
 }
 
 /// One item row: the cursor, the label, the description column and the `● current` marker.
+/// The whole row never exceeds `width` display columns.
 fn row_line(
     theme: &Theme,
     item: &Item,
@@ -184,29 +185,37 @@ fn row_line(
     };
     let cursor = if is_selected { cursor(ascii) } else { "  " };
     let mut spans = vec![Span::styled(cursor.to_string(), selected_style)];
+    let mut used = 2usize;
     let marker = if item.current {
         if ascii { " * current" } else { " ● current" }
     } else {
         ""
     };
-    let description = item.description.clone().unwrap_or_default();
-    let mut used = 2 + UnicodeWidthStr::width(item.label.as_str());
-    spans.push(Span::styled(item.label.clone(), selected_style));
-    if two_columns && !description.is_empty() {
-        let pad = PRIMARY_COLUMN.saturating_sub(used).max(1);
-        let pad = pad.min(width.saturating_sub(used));
+    let marker_width = UnicodeWidthStr::width(marker);
+    let description = item.description.as_deref().unwrap_or("");
+    if two_columns && !description.is_empty() && width > 2 {
+        let label = truncate(&item.label, PRIMARY_COLUMN.min(width - used));
+        used += UnicodeWidthStr::width(label.as_str());
+        spans.push(Span::styled(label, selected_style));
+        let pad = PRIMARY_COLUMN
+            .saturating_sub(used)
+            .max(1)
+            .min(width.saturating_sub(used + marker_width));
         spans.push(Span::raw(" ".repeat(pad)));
         used += pad;
-        let room = width.saturating_sub(used + UnicodeWidthStr::width(marker));
-        spans.push(Span::styled(
-            truncate(&description, room.max(MIN_DESCRIPTION.min(room))),
-            theme.truncation,
-        ));
-    } else if used + UnicodeWidthStr::width(marker) > width {
-        // No room for the marker: drop it rather than overflow.
-        return Line::from(spans);
+        let room = width.saturating_sub(used + marker_width);
+        // The description column only exists when it can hold a useful amount.
+        if room >= MIN_DESCRIPTION {
+            let description = truncate(description, room);
+            used += UnicodeWidthStr::width(description.as_str());
+            spans.push(Span::styled(description, theme.truncation));
+        }
+    } else {
+        let label = truncate(&item.label, width.saturating_sub(used + marker_width));
+        used += UnicodeWidthStr::width(label.as_str());
+        spans.push(Span::styled(label, selected_style));
     }
-    if !marker.is_empty() {
+    if !marker.is_empty() && used + marker_width <= width {
         spans.push(Span::styled(marker.to_string(), theme.truncation));
     }
     Line::from(spans)
