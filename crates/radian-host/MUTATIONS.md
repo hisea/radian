@@ -695,3 +695,23 @@ Base `eb7ec96` · 一次性 detached worktree `/tmp/bg2-mut`（跑完 `git workt
 
 3/3 抓住。N4 是「孤儿被重新上报/重跑」这条的最近可测变异：设计上恢复只**上报一次**、绝不重跑
 （ADR 0037 决定 6），代码里没有重跑路径，所以没有「真的重跑」的单行变异。
+## switch-replay: the `/model` switch path carries the reasoning replay (2026-10-15)
+
+Worktree `.radian-worktrees/ab3-radian`, branch `dogfood/ab3-switch-replay` (base `a39738f`).
+Each mutation was made in place, restored from a copy in `/tmp` and compared with `cmp`
+(identical); `git status --short` then showed only the two new test files. Every run used
+`--no-fail-fast`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| SR-S1 | `RouteContext::args_for` (the `/model` switch path, `src/model.rs:480`) builds `reasoning_replay` as `None` instead of `resolve_reasoning_replay(&provider_ref, model)` | caught (rc=101, **exactly one** failure in `-p radian-host --no-fail-fast`) | `switch_reasoning_replay::the_switch_path_carries_the_reasoning_replay` — `left: None, right: Some("reasoning_content")` for `opencode-go/deepseek-v4.1-flash` |
+| SR-S2 | `route_replays_reasoning` returns `false` (the switched route's budget no longer counts reasoning) | caught (rc=101) | `switch_reasoning_budget::a_switched_route_counts_reasoning_exactly_when_it_replays_it`; `switch_reasoning_replay::the_switch_path_carries_the_reasoning_replay` (the "budget's answer matches the request's field" assertion); and the pre-existing `reasoning_replay::the_catalog_and_a_named_override_decide_reasoning_replay` |
+
+SR-S1 is the hole this task closed. Under it nothing else failed: the rest of `radian-host`
+(276 lib tests and 15 other integration files, 87 tests), `radian-tui`'s
+`tests/model_switch.rs` (16 tests) and the whole `radian-tui`/`agent-cli` suites stayed green.
+(`-p radian-tui -p agent-cli` needs `cargo build -p agent-extensions --bin mcp-fixture` first;
+without it 11 tests fail on "mcp-fixture is not built", which is unrelated to this decision —
+they were re-run green after the fixture was built.) SR-S2 was already caught by
+`reasoning_replay.rs`; the two new tests pin the same decision on the switch path, where
+`args_for` and the budget resolver are two separate resolutions that must agree.
