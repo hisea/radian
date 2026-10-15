@@ -13,7 +13,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use radian_permissions::ApprovalRequest;
 
 use crate::app::{
-    App, Entry, EntryKind, Modal, TurnState, budget_status_text, mcp_text, usage_text,
+    App, Entry, EntryKind, Modal, TrustWizard, TurnState, budget_status_text, mcp_text, usage_text,
 };
 use crate::blocks::{self, BodyLine};
 use crate::login::LoginWizard;
@@ -820,6 +820,48 @@ fn login_height(
     login_panel(wizard, width, theme, glyphs).len() as u16
 }
 
+/// The startup project-trust panel (ADR 0031 T3, ADR 0035): the shared panel with
+/// the workspace line, the choices through [`crate::select_list`], and the hardcoded key
+/// hints. The cursor's default is the fail-safe `UntrustHere`.
+pub fn trust_panel(
+    wizard: &TrustWizard,
+    width: usize,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+) -> Vec<Line<'static>> {
+    let ascii = glyphs == crate::footer::Glyphs::Ascii;
+    let inner = width.saturating_sub(4).max(1);
+    let items: Vec<crate::select_list::Item> = wizard
+        .choices
+        .iter()
+        .map(|choice| crate::select_list::Item::new(wizard.label(*choice)))
+        .collect();
+    let list =
+        crate::select_list::view(theme, &items, "", wizard.cursor, items.len(), inner, ascii);
+    let mut panel = crate::panel::Panel::new("project trust").row(Line::from(Span::styled(
+        format!("project resources found in {}", wizard.workspace.display()),
+        theme.text,
+    )));
+    for line in list.lines {
+        panel = panel.row(line);
+    }
+    panel = panel
+        .hint("↑/↓", "choose")
+        .hint("⏎", "select")
+        .hint("esc", "do not trust");
+    panel.lines(width, theme, glyphs)
+}
+
+/// The trust panel's height, measured from the panel itself.
+fn trust_height(
+    wizard: &TrustWizard,
+    width: usize,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+) -> u16 {
+    trust_panel(wizard, width, theme, glyphs).len() as u16
+}
+
 /// The error style for wizard problems (a note-colored line; no new theme role).
 /// The input area's height: one rule above, the text rows, one rule below.
 fn input_height(app: &App, width: usize) -> u16 {
@@ -1237,8 +1279,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
         // The `/logout` confirmation is a two-line box like the `/memory` one.
         Some(Modal::ConfirmLogout(_)) => 4,
-        // The trust prompt lists up to five options plus a header and a key line.
-        Some(Modal::Trust(wizard)) => wizard.choices.len() as u16 + 3,
+        // The trust prompt lists up to five options plus a header and the two borders.
+        Some(Modal::Trust(wizard)) => {
+            trust_height(wizard, area.width as usize, &app.theme, app.footer_glyphs())
+        }
         _ => input_height(app, area.width as usize),
     };
     // The widget lines are part of the middle block.
@@ -1402,33 +1446,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             frame.render_widget(Paragraph::new(lines), input_area);
         }
         Some(Modal::Trust(wizard)) => {
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(app.theme.approval_border)
-                .title(" project trust ");
-            frame.render_widget(&block, chunks[2]);
-            let inner = block.inner(chunks[2]);
-            let mut lines = vec![Line::from(format!(
-                "project resources found in {}",
-                wizard.workspace.display()
-            ))];
-            for (index, choice) in wizard.choices.iter().enumerate() {
-                let marker = if index == wizard.cursor { "> " } else { "  " };
-                let style = if index == wizard.cursor {
-                    app.theme.approval_border
-                } else {
-                    Style::default()
-                };
-                lines.push(Line::from(Span::styled(
-                    format!("{marker}{}", wizard.label(*choice)),
-                    style,
-                )));
-            }
-            lines.push(Line::from(Span::styled(
-                "Up/Down choose   Enter select   Esc = do not trust",
-                app.theme.hint,
-            )));
-            frame.render_widget(Paragraph::new(lines), inner);
+            let lines = trust_panel(
+                wizard,
+                chunks[2].width as usize,
+                &app.theme,
+                app.footer_glyphs(),
+            );
+            frame.render_widget(Paragraph::new(lines), chunks[2]);
         }
         Some(Modal::ConfirmLogout(provider)) => {
             let block = Block::default()

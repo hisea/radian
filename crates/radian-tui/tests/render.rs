@@ -67,9 +67,9 @@ fn style_of(terminal: &Terminal<TestBackend>, needle: &str) -> Option<ratatui::s
             line.push_str(buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
         }
         if let Some(col) = line.find(needle) {
-            // The first character of the match is at display column `col`, but wide cells
-            // shift columns; for ASCII markers they coincide.
-            let x = area.left() + col as u16;
+            // `col` is a byte offset; the buffer column is the display width of the prefix
+            // (wide cells shift it, so `↑` or CJK would otherwise read the wrong cell).
+            let x = area.left() + unicode_width::UnicodeWidthStr::width(&line[..col]) as u16;
             return buffer.cell((x, y)).map(|c| c.style());
         }
     }
@@ -1878,14 +1878,60 @@ fn the_login_wizard_uses_the_text_hierarchy() {
     assert!(text.contains("choose a provider"), "{text}");
     let prompt = style_of(&terminal, "choose").expect("the prompt");
     assert_eq!(prompt.fg, app.theme.text.fg, "the prompt is main text");
-    let hint = style_of(&terminal, "(↑/↓,").expect("the key hint");
+    // ADR 0035: the key hints live in the panel's bottom border (dim keys).
+    let hint = style_of(&terminal, "↑/↓").expect("the key hint");
     assert_eq!(hint.fg, app.theme.hint.fg, "the key hint is weak");
-    // The first choice row is the selection: the emphasis (accent) role.
-    let selected = style_of(&terminal, ">").expect("the selected row");
-    assert_eq!(
-        selected.fg, app.theme.notice_label.fg,
-        "the selected row is the emphasis"
+    // The first choice row is the selection: the shared list's emphasis (bold cursor).
+    let selected = style_of(&terminal, "❯").expect("the selected row");
+    assert!(
+        selected
+            .add_modifier
+            .contains(ratatui::style::Modifier::BOLD),
+        "the selected row is emphasized"
     );
+}
+
+/// The startup trust modal (ADR 0031 T3, ADR 0035): the shared panel with the
+/// choices through the shared list, at 80/120 columns and in the ascii tier. The cursor's
+/// default is the fail-safe `UntrustHere`.
+#[test]
+fn the_trust_panel_snapshot_at_80_120_and_ascii() {
+    let mut app = App::new("m", "s");
+    app.push_trust_modal(std::path::PathBuf::from("/work/example"));
+
+    let terminal = render(&mut app, 80, 24);
+    let text = screen(&terminal);
+    assert!(text.contains("╭─ project trust "), "{text}");
+    assert!(
+        text.contains("project resources found in /work/example"),
+        "{text}"
+    );
+    assert!(
+        text.contains("❯ Do not trust this directory (/work/example)"),
+        "the fail-safe default: {text}"
+    );
+    assert!(
+        text.contains("↑/↓ choose · ⏎ select · esc do not trust"),
+        "{text}"
+    );
+
+    let terminal = render(&mut app, 120, 24);
+    let text = screen(&terminal);
+    assert!(text.contains("╭─ project trust "), "{text}");
+    assert!(
+        text.contains("Trust the parent directory (/work)"),
+        "{text}"
+    );
+
+    app.apply_footer(&radian_host::config::TuiFooterConfig {
+        glyphs: Some("ascii".into()),
+        ..Default::default()
+    });
+    let terminal = render(&mut app, 80, 24);
+    let text = screen(&terminal);
+    assert!(text.contains("+- project trust "), "{text}");
+    assert!(text.contains("> Do not trust this directory"), "{text}");
+    assert!(!text.contains('╭'), "{text}");
 }
 
 /// The display modes most tests lay out with: both folds expanded, so a test's geometry does
