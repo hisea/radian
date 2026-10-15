@@ -523,3 +523,14 @@ Base `60b1976` · 一次性 worktree `/tmp/radian-mut-gcfix` · 每条跑完 `gi
 
 2/2 抓住。威胁测试 `the_fsmonitor_threat_is_real_without_the_defense` 是 canary：裸 `git add`
 带 `core.fsmonitor` 会写标记（已在 git 2.53.0 上证明），证明这条防线不是多余的。
+
+## git-commit-fix 审查：`core.hooksPath` 放公共参数（2026-10-16）
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| GCF-C | 从 `common_args` 去掉 `core.hooksPath=/dev/null`（`git add` 就不再带） | `every_git_call_disables_the_dangerous_repo_config` 与 `the_post_index_change_hook_does_not_run` | ✅ |
+
+威胁 canary `the_post_index_change_threat_is_real_without_the_defense`：仓库配置
+`core.hooksPath=.husky` + 工作区里会写标记的 `.husky/post-index-change`，裸 `git add` 会写标记
+（git 2.53.0 实测）。`RepoPin::still` 的文件系统预检（新冒出的 `.git` 先于 `git rev-parse` 拒绝）
+是纵深防御，去掉它行为上仍拒绝（rev-parse 会解析到新仓库而判定不同），所以没有对应变异。
