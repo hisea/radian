@@ -1,17 +1,23 @@
-//! The structured-question form (ADR 0024 Q7): the state of one `ask_user` request, as a
-//! [`Modal`](crate::app::Modal) over the transcript.
+//! The structured-question form (ADR 0024 Q7 and revision 1): the state of one `ask_user`
+//! request, as a [`Modal`](crate::app::Modal) over the transcript.
 //!
 //! Pure, like [`App`](crate::app::App): it turns keys into state changes and, at the end, one
 //! [`QuestionAnswer`]. It never answers the queue itself — the loop does, through the facade.
 //!
-//! The form's own keys come from the keymap's `form` layer (rebindable, ADR 0024 Q7); the
-//! approval and confirmation keys stay hardcoded. A `text` question and the `Other` row reuse
-//! [`Composer`], so editing behaves exactly like the message box.
+//! Revision 1's shape: the questions are **tabs** (the last tab is `Submit`), the current
+//! question shows its options (or a text field), and the panel's bottom border carries the key
+//! hints (R2). The form's own keys come from the keymap's `form` layer (rebindable, ADR 0024
+//! Q7); `n` (a note) and `alt-h` (hide) are the form's own additions. A `text` question, the
+//! `Other` row and a note reuse [`Composer`], so editing behaves exactly like the message box.
 
 use radian_coding::{Question, QuestionAnswer, QuestionKind, QuestionReply};
 
 use crate::composer::Composer;
 use crate::keys::Action;
+use crate::panel::Hint;
+
+/// The tab label's display width cap (ADR 0024 R4, revision 2: no scrolling).
+pub const MAX_TAB_WIDTH: usize = 16;
 
 /// One question's in-progress answer.
 #[derive(Debug, Default)]
@@ -24,6 +30,8 @@ pub struct FormAnswer {
     pub other: bool,
     /// The free text: a `text` answer, or the `Other` text.
     pub text: Composer,
+    /// The optional note (ADR 0024 R4).
+    pub note: Composer,
 }
 
 /// The form for one request.
@@ -35,10 +43,14 @@ pub struct QuestionForm {
     pub origin: String,
     pub questions: Vec<Question>,
     pub answers: Vec<FormAnswer>,
-    /// The question shown, or `None` for the overview.
+    /// The shown tab: a question index, or `None` for the `Submit` tab.
     pub current: Option<usize>,
     /// The first `Esc` set this; the second declines (ADR 0024 Q7).
     pub confirm_decline: bool,
+    /// `alt-h`: the panel is collapsed to one line so the transcript is readable (R3).
+    pub hidden: bool,
+    /// The note being edited, when `n` opened one (R3).
+    pub editing_note: Option<usize>,
 }
 
 /// What one key produced.
@@ -46,7 +58,7 @@ pub struct QuestionForm {
 pub enum FormOutcome {
     /// The form handled the key and stays up.
     Stay,
-    /// The overview's submit could not proceed: this required question has no answer.
+    /// The submit could not proceed: this required question has no answer.
     Blocked(String),
     /// Submit: the answers.
     Answer(QuestionAnswer),
@@ -59,8 +71,10 @@ pub enum FormOutcome {
 pub enum FormKey {
     /// A `form`-layer action (rebindable), or a composer-editing action for the focused field.
     Action(Action),
-    /// A printable character for the focused field.
+    /// A printable character for the focused field (or the form's own `n`).
     Char(char),
+    /// `alt-h`: collapse or show the panel (R3).
+    Hide,
 }
 
 impl QuestionForm {
@@ -73,6 +87,8 @@ impl QuestionForm {
             answers,
             current: Some(0),
             confirm_decline: false,
+            hidden: false,
+            editing_note: None,
         }
     }
 
@@ -85,7 +101,7 @@ impl QuestionForm {
         self.questions.is_empty()
     }
 
-    /// The question shown, or `None` for the overview.
+    /// The question shown, or `None` for the `Submit` tab.
     pub fn current_question(&self) -> Option<&Question> {
         self.current.and_then(|index| self.questions.get(index))
     }
@@ -116,6 +132,28 @@ impl QuestionForm {
         match question.kind {
             QuestionKind::Text => true,
             _ => question.allow_other && answer.cursor == question.options.len(),
+        }
+    }
+
+    /// Whether the current question's note field is being edited (`n`).
+    pub fn note_focused(&self) -> bool {
+        self.editing_note.is_some() && self.editing_note == self.current
+    }
+
+    fn note_mut(&mut self) -> Option<&mut Composer> {
+        if !self.note_focused() {
+            return None;
+        }
+        let index = self.editing_note?;
+        self.answers.get_mut(index).map(|answer| &mut answer.note)
+    }
+
+    /// The focused composer: the note while editing one, else the `Other`/`text` field.
+    fn composer_mut(&mut self) -> Option<&mut Composer> {
+        if self.note_focused() {
+            self.note_mut()
+        } else {
+            self.text_mut()
         }
     }
 
@@ -158,6 +196,7 @@ impl QuestionForm {
                 QuestionKind::Text => QuestionReply {
                     id: question.id.clone(),
                     text: Some(answer.text.text()).filter(|text| !text.is_empty()),
+                    note: note_of(answer),
                     ..QuestionReply::default()
                 },
                 _ => QuestionReply {
@@ -167,119 +206,200 @@ impl QuestionForm {
                     other: (question.allow_other && answer.other)
                         .then(|| answer.text.text())
                         .filter(|text| !text.is_empty()),
-                    note: None,
+                    note: note_of(answer),
                 },
             })
             .collect();
         QuestionAnswer::new(format!("q-{}", self.request_id), replies)
     }
 
+    /// The tab labels: each question's `header` truncated to [`MAX_TAB_WIDTH`], a completion
+    /// mark on an answered one, then `Submit` (ADR 0024 R2, revision 2: no
+    /// scrolling — each label is capped and the row is clipped).
+    pub fn tab_labels(&self) -> Vec<(String, bool)> {
+        let mut tabs: Vec<(String, bool)> = self
+            .questions
+            .iter()
+            .zip(&self.answers)
+            .map(|(question, answer)| {
+                let answered = Self::is_answered(question, answer);
+                let mark = if answered { "✓ " } else { "" };
+                (
+                    crate::render::clip_display(
+                        &format!("{mark}{}", question.header()),
+                        MAX_TAB_WIDTH,
+                    ),
+                    answered,
+                )
+            })
+            .collect();
+        tabs.push(("Submit".to_string(), false));
+        tabs
+    }
+
+    /// The bottom-border key hints, which change with the current tab (R2/R3).
+    pub fn hints(&self) -> Vec<Hint> {
+        let mut hints = Vec::new();
+        if let Some(question) = self.current_question() {
+            match question.kind {
+                QuestionKind::Single => {
+                    hints.push(Hint::new("⏎", "select"));
+                    hints.push(Hint::new("n", "note"));
+                }
+                QuestionKind::Multi => {
+                    hints.push(Hint::new("space", "toggle"));
+                    hints.push(Hint::new("⏎", "next"));
+                }
+                QuestionKind::Text => {}
+            }
+        } else {
+            hints.push(Hint::new("⏎", "submit"));
+        }
+        hints.push(Hint::new("↑/↓", "move"));
+        hints.push(Hint::new("⇥/←/→", "question"));
+        hints.push(Hint::new("esc", "cancel"));
+        hints.push(Hint::new("alt-h", "hide"));
+        hints
+    }
+
     /// Handles one key. The form stays up unless it submitted or declined.
     pub fn key(&mut self, key: FormKey) -> FormOutcome {
         match key {
+            FormKey::Hide => {
+                self.hidden = !self.hidden;
+            }
             FormKey::Char(c) => {
                 self.confirm_decline = false;
-                if let Some(text) = self.text_mut() {
+                if let Some(note) = self.note_mut() {
+                    note.insert_char(c);
+                } else if let Some(text) = self.text_mut() {
                     text.insert_char(c);
+                } else if c == 'n' {
+                    // `n` opens a note for the current question (R3).
+                    self.editing_note = self.current;
                 }
             }
-            FormKey::Action(action) => match action {
-                Action::FormDecline => {
-                    if self.confirm_decline {
-                        return FormOutcome::Decline;
-                    }
-                    self.confirm_decline = true;
-                }
-                Action::FormNext => {
-                    self.confirm_decline = false;
-                    self.move_question(1);
-                }
-                Action::FormPrev => {
-                    self.confirm_decline = false;
-                    self.move_question(-1);
-                }
-                Action::FormUp => {
-                    self.confirm_decline = false;
-                    self.move_cursor(-1);
-                }
-                Action::FormDown => {
-                    self.confirm_decline = false;
-                    self.move_cursor(1);
-                }
-                Action::FormSelect => {
-                    self.confirm_decline = false;
-                    self.select();
-                }
-                Action::FormSubmit => {
-                    self.confirm_decline = false;
-                    return self.submit();
-                }
-                // The composer's editing actions, for the focused free-text field.
-                other => {
-                    self.confirm_decline = false;
-                    if let Some(text) = self.text_mut() {
-                        match other {
-                            Action::CursorLeft => {
-                                text.left();
-                            }
-                            Action::CursorRight => {
-                                text.right();
-                            }
-                            Action::WordLeft => {
-                                text.word_left();
-                            }
-                            Action::WordRight => {
-                                text.word_right();
-                            }
-                            Action::LineStart => {
-                                text.line_start();
-                            }
-                            Action::LineEnd => {
-                                text.line_end();
-                            }
-                            Action::DeleteBefore => {
-                                text.backspace();
-                            }
-                            Action::DeleteUnder => {
-                                text.delete();
-                            }
-                            Action::DeleteWord => {
-                                text.delete_word();
-                            }
-                            Action::DeleteToLineStart => {
-                                text.kill_to_line_start();
-                            }
-                            Action::DeleteToLineEnd => {
-                                text.kill_to_line_end();
-                            }
-                            Action::Newline => {
-                                text.insert_char('\n');
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            },
+            FormKey::Action(action) => return self.action(action),
         }
         FormOutcome::Stay
     }
 
-    /// `Tab`/`Shift-Tab`: the next/previous question, wrapping.
-    fn move_question(&mut self, delta: isize) {
-        let count = self.questions.len();
-        if count == 0 {
-            return;
+    fn action(&mut self, action: Action) -> FormOutcome {
+        match action {
+            Action::FormDecline => {
+                // Esc cancels a note edit first; otherwise it confirms a decline.
+                if self.editing_note.is_some() {
+                    self.editing_note = None;
+                    self.confirm_decline = false;
+                } else if self.confirm_decline {
+                    return FormOutcome::Decline;
+                } else {
+                    self.confirm_decline = true;
+                }
+            }
+            Action::FormNext => {
+                self.confirm_decline = false;
+                self.move_tab(1);
+            }
+            Action::FormPrev => {
+                self.confirm_decline = false;
+                self.move_tab(-1);
+            }
+            Action::FormUp => {
+                self.confirm_decline = false;
+                self.move_cursor(-1);
+            }
+            Action::FormDown => {
+                self.confirm_decline = false;
+                self.move_cursor(1);
+            }
+            // `Space`: a `single` question selects without advancing; a `multi` toggles (R3).
+            Action::FormSelect => {
+                self.confirm_decline = false;
+                self.select();
+            }
+            // `Enter`: save a note, select-and-advance a `single`, toggle a `multi`, or submit.
+            Action::FormSubmit => {
+                self.confirm_decline = false;
+                if self.editing_note.is_some() {
+                    self.editing_note = None;
+                    return FormOutcome::Stay;
+                }
+                match self.current_question() {
+                    Some(question) if question.kind == QuestionKind::Multi => self.select(),
+                    Some(question) if question.kind == QuestionKind::Single => {
+                        self.select();
+                        self.move_tab(1);
+                    }
+                    Some(_) => self.move_tab(1),
+                    None => return self.submit(),
+                }
+            }
+            // The composer's editing actions, for the focused free-text field.
+            other => {
+                self.confirm_decline = false;
+                let composer = self.composer_mut();
+                if let Some(text) = composer {
+                    match other {
+                        Action::CursorLeft => {
+                            text.left();
+                        }
+                        Action::CursorRight => {
+                            text.right();
+                        }
+                        Action::WordLeft => {
+                            text.word_left();
+                        }
+                        Action::WordRight => {
+                            text.word_right();
+                        }
+                        Action::LineStart => {
+                            text.line_start();
+                        }
+                        Action::LineEnd => {
+                            text.line_end();
+                        }
+                        Action::DeleteBefore => {
+                            text.backspace();
+                        }
+                        Action::DeleteUnder => {
+                            text.delete();
+                        }
+                        Action::DeleteWord => {
+                            text.delete_word();
+                        }
+                        Action::DeleteToLineStart => {
+                            text.kill_to_line_start();
+                        }
+                        Action::DeleteToLineEnd => {
+                            text.kill_to_line_end();
+                        }
+                        Action::Newline => {
+                            text.insert_char('\n');
+                        }
+                        _ => {}
+                    }
+                }
+            }
         }
-        let current = self.current.map_or(0, |index| index as isize);
-        let next = (current + delta).rem_euclid(count as isize) as usize;
-        self.current = Some(next);
+        FormOutcome::Stay
+    }
+
+    /// `Tab`/`Shift-Tab`: the next/previous tab, wrapping through `Submit` (R3).
+    fn move_tab(&mut self, delta: isize) {
+        // The tabs are `0..len` then `Submit` (`None`).
+        let count = self.questions.len() + 1;
+        let current = self.current.map_or(self.questions.len(), |index| index);
+        let next = (current as isize + delta).rem_euclid(count as isize) as usize;
+        self.editing_note = None;
+        self.current = (next < self.questions.len()).then_some(next);
     }
 
     /// Up/Down: the option cursor of the current question (or the composer's own cursor in a
-    /// free-text field).
+    /// free-text field or a note).
     fn move_cursor(&mut self, delta: isize) {
-        if self.text_focused() {
-            if let Some(text) = self.text_mut() {
+        if self.note_focused() || self.text_focused() {
+            if let Some(text) = self.composer_mut() {
                 if delta < 0 {
                     text.up();
                 } else {
@@ -298,7 +418,7 @@ impl QuestionForm {
         answer.cursor = next;
     }
 
-    /// `Space`: choose the highlighted row.
+    /// `Space`/`Enter`: choose the highlighted row (a `multi` toggles, a `single` selects).
     fn select(&mut self) {
         let Some(index) = self.current else { return };
         let question = &self.questions[index];
@@ -335,23 +455,17 @@ impl QuestionForm {
         }
     }
 
-    /// `Enter`: the next question, the overview from the last one, or the submit in the
-    /// overview.
+    /// The `Submit` tab: answer, or the first unanswered required question.
     fn submit(&mut self) -> FormOutcome {
-        match self.current {
-            Some(index) if index + 1 < self.questions.len() => {
-                self.current = Some(index + 1);
-                FormOutcome::Stay
-            }
-            Some(_) => {
-                // The last question: go to the overview.
-                self.current = None;
-                FormOutcome::Stay
-            }
-            None => match self.first_unanswered_required() {
-                Some(question) => FormOutcome::Blocked(question.id.clone()),
-                None => FormOutcome::Answer(self.to_answer()),
-            },
+        match self.first_unanswered_required() {
+            Some(question) => FormOutcome::Blocked(question.id.clone()),
+            None => FormOutcome::Answer(self.to_answer()),
         }
     }
+}
+
+/// A non-empty note, or `None`.
+fn note_of(answer: &FormAnswer) -> Option<String> {
+    let text = answer.note.text();
+    (!text.is_empty()).then_some(text)
 }
