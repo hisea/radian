@@ -18,6 +18,7 @@ pub mod cost;
 mod describe;
 mod diagnostics;
 mod errors;
+mod escape;
 pub mod git_commit;
 mod headers;
 mod home;
