@@ -347,6 +347,12 @@ impl AccessWizard {
     }
 }
 
+impl Default for AccessWizard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// The startup trust modal's state (ADR 0031 T3): the workspace and the highlighted option.
 /// The default highlight is "do not trust this directory", so Enter is the
 /// fail-safe answer.
@@ -4046,7 +4052,7 @@ impl App {
                     if tier == crate::profile::Tier::FullAccess {
                         // `full` means no sandbox: confirm before opening it (ADR 0038
                         // decision 2). The panel's default focus is `cancel`.
-                        self.push_modal(Modal::AccessFull(Box::new(AccessWizard::new())));
+                        self.push_modal(Modal::AccessFull(Box::default()));
                         return UpdateResult::dirty();
                     }
                     UpdateResult::effect(Effect::SetAccess {
