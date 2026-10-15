@@ -251,3 +251,12 @@ Base `ea8d251` · 就地变异（改源码），每个变异前把文件复制�
 |---|---|---|---|
 | L1 | `number_lines` 的行号从 `start_line + index` 变成 `start_line + index + 1`（编号整体加一，中段 offset 不再对应用户给的行） | `read::read_prefixes_each_line_with_its_file_line_number`（中段读期望 `3: gamma`，变异给出 `4: gamma`） | ✅ |
 | L2 | `suggest_similar` 列目录从「请求文件所在目录」改成「工作区根」 | `read::a_missing_read_suggests_a_similar_name_from_the_same_directory`（应为 `deep/readme.md`，变异给出根目录的同名 `README.md`） | ✅ |
+
+### patch 分层匹配与 replace_all（piece 3）
+
+每个变异用 `cargo test -p radian-coding --test patch --no-fail-fast -- <test>`，跑完从副本还原并逐字节比较。
+
+| # | 变异（行为） | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| P3-1 | 第 2 层（排版字符归一化）只取第一个匹配（`take(1)`），非唯一也接受 | `patch::a_normalised_match_must_still_be_unique`（期望 `patch_ambiguous`，变异返回 Ok） | ✅ |
+| P3-2 | 写入前把结果里的 `\r\n` 全部换成 `\n`（CRLF 文件被改成 LF） | `patch::a_crlf_file_matches_an_lf_needle_and_stays_crlf`（期望字节含 `\r\n`） | ✅ |
