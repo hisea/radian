@@ -1093,3 +1093,22 @@ Base `edfa320` · 一次性 worktree `/tmp/radian-esc-mut2`，跑完 `git checko
 | ESC-M2 | Esc 映射回 `UntrustHere`（持久，会写 `trust.json`） | `update::tests::escaping_the_trust_modal_untrusts_this_session_only` | ✅ |
 
 1/1 抓住。（早先 ESC-M1「Esc → `TrustHere`」见上一节。）
+
+## glyphs（品牌字形与 unicode 档字形覆盖，ADR 0027）
+
+Base `45723f6` · 一次性 worktree `/tmp/radian-glyphs-mut`，每个变异跑完 `cp /tmp/glyphs-backup` 还原，最后 `git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| G-M1 | unicode 品牌改回 `㎭` | `footer::tests::the_brand_mark_is_per_glyph_set` | ✅ |
+| G-M2 | reasoning 的 unicode 图标改回未覆盖的 `◐` | `footer::tests::unicode_tier_glyphs_are_all_verified_covered` | ✅ |
+| G-M3 | spinner 改回未覆盖的 braille `⠋⠙⠸⠴` | 同上 | ✅ |
+| G-M4 | host 的 unicode 图标改回未覆盖的 `⌂` | 同上 | ✅ |
+
+4/4 抓住。
+
+（blocks2 合并后，在 `90dfd27` 重跑 G-M1..M4，并加 G-M5：unicode `tool_status` 改回未覆盖的 `⟳ ✔ ✘`；5/5 抓住。一次性 worktree `/tmp/radian-glyphs-mut2`，还原后 `git status --short` 为空。）
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| G-M5 | `Glyphs::Unicode.tool_status()` 改回 `⟳ ✔ ✘` | `footer::tests::unicode_tier_glyphs_are_all_verified_covered` | ✅ |

@@ -458,7 +458,7 @@ impl Pty {
                 // The expanded header and the first info line are at the **top** of the block;
                 // with the trust line the block can be taller than a 24-row pty, so accept a
                 // later info line that stays visible when the view is pinned to the bottom.
-                screen.contains("▼ startup information")
+                screen.contains("- startup information")
                     || screen.contains("profile:")
                     || screen.contains("ask_user:")
             }) {
@@ -7912,7 +7912,7 @@ async fn pty_the_pi_footer_is_two_rows() {
     // The model item is on the footer's first row; the tokens item on the second. The screen
     // text is one string, so both must be present, and the tokens glyph marks the second row.
     assert!(
-        pty.wait_for_screen("↑-", 10),
+        pty.wait_for_screen("^-", 10),
         "the tokens row is missing:\n{}",
         pty.screen()
     );
@@ -7956,7 +7956,7 @@ async fn pty_the_shipped_default_footer_is_two_rows_without_a_config() {
     // The shipped default is the `full` preset (ADR 0027): the identity row (brand,
     // model, repo/worktree) and the numbers row (tokens, speed, cost, context, elapsed).
     assert!(
-        first.contains('㎭') || first.contains("rad"),
+        first.contains('R') || first.contains("rad"),
         "the brand is on the first row: {first:?}"
     );
     assert!(
@@ -7968,7 +7968,7 @@ async fn pty_the_shipped_default_footer_is_two_rows_without_a_config() {
         "the repo/worktree name is on the identity row: {first:?}"
     );
     assert!(
-        second.contains('↑'),
+        second.contains('^'),
         "the numbers row shows the tokens: {second:?}"
     );
     assert!(
@@ -8016,7 +8016,7 @@ async fn pty_the_default_footer_drops_the_right_group_on_a_narrow_terminal() {
     let second = lines.last().cloned().unwrap_or_default();
     assert!(first.contains("mock"), "the model survives: {first:?}");
     assert!(
-        !first.contains('◐'),
+        !first.contains('*'),
         "the right group drops first: {first:?}"
     );
     assert!(

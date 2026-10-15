@@ -466,6 +466,7 @@ fn run(
             cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             // The picker phase has no session and no sandbox yet.
             None,
+            None,
         )?;
         if let Some(signal) = signal {
             // A signal during the pre-session phase leaves exactly like the session phase —
@@ -1073,20 +1074,31 @@ fn run(
         Arc::clone(&contributions),
         Arc::clone(&on_tick),
     );
-    // ADR 0027 C4: the opencode-go usage contributor, enabled only when a key is stored (a
-    // logged-in provider is opencode-go). The key never leaves this spawn: only the display
-    // text enters the store. `usage_period_secs = 0` turns it off; the period is clamped to
-    // 15 s–10 min.
-    if let Some(period) = usage_period(config.tui.usage_period_secs)
+    // ADR 0027 C4 + revision 5: the opencode-go usage contributor. It is spawned only when a
+    // key is stored, but it refreshes (and its row shows) only while the **current** model's
+    // provider is opencode-go. The watch channel is that gate: the UI flips it on a `/model`
+    // switch. The key never leaves this spawn: only the display text enters the store.
+    // `usage_period_secs = 0` turns it off; the period is clamped to 15 s–10 min.
+    let usage_gate = if let Some(period) = usage_period(config.tui.usage_period_secs)
         && let Ok(Some(key)) = radian_host::auth::resolve_key("opencode-go")
     {
-        radian_host::spawn_contributor(
+        // The startup model decides the first state (a resumed route wins over the CLI's).
+        let startup_provider = session
+            .model_route()
+            .map(|(provider, _)| provider)
+            .unwrap_or_else(|| provider_name.clone());
+        let (gate_tx, gate_rx) = tokio::sync::watch::channel(startup_provider == "opencode-go");
+        radian_host::spawn_contributor_gated(
             runtime.handle(),
             Arc::new(radian_host::OpencodeGoUsage::new(key.key.clone(), period)),
             Arc::clone(&contributions),
             Arc::clone(&on_tick),
+            gate_rx,
         );
-    }
+        Some(gate_tx)
+    } else {
+        None
+    };
     app.set_contributions(Arc::clone(&contributions));
     // A plain run enters the terminal only now: every fallible check above, and the session
     // itself, have already run. (`--pick` entered it before the picker and keeps it here.)
@@ -1302,7 +1314,7 @@ fn run(
         banner,
         banner_narrow: format!(
             "{} radian {}",
-            radian_tui::startup::RAD_MARK,
+            radian_tui::footer::brand_mark(app.footer_glyphs()),
             env!("CARGO_PKG_VERSION")
         ),
         summary,
@@ -1360,6 +1372,7 @@ fn run(
         config.tui.theme.clone(),
         cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         bash_sandbox,
+        usage_gate,
     );
     exit_trace("loop-done");
     // Tell a pending signal task that the loop left on its own, so it does not force-exit.
@@ -1956,6 +1969,9 @@ struct LoopContext<'a> {
     bash_sandbox: Option<radian_sandbox::Sandbox>,
     /// The running `!` command's cancellation token (Esc, ADR 0033).
     bash_cancel: Option<agent_core::CancellationToken>,
+    /// The opencode-go usage gate (ADR 0027): the UI flips it when `/model`
+    /// switches the current provider. `None` when there is no key or the period is off.
+    usage_gate: Option<tokio::sync::watch::Sender<bool>>,
 }
 
 impl LoopContext<'_> {
@@ -1965,6 +1981,15 @@ impl LoopContext<'_> {
         // ADR 0027: the loop is the only place that reads the wall clock for the
         // footer's `speed`/`elapsed`; the timer itself is pure.
         app.set_now(std::time::Instant::now());
+        // ADR 0027: a `/model` switch arrives as a model `ConfigChanged` at the turn
+        // boundary. Flip the usage gate then: away from opencode-go the contributor stops
+        // refreshing (no network) and its row hides; back to it, one immediate refresh.
+        if let UiEvent::Runtime(radian_session::RuntimeEvent::ConfigChanged { change, .. }) = &event
+            && let Some(route) = radian_host::ModelRoute::from_value(change)
+            && let Some(gate) = &self.usage_gate
+        {
+            let _ = gate.send(route.provider == "opencode-go");
+        }
         let result = match event {
             UiEvent::Agent(event) => app.update(AppInput::Event(event)),
             UiEvent::Runtime(event) => app.update(AppInput::Runtime(event)),
@@ -2612,6 +2637,8 @@ fn ui_loop(
     current_theme: Option<String>,
     thinking_max_tokens: u32,
     bash_sandbox: Option<radian_sandbox::Sandbox>,
+    // The opencode-go usage gate (ADR 0027), flipped on a `/model` switch.
+    usage_gate: Option<tokio::sync::watch::Sender<bool>>,
 ) -> Result<Option<i32>, String> {
     let mut picking_signal: Option<i32> = None;
     let mut ctx = match phase {
@@ -2639,6 +2666,7 @@ fn ui_loop(
             clipboard: app.clipboard,
             bash_sandbox: bash_sandbox.clone(),
             bash_cancel: None,
+            usage_gate,
         }),
     };
     // The first frame: the startup notices and the resumed history are already in the app, and

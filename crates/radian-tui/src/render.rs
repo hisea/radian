@@ -402,14 +402,15 @@ fn render_row(
             None => Line::from(vec![Span::raw(String::new())]),
         };
     }
-    // The collapsed reasoning placeholder is one synthetic line: its `▸` is the marker
+    // The collapsed reasoning placeholder is one synthetic line: its marker is the marker
     // column's own glyph (ADR 0028 rule 5), so the body column does not move
-    // between folded and expanded.
+    // between folded and expanded. `>` stands in for `▸` (ADR 0027: `▸` is not in
+    // all seven checked fonts).
     let placeholder = entry.kind == EntryKind::Reasoning && row.hint;
     let lead = if row.code {
         String::new()
     } else if placeholder {
-        "▸ ".to_string()
+        "> ".to_string()
     } else if first_text {
         prefix.to_string()
     } else {

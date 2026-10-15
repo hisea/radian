@@ -3,7 +3,7 @@
 //! state on a `TestBackend`, so no pty is needed.
 
 use radian_tui::app::{App, EntryKind};
-use radian_tui::startup::{RAD_MARK, StartupScreen, TIPS, banner_rows, tip_for};
+use radian_tui::startup::{StartupScreen, TIPS, banner_rows, tip_for};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -15,7 +15,7 @@ fn ctrl(code: char) -> KeyEvent {
 fn screen() -> StartupScreen {
     StartupScreen {
         banner: banner_rows("0.1.0", "mock-model", "~/Code/radian"),
-        banner_narrow: format!("{RAD_MARK} radian 0.1.0"),
+        banner_narrow: "R radian 0.1.0".to_string(),
         summary: "workspace · seatbelt · context 1000 · memory off · ask_user on".to_string(),
         lines: vec![
             "profile: workspace".to_string(),
@@ -47,7 +47,7 @@ fn the_information_block_collapses_and_ctrl_p_toggles_it() {
     assert!(
         collapsed
             .iter()
-            .any(|text| text.starts_with("▶ workspace · seatbelt")),
+            .any(|text| text.starts_with("+ workspace · seatbelt")),
         "{collapsed:?}"
     );
     assert!(
@@ -62,7 +62,7 @@ fn the_information_block_collapses_and_ctrl_p_toggles_it() {
     assert!(
         expanded
             .iter()
-            .any(|text| text.starts_with("▼ startup information")),
+            .any(|text| text.starts_with("- startup information")),
         "{expanded:?}"
     );
     assert!(
@@ -76,7 +76,7 @@ fn the_information_block_collapses_and_ctrl_p_toggles_it() {
     let back = entry_texts(&app);
     assert!(
         back.iter()
-            .any(|text| text.starts_with("▶ workspace · seatbelt")),
+            .any(|text| text.starts_with("+ workspace · seatbelt")),
         "{back:?}"
     );
 }
@@ -163,7 +163,7 @@ fn the_banner_shows_three_rows_or_the_one_line_fallback() {
         .unwrap();
     let narrow = buffer_text(terminal.backend().buffer());
     assert!(
-        narrow.contains("radian 0.1.0") && narrow.contains(RAD_MARK),
+        narrow.contains("radian 0.1.0") && narrow.contains('R'),
         "the fallback is missing:\n{narrow}"
     );
     assert!(
@@ -172,14 +172,15 @@ fn the_banner_shows_three_rows_or_the_one_line_fallback() {
     );
 }
 
-/// The width rule counts `㎭` as two columns (ADR 0027): the fallback line's width is
-/// `unicode-width`'s, never its byte or char count.
+/// The fallback line's width goes through `unicode-width` (ADR 0027). The unicode brand mark
+/// is one column: revision 4 replaced the East-Asian-Wide `㎭` with `R`.
 #[test]
-fn the_rad_mark_is_two_columns_wide() {
+fn the_banner_fallback_width_uses_unicode_width() {
     use unicode_width::UnicodeWidthStr;
-    assert_eq!(RAD_MARK.width(), 2, "㎭ is a wide character");
-    let line = format!("{RAD_MARK} radian 0.1.0");
-    assert_eq!(line.width(), 2 + " radian 0.1.0".width());
+    let mark = radian_tui::footer::brand_mark(radian_tui::footer::Glyphs::Unicode);
+    assert_eq!(mark, "R");
+    let line = format!("{mark} radian 0.1.0");
+    assert_eq!(line.width(), 1 + " radian 0.1.0".width());
 }
 
 fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
