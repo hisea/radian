@@ -2328,6 +2328,28 @@ async fn pty_mcp_tools_run_through_approval_and_the_status_bar_shows_them() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
+/// ADR 0027: `tui.brand` is the one source for the footer's `brand` item and the
+/// startup banner's one-line fallback. At a width below the wordmark the fallback shows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_the_brand_config_is_the_banner_fallback() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let config = format!(
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
+         base_url = \"{}\"\n[tui]\nbrand = \"ʀ\"\n",
+        server.base_url
+    );
+    let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 20);
+    assert!(
+        pty.wait_for_screen("ʀ radian", 10),
+        "the configured brand is not in the fallback banner:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
 /// ADR 0012 option B keeps MCP servers running outside the sandbox under `workspace-write`,
 /// so the startup notice is the only thing that tells the user. A test holds it in place.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -1211,6 +1211,9 @@ pub struct App {
     bash_context_pending: Option<String>,
     /// The color theme (config `tui.theme`, `NO_COLOR`).
     pub theme: Theme,
+    /// `tui.brand` (ADR 0027): the brand text, or `None` for the glyph set's
+    /// default. The footer's `brand` item and the startup banner both read it.
+    pub brand: Option<String>,
     /// The key bindings (config `tui.keybindings`), defaulting to the pre-config key table.
     pub keymap: Keymap,
     /// How the input area is drawn (config `tui.input_style`), defaulting to `lines`.
@@ -1311,6 +1314,7 @@ impl App {
             bash_available: true,
             bash_context_pending: None,
             theme: Theme::default(),
+            brand: None,
             keymap: Keymap::default(),
             input_style: InputStyle::default(),
             total_lines: 0,
@@ -1418,6 +1422,9 @@ impl App {
         );
         self.theme = theme;
         warnings.extend(theme_warnings);
+        // `tui.brand` (ADR 0027): a configured short text, else `None` for the
+        // glyph set's default. The reader already refused an over-wide value.
+        self.brand = config.tui.brand.clone();
         // An unknown `tui.input_style` is a skipped key (the reader warns once); the TUI falls
         // back to the default.
         self.input_style = config
@@ -4238,6 +4245,15 @@ impl App {
     /// The footer's glyph set, for the items that draw an icon.
     pub fn footer_glyphs(&self) -> crate::footer::Glyphs {
         self.footer.glyphs()
+    }
+
+    /// The brand mark (ADR 0027): `tui.brand` when set, else the glyph set's
+    /// default. The footer's `brand` item and the startup banner's one-line fallback share it,
+    /// so the two can never disagree.
+    pub fn brand_mark(&self) -> &str {
+        self.brand
+            .as_deref()
+            .unwrap_or_else(|| crate::footer::brand_mark(self.footer_glyphs()))
     }
 
     /// Applies `[tui.footer]` (ADR 0027 C2). Returns the footer's warnings (unknown item,

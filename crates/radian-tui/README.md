@@ -132,6 +132,12 @@ was not your choice, every config-file and approval-policy warning), and one `Ti
 information line's `label: value` split follows a notice's: the label uses `notice_label`, the
 value `notice_body` (ADR 0028 / ADR 0029). `Ctrl-P` (`toggle_startup`) folds and
 unfolds the information. `tui.banner = false` hides the wordmark, `tui.tips = false` the Tip.
+`tui.brand = "<text>"` (ADR 0027) replaces the brand mark in **both** the footer's
+`brand` item and the one-line banner fallback (one source; ≤ 4 display columns, wider is a
+config error). Without it the glyph set's default is used (`nerd` `󰰠`, `unicode` bold accent `R`,
+`ascii` `rad`). A user-written glyph is **not** covered by the font-coverage rule: a font that
+lacks it draws a fallback glyph, which may sit off the baseline. `[tui.footer.items.brand] style`
+still overrides the color.
 The transcript scrolls with PageUp/PageDown, Shift-Up/Shift-Down and Ctrl-Home/Ctrl-End; the
 bare arrow keys belong to the composer.
 

@@ -1325,11 +1325,7 @@ fn run(
     mark("before-startup");
     app.set_startup(radian_tui::startup::StartupScreen {
         banner,
-        banner_narrow: format!(
-            "{} radian {}",
-            radian_tui::footer::brand_mark(app.footer_glyphs()),
-            env!("CARGO_PKG_VERSION")
-        ),
+        banner_narrow: format!("{} radian {}", app.brand_mark(), env!("CARGO_PKG_VERSION")),
         summary,
         lines: startup_lines,
         safety,

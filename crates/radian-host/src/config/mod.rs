@@ -287,6 +287,10 @@ pub struct TuiConfig {
     /// `tui.banner`: whether the startup screen shows the wordmark. `None`
     /// means the default, on.
     pub banner: Option<bool>,
+    /// `tui.brand`: the brand text (ADR 0027). `None` means the glyph set's default
+    /// (`nerd` `󰰠`, `unicode` `R`, `ascii` `rad`). Any string at most 4 display columns wide;
+    /// wider is a config error (it would break the footer and the banner).
+    pub brand: Option<String>,
     /// `tui.usage_period_secs`: the opencode-go usage refresh period (ADR 0027 C4). `None` means
     /// the default (60 s); `0` disables the contributor; other values are clamped to 15–600 s.
     pub usage_period_secs: Option<u64>,
@@ -1093,6 +1097,20 @@ fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
             ("tips", _) => config.skipped.push("tui.tips".into()),
             ("banner", Value::Boolean(banner)) => config.tui.banner = Some(*banner),
             ("banner", _) => config.skipped.push("tui.banner".into()),
+            // ADR 0027: the brand is any short text (≤ 4 display columns). Wider is
+            // a config error, not a skipped key: it would misalign the footer and the banner.
+            ("brand", Value::String(brand)) => {
+                if unicode_width::UnicodeWidthStr::width(brand.as_str()) > 4 {
+                    return Err(wrong_type(
+                        path,
+                        "tui.brand",
+                        "a string at most 4 display columns wide",
+                    ));
+                }
+                config.tui.brand = Some(brand.clone());
+            }
+            // A non-string brand is a display preference: skip it with a warning.
+            ("brand", _) => config.skipped.push("tui.brand".into()),
             (other, _) => config.skipped.push(format!("tui.{other}")),
         }
     }
@@ -1953,6 +1971,25 @@ mod startup_pref_tests {
         let config = parse_str("schema_version = 1\n[tui]\ntips = \"yes\"\n").unwrap();
         assert_eq!(config.tui.tips, None);
         assert!(config.skipped.contains(&"tui.tips".to_string()));
+    }
+
+    /// ADR 0027: `tui.brand` is carried, a non-string is skipped (the `tui.*`
+    /// rule), and a value wider than 4 display columns is a config error (it would misalign
+    /// the footer and the banner).
+    #[test]
+    fn tui_brand_is_carried_and_over_wide_is_refused() {
+        let config = parse_str("schema_version = 1\n[tui]\nbrand = \"ʀ\"\n").unwrap();
+        assert_eq!(config.tui.brand.as_deref(), Some("ʀ"));
+
+        // A non-string is a display preference: skipped, never a refusal.
+        let config = parse_str("schema_version = 1\n[tui]\nbrand = 3\n").unwrap();
+        assert_eq!(config.tui.brand, None);
+        assert!(config.skipped.contains(&"tui.brand".to_string()));
+
+        // `㎭` is East-Asian-Wide (2 columns): two are 4 (fine), three are 5 (refused).
+        assert!(parse_str("schema_version = 1\n[tui]\nbrand = \"㎭㎭\"\n").is_ok());
+        let error = parse_str("schema_version = 1\n[tui]\nbrand = \"㎭㎭R\"\n").unwrap_err();
+        assert!(matches!(error, ConfigError::WrongType { .. }), "{error}");
     }
 }
 

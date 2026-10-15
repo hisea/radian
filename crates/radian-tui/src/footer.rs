@@ -926,9 +926,10 @@ fn item_default_style(app: &App, item: &Item, data: &ItemData) -> Style {
     if let Some(style) = &item.style {
         return style.resolve(app);
     }
-    // ADR 0027: the unicode brand is a bold accent `R`. The theme's accent role is
+    // ADR 0027/8: the brand is a bold accent mark. The theme's accent role is
     // `notice_label` (the `accent` style alias maps to it), so the mark follows a theme switch.
-    if item.id == "brand" && app.footer_glyphs() == Glyphs::Unicode {
+    // A configured `tui.brand` keeps this style in every glyph set.
+    if item.id == "brand" && (app.footer_glyphs() == Glyphs::Unicode || app.brand.is_some()) {
         return role_style(app, Role::NoticeLabel);
     }
     default_role(&item.id)
@@ -1075,9 +1076,9 @@ struct ItemData<'a> {
 fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>> {
     let session = app.projection.read();
     match id {
-        // ADR 0027: the brand mark per glyph set (see [`brand_mark`]).
+        // ADR 0027/8: `tui.brand` when set, else the brand mark per glyph set.
         "brand" => Some(ItemData {
-            values: vec![("brand", brand_mark(app.footer_glyphs()).to_string())],
+            values: vec![("brand", app.brand_mark().to_string())],
             default_format: "{brand}",
             numeric: None,
         }),

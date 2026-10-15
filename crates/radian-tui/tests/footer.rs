@@ -949,6 +949,32 @@ fn the_brand_is_the_unicode_glyph_by_default() {
     assert!(row(&terminal, 11).contains('R'), "{}", row(&terminal, 11));
 }
 
+/// ADR 0027: `tui.brand` replaces the glyph set's default in the footer's `brand`
+/// item.
+#[test]
+fn the_brand_config_replaces_the_glyph_default() {
+    let mut app = App::new("mock", "s");
+    app.apply_footer(&rows(vec![item("brand")]));
+    app.brand = Some("ʀ".to_string());
+    let terminal = render(&mut app, 40, 12);
+    let line = row(&terminal, 11);
+    assert!(line.contains('ʀ'), "{line:?}");
+    assert!(
+        !line.contains('R'),
+        "the configured brand, not the default `R`: {line:?}"
+    );
+}
+
+/// Without `tui.brand`, `App::brand_mark` is the glyph set's default (ADR 0027/8).
+#[test]
+fn the_brand_default_follows_the_glyph_set() {
+    for (set, expected) in [("unicode", "R"), ("nerd", "\u{f0c20}"), ("ascii", "rad")] {
+        let mut app = App::new("mock", "s");
+        app.apply_footer(&with_glyphs(set));
+        assert_eq!(app.brand_mark(), expected, "{set}");
+    }
+}
+
 /// ADR 0027's sample: the deck's third row, whole, is
 /// `↑15M ↓2.6M R1962M $14.510 41.3%/1.0M` (compact tokens, a 3-decimal cost, the context
 /// share with one decimal and the window in `M`).
