@@ -115,6 +115,18 @@ impl ContributionStore {
         true
     }
 
+    /// Removes one item's contribution (ADR 0027): when the current model switches
+    /// away from a provider its row hides. Returns whether anything changed.
+    pub fn remove(&self, item: &str) -> bool {
+        let mut items = self.items.write().unwrap_or_else(|e| e.into_inner());
+        if items.remove(item).is_none() {
+            return false;
+        }
+        drop(items);
+        self.bump();
+        true
+    }
+
     /// One item's contribution.
     pub fn get(&self, item: &str) -> Option<Contribution> {
         self.items
@@ -249,6 +261,51 @@ pub fn spawn(
                 on_tick(tick);
             }
             tokio::time::sleep(runner.period()).await;
+        }
+    })
+}
+
+/// Like [`spawn`], but the contributor is **gated** (ADR 0027): while `active` is
+/// false the loop removes its items (so the row hides) and refreshes nothing — no network; the
+/// moment it becomes true it refreshes once, then every period. `active` is a watch channel, so
+/// a change wakes a sleeping loop at once.
+pub fn spawn_gated(
+    handle: &tokio::runtime::Handle,
+    contributor: Arc<dyn StatusContributor>,
+    store: Arc<ContributionStore>,
+    on_tick: Arc<dyn Fn(Tick) + Send + Sync>,
+    mut active: tokio::sync::watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    let items = contributor.items();
+    handle.spawn(async move {
+        let mut runner = ContributorRunner::new(contributor, Arc::clone(&store));
+        loop {
+            if !*active.borrow() {
+                // Inactive: hide the row and wait for a change (no refresh, no network).
+                let changed = items.iter().any(|item| store.remove(item));
+                if changed {
+                    on_tick(Tick {
+                        changed: true,
+                        notice: None,
+                    });
+                }
+                if active.changed().await.is_err() {
+                    break;
+                }
+                continue;
+            }
+            let tick = runner.tick().await;
+            if tick.changed || tick.notice.is_some() {
+                on_tick(tick);
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(runner.period()) => {}
+                result = active.changed() => {
+                    if result.is_err() {
+                        break;
+                    }
+                }
+            }
         }
     })
 }
