@@ -555,3 +555,13 @@ Base `62ae29e` · 一次性 worktree `/tmp/radian-sl-mut`，还原后 `git statu
 | S-M3 | 说明句改回 `**on**` | `describe::tests::the_workspace_facts_have_no_markdown` | ✅ |
 
 2/2 抓住。
+
+## brand-config（[tui] brand，ADR 0027，2026-10-15）
+
+Base `4772113` · 一次性 worktree `/tmp/radian-bc-mut`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| B-M3 | 去掉 `tui.brand` 的 4 显示宽度检查 | `startup_pref_tests::tui_brand_is_carried_and_over_wide_is_refused` | ✅ |
+
+1/1 抓住。

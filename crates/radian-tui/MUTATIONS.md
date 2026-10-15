@@ -1131,3 +1131,15 @@ Base `62ae29e` · 一次性 worktree `/tmp/radian-sl-mut`。
 | S-M1 | TUI 摘要行改回搜索 `sandbox_facts` 文本（macOS 上写 `none`） | `pty::pty_the_startup_summary_names_the_real_sandbox_backend` | ✅ |
 
 1/1 抓住。
+
+## brand-config（[tui] brand，ADR 0027，2026-10-15）
+
+Base `4772113` · 一次性 worktree `/tmp/radian-bc-mut`，还原后 `git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| B-M1 | footer 的 brand 条目忽略配置，用 glyphs 默认 | `footer::the_brand_config_replaces_the_glyph_default` | ✅ |
+| B-M2 | `App::brand_mark` 忽略配置（banner 用 glyphs 默认） | `pty::pty_the_brand_config_is_the_banner_fallback` | ✅ |
+| B-M4 | `App::brand_mark` 缺省不走 glyphs 档（返回固定值） | `footer::the_brand_default_follows_the_glyph_set` | ✅ |
+
+3/3 抓住。
