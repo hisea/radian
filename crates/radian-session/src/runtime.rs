@@ -221,6 +221,24 @@ pub enum RuntimeEvent {
         branch: String,
         files: usize,
     },
+    /// A background `shell` job started (ADR 0037 decision 5). Audit only: `critical =
+    /// false`. The start/settle pair is how a resume learns a job existed; a start with no
+    /// settle after a crash is reported once as unknown and never re-run.
+    BackgroundJobStarted {
+        job_id: String,
+        /// The command's first line (the summary `job_list` shows).
+        command: String,
+        /// The workspace-relative output path.
+        output: String,
+    },
+    /// A background `shell` job settled (ADR 0037 decision 5). Audit only: `critical =
+    /// false`. `state` is the `[status: ...]` spelling (`exited 0`, `signal 9`, `killed`,
+    /// `timed out`); `duration_ms` is how long it ran.
+    BackgroundJobSettled {
+        job_id: String,
+        state: String,
+        duration_ms: u64,
+    },
 }
 
 impl RuntimeEvent {
@@ -242,6 +260,8 @@ impl RuntimeEvent {
             RuntimeEvent::ProjectTrustChanged { .. } => "ProjectTrustChanged",
             RuntimeEvent::UserBash { .. } => "UserBash",
             RuntimeEvent::GitCommitted { .. } => "GitCommitted",
+            RuntimeEvent::BackgroundJobStarted { .. } => "BackgroundJobStarted",
+            RuntimeEvent::BackgroundJobSettled { .. } => "BackgroundJobSettled",
         }
     }
 
@@ -263,7 +283,9 @@ impl RuntimeEvent {
             | RuntimeEvent::SessionForked { .. }
             | RuntimeEvent::ProjectTrustChanged { .. }
             | RuntimeEvent::UserBash { .. }
-            | RuntimeEvent::GitCommitted { .. } => false,
+            | RuntimeEvent::GitCommitted { .. }
+            | RuntimeEvent::BackgroundJobStarted { .. }
+            | RuntimeEvent::BackgroundJobSettled { .. } => false,
         }
     }
 
@@ -400,6 +422,20 @@ pub(crate) struct GitCommittedData<'a> {
     pub files: usize,
 }
 
+#[derive(Serialize)]
+pub(crate) struct BackgroundJobStartedData<'a> {
+    pub job_id: &'a str,
+    pub command: &'a str,
+    pub output: &'a str,
+}
+
+#[derive(Serialize)]
+pub(crate) struct BackgroundJobSettledData<'a> {
+    pub job_id: &'a str,
+    pub state: &'a str,
+    pub duration_ms: u64,
+}
+
 /// The `data` view of one runtime event. A manual enum (like the transcript writer's
 /// `Render`) keeps the field order of the ADR and avoids an externally tagged wrapper.
 pub(crate) enum RuntimeData<'a> {
@@ -418,6 +454,8 @@ pub(crate) enum RuntimeData<'a> {
     ProjectTrustChanged(ProjectTrustChangedData),
     UserBash(UserBashData<'a>),
     GitCommitted(GitCommittedData<'a>),
+    BackgroundJobStarted(BackgroundJobStartedData<'a>),
+    BackgroundJobSettled(BackgroundJobSettledData<'a>),
 }
 
 impl Serialize for RuntimeData<'_> {
@@ -438,6 +476,8 @@ impl Serialize for RuntimeData<'_> {
             RuntimeData::ProjectTrustChanged(d) => d.serialize(serializer),
             RuntimeData::UserBash(d) => d.serialize(serializer),
             RuntimeData::GitCommitted(d) => d.serialize(serializer),
+            RuntimeData::BackgroundJobStarted(d) => d.serialize(serializer),
+            RuntimeData::BackgroundJobSettled(d) => d.serialize(serializer),
         }
     }
 }
@@ -560,6 +600,24 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
             commit,
             branch,
             files: *files,
+        }),
+        RuntimeEvent::BackgroundJobStarted {
+            job_id,
+            command,
+            output,
+        } => RuntimeData::BackgroundJobStarted(BackgroundJobStartedData {
+            job_id,
+            command,
+            output,
+        }),
+        RuntimeEvent::BackgroundJobSettled {
+            job_id,
+            state,
+            duration_ms,
+        } => RuntimeData::BackgroundJobSettled(BackgroundJobSettledData {
+            job_id,
+            state,
+            duration_ms: *duration_ms,
         }),
     }
 }
