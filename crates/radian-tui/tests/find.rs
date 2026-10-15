@@ -454,8 +454,9 @@ fn a_hit_in_a_folded_tool_body_expands_only_that_entry() {
     render(&mut app);
     assert_eq!(
         app.total_lines,
-        folded_total + 3,
-        "the hit entry's four body lines replace its one-line hint"
+        folded_total + 4,
+        "the hit entry's four body lines replace its one-line hint, and its Output divider \
+         comes back (a real section, ADR 0028)"
     );
     // The match line is on screen, centered: the jump mapped it through the display geometry.
     let display_line: usize = app.entries[..match_line.entry]

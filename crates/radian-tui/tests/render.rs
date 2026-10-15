@@ -825,11 +825,11 @@ fn the_tool_fold_changes_the_line_count_and_ctrl_o_walks_it() {
     app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
     assert_eq!(app.tool_display.fold, ToolFold::Collapsed);
     let _ = render(&mut app, 60, 30);
-    // `collapsed` keeps the header only: the five preview lines `errors` showed are gone
-    // (ADR 0028 R4's interpretation - the reviewer's T2).
+    // `collapsed` keeps the header only: the five preview lines `errors` showed are gone, and
+    // with them the Output divider (a folded hint is not a section, ADR 0028).
     assert_eq!(
         app.total_lines,
-        folded - 5,
+        folded - 6,
         "collapsed shows the header only"
     );
     app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
@@ -1552,10 +1552,10 @@ fn collapsed_and_errors_differ_for_a_successful_card() {
     }
     // The empty assistant entry contributes nothing (its blank line is stripped, rule 1) and
     // the container's gap before the card is one line. The card (ADR 0028) is the
-    // top border + the head + the Output divider + the body + the bottom border: 20 body
-    // lines expanded, 5 preview + 1 hint under `errors`, a single `[20 lines]` hint under
-    // `collapsed`.
-    assert_eq!(counts, vec![25, 11, 6], "expanded / errors / collapsed");
+    // top border + the head + the body + the bottom border, plus the Output divider only when
+    // a real output section is shown: 20 body lines expanded, 5 preview + 1 hint + the
+    // divider under `errors`, a single `[20 lines]` hint and no divider under `collapsed`.
+    assert_eq!(counts, vec![25, 11, 5], "expanded / errors / collapsed");
     // A failure: the same count in all three, and the body really visible.
     for fold in [ToolFold::Expanded, ToolFold::Errors, ToolFold::Collapsed] {
         let mut app = app_with(true);

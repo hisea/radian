@@ -836,7 +836,8 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
                 })
                 .sum();
             let meta = card_meta(entry);
-            content + frame_rows(frame_plan(entry.card, content > 0, meta.is_some()))
+            let has_output = plan_has_output(&plan, &text);
+            content + frame_rows(frame_plan(entry.card, has_output, meta.is_some()))
         }
         _ => crate::render::wrap_line_count(&text, body_width),
     }
@@ -1165,10 +1166,12 @@ fn layout_unstripped(
                     0,
                 ),
             };
+            let has_output = plan_has_output(&plan, &text);
             frame_tail(
                 entry.card,
                 body_plan_lines(&plan, &text, body_width),
                 card_meta(entry),
+                has_output,
             )
         }
         _ => prose_lines(&text, body_width),
@@ -1261,6 +1264,18 @@ fn frame_plan(card: Card, has_output: bool, has_meta: bool) -> FramePlan {
     }
 }
 
+/// Whether a body plan shows a real output section: a non-blank text line. A folded hint is
+/// not a section, and neither is an empty result (ADR 0028 rule 1's "no output, no
+/// section").
+fn plan_has_output(plan: &[tools::BodyLine], text: &str) -> bool {
+    plan.iter().any(|line| match line {
+        tools::BodyLine::Text { source, .. } => {
+            !text.get(source.clone()).unwrap_or("").trim().is_empty()
+        }
+        tools::BodyLine::Hint(_) => false,
+    })
+}
+
 /// How many rows a frame adds to a card's content.
 fn frame_rows(plan: FramePlan) -> usize {
     plan.top as usize + plan.divider as usize + plan.meta as usize + plan.bottom as usize
@@ -1312,11 +1327,16 @@ fn frame_head(card: Card, content: Vec<BodyLine>) -> Vec<BodyLine> {
 
 /// Wraps a result's content rows in its frame: the top border (a torn result has no call to
 /// draw one), the divider, the output, the meta row and the bottom border.
-fn frame_tail(card: Card, content: Vec<BodyLine>, meta: Option<String>) -> Vec<BodyLine> {
+fn frame_tail(
+    card: Card,
+    content: Vec<BodyLine>,
+    meta: Option<String>,
+    has_output: bool,
+) -> Vec<BodyLine> {
     if card == Card::None {
         return content;
     }
-    let plan = frame_plan(card, !content.is_empty(), meta.is_some());
+    let plan = frame_plan(card, has_output, meta.is_some());
     let mut out = Vec::with_capacity(content.len() + frame_rows(plan));
     if plan.top {
         out.push(BodyLine::frame_row(Frame::Top));
@@ -1682,8 +1702,9 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
                 }
             }
             let meta = card_meta(entry);
+            let has_output = plan_has_output(&plan, &text);
             frame_text(
-                frame_plan(entry.card, !content.is_empty(), meta.is_some()),
+                frame_plan(entry.card, has_output, meta.is_some()),
                 content,
                 meta,
             )
