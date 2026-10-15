@@ -1584,7 +1584,7 @@ async fn system_prompt_is_sent() {
 async fn the_default_role_layers_are_sent() {
     let server = MockServer::start(vec![text_reply("ok")]).await;
     let (code, _, _) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
             &[],
         ),
@@ -1617,7 +1617,7 @@ async fn the_default_role_layers_are_sent() {
 async fn the_safe_tier_runtime_layer_has_no_shell() {
     let server = MockServer::start(vec![text_reply("ok")]).await;
     let (code, _, _) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
