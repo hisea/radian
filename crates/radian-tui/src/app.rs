@@ -4314,7 +4314,7 @@ impl App {
     /// projection, which is what prices each arriving call: the footer reads the accumulated
     /// fee from there, because a call keeps the price it arrived under even after a switch.
     pub fn set_model_price(&mut self, price: Option<radian_host::ModelPrice>) {
-        self.model_price = price;
+        self.model_price = price.clone();
         self.projection.set_price(price);
     }
 
