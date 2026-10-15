@@ -928,6 +928,22 @@ fn run(
         }
         settings
     };
+    // ADR 0018: the same level, converted per route, so a `/model` switch never
+    // leaves the summary carrying the previous route's wire form.
+    let compaction_settings_for = {
+        let providers = config.providers.clone();
+        let level = config
+            .compaction
+            .thinking
+            .clone()
+            .unwrap_or_else(|| "low".to_owned());
+        let max_tokens = cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+        std::sync::Arc::new(move |provider: &str, model: &str| {
+            radian_host::compaction_settings_for_route(
+                &providers, provider, model, &level, max_tokens,
+            )
+        }) as radian_runtime::CompactionSettingsFor
+    };
     // ADR 0014 Q2: the catalog (or a `[providers.<id>]` override) decides whether
     // this route replays reasoning.
     let reasoning_replay = radian_host::resolve_reasoning_replay(&provider_ref, &model_name);
@@ -1186,6 +1202,7 @@ fn run(
                     .map(|tokens| ContextBudget::new(tokens).with_reasoning(replays_reasoning)),
                 auto_compact: !cli.no_auto_compact && config.compaction.auto.unwrap_or(true),
                 compaction_settings,
+                compaction_settings_for: Some(compaction_settings_for),
                 sandbox,
                 tier: tier.preset(),
                 profile,

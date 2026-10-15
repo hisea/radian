@@ -177,3 +177,15 @@ Base `a858ba6` · 一次性 worktree `/tmp/e2e-mut`（`git worktree add` 自本�
 
 3/3 抓住，无等价变异。E1/E3 的代码在 `agent-core`/`radian-runtime` 的产品路径上；由本片新增的
 `e2e_resume_compaction` 专门抓住。
+
+## ADR 0018：摘要设置随 /model 后的活动路由换算（2026-10-15）
+
+Base `6df1351` · 在本任务工作树内施加后从副本还原（`cmp` 确认）· `--no-fail-fast`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| S1 | 设置在启动时冻结（`run_turn` 不把 `turn_compaction_settings` 放进 `options.compaction_settings`，Core 永远用启动路由的 wire 形式） | `driver::the_summary_settings_follow_a_switch_to_an_anthropic_route`、`driver::the_summary_settings_follow_a_switch_to_an_openai_route` | ✅ failed |
+
+1/1 抓住。去掉那一行后，Anthropic 路由的摘要仍带启动路由的 `reasoning_effort`，反向则仍带
+`thinking`，两个方向的测试都红（`left` 是启动形式、`right` 是当前路由形式）。这正是审查指出的
+bug：provider 会以 400 拒绝，压缩随之失败。

@@ -350,6 +350,25 @@ pub fn compaction_settings_for(
     (settings, notice)
 }
 
+/// [`compaction_settings_for`] for a route named by `(provider_name, model)`, resolving the
+/// provider from the config's declarations exactly as the per-route budget resolver does
+/// (ADR 0026 D7). The driver calls it at the turn boundary so the summary call's settings
+/// follow a `/model` switch (ADR 0018): a form frozen at startup (`reasoning_effort`
+/// on an Anthropic route, or the reverse) is rejected by the provider and the compaction fails.
+/// An unknown provider yields `Null` — no setting is invented.
+pub fn compaction_settings_for_route(
+    providers: &std::collections::BTreeMap<String, crate::ProviderDecl>,
+    provider_name: &str,
+    model: &str,
+    level: &str,
+    max_tokens: u32,
+) -> serde_json::Value {
+    match crate::resolve_provider(provider_name, providers, None) {
+        Ok((provider, _)) => compaction_settings_for(&provider, model, level, max_tokens).0,
+        Err(_) => serde_json::Value::Null,
+    }
+}
+
 /// The reasoning-replay field for a route (ADR 0014 Q2): the `[providers.<id>]`
 /// override when the provider is named, else the catalog's `interleaved` field. `None` means
 /// the model does not require replay, or declares a field Radian does not replay (e.g.

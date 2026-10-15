@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
+use serde_json::Value;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -46,6 +47,12 @@ pub struct TurnOptions {
     /// when a `/model` switch changes the model, because a budget frozen in `AgentConfig` could
     /// never follow the model. `None` keeps the configured budget, so nothing else changes.
     pub context_budget: Option<ContextBudget>,
+    /// Overrides `AgentConfig::compaction_settings` for this turn (ADR 0018). The
+    /// summary call's request-level reasoning setting is a **per-route** wire value: after a
+    /// `/model` switch the same configured level converts to a different form (or none), so the
+    /// driver recomputes it at the turn boundary like the budget. `None` keeps the configured
+    /// value.
+    pub compaction_settings: Option<Value>,
     /// After cancellation, how long a running tool may keep going to clean up (for MCP:
     /// send the cancel notification, then stop and reap the server). After this, the tool's
     /// future is dropped.
@@ -59,6 +66,7 @@ impl Default for TurnOptions {
             steer_mode: SteerMode::default(),
             max_parallel_tools: DEFAULT_MAX_PARALLEL_TOOLS,
             context_budget: None,
+            compaction_settings: None,
             max_model_calls: None,
             tool_cancel_grace: DEFAULT_TOOL_CANCEL_GRACE,
         }
@@ -247,6 +255,9 @@ struct CompactionRun<'a> {
     trigger: CompactionTrigger,
     instructions: Option<String>,
     events: &'a dyn EventSink,
+    /// The request-level settings the summary and shorten-retry calls carry (ADR 0018
+    /// revision 8), already converted for the route in force by the host.
+    settings: Value,
 }
 
 /// Plans a compaction that reserves the space the verbatim user messages will take (ADR 0018
@@ -312,6 +323,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         cancellation: &CancellationToken,
         events: &dyn EventSink,
         budget: Option<ContextBudget>,
+        settings: Option<Value>,
     ) -> Result<CompactionOutcome, CompactionFailure> {
         let interrupt = Interrupt {
             token: cancellation.clone(),
@@ -338,6 +350,10 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         let count_reasoning = budget.is_some_and(|config| config.count_reasoning);
         let tokens_before =
             budget::request_size_with(&request, count_reasoning).tokens(bytes_per_token);
+        // The caller's per-route settings (ADR 0018) win over the configured ones,
+        // like the budget above: a manual `/compact` after a `/model` switch must convert the
+        // level for the route in force.
+        let settings = settings.unwrap_or_else(|| self.agent.config.compaction_settings.clone());
         match self
             .compact_transcript(CompactionRun {
                 interrupt: &interrupt,
@@ -350,6 +366,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
                 trigger: CompactionTrigger::Manual,
                 instructions,
                 events,
+                settings,
             })
             .await?
         {
@@ -389,6 +406,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
             trigger,
             instructions,
             events,
+            settings,
         } = run;
         let revision = self.transcript_revision + 1;
         let source_revision = self.transcript_revision;
@@ -453,7 +471,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
             &to_summarize,
             instructions.as_deref(),
             summary_max,
-            self.agent.config.compaction_settings.clone(),
+            settings.clone(),
         );
         for attempt in 0..2 {
             let noop = NoopSink;
@@ -514,7 +532,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
                         compaction::SummaryError::TooLong { .. } => compaction::shorten_request(
                             text.trim(),
                             compaction::shorten_target(summary_max),
-                            self.agent.config.compaction_settings.clone(),
+                            settings.clone(),
                         ),
                         // Empty (and the only other variant) resends the original request.
                         compaction::SummaryError::Empty => compaction::summary_request(
@@ -522,7 +540,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
                             &to_summarize,
                             instructions.as_deref(),
                             summary_max,
-                            self.agent.config.compaction_settings.clone(),
+                            settings.clone(),
                         ),
                     };
                 }
@@ -719,6 +737,18 @@ impl<'s, M: Model, P: ToolProvider, H: Hooks> ActiveRun<'s, M, P, H> {
         self.options
             .context_budget
             .or(self.agent.config.context_budget)
+    }
+
+    /// The compaction call's request-level settings in force this turn (ADR 0018):
+    /// the per-turn override (a `/model` switch moves the wire form, ADR 0026 D7) wins over the
+    /// configured one. Every summary/shorten request goes through here, so a switch never makes
+    /// the summary carry the previous route's form (`reasoning_effort` on an Anthropic route,
+    /// or the reverse).
+    fn compaction_settings(&self) -> Value {
+        self.options
+            .compaction_settings
+            .clone()
+            .unwrap_or_else(|| self.agent.config.compaction_settings.clone())
     }
 
     pub(crate) fn new(
@@ -1240,6 +1270,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
                             trigger: CompactionTrigger::Overflow,
                             instructions: None,
                             events,
+                            settings: self.run.compaction_settings(),
                         })
                         .await;
                     match step {
@@ -1391,6 +1422,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
                 trigger: CompactionTrigger::Budget,
                 instructions: None,
                 events,
+                settings: self.run.compaction_settings(),
             })
             .await;
         match step {
