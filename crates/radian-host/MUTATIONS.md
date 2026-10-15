@@ -647,6 +647,25 @@ Base `65ea1ed` · 一次性 worktree `/tmp/radian-ce-mut`，还原后 `git statu
 
 3/3 抓住。
 
+## small-fixes-2：上下文文件去重
+
+Base `e157bfb` · 一次性 worktree `.radian-worktrees/sf2-mut`（detached，跑完删除）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SF1 | `load` 去掉 `seen` 去重 | `context::tests::a_symlinked_context_file_is_read_once` | ✅ |
+## 分档定价（研究 F5）
+
+Base `ba964a4` · 一次性 worktree `.radian-worktrees/tp-mut`（detached，跑完删除）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| TP1 | `rates_for` 恒用基础档（忽略 tiers） | `cost::tests::a_context_tier_prices_the_whole_call_above_its_threshold` | ✅ |
+| TP3 | 边界用 `>=` 而不是 `>` | 同上（「正好在阈值仍是基础档」那条断言） | ✅ |
+
+TP2（「阈值用会话累计」）在当前结构里不可表达：`cost_micros`/`rates_for` 是纯函数，只拿到
+**本次调用**的 `ModelUsage`，没有会话累计可拿；`restore_usage` 也是逐条记录调用 `cost_micros`。
+这正是研究 F5 要的语义（阈值比的是这次请求自己的输入长度），所以没有对应变异。
 ## review-fixes-1 (2026-10-15): git filters + corrupt trust
 
 One-shot detached worktree `.radian-worktrees/rf1-mutations` (from the branch HEAD, deleted
@@ -715,3 +734,53 @@ without it 11 tests fail on "mcp-fixture is not built", which is unrelated to th
 they were re-run green after the fixture was built.) SR-S2 was already caught by
 `reasoning_replay.rs`; the two new tests pin the same decision on the switch path, where
 `args_for` and the budget resolver are two separate resolutions that must agree.
+## memory-scope: id commands find the record's scope themselves (ADR 0021 D1)
+
+Base `21bf74b` · in-place in this worktree, each mutation applied from a copy and restored from
+it afterwards (`md5` compared); `cargo test -p radian-host --lib --no-fail-fast memory::commands`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| M1 | `resolve_write_scope` auto branch returns `WriteScope::Project` (the old behaviour) | ✅ caught | `memory::commands::tests::{forget_finds_a_global_record_in_an_unlinked_workspace, edit_finds_a_global_record_in_an_unlinked_workspace, archive_and_restore_find_a_global_record_in_an_unlinked_workspace, confirm_finds_a_global_record_in_an_unlinked_workspace, an_unknown_id_is_a_clear_error}` |
+| M2 | `resolve_read_scope` auto branch returns `ScopeSelection::ProjectOnly` | ✅ caught | `memory::commands::tests::{show_finds_a_global_record_in_an_unlinked_workspace, an_unknown_id_is_a_clear_error}` |
+| M3 | `MemoryService::locate` only searches Global (skips Project) | ✅ caught | `memory::commands::tests::{a_linked_workspace_acts_on_the_project_record, an_unconfirmed_forget_writes_nothing}` |
+| M4 | the auto not-found path returns the store message (`no record <id>`) instead of `no memory record <id>` | ✅ caught | `memory::commands::tests::an_unknown_id_is_a_clear_error` |
+| M5 | `resolve_write_scope` ignores an explicit `--global` (always locates) | ✅ caught | `memory::commands::tests::an_explicit_scope_never_crosses_to_the_other_scope` |
+| M6 | `resolve_read_scope` ignores explicit `--global`/`--project` (always locates) | ✅ caught | `memory::commands::tests::an_explicit_scope_never_crosses_to_the_other_scope` |
+
+6/6 caught. `show` already read Global through the default Project→Global view before this change,
+so its test (`show_finds_a_global_record_in_an_unlinked_workspace`) is a regression guard, not a
+red-on-old-code test; the new not-found wording is what M4 reds on the old code for `show`.
+(Follow-up `memory-scope-wording` below moves that wording into `MemoryError::NotFound`, so the
+store message M4 mutated is the `no memory record <id>` wording itself now.)
+
+## memory-scope-wording: one not-found message for an unknown id (ADR 0021 D1 follow-up)
+
+Base `083c6c8` · in-place in this worktree, the mutation applied from a copy and restored from it
+afterwards (`md5` compared, `git status --short` empty), `cargo test -p radian-host --lib
+--no-fail-fast memory::`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| W1 | `MemoryError::NotFound`'s wording goes back to `no record <id>` | ✅ caught | `memory::commands::tests::an_unknown_id_is_a_clear_error`, `memory::tools::tests::an_unknown_memory_get_uses_the_stores_not_found_wording` |
+
+## memory-project-auto-create: ADR 0021 (decisions 1 and 2)
+
+Base `6f2a08b` · in-place in this worktree, each mutation applied with `python3` from a copy and
+restored from it afterwards (`md5` compared, `git status --short` empty), `cargo test -p
+radian-host --lib --no-fail-fast memory::` (AC-1 additionally: `cargo test -p agent-cli --test
+cli -- memory` after `cargo build -p radian-tui --bin radian`, and `cargo test -p radian-tui
+--test pty -- pty_a_memory_add`).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| AC-1 | `project_for_write` never registers: a git workspace with an unknown key gets the `Unlinked` error (the pre-revision behaviour) | ✅ caught | `memory::service::tests::{a_write_registers_a_git_workspace_and_a_read_never_does, a_write_outside_a_repository_is_refused_and_creates_nothing, a_write_still_creates_when_a_candidate_previous_project_exists}`, `memory::tools::tests::{a_save_in_a_git_workspace_registers_the_project_and_notices_once, a_save_outside_a_project_workspace_is_refused_without_suggesting_global}`, and end to end `agent_cli::cli::{memory_add_registers_a_git_workspace_and_prints_one_notice, memory_save_in_a_git_workspace_creates_the_project_and_exec_shows_the_notice, memory_unlinked_workspace_refuses_project_writes_and_lists_global}`, `radian_tui::pty::pty_a_memory_add_shows_the_created_project_notice` |
+| AC-2 | `MemoryService::state` registers a git workspace itself, so every **read** creates a project | ✅ caught | `memory::tools::tests::a_read_never_registers_a_project`, `memory::service::tests::{a_write_registers_a_git_workspace_and_a_read_never_does, a_write_still_creates_when_a_candidate_previous_project_exists}`, `memory::tools::tests::a_save_in_a_git_workspace_registers_the_project_and_notices_once` |
+| AC-3 | `project_for_write` drops the git check (registers any unregistered directory, `/tmp` included) | ✅ caught | `memory::service::tests::a_write_outside_a_repository_is_refused_and_creates_nothing`, `memory::tools::tests::a_save_outside_a_project_workspace_is_refused_without_suggesting_global` |
+| AC-4 | the `memory_unlinked` tool error says "Save to the global scope instead" again | ✅ caught | `memory::tools::tests::the_unlinked_tool_error_never_suggests_global` |
+| AC-5 | the `memory_save` description drops the global rule | ✅ caught | `memory::tools::tests::the_save_description_states_when_global_is_right` |
+| AC-6 | the not-a-project-workspace refusal suggests the global scope | ✅ caught | `memory::tools::tests::a_save_outside_a_project_workspace_is_refused_without_suggesting_global` |
+
+6/6 caught. In each run only the tests listed above failed (the rest of the `memory::` filter
+stayed green); AC-1 also reds the three CLI tests and the pty test above, which is what the two
+end-to-end tests are for.

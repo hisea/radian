@@ -148,6 +148,12 @@ pub struct Entry {
     pub tool: Option<Box<crate::tools::ToolCard>>,
     /// A compaction summary's data (ADR 0028 R5). `None` for every other entry.
     pub compaction: Option<Box<CompactionInfo>>,
+    /// Where this tool entry sits in a merged card (ADR 0028). Derived from the
+    /// entry order, refreshed whenever the entries change; the data stays two entries.
+    pub card: crate::blocks::Card,
+    /// A tool result's error code (`interrupted` for a cancelled call, ADR 0001), for the
+    /// card's `cancelled` meta. `None` for every other entry.
+    pub error_code: Option<String>,
     /// A **per-entry** fold override (ADR 0028 R6): `Some(true)` expands this entry whatever
     /// the global fold says, which is how a search hit opens exactly one folded entry.
     /// Cleared by the next global fold toggle. Part of the layout cache key.
@@ -181,6 +187,8 @@ impl Entry {
             result: None,
             tool: None,
             compaction: None,
+            card: crate::blocks::Card::None,
+            error_code: None,
             fold_override: None,
             block_cache: None,
             layout_cache: None,
@@ -1163,6 +1171,10 @@ pub struct App {
     pub projection: Arc<SessionProjection>,
     pub quit: bool,
     pub note: Option<String>,
+    /// The call ids of the tools running right now (ADR 0027's status note). A
+    /// batch can run several; the note clears only when the last one finishes, so the footer
+    /// does not say "tool shell running" while the next model request is already in flight.
+    running_tools: std::collections::HashSet<String>,
     /// A compaction is running (ADR 0018): the input rule's status line shows `Compacting`
     /// (ADR 0027). Set on `CompactionStarted`, cleared when it finishes, fails or
     /// is skipped.
@@ -1311,6 +1323,7 @@ impl App {
             projection: Arc::new(SessionProjection::new()),
             quit: false,
             note: None,
+            running_tools: std::collections::HashSet::new(),
             compacting: false,
             pending: 0,
             startup_screen: None,
@@ -3968,8 +3981,17 @@ impl App {
                 self.timer
                     .response_finished(self.now, usage.as_ref().and_then(|usage| usage.output));
             }
-            AgentEvent::ToolStarted { name, .. } => {
+            AgentEvent::ToolStarted { call_id, name, .. } => {
+                self.running_tools.insert(call_id.clone());
                 self.note = Some(format!("tool {name} running"));
+            }
+            AgentEvent::ToolFinished { call_id, .. } => {
+                // The tool is done. Clear the note only when no other tool in the batch is
+                // still running; otherwise the footer keeps naming a running one.
+                self.running_tools.remove(call_id);
+                if self.running_tools.is_empty() {
+                    self.note = None;
+                }
             }
             AgentEvent::TranscriptAppended { message, .. } => self.push_message(message),
             // ADR 0018: compaction is visible to the user as it happens.
@@ -4016,6 +4038,7 @@ impl App {
                 // from the queue alone is what makes "the waiter gave up" and "the turn ended"
                 // the same event.
                 self.note = None;
+                self.running_tools.clear();
                 self.compacting = false;
                 // ADR 0033: a `!` submitted behind the turn starts now.
                 if let Some((command, exclude_from_context)) = self.queued_bash.take() {
@@ -4141,13 +4164,19 @@ impl App {
                     );
                     // The call-time head has no result text yet (a `git_diff` head is terse
                     // until its diff arrives and the pairing refreshes it). Its status glyph
-                    // is the running one (rule 4); the pairing swaps it for ✔/✘.
+                    // is the running one (rule 4); the pairing swaps it for ✔/✘. The renderer
+                    // substitutes the live spinner frame for it while the call runs (ADR 0027
+                    // revision 10).
                     let [running, _, _] = self.footer.glyphs().tool_status();
+                    let glyph = running.to_string();
                     let mut entry = Entry::new(
                         EntryKind::ToolCall,
-                        format!("{running} {}", crate::tools::head_text(&card, "")),
+                        crate::tools::call_text(&card, &glyph, ""),
                     );
                     entry.tool = Some(Box::new(card));
+                    // A call with no result yet is a whole card of its own (ADR 0028 revision
+                    // 2); the pairing below turns it into the head of the merged card.
+                    entry.card = crate::blocks::Card::Solo;
                     self.entries.push(entry);
                 }
             }
@@ -4175,8 +4204,7 @@ impl App {
                         // regenerated from the same function the layout uses.
                         let [_, ok, failed] = self.footer.glyphs().tool_status();
                         let glyph = if result.is_error { failed } else { ok };
-                        entry.text =
-                            format!("{glyph} {}", crate::tools::head_text(card, &result.text()));
+                        entry.text = crate::tools::call_text(card, glyph, &result.text());
                         Some((card.name.clone(), card.arguments.clone()))
                     });
                 let (name, arguments) = paired.unwrap_or_default();
@@ -4188,7 +4216,9 @@ impl App {
                 let display = crate::tools::result_display_text(&card, &result.text());
                 let mut entry = Entry::new(EntryKind::ToolResult, display);
                 entry.is_error = result.is_error;
+                entry.error_code = result.error_code.clone();
                 entry.tool = Some(Box::new(card));
+                entry.card = crate::blocks::Card::Solo;
                 // Rule 4: the result sits right after **its own** call, so a batch reads
                 // call/result, call/result instead of every call then every result. The
                 // entries are the UI's own order; the journal keeps the message order, so a
@@ -4202,6 +4232,10 @@ impl App {
                             .is_some_and(|call| call.call_id == result.call_id)
                 }) {
                     Some(index) => {
+                        // The call heads the merged card and this result closes it (ADR 0028
+                        // revision 2): the drawing merges them, the data stays two entries.
+                        self.entries[index].card = crate::blocks::Card::Head;
+                        entry.card = crate::blocks::Card::Tail;
                         self.entries.insert(index + 1, entry);
                         // The insertion shifts every later entry: a selection anchored to one
                         // of them moves with it.
@@ -4280,7 +4314,7 @@ impl App {
     /// projection, which is what prices each arriving call: the footer reads the accumulated
     /// fee from there, because a call keeps the price it arrived under even after a switch.
     pub fn set_model_price(&mut self, price: Option<radian_host::ModelPrice>) {
-        self.model_price = price;
+        self.model_price = price.clone();
         self.projection.set_price(price);
     }
 

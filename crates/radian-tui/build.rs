@@ -22,7 +22,11 @@ const EXTRA_SYNTAXES: &[(&str, &str)] = &[
 ];
 
 fn main() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/syntaxes");
+    // Runtime, not `env!`: the build script's own `CARGO_MANIFEST_DIR` is baked when the
+    // build script is compiled, so a workspace moved (renamed) after that kept reading the old
+    // absolute path. Cargo sets this variable when it **runs** the build script.
+    let manifest = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+    let root = Path::new(&manifest).join("../../third_party/syntaxes");
     println!("cargo:rerun-if-changed={}", root.display());
     let mut builder = SyntaxSet::load_defaults_newlines().into_builder();
     for (name, file) in EXTRA_SYNTAXES {
