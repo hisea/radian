@@ -59,7 +59,7 @@ Use this section when the owner asks you to hand work to pi in herdr. pi is a se
 ### Set up
 
 - Check `test "$HERDR_ENV" = 1`. Find pi with `herdr agent list`. Read its pane with `herdr pane read <pane>` before you send anything. Make sure its input box is empty: a stale draft is added to the front of your message.
-- Give each task its own git worktree and branch: `git worktree add ../radian-pi -b pi/<task>`. pi works only there. pi commits on the branch and does not push or merge. You merge after the review, and only when the owner agrees. Remove the worktree after the merge.
+- Give each task its own git worktree and branch under the gitignored `.radian-worktrees/` (the same directory ADR 0030 uses for task agents): `git worktree add .radian-worktrees/<task> -b pi/<task> origin/main`. pi works only there. A session in the main checkout never touches `.radian-worktrees/`. pi commits on the branch and does not push or merge. You merge after the review, and only when the owner agrees. Remove the worktree after the merge.
 - Write the brief in a file outside the repository, in the scratchpad. Send one line with `herdr agent prompt <pane> "<one line that names the file>"`. Do not send long or multi-line text.
 
 ### What the brief holds
