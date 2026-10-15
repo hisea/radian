@@ -1131,3 +1131,17 @@ Base `62ae29e` · 一次性 worktree `/tmp/radian-sl-mut`。
 | S-M1 | TUI 摘要行改回搜索 `sandbox_facts` 文本（macOS 上写 `none`） | `pty::pty_the_startup_summary_names_the_real_sandbox_backend` | ✅ |
 
 1/1 抓住。
+
+## ime-latency（输入法一次提交的整串汉字，2026-10-15）
+
+Base `e2a0392` · 一次性 worktree `/tmp/radian-ime-mut*`，还原后 `git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| IM-M1 | `read_input` 恢复 `tty_readiness(timeout)` 的非零等待 | `pty_a_committed_ime_string_reaches_the_input_in_one_frame`（整串 687 ms > 150 ms 界限） | ✅ |
+| IM-M2 | 去掉 `MAY_HAVE_BUFFERED` 收窄（Idle 分支无条件走 crossterm 的 `poll(0)`） | `pty_a_closed_master_ends_the_app_cleanly` | ❌ 未抓住（0/5） |
+| IM-M3 | `tty_readiness` 不检查 `POLLHUP`（该测试本来的目标变异） | `pty_a_closed_master_ends_the_app_cleanly`（卡死，exit 124） | ✅ |
+
+IM-M2 与既有记录一致（见上文 `RESIZE-B`：closed-master 测试抓不到收窄的缺失——收窄省的是 CPU，
+不是保证退出；退出由第一次 `tty_readiness` 的 Gone 与主循环兜底覆盖，两者都用同一个
+`tty_readiness`）。IM-M3 证明这次改动没有削弱该测试对 POLLHUP 的检查。
