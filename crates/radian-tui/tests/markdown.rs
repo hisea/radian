@@ -329,9 +329,12 @@ fn a_find_jump_lands_on_the_markdown_paragraph_under_a_folded_entry() {
     assert_eq!(m.entry, 1);
     // `current_line` is the **search** geometry (the channel expanded); the jump recomputes
     // the display line with the channel folded.
-    assert_eq!(find.current_line(), Some(expanded + m.line));
+    // The container's gap line before the assistant entry is part of both geometries
+    // (ADR 0028 rule 1).
+    let gap = blocks::block_gap(Some(&app.entries[0]), &app.entries[1]);
+    assert_eq!(find.current_line(), Some(expanded + gap + m.line));
     assert!(!app.is_following(), "a jump closes follow");
-    let hit_line = folded + m.line;
+    let hit_line = folded + gap + m.line;
     // The jump scrolled the paragraph into view: a jump that kept the expanded line would put
     // it twenty lines down, off a twelve-row screen.
     let terminal = render(&mut app, width as u16, 12);
@@ -385,9 +388,13 @@ fn a_whole_line_selection_copies_the_source_line() {
         let anchor = select::locate(&app.entries, modes, 80, 0, 0).expect("anchor");
         let head = select::locate(&app.entries, modes, 80, last, cells + 2).expect("head");
         let copied = select::logical_text(&app.entries, &select::Selection { anchor, head });
+        // A trailing newline in the source is a blank **edge** line, which the layout strips
+        // (ADR 0028 rule 1): the display's last line is the line itself, and the
+        // copy is what is displayed.
         assert_eq!(
-            copied, body,
-            "the whole line copies the source for {body:?}"
+            copied,
+            body.trim_end_matches('\n'),
+            "the whole line copies the displayed source line for {body:?}"
         );
     }
 }

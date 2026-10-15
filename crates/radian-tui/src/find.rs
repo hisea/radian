@@ -136,6 +136,9 @@ pub fn compute(
     let mut starts = Vec::with_capacity(entries.len());
     let mut line = 0usize;
     for (entry, item) in entries.iter().enumerate() {
+        // The container's gap before this entry is part of the transcript's geometry
+        // (ADR 0028 rule 1), so an absolute line is the same in both.
+        line += crate::blocks::block_gap(entries.get(entry.wrapping_sub(1)), item);
         starts.push(line);
         // Folded content must not vanish from the search (ADR 0028 R6): matching runs over
         // the **fully expanded** form - thinking, tool bodies and compaction summaries alike.
@@ -200,9 +203,10 @@ mod tests {
                 MatchLine { entry: 2, line: 1 },
             ]
         );
-        assert_eq!(starts, vec![0, 3, 4]);
-        // The third entry's two lines start at 4 and 5.
-        assert_eq!(starts[2], 4);
+        // The user block's bottom pad is its separation (no container gap after it); the
+        // assistant entry is followed by one container gap, so the notice starts at 5.
+        assert_eq!(starts, vec![0, 3, 5]);
+        assert_eq!(starts[2], 5);
     }
 
     #[test]

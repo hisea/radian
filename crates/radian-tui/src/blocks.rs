@@ -577,6 +577,94 @@ pub fn is_folded(entry: &Entry, modes: DisplayModes) -> bool {
     }
 }
 
+/// Strips an entry's **backgroundless blank** edge lines (ADR 0028 rule 1): the
+/// container owns the spacing between blocks, so a text-derived blank line at an entry's
+/// start or end (a leading/trailing newline in the message) must not add a second one. A
+/// **pad** row is the block's own shape (a user block's breathing room, painted or not) and
+/// stays; the layout is the one place this happens, so counting, drawing, the selection
+/// mapping and the search all see the stripped form.
+fn strip_edge_blanks(lines: &mut Vec<BodyLine>) {
+    let blank = |line: &BodyLine| !line.pad && !line.hint && line.chars.is_empty();
+    let start = lines
+        .iter()
+        .position(|line| !blank(line))
+        .unwrap_or(lines.len());
+    let end = lines
+        .iter()
+        .rposition(|line| !blank(line))
+        .map_or(start, |index| index + 1);
+    lines.drain(end..);
+    lines.drain(..start);
+}
+
+/// The blank lines the container inserts between two adjacent entries (ADR 0028
+/// rule 1). Zero when the two entries are one visual block:
+///
+/// * a tool call and **its own** result (matched by call id, rule 4) - the result hugs its
+///   call, with no gap in between;
+/// * either side is a user block: its pad row is the separation already (painted in a theme
+///   with a user background, blank in one without - the shape is the same either way).
+///
+/// Otherwise exactly one line. The counting ([`line_count`]'s callers), the drawing
+/// ([`crate::render::visible_lines`]), the selection mapping and the find geometry all call
+/// this, so a gap cannot exist in one and not the other.
+pub fn block_gap(prev: Option<&Entry>, next: &Entry) -> usize {
+    let Some(prev) = prev else {
+        return 0;
+    };
+    if is_call_result_pair(prev, next) {
+        return 0;
+    }
+    // The startup block is **one** block built from several entries (the wordmark, the folded
+    // line or the full lines, the safety lines that never fold, the Tip): no gaps inside it.
+    if is_startup_block(prev.kind) && is_startup_block(next.kind) {
+        return 0;
+    }
+    if prev.kind == EntryKind::User || next.kind == EntryKind::User {
+        return 0;
+    }
+    1
+}
+
+/// The entries the startup block is made of (ADR 0027 §标志 / the owner's 2026-10-14 startup
+/// screen): one visual block, so the container inserts no gaps between them.
+fn is_startup_block(kind: EntryKind) -> bool {
+    matches!(
+        kind,
+        EntryKind::Banner | EntryKind::Startup | EntryKind::Warning | EntryKind::Tip
+    )
+}
+
+/// Whether `prev` is the tool call `next` answers (same call id).
+pub fn is_call_result_pair(prev: &Entry, next: &Entry) -> bool {
+    prev.kind == EntryKind::ToolCall
+        && next.kind == EntryKind::ToolResult
+        && prev
+            .tool
+            .as_ref()
+            .zip(next.tool.as_ref())
+            .is_some_and(|(call, result)| call.call_id == result.call_id)
+}
+
+/// The gap before each entry: `gaps[i]` is the blank lines before entry `i` (`gaps[0]` is 0).
+/// The container's total line count is the sum of the entries' counts plus these.
+pub fn gaps(entries: &[Entry]) -> Vec<usize> {
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| block_gap(entries.get(index.wrapping_sub(1)), entry))
+        .collect()
+}
+
+/// Whether the entry's display text has a blank **edge paragraph** (a leading or trailing
+/// newline, or an empty text): the layout strips those lines (rule 1), so a counting path that
+/// does not want to lay the entry out has to fall back to [`layout`] in this case. Every other
+/// text keeps the fast path.
+fn has_blank_edge(text: &str) -> bool {
+    let blank = |paragraph: &str| paragraph.trim().is_empty();
+    text.split('\n').next().is_some_and(blank) || text.rsplit('\n').next().is_some_and(blank)
+}
+
 /// Whether a foldable entry shows its content: the global fold says so, or a per-entry
 /// override (ADR 0028 R6: a search hit opens exactly one entry).
 pub fn expanded(entry: &Entry, global: bool) -> bool {
@@ -595,6 +683,17 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
     let prefix = crate::render::marker_prefix(entry.kind).width();
     let body_width = width.saturating_sub(prefix).max(1);
     let text = crate::render::display_text(entry);
+    // A blank edge line is stripped by the layout; the cheap arms below do not know that, so
+    // this entry goes through the layout itself (the one place the rule lives). Highlighting
+    // is a color-only pass and must not run here: the measure pass is the cheap one
+    // (`tui.display.highlight`'s lazy rule).
+    if has_blank_edge(&text) {
+        let plain = DisplayModes {
+            highlight: false,
+            ..modes
+        };
+        return layout(entry, &parse_blocks_for(entry, mode), plain, width).len();
+    }
     match entry.kind {
         EntryKind::User => {
             // pad + text + pad.
@@ -803,6 +902,21 @@ pub(crate) fn parse_blocks_for(entry: &Entry, mode: ReasoningMode) -> Vec<Block>
 /// Lays the entry's body out at `width`. The renderer's spans and the selection's cell →
 /// offset mapping both read these lines.
 pub fn layout(entry: &Entry, blocks: &[Block], modes: DisplayModes, width: usize) -> Vec<BodyLine> {
+    // The container owns the spacing (ADR 0028 rule 1): a text-derived blank line
+    // at an entry's start or end is stripped here, so counting, drawing, the selection mapping
+    // and the search all see the same shape.
+    let mut lines = layout_unstripped(entry, blocks, modes, width);
+    strip_edge_blanks(&mut lines);
+    lines
+}
+
+/// [`layout`] without the edge stripping.
+fn layout_unstripped(
+    entry: &Entry,
+    blocks: &[Block],
+    modes: DisplayModes,
+    width: usize,
+) -> Vec<BodyLine> {
     let mode = modes.reasoning;
     let prefix = crate::render::marker_prefix(entry.kind).width();
     let body_width = width.saturating_sub(prefix).max(1);
@@ -812,7 +926,19 @@ pub fn layout(entry: &Entry, blocks: &[Block], modes: DisplayModes, width: usize
     match (entry.kind, mode) {
         (EntryKind::Reasoning, ReasoningMode::Hidden) if !reasoning_expanded => Vec::new(),
         (EntryKind::Reasoning, ReasoningMode::Collapsed) if !reasoning_expanded => {
-            vec![BodyLine::prose(Vec::new(), 0, placeholder(entry))]
+            vec![BodyLine {
+                chars: Vec::new(),
+                end: 0,
+                text: placeholder(entry),
+                code: false,
+                pad: false,
+                role: tools::LineRole::Normal,
+                hint: true,
+                diagram: None,
+                reason: false,
+                md: None,
+                syntax: None,
+            }]
         }
         (EntryKind::User, _) => {
             let mut lines = vec![BodyLine::pad(0)];
@@ -1044,13 +1170,12 @@ const SPINNER: [char; 4] = ['⠋', '⠙', '⠸', '⠴'];
 /// line count stays 1 either way.
 fn placeholder(entry: &Entry) -> String {
     let lines = entry.text.lines().count().max(1);
+    // No `▸` here: the marker column carries it (ADR 0028 rule 5), so the body
+    // column is the same folded and expanded.
     if entry.live {
-        format!(
-            "▸ thinking ({lines} lines) {}",
-            SPINNER[entry.text.len() % 4]
-        )
+        format!("thinking ({lines} lines) {}", SPINNER[entry.text.len() % 4])
     } else {
-        format!("▸ thinking ({lines} lines)")
+        format!("thinking ({lines} lines)")
     }
 }
 
@@ -1156,6 +1281,19 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
     let prefix = crate::render::marker_prefix(entry.kind).width();
     let body_width = width.saturating_sub(prefix).max(1);
     let text = crate::render::display_text(entry);
+    // The stripped edge lines are part of the shape: the text-only path takes them from the
+    // layout when there are any (see `has_blank_edge`), so the search geometry and the drawing
+    // cannot disagree.
+    if has_blank_edge(&text) {
+        let plain = DisplayModes {
+            highlight: false,
+            ..modes
+        };
+        return layout(entry, &parse_blocks_for(entry, mode), plain, width)
+            .into_iter()
+            .map(|line| line.text)
+            .collect();
+    }
     let reasoning_expanded = expanded(entry, mode == ReasoningMode::Expanded);
     match (entry.kind, mode) {
         (EntryKind::Reasoning, ReasoningMode::Hidden) if !reasoning_expanded => Vec::new(),
@@ -2012,6 +2150,68 @@ mod tests {
     }
 
     #[test]
+    fn the_container_gap_is_one_line_except_within_a_block() {
+        let user = Entry::new(EntryKind::User, "hi");
+        let assistant = Entry::new(EntryKind::Assistant, "hello");
+        let notice = Entry::new(EntryKind::Notice, "note");
+        let banner = Entry::new(EntryKind::Banner, "radian");
+        let startup = Entry::new(EntryKind::Startup, "profile: x");
+        let mut call = Entry::new(EntryKind::ToolCall, "-> shell");
+        call.tool = Some(Box::new(tools::ToolCard::new(
+            "c1",
+            "shell",
+            serde_json::json!({}),
+        )));
+        let mut result = Entry::new(EntryKind::ToolResult, "ok");
+        result.tool = Some(Box::new(tools::ToolCard::new(
+            "c1",
+            "shell",
+            serde_json::json!({}),
+        )));
+        let mut other = Entry::new(EntryKind::ToolResult, "other");
+        other.tool = Some(Box::new(tools::ToolCard::new(
+            "c2",
+            "shell",
+            serde_json::json!({}),
+        )));
+
+        assert_eq!(block_gap(None, &assistant), 0, "the first entry has no gap");
+        assert_eq!(block_gap(Some(&assistant), &notice), 1, "ordinary blocks");
+        assert_eq!(block_gap(Some(&assistant), &user), 0, "a user block's pad");
+        assert_eq!(block_gap(Some(&user), &assistant), 0, "the same pad");
+        assert_eq!(block_gap(Some(&call), &result), 0, "a result hugs its call");
+        assert_eq!(
+            block_gap(Some(&call), &other),
+            1,
+            "another call's result is another block"
+        );
+        assert_eq!(block_gap(Some(&banner), &startup), 0, "the startup block");
+        assert_eq!(block_gap(Some(&startup), &assistant), 1, "after it");
+        assert_eq!(gaps(&[assistant, notice]).len(), 2);
+    }
+
+    #[test]
+    fn a_blank_edge_line_is_stripped_and_a_pad_is_kept() {
+        // A text-derived blank line at either edge is the container's job.
+        let mut text = Entry::new(EntryKind::Assistant, "\nhello\n\n");
+        assert_eq!(
+            layout(&text, &parse_blocks("\nhello\n\n"), EXPANDED, 20).len(),
+            1
+        );
+        assert_eq!(line_count(&text, EXPANDED, 20), 1);
+        assert_eq!(
+            body_text_lines(&text, EXPANDED, 20),
+            vec!["hello".to_string()]
+        );
+        // A user block's pad rows are its shape: they stay.
+        text.kind = EntryKind::User;
+        text.text = "hi".to_string();
+        let lines = layout(&text, &[], EXPANDED, 20);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].pad && lines[2].pad);
+    }
+
+    #[test]
     fn fences_split_paragraphs_and_carry_the_language() {
         let blocks = parse_blocks("prose one\n\n```rust\nlet x = 1;\n```\nprose two");
         assert_eq!(blocks.len(), 3);
@@ -2182,7 +2382,9 @@ mod tests {
         assert_eq!(line_count(&entry, EXPANDED, 40), 3);
         // The collapsed placeholder carries the spinner while streaming.
         let lines = layout(&entry, &[], modes_with(ReasoningMode::Collapsed), 40);
-        assert!(lines[0].text.contains("▸ thinking (3 lines)"));
+        // The `▸` is the marker column's glyph (rule 5), not part of the placeholder text.
+        assert!(lines[0].text.contains("thinking (3 lines)"));
+        assert!(lines[0].hint, "the placeholder is a synthesized line");
         assert!(
             lines[0]
                 .text
@@ -2192,6 +2394,6 @@ mod tests {
         );
         entry.live = false;
         let lines = layout(&entry, &[], modes_with(ReasoningMode::Collapsed), 40);
-        assert_eq!(lines[0].text, "▸ thinking (3 lines)");
+        assert_eq!(lines[0].text, "thinking (3 lines)");
     }
 }
