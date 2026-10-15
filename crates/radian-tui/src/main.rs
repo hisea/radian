@@ -1668,9 +1668,20 @@ fn crossterm_event() -> Input {
 /// 2. **Fallback**: the main loop calls [`terminal_is_gone`] (a non-consuming `poll(2)`) on a
 ///    periodic tick, so even a thread stuck inside crossterm ends the process through the
 ///    ordinary [`UiEvent::TerminalGone`] path.
+///
+/// When guard 1 applies (a previous read may have buffered events) the readiness wait is
+/// **zero**: the buffered events are already in hand, so there is nothing to wait for on the
+/// fd. Waiting the full `timeout` there added one poll period (~50 ms) per buffered event; an
+/// IME commits a whole word at once, so its characters appeared one at a time, ~50 ms apart.
+/// The zero-timeout poll still reports a hang-up, so the safety semantics do not change.
 #[cfg(unix)]
 fn read_input(timeout: Duration) -> Input {
     block_input_if_asked();
+    let timeout = if MAY_HAVE_BUFFERED.load(std::sync::atomic::Ordering::SeqCst) {
+        Duration::ZERO
+    } else {
+        timeout
+    };
     match tty_readiness(timeout) {
         Tty::Gone => Input::Gone,
         Tty::Readable => {
