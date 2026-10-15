@@ -287,6 +287,9 @@ struct Shared {
     wake: Condvar,
     stop: AtomicBool,
     counter: AtomicU64,
+    /// The sender's connect/write/read timeouts: the production values, or the test seam's.
+    timeout: Duration,
+    retry: Duration,
 }
 
 /// The latest-only sender (ADR H4): one dedicated OS thread, a slot that keeps only the newest
@@ -300,11 +303,20 @@ pub struct Reporter {
 impl Reporter {
     /// Starts the sender thread.
     pub fn spawn(env: HerdrEnv) -> Self {
+        Self::with_timeouts(env, TIMEOUT, RETRY)
+    }
+
+    /// The crate-private test seam: the same sender with longer timeouts, so a loaded machine
+    /// cannot turn a reply the test is deliberately holding into a retry. Production always
+    /// uses [`TIMEOUT`]/[`RETRY`].
+    pub(crate) fn with_timeouts(env: HerdrEnv, timeout: Duration, retry: Duration) -> Self {
         let shared = Arc::new(Shared {
             slot: Mutex::new(None),
             wake: Condvar::new(),
             stop: AtomicBool::new(false),
             counter: AtomicU64::new(0),
+            timeout,
+            retry,
         });
         let thread_env = env.clone();
         let thread_shared = Arc::clone(&shared);
@@ -343,26 +355,38 @@ impl Reporter {
             line: release_line(&self.env, seq, &self.id()),
             retry: false,
         };
-        send(&self.env, &request);
+        send(&self.env, &request, TIMEOUT, RETRY);
     }
 
     /// Stops the sender thread (best effort; a blocked write times out on its own).
+    ///
+    /// `stop` is set while holding the slot mutex. Setting it without the lock loses a race
+    /// with the sender: the sender can check `stop` (false), then call `wake.wait`, and the
+    /// `notify_all` lands before it is registered as a waiter. It then waits forever and the
+    /// `join` below hangs (the herdr-report hang).
     pub fn shutdown(&self) {
-        self.shared.stop.store(true, Ordering::SeqCst);
-        self.shared.wake.notify_all();
+        self.stop_and_wake();
         if let Some(handle) = self.thread.lock().unwrap_or_else(|e| e.into_inner()).take() {
             let _ = handle.join();
         }
+    }
+
+    /// Signals the sender under the slot mutex, so a sender between its `stop` check and its
+    /// `wait` cannot miss the wakeup.
+    fn stop_and_wake(&self) {
+        let _slot = self.shared.slot.lock().unwrap_or_else(|e| e.into_inner());
+        self.shared.stop.store(true, Ordering::SeqCst);
+        self.shared.wake.notify_all();
     }
 }
 
 impl Drop for Reporter {
     /// Signals the sender thread and returns without joining: a panic must not wait on an
     /// in-flight send (ADR 0034 H5, the panic path does no I/O). The thread exits on its own
-    /// after its current timeout.
+    /// after its current timeout. The lock taken here is the slot mutex, which the sender never
+    /// holds during a send, so this still does not wait on I/O.
     fn drop(&mut self) {
-        self.shared.stop.store(true, Ordering::SeqCst);
-        self.shared.wake.notify_all();
+        self.stop_and_wake();
     }
 }
 
@@ -376,7 +400,7 @@ fn sender_loop(env: HerdrEnv, shared: Arc<Shared>) {
             slot.take()
         };
         match request {
-            Some(request) => send(&env, &request),
+            Some(request) => send(&env, &request, shared.timeout, shared.retry),
             None if shared.stop.load(Ordering::SeqCst) => return,
             None => {}
         }
@@ -385,13 +409,13 @@ fn sender_loop(env: HerdrEnv, shared: Arc<Shared>) {
 
 /// One request over the socket: connect, write the line, wait for a response line. A report
 /// retries once with the longer timeout; the response is only read to confirm delivery.
-fn send(env: &HerdrEnv, request: &Request) {
-    if send_once(env, request, TIMEOUT).is_ok() {
+fn send(env: &HerdrEnv, request: &Request, timeout: Duration, retry: Duration) {
+    if send_once(env, request, timeout).is_ok() {
         return;
     }
     // One retry with the longer timeout; a release is sent once.
     if request.retry {
-        let _ = send_once(env, request, RETRY);
+        let _ = send_once(env, request, retry);
     }
 }
 
@@ -528,12 +552,40 @@ mod tests {
         (path, listener)
     }
 
+    /// The test-side deadlines. `UnixListener::accept` and a socket read have no timeout, so a
+    /// test that waits for a connection or a line the sender never sends must fail here, not
+    /// hang. (The herdr-report hang was a lost wakeup in `shutdown`; a future one must not turn
+    /// into a stuck test binary.)
+    const ACCEPT_DEADLINE: Duration = Duration::from_secs(5);
+    const READ_DEADLINE: Duration = Duration::from_secs(5);
+    /// The tests hold a reply on purpose; a loaded machine must not turn that into a retry, so
+    /// the sender gets these timeouts instead of the production 500 ms / 1500 ms.
+    const TEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// Accepts one connection, or fails after [`ACCEPT_DEADLINE`]. `accept` runs on a helper
+    /// thread, so the deadline is a channel receive, not a sleep.
+    fn accept(listener: &UnixListener) -> UnixStream {
+        let listener = listener.try_clone().expect("clone listener");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(listener.accept());
+        });
+        match rx.recv_timeout(ACCEPT_DEADLINE) {
+            Ok(Ok((conn, _))) => conn,
+            Ok(Err(e)) => panic!("accept failed: {e}"),
+            Err(_) => panic!("no connection arrived within {ACCEPT_DEADLINE:?}"),
+        }
+    }
+
     fn read_line(conn: &mut UnixStream) -> String {
+        conn.set_read_timeout(Some(READ_DEADLINE))
+            .expect("set read timeout");
         let mut line = String::new();
-        BufReader::new(conn.try_clone().unwrap())
-            .read_line(&mut line)
-            .expect("read");
-        line
+        match BufReader::new(conn.try_clone().unwrap()).read_line(&mut line) {
+            Ok(0) => panic!("the connection closed before a line arrived"),
+            Ok(_) => line,
+            Err(e) => panic!("no line arrived within {READ_DEADLINE:?}: {e}"),
+        }
     }
 
     fn reply(conn: &mut UnixStream) {
@@ -548,9 +600,9 @@ mod tests {
             pane_id: "w1:p1".into(),
             socket: socket.clone(),
         };
-        let reporter = Reporter::spawn(env);
+        let reporter = Reporter::with_timeouts(env, TEST_TIMEOUT, TEST_TIMEOUT);
         reporter.report(&Report::new(State::Working), 7);
-        let (mut conn, _) = listener.accept().expect("accept");
+        let mut conn = accept(&listener);
         let line = read_line(&mut conn);
         reply(&mut conn);
         let value: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
@@ -582,7 +634,7 @@ mod tests {
             start.elapsed()
         );
         // The connection is accepted but never answered; the sender's read times out.
-        let (_conn, _) = listener.accept().expect("accept");
+        let _conn = accept(&listener);
         reporter.shutdown();
         let _ = std::fs::remove_file(&socket);
     }
@@ -595,17 +647,17 @@ mod tests {
             pane_id: "w1:p1".into(),
             socket: socket.clone(),
         };
-        let reporter = Reporter::spawn(env);
+        let reporter = Reporter::with_timeouts(env, TEST_TIMEOUT, TEST_TIMEOUT);
         // The first report connects; the listener accepts but holds the reply.
         reporter.report(&Report::new(State::Idle), 1);
-        let (mut first, _) = listener.accept().expect("accept");
+        let mut first = accept(&listener);
         let first_line = read_line(&mut first);
         // Queue two more while the first send is waiting for its reply.
         reporter.report(&Report::new(State::Working), 2);
         reporter.report(&Report::new(State::Blocked), 3);
         // Release the first; the sender then takes the slot (the latest, `blocked`).
         reply(&mut first);
-        let (mut second, _) = listener.accept().expect("accept");
+        let mut second = accept(&listener);
         let second_line = read_line(&mut second);
         reply(&mut second);
         assert_eq!(
