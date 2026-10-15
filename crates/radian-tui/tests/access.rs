@@ -53,10 +53,7 @@ fn access_with_no_argument_reports_the_tier_and_source() {
 fn access_to_a_sandboxed_tier_switches_without_confirmation() {
     for command in ["/access safe", "/access workspace"] {
         let app = submit(command);
-        assert!(
-            matches!(app.top_modal(), None),
-            "{command} must not open a panel"
-        );
+        assert!(app.top_modal().is_none(), "{command} must not open a panel");
     }
     // The effect itself, checked directly (the helper above consumed it).
     let mut app = App::new("m", "s");
