@@ -342,13 +342,11 @@ async fn a_session_cleanup_settle_is_not_notified() {
     wait_for_pid(&root, "s.pid").await;
     session.shutdown_jobs();
 
-    let mut settled = false;
     loop {
         match tokio::time::timeout(Duration::from_secs(15), events.recv()).await {
             Ok(Ok(JobEvent::Settled { state, notify, .. })) => {
                 assert_eq!(state.label(), "killed", "a cleanup settles as killed");
                 assert!(!notify, "a session-exit settle must not notify");
-                settled = true;
                 break;
             }
             Ok(Ok(JobEvent::Started { .. })) => continue,
@@ -356,7 +354,6 @@ async fn a_session_cleanup_settle_is_not_notified() {
             Err(_) => panic!("timed out waiting for a settle event"),
         }
     }
-    assert!(settled);
 }
 
 // ---------- 2. wait timeout ----------
