@@ -1234,7 +1234,9 @@ fn run(
             radian_tui::workspace::display_coding_root(&workspace_root, home.as_deref())
         )
     });
-    let context_line = format!("context: {}", window.describe());
+    // The context window (ADR 0018) and the loaded context files (ADR 0036 C2) are separate
+    // lines; `context:` is the files, matching the ADR's wording.
+    let context_line = format!("context window: {}", window.describe());
     let session_line = match &resume {
         Some(id) => format!(
             "resumed session {id} ({} messages) · Enter sends · Ctrl-C cancels a turn · \
@@ -1275,6 +1277,7 @@ fn run(
         format!("profile: {}", session.facts().profile_line),
         sandbox_facts,
         context_line,
+        format!("context: {}", session.facts().context_line),
     ];
     if let Some(line) = &workspace_line {
         startup_lines.push(line.clone());
