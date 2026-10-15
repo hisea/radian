@@ -265,8 +265,10 @@ async fn a_wait_timeout_returns_running_and_leaves_the_job_alive() {
     );
     assert!(text.contains("[status: running]"), "{text}");
     assert!(text.contains("the job was not killed"), "{text}");
+    // A wrong kill would settle well within this window; the job must outlive it. This is a
+    // bounded process-state wait, not a sleep to let a race resolve.
     assert!(
-        alive(leader),
+        !gone_within(leader, Duration::from_secs(1)).await,
         "a wait timeout must not kill the job (pid {leader})"
     );
 
@@ -445,7 +447,7 @@ async fn a_cancelled_turn_leaves_the_job_running() {
     let text = output_text(&result.unwrap());
     assert!(text.contains("the turn was cancelled"), "{text}");
     assert!(
-        alive(leader),
+        !gone_within(leader, Duration::from_secs(1)).await,
         "a cancelled turn must not kill the job (pid {leader})"
     );
 
