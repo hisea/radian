@@ -304,7 +304,11 @@ fn the_meta_writes_only_the_data_that_exists() {
     // A measured duration is written; an unmeasured one is not (the shell card above has
     // none and shows none).
     let mut app = shell_app(Some(ok_result("done")));
-    if let Some(entry) = app.entries.iter_mut().find(|e| e.kind == radian_tui::app::EntryKind::ToolResult) {
+    if let Some(entry) = app
+        .entries
+        .iter_mut()
+        .find(|e| e.kind == radian_tui::app::EntryKind::ToolResult)
+    {
         entry.tool.as_mut().expect("the card").duration_ms = Some(50);
     }
     let terminal = render(&mut app, 80, 12);
@@ -343,7 +347,11 @@ fn the_meta_writes_only_the_data_that_exists() {
         "only the exit code: {}",
         screen(&terminal)
     );
-    assert!(!screen(&terminal).contains("timeout"), "{}", screen(&terminal));
+    assert!(
+        !screen(&terminal).contains("timeout"),
+        "{}",
+        screen(&terminal)
+    );
 }
 
 #[test]
