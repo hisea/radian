@@ -2217,6 +2217,18 @@ impl EventSink for Ui {
             AgentEvent::ToolStarted { index, name, .. } => {
                 eprintln!("[tool {index}] {name}: started");
             }
+            AgentEvent::ModelRetrying {
+                attempt,
+                max,
+                delay,
+                reason,
+            } => {
+                // ADR 0017: the same line the TUI shows, on stderr, before the wait.
+                // The failed attempt's streamed text went to stdout and cannot be unwritten, so
+                // this only closes its line before the retry notice and the next attempt.
+                self.end_of_turn();
+                eprintln!("retrying {attempt}/{max} in {}s: {reason}", delay.as_secs());
+            }
             AgentEvent::ToolFinished {
                 index, is_error, ..
             } => {

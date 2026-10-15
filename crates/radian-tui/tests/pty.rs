@@ -3610,7 +3610,9 @@ fn pty_anthropic_only_flags_are_refused_under_openai_compatible() {
 async fn pty_a_model_error_is_shown_and_the_session_continues() {
     let _serial = pty_guard();
     let server = MockServer::start(vec![
-        Reply::status(500, "provider is down"),
+        // Non-transient, so one failure ends the turn (ADR 0017 retries only
+        // connection failures, dropped streams, idle timeouts and 408/429/5xx/529).
+        Reply::status(400, "provider is down"),
         text_reply("SECOND-OK"),
     ])
     .await;
@@ -3637,7 +3639,7 @@ async fn pty_a_model_error_is_shown_and_the_session_continues() {
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("HTTP 500", 20),
+        pty.wait_for_screen("HTTP 400", 20),
         "the HTTP status is not shown:\n{}",
         pty.screen()
     );

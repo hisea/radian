@@ -1197,7 +1197,7 @@ async fn an_authorization_header_is_refused_so_the_key_has_one_source() {
 async fn a_header_value_never_leaks_into_errors() {
     // The server echoes the header value in an error body; neither stream may carry it.
     let server = MockServer::start(vec![Reply::status(
-        500,
+        400,
         "{\"error\":{\"message\":\"bad team-secret-value\"}}",
     )])
     .await;
@@ -1222,7 +1222,7 @@ async fn a_header_value_never_leaks_into_errors() {
 
     assert_eq!(code, 1);
     assert!(stdout.is_empty(), "{stdout}");
-    assert!(stderr.contains("HTTP 500"), "{stderr}");
+    assert!(stderr.contains("HTTP 400"), "{stderr}");
     assert!(!stderr.contains("team-secret-value"), "{stderr}");
 }
 
@@ -4854,7 +4854,9 @@ async fn search_redacts_the_key_from_a_snippet() {
 #[tokio::test]
 async fn an_interactive_model_error_is_shown_and_the_session_continues() {
     let server = MockServer::start(vec![
-        Reply::status(500, "provider is down"),
+        // A non-transient status (ADR 0017 retries only connection failures, dropped
+        // streams, idle timeouts and 408/429/5xx/529), so one failure ends the turn.
+        Reply::status(400, "provider is down"),
         text_reply("SECOND-OK"),
     ])
     .await;
@@ -4872,7 +4874,7 @@ async fn an_interactive_model_error_is_shown_and_the_session_continues() {
     cli.wait_for_stderr("> ").await;
     cli.write("first\n").await;
     // The error text reaches stderr (masked by the adapter and the host).
-    cli.wait_for_stderr("HTTP 500").await;
+    cli.wait_for_stderr("HTTP 400").await;
     cli.wait_for_stderr("provider is down").await;
     // The prompt is back: the session did not exit.
     cli.wait_for_stderr_count("> ", 2).await;
@@ -4885,10 +4887,37 @@ async fn an_interactive_model_error_is_shown_and_the_session_continues() {
     assert_eq!(server.requests().len(), 2, "both turns reached the model");
 }
 
+/// ADR 0017: a transient error (HTTP 500) is retried inside the one model call, the
+/// retry line goes to stderr, and the turn still succeeds on the second attempt.
+#[tokio::test]
+async fn a_transient_error_is_retried_and_the_turn_still_succeeds() {
+    let server = MockServer::start(vec![
+        Reply::status(500, "provider is down"),
+        text_reply("RETRIED-OK"),
+    ])
+    .await;
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_radian(
+            &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
+            &[("OPENAI_API_KEY", KEY)],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("RETRIED-OK"), "{stdout}");
+    assert!(stderr.contains("retrying 1/3"), "{stderr}");
+    assert_eq!(
+        server.requests().len(),
+        2,
+        "the first attempt and its retry reached the model"
+    );
+}
+
 /// One-shot mode is unchanged: a model error still exits 1, and the message is on stderr.
 #[tokio::test]
 async fn one_shot_model_error_still_exits_one_and_shows_the_error() {
-    let server = MockServer::start(vec![Reply::status(500, "provider is down")]).await;
+    let server = MockServer::start(vec![Reply::status(400, "provider is down")]).await;
     let (code, stdout, stderr) = feed_and_wait(
         spawn_radian(
             &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
@@ -4898,7 +4927,7 @@ async fn one_shot_model_error_still_exits_one_and_shows_the_error() {
     )
     .await;
     assert_eq!(code, 1, "{stderr}");
-    assert!(stderr.contains("HTTP 500"), "{stderr}");
+    assert!(stderr.contains("HTTP 400"), "{stderr}");
     assert!(stdout.is_empty(), "stdout must stay model-only: {stdout}");
 }
 

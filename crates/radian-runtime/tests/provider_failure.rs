@@ -59,7 +59,14 @@ async fn run_inputs(
     let journal = Arc::new(SessionJournal::create(path, "sid", created()).unwrap());
     let inbox = Inbox::durable(16, Arc::clone(&journal));
     let recorder = Arc::new(Recorder::default());
-    let agent = Arc::new(Agent::new(model(server), NoTools));
+    let agent = Arc::new(
+        Agent::new(model(server), NoTools).with_config(agent_core::AgentConfig {
+            // These tests pin the one-failure-per-turn behaviour (ADR 0017 §2); revision 1's
+            // retry is exercised in agent-core's retry tests.
+            retries: 0,
+            ..Default::default()
+        }),
+    );
     let mut driver = Driver::open(
         &agent,
         journal,
@@ -219,7 +226,12 @@ async fn resume_after_a_failed_turn_keeps_the_history() {
     let journal = Arc::new(SessionJournal::resume(&path, "sid").unwrap());
     let inbox = Inbox::durable(16, Arc::clone(&journal));
     let recorder = Arc::new(Recorder::default());
-    let agent = Arc::new(Agent::new(model(&server), NoTools));
+    let agent = Arc::new(Agent::new(model(&server), NoTools).with_config(
+        agent_core::AgentConfig {
+            retries: 0,
+            ..Default::default()
+        },
+    ));
     let mut driver = Driver::open(
         &agent,
         journal,

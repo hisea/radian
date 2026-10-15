@@ -193,6 +193,9 @@ impl EventSink for ProjectionSink {
             }
             // The committed message replaces the live view, so the stream buffer is done.
             AgentEvent::TranscriptAppended { .. } => self.projection.clear_stream(),
+            // ADR 0017: a retry discards the failed attempt's streamed text (it was
+            // live-only, ADR 0010), so the buffer is cleared before the next attempt starts.
+            AgentEvent::ModelRetrying { .. } => self.projection.clear_stream(),
             _ => {}
         }
         // The fact is written to the projection, and the event still goes on the channel:
@@ -442,6 +445,36 @@ mod tests {
             projection.snapshot(),
             StreamSnapshot::default(),
             "the live view is over"
+        );
+    }
+
+    /// ADR 0017: a retry discards the failed attempt's live view (its deltas are
+    /// live-only) and the event still reaches the UI (it is not a fact).
+    #[test]
+    fn a_retrying_event_clears_the_stream_and_reaches_the_ui() {
+        let (sink, projection, rx) = sink();
+        sink.emit(AgentEvent::ModelTextDelta {
+            text: "half".into(),
+        });
+        assert_eq!(projection.snapshot().assistant, "half");
+
+        sink.emit(AgentEvent::ModelRetrying {
+            attempt: 1,
+            max: 3,
+            delay: std::time::Duration::from_secs(4),
+            reason: "the stream was dropped".into(),
+        });
+        let events: Vec<UiEvent> = rx.try_iter().collect();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, UiEvent::Agent(AgentEvent::ModelRetrying { .. }))),
+            "the retry reaches the UI"
+        );
+        assert_eq!(
+            projection.snapshot(),
+            StreamSnapshot::default(),
+            "the failed attempt's live view is gone"
         );
     }
 }
