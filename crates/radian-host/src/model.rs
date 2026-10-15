@@ -336,7 +336,8 @@ pub fn compaction_settings_for(
     let notice = match applied {
         Some(applied) if applied == level => None,
         Some(applied) => {
-            let supported = crate::supported_thinking_levels_ref_with(provider, model, Some(max_tokens));
+            let supported =
+                crate::supported_thinking_levels_ref_with(provider, model, Some(max_tokens));
             Some(format!(
                 "thinking {level} → {applied} (this model supports {})",
                 supported.join("/")

@@ -35,9 +35,7 @@ pub(crate) fn build_body(
     // ADR 0026 D11: the thinking level's wire value, when the route's map gives one. Absent
     // otherwise, so a level-less model keeps the pre-D11 request byte for byte. A request-level
     // value (ADR 0018) wins over it.
-    if !request_effort
-        && let Some(effort) = &config.reasoning_effort
-    {
+    if !request_effort && let Some(effort) = &config.reasoning_effort {
         body.insert("reasoning_effort".into(), json!(effort));
     }
     // Only ask for streamed usage when we handle it; some compatible servers reject the key.

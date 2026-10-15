@@ -393,7 +393,11 @@ pub fn summary_request(
 /// `settings` is the host's request-level compaction setting (ADR 0018), the same
 /// value the first summary request carried: the retry is the same kind of call and must run at
 /// the same reasoning level.
-pub fn shorten_request(overlong_summary: &str, target_tokens: u64, settings: Value) -> ModelRequest {
+pub fn shorten_request(
+    overlong_summary: &str,
+    target_tokens: u64,
+    settings: Value,
+) -> ModelRequest {
     let facts = verified_facts_max_tokens(target_tokens);
     let body = format!(
         "The summary below is over the length limit. Rewrite it shorter, keeping the same sections. \

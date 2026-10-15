@@ -1719,10 +1719,8 @@ theme = "light"
     /// anything else is a config error, never a silent clamp from the default.
     #[test]
     fn compaction_thinking_accepts_the_levels_and_current_and_refuses_anything_else() {
-        let config = parse_str(
-            "schema_version = 1\n[compaction]\nthinking = \"current\"\n",
-        )
-        .unwrap();
+        let config =
+            parse_str("schema_version = 1\n[compaction]\nthinking = \"current\"\n").unwrap();
         assert_eq!(config.compaction.thinking.as_deref(), Some("current"));
         for level in ["off", "minimal", "low", "medium", "high", "xhigh", "max"] {
             let config = parse_str(&format!(

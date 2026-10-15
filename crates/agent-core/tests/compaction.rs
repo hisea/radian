@@ -331,7 +331,13 @@ fn the_shorten_request_carries_only_the_overlong_summary() {
 #[test]
 fn the_compaction_setting_is_copied_into_the_summary_and_the_shorten_requests() {
     let settings = json!({"reasoning_effort": "low"});
-    let summary = summary_request(None, &[Message::user("only")], None, 8_192, settings.clone());
+    let summary = summary_request(
+        None,
+        &[Message::user("only")],
+        None,
+        8_192,
+        settings.clone(),
+    );
     assert_eq!(summary.settings, settings);
     let shorten = shorten_request("OVERLONG", shorten_target(8_192), settings.clone());
     assert_eq!(shorten.settings, settings);

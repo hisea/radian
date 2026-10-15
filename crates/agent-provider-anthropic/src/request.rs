@@ -47,9 +47,7 @@ pub(crate) fn build_body(
     // (`AgentConfig.compaction_settings`, ADR 0018) wins over the config. When
     // neither is present the key is simply absent, so a thinking-free request is byte-identical
     // to the adapter before this feature (acceptance 5).
-    if !request_thinking
-        && let Some(thinking) = config.thinking
-    {
+    if !request_thinking && let Some(thinking) = config.thinking {
         body.insert(
             "thinking".into(),
             match thinking {

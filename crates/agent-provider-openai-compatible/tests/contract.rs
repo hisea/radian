@@ -395,8 +395,8 @@ async fn contract_13_the_request_reasoning_effort_wins_over_the_config() {
     ])])
     .await;
     let base = server.base_url.clone();
-    let mut config = OpenAiCompatibleConfig::new(base, "contract-model")
-        .with_api_key(ApiKey::new(SECRET));
+    let mut config =
+        OpenAiCompatibleConfig::new(base, "contract-model").with_api_key(ApiKey::new(SECRET));
     config.reasoning_effort = Some("high".into());
     let model = OpenAiCompatible::new(config).expect("a local mock config is valid");
     let request = ModelRequest {
