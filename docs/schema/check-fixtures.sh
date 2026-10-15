@@ -88,6 +88,12 @@ EXPECT = {
         user_bash=[(5, "echo hi", False, 0), (6, "false", True, 1)],
         repair={},
     ),
+    "context-files.jsonl": dict(
+        outcome="accept",
+        events=1,
+        skips=[],
+        repair={},
+    ),
     "git-committed.jsonl": dict(
         outcome="accept",
         events=6,
