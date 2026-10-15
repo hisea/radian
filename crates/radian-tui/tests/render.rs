@@ -1934,6 +1934,59 @@ fn the_trust_panel_snapshot_at_80_120_and_ascii() {
     assert!(!text.contains('╭'), "{text}");
 }
 
+/// The session picker (ADR 0035/2): the shared panel with the filter row, the
+/// sessions through the shared list, and the selected `--resume <id>` on the top border.
+#[test]
+fn the_picker_panel_snapshot_at_80_120_and_ascii() {
+    use radian_host::sessions::SessionRow;
+    use radian_tui::app::Overlay;
+    use radian_tui::picker::Picker;
+    let rows = vec![
+        SessionRow {
+            session_id: "alpha".into(),
+            created_ts: None,
+            last_ts: Some("2026-10-15T00:00:00Z".into()),
+            message_count: 2,
+            summary: "the first session".into(),
+        },
+        SessionRow {
+            session_id: "beta".into(),
+            created_ts: None,
+            last_ts: Some("2026-10-15T01:00:00Z".into()),
+            message_count: 5,
+            summary: "the second session".into(),
+        },
+    ];
+    let mut app = App::new("m", "s");
+    app.push_overlay(Overlay::Picker(Picker::new(rows, None, "/w")));
+
+    let terminal = render(&mut app, 80, 24);
+    let text = screen(&terminal);
+    assert!(text.contains("╭─ sessions "), "{text}");
+    assert!(text.contains("filter: "), "{text}");
+    assert!(text.contains("❯ alpha"), "{text}");
+    assert!(text.contains("--resume alpha"), "the copyable hint: {text}");
+    assert!(
+        text.contains("↑/↓ select · ⏎ resume · n new · tab search · esc close"),
+        "{text}"
+    );
+
+    let terminal = render(&mut app, 120, 24);
+    let text = screen(&terminal);
+    assert!(text.contains("╭─ sessions "), "{text}");
+    assert!(text.contains("the second session"), "{text}");
+
+    app.apply_footer(&radian_host::config::TuiFooterConfig {
+        glyphs: Some("ascii".into()),
+        ..Default::default()
+    });
+    let terminal = render(&mut app, 80, 24);
+    let text = screen(&terminal);
+    assert!(text.contains("+- sessions "), "{text}");
+    assert!(text.contains("> alpha"), "{text}");
+    assert!(!text.contains('╭'), "{text}");
+}
+
 /// The display modes most tests lay out with: both folds expanded, so a test's geometry does
 /// not depend on the fold defaults.
 #[allow(dead_code)]

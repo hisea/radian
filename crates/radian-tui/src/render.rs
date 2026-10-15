@@ -1370,7 +1370,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // The picker overlay draws over the transcript; the input box and the status bar stay
     // visible below it (ADR 0023 U4).
     if let Some(picker) = app.picker() {
-        crate::picker::draw(frame, chunks[0], picker);
+        crate::picker::draw(frame, chunks[0], picker, &app.theme, app.footer_glyphs());
     }
 
     if !completion.is_empty() {
