@@ -1147,8 +1147,8 @@ fn run(
     };
     let driver_stopped = {
         let tx = tx.clone();
-        Arc::new(move || {
-            let _ = tx.send(UiEvent::DriverStopped);
+        Arc::new(move |end| {
+            let _ = tx.send(UiEvent::DriverStopped(end));
         })
     };
     let before_driver: Option<Arc<dyn Fn() + Send + Sync>> = cli
@@ -2529,15 +2529,27 @@ impl LoopContext<'_> {
                 app.quit = true;
                 return false;
             }
-            UiEvent::DriverStopped => {
-                app.note = Some("the driver stopped; leaving".into());
+            UiEvent::DriverStopped(end) => {
+                // The driver stopped: a fatal error (ADR 0001: the journal may be broken, so
+                // no record is written), a panic, or a graceful close. The session is over.
+                // The TUI leaves `Running`, names the reason in the status bar and refuses
+                // `/fork` (ADR 0022 §1's "idle session" no longer exists). It stays so the
+                // reason is readable; the user quits with the ordinary keys.
+                let reason = match &end {
+                    radian_host::DriverEnd::Ok => "the driver stopped".to_string(),
+                    radian_host::DriverEnd::Failed(error) => format!("driver failed: {error}"),
+                    radian_host::DriverEnd::Panicked(message) => {
+                        format!("driver panicked: {message}")
+                    }
+                };
+                app.session_ended = Some(reason.clone());
+                app.pending_fork = None;
+                app.projection.set_turn(radian_tui::TurnState::Idle);
+                app.note = Some(reason.clone());
                 app.entries.push(radian_tui::Entry::new(
                     radian_tui::EntryKind::Notice,
-                    "the driver task ended; the session is closed",
+                    format!("the session ended: {reason}"),
                 ));
-                app.quit = true;
-                // One last frame, so the notice is what the user sees before the screen is
-                // restored.
                 return true;
             }
         };
@@ -3281,19 +3293,30 @@ fn ui_loop(
         // window is the other time-driven display (ADR 0023 U2): while it is armed the loop
         // wakes at its deadline to drop the hint.
         if effects.is_empty() {
+            let now = std::time::Instant::now();
             let quit_remaining = app
                 .quit_pending
-                .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()));
-            let first = if app.is_selecting() || quit_remaining.is_some() {
-                // The nearer of the two deadlines; `AUTO_SCROLL_TICK` is the drag's own tick.
-                let timeout = match (app.is_selecting(), quit_remaining) {
-                    (true, Some(quit)) => quit.min(AUTO_SCROLL_TICK),
+                .map(|deadline| deadline.saturating_duration_since(now));
+            // A `/fork` waiting for the turn boundary has its own deadline (FORK_COMMIT_WAIT).
+            let fork_remaining = app
+                .pending_fork
+                .map(|deadline| deadline.saturating_duration_since(now));
+            let wait_remaining = match (quit_remaining, fork_remaining) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+            let first = if app.is_selecting() || wait_remaining.is_some() {
+                // The nearer of the deadlines; `AUTO_SCROLL_TICK` is the drag's own tick.
+                let timeout = match (app.is_selecting(), wait_remaining) {
+                    (true, Some(wait)) => wait.min(AUTO_SCROLL_TICK),
                     (true, None) => AUTO_SCROLL_TICK,
-                    (false, Some(quit)) => quit.max(std::time::Duration::ZERO),
-                    (false, None) => unreachable!("the branch requires selection or a quit window"),
+                    (false, Some(wait)) => wait.max(std::time::Duration::ZERO),
+                    (false, None) => unreachable!("the branch requires selection or a deadline"),
                 }
-                // Also wake for the hang-up check, so a drag or an armed quit window never
-                // postpones it for longer than one tick.
+                // Also wake for the hang-up check, so a drag or a deadline never postpones it
+                // for longer than one tick.
                 .min(TTY_CHECK_TICK);
                 match rx.recv_timeout(timeout) {
                     Ok(event) => Some(event),
@@ -3301,6 +3324,17 @@ fn ui_loop(
                         // Guard 2: the input thread may be stuck inside crossterm's reader; a
                         // non-consuming `poll(2)` on stdin still reports the hang-up.
                         if terminal_is_gone() {
+                            app.quit = true;
+                            break;
+                        }
+                        // A `/fork` waiting for the journaled turn boundary: give up at its
+                        // deadline with a notice, never an empty child session.
+                        if app
+                            .pending_fork
+                            .is_some_and(|d| std::time::Instant::now() >= d)
+                            && app.update(AppInput::ForkDeadline).dirty
+                            && !draw_frame(terminal, app)?
+                        {
                             app.quit = true;
                             break;
                         }

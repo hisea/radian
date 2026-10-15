@@ -40,7 +40,7 @@ pub enum UiEvent {
     /// A signal asked the app to stop.
     Signal(i32),
     /// The driver task ended.
-    DriverStopped,
+    DriverStopped(radian_host::DriverEnd),
 }
 
 /// A terminal event, forwarded by the input thread.
