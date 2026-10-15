@@ -544,3 +544,14 @@ Base `45723f6` · 一次性 worktree `/tmp/radian-glyphs-mut`，还原后 `git s
 | U-M2 | `resetsAt` 改回 `Option<String>`（数字形式让整个响应解析失败、行消失） | `opencode_go::tests::resets_at_accepts_epoch_numbers` | ✅ |
 
 2/2 抓住（U-M2 先试过只改字段类型，会编译失败 E0308，改成完整还原旧的 `Option<String>` + `countdown` 用法后才算数）。
+
+## startup-line（摘要行写真实沙箱后端，2026-10-14）
+
+Base `62ae29e` · 一次性 worktree `/tmp/radian-sl-mut`，还原后 `git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| S-M2 | `sandbox_word` 的 workspace 分支写死 `seatbelt`（Linux 上是错的） | `describe::tests::the_summary_word_is_the_backend_it_is_given` | ✅ |
+| S-M3 | 说明句改回 `**on**` | `describe::tests::the_workspace_facts_have_no_markdown` | ✅ |
+
+2/2 抓住。
