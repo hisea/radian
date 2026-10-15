@@ -1101,6 +1101,65 @@ mod tests {
         assert_eq!(count_cache_breakpoints(&body), 0);
     }
 
+    /// An `EmbeddedResource` whose body text is empty. `blocks()` drops empty
+    /// `ContentPart::Text` parts, but this is not a `Text` part, so it becomes a
+    /// `{"type":"text","text":""}` block — the one path by which an empty text block reaches the
+    /// request. Anthropic rejects `cache_control` on it (wire notes §2.4).
+    fn empty_text_block() -> ContentPart {
+        ContentPart::EmbeddedResource {
+            resource: json!({"text": "", "uri": "file:///empty"}),
+            annotations: None,
+            meta: None,
+        }
+    }
+
+    /// The last message ends with an empty text block (and the system prompt is empty): the scan
+    /// walks back to the previous non-empty block and marks there, leaving the empty block and
+    /// the empty system prompt without one.
+    #[test]
+    fn auto_skips_a_trailing_empty_text_block() {
+        let mut req = request(vec![Message::User {
+            content: vec![ContentPart::text("keep me"), empty_text_block()],
+            meta: MessageMeta::default(),
+        }]);
+        req.system_prompt = Some(String::new());
+
+        let body = build_body(&req, &config()).unwrap();
+
+        assert_eq!(body["system"], json!(""));
+        let last = body["messages"].as_array().unwrap().last().unwrap();
+        assert_eq!(last["content"][1]["type"], "text");
+        assert_eq!(last["content"][1]["text"], "");
+        assert!(
+            last["content"][1].get("cache_control").is_none(),
+            "an empty text block may not carry cache_control: {last:?}"
+        );
+        assert_eq!(
+            last["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert_eq!(count_cache_breakpoints(&body), 1);
+    }
+
+    /// A last message whose only block is an empty text block has nowhere legal to put a
+    /// breakpoint, so Auto adds none.
+    #[test]
+    fn auto_never_marks_an_empty_text_block() {
+        let body = build_body(
+            &request(vec![Message::User {
+                content: vec![empty_text_block()],
+                meta: MessageMeta::default(),
+            }]),
+            &config(),
+        )
+        .unwrap();
+        let last = body["messages"].as_array().unwrap().last().unwrap();
+        assert_eq!(last["content"][0]["type"], "text");
+        assert_eq!(last["content"][0]["text"], "");
+        assert!(last["content"][0].get("cache_control").is_none());
+        assert_eq!(count_cache_breakpoints(&body), 0);
+    }
+
     /// A tool_result block is cacheable; a conversation that ends on one is marked there.
     #[test]
     fn auto_marks_a_trailing_tool_result_block() {
