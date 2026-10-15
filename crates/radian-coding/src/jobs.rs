@@ -124,6 +124,9 @@ struct JobCell {
     output: PathBuf,
     /// The process group id (the leader's pid).
     pgid: u32,
+    /// How many `job_output wait=true` calls are blocked on this job right now. A settle with
+    /// a waiter is one the model already gets through the wait, so it is not notified again.
+    waiters: usize,
     /// Shared with the supervisor: `true` once the leader has been reaped. Every signal is
     /// sent while holding this, so a reused group id can never be signalled.
     reaped: Arc<Mutex<bool>>,
@@ -142,11 +145,25 @@ pub struct JobSummary {
     pub output: String,
 }
 
-/// A settle notice for slice 3's inbox wiring.
+/// One job lifecycle notice for the host (ADR 0037 slices 3-4): the host writes the durable
+/// start/settle records and, on a settle, decides whether to notify the model.
 #[derive(Debug, Clone)]
-pub struct JobSettled {
-    pub id: String,
-    pub state: JobState,
+pub enum JobEvent {
+    Started {
+        id: String,
+        /// The command's first line.
+        command: String,
+        /// The workspace-relative output path.
+        output: String,
+    },
+    Settled {
+        id: String,
+        state: JobState,
+        duration_ms: u64,
+        /// Whether the model should be told: `false` for `job_kill`/a session-exit settle and
+        /// for a settle a `job_output wait` already returned (ADR 0037 decisions 2 and 4).
+        notify: bool,
+    },
 }
 
 /// The registry, per session.
@@ -158,7 +175,7 @@ struct JobsInner {
     workspace: PathBuf,
     dir: PathBuf,
     state: Mutex<JobsState>,
-    settled: tokio::sync::broadcast::Sender<JobSettled>,
+    events: tokio::sync::broadcast::Sender<JobEvent>,
 }
 
 #[derive(Default)]
@@ -172,21 +189,21 @@ impl Jobs {
     /// A registry for `workspace`. No I/O: the jobs directory is created by the first
     /// [`Jobs::start`], so opening a session never touches the disk.
     pub fn new(workspace: &Path) -> Self {
-        let (settled, _) = tokio::sync::broadcast::channel(SETTLED_CAPACITY);
+        let (events, _) = tokio::sync::broadcast::channel(SETTLED_CAPACITY);
         Self {
             inner: Arc::new(JobsInner {
                 workspace: workspace.to_path_buf(),
                 dir: workspace.join(".radian").join("jobs"),
                 state: Mutex::new(JobsState::default()),
-                settled,
+                events,
             }),
         }
     }
 
-    /// Subscribe to settle notices (slice 3). Each receiver sees every settle that happens
-    /// after it subscribes.
-    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<JobSettled> {
-        self.inner.settled.subscribe()
+    /// Subscribe to job lifecycle notices (ADR 0037 slices 3-4). Each receiver sees every
+    /// notice that happens after it subscribes.
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<JobEvent> {
+        self.inner.events.subscribe()
     }
 
     /// Starts `command` in the background under `sandbox`. One approval covers its whole life
@@ -261,6 +278,7 @@ impl Jobs {
             output: output.clone(),
             pgid: pid,
             reaped: Arc::new(Mutex::new(false)),
+            waiters: 0,
             settled,
         }));
 
@@ -289,9 +307,9 @@ impl Jobs {
         }
         {
             let supervisor_cell = Arc::clone(&cell);
-            let settled = self.inner.settled.clone();
+            let events = self.inner.events.clone();
             let job_id = id.clone();
-            thread::spawn(move || supervise(pid, child, supervisor_cell, done_rx, settled, job_id));
+            thread::spawn(move || supervise(pid, child, supervisor_cell, done_rx, events, job_id));
         }
         if let Some(timeout) = timeout {
             let timer_cell = Arc::clone(&cell);
@@ -303,6 +321,12 @@ impl Jobs {
 
         state.order.push(id.clone());
         state.jobs.insert(id.clone(), Arc::clone(&cell));
+        drop(state);
+        let _ = self.inner.events.send(JobEvent::Started {
+            id: id.clone(),
+            command: first_line(command),
+            output: self.relative(&output),
+        });
         Ok(StartInfo { id, output })
     }
 
@@ -321,9 +345,11 @@ impl Jobs {
         let mut wait_cancelled = false;
         if wait {
             let mut rx = {
-                let cell = lock(&cell);
+                let mut cell = lock(&cell);
+                cell.waiters += 1;
                 cell.settled.subscribe()
             };
+            let _waiter = WaiterGuard(Arc::clone(&cell));
             if !*rx.borrow_and_update() {
                 tokio::select! {
                     _ = rx.changed() => {}
@@ -385,6 +411,18 @@ impl Jobs {
                 Ok(KillResult::Requested)
             }
         }
+    }
+
+    /// The tail of a job's output plus its state and relative output path, for the completion
+    /// message (ADR 0037 decision 5). `None` for an unknown id.
+    pub fn tail(&self, id: &str, max: usize) -> Option<(JobState, String, String)> {
+        let cell = self.get(id).ok()?;
+        let cell = lock(&cell);
+        Some((
+            cell.state.clone(),
+            self.relative(&cell.output),
+            cell.ring.tail(max),
+        ))
     }
 
     /// Session end: SIGKILL every running job's group. No file I/O (ADR 0037 decision 6), so
@@ -493,6 +531,13 @@ impl Ring {
             (0, self.buf.iter().skip(skip).copied().collect())
         }
     }
+
+    /// The last `max` bytes of the ring, for the completion message's inline preview.
+    fn tail(&self, max: usize) -> String {
+        let skip = self.buf.len().saturating_sub(max);
+        let bytes: Vec<u8> = self.buf.iter().skip(skip).copied().collect();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
 }
 
 /// Reads to EOF, appending to the job's output file and pushing into its ring. Runs on its own
@@ -545,7 +590,7 @@ fn supervise(
     mut child: Child,
     cell: Arc<Mutex<JobCell>>,
     done: mpsc::Receiver<()>,
-    settled: tokio::sync::broadcast::Sender<JobSettled>,
+    events: tokio::sync::broadcast::Sender<JobEvent>,
     id: String,
 ) {
     wait_for_exit_without_reaping(pid);
@@ -565,7 +610,7 @@ fn supervise(
     let _ = done.recv_timeout(READER_GRACE);
     let _ = done.recv_timeout(READER_GRACE);
 
-    let state = {
+    let (state, duration_ms, notify) = {
         let mut cell = lock(&cell);
         cell.state = match cell.termination {
             Some(Termination::Killed) => JobState::Killed,
@@ -573,10 +618,32 @@ fn supervise(
             None => exit_state(status),
         };
         let state = cell.state.clone();
+        let duration_ms = cell.started.elapsed().as_millis() as u64;
+        // `job_kill` and a session-exit settle are not notified; a settle a waiter is already
+        // blocked on is not notified again (ADR 0037 decisions 2 and 4). A timeout **is**
+        // notified: the model set the timeout but did not ask to kill the job, so it may be
+        // waiting on it.
+        let notify = !matches!(cell.termination, Some(Termination::Killed)) && cell.waiters == 0;
         let _ = cell.settled.send(true);
-        state
+        (state, duration_ms, notify)
     };
-    let _ = settled.send(JobSettled { id, state });
+    let _ = events.send(JobEvent::Settled {
+        id,
+        state,
+        duration_ms,
+        notify,
+    });
+}
+
+/// Decrements a job's waiter count on drop, so a cancelled or panicked `job_output wait`
+/// cannot leave a job marked as "already waited" forever.
+struct WaiterGuard(Arc<Mutex<JobCell>>);
+
+impl Drop for WaiterGuard {
+    fn drop(&mut self) {
+        let mut cell = lock(&self.0);
+        cell.waiters = cell.waiters.saturating_sub(1);
+    }
 }
 
 fn exit_state(status: Option<ExitStatus>) -> JobState {

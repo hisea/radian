@@ -86,6 +86,9 @@ pub struct CodingTools {
     root: Arc<WorkspaceRoot>,
     limits: Limits,
     sandbox: Option<Arc<Sandbox>>,
+    /// The background-job registry (ADR 0037). The host supplies one so it can subscribe to
+    /// job lifecycle notices; when it does not, `open_session` creates one.
+    jobs: Option<Arc<jobs::Jobs>>,
 }
 
 impl CodingTools {
@@ -98,6 +101,7 @@ impl CodingTools {
             root: Arc::new(WorkspaceRoot::new(root)?),
             limits: Limits::default(),
             sandbox: None,
+            jobs: None,
         })
     }
 
@@ -121,11 +125,19 @@ impl CodingTools {
             root: Arc::new(root),
             limits: Limits::default(),
             sandbox: Some(Arc::new(sandbox)),
+            jobs: None,
         })
     }
 
     pub fn with_limits(mut self, limits: Limits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Supplies the background-job registry (ADR 0037 slice 3): the host creates it so it can
+    /// subscribe to [`jobs::Jobs::subscribe`] and write the durable start/settle records.
+    pub fn with_jobs(mut self, jobs: Arc<jobs::Jobs>) -> Self {
+        self.jobs = Some(jobs);
         self
     }
 
@@ -143,12 +155,16 @@ impl ToolProvider for CodingTools {
     type Session = CodingSession;
 
     async fn open_session(&self) -> Result<Self::Session, ToolError> {
+        let jobs = match &self.jobs {
+            Some(jobs) => Arc::clone(jobs),
+            None => Arc::new(jobs::Jobs::new(self.root.root())),
+        };
         Ok(CodingSession {
             root: Arc::clone(&self.root),
             limits: self.limits,
             sandbox: self.sandbox.clone(),
             specs: specs(self.sandbox.as_deref().map(Sandbox::mode)),
-            jobs: Arc::new(jobs::Jobs::new(self.root.root())),
+            jobs,
         })
     }
 }
