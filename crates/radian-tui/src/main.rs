@@ -31,140 +31,155 @@ use ratatui::crossterm::terminal;
 #[command(
     name = "radian",
     version,
-    about = "Full-screen TUI for the radian agent runtime"
+    about = "Full-screen TUI for the radian agent runtime",
+    // ADR 0032 A6: the joined surface is longer than either binary's, so the commands and
+    // the flags are grouped.
+    subcommand_help_heading = "Commands"
 )]
 struct Cli {
+    // The TUI's own setup flags come first: the default mode is the full-screen TUI, and the
+    // `--help` groups read in the order the owner asked for (TUI, session, model, mcp,
+    // permissions).
+    /// The configuration file (ADR 0008). Overrides `RADIAN_CONFIG` and
+    /// `~/.radian/config/config.toml`. Read-only: this slice never writes it.
+    #[arg(help_heading = "TUI", long, value_name = "FILE")]
+    config: Option<PathBuf>,
+
+    /// Expose the built-in file and read-only git tools rooted at this directory
+    /// (read/write/patch/list, git_status/git_diff). No shell is provided.
+    #[arg(help_heading = "TUI", long, value_name = "DIR")]
+    workspace: Option<PathBuf>,
+
+    #[arg(help_heading = "TUI", long)]
+    system: Option<String>,
+
     /// Model name sent to the API. Required unless the config file's `model.model` provides
     /// it.
-    #[arg(long)]
+    #[arg(help_heading = "Model", long)]
     model: Option<String>,
 
     /// Provider wire protocol: `openai-compatible` (the default, unchanged) or `anthropic`.
-    #[arg(long, value_name = "PROVIDER")]
+    #[arg(help_heading = "Model", long, value_name = "PROVIDER")]
     provider: Option<String>,
 
     /// Everything before the provider's path (`/chat/completions` for openai-compatible,
     /// `/v1/messages` for anthropic). Defaults to the provider's public endpoint.
-    #[arg(long, value_name = "URL")]
+    #[arg(help_heading = "Model", long, value_name = "URL")]
     base_url: Option<String>,
-
-    /// The configuration file (ADR 0008). Overrides `RADIAN_CONFIG` and
-    /// `~/.radian/config/config.toml`. Read-only: this slice never writes it.
-    #[arg(long, value_name = "FILE")]
-    config: Option<PathBuf>,
 
     /// `max_tokens` for anthropic (the Messages API requires it). Ignored for
     /// openai-compatible. Defaults to 16384.
-    #[arg(long, value_name = "N")]
+    #[arg(help_heading = "Model", long, value_name = "N")]
     max_tokens: Option<u32>,
 
     /// Extended thinking for anthropic: `off` (default), `adaptive`, or `enabled:<budget>`.
     /// Ignored for openai-compatible.
-    #[arg(long, value_name = "MODE")]
+    #[arg(help_heading = "Model", long, value_name = "MODE")]
     thinking: Option<String>,
 
     /// Extra request header, repeatable: `--header NAME=VALUE`.
-    #[arg(long = "header", value_name = "NAME=VALUE")]
+    #[arg(help_heading = "Model", long = "header", value_name = "NAME=VALUE")]
     header: Vec<String>,
 
     /// Where session files live. Defaults to `RADIAN_SESSION_DIR`, then `~/.radian/sessions`
     /// (`$RADIAN_HOME/sessions` when that is set, ADR 0020). The same rule as `agent-cli`.
-    #[arg(long, value_name = "DIR")]
+    #[arg(help_heading = "Session", long, value_name = "DIR")]
     session_dir: Option<PathBuf>,
 
     /// A stable session identifier: the session file's name. Generated once per process when
     /// omitted.
-    #[arg(long, value_name = "VALUE", conflicts_with = "resume")]
+    #[arg(
+        help_heading = "Session",
+        long,
+        value_name = "VALUE",
+        conflicts_with = "resume"
+    )]
     session_id: Option<String>,
 
     /// Resume an existing session by id, rendering its history into the transcript. Without a
     /// value it shows the session picker (resuming only: no "new" entry).
-    #[arg(long, value_name = "SESSION_ID", num_args = 0..=1, conflicts_with = "list")]
+    #[arg(help_heading = "Session", long, value_name = "SESSION_ID", num_args = 0..=1, conflicts_with = "list")]
     resume: Option<Option<String>>,
 
     /// List this workspace's sessions and exit.
-    #[arg(long)]
+    #[arg(help_heading = "Session", long)]
     list: bool,
 
     /// Show a full-screen picker for this workspace's sessions before opening one (Phase 4):
     /// Up/Down select, type to filter, Tab full-text search, Enter resume, n new, Esc quit.
     /// Conflicts with `--resume`/`--session-id`; it does not create a session file.
-    #[arg(long, conflicts_with_all = ["resume", "session_id"])]
+    #[arg(help_heading = "Session", long, conflicts_with_all = ["resume", "session_id"])]
     pick: bool,
-
-    /// Expose the built-in file and read-only git tools rooted at this directory
-    /// (read/write/patch/list, git_status/git_diff). No shell is provided.
-    #[arg(long, value_name = "DIR")]
-    workspace: Option<PathBuf>,
 
     /// A JSON file listing MCP stdio servers to start (`{"servers": [...]}`), the same format
     /// `agent-cli` reads. Under `workspace` their tools ask before running and the
     /// servers themselves are **not** sandboxed (ADR 0012 option B).
-    #[arg(long, value_name = "FILE")]
+    #[arg(help_heading = "MCP", long, value_name = "FILE")]
     mcp_config: Option<String>,
 
     /// The permission tier (ADR 0016): `safe` denies file modification, `workspace`
     /// allows writes that resolve inside the workspace, `full` also allows MCP. Defaults to
     /// the config file's `permissions.profile`, then `workspace`.
-    #[arg(long, value_name = "TIER")]
+    #[arg(help_heading = "Permissions", long, value_name = "TIER")]
     profile: Option<String>,
 
     /// How `ask` is resolved (ADR 0012's ApprovalPolicy): `on-ask` asks when a rule says so,
     /// `always` asks for every call a rule does not deny, `never` turns `ask` into a denial,
     /// `auto` answers every `ask` with "allow" (ADR 0026 D9). Omit to fall back to the
     /// config's `[permissions] approval`, then the session's journaled state, then `on-ask`.
-    #[arg(long, value_name = "POLICY")]
+    #[arg(help_heading = "Permissions", long, value_name = "POLICY")]
     approval: Option<String>,
 
     /// Approve every tool call without asking, like `agent --yes`. Not "allow everything":
     /// `deny` rules still deny and the sandbox still applies; only the question is removed.
-    #[arg(long)]
+    #[arg(help_heading = "Permissions", long)]
     yes: bool,
 
     /// The per-turn model call limit. The core's default (`DEFAULT_MAX_MODEL_CALLS`, 32) is a
     /// fuse for unattended runs; an interactive coding session reads many files per turn and
     /// a human can cancel, so the TUI defaults much higher. It is still a fuse: a loop of
     /// small calls is not stopped by the context budget (which only triggers compaction).
-    #[arg(long, value_name = "N", default_value_t = TUI_DEFAULT_MAX_MODEL_CALLS)]
+    #[arg(help_heading = "Model", long, value_name = "N", default_value_t = TUI_DEFAULT_MAX_MODEL_CALLS)]
     max_model_calls: u32,
 
     /// Allow a shell command prefix without asking, repeatable (e.g. `--allow-shell-command
     /// "git status"`). Only a *simple* command matches: any shell metacharacter keeps the
     /// call at `ask`. Write these at the subcommand level, never at a bare program name.
-    #[arg(long = "allow-shell-command", value_name = "PREFIX")]
+    #[arg(
+        help_heading = "Permissions",
+        long = "allow-shell-command",
+        value_name = "PREFIX"
+    )]
     allow_shell_command: Vec<String>,
 
     /// The model's context window in tokens (ADR 0015). Omitted, the models.dev catalog is
     /// consulted for `(provider, model)` (ADR 0018); an explicit value always wins. With
     /// neither, the budget is off and the status bar says so.
-    #[arg(long, value_name = "TOKENS")]
+    #[arg(help_heading = "Model", long, value_name = "TOKENS")]
     context_window: Option<u64>,
 
     /// Never fetch the models.dev catalog; use only the local cache.
-    #[arg(long)]
+    #[arg(help_heading = "Model", long)]
     offline_catalog: bool,
 
     /// The models.dev provider id to look the model up under (default: derived from the
     /// `--base-url` hostname; e.g. `opencode.ai` → `opencode`).
-    #[arg(long, value_name = "PROVIDER")]
+    #[arg(help_heading = "Model", long, value_name = "PROVIDER")]
     catalog_provider: Option<String>,
 
     /// Turn automatic compaction off. Over the input budget `B` the request is then sent
     /// unchanged (ADR 0018).
-    #[arg(long)]
+    #[arg(help_heading = "Model", long)]
     no_auto_compact: bool,
 
     /// Trust this workspace's project resources for **this process only** (never written to
     /// `trust.json`; ADR 0031 T3).
-    #[arg(long, conflicts_with = "no_trust")]
+    #[arg(help_heading = "Permissions", long, conflicts_with = "no_trust")]
     trust: bool,
 
     /// Do not trust this workspace's project resources for this process only (ADR 0031 T3).
-    #[arg(long)]
+    #[arg(help_heading = "Permissions", long)]
     no_trust: bool,
-
-    #[arg(long)]
-    system: Option<String>,
 
     /// Test hook: enter the terminal, then panic, so the restore hook can be exercised.
     #[arg(long, hide = true)]
