@@ -2,7 +2,7 @@
 //! preset, glyphs, thresholds, truncation and the warnings. Pure `App` state on a
 //! `TestBackend`, so no pty is needed.
 
-use agent_core::{BudgetReport, UsageSource};
+use agent_core::{BudgetReport, EventSink, UsageSource};
 use radian_host::config::{TuiFooterConfig, TuiFooterItemConfig, TuiFooterRowConfig};
 use radian_tui::App;
 use radian_tui::footer::{Footer, Preset};
@@ -550,6 +550,57 @@ fn the_speed_and_elapsed_items_use_the_injected_clock() {
     let line = row(&terminal, 11);
     assert!(line.contains("1.5s"), "the live elapsed: {line:?}");
     assert!(line.contains("50.0 tok/s"), "the speed stays: {line:?}");
+}
+
+/// F2 (ADR 0018): a summarization call's usage reaches the footer's totals and fee
+/// through the **real sink** (the one the driver emits into), not just by calling the
+/// projection directly. Before this slice the compaction's spending never appeared at all.
+#[test]
+fn a_compaction_usage_reaches_the_footer_totals() {
+    use std::sync::mpsc::channel;
+    let mut app = App::new("mock", "s");
+    app.apply_footer(&rows(vec![item("tokens"), item("cost")]));
+    app.set_model_price(Some(radian_host::ModelPrice {
+        input: 3_000_000, // $3 / Mtok
+        output: 15_000_000,
+        cache_read: None,
+        cache_write: None,
+    }));
+    let (tx, _rx) = channel();
+    let sink = radian_tui::events::ProjectionSink::new(tx, std::sync::Arc::clone(&app.projection));
+    sink.emit(agent_core::AgentEvent::CompactionUsage {
+        revision: 1,
+        model: "current".into(),
+        usage: agent_core::ModelUsage {
+            input: Some(50_000),
+            output: Some(2_000),
+            input_includes_cache: Some(false),
+            ..Default::default()
+        },
+    });
+
+    // The projection holds the exact micro-dollars: 50000 x $3 + 2000 x $15 per Mtok = $0.18.
+    assert_eq!(app.projection.read().cost_micros(), Some(180_000));
+    let terminal = render(&mut app, 120, 12);
+    let line = row(&terminal, 11);
+    // The summary's tokens are in the totals (50K in, 2K out) ...
+    assert!(line.contains("50K"), "the summary's input: {line:?}");
+    assert!(line.contains("2K"), "the summary's output: {line:?}");
+    // ... and in the fee.
+    assert!(line.contains("$0.18"), "the summary's fee: {line:?}");
+
+    // A conversation response then adds to the same totals through the same sink.
+    sink.emit(agent_core::AgentEvent::ModelResponseReceived {
+        stop_reason: agent_core::StopReason::EndTurn,
+        tool_calls: 0,
+        usage: Some(agent_core::ModelUsage {
+            input: Some(50_000),
+            input_includes_cache: Some(false),
+            ..Default::default()
+        }),
+    });
+    assert_eq!(app.projection.read().usage_input(), Some(100_000));
+    assert_eq!(app.projection.read().cost_micros(), Some(330_000), "$0.33");
 }
 
 /// The `cost` item shows the fee accumulated **per call, at the price in force when the call

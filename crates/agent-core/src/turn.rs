@@ -482,12 +482,23 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
                     .append(JournalRecord::CompactionUsage {
                         revision,
                         model: compaction::COMPACTION_MODEL_CURRENT.to_owned(),
-                        usage,
+                        usage: usage.clone(),
                     })
                     .await
             {
                 self.recovery_required = true;
                 return Err(CompactionFailure::Journal(error));
+            }
+            // The summarizer's call is not a conversation response (`ModelResponseReceived` is
+            // for those, and a host times it as this turn's generation), but it is billed: tell
+            // the host so its session total includes it (ADR 0018). Emitted per
+            // attempt — the controlled retry is a second real call and costs money too.
+            if let Some(usage) = response.usage.clone() {
+                events.emit(AgentEvent::CompactionUsage {
+                    revision,
+                    model: compaction::COMPACTION_MODEL_CURRENT.to_owned(),
+                    usage,
+                });
             }
             let text = text_of(&response.content);
             match compaction::check_summary(&text, summary_max) {
