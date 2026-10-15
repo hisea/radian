@@ -3857,24 +3857,20 @@ async fn pty_the_memory_notice_names_the_project_state_and_the_budget() {
         110,
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
-    // The memory notice is one of the folded startup lines.
+    // The memory notice is one of the folded startup lines. Wait for the
+    // text itself: `expand_startup` returns on the first expanded frame it sees, and under load
+    // the pty can hold only part of that frame. The notice wraps across lines, so compare the
+    // screen with its whitespace normalized; the bound only fails a missing notice.
     pty.expand_startup();
-    let notice = pty
-        .screen()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
     assert!(
-        notice.contains("[memory]"),
-        "the memory startup notice is shown: {notice}"
-    );
-    assert!(
-        notice.contains("no project linked"),
-        "the notice names the unlinked state: {notice}"
-    );
-    assert!(
-        notice.contains("injection on, up to 2000 tokens"),
-        "the notice names the budget: {notice}"
+        pty.wait_until(10, |screen| {
+            let notice = screen.split_whitespace().collect::<Vec<_>>().join(" ");
+            notice.contains("[memory]")
+                && notice.contains("no project linked")
+                && notice.contains("injection on, up to 2000 tokens")
+        }),
+        "the memory startup notice is missing:\n{}",
+        pty.screen()
     );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
