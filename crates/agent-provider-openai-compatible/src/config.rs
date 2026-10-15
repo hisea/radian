@@ -52,6 +52,11 @@ pub struct OpenAiCompatibleConfig {
     /// The unified thinking level's wire value, sent as `reasoning_effort` (ADR 0026 D11).
     /// `None` sends no key, which is byte-identical to the adapter before the feature.
     pub reasoning_effort: Option<String>,
+    /// The assistant-message field the model requires its reasoning to be replayed in
+    /// (ADR 0014 Q1). `None` sends no reasoning at all, byte-identical to the
+    /// adapter before the feature; `Some(field)` writes the reasoning of every assistant
+    /// message under that key (an empty string when the message had none, Q3).
+    pub reasoning_replay: Option<String>,
 }
 
 /// Header values are hidden: custom headers often carry credentials such as `X-API-Key`.
@@ -69,6 +74,7 @@ impl fmt::Debug for OpenAiCompatibleConfig {
             .field("max_response_bytes", &self.max_response_bytes)
             .field("include_usage", &self.include_usage)
             .field("reasoning_effort", &self.reasoning_effort)
+            .field("reasoning_replay", &self.reasoning_replay)
             .finish()
     }
 }
@@ -86,6 +92,7 @@ impl OpenAiCompatibleConfig {
             max_response_bytes: 32 * 1024 * 1024,
             include_usage: None,
             reasoning_effort: None,
+            reasoning_replay: None,
         }
     }
 
