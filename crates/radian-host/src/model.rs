@@ -287,6 +287,68 @@ pub fn resolve_thinking_ref(
     )
 }
 
+/// The `[compaction] thinking` value that means "do not override the conversation's level"
+/// (ADR 0018, decision 1).
+pub const COMPACTION_THINKING_CURRENT: &str = "current";
+
+/// Builds the request-level settings the **compaction** (summary) call carries, from the
+/// configured `[compaction] thinking` level (ADR 0018, decision 1). Returns
+/// `(settings, notice)`:
+///
+/// * `settings` is the object for `agent_core::AgentConfig::compaction_settings` — the wire
+///   value the route's protocol expects (`{"reasoning_effort":…}` for OpenAI-compatible,
+///   `{"thinking":…}` for Anthropic) — or [`serde_json::Value::Null`] when the call must carry
+///   no setting: the level is [`COMPACTION_THINKING_CURRENT`], the route's map supports no
+///   level, or the level maps to "send nothing" (`off`).
+/// * `notice` is a one-line clamp message when the requested level was moved to the nearest
+///   supported one (or the route supports none). A supported level yields `None`.
+///
+/// The level is clamped with the **same map `/thinking` uses** (`clamp_thinking_with`, ADR
+/// 0026 D11), so the summary call's level is clamped exactly like the conversation's.
+pub fn compaction_settings_for(
+    provider: &crate::ProviderRef,
+    model: &str,
+    level: &str,
+    max_tokens: u32,
+) -> (serde_json::Value, Option<String>) {
+    if level == COMPACTION_THINKING_CURRENT {
+        return (serde_json::Value::Null, None);
+    }
+    let adapter = provider.protocol_for(model).adapter();
+    let map = crate::thinking_map_for_ref(provider, model);
+    // The level actually applied (`None` when the route supports no level at all), for the
+    // clamp notice.
+    let applied = crate::clamp_thinking_with(map, level, Some(max_tokens)).map(|(level, _)| level);
+    let (thinking, effort) = resolve_thinking_map(map, level, None, adapter, Some(max_tokens));
+    let settings = match adapter {
+        Provider::OpenAiCompatible => match effort.filter(|wire| !wire.is_empty()) {
+            Some(wire) => serde_json::json!({ "reasoning_effort": wire }),
+            None => serde_json::Value::Null,
+        },
+        Provider::Anthropic => match thinking {
+            Thinking::Off => serde_json::Value::Null,
+            Thinking::Adaptive => serde_json::json!({ "thinking": { "type": "adaptive" } }),
+            Thinking::Enabled { budget_tokens } => serde_json::json!({
+                "thinking": { "type": "enabled", "budget_tokens": budget_tokens }
+            }),
+        },
+    };
+    let notice = match applied {
+        Some(applied) if applied == level => None,
+        Some(applied) => {
+            let supported = crate::supported_thinking_levels_ref_with(provider, model, Some(max_tokens));
+            Some(format!(
+                "thinking {level} → {applied} (this model supports {})",
+                supported.join("/")
+            ))
+        }
+        // The route supports no level at all: there is nothing to clamp to and nothing to
+        // say — the summary call simply carries no setting, exactly like the conversation.
+        None => None,
+    };
+    (settings, notice)
+}
+
 /// The reasoning-replay field for a route (ADR 0014 Q2): the `[providers.<id>]`
 /// override when the provider is named, else the catalog's `interleaved` field. `None` means
 /// the model does not require replay, or declares a field Radian does not replay (e.g.
@@ -633,6 +695,81 @@ mod thinking_resolution_tests {
             Thinking::Off,
             "a wire value the anthropic adapter does not know sends nothing"
         );
+    }
+}
+
+#[cfg(test)]
+mod compaction_settings_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn builtin(name: &str) -> crate::ProviderRef {
+        crate::resolve_provider(name, &BTreeMap::new(), None)
+            .expect("a built-in provider resolves")
+            .0
+    }
+
+    /// `"current"` means "do not override": the summary call carries no setting and there is
+    /// nothing to say (ADR 0018, decision 1).
+    #[test]
+    fn current_carries_no_setting() {
+        let provider = builtin("opencode-go");
+        let (settings, notice) = compaction_settings_for(
+            &provider,
+            "deepseek-v4.1-flash",
+            COMPACTION_THINKING_CURRENT,
+            4096,
+        );
+        assert_eq!(settings, serde_json::Value::Null);
+        assert_eq!(notice, None);
+    }
+
+    /// An OpenAI-compatible route gets `reasoning_effort`; a supported level produces no notice.
+    #[test]
+    fn an_openai_route_converts_the_level_to_reasoning_effort() {
+        let provider = builtin("opencode-go");
+        let (settings, notice) =
+            compaction_settings_for(&provider, "deepseek-v4.1-flash", "low", 4096);
+        assert_eq!(settings, serde_json::json!({"reasoning_effort": "low"}));
+        assert_eq!(notice, None, "low is supported, nothing to say");
+    }
+
+    /// A level the route does not support clamps with the `/thinking` rule (up first) and is
+    /// said once. deepseek-v4.1-flash supports low/high/max, so `medium` clamps up to `high`.
+    #[test]
+    fn an_unsupported_level_is_clamped_and_noticed() {
+        let provider = builtin("opencode-go");
+        let (settings, notice) =
+            compaction_settings_for(&provider, "deepseek-v4.1-flash", "medium", 4096);
+        assert_eq!(settings, serde_json::json!({"reasoning_effort": "high"}));
+        let notice = notice.expect("a clamp is said once");
+        assert!(notice.contains("medium → high"), "{notice}");
+        assert!(notice.contains("low/high/max"), "{notice}");
+    }
+
+    /// An Anthropic route gets the adapter's `thinking` shape; `off` sends nothing.
+    #[test]
+    fn an_anthropic_route_converts_the_level_to_a_thinking_object() {
+        let provider = builtin("anthropic");
+        let (settings, notice) = compaction_settings_for(&provider, "claude-test", "low", 4096);
+        assert_eq!(
+            settings,
+            serde_json::json!({"thinking": {"type": "enabled", "budget_tokens": 2048}})
+        );
+        assert_eq!(notice, None);
+        let (settings, notice) = compaction_settings_for(&provider, "claude-test", "off", 4096);
+        assert_eq!(settings, serde_json::Value::Null, "off sends no key");
+        assert_eq!(notice, None, "off is supported on this route");
+    }
+
+    /// A route with no thinking map carries nothing and says nothing (there is no level to
+    /// clamp to; the summary call matches the conversation, ADR 0026 D11).
+    #[test]
+    fn a_mapless_route_carries_nothing_and_says_nothing() {
+        let provider = builtin("opencode-go");
+        let (settings, notice) = compaction_settings_for(&provider, "gpt-5-nano", "low", 4096);
+        assert_eq!(settings, serde_json::Value::Null);
+        assert_eq!(notice, None);
     }
 }
 

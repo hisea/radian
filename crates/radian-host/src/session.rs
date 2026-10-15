@@ -327,6 +327,11 @@ pub struct SessionSetup {
     pub system_prompt: Option<String>,
     pub context_budget: Option<ContextBudget>,
     pub auto_compact: bool,
+    /// The request-level settings the **compaction** call carries (ADR 0018,
+    /// decision 1), already converted to the route's wire value by the host
+    /// ([`crate::compaction_settings_for`]); `Null` sends none. Copied into
+    /// `AgentConfig.compaction_settings`.
+    pub compaction_settings: serde_json::Value,
     /// The sandbox `shell` runs under; `None` for the safe tier.
     pub sandbox: Option<Sandbox>,
     /// The tier, for the startup description.
@@ -914,6 +919,7 @@ pub async fn open_session(
         system_prompt,
         context_budget,
         auto_compact,
+        compaction_settings,
         sandbox,
         tier,
         profile,
@@ -1117,6 +1123,7 @@ pub async fn open_session(
         system_prompt,
         context_budget,
         auto_compact,
+        compaction_settings,
         ..AgentConfig::default()
     };
     let facts_hooks = Arc::new(crate::prompt::SessionFactsHooks::new(

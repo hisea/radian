@@ -108,9 +108,10 @@ pub use job_notify::{
 pub use mcp::load_mcp_config;
 pub use mermaid::{MermaidCheckSession, MermaidCheckTools, check};
 pub use model::{
-    DEFAULT_MAX_TOKENS, HostModel, MIN_THINKING_BUDGET, ModelArgs, Provider, RouteContext,
-    SwitchableModel, Thinking, build_model, check_provider_flags, redact_base_url,
-    resolve_reasoning_replay, resolve_thinking, resolve_thinking_ref, route_replays_reasoning,
+    COMPACTION_THINKING_CURRENT, DEFAULT_MAX_TOKENS, HostModel, MIN_THINKING_BUDGET, ModelArgs,
+    Provider, RouteContext, SwitchableModel, Thinking, build_model, check_provider_flags,
+    compaction_settings_for, redact_base_url, resolve_reasoning_replay, resolve_thinking,
+    resolve_thinking_ref, route_replays_reasoning,
 };
 pub use opencode_go::{
     DEFAULT_PERIOD as OPENCODE_GO_DEFAULT_PERIOD, MAX_PERIOD as OPENCODE_GO_MAX_PERIOD,
