@@ -65,32 +65,6 @@ impl TurnTimer {
     }
 }
 
-/// One generation's cost in micro-dollars, from the session's token totals and the model's
-/// catalog price (per million tokens). `None` when the price is unknown or no token count was
-/// reported: the item hides rather than showing `$0.00` for a model with no price.
-pub fn cost_micros(
-    price: Option<radian_host::ModelPrice>,
-    input: Option<u64>,
-    output: Option<u64>,
-    cache_read: Option<u64>,
-    cache_write: Option<u64>,
-) -> Option<u64> {
-    let price = price?;
-    let mut total: u64 = 0;
-    let mut priced = false;
-    let mut add = |tokens: Option<u64>, rate: Option<u64>| {
-        if let (Some(tokens), Some(rate)) = (tokens, rate) {
-            total = total.saturating_add(tokens.saturating_mul(rate) / 1_000_000);
-            priced = true;
-        }
-    };
-    add(input, Some(price.input));
-    add(output, Some(price.output));
-    add(cache_read, price.cache_read);
-    add(cache_write, price.cache_write);
-    priced.then_some(total)
-}
-
 /// `16.2s`, `1m02s` past a minute, `1h02m` past an hour.
 pub fn format_duration(duration: Duration) -> String {
     let seconds = duration.as_secs_f64();
@@ -191,33 +165,6 @@ mod tests {
         timer.request_started(base);
         timer.response_finished(base, Some(10));
         assert_eq!(timer.speed(base), None);
-    }
-
-    /// The cost is computed from the catalog price (per million tokens) and the reported
-    /// totals; an unknown price or no token count hides it.
-    #[test]
-    fn the_cost_uses_the_catalog_price() {
-        let price = radian_host::ModelPrice {
-            input: 3_000_000,   // $3 / Mtok
-            output: 15_000_000, // $15 / Mtok
-            cache_read: Some(300_000),
-            cache_write: None,
-        };
-        // 1M input ($3) + 100K output ($1.5) + 500K cache read ($0.15) = $4.65.
-        assert_eq!(
-            cost_micros(
-                Some(price),
-                Some(1_000_000),
-                Some(100_000),
-                Some(500_000),
-                None
-            ),
-            Some(4_650_000)
-        );
-        // No price at all: no cost, and never `$0.00`.
-        assert_eq!(cost_micros(None, Some(10), Some(2), None, None), None);
-        // A price but no token count: same.
-        assert_eq!(cost_micros(Some(price), None, None, None, None), None);
     }
 
     /// The three number formats.

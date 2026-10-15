@@ -968,7 +968,10 @@ pub struct App {
     pub git_branch: Option<String>,
     /// The machine's hostname (ADR 0027 `host`), read once at startup.
     pub hostname: Option<String>,
-    /// The model's catalog unit prices (ADR 0027 `cost`), set once at startup.
+    /// The model's catalog unit prices (ADR 0027). Kept for the host's startup
+    /// wiring and its own tests; the footer's `cost` reads the **projection's** accumulated
+    /// fee, because the fee is per call at the price in force then (a `/model` switch does not
+    /// re-price earlier calls). [`App::set_model_price`] records it in both places.
     pub model_price: Option<radian_host::ModelPrice>,
     /// Whether automatic compaction is on (`context`'s `{auto}` marker), set once at startup.
     pub auto_compact: bool,
@@ -3820,9 +3823,12 @@ impl App {
         self.hostname = hostname;
     }
 
-    /// The model's catalog unit prices (ADR 0027).
+    /// The model's catalog unit prices (ADR 0027). Written through to the
+    /// projection, which is what prices each arriving call: the footer reads the accumulated
+    /// fee from there, because a call keeps the price it arrived under even after a switch.
     pub fn set_model_price(&mut self, price: Option<radian_host::ModelPrice>) {
         self.model_price = price;
+        self.projection.set_price(price);
     }
 
     /// Whether automatic compaction is on (ADR 0027).

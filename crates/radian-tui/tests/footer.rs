@@ -552,21 +552,11 @@ fn the_speed_and_elapsed_items_use_the_injected_clock() {
     assert!(line.contains("50.0 tok/s"), "the speed stays: {line:?}");
 }
 
-/// The `cost` item uses the model's catalog price and the session's totals; without a price it
-/// hides rather than showing `$0.00` (ADR 0027).
+/// The `cost` item shows the fee accumulated **per call, at the price in force when the call
+/// arrived** (ADR 0027). Without a price it hides rather than showing `$0.00`.
 #[test]
 fn the_cost_item_uses_the_model_price() {
     let mut app = App::new("mock", "s");
-    app.projection.add_usage(&agent_core::ModelUsage {
-        input: Some(1_000_000),
-        output: Some(100_000),
-        ..Default::default()
-    });
-    app.apply_footer(&rows(vec![item("cost")]));
-    // No price: hidden.
-    let terminal = render(&mut app, 80, 12);
-    assert!(!row(&terminal, 11).contains('$'), "{}", row(&terminal, 11));
-
     // $3/Mtok in, $15/Mtok out: $3.00 + $1.50 = $4.50.
     app.set_model_price(Some(radian_host::ModelPrice {
         input: 3_000_000,
@@ -574,8 +564,124 @@ fn the_cost_item_uses_the_model_price() {
         cache_read: Some(300_000),
         cache_write: None,
     }));
+    app.apply_footer(&rows(vec![item("cost")]));
+
+    // No usage yet: hidden.
+    let terminal = render(&mut app, 80, 12);
+    assert!(!row(&terminal, 11).contains('$'), "{}", row(&terminal, 11));
+
+    app.projection.add_usage(&agent_core::ModelUsage {
+        input: Some(1_000_000),
+        output: Some(100_000),
+        input_includes_cache: Some(false),
+        ..Default::default()
+    });
     let terminal = render(&mut app, 80, 12);
     assert_eq!(row(&terminal, 11).trim_end(), "$4.50");
+
+    // A session with no price at all hides, even with tokens counted.
+    let mut unpriced = App::new("mock", "s");
+    unpriced.apply_footer(&rows(vec![item("cost")]));
+    unpriced.projection.add_usage(&agent_core::ModelUsage {
+        input: Some(1_000_000),
+        ..Default::default()
+    });
+    let terminal = render(&mut unpriced, 80, 12);
+    assert!(!row(&terminal, 11).contains('$'), "{}", row(&terminal, 11));
+}
+
+/// F1 (the research's §3.2 numbers): on an OpenAI-compatible endpoint, 190 000 of a 200 000
+/// token prompt are a cache hit. The hit must be billed **once, at the cache rate** — reading
+/// `input` as reported charged it again at full price ($0.03177 instead of $0.00327, 9.7x).
+#[test]
+fn a_cache_hit_is_billed_once_at_the_cache_rate() {
+    let mut app = App::new("mock", "s");
+    // opencode-go / deepseek-v4.1-flash: $0.15 in, $0.60 out, $0.003 cache read.
+    app.set_model_price(Some(radian_host::ModelPrice {
+        input: 150_000,
+        output: 600_000,
+        cache_read: Some(3_000),
+        cache_write: None,
+    }));
+    app.apply_footer(&rows(vec![item("cost")]));
+    app.projection.add_usage(&agent_core::ModelUsage {
+        input: Some(200_000),
+        output: Some(2_000),
+        cache_read: Some(190_000),
+        input_includes_cache: Some(true),
+        ..Default::default()
+    });
+    let terminal = render(&mut app, 80, 12);
+    // (200000-190000) x $0.15 + 2000 x $0.60 + 190000 x $0.003 = $0.00327.
+    assert_eq!(row(&terminal, 11).trim_end(), "$0.0033");
+}
+
+/// F4 (ADR 0026 D5): each call is priced at the rate it arrived under, so a `/model` switch
+/// prices the calls after it with the new model and leaves the earlier ones alone.
+#[test]
+fn a_model_switch_prices_only_the_calls_after_it() {
+    let mut app = App::new("mock", "s");
+    app.apply_footer(&rows(vec![item("cost")]));
+    app.set_model_price(Some(radian_host::ModelPrice {
+        input: 150_000, // the cheap model: $0.15 / Mtok
+        output: 600_000,
+        cache_read: None,
+        cache_write: None,
+    }));
+    let cheap = agent_core::ModelUsage {
+        input: Some(1_000_000),
+        input_includes_cache: Some(false),
+        ..Default::default()
+    };
+    app.projection.add_usage(&cheap);
+    app.set_model_price(Some(radian_host::ModelPrice {
+        input: 3_000_000, // the expensive one: $3 / Mtok
+        output: 15_000_000,
+        cache_read: None,
+        cache_write: None,
+    }));
+    app.projection.add_usage(&cheap);
+
+    let terminal = render(&mut app, 80, 12);
+    // $0.15 (at the old price) + $3.00 (at the new one) — not 2M x $3 = $6.00.
+    assert_eq!(row(&terminal, 11).trim_end(), "$3.15");
+}
+
+/// F7 (ADR 0027: never `$0.00`): a response that reports all zeros — an empty or
+/// refused answer — has nothing to bill, so the item hides.
+#[test]
+fn an_all_zero_response_hides_the_cost() {
+    let mut app = App::new("mock", "s");
+    app.set_model_price(Some(radian_host::ModelPrice {
+        input: 3_000_000,
+        output: 15_000_000,
+        cache_read: Some(300_000),
+        cache_write: None,
+    }));
+    app.apply_footer(&rows(vec![item("cost")]));
+    app.projection.add_usage(&agent_core::ModelUsage {
+        input: Some(0),
+        output: Some(0),
+        cache_read: Some(0),
+        cache_write: Some(0),
+        input_includes_cache: Some(true),
+        ..Default::default()
+    });
+    let terminal = render(&mut app, 80, 12);
+    let line = row(&terminal, 11);
+    assert!(
+        !line.contains('$'),
+        "no $0.00 for a zero response: {line:?}"
+    );
+
+    // Once a real call lands, the fee appears (and the earlier zero added nothing).
+    app.projection.add_usage(&agent_core::ModelUsage {
+        input: Some(1_000_000),
+        input_includes_cache: Some(false),
+        ..Default::default()
+    });
+    let terminal = render(&mut app, 80, 12);
+    assert_eq!(row(&terminal, 11).trim_end(), "$3.00");
 }
 
 /// The `tokens` item shows the cache-read total (ADR 0027), and `-` when the

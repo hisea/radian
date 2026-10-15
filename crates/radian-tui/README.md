@@ -224,7 +224,7 @@ find_next = ["ctrl-g", "shift-enter"]
 | `context` | `{bar}`, `{percent}`, `{used}`, `{budget}`, `{auto}` | `{used}/{budget}`; `{auto}` is `⟲` (`auto` under ascii) while auto-compaction is on |
 | `context_bar` | `{bar}`, `{percent}`, `{used}`, `{budget}`, `{auto}` | `{bar} {percent}%`, `width` 10, `fill` `━`, `empty` `─` |
 | `tokens` | `{in}`, `{out}`, `{cache}` | `↑{in} ↓{out} ⛁{cache}`; numbers are `19K`-style, `-` when a provider never reported one |
-| `cost` | `{usd}` | `$` from the model's catalog price (per million tokens) and the session totals; hidden when the catalog has no price (never a fabricated number) |
+| `cost` | `{usd}` | the session's accumulated fee: each call priced at the route's price **when it arrived** (`radian_host::cost`), so a `/model` switch does not re-price history. The cached tokens are billed once at the cache rate (`uncached_input()`). Hidden until some call had something to bill and when the catalog has no price — never a fabricated number, never `$0.00` |
 | `speed` | `{speed}` | `42.1 tok/s`, the last finished generation's reported output over its measured time |
 | `elapsed` | `{elapsed}` | `16.2s`, live while a generation runs, the last one when idle, empty after a resume |
 | `pending` | `{count}` | shown only when a request waits |

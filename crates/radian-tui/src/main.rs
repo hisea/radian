@@ -452,11 +452,13 @@ fn run(
             &tx,
             Phase::Picking,
             // The picking phase has no resolved model yet (review M1): the route is only a
-            // fallback for the `/thinking` clamp, which the picker overlay cannot reach.
+            // fallback for the `/thinking` clamp, which the picker overlay cannot reach. No
+            // session exists, so nothing is billed: the price resolver answers "no price".
             (
                 cli.provider.clone().unwrap_or_default(),
                 cli.model.clone().unwrap_or_default(),
             ),
+            Arc::new(|_: &str, _: &str| None),
             &config.providers,
             cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         )?;
@@ -733,16 +735,33 @@ fn run(
         request_max_output,
         true,
     );
-    let budget_for = std::sync::Arc::new(move |provider: &str, switch_model: &str| {
-        // The switched route carries its own provider id, so the resolver uses it directly
-        // instead of deriving one from the startup base URL.
-        radian_host::resolve_offline(&radian_host::WindowQuery {
-            catalog_provider: Some(provider.to_owned()),
-            model: switch_model.to_owned(),
-            ..window_query.clone()
-        })
-        .budget
-    }) as radian_runtime::BudgetFor;
+    let budget_for = {
+        let query = window_query.clone();
+        std::sync::Arc::new(move |provider: &str, switch_model: &str| {
+            // The switched route carries its own provider id, so the resolver uses it directly
+            // instead of deriving one from the startup base URL.
+            radian_host::resolve_offline(&radian_host::WindowQuery {
+                catalog_provider: Some(provider.to_owned()),
+                model: switch_model.to_owned(),
+                ..query.clone()
+            })
+            .budget
+        }) as radian_runtime::BudgetFor
+    };
+    // ADR 0027 + ADR 0026 D5/D7: the same warm-cache lookup gives the **price**, so
+    // a switch bills later calls at the new model's rate. Offline like `budget_for`: a switch
+    // never fetches, and a cache miss means "no price" (the fee stays hidden), not a guess.
+    let route_price = {
+        let query = window_query.clone();
+        std::sync::Arc::new(move |provider: &str, switch_model: &str| {
+            radian_host::resolve_offline(&radian_host::WindowQuery {
+                catalog_provider: Some(provider.to_owned()),
+                model: switch_model.to_owned(),
+                ..query.clone()
+            })
+            .price
+        }) as RoutePrice
+    };
     // The permission tier and the sandbox. For an enforced tier a probe failure is an error
     // here, never a fallback to an unsandboxed run (ADR 0012 decision 2). Still before
     // the session file exists, so a refusal leaves nothing behind (dogfooding D2).
@@ -1033,7 +1052,20 @@ fn run(
     // ADR 0027: the hostname, the model's catalog prices (`cost`) and whether
     // automatic compaction is on (`context`'s `{auto}`). Each is a startup fact.
     app.set_hostname(radian_host::hostname());
-    app.set_model_price(window.price);
+    // The price must be the one for the route actually in force: a resume where the journal
+    // recorded a different model uses **that** model's rate, not the command line's (ADR 0026
+    // D8). `window.price` is the startup route's (possibly freshly fetched); a differing
+    // resumed route is resolved from the warm cache only, like any other switch.
+    let startup_price = match session.model_route() {
+        Some((route_provider, route_model))
+            if (route_provider.as_str(), route_model.as_str())
+                != (provider_name.as_str(), model_name.as_str()) =>
+        {
+            route_price(&route_provider, &route_model)
+        }
+        _ => window.price,
+    };
+    app.set_model_price(startup_price);
     app.set_auto_compact(!cli.no_auto_compact && config.compaction.auto.unwrap_or(true));
     // ADR 0027 C3: the contributors. Their changes wake the UI through the same dirty channel
     // (ADR 0023 U2), and a refresh failure becomes a notice; the UI never waits for one.
@@ -1319,6 +1351,7 @@ fn run(
             memory: &memory_service,
         },
         (provider_name.clone(), model_name.clone()),
+        Arc::clone(&route_price),
         &config.providers,
         cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
     );
@@ -1840,9 +1873,36 @@ fn apply_dirty(app: &mut App) -> bool {
     }
 }
 
+/// Looks up a route's catalog prices from the warm local cache (ADR 0026 D7, ADR 0027
+/// revision 1). Offline by construction: a switch never fetches, and a miss means "no price".
+type RoutePrice = Arc<dyn Fn(&str, &str) -> Option<radian_host::ModelPrice> + Send + Sync>;
+
+/// The catalog prices of the route an **applied** `ConfigChanged` names (ADR 0026 D5/D7).
+///
+/// Pure and total: every other runtime event, every non-model change (`{"approval": …}`,
+/// `{"thinking": …}`) and every change whose route is not resolvable yields `None`, so a
+/// caller can call it unconditionally. Extraction is what makes the loop's rule unit-testable
+/// without a pty: "a switch re-prices the calls **after** it, and only those".
+fn price_for_applied_change(
+    event: &radian_session::RuntimeEvent,
+    route_price: &RoutePrice,
+) -> Option<Option<radian_host::ModelPrice>> {
+    let radian_session::RuntimeEvent::ConfigChanged { change, .. } = event else {
+        return None;
+    };
+    let route = radian_host::ModelRoute::from_value(change)?;
+    // `Some(None)` is "the route changed but the catalog has no price for it": the caller must
+    // still clear the old price, or later calls would be billed at the previous model's rate.
+    Some(route_price(&route.provider, &route.model))
+}
+
 struct LoopContext<'a> {
     /// The startup route (ADR 0026 D11): the fallback when the session has no route yet.
     startup_route: (String, String),
+    /// The catalog prices of a route, from the **warm local cache only** (ADR 0026 D7: a
+    /// switch never fetches). Resolved on startup and again whenever a route change is
+    /// applied, so every later call is billed at its own model's price (ADR 0027).
+    route_price: RoutePrice,
     /// The config's `[providers.<name>]` declarations (ADR 0026 D10), for `/model`'s provider
     /// completion.
     config_providers: std::collections::BTreeMap<String, radian_host::ProviderDecl>,
@@ -1877,7 +1937,16 @@ impl LoopContext<'_> {
         app.set_now(std::time::Instant::now());
         let result = match event {
             UiEvent::Agent(event) => app.update(AppInput::Event(event)),
-            UiEvent::Runtime(event) => app.update(AppInput::Runtime(event)),
+            UiEvent::Runtime(event) => {
+                // ADR 0027 + ADR 0026 D5: the driver applies a queued route at a
+                // turn boundary and tells us through `ConfigChanged`. From now on every call
+                // is the new model's, so the price that prices it changes here — earlier
+                // calls keep the fee they already accumulated.
+                if let Some(price) = price_for_applied_change(&event, &self.route_price) {
+                    app.set_model_price(price);
+                }
+                app.update(AppInput::Runtime(event))
+            }
             UiEvent::Pending => {
                 // ADR 0023 U7: the UI shows the queue's head. Reading it here is what makes a
                 // waiter that gave up (a cancelled turn) disappear immediately.
@@ -2413,6 +2482,7 @@ fn ui_loop(
     tx: &Sender<UiEvent>,
     phase: Phase<'_>,
     startup_route: (String, String),
+    route_price: RoutePrice,
     config_providers: &std::collections::BTreeMap<String, radian_host::ProviderDecl>,
     thinking_max_tokens: u32,
 ) -> Result<Option<i32>, String> {
@@ -2427,6 +2497,7 @@ fn ui_loop(
             memory,
         } => Some(LoopContext {
             startup_route: startup_route.clone(),
+            route_price: Arc::clone(&route_price),
             config_providers: config_providers.clone(),
             thinking_max_tokens,
             workspace,
@@ -3067,5 +3138,84 @@ mod tests {
         let cli =
             Cli::try_parse_from(["radian", "--model", "m", "--max-model-calls", "5"]).unwrap();
         assert_eq!(cli.max_model_calls, 5);
+    }
+
+    /// The loop's `/model` rule (F4, ADR 0027): an **applied route change** carries
+    /// the new model's price forward, a change of some other kind leaves it alone, and a route
+    /// the catalog cannot price clears it (so later calls are not billed at the old rate).
+    #[test]
+    fn an_applied_route_change_moves_the_price_and_other_changes_do_not() {
+        use radian_session::RuntimeEvent;
+        let lookup = |provider: &str, model: &str| match (provider, model) {
+            ("opencode-go", "cheap") => Some(radian_host::ModelPrice {
+                input: 150_000,
+                output: 600_000,
+                cache_read: None,
+                cache_write: None,
+            }),
+            ("anthropic", "expensive") => Some(radian_host::ModelPrice {
+                input: 3_000_000,
+                output: 15_000_000,
+                cache_read: Some(300_000),
+                cache_write: Some(3_750_000),
+            }),
+            // A model the warm cache does not know.
+            _ => None,
+        };
+        let route_price: RoutePrice = Arc::new(lookup);
+        let changed = |change: serde_json::Value| RuntimeEvent::ConfigChanged {
+            revision: 1,
+            change,
+        };
+
+        // A model switch names the new route, so its price is looked up.
+        let got = price_for_applied_change(
+            &changed(radian_host::ModelRoute::new("opencode-go", "cheap").to_value()),
+            &route_price,
+        );
+        assert_eq!(
+            got,
+            Some(Some(radian_host::ModelPrice {
+                input: 150_000,
+                output: 600_000,
+                cache_read: None,
+                cache_write: None,
+            })),
+            "the switched route's price"
+        );
+        // A route the cache cannot price is **cleared**, not left at the old model's rate.
+        assert_eq!(
+            price_for_applied_change(
+                &changed(radian_host::ModelRoute::new("opencode-go", "unknown").to_value()),
+                &route_price
+            ),
+            Some(None)
+        );
+        // A non-route change (`/auto`, `/thinking`) is not a price fact at all.
+        assert_eq!(
+            price_for_applied_change(
+                &changed(serde_json::json!({"approval": "auto"})),
+                &route_price
+            ),
+            None
+        );
+        assert_eq!(
+            price_for_applied_change(
+                &changed(serde_json::json!({"thinking": "high"})),
+                &route_price
+            ),
+            None
+        );
+        // Any other runtime event is not either.
+        assert_eq!(
+            price_for_applied_change(
+                &RuntimeEvent::TurnFailed {
+                    turn_id: "t-1".into(),
+                    message: "boom".into(),
+                },
+                &route_price
+            ),
+            None
+        );
     }
 }

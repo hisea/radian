@@ -13,6 +13,7 @@ pub mod auth;
 mod catalog;
 pub mod config;
 pub mod contrib;
+pub mod cost;
 mod describe;
 mod diagnostics;
 mod errors;

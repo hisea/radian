@@ -894,17 +894,11 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
             default_format: "↑{in} ↓{out} ⛁{cache}",
             numeric: None,
         }),
-        // ADR 0027: the cost from the model's catalog price and the session's
-        // token totals. No price (or no reported tokens) means the item hides; never `$0.00`
-        // for a model whose price we do not know (v5 §5).
+        // ADR 0027: the fee the session has accumulated, each call priced at the
+        // rate in force when it arrived (`radian_host::cost`). Nothing billed yet means the
+        // item hides; never `$0.00` for a model whose price we do not know (v5 §5).
         "cost" => {
-            let micros = crate::timing::cost_micros(
-                app.model_price,
-                session.usage_input(),
-                session.usage_output(),
-                session.usage_cache_read(),
-                session.usage_cache_write(),
-            )?;
+            let micros = session.cost_micros()?;
             Some(ItemData {
                 values: vec![("usd", crate::timing::format_cost(micros))],
                 default_format: "{usd}",
