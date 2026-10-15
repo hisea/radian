@@ -6,7 +6,7 @@
 //!
 //! [`parse`] only **parses**: running a command is an effect the event loop executes, so the
 //! app stays pure (ADR 0023 U3). `/memory` runs the same `radian-host::memory` command set
-//! `agent memory` uses (one clap grammar, one executor). Adding a command is one arm here.
+//! `radian memory` uses (one clap grammar, one executor). Adding a command is one arm here.
 
 use radian_host::memory::commands::{self, CommandOutput, MemoryCommand};
 

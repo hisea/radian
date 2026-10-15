@@ -4,7 +4,7 @@
 //! The verification is a **minimal** request — `GET <base>/models` — sent before a key is
 //! written to `auth.json`. A failure is shown to the user, who may still save. This is a
 //! new outbound item in ADR 0013's inventory: one request, only when the user runs
-//! `/login` or `agent login`, to the endpoint they named, with the key they typed.
+//! `/login` or `radian login`, to the endpoint they named, with the key they typed.
 //!
 //! The key never appears in an error: responses are matched by status, and transport errors
 //! (which can embed the URL) are rebuilt from a redacted URL (ADR 0013's `redact` rule).

@@ -485,7 +485,7 @@ the rest is sent as an ordinary message.
 | `/theme <name>` | switch the color theme immediately and write `tui.theme` back to the config file (ADR 0008 revision): a built-in (`dark`/`light`/`mono`) or a `*.json` file in `~/.radian/themes/`. `NO_COLOR` wins, so it does not switch; a read-only config (a newer `schema_version`) applies for the session but is never written |
 | `/sessions [query]` | open the session **picker overlay** for this workspace (the `--pick` screen); type to filter, `Tab` full-text search, Enter shows the copyable `--resume <id>` line |
 | `/export [md\|json] [path] [--force]` | export **this** session (default `md`, default `<workspace>/radian-<id>.<ext>`) |
-| `/memory <command> …` | the same durable-memory commands as `agent memory` (ADR 0021 D7): `list`, `search`, `show`, `add`, `edit`, `archive`, `restore`, `forget`, `purge`, `confirm`, `export`, `import`, `project` / `project new`, `relink`, `split`, `merge` |
+| `/memory <command> …` | the same durable-memory commands as `radian memory` (ADR 0021 D7): `list`, `search`, `show`, `add`, `edit`, `archive`, `restore`, `forget`, `purge`, `confirm`, `export`, `import`, `project` / `project new`, `relink`, `split`, `merge` |
 
 - Arguments are split with shell quoting, so `/memory add "two words"` is one argument.
   Unbalanced quotes are an error notice.
@@ -498,7 +498,7 @@ the rest is sent as an ordinary message.
   it between turns, so a running turn finishes first, and the result is a notice. Ctrl-C/Esc
   cancels an in-flight compaction without committing.
 - `/sessions` opens the session picker overlay (the same one `--pick` runs); the event loop loads the rows, because that reads the session directory. It never switches sessions in place — selecting shows `--resume <id>`, and the composer keeps typing until you navigate into the picker. `/export` uses the same
-  `radian-host` renderer as `agent --export` (redacted, read-only JSONL), writes atomically,
+  `radian-host` renderer as `radian exec --export` (redacted, read-only JSONL), writes atomically,
   and refuses to overwrite without `--force`; a relative path is resolved against the
   workspace, an absolute one may point anywhere the user named.
 - `/fork` (ADR 0022) creates a child session from this session's effective history at its
@@ -1016,7 +1016,7 @@ could be built. This is the same wiring `agent-cli` uses:
   0012 decision 4 and does **not** claim credential isolation: the macOS backend leaves
   `mach-lookup` open, so the IPC boundary is not tightened.
 - A `[memory]` startup notice names the project state (the linked project id, or "no project
-  linked" with the `agent memory project new`/`relink` hint) and the injection budget
+  linked" with the `radian memory project new`/`relink` hint) and the injection budget
   (ADR 0021 D2/D6). The agent's four memory tools are mounted and the current memory is
   injected into the system prompt each turn; `memory_search`/`memory_get` are allowed and
   `memory_save`/`memory_revise` ask. Tested by
@@ -1036,7 +1036,7 @@ Every call goes through `radian-permissions` (ADR 0012) as a `Hooks` implementat
   "the model call budget is used up" and the turn ends; a new message starts a fresh count.
   Tested by `pty_max_model_calls_limits_the_turn`.
 - `--yes` answers every `ask` with "allow once" and shows no dialog, the same as
-  `agent --yes`. It removes the question only: `deny` rules still deny, the sandbox still
+  `radian exec --yes`. It removes the question only: `deny` rules still deny, the sandbox still
   applies, every decision is still audited, and the startup says it is on. With
   `workspace` this means "the sandbox is the boundary"; with `full` there is no
   boundary left, so read the profile line before you use it. Tested by
