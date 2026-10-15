@@ -208,6 +208,12 @@ struct Cli {
     #[arg(long, hide = true, value_name = "COUNT")]
     flood_facts: Option<u64>,
 
+    /// A non-TUI mode (ADR 0032): `radian exec …` is today's `agent` command, the management
+    /// commands (`radian memory`/`login`/`config`) run the same library dispatch. Absent: the
+    /// full-screen TUI, which is what `radian` has always been.
+    #[command(subcommand)]
+    command: Option<RadianCommand>,
+
     /// Test hook, **kept** as a diagnostic: append
     /// `<point> <unix-nanos>` to this file at each step of the terminal-gone exit path. It
     /// tells "the exit path ran but slowly" from "the POLLHUP path never fired" (and, with
@@ -216,6 +222,44 @@ struct Cli {
     /// per-site counters are not even touched (`exit_trace_once` returns on an unset `OnceLock`).
     #[arg(long, hide = true, value_name = "FILE")]
     exit_trace: Option<PathBuf>,
+}
+
+/// The subcommands that are not the TUI (ADR 0032). `exec` is today's `agent` command, run
+/// through the `agent-cli` library so the two entries cannot drift; the management commands
+/// follow in the same shape.
+#[derive(clap::Subcommand, Debug)]
+enum RadianCommand {
+    /// Run one turn or an interactive line session: today's `agent` command, unchanged.
+    /// `radian exec -p "…"` prints only the model's text; `radian exec` is the line REPL.
+    ///
+    /// The `agent` parser owns this mode's flags, help and usage errors (`radian exec --help`
+    /// shows them, and a bad flag exits 2 through clap, exactly as `agent` does), so clap's
+    /// own help for this variant is off and everything after `exec` is passed through.
+    #[command(disable_help_flag = true, disable_version_flag = true)]
+    Exec {
+        /// Everything `agent` accepts, passed through unchanged.
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "ARGS"
+        )]
+        args: Vec<String>,
+    },
+}
+
+/// Runs a non-TUI subcommand and returns its exit code (ADR 0032 A3: 0 ok, 1 the run failed,
+/// 2 usage/setup, 101 panic, 128+signal - the same codes the `agent` binary returns, because
+/// it is the same dispatch).
+fn run_subcommand(command: RadianCommand) -> ExitCode {
+    match command {
+        RadianCommand::Exec { args } => {
+            // The agent parser owns `--help`/`--version`/usage errors: `parse_from` exits
+            // inside clap for those, exactly as the `agent` binary does.
+            ExitCode::from(agent_cli::parse_and_run(
+                std::iter::once("agent".to_string()).chain(args),
+            ) as u8)
+        }
+    }
 }
 
 /// The TUI's per-turn model call limit when `--max-model-calls` is not given (decision
@@ -249,7 +293,12 @@ fn mark(label: &str) {
 fn main() -> ExitCode {
     radian_session::trace::start();
     radian_tui::terminal::install_panic_hook();
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    // A subcommand is a mode of its own: it never enters the TUI, never reads the TUI's
+    // flags, and returns its own exit code (ADR 0032).
+    if let Some(command) = cli.command.take() {
+        return run_subcommand(command);
+    }
     if let Some(path) = &cli.exit_trace {
         let _ = EXIT_TRACE.set(path.clone());
     }
