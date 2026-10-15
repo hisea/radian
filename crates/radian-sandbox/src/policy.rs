@@ -453,4 +453,27 @@ mod tests {
         );
         assert!(out.is_empty(), "{out:?}");
     }
+
+    /// The workspace root itself is always walked: the user named it, so even if it carries the
+    /// cache marker, its own repository is still discovered. Only subdirectories are skipped.
+    #[test]
+    fn the_workspace_root_is_walked_even_when_it_is_cache_tagged() {
+        let dir = TempDir::new("root-cache-tagged");
+        std::fs::write(
+            dir.path().join(CACHEDIR_TAG),
+            "Signature: 8a477f597d28d172789f06886806bc55\n",
+        )
+        .unwrap();
+        let git = dir.path().join(".git");
+        std::fs::create_dir_all(&git).unwrap();
+
+        let mut out = Vec::new();
+        collect_git(dir.path(), 0, &mut out, &mut |_| {});
+
+        assert_eq!(
+            out,
+            vec![std::fs::canonicalize(&git).unwrap()],
+            "the workspace root is walked regardless of the marker"
+        );
+    }
 }
