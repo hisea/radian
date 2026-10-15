@@ -380,7 +380,7 @@ pub fn commit(
     // the same ones `git add` gets, so a directory argument is expanded to its files.
     let scope = workspace.to_string_lossy().into_owned();
     let to_stage: Vec<String> = if paths.is_empty() {
-        staged_paths(workspace, pin, &[scope.clone()])?
+        staged_paths(workspace, pin, std::slice::from_ref(&scope))?
     } else {
         let resolved: Vec<String> = resolved
             .iter()
