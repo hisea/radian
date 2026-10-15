@@ -47,6 +47,9 @@ enum Row {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Panel {
     title: String,
+    /// An optional right-aligned label on the top border (the approval box's window
+    /// indicator). Empty by default, so a plain titled panel is unchanged.
+    right_title: String,
     rows: Vec<Row>,
     hints: Vec<Hint>,
 }
@@ -69,6 +72,13 @@ impl Panel {
     /// Adds a `├──┤` divider between body rows.
     pub fn divider(mut self) -> Self {
         self.rows.push(Row::Divider);
+        self
+    }
+
+    /// A right-aligned label on the top border (e.g. `lines 1–11 of 60`). Kept separate from
+    /// the title so a long title and a long indicator can share the border.
+    pub fn right_title(mut self, label: impl Into<String>) -> Self {
+        self.right_title = label.into();
         self
     }
 
@@ -111,21 +121,36 @@ impl Panel {
     fn top_border(&self, width: usize, theme: &Theme, box_chars: &BoxChars) -> Line<'static> {
         let border = role_style(theme, Role::ApprovalBorder);
         let title_style = role_style(theme, Role::NoticeLabel).add_modifier(Modifier::BOLD);
-        let title = collapse(&self.title);
+        let right_style = role_style(theme, Role::Hint);
+        let right = collapse(&self.right_title);
+        // The right label is measured first, so the left title is truncated to leave it room.
+        let right_label = if right.is_empty() {
+            String::new()
+        } else {
+            truncate_str(&format!(" {right} "), width.saturating_sub(4))
+        };
+        let right_width = width_of(&right_label);
         let mut spans = vec![Span::styled(
             format!("{}{}", box_chars.top_left, box_chars.horizontal),
             border,
         )];
-        if title.is_empty() {
-            spans.push(Span::styled(
-                repeat(box_chars.horizontal, width.saturating_sub(3)),
-                border,
-            ));
-        } else {
-            let label = truncate_str(&format!(" {title} "), width.saturating_sub(3));
-            let fill = width.saturating_sub(3 + width_of(&label));
-            spans.push(Span::styled(label.clone(), title_style));
+        let mut used = 2;
+        let title = collapse(&self.title);
+        if !title.is_empty() {
+            let room = width.saturating_sub(3 + right_width);
+            let label = truncate_str(&format!(" {title} "), room);
+            used += width_of(&label);
+            spans.push(Span::styled(label, title_style));
+        }
+        // `╭─` (2) + left + fill + right + `─` (1) + `╮` (1) == width.
+        let tail = if right_width > 0 { right_width + 2 } else { 1 };
+        let fill = width.saturating_sub(used + tail);
+        if fill > 0 {
             spans.push(Span::styled(repeat(box_chars.horizontal, fill), border));
+        }
+        if right_width > 0 {
+            spans.push(Span::styled(right_label, right_style));
+            spans.push(Span::styled(box_chars.horizontal.to_string(), border));
         }
         spans.push(Span::styled(box_chars.top_right.to_string(), border));
         Line::from(spans)
@@ -362,6 +387,25 @@ mod tests {
         assert_eq!(lines[0], "╭──────────────────╮");
         let lines = render(&Panel::new("  a \n b  "), 30);
         assert!(lines[0].starts_with("╭─ a b "), "{:?}", lines[0]);
+    }
+
+    /// A right title shares the top border: `╭─ title ── right ─╮`, exactly `width` cells.
+    #[test]
+    fn a_right_title_sits_on_the_top_border() {
+        let panel = Panel::new("approve tool call?").right_title("lines 1–11 of 60");
+        let lines = render(&panel, 60);
+        assert!(
+            lines[0].starts_with("╭─ approve tool call? "),
+            "{:?}",
+            lines[0]
+        );
+        assert!(lines[0].ends_with(" lines 1–11 of 60 ─╮"), "{:?}", lines[0]);
+        assert_eq!(width_of(&lines[0]), 60, "{:?}", lines[0]);
+        // A right title alone keeps the border shape.
+        let lines = render(&Panel::new("").right_title("x"), 20);
+        assert!(lines[0].starts_with("╭"), "{:?}", lines[0]);
+        assert!(lines[0].ends_with(" x ─╮"), "{:?}", lines[0]);
+        assert_eq!(width_of(&lines[0]), 20, "{:?}", lines[0]);
     }
 
     /// The ascii glyph set uses `+ - |`.

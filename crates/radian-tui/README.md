@@ -132,6 +132,12 @@ was not your choice, every config-file and approval-policy warning), and one `Ti
 information line's `label: value` split follows a notice's: the label uses `notice_label`, the
 value `notice_body` (ADR 0028 / ADR 0029). `Ctrl-P` (`toggle_startup`) folds and
 unfolds the information. `tui.banner = false` hides the wordmark, `tui.tips = false` the Tip.
+`tui.brand = "<text>"` (ADR 0027) replaces the brand mark in **both** the footer's
+`brand` item and the one-line banner fallback (one source; ≤ 4 display columns, wider is a
+config error). Without it the glyph set's default is used (`nerd` `󰰠`, `unicode` bold accent `R`,
+`ascii` `rad`). A user-written glyph is **not** covered by the font-coverage rule: a font that
+lacks it draws a fallback glyph, which may sit off the baseline. `[tui.footer.items.brand] style`
+still overrides the color.
 The collapsed summary names the sandbox in plain words: `workspace · macOS
 sandbox · context …` on macOS, `workspace · Linux sandbox · context …` on Linux, `no exec` for
 `safe` and `no sandbox` for `full`; the exact backend name (`macos-seatbelt`, `linux-bwrap`)
@@ -270,8 +276,11 @@ A glyph the font does not have is drawn by a system fallback font with different
 sits off the baseline. The `unicode` tier (the default, no Nerd Font needed) therefore only uses
 characters that **all** of Menlo, SF Mono, JetBrains Mono, Cascadia Code, Fira Code, Operator
 Mono and Source Code Pro have. The brand is `R` (bold accent) here, `󰰠` under `nerd`, `rad` under
-`ascii`; `㎭` (U+33AD) is gone (East-Asian-Wide, off-baseline fallback). The spinner is the
-quadrant `▖▘▝▗` (the arc `◜◝◞◟` and the braille `⠋⠙⠸⠴` are missing from most of the fonts).
+`ascii`; `㎭` (U+33AD) is gone (East-Asian-Wide, off-baseline fallback). The spinner's default
+is `pulse` (`⏺`, one cell); the covered optional kind is `quadrant` (`▖▘▝▗`). The arc
+(`◜◝◞◟`), the braille (`⠋⠙⠸⠴`) and `pulse` itself are the **documented exceptions** to this
+rule (ADR 0027/10: the owner picked them after seeing them), so a font without them
+draws a fallback glyph; `tui.spinner = "quadrant"` switches to the covered set.
 
 Check a glyph with `crates/radian-tui/scripts/check-glyph-coverage.py` (needs `fonttools` in a
 throwaway venv; it is not a repository dependency and not part of `cargo test`). A font that is
@@ -297,7 +306,15 @@ from slipping in unchecked.
 | `▖` | U+2596 | spinner frame 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `▘` | U+2598 | spinner frame 2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `▝` | U+259D | spinner frame 3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `▗` | U+2597 | spinner frame 4 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▗` | U+2597 | spinner frame 4 (`quadrant`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+Documented exceptions (allowed to fall back; the test keeps them in a separate set):
+
+| glyph | codepoint | use | Menlo | SF Mono | JetBrains Mono | Cascadia Code | Fira Code | Operator Mono | Source Code Pro |
+|---|---|---|---|---|---|---|---|---|---|
+| `⏺` | U+23FA | spinner default (`pulse`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `◜` `◝` `◞` `◟` | U+25DC…DF | spinner `arc` | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ |
+| `⠋` `⠙` `⠹` `⠸` `⠼` `⠴` `⠦` `⠧` `⠇` `⠏` | U+280B… | spinner `braille` | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
 
 Replaced or dropped in the `unicode` tier (they were not in all seven fonts):
 
@@ -468,7 +485,7 @@ the rest is sent as an ordinary message.
 | `/theme <name>` | switch the color theme immediately and write `tui.theme` back to the config file (ADR 0008 revision): a built-in (`dark`/`light`/`mono`) or a `*.json` file in `~/.radian/themes/`. `NO_COLOR` wins, so it does not switch; a read-only config (a newer `schema_version`) applies for the session but is never written |
 | `/sessions [query]` | open the session **picker overlay** for this workspace (the `--pick` screen); type to filter, `Tab` full-text search, Enter shows the copyable `--resume <id>` line |
 | `/export [md\|json] [path] [--force]` | export **this** session (default `md`, default `<workspace>/radian-<id>.<ext>`) |
-| `/memory <command> …` | the same durable-memory commands as `agent memory` (ADR 0021 D7): `list`, `search`, `show`, `add`, `edit`, `archive`, `restore`, `forget`, `purge`, `confirm`, `export`, `import`, `project` / `project new`, `relink`, `split`, `merge` |
+| `/memory <command> …` | the same durable-memory commands as `radian memory` (ADR 0021 D7): `list`, `search`, `show`, `add`, `edit`, `archive`, `restore`, `forget`, `purge`, `confirm`, `export`, `import`, `project` / `project new`, `relink`, `split`, `merge` |
 
 - Arguments are split with shell quoting, so `/memory add "two words"` is one argument.
   Unbalanced quotes are an error notice.
@@ -481,7 +498,7 @@ the rest is sent as an ordinary message.
   it between turns, so a running turn finishes first, and the result is a notice. Ctrl-C/Esc
   cancels an in-flight compaction without committing.
 - `/sessions` opens the session picker overlay (the same one `--pick` runs); the event loop loads the rows, because that reads the session directory. It never switches sessions in place — selecting shows `--resume <id>`, and the composer keeps typing until you navigate into the picker. `/export` uses the same
-  `radian-host` renderer as `agent --export` (redacted, read-only JSONL), writes atomically,
+  `radian-host` renderer as `radian exec --export` (redacted, read-only JSONL), writes atomically,
   and refuses to overwrite without `--force`; a relative path is resolved against the
   workspace, an absolute one may point anywhere the user named.
 - `/fork` (ADR 0022) creates a child session from this session's effective history at its
@@ -696,6 +713,15 @@ throwaway terminal, not your working one.
    `Ctrl-J`. *Expect*: Shift+Enter inserts a newline where the terminal reports it (herdr and
    kitty-protocol terminals), and `Ctrl-J` always does; a terminal that cannot report it sends
    instead - record which of the three did what. *Fail*: a newline that also sends.
+3c. **Spinner** (`tui.spinner`; ADR 0027/9/10). *Steps*: start a turn (send a
+   message) with `tui.spinner = "pulse"` (the default), then `"arc"`, then `"quadrant"`, then
+   `"braille"`, then `glyphs = "ascii"`. *Expect*: the input rule shows
+   `── <spinner>  Working ` (two spaces) while the turn runs, a plain rule when idle; `pulse`
+   is a `⏺` that only changes color (500 ms); `arc`/`quadrant`/`braille` turn every 250 ms;
+   `ascii` is `*` (pulse) or `| / - \`. *Look*: **does the spinner render in your terminal
+   font?** `pulse` (`⏺`) and `arc` are the documented exceptions (no checked font has `⏺`; a
+   box means the fallback font lacks it); `quadrant` is the covered alternative. *Fail*:
+   record the font and what you see.
 4. **Ctrl-C** (merge `22b2753`, `01177c2`). *Steps*: type text, `Ctrl-C` (clears; press `↑`
    to find it); empty the input, `Ctrl-C` (status shows `Press Ctrl-C again to quit`), then
    **resize the window** and `Ctrl-C` again inside 2 s; then `Ctrl-C` twice with no resize.
@@ -990,7 +1016,7 @@ could be built. This is the same wiring `agent-cli` uses:
   0012 decision 4 and does **not** claim credential isolation: the macOS backend leaves
   `mach-lookup` open, so the IPC boundary is not tightened.
 - A `[memory]` startup notice names the project state (the linked project id, or "no project
-  linked" with the `agent memory project new`/`relink` hint) and the injection budget
+  linked" with the `radian memory project new`/`relink` hint) and the injection budget
   (ADR 0021 D2/D6). The agent's four memory tools are mounted and the current memory is
   injected into the system prompt each turn; `memory_search`/`memory_get` are allowed and
   `memory_save`/`memory_revise` ask. Tested by
@@ -1010,7 +1036,7 @@ Every call goes through `radian-permissions` (ADR 0012) as a `Hooks` implementat
   "the model call budget is used up" and the turn ends; a new message starts a fresh count.
   Tested by `pty_max_model_calls_limits_the_turn`.
 - `--yes` answers every `ask` with "allow once" and shows no dialog, the same as
-  `agent --yes`. It removes the question only: `deny` rules still deny, the sandbox still
+  `radian exec --yes`. It removes the question only: `deny` rules still deny, the sandbox still
   applies, every decision is still audited, and the startup says it is on. With
   `workspace` this means "the sandbox is the boundary"; with `full` there is no
   boundary left, so read the profile line before you use it. Tested by

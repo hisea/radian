@@ -287,6 +287,13 @@ pub struct TuiConfig {
     /// `tui.banner`: whether the startup screen shows the wordmark. `None`
     /// means the default, on.
     pub banner: Option<bool>,
+    /// `tui.brand`: the brand text (ADR 0027). `None` means the glyph set's default
+    /// (`nerd` `󰰠`, `unicode` `R`, `ascii` `rad`). Any string at most 4 display columns wide;
+    /// wider is a config error (it would break the footer and the banner).
+    pub brand: Option<String>,
+    /// `tui.spinner`: `"pulse"` (the default), `"arc"`, `"quadrant"` or `"braille"`
+    /// (ADR 0027). The TUI validates it; an unknown value warns and uses `pulse`.
+    pub spinner: Option<String>,
     /// `tui.usage_period_secs`: the opencode-go usage refresh period (ADR 0027 C4). `None` means
     /// the default (60 s); `0` disables the contributor; other values are clamped to 15–600 s.
     pub usage_period_secs: Option<u64>,
@@ -557,6 +564,7 @@ fn parse_providers(value: &Value, path: &Path, config: &mut Config) -> Result<()
         let mut decl = crate::provider::ProviderDecl {
             kind: String::new(),
             base_url: String::new(),
+            reasoning_replay: None,
         };
         for (field, value) in spec {
             match (field.as_str(), value) {
@@ -589,6 +597,23 @@ fn parse_providers(value: &Value, path: &Path, config: &mut Config) -> Result<()
                         path,
                         &format!("providers.{name}.base_url"),
                         "a string",
+                    ));
+                }
+                // ADR 0014 Q2: a field name overrides the catalog, `false` turns
+                // replay off. `true` names no field, so it is refused rather than guessed.
+                ("reasoning_replay", Value::String(field)) if !field.is_empty() => {
+                    decl.reasoning_replay = Some(crate::provider::ReasoningReplayOverride::Field(
+                        field.clone(),
+                    ));
+                }
+                ("reasoning_replay", Value::Boolean(false)) => {
+                    decl.reasoning_replay = Some(crate::provider::ReasoningReplayOverride::Off);
+                }
+                ("reasoning_replay", _) => {
+                    return Err(wrong_type(
+                        path,
+                        &format!("providers.{name}.reasoning_replay"),
+                        "a non-empty string or false",
                     ));
                 }
                 (other, _) => config.skipped.push(format!("providers.{name}.{other}")),
@@ -1125,6 +1150,24 @@ fn parse_tui(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
             ("tips", _) => config.skipped.push("tui.tips".into()),
             ("banner", Value::Boolean(banner)) => config.tui.banner = Some(*banner),
             ("banner", _) => config.skipped.push("tui.banner".into()),
+            // ADR 0027: the brand is any short text (≤ 4 display columns). Wider is
+            // a config error, not a skipped key: it would misalign the footer and the banner.
+            ("brand", Value::String(brand)) => {
+                if unicode_width::UnicodeWidthStr::width(brand.as_str()) > 4 {
+                    return Err(wrong_type(
+                        path,
+                        "tui.brand",
+                        "a string at most 4 display columns wide",
+                    ));
+                }
+                config.tui.brand = Some(brand.clone());
+            }
+            // A non-string brand is a display preference: skip it with a warning.
+            ("brand", _) => config.skipped.push("tui.brand".into()),
+            // ADR 0027: the spinner kind is a display preference; the TUI
+            // validates the name and falls back with a warning.
+            ("spinner", Value::String(spinner)) => config.tui.spinner = Some(spinner.clone()),
+            ("spinner", _) => config.skipped.push("tui.spinner".into()),
             (other, _) => config.skipped.push(format!("tui.{other}")),
         }
     }
@@ -1951,6 +1994,56 @@ theme = "light"
         );
     }
 
+    /// ADR 0014 Q2: `[providers.<id>] reasoning_replay` overrides the catalog — a
+    /// non-empty field name, or `false` to switch replay off. `true` names no field and is
+    /// refused rather than guessed.
+    #[test]
+    fn a_named_providers_reasoning_replay_override_is_carried() {
+        let config = parse_str(concat!(
+            "schema_version = 1\n",
+            "[providers.corp]\n",
+            "kind = \"openai-compatible\"\n",
+            "base_url = \"https://llm.example.com/v1\"\n",
+            "reasoning_replay = \"reasoning_content\"\n",
+            "[providers.relay]\n",
+            "kind = \"openai-compatible\"\n",
+            "base_url = \"https://relay.example/v1\"\n",
+            "reasoning_replay = false\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            config.providers["corp"].reasoning_replay,
+            Some(crate::provider::ReasoningReplayOverride::Field(
+                "reasoning_content".into()
+            ))
+        );
+        assert_eq!(
+            config.providers["relay"].reasoning_replay,
+            Some(crate::provider::ReasoningReplayOverride::Off)
+        );
+        // Absent: the catalog decides.
+        let config = parse_str(concat!(
+            "schema_version = 1\n",
+            "[providers.corp]\n",
+            "kind = \"openai-compatible\"\n",
+            "base_url = \"https://llm.example.com/v1\"\n",
+        ))
+        .unwrap();
+        assert_eq!(config.providers["corp"].reasoning_replay, None);
+
+        // `true` is not a field name.
+        let error = parse_str(concat!(
+            "schema_version = 1\n",
+            "[providers.corp]\n",
+            "kind = \"openai-compatible\"\n",
+            "base_url = \"https://llm.example.com/v1\"\n",
+            "reasoning_replay = true\n",
+        ))
+        .unwrap_err();
+        assert!(matches!(error, ConfigError::WrongType { .. }), "{error}");
+        assert!(error.to_string().contains("reasoning_replay"), "{error}");
+    }
+
     #[test]
     fn the_adrs_ask_allow_deny_profiles_are_known_and_ignored() {
         let config = parse_str("schema_version = 1\n[permissions]\nprofile = \"ask\"\n").unwrap();
@@ -2009,6 +2102,37 @@ mod startup_pref_tests {
         let config = parse_str("schema_version = 1\n[tui]\ntips = \"yes\"\n").unwrap();
         assert_eq!(config.tui.tips, None);
         assert!(config.skipped.contains(&"tui.tips".to_string()));
+    }
+
+    /// ADR 0027: `tui.brand` is carried, a non-string is skipped (the `tui.*`
+    /// rule), and a value wider than 4 display columns is a config error (it would misalign
+    /// the footer and the banner).
+    #[test]
+    fn tui_brand_is_carried_and_over_wide_is_refused() {
+        let config = parse_str("schema_version = 1\n[tui]\nbrand = \"ʀ\"\n").unwrap();
+        assert_eq!(config.tui.brand.as_deref(), Some("ʀ"));
+
+        // A non-string is a display preference: skipped, never a refusal.
+        let config = parse_str("schema_version = 1\n[tui]\nbrand = 3\n").unwrap();
+        assert_eq!(config.tui.brand, None);
+        assert!(config.skipped.contains(&"tui.brand".to_string()));
+
+        // `㎭` is East-Asian-Wide (2 columns): two are 4 (fine), three are 5 (refused).
+        assert!(parse_str("schema_version = 1\n[tui]\nbrand = \"㎭㎭\"\n").is_ok());
+        let error = parse_str("schema_version = 1\n[tui]\nbrand = \"㎭㎭R\"\n").unwrap_err();
+        assert!(matches!(error, ConfigError::WrongType { .. }), "{error}");
+    }
+
+    /// ADR 0027: `tui.spinner` is carried; a non-string is skipped (the `tui.*`
+    /// rule). The TUI validates the name and falls back to `pulse`.
+    #[test]
+    fn tui_spinner_is_carried_and_non_strings_are_skipped() {
+        let config = parse_str("schema_version = 1\n[tui]\nspinner = \"quadrant\"\n").unwrap();
+        assert_eq!(config.tui.spinner.as_deref(), Some("quadrant"));
+
+        let config = parse_str("schema_version = 1\n[tui]\nspinner = 3\n").unwrap();
+        assert_eq!(config.tui.spinner, None);
+        assert!(config.skipped.contains(&"tui.spinner".to_string()));
     }
 }
 

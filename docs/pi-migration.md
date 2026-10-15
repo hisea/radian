@@ -1,6 +1,6 @@
 # Migrating from Pi
 
-`agent config import-pi` drafts a Radian configuration from a Pi agent directory. It is a
+`radian config import-pi` drafts a Radian configuration from a Pi agent directory. It is a
 **translation aid, not a compatibility layer**:
 
 > Radian does not promise compatibility with Pi's file format. Pi may change its settings,
@@ -10,9 +10,9 @@
 ## The command
 
 ```sh
-agent config import-pi --from <pi-agent-dir>            # draft on stdout, report on stderr
-agent config import-pi --from <pi-agent-dir> > draft.toml
-agent config import-pi --from <pi-agent-dir> --write    # save it, refusing to overwrite
+radian config import-pi --from <pi-agent-dir>            # draft on stdout, report on stderr
+radian config import-pi --from <pi-agent-dir> > draft.toml
+radian config import-pi --from <pi-agent-dir> --write    # save it, refusing to overwrite
 ```
 
 - The Pi agent directory defaults to `~/.pi/agent` **for Pi**; for this command it is

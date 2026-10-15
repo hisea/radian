@@ -2439,6 +2439,28 @@ async fn pty_mcp_tools_run_through_approval_and_the_status_bar_shows_them() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
+/// ADR 0027: `tui.brand` is the one source for the footer's `brand` item and the
+/// startup banner's one-line fallback. At a width below the wordmark the fallback shows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_the_brand_config_is_the_banner_fallback() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let config = format!(
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
+         base_url = \"{}\"\n[tui]\nbrand = \"ʀ\"\n",
+        server.base_url
+    );
+    let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 20);
+    assert!(
+        pty.wait_for_screen("ʀ radian", 10),
+        "the configured brand is not in the fallback banner:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
 /// ADR 0012 option B keeps MCP servers running outside the sandbox under `workspace-write`,
 /// so the startup notice is the only thing that tells the user. A test holds it in place.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -5122,6 +5144,42 @@ fn pty_an_idle_screen_is_not_redrawn() {
     assert_eq!(
         after, before,
         "an idle screen must not be redrawn (ADR 0023 U2)"
+    );
+}
+
+/// ADR 0027: a **visible** spinner redraws on its interval (the test above pins
+/// the idle case). `arc` turns every 250 ms, so a ~1.2 s window must show several frames.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_visible_spinner_redraws_on_its_interval() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
+    let config = format!(
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
+         base_url = \"{}\"\n[tui]\nspinner = \"arc\"\n",
+        server.base_url
+    );
+    let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 20, 100);
+    assert!(
+        pty.wait_for_screen("type a message", 10),
+        "{}",
+        pty.screen()
+    );
+    let _ = settled_frame_count(&mut pty);
+    // A turn that never finishes keeps the spinner visible.
+    pty.send(b"hello\r");
+    assert!(
+        pty.wait_for_screen("Working", 10),
+        "the input rule must show the running state: {}",
+        pty.screen()
+    );
+    let start = frame_count(&pty);
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    let after = frame_count(&pty);
+    pty.quit();
+    assert!(
+        after >= start + 3,
+        "the arc spinner must redraw about every 250 ms: {start} -> {after}"
     );
 }
 

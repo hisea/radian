@@ -1004,10 +1004,29 @@ pub(crate) fn parse_blocks_for(entry: &Entry, mode: ReasoningMode) -> Vec<Block>
 /// Lays the entry's body out at `width`. The renderer's spans and the selection's cell →
 /// offset mapping both read these lines.
 pub fn layout(entry: &Entry, blocks: &[Block], modes: DisplayModes, width: usize) -> Vec<BodyLine> {
+    layout_with(
+        entry,
+        blocks,
+        modes,
+        width,
+        crate::spinner::Frame::default(),
+    )
+}
+
+/// [`layout`] with the live spinner frame (ADR 0027): the render path passes the
+/// frame for the current tick, so a live reasoning line's indicator animates. The line count
+/// and the text-only paths use [`layout`], because the glyph never changes the shape.
+pub fn layout_with(
+    entry: &Entry,
+    blocks: &[Block],
+    modes: DisplayModes,
+    width: usize,
+    spinner: crate::spinner::Frame,
+) -> Vec<BodyLine> {
     // The container owns the spacing (ADR 0028 rule 1): a text-derived blank line
     // at an entry's start or end is stripped here, so counting, drawing, the selection mapping
     // and the search all see the same shape.
-    let mut lines = layout_unstripped(entry, blocks, modes, width);
+    let mut lines = layout_unstripped(entry, blocks, modes, width, spinner);
     strip_edge_blanks(&mut lines);
     lines
 }
@@ -1018,6 +1037,7 @@ fn layout_unstripped(
     blocks: &[Block],
     modes: DisplayModes,
     width: usize,
+    spinner: crate::spinner::Frame,
 ) -> Vec<BodyLine> {
     let mode = modes.reasoning;
     let prefix = crate::render::marker_prefix(entry.kind).width();
@@ -1031,7 +1051,7 @@ fn layout_unstripped(
             vec![BodyLine {
                 chars: Vec::new(),
                 end: 0,
-                text: placeholder(entry),
+                text: placeholder(entry, spinner),
                 code: false,
                 pad: false,
                 frame: Frame::None,
@@ -1772,32 +1792,18 @@ fn prose_lines(text: &str, width: usize) -> Vec<BodyLine> {
         .collect()
 }
 
-/// The streaming spinner: a deterministic function of the text's length, so a delta batch
-/// (which changes the length and dirties the frame) is the only thing that turns it. The
-/// quadrant blocks (ADR 0027) are in all seven checked fonts; the braille frames
-/// (`⠋⠙⠸⠴`) and the arc (`◜◝◞◟`) are not, so they are not used.
-pub const SPINNER: [char; 4] = ['▖', '▘', '▝', '▗'];
-
-/// The collapsed reasoning placeholder (ADR 0028 R3). `live` entries get the spinner; the
-/// line count stays 1 either way.
-fn placeholder(entry: &Entry) -> String {
+/// The collapsed reasoning placeholder (ADR 0028 R3). `live` entries get the spinner frame
+/// (ADR 0027: a function of the tick, not of the text length); the line count
+/// stays 1 either way.
+fn placeholder(entry: &Entry, spinner: crate::spinner::Frame) -> String {
     let lines = entry.text.lines().count().max(1);
     // No `▸` here: the marker column carries it (ADR 0028 rule 5), so the body
     // column is the same folded and expanded.
     if entry.live {
-        format!(
-            "thinking ({lines} lines) {}",
-            spinner_frame(entry.text.len())
-        )
+        format!("thinking ({lines} lines) {}", spinner.glyph)
     } else {
         format!("thinking ({lines} lines)")
     }
-}
-
-/// One spinner frame. The card head's running status and the reasoning placeholder share it
-/// (ADR 0027's spinner; a shared time-driven function replaces it when p4's lands).
-pub(crate) fn spinner_frame(seed: usize) -> char {
-    SPINNER[seed % SPINNER.len()]
 }
 
 /// One code source line laid out for `width`: the rendered text (tab-expanded to 4 spaces,
@@ -1920,7 +1926,7 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
     match (entry.kind, mode) {
         (EntryKind::Reasoning, ReasoningMode::Hidden) if !reasoning_expanded => Vec::new(),
         (EntryKind::Reasoning, ReasoningMode::Collapsed) if !reasoning_expanded => {
-            vec![placeholder(entry)]
+            vec![placeholder(entry, crate::spinner::Frame::default())]
         }
         (EntryKind::User, _) => {
             let mut lines = vec![String::new()];
@@ -3025,9 +3031,9 @@ mod tests {
         assert!(
             lines[0]
                 .text
-                .chars()
-                .last()
-                .is_some_and(|c| SPINNER.contains(&c))
+                .ends_with(crate::spinner::Frame::default().glyph),
+            "{}",
+            lines[0].text
         );
         entry.live = false;
         let lines = layout(&entry, &[], modes_with(ReasoningMode::Collapsed), 40);

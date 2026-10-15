@@ -188,19 +188,14 @@ fn a_running_call_is_a_card_with_a_spinner_and_no_output_section() {
     let mut app = shell_app(None);
     let terminal = render(&mut app, 80, 12);
     let text = screen(&terminal);
-    // The running glyph is the existing spinner frame (ADR 0027/10's frames; the
-    // shared time-driven one lands later).
+    // The running glyph is the live spinner frame (ADR 0027: the default pulse
+    // draws `⏺`); the renderer substitutes it for the status glyph baked at call time.
     let head = text
         .lines()
         .find(|l| l.contains("shell: make test"))
         .unwrap();
     assert!(head.starts_with("│ "), "{head}");
-    assert!(
-        radian_tui::blocks::SPINNER
-            .iter()
-            .any(|c| head.contains(*c)),
-        "the running spinner: {head}"
-    );
+    assert!(head.contains('⏺'), "the running spinner: {head}");
     assert!(text.contains("$ make test"), "the command section: {text}");
     assert!(!text.contains("├── "), "no output, no divider: {text}");
     assert!(text.contains('└'), "the card closes: {text}");

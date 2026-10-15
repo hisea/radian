@@ -1,17 +1,17 @@
-//! The `agent` command as a library (ADR 0032 slice 1): a chat client wiring the core turn
+//! The headless command behind `radian exec`, as a library (ADR 0032): a chat client wiring
 //! loop to an OpenAI-compatible model and MCP stdio tools, driven by `radian-runtime` so every
 //! session is durable.
 //!
-//! The `agent` binary is a thin wrapper over [`Cli`] + [`run_blocking`]; `radian exec` embeds
+//! `radian exec` parses [`Cli`] and calls [`run_blocking`]
 //! the same parser and dispatch, so the two entries cannot drift.
 //!
 //! stdout carries only what the model said (streamed); status, prompts, reasoning and
-//! errors go to stderr, so `agent -p "..."` can be piped. The API key is read from an
+//! errors go to stderr, so `radian exec -p "..."` can be piped. The API key is read from an
 //! environment variable only, and is redacted from everything this program prints — and
 //! from everything it writes to disk.
 
 mod approval;
-/// `agent login` / `agent logout` (ADR 0026 D3).
+/// `radian login` / `radian logout` (ADR 0026 D3).
 mod login;
 mod profile;
 mod tools;
@@ -51,10 +51,12 @@ const USAGE_ERROR: i32 = 2;
 
 #[derive(Parser, Default)]
 #[command(
-    name = "agent",
+    // The command is `radian exec` now: its help, usage and `--version` name the program the
+    // user actually ran (ADR 0032 direction; the `agent` binary is gone).
+    name = "radian",
     version,
     about = "Chat with a model, with optional MCP tools",
-    // A subcommand (`agent memory …`) is a mode of its own, like `--list`: it must not need
+    // A subcommand (`radian memory …`) is a mode of its own, like `--list`: it must not need
     // `--model`. `--model` is not clap-required at all now (the config file may supply it),
     // so this is a no-op today; it stays so a future required argument cannot leak into the
     // subcommand modes.
@@ -194,7 +196,8 @@ pub struct Cli {
     #[arg(long, value_name = "SEQ", requires = "fork")]
     at: Option<u64>,
 
-    /// A mode of its own: `agent memory …` (ADR 0021) or `agent config …` (ADR 0008). Neither
+    /// A mode of its own: `radian memory …` (ADR 0021) or `radian config …` (ADR 0008).
+    /// Neither
     /// needs `--model`, reads a key, creates a session file or touches the network. Memory is
     /// shared across sessions and resolved per project (a git repository, shared by its
     /// worktrees).
@@ -275,9 +278,10 @@ pub struct Cli {
 /// Why startup failed. The message must not contain the key.
 pub(crate) struct SetupError(pub(crate) String);
 
-/// Why a "print and exit" command (`--list`, `--search`, `--export`, `agent memory`) stopped.
+/// Why a "print and exit" command (`--list`, `--search`, `--export`, `radian memory`) stopped.
 ///
-/// A closed stdout (`agent --list | head`) is a normal way to stop, not a failure (dogfooding
+/// A closed stdout (`radian exec --list | head`) is a normal way to stop, not a failure
+/// (dogfooding
 /// D21); it is kept apart from a real error so it exits 0 with no message.
 pub(crate) enum OutputError {
     /// A setup, usage or memory-command failure: the message is printed, this code returned.
@@ -337,9 +341,9 @@ impl OutputError {
     /// The line to print to stderr, if any. A broken pipe prints nothing.
     fn message(&self) -> Option<String> {
         match self {
-            OutputError::Failed { message, .. } => Some(format!("agent: {message}")),
+            OutputError::Failed { message, .. } => Some(format!("radian: {message}")),
             OutputError::BrokenPipe => None,
-            OutputError::Write(error) => Some(format!("agent: cannot write to stdout: {error}")),
+            OutputError::Write(error) => Some(format!("radian: cannot write to stdout: {error}")),
         }
     }
 }
@@ -366,7 +370,7 @@ enum ExportFormat {
     Json,
 }
 
-/// The top-level subcommands. `agent` also has flag-only modes (`--list`, `--export`,
+/// The top-level subcommands. The command also has flag-only modes (`--list`, `--export`,
 /// `--search`); those stay flags for compatibility. The subcommand name comes from the
 /// variant, not the field that stores it.
 #[derive(clap::Subcommand, Debug)]
@@ -376,7 +380,7 @@ pub enum Command {
         #[command(subcommand)]
         command: MemoryCommand,
     },
-    /// Configuration tools (ADR 0008): `agent config --help`.
+    /// Configuration tools (ADR 0008): `radian config --help`.
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
@@ -394,12 +398,12 @@ pub enum Command {
     },
     /// Remove a stored credential (asks first; every other entry is untouched).
     Logout {
-        /// The provider id the key is stored under (`agent login` printed it).
+        /// The provider id the key is stored under (`radian login` printed it).
         provider: String,
     },
 }
 
-/// The `agent config` grammar. `import-pi` is the only entry point in this version, and it is
+/// The `radian config` grammar. `import-pi` is the only entry point in this version, and it is
 /// read-only unless `--write` is given.
 #[derive(clap::Subcommand, Debug)]
 pub enum ConfigCommand {
@@ -426,13 +430,13 @@ fn run_config(cli: &Cli, command: ConfigCommand) -> i32 {
     finish(config_command(cli, command))
 }
 
-/// Runs one `agent config` subcommand. Deliberately before `setup`: no model, no key, no
+/// Runs one `radian config` subcommand. Deliberately before `setup`: no model, no key, no
 /// session file and no network. The Pi directory is only ever the one the user named.
 fn config_command(cli: &Cli, command: ConfigCommand) -> Result<(), OutputError> {
     match command {
         ConfigCommand::ImportPi { from, write } => {
             let draft = radian_host::import_pi(&from)?;
-            // The report goes to stderr, so `agent config import-pi --from d > draft.toml`
+            // The report goes to stderr, so `radian config import-pi --from d > draft.toml`
             // still shows what could not be mapped.
             for note in &draft.notes {
                 eprintln!("[import-pi] {note}");
@@ -464,7 +468,7 @@ fn config_command(cli: &Cli, command: ConfigCommand) -> Result<(), OutputError> 
     }
 }
 
-/// Runs one `agent memory` subcommand. Deliberately before `setup`: no model, no key, no
+/// Runs one `radian memory` subcommand. Deliberately before `setup`: no model, no key, no
 /// session file, no network. The grammar and the execution live in
 /// `radian_host::memory::commands`, shared byte-for-byte with the TUI's `/memory`.
 fn memory_command(cli: &Cli, command: MemoryCommand) -> Result<(), OutputError> {
@@ -615,7 +619,7 @@ fn confirm_or_refuse(message: &str) -> Result<(), CommandError> {
 impl Cli {
     /// A `Cli` carrying only one management command, everything else at its default. The
     /// top-level `radian memory`/`login`/`config` build this so they run the **same** dispatch
-    /// the `agent` parser feeds (ADR 0032 direction).
+    /// the parser feeds (ADR 0032 direction).
     pub fn for_command(command: Command) -> Self {
         Self {
             command: Some(command),
@@ -623,7 +627,8 @@ impl Cli {
         }
     }
 
-    /// [`Cli::for_command`] with the workspace `agent --workspace DIR memory …` would carry.
+    /// [`Cli::for_command`] with the workspace `radian exec --workspace DIR memory …` would
+    /// carry.
     pub fn for_memory(workspace: Option<String>, command: MemoryCommand) -> Self {
         Self {
             command: Some(Command::Memory { command }),
@@ -634,7 +639,7 @@ impl Cli {
 }
 
 /// Parses `args` (program name included) and runs it to completion, returning the process
-/// exit code. This is what the `agent` binary and `radian exec` both call: clap's own errors
+/// exit code. This is what `radian exec` calls (the TUI passes the argv): clap's own errors
 /// (a usage error, `--help`, `--version`) exit inside [`Cli::parse_from`], exactly as the
 /// binary always did.
 pub fn parse_and_run<I, T>(args: I) -> i32
@@ -646,7 +651,7 @@ where
 }
 
 /// Runs the parsed CLI to completion and returns the exit code: the runtime is built here and
-/// torn down with a bound, exactly as the `agent` binary has always done.
+/// torn down with a bound, exactly as the headless command always did.
 pub fn run_blocking(cli: Cli) -> i32 {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -661,7 +666,7 @@ pub fn run_blocking(cli: Cli) -> i32 {
 }
 
 pub async fn run(mut cli: Cli) -> i32 {
-    // `agent memory` and `agent config` are modes of their own: no model, no key, no session
+    // `radian memory` and `radian config` are modes of their own: no model, no key, no session
     // file, no network. They are handled before `setup`, like the session-management commands.
     if cli.command.is_some() {
         if cli.list
@@ -670,14 +675,14 @@ pub async fn run(mut cli: Cli) -> i32 {
             || cli.prompt.is_some()
             || cli.resume.is_some()
         {
-            eprintln!("agent: a subcommand cannot be combined with a session command");
+            eprintln!("radian: a subcommand cannot be combined with a session command");
             return USAGE_ERROR;
         }
         match cli.command.take() {
             Some(Command::Memory { command }) => return run_memory(&cli, command),
             Some(Command::Config { command }) => return run_config(&cli, command),
             // D3: the credential commands are modes of their own — no model, no session
-            // file; `agent login` talks to the named endpoint once (the verification).
+            // file; `radian login` talks to the named endpoint once (the verification).
             Some(Command::Login { provider }) => return login::run_login(provider).await,
             Some(Command::Logout { provider }) => return login::run_logout(provider).await,
             None => unreachable!("checked just above"),
@@ -698,7 +703,7 @@ pub async fn run(mut cli: Cli) -> i32 {
         return match fork_session(&cli, parent_id).await {
             Ok(()) => 0,
             Err((message, code)) => {
-                eprintln!("agent: {message}");
+                eprintln!("radian: {message}");
                 code
             }
         };
@@ -706,7 +711,7 @@ pub async fn run(mut cli: Cli) -> i32 {
     let setup = match setup(&cli).await {
         Ok(setup) => setup,
         Err(e) => {
-            eprintln!("agent: {}", e.0);
+            eprintln!("radian: {}", e.0);
             return USAGE_ERROR;
         }
     };
@@ -722,7 +727,7 @@ pub async fn run(mut cli: Cli) -> i32 {
     match chat(setup, cli).await {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("agent: {}", redact(&e.0, &redact_secrets));
+            eprintln!("radian: {}", redact(&e.0, &redact_secrets));
             USAGE_ERROR
         }
     }
@@ -910,7 +915,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         {
             Some(note) => note,
             None => format!(
-                "no credential for `{key_id}`: run `agent login {key_id}` (or `/login {key_id}` \
+                "no credential for `{key_id}`: run `radian login {key_id}` (or `/login {key_id}` \
                  in the TUI); refusing to continue because {} is not a local address",
                 radian_host::redact_base_url(&probe_base_url)
             ),
@@ -986,6 +991,10 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         route.adapter(),
         Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
     );
+    // ADR 0014 Q2: the catalog (or a `[providers.<id>]` override) decides whether
+    // this route replays reasoning.
+    let reasoning_replay = radian_host::resolve_reasoning_replay(&provider_ref, &model_name);
+    let replays_reasoning = reasoning_replay.is_some();
     let initial = build_model(ModelArgs {
         provider: route.adapter(),
         base_url: route.base_url.clone(),
@@ -996,6 +1005,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
         max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         thinking: thinking_of,
         reasoning_effort,
+        reasoning_replay,
     })
     .map_err(SetupError)?;
     // ADR 0026 D5: switchable, like the TUI. The CLI has no `/model`, but the journal can
@@ -1030,13 +1040,22 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     );
     let budget_for = {
         let query = window_query.clone();
+        let providers = config.providers.clone();
         std::sync::Arc::new(move |provider: &str, switch_model: &str| {
-            radian_host::resolve_offline(&radian_host::WindowQuery {
+            let window = radian_host::resolve_offline(&radian_host::WindowQuery {
                 catalog_provider: Some(provider.to_owned()),
                 model: switch_model.to_owned(),
                 ..query.clone()
+            });
+            // ADR 0014 Q4: the estimate counts reasoning exactly when the route
+            // replays it, so the projection matches the request actually sent.
+            window.budget.map(|tokens| {
+                ContextBudget::new(tokens).with_reasoning(radian_host::route_replays_reasoning(
+                    provider,
+                    switch_model,
+                    &providers,
+                ))
             })
-            .budget
         }) as radian_runtime::BudgetFor
     };
     // The same lookup gives the **price** (ADR 0027), offline like the budget: the
@@ -1099,7 +1118,7 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
     let context_budget = window
         .budget
         .filter(|tokens| *tokens > 0)
-        .map(ContextBudget::new);
+        .map(|tokens| ContextBudget::new(tokens).with_reasoning(replays_reasoning));
     Ok(Setup {
         model,
         provider_id: provider_name.clone(),
@@ -1416,7 +1435,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     let sessions_for_deny = session_dir(&cli)?;
     let _ = radian_host::ensure_private_dir(&sessions_for_deny);
     // ADR 0021: the memory root is under `~/.radian/` (ADR 0020), sandbox-denied, and the
-    // service is the same one `agent memory` uses. `None` only when neither `RADIAN_HOME` nor
+    // service is the same one `radian memory` uses. `None` only when neither `RADIAN_HOME` nor
     // `HOME` is set; then memory is simply off for this run.
     let memory_root = radian_host::memory_dir();
     let mut sandbox_deny_read = vec![sessions_for_deny.clone()];
@@ -1465,10 +1484,10 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
         Arc::new(move |event: &radian_session::RuntimeEvent| {
             if let radian_session::RuntimeEvent::TurnFailed { message, .. } = event {
                 let message = redact(message, &secrets);
-                eprintln!("agent: {message}");
+                eprintln!("radian: {message}");
                 // ADR 0018's fallback: a recognizable context overflow gets one extra line.
                 if radian_host::is_context_overflow(&message) {
-                    eprintln!("agent: {}", radian_host::CONTEXT_OVERFLOW_HELP);
+                    eprintln!("radian: {}", radian_host::CONTEXT_OVERFLOW_HELP);
                 }
             }
         })
@@ -1529,6 +1548,8 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             price_for: setup.price_for,
             protected_branches: Vec::new(),
             servers: setup.servers,
+            // ADR 0036: a CLI session uses the `default` role.
+            role: None,
             system_prompt: setup.system_prompt.clone(),
             context_budget: setup.context_budget,
             auto_compact: setup.auto_compact,
@@ -1577,7 +1598,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     if let Some(choice) = trust_choice
         && let Err(error) = session.record_trust_async(choice).await
     {
-        eprintln!("agent: cannot write trust.json: {error}");
+        eprintln!("radian: cannot write trust.json: {error}");
     }
 
     // ADR 0026 D8: an explicit `--model`/`--provider` wins over the resumed change, and the
@@ -1746,7 +1767,7 @@ async fn enqueue_input(
 async fn one_shot(run: &mut Run, prompt: String) -> i32 {
     if let Err(error) = enqueue_input(&run.inbox, &run.hooks, prompt, TERMINAL_SOURCE, false).await
     {
-        eprintln!("agent: {}", redact(&error.to_string(), &run.secrets));
+        eprintln!("radian: {}", redact(&error.to_string(), &run.secrets));
         let _ = shutdown(&run.inbox, &run.ui, &run.session).await;
         return 1;
     }
@@ -1773,7 +1794,7 @@ async fn one_shot(run: &mut Run, prompt: String) -> i32 {
     match run.ui.last_status() {
         Some(RunStatus::Completed) => 0,
         Some(status) => {
-            eprintln!("agent: the turn ended as {status:?}");
+            eprintln!("radian: the turn ended as {status:?}");
             1
         }
         None => 1,
@@ -1872,9 +1893,9 @@ async fn interactive_loop(run: &mut Run, lines: &LineHub) -> i32 {
                 if let Err(error) = result {
                     match &error {
                         InboxError::Full { .. } => eprintln!(
-                            "agent: the inbox is full; that input was not queued (try again)"
+                            "radian: the inbox is full; that input was not queued (try again)"
                         ),
-                        other => eprintln!("agent: {}", redact(&other.to_string(), &run.secrets)),
+                        other => eprintln!("radian: {}", redact(&other.to_string(), &run.secrets)),
                     }
                     continue;
                 }
@@ -1953,7 +1974,7 @@ fn on_signal(ui: &Ui, inbox: &Inbox, cancelling: &mut bool) -> Next {
     }
     *cancelling = true;
     inbox.cancel(CancelCause::Requested);
-    eprintln!("agent: cancelling (Ctrl-C again to quit)");
+    eprintln!("radian: cancelling (Ctrl-C again to quit)");
     Next::Again
 }
 
@@ -1991,11 +2012,11 @@ async fn report_task(session: &Arc<radian_host::LocalSession>, secrets: &[String
     match session.join().await {
         radian_host::DriverEnd::Ok => 0,
         radian_host::DriverEnd::Failed(error) => {
-            eprintln!("agent: {}", redact(&error, secrets));
+            eprintln!("radian: {}", redact(&error, secrets));
             1
         }
         radian_host::DriverEnd::Panicked(message) => {
-            eprintln!("agent: the driver task ended unexpectedly: {message}");
+            eprintln!("radian: the driver task ended unexpectedly: {message}");
             1
         }
     }
@@ -2005,7 +2026,7 @@ fn report_error(result: &Result<(), String>, secrets: &[String]) -> Option<i32> 
     match result {
         Ok(()) => None,
         Err(error) => {
-            eprintln!("agent: {}", redact(error, secrets));
+            eprintln!("radian: {}", redact(error, secrets));
             Some(1)
         }
     }
@@ -2031,7 +2052,7 @@ async fn wait_for_turn(
                 }
                 *cancelling = true;
                 inbox.cancel(CancelCause::Requested);
-                eprintln!("agent: cancelling (Ctrl-C again to quit)");
+                eprintln!("radian: cancelling (Ctrl-C again to quit)");
             }
             _ = driver_ended.notified() => return TurnEnd::DriverEnded,
             _ = ui.finished.notified() => return TurnEnd::Done,
@@ -2239,7 +2260,7 @@ impl EventSink for Ui {
                     RunStatus::Cancelled(_) => {
                         // Carries both the lowercase hint and the debug status: the tests
                         // wait for either.
-                        eprintln!("agent: cancelled ({status:?}); type another line or /exit")
+                        eprintln!("radian: cancelled ({status:?}); type another line or /exit")
                     }
                     other => eprintln!("[turn] ended as {other:?}"),
                 }

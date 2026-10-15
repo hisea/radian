@@ -130,7 +130,7 @@ struct Cli {
     #[arg(help_heading = "Permissions", long, value_name = "POLICY")]
     approval: Option<String>,
 
-    /// Approve every tool call without asking, like `agent --yes`. Not "allow everything":
+    /// Approve every tool call without asking, like `radian exec --yes`. Not "allow everything":
     /// `deny` rules still deny and the sandbox still applies; only the question is removed.
     #[arg(help_heading = "Permissions", long)]
     yes: bool,
@@ -275,7 +275,7 @@ enum RadianCommand {
     /// Manage durable memory (ADR 0021 D7): the same grammar as `radian exec memory` and the
     /// TUI's `/memory`.
     Memory {
-        /// The workspace project memory is resolved against, like `agent --workspace`.
+        /// The workspace project memory is resolved against, like `radian exec --workspace`.
         #[arg(long, value_name = "DIR")]
         workspace: Option<PathBuf>,
         #[command(subcommand)]
@@ -304,8 +304,10 @@ fn run_subcommand(command: RadianCommand) -> ExitCode {
         RadianCommand::Exec { args } => {
             // The agent parser owns `--help`/`--version`/usage errors: `parse_from` exits
             // inside clap for those, exactly as the `agent` binary does.
+            // The program name clap shows in usage and errors: `radian exec`, the command
+            // the user ran.
             ExitCode::from(agent_cli::parse_and_run(
-                std::iter::once("agent".to_string()).chain(args),
+                std::iter::once("radian exec".to_string()).chain(args),
             ) as u8)
         }
         // The management commands build the same `Cli` the `agent` parser would and run the
@@ -798,7 +800,7 @@ fn run(
                 match radian_host::resolve_note(&key_id).map_err(|e| e.to_string())? {
                     Some(note) => note,
                     None => format!(
-                        "no credential for `{key_id}`: run `agent login {key_id}`, or \
+                        "no credential for `{key_id}`: run `radian login {key_id}`, or \
                          `/login {key_id}` in the TUI; refusing to continue because {} is not a \
                          local address",
                         radian_host::redact_base_url(&probe_base_url)
@@ -904,6 +906,10 @@ fn run(
         route.adapter(),
         Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
     );
+    // ADR 0014 Q2: the catalog (or a `[providers.<id>]` override) decides whether
+    // this route replays reasoning.
+    let reasoning_replay = radian_host::resolve_reasoning_replay(&provider_ref, &model_name);
+    let replays_reasoning = reasoning_replay.is_some();
     let initial = build_model(ModelArgs {
         provider: route.adapter(),
         base_url: route.base_url.clone(),
@@ -915,6 +921,7 @@ fn run(
         max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         thinking: thinking_of,
         reasoning_effort,
+        reasoning_replay,
     })?;
     // ADR 0026 D5: the model is switchable. The slot is shared with the driver (open_session
     // wires it), so a `/model` change reaches the next request without touching the key.
@@ -944,15 +951,24 @@ fn run(
     );
     let budget_for = {
         let query = window_query.clone();
+        let providers = config.providers.clone();
         std::sync::Arc::new(move |provider: &str, switch_model: &str| {
             // The switched route carries its own provider id, so the resolver uses it directly
             // instead of deriving one from the startup base URL.
-            radian_host::resolve_offline(&radian_host::WindowQuery {
+            let window = radian_host::resolve_offline(&radian_host::WindowQuery {
                 catalog_provider: Some(provider.to_owned()),
                 model: switch_model.to_owned(),
                 ..query.clone()
+            });
+            // ADR 0014 Q4: the estimate counts reasoning exactly when the route
+            // replays it, so the projection matches the request actually sent.
+            window.budget.map(|tokens| {
+                ContextBudget::new(tokens).with_reasoning(radian_host::route_replays_reasoning(
+                    provider,
+                    switch_model,
+                    &providers,
+                ))
             })
-            .budget
         }) as radian_runtime::BudgetFor
     };
     // ADR 0027 + ADR 0026 D5/D7: the same warm-cache lookup gives the **price**, so
@@ -1139,8 +1155,12 @@ fn run(
                 coding_root: Some(workspace_path.clone()),
                 model,
                 servers,
+                // ADR 0036: an interactive session uses the `default` role.
+                role: None,
                 system_prompt: cli.system.clone(),
-                context_budget: window.budget.map(ContextBudget::new),
+                context_budget: window
+                    .budget
+                    .map(|tokens| ContextBudget::new(tokens).with_reasoning(replays_reasoning)),
                 auto_compact: !cli.no_auto_compact && config.compaction.auto.unwrap_or(true),
                 sandbox,
                 tier: tier.preset(),
@@ -1564,11 +1584,7 @@ fn run(
     mark("before-startup");
     app.set_startup(radian_tui::startup::StartupScreen {
         banner,
-        banner_narrow: format!(
-            "{} radian {}",
-            radian_tui::footer::brand_mark(app.footer_glyphs()),
-            env!("CARGO_PKG_VERSION")
-        ),
+        banner_narrow: format!("{} radian {}", app.brand_mark(), env!("CARGO_PKG_VERSION")),
         summary,
         lines: startup_lines,
         safety,
@@ -2110,6 +2126,25 @@ fn terminal_gone(error: &std::io::Error) -> bool {
 /// Whether the tty is already hung up, as `poll(2)` sees it right now. A draw failure carries
 /// crossterm's own "failed to write the buffered data" (no errno), so the tty's own state is
 /// the reliable test.
+/// Advances the spinner's clock and returns the new frame when a spinner is visible and the
+/// frame changed since `last` (ADR 0027). The idle tick calls this, so an idle app
+/// still makes no frame and a visible spinner redraws on its interval.
+fn spinner_tick(
+    app: &mut App,
+    last: &mut Option<radian_tui::spinner::Frame>,
+) -> Option<radian_tui::spinner::Frame> {
+    if !app.spinner_visible() {
+        return None;
+    }
+    app.set_now(std::time::Instant::now());
+    let frame = app.spinner_frame();
+    if *last == Some(frame) {
+        return None;
+    }
+    *last = Some(frame);
+    Some(frame)
+}
+
 fn terminal_is_gone() -> bool {
     #[cfg(unix)]
     {
@@ -3100,6 +3135,9 @@ fn ui_loop(
         return Ok(None);
     }
     radian_tui::terminal::set_cursor_visible(app.input_editable());
+    // The last spinner frame drawn (ADR 0027): the idle tick redraws only when the
+    // frame changes, so the pulse (500 ms) does not draw on every 250 ms wake.
+    let mut last_spinner: Option<radian_tui::spinner::Frame> = None;
     // An effect batch the draw-fairness cap did not finish: declared outside the loop so the
     // rest survives to the next turn (never dropped, order kept).
     let mut effects: Vec<Effect> = Vec::new();
@@ -3160,6 +3198,12 @@ fn ui_loop(
                             app.quit = true;
                             break;
                         }
+                        if spinner_tick(app, &mut last_spinner).is_some()
+                            && !draw_frame(terminal, app)?
+                        {
+                            app.quit = true;
+                            break;
+                        }
                         continue;
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => None,
@@ -3171,6 +3215,12 @@ fn ui_loop(
                     Ok(event) => Some(event),
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                         if terminal_is_gone() {
+                            app.quit = true;
+                            break;
+                        }
+                        if spinner_tick(app, &mut last_spinner).is_some()
+                            && !draw_frame(terminal, app)?
+                        {
                             app.quit = true;
                             break;
                         }
@@ -3249,6 +3299,7 @@ fn ui_loop(
                 app.quit = true;
                 break;
             }
+            last_spinner = Some(app.spinner_frame());
             // The cursor is visible only while the input box is editable.
             radian_tui::terminal::set_cursor_visible(app.input_editable());
         }
@@ -3312,8 +3363,16 @@ fn model_route_candidates(
             });
         }
     }
-    // The current provider's models first, then by provider and model name (ADR 0035
-    // revision 2).
+    sort_model_candidates(&mut candidates, current_provider);
+    candidates
+}
+
+/// The flat `/model` list's order (ADR 0035): the current provider's models first,
+/// then by provider and model name.
+fn sort_model_candidates(
+    candidates: &mut [radian_tui::command::Candidate],
+    current_provider: Option<&str>,
+) {
     let is_current = |candidate: &radian_tui::command::Candidate| {
         current_provider.is_some_and(|provider| {
             candidate
@@ -3328,7 +3387,6 @@ fn model_route_candidates(
             .then_with(|| left.description.cmp(&right.description))
             .then_with(|| left.insert.cmp(&right.insert))
     });
-    candidates
 }
 
 /// One provider's model ids: the built-in descriptor's list, then the cached `/v1/models` ids
@@ -3795,6 +3853,46 @@ mod tests {
         );
         // And a second `Dirty` that finds the flag already cleared is coalesced away.
         assert!(!apply_dirty(&mut app));
+    }
+
+    /// ADR 0035: the current provider's models come first in the flat `/model`
+    /// list, then the rest by provider and model name.
+    #[test]
+    fn the_flat_model_list_puts_the_current_provider_first() {
+        let candidate = |insert: &str, provider: &str| radian_tui::command::Candidate {
+            insert: insert.to_owned(),
+            description: provider.to_owned(),
+        };
+        let mut candidates = vec![
+            candidate("openai/gpt-5", "openai"),
+            candidate("opencode-go/zeta", "opencode-go"),
+            candidate("anthropic/claude-4", "anthropic"),
+            candidate("opencode-go/alpha", "opencode-go"),
+        ];
+        sort_model_candidates(&mut candidates, Some("opencode-go"));
+        let order: Vec<&str> = candidates.iter().map(|c| c.insert.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "opencode-go/alpha",
+                "opencode-go/zeta",
+                "anthropic/claude-4",
+                "openai/gpt-5"
+            ],
+            "the current provider's models first, then by provider and model"
+        );
+        // Without a current provider, only the name order applies.
+        sort_model_candidates(&mut candidates, None);
+        let order: Vec<&str> = candidates.iter().map(|c| c.insert.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "anthropic/claude-4",
+                "openai/gpt-5",
+                "opencode-go/alpha",
+                "opencode-go/zeta"
+            ]
+        );
     }
 
     #[test]

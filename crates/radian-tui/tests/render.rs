@@ -67,9 +67,9 @@ fn style_of(terminal: &Terminal<TestBackend>, needle: &str) -> Option<ratatui::s
             line.push_str(buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
         }
         if let Some(col) = line.find(needle) {
-            // The first character of the match is at display column `col`, but wide cells
-            // shift columns; for ASCII markers they coincide.
-            let x = area.left() + col as u16;
+            // `col` is a byte offset; the buffer column is the display width of the prefix
+            // (wide cells shift it, so `↑` or CJK would otherwise read the wrong cell).
+            let x = area.left() + unicode_width::UnicodeWidthStr::width(&line[..col]) as u16;
             return buffer.cell((x, y)).map(|c| c.style());
         }
     }
@@ -206,6 +206,69 @@ fn the_status_line_shows_model_and_turn_state() {
     let text = screen(&terminal);
     assert!(text.contains("my-model"), "{text}");
     assert!(text.contains("running"), "{text}");
+}
+
+/// ADR 0027: the input rule shows the spinner and the running state while a turn
+/// runs (`── ◜  Working `), and is a plain rule when idle. The spinner and the text are
+/// separated by **two** spaces.
+#[test]
+fn the_input_rule_shows_the_spinner_status_while_running() {
+    let mut app = App::new("m", "s");
+    app.spinner_kind = radian_tui::spinner::Kind::Arc;
+    // The frame is a function of the injected clock (ADR 0027).
+    app.set_now(app.spinner_origin);
+    app.projection.set_turn(radian_tui::TurnState::Running);
+    let terminal = render(&mut app, 60, 10);
+    let text = screen(&terminal);
+    assert!(
+        text.contains("◜  Working"),
+        "the spinner and two spaces on the input rule: {text}"
+    );
+
+    // Idle: no spinner, no text.
+    app.projection.set_turn(radian_tui::TurnState::Idle);
+    let terminal = render(&mut app, 60, 10);
+    let text = screen(&terminal);
+    assert!(!text.contains("Working"), "an idle rule is plain: {text}");
+    assert!(!text.contains('◜'), "{text}");
+}
+
+/// ADR 0018 + ADR 0027: a running compaction shows `Compacting` on the input rule
+/// (the `CompactionStarted`/`CompactionFinished` events exist, so this is not invented).
+#[test]
+fn the_input_rule_shows_compacting() {
+    let mut app = App::new("m", "s");
+    app.spinner_kind = radian_tui::spinner::Kind::Arc;
+    app.set_now(app.spinner_origin);
+    app.projection.set_turn(radian_tui::TurnState::Running);
+    app.compacting = true;
+    let terminal = render(&mut app, 60, 10);
+    let text = screen(&terminal);
+    assert!(text.contains("◜  Compacting"), "{text}");
+
+    // The flag clears when the compaction ends.
+    app.compacting = false;
+    let terminal = render(&mut app, 60, 10);
+    let text = screen(&terminal);
+    assert!(!text.contains("Compacting"), "{text}");
+}
+
+/// ADR 0027: the `box` style puts the same status on the border's top edge.
+#[test]
+fn the_box_style_shows_the_spinner_on_the_border() {
+    let mut app = App::new("m", "s");
+    app.spinner_kind = radian_tui::spinner::Kind::Arc;
+    app.set_now(app.spinner_origin);
+    app.input_style = radian_tui::render::InputStyle::Box;
+    app.projection.set_turn(radian_tui::TurnState::Running);
+    let terminal = render(&mut app, 60, 10);
+    let text = screen(&terminal);
+    assert!(
+        text.contains("◜  Working"),
+        "the box border carries the status: {text}"
+    );
+    // The rounded corner is still there (the title starts with a space).
+    assert!(text.contains('╭'), "{text}");
 }
 
 #[test]
@@ -912,7 +975,7 @@ fn a_git_diff_body_colors_its_line_kinds() {
     let style = |needle: &str| style_of(&terminal, needle).expect(needle);
     assert_eq!(style("+new line").fg, theme.diff_added.fg, "added");
     assert_eq!(style("-old line").fg, theme.diff_removed.fg, "removed");
-    assert_eq!(style(" context").fg, theme.diff_context.fg, "context");
+    assert_eq!(style("context").fg, theme.diff_context.fg, "context");
     assert_eq!(style("@@").fg, theme.diff_hunk.fg, "@@ is structure");
     assert_eq!(
         style("diff --git").fg,
@@ -1916,14 +1979,113 @@ fn the_login_wizard_uses_the_text_hierarchy() {
     assert!(text.contains("choose a provider"), "{text}");
     let prompt = style_of(&terminal, "choose").expect("the prompt");
     assert_eq!(prompt.fg, app.theme.text.fg, "the prompt is main text");
-    let hint = style_of(&terminal, "(↑/↓,").expect("the key hint");
+    // ADR 0035: the key hints live in the panel's bottom border (dim keys).
+    let hint = style_of(&terminal, "↑/↓").expect("the key hint");
     assert_eq!(hint.fg, app.theme.hint.fg, "the key hint is weak");
-    // The first choice row is the selection: the emphasis (accent) role.
-    let selected = style_of(&terminal, ">").expect("the selected row");
-    assert_eq!(
-        selected.fg, app.theme.notice_label.fg,
-        "the selected row is the emphasis"
+    // The first choice row is the selection: the shared list's emphasis (bold cursor).
+    let selected = style_of(&terminal, "❯").expect("the selected row");
+    assert!(
+        selected
+            .add_modifier
+            .contains(ratatui::style::Modifier::BOLD),
+        "the selected row is emphasized"
     );
+}
+
+/// The startup trust modal (ADR 0031 T3, ADR 0035): the shared panel with the
+/// choices through the shared list, at 80/120 columns and in the ascii tier. The cursor's
+/// default is the fail-safe `UntrustHere`.
+#[test]
+fn the_trust_panel_snapshot_at_80_120_and_ascii() {
+    let mut app = App::new("m", "s");
+    app.push_trust_modal(std::path::PathBuf::from("/work/example"));
+
+    let terminal = render(&mut app, 80, 24);
+    let text = screen(&terminal);
+    assert!(text.contains("╭─ project trust "), "{text}");
+    assert!(
+        text.contains("project resources found in /work/example"),
+        "{text}"
+    );
+    assert!(
+        text.contains("❯ Do not trust this directory (/work/example)"),
+        "the fail-safe default: {text}"
+    );
+    assert!(
+        text.contains("↑/↓ choose · ⏎ select · esc do not trust"),
+        "{text}"
+    );
+
+    let terminal = render(&mut app, 120, 24);
+    let text = screen(&terminal);
+    assert!(text.contains("╭─ project trust "), "{text}");
+    assert!(
+        text.contains("Trust the parent directory (/work)"),
+        "{text}"
+    );
+
+    app.apply_footer(&radian_host::config::TuiFooterConfig {
+        glyphs: Some("ascii".into()),
+        ..Default::default()
+    });
+    let terminal = render(&mut app, 80, 24);
+    let text = screen(&terminal);
+    assert!(text.contains("+- project trust "), "{text}");
+    assert!(text.contains("> Do not trust this directory"), "{text}");
+    assert!(!text.contains('╭'), "{text}");
+}
+
+/// The session picker (ADR 0035/2): the shared panel with the filter row, the
+/// sessions through the shared list, and the selected `--resume <id>` on the top border.
+#[test]
+fn the_picker_panel_snapshot_at_80_120_and_ascii() {
+    use radian_host::sessions::SessionRow;
+    use radian_tui::app::Overlay;
+    use radian_tui::picker::Picker;
+    let rows = vec![
+        SessionRow {
+            session_id: "alpha".into(),
+            created_ts: None,
+            last_ts: Some("2026-10-15T00:00:00Z".into()),
+            message_count: 2,
+            summary: "the first session".into(),
+        },
+        SessionRow {
+            session_id: "beta".into(),
+            created_ts: None,
+            last_ts: Some("2026-10-15T01:00:00Z".into()),
+            message_count: 5,
+            summary: "the second session".into(),
+        },
+    ];
+    let mut app = App::new("m", "s");
+    app.push_overlay(Overlay::Picker(Picker::new(rows, None, "/w")));
+
+    let terminal = render(&mut app, 80, 24);
+    let text = screen(&terminal);
+    assert!(text.contains("╭─ sessions "), "{text}");
+    assert!(text.contains("filter: "), "{text}");
+    assert!(text.contains("❯ alpha"), "{text}");
+    assert!(text.contains("--resume alpha"), "the copyable hint: {text}");
+    assert!(
+        text.contains("↑/↓ select · ⏎ resume · n new · tab search · esc close"),
+        "{text}"
+    );
+
+    let terminal = render(&mut app, 120, 24);
+    let text = screen(&terminal);
+    assert!(text.contains("╭─ sessions "), "{text}");
+    assert!(text.contains("the second session"), "{text}");
+
+    app.apply_footer(&radian_host::config::TuiFooterConfig {
+        glyphs: Some("ascii".into()),
+        ..Default::default()
+    });
+    let terminal = render(&mut app, 80, 24);
+    let text = screen(&terminal);
+    assert!(text.contains("+- sessions "), "{text}");
+    assert!(text.contains("> alpha"), "{text}");
+    assert!(!text.contains('╭'), "{text}");
 }
 
 /// The display modes most tests lay out with: both folds expanded, so a test's geometry does
