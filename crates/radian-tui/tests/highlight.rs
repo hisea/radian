@@ -23,6 +23,7 @@ fn modes(highlight: bool) -> DisplayModes {
         },
         mermaid: true,
         highlight,
+        glyphs: radian_tui::footer::Glyphs::Unicode,
     }
 }
 

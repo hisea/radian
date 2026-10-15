@@ -39,6 +39,37 @@ impl Glyphs {
         }
     }
 
+    /// The card frame's characters (ADR 0028 rule 2): unicode box drawing for the
+    /// unicode and nerd sets, `+ - |` for ascii.
+    pub fn frame(self) -> FrameGlyphs {
+        match self {
+            Self::Unicode | Self::Nerd => FrameGlyphs {
+                top_left: "┌",
+                top_right: "┐",
+                bottom_left: "└",
+                bottom_right: "┘",
+                tee_left: "├",
+                tee_right: "┤",
+                horizontal: "─",
+                vertical: "│",
+                bracket_left: "⟦",
+                bracket_right: "⟧",
+            },
+            Self::Ascii => FrameGlyphs {
+                top_left: "+",
+                top_right: "+",
+                bottom_left: "+",
+                bottom_right: "+",
+                tee_left: "+",
+                tee_right: "+",
+                horizontal: "-",
+                vertical: "|",
+                bracket_left: "[",
+                bracket_right: "]",
+            },
+        }
+    }
+
     /// The tool-call status glyphs (ADR 0028 rule 4): running, success, failure.
     /// The unicode set is omp's (`⟳`/`✔`/`✘`); the other two sets exist because a terminal
     /// without those code points needs something.
@@ -49,6 +80,22 @@ impl Glyphs {
             Self::Ascii => ["*", "+", "x"],
         }
     }
+}
+
+/// The characters a card frame draws (ADR 0028).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameGlyphs {
+    pub top_left: &'static str,
+    pub top_right: &'static str,
+    pub bottom_left: &'static str,
+    pub bottom_right: &'static str,
+    pub tee_left: &'static str,
+    pub tee_right: &'static str,
+    pub horizontal: &'static str,
+    pub vertical: &'static str,
+    /// The meta row's brackets (ADR 0028 rule 3).
+    pub bracket_left: &'static str,
+    pub bracket_right: &'static str,
 }
 
 /// Which footer the session shows.

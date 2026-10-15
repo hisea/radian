@@ -178,6 +178,7 @@ mod tests {
         },
         mermaid: true,
         highlight: true,
+        glyphs: crate::footer::Glyphs::Unicode,
     };
     use crate::app::{Entry, EntryKind};
 

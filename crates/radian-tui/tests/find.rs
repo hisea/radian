@@ -335,6 +335,7 @@ const EXPANDED: DisplayModes = DisplayModes {
     },
     mermaid: true,
     highlight: true,
+    glyphs: radian_tui::footer::Glyphs::Unicode,
 };
 
 /// A folded tool body must not vanish from the search (ADR 0028 R4 / this slice): the match

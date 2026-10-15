@@ -24,6 +24,7 @@ const EXPANDED: DisplayModes = DisplayModes {
     },
     mermaid: true,
     highlight: true,
+    glyphs: radian_tui::footer::Glyphs::Unicode,
 };
 
 fn text(lines: &[Line<'static>]) -> Vec<String> {

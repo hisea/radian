@@ -348,17 +348,45 @@ fn shell_head(card: &ToolCard, _text: &str) -> String {
                 .map(str::to_owned)
         })
         .unwrap_or_else(|| card.arguments_summary());
-    let command = truncate_chars(&command.replace('\n', " "), 80);
-    let exit = exit_code(card);
-    match exit {
-        Some(code) => format!("shell: {command} (exit {code})"),
-        None if card.structured.is_some() => format!("shell: {command} (no exit code)"),
-        None => format!("shell: {command}"),
-    }
+    // ADR 0028 rule 1: the head is the status line's title (`shell: <title>`), and
+    // the command is the first section (`$ <command>`), built by `call_text`.
+    let title = command.lines().next().unwrap_or("").trim();
+    format!("shell: {}", truncate_chars(title, 60))
 }
 
-/// The exit code from the structured result (`shell`'s own JSON), when it has one.
-fn exit_code(card: &ToolCard) -> Option<i64> {
+/// The command a shell card runs, verbatim (its own newlines kept).
+pub(crate) fn shell_command(card: &ToolCard) -> String {
+    card.structured
+        .as_ref()
+        .and_then(|value| value.get("command"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            card.arguments
+                .get("command")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_default()
+}
+
+/// The call entry's text: the status line (`<glyph> <head>`), then - for a shell card whose
+/// command is known - the command section (`$ <command>`, ADR 0028 rule 1). The
+/// text **is** what the card draws and copies, so the command stays copyable.
+pub fn call_text(card: &ToolCard, glyph: &str, text: &str) -> String {
+    let head = head_text(card, text);
+    if card.name == "shell" {
+        let command = shell_command(card);
+        if !command.is_empty() {
+            return format!("{glyph} {head}\n$ {command}");
+        }
+    }
+    format!("{glyph} {head}")
+}
+
+/// The exit code from the structured result (`shell`'s own JSON), when it has one. Also the
+/// card's meta row (ADR 0028 rule 6).
+pub(crate) fn exit_code_of(card: &ToolCard) -> Option<i64> {
     card.structured
         .as_ref()
         .and_then(|value| value.get("exit_code"))
@@ -768,6 +796,10 @@ pub struct DisplayModes {
     /// Code-block syntax highlighting (ADR 0028 R2, `tui.display.highlight`). In the layout
     /// cache key for the same reason as `mermaid`: highlighted lines are what is drawn.
     pub highlight: bool,
+    /// The footer's glyph set (`tui.footer.glyphs`): the card frame's border characters
+    /// follow it (ADR 0028 rule 2, `ascii` draws `+ - |`). Not in the layout cache
+    /// key: it changes only the drawn characters, never the line count.
+    pub glyphs: crate::footer::Glyphs,
 }
 
 impl Default for DisplayModes {
@@ -779,6 +811,7 @@ impl Default for DisplayModes {
             tools: ToolDisplay::default(),
             mermaid: true,
             highlight: true,
+            glyphs: crate::footer::Glyphs::default(),
         }
     }
 }
@@ -852,21 +885,33 @@ mod tests {
     }
 
     #[test]
-    fn the_shell_head_carries_the_command_and_the_exit_code() {
-        let mut card = card("shell", json!({"command": "ls -la /tmp"}));
-        // No structured value yet (or ever): the exit code is simply not known.
-        assert_eq!(shell_head(&card, ""), "shell: ls -la /tmp");
-        card.structured = Some(json!({"command": "ls -la /tmp", "exit_code": 2}));
-        assert_eq!(shell_head(&card, ""), "shell: ls -la /tmp (exit 2)");
-        // A signal death (no code) from the structured value.
-        card.structured = Some(json!({"command": "sleep 9", "exit_code": null}));
-        assert_eq!(shell_head(&card, ""), "shell: sleep 9 (no exit code)");
-        // A long command is cut to one line.
-        let mut long = ToolCard::new("c1", "shell", json!({"command": "x".repeat(200)}));
-        long.structured = Some(json!({"exit_code": 0}));
-        let head = shell_head(&long, "");
-        assert!(head.ends_with("(exit 0)"));
-        assert!(head.chars().count() < 100, "{head}");
+    fn the_shell_head_is_the_status_line_title() {
+        // ADR 0028 rule 1: the head is the status line's title (`shell: <title>`);
+        // the command is the first section, built by `call_text`. The exit code is the meta
+        // row's (`card_meta`), never the head's.
+        let one = card("shell", json!({"command": "ls -la /tmp"}));
+        assert_eq!(shell_head(&one, ""), "shell: ls -la /tmp");
+        // A multi-line command's title is its first line.
+        let multi = card("shell", json!({"command": "a\nb"}));
+        assert_eq!(shell_head(&multi, ""), "shell: a");
+        // A structured result (the exit code, a signal death) does not change the head.
+        let mut with_exit = card("shell", json!({"command": "ls -la /tmp"}));
+        with_exit.structured = Some(json!({"command": "ls -la /tmp", "exit_code": 2}));
+        assert_eq!(shell_head(&with_exit, ""), "shell: ls -la /tmp");
+        with_exit.structured = Some(json!({"command": "sleep 9", "exit_code": null}));
+        assert_eq!(shell_head(&with_exit, ""), "shell: sleep 9");
+        // The call entry's text carries the head and the whole command section, so the
+        // command stays copyable.
+        assert_eq!(
+            call_text(&with_exit, "✔", ""),
+            "✔ shell: sleep 9\n$ sleep 9",
+            "the command section keeps the structured command"
+        );
+        // A long title is cut (the section keeps the full command).
+        let long = ToolCard::new("c1", "shell", json!({"command": "x".repeat(200)}));
+        let title = shell_head(&long, "");
+        assert!(title.chars().count() < 80, "{title}");
+        assert!(call_text(&long, "✔", "").contains(&"x".repeat(200)));
     }
 
     #[test]

@@ -761,10 +761,12 @@ fn a_tool_card_head_is_the_same_on_the_live_and_resume_paths() {
 
     let live_text = screen(&render(&mut live, 60, 12));
     let resume_text = screen(&render(&mut resumed, 60, 12));
-    assert!(
-        live_text.contains("shell: make test (exit 0)"),
-        "{live_text}"
-    );
+    // The card's head is the status line (ADR 0028): `shell: <title>`, with the
+    // command and the output as its sections.
+    assert!(live_text.contains("✔ shell: make test"), "{live_text}");
+    assert!(live_text.contains("├── Command"), "{live_text}");
+    assert!(live_text.contains("$ make test"), "{live_text}");
+    assert!(live_text.contains("├── Output"), "{live_text}");
     assert_eq!(live_text, resume_text, "live and resume render identically");
 }
 
@@ -808,7 +810,8 @@ fn the_tool_fold_changes_the_line_count_and_ctrl_o_walks_it() {
     assert_eq!(app.tool_display.fold, ToolFold::Errors);
     let _ = render(&mut app, 60, 30);
     let folded = app.total_lines;
-    assert!(folded < 10, "folded: {folded} lines");
+    // The card's frame (top, the Command divider, the bottom) is constant across the folds.
+    assert!(folded < 14, "folded: {folded} lines");
     // Ctrl-O: errors -> expanded -> collapsed -> errors.
     app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
     assert_eq!(app.tool_display.fold, ToolFold::Expanded);
@@ -1057,42 +1060,68 @@ fn the_block_layout_snapshot() {
             line.trim_end().to_string()
         })
         .collect();
-    let golden = vec![
-        "",                              // the user block's top pad (banded)
-        "> explain the failure",         // the user text
-        "",                              // the user block's bottom pad (banded)
-        "▸ thinking (3 lines)",          // the folded channel: ▸ in the marker column
-        "",                              // the container's gap
-        "  Looking into it.",            // the assistant
-        "",                              // the gap
-        "->✘ shell: make test (exit 2)", // the call, with its status glyph
-        " <-$ make test",                // its result, one cell further right
-        "   exit code: 2",
-        "   --- stdout ---",
-        "   boom",
-        "",                          // the gap
-        "->✔ list: src (2 entries)", // the second call
-        " <-d 4.0K src",             // its result (the aligned table)
-        "   f 512 B b.md",
-        "", // the gap
-        "* profile: workspace · sandbox seatbelt",
-        "", // the gap above the rule line
-        "── context compacted ──",
-        "", // the gap below it
+    // The frame's rows are built, not typed out: an 80-column border is 78 cells wide.
+    let top = format!("┌{}┐", "─".repeat(78));
+    let bottom = format!("└{}┘", "─".repeat(78));
+    // `├── label ──…┤` is 80 cells: 4 + label + 1 + fill + 1.
+    let divider = |label: &str| format!("├── {label} {}┤", "─".repeat(74 - label.chars().count()));
+    let row = |text: &str| {
+        format!(
+            "│ {text}{}│",
+            " ".repeat(77usize.saturating_sub(text.chars().count()))
+        )
+    };
+    let golden: Vec<String> = vec![
+        "".to_string(),                      // the user block's top pad (banded)
+        "> explain the failure".to_string(), // the user text
+        "".to_string(),                      // the user block's bottom pad (banded)
+        "▸ thinking (3 lines)".to_string(),  // the folded channel: ▸ in the marker column
+        "".to_string(),                      // the container's gap
+        "  Looking into it.".to_string(),    // the assistant
+        "".to_string(),                      // the gap
+        top.clone(),                         // the shell card's frame (ADR 0028)
+        row("✘ shell: make test"),           // the head status line
+        divider("Command"),                  // section 1's label
+        row("$ make test"),                  // the command
+        divider("Error"),                    // section 2's label (the call failed)
+        row("$ make test"),                  // the output
+        row("exit code: 2"),
+        row("--- stdout ---"),
+        row("boom"),
+        row("⟦exit 2⟧"), // the meta row, `⟦ ⟧` (revision 3 rule 3)
+        bottom.clone(),  // the card's bottom border
+        "".to_string(),  // the gap
+        top.clone(),     // the list card
+        row("✔ list: src (2 entries)"),
+        divider("Output"),
+        row("d 4.0K src"), // the aligned table
+        row("f 512 B b.md"),
+        bottom.clone(),
+        "".to_string(), // the gap
+        "* profile: workspace · sandbox seatbelt".to_string(),
+        "".to_string(), // the gap above the rule line
+        "── context compacted ──".to_string(),
+        "".to_string(), // the gap below it
     ];
     assert_eq!(rows[..golden.len()], golden[..], "{rows:#?}");
-    // The bands: the user block's three rows, the failed card's five, the successful card's
-    // three; a gap row carries none.
+    // The bands: the user block's three rows, the failed card's frame and every row inside
+    // it, the successful card's differing band; a gap row carries none.
     let bg = |x: u16, y: u16| buffer.cell((x, y)).map(|c| c.bg);
     let user_bg = bg(0, 1);
     assert_eq!(bg(0, 0), user_bg, "the user pad carries the band");
     assert_eq!(bg(79, 2), user_bg, "the bottom pad reaches the row's end");
     let failed = bg(0, 7);
-    assert_eq!(bg(0, 8), failed, "the result's row carries the card's band");
-    assert_eq!(bg(0, 11), failed);
+    for y in 7..=17u16 {
+        assert_eq!(
+            bg(0, y),
+            failed,
+            "the failed card's row {y} carries the band"
+        );
+        assert_eq!(bg(79, y), failed, "…to the row's end");
+    }
     assert_ne!(failed, bg(0, 5), "the assistant row has no card band");
     assert_eq!(bg(0, 6), bg(0, 5), "a gap row is not banded");
-    assert_ne!(bg(0, 13), failed, "the successful card's band differs");
+    assert_ne!(bg(0, 19), failed, "the successful card's band differs");
 }
 
 /// A tab is four columns when the wrap decides where to break (ADR 0028 R9), not zero: a line
@@ -1522,10 +1551,11 @@ fn collapsed_and_errors_differ_for_a_successful_card() {
         counts.push(app.total_lines);
     }
     // The empty assistant entry contributes nothing (its blank line is stripped, rule 1) and
-    // the container's gap before the card is one line: the card head (1) + the body (20) = 22
-    // expanded, 1 + 5 preview + 1 hint = 8 under `errors`, 1 + a single `[20 lines]` hint = 3
-    // under `collapsed`.
-    assert_eq!(counts, vec![22, 8, 3], "expanded / errors / collapsed");
+    // the container's gap before the card is one line. The card (ADR 0028) is the
+    // top border + the head + the Output divider + the body + the bottom border: 20 body
+    // lines expanded, 5 preview + 1 hint under `errors`, a single `[20 lines]` hint under
+    // `collapsed`.
+    assert_eq!(counts, vec![25, 11, 6], "expanded / errors / collapsed");
     // A failure: the same count in all three, and the body really visible.
     for fold in [ToolFold::Expanded, ToolFold::Errors, ToolFold::Collapsed] {
         let mut app = app_with(true);
@@ -1862,6 +1892,7 @@ const EXPANDED: DisplayModes = DisplayModes {
     },
     mermaid: true,
     highlight: true,
+    glyphs: radian_tui::footer::Glyphs::Unicode,
 };
 
 /// The question form's key line stays visible when the option list fills the box (same bug the

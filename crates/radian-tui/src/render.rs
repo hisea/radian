@@ -330,6 +330,7 @@ fn entry_lines(
             Some(i) == first_text,
             band,
             width,
+            modes.glyphs,
         );
         if Some(i) == last && entry.interrupted {
             line.spans
@@ -378,6 +379,7 @@ fn render_row(
     first_text: bool,
     band: Option<Style>,
     width: usize,
+    glyphs: crate::footer::Glyphs,
 ) -> Line<'static> {
     if row.pad {
         return match band {
@@ -385,6 +387,11 @@ fn render_row(
             Some(band) => Line::from(Span::styled(" ".repeat(width), band)),
             None => Line::from(vec![Span::raw(String::new())]),
         };
+    }
+    // A merged tool card's frame (ADR 0028): the borders are decoration, never
+    // text, so a copy carries none of them.
+    if row.frame != blocks::Frame::None {
+        return render_frame_row(entry, row, style, theme, band, width, glyphs);
     }
     // The collapsed reasoning placeholder is one synthetic line: its `▸` is the marker
     // column's own glyph (ADR 0028 rule 5), so the body column does not move
@@ -430,90 +437,7 @@ fn render_row(
         None => body,
     };
     spans.push(Span::styled(lead, lead_style));
-    // A structured notice's **first** line (`profile: …`, `[memory] …`) steps the label up
-    // with the accent role and keeps the body on pi's secondary level (ADR 0028, owner
-    // decision). Only the first: a wrapped continuation that happens to contain a colon
-    // (`https://…`, `12:30`, a `path:line`) is prose, not a label.
-    if first_text
-        && matches!(entry.kind, EntryKind::Notice | EntryKind::Startup)
-        && let Some((label, rest)) = split_label(&row.text)
-    {
-        let label_style = match band {
-            Some(band) => theme.notice_label.patch(band),
-            None => theme.notice_label,
-        };
-        let rest_style = match band {
-            Some(band) => theme.notice_body.patch(band),
-            None => theme.notice_body,
-        };
-        spans.push(Span::styled(label.to_owned(), label_style));
-        spans.push(Span::styled(rest.to_owned(), rest_style));
-    } else if let Some(md) = &row.md {
-        // Assistant Markdown (ADR 0028 R2): each piece takes its own role's style.
-        for piece in md {
-            let style = match piece.style {
-                blocks::MdStyle::Heading => theme.md_heading,
-                blocks::MdStyle::Bold => theme.md_heading.patch(Modifier::BOLD),
-                blocks::MdStyle::Italic => theme.text.add_modifier(Modifier::ITALIC),
-                blocks::MdStyle::Code => theme.md_code,
-                blocks::MdStyle::Link => theme.md_link,
-                blocks::MdStyle::LinkUrl => theme.md_link_url,
-                blocks::MdStyle::Quote => theme.md_quote,
-                blocks::MdStyle::QuoteBar => theme.md_quote_border,
-                blocks::MdStyle::Bullet => theme.md_list_bullet,
-                blocks::MdStyle::Rule => theme.md_hr,
-                blocks::MdStyle::TableBorder => theme.md_hr,
-                blocks::MdStyle::Plain => body_style,
-            };
-            let style = match band {
-                Some(band) => style.patch(band),
-                None => style,
-            };
-            spans.push(Span::styled(piece.text.clone(), style));
-        }
-    } else if let Some(syntax) = &row.syntax {
-        // A syntax-highlighted code line (ADR 0028 R2): each piece takes its Radian role's
-        // style; `Plain` keeps the code block's own style. The text is unchanged, so
-        // selection, copy and search are unaffected.
-        for (text, role) in syntax {
-            let style = match role {
-                crate::highlight::SyntaxRole::Comment => theme.syntax_comment,
-                crate::highlight::SyntaxRole::Keyword => theme.syntax_keyword,
-                crate::highlight::SyntaxRole::Function => theme.syntax_function,
-                crate::highlight::SyntaxRole::Variable => theme.syntax_variable,
-                crate::highlight::SyntaxRole::String => theme.syntax_string,
-                crate::highlight::SyntaxRole::Number => theme.syntax_number,
-                crate::highlight::SyntaxRole::Type => theme.syntax_type,
-                crate::highlight::SyntaxRole::Operator => theme.syntax_operator,
-                crate::highlight::SyntaxRole::Punctuation => theme.syntax_punctuation,
-                crate::highlight::SyntaxRole::Plain => body_style,
-            };
-            let style = match band {
-                Some(band) => style.patch(band),
-                None => style,
-            };
-            spans.push(Span::styled(text.clone(), style));
-        }
-    } else if let Some(diagram) = &row.diagram {
-        // A rendered diagram (ADR 0028 R8): each piece takes its own role's style.
-        for (piece, role) in diagram {
-            let style = match role {
-                blocks::DiagramRole::Node => theme.mermaid_node,
-                blocks::DiagramRole::Edge => theme.mermaid_edge,
-                blocks::DiagramRole::Text => theme.mermaid_text,
-            };
-            let style = match band {
-                Some(band) => style.patch(band),
-                None => style,
-            };
-            spans.push(Span::styled(piece.clone(), style));
-        }
-    } else if row.reason {
-        // A weak one-line reason (`mermaid: …`, ADR 0028 R8): the dim/truncation role.
-        spans.push(Span::styled(row.text.clone(), theme.truncation));
-    } else {
-        spans.push(Span::styled(row.text.clone(), body_style));
-    }
+    spans.extend(body_spans(entry, row, body_style, theme, band, first_text));
     if let Some(band) = band {
         // Pad to the full width so the band reaches the row's end (owner acceptance:
         // including the row's trailing whitespace).
@@ -639,6 +563,7 @@ pub fn visible_lines(
                             Some(i) == first_text,
                             band,
                             width,
+                            modes.glyphs,
                         );
                         if Some(i) == last && entry.interrupted {
                             line.spans
@@ -1799,4 +1724,240 @@ fn truncate_columns(text: &str, width: usize) -> String {
         used += cell;
     }
     out
+}
+
+/// The body spans of one row: a structured notice's label split, a Markdown line's pieces, a
+/// syntax-highlighted code line, a diagram, a weak reason, or the plain body. Shared by the
+/// unframed path and a card's framed content rows, so both render identically.
+fn body_spans(
+    entry: &Entry,
+    row: &BodyLine,
+    body_style: Style,
+    theme: &Theme,
+    band: Option<Style>,
+    first_text: bool,
+) -> Vec<Span<'static>> {
+    let mut out = Vec::with_capacity(4);
+    // A structured notice's **first** line (`profile: …`, `[memory] …`) steps the label up
+    // with the accent role and keeps the body on pi's secondary level (ADR 0028, owner
+    // decision). Only the first: a wrapped continuation that happens to contain a colon
+    // (`https://…`, `12:30`, a `path:line`) is prose, not a label.
+    if first_text
+        && matches!(entry.kind, EntryKind::Notice | EntryKind::Startup)
+        && let Some((label, rest)) = split_label(&row.text)
+    {
+        let label_style = match band {
+            Some(band) => theme.notice_label.patch(band),
+            None => theme.notice_label,
+        };
+        let rest_style = match band {
+            Some(band) => theme.notice_body.patch(band),
+            None => theme.notice_body,
+        };
+        out.push(Span::styled(label.to_owned(), label_style));
+        out.push(Span::styled(rest.to_owned(), rest_style));
+    } else if let Some(md) = &row.md {
+        // Assistant Markdown (ADR 0028 R2): each piece takes its own role's style.
+        for piece in md {
+            let style = match piece.style {
+                blocks::MdStyle::Heading => theme.md_heading,
+                blocks::MdStyle::Bold => theme.md_heading.patch(Modifier::BOLD),
+                blocks::MdStyle::Italic => theme.text.add_modifier(Modifier::ITALIC),
+                blocks::MdStyle::Code => theme.md_code,
+                blocks::MdStyle::Link => theme.md_link,
+                blocks::MdStyle::LinkUrl => theme.md_link_url,
+                blocks::MdStyle::Quote => theme.md_quote,
+                blocks::MdStyle::QuoteBar => theme.md_quote_border,
+                blocks::MdStyle::Bullet => theme.md_list_bullet,
+                blocks::MdStyle::Rule => theme.md_hr,
+                blocks::MdStyle::TableBorder => theme.md_hr,
+                blocks::MdStyle::Plain => body_style,
+            };
+            let style = match band {
+                Some(band) => style.patch(band),
+                None => style,
+            };
+            out.push(Span::styled(piece.text.clone(), style));
+        }
+    } else if let Some(syntax) = &row.syntax {
+        // A syntax-highlighted code line (ADR 0028 R2): each piece takes its Radian role's
+        // style; `Plain` keeps the code block's own style. The text is unchanged, so
+        // selection, copy and search are unaffected.
+        for (text, role) in syntax {
+            let style = match role {
+                crate::highlight::SyntaxRole::Comment => theme.syntax_comment,
+                crate::highlight::SyntaxRole::Keyword => theme.syntax_keyword,
+                crate::highlight::SyntaxRole::Function => theme.syntax_function,
+                crate::highlight::SyntaxRole::Variable => theme.syntax_variable,
+                crate::highlight::SyntaxRole::String => theme.syntax_string,
+                crate::highlight::SyntaxRole::Number => theme.syntax_number,
+                crate::highlight::SyntaxRole::Type => theme.syntax_type,
+                crate::highlight::SyntaxRole::Operator => theme.syntax_operator,
+                crate::highlight::SyntaxRole::Punctuation => theme.syntax_punctuation,
+                crate::highlight::SyntaxRole::Plain => body_style,
+            };
+            let style = match band {
+                Some(band) => style.patch(band),
+                None => style,
+            };
+            out.push(Span::styled(text.clone(), style));
+        }
+    } else if let Some(diagram) = &row.diagram {
+        // A rendered diagram (ADR 0028 R8): each piece takes its own role's style.
+        for (piece, role) in diagram {
+            let style = match role {
+                blocks::DiagramRole::Node => theme.mermaid_node,
+                blocks::DiagramRole::Edge => theme.mermaid_edge,
+                blocks::DiagramRole::Text => theme.mermaid_text,
+            };
+            let style = match band {
+                Some(band) => style.patch(band),
+                None => style,
+            };
+            out.push(Span::styled(piece.clone(), style));
+        }
+    } else if row.reason {
+        // A weak one-line reason (`mermaid: …`, ADR 0028 R8): the dim/truncation role.
+        out.push(Span::styled(row.text.clone(), theme.truncation));
+    } else {
+        out.push(Span::styled(row.text.clone(), body_style));
+    }
+    out
+}
+
+/// A framed content row (ADR 0028): `│ ` in the marker column, the body from
+/// column 2, the right border at the last column. The row's text never contains a border
+/// character.
+fn render_frame_row(
+    entry: &Entry,
+    row: &BodyLine,
+    style: Style,
+    theme: &Theme,
+    band: Option<Style>,
+    width: usize,
+    glyphs: crate::footer::Glyphs,
+) -> Line<'static> {
+    let frame = glyphs.frame();
+    let border_style = patch_band(theme.approval_border, band);
+    let inner = width.saturating_sub(2);
+    let content_width = width.saturating_sub(3);
+    match row.frame {
+        blocks::Frame::Top => Line::from(Span::styled(
+            format!(
+                "{}{}{}",
+                frame.top_left,
+                frame.horizontal.repeat(inner),
+                frame.top_right
+            ),
+            border_style,
+        )),
+        blocks::Frame::Bottom => Line::from(Span::styled(
+            format!(
+                "{}{}{}",
+                frame.bottom_left,
+                frame.horizontal.repeat(inner),
+                frame.bottom_right
+            ),
+            border_style,
+        )),
+        blocks::Frame::Divider => {
+            // `├── Output ──…┤`: the label is a level weaker than the border. A call's
+            // divider labels its command section (ADR 0028), a result's its
+            // output (`Error` when the call failed).
+            let label = if entry.kind == EntryKind::ToolCall {
+                "Command"
+            } else if entry.is_error {
+                "Error"
+            } else {
+                "Output"
+            };
+            let used = 2 + 1 + UnicodeWidthStr::width(label) + 1;
+            let fill = content_width.saturating_sub(used);
+            Line::from(vec![
+                Span::styled(
+                    format!("{}{} ", frame.tee_left, frame.horizontal.repeat(2)),
+                    border_style,
+                ),
+                Span::styled(label.to_owned(), patch_band(theme.truncation, band)),
+                Span::styled(
+                    format!(" {}{}", frame.horizontal.repeat(fill + 1), frame.tee_right),
+                    border_style,
+                ),
+            ])
+        }
+        blocks::Frame::Body | blocks::Frame::Meta => {
+            let meta = row.frame == blocks::Frame::Meta;
+            let body = body_style_of(entry, row, style, theme);
+            let mut spans = vec![Span::styled(format!("{} ", frame.vertical), border_style)];
+            if meta {
+                // The meta row (ADR 0028 rule 3): `⟦…⟧` (ascii `[…]`), a level
+                // weaker than the border.
+                spans.push(Span::styled(frame.bracket_left.to_owned(), border_style));
+                spans.push(Span::styled(
+                    row.text.clone(),
+                    patch_band(theme.truncation, band),
+                ));
+                spans.push(Span::styled(frame.bracket_right.to_owned(), border_style));
+            } else if entry.kind == EntryKind::ToolCall
+                && let Some(split) = shell_call_split(&row.text)
+            {
+                // A shell command line is `$ <command>` (revision 3): the `$` is a level
+                // weaker, the command keeps the call's accent.
+                let (prompt, command) = split;
+                spans.push(Span::styled(
+                    prompt.to_owned(),
+                    patch_band(theme.truncation, band),
+                ));
+                spans.push(Span::styled(command.to_owned(), patch_band(body, band)));
+            } else {
+                spans.extend(body_spans(entry, row, body, theme, band, false));
+            }
+            let used = 2 + UnicodeWidthStr::width(row.text.as_str()) + if meta { 2 } else { 0 };
+            if used < content_width + 2 {
+                spans.push(Span::styled(
+                    " ".repeat(content_width + 2 - used),
+                    band.unwrap_or_default(),
+                ));
+            }
+            spans.push(Span::styled(frame.vertical.to_owned(), border_style));
+            Line::from(spans)
+        }
+        blocks::Frame::None => Line::from(vec![]),
+    }
+}
+
+/// Patches a style with a card band (the background is the band's, the foreground the
+/// style's).
+fn patch_band(style: Style, band: Option<Style>) -> Style {
+    match band {
+        Some(band) => style.patch(band),
+        None => style,
+    }
+}
+
+/// The body role for a row, the same computation the unframed path makes.
+fn body_style_of(entry: &Entry, row: &BodyLine, style: Style, theme: &Theme) -> Style {
+    let placeholder = entry.kind == EntryKind::Reasoning && row.hint;
+    if placeholder {
+        theme.reasoning
+    } else if matches!(entry.kind, EntryKind::Notice | EntryKind::Startup) {
+        theme.notice_body
+    } else if row.role != crate::tools::LineRole::Normal {
+        match row.role {
+            crate::tools::LineRole::Warn => theme.note,
+            crate::tools::LineRole::DiffAdded => theme.diff_added,
+            crate::tools::LineRole::DiffRemoved => theme.diff_removed,
+            crate::tools::LineRole::DiffContext => theme.diff_context,
+            crate::tools::LineRole::DiffHunk => theme.diff_hunk,
+            crate::tools::LineRole::Normal => style,
+        }
+    } else {
+        style
+    }
+}
+
+/// Splits a shell call line into its prompt (`<glyph> $ `) and the command (ADR 0028 revision
+/// 2 rule 3), when the row is one.
+fn shell_call_split(text: &str) -> Option<(&str, &str)> {
+    text.starts_with("$ ").then(|| text.split_at(2))
 }

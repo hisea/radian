@@ -33,6 +33,7 @@ fn modes(reasoning: ReasoningMode, mermaid: bool) -> DisplayModes {
         },
         mermaid,
         highlight: true,
+        glyphs: radian_tui::footer::Glyphs::Unicode,
     }
 }
 
