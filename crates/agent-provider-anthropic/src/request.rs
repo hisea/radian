@@ -34,7 +34,13 @@ pub(crate) fn build_body(
     config: &AnthropicConfig,
 ) -> Result<Value, ModelError> {
     let mut body = Map::new();
-    for source in [&config.extra_body, &settings_object(&request.settings)?] {
+    let settings = settings_object(&request.settings)?;
+    // ADR 0018, decision 1: a request-level `thinking` (the summary call's own,
+    // lower reasoning setting) wins over the adapter config. The config still wins over
+    // `extra_body` (its own dial), so the guard is on the **request settings**, not on the
+    // merged body.
+    let request_thinking = settings.contains_key("thinking");
+    for source in [&config.extra_body, &settings] {
         for (key, value) in source {
             if RESERVED.contains(&key.as_str()) {
                 return Err(ModelError::Protocol(format!(
@@ -47,10 +53,11 @@ pub(crate) fn build_body(
     body.insert("model".into(), json!(config.model));
     body.insert("max_tokens".into(), json!(config.max_tokens));
     body.insert("stream".into(), json!(true));
-    // The config wins over any `thinking` passed through `extra_body`/`settings`, but when no
-    // thinking is configured the key is simply absent, so a thinking-free request is
-    // byte-identical to the adapter before this feature (acceptance 5).
-    if let Some(thinking) = config.thinking {
+    // The config wins over any `thinking` passed through `extra_body`, but a request setting
+    // (`AgentConfig.compaction_settings`, ADR 0018) wins over the config. When
+    // neither is present the key is simply absent, so a thinking-free request is byte-identical
+    // to the adapter before this feature (acceptance 5).
+    if !request_thinking && let Some(thinking) = config.thinking {
         body.insert(
             "thinking".into(),
             match thinking {
@@ -715,6 +722,27 @@ mod tests {
         );
         let body = build_body(&request(vec![Message::user("hi")]), &cfg).unwrap();
         assert_eq!(body["thinking"], json!({"type": "adaptive"}));
+    }
+
+    /// ADR 0018, decision 1: a request-level `thinking` (the summary call's own,
+    /// lower reasoning setting) wins over the configured one.
+    #[test]
+    fn the_request_thinking_wins_over_the_config() {
+        let cfg = config().with_thinking(crate::config::ThinkingConfig::Adaptive);
+        let mut req = request(vec![Message::user("hi")]);
+        req.settings = json!({"thinking": {"type": "enabled", "budget_tokens": 2048}});
+        let body = build_body(&req, &cfg).unwrap();
+        assert_eq!(
+            body["thinking"],
+            json!({"type": "enabled", "budget_tokens": 2048})
+        );
+
+        // A request-level `thinking` also wins when the config has none: the adapter passes
+        // through what it is given and invents nothing.
+        let mut permissive = request(vec![Message::user("hi")]);
+        permissive.settings = json!({"thinking": {"type": "custom"}});
+        let body = build_body(&permissive, &config()).unwrap();
+        assert_eq!(body["thinking"], json!({"type": "custom"}));
     }
 
     fn assistant_with_payload(payload: &str, calls: Vec<ToolCall>) -> Message {

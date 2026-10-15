@@ -961,6 +961,58 @@ async fn an_overlong_summary_is_shortened_on_the_retry() {
     );
 }
 
+/// ADR 0018, decision 1: the host's `compaction_settings` reaches the summary
+/// request and the shorten retry, and is **never** added to the conversation request.
+#[tokio::test]
+async fn the_compaction_setting_reaches_the_summary_and_the_shorten_requests_only() {
+    let overlong = "L".repeat(9_000);
+    let model = ScriptedModel::new([
+        summary_reply(&overlong, 50),
+        summary_reply("the shorter summary", 10),
+        text("done"),
+    ]);
+    let journal = Arc::new(RecordingJournal::new());
+    let setting = serde_json::json!({"reasoning_effort": "low"});
+    let conversation = serde_json::json!({"temperature": 0.2});
+    let agent = Arc::new(Agent::new(model.clone(), NoTools).with_config(AgentConfig {
+        context_budget: Some(ContextBudget::new(3_000).with_bytes_per_token(1)),
+        auto_compact: true,
+        model_settings: conversation.clone(),
+        compaction_settings: setting.clone(),
+        ..Default::default()
+    }));
+    let mut session = agent
+        .open_session_with_journal(big_history(), journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let outcome = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+
+    let requests = model.requests();
+    assert_eq!(requests.len(), 3, "summary, shorten, compacted request");
+    assert_eq!(
+        requests[0].settings, setting,
+        "the summary request carries the host's compaction setting"
+    );
+    assert_eq!(
+        requests[1].settings, setting,
+        "the shorten retry carries the same setting"
+    );
+    assert_eq!(
+        requests[2].settings, conversation,
+        "the conversation request carries only `model_settings`"
+    );
+    assert!(
+        requests[2].settings.get("reasoning_effort").is_none(),
+        "the compaction setting must not leak into a conversation request"
+    );
+}
+
 /// The first summary is empty: the retry resends the **original** request, not a shortening
 /// one.
 #[tokio::test]

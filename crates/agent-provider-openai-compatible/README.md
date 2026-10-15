@@ -15,7 +15,9 @@ prompt caching, `tool_choice`, or server-side tools.
 `OpenAiCompatibleConfig::new(base_url, model)`, `with_api_key(ApiKey)`,
 `with_include_usage(bool)`. Fields: `base_url` (everything before `/chat/completions`),
 `model`, `api_key: Option<ApiKey>`, `headers`, `extra_body` (merged under per-request settings;
-`model`/`messages`/`tools`/`stream`/`stream_options` cannot be set this way), `connect_timeout`
+`model`/`messages`/`tools`/`stream`/`stream_options` cannot be set this way — but
+`reasoning_effort` can: since ADR 0018 a request-level `reasoning_effort` (or one in
+`extra_body`, when the config has none) wins over `config.reasoning_effort`), `connect_timeout`
 (30 s), `idle_timeout` (120 s, per silence — there is no total time limit), `max_response_bytes`
 (32 MiB), `include_usage: Option<bool>` (`None` = the host-based default: on for
 `api.openai.com`, off everywhere else, compared by exact host).
