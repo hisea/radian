@@ -8,7 +8,7 @@ use agent_core::{
 use radian_sandbox::{Sandbox, SandboxMode};
 
 use crate::workspace::{WorkspaceError, WorkspaceRoot};
-use crate::{fail, git, list, patch, read, shell, write};
+use crate::{fail, git, glob, grep, jobs, list, patch, read, shell, write};
 
 /// Resource bounds, all overridable with [`CodingTools::with_limits`]. Defaults are chosen
 /// so a single tool call cannot blow up the model context or the session file.
@@ -26,6 +26,18 @@ pub struct Limits {
     pub max_list_entries: usize,
     /// `list`'s default entry cap.
     pub default_list_entries: usize,
+    /// Hard cap for one `glob` result set.
+    pub max_glob_results: usize,
+    /// `glob`'s default result cap when the model does not give one.
+    pub default_glob_results: usize,
+    /// Hard cap for `grep`'s total matches.
+    pub max_grep_matches: usize,
+    /// `grep`'s default total match cap when the model does not give one.
+    pub default_grep_matches: usize,
+    /// `grep`'s per-file match cap. Not model-settable: one file must not fill the result.
+    pub default_grep_matches_per_file: usize,
+    /// Hard cap on a model-supplied `grep` `context` line count.
+    pub max_grep_context: usize,
     /// Output cap for `git_status`/`git_diff`.
     pub max_git_output_bytes: usize,
     /// How long a git invocation may run.
@@ -50,6 +62,12 @@ impl Default for Limits {
             max_patch_bytes: 4 << 20,     // 4 MiB
             max_list_entries: 5000,
             default_list_entries: 500,
+            max_glob_results: 5000,
+            default_glob_results: 500,
+            max_grep_matches: 5000,
+            default_grep_matches: 200,
+            default_grep_matches_per_file: 50,
+            max_grep_context: 10,
             max_git_output_bytes: 1 << 20, // 1 MiB
             git_timeout: Duration::from_secs(10),
             // Per stream, and aligned with `read`'s default budget: 64 KiB is enough for the
@@ -86,6 +104,9 @@ pub struct CodingTools {
     root: Arc<WorkspaceRoot>,
     limits: Limits,
     sandbox: Option<Arc<Sandbox>>,
+    /// The background-job registry (ADR 0037). The host supplies one so it can subscribe to
+    /// job lifecycle notices; when it does not, `open_session` creates one.
+    jobs: Option<Arc<jobs::Jobs>>,
 }
 
 impl CodingTools {
@@ -98,6 +119,7 @@ impl CodingTools {
             root: Arc::new(WorkspaceRoot::new(root)?),
             limits: Limits::default(),
             sandbox: None,
+            jobs: None,
         })
     }
 
@@ -121,11 +143,19 @@ impl CodingTools {
             root: Arc::new(root),
             limits: Limits::default(),
             sandbox: Some(Arc::new(sandbox)),
+            jobs: None,
         })
     }
 
     pub fn with_limits(mut self, limits: Limits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Supplies the background-job registry (ADR 0037 slice 3): the host creates it so it can
+    /// subscribe to [`jobs::Jobs::subscribe`] and write the durable start/settle records.
+    pub fn with_jobs(mut self, jobs: Arc<jobs::Jobs>) -> Self {
+        self.jobs = Some(jobs);
         self
     }
 
@@ -143,22 +173,42 @@ impl ToolProvider for CodingTools {
     type Session = CodingSession;
 
     async fn open_session(&self) -> Result<Self::Session, ToolError> {
+        let jobs = match &self.jobs {
+            Some(jobs) => Arc::clone(jobs),
+            None => Arc::new(jobs::Jobs::new(self.root.root())),
+        };
         Ok(CodingSession {
             root: Arc::clone(&self.root),
             limits: self.limits,
             sandbox: self.sandbox.clone(),
             specs: specs(self.sandbox.as_deref().map(Sandbox::mode)),
+            jobs,
         })
     }
 }
 
-/// One session's view of the built-in tools. Holds only the root, the limits, the sandbox and
-/// the specs; there is no per-session state to close.
+/// One session's view of the built-in tools. Holds the root, the limits, the sandbox, the
+/// specs and the background-job registry (ADR 0037).
 pub struct CodingSession {
     root: Arc<WorkspaceRoot>,
     limits: Limits,
     sandbox: Option<Arc<Sandbox>>,
     specs: Vec<ToolSpec>,
+    jobs: Arc<jobs::Jobs>,
+}
+
+impl CodingSession {
+    /// The session's background-job registry. Slice 3 subscribes to settled jobs here; the
+    /// host's session shutdown calls [`CodingSession::shutdown_jobs`].
+    pub fn jobs(&self) -> &Arc<jobs::Jobs> {
+        &self.jobs
+    }
+
+    /// Session end (ADR 0037 decision 6): kill every running job's process group. No file I/O,
+    /// so the panic path may call it too.
+    pub fn shutdown_jobs(&self) {
+        self.jobs.kill_all();
+    }
 }
 
 fn specs(shell_mode: Option<SandboxMode>) -> Vec<ToolSpec> {
@@ -167,11 +217,17 @@ fn specs(shell_mode: Option<SandboxMode>) -> Vec<ToolSpec> {
         write::spec(),
         patch::spec(),
         list::spec(),
+        glob::spec(),
+        grep::spec(),
         git::status_spec(),
         git::diff_spec(),
     ];
     if let Some(mode) = shell_mode {
         specs.push(shell::spec(mode));
+        // The job tools exist only with `shell`: without a sandbox there are no jobs.
+        specs.push(jobs::output_spec());
+        specs.push(jobs::list_spec());
+        specs.push(jobs::kill_spec());
     }
     specs
 }
@@ -191,11 +247,21 @@ impl ToolSession for CodingSession {
             "write" => write::run(&self.root, &self.limits, &call.arguments).await,
             "patch" => patch::run(&self.root, &self.limits, &call.arguments).await,
             "list" => list::run(&self.root, &self.limits, &call.arguments).await,
+            "glob" => glob::run(&self.root, &self.limits, &call.arguments).await,
+            "grep" => grep::run(&self.root, &self.limits, &call.arguments).await,
             "git_status" => git::status(&self.root, &self.limits, &call.arguments).await,
             "git_diff" => git::diff(&self.root, &self.limits, &call.arguments).await,
             "shell" => match &self.sandbox {
                 Some(sandbox) => {
-                    shell::run(&self.root, sandbox, &self.limits, &call.arguments, &cx).await
+                    shell::run(
+                        &self.root,
+                        sandbox,
+                        &self.limits,
+                        &self.jobs,
+                        &call.arguments,
+                        &cx,
+                    )
+                    .await
                 }
                 // Unreachable through the advertised specs; kept as a refusal rather than a
                 // fallback so a hand-built call can never run unsandboxed.
@@ -204,6 +270,9 @@ impl ToolSession for CodingSession {
                     "`shell` needs a sandbox and this session has none",
                 )),
             },
+            "job_output" => jobs::run_output(&self.jobs, &call.arguments, &cx).await,
+            "job_list" => jobs::run_list(&self.jobs),
+            "job_kill" => jobs::run_kill(&self.jobs, &call.arguments),
             other => Err(fail(
                 "unknown_tool",
                 format!("`{other}` is not one of the built-in coding tools"),

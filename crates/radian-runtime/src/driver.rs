@@ -16,6 +16,7 @@
 //! state does **not** survive a process restart (plan Phase 2, last point).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent_core::{
@@ -130,6 +131,10 @@ pub struct Driver<M: Model, P: ToolProvider, H: Hooks> {
     /// The budget the next turn runs under: set when a model change is applied, `None` keeps
     /// the configured one.
     turn_budget: Option<ContextBudget>,
+    /// `true` while a turn (or a `/compact` control request) is in flight (ADR 0037 decision
+    /// 3). The host shares it so a job-settle notifier can choose the `inject` lane (busy) or
+    /// the waking `followup` lane (idle).
+    turn_running: Arc<AtomicBool>,
 }
 
 impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
@@ -215,6 +220,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             recovered_history: Some(recovered_history),
             budget_for: None,
             turn_budget: None,
+            turn_running: Arc::new(AtomicBool::new(false)),
             closed: false,
         };
         // D8: resume restores the last recorded change (the model and its budget) before the
@@ -260,6 +266,17 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
     #[cfg(feature = "testing")]
     pub fn test_turn_budget(&self) -> Option<ContextBudget> {
         self.turn_budget
+    }
+
+    /// The shared "a turn is in flight" flag (ADR 0037 decision 3). The host clones it before
+    /// the driver moves into its task; the driver sets it around every turn and control run.
+    pub fn turn_running_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.turn_running)
+    }
+
+    /// Overrides the shared flag (a host that wants its own handle).
+    pub fn set_turn_running(&mut self, flag: Arc<AtomicBool>) {
+        self.turn_running = flag;
     }
 
     /// The applied configuration. A model adapter reads this; the driver writes it only at
@@ -355,7 +372,10 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             // A manual `/compact` runs **between turns** (ADR 0018). A request that arrived
             // during a turn has waited for it to end; the wake branch never runs one.
             if let Some(request) = self.inbox.claim_control().await {
-                self.run_control(request).await?;
+                self.turn_running.store(true, Ordering::SeqCst);
+                let result = self.run_control(request).await;
+                self.turn_running.store(false, Ordering::SeqCst);
+                result?;
                 continue;
             }
             let Some(entry) = self.inbox.claim_next_turn().await else {
@@ -363,7 +383,10 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
                 self.inbox.wake_signal().await;
                 continue;
             };
-            self.run_turn(entry).await?;
+            self.turn_running.store(true, Ordering::SeqCst);
+            let result = self.run_turn(entry).await;
+            self.turn_running.store(false, Ordering::SeqCst);
+            result?;
         }
         Ok(())
     }

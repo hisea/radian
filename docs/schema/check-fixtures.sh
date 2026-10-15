@@ -18,6 +18,7 @@ KNOWN_EVENTS = {
     "Rewound", "ContextBudgetReached", "PermissionResolved", "ApprovalPolicyChanged",
     "MemoryInjected", "ModelUsageRecorded", "CompactionUsageRecorded", "SessionForked",
     "ProjectTrustChanged", "UserBash", "GitCommitted",
+    "BackgroundJobStarted", "BackgroundJobSettled",
 }
 # ADR 0005/0006 §5.5：InputSource 的 snake_case 全集。
 SOURCES = {
@@ -100,6 +101,19 @@ EXPECT = {
         events=6,
         skips=[],
         git_committed=(5, "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678", "feature/x", 3),
+        repair={},
+    ),
+    "background-jobs.jsonl": dict(
+        outcome="accept",
+        events=7,
+        skips=[],
+        background_jobs={
+            "starts": [
+                (3, "job-1", "cargo test --workspace", ".radian/jobs/job-1.out"),
+                (4, "job-2", "sleep 600", ".radian/jobs/job-2.out"),
+            ],
+            "settles": [(5, "job-1", "exited 0", 1200)],
+        },
         repair={},
     ),
     "replace-committed.jsonl": dict(
@@ -642,6 +656,35 @@ def check_fixture(name, exp):
         for e in events:
             if e["event"] == "GitCommitted" and e["critical"]:
                 raise Corruption(f"{name}: GitCommitted 必须是 critical:false")
+    if "background_jobs" in exp:
+        starts = [
+            (
+                e["seq"],
+                e["data"].get("job_id"),
+                e["data"].get("command"),
+                e["data"].get("output"),
+            )
+            for e in events
+            if e["event"] == "BackgroundJobStarted"
+        ]
+        settles = [
+            (
+                e["seq"],
+                e["data"].get("job_id"),
+                e["data"].get("state"),
+                e["data"].get("duration_ms"),
+            )
+            for e in events
+            if e["event"] == "BackgroundJobSettled"
+        ]
+        if starts != [tuple(x) for x in exp["background_jobs"]["starts"]]:
+            raise Corruption(f"{name}: background job starts {starts} != 期望")
+        if settles != [tuple(x) for x in exp["background_jobs"]["settles"]]:
+            raise Corruption(f"{name}: background job settles {settles} != 期望")
+        # ADR 0037 决定 5：启动/结束记录是非 critical 审计。
+        for e in events:
+            if e["event"] in ("BackgroundJobStarted", "BackgroundJobSettled") and e["critical"]:
+                raise Corruption(f"{name}: {e['event']} 必须是 critical:false")
     if outcome == "accept_drop_tail":
         return f"PASS {name}: 接受，丢弃 torn tail {len(tail)} 字节，replay {len(events)} 个事件"
     if outcome == "accept_with_skips":

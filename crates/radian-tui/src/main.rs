@@ -195,6 +195,12 @@ struct Cli {
     #[arg(long, hide = true, value_name = "SECS")]
     panic_with_child: Option<u64>,
 
+    /// Test hook: start this command as a background job (its own process group), wait for it
+    /// to write `job.pid` in the workspace, then panic. The panic path must kill the group
+    /// (ADR 0037 decision 6: `Jobs::drop` -> `kill_all`, killpg only).
+    #[arg(long, hide = true, value_name = "COMMAND")]
+    panic_with_background_job: Option<String>,
+
     /// Test hook: make the driver task panic instead of running, so the UI's watch on it can
     /// be exercised.
     #[arg(long, hide = true)]
@@ -1147,6 +1153,7 @@ fn run(
                 budget_for: Some(budget_for),
                 price_for: Some(Arc::clone(&route_price)),
                 protected_branches: config.git.protected_branches.clone(),
+                allowed_filters: Some(config.git.allowed_filters()),
                 session_id: radian_host::SessionId::new(session_id.clone()),
                 session_dir: dir.clone(),
                 workspace: workspace_path.clone(),
@@ -1405,6 +1412,32 @@ fn run(
         std::fs::write(dir.join("child.pid"), pid.to_string())
             .map_err(|e| format!("child.pid: {e}"))?;
         panic!("radian: panic path test with a child in flight");
+    }
+    if let Some(command) = &cli.panic_with_background_job {
+        // Test hook: a background job is running when the panic happens. The panic path must
+        // kill its whole process group (ADR 0037 decision 6). The registry is reached through
+        // the host facade; the command runs under a `full` sandbox (this is a test hook).
+        let jobs = session
+            .jobs_registry()
+            .expect("the session has coding tools");
+        let workspace = session.workspace().to_path_buf();
+        let policy =
+            radian_sandbox::SandboxPolicy::new(radian_sandbox::SandboxMode::FullAccess, &workspace)
+                .expect("a full-access policy");
+        let sandbox = radian_sandbox::Sandbox::from_policy(policy).expect("a full-access sandbox");
+        jobs.start(&sandbox, &workspace, command, None)
+            .expect("start the test job");
+        // The command writes its pid (and its child's) before it sleeps; wait for it, bounded.
+        let marker = workspace.join("job.pid");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::fs::read_to_string(&marker).is_err() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the test job never wrote job.pid"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("radian: panic path test with a background job in flight");
     }
     let memory_service = session.memory().cloned();
     // The history of a resumed session is rendered before the first frame, so the transcript
@@ -2753,6 +2786,51 @@ impl LoopContext<'_> {
             // `/skills` (ADR 0025 S3): the discovered skills as notices.
             Effect::ListSkills => {
                 let notices = radian_host::notices(self.session.skills());
+                self.send(AppInput::SessionDone(notices));
+                Ok(())
+            }
+            // ADR 0037 decision 4: `/jobs` lists or stops the session's background jobs. The
+            // registry lives in the host, so the loop reads it here and shows notices.
+            Effect::Jobs(request) => {
+                let notices = match request {
+                    radian_tui::command::JobsRequest::List => {
+                        let jobs = self.session.jobs();
+                        if jobs.is_empty() {
+                            vec!["no background jobs in this session".to_owned()]
+                        } else {
+                            jobs.iter()
+                                .map(|job| {
+                                    format!(
+                                        "{}  {}  {}s  {}  {}",
+                                        job.id,
+                                        job.state.label(),
+                                        job.elapsed.as_secs(),
+                                        job.command,
+                                        job.output
+                                    )
+                                })
+                                .collect()
+                        }
+                    }
+                    radian_tui::command::JobsRequest::Kill(id) => {
+                        match self.session.kill_job(&id) {
+                            Ok(()) => {
+                                vec![format!("stopping {id} (SIGTERM, then SIGKILL after 2s)")]
+                            }
+                            Err(error) => vec![error],
+                        }
+                    }
+                    radian_tui::command::JobsRequest::KillAll => {
+                        let running = self
+                            .session
+                            .jobs()
+                            .iter()
+                            .filter(|job| job.state.is_running())
+                            .count();
+                        self.session.kill_all_jobs();
+                        vec![format!("stopping {running} background job(s)")]
+                    }
+                };
                 self.send(AppInput::SessionDone(notices));
                 Ok(())
             }
