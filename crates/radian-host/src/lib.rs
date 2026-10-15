@@ -23,6 +23,7 @@ pub mod git_commit;
 mod headers;
 pub mod herdr;
 mod home;
+pub mod job_notify;
 pub mod login;
 mod mcp;
 pub mod memory;
@@ -102,12 +103,15 @@ pub use home::{
     memory_dir_for, radian_home, radian_home_for, sessions_dir, sessions_dir_for, skills_dir,
     skills_dir_for, themes_dir, themes_dir_for, trust_dir, trust_dir_for, user_home,
 };
+pub use job_notify::{
+    JobNotifier, MAX_CONSECUTIVE_WAKES, NOTIFY_INLINE_BYTES, orphan_jobs, orphan_message,
+};
 pub use mcp::load_mcp_config;
 pub use mermaid::{MermaidCheckSession, MermaidCheckTools, check};
 pub use model::{
     DEFAULT_MAX_TOKENS, HostModel, MIN_THINKING_BUDGET, ModelArgs, Provider, RouteContext,
     SwitchableModel, Thinking, build_model, check_provider_flags, redact_base_url,
-    resolve_thinking, resolve_thinking_ref,
+    resolve_reasoning_replay, resolve_thinking, resolve_thinking_ref, route_replays_reasoning,
 };
 pub use opencode_go::{
     DEFAULT_PERIOD as OPENCODE_GO_DEFAULT_PERIOD, MAX_PERIOD as OPENCODE_GO_MAX_PERIOD,
@@ -125,10 +129,10 @@ pub use projection::{
 pub use provider::{
     CUSTOM_LOGIN, DEFAULT_THINKING_LEVEL, DESCRIPTORS, DescriptorModel, GENERIC_ID, LoginMethod,
     NamedProvider, NamedSource, Protocol, ProviderDecl, ProviderDescriptor, ProviderRef,
-    RADIAN_KIND, Route, THINKING_LEVELS, ThinkingMap, clamp_thinking, clamp_thinking_with,
-    descriptor, descriptors, level_fits, login_choices, name_error, parse_thinking_level,
-    resolve_provider, resolve_route, resolve_route_for, supported_thinking_levels,
-    supported_thinking_levels_ref, supported_thinking_levels_ref_with,
+    RADIAN_KIND, ReasoningReplayOverride, Route, THINKING_LEVELS, ThinkingMap, clamp_thinking,
+    clamp_thinking_with, descriptor, descriptors, level_fits, login_choices, name_error,
+    parse_thinking_level, resolve_provider, resolve_route, resolve_route_for,
+    supported_thinking_levels, supported_thinking_levels_ref, supported_thinking_levels_ref_with,
     supported_thinking_levels_with, supported_wire, thinking_map_for, thinking_map_for_ref,
     thinking_rank, valid_name, wire_budget,
 };

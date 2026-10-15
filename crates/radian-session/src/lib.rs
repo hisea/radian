@@ -60,7 +60,7 @@ pub use writer::{ForkParent, SessionCreatedData, SessionJournal, WriteError, now
 /// Fault-injection seams, compiled only with the `testing` feature. Off by default so a
 /// production build cannot arm them (ADR 0019 §7's failed-abort-write path).
 #[cfg(feature = "testing")]
-pub use writer::{fail_next_aborted_write, fail_next_write};
+pub use writer::{fail_next_aborted_write, fail_next_write, lock_retry_attempts};
 
 /// Test-only observability (feature `testing`): how many times the reader opened a session on
 /// this thread. `open_session` must parse a resumed journal **once** (resume-perf B); a test

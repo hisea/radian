@@ -139,6 +139,10 @@ pub enum Role {
     ReasoningMax,
     Interrupted,
     User,
+    /// The `bar` input style's background band (ADR 0035 V3): the whole row behind the text,
+    /// plus the foreground of the text on it. pi's `userMessageBg`/`text` — the same band as a
+    /// user message block, which is omp's composer fill.
+    InputBar,
     ToolCall,
     ToolResult,
     ToolResultError,
@@ -201,7 +205,7 @@ pub enum Role {
 }
 
 impl Role {
-    pub const ALL: [Role; 62] = [
+    pub const ALL: [Role; 63] = [
         Role::Reasoning,
         Role::ReasoningOff,
         Role::ReasoningMinimal,
@@ -212,6 +216,7 @@ impl Role {
         Role::ReasoningMax,
         Role::Interrupted,
         Role::User,
+        Role::InputBar,
         Role::ToolCall,
         Role::ToolResult,
         Role::ToolResultError,
@@ -279,6 +284,7 @@ impl Role {
             Role::ReasoningMax => "reasoning_max",
             Role::Interrupted => "interrupted",
             Role::User => "user",
+            Role::InputBar => "input_bar",
             Role::ToolCall => "tool_call",
             Role::ToolResult => "tool_result",
             Role::ToolResultError => "tool_result_error",
@@ -352,6 +358,7 @@ impl Role {
             Role::ReasoningMax => &mut theme.reasoning_max,
             Role::Interrupted => &mut theme.interrupted,
             Role::User => &mut theme.user,
+            Role::InputBar => &mut theme.input_bar,
             Role::ToolCall => &mut theme.tool_call,
             Role::ToolResult => &mut theme.tool_result,
             Role::ToolResultError => &mut theme.tool_result_error,
@@ -426,6 +433,9 @@ pub struct Theme {
     /// The `[interrupted]` marker (ADR 0003).
     pub interrupted: Style,
     pub user: Style,
+    /// The `bar` input style's band (ADR 0035 V3): the background behind the input's whole
+    /// row plus the level of the text on it. pi's `userMessageBg` + `text`.
+    pub input_bar: Style,
     pub tool_call: Style,
     pub tool_result: Style,
     pub tool_result_error: Style,
@@ -631,6 +641,11 @@ impl Theme {
         let text = spec(pi::TEXT, Modifier::empty(), truecolor);
         let muted = spec(pi::MUTED, Modifier::empty(), truecolor);
         let dim = spec(pi::DIM, Modifier::empty(), truecolor);
+        // The band behind a user message block and the `bar` input's rows (ADR 0035 V3): omp's
+        // composer fill is the user message's own background, so the two read as one surface.
+        let band = spec_bg(pi::USER_BG, Modifier::empty(), truecolor)
+            .bg
+            .expect("a bg");
         Self {
             name: ThemeName::Dark,
             reserved: BTreeMap::new(),
@@ -638,9 +653,8 @@ impl Theme {
             // titles; secondary = tool output, notices and thinking; weak = hints,
             // truncation, counters and completion descriptions.
             text,
-            user: text.bg(spec_bg(pi::USER_BG, Modifier::empty(), truecolor)
-                .bg
-                .expect("a bg")),
+            user: text.bg(band),
+            input_bar: text.bg(band),
             reasoning: spec(pi::THINKING, Modifier::ITALIC, truecolor),
             reasoning_off: spec(pi::DIM, Modifier::DIM, truecolor),
             reasoning_minimal: spec(pi::MUTED, Modifier::empty(), truecolor),
@@ -718,6 +732,11 @@ impl Theme {
         let text = spec(pi::TEXT, Modifier::empty(), truecolor);
         let muted = spec(pi::MUTED, Modifier::empty(), truecolor);
         let dim = spec(pi::DIM, Modifier::empty(), truecolor);
+        // The band behind a user message block and the `bar` input's rows (ADR 0035 V3): omp's
+        // composer fill is the user message's own background, so the two read as one surface.
+        let band = spec_bg(pi::USER_BG, Modifier::empty(), truecolor)
+            .bg
+            .expect("a bg");
         Self {
             name: ThemeName::Light,
             reserved: BTreeMap::new(),
@@ -725,9 +744,8 @@ impl Theme {
             // titles; secondary = tool output, notices and thinking; weak = hints,
             // truncation, counters and completion descriptions.
             text,
-            user: text.bg(spec_bg(pi::USER_BG, Modifier::empty(), truecolor)
-                .bg
-                .expect("a bg")),
+            user: text.bg(band),
+            input_bar: text.bg(band),
             reasoning: spec(pi::THINKING, Modifier::ITALIC, truecolor),
             reasoning_off: spec(pi::DIM, Modifier::DIM, truecolor),
             reasoning_minimal: spec(pi::MUTED, Modifier::empty(), truecolor),
@@ -814,6 +832,9 @@ impl Theme {
             reasoning_max: style(None, Modifier::BOLD | Modifier::UNDERLINED),
             interrupted: style(None, Modifier::BOLD | Modifier::UNDERLINED),
             user: style(None, Modifier::BOLD),
+            // No color: the band cannot exist, so the input is told apart by its rail alone
+            // (the input text keeps the ordinary level).
+            input_bar: style(None, Modifier::empty()),
             tool_call: style(None, Modifier::REVERSED),
             tool_result: style(None, Modifier::empty()),
             tool_result_error: style(None, Modifier::BOLD | Modifier::UNDERLINED),
@@ -903,11 +924,12 @@ impl Theme {
     }
 
     /// Every style this theme defines, for the "mono has no colors" test.
-    pub fn styles(&self) -> [Style; 37] {
+    pub fn styles(&self) -> [Style; 38] {
         [
             self.reasoning,
             self.interrupted,
             self.user,
+            self.input_bar,
             self.tool_call,
             self.tool_result,
             self.tool_result_error,
@@ -1170,6 +1192,21 @@ mod tests {
     fn light_differs_from_dark() {
         assert_ne!(Theme::light().user, Theme::dark().user);
         assert_ne!(Theme::light().turn_running, Theme::dark().turn_running);
+    }
+
+    /// ADR 0035 V3: the `bar` input's band is the user message's own band on the main text
+    /// level (omp's composer fill is `userMessageBg`); `mono` has no color to give it, so the
+    /// input keeps the ordinary level and is told apart by its rail.
+    #[test]
+    fn the_input_bar_band_is_the_user_band_on_the_main_level() {
+        for theme in [Theme::dark(), Theme::light()] {
+            assert_eq!(theme.input_bar.bg, theme.user.bg, "{:?}", theme.name);
+            assert_eq!(theme.input_bar.fg, theme.text.fg, "{:?}", theme.name);
+        }
+        let mono = Theme::mono();
+        assert_eq!(mono.input_bar.bg, None);
+        assert_eq!(mono.input_bar.fg, None);
+        assert_eq!(mono.input_bar.add_modifier, Modifier::empty());
     }
 
     #[test]

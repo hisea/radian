@@ -659,3 +659,71 @@ Base `ba964a4` · 一次性 worktree `.radian-worktrees/tp-mut`（detached，跑
 TP2（「阈值用会话累计」）在当前结构里不可表达：`cost_micros`/`rates_for` 是纯函数，只拿到
 **本次调用**的 `ModelUsage`，没有会话累计可拿；`restore_usage` 也是逐条记录调用 `cost_micros`。
 这正是研究 F5 要的语义（阈值比的是这次请求自己的输入长度），所以没有对应变异。
+## review-fixes-1 (2026-10-15): git filters + corrupt trust
+
+One-shot detached worktree `.radian-worktrees/rf1-mutations` (from the branch HEAD, deleted
+## ADR 0014 reasoning replay (2026-10-15)
+
+One-shot detached worktree `.radian-worktrees/rr-mutations` (from the branch HEAD, deleted
+after); each mutation restored with `git checkout --`, `git status --short` empty at the end.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| RF1-FA-A | skip the filter check entirely (`check_filters` returns `Ok`) | caught (rc=101) | `a_filter_driver_not_in_allowed_filters_is_refused` (the marker was created) |
+| RF1-FA-B | allow every driver (drop the `allowed_filters` membership check) | caught (rc=101) | `a_filter_driver_not_in_allowed_filters_is_refused` |
+| RF1-FA-C | treat `lfs` with a non-`git-lfs` command as allowed | caught (rc=101) | `lfs_is_allowed_only_with_a_git_lfs_command` |
+| RF1-FC | `read_at(path).unwrap_or_default()` in `set_at` again | caught (rc=101) | `trust::tests::a_corrupt_record_is_not_overwritten` |
+| RR-D | treat `reasoning_details` as a replayable text field (add it to `REPLAYABLE_INTERLEAVED`) | caught (rc=101) | `catalog::tests::the_catalog_interleaved_field_decides_reasoning_replay` |
+| RR-F | ignore a named provider's `reasoning_replay` override (fall through to the catalog) | caught (rc=101) | `the_catalog_and_a_named_override_decide_reasoning_replay` |
+
+## review-fixes-1b (2026-10-15): the filter check must list files, not directories
+
+One-shot detached worktree `.radian-worktrees/rf1b-mutations` (from the branch HEAD, deleted
+after); each mutation restored with `git checkout --`, `git status --short` empty at the end.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| RF1-FA-D | back to `git status --porcelain -z` (a new directory shows as `newdir/`) | caught (rc=101) | `a_new_file_in_a_new_directory_is_checked`, `status_show_untracked_files_no_does_not_hide_the_check` |
+| RF1-FA-E | check the explicit directory path instead of expanding it (`ls-files`) | caught (rc=101) | `a_directory_argument_is_expanded_for_the_filter_check` |
+
+## review-fixes-1c (2026-10-15): check-attr reads paths from stdin
+
+One-shot detached worktree `.radian-worktrees/rf1c-mutations` (from the branch HEAD, deleted
+after); the mutation was restored with `git checkout --`, `git status --short` empty at the end.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| RF1-FA-F | pass the path list to `git check-attr` as argv again | caught (rc=101, `Argument list too long`) | `a_large_repository_does_not_hit_the_argument_limit` |
+## bg-jobs-2：job 通知的 lane、唤醒上限与孤儿扫描（ADR 0037 切片 3-4，2026-10-16）
+
+Base `eb7ec96` · 一次性 detached worktree `/tmp/bg2-mut`（跑完 `git worktree remove --force`）。
+变异用 `cargo test -p radian-host --test job_notify --no-fail-fast -- <test> --exact`，还原后干净。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| N1 | busy/idle 两条 lane 对调（busy 唤醒、idle 注入） | `busy_injects_and_idle_wakes` | ✅ |
+| N3 | 唤醒上限不检查（`< u32::MAX`） | `the_wake_cap_degrades_to_inject_and_a_user_message_resets_it` | ✅ |
+| N4 | `orphan_jobs` 去掉 settled 过滤（已结束的 job 被当成孤儿上报） | `orphan_jobs_reports_a_start_without_a_settle` | ✅ |
+
+3/3 抓住。N4 是「孤儿被重新上报/重跑」这条的最近可测变异：设计上恢复只**上报一次**、绝不重跑
+（ADR 0037 决定 6），代码里没有重跑路径，所以没有「真的重跑」的单行变异。
+## switch-replay: the `/model` switch path carries the reasoning replay (2026-10-15)
+
+Worktree `.radian-worktrees/ab3-radian`, branch `dogfood/ab3-switch-replay` (base `a39738f`).
+Each mutation was made in place, restored from a copy in `/tmp` and compared with `cmp`
+(identical); `git status --short` then showed only the two new test files. Every run used
+`--no-fail-fast`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| SR-S1 | `RouteContext::args_for` (the `/model` switch path, `src/model.rs:480`) builds `reasoning_replay` as `None` instead of `resolve_reasoning_replay(&provider_ref, model)` | caught (rc=101, **exactly one** failure in `-p radian-host --no-fail-fast`) | `switch_reasoning_replay::the_switch_path_carries_the_reasoning_replay` — `left: None, right: Some("reasoning_content")` for `opencode-go/deepseek-v4.1-flash` |
+| SR-S2 | `route_replays_reasoning` returns `false` (the switched route's budget no longer counts reasoning) | caught (rc=101) | `switch_reasoning_budget::a_switched_route_counts_reasoning_exactly_when_it_replays_it`; `switch_reasoning_replay::the_switch_path_carries_the_reasoning_replay` (the "budget's answer matches the request's field" assertion); and the pre-existing `reasoning_replay::the_catalog_and_a_named_override_decide_reasoning_replay` |
+
+SR-S1 is the hole this task closed. Under it nothing else failed: the rest of `radian-host`
+(276 lib tests and 15 other integration files, 87 tests), `radian-tui`'s
+`tests/model_switch.rs` (16 tests) and the whole `radian-tui`/`agent-cli` suites stayed green.
+(`-p radian-tui -p agent-cli` needs `cargo build -p agent-extensions --bin mcp-fixture` first;
+without it 11 tests fail on "mcp-fixture is not built", which is unrelated to this decision —
+they were re-run green after the fixture was built.) SR-S2 was already caught by
+`reasoning_replay.rs`; the two new tests pin the same decision on the switch path, where
+`args_for` and the budget resolver are two separate resolutions that must agree.

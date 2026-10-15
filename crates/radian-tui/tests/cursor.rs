@@ -26,6 +26,8 @@ fn render(app: &mut App, width: u16, height: u16) -> Terminal<TestBackend> {
 fn the_cursor_cell_counts_display_width_not_chars() {
     let mut app = App::new("m", "s");
     classic_footer(&mut app);
+    // The `lines` style (the `bar` default is exercised below).
+    app.input_style = radian_tui::render::InputStyle::Lines;
     app.input.set_text("你好");
     let terminal = render(&mut app, 20, 8);
     let cursor = terminal.backend().cursor_position();
@@ -40,6 +42,7 @@ fn the_cursor_cell_counts_display_width_not_chars() {
 fn the_cursor_follows_soft_wrap() {
     let mut app = App::new("m", "s");
     classic_footer(&mut app);
+    app.input_style = radian_tui::render::InputStyle::Lines;
     app.input.set_text("abcdefghij");
     let terminal = render(&mut app, 10, 8);
     let cursor = terminal.backend().cursor_position();
@@ -50,8 +53,10 @@ fn the_cursor_follows_soft_wrap() {
 
 #[test]
 fn a_multiline_input_grows_the_box_and_a_long_one_scrolls_to_the_cursor() {
+    use radian_tui::render::InputStyle;
     let mut app = App::new("m", "s");
     classic_footer(&mut app);
+    app.input_style = InputStyle::Lines;
     app.input.set_text("a\nb\nc");
     let terminal = render(&mut app, 20, 12);
     let cursor = terminal.backend().cursor_position();
@@ -61,6 +66,7 @@ fn a_multiline_input_grows_the_box_and_a_long_one_scrolls_to_the_cursor() {
     // More than ten rows: the box caps and follows the cursor instead of growing.
     let mut app = App::new("m", "s");
     classic_footer(&mut app);
+    app.input_style = InputStyle::Lines;
     app.input.set_text(&"x\n".repeat(20));
     let terminal = render(&mut app, 20, 30);
     let cursor = terminal.backend().cursor_position();
@@ -94,8 +100,10 @@ fn the_box_cursor_counts_the_prompts_display_width() {
 /// border).
 #[test]
 fn the_lines_cursor_counts_the_prompts_display_width() {
+    use radian_tui::render::InputStyle;
     let mut app = App::new("m", "s");
     classic_footer(&mut app);
+    app.input_style = InputStyle::Lines;
     let terminal = render(&mut app, 20, 8);
     assert_eq!(terminal.backend().cursor_position().x, 2, "empty");
     app.input.set_text("f");
@@ -104,6 +112,39 @@ fn the_lines_cursor_counts_the_prompts_display_width() {
     app.input.set_text("你");
     let terminal = render(&mut app, 20, 8);
     assert_eq!(terminal.backend().cursor_position().x, 4, "CJK");
+}
+
+/// The `bar` style's cursor: the rail plus its one cell of padding (two display cells), with no
+/// rule or border row above the text — the status row takes that row instead (ADR 0035 V3).
+#[test]
+fn the_bar_cursor_counts_the_rails_display_width() {
+    use radian_tui::render::InputStyle;
+    let mut app = App::new("m", "s");
+    classic_footer(&mut app);
+    app.input_style = InputStyle::Bar;
+    let terminal = render(&mut app, 20, 8);
+    assert_eq!(terminal.backend().cursor_position().x, 2, "empty");
+    app.input.set_text("f");
+    let terminal = render(&mut app, 20, 8);
+    assert_eq!(terminal.backend().cursor_position().x, 3, "ASCII");
+    // A CJK character is two cells, and the cursor respects the rail's display width.
+    app.input.set_text("你");
+    let terminal = render(&mut app, 20, 8);
+    assert_eq!(terminal.backend().cursor_position().x, 4, "CJK");
+    app.input.set_text("你好");
+    let terminal = render(&mut app, 20, 8);
+    assert_eq!(
+        terminal.backend().cursor_position().x,
+        6,
+        "two CJK characters"
+    );
+    // The text sits on the band row, one below the status row (the status row takes the row
+    // the `lines` style spends on its top rule, so the band is one row lower).
+    assert_eq!(
+        terminal.backend().cursor_position().y,
+        6,
+        "on the band, below the status row"
+    );
 }
 
 /// A continuation line aligns with the first line's text in **both** styles: the indent is the

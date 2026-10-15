@@ -411,6 +411,24 @@ fn event_data_value(
             "branch": branch,
             "files": files,
         }),
+        EventData::BackgroundJobStarted {
+            job_id,
+            command,
+            output,
+        } => json!({
+            "job_id": job_id,
+            "command": command,
+            "output": output,
+        }),
+        EventData::BackgroundJobSettled {
+            job_id,
+            state,
+            duration_ms,
+        } => json!({
+            "job_id": job_id,
+            "state": state,
+            "duration_ms": duration_ms,
+        }),
         EventData::Other(value) => value.clone(),
     };
     Ok(value)

@@ -67,9 +67,9 @@ fn style_of(terminal: &Terminal<TestBackend>, needle: &str) -> Option<ratatui::s
             line.push_str(buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
         }
         if let Some(col) = line.find(needle) {
-            // The first character of the match is at display column `col`, but wide cells
-            // shift columns; for ASCII markers they coincide.
-            let x = area.left() + col as u16;
+            // `col` is a byte offset; the buffer column is the display width of the prefix
+            // (wide cells shift it, so `↑` or CJK would otherwise read the wrong cell).
+            let x = area.left() + unicode_width::UnicodeWidthStr::width(&line[..col]) as u16;
             return buffer.cell((x, y)).map(|c| c.style());
         }
     }
@@ -524,9 +524,11 @@ fn the_decline_confirmation_is_shown() {
 
 /// The input area in the style of pi: a rule above and below, `> ` on the
 /// first line, and continuation lines indented by two cells instead of repeating the prompt.
+/// This is `tui.input_style = "lines"` (the default is `bar`, ADR 0035 V3).
 #[test]
 fn the_input_area_has_rules_and_a_prompt_instead_of_a_box() {
     let mut app = App::new("m", "s");
+    app.input_style = radian_tui::render::InputStyle::Lines;
     app.input = "first\nsecond".into();
     let text = screen(&render(&mut app, 20, 8));
     assert!(!text.contains("message"), "the box title is gone:\n{text}");
@@ -553,14 +555,23 @@ fn the_input_area_has_rules_and_a_prompt_instead_of_a_box() {
     }
 }
 
-/// The empty input shows the placeholder after the prompt.
+/// The empty input shows the placeholder after the prompt (`lines`), and after the rail in the
+/// default `bar` style.
 #[test]
 fn the_empty_input_shows_the_placeholder_after_the_prompt() {
     let mut app = App::new("m", "s");
+    app.input_style = radian_tui::render::InputStyle::Lines;
     let text = screen(&render(&mut app, 80, 8));
     assert!(
         text.contains("❯ (type a message, Enter to send, Ctrl-J for a new line)"),
         "{text}"
+    );
+
+    let mut bar = App::new("m", "s");
+    let text = screen(&render(&mut bar, 80, 8));
+    assert!(
+        text.contains("▎ (type a message, Enter to send, Ctrl-J for a new line)"),
+        "the bar's placeholder follows the rail:\n{text}"
     );
 }
 
@@ -586,6 +597,247 @@ fn the_box_input_style_draws_the_rounded_box_with_the_prompt() {
         "the box has **rounded** corners:\n{text}"
     );
     assert!(!text.contains('┌'), "no square corners:\n{text}");
+}
+
+// ---------- the `bar` input style (ADR 0035 V3) ----------
+
+/// Row `y` as a string, trailing cells kept so a band's width is visible.
+fn row(terminal: &Terminal<TestBackend>, y: u16) -> String {
+    let buffer = terminal.backend().buffer();
+    let area = *buffer.area();
+    (area.left()..area.right())
+        .map(|x| {
+            buffer
+                .cell((x, y))
+                .map(|c| c.symbol())
+                .unwrap_or(" ")
+                .to_string()
+        })
+        .collect()
+}
+
+/// The index of the first screen row whose text contains `needle`.
+fn row_of(terminal: &Terminal<TestBackend>, needle: &str) -> Option<usize> {
+    let area = *terminal.backend().buffer().area();
+    (area.top()..area.bottom())
+        .find(|y| row(terminal, *y).contains(needle))
+        .map(usize::from)
+}
+
+/// The style of the cell at `(x, y)`.
+fn cell_style(terminal: &Terminal<TestBackend>, x: u16, y: u16) -> ratatui::style::Style {
+    terminal
+        .backend()
+        .buffer()
+        .cell((x, y))
+        .map(|cell| cell.style())
+        .expect("a cell inside the buffer")
+}
+
+/// Asserts that the band covers row `y` from column 0 to `width`, by **display column**: a wide
+/// glyph's own cell is read (and counted as its two columns), so ratatui's skip cell behind it
+/// — which the terminal paints as part of the glyph — is never mistaken for a hole.
+fn assert_band_across(terminal: &Terminal<TestBackend>, y: u16, band: Option<Color>, width: u16) {
+    use unicode_width::UnicodeWidthStr;
+    let buffer = terminal.backend().buffer();
+    let mut col = 0usize;
+    while col < width as usize {
+        let symbol = buffer
+            .cell((col as u16, y))
+            .map(|cell| cell.symbol())
+            .unwrap_or(" ");
+        assert_eq!(
+            cell_style(terminal, col as u16, y).bg,
+            band,
+            "row {y} column {col} is outside the band: {:?}",
+            row(terminal, y)
+        );
+        col += UnicodeWidthStr::width(symbol).max(1);
+    }
+    assert_eq!(
+        col,
+        width as usize,
+        "the band does not reach the last column: {:?}",
+        row(terminal, y)
+    );
+}
+
+/// ADR 0035 V3: `tui.input_style = "bar"` is one background band per input row with the accent
+/// rail on the left — no border, no rules — and a multi-line input grows the band by its rows.
+#[test]
+fn the_bar_input_style_draws_a_full_width_band_with_the_rail() {
+    use radian_tui::render::InputStyle;
+    let mut app = App::new("m", "s");
+    app.input_style = InputStyle::Bar;
+    app.input = "first\nsecond".into();
+    let terminal = render(&mut app, 20, 8);
+    let text = screen(&terminal);
+    let band = app.theme.input_bar.bg.expect("the band's background");
+    let first = row_of(&terminal, "▎ first").expect("the first band row");
+    let second = row_of(&terminal, "▎ second").expect("the second band row");
+    assert_eq!(second, first + 1, "one band row per input row:\n{text}");
+    for y in [first as u16, second as u16] {
+        let line = row(&terminal, y);
+        // The band's own rows carry no rule, border or box corner anywhere.
+        assert!(
+            !line.contains(['─', '│', '╭', '╰']),
+            "a band row has no rule or border: {line:?}"
+        );
+        assert_eq!(
+            cell_style(&terminal, 0, y).fg,
+            app.theme.notice_label.fg,
+            "the rail is the accent: row {y}"
+        );
+        // The band covers the whole row, the trailing cells included.
+        assert_band_across(&terminal, y, Some(band), 20);
+        // The text after the rail keeps the main level, not the accent.
+        assert_eq!(
+            cell_style(&terminal, 2, y).fg,
+            app.theme.input_bar.fg,
+            "the text is the band's own foreground: row {y}"
+        );
+    }
+    // A CJK input wraps by display width, and every row of the wrap is banded the same way.
+    let mut wide = App::new("m", "s");
+    wide.input_style = InputStyle::Bar;
+    wide.input = "中文中文中文".into();
+    let terminal = render(&mut wide, 12, 8);
+    // Inner width 10: five 2-cell characters, then the sixth.
+    let first = row_of(&terminal, "▎ 中").expect("the first band row");
+    let wrapped = row(&terminal, (first + 1) as u16);
+    assert!(
+        wrapped.starts_with("▎ ") && wrapped.contains('文'),
+        "the band grew a row for the wrapped tail: {wrapped:?}"
+    );
+    assert_band_across(&terminal, (first + 1) as u16, wide.theme.input_bar.bg, 12);
+}
+
+/// The band reaches the terminal's last column at both widths the brief pins (80 and 120).
+#[test]
+fn the_bar_band_fills_the_terminal_width() {
+    use radian_tui::render::InputStyle;
+    for width in [80u16, 120] {
+        let mut app = App::new("m", "s");
+        app.input_style = InputStyle::Bar;
+        app.input = "wide".into();
+        let terminal = render(&mut app, width, 8);
+        let y = row_of(&terminal, "▎ wide").expect("the band") as u16;
+        assert_band_across(&terminal, y, app.theme.input_bar.bg, width);
+    }
+}
+
+/// ADR 0035 V3 / decision 1: the status row above the band is **always** one row —
+/// blank while idle, `<spinner>  Working · 12s · esc to interrupt` while a turn runs — so the
+/// band and the transcript never move when a turn starts or ends.
+#[test]
+fn the_bar_status_row_never_moves_the_band_or_the_transcript() {
+    use radian_tui::render::InputStyle;
+    let mut app = App::new("m", "s");
+    app.input_style = InputStyle::Bar;
+    app.spinner_kind = radian_tui::spinner::Kind::Arc;
+    app.set_now(app.spinner_origin);
+    app.input = "hello".into();
+    app.push_message(&Message::user("a question"));
+
+    // Wide enough that the whole status row fits: it is asserted on, not clipped.
+    let idle = render(&mut app, 80, 10);
+    let band_row = row_of(&idle, "▎ hello").expect("the band");
+    let transcript_row = row_of(&idle, "a question").expect("the transcript");
+    // Idle: the row above the band is blank (but there).
+    assert_eq!(row(&idle, (band_row - 1) as u16).trim_end(), "");
+    assert!(!screen(&idle).contains("Working"));
+
+    app.projection.set_turn(radian_tui::TurnState::Running);
+    app.timer.request_started(app.spinner_origin);
+    app.set_now(app.spinner_origin + std::time::Duration::from_secs(12));
+    let running = render(&mut app, 80, 10);
+    assert_eq!(
+        row_of(&running, "▎ hello"),
+        Some(band_row),
+        "the band must not move when the turn starts"
+    );
+    assert_eq!(
+        row_of(&running, "a question"),
+        Some(transcript_row),
+        "the transcript must not move either"
+    );
+    let status = row(&running, (band_row - 1) as u16);
+    assert!(
+        status.contains("◜  Working · 12s · esc to interrupt"),
+        "the live status row: {status:?}"
+    );
+
+    // The turn ends: the row is blank again and nothing moved.
+    app.projection.set_turn(radian_tui::TurnState::Idle);
+    let after = render(&mut app, 80, 10);
+    assert_eq!(row_of(&after, "▎ hello"), Some(band_row));
+    assert_eq!(row_of(&after, "a question"), Some(transcript_row));
+    assert_eq!(row(&after, (band_row - 1) as u16).trim_end(), "");
+
+    // A running `!` is a status but not a **turn**: its row carries the state without the
+    // turn's interrupt hint (Esc does not cancel a `!` through this path).
+    app.bash_running = Some("sleep 1".to_string());
+    let terminal = render(&mut app, 80, 10);
+    let status = row(&terminal, (band_row - 1) as u16);
+    assert!(status.contains("Running a command"), "{status:?}");
+    assert!(
+        !status.contains("esc to interrupt"),
+        "no turn is running: {status:?}"
+    );
+    app.bash_running = None;
+}
+
+/// ADR 0035 V3: `bar` spends exactly one row on the status row and one per input row — no rule
+/// or border rows and no slack. The band is the input area's last row (the `classic` status bar
+/// is directly below it), and a two-row input grows the band by exactly one row.
+#[test]
+fn the_bar_input_takes_exactly_the_status_row_and_its_text_rows() {
+    use radian_tui::render::InputStyle;
+    let mut app = App::new("m", "s");
+    classic_footer(&mut app);
+    app.input_style = InputStyle::Bar;
+    app.input = "hello".into();
+    // Height 8, the one-row `classic` status bar at row 7: the status row is 5, the band 6.
+    let terminal = render(&mut app, 20, 8);
+    assert_eq!(
+        row_of(&terminal, "▎ hello"),
+        Some(6),
+        "the band is the input's last row:\n{}",
+        screen(&terminal)
+    );
+    assert_eq!(row(&terminal, 5).trim_end(), "", "the blank status row");
+
+    app.input = "one\ntwo".into();
+    let terminal = render(&mut app, 20, 8);
+    assert_eq!(
+        row_of(&terminal, "▎ one"),
+        Some(5),
+        "the status row moved up"
+    );
+    assert_eq!(row_of(&terminal, "▎ two"), Some(6));
+}
+
+/// `tui.footer.glyphs = "ascii"` reaches the rail and the status spinner too (ADR 0027
+/// revision 4: the unicode glyphs are only used when the font set has them).
+#[test]
+fn the_bar_rail_and_spinner_fall_back_to_ascii() {
+    use radian_tui::render::InputStyle;
+    let mut app = App::new("m", "s");
+    app.input_style = InputStyle::Bar;
+    app.input = "hi".into();
+    app.apply_footer(&radian_host::config::TuiFooterConfig {
+        glyphs: Some("ascii".to_string()),
+        ..Default::default()
+    });
+    app.set_now(app.spinner_origin);
+    app.projection.set_turn(radian_tui::TurnState::Running);
+    let text = screen(&render(&mut app, 40, 10));
+    assert!(text.contains("| hi"), "the ascii rail:\n{text}");
+    assert!(!text.contains('▎'), "no unicode rail:\n{text}");
+    assert!(
+        text.contains("*  Working · esc to interrupt"),
+        "the ascii pulse glyph: \n{text}"
+    );
 }
 
 /// A transcript selection draws with the theme's `selection` role: the band lands exactly on
@@ -1941,14 +2193,113 @@ fn the_login_wizard_uses_the_text_hierarchy() {
     assert!(text.contains("choose a provider"), "{text}");
     let prompt = style_of(&terminal, "choose").expect("the prompt");
     assert_eq!(prompt.fg, app.theme.text.fg, "the prompt is main text");
-    let hint = style_of(&terminal, "(↑/↓,").expect("the key hint");
+    // ADR 0035: the key hints live in the panel's bottom border (dim keys).
+    let hint = style_of(&terminal, "↑/↓").expect("the key hint");
     assert_eq!(hint.fg, app.theme.hint.fg, "the key hint is weak");
-    // The first choice row is the selection: the emphasis (accent) role.
-    let selected = style_of(&terminal, ">").expect("the selected row");
-    assert_eq!(
-        selected.fg, app.theme.notice_label.fg,
-        "the selected row is the emphasis"
+    // The first choice row is the selection: the shared list's emphasis (bold cursor).
+    let selected = style_of(&terminal, "❯").expect("the selected row");
+    assert!(
+        selected
+            .add_modifier
+            .contains(ratatui::style::Modifier::BOLD),
+        "the selected row is emphasized"
     );
+}
+
+/// The startup trust modal (ADR 0031 T3, ADR 0035): the shared panel with the
+/// choices through the shared list, at 80/120 columns and in the ascii tier. The cursor's
+/// default is the fail-safe `UntrustHere`.
+#[test]
+fn the_trust_panel_snapshot_at_80_120_and_ascii() {
+    let mut app = App::new("m", "s");
+    app.push_trust_modal(std::path::PathBuf::from("/work/example"));
+
+    let terminal = render(&mut app, 80, 24);
+    let text = screen(&terminal);
+    assert!(text.contains("╭─ project trust "), "{text}");
+    assert!(
+        text.contains("project resources found in /work/example"),
+        "{text}"
+    );
+    assert!(
+        text.contains("❯ Do not trust this directory (/work/example)"),
+        "the fail-safe default: {text}"
+    );
+    assert!(
+        text.contains("↑/↓ choose · ⏎ select · esc do not trust"),
+        "{text}"
+    );
+
+    let terminal = render(&mut app, 120, 24);
+    let text = screen(&terminal);
+    assert!(text.contains("╭─ project trust "), "{text}");
+    assert!(
+        text.contains("Trust the parent directory (/work)"),
+        "{text}"
+    );
+
+    app.apply_footer(&radian_host::config::TuiFooterConfig {
+        glyphs: Some("ascii".into()),
+        ..Default::default()
+    });
+    let terminal = render(&mut app, 80, 24);
+    let text = screen(&terminal);
+    assert!(text.contains("+- project trust "), "{text}");
+    assert!(text.contains("> Do not trust this directory"), "{text}");
+    assert!(!text.contains('╭'), "{text}");
+}
+
+/// The session picker (ADR 0035/2): the shared panel with the filter row, the
+/// sessions through the shared list, and the selected `--resume <id>` on the top border.
+#[test]
+fn the_picker_panel_snapshot_at_80_120_and_ascii() {
+    use radian_host::sessions::SessionRow;
+    use radian_tui::app::Overlay;
+    use radian_tui::picker::Picker;
+    let rows = vec![
+        SessionRow {
+            session_id: "alpha".into(),
+            created_ts: None,
+            last_ts: Some("2026-10-15T00:00:00Z".into()),
+            message_count: 2,
+            summary: "the first session".into(),
+        },
+        SessionRow {
+            session_id: "beta".into(),
+            created_ts: None,
+            last_ts: Some("2026-10-15T01:00:00Z".into()),
+            message_count: 5,
+            summary: "the second session".into(),
+        },
+    ];
+    let mut app = App::new("m", "s");
+    app.push_overlay(Overlay::Picker(Picker::new(rows, None, "/w")));
+
+    let terminal = render(&mut app, 80, 24);
+    let text = screen(&terminal);
+    assert!(text.contains("╭─ sessions "), "{text}");
+    assert!(text.contains("filter: "), "{text}");
+    assert!(text.contains("❯ alpha"), "{text}");
+    assert!(text.contains("--resume alpha"), "the copyable hint: {text}");
+    assert!(
+        text.contains("↑/↓ select · ⏎ resume · n new · tab search · esc close"),
+        "{text}"
+    );
+
+    let terminal = render(&mut app, 120, 24);
+    let text = screen(&terminal);
+    assert!(text.contains("╭─ sessions "), "{text}");
+    assert!(text.contains("the second session"), "{text}");
+
+    app.apply_footer(&radian_host::config::TuiFooterConfig {
+        glyphs: Some("ascii".into()),
+        ..Default::default()
+    });
+    let terminal = render(&mut app, 80, 24);
+    let text = screen(&terminal);
+    assert!(text.contains("+- sessions "), "{text}");
+    assert!(text.contains("> alpha"), "{text}");
+    assert!(!text.contains('╭'), "{text}");
 }
 
 /// The display modes most tests lay out with: both folds expanded, so a test's geometry does

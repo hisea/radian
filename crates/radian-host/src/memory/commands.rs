@@ -1,4 +1,5 @@
-//! The `agent memory` / `/memory` command set, shared by both hosts (ADR 0021 D7).
+//! The `radian memory` / `/memory` command set, shared by the TUI and the headless
+//! command (ADR 0021 D7).
 //!
 //! One clap grammar ([`MemoryCommand`]) and one executor ([`execute`]) so the CLI and the TUI
 //! cannot drift in what a command means or what it prints. [`execute`] neither prints nor
@@ -22,7 +23,8 @@ use super::service::{MemoryService, MemoryServiceError, ProjectState, ScopeSelec
 /// The exit code for a usage or refusal error, matching the CLI's `USAGE_ERROR` and clap.
 pub const USAGE_ERROR: i32 = 2;
 
-/// `agent memory <command>` / `/memory <command>` (ADR 0021 D7): the user commands for durable
+/// `radian memory <command>` / `/memory <command>` (ADR 0021 D7): the user commands for
+/// durable
 /// memory. Every one is `Source::User`, and none of them needs a model, a key or a session
 /// file. `forget`, `purge`, `split` and `merge` need confirmation.
 #[derive(clap::Subcommand, Debug, Clone)]

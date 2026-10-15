@@ -921,7 +921,7 @@ impl Draft {
         let body = toml::to_string(&Toml::Table(root)).expect("the draft is serializable");
         format!(
             "# A Radian configuration drafted from a Pi agent directory by\n\
-             # `agent config import-pi`. Radian does not promise compatibility with Pi's file\n\
+             # `radian config import-pi`. Radian does not promise compatibility with Pi's file\n\
              # format: review this file, and read the notes the command printed on stderr for\n\
              # everything that could not be mapped.\n\
              {body}"
