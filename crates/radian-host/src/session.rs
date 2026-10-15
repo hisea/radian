@@ -27,7 +27,7 @@ use radian_runtime::{
 use radian_sandbox::Sandbox;
 use radian_session::{SessionCreatedData, SessionJournal};
 
-use crate::describe::{Wording, describe};
+use crate::describe::{Wording, describe, sandbox_word};
 use crate::home::skills_dir;
 use crate::memory::{InjectionConfig, MemoryHooks, MemoryService, MemoryTools, ProjectState};
 use crate::model::SwitchableModel;
@@ -381,6 +381,9 @@ pub struct SessionFacts {
     pub profile_line: String,
     /// The `[sandbox]` line.
     pub sandbox_facts: String,
+    /// The startup summary's word for the sandbox (ADR 0027): the real backend for
+    /// `workspace`, `no exec` for `safe`, `no sandbox` for `full`. The TUI prints it as-is.
+    pub sandbox_word: String,
     /// The `[memory]` line.
     pub memory_notice: String,
     /// Whether this process has a memory root (`/memory` is refused without one).
@@ -865,8 +868,14 @@ pub async fn open_session(
     let queue: Arc<SessionQueue> = Arc::new(PendingQueue::new());
     let origin = session_id.as_str().to_string();
 
-    // The startup description, before the sandbox moves into the tools.
+    // The startup description, before the sandbox moves into the tools. The summary word
+    // comes from the real backend name, not from searching the description text (which does
+    // not name the backend in the `workspace` tier).
     let (profile_line, sandbox_facts) = describe(tier.sandbox_mode(), sandbox.as_ref(), wording);
+    let sandbox_word = sandbox_word(
+        tier.sandbox_mode(),
+        sandbox.as_ref().map(Sandbox::backend_name),
+    );
     let coding = build_coding_tools(coding_root.as_deref(), sandbox)?;
     // ADR 0024 Q5: `ask_user` is mounted whenever a human is there to answer, **whether or not**
     // there are coding tools. It is its own provider, so a host without `--workspace` still
@@ -1091,6 +1100,7 @@ pub async fn open_session(
     let facts = SessionFacts {
         profile_line,
         sandbox_facts,
+        sandbox_word,
         memory_notice,
         memory_enabled: memory.is_some(),
         mcp_configured,

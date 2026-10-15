@@ -2399,6 +2399,58 @@ async fn pty_the_workspace_write_notice_names_the_mcp_sandbox_gap() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
+/// ADR 0027: the startup summary's sandbox word is the **real** backend, never `none`. The
+/// bug was searching the `workspace` tier's description text, which does not name the backend,
+/// so macOS showed `workspace · none`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_the_startup_summary_names_the_real_sandbox_backend() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("summary-sandbox");
+    let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "summary-sandbox",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        30,
+        120,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    let screen = pty.screen();
+    // The collapsed summary line carries the tier, the sandbox word and the rest.
+    let summary = screen
+        .lines()
+        .find(|line| line.contains("context ") && line.contains("ask_user"))
+        .unwrap_or_else(|| panic!("no summary line:\n{screen}"));
+    assert!(
+        !summary.contains("· none ·"),
+        "the workspace tier has a sandbox; it must not read as none: {summary:?}"
+    );
+    let expected = if cfg!(target_os = "macos") {
+        "macos-seatbelt"
+    } else {
+        "linux-bwrap"
+    };
+    assert!(
+        summary.contains(expected),
+        "the summary must name the real backend ({expected}): {summary:?}"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
 /// `--yes` removes the question, not the rules: a shell command under `workspace-write`
 /// (which would ask) runs without a prompt, through the sandbox, and the decision is still
 /// written to the audit record.
@@ -8184,7 +8236,9 @@ async fn pty_bang_runs_and_enters_the_context() {
     );
     let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
-    pty.send(b"!printf BANG-OUTPUT\r");
+    // The output must not be a substring of the command text: `wait_for_screen` would
+    // otherwise match the echoed input line and race the command (the audit-test flake).
+    pty.send(b"!printf 'BANG-%s' OUTPUT\r");
     assert!(
         pty.wait_for_screen("BANG-OUTPUT", 20),
         "the command output is not on screen:\n{}",
@@ -8192,7 +8246,7 @@ async fn pty_bang_runs_and_enters_the_context() {
     );
     // The block's first line is `$ cmd`.
     assert!(
-        pty.wait_for_screen("$ printf BANG-OUTPUT", 10),
+        pty.wait_for_screen("$ printf 'BANG-%s' OUTPUT", 10),
         "the command line is not on screen:\n{}",
         pty.screen()
     );
@@ -8217,7 +8271,7 @@ async fn pty_bang_runs_and_enters_the_context() {
         .map(|message| message["content"].as_str().unwrap_or_default())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(users.contains("Ran `printf BANG-OUTPUT`"), "{users}");
+    assert!(users.contains("Ran `printf 'BANG-%s' OUTPUT`"), "{users}");
     assert!(users.contains("BANG-OUTPUT"), "{users}");
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
@@ -8236,7 +8290,9 @@ async fn pty_bangbang_stays_out_of_the_context() {
     );
     let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
-    pty.send(b"!!printf BANG-SECRET\r");
+    // Distinct output (the command text has no `BANG-SECRET`), so the wait cannot match the
+    // echoed input line.
+    pty.send(b"!!printf 'BANG-%s' SECRET\r");
     assert!(
         pty.wait_for_screen("BANG-SECRET", 20),
         "the command output is not on screen:\n{}",
@@ -8316,9 +8372,12 @@ async fn pty_bang_is_audited_in_the_journal() {
         100,
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
-    pty.send(b"!!printf AUDITED\r");
+    // The output must not appear in the command text: `wait_for_screen("AUDITED")` used to
+    // match the echoed `!!printf AUDITED` and quit before the command (and its `UserBash`
+    // record) ran. `printf 'A%sB' Z` prints `AZB`, which the command text does not contain.
+    pty.send(b"!!printf 'A%sB' Z\r");
     assert!(
-        pty.wait_for_screen("AUDITED", 20),
+        pty.wait_for_screen("AZB", 20),
         "the command output is not on screen:\n{}",
         pty.screen()
     );
@@ -8336,7 +8395,7 @@ async fn pty_bang_is_audited_in_the_journal() {
         "no UserBash audit record:\n{text}"
     );
     assert!(
-        text.contains("\"command\":\"printf AUDITED\"")
+        text.contains("\"command\":\"printf 'A%sB' Z\"")
             && text.contains("\"exclude_from_context\":true"),
         "the audit record is missing its fields:\n{text}"
     );

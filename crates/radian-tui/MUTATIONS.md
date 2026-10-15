@@ -1122,3 +1122,12 @@ Base `3ccd4db` · 一次性 worktree `/tmp/radian-mut-bangcancel` · 跑完 `git
 
 Ctrl-C 只有在 turn 运行时才表示取消（否则是 arm quit），所以测试用一个永不结束的
 `Reply::SseThenHang` 起一个 turn，再发 0x03，断言 `!` 块显示 `[cancelled]`。
+## startup-line（摘要行写真实沙箱后端，2026-10-14）
+
+Base `62ae29e` · 一次性 worktree `/tmp/radian-sl-mut`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| S-M1 | TUI 摘要行改回搜索 `sandbox_facts` 文本（macOS 上写 `none`） | `pty::pty_the_startup_summary_names_the_real_sandbox_backend` | ✅ |
+
+1/1 抓住。
