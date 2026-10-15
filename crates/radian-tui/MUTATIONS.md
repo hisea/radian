@@ -1078,3 +1078,14 @@ Base `edfa320` · 一次性 worktree `/tmp/radian-esc-mut2`，跑完 `git checko
 | ESC-M2 | Esc 映射回 `UntrustHere`（持久，会写 `trust.json`） | `update::tests::escaping_the_trust_modal_untrusts_this_session_only` | ✅ |
 
 1/1 抓住。（早先 ESC-M1「Esc → `TrustHere`」见上一节。）
+
+## bang-cancel：Ctrl-C 停止运行中的 `!`（ADR 0033，2026-10-16）
+
+Base `3ccd4db` · 一次性 worktree `/tmp/radian-mut-bangcancel` · 跑完 `git checkout -- .`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| BC-A | 去掉 `Effect::Cancel` 分支里的 `bash_cancel.cancel()` | `pty_ctrl_c_stops_a_running_bang` | ✅ |
+
+Ctrl-C 只有在 turn 运行时才表示取消（否则是 arm quit），所以测试用一个永不结束的
+`Reply::SseThenHang` 起一个 turn，再发 0x03，断言 `!` 块显示 `[cancelled]`。
