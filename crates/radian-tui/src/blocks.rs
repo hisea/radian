@@ -2767,6 +2767,28 @@ mod tests {
         );
     }
 
+    /// The synthesized Markdown decorations (bullet, checkbox, quote bar) have no source
+    /// offset, so a copy never includes them (the real text does).
+    #[test]
+    fn markdown_decorations_do_not_copy() {
+        let lines = md_lines(
+            "- one\n- [ ] todo\n\n> quoted\n",
+            0,
+            40,
+            crate::footer::Glyphs::Unicode,
+        );
+        let mut found = 0;
+        for line in &lines {
+            for piece in line.md.as_deref().unwrap_or_default() {
+                if ["- ", "☐ ", "▏ "].contains(&piece.text.as_str()) {
+                    assert!(piece.offset.is_none(), "a decoration copies: {piece:?}");
+                    found += 1;
+                }
+            }
+        }
+        assert_eq!(found, 3, "the bullet, the checkbox and the quote bar");
+    }
+
     /// A heading's `#` uses the weak role; the text is the heading role (level 1 underlined).
     #[test]
     fn headings_keep_the_hash_with_their_own_role() {
