@@ -269,9 +269,7 @@ impl Catalog {
                             .get("cost")
                             .and_then(Value::as_object)
                             .and_then(parse_price),
-                        reasoning_replay: model
-                            .get("interleaved")
-                            .and_then(parse_interleaved),
+                        reasoning_replay: model.get("interleaved").and_then(parse_interleaved),
                         limit: ModelLimit {
                             context: limit.get("context").and_then(Value::as_u64),
                             output: limit.get("output").and_then(Value::as_u64),

@@ -324,7 +324,10 @@ mod tests {
             Message::assistant("plain reply"),
         ]);
         let body = build_body(&req, &cfg, false).unwrap();
-        assert_eq!(body["messages"][1]["reasoning_content"], "first thought\nsecond thought");
+        assert_eq!(
+            body["messages"][1]["reasoning_content"],
+            "first thought\nsecond thought"
+        );
         assert_eq!(body["messages"][2]["reasoning_content"], "");
         // The reasoning never leaks into the visible content.
         assert_eq!(body["messages"][1]["content"], "answer");

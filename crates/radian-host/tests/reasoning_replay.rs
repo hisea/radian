@@ -71,10 +71,7 @@ fn the_catalog_and_a_named_override_decide_reasoning_replay() {
         decl(Some(ReasoningReplayOverride::Field("reasoning".into()))),
     );
     let mut off = BTreeMap::new();
-    off.insert(
-        "acme".to_owned(),
-        decl(Some(ReasoningReplayOverride::Off)),
-    );
+    off.insert("acme".to_owned(), decl(Some(ReasoningReplayOverride::Off)));
     assert!(route_replays_reasoning("acme", "m", &on));
     assert!(!route_replays_reasoning("acme", "m", &off));
     // An override of `reasoning` is used verbatim, not the catalog's field.

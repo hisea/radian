@@ -1045,9 +1045,11 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
             // ADR 0014 Q4: the estimate counts reasoning exactly when the route
             // replays it, so the projection matches the request actually sent.
             window.budget.map(|tokens| {
-                ContextBudget::new(tokens).with_reasoning(
-                    radian_host::route_replays_reasoning(provider, switch_model, &providers),
-                )
+                ContextBudget::new(tokens).with_reasoning(radian_host::route_replays_reasoning(
+                    provider,
+                    switch_model,
+                    &providers,
+                ))
             })
         }) as radian_runtime::BudgetFor
     };

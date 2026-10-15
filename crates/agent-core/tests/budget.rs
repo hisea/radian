@@ -544,7 +544,10 @@ fn reasoning_is_counted_only_when_the_budget_asks_for_it() {
     let without = request(Vec::new());
     // Off: adding reasoning does not change the estimate — the provider does not receive it.
     assert_eq!(estimate_tokens(&with, 4), estimate_tokens(&without, 4));
-    assert_eq!(estimate_tokens_with(&with, 4, false), estimate_tokens(&without, 4));
+    assert_eq!(
+        estimate_tokens_with(&with, 4, false),
+        estimate_tokens(&without, 4)
+    );
     // On: the reasoning really is sent, so it really is counted.
     assert!(estimate_tokens_with(&with, 4, true) > estimate_tokens(&with, 4));
     assert!(estimate_tokens_with(&with, 4, true) > estimate_tokens_with(&without, 4, true));

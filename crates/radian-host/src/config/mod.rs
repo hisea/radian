@@ -579,8 +579,9 @@ fn parse_providers(value: &Value, path: &Path, config: &mut Config) -> Result<()
                 // ADR 0014 Q2: a field name overrides the catalog, `false` turns
                 // replay off. `true` names no field, so it is refused rather than guessed.
                 ("reasoning_replay", Value::String(field)) if !field.is_empty() => {
-                    decl.reasoning_replay =
-                        Some(crate::provider::ReasoningReplayOverride::Field(field.clone()));
+                    decl.reasoning_replay = Some(crate::provider::ReasoningReplayOverride::Field(
+                        field.clone(),
+                    ));
                 }
                 ("reasoning_replay", Value::Boolean(false)) => {
                     decl.reasoning_replay = Some(crate::provider::ReasoningReplayOverride::Off);
