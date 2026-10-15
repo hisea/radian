@@ -247,6 +247,33 @@ pub struct SkillsConfig {
     pub disabled: Vec<String>,
 }
 
+/// `[memory]` (ADR 0021). Only the two keys this revision adds are read;
+/// the rest of the D6 injection table (`enabled`, `max_tokens`, `global_budget`,
+/// `project_budget`, `overflow`) is still the documented default and is named in
+/// [`Config::skipped`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemoryConfig {
+    /// `[memory.injection] additions`: append later turns' new hits as one System message.
+    /// `None` means the default, **on**; the host reads `unwrap_or(true)`.
+    pub additions: Option<bool>,
+    /// `[memory.injection] addition_budget`: the token cap on one turn's addition. `None`
+    /// means the default (500).
+    pub addition_budget: Option<u64>,
+}
+
+impl MemoryConfig {
+    /// The injection configuration this section describes, with the D6 defaults for everything
+    /// the file does not set.
+    pub fn injection(&self) -> crate::memory::InjectionConfig {
+        let defaults = crate::memory::InjectionConfig::default();
+        crate::memory::InjectionConfig {
+            additions: self.additions.unwrap_or(defaults.additions),
+            addition_budget: self.addition_budget.unwrap_or(defaults.addition_budget),
+            ..defaults
+        }
+    }
+}
+
 /// One `[tui.colors]` color value (ADR 0029 decision 5): a color literal (`#hex`,
 /// `oklch(..)`, `okhsl(..)` or `""` for the terminal default) or a 256-color index.
 /// The literal text is resolved by the TUI, which owns the color grammar.
@@ -434,6 +461,8 @@ pub struct Config {
     pub integrations: IntegrationsConfig,
     pub compaction: CompactionConfig,
     pub skills: SkillsConfig,
+    /// `[memory]` (ADR 0021): the injection keys this revision adds.
+    pub memory: MemoryConfig,
     /// `[git]` (ADR 0030 R10): the branches `git_commit` refuses besides `main`/`master`.
     pub git: GitConfig,
     pub tui: TuiConfig,
@@ -541,6 +570,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
             "integrations" => parse_integrations(value, path, &mut config)?,
             "compaction" => parse_compaction(value, path, &mut config)?,
             "skills" => parse_skills(value, path, &mut config)?,
+            "memory" => parse_memory(value, path, &mut config)?,
             "git" => parse_git(value, &mut config)?,
             "tui" => parse_tui(value, path, &mut config)?,
             "providers" => parse_providers(value, path, &mut config)?,
@@ -855,6 +885,46 @@ fn parse_git(value: &Value, config: &mut Config) -> Result<(), ConfigError> {
                 }
             }
             config.git.allowed_filters = Some(names);
+        }
+    }
+    Ok(())
+}
+
+fn parse_memory(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
+    let Some(table) = value.as_table() else {
+        return Err(wrong_type(path, "memory", "a table"));
+    };
+    for (key, value) in table {
+        match key.as_str() {
+            "injection" => {
+                let Some(injection) = value.as_table() else {
+                    return Err(wrong_type(path, "memory.injection", "a table"));
+                };
+                for (key, value) in injection {
+                    match (key.as_str(), value) {
+                        ("additions", Value::Boolean(on)) => {
+                            config.memory.additions = Some(*on);
+                        }
+                        ("additions", _) => {
+                            return Err(wrong_type(path, "memory.injection.additions", "a boolean"));
+                        }
+                        ("addition_budget", Value::Integer(budget)) if *budget > 0 => {
+                            config.memory.addition_budget = Some(*budget as u64);
+                        }
+                        ("addition_budget", _) => {
+                            return Err(wrong_type(
+                                path,
+                                "memory.injection.addition_budget",
+                                "a positive integer",
+                            ));
+                        }
+                        // The rest of the D6 table is known but not wired in this slice: it is
+                        // interpreted as the documented default and named on the startup line.
+                        (other, _) => config.skipped.push(format!("memory.injection.{other}")),
+                    }
+                }
+            }
+            other => config.skipped.push(format!("memory.{other}")),
         }
     }
     Ok(())

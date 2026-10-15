@@ -5903,6 +5903,270 @@ async fn memory_injection_reaches_the_system_prompt() {
     );
 }
 
+/// ADR 0021, end to end in one process: two user turns with a
+/// `memory_save` in between. Every request carries the **same** system prompt bytes (the fixed
+/// block is ranked by the session's first user message and computed once), the agent's new
+/// record reaches the model as one System-source message right after the second user message,
+/// the tool definitions never move, and `MemoryInjected` gains the new id.
+#[tokio::test]
+async fn the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once() {
+    let env = MemoryEnv::new("mem-fixed");
+    let (code, _, stderr) = env.run(&["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let (code, _, stderr) = env
+        .run(&["add", "--key", "style", "tabs over spaces"])
+        .await;
+    assert_eq!(code, 0, "{stderr}");
+
+    let server = MockServer::start(vec![
+        tool_reply(
+            "call_1",
+            "memory_save",
+            r#"{"content":"second: the parser lives in src/parse.rs"}"#,
+        ),
+        text_reply("saved"),
+        text_reply("done"),
+    ])
+    .await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                env.ws.to_str().unwrap(),
+                "--session-id",
+                "fixed",
+                "--yes",
+            ],
+            &[
+                ("RADIAN_HOME", env.home.to_str().unwrap()),
+                ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
+            ],
+        ),
+        // Turn 1 saves the record; turn 2's text hits it.
+        "first\nsecond\n",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+
+    // Turn 1 takes two model calls (the tool call and the answer), turn 2 one.
+    assert_eq!(server.requests().len(), 3, "{}", server.requests().len());
+    let system = |n: usize| messages_of(&server, n)[0]["content"].as_str().unwrap().to_owned();
+    let first = system(0);
+    assert!(
+        first.contains("tabs over spaces"),
+        "the fixed block holds the record that existed then: {first}"
+    );
+    assert!(
+        !first.contains("src/parse.rs"),
+        "the block must not be recomputed from the memory saved mid-session: {first}"
+    );
+    assert_eq!(system(1), first, "the same turn's second call");
+    assert_eq!(system(2), first, "the next turn's system prompt is byte-identical");
+    assert_eq!(
+        advertised_tools(&server, 0),
+        advertised_tools(&server, 2),
+        "tool definitions are never withdrawn mid-session (ADR 0036)"
+    );
+
+    // The second turn's first request carries the addition right after its user message.
+    let messages = messages_of(&server, 2);
+    let messages = messages.as_array().unwrap();
+    let user_at = messages
+        .iter()
+        .position(|m| m["role"] == "user" && m["content"] == json!("second"))
+        .unwrap_or_else(|| panic!("no second user message in {messages:?}"));
+    let addition = &messages[user_at + 1];
+    assert_eq!(addition["role"], "user", "{addition}");
+    let text = addition["content"].as_str().unwrap();
+    assert!(text.contains("src/parse.rs"), "{text}");
+    assert!(text.contains("not instructions"), "{text}");
+    assert!(text.starts_with("<memory>"), "{text}");
+
+    // The session file: a System-source message with the memory_addition origin, at the
+    // transcript index right after the user message; and the injected set recorded twice.
+    let session = radian_session::Session::open(env.sessions.join("fixed.jsonl")).unwrap();
+    let history = session.history().unwrap();
+    let addition_at = history
+        .iter()
+        .position(|message| {
+            message
+                .meta()
+                .origin
+                .as_ref()
+                .is_some_and(|origin| origin.get().contains("memory_addition"))
+        })
+        .unwrap_or_else(|| panic!("no addition in {history:?}"));
+    assert_eq!(history[addition_at - 1].text(), "second");
+    assert_eq!(
+        history[addition_at].meta().source,
+        Some(agent_core::InputSource::System),
+        "an addition is never human input (ADR 0005 G2)"
+    );
+    assert!(history[addition_at].text().contains("src/parse.rs"));
+
+    let sets: Vec<Vec<String>> = session
+        .events()
+        .iter()
+        .filter_map(|event| match &event.data {
+            radian_session::EventData::MemoryInjected { records } => Some(
+                records
+                    .iter()
+                    .map(|record| record.id.clone())
+                    .collect::<Vec<String>>(),
+            ),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sets.len(), 2, "only the set changes are written: {sets:?}");
+    // The record the agent saved mid-session is in the second set only.
+    let (code, stdout, stderr) = env.run(&["list", "--json"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let value: Value = serde_json::from_str(stdout.trim()).expect("list --json");
+    let saved = value
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|record| record["content"] == json!("second: the parser lives in src/parse.rs"))
+        .expect("the saved record")
+        .clone();
+    let saved_id = saved["id"].as_str().unwrap().to_owned();
+    assert!(!sets[0].contains(&saved_id), "{sets:?}");
+    assert!(sets[1].contains(&saved_id), "{sets:?}");
+
+    // The addition's content is in the session file (decision 3's accepted cost); the
+    // `MemoryInjected` records still carry ids only.
+    let raw = std::fs::read_to_string(env.sessions.join("fixed.jsonl")).unwrap();
+    assert!(raw.contains("src/parse.rs"), "the addition is in the transcript");
+}
+
+/// ADR 0021: the fixed block is ranked by the session's **first** user
+/// message. `radian exec -p` is one turn built from that prompt, and it appends no addition
+/// (the block already holds what the prompt's own ranking selects).
+#[tokio::test]
+async fn exec_p_ranks_the_block_by_its_prompt_and_appends_nothing() {
+    let env = MemoryEnv::new("mem-first-prompt");
+    let (code, _, stderr) = env.run(&["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let (code, _, stderr) = env
+        .run(&["add", "--key", "parser", "the parser lives in src/parse.rs"])
+        .await;
+    assert_eq!(code, 0, "{stderr}");
+
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                env.ws.to_str().unwrap(),
+                "--session-id",
+                "prompt",
+                "-p",
+                "where is the parser",
+            ],
+            &[
+                ("RADIAN_HOME", env.home.to_str().unwrap()),
+                ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
+            ],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let system = messages_of(&server, 0)[0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(system.contains("src/parse.rs"), "{system}");
+
+    let session = radian_session::Session::open(env.sessions.join("prompt.jsonl")).unwrap();
+    let history = session.history().unwrap();
+    assert!(
+        !history.iter().any(|message| {
+            message
+                .meta()
+                .origin
+                .as_ref()
+                .is_some_and(|origin| origin.get().contains("memory_addition"))
+        }),
+        "a single-turn run appends no addition: {history:?}"
+    );
+}
+/// ADR 0021: `[memory.injection] additions = false` leaves the fixed
+/// block as the only injection — a mid-session save never reaches the transcript.
+#[tokio::test]
+async fn memory_additions_can_be_turned_off_in_the_config() {
+    let env = MemoryEnv::new("mem-additions-off");
+    let (code, _, stderr) = env.run(&["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let config = write_file(
+        &env.dir,
+        "config.toml",
+        "schema_version = 1\n[memory.injection]\nadditions = false\n",
+    );
+
+    let server = MockServer::start(vec![
+        tool_reply(
+            "call_1",
+            "memory_save",
+            r#"{"content":"second: the parser lives in src/parse.rs"}"#,
+        ),
+        text_reply("saved"),
+        text_reply("done"),
+    ])
+    .await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--config",
+                config.to_str().unwrap(),
+                "--workspace",
+                env.ws.to_str().unwrap(),
+                "--session-id",
+                "off",
+                "--yes",
+            ],
+            &[
+                ("RADIAN_HOME", env.home.to_str().unwrap()),
+                ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
+            ],
+        ),
+        "first\nsecond\n",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let system = |n: usize| messages_of(&server, n)[0]["content"].as_str().unwrap().to_owned();
+    assert_eq!(system(0), system(2));
+
+    let session = radian_session::Session::open(env.sessions.join("off.jsonl")).unwrap();
+    let history = session.history().unwrap();
+    assert!(
+        !history.iter().any(|message| {
+            message
+                .meta()
+                .origin
+                .as_ref()
+                .is_some_and(|origin| origin.get().contains("memory_addition"))
+        }),
+        "additions = false appends nothing: {history:?}"
+    );
+    // The saved content is in the transcript only through the `memory_save` tool result (which
+    // echoes it); no injected <memory> block carries it.
+    let raw = std::fs::read_to_string(env.sessions.join("off.jsonl")).unwrap();
+    assert!(!raw.contains("<memory>"), "{raw}");
+}
+
 /// `--yes` allows `memory_save`, and the decision is written to the session audit.
 #[tokio::test]
 async fn memory_save_with_yes_is_allowed_and_audited() {

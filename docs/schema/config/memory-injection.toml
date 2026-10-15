@@ -1,0 +1,19 @@
+# ADR 0021：`[memory.injection]` 是记忆注入的配置面。本修订新增两个键：
+# `additions`（后续轮次的新命中是否作为一条 System 消息追加，默认 true）与
+# `addition_budget`（一次追加的 token 上限，默认 500，整条选取、不截断）。D6 表里其余已知键
+# （`enabled`、`max_tokens`、`global_budget`、`project_budget`、`overflow`）本期仍按文档默认值
+# 解释，读取器把它们记进 skipped（启动行会点名），不拒绝文件。
+schema_version = 1
+
+[model]
+provider = "example"
+base_url = "https://example.com/v1"
+model = "m-1"
+
+[memory.injection]
+additions = false
+addition_budget = 750
+max_tokens = 2000
+global_budget = 500
+project_budget = 1500
+overflow = "ranked"

@@ -21,9 +21,9 @@ use std::sync::{Arc, Mutex};
 
 use agent_core::{
     Agent, AgentEvent, AgentSession, CancelReason, CancellationToken, CompactionFailure,
-    ContextBudget, EventSink, Hooks, IncompleteReason, JournalError, JournalRecord, Message,
-    MessageId, Model, RunError, RunOutcome, RunStatus, SessionError, SteeringHandle, Step,
-    ToolProvider, TranscriptJournal, TurnOptions,
+    ContextBudget, EventSink, Hooks, IncompleteReason, InputSource, JournalError, JournalRecord,
+    Message, MessageId, Model, RunError, RunOutcome, RunStatus, SessionError, SteeringHandle,
+    Step, ToolProvider, TranscriptJournal, TurnOptions,
 };
 use radian_session::{
     EventData, InboxLane, ReadError, RuntimeEvent, Session, SessionJournal, TurnOutcome, TurnReason,
@@ -36,6 +36,16 @@ use crate::config::{ConfigQueue, ConfigSlot, ModelRoute};
 /// the token count, so the host can also say whether the route replays reasoning and the
 /// estimate must count it (ADR 0014 Q4).
 pub type BudgetFor = Arc<dyn Fn(&str, &str) -> Option<ContextBudget> + Send + Sync>;
+
+/// A host seam that adds context to a **user** turn before its first model call (ADR 0021
+/// revision 2 decision 3): the memory addition. It is called with the turn's user text and the
+/// transcript **before** the turn's input is committed, and returns the one message the driver
+/// puts in the inbox's `inject` lane — or `None`, which is the common case.
+///
+/// The driver only calls it for an input whose declared source is [`InputSource::User`], and it
+/// injects with [`InputSource::System`]: the message is context, never human input (ADR 0005
+/// G2). A `None` return or an inbox refusal changes nothing about the turn.
+pub type TurnAdditions = Arc<dyn Fn(&str, &[Message]) -> Option<Message> + Send + Sync>;
 use crate::inbox::{ControlRequest, Inbox, InboxEntry, Lane};
 
 /// Why the driver could not continue.
@@ -132,6 +142,9 @@ pub struct Driver<M: Model, P: ToolProvider, H: Hooks> {
     /// 3). The host shares it so a job-settle notifier can choose the `inject` lane (busy) or
     /// the waking `followup` lane (idle).
     turn_running: Arc<AtomicBool>,
+    /// The host's per-turn addition seam (ADR 0021). `None` keeps the
+    /// behavior a host that never installed one had before.
+    turn_additions: Option<TurnAdditions>,
 }
 
 impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
@@ -217,6 +230,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             budget_for: None,
             turn_budget: None,
             turn_running: Arc::new(AtomicBool::new(false)),
+            turn_additions: None,
             closed: false,
         };
         // D8: resume restores the last recorded change (the model and its budget) before the
@@ -268,6 +282,12 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
     /// the driver moves into its task; the driver sets it around every turn and control run.
     pub fn turn_running_handle(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.turn_running)
+    }
+
+    /// Installs the host's per-turn addition seam (ADR 0021). Set it
+    /// before `run()`; the last one wins.
+    pub fn set_turn_additions(&mut self, additions: TurnAdditions) {
+        self.turn_additions = Some(additions);
     }
 
     /// Overrides the shared flag (a host that wants its own handle).
@@ -399,6 +419,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         let inbox = Arc::clone(&self.inbox);
         let live: Arc<dyn EventSink> = Arc::clone(&self.live);
         let runtime_events = self.runtime_events.clone();
+        let turn_additions = self.turn_additions.clone();
         let mut options = self.options.clone();
         // ADR 0026 D7: a `/model` switch moves the budget with the model. `None` keeps the
         // configured budget, so a session that never switches behaves exactly as before.
@@ -426,9 +447,25 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         let mut admitted: HashSet<MessageId> = HashSet::new();
         let tap = Tap::new(&*live);
 
+        // The addition seam needs the turn's own text and source after the message has moved
+        // into the run (ADR 0021).
+        let input_text = entry.message.text();
+        let input_source = entry.source;
+
         let mut run = self.session.start_turn_with(entry.message, options)?;
         let steering = run.steering_handle();
         let cancellation = run.cancellation_handle();
+        // ADR 0021: a host may add one message to a **user** turn. It
+        // goes into the `inject` lane, so it is a durable input with an id, and the
+        // `drain_steering` below hands it to the core before the turn's first model call —
+        // right after the user message in the transcript. The host's callback sees the
+        // transcript as it is now, which is the dedup ledger. A refused inject is dropped: the
+        // addition is context, never a session fact (ADR 0021 invariant 2).
+        if let (Some(additions), InputSource::User) = (turn_additions.as_ref(), input_source)
+            && let Some(message) = additions(&input_text, run.transcript())
+        {
+            let _ = inbox.inject(message, InputSource::System).await;
+        }
         // Anything already waiting in the next_step lane joins before the first request.
         drain_steering(
             &inbox,

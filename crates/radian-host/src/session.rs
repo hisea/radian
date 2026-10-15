@@ -30,7 +30,10 @@ use radian_session::{SessionCreatedData, SessionJournal};
 use crate::cost::RoutePrice;
 use crate::describe::{Wording, describe, sandbox_word};
 use crate::home::{radian_home, skills_dir, user_home};
-use crate::memory::{InjectionConfig, MemoryHooks, MemoryService, MemoryTools, ProjectState};
+use crate::memory::{
+    InjectionConfig, MemoryHooks, MemoryService, MemoryTools, ProjectState,
+    injection::MemoryInjection,
+};
 use crate::model::SwitchableModel;
 use crate::pending::{
     Answered, PendingQueue, PendingRequest, PendingResponse, QueuedApprover, QueuedPrompter,
@@ -343,6 +346,9 @@ pub struct SessionSetup {
     pub skills_builtin: bool,
     /// `[skills] disabled`: built-in skill names to leave out.
     pub skills_disabled: Vec<String>,
+    /// The memory injection configuration (ADR 0021). The host builds it
+    /// from `[memory.injection]`; `InjectionConfig::default()` is the documented D6 table.
+    pub memory_injection: InjectionConfig,
     /// `true` to resume
     /// The project-trust state this session starts with (ADR 0031 T3). The host resolves it
     /// before `open_session`; `needs_ask` means an interactive host must ask before the first
@@ -926,6 +932,7 @@ pub async fn open_session(
         skills_extra_paths,
         skills_builtin,
         skills_disabled,
+        memory_injection,
         trust,
         resume,
         config_snapshot,
@@ -978,7 +985,7 @@ pub async fn open_session(
             Arc::new(QueuedPrompter::new(Arc::clone(&queue), origin.clone()));
         radian_coding::AskTools::new(prompter)
     });
-    let injection_config = InjectionConfig::default();
+    let injection_config = memory_injection;
     let memory = memory_root
         .as_ref()
         .map(|root| MemoryService::open(&workspace, root));
@@ -1067,12 +1074,16 @@ pub async fn open_session(
     };
     let shared_skills = Arc::new(skills);
     let skills_hooks = Arc::new(SkillsHooks::new(&shared_skills));
-    let memory_hooks = Arc::new(MemoryHooks::new(
+    // ADR 0021: one injection object per session. The fixed block is computed once
+    // (by whichever of the two seams runs first) and the driver's per-turn seam appends later
+    // turns' new hits as one System message through the inbox's inject lane.
+    let injection = MemoryInjection::new(
         memory.clone(),
         Arc::clone(&journal),
         injection_config,
         memory_warning,
-    ));
+    );
+    let memory_hooks = Arc::new(MemoryHooks::from_shared(Arc::clone(&injection)));
     radian_session::trace::took("open/hooks+skills", t0);
     // ADR 0030 R10: pin the repository now, before the model runs. A workspace that is not a
     // git repository does not mount `git_commit` at all.
@@ -1125,7 +1136,9 @@ pub async fn open_session(
         ..AgentConfig::default()
     };
     let facts_hooks = Arc::new(crate::prompt::SessionFactsHooks::new(
-        crate::prompt::session_layer(&workspace, &model_name),
+        workspace.clone(),
+        model_name,
+        Some(Arc::clone(&config_slot)),
     ));
     let agent = Arc::new(
         Agent::new(model, tools)
@@ -1174,6 +1187,9 @@ pub async fn open_session(
     radian_session::trace::took("open/driver-recover", t0);
     driver.set_turn_timeout(turn_timeout);
     driver.set_runtime_events(runtime_events);
+    // ADR 0021: the per-turn memory addition, placed in the inject lane
+    // after the user's turn is claimed and before its first model call.
+    driver.set_turn_additions(crate::memory::injection::addition_seam(Arc::clone(&injection)));
     if let Some(budget_for) = budget_for.clone() {
         driver.set_budget_for(budget_for);
     }

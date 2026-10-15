@@ -94,9 +94,7 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
     ));
 
     // The volatile `<session>` facts (ADR 0036 D1): appended last.
-    let facts = Arc::new(radian_host::prompt::SessionFactsHooks::new(
-        radian_host::prompt::session_layer(&ws, "m-1"),
-    ));
+    let facts = Arc::new(radian_host::prompt::SessionFactsHooks::new(&ws, "m-1", None));
 
     // The production function, called exactly as `open_session` calls it.
     let hooks = session_hooks(permissions, memory, skills_hooks, facts);

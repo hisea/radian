@@ -1191,6 +1191,7 @@ fn run(
                 ),
                 skills_builtin: config.skills.builtin.unwrap_or(true),
                 skills_disabled: config.skills.disabled.clone(),
+                memory_injection: config.memory.injection(),
                 trust: trust_setup,
                 resume: resume.is_some(),
                 config_snapshot: serde_json::json!({
