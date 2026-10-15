@@ -141,6 +141,7 @@ fn fg_source(role: Role) -> Option<&'static str> {
         Role::MermaidEdge => Some("dim"),
         Role::MermaidText => Some("text"),
         Role::MdHeading => Some("mdHeading"),
+        Role::MdHeadingMark => Some("dim"),
         Role::MdLink => Some("mdLink"),
         Role::MdLinkUrl => Some("mdLinkUrl"),
         Role::MdCode => Some("mdCode"),

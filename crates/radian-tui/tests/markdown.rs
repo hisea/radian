@@ -21,6 +21,7 @@ fn ctrl(c: char) -> KeyEvent {
 
 fn modes(reasoning: ReasoningMode) -> DisplayModes {
     DisplayModes {
+        glyphs: radian_tui::footer::Glyphs::Unicode,
         reasoning,
         tools: ToolDisplay {
             fold: ToolFold::Expanded,
@@ -90,15 +91,15 @@ fn the_block_kinds_and_inline_roles_render() {
     assert!(text.contains("italic"), "{text}");
     assert!(text.contains("code"), "{text}");
     assert!(text.contains("link (https://x.example)"), "{text}");
-    assert!(text.contains("• one"), "{text}");
-    assert!(text.contains("  • nested"), "nested indent: {text}");
-    assert!(text.contains("│ quoted"), "{text}");
+    assert!(text.contains("- one"), "{text}");
+    assert!(text.contains("  - nested"), "nested indent: {text}");
+    assert!(text.contains("▏ quoted"), "{text}");
     assert!(text.contains('─'), "the rule: {text}");
     // The roles' colors come from the theme.
     let heading = style_of(&terminal, "Title").expect("heading");
     let link = style_of(&terminal, "link").expect("link");
     let code = style_of(&terminal, "code").expect("code");
-    let bullet = style_of(&terminal, "•").expect("bullet");
+    let bullet = style_of(&terminal, "-").expect("bullet");
     assert_eq!(heading.fg, app.theme.md_heading.fg);
     assert_eq!(link.fg, app.theme.md_link.fg);
     assert_eq!(code.fg, app.theme.md_code.fg);
@@ -141,7 +142,7 @@ fn a_streaming_half_parses() {
     let mut app = App::new("m", "s");
     assistant(&mut app, "- one\n- tw");
     let text = screen(&render(&mut app, 40, 12));
-    assert!(text.contains("• one") && text.contains("• tw"), "{text}");
+    assert!(text.contains("- one") && text.contains("- tw"), "{text}");
     let mut app = App::new("m", "s");
     assistant(&mut app, "| a | b |\n| --- | --- |\n| 1 |");
     let text = screen(&render(&mut app, 40, 12));
@@ -607,4 +608,86 @@ fn a_long_ordered_list_item_wraps_in_a_wide_window() {
             );
         }
     }
+}
+
+// ---- ADR 0035: the sample snapshot and the code fence ----
+
+/// A code block shows its fence line (weak) as its title and end.
+#[test]
+fn a_code_block_shows_its_fence() {
+    let mut app = App::new("m", "s");
+    assistant(&mut app, "```rust\nlet x = 1;\n```\n");
+    let terminal = render(&mut app, 60, 12);
+    let text = screen(&terminal);
+    assert!(text.contains("```rust"), "the opening fence: {text}");
+    assert!(text.contains("let x = 1;"), "{text}");
+    // The fence uses the weak role (dim).
+    let fence = style_of(&terminal, "```rust").expect("the fence");
+    assert_eq!(fence.fg, app.theme.truncation.fg, "the fence is weak");
+}
+
+/// The sample Markdown covering every element at 80 and 120 columns, and the ascii glyph set.
+#[test]
+fn the_sample_markdown_snapshot() {
+    let sample = "# 标题 Heading\n\n\
+        A **bold** *italic* ~~struck~~ `code` [link](https://x) word.\n\n\
+        - one\n  - nested\n- two\n\n\
+        1. first\n2. second\n\n\
+        - [ ] todo\n- [x] done\n\n\
+        > quoted 引用\n\n\
+        ---\n\n\
+        | h1 | h2 |\n| --- | --- |\n| a | b |\n| c | d |\n\n\
+        ```rust\nlet x = 1;\n```\n\n\
+        a<br>b\n\n<blockquote>html quote</blockquote>\n";
+    for width in [80u16, 120] {
+        let mut app = App::new("m", "s");
+        assistant(&mut app, sample);
+        let text = screen(&render(&mut app, width, 44));
+        for needle in [
+            // The CJK characters are wide, so the screen model has a cell between them;
+            // assert the parts, not the contiguous string.
+            "# ",
+            "Heading",
+            "标",
+            "题",
+            "bold",
+            "struck",
+            "code",
+            "link (https://x)",
+            "- one",
+            "  - nested",
+            "1. first",
+            "☐ todo",
+            "☑ done",
+            "▏ quoted",
+            "引",
+            "┌",
+            "```rust",
+            "let x = 1;",
+            "html quote",
+        ] {
+            assert!(
+                text.contains(needle),
+                "width {width}: missing {needle:?}:\n{text}"
+            );
+        }
+        // The strike's markup is not shown; the blockquote's tags are stripped.
+        assert!(!text.contains("~~struck~~"), "{text}");
+        assert!(!text.contains("<blockquote>"), "{text}");
+    }
+    // The ascii glyph set: the same elements with `+ - |`, `[ ]`/`[x]` and `| `.
+    let mut app = App::new("m", "s");
+    app.apply_footer(&radian_host::config::TuiFooterConfig {
+        glyphs: Some("ascii".to_string()),
+        ..Default::default()
+    });
+    assistant(&mut app, sample);
+    let text = screen(&render(&mut app, 80, 44));
+    assert!(
+        text.contains("[ ] todo") && text.contains("[x] done"),
+        "{text}"
+    );
+    assert!(text.contains("| quoted"), "{text}");
+    assert!(text.contains("+--"), "the ascii table: {text}");
+    assert!(!text.contains('▏'), "{text}");
 }
