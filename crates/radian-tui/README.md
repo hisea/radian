@@ -223,7 +223,7 @@ find_next = ["ctrl-g", "shift-enter"]
 | `session` | `{id}` | the session id |
 | `context` | `{bar}`, `{percent}`, `{used}`, `{budget}`, `{auto}` | `{used}/{budget}`; `{auto}` is `⟲` (`auto` under ascii) while auto-compaction is on |
 | `context_bar` | `{bar}`, `{percent}`, `{used}`, `{budget}`, `{auto}` | `{bar} {percent}%`, `width` 10, `fill` `━`, `empty` `─` |
-| `tokens` | `{in}`, `{out}`, `{cache}` | `↑{in} ↓{out} ⛁{cache}`; numbers are `19K`-style, `-` when a provider never reported one |
+| `tokens` | `{in}`, `{out}`, `{cache}`, `{cache_write}` | `↑{in} ↓{out} ⛁{cache}`; numbers are `19K`-style, `-` when a provider never reported one. `{cache_write}` (ADR 0027) is a cache **write**, billed at its own rate but deliberately **not** in the default format, so the row does not grow |
 | `cost` | `{usd}` | the session's accumulated fee: each call priced at the route's price **when it arrived** (`radian_host::cost`), so a `/model` switch does not re-price history. The cached tokens are billed once at the cache rate (`uncached_input()`). Hidden until some call had something to bill and when the catalog has no price — never a fabricated number, never `$0.00` |
 | `speed` | `{speed}` | `42.1 tok/s`, the last finished generation's reported output over its measured time |
 | `elapsed` | `{elapsed}` | `16.2s`, live while a generation runs, the last one when idle, empty after a resume |

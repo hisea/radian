@@ -735,8 +735,8 @@ fn an_all_zero_response_hides_the_cost() {
     assert_eq!(row(&terminal, 11).trim_end(), "$3.00");
 }
 
-/// The `tokens` item shows the cache-read total (ADR 0027), and `-` when the
-/// provider never reported one (never a fabricated 0).
+/// ADR 0027: the cache-read total (ADR 0027 adds `{cache_write}`, off by
+/// default), and `-` when the provider never reported one (never a fabricated 0).
 #[test]
 fn the_cache_tokens_are_shown() {
     let mut app = App::new("mock", "s");
@@ -761,6 +761,61 @@ fn the_cache_tokens_are_shown() {
     none.apply_footer(&rows(vec![item("tokens")]));
     let terminal = render(&mut none, 80, 12);
     assert!(row(&terminal, 11).contains('-'), "{}", row(&terminal, 11));
+}
+
+/// F8 (ADR 0027): the `tokens` item has a `{cache_write}` placeholder, because a
+/// cache write is billed at its own (often higher) rate and the `{cache}` total does not show
+/// it. It is available but **not** in the default format: the numbers row must not get wider by
+/// default.
+#[test]
+fn the_cache_write_tokens_show_only_when_the_format_asks_for_them() {
+    let mut app = App::new("mock", "s");
+    app.projection.add_usage(&agent_core::ModelUsage {
+        input: Some(10_000),
+        output: Some(760),
+        cache_read: Some(33_000),
+        cache_write: Some(12_000),
+        ..Default::default()
+    });
+
+    // The default format: the cache write is nowhere on the line.
+    app.apply_footer(&rows(vec![item("tokens")]));
+    let terminal = render(&mut app, 80, 12);
+    let line = row(&terminal, 11);
+    assert!(line.contains("33K"), "the cache read: {line:?}");
+    assert!(
+        !line.contains("12K"),
+        "the default format must not grow a cache-write field: {line:?}"
+    );
+
+    // A format that asks for it gets the number, and the config parses **without a warning**
+    // (the placeholder list is what validates a format at startup).
+    let warnings = app.apply_footer(&rows(vec![TuiFooterItemConfig {
+        id: "tokens".to_string(),
+        format: Some("{cache}/{cache_write}".to_string()),
+        ..Default::default()
+    }]));
+    assert!(
+        warnings.is_empty(),
+        "`{{cache_write}}` is a known placeholder for `tokens`: {warnings:?}"
+    );
+    let terminal = render(&mut app, 80, 12);
+    assert_eq!(row(&terminal, 11).trim_end(), "33K/12K");
+
+    // A provider that never reported a write shows `-`, never a fabricated 0.
+    let mut none = App::new("mock", "s");
+    none.projection.add_usage(&agent_core::ModelUsage {
+        input: Some(10_000),
+        cache_read: Some(33_000),
+        ..Default::default()
+    });
+    none.apply_footer(&rows(vec![TuiFooterItemConfig {
+        id: "tokens".to_string(),
+        format: Some("{cache_write}".to_string()),
+        ..Default::default()
+    }]));
+    let terminal = render(&mut none, 80, 12);
+    assert_eq!(row(&terminal, 11).trim_end(), "-");
 }
 
 /// The `git_branch` item shows the change counts from the contributor store: `{dirty}` is the

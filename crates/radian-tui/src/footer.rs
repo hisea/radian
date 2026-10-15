@@ -330,7 +330,7 @@ fn item_placeholders(id: &str) -> &'static [&'static str] {
         "session" => &["id"],
         "context" => &["bar", "percent", "used", "budget", "auto"],
         "context_bar" => &["bar", "percent", "used", "budget", "auto"],
-        "tokens" => &["in", "out", "cache"],
+        "tokens" => &["in", "out", "cache", "cache_write"],
         "speed" => &["speed"],
         "elapsed" => &["elapsed"],
         "cost" => &["usd"],
@@ -888,6 +888,16 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
                     "cache",
                     session
                         .usage_cache_read()
+                        .map_or_else(|| "-".to_string(), crate::timing::format_tokens),
+                ),
+                // F8 (ADR 0027): the cache-**write** total. It is billed at its own
+                // (often higher) rate, so it is available to a format that wants to show it —
+                // but it is deliberately **not** in the default format, which stays as narrow
+                // as it was (see the "cache_write shows only when asked for" test).
+                (
+                    "cache_write",
+                    session
+                        .usage_cache_write()
                         .map_or_else(|| "-".to_string(), crate::timing::format_tokens),
                 ),
             ],
