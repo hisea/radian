@@ -401,6 +401,54 @@ fn the_usage_cache_semantics_fixture_reads_back_field_for_field() {
     );
 }
 
+/// ADR 0037 decision 5: the background-job start/settle audit records round-trip and never
+/// enter the transcript. Rust half of the differential check with `check-fixtures.sh`.
+#[test]
+fn the_background_jobs_fixture_reads_back_field_for_field() {
+    let session = Session::open(fixture("background-jobs.jsonl")).unwrap();
+    assert!(session.skipped().is_empty());
+
+    let starts: Vec<(&str, &str, &str)> = session
+        .events()
+        .iter()
+        .filter_map(|event| match &event.data {
+            EventData::BackgroundJobStarted {
+                job_id,
+                command,
+                output,
+            } => Some((job_id.as_str(), command.as_str(), output.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        starts,
+        vec![
+            ("job-1", "cargo test --workspace", ".radian/jobs/job-1.out"),
+            ("job-2", "sleep 600", ".radian/jobs/job-2.out"),
+        ]
+    );
+    let settles: Vec<(&str, &str, u64)> = session
+        .events()
+        .iter()
+        .filter_map(|event| match &event.data {
+            EventData::BackgroundJobSettled {
+                job_id,
+                state,
+                duration_ms,
+            } => Some((job_id.as_str(), state.as_str(), *duration_ms)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(settles, vec![("job-1", "exited 0", 1200)]);
+
+    // Audit only: the transcript is the one message, unchanged.
+    assert_eq!(session.history().unwrap().len(), 1);
+    assert_eq!(
+        session.history().unwrap(),
+        recover(&session.journal_records()).unwrap()
+    );
+}
+
 /// ADR 0022 fixtures: the reader accepts a parent with `SessionForked` and a child with
 /// `SessionCreated.parent`; the two seqs agree. Rust half of the differential check with
 /// `docs/schema/check-fixtures.sh`.

@@ -15,7 +15,7 @@ use agent_core::{
     ToolProvider, ToolSession,
 };
 use common::TempDir;
-use radian_coding::{CodingSession, CodingTools};
+use radian_coding::{CodingSession, CodingTools, JobEvent};
 use radian_sandbox::{Sandbox, SandboxMode, SandboxPolicy};
 use serde_json::{Value, json};
 
@@ -238,6 +238,122 @@ async fn a_background_job_returns_at_once_and_job_output_returns_increments() {
     assert!(!done.contains("first"), "the increment only: {done}");
 
     session.shutdown_jobs();
+}
+
+// ---------- 2b. a waited settle is not notified ----------
+
+/// A settle a `job_output wait=true` is blocked on is the model's already, so the registry
+/// marks it `notify: false` (ADR 0037 decision 4). The waiter count is what carries that.
+#[tokio::test]
+async fn a_waited_settle_is_not_notified() {
+    let dir = TempDir::new("jobs-waited");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+    let session = tools.open_session().await.expect("session");
+    let mut events = session.jobs().subscribe();
+
+    // The job ends on its own shortly, while the wait is blocked.
+    let (id, _) = start(&session, "sleep 0.3; echo done", None).await;
+    let wait = exec(
+        &session,
+        "job_output",
+        json!({"job_id": id, "wait": true, "timeout_ms": 60_000}),
+    );
+    let settle = async {
+        loop {
+            match events.recv().await {
+                Ok(JobEvent::Settled { notify, .. }) => return notify,
+                Ok(JobEvent::Started { .. }) => continue,
+                Err(error) => panic!("no settle event: {error}"),
+            }
+        }
+    };
+    let (result, notify) = tokio::join!(wait, settle);
+    let text = output_text(&result.expect("the wait returns"));
+    assert!(text.contains("[status: exited 0]"), "{text}");
+    assert!(
+        !notify,
+        "a settle a wait already returned must not be notified again"
+    );
+}
+
+// ---------- 2c. the notify flag per settle kind ----------
+
+/// The `notify` flag of the next settle on `events` (skipping the start), bounded.
+async fn next_settle_notify(events: &mut tokio::sync::broadcast::Receiver<JobEvent>) -> bool {
+    loop {
+        match tokio::time::timeout(Duration::from_secs(15), events.recv()).await {
+            Ok(Ok(JobEvent::Settled { notify, .. })) => return notify,
+            Ok(Ok(JobEvent::Started { .. })) => continue,
+            Ok(Err(error)) => panic!("no settle event: {error}"),
+            Err(_) => panic!("timed out waiting for a settle event"),
+        }
+    }
+}
+
+/// The registry computes `notify` itself, so each settle kind is pinned here rather than in a
+/// host test that builds the flag by hand (ADR 0037 decisions 2, 4 and 6).
+#[tokio::test]
+async fn the_notify_flag_follows_the_settle_kind() {
+    // A natural exit notifies.
+    let dir = TempDir::new("jobs-notify-natural");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+    let session = tools.open_session().await.expect("session");
+    let mut events = session.jobs().subscribe();
+    let (_id, _) = start(&session, "echo done", None).await;
+    assert!(
+        next_settle_notify(&mut events).await,
+        "a natural exit notifies"
+    );
+
+    // `job_kill` does not.
+    let mut events = session.jobs().subscribe();
+    let (id, _) = start(&session, "echo $$ > k.pid; sleep 600", None).await;
+    wait_for_pid(&root, "k.pid").await;
+    exec(&session, "job_kill", json!({"job_id": id}))
+        .await
+        .unwrap();
+    assert!(
+        !next_settle_notify(&mut events).await,
+        "job_kill must not notify"
+    );
+
+    // A timeout notifies (decision a: the model set it but did not ask to kill the job).
+    let mut events = session.jobs().subscribe();
+    let (_id, _) = start(&session, "echo $$ > t.pid; sleep 600", Some(1)).await;
+    assert!(next_settle_notify(&mut events).await, "a timeout notifies");
+}
+
+/// A session-end cleanup is a kill: the settle reads `killed` and `notify: false`
+/// (ADR 0037 decision 4). Without `kill_all` marking the termination the settle would be
+/// `signal 9` and notify.
+#[tokio::test]
+async fn a_session_cleanup_settle_is_not_notified() {
+    let dir = TempDir::new("jobs-notify-cleanup");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+    let session = tools.open_session().await.expect("session");
+    let mut events = session.jobs().subscribe();
+    let (_id, _) = start(&session, "echo $$ > s.pid; sleep 600", None).await;
+    wait_for_pid(&root, "s.pid").await;
+    session.shutdown_jobs();
+
+    loop {
+        match tokio::time::timeout(Duration::from_secs(15), events.recv()).await {
+            Ok(Ok(JobEvent::Settled { state, notify, .. })) => {
+                assert_eq!(state.label(), "killed", "a cleanup settles as killed");
+                assert!(!notify, "a session-exit settle must not notify");
+                break;
+            }
+            Ok(Ok(JobEvent::Started { .. })) => continue,
+            Ok(Err(error)) => panic!("no settle event: {error}"),
+            Err(_) => panic!("timed out waiting for a settle event"),
+        }
+    }
 }
 
 // ---------- 2. wait timeout ----------
@@ -520,6 +636,28 @@ async fn session_end_cleanup_kills_every_running_group() {
     );
     assert!(!group_alive(a), "group {a} still has members");
     assert!(!group_alive(b), "group {b} still has members");
+}
+
+/// Dropping the registry (the panic-path net, ADR 0037 decision 6) kills every running group.
+/// The pty test `pty_panic_path_does_not_orphan_a_background_job` covers the whole app; this
+/// pins the mechanism directly.
+#[tokio::test]
+async fn dropping_the_registry_kills_every_running_group() {
+    let dir = TempDir::new("jobs-drop");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+    let session = tools.open_session().await.expect("session");
+
+    let (_, _) = start(&session, "echo $$ > drop.pid; sleep 600", None).await;
+    let pid = wait_for_pid(&root, "drop.pid").await;
+
+    drop(session);
+    assert!(
+        gone_within(pid, Duration::from_secs(10)).await,
+        "the job (pid {pid}) survived the registry drop"
+    );
+    assert!(!group_alive(pid), "group {pid} still has members");
 }
 
 // ---------- 7. job_list ----------

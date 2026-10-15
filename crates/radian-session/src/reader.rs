@@ -29,7 +29,7 @@ pub(crate) const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 
 /// The v1 events known to a schema-v1 reader (ADR 0006 §4). Anything else is unknown and
 /// handled by the `critical` policy.
-pub(crate) const KNOWN_EVENTS: [&str; 26] = [
+pub(crate) const KNOWN_EVENTS: [&str; 28] = [
     "SessionCreated",
     "InboxEnqueued",
     "InputClaimed",
@@ -56,6 +56,8 @@ pub(crate) const KNOWN_EVENTS: [&str; 26] = [
     "ProjectTrustChanged",
     "UserBash",
     "GitCommitted",
+    "BackgroundJobStarted",
+    "BackgroundJobSettled",
 ];
 
 /// The parsed body of one known event. Events this slice does not interpret (for example
@@ -196,6 +198,21 @@ pub enum EventData {
         commit: String,
         branch: String,
         files: usize,
+    },
+    /// A background `shell` job started (ADR 0037 decision 5). Typed for an exact round trip;
+    /// audit only, never a transcript record. A start with no settle after a crash is how the
+    /// host reports an orphan.
+    BackgroundJobStarted {
+        job_id: String,
+        command: String,
+        output: String,
+    },
+    /// A background `shell` job settled (ADR 0037 decision 5). Typed for an exact round trip;
+    /// audit only, never a transcript record.
+    BackgroundJobSettled {
+        job_id: String,
+        state: String,
+        duration_ms: u64,
     },
     /// A known event this crate does not interpret (`SessionCreated`) or an unknown
     /// non-critical event.
@@ -673,6 +690,22 @@ impl LineScanner {
                     files: d.files,
                 }
             }
+            "BackgroundJobStarted" => {
+                let d: BackgroundJobStartedData = data_of(raw, self.lineno, path)?;
+                EventData::BackgroundJobStarted {
+                    job_id: d.job_id,
+                    command: d.command,
+                    output: d.output,
+                }
+            }
+            "BackgroundJobSettled" => {
+                let d: BackgroundJobSettledData = data_of(raw, self.lineno, path)?;
+                EventData::BackgroundJobSettled {
+                    job_id: d.job_id,
+                    state: d.state,
+                    duration_ms: d.duration_ms,
+                }
+            }
             "InboxEnqueued" => {
                 let d: InboxEnqueuedData = data_of(raw, self.lineno, path)?;
                 EventData::InboxEnqueued {
@@ -1002,6 +1035,8 @@ fn record_from_event(event: &SessionEvent) -> Option<JournalRecord> {
         | EventData::ProjectTrustChanged { .. }
         | EventData::UserBash { .. }
         | EventData::GitCommitted { .. }
+        | EventData::BackgroundJobStarted { .. }
+        | EventData::BackgroundJobSettled { .. }
         | EventData::Other(_) => None,
     }
 }
@@ -1195,6 +1230,20 @@ struct GitCommittedData {
     commit: String,
     branch: String,
     files: usize,
+}
+
+#[derive(Deserialize)]
+struct BackgroundJobStartedData {
+    job_id: String,
+    command: String,
+    output: String,
+}
+
+#[derive(Deserialize)]
+struct BackgroundJobSettledData {
+    job_id: String,
+    state: String,
+    duration_ms: u64,
 }
 
 /// Feeds one record to the shared replacement state machine, mapping a rejection to the

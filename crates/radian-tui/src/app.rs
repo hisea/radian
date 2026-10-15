@@ -875,6 +875,9 @@ pub enum Effect {
     /// List the discovered skills (`/skills`, ADR 0025 S3) as notices. The answer is
     /// [`Input::SessionDone`].
     ListSkills,
+    /// `/jobs` (ADR 0037 decision 4): list the session's background jobs, or stop one/all. The
+    /// loop runs it (the registry lives in the host) and answers with [`Input::SessionDone`].
+    Jobs(command::JobsRequest),
     /// Write the transcript selection to the system clipboard (`tui.clipboard` picks the
     /// transport). The loop runs it and answers with [`Input::ClipboardDone`]: OSC 52 has no
     /// receipt, and `pbcopy` can fail — the loop owns both facts, `update` only owns the text.
@@ -993,6 +996,7 @@ impl PartialEq for Effect {
                 },
             ) => an == bn && aa == ba && as_ == bs,
             (ListSkills, ListSkills) => true,
+            (Jobs(a), Jobs(b)) => a == b,
             (Theme { name: a }, Theme { name: b }) => a == b,
             (Inject(a), Inject(b)) => a == b,
             (CancelBash, CancelBash) => true,
@@ -3846,6 +3850,7 @@ impl App {
             } => self.begin_bash(command, exclude_from_context),
             // `/skills`: the host lists the discovered skills as notices.
             command::Outcome::Skills => UpdateResult::effect(Effect::ListSkills),
+            command::Outcome::Jobs(request) => UpdateResult::effect(Effect::Jobs(request)),
             command::Outcome::Message => UpdateResult::none(),
         }
     }

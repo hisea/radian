@@ -189,3 +189,23 @@ J7 是评审发现的洞：去掉 `signal_group(pid, SIGKILL)` 后原 9 个测�
 `exited 0` 后断言孙子进程没了。同一变异下也观察到：孙子进程攥着 stdout/stderr，reader 的 EOF
 要等 `READER_GRACE`（两个流各 2 s），所以 settle 被推迟约 4 s（测试 14.05 s vs 修好后 0.02 s）；
 正确代码里先杀组、管道随即关闭，settle 不延迟。
+
+## bg-jobs-2：完成通知、journal、/jobs、崩溃（ADR 0037 切片 3-4，2026-10-16）
+
+Base `eb7ec96`（N2/N5/N6/N7）、`cefd46e`（N8/N9）· 一次性 detached worktree `/tmp/bg2-mut`、`/tmp/bg2b-mut`
+（跑完 `git worktree remove --force`）。
+每个变异用 `cargo test -p <pkg> --test <target> --no-fail-fast -- <test> --exact`（会重新编译），
+还原后 `git status --short` 为空（只留未跟踪的备份与脚本，随 worktree 一起删掉）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| N2 | settle 的 `notify` 忽略 `waiters`（被 `job_output wait=true` 等到的 settle 又通知一次） | `jobs::a_waited_settle_is_not_notified` | ✅ |
+| N5 | `kill_all` 只杀第一个（session-end/`/jobs kill all` 留下其余的） | `jobs::session_end_cleanup_kills_every_running_group` | ✅ |
+| N6 | `Drop for Jobs` 变成 no-op（panic 路径不清理） | `jobs::dropping_the_registry_kills_every_running_group` | ✅ |
+| N7 | 前台 timeout 消息去掉 `background: true` 的提示 | `shell::a_timeout_kills_the_whole_process_group` | ✅ |
+| N8 | `notify` 计算忽略 `Termination::Killed`（被 kill 的 job 也通知） | `jobs::the_notify_flag_follows_the_settle_kind` | ✅ |
+| N9 | `kill_all` 不设 `termination = Killed`（session-end settle 读成 `signal 9` 并通知） | `jobs::a_session_cleanup_settle_is_not_notified` | ✅ |
+
+6/6 抓住。N6 另有端到端 `radian-tui` 的
+`pty_panic_path_does_not_orphan_a_background_job`（exit 101 + 组为空）覆盖；那里用
+`--panic-with-background-job` 钩子先起 job 再 panic。

@@ -87,7 +87,9 @@ pub(crate) fn spec(mode: SandboxMode) -> ToolSpec {
              capped: past the budget the start and the end are kept and the middle is \
              replaced by a marker naming the discarded bytes (the end is always kept, \
              because that is where a failing command's error is). The process group is \
-             killed on timeout or cancellation. Use `cwd` (workspace-relative) to run \
+             killed on timeout or cancellation. The timeout is clamped to the configured \
+             maximum (600 s by default); for a command that needs longer use `background: \
+             true`, which has no default timeout. Use `cwd` (workspace-relative) to run \
              somewhere other than the workspace root. Set `background: true` for a command \
              that outlives the foreground timeout: it returns at once with a job id and an \
              output file, and the three `job_*` tools read, list and stop it. Background jobs \
@@ -722,7 +724,9 @@ fn report(
     text.push_str(&format!("$ {command}\n"));
     if outcome.timed_out {
         text.push_str(&format!(
-            "[timed out after {timeout:?}; the process group was killed]\n"
+            "[timed out after {timeout:?}; the process group was killed. For a command that \
+             needs longer, use `background: true` (no default timeout) and `job_output` with \
+             `wait: true`.\n"
         ));
     }
     if outcome.cancelled {

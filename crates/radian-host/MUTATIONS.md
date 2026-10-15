@@ -682,3 +682,16 @@ after); the mutation was restored with `git checkout --`, `git status --short` e
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | RF1-FA-F | pass the path list to `git check-attr` as argv again | caught (rc=101, `Argument list too long`) | `a_large_repository_does_not_hit_the_argument_limit` |
+## bg-jobs-2：job 通知的 lane、唤醒上限与孤儿扫描（ADR 0037 切片 3-4，2026-10-16）
+
+Base `eb7ec96` · 一次性 detached worktree `/tmp/bg2-mut`（跑完 `git worktree remove --force`）。
+变异用 `cargo test -p radian-host --test job_notify --no-fail-fast -- <test> --exact`，还原后干净。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| N1 | busy/idle 两条 lane 对调（busy 唤醒、idle 注入） | `busy_injects_and_idle_wakes` | ✅ |
+| N3 | 唤醒上限不检查（`< u32::MAX`） | `the_wake_cap_degrades_to_inject_and_a_user_message_resets_it` | ✅ |
+| N4 | `orphan_jobs` 去掉 settled 过滤（已结束的 job 被当成孤儿上报） | `orphan_jobs_reports_a_start_without_a_settle` | ✅ |
+
+3/3 抓住。N4 是「孤儿被重新上报/重跑」这条的最近可测变异：设计上恢复只**上报一次**、绝不重跑
+（ADR 0037 决定 6），代码里没有重跑路径，所以没有「真的重跑」的单行变异。

@@ -248,6 +248,17 @@ pub trait SessionFacade: Send + Sync {
     /// Appends one durable `UserBash` audit record (ADR 0033). Both `!` and `!!` call it; the
     /// record is audit-only and never replayed.
     fn record_user_bash(&self, record: &UserBashRecord);
+
+    /// The session's background jobs (`/jobs`, ADR 0037 decision 4). Empty for a host with no
+    /// coding tools.
+    fn jobs(&self) -> Vec<radian_coding::JobSummary>;
+
+    /// Stop one background job (`/jobs kill <id>`). `Err` is a notice (an unknown id, or a
+    /// host with no jobs).
+    fn kill_job(&self, id: &str) -> Result<(), String>;
+
+    /// Stop every running background job (`/jobs kill all`).
+    fn kill_all_jobs(&self);
 }
 
 /// How the driver task ended.
@@ -450,6 +461,11 @@ pub struct LocalSession {
     /// completion and `/skill:<name>` expansion; the prompt hook and the `skill` tool share the
     /// same `Arc`.
     skills: Arc<Vec<Skill>>,
+    /// The background-job notifier (ADR 0037 slices 3-4). `None` for a host with no coding
+    /// tools. The host calls [`JobNotifier::reset_wakes`] when a user message arrives.
+    job_notifier: Option<Arc<crate::job_notify::JobNotifier>>,
+    /// The background-job registry, for `/jobs` (ADR 0037 decision 4).
+    jobs: Option<Arc<radian_coding::Jobs>>,
     /// The project-trust state (ADR 0031 T3). Interior mutability: the startup prompt resolves
     /// it after `open_session` and the startup line reads it.
     trust: Mutex<trust::Setup>,
@@ -485,6 +501,12 @@ impl LocalSession {
     /// The journal, for host work that reads the session file (`/export`, `/sessions`).
     pub fn journal(&self) -> &Arc<SessionJournal> {
         &self.journal
+    }
+
+    /// The background-job registry (ADR 0037). The panic-path test hook starts a job through
+    /// it; `/jobs` uses the facade's `jobs()`/`kill_job()` instead.
+    pub fn jobs_registry(&self) -> Option<Arc<radian_coding::Jobs>> {
+        self.jobs.clone()
     }
 
     pub fn projection(&self) -> &Arc<SessionProjection> {
@@ -748,6 +770,26 @@ impl SessionFacade for LocalSession {
         ));
     }
 
+    fn jobs(&self) -> Vec<radian_coding::JobSummary> {
+        self.jobs
+            .as_ref()
+            .map(|jobs| jobs.list())
+            .unwrap_or_default()
+    }
+
+    fn kill_job(&self, id: &str) -> Result<(), String> {
+        match &self.jobs {
+            Some(jobs) => jobs.stop(id).map(|_| ()).map_err(|error| error.message),
+            None => Err("this session has no background jobs".to_owned()),
+        }
+    }
+
+    fn kill_all_jobs(&self) {
+        if let Some(jobs) = &self.jobs {
+            jobs.kill_all();
+        }
+    }
+
     /// Re-validates the capability, then runs the command. The check is here as well as in the
     /// UI: a facade whose list the UI ignored still refuses.
     fn command(&self, command: SessionCommand) -> Result<(), CommandRefused> {
@@ -762,6 +804,10 @@ impl SessionFacade for LocalSession {
                 // before it starts; an unset source is treated as non-human and denied.
                 self.hooks
                     .set_turn_source(Some(agent_core::InputSource::User));
+                // A user message resets the job-notification wake budget (ADR 0037 decision 3).
+                if let Some(notifier) = &self.job_notifier {
+                    notifier.reset_wakes();
+                }
                 self.runtime
                     .block_on(self.inbox.followup(text, agent_core::InputSource::User))
                     .map(|_| ())
@@ -770,6 +816,9 @@ impl SessionFacade for LocalSession {
             SessionCommand::Steer(text) => {
                 self.hooks
                     .set_turn_source(Some(agent_core::InputSource::User));
+                if let Some(notifier) = &self.job_notifier {
+                    notifier.reset_wakes();
+                }
                 self.runtime
                     .block_on(self.inbox.steer(text, agent_core::InputSource::User))
                     .map(|_| ())
@@ -780,6 +829,9 @@ impl SessionFacade for LocalSession {
                 // starts a turn; the source is `User` (the human typed the command).
                 self.hooks
                     .set_turn_source(Some(agent_core::InputSource::User));
+                if let Some(notifier) = &self.job_notifier {
+                    notifier.reset_wakes();
+                }
                 self.runtime
                     .block_on(self.inbox.inject(message, agent_core::InputSource::User))
                     .map(|_| ())
@@ -912,7 +964,7 @@ pub async fn open_session(
         tier.sandbox_mode(),
         sandbox.as_ref().map(Sandbox::backend_name),
     );
-    let coding = build_coding_tools(coding_root.as_deref(), sandbox)?;
+    let (coding, jobs) = build_coding_tools(coding_root.as_deref(), sandbox)?;
     // ADR 0024 Q5: `ask_user` is mounted whenever a human is there to answer, **whether or not**
     // there are coding tools. It is its own provider, so a host without `--workspace` still
     // advertises it. `None` is what the model sees as "no such tool".
@@ -1124,6 +1176,34 @@ pub async fn open_session(
     // fold the same journal a second time for its initial view.
     let recovered_history = driver.take_recovered_history().unwrap_or_default();
 
+    // ADR 0037 slices 3-4: the job notifier. The driver shares its "turn in flight" flag, so
+    // the notifier can choose the `inject` lane (busy) or the waking `followup` lane (idle).
+    // It writes the durable start/settle records and sends the completion System message.
+    let turn_running = driver.turn_running_handle();
+    let job_notifier = jobs.as_ref().map(|jobs| {
+        let notifier = crate::job_notify::JobNotifier::new(
+            Arc::clone(jobs),
+            Arc::clone(&inbox),
+            Arc::clone(&journal),
+            Arc::clone(&turn_running),
+        );
+        notifier.spawn(&runtime);
+        notifier
+    });
+
+    // ADR 0037 decision 6: a start with no settle after a crash is reported once as unknown
+    // and never re-run. Injected (no wake), so the model sees it on the next turn.
+    if let Some(parsed) = parsed.as_ref() {
+        for (id, command) in crate::job_notify::orphan_jobs(parsed) {
+            let _ = inbox
+                .inject(
+                    crate::job_notify::orphan_message(&id, &command),
+                    agent_core::InputSource::System,
+                )
+                .await;
+        }
+    }
+
     // The config queue is owned by the driver; the facade only pushes to it, so clone the
     // handle before the driver moves into its task.
     let config_queue = Arc::clone(driver.config_queue());
@@ -1206,6 +1286,8 @@ pub async fn open_session(
         queue,
         memory,
         skills: shared_skills,
+        job_notifier,
+        jobs,
         trust: Mutex::new(trust),
         runtime,
         driver: DriverTask {
@@ -1278,19 +1360,25 @@ fn open_journal(
 fn build_coding_tools(
     workspace: Option<&Path>,
     sandbox: Option<Sandbox>,
-) -> Result<Option<CodingTools>, SessionError> {
+) -> Result<(Option<CodingTools>, Option<Arc<radian_coding::Jobs>>), SessionError> {
     match (workspace, sandbox) {
         (Some(dir), Some(sandbox)) => {
-            CodingTools::with_sandbox(dir, sandbox)
-                .map(Some)
-                .map_err(|error| {
-                    SessionError::Message(format!("--workspace {}: {error}", dir.display()))
-                })
+            let tools = CodingTools::with_sandbox(dir, sandbox).map_err(|error| {
+                SessionError::Message(format!("--workspace {}: {error}", dir.display()))
+            })?;
+            // The host creates the registry (from the canonical root) so it can subscribe to
+            // job lifecycle notices and write the durable start/settle records (ADR 0037).
+            let jobs = Arc::new(radian_coding::Jobs::new(tools.root()));
+            Ok((Some(tools.with_jobs(Arc::clone(&jobs))), Some(jobs)))
         }
-        (Some(dir), None) => CodingTools::new(dir).map(Some).map_err(|error| {
-            SessionError::Message(format!("--workspace {}: {error}", dir.display()))
-        }),
-        (None, _) => Ok(None),
+        (Some(dir), None) => {
+            let tools = CodingTools::new(dir).map_err(|error| {
+                SessionError::Message(format!("--workspace {}: {error}", dir.display()))
+            })?;
+            let jobs = Arc::new(radian_coding::Jobs::new(tools.root()));
+            Ok((Some(tools.with_jobs(Arc::clone(&jobs))), Some(jobs)))
+        }
+        (None, _) => Ok((None, None)),
     }
 }
 

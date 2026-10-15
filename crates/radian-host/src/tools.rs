@@ -81,14 +81,14 @@ impl HostTools {
             push("list", "list a directory");
             push(
                 "shell",
-                "run a command in the workspace, foreground or background",
+                "run a command in the workspace; `background: true` for a long one",
             );
             push(
                 "job_output",
-                "read a background job's new output, optionally waiting",
+                "read a background job's new output (wait: true waits for the end)",
             );
             push("job_list", "list this session's background jobs");
-            push("job_kill", "stop a background job");
+            push("job_kill", "stop a background job's process group");
             push("git_status", "the working tree status");
             push("git_diff", "a diff of the working tree");
         }
