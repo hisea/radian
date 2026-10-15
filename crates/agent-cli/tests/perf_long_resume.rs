@@ -18,6 +18,8 @@ mod long_session;
 
 use std::io::Read;
 use std::net::TcpListener;
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
@@ -25,7 +27,11 @@ use std::time::{Duration, Instant};
 
 use long_session::write_long_session;
 
-const BIN: &str = env!("CARGO_BIN_EXE_agent");
+/// The `radian` binary (ADR 0032: the headless command is `radian exec`), refusing a stale
+/// build - `cargo test -p agent-cli` does not rebuild `radian-tui`.
+fn bin() -> PathBuf {
+    common::radian_bin()
+}
 const POLL: Duration = Duration::from_millis(1);
 
 struct TempDir(PathBuf);
@@ -93,7 +99,8 @@ fn ms(d: Duration) -> f64 {
 async fn resume_to_first_request(dir: &Path, session_id: &str) -> Option<Duration> {
     let start = Instant::now();
     let (port, rx) = header_server(start);
-    let mut child: Child = Command::new(BIN)
+    let mut child: Child = Command::new(bin())
+        .arg("exec")
         .args([
             "--model",
             "m",

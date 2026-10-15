@@ -1,4 +1,9 @@
-//! The `agent` CLI against a mock model server and the real MCP fixture, as subprocesses.
+//! The headless command (`radian exec`) against a mock model server and the real MCP
+//! fixture, as subprocesses. It used to drive the `agent` binary (ADR 0032): every
+//! `agent <args>` is now `radian exec <args>`, and the management subcommands are top-level
+//! (`radian memory`, `radian login`, `radian config`).
+
+mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -28,15 +33,10 @@ const STATE_WATCHDOG: Duration = Duration::from_secs(30);
 
 // ---------- helpers ----------
 
-/// The `agent` binary, built by the harness.
-fn agent_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_agent")
-}
-
-/// The MCP fixture built next to `agent`. `cargo test -p agent-cli` alone does not
+/// The MCP fixture built next to `radian`. `cargo test -p agent-cli` alone does not
 /// necessarily build it, so the failure says what to run.
 fn fixture_bin() -> PathBuf {
-    let path = Path::new(agent_bin()).parent().unwrap().join("mcp-fixture");
+    let path = common::target_dir().join("mcp-fixture");
     assert!(
         path.exists(),
         "mcp-fixture is not built; run: cargo build -p agent-extensions --bin mcp-fixture"
@@ -171,10 +171,26 @@ fn write_auth_json(root: &Path, envs: &[(&str, &str)]) {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 }
-fn spawn_agent(args: &[&str], envs: &[(&str, &str)]) -> Child {
+fn spawn_radian(args: &[&str], envs: &[(&str, &str)]) -> Child {
+    spawn_radian_command(true, args, envs)
+}
+
+/// Spawns `radian <args>` (no `exec`): the top-level management commands (`radian memory`,
+/// `radian login`, `radian logout`, `radian config`), which run the same code as
+/// `radian exec <command>` (ADR 0032 direction).
+fn spawn_radian_top(args: &[&str], envs: &[(&str, &str)]) -> Child {
+    spawn_radian_command(false, args, envs)
+}
+
+/// The one spawn helper: `radian exec <args>` (`exec`) or `radian <args>`.
+fn spawn_radian_command(exec: bool, args: &[&str], envs: &[(&str, &str)]) -> Child {
     let home = fresh_session_dir();
     write_auth_json(&home, envs);
-    Command::new(agent_bin())
+    let mut command = Command::new(common::radian_bin());
+    if exec {
+        command.arg("exec");
+    }
+    command
         .args(args)
         .env_remove("OPENAI_API_KEY")
         .env("RADIAN_SESSION_DIR", fresh_session_dir())
@@ -194,7 +210,7 @@ fn spawn_agent(args: &[&str], envs: &[(&str, &str)]) -> Child {
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .expect("spawn agent")
+        .expect("spawn radian")
 }
 
 /// Writes all input, closes stdin, and waits with a cap so a stuck CLI fails the test
@@ -332,7 +348,7 @@ struct Running {
 
 impl Running {
     fn spawn(args: &[&str], envs: &[(&str, &str)]) -> Self {
-        let mut child = spawn_agent(args, envs);
+        let mut child = spawn_radian(args, envs);
         let stdin = child.stdin.take().unwrap();
         let stderr = child.stderr.take().unwrap();
         Self {
@@ -459,7 +475,7 @@ async fn one_shot_streams_text_to_stdout_only() {
     let server = MockServer::start(vec![text_reply("Hello there")]).await;
 
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
             &[],
         ),
@@ -484,7 +500,7 @@ async fn a_model_error_exits_one() {
     .await;
 
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
             &[],
         ),
@@ -497,11 +513,42 @@ async fn a_model_error_exits_one() {
     assert!(stderr.contains("HTTP 401"), "{stderr}");
 }
 
+/// ADR 0032 direction: the diagnostics say `radian: …`, not `agent: …` (the binary is
+/// gone; `radian exec` is the headless command). Every failure line carries the prefix.
+#[tokio::test]
+async fn diagnostics_carry_the_radian_prefix() {
+    let server = MockServer::start(vec![Reply::status(
+        401,
+        "{\"error\":{\"message\":\"bad key\"}}",
+    )])
+    .await;
+
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_radian(
+            &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
+            &[],
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 1);
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(
+        stderr.lines().any(|line| line.starts_with("radian: ")),
+        "a diagnostic line starts with `radian: `: {stderr}"
+    );
+    assert!(
+        !stderr.contains("agent: "),
+        "no `agent: ` line remains: {stderr}"
+    );
+}
+
 // ---------- usage and configuration errors ----------
 
 #[tokio::test]
 async fn usage_errors_exit_two() {
-    let (code, _, _) = feed_and_wait(spawn_agent(&["-p", "hi"], &[]), "").await; // no --model
+    let (code, _, _) = feed_and_wait(spawn_radian(&["-p", "hi"], &[]), "").await; // no --model
     assert_eq!(code, 2);
 }
 
@@ -510,7 +557,7 @@ async fn usage_errors_exit_two() {
 #[tokio::test]
 async fn the_removed_context_threshold_flag_is_an_error() {
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -537,7 +584,7 @@ async fn bad_mcp_config_exits_two_with_the_path() {
     // Unknown field.
     let unknown = write_file(&dir, "unknown.json", "{\"servers\": [], \"bogus\": 1}");
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -559,7 +606,7 @@ async fn bad_mcp_config_exits_two_with_the_path() {
     // Missing file.
     let missing = dir.join("no-such-file.json");
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -589,7 +636,7 @@ async fn bad_mcp_config_exits_two_with_the_path() {
         .to_string(),
     );
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -622,7 +669,7 @@ async fn the_key_comes_from_the_named_env_and_never_leaks() {
     .await;
 
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
             &[("AGENT_CLI_TEST_KEY", KEY)],
         ),
@@ -653,7 +700,7 @@ async fn a_runtime_error_redacts_every_auth_key_not_only_the_route_key() {
     .await;
 
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
             &[
                 ("OPENAI_API_KEY", route_key),
@@ -693,7 +740,7 @@ async fn a_workspace_with_project_resources_is_untrusted_without_a_terminal() {
     let sessions = dir.0.join("sessions");
     let server = MockServer::start(vec![text_reply("TRUST-OK")]).await;
     let (code, _stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -755,7 +802,7 @@ async fn trust_flags_override_without_writing() {
         ),
     ] {
         let (code, _, stderr) = feed_and_wait(
-            spawn_agent(
+            spawn_radian(
                 &[
                     "--model",
                     "m",
@@ -806,7 +853,7 @@ async fn piped_stdin_is_never_read_as_the_trust_answer() {
     let sessions = dir.0.join("sessions");
     let server = MockServer::start(vec![text_reply("PIPED-OK")]).await;
     let (code, _stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -855,7 +902,7 @@ async fn a_remote_base_url_without_a_key_fails_fast() {
     let start = Instant::now();
 
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -892,7 +939,7 @@ async fn a_local_base_url_needs_no_key_and_sends_no_authorization() {
     let server = MockServer::start(vec![text_reply("ok")]).await;
 
     let (code, stdout, _) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
             &[],
         ),
@@ -910,7 +957,7 @@ async fn a_local_base_url_needs_no_key_and_sends_no_authorization() {
 #[tokio::test]
 async fn the_removed_api_key_env_flag_is_a_usage_error() {
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &["--model", "m", "--api-key-env", "SOME_KEY", "-p", "hi"],
             &[],
         ),
@@ -927,7 +974,7 @@ async fn the_removed_api_key_env_flag_is_a_usage_error() {
 #[tokio::test]
 async fn a_non_generic_descriptor_refuses_base_url_and_header() {
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--provider",
                 "anthropic",
@@ -948,7 +995,7 @@ async fn a_non_generic_descriptor_refuses_base_url_and_header() {
     assert!(stderr.contains("--base-url"), "{stderr}");
 
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--provider",
                 "anthropic",
@@ -974,7 +1021,7 @@ async fn a_non_generic_descriptor_refuses_base_url_and_header() {
 async fn opencode_go_sends_the_session_header_byte_for_byte() {
     let server = MockServer::start(vec![text_reply("GO-OK")]).await;
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--provider",
                 "opencode-go",
@@ -1013,7 +1060,7 @@ async fn a_config_with_model_api_key_is_refused() {
     )
     .unwrap();
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &["--model", "m", "-p", "hi"],
             &[("RADIAN_CONFIG", path.to_str().unwrap())],
         ),
@@ -1034,7 +1081,7 @@ async fn a_header_flag_is_sent_and_can_be_repeated() {
     let server = MockServer::start(vec![text_reply("ok")]).await;
 
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -1064,7 +1111,7 @@ async fn a_header_flag_is_sent_and_can_be_repeated() {
 async fn a_header_without_an_equals_sign_is_a_usage_error_that_does_not_echo_it() {
     // The malformed argument may itself be a credential: the error must not contain it.
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -1090,7 +1137,7 @@ async fn a_header_without_an_equals_sign_is_a_usage_error_that_does_not_echo_it(
 #[tokio::test]
 async fn an_invalid_header_name_is_refused() {
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -1116,7 +1163,7 @@ async fn an_authorization_header_is_refused_so_the_key_has_one_source() {
     let server = MockServer::start(vec![text_reply("should not be reached")]).await;
 
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -1153,7 +1200,7 @@ async fn a_header_value_never_leaks_into_errors() {
     .await;
 
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -1195,7 +1242,7 @@ async fn a_header_value_can_reference_the_generated_session_id() {
     let server = MockServer::start(vec![text_reply("one"), text_reply("two")]).await;
 
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -1226,7 +1273,7 @@ async fn two_processes_get_different_generated_session_ids() {
     for _ in 0..2 {
         let server = MockServer::start(vec![text_reply("ok")]).await;
         let (code, _, stderr) = feed_and_wait(
-            spawn_agent(
+            spawn_radian(
                 &[
                     "--model",
                     "m",
@@ -1255,7 +1302,7 @@ async fn an_explicit_session_id_is_used_verbatim_and_not_announced() {
     let server = MockServer::start(vec![text_reply("one"), text_reply("two")]).await;
 
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -1287,7 +1334,7 @@ async fn include_usage_flag_controls_stream_options() {
     // Absent: the default policy. 127.0.0.1 is not api.openai.com, so usage is off.
     let server = MockServer::start(vec![text_reply("ok")]).await;
     feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
             &[],
         ),
@@ -1299,7 +1346,7 @@ async fn include_usage_flag_controls_stream_options() {
     // --include-usage: on.
     let server = MockServer::start(vec![text_reply("ok")]).await;
     feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -1322,7 +1369,7 @@ async fn include_usage_flag_controls_stream_options() {
     // --include-usage=false: explicitly off.
     let server = MockServer::start(vec![text_reply("ok")]).await;
     feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -1349,7 +1396,7 @@ async fn answering_y_approves_and_the_tool_runs() {
     let server = MockServer::start(echo_then("done")).await;
 
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -1378,7 +1425,7 @@ async fn answering_n_denies_the_call() {
     let server = MockServer::start(echo_then("fine")).await;
 
     let (code, _, _) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -1406,7 +1453,7 @@ async fn yes_flag_allows_without_asking() {
     let server = MockServer::start(echo_then("done")).await;
 
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -1466,7 +1513,7 @@ async fn interactive_sessions_keep_history_and_eof_exits_cleanly() {
     let server = MockServer::start(vec![text_reply("one"), text_reply("two")]).await;
 
     let (code, stdout, _) = feed_and_wait(
-        spawn_agent(&["--model", "m", "--base-url", &server.base_url], &[]),
+        spawn_radian(&["--model", "m", "--base-url", &server.base_url], &[]),
         "first\nsecond\n", // EOF, no /exit
     )
     .await;
@@ -1491,7 +1538,7 @@ async fn system_prompt_is_sent() {
     let server = MockServer::start(vec![text_reply("ok")]).await;
 
     let (code, _, _) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -1525,7 +1572,7 @@ async fn turn_timeout_ends_the_turn() {
     let start = Instant::now();
 
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -1670,7 +1717,7 @@ async fn every_exit_reaps_the_mcp_children() {
             let (code, _, _) = running.finish().await;
             (code, ())
         } else {
-            let (code, _, _) = feed_and_wait(spawn_agent(&arg_refs, &[]), input).await;
+            let (code, _, _) = feed_and_wait(spawn_radian(&arg_refs, &[]), input).await;
             (code, ())
         };
         assert_eq!(code, 0, "{name}");
@@ -1702,7 +1749,7 @@ async fn a_normal_exit_lets_each_server_shut_down_before_the_cli_leaves() {
         ];
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
-        let (code, _, _) = feed_and_wait(spawn_agent(&arg_refs, &[]), input).await;
+        let (code, _, _) = feed_and_wait(spawn_radian(&arg_refs, &[]), input).await;
 
         assert_eq!(code, 0, "{name}");
         let lines = log_lines(&log);
@@ -1785,7 +1832,7 @@ async fn built_in_write_tool_creates_a_file_in_the_workspace() {
     .await;
 
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -1829,7 +1876,7 @@ async fn built_in_read_outside_the_workspace_is_refused_and_the_turn_continues()
     .await;
 
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -1865,7 +1912,7 @@ async fn without_workspace_the_built_in_tools_do_not_exist() {
     .await;
 
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -1897,7 +1944,7 @@ async fn a_new_session_writes_a_valid_jsonl() {
     let sessions = fresh_session_dir();
     let server = MockServer::start(vec![text_reply("hi")]).await;
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -1967,7 +2014,7 @@ async fn resume_carries_the_previous_history() {
     let server = MockServer::start(vec![text_reply("one"), text_reply("two")]).await;
 
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -1988,7 +2035,7 @@ async fn resume_carries_the_previous_history() {
     assert_eq!(code, 0, "{stderr}");
 
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -2042,7 +2089,7 @@ async fn list_shows_only_the_current_workspace() {
 
     for (id, workspace) in [("a-1", &ws_a), ("b-1", &ws_b)] {
         let (code, _, stderr) = feed_and_wait(
-            spawn_agent(
+            spawn_radian(
                 &[
                     "--model",
                     "m",
@@ -2066,7 +2113,7 @@ async fn list_shows_only_the_current_workspace() {
     }
 
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -2107,7 +2154,7 @@ async fn reasoning_is_printed_apart_from_the_answer() {
     .await;
 
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
             &[],
         ),
@@ -2149,7 +2196,7 @@ async fn a_second_process_cannot_open_the_same_session() {
     wait_until("the model request", || server.requests().len() == 1).await;
 
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -2187,7 +2234,7 @@ async fn the_session_file_contains_no_key_or_header_values() {
     let sessions = fresh_session_dir();
     let server = MockServer::start(vec![text_reply("ok")]).await;
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -2299,7 +2346,7 @@ async fn a_killed_session_resumes_without_replaying_the_tool() {
     // Resume: the repaired result is written back, the steer is requeued and applied, and
     // the tool is not run again.
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -2379,7 +2426,7 @@ async fn full_access_is_not_the_default_and_no_write_tools_without_a_workspace()
     .await;
 
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -2426,7 +2473,7 @@ async fn a_failed_sandbox_probe_refuses_instead_of_degrading() {
     let server = MockServer::start(vec![text_reply("done")]).await;
 
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -2465,7 +2512,7 @@ async fn the_startup_text_does_not_claim_credential_isolation() {
     let server = MockServer::start(vec![text_reply("done")]).await;
 
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -2524,7 +2571,7 @@ async fn the_context_file_is_reported_on_the_startup_line() {
     let server = MockServer::start(vec![text_reply("done")]).await;
 
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -2780,7 +2827,7 @@ async fn yes_does_not_bypass_a_deny_rule() {
     .await;
 
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -2945,7 +2992,7 @@ async fn shell_cannot_write_outside_the_workspace() {
     let server = MockServer::start(vec![shell_reply("c1", &command), text_reply("done")]).await;
 
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -3008,7 +3055,7 @@ async fn without_a_window_the_budget_is_off_and_says_so() {
     .await;
 
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -3050,7 +3097,7 @@ async fn an_over_budget_request_is_still_sent_and_the_turn_completes() {
     .await;
 
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -3089,7 +3136,7 @@ async fn a_context_window_at_or_below_the_reservation_is_rejected() {
     let server = anth::MockServer::start(vec![]).await;
 
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "claude-x",
@@ -3135,7 +3182,7 @@ async fn an_over_budget_turn_records_a_normal_outcome() {
     .await;
 
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -3172,12 +3219,13 @@ async fn an_over_budget_turn_records_a_normal_outcome() {
     assert!(raw.contains("\"completed\""), "{raw}");
 }
 
-/// Like [`spawn_agent`], but uses a caller-owned session directory, so a test can assert
+/// Like [`spawn_radian`], but uses a caller-owned session directory, so a test can assert
 /// that a failed start left it empty (dogfooding D2).
-fn spawn_agent_in(session_dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Child {
+fn spawn_radian_in(session_dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Child {
     let home = fresh_session_dir();
     write_auth_json(&home, envs);
-    Command::new(agent_bin())
+    Command::new(common::radian_bin())
+        .arg("exec")
         .args(args)
         .env_remove("OPENAI_API_KEY")
         .env("RADIAN_SESSION_DIR", session_dir)
@@ -3216,7 +3264,7 @@ async fn a_missing_workspace_is_a_workspace_error_and_leaves_no_session() {
     std::fs::create_dir_all(&session_dir).unwrap();
     let missing = dir.join("no-such-workspace");
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent_in(
+        spawn_radian_in(
             &session_dir,
             &[
                 "--model",
@@ -3261,7 +3309,7 @@ async fn a_session_dir_above_the_workspace_is_refused_and_leaves_no_session() {
     let ws = session_dir.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent_in(
+        spawn_radian_in(
             &session_dir,
             &[
                 "--model",
@@ -3316,7 +3364,7 @@ async fn a_failed_probe_leaves_no_session_and_the_retry_creates_one() {
     let sessions = session_dir.to_str().unwrap().to_owned();
 
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent_in(
+        spawn_radian_in(
             &session_dir,
             &[
                 "--model",
@@ -3346,7 +3394,7 @@ async fn a_failed_probe_leaves_no_session_and_the_retry_creates_one() {
     assert_session_dir_empty(&session_dir);
 
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent_in(
+        spawn_radian_in(
             &session_dir,
             &[
                 "--model",
@@ -3385,7 +3433,7 @@ async fn a_bad_mcp_config_leaves_no_session() {
     std::fs::create_dir_all(&ws).unwrap();
     let bad = write_file(&dir, "bad.json", "{\"servers\": [], \"bogus\": 1}");
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent_in(
+        spawn_radian_in(
             &session_dir,
             &[
                 "--model",
@@ -3433,7 +3481,7 @@ fn anth_text_reply(text: &str) -> anth::Reply {
 async fn anthropic_provider_sends_a_messages_request_and_shows_the_reply() {
     let server = anth::MockServer::start(vec![anth_text_reply("ANTHROPIC-REPLY-OK")]).await;
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &["--model", "claude-x", "--provider", "anthropic", "-p", "hi"],
             &[
                 ("ANTHROPIC_API_KEY", "sk-ant-test-key"),
@@ -3467,7 +3515,7 @@ async fn anthropic_reads_anthropic_api_key_env_by_default_and_never_leaks_it() {
     let server = anth::MockServer::start(vec![anth_text_reply("ok")]).await;
     let dir = fresh_session_dir();
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent_in(
+        spawn_radian_in(
             &dir,
             &[
                 "--model",
@@ -3523,7 +3571,7 @@ async fn anthropic_thinking_modes_are_sent_in_the_body() {
     ] {
         let server = anth::MockServer::start(vec![anth_text_reply("ok")]).await;
         let (code, _, stderr) = feed_and_wait(
-            spawn_agent(
+            spawn_radian(
                 &[
                     "--model",
                     "claude",
@@ -3554,7 +3602,7 @@ async fn the_session_snapshot_names_the_real_provider() {
     let server = anth::MockServer::start(vec![anth_text_reply("ok")]).await;
     let dir = fresh_session_dir();
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent_in(
+        spawn_radian_in(
             &dir,
             &[
                 "--model",
@@ -3582,7 +3630,7 @@ async fn the_session_snapshot_names_the_real_provider() {
     let server = MockServer::start(vec![text_reply("ok")]).await;
     let dir = fresh_session_dir();
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent_in(
+        spawn_radian_in(
             &dir,
             &[
                 "--model",
@@ -3613,7 +3661,7 @@ async fn the_session_snapshot_names_the_real_provider() {
 async fn the_default_provider_still_sends_an_openai_request() {
     let server = MockServer::start(vec![text_reply("OPENAI-REPLY")]).await;
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
             &[("OPENAI_API_KEY", KEY)],
         ),
@@ -3640,7 +3688,7 @@ async fn the_legacy_enabled_budget_is_accepted_and_clamped_like_high() {
     let server = anth::MockServer::start(vec![anth_text_reply("LEGACY-OK")]).await;
     let dir = fresh_session_dir();
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent_in(
+        spawn_radian_in(
             &dir,
             &[
                 "--model",
@@ -3683,7 +3731,7 @@ async fn a_level_budget_clamps_to_max_tokens() {
     let server = anth::MockServer::start(vec![anth_text_reply("CLAMPED")]).await;
     let dir = fresh_session_dir();
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent_in(
+        spawn_radian_in(
             &dir,
             &[
                 "--model",
@@ -3719,7 +3767,7 @@ async fn a_level_budget_clamps_to_max_tokens() {
     let server = anth::MockServer::start(vec![anth_text_reply("NO-ROOM")]).await;
     let dir = fresh_session_dir();
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent_in(
+        spawn_radian_in(
             &dir,
             &[
                 "--model",
@@ -3752,7 +3800,7 @@ async fn a_level_budget_clamps_to_max_tokens() {
     // The user's explicit legacy budget is **not** clamped: over-limit stays a usage error.
     let dir = fresh_session_dir();
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent_in(
+        spawn_radian_in(
             &dir,
             &[
                 "--model",
@@ -3864,7 +3912,7 @@ async fn export_renders_markdown_and_json() {
     std::fs::create_dir_all(&ws).unwrap();
     let server = MockServer::start(vec![text_reply("REPLY-TEXT-ONE")]).await;
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -3896,7 +3944,7 @@ async fn export_renders_markdown_and_json() {
         "--export",
         "e1",
     ];
-    let (code, stdout, stderr) = feed_and_wait(spawn_agent(&base, &[]), "").await;
+    let (code, stdout, stderr) = feed_and_wait(spawn_radian(&base, &[]), "").await;
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("# Session e1"), "{stdout}");
     assert!(stdout.contains("USER-TEXT-ONE"), "{stdout}");
@@ -3904,7 +3952,7 @@ async fn export_renders_markdown_and_json() {
 
     let mut json_args = base.to_vec();
     json_args.extend_from_slice(&["--format", "json"]);
-    let (code, stdout, stderr) = feed_and_wait(spawn_agent(&json_args, &[]), "").await;
+    let (code, stdout, stderr) = feed_and_wait(spawn_radian(&json_args, &[]), "").await;
     assert_eq!(code, 0, "{stderr}");
     let parsed: Value = serde_json::from_str(&stdout).expect("the JSON export is valid JSON");
     assert_eq!(parsed["session_id"], "e1");
@@ -3940,7 +3988,7 @@ async fn export_omits_reasoning_and_provider_payload_by_default() {
         "optin",
     ];
 
-    let (code, stdout, stderr) = feed_and_wait(spawn_agent(&base, &[]), "").await;
+    let (code, stdout, stderr) = feed_and_wait(spawn_radian(&base, &[]), "").await;
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("VISIBLE-ANSWER"), "{stdout}");
     assert!(!stdout.contains("SECRET-REASONING"), "{stdout}");
@@ -3948,14 +3996,14 @@ async fn export_omits_reasoning_and_provider_payload_by_default() {
 
     let mut with_reasoning = base.to_vec();
     with_reasoning.push("--include-reasoning");
-    let (code, stdout, stderr) = feed_and_wait(spawn_agent(&with_reasoning, &[]), "").await;
+    let (code, stdout, stderr) = feed_and_wait(spawn_radian(&with_reasoning, &[]), "").await;
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("SECRET-REASONING"), "{stdout}");
     assert!(!stdout.contains("PAYLOAD-MARKER"), "{stdout}");
 
     let mut with_payload = base.to_vec();
     with_payload.push("--include-provider-payload");
-    let (code, stdout, stderr) = feed_and_wait(spawn_agent(&with_payload, &[]), "").await;
+    let (code, stdout, stderr) = feed_and_wait(spawn_radian(&with_payload, &[]), "").await;
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("PAYLOAD-MARKER"), "{stdout}");
     assert!(!stdout.contains("SECRET-REASONING"), "{stdout}");
@@ -3978,7 +4026,7 @@ async fn export_redacts_the_key_and_header_values() {
         None,
     );
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -4017,7 +4065,7 @@ async fn export_refuses_another_workspaces_session() {
     std::fs::create_dir_all(&ws_b).unwrap();
     write_session(&sessions, "in-b", &canonical(&ws_b), "text", None, None);
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -4061,12 +4109,12 @@ async fn export_out_refuses_to_overwrite_without_force() {
         out.to_str().unwrap(),
     ];
 
-    let (code, _, stderr) = feed_and_wait(spawn_agent(&base, &[]), "").await;
+    let (code, _, stderr) = feed_and_wait(spawn_radian(&base, &[]), "").await;
     assert_eq!(code, 0, "{stderr}");
     let first = std::fs::read_to_string(&out).unwrap();
     assert!(first.contains("OUT-TEXT"), "{first}");
 
-    let (code, _, stderr) = feed_and_wait(spawn_agent(&base, &[]), "").await;
+    let (code, _, stderr) = feed_and_wait(spawn_radian(&base, &[]), "").await;
     assert_eq!(code, 2, "{stderr}");
     assert!(stderr.contains("already exists"), "{stderr}");
     assert_eq!(std::fs::read_to_string(&out).unwrap(), first);
@@ -4074,7 +4122,7 @@ async fn export_out_refuses_to_overwrite_without_force() {
     std::fs::write(&out, "OLD").unwrap();
     let mut forced = base.to_vec();
     forced.push("--force");
-    let (code, _, stderr) = feed_and_wait(spawn_agent(&forced, &[]), "").await;
+    let (code, _, stderr) = feed_and_wait(spawn_radian(&forced, &[]), "").await;
     assert_eq!(code, 0, "{stderr}");
     assert_ne!(std::fs::read_to_string(&out).unwrap(), "OLD");
 }
@@ -4090,7 +4138,7 @@ async fn search_finds_text_and_reports_no_match() {
     std::fs::create_dir_all(&ws).unwrap();
     let server = MockServer::start(vec![text_reply("SEARCHABLE-MARKER here")]).await;
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -4122,7 +4170,7 @@ async fn search_finds_text_and_reports_no_match() {
     ];
     let mut hit_args = base.to_vec();
     hit_args.extend_from_slice(&["--search", "SEARCHABLE-MARKER"]);
-    let (code, stdout, stderr) = feed_and_wait(spawn_agent(&hit_args, &[]), "").await;
+    let (code, stdout, stderr) = feed_and_wait(spawn_radian(&hit_args, &[]), "").await;
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(stdout.lines().count(), 1, "{stdout}");
     let row = stdout.lines().next().unwrap();
@@ -4132,7 +4180,7 @@ async fn search_finds_text_and_reports_no_match() {
 
     let mut miss_args = base.to_vec();
     miss_args.extend_from_slice(&["--search", "NO-SUCH-TEXT-XYZ"]);
-    let (code, stdout, stderr) = feed_and_wait(spawn_agent(&miss_args, &[]), "").await;
+    let (code, stdout, stderr) = feed_and_wait(spawn_radian(&miss_args, &[]), "").await;
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.is_empty(), "{stdout}");
     assert!(stderr.contains("no match"), "{stderr}");
@@ -4149,7 +4197,7 @@ async fn session_commands_do_not_touch_the_session_directory() {
     std::fs::create_dir_all(&ws).unwrap();
     let server = MockServer::start(vec![text_reply("KEEP-MARKER")]).await;
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -4182,11 +4230,11 @@ async fn session_commands_do_not_touch_the_session_directory() {
     ];
     let mut export_args = base.to_vec();
     export_args.extend_from_slice(&["--export", "keep"]);
-    let (code, _, stderr) = feed_and_wait(spawn_agent(&export_args, &[]), "").await;
+    let (code, _, stderr) = feed_and_wait(spawn_radian(&export_args, &[]), "").await;
     assert_eq!(code, 0, "{stderr}");
     let mut search_args = base.to_vec();
     search_args.extend_from_slice(&["--search", "KEEP-MARKER"]);
-    let (code, _, stderr) = feed_and_wait(spawn_agent(&search_args, &[]), "").await;
+    let (code, _, stderr) = feed_and_wait(spawn_radian(&search_args, &[]), "").await;
     assert_eq!(code, 0, "{stderr}");
 
     assert_eq!(
@@ -4207,7 +4255,7 @@ async fn session_commands_do_not_touch_the_session_directory() {
 #[tokio::test]
 async fn session_commands_conflict_with_a_prompt() {
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(&["--model", "m", "--export", "x", "-p", "hi"], &[]),
+        spawn_radian(&["--model", "m", "--export", "x", "-p", "hi"], &[]),
         "",
     )
     .await;
@@ -4241,19 +4289,19 @@ async fn session_commands_do_not_need_a_model() {
 
     let mut list_args = base.to_vec();
     list_args.push("--list");
-    let (code, stdout, stderr) = feed_and_wait(spawn_agent(&list_args, &[]), "").await;
+    let (code, stdout, stderr) = feed_and_wait(spawn_radian(&list_args, &[]), "").await;
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("nm"), "{stdout}");
 
     let mut export_args = base.to_vec();
     export_args.extend_from_slice(&["--export", "nm"]);
-    let (code, stdout, stderr) = feed_and_wait(spawn_agent(&export_args, &[]), "").await;
+    let (code, stdout, stderr) = feed_and_wait(spawn_radian(&export_args, &[]), "").await;
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("NO-MODEL-TEXT"), "{stdout}");
 
     let mut search_args = base.to_vec();
     search_args.extend_from_slice(&["--search", "NO-MODEL-TEXT"]);
-    let (code, stdout, stderr) = feed_and_wait(spawn_agent(&search_args, &[]), "").await;
+    let (code, stdout, stderr) = feed_and_wait(spawn_radian(&search_args, &[]), "").await;
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("nm"), "{stdout}");
 }
@@ -4266,14 +4314,14 @@ async fn a_conversation_still_requires_a_model() {
     // The setup check runs **before** the API-key lookup, and its wording is unique: asserting
     // only `--model` would also be satisfied by the later "no API key" error, so a mutation
     // that dropped the model requirement would slip past. Assert the sentence itself.
-    let (code, _, stderr) = feed_and_wait(spawn_agent(&["-p", "hi"], &[]), "").await;
+    let (code, _, stderr) = feed_and_wait(spawn_radian(&["-p", "hi"], &[]), "").await;
     assert_eq!(code, 2, "{stderr}");
     assert!(
         stderr.contains("no model: pass --model, or set model.model in the config file"),
         "{stderr}"
     );
 
-    let (code, _, stderr) = feed_and_wait(spawn_agent(&[], &[]), "").await;
+    let (code, _, stderr) = feed_and_wait(spawn_radian(&[], &[]), "").await;
     assert_eq!(code, 2, "{stderr}");
     assert!(
         stderr.contains("no model: pass --model, or set model.model in the config file"),
@@ -4312,7 +4360,7 @@ async fn export_refuses_a_path_like_session_id() {
     for bad in ["../x", "a/b", ".."] {
         let mut args = base.to_vec();
         args.extend_from_slice(&["--export", bad]);
-        let (code, stdout, stderr) = feed_and_wait(spawn_agent(&args, &[]), "").await;
+        let (code, stdout, stderr) = feed_and_wait(spawn_radian(&args, &[]), "").await;
         assert_eq!(code, 2, "{bad:?}: {stderr}");
         assert!(stderr.contains("session id"), "{bad:?}: {stderr}");
         assert!(stdout.is_empty(), "{bad:?}: {stdout}");
@@ -4343,7 +4391,7 @@ async fn export_redacts_the_anthropic_key_without_api_key_env() {
         None,
     );
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--session-dir",
                 sessions.to_str().unwrap(),
@@ -4391,11 +4439,11 @@ async fn session_id_already_exists_points_at_resume() {
         "-p",
         "hi",
     ];
-    let (code, _, stderr) = feed_and_wait(spawn_agent(&args, &[]), "").await;
+    let (code, _, stderr) = feed_and_wait(spawn_radian(&args, &[]), "").await;
     assert_eq!(code, 0, "{stderr}");
     let before = std::fs::read(sessions.join("dup.jsonl")).unwrap();
 
-    let (code, _, stderr) = feed_and_wait(spawn_agent(&args, &[]), "").await;
+    let (code, _, stderr) = feed_and_wait(spawn_radian(&args, &[]), "").await;
     assert_eq!(code, 2, "{stderr}");
     assert!(stderr.contains("already exists"), "{stderr}");
     assert!(stderr.contains("--resume dup"), "{stderr}");
@@ -4431,7 +4479,7 @@ async fn anthropic_only_flags_are_refused_under_openai_compatible() {
             "hi",
         ];
         args.extend(extra);
-        let (code, stdout, stderr) = feed_and_wait(spawn_agent(&args, &[]), "").await;
+        let (code, stdout, stderr) = feed_and_wait(spawn_radian(&args, &[]), "").await;
         assert_eq!(code, 2, "{label}: {stderr}");
         assert!(stderr.contains("anthropic"), "{label}: {stderr}");
         assert!(stdout.is_empty(), "{label}: {stdout}");
@@ -4449,7 +4497,7 @@ async fn anthropic_provider_accepts_thinking_and_max_tokens() {
     let server = anth::MockServer::start(vec![anth_text_reply("THINK-OK")]).await;
     let dir = scratch("anthropic-flags");
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent_in(
+        spawn_radian_in(
             &dir,
             &[
                 "--model",
@@ -4498,7 +4546,7 @@ fn scratch_directories_are_removed_when_the_guard_drops() {
 /// aliases but are not advertised in `--help`.
 #[tokio::test]
 async fn tier_names_and_aliases_are_accepted_but_help_lists_only_new_names() {
-    let (code, stdout, stderr) = feed_and_wait(spawn_agent(&["--help"], &[]), "").await;
+    let (code, stdout, stderr) = feed_and_wait(spawn_radian(&["--help"], &[]), "").await;
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("workspace"), "{stdout}");
     assert!(stdout.contains("full"), "{stdout}");
@@ -4523,7 +4571,7 @@ async fn tier_names_and_aliases_are_accepted_but_help_lists_only_new_names() {
         let sessions = dir.join("sessions");
         std::fs::create_dir_all(&sessions).unwrap();
         let (code, _, stderr) = feed_and_wait(
-            spawn_agent(
+            spawn_radian(
                 &[
                     "--model",
                     "m",
@@ -4555,7 +4603,7 @@ async fn a_new_session_directory_and_file_are_owner_only() {
     let server = MockServer::start(vec![text_reply("done")]).await;
 
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent_in(
+        spawn_radian_in(
             &sessions,
             &[
                 "--model",
@@ -4596,7 +4644,7 @@ async fn a_wide_session_directory_is_warned_about_and_not_changed() {
     let server = MockServer::start(vec![text_reply("done")]).await;
 
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent_in(
+        spawn_radian_in(
             &sessions,
             &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
             &[],
@@ -4624,7 +4672,7 @@ async fn a_wide_session_directory_is_warned_about_and_not_changed() {
 async fn a_base_url_with_credentials_is_redacted_in_errors() {
     // No key + a remote endpoint: the "no API key" error names the endpoint.
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -4649,7 +4697,7 @@ async fn a_base_url_with_credentials_is_redacted_in_errors() {
     // An unparseable URL with a secret: the provider error names the redacted form, and the
     // host must not prepend the raw one.
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &["--model", "m", "--base-url", "url-secret", "-p", "hi"],
             &[("OPENAI_API_KEY", "sk-x")],
         ),
@@ -4674,7 +4722,7 @@ async fn search_redacts_the_key_from_a_snippet() {
     std::fs::create_dir_all(&ws).unwrap();
     let server = MockServer::start(vec![text_reply("echoed sk-search-secret in the answer")]).await;
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -4697,7 +4745,7 @@ async fn search_redacts_the_key_from_a_snippet() {
     assert_eq!(code, 0, "{stderr}");
 
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -4764,7 +4812,7 @@ async fn an_interactive_model_error_is_shown_and_the_session_continues() {
 async fn one_shot_model_error_still_exits_one_and_shows_the_error() {
     let server = MockServer::start(vec![Reply::status(500, "provider is down")]).await;
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
             &[("OPENAI_API_KEY", KEY)],
         ),
@@ -4783,7 +4831,7 @@ async fn a_context_overflow_error_adds_a_hint() {
     let body = r#"{"error":{"message":"This model's maximum context length is 16385 tokens. However, your messages resulted in 20000 tokens.","type":"invalid_request_error","code":"context_length_exceeded"}}"#;
     let server = MockServer::start(vec![Reply::status(400, body)]).await;
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
             &[("OPENAI_API_KEY", KEY)],
         ),
@@ -4817,7 +4865,7 @@ const CATALOG_JSON: &str = r#"{
 async fn the_startup_line_names_an_explicit_window() {
     let server = MockServer::start(vec![text_reply("ok")]).await;
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -4845,7 +4893,7 @@ async fn the_startup_line_names_an_explicit_window() {
 async fn the_startup_line_names_compaction_state() {
     let server = MockServer::start(vec![text_reply("ok")]).await;
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -4868,7 +4916,7 @@ async fn the_startup_line_names_compaction_state() {
 
     let server = MockServer::start(vec![text_reply("ok")]).await;
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -4895,7 +4943,7 @@ async fn the_startup_line_is_unknown_without_a_window() {
     let server = MockServer::start(vec![text_reply("ok")]).await;
     let home = scratch("no-window-home");
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -4923,7 +4971,7 @@ async fn the_startup_line_names_the_catalog() {
     let catalog_url = format!("{}/api.json", catalog.base_url);
     let home = scratch("catalog-home");
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "deepseek-v4.1-flash",
@@ -4956,9 +5004,9 @@ async fn the_startup_line_names_the_catalog() {
 
 // ---------- ADR 0020: the `~/.radian/` layout ----------
 
-/// Like [`spawn_agent`], but without the default `RADIAN_SESSION_DIR`, so a test controls the
+/// Like [`spawn_radian`], but without the default `RADIAN_SESSION_DIR`, so a test controls the
 /// session location (`RADIAN_HOME` / `RADIAN_SESSION_DIR` / `--session-dir`).
-fn spawn_agent_bare(args: &[&str], envs: &[(&str, &str)]) -> Child {
+fn spawn_radian_bare(args: &[&str], envs: &[(&str, &str)]) -> Child {
     let home = fresh_session_dir();
     let root = envs
         .iter()
@@ -4966,7 +5014,8 @@ fn spawn_agent_bare(args: &[&str], envs: &[(&str, &str)]) -> Child {
         .map(|(_, value)| PathBuf::from(value))
         .unwrap_or_else(|| home.join(".radian"));
     write_auth_json(&root, envs);
-    Command::new(agent_bin())
+    Command::new(common::radian_bin())
+        .arg("exec")
         .args(args)
         .env_remove("OPENAI_API_KEY")
         .env_remove("RADIAN_SESSION_DIR")
@@ -4992,7 +5041,7 @@ async fn radian_home_places_sessions_under_the_radian_root() {
     let dir = scratch("radian-home");
     let radian_home = dir.join("rh");
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent_bare(
+        spawn_radian_bare(
             &[
                 "--model",
                 "m",
@@ -5023,7 +5072,7 @@ async fn radian_session_dir_overrides_radian_home() {
     let radian_home = dir.join("rh");
     let custom = dir.join("custom-sessions");
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent_bare(
+        spawn_radian_bare(
             &[
                 "--model",
                 "m",
@@ -5072,7 +5121,7 @@ async fn workspace_shell_cannot_read_the_sessions_directory() {
     ])
     .await;
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent_bare(
+        spawn_radian_bare(
             &[
                 "--model",
                 "m",
@@ -5123,7 +5172,7 @@ async fn workspace_shell_cannot_read_a_moved_sessions_directory() {
     ])
     .await;
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent_bare(
+        spawn_radian_bare(
             &[
                 "--model",
                 "m",
@@ -5206,10 +5255,12 @@ impl MemoryEnv {
         args: &[&str],
         input: &str,
     ) -> (i32, String, String) {
+        // The top-level `radian memory --workspace … <command>` (ADR 0032 direction:
+        // `radian memory` and `radian exec memory` run the same code).
         let mut full: Vec<String> = vec![
+            "memory".into(),
             "--workspace".into(),
             ws.to_string_lossy().into_owned(),
-            "memory".into(),
         ];
         full.extend(args.iter().map(|arg| (*arg).to_owned()));
         let refs: Vec<&str> = full.iter().map(String::as_str).collect();
@@ -5217,7 +5268,7 @@ impl MemoryEnv {
             ("RADIAN_HOME", self.home.to_str().unwrap()),
             ("RADIAN_SESSION_DIR", self.sessions.to_str().unwrap()),
         ];
-        feed_and_wait(spawn_agent(&refs, &envs), input).await
+        feed_and_wait(spawn_radian_top(&refs, &envs), input).await
     }
 
     /// The log of the only project in this home.
@@ -5598,7 +5649,7 @@ async fn memory_injection_reaches_the_system_prompt() {
 
     let server = MockServer::start(vec![text_reply("ok")]).await;
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -5651,7 +5702,7 @@ async fn memory_save_with_yes_is_allowed_and_audited() {
     ])
     .await;
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -5705,7 +5756,7 @@ async fn memory_save_without_yes_is_denied() {
     ])
     .await;
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -5740,7 +5791,7 @@ async fn memory_save_without_yes_is_denied() {
 async fn an_interactive_compact_is_a_command_and_compactfoo_is_a_message() {
     let server = MockServer::start(vec![text_reply("REPLY-TO-COMPACTFOO")]).await;
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(&["--model", "m", "--base-url", &server.base_url], &[]),
+        spawn_radian(&["--model", "m", "--base-url", &server.base_url], &[]),
         "/compact\n/compactfoo\n/compact note\n/exit\n",
     )
     .await;
@@ -5770,7 +5821,7 @@ async fn a_config_file_supplies_the_model_and_the_cli_overrides_it() {
 
     // No `--model`: the config supplies it.
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--config",
                 config.to_str().unwrap(),
@@ -5795,7 +5846,7 @@ async fn a_config_file_supplies_the_model_and_the_cli_overrides_it() {
 
     // `--model` wins over the file.
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--config",
                 config.to_str().unwrap(),
@@ -5818,7 +5869,7 @@ async fn a_config_file_supplies_the_model_and_the_cli_overrides_it() {
 
     // `RADIAN_CONFIG` is the fallback.
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--base-url",
                 &server.base_url,
@@ -5848,7 +5899,7 @@ async fn a_lower_schema_version_refuses_to_start_without_creating_a_session() {
     let server = MockServer::start(vec![text_reply("never")]).await;
 
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--config",
                 config.to_str().unwrap(),
@@ -5887,7 +5938,7 @@ async fn a_plaintext_secret_in_the_config_is_refused_without_echoing_it() {
     let server = MockServer::start(vec![text_reply("never")]).await;
 
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--config",
                 config.to_str().unwrap(),
@@ -5921,7 +5972,7 @@ async fn a_failing_config_in_the_temp_radian_home_is_read_and_named() {
     std::fs::write(&config, "schema_version = 0\n").unwrap();
 
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &["--model", "m", "-p", "hi"],
             &[("RADIAN_HOME", dir.to_str().unwrap())],
         ),
@@ -5954,7 +6005,7 @@ async fn the_harness_never_reads_a_config_outside_its_temp_root() {
     // reached.
     let server = MockServer::start(vec![text_reply("ok")]).await;
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
             &[("HOME", dir.to_str().unwrap())],
         ),
@@ -6012,7 +6063,7 @@ fn a_closed_stdout_is_not_a_panic_for_every_output_command() {
 
     // One memory record, so `agent memory list` has a line to write.
     let home = scratch("sigpipe-home");
-    let add = std::process::Command::new(agent_bin())
+    let add = std::process::Command::new(common::radian_bin())
         .args(["memory", "add", "--global", "a memory record"])
         .env("RADIAN_HOME", home.as_os_str())
         .env("HOME", home.as_os_str())
@@ -6064,7 +6115,8 @@ fn a_closed_stdout_is_not_a_panic_for_every_output_command() {
         vec!["memory", "list", "--global"],
     ];
     for args in cases {
-        let mut child = std::process::Command::new(agent_bin())
+        let mut child = std::process::Command::new(common::radian_bin())
+            .arg("exec")
             .args(&args)
             .env("RADIAN_HOME", home_arg)
             .env("HOME", home_arg)
@@ -6091,7 +6143,7 @@ async fn list_and_search_refuse_session_id() {
         vec!["--list", "--session-id", "x"],
         vec!["--search", "x", "--session-id", "x"],
     ] {
-        let (code, _, stderr) = feed_and_wait(spawn_agent(&args, &[]), "").await;
+        let (code, _, stderr) = feed_and_wait(spawn_radian(&args, &[]), "").await;
         assert_eq!(code, 2, "args {args:?}: {stderr}");
         assert!(stderr.contains("--session-id"), "args {args:?}: {stderr}");
     }
@@ -6150,7 +6202,7 @@ async fn fork_creates_a_child_and_refuses_a_locked_parent() {
     let boundary = write_turn_session(&sessions, "parent", &workspace).await;
 
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 // No --model: --fork is a session command.
                 "--fork",
@@ -6196,7 +6248,7 @@ async fn fork_creates_a_child_and_refuses_a_locked_parent() {
     let held =
         radian_session::SessionJournal::resume(sessions.join("parent.jsonl"), "parent").unwrap();
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--fork",
                 "parent",
@@ -6269,7 +6321,7 @@ async fn config_import_pi_drafts_a_valid_configuration_and_never_shows_a_literal
     let pi = dir.join("pi");
     write_pi_fixture(&pi);
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian_top(
             &["config", "import-pi", "--from", pi.to_str().unwrap()],
             &[],
         ),
@@ -6325,7 +6377,7 @@ async fn config_import_pi_drafts_a_valid_configuration_and_never_shows_a_literal
     )
     .unwrap();
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian_top(
             &["config", "import-pi", "--from", pi.to_str().unwrap()],
             &[],
         ),
@@ -6361,7 +6413,7 @@ async fn config_import_pi_lists_a_command_key_and_does_not_run_it() {
     )
     .unwrap();
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian_top(
             &["config", "import-pi", "--from", pi.to_str().unwrap()],
             &[],
         ),
@@ -6388,7 +6440,7 @@ async fn config_import_pi_never_reads_auth_json() {
     std::fs::set_permissions(&auth, std::fs::Permissions::from_mode(0o000)).unwrap();
 
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian_top(
             &["config", "import-pi", "--from", pi.to_str().unwrap()],
             &[],
         ),
@@ -6416,7 +6468,7 @@ async fn config_import_pi_write_creates_the_file_and_refuses_to_overwrite() {
     let pi_arg = pi.to_str().unwrap();
 
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent_bare(
+        spawn_radian_top(
             &["config", "import-pi", "--from", pi_arg, "--write"],
             &[("RADIAN_HOME", home_arg)],
         ),
@@ -6433,7 +6485,7 @@ async fn config_import_pi_write_creates_the_file_and_refuses_to_overwrite() {
 
     let before = std::fs::read(&target).unwrap();
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent_bare(
+        spawn_radian_top(
             &["config", "import-pi", "--from", pi_arg, "--write"],
             &[("RADIAN_HOME", home_arg)],
         ),
@@ -6450,14 +6502,15 @@ async fn config_import_pi_write_creates_the_file_and_refuses_to_overwrite() {
 /// a failure (exit 1), not a silent empty draft.
 #[tokio::test]
 async fn config_import_pi_requires_from_and_an_existing_directory() {
-    let (code, _, stderr) = feed_and_wait(spawn_agent(&["config", "import-pi"], &[]), "").await;
+    let (code, _, stderr) =
+        feed_and_wait(spawn_radian_top(&["config", "import-pi"], &[]), "").await;
     assert_eq!(code, 2, "{stderr}");
     assert!(stderr.contains("--from"), "{stderr}");
 
     let dir = scratch("import-pi-missing");
     let missing = dir.join("nope");
     let (code, stdout, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian_top(
             &["config", "import-pi", "--from", missing.to_str().unwrap()],
             &[],
         ),
@@ -6478,7 +6531,7 @@ fn config_import_pi_survives_a_closed_stdout() {
     write_pi_fixture(&pi);
     let home = dir.join("home");
     std::fs::create_dir_all(&home).unwrap();
-    let mut child = std::process::Command::new(agent_bin())
+    let mut child = std::process::Command::new(common::radian_bin())
         .args(["config", "import-pi", "--from", pi.to_str().unwrap()])
         .env("RADIAN_HOME", home.as_os_str())
         .env("HOME", home.as_os_str())
@@ -6502,7 +6555,7 @@ async fn the_startup_line_says_ask_user_is_off() {
     let server = MockServer::start(vec![text_reply("done")]).await;
 
     let (code, _, stderr) = feed_and_wait(
-        spawn_agent(
+        spawn_radian(
             &[
                 "--model",
                 "m",
@@ -6604,7 +6657,7 @@ async fn named_providers_keep_separate_keys_and_config_wins_over_auth() {
     };
 
     // `corp` talks to its own endpoint with its own key.
-    let child = spawn_agent_raw(
+    let child = spawn_radian_raw(
         &["--provider", "corp", "--model", "m-1", "-p", "hi"],
         &envs(&[]),
     );
@@ -6621,7 +6674,7 @@ async fn named_providers_keep_separate_keys_and_config_wins_over_auth() {
     assert_eq!(relay.requests().len(), 0, "relay is untouched");
 
     // `relay` likewise, and `corp` still sees exactly one request.
-    let child = spawn_agent_raw(
+    let child = spawn_radian_raw(
         &["--provider", "relay", "--model", "m-1", "-p", "hi"],
         &envs(&[]),
     );
@@ -6651,7 +6704,7 @@ async fn named_providers_keep_separate_keys_and_config_wins_over_auth() {
         ),
     )
     .unwrap();
-    let child = spawn_agent_raw(&["--model", "m-1", "-p", "hi"], &envs(&[]));
+    let child = spawn_radian_raw(&["--model", "m-1", "-p", "hi"], &envs(&[]));
     let (code, stdout, stderr) = feed_and_wait(child, "").await;
     assert_eq!(code, 0, "{stdout}\n{stderr}");
     assert_eq!(stdout, "RELAY\n", "the config's base_url won");
@@ -6662,10 +6715,11 @@ async fn named_providers_keep_separate_keys_and_config_wins_over_auth() {
     assert!(stderr.contains("corp"), "{stderr}");
 }
 
-/// A `spawn_agent` that takes the environment verbatim (the helper above derives it from key
+/// A `spawn_radian` that takes the environment verbatim (the helper above derives it from key
 /// env vars; named providers carry their own in `auth.json`).
-fn spawn_agent_raw(args: &[&str], envs: &[(String, String)]) -> Child {
-    Command::new(agent_bin())
+fn spawn_radian_raw(args: &[&str], envs: &[(String, String)]) -> Child {
+    Command::new(common::radian_bin())
+        .arg("exec")
         .args(args)
         .env_remove("OPENAI_API_KEY")
         .envs(envs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
@@ -6674,16 +6728,16 @@ fn spawn_agent_raw(args: &[&str], envs: &[(String, String)]) -> Child {
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .expect("spawn agent")
+        .expect("spawn radian")
 }
 
-// ---------- agent login / agent logout (ADR 0026 D3) ----------
+// ---------- radian login / radian logout (ADR 0026 D3) ----------
 
 /// `agent login` refuses without a terminal: a key pasted into a pipe would be visible, so
 /// the message points at `auth.json` instead (D3). Exit code 2 (usage-shaped).
 #[tokio::test]
 async fn login_without_a_terminal_refuses_and_points_at_auth_json() {
-    let output = tokio::process::Command::new(agent_bin())
+    let output = tokio::process::Command::new(common::radian_bin())
         .args(["login", "openai"])
         .env("HOME", fresh_session_dir())
         .env("RADIAN_HOME", fresh_session_dir())
@@ -6837,7 +6891,7 @@ async fn pty_agent_login_custom_hides_the_key_and_restores_echo() {
     let home = fresh_session_dir();
     let credentials = home.join("credentials");
     std::fs::create_dir_all(&credentials).unwrap();
-    let mut pty = PtyChild::spawn(&[agent_bin(), "login", "custom"], &home);
+    let mut pty = PtyChild::spawn(&[&common::radian_bin_str(), "login", "custom"], &home);
     let mut seen = Vec::new();
     const KEY: &str = "sk-CLI-HIDDEN-99";
     assert!(
@@ -6907,7 +6961,7 @@ async fn pty_agent_login_custom_hides_the_key_and_restores_echo() {
 async fn pty_agent_login_ctrl_c_during_the_key_prompt_restores_echo() {
     let home = fresh_session_dir();
     std::fs::create_dir_all(home.join("credentials")).unwrap();
-    let mut pty = PtyChild::spawn(&[agent_bin(), "login", "anthropic"], &home);
+    let mut pty = PtyChild::spawn(&[&common::radian_bin_str(), "login", "anthropic"], &home);
     let mut seen = Vec::new();
     assert!(
         pty.wait_for(&mut seen, "API key", 10).await,
