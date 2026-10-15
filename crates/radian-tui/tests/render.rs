@@ -524,9 +524,11 @@ fn the_decline_confirmation_is_shown() {
 
 /// The input area in the style of pi: a rule above and below, `> ` on the
 /// first line, and continuation lines indented by two cells instead of repeating the prompt.
+/// This is `tui.input_style = "lines"` (the default is `bar`, ADR 0035 V3).
 #[test]
 fn the_input_area_has_rules_and_a_prompt_instead_of_a_box() {
     let mut app = App::new("m", "s");
+    app.input_style = radian_tui::render::InputStyle::Lines;
     app.input = "first\nsecond".into();
     let text = screen(&render(&mut app, 20, 8));
     assert!(!text.contains("message"), "the box title is gone:\n{text}");
@@ -553,14 +555,23 @@ fn the_input_area_has_rules_and_a_prompt_instead_of_a_box() {
     }
 }
 
-/// The empty input shows the placeholder after the prompt.
+/// The empty input shows the placeholder after the prompt (`lines`), and after the rail in the
+/// default `bar` style.
 #[test]
 fn the_empty_input_shows_the_placeholder_after_the_prompt() {
     let mut app = App::new("m", "s");
+    app.input_style = radian_tui::render::InputStyle::Lines;
     let text = screen(&render(&mut app, 80, 8));
     assert!(
         text.contains("❯ (type a message, Enter to send, Ctrl-J for a new line)"),
         "{text}"
+    );
+
+    let mut bar = App::new("m", "s");
+    let text = screen(&render(&mut bar, 80, 8));
+    assert!(
+        text.contains("▎ (type a message, Enter to send, Ctrl-J for a new line)"),
+        "the bar's placeholder follows the rail:\n{text}"
     );
 }
 

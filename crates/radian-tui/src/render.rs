@@ -739,15 +739,14 @@ const FIND_BOX_HEIGHT: u16 = 3;
 /// How the input area is drawn (config `tui.input_style`, owner UI review 2026-10-13).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InputStyle {
-    /// A rule above and below, `> ` on the first line, continuation lines indented two cells.
-    /// The default.
+    /// The banded input (ADR 0035 V3, omp's `rail`, the default): one background band per row
+    /// with a left accent rail, no border and no rules, and a fixed status row above the band.
     #[default]
+    Bar,
+    /// A rule above and below, `> ` on the first line, continuation lines indented two cells.
     Lines,
     /// The bordered box with a ` message ` title (the pre-review shape).
     Box,
-    /// The banded input (ADR 0035 V3, the omp `rail`): one background band per row with a left
-    /// accent rail, no border and no rules, and a fixed status row above the band.
-    Bar,
 }
 
 impl InputStyle {

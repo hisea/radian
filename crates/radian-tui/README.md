@@ -112,17 +112,27 @@ the provider and the model only.
 
 ```
 transcript: user >, assistant, ~ reasoning, -> tool, <- result
-──────────────────────────────────────────────────────────────
-> type here
-──────────────────────────────────────────────────────────────
+  ◜  Working · 12s · esc to interrupt
+▎ type here
  model │ idle/running/cancelled │ tier │ usage in/out │ mcp servers/tools │ context │ scroll N/M
 ```
 
-The input area is a rule above and below with a `> ` prompt; a continuation
-line is indented two cells instead of repeating the prompt. `tui.input_style = "box"` is the
-owner's bordered shape (2026-10-14): **rounded** corners, the `❯` prompt, and the border in
-the theme's accent role (`notice_label` — ADR 0029 reserves accent for labels and
-attention surfaces). It is a real composer either way (cursor editing, multi-line, history).
+The default input area is `tui.input_style = "bar"` (ADR 0035 V3, the omp `rail`): one
+background band per input row (the theme's `input_bar` role — pi's `text` on `userMessageBg`,
+the same band as a user message block), the accent rail `▎` on the left (`|` with
+`glyphs = "ascii"`), no border and no rules; a multi-line input grows the band by its rows, and
+its continuation rows carry the rail too. Directly above the band is a **fixed one-row status
+line**: blank while idle but still occupying its row — so the band and the transcript never
+move when a turn starts or finishes — and
+`<spinner>  Working · 12s · esc to interrupt` while a turn runs (the spinner is the same one the
+`lines`/`box` rule line uses, the rest is one level weaker; the clock is the footer's `elapsed`
+and `esc to interrupt` appears exactly while a turn is running). `tui.input_style = "lines"` is
+the earlier shape: a rule above and below with a `> ` prompt, continuation lines indented two
+cells. `tui.input_style = "box"` is the owner's bordered shape (2026-10-14): **rounded**
+corners, the `❯` prompt, and the border in the theme's accent role (`notice_label` — ADR 0029
+revision 1 reserves accent for labels and attention surfaces). The `lines` and `box` styles put
+the same running status on their top rule / border instead of on a status row. It is a real
+composer in all three (cursor editing, multi-line, history).
 
 The **startup screen** is the leading block of transcript entries: the
 wordmark (three rows at the primary `text` level; below its width it drops to one line,
@@ -195,7 +205,7 @@ The file is read the same way as the CLI's (`--config`, `RADIAN_CONFIG`,
 schema_version = 1
 [tui]
 theme = "dark"                 # a built-in name, or a theme file name (see below)
-input_style = "lines"          # lines (default) | box
+input_style = "bar"            # bar (default) | lines | box
 mouse = true                   # wheel + transcript selection (default true)
 clipboard = "osc52"            # osc52 (default) | pbcopy (macOS) | off
 
@@ -214,9 +224,10 @@ find = ["ctrl-f"]              # open the in-transcript search box
 find_next = ["ctrl-g", "shift-enter"]
 ```
 
-- `input_style`: `lines` (the default: a rule above and below, `> ` on the first line) or `box`
+- `input_style`: `bar` (the default: the banded input with the accent rail and the fixed status
+  row above it, ADR 0035 V3), `lines` (a rule above and below, `> ` on the first line) or `box`
   (the owner's rounded box with the `❯` prompt). An unknown value is ignored with a warning and
-  falls back to `lines`.
+  falls back to `bar`.
 - `tips` / `banner`: whether the startup screen shows the one Tip line and the wordmark. Both
   default to on; `false` hides them.
 - `footer` (ADR 0027 C2, revision 3): the status area's rows. `preset` is `deck` (the default,
@@ -371,6 +382,7 @@ Every pi role maps onto a Radian role (`[tui.colors]` accepts both name families
 | Radian role | pi role(s) it takes |
 |---|---|
 | `user` | `userMessageText` (fg) + `userMessageBg` (bg) |
+| `input_bar` | `text` (fg) + `userMessageBg` (bg) — the `bar` input's band, the same band as a user message block (ADR 0035 V3) |
 | `selection` | `selectedBg` (bg only — the text keeps its own foreground under the band) |
 | `tool_pending_bg` / `tool_success_bg` / `tool_error_bg` | `toolPendingBg` / `toolSuccessBg` / `toolErrorBg` (the tool card's band by state) |
 | `notice_label` / `notice_body` | `accent` / `muted` (a structured notice's label and the rest) |
@@ -596,8 +608,11 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
 - **the `AUTO` status marker** (ADR 0026 D9): turn auto on with `/auto on` — does the reversed
   `AUTO` segment stand out as "this session behaves differently" in `dark`, `light` and `mono`,
   without reading as an error? pty automation asserts the text, not the prominence.
-- **the input area's two styles**: is `lines` (the default) comfortable, and is
-  the `> ` prompt clear when the input is multi-line? Try `input_style = "box"` and compare.
+- **the input area's three styles**: is the default `bar` band
+  comfortable — the rail clear, the band reaching the right edge, multi-line and a CJK line
+  banded on every row, and the status row above it (`◜  Working · 12s · esc to interrupt`) not
+  shifting the band or the transcript? Compare `input_style = "lines"` (the rule above and
+  below, `> `) and `input_style = "box"`.
 - **notice and hint readability**: `/help`'s output and the placeholder must be
   readable on your background. `dark` now uses the terminal's default foreground for notices and
   `Gray` for hints; is that right on your terminal, and is the light palette's hint (dark gray on
@@ -703,11 +718,20 @@ throwaway terminal, not your working one.
    record the font name and what you see.
 3. **Rounded input box and `❯`** (`tui.input_style = "box"`; merge `22b2753`; the prompt and
    cursor fixes are `pi/ui-r3`). *Steps*: set `input_style = "box"` in `[tui]`, restart; type a
-   multi-line draft (`Ctrl-J`); resize. *Expect*: rounded corners, the `❯` prompt **in both
-   styles**, the border in the theme accent (`notice_label`); the cursor sits right after the
+   multi-line draft (`Ctrl-J`); resize. *Expect*: rounded corners, the `❯` prompt **in `lines`
+   and `box`**, the border in the theme accent (`notice_label`); the cursor sits right after the
    text (empty: one cell into the prompt; the old byte-length bug put it two cells right); the
    continuation line aligns under the text; no corner breaks at any width. *Fail*: record the
    width where a corner/glyph breaks.
+3c. **The `bar` input and its status row** (ADR 0035 V3; default). *Steps*: open `radian`
+   (no `input_style`), type a one-line draft, then a `Ctrl-J` multi-line one, then a CJK line;
+   send a message and watch a turn run; resize to 40/80/120. *Expect*: one banded row per input
+   row, the accent `▎` rail on each, the band reaching the right edge (never a highlight that
+   stops at the text); above the band one always-present row — blank when idle, `◜  Working ·
+   12s · esc to interrupt` while a turn runs — and neither the band nor the transcript moves
+   when the turn starts or ends; the cursor after the rail (CJK two cells). *Look*: is the rail
+   the accent and is the band the same color as a user message block? *Fail*: record the width
+   or the font where it reads wrong.
 3b. **Shift+Enter** (`pi/ui-r3`). *Steps*: in Terminal.app, iTerm2/Ghostty (or another
    kitty-protocol terminal) and inside herdr, press `Shift+Enter` in a non-empty draft; then
    `Ctrl-J`. *Expect*: Shift+Enter inserts a newline where the terminal reports it (herdr and

@@ -1228,7 +1228,7 @@ pub struct App {
     pub spinner_kind: crate::spinner::Kind,
     /// The key bindings (config `tui.keybindings`), defaulting to the pre-config key table.
     pub keymap: Keymap,
-    /// How the input area is drawn (config `tui.input_style`), defaulting to `lines`.
+    /// How the input area is drawn (config `tui.input_style`), defaulting to `bar`.
     pub input_style: InputStyle,
     pub total_lines: usize,
     pub view_height: u16,

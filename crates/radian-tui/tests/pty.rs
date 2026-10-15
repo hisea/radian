@@ -4946,11 +4946,15 @@ async fn pty_a_closed_master_ends_the_app_cleanly() {
     }
 }
 
-/// The remaining window: the main loop can be stuck **inside crossterm's reader** (the tty can
-/// hang up between `poll(2)` and crossterm's read, or a half-read escape sequence can make it
-/// read again), so the loop never sees the signal flag. `--block-input` parks the read after
-/// writing a marker, standing in for that spin; a SIGHUP must still end the process, forced by
-/// the signal task's watchdog with the shell convention 128+SIGHUP.
+/// The remaining window: the main loop can be stuck inside a long frame (a terminal write that
+/// blocks because nobody drains it), so it never sees the signal flag and only the signal task's
+/// watchdog can end the process. `--slow-draw` parks every frame, which makes that hang
+/// deterministic; `--block-input` still writes its marker, so the test signals only once the app
+/// is up. (Letting the **first frame** overflow the pty output buffer parks the loop too — that
+/// is what [`spawn_direct`] documents — but only until the frame's size crosses the buffer's,
+/// so the `bar` input's shorter frame is no longer a reliable hang and the hook is used instead.)
+/// A SIGHUP must still end the process, forced by the signal task's watchdog with the shell
+/// convention 128+SIGHUP.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
@@ -4977,6 +4981,10 @@ async fn pty_a_hung_main_loop_still_exits_on_a_signal() {
             ws.to_str().unwrap(),
             "--block-input",
             marker.to_str().unwrap(),
+            // Longer than the test's 10 s deadline: every frame parks the loop, so the loop is
+            // inside one when the signal arrives and only the watchdog can end it.
+            "--slow-draw",
+            "60000",
         ],
         home.path(),
     );
@@ -6909,7 +6917,7 @@ async fn pty_the_slash_completion_walks_the_command_tree() {
     );
     pty.send(b"\t");
     assert!(
-        pty.wait_for_screen("❯ /memory ", 10),
+        pty.wait_for_screen("▎ /memory ", 10),
         "Tab did not complete the command name:\n{}",
         pty.screen()
     );
@@ -6922,7 +6930,7 @@ async fn pty_the_slash_completion_walks_the_command_tree() {
     );
     pty.send(b"\t");
     assert!(
-        pty.wait_for_screen("❯ /memory forget", 10),
+        pty.wait_for_screen("▎ /memory forget", 10),
         "Tab did not complete the subcommand:\n{}",
         pty.screen()
     );
@@ -8913,9 +8921,12 @@ fn longest_run(screen: &str, ch: char) -> usize {
 async fn pty_a_bare_resize_re_lays_out() {
     let _serial = pty_guard();
     let server = MockServer::start(vec![text_reply("never")]).await;
+    // The rule is the width witness, so this test asks for `tui.input_style = "lines"`: the
+    // default `bar` band has no rule to measure (its width at 80 and 120 columns is pinned by
+    // the `TestBackend` snapshots in `tests/render.rs`).
     let config = format!(
         "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
-         base_url = \"{}\"\n",
+         base_url = \"{}\"\n[tui]\ninput_style = \"lines\"\n",
         server.base_url
     );
     let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
