@@ -83,14 +83,63 @@ impl Glyphs {
     }
 
     /// The tool-call status glyphs (ADR 0028 rule 4): running, success, failure.
-    /// The unicode set is covered by all seven checked fonts (ADR 0027): omp's
-    /// `⟳`/`✔`/`✘` are not, so `~`/`+`/`×` stand in. The Nerd set uses the Font Awesome
+    /// The unicode set is covered by all six checked fonts (ADR 0027 and 6): omp's
+    /// `⟳`/`✔`/`✘` are not, so `~`/`✓`/`×` stand in. The Nerd set uses the Font Awesome
     /// codepoints; the ASCII set is plain.
     pub fn tool_status(self) -> [&'static str; 3] {
         match self {
-            Self::Unicode => ["~", "+", "×"],
+            Self::Unicode => ["~", "✓", "×"],
             Self::Nerd => ["\u{f110}", "\u{f00c}", "\u{f00d}"],
             Self::Ascii => ["*", "+", "x"],
+        }
+    }
+
+    /// The token arrows: the unicode tier uses `↑`/`↓` (revision 6 item 2; both are in all six
+    /// checked fonts), the other tiers keep `^`/`v`.
+    pub fn token_arrows(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Unicode => ("↑", "↓"),
+            Self::Nerd | Self::Ascii => ("^", "v"),
+        }
+    }
+
+    /// The folded-reasoning marker: `›` for the unicode tier (revision 6 item 2; `▸` is not in
+    /// all six fonts and `›` is), `>` for the other tiers.
+    pub fn fold_marker(self) -> &'static str {
+        match self {
+            Self::Unicode => "›",
+            Self::Nerd | Self::Ascii => ">",
+        }
+    }
+}
+
+/// How the gap between a row's left and right groups is drawn (ADR 0027 item 4,
+/// following omp's `statusLine.contextLine`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ContextLine {
+    /// The gap is spaces (the default; Radian's footer has no background fill, so a line by
+    /// default would be noise - omp's `off` still draws a solid accent line).
+    #[default]
+    Off,
+    /// The gap is a `─` rule: the used fraction of the context window in the `budget` role,
+    /// the rest in the `footer_separator` role (omp's `percentage`). With no known budget the
+    /// gap stays spaces: never a fabricated percentage.
+    Percentage,
+}
+
+impl ContextLine {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "off" => Some(Self::Off),
+            "percentage" => Some(Self::Percentage),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Percentage => "percentage",
         }
     }
 }
@@ -272,6 +321,11 @@ pub struct Footer {
     preset: Preset,
     glyphs: Glyphs,
     rows: Vec<Row>,
+    /// The left/right gap fill (ADR 0027 item 4).
+    context_line: ContextLine,
+    /// The footer inherits the terminal's background (ADR 0027 item 5): every
+    /// cell's background is cleared, a configured item style's included.
+    transparent: bool,
 }
 
 impl Footer {
@@ -308,9 +362,19 @@ impl Footer {
                 ItemStyle::Role(Role::FooterSeparator)
             }),
         };
+        let context_line = match config.context_line.as_deref() {
+            None => ContextLine::Off,
+            Some(name) => ContextLine::parse(name).unwrap_or_else(|| {
+                warnings.push(format!(
+                    "tui.footer.context_line = {name:?} is not one of off|percentage; using off"
+                ));
+                ContextLine::Off
+            }),
+        };
+        let transparent = config.transparent.unwrap_or(false);
         let rows: Vec<Row> = if config.rows.is_empty() {
             // The built-in preset, then the per-field `items` config on top.
-            let mut rows = preset_rows(preset);
+            let mut rows = preset_rows(preset, glyphs);
             for row in &mut rows {
                 for item in row.left.iter_mut().chain(row.right.iter_mut()) {
                     if let Some(field) = config.items.get(&item.id) {
@@ -348,6 +412,8 @@ impl Footer {
                 preset,
                 glyphs,
                 rows,
+                context_line,
+                transparent,
             },
             warnings,
         )
@@ -366,22 +432,33 @@ impl Footer {
     /// pre-ADR one-line status bar); `pi` builds its rows here.
     pub fn lines(&self, app: &App, width: usize) -> Vec<Line<'static>> {
         let rows: Cow<'_, [Row]> = if self.rows.is_empty() {
-            Cow::Owned(preset_rows(self.preset))
+            Cow::Owned(preset_rows(self.preset, self.glyphs))
         } else {
             Cow::Borrowed(&self.rows)
         };
         // A row with no data renders empty (the deck's usage row, revision 3): drop it so it
         // never leaves a blank line.
         rows.iter()
-            .map(|row| render_row(app, row, width))
+            .map(|row| render_row(app, row, width, self.context_line))
             .filter(|line| !line.spans.is_empty())
+            .map(|mut line| {
+                if self.transparent {
+                    // ADR 0027 item 5: no background, so a transparent terminal
+                    // shows through. The gap's spaces and the gauge keep their own colors.
+                    for span in &mut line.spans {
+                        span.style.bg = None;
+                    }
+                }
+                line
+            })
             .collect()
     }
 }
 
 /// The built-in rows for a preset (ADR 0027 C2 and revision 1; a configured `rows` overrides
 /// them entirely). `classic` is drawn by the renderer, so its rows are unused.
-fn preset_rows(preset: Preset) -> Vec<Row> {
+fn preset_rows(preset: Preset, glyphs: Glyphs) -> Vec<Row> {
+    let (token_in, token_out) = glyphs.token_arrows();
     let item = |id: &str| Item {
         id: id.to_string(),
         icon: None,
@@ -432,7 +509,10 @@ fn preset_rows(preset: Preset) -> Vec<Row> {
                 ..row(
                     Vec::new(),
                     vec![
-                        with_format("tokens", "^{in} v{out} R{cache}"),
+                        with_format(
+                            "tokens",
+                            &format!("{token_in}{{in}} {token_out}{{out}} R{{cache}}"),
+                        ),
                         item("cost"),
                         no_symbol("context", "{percent}%/{budget}"),
                     ],
@@ -459,7 +539,10 @@ fn preset_rows(preset: Preset) -> Vec<Row> {
                 // The numbers row: tokens (in/out/cache), speed, cost, context (share/window
                 // with the auto-compaction marker), elapsed.
                 left: vec![
-                    with_format("tokens", "^{in} v{out} {cache}"),
+                    with_format(
+                        "tokens",
+                        &format!("{token_in}{{in}} {token_out}{{out}} {{cache}}"),
+                    ),
                     item("speed"),
                     item("cost"),
                     with_format("context", "{percent}%/{budget}{auto}"),
@@ -728,6 +811,14 @@ fn item_priority(id: &str) -> i64 {
     }
 }
 
+/// The used fraction of the context window, `None` when either the budget or the usage report
+/// is unknown (ADR 0027 item 4: the gap gauge and the `context` item share it).
+fn context_fraction(session: &radian_host::ProjectionRead<'_>) -> Option<f64> {
+    let budget = session.context_window()?;
+    let used = session.budget()?.projected_tokens;
+    (budget > 0).then(|| used as f64 / budget as f64)
+}
+
 /// An item's default theme role (the classic status bar's assignments, kept so a default
 /// footer reads the same way). `None` means the terminal's default style.
 fn default_role(id: &str) -> Option<Role> {
@@ -778,7 +869,7 @@ struct Piece {
     priority: i64,
 }
 
-fn render_row(app: &App, row: &Row, width: usize) -> Line<'static> {
+fn render_row(app: &App, row: &Row, width: usize, context_line: ContextLine) -> Line<'static> {
     let mut left: Vec<Piece> = row
         .left
         .iter()
@@ -820,7 +911,37 @@ fn render_row(app: &App, row: &Row, width: usize) -> Line<'static> {
             .sum();
         let gap = width.saturating_sub(used + group_width(&right, separator));
         if gap > 0 {
-            spans.push(Span::raw(" ".repeat(gap)));
+            // ADR 0027 item 4: the gap can show the context usage (omp's
+            // `contextLine = percentage`): the used fraction in the budget role, the rest in
+            // the separator (border) role. No known budget: spaces, never a fabricated number.
+            // The read is taken only when the fill is on: the projection Mutex is not
+            // reentrant, so a call from a path that already holds it would deadlock.
+            let fraction = match context_line {
+                ContextLine::Percentage => {
+                    let session = app.projection.read();
+                    context_fraction(&session)
+                }
+                ContextLine::Off => None,
+            };
+            match fraction {
+                Some(fraction) => {
+                    let used_cells = ((fraction.clamp(0.0, 1.0)) * gap as f64).round() as usize;
+                    let used_cells = used_cells.min(gap);
+                    if used_cells > 0 {
+                        spans.push(Span::styled(
+                            "─".repeat(used_cells),
+                            role_style(app, Role::Budget),
+                        ));
+                    }
+                    if gap > used_cells {
+                        spans.push(Span::styled(
+                            "─".repeat(gap - used_cells),
+                            role_style(app, Role::FooterSeparator),
+                        ));
+                    }
+                }
+                None => spans.push(Span::raw(" ".repeat(gap))),
+            }
         }
         for (text, style) in &right_text {
             spans.push(Span::styled(text.clone(), *style));
@@ -1229,10 +1350,7 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
             let budget = session.context_window();
             let report = session.budget();
             let used = report.map(|report| report.projected_tokens);
-            let fraction = match (used, budget) {
-                (Some(used), Some(budget)) if budget > 0 => used as f64 / budget as f64,
-                _ => 0.0,
-            };
+            let fraction = context_fraction(&session).unwrap_or(0.0);
             // One decimal (ADR 0027): `41.3%`.
             let percent = format!("{:.1}", fraction * 100.0);
             let bar = if id == "context_bar" {
@@ -1246,7 +1364,7 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
                 if app.footer_glyphs() == Glyphs::Ascii {
                     " auto".to_string()
                 } else {
-                    // `⟲` (U+27F2) is missing from six of the seven fonts (revision 4): `~`.
+                    // `⟲` (U+27F2) is missing from five of the six fonts (revision 4): `~`.
                     " ~".to_string()
                 }
             } else {
@@ -1307,7 +1425,12 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
                         .map_or_else(|| "-".to_string(), crate::timing::format_tokens),
                 ),
             ],
-            default_format: "^{in} v{out} R{cache}",
+            // The default format is a tier default (ADR 0027 item 2): the unicode
+            // tier's arrows, or `^`/`v`. A user-configured format always wins.
+            default_format: match app.footer_glyphs() {
+                Glyphs::Unicode => "↑{in} ↓{out} R{cache}",
+                Glyphs::Nerd | Glyphs::Ascii => "^{in} v{out} R{cache}",
+            },
             numeric: None,
         }),
         // ADR 0027: the fee the session has accumulated, each call priced at the
@@ -1468,7 +1591,7 @@ fn render_bar(item: &Item, fraction: f64) -> String {
 /// icon carry one; the rest are plain text.
 fn glyph(id: &str, glyphs: Glyphs) -> &'static str {
     match (id, glyphs) {
-        // ADR 0027: the unicode icons must exist in all seven mainstream coding
+        // ADR 0027 and 6: the unicode icons must exist in all six mainstream coding
         // fonts (see the README's coverage table), so `⌂ ◷ ◫ ◐ ⛁ ⬡` are replaced or dropped.
         // `@ # *` and `»` are in every one; the rest are text-only.
         ("host", Glyphs::Unicode) => "@ ",
@@ -1537,10 +1660,10 @@ mod tests {
     use super::*;
 
     /// Every non-ASCII glyph the `unicode` tier can draw (ADR 0027). Each one is
-    /// checked against the seven fonts by `scripts/check-glyph-coverage.py` and listed in the
+    /// checked against the six fonts by `scripts/check-glyph-coverage.py` and listed in the
     /// README's coverage table. A new glyph makes this test fail until it is re-checked and
     /// added here.
-    const VERIFIED_COVERED: &str = "»│━─×▖▘▝▗";
+    const VERIFIED_COVERED: &str = "»│━─×▖▘▝▗↑↓✓›…";
 
     /// The documented exceptions to the coverage rule (ADR 0027/10): the owner
     /// picked the arc and the pulse after seeing them, and braille is an opt-in, so these may
@@ -1610,14 +1733,14 @@ mod tests {
         }
     }
 
-    /// The unicode tier only draws glyphs the seven checked fonts all have. Every item glyph
+    /// The unicode tier only draws glyphs the six checked fonts all have. Every item glyph
     /// (from the built-in presets), the spinner frames, the separators, the context bar and
     /// the auto marker are checked.
     #[test]
     fn unicode_tier_glyphs_are_all_verified_covered() {
         let mut glyphs: Vec<char> = Vec::new();
         for preset in [Preset::Deck, Preset::Full, Preset::Pi] {
-            for row in preset_rows(preset) {
+            for row in preset_rows(preset, Glyphs::Unicode) {
                 for item in row.left.iter().chain(row.right.iter()) {
                     glyphs.extend(glyph(&item.id, Glyphs::Unicode).chars());
                     if let Some(format) = &item.format {
@@ -1641,6 +1764,8 @@ mod tests {
             }
         }
         glyphs.extend("━─".chars());
+        // The status line's truncation marker (ADR 0027 item 2: `…`).
+        glyphs.extend("…".chars());
         glyphs.extend(" ~".chars());
         for ch in glyphs {
             if ch.is_ascii() || ch == ' ' {

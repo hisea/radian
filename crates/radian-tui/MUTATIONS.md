@@ -1291,6 +1291,22 @@ Base `d47e876` · 一次性 detached worktree `/tmp/pa-mut`（跑完 `git worktr
 3/3 抓住。三个变异都是**原有行为测试**，证明这次外观迁移没有削弱它们（审批的 `y`、信任 Esc
 只限本次不写盘、选择器按 id 或 summary 过滤）。外观本身由新的 TestBackend 快照覆盖。
 
+## glyphs2: ADR 0027 items 1/2/4/5 (2026-10-15)
+
+Base `1155b98` · one-shot worktree `/tmp/g2-mut` (from HEAD, deleted after) · each mutation
+applied by a patch with an anchor assertion, then `cargo test -p radian-tui --test footer
+<name>` / `--test render <name>` / `--lib <name>` (one positional filter at a time) under
+`timeout 300`; files restored after each; `git status --short` empty at the end.
+
+| # | Rule mutated | Mutation | Caught by |
+|---|---|---|---|
+| G1 | 2: the unicode token arrows | `Glyphs::token_arrows` returns `^`/`v` for unicode | `footer.rs::the_unicode_footer_snapshot_at_80_and_120_columns` FAILED |
+| G2 | 2: the unicode fold marker | `Glyphs::fold_marker` returns `>` for unicode | `render.rs::the_block_layout_snapshot` and `render.rs::thinking_folds_to_one_line_and_ctrl_t_expands_it` FAILED |
+| G3 | 5: transparent clears the background | the post-pass is skipped (`if false && self.transparent`) | `footer.rs::transparent_clears_the_footer_background` FAILED |
+| G4 | 1/2: the coverage rule | the unicode `reasoning` icon becomes `◐` (no reference font has it) | `footer::tests::unicode_tier_glyphs_are_all_verified_covered` FAILED |
+
+4/4 caught. G2's glyph is drawn in the transcript (the folded-reasoning marker), so its
+catching tests are the render snapshots, not the footer ones.
 ## md-test-speed：中文 Markdown 选区测试从 N² 改成每格 4 次（2026-10-15）
 
 `a_chinese_markdown_selection_does_not_panic` 原来对每两个格子都做一次选区（N²，每次重新排版），在工作区测试里约占 700 s；

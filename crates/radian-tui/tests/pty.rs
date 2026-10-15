@@ -9022,7 +9022,7 @@ async fn pty_the_pi_footer_is_two_rows() {
     // The model item is on the footer's first row; the tokens item on the second. The screen
     // text is one string, so both must be present, and the tokens glyph marks the second row.
     assert!(
-        pty.wait_for_screen("^-", 10),
+        pty.wait_for_screen("↑-", 10),
         "the tokens row is missing:\n{}",
         pty.screen()
     );
@@ -9084,7 +9084,7 @@ async fn pty_the_shipped_default_footer_is_two_rows_without_a_config() {
         "the repo/worktree name is on the identity row: {first:?}"
     );
     assert!(
-        second.contains('^'),
+        second.contains('↑'),
         "the numbers row shows the tokens: {second:?}"
     );
     assert!(
@@ -9196,14 +9196,14 @@ async fn pty_a_resume_shows_the_sessions_earlier_tokens_and_fee() {
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
     // The earlier turn's tokens are there (1M in, 100K out). The default `tokens` format is
-    // `^{in} v{out} R{cache}` (ADR 0027's ASCII-default icons), and `format_tokens`
+    // `↑{in} ↓{out} R{cache}` (ADR 0027 item 2's unicode arrows), and `format_tokens`
     // keeps one decimal under 10 (so 1 000 000 is `1.0M`) and rounds above it (`100K`).
     assert!(
-        pty.wait_for_screen("^1.0M", 10),
+        pty.wait_for_screen("↑1.0M", 10),
         "the resumed token total is missing:\n{}",
         pty.screen()
     );
-    assert!(pty.screen().contains("v100K"), "{}", pty.screen());
+    assert!(pty.screen().contains("↓100K"), "{}", pty.screen());
     // ... and its fee: 1M x $0.15 + 100K x $0.60 per Mtok = $0.21, three decimals
     // (ADR 0027).
     assert!(
