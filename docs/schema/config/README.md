@@ -15,10 +15,12 @@
 | `tui-tips-banner.toml` | ADR 0008：`tui.tips`/`tui.banner`（布尔，默认都开）关闭启动画面的 Tip 行与字标。 | **接受**，0 拒绝；无明文密钥样字符串。 | §2 |
 | `tui-brand.toml` | ADR 0027：`tui.brand` 是品牌文字（≤ 4 显示宽度），footer 的 `brand` 条目与启动画面一行回退共用；不写时用 glyphs 档默认；超出是配置错误。 | **接受**，0 拒绝；无明文密钥样字符串。 | §2 / ADR 0027 |
 | `tui-spinner.toml` | ADR 0027：`tui.spinner = "pulse" | "arc" | "quadrant" | "braille"`（默认 pulse；未知值警告回退）。 | **接受**，0 拒绝；无明文密钥样字符串。 | §2 / ADR 0027 |
+| `tui-input-style.toml` | ADR 0035 V3：`tui.input_style = "bar" | "lines" | "box"`（默认 `bar`；未知值警告回退）。 | **接受**，0 拒绝；无明文密钥样字符串。 | §2 / ADR 0035 V3 |
 | `tui-footer.toml` | ADR 0027 C2：`[tui.footer]` 的 preset/separator/glyphs/context_line/transparent 与 `[[tui.footer.rows]]` 的 left/right（字符串或表两种条目写法、icon/format/style/priority/thresholds 与条目专属参数）。 | **接受**，0 拒绝；未知条目 id 由 TUI 原样显示并警告，不拒绝文件。 | §2 / ADR 0027 |
 | `tui-footer-items.toml` | ADR 0027：`[tui.footer.items.<id>]` 的 symbol/style/symbol_style/format/disabled，`separator_style`（角色或 starship 颜色），`tui.usage_period_secs`。 | **接受**，0 拒绝。 | §2 / ADR 0027 |
 | `tui-widgets.toml` | ADR 0027 C3：`[tui.widgets]` 的 `above_input`/`below_input` 在输入框上/下放一行贡献者条目（条目 id）。 | **接受**，0 拒绝。 | §2 / ADR 0027 |
 | `providers.toml` | ADR 0026 D10:`[providers.<名字>]` 具名 provider(`kind` + `base_url`),`model.provider = "<名字>"` 选用。ADR 0014 Q2:同名表下 `reasoning_replay` 可覆盖目录的推理回传字段(字段名串,或 `false` 关掉)。 | **接受**，0 拒绝；名字非法/与内建重名是另一个拒绝场景（读取器报 `providers.<name>` 错误）。 | §2 / ADR 0026 D10 / ADR 0014 Q2 |
+| `git.toml` | ADR 0030 R10 / 修订 4:`[git] protected_branches` 列出 `git_commit` 额外拒绝的分支;`allowed_filters` 列出 `git add` 允许运行的 `filter.<名字>` 驱动(默认 `["lfs"]`,`[]` 表示一个都不允许)。 | **接受**,0 拒绝;无明文密钥样字符串。 | §2 / ADR 0030 R10 / 修订 4 |
 | `permissions-approval.toml` | ADR 0026 D9:`[permissions] approval = "auto"`(四个已知名字之一)。`full` 档位下这个值被忽略并警告;命令行 `--approval`/`--yes` 永远优先。 | **接受**,0 拒绝;无明文密钥样字符串。 | §2 / ADR 0026 D9 |
 | `skills-builtin.toml` | ADR 0025:`[skills] builtin = false` 关掉全部内建 skill,`disabled = ["<name>"]` 关掉单个(用户级/extra_paths 不受影响)。 | **接受**,0 拒绝;未知值/未知键是警告。 | §2 / ADR 0025 |
 | `integrations-herdr.toml` | ADR 0034 H6:`[integrations] herdr = true|false`,缺省 `true`。只在 herdr pane 里生效(`HERDR_ENV=1` 且 pane id、socket path 非空);`RADIAN_HERDR=0` 一次性关闭。上报只有状态、会话 id、journal 路径与恢复命令,不含 transcript/usage/model/费用/命令正文。 | **接受**,0 拒绝。 | §2 / ADR 0034 |

@@ -28,6 +28,7 @@ pub const HELP: &str = "\
                       forget, purge, confirm, export, import, project, relink, split, merge
 /skill:<name> [args]  run a skill: read its body into the message (ADR 0025)
 /skills               list the discovered skills
+/jobs [kill <id|all>] list this session's background jobs, or stop one/all (ADR 0037)
 /login [provider]     store an API key in credentials/auth.json (ADR 0026 D3); custom
                       names a new endpoint (name, protocol, base URL, key)
 /logout <provider>    remove a stored credential (asks first)
@@ -46,6 +47,17 @@ pub struct PendingCommand {
     /// A `/model` switch waiting behind this confirm (ADR 0026 D7): `y` compacts to this
     /// budget and then queues the route; `n` cancels. `None` for a `/memory` confirm.
     pub switch: Option<(String, String, u64)>,
+}
+
+/// What `/jobs` asked for (ADR 0037 decision 4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobsRequest {
+    /// `/jobs`: list the session's background jobs.
+    List,
+    /// `/jobs kill <id>`: stop one job's process group.
+    Kill(String),
+    /// `/jobs kill all`: stop every running job.
+    KillAll,
 }
 
 /// What one submitted `/…` line meant. Parsing only: running the command is the loop's job
@@ -88,6 +100,8 @@ pub enum Outcome {
     Skill { name: String, args: String },
     /// `/skills`: list the discovered skills (name + description) as notices.
     Skills,
+    /// `/jobs`: list the session's background jobs, or stop one/all (ADR 0037 decision 4).
+    Jobs(JobsRequest),
     /// A user's `!`/`!!` shell command (ADR 0033). The command string runs in the sandbox
     /// (the tier's shell); `exclude_from_context` (`!!`) keeps its output out of the model's
     /// context. Execution is the loop's effect.
@@ -852,9 +866,22 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         Some("/auto") | Some("/yolo") => auto_toggle(&tokens[1..]),
         Some("/skills") if tokens.len() == 1 => Outcome::Skills,
         Some("/skills") => Outcome::Notices(vec!["usage: /skills (no arguments)".to_owned()]),
+        Some("/jobs") => jobs_request(&tokens[1..]),
         Some(other) if other.starts_with("/skill:") => skill_command(other, line),
         Some(other) => Outcome::Notices(vec![format!("unknown command {other}; /help lists them")]),
         None => Outcome::Message,
+    }
+}
+
+/// `/jobs [kill <id|all>]` (ADR 0037 decision 4). Anything else is a usage notice.
+fn jobs_request(args: &[String]) -> Outcome {
+    match args {
+        [] => Outcome::Jobs(JobsRequest::List),
+        [kill, id] if kill == "kill" && id == "all" => Outcome::Jobs(JobsRequest::KillAll),
+        [kill, id] if kill == "kill" && !id.is_empty() => {
+            Outcome::Jobs(JobsRequest::Kill(id.clone()))
+        }
+        _ => Outcome::Notices(vec!["usage: /jobs [kill <id|all>]".to_owned()]),
     }
 }
 

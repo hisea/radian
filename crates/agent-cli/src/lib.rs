@@ -106,8 +106,8 @@ pub struct Cli {
     #[arg(long)]
     mcp_config: Option<String>,
 
-    /// Expose the built-in file and read-only git tools rooted at this directory
-    /// (read/write/patch/list, git_status/git_diff). Under `workspace` this also
+    /// Expose the built-in file and read-only tools rooted at this directory
+    /// (read/write/patch/list, glob/grep, git_status/git_diff). Under `workspace` this also
     /// exposes `shell`, which runs only inside the sandbox.
     #[arg(long)]
     workspace: Option<String>,
@@ -1547,6 +1547,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             budget_for: Some(setup.budget_for),
             price_for: setup.price_for,
             protected_branches: Vec::new(),
+            allowed_filters: None,
             servers: setup.servers,
             // ADR 0036: a CLI session uses the `default` role.
             role: None,
@@ -1588,6 +1589,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             },
             before_driver: None,
             memory_warning: Arc::new(|message: &str| eprintln!("[memory] {message}")),
+            memory_notice_line: Arc::new(|line: &str| eprintln!("[memory] {line}")),
         },
     )
     .await

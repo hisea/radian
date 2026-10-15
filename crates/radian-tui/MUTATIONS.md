@@ -1214,6 +1214,31 @@ Base `9cb727d` · 一次性 worktree `/tmp/radian-es-mut`，还原后 `git statu
 
 2/2 抓住。
 
+## bar-input（ADR 0035 片 C：bar 输入框 + 上方状态行，2026-10-15）
+
+Base `d72d17c`（本片三个提交的最后一块）· 就地变异：改前 `cp` 到 `/tmp`，改后跑测试，
+再从副本写回，逐个 `diff` 确认与副本逐字节相同；`git status --short` 只留本片的新测试。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| BI-M1 | `bar` 的高度空闲时不带状态行（`rows + u16::from(spinner_status().is_some())`） | `render::the_bar_status_row_never_moves_the_band_or_the_transcript`、`render::the_bar_input_takes_exactly_the_status_row_and_its_text_rows` | ✅ |
+| BI-M2 | `bar` 高度按 `rows + 2`（多一个空行） | `render::the_bar_input_takes_exactly_the_status_row_and_its_text_rows` | ✅ |
+| BI-M3 | 缺省回到 `lines`（`#[default]` 挪回 `Lines`） | `config::the_input_style_is_applied_and_an_unknown_value_falls_back_to_bar`、`render::the_empty_input_shows_the_placeholder_after_the_prompt` | ✅ |
+| BI-M4 | 竖条不是强调色（`rail_style = band`） | `render::the_bar_input_style_draws_a_full_width_band_with_the_rail`（竖条的 fg 断言） | ✅ |
+| BI-M5 | 背景带不到整行宽（去掉尾部补白） | `render::the_bar_band_fills_the_terminal_width`、`the_bar_input_style_draws_a_full_width_band_with_the_rail` | ✅ |
+| BI-M6 | spinner 后只留一个空格 | `render::the_bar_status_row_never_moves_the_band_or_the_transcript` | ✅ |
+| BI-M7 | `esc to interrupt` 对任何状态都显示（不只 turn 运行中） | 同上（`Running a command` 那一段） | ✅ |
+| BI-M8 | 状态行的时间保留一位小数（`12.0s` 而不是 `12s`） | `timing::tests::the_numbers_format_short` | ✅ |
+
+8/8 抓住。两处过程记录：
+
+- BI-M7 第一次（测试在 40 列下渲染）**没抓住**：整行状态在 40 列被裁到
+  `… · esc to`，`!contains("esc to interrupt")` 因截断而成立。把该用例的三次渲染改成 80 列后
+  M7 被抓住——**断言前先确认被断言的字串真的完整落在屏幕上**。
+- 与 bar 无关但同片验证的一条：去掉 `signals.rs` 里信号任务的强制退出（不再
+  `std::process::exit(128 + signal)`）后 `pty::pty_a_hung_main_loop_still_exits_on_a_signal`
+  FAILED（该用例的挂起机制本片改成了 `--slow-draw`，见下），还原后逐字节相同、
+  测试重新通过。这证明改用 `--slow-draw` 没有削弱该用例对看门狗的检查。
 ## panels-adopt：其余弹出层改用共享面板与列表（ADR 0035/2，2026-10-16）
 
 Base `d47e876` · 一次性 detached worktree `/tmp/pa-mut`（跑完 `git worktree remove --force`）。
@@ -1244,3 +1269,14 @@ applied by a patch with an anchor assertion, then `cargo test -p radian-tui --te
 
 4/4 caught. G2's glyph is drawn in the transcript (the folded-reasoning marker), so its
 catching tests are the render snapshots, not the footer ones.
+## md-test-speed：中文 Markdown 选区测试从 N² 改成每格 4 次（2026-10-15）
+
+`a_chinese_markdown_selection_does_not_panic` 原来对每两个格子都做一次选区（N²，每次重新排版），在工作区测试里约占 700 s；
+改成每个格子分别与第一个格子、最后一个格子、自己组成选区（每个格子都当过起点和终点），同机 debug 构建约 14 s。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| MS-M1 | `md_chars` 给所有合成格子一个假偏移（上一个源字节 + 1） | `markdown::a_chinese_markdown_selection_does_not_panic`（`select.rs:213` panic） | ✅ |
+| MS-M2 | 只给列表符号 `•` 这一个合成格子假偏移 1（落在「能」的 UTF-8 中间） | 同上 | ✅ |
+
+另记一个无效变异：「只给第 200 字节之后的第一个合成格子假偏移」——那一处的上一个字符是 ASCII，`+1` 正好是合法边界，不会 panic，不能说明覆盖缺口；MS-M2 用确定落在多字节中间的单格变异代替。

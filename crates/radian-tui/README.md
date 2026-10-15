@@ -112,17 +112,27 @@ the provider and the model only.
 
 ```
 transcript: user >, assistant, ~ reasoning, -> tool, <- result
-──────────────────────────────────────────────────────────────
-> type here
-──────────────────────────────────────────────────────────────
+  ◜  Working · 12s · esc to interrupt
+▎ type here
  model │ idle/running/cancelled │ tier │ usage in/out │ mcp servers/tools │ context │ scroll N/M
 ```
 
-The input area is a rule above and below with a `> ` prompt; a continuation
-line is indented two cells instead of repeating the prompt. `tui.input_style = "box"` is the
-owner's bordered shape (2026-10-14): **rounded** corners, the `❯` prompt, and the border in
-the theme's accent role (`notice_label` — ADR 0029 reserves accent for labels and
-attention surfaces). It is a real composer either way (cursor editing, multi-line, history).
+The default input area is `tui.input_style = "bar"` (ADR 0035 V3, the omp `rail`): one
+background band per input row (the theme's `input_bar` role — pi's `text` on `userMessageBg`,
+the same band as a user message block), the accent rail `▎` on the left (`|` with
+`glyphs = "ascii"`), no border and no rules; a multi-line input grows the band by its rows, and
+its continuation rows carry the rail too. Directly above the band is a **fixed one-row status
+line**: blank while idle but still occupying its row — so the band and the transcript never
+move when a turn starts or finishes — and
+`<spinner>  Working · 12s · esc to interrupt` while a turn runs (the spinner is the same one the
+`lines`/`box` rule line uses, the rest is one level weaker; the clock is the footer's `elapsed`
+and `esc to interrupt` appears exactly while a turn is running). `tui.input_style = "lines"` is
+the earlier shape: a rule above and below with a `> ` prompt, continuation lines indented two
+cells. `tui.input_style = "box"` is the owner's bordered shape (2026-10-14): **rounded**
+corners, the `❯` prompt, and the border in the theme's accent role (`notice_label` — ADR 0029
+revision 1 reserves accent for labels and attention surfaces). The `lines` and `box` styles put
+the same running status on their top rule / border instead of on a status row. It is a real
+composer in all three (cursor editing, multi-line, history).
 
 The **startup screen** is the leading block of transcript entries: the
 wordmark (three rows at the primary `text` level; below its width it drops to one line,
@@ -195,7 +205,7 @@ The file is read the same way as the CLI's (`--config`, `RADIAN_CONFIG`,
 schema_version = 1
 [tui]
 theme = "dark"                 # a built-in name, or a theme file name (see below)
-input_style = "lines"          # lines (default) | box
+input_style = "bar"            # bar (default) | lines | box
 mouse = true                   # wheel + transcript selection (default true)
 clipboard = "osc52"            # osc52 (default) | pbcopy (macOS) | off
 
@@ -214,9 +224,10 @@ find = ["ctrl-f"]              # open the in-transcript search box
 find_next = ["ctrl-g", "shift-enter"]
 ```
 
-- `input_style`: `lines` (the default: a rule above and below, `> ` on the first line) or `box`
+- `input_style`: `bar` (the default: the banded input with the accent rail and the fixed status
+  row above it, ADR 0035 V3), `lines` (a rule above and below, `> ` on the first line) or `box`
   (the owner's rounded box with the `❯` prompt). An unknown value is ignored with a warning and
-  falls back to `lines`.
+  falls back to `bar`.
 - `tips` / `banner`: whether the startup screen shows the one Tip line and the wordmark. Both
   default to on; `false` hides them.
 - `footer` (ADR 0027 C2, revision 3): the status area's rows. `preset` is `deck` (the default,
@@ -381,6 +392,7 @@ Every pi role maps onto a Radian role (`[tui.colors]` accepts both name families
 | Radian role | pi role(s) it takes |
 |---|---|
 | `user` | `userMessageText` (fg) + `userMessageBg` (bg) |
+| `input_bar` | `text` (fg) + `userMessageBg` (bg) — the `bar` input's band, the same band as a user message block (ADR 0035 V3) |
 | `selection` | `selectedBg` (bg only — the text keeps its own foreground under the band) |
 | `tool_pending_bg` / `tool_success_bg` / `tool_error_bg` | `toolPendingBg` / `toolSuccessBg` / `toolErrorBg` (the tool card's band by state) |
 | `notice_label` / `notice_body` | `accent` / `muted` (a structured notice's label and the rest) |
@@ -496,6 +508,7 @@ the rest is sent as an ordinary message.
 | `/sessions [query]` | open the session **picker overlay** for this workspace (the `--pick` screen); type to filter, `Tab` full-text search, Enter shows the copyable `--resume <id>` line |
 | `/export [md\|json] [path] [--force]` | export **this** session (default `md`, default `<workspace>/radian-<id>.<ext>`) |
 | `/memory <command> …` | the same durable-memory commands as `radian memory` (ADR 0021 D7): `list`, `search`, `show`, `add`, `edit`, `archive`, `restore`, `forget`, `purge`, `confirm`, `export`, `import`, `project` / `project new`, `relink`, `split`, `merge` |
+| `/jobs [kill <id\|all>]` | list this session's background `shell` jobs (id, state, elapsed, command, output file) as notices, or stop one/all (ADR 0037 decision 4). `kill` sends SIGTERM to the process group, then SIGKILL after 2 s; the model gets a completion message on the busy/idle lane |
 
 - Arguments are split with shell quoting, so `/memory add "two words"` is one argument.
   Unbalanced quotes are an error notice.
@@ -508,6 +521,7 @@ the rest is sent as an ordinary message.
   it between turns, so a running turn finishes first, and the result is a notice. Ctrl-C/Esc
   cancels an in-flight compaction without committing.
 - `/sessions` opens the session picker overlay (the same one `--pick` runs); the event loop loads the rows, because that reads the session directory. It never switches sessions in place — selecting shows `--resume <id>`, and the composer keeps typing until you navigate into the picker. `/export` uses the same
+- `/jobs` lists the session's background `shell` jobs as notices; `/jobs kill <id>` and `/jobs kill all` stop them. A settle the model has not seen arrives as a System message (busy: injected into the running turn; idle: a follow-up turn that wakes it), and after three wake-started turns with no user input it is injected only (ADR 0037 decision 3).
   `radian-host` renderer as `radian exec --export` (redacted, read-only JSONL), writes atomically,
   and refuses to overwrite without `--force`; a relative path is resolved against the
   workspace, an absolute one may point anywhere the user named.
@@ -566,6 +580,7 @@ The transcript owns its scrolling:
 | 20 | auto (ADR 0026 D9): `!` approves once and enables auto (the next ask never prompts, `AUTO` on the status bar); `Y` stays allow-once; `/auto on\|off`, `/yolo` alias; switch audited + `ConfigChanged` journaled; resume restores on `workspace`, not on `full` (with the hint); config `auto` honored on `workspace`, ignored with a warning on `full` | `tests/auto.rs`, `tests/pty.rs` |
 | 21 | syntax highlighting (ADR 0028 R2): keyword/string/comment take the theme's `syntax*` colors, a theme file's value reaches the cells, an unclosed or unknown-language block stays plain, `highlight = false` disables it, a truncated line keeps its colors, and the text is unchanged (copy/search) | `tests/highlight.rs` |
 | — | Enter=followup idle / steer running; Ctrl-C cancel-then-quit | `tests/input.rs` |
+| — | background jobs (ADR 0037): `shell` `background:true` returns at once, `job_output wait=true` returns the increment and the settle, `job_list`/`job_kill` work, `/jobs` lists and `/jobs kill all` stops them, a settle arrives as a System message, and a crash reports an orphan | `tests/jobs.rs` (coding), `tests/job_notify.rs` (host), `tests/pty.rs` |
 
 ## Must be hand-tested in a real terminal
 
@@ -606,8 +621,11 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
 - **the `AUTO` status marker** (ADR 0026 D9): turn auto on with `/auto on` — does the reversed
   `AUTO` segment stand out as "this session behaves differently" in `dark`, `light` and `mono`,
   without reading as an error? pty automation asserts the text, not the prominence.
-- **the input area's two styles**: is `lines` (the default) comfortable, and is
-  the `> ` prompt clear when the input is multi-line? Try `input_style = "box"` and compare.
+- **the input area's three styles**: is the default `bar` band
+  comfortable — the rail clear, the band reaching the right edge, multi-line and a CJK line
+  banded on every row, and the status row above it (`◜  Working · 12s · esc to interrupt`) not
+  shifting the band or the transcript? Compare `input_style = "lines"` (the rule above and
+  below, `> `) and `input_style = "box"`.
 - **notice and hint readability**: `/help`'s output and the placeholder must be
   readable on your background. `dark` now uses the terminal's default foreground for notices and
   `Gray` for hints; is that right on your terminal, and is the light palette's hint (dark gray on
@@ -713,11 +731,20 @@ throwaway terminal, not your working one.
    record the font name and what you see.
 3. **Rounded input box and `❯`** (`tui.input_style = "box"`; merge `22b2753`; the prompt and
    cursor fixes are `pi/ui-r3`). *Steps*: set `input_style = "box"` in `[tui]`, restart; type a
-   multi-line draft (`Ctrl-J`); resize. *Expect*: rounded corners, the `❯` prompt **in both
-   styles**, the border in the theme accent (`notice_label`); the cursor sits right after the
+   multi-line draft (`Ctrl-J`); resize. *Expect*: rounded corners, the `❯` prompt **in `lines`
+   and `box`**, the border in the theme accent (`notice_label`); the cursor sits right after the
    text (empty: one cell into the prompt; the old byte-length bug put it two cells right); the
    continuation line aligns under the text; no corner breaks at any width. *Fail*: record the
    width where a corner/glyph breaks.
+3c. **The `bar` input and its status row** (ADR 0035 V3; default). *Steps*: open `radian`
+   (no `input_style`), type a one-line draft, then a `Ctrl-J` multi-line one, then a CJK line;
+   send a message and watch a turn run; resize to 40/80/120. *Expect*: one banded row per input
+   row, the accent `▎` rail on each, the band reaching the right edge (never a highlight that
+   stops at the text); above the band one always-present row — blank when idle, `◜  Working ·
+   12s · esc to interrupt` while a turn runs — and neither the band nor the transcript moves
+   when the turn starts or ends; the cursor after the rail (CJK two cells). *Look*: is the rail
+   the accent and is the band the same color as a user message block? *Fail*: record the width
+   or the font where it reads wrong.
 3b. **Shift+Enter** (`pi/ui-r3`). *Steps*: in Terminal.app, iTerm2/Ghostty (or another
    kitty-protocol terminal) and inside herdr, press `Shift+Enter` in a non-empty draft; then
    `Ctrl-J`. *Expect*: Shift+Enter inserts a newline where the terminal reports it (herdr and
@@ -1029,8 +1056,12 @@ could be built. This is the same wiring `agent-cli` uses:
   linked" with the `radian memory project new`/`relink` hint) and the injection budget
   (ADR 0021 D2/D6). The agent's four memory tools are mounted and the current memory is
   injected into the system prompt each turn; `memory_search`/`memory_get` are allowed and
-  `memory_save`/`memory_revise` ask. Tested by
-  `pty_the_memory_notice_names_the_project_state_and_the_budget`.
+  `memory_save`/`memory_revise` ask. A default-scope `memory_save` or `/memory add` that
+  **registers** this workspace as a project (ADR 0021) is shown as a `Notice`
+  transcript entry — one line naming the new project and its identity key — because stderr
+  would be drawn over by the fullscreen UI. Tested by
+  `pty_the_memory_notice_names_the_project_state_and_the_budget` and
+  `pty_a_memory_add_shows_the_created_project_notice`.
 
 Every call goes through `radian-permissions` (ADR 0012) as a `Hooks` implementation:
 

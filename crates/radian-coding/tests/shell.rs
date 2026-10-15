@@ -338,6 +338,11 @@ async fn a_timeout_kills_the_whole_process_group() {
     let structured = structured(&output);
     assert_eq!(structured["timed_out"], json!(true), "{structured}");
     assert!(output_text(&output).contains("timed out"), "{output:?}");
+    // The message names the way out of the foreground cap (ADR 0037 decision 6).
+    assert!(
+        output_text(&output).contains("background: true"),
+        "the timeout must point at background: true: {output:?}"
+    );
 
     let leader = read_pid(&root, "leader.pid");
     let background = read_pid(&root, "bg.pid");

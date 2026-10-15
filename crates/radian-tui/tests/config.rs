@@ -161,7 +161,8 @@ find_close = [\"ctrl-x\"]
 /// `tui.input_style`: a known value is applied, an unknown one falls back to the default and
 /// is reported as a skipped key (the `tui.*` rule).
 #[test]
-fn the_input_style_is_applied_and_an_unknown_value_falls_back_to_lines() {
+fn the_input_style_is_applied_and_an_unknown_value_falls_back_to_bar() {
+    // ADR 0035 V3: `bar` is the default.
     let mut app = App::new("m", "s");
     let warnings = app
         .apply_config(
@@ -171,7 +172,7 @@ fn the_input_style_is_applied_and_an_unknown_value_falls_back_to_lines() {
         .unwrap();
     assert_eq!(
         app.input_style,
-        radian_tui::render::InputStyle::Lines,
+        radian_tui::render::InputStyle::Bar,
         "an unknown style falls back to the default"
     );
     assert!(
@@ -181,13 +182,21 @@ fn the_input_style_is_applied_and_an_unknown_value_falls_back_to_lines() {
         "{warnings:?}"
     );
 
-    let mut app = App::new("m", "s");
-    app.apply_config(
-        &config("schema_version = 1\n[tui]\ninput_style = \"box\"\n"),
-        false,
-    )
-    .unwrap();
-    assert_eq!(app.input_style, radian_tui::render::InputStyle::Box);
+    for (spelling, expected) in [
+        ("box", radian_tui::render::InputStyle::Box),
+        ("lines", radian_tui::render::InputStyle::Lines),
+        ("bar", radian_tui::render::InputStyle::Bar),
+    ] {
+        let mut app = App::new("m", "s");
+        app.apply_config(
+            &config(&format!(
+                "schema_version = 1\n[tui]\ninput_style = \"{spelling}\"\n"
+            )),
+            false,
+        )
+        .unwrap();
+        assert_eq!(app.input_style, expected, "{spelling}");
+    }
 }
 
 /// The `dark` theme is the pre-config palette; this is the screenshot assertion for a couple

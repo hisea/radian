@@ -47,7 +47,7 @@ pub enum MemoryError {
     },
     #[error("this store was not opened for scope {0:?}")]
     ScopeNotOpen(Scope),
-    #[error("no record {id}")]
+    #[error("no memory record {id}")]
     NotFound { id: MemoryId },
     #[error("no project {0}")]
     UnknownProject(crate::model::ProjectId),

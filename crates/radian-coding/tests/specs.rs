@@ -39,7 +39,16 @@ async fn agent_core_accepts_the_built_in_tool_specs() {
         .collect();
     assert_eq!(
         names,
-        ["read", "write", "patch", "list", "git_status", "git_diff"]
+        [
+            "read",
+            "write",
+            "patch",
+            "list",
+            "glob",
+            "grep",
+            "git_status",
+            "git_diff"
+        ]
     );
 
     // Through the core: `open_session` compiles every schema and refuses duplicates.

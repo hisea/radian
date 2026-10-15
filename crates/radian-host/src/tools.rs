@@ -79,7 +79,18 @@ impl HostTools {
             push("patch", "replace exact text in a file");
             push("write", "create or overwrite a file");
             push("list", "list a directory");
-            push("shell", "run a command in the workspace");
+            push("glob", "find files whose path matches a glob");
+            push("grep", "search file contents with a regex");
+            push(
+                "shell",
+                "run a command in the workspace; `background: true` for a long one",
+            );
+            push(
+                "job_output",
+                "read a background job's new output (wait: true waits for the end)",
+            );
+            push("job_list", "list this session's background jobs");
+            push("job_kill", "stop a background job's process group");
             push("git_status", "the working tree status");
             push("git_diff", "a diff of the working tree");
         }
@@ -269,6 +280,12 @@ impl ToolSession for HostSession {
     }
 
     async fn close(&mut self) -> Result<(), ToolError> {
+        // Session end (ADR 0037 decision 6): kill every running background job's process
+        // group. The registry also kills on drop (the panic path), but a normal shutdown
+        // names it here.
+        if let Some(coding) = &self.coding {
+            coding.shutdown_jobs();
+        }
         self.mcp.close().await
     }
 }
