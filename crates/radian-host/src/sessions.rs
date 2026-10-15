@@ -72,20 +72,27 @@ pub fn open_index(dir: &Path) -> Result<Option<Index>, String> {
         return Ok(None);
     }
     radian_session::warn_if_wide(dir);
+    let t_open = std::time::Instant::now();
     let mut index = Index::open(dir.join("index.db"))
         .map_err(|e| format!("cannot open the session index in {}: {e}", dir.display()))?;
+    radian_session::trace::took("picker/index-open", t_open);
+    let t_rebuild = std::time::Instant::now();
     index
         .rebuild_dir(dir)
         .map_err(|e| format!("cannot rebuild the session index: {e}"))?;
+    radian_session::trace::took("picker/index-rebuild", t_rebuild);
     Ok(Some(index))
 }
 
 /// The sessions of `workspace`, newest activity first, with their summaries.
 pub fn list(index: &Index, workspace: &str) -> Result<Vec<SessionRow>, String> {
+    let t = std::time::Instant::now();
     let sessions = index
         .list(Some(workspace))
         .map_err(|e| format!("cannot list sessions: {e}"))?;
-    sessions
+    radian_session::trace::took("picker/list", t);
+    let t_sum = std::time::Instant::now();
+    let out: Result<Vec<SessionRow>, String> = sessions
         .into_iter()
         .map(|session| {
             let (message_count, summary) = summarize(index, &session.session_id);
@@ -97,7 +104,9 @@ pub fn list(index: &Index, workspace: &str) -> Result<Vec<SessionRow>, String> {
                 summary,
             })
         })
-        .collect()
+        .collect();
+    radian_session::trace::took("picker/summarize", t_sum);
+    out
 }
 
 /// Substring search over `workspace`'s message text. `snippet` comes back as one line; the

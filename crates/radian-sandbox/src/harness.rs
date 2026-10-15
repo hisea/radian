@@ -139,6 +139,13 @@ struct Rig {
 
 /// Runs the whole matrix under the platform backend. Fails if the backend is unavailable or
 /// its probe fails — the enforced half never runs unsandboxed.
+/// A unique suffix for the short Unix socket path (one per matrix run in this process).
+fn unix_socket_seq() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    N.fetch_add(1, Ordering::SeqCst)
+}
+
 pub fn run_matrix() -> Result<Matrix, SandboxError> {
     let root = new_root()?;
     let ws = std::fs::canonicalize(root.join("ws"))?;
@@ -206,6 +213,21 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
     // ADR 0016: the network cases are asserted against `safe` (off) and `workspace` (on),
     // so the rig needs both enforced sandboxes as well as the transparent control.
     let safe = Sandbox::from_policy(radian_deny(SandboxPolicy::safe(&ws)?))?;
+    // ADR 0016: a listener outside the workspace, and a `workspace` sandbox that
+    // whitelists exactly that socket. The listener stays bound (connect fills its backlog).
+    // The AF_UNIX path limit (~104 bytes) is why this lives under `/tmp` and not the test
+    // root: the sandbox canonicalizes it (`/tmp` -> `/private/tmp`), so the connect and the
+    // whitelist both use the canonical path.
+    let short = std::path::PathBuf::from(format!(
+        "/tmp/radian-esc-{}-{}.sock",
+        std::process::id(),
+        unix_socket_seq()
+    ));
+    let _unix_listener = std::os::unix::net::UnixListener::bind(&short)?;
+    let unix_listener_path = std::fs::canonicalize(&short)?;
+    let whitelisted = Sandbox::from_policy(
+        radian_deny(SandboxPolicy::workspace_write(&ws)?).allow_unix_socket(&unix_listener_path),
+    )?;
     let control = Sandbox::new(SandboxMode::FullAccess, &ws)?;
     let worktree_name = wt
         .file_name()
@@ -228,6 +250,7 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
     rig.escape_writes(&sandbox, &control);
     rig.symlink_escapes(&sandbox, &control);
     rig.network(&safe, &sandbox, &control);
+    rig.unix_socket(&safe, &sandbox, &whitelisted, &control, &unix_listener_path);
     rig.pty_ok(&sandbox, &control);
     rig.tiocsti_outside_terminal(&sandbox, &control);
     rig.environment(&sandbox, &control, &secret_name, &secret_value);
@@ -248,6 +271,7 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
         orphans,
         root,
     };
+    let _ = std::fs::remove_file(&unix_listener_path);
     if matrix.passed() {
         let _ = std::fs::remove_dir_all(&matrix.root);
     }
@@ -397,6 +421,59 @@ impl Rig {
             "connect_external",
             Expect::MustSucceed,
             "python3 -c 'import socket; s=socket.create_connection((\"1.1.1.1\",443),4); s.close()'",
+        );
+    }
+
+    /// ADR 0016: the `workspace` tier denies outbound Unix sockets except the
+    /// whitelist; `safe` (no network) denies all of them. DNS still resolves through the
+    /// always-allowed mDNSResponder socket.
+    fn unix_socket(
+        &mut self,
+        safe: &Sandbox,
+        workspace: &Sandbox,
+        whitelisted: &Sandbox,
+        control: &Sandbox,
+        sock: &Path,
+    ) {
+        let connect = format!(
+            "python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect({:?}); s.close(); sys.exit(0)'",
+            sock.to_string_lossy()
+        );
+        // `workspace`: the socket is not whitelisted, so the connect is denied.
+        self.sh_case(
+            workspace,
+            control,
+            "unix_socket",
+            "workspace_denied",
+            Expect::MustFail,
+            &connect,
+        );
+        // The same socket in `allow_unix_sockets` connects (the control for the fix).
+        self.sh_case(
+            whitelisted,
+            control,
+            "unix_socket",
+            "whitelisted_allowed",
+            Expect::MustSucceed,
+            &connect,
+        );
+        // `safe` has no network at all.
+        self.sh_case(
+            safe,
+            control,
+            "unix_socket",
+            "safe_denied",
+            Expect::MustFail,
+            &connect,
+        );
+        // DNS resolution uses mDNSResponder, which stays allowed when the network is on.
+        self.sh_case(
+            workspace,
+            control,
+            "unix_socket",
+            "dns_resolves",
+            Expect::MustSucceed,
+            "python3 -c 'import socket; socket.getaddrinfo(\"example.com\", 443)'",
         );
     }
 

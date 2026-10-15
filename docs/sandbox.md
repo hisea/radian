@@ -117,6 +117,13 @@ macOS 后端**全开 `mach-lookup`**，`mach-lookup` 最小化排到 Phase 7。�
 另注：环境变量过滤属于**启动层**（本 crate 的 `command`），不是沙箱机制本身；`sandbox-exec` 与
 bwrap 都不过滤环境。
 
+**Unix socket（ADR 0016，2026-10-14）**：`(allow network*)` 同时放行了连接本机**任何同用户
+的 Unix socket**（herdr、ssh-agent、`docker.sock` 等），本修订之前的版本存在这个口子。现在开网时
+seatbelt 追加 `(deny network-outbound (remote unix-socket))`，只放行固定的 mDNSResponder（DNS 需要）
+和用户级配置 `[sandbox] allow_unix_sockets` 里写明的路径（canonicalize；失败只警告并跳过）。
+`mach-lookup` **仍是全放**（另一类本机 IPC，未收紧，单独评估）。Linux（bwrap）的同类问题
+（路径 socket 经可写/可读挂载、抽象 socket 经共享的网络命名空间）**未核实**，见下。
+
 ## 复现 Linux 运行（VM）
 
 ```sh
@@ -218,6 +225,9 @@ macOS 本机与 Linux VM 各自重跑 **42/42 PASS**，两份 evidence 已更新
   其他 macOS 版本、发行版、x86_64、容器内、setuid bwrap、无特权 userns 被禁用的发行版均未验证。
 - **没有测** `network = true` 的细粒度（只做全开/全关）；`mach-lookup` 最小化未做；时间注入类
   逃生未系统测试（`already-open fd` 不受限，spawner 不向子进程传可写 fd，但没有专门用例）。
+- **Unix socket**：macOS 的修复有逃逸矩阵的 `unix_socket` 组（workspace 拒、白名单放行、DNS 通、
+  safe 拒）。**Linux 同类问题未核实**：bwrap 只共享/隔离网络命名空间，抽象 socket 可能在共享
+  命名空间内可达；路径 socket 经可读/可写挂载也可能可达。Linux VM 验证恢复时一并做。
 - `Safe` 档位在 Linux 上 `HOME`/`TMPDIR` 位于工作区但工作区只读，需要临时目录的命令会失败——
   这是 `Safe` 的诚实语义，未专门验证。
 - 兼容性轮次只覆盖列出的命令；任意第三方构建系统可能还需要别的放行。

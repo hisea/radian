@@ -129,6 +129,7 @@ pub(crate) fn build_sandbox(
     profile: ProfileArg,
     workspace: &Path,
     deny_read: &[std::path::PathBuf],
+    allow_unix_sockets: &[std::path::PathBuf],
 ) -> Result<Option<Sandbox>, SetupError> {
     if profile == ProfileArg::Safe {
         return Ok(None);
@@ -150,6 +151,10 @@ pub(crate) fn build_sandbox(
     // readable in the enforced tiers. `full` gets the list too, but its transparent backend ignores it.
     for path in deny_read {
         policy = policy.deny_read(path);
+    }
+    // ADR 0016: the user's whitelisted Unix sockets.
+    for path in allow_unix_sockets {
+        policy = policy.allow_unix_socket(path);
     }
     match Sandbox::from_policy(policy) {
         Ok(sandbox) => Ok(Some(sandbox)),

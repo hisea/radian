@@ -126,7 +126,7 @@ attention surfaces). It is a real composer either way (cursor editing, multi-lin
 
 The **startup screen** is the leading block of transcript entries: the
 wordmark (three rows at the primary `text` level; below its width it drops to one line,
-`㎭ radian <version>`, with the width measured by `unicode-width`), one collapsed information
+`<brand> radian <version>` (ADR 0027: `R` unicode, `󰰠` nerd, `rad` ascii), with the width measured by `unicode-width`), one collapsed information
 line, the safety lines in the `warning` kind that are never folded (a workspace boundary that
 was not your choice, every config-file and approval-policy warning), and one `Tip:` line. An
 information line's `label: value` split follows a notice's: the label uses `notice_label`, the
@@ -137,33 +137,44 @@ bare arrow keys belong to the composer.
 
 | Key | Action |
 |---|---|
-| Enter | send. Idle → `Inbox::followup`; while a turn runs → `Inbox::steer`. **While a completion list is up it accepts the best candidate instead** (it completes, it never executes) |
-| Tab | complete what is at the cursor. On a `/…` line: the command tree (below). Otherwise the `@` file reference: one candidate is inserted (a directory keeps its trailing `/`, a file gets a space); several complete to their longest common prefix, and a second Tab already at that prefix shows the candidate list above the input box; any other word does nothing (the key is reserved) |
-| Ctrl-J (or Shift-Enter / Alt-Enter) | insert a newline in the input |
+| Enter | send. Idle → `Inbox::followup`; while a turn runs → `Inbox::steer`. **While a completion menu is up it accepts the highlighted row instead** (it completes, it never executes, and it never sends) |
+| Tab | complete what is at the cursor. On a `/…` line: the command tree (below). Otherwise the `@` file reference: one candidate is inserted (a directory keeps its trailing `/`, a file gets a space); several complete to their longest common prefix, and a second Tab already at that prefix shows the menu above the input box; any other word does nothing (the key is reserved). **While the menu is up it accepts the highlighted row**, like Enter |
+| Ctrl-J (or Shift-Enter / Alt-Enter) | insert a newline in the input (Shift-Enter needs the keyboard-enhancement protocol; Ctrl-J works everywhere) |
 | Left / Right | move the cursor one character |
 | Ctrl-Left / Ctrl-Right (or Alt-Left / Alt-Right) | move by one word |
 | Home / End (or Ctrl-A / Ctrl-E) | the input **line's** start / end |
-| Up / Down | on the first / last input line: the previous / next history entry (Down past the newest returns to the draft); otherwise move between the input's lines, keeping the column |
+| Up / Down | **while a completion menu is up, move its highlight** (and wrap); otherwise on the first / last input line the previous / next history entry (Down past the newest returns to the draft), else move between the input's lines, keeping the column |
 | Backspace / Delete | delete before / under the cursor |
 | Ctrl-W | delete the previous word |
 | Ctrl-U / Ctrl-K | delete to the line's start / end |
 | PageUp / PageDown | scroll the transcript a page |
 | Shift-Up / Shift-Down | scroll the transcript one line |
 | Ctrl-Home / Ctrl-End | scroll the transcript to its top / bottom |
-| Esc | (`escape` in the transcript, `find_close` in the find box) close the find box or the `@` candidate list if one is up; otherwise clear a non-empty input first (the line stays in the history, so `Up` finds it); with an empty input, cancel the running turn / quit |
+| Esc | (`escape` in the transcript, `find_close` in the find box) close the find box or a completion menu if one is up (the input is kept); otherwise clear a non-empty input first (the line stays in the history, so `Up` finds it); with an empty input, cancel the running turn / quit |
 | Ctrl-C | cancel the running turn; idle with a non-empty input, clear it (into the history); idle with an empty input, arm "press Ctrl-C again to quit" for 2 s (any other key, or the window closing, disarms it; the status bar shows `Press Ctrl-C again to quit`) |
 | Ctrl-P (`toggle_startup`) | fold or unfold the startup information block |
+| Ctrl-N (`menu_next`) | while a completion menu is up, move its highlight down (Ctrl-P is taken, so Ctrl-N is the menu's other key; ) |
 | Ctrl-F (`find` in the transcript, `find_prev` in the find box) | open the in-transcript search box (`find: <query>`, replacing the input line; the message draft is kept). Type to search the displayed transcript case-insensitively; a second Ctrl-F or Enter is the earlier match, Shift-Enter or Ctrl-G the later one (no wrap); the status bar shows `match i/N`; Esc closes the box where the viewport is |
 | bracketed paste | inserts at the cursor, `\r\n` normalized to `\n`, and never sends |
 
-Shift-Enter needs a terminal with the enhanced keyboard protocol; Ctrl-J works everywhere.
+Shift-Enter needs the terminal's **keyboard-enhancement** protocol: without it most terminals
+send Shift+Enter as a plain Enter, which sends. Radian asks the terminal at startup
+(`supports_keyboard_enhancement`, crossterm 0.29's kitty-protocol probe: it writes
+`ESC[?u ESC[c` and waits up to **2 s** for a reply; a terminal that answers the
+device-attributes query but not the flags query ends the wait immediately) and, when the answer
+is yes, pushes `DISAMBIGUATE_ESCAPE_CODES`; the flags are popped on every exit path, panic and
+signal included. `RADIAN_KEYBOARD_ENHANCEMENT=0` skips the probe and the push (a pty has nobody
+to answer, so the tests set it); `=1` pushes without asking. Ctrl-J and Alt-Enter work
+everywhere and stay the fallback.
 
 `@relative/path` in a message attaches the file's contents to the request (Phase 4): resolved
 inside the workspace like the `read` tool (no absolute path, no `..`, a symlink that leaves is
 refused), at most 100 KiB per file and 400 KiB in total, and a binary file makes the message
 unsendable with the input kept. The transcript folds each attachment to `[file: P, N lines]`.
-`Tab` completes the path; the candidate list is at most 10 rows plus `+N more`, clipped to the
-terminal width, and never covers an approval prompt.
+`Tab` completes the path; the menu is at most 10 rows plus `+N more`, clipped to the terminal
+width, and never covers an approval prompt. The first (best) row is highlighted with the theme's
+`selection` (reversed in `mono`); `Up`/`Down` (or `Ctrl-N`) move the highlight and wrap, `Enter`
+or `Tab` accepts the highlighted row, and `Esc` closes the menu keeping the input.
 
 ### Theme and keybindings (config `tui.*`)
 
@@ -188,6 +199,7 @@ send = ["ctrl-s"]              # replaces the default `enter`
 newline = ["ctrl-j", "alt-enter", "shift-enter"]
 history_prev = ["up"]
 complete = ["tab"]             # the `@` file-reference completion
+menu_next = ["ctrl-n"]         # move the completion menu's highlight down
 find = ["ctrl-f"]              # open the in-transcript search box
 find_next = ["ctrl-g", "shift-enter"]
 ```
@@ -197,23 +209,32 @@ find_next = ["ctrl-g", "shift-enter"]
   falls back to `lines`.
 - `tips` / `banner`: whether the startup screen shows the one Tip line and the wordmark. Both
   default to on; `false` hides them.
-- `footer` (ADR 0027 C2, revision 1): the status area's rows. `preset` is `full` (the default:
-  the identity row `brand`, `host`, `model`, `reasoning`, `cwd`, `git_branch`, `session` and
-  the numbers row `tokens`, `speed`, `cost`, `context`, `elapsed`), `pi` (the earlier two rows)
-  or `classic` (today's one line, byte-for-byte). `separator` joins items (default `" │ "`), each
-  row may override it, and `glyphs` is `unicode` (default), `nerd` or `ascii`. Each
-  `[[tui.footer.rows]]` has a `left` and a `right` group; an item is a bare id or a table with
-  `item`, `icon`, `format`, `style` (a theme role name, or pi's `dim`/`muted`/`accent`/`warn`/
-  `error`/`ok`/`text`), `priority`, `thresholds = [{ at = 70, style = "warn" }, …]` and the
-  item's own parameters. An unknown item id, placeholder, style or parameter is shown raw
-  with one warning and never blocks startup. Narrow terminals drop the `right` group first,
-  then the `left` group from its end, lowest `priority` first. `host`, the model's price and
-  the auto-compaction switch are read once at startup; `git_branch`/`worktree` and the change
-  counts come from the background contributor, so the draw path never runs git.
+- `footer` (ADR 0027 C2, revision 3): the status area's rows. `preset` is `deck` (the default,
+  three rows: the opencode-go usage line — dropped when it has no data — then
+  `model`/`cwd`/`git_branch`/`worktree` with `context_bar`/`reasoning` on the right, then
+  `tokens`/`cost`/`context` on the right), `full` (revision 1's two rows), `pi` (the earlier two
+  rows) or `classic` (today's one line, byte-for-byte). `separator` joins items (default
+  `" │ "`, any string), each row may override it, and `separator_style` styles it (default the
+  `footer_separator` role, dim). `glyphs` is `unicode` (default), `nerd` or `ascii`.
+  `[tui.footer.items.<id>]` gives one item its `symbol`/`style`/`symbol_style`/`format`/
+  `disabled`; a bare id in a row takes it, an inline table wins. Each `[[tui.footer.rows]]` has
+  a `left` and a `right` group; an item is a bare id or a table with `item`, `icon`/`symbol`,
+  `format`, `style`, `symbol_style`, `priority`, `thresholds = [{ at = 70, style = "warn" }, …]`
+  and the item's own parameters. A `style` (or `[text](style)` inline) is a theme role
+  (`accent`, `muted`, `footer_separator`, pi's `dim`/`warn`/`error`/`ok`/`text`) or a
+  starship-style color (`red`, `bright_blue`, `#rrggbb`, a 0–255 number, with
+  `bold`/`italic`/`dimmed`); a role follows the theme, a fixed color does not. `format` may
+  color a span with `[text](style)`. An unknown item id, placeholder or parameter is shown raw
+  with one warning and never blocks startup; a bad color is a startup warning too. Narrow
+  terminals drop the `right` group first, then the `left` group from its end, lowest
+  `priority` first. Numbers are compact (`15M`, `2.6M`, `1962M`, `$14.510`, `41.3%`).
+  `host`, the model's price and the auto-compaction switch are read once at startup;
+  `git_branch`/`worktree` and the change counts come from the background contributor, so the
+  draw path never runs git.
 
 | item | placeholders | default |
 |---|---|---|
-| `brand` | `{brand}` | `㎭` (the unit glyph; `rad` under `glyphs = ascii`) |
+| `brand` | `{brand}` | `R` (bold accent, unicode) / `󰰠` (nerd) / `rad` (ascii); ADR 0027 |
 | `host` | `{host}` | the machine's hostname, read once at startup |
 | `model` | `{display_name}`, `{id}`, `{provider}` | the model's display name (or id) |
 | `reasoning` | `{level}` | the thinking level, one theme role per level |
@@ -221,9 +242,9 @@ find_next = ["ctrl-g", "shift-enter"]
 | `cwd` | `{path}`, `{path_home}`, `{basename}`, `{repo}`, `{worktree}` | `{path_home}` (`$HOME` → `~`); `{repo}` falls back to the directory name, `{worktree}` is the contributor's current worktree |
 | `git_branch` | `{branch}`, `{dirty}`, `{modified}`, `{untracked}` | `{branch}`; `{dirty}` is ` ?<total>` while the tree has changes (contributor) |
 | `session` | `{id}` | the session id |
-| `context` | `{bar}`, `{percent}`, `{used}`, `{budget}`, `{auto}` | `{used}/{budget}`; `{auto}` is `⟲` (`auto` under ascii) while auto-compaction is on |
+| `context` | `{bar}`, `{percent}`, `{used}`, `{budget}`, `{auto}` | `{used}/{budget}`; `{auto}` is `~` (`auto` under ascii) while auto-compaction is on |
 | `context_bar` | `{bar}`, `{percent}`, `{used}`, `{budget}`, `{auto}` | `{bar} {percent}%`, `width` 10, `fill` `━`, `empty` `─` |
-| `tokens` | `{in}`, `{out}`, `{cache}`, `{cache_write}` | `↑{in} ↓{out} ⛁{cache}`; numbers are `19K`-style, `-` when a provider never reported one. `{cache_write}` (ADR 0027) is a cache **write**, billed at its own rate but deliberately **not** in the default format, so the row does not grow |
+| `tokens` | `{in}`, `{out}`, `{cache}`, `{cache_write}` | `^{in} v{out} R{cache}`; compact K/M, `-` when a provider never reported one. `{cache_write}` (ADR 0027) is a cache **write**, billed at its own rate but deliberately **not** in the default format, so the row does not grow |
 | `cost` | `{usd}` | the session's accumulated fee: each call priced at the route's price **when it arrived** (`radian_host::cost`), so a `/model` switch does not re-price history. The cached tokens are billed once at the cache rate (`uncached_input()`). Hidden until some call had something to bill and when the catalog has no price — never a fabricated number, never `$0.00` |
 | `speed` | `{speed}` | `42.1 tok/s`, the last finished generation's reported output over its measured time |
 | `elapsed` | `{elapsed}` | `16.2s`, live while a generation runs, the last one when idle, empty after a resume |
@@ -233,10 +254,69 @@ find_next = ["ctrl-g", "shift-enter"]
 
 | `worktree` | `{worktree}` | 只在 git worktree 里显示（贡献者） |
 | `status` | `{status}` | `status.*` 贡献文本，`keys = ["…"]` 可过滤 |
+| `opencode-go.usage` | — | opencode-go 用量的**剩余**百分比与重置倒计时（ADR 0027 C4，贡献者；`tui.usage_period_secs` 0 关闭） |
 
 `worktree`/`status` 来自贡献者存储（ADR 0027 C3）：一个 `git` 贡献者每 5 s 在后台刷新
 `git_branch`/`worktree`（绘制路径从不跑 git），刷新失败保留旧值并画成暗色。`[tui.widgets]`
 的 `above_input`/`below_input` 把同样的条目 id 放到输入框上/下一行。
+
+#### Glyph coverage (ADR 0027)
+
+A glyph the font does not have is drawn by a system fallback font with different metrics, so it
+sits off the baseline. The `unicode` tier (the default, no Nerd Font needed) therefore only uses
+characters that **all** of Menlo, SF Mono, JetBrains Mono, Cascadia Code, Fira Code, Operator
+Mono and Source Code Pro have. The brand is `R` (bold accent) here, `󰰠` under `nerd`, `rad` under
+`ascii`; `㎭` (U+33AD) is gone (East-Asian-Wide, off-baseline fallback). The spinner is the
+quadrant `▖▘▝▗` (the arc `◜◝◞◟` and the braille `⠋⠙⠸⠴` are missing from most of the fonts).
+
+Check a glyph with `crates/radian-tui/scripts/check-glyph-coverage.py` (needs `fonttools` in a
+throwaway venv; it is not a repository dependency and not part of `cargo test`). A font that is
+not installed is printed as `未查`, never guessed. The unit test
+`footer::tests::unicode_tier_glyphs_are_all_verified_covered` keeps a new unicode-tier glyph
+from slipping in unchecked.
+
+| glyph | codepoint | use | Menlo | SF Mono | JetBrains Mono | Cascadia Code | Fira Code | Operator Mono | Source Code Pro |
+|---|---|---|---|---|---|---|---|---|---|
+| `R` | U+0052 | brand (unicode) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `@` | U+0040 | host | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `»` | U+00BB | speed | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `*` | U+002A | reasoning | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `#` | U+0023 | session | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `^` | U+005E | tokens in | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `v` | U+0076 | tokens out | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `~` | U+007E | auto-compaction marker | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `~` `+` `×` | U+007E/2B/D7 | tool status: running / success / failure | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `>` | U+003E | reasoning fold marker | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `│` | U+2502 | footer separator | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `━` | U+2501 | context bar fill | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `─` | U+2500 | context bar empty | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▖` | U+2596 | spinner frame 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▘` | U+2598 | spinner frame 2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▝` | U+259D | spinner frame 3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▗` | U+2597 | spinner frame 4 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+Replaced or dropped in the `unicode` tier (they were not in all seven fonts):
+
+| was | U+ | now |
+|---|---|---|
+| `⌂` host | U+2302 | `@` |
+| `◷` elapsed | U+25F7 | no icon (text only) |
+| `◫` context | U+25EB | no icon (text only) |
+| `◐` reasoning | U+25D0 | `*` |
+| `⛁` session | U+26C1 | `#` |
+| `⬡` tier | U+2B21 | no icon (text only) |
+| `↑` `↓` tokens | U+2191/3 | `^` `v` |
+| `⟲` auto | U+27F2 | `~` |
+| `⠋⠙⠸⠴` spinner | U+280B… | `▖▘▝▗` |
+| `▸` thinking fold | U+25B8 | `>` |
+| `⟳` `✔` `✘` tool status | U+27F3/2714/2718 | `~` `+` `×` |
+| `▶` `▼` startup fold | U+25B6/BC | `+` `-` |
+| `㎭` brand | U+33AD | `R` / `󰰠` / `rad` |
+
+Not in the all-seven set but kept (they are not tier-gated icons): the `❯` input prompt (the
+owner's choice; `box` style only) and text arrows (`→`, `•` in the question UI — `•` is in all
+seven, `→` is not, but it is prose, not an icon). The banner wordmark and the box-drawing
+characters (`╭╮╯╰`, `┌┐└┘`, `─│`) are in all seven.
 - `theme`: `dark` and `light` are **pi's own palettes**, read
   through the same ADR 0029 conversion a theme file uses: the three text levels are pi's
   brightness gradient (dark: `text` 89%, `muted` 67%, `dim` 56%), and every semantic color
@@ -336,9 +416,10 @@ decision 3), so ADR 0027/0028 can wire them without re-reading the file.
   (`form_next`, `form_prev`, `form_up`, `form_down`, `form_select`, `form_submit`,
   `form_decline`) is the third: it is the one modal whose keys are rebindable (ADR 0024 Q7),
   and `cancel` (Ctrl-C) still runs before it.
-- While the `@` completion list is showing, `escape` only closes the list (it does not clear
-  the input), and any key other than `complete` dismisses it. Both follow the keymap, so a
-  rebound `escape`/`complete` moves that behavior too. Likewise `find_close`'s `esc` closes the
+- While a completion menu is showing, `up`/`down` (and `menu_next`) move its highlight,
+  `escape` closes it (it does not clear the input), and `complete`/`send` accept the highlighted
+  row; any other key dismisses it. These follow the keymap, so a rebound `escape`/`complete`
+  moves that behavior too. Likewise `find_close`'s `esc` closes the
   box before `escape` would clear the input.
 - Note that rebinding `send` away from `enter` leaves `enter` a no-op unless `newline` is given
   it too (as in the example) — the keys are a total map, not layered.
@@ -358,8 +439,11 @@ and the index only read `*.jsonl`, so a draft is never a session.
 A `/…` line is a command: it never reaches the model, the transcript or the journal. Typing `/`
 shows the command tree's candidates above the input area; **every level completes**, with one
 fuzzy match (a subsequence, prefix matches first): `/mem` → `/memory`, then `/memory fo` →
-`forget`. Tab or Enter accepts the best candidate (it completes the line, it never runs it) and
-Esc closes the list. `/mem fo` completes both levels at once.
+`forget`. The menu highlights its first row; `Up`/`Down` move the highlight, `Tab` or `Enter`
+accepts the highlighted row (it completes the line, it never runs it) and `Esc` closes the menu
+keeping the line. `/mem fo` completes both levels at once. The `/theme`, `/model` and
+`/thinking` rows mark the value in effect with `● current`, and each `/thinking` row names the
+wire value it sends (`enabled:4096` for Anthropic, `high` for openai-compatible).
 
 The levels are data (`command.rs`): the command names from their `/help` lines, `/memory`'s
 subcommands, the record ids of `show`/`edit`/`archive`/`restore`/`forget`/`confirm` (listed by
@@ -474,10 +558,15 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   and the reported-vs-estimated wording readable at your width, and does the over-budget
   highlight stand out without looking like an error?
 - **the footer** (ADR 0027 C2, revision 1): the default is the `full` two rows (identity, then
-  numbers). Are the brand `㎭`, the hostname, the repo/worktree name and the change counts
+  numbers). Are the brand `R`, the hostname, the repo/worktree name and the change counts
   right, and do the numbers row's `speed`/`cost`/`elapsed` read as expected? Does the context
-  share/`⟲` marker read at your width, and does a narrow terminal drop the low priorities
+  share/`~` marker read at your width, and does a narrow terminal drop the low priorities
   first? Try `tui.footer.preset = "pi"` and `"classic"` and compare.
+- **`!` and `!!`** (ADR 0033): type `!ls` — does the `$ ls` block and its color read right, and
+  does the output arrive without a perceptible stall? Type `!!ls` — is the dimmer block clearly
+  different? Does `!sleep 30` cancel with Esc, and does a second `!` while one runs say so? Is
+  the sandbox visible (a write outside the workspace fails with a readable line) and does the
+  command never open an approval box? On the `safe` tier `!` must refuse with one line.
 - **the `AUTO` status marker** (ADR 0026 D9): turn auto on with `/auto on` — does the reversed
   `AUTO` segment stand out as "this session behaves differently" in `dark`, `light` and `mono`,
   without reading as an error? pty automation asserts the text, not the prominence.
@@ -582,15 +671,22 @@ throwaway terminal, not your working one.
    wide terminal (≥80 cols); `Ctrl-P`; reopen at ~40 cols; open again at ~20 cols.
    *Expect*: wide → the three-row wordmark plus one collapsed info line, one `Tip:` line, and
    the safety/warning lines (never folded); `Ctrl-P` folds/unfolds only the info line; narrow
-   → the wordmark drops to the single line `㎭ radian <version>`; ≤ its width → no wordmark.
-   *Look*: **does `㎭` render, and does it occupy two columns?** A one-column or
-   double-drawn glyph shifts the whole line; try two fonts. *Fail*: record `unicode-width`'s
-   assumption vs what you see, font name, and the exact width where it breaks.
-3. **Rounded input box and `❯`** (`tui.input_style = "box"`; merge `22b2753`). *Steps*: set
-   `input_style = "box"` in `[tui]`, restart; type a multi-line draft (`Ctrl-J`); resize.
-   *Expect*: rounded corners, `❯` prompt, the border in the theme accent (`notice_label`); the
-   continuation line aligns under the text; no corner breaks at any width. Compare with the
-   default `lines` (`> `). *Fail*: record the width where a corner/glyph breaks.
+   → the wordmark drops to the single line `<brand> radian <version>` (`R` unicode, `󰰠` nerd,
+   `rad` ascii); ≤ its width → no wordmark. *Look*: **does the brand mark render?** The unicode
+   `R` is one column; the nerd mark needs a Nerd Font (a box means it is missing). *Fail*:
+   record the font name and what you see.
+3. **Rounded input box and `❯`** (`tui.input_style = "box"`; merge `22b2753`; the prompt and
+   cursor fixes are `pi/ui-r3`). *Steps*: set `input_style = "box"` in `[tui]`, restart; type a
+   multi-line draft (`Ctrl-J`); resize. *Expect*: rounded corners, the `❯` prompt **in both
+   styles**, the border in the theme accent (`notice_label`); the cursor sits right after the
+   text (empty: one cell into the prompt; the old byte-length bug put it two cells right); the
+   continuation line aligns under the text; no corner breaks at any width. *Fail*: record the
+   width where a corner/glyph breaks.
+3b. **Shift+Enter** (`pi/ui-r3`). *Steps*: in Terminal.app, iTerm2/Ghostty (or another
+   kitty-protocol terminal) and inside herdr, press `Shift+Enter` in a non-empty draft; then
+   `Ctrl-J`. *Expect*: Shift+Enter inserts a newline where the terminal reports it (herdr and
+   kitty-protocol terminals), and `Ctrl-J` always does; a terminal that cannot report it sends
+   instead - record which of the three did what. *Fail*: a newline that also sends.
 4. **Ctrl-C** (merge `22b2753`, `01177c2`). *Steps*: type text, `Ctrl-C` (clears; press `↑`
    to find it); empty the input, `Ctrl-C` (status shows `Press Ctrl-C again to quit`), then
    **resize the window** and `Ctrl-C` again inside 2 s; then `Ctrl-C` twice with no resize.

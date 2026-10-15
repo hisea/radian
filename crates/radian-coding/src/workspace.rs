@@ -40,6 +40,15 @@ impl WorkspaceRoot {
         &self.root
     }
 
+    /// Resolves a workspace-relative path that must exist and stay inside the workspace, for a
+    /// host tool that needs the same boundary the file tools use (ADR 0030 R10's `git_commit`).
+    /// Rejects absolute paths, `..` and symlinks out of the workspace; returns the canonical
+    /// path or the reason as text.
+    pub fn resolve_in_workspace(&self, user: &str) -> Result<PathBuf, String> {
+        self.resolve_existing(user)
+            .map_err(|failure| failure.message)
+    }
+
     /// Rejects absolute paths and Windows prefixes before any filesystem access, then joins
     /// the workspace-relative path onto the root.
     fn joined(&self, user: &str) -> Result<PathBuf, ToolFailure> {

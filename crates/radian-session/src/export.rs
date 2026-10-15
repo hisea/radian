@@ -391,6 +391,26 @@ fn event_data_value(
         EventData::ProjectTrustChanged { path, decision } => {
             json!({"path": path, "decision": decision})
         }
+        EventData::UserBash {
+            command,
+            exclude_from_context,
+            exit_code,
+            cancelled,
+        } => json!({
+            "command": command,
+            "exclude_from_context": exclude_from_context,
+            "exit_code": exit_code,
+            "cancelled": cancelled,
+        }),
+        EventData::GitCommitted {
+            commit,
+            branch,
+            files,
+        } => json!({
+            "commit": commit,
+            "branch": branch,
+            "files": files,
+        }),
         EventData::Other(value) => value.clone(),
     };
     Ok(value)

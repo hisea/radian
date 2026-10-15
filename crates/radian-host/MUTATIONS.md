@@ -461,6 +461,9 @@ Base `9fef91d` · 一次性 worktree `/tmp/radian-trust-mut`，每条跑完 `git
 
 4/4 抓住。
 
+## ADR 0025 / ADR 0028 R8：内建 skill + diagrams + mermaid_check（2026-10-15）
+
+Base `cf37140` · 一次性 worktree `/tmp/radian-diag-mut`，每条跑完 `git checkout -- .`，`git status --short`
 ## ADR 0031 片 B：启动期提问、覆盖、审计（2026-10-14）
 
 Base `b2c9c1c` · 一次性 worktree `/tmp/radian-trustb-mut`，每条跑完 `git checkout -- .`，`git status --short`
@@ -468,6 +471,10 @@ Base `b2c9c1c` · 一次性 worktree `/tmp/radian-trustb-mut`，每条跑完 `gi
 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
+| DG-M1 | 内建 skill 排在用户级**之前**（内建先发现，用户级被它 shadow） | `skills::tests::a_user_skill_of_the_same_name_overrides_the_builtin` | ✅ |
+| DG-M2 | `mermaid_check` 失败也返回 `ok: 0x0` | `mermaid::tests::each_failure_has_its_own_reason_and_a_hint`（另 2 条也挂） | ✅ |
+
+2/2 抓住。
 | T-B1 | 启动 modal 的默认高亮改成 `TrustHere`（回车即信任） | pty `pty_trust_modal_asks_and_enter_untrusts` | ✅ |
 | T-B2 | `trust::load_for` 在命令行覆盖时也 `set_at` 写盘 | cli `trust_flags_override_without_writing` | ✅ |
 | T-B3 | 非交互且无决策时把 decision 改成 `Trust` | cli `a_workspace_with_project_resources_is_untrusted_without_a_terminal`（含 status line 断言） | ✅ |
@@ -485,3 +492,66 @@ Base `e9397be` · 一次性 worktree `/tmp/radian-trustb2-mut`，跑完 `git che
 | T-B5 | `trust_interactive` 退回 `cli.prompt.is_none()`（无 `-p` 即提问，管道 stdin 也问） | cli `piped_stdin_is_never_read_as_the_trust_answer`（提问行出现、管道内容被当成回答、消息没到模型） | ✅ |
 
 1/1 抓住。
+
+## git-commit：宿主侧 `git_commit`（ADR 0030 R10，2026-10-16）
+
+Base `a584b4b` · 一次性 worktree `/tmp/radian-mut-gitcommit`（`git worktree add --detach`，
+共享 target 安全：radian-host 无 build.rs）· 每条跑完 `git checkout -- .`，`git status --short`
+为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| GC-A | 去掉 `--no-verify` | `the_commit_command_never_runs_a_hook`（命令参数单测） | ✅ |
+| GC-B | 去掉 `core.hooksPath=/dev/null` | `the_commit_command_never_runs_a_hook` | ✅ |
+| GC-C | 去掉路径边界检查 | `outside_paths_are_refused` | ✅ |
+| GC-D | 去掉保护分支检查 | `branch_rules_are_enforced` | ✅ |
+| GC-E | 不写审计事件 | `the_commit_is_audited` | ✅ |
+
+5/5 抓住。**过程记录**：GC-A/GC-B 第一轮**没抓住**——两者互为保险（只去一个，hook 仍然不会跑），
+所以加了 `commit_args` 的参数单测分别断言两者，才各自抓住。GC-E 第一轮变异写错（在 GitCommitted
+之前又插了一条 TurnStarted，没删掉 GitCommitted），改成真正删除后才由审计测试抓住。
+
+## git-commit-fix：钉住仓库 + `core.fsmonitor=false`（ADR 0030 R10 安全修订，2026-10-16）
+
+Base `60b1976` · 一次性 worktree `/tmp/radian-mut-gcfix` · 每条跑完 `git checkout -- .`，
+`git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| GCF-A | 去掉钉住检查（`pin.still`） | `a_git_dir_created_in_a_subdirectory_workspace_is_refused` | ✅ |
+| GCF-B | 去掉 `-c core.fsmonitor=false` | `the_fsmonitor_defense_blocks_a_repo_config_script` | ✅ |
+
+2/2 抓住。威胁测试 `the_fsmonitor_threat_is_real_without_the_defense` 是 canary：裸 `git add`
+带 `core.fsmonitor` 会写标记（已在 git 2.53.0 上证明），证明这条防线不是多余的。
+
+## git-commit-fix 审查：`core.hooksPath` 放公共参数（2026-10-16）
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| GCF-C | 从 `common_args` 去掉 `core.hooksPath=/dev/null`（`git add` 就不再带） | `every_git_call_disables_the_dangerous_repo_config` 与 `the_post_index_change_hook_does_not_run` | ✅ |
+
+威胁 canary `the_post_index_change_threat_is_real_without_the_defense`：仓库配置
+`core.hooksPath=.husky` + 工作区里会写标记的 `.husky/post-index-change`，裸 `git add` 会写标记
+（git 2.53.0 实测）。`RepoPin::still` 的文件系统预检（新冒出的 `.git` 先于 `git rev-parse` 拒绝）
+是纵深防御，去掉它行为上仍拒绝（rev-parse 会解析到新仓库而判定不同），所以没有对应变异。
+## usage（用量行只跟着当前模型，ADR 0027）
+
+Base `45723f6` · 一次性 worktree `/tmp/radian-glyphs-mut`，还原后 `git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| U-M1 | `spawn_gated` 关掉闸门时仍刷新（切走后不停刷新） | `tests/usage_gate.rs::the_usage_row_follows_the_current_model` | ✅ |
+| U-M2 | `resetsAt` 改回 `Option<String>`（数字形式让整个响应解析失败、行消失） | `opencode_go::tests::resets_at_accepts_epoch_numbers` | ✅ |
+
+2/2 抓住（U-M2 先试过只改字段类型，会编译失败 E0308，改成完整还原旧的 `Option<String>` + `countdown` 用法后才算数）。
+
+## startup-line（摘要行写真实沙箱后端，2026-10-14）
+
+Base `62ae29e` · 一次性 worktree `/tmp/radian-sl-mut`，还原后 `git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| S-M2 | `sandbox_word` 的 workspace 分支写死 `seatbelt`（Linux 上是错的） | `describe::tests::the_summary_word_is_the_backend_it_is_given` | ✅ |
+| S-M3 | 说明句改回 `**on**` | `describe::tests::the_workspace_facts_have_no_markdown` | ✅ |
+
+2/2 抓住。

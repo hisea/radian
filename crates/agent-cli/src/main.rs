@@ -732,6 +732,12 @@ struct Setup {
     /// The extra skill roots from `[skills] extra_paths` (ADR 0025 slice 4), resolved against
     /// the config file's directory and the user's home.
     skills_extra_paths: Vec<PathBuf>,
+    /// `[skills] builtin` (ADR 0025); default true.
+    skills_builtin: bool,
+    /// `[skills] disabled`: built-in skill names to leave out.
+    skills_disabled: Vec<String>,
+    /// `[sandbox] allow_unix_sockets`, `~`-expanded and canonicalized (ADR 0016).
+    allow_unix_sockets: Vec<PathBuf>,
 }
 
 async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
@@ -1083,6 +1089,18 @@ async fn setup(cli: &Cli) -> Result<Setup, SetupError> {
             config.source.as_deref().and_then(std::path::Path::parent),
             radian_host::user_home().as_deref(),
         ),
+        skills_builtin: config.skills.builtin.unwrap_or(true),
+        skills_disabled: config.skills.disabled.clone(),
+        allow_unix_sockets: {
+            let (paths, warnings) = radian_host::resolve_allow_unix_sockets(
+                &config.sandbox.allow_unix_sockets,
+                radian_host::user_home().as_deref(),
+            );
+            for warning in &warnings {
+                eprintln!("[config] {warning}");
+            }
+            paths
+        },
     })
 }
 
@@ -1375,7 +1393,13 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
     if let Some(trust) = radian_host::trust_dir() {
         sandbox_deny_read.push(trust);
     }
-    let sandbox = profile::build_sandbox(profile_arg, &workspace_path, &sandbox_deny_read)?;
+    // ADR 0016: the whitelisted Unix sockets (resolved in `setup`).
+    let sandbox = profile::build_sandbox(
+        profile_arg,
+        &workspace_path,
+        &sandbox_deny_read,
+        &setup.allow_unix_sockets,
+    )?;
 
     // The approver and the audit sink. An `auto` policy (ADR 0026 D9, from `--yes`/`--approval
     // auto`/config/resume) answers every `ask` before any approver is consulted, so the
@@ -1463,6 +1487,7 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             config_queue: setup.config_queue,
             budget_for: Some(setup.budget_for),
             price_for: setup.price_for,
+            protected_branches: Vec::new(),
             servers: setup.servers,
             system_prompt: setup.system_prompt.clone(),
             context_budget: setup.context_budget,
@@ -1472,6 +1497,8 @@ async fn chat(setup: Setup, cli: Cli) -> Result<i32, SetupError> {
             profile: permission_profile,
             memory_root,
             skills_extra_paths: setup.skills_extra_paths,
+            skills_builtin: setup.skills_builtin,
+            skills_disabled: setup.skills_disabled,
             trust: trust_setup,
             resume: cli.resume.is_some(),
             config_snapshot: serde_json::json!({

@@ -227,7 +227,7 @@ never reached by forgetting a flag.
   mounted with a workspace, and `shell` additionally needs a sandbox.
 - **Under `workspace`**, writes are confined to the workspace, repository metadata (`.git`) is
   read-only, sensitive directories (`~/.ssh`, `~/.aws`, `~/.gnupg`, browser profiles, …) are
-  not readable by default, and the network is **on** (outbound and local-loopback
+  not readable by default, and the network is on (outbound and local-loopback
   connect/bind/listen) with the pty devices available, so a project's own tests can run
   (ADR 0016). This is **not** a claim of credential isolation: the macOS backend leaves
   `mach-lookup` open, so the IPC boundary is not tightened. MCP server processes are started

@@ -92,6 +92,22 @@ pub fn locate_hit(
 ) -> Option<Hit> {
     let mut remaining = line;
     for (index, entry) in entries.iter().enumerate() {
+        // The container's gap line before this entry (ADR 0028 rule 1) belongs to
+        // the **previous** entry's end: a selection dragged across it copies the newline
+        // between the two entries, exactly as a trailing blank line of the previous text did.
+        let gap = crate::blocks::block_gap(entries.get(index.wrapping_sub(1)), entry);
+        if remaining < gap {
+            let previous = index.checked_sub(1)?;
+            let text_len = display_text(&entries[previous]).len();
+            return Some(Hit {
+                anchor: Anchor {
+                    entry: previous,
+                    offset: text_len,
+                },
+                on_char: false,
+            });
+        }
+        remaining -= gap;
         let count = body_lines(entry, modes, width).len();
         if remaining >= count {
             remaining -= count;
@@ -331,6 +347,18 @@ pub fn highlight_rows(
         if out.len() >= height {
             break;
         }
+        // The container's gap line before this entry: it is never highlighted (it carries no
+        // text), but it occupies a row.
+        let gap = crate::blocks::block_gap(entries.get(index.wrapping_sub(1)), entry);
+        if line + gap > scroll {
+            for _ in scroll.saturating_sub(line)..gap {
+                if out.len() >= height {
+                    break;
+                }
+                out.push(Vec::new());
+            }
+        }
+        line += gap;
         let count = body_lines(entry, modes, width).len();
         let next = line + count;
         if next > scroll {

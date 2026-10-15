@@ -20,7 +20,7 @@ mod tests {
     async fn built_in_tools_are_exposed_and_dispatched() {
         let ws = scratch("builtin");
         let coding = CodingTools::new(&ws).unwrap();
-        let tools = CliTools::new(Some(coding), None, McpToolProvider::new(Vec::new()));
+        let tools = CliTools::new(Some(coding), None, McpToolProvider::new(Vec::new()), None);
         let session = tools.open_session().await.unwrap();
         let names: Vec<&str> = session
             .tool_specs()
@@ -29,7 +29,15 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            ["read", "write", "patch", "list", "git_status", "git_diff"]
+            [
+                "read",
+                "write",
+                "patch",
+                "list",
+                "git_status",
+                "git_diff",
+                "mermaid_check"
+            ]
         );
 
         let call = agent_core::ToolCall {
@@ -49,9 +57,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn without_a_workspace_only_mcp_tools_exist() {
-        let tools = CliTools::new(None, None, McpToolProvider::new(Vec::new()));
+    async fn without_a_workspace_only_the_host_tools_exist() {
+        let tools = CliTools::new(None, None, McpToolProvider::new(Vec::new()), None);
         let session = tools.open_session().await.unwrap();
-        assert!(session.tool_specs().is_empty());
+        // `mermaid_check` is a host tool, not a workspace tool (ADR 0028 R8).
+        assert_eq!(
+            session
+                .tool_specs()
+                .iter()
+                .map(|spec| spec.name.as_str())
+                .collect::<Vec<_>>(),
+            ["mermaid_check"]
+        );
     }
 }

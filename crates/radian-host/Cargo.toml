@@ -24,6 +24,11 @@ radian-runtime = { path = "../radian-runtime" }
 # The memory service (ADR 0021 D2/D8) sits on the storage layer.
 radian-memory = { path = "../radian-memory" }
 radian-sandbox = { path = "../radian-sandbox" }
+# The bounded Mermaid renderer (ADR 0028 R8): `mermaid_check` renders with the same crate the
+# TUI draws with, so the check and the transcript cannot disagree.
+codex-mermaid = { path = "../../third_party/codex-mermaid" }
+# `mermaid_check` reports the diagram's real display width (CJK and box characters are 2 cells).
+unicode-width = "0.2.2"
 # Reused for the owner-only file/directory creation (ADR 0013) in `diagnostics`.
 radian-session = { path = "../radian-session" }
 # The model catalog fetches over HTTP (ADR 0018); the same client the adapters use, so no new

@@ -794,6 +794,121 @@ fn dbg_resume_trace() {
 }
 
 #[test]
+#[ignore = "debug: first-frame render costs"]
+fn dbg_render_costs() {
+    // A first frame with a 200-line Rust block: the syntax set loads here (a fresh process).
+    let code: String = (0..200)
+        .map(|i| format!("fn f{i}(x: &str) -> usize {{ x.len() + {i} }}\n"))
+        .collect();
+    let mut app = App::new("m", "s");
+    app.entries.push(Entry::new(
+        EntryKind::Assistant,
+        format!("```rust\n{code}```\n"),
+    ));
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    let t = Instant::now();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app))
+        .unwrap();
+    println!(
+        "first frame with a 200-line rust block (syntax set load): {} ms",
+        t.elapsed().as_millis()
+    );
+    // A second frame is cached.
+    let t = Instant::now();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app))
+        .unwrap();
+    println!("second frame (cached): {} ms", t.elapsed().as_millis());
+    // A big mermaid diagram.
+    let diagram: String = (0..200).map(|i| format!("A{i}-->B{i};\n")).collect();
+    let t = Instant::now();
+    let _ = codex_mermaid::render_spans(&format!("graph TD;\n{diagram}"), 120);
+    println!("mermaid 200 edges: {} ms", t.elapsed().as_millis());
+}
+
+#[test]
+#[ignore = "debug: generate the resume-perf-c session dir"]
+fn dbg_gen_sessions() {
+    let dir = PathBuf::from("/tmp/radian-resumec/sessions");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let sizes: Vec<usize> = std::iter::once(14_000)
+        .chain((0..4).map(|_| 3_000))
+        .chain((0..28).map(|_| 400))
+        .collect();
+    let ws = "/private/tmp/radian-resumec/ws";
+    std::fs::create_dir_all(ws).unwrap();
+    let mut total = 0u64;
+    for (i, n) in sizes.iter().enumerate() {
+        let id = format!("s{i:02}");
+        let path = dir.join(format!("{id}.jsonl"));
+        let stats = long_session::write_long_session(&path, &id, *n, 0);
+        total += stats.bytes;
+        // The shared generator hardcodes `/work/example`; point the sessions at a real
+        // workspace so the picker lists them.
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, text.replacen("/work/example", ws, 1)).unwrap();
+    }
+    // A "rich" session like the owner's: ~370 assistant messages with a mermaid diagram and
+    // TypeScript/Rust code blocks (the first-frame render cost, not line counts).
+    let rich = dir.join("rich.jsonl");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let journal = radian_session::SessionJournal::create(
+            &rich,
+            "rich",
+            radian_session::SessionCreatedData::new(ws, serde_json::json!({})),
+        )
+        .unwrap();
+        for i in 0..370usize {
+            let text = format!(
+                "回答 {i}：\n\n```mermaid\ngraph TD; A{i}-->B{i}; B{i}-->C{i};\n```\n\n下面是代码：\n\n```typescript\ninterface X{i} {{ a: number; b: string; }}\nfunction f{i}(x: X{i}): number {{ return x.a + x.b.length; }}\n```\n\n还有 Rust：\n\n```rust\nfn g{i}(x: &str) -> usize {{ x.len() + {i} }}\n```\n"
+            );
+            agent_core::TranscriptJournal::append(
+                &journal,
+                agent_core::JournalRecord::Message {
+                    index: i,
+                    message: agent_core::Message::assistant(text),
+                },
+            )
+            .await
+            .unwrap();
+        }
+    });
+    // A tiny session with one big code block, so the visible window hits the syntax set.
+    let hl = dir.join("aaa.jsonl");
+    runtime.block_on(async {
+        let journal = radian_session::SessionJournal::create(
+            &hl,
+            "aaa",
+            radian_session::SessionCreatedData::new(ws, serde_json::json!({})),
+        )
+        .unwrap();
+        let code: String = (0..200)
+            .map(|i| format!("fn f{i}(x: &str) -> usize {{ x.len() + {i} }}\n"))
+            .collect();
+        let text = format!("```rust\n{code}```\n");
+        agent_core::TranscriptJournal::append(
+            &journal,
+            agent_core::JournalRecord::Message {
+                index: 0,
+                message: agent_core::Message::assistant(text),
+            },
+        )
+        .await
+        .unwrap();
+    });
+    let mut index = radian_session::Index::open(dir.join("index.db")).unwrap();
+    index.rebuild_dir(&dir).unwrap();
+    println!(
+        "generated {} sessions, {} MB (+ rich + aaa)",
+        sizes.len(),
+        total / (1024 * 1024)
+    );
+}
+
+#[test]
 #[ignore = "measurement, not an assertion; run with --ignored --nocapture"]
 fn perf_tui_resume() {
     let _serial = guard();

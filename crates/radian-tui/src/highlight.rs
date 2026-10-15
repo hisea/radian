@@ -45,6 +45,13 @@ pub type HighlightedLine = Vec<(String, SyntaxRole)>;
 /// 368 KB dump embedded by the `default-syntaxes` feature; loading it deserializes it on first
 /// use.
 fn syntax_set() -> &'static SyntaxSet {
+    let t = std::time::Instant::now();
+    let set = syntax_set_inner();
+    radian_session::trace::took("first-frame/syntax-set", t);
+    set
+}
+
+fn syntax_set_inner() -> &'static SyntaxSet {
     // Built at compile time by `build.rs`: syntect's packed default set plus the vendored
     // TypeScript/TSX/TOML grammars (see `third_party/syntaxes/RADIAN-CHANGES.md`). The YAML is
     // parsed there (about 2 s each) so the runtime only deserializes this dump.
@@ -198,7 +205,9 @@ pub fn highlighted(body: &str, lang: &str) -> Option<Arc<Vec<HighlightedLine>>> 
         return Some(Arc::clone(hit));
     }
     let lines: Vec<&str> = body.lines().collect();
+    let t = std::time::Instant::now();
     let highlighted = highlight_lines(&lines, lang)?;
+    radian_session::trace::took("first-frame/highlight", t);
     let value = Arc::new(highlighted);
     if let Ok(mut cache) = cache().lock() {
         // Bounded: a long session can visit many blocks; the cache is a redraw accelerator,

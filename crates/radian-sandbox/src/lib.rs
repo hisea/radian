@@ -115,7 +115,9 @@ fn validate_workspace(policy: &SandboxPolicy) -> Result<(), SandboxError> {
 }
 
 /// A ready-to-use sandbox. Constructing it probes the backend; the probe must succeed or
-/// construction fails.
+/// construction fails. `Clone` is cheap (a policy and a `'static` backend): the TUI keeps one
+/// clone for the user's `!`/`!!` commands while the coding tools own another (ADR 0033).
+#[derive(Clone)]
 pub struct Sandbox {
     backend: &'static dyn SandboxBackend,
     policy: SandboxPolicy,

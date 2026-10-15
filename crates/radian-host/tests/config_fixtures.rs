@@ -34,6 +34,7 @@ fn the_reader_matches_the_reference_checker() {
         ("tui-theme-colors.toml", "accept"),
         ("providers.toml", "accept"),
         ("skills-extra-paths.toml", "accept"),
+        ("skills-builtin.toml", "accept"),
         ("v1-unknown-fields.toml", "accept"),
         ("schema-version-newer.toml", "readonly"),
         ("schema-version-lower.toml", "reject"),
@@ -80,6 +81,20 @@ fn tui_display_preferences_are_carried() {
     assert_eq!(config.tui.display_tool_preview_lines, Some(8));
     assert_eq!(config.tui.display_mermaid, Some(true));
     assert_eq!(config.tui.display_highlight, Some(false));
+}
+
+/// `skills-builtin.toml` (ADR 0025): `builtin` and `disabled` are carried.
+#[test]
+fn skills_builtin_and_disabled_are_carried() {
+    let (path, text) = fixture("skills-builtin.toml");
+    let config = config::parse(&path, &text).unwrap();
+    assert_eq!(config.skills.builtin, Some(false));
+    assert_eq!(config.skills.disabled, vec!["diagrams".to_owned()]);
+    assert!(
+        !config.skipped.iter().any(|key| key.starts_with("skills")),
+        "{:?}",
+        config.skipped
+    );
 }
 
 /// `v1-unknown-fields.toml` is accepted *and* the unknown fields are reported (ignored, not

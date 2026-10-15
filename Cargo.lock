@@ -2281,6 +2281,7 @@ dependencies = [
  "agent-provider-anthropic",
  "agent-provider-openai-compatible",
  "clap",
+ "codex-mermaid",
  "futures-util",
  "radian-coding",
  "radian-memory",
@@ -2295,6 +2296,7 @@ dependencies = [
  "tokio",
  "toml",
  "toml_edit",
+ "unicode-width",
 ]
 
 [[package]]

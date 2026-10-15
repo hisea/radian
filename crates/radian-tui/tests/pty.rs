@@ -180,6 +180,7 @@ fn spawn_direct_keeping_slave(
         cmd.current_dir(cwd);
     }
     cmd.env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json");
+    cmd.env("RADIAN_KEYBOARD_ENHANCEMENT", "0");
     let keep_slave = slave.try_clone().unwrap();
     cmd.stdin(std::process::Stdio::from(slave.try_clone().unwrap()));
     cmd.stdout(std::process::Stdio::from(slave.try_clone().unwrap()));
@@ -215,6 +216,9 @@ struct Pty {
     bytes: Arc<Mutex<Vec<u8>>>,
     parser: Parser,
     child: Box<dyn portable_pty::Child + Send + Sync>,
+    /// The pty master, kept so a test can change the window size (`TIOCSWINSZ`) without
+    /// sending any input (the owner's bare-resize bug).
+    master: Box<dyn portable_pty::MasterPty + Send>,
     processed: usize,
     /// A private `HOME` for the app: its catalog cache lives here, never in the user's real
     /// cache. Held only so the directory is removed when the pty is dropped.
@@ -334,12 +338,17 @@ impl Pty {
         // `cmd.env_clear()` above is what makes this hermetic: neither `RADIAN_HOME` nor
         // `RADIAN_CONFIG` reaches the child, so a config can only come from this temp `HOME`.
         cmd.env("RADIAN_CATALOG_URL", "http://127.0.0.1:1/api.json");
+        // A pty has nobody to answer the kitty keyboard-enhancement query, and crossterm
+        // waits up to 2 s for it; the harness opts out (a test that wants the sequences sets
+        // the variable back to `1` through `envs`).
+        cmd.env("RADIAN_KEYBOARD_ENHANCEMENT", "0");
         for (name, value) in envs {
             cmd.env(name, value);
         }
         let child = pair.slave.spawn_command(cmd).unwrap();
         let writer = pair.master.take_writer().unwrap();
         let mut reader = pair.master.try_clone_reader().unwrap();
+        let master = pair.master;
         let bytes: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let log = Arc::clone(&bytes);
         std::thread::spawn(move || {
@@ -356,9 +365,23 @@ impl Pty {
             bytes,
             parser: Parser::new(rows, cols, 5000),
             child,
+            master,
             processed: 0,
             home,
         }
+    }
+
+    /// Changes the pty's window size **without sending any input**: a `TIOCSWINSZ` on the
+    /// master, which is what dragging a window does. The app must re-lay out on its own.
+    fn resize(&mut self, rows: u16, cols: u16) {
+        self.master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
     }
 
     fn send(&mut self, bytes: &[u8]) {
@@ -435,7 +458,7 @@ impl Pty {
                 // The expanded header and the first info line are at the **top** of the block;
                 // with the trust line the block can be taller than a 24-row pty, so accept a
                 // later info line that stays visible when the view is pinned to the bottom.
-                screen.contains("▼ startup information")
+                screen.contains("- startup information")
                     || screen.contains("profile:")
                     || screen.contains("ask_user:")
             }) {
@@ -2349,6 +2372,58 @@ async fn pty_the_workspace_write_notice_names_the_mcp_sandbox_gap() {
     assert!(
         notice.contains("not a complete credential boundary"),
         "the notice must not claim credential isolation: {notice}"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0027: the startup summary's sandbox word is the **real** backend, never `none`. The
+/// bug was searching the `workspace` tier's description text, which does not name the backend,
+/// so macOS showed `workspace · none`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_the_startup_summary_names_the_real_sandbox_backend() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("summary-sandbox");
+    let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "summary-sandbox",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        30,
+        120,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    let screen = pty.screen();
+    // The collapsed summary line carries the tier, the sandbox word and the rest.
+    let summary = screen
+        .lines()
+        .find(|line| line.contains("context ") && line.contains("ask_user"))
+        .unwrap_or_else(|| panic!("no summary line:\n{screen}"));
+    assert!(
+        !summary.contains("· none ·"),
+        "the workspace tier has a sandbox; it must not read as none: {summary:?}"
+    );
+    let expected = if cfg!(target_os = "macos") {
+        "macos-seatbelt"
+    } else {
+        "linux-bwrap"
+    };
+    assert!(
+        summary.contains(expected),
+        "the summary must name the real backend ({expected}): {summary:?}"
     );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
@@ -6470,7 +6545,7 @@ async fn pty_the_slash_completion_walks_the_command_tree() {
     );
     pty.send(b"\t");
     assert!(
-        pty.wait_for_screen("> /memory ", 10),
+        pty.wait_for_screen("❯ /memory ", 10),
         "Tab did not complete the command name:\n{}",
         pty.screen()
     );
@@ -6483,7 +6558,7 @@ async fn pty_the_slash_completion_walks_the_command_tree() {
     );
     pty.send(b"\t");
     assert!(
-        pty.wait_for_screen("> /memory forget", 10),
+        pty.wait_for_screen("❯ /memory forget", 10),
         "Tab did not complete the subcommand:\n{}",
         pty.screen()
     );
@@ -7889,7 +7964,7 @@ async fn pty_the_pi_footer_is_two_rows() {
     // The model item is on the footer's first row; the tokens item on the second. The screen
     // text is one string, so both must be present, and the tokens glyph marks the second row.
     assert!(
-        pty.wait_for_screen("↑-", 10),
+        pty.wait_for_screen("^-", 10),
         "the tokens row is missing:\n{}",
         pty.screen()
     );
@@ -7933,7 +8008,7 @@ async fn pty_the_shipped_default_footer_is_two_rows_without_a_config() {
     // The shipped default is the `full` preset (ADR 0027): the identity row (brand,
     // model, repo/worktree) and the numbers row (tokens, speed, cost, context, elapsed).
     assert!(
-        first.contains('㎭') || first.contains("rad"),
+        first.contains('R') || first.contains("rad"),
         "the brand is on the first row: {first:?}"
     );
     assert!(
@@ -7945,7 +8020,7 @@ async fn pty_the_shipped_default_footer_is_two_rows_without_a_config() {
         "the repo/worktree name is on the identity row: {first:?}"
     );
     assert!(
-        second.contains('↑'),
+        second.contains('^'),
         "the numbers row shows the tokens: {second:?}"
     );
     assert!(
@@ -8107,7 +8182,7 @@ async fn pty_the_default_footer_drops_the_right_group_on_a_narrow_terminal() {
     let second = lines.last().cloned().unwrap_or_default();
     assert!(first.contains("mock"), "the model survives: {first:?}");
     assert!(
-        !first.contains('◐'),
+        !first.contains('*'),
         "the right group drops first: {first:?}"
     );
     assert!(
@@ -8124,4 +8199,402 @@ fn short_workspace(label: &str) -> std::path::PathBuf {
     let path = std::path::PathBuf::from(format!("/tmp/radian-{label}-{}", std::process::id()));
     std::fs::create_dir_all(&path).unwrap();
     path
+}
+
+/// The longest run of `ch` on any screen line: the input box's rule length is a cheap proxy
+/// for "the app laid out at this width".
+fn longest_run(screen: &str, ch: char) -> usize {
+    screen
+        .lines()
+        .map(|line| {
+            line.chars()
+                .fold((0usize, 0usize), |(best, run), c| {
+                    if c == ch {
+                        (best.max(run + 1), run + 1)
+                    } else {
+                        (best, 0)
+                    }
+                })
+                .0
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// changing the window size with **no other input** must re-lay out. The
+/// old bug: crossterm only drains its SIGWINCH pipe while reading stdin, so an idle app stayed
+/// at the old width until a key or wheel arrived ("scroll once and it fixes itself"). The app
+/// now polls `TIOCGWINSZ` on its idle tick.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_bare_resize_re_lays_out() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let config = format!(
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
+         base_url = \"{}\"\n",
+        server.base_url
+    );
+    let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    let before = longest_run(&pty.screen(), '─');
+    assert!(before > 90, "the initial rule spans the terminal: {before}");
+
+    // Only the size changes; no key, no wheel.
+    pty.resize(24, 60);
+    assert!(
+        pty.wait_until(5, |screen| longest_run(screen, '─') < 62),
+        "no re-layout after a bare resize (rule was {before}, now {}):\n{}",
+        longest_run(&pty.screen(), '─'),
+        pty.screen()
+    );
+
+    // Three changes in a row land on the last size.
+    pty.resize(24, 70);
+    pty.resize(24, 80);
+    pty.resize(24, 50);
+    assert!(
+        pty.wait_until(5, |screen| longest_run(screen, '─') < 52),
+        "the final size must win (rule is {}):\n{}",
+        longest_run(&pty.screen(), '─'),
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// The keyboard-enhancement flags (kitty protocol, ): when the terminal
+/// supports them, `DISAMBIGUATE_ESCAPE_CODES` is pushed so Shift+Enter arrives as
+/// Enter+SHIFT instead of a plain Enter, and the flags are popped on **every** exit path.
+///
+/// A pty cannot answer the support query, so this test forces the push through the
+/// `RADIAN_KEYBOARD_ENHANCEMENT=1` override; the query itself is a real-terminal matter (the
+/// hand-test list). The push is `CSI > 1 u` (DISAMBIGUATE_ESCAPE_CODES = 1) and the pop is
+/// `CSI < 1 u` (crossterm 0.29.0 `event.rs:495-527`).
+#[test]
+fn pty_keyboard_enhancement_is_pushed_and_popped_on_exit() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("keyboard-enhance");
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "keyboard-enhance",
+            "--offline-catalog",
+        ],
+        &[("RADIAN_KEYBOARD_ENHANCEMENT", "1")],
+        20,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("type a message", 10),
+        "{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_raw("\u{1b}[>1u", 5),
+        "the enhancement flags are pushed at startup"
+    );
+    pty.quit();
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    let pop = raw
+        .find("\u{1b}[<1u")
+        .expect("the flags are popped on exit");
+    let leave = raw
+        .rfind("\u{1b}[?1049l")
+        .expect("the alternate screen is left");
+    assert!(
+        pop < leave,
+        "the pop comes before leaving the alternate screen"
+    );
+}
+
+/// ADR 0033 acceptance: `!cmd` runs in the sandbox, shows a `$ cmd` block, and its `Ran \`cmd\``
+/// message reaches the next request's user messages.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_bang_runs_and_enters_the_context() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("AFTER-BANG")]).await;
+    let config = format!(
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
+         base_url = \"{}\"\n",
+        server.base_url
+    );
+    let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // The output must not be a substring of the command text: `wait_for_screen` would
+    // otherwise match the echoed input line and race the command (the audit-test flake).
+    pty.send(b"!printf 'BANG-%s' OUTPUT\r");
+    assert!(
+        pty.wait_for_screen("BANG-OUTPUT", 20),
+        "the command output is not on screen:\n{}",
+        pty.screen()
+    );
+    // The block's first line is `$ cmd`.
+    assert!(
+        pty.wait_for_screen("$ printf 'BANG-%s' OUTPUT", 10),
+        "the command line is not on screen:\n{}",
+        pty.screen()
+    );
+    // ADR 0033 + ADR 0012: `!` is the human's own command; it never opens the approval box.
+    assert!(
+        !pty.screen().contains("approve tool call"),
+        "`!` must not ask for approval:\n{}",
+        pty.screen()
+    );
+    pty.send(b"next\r");
+    assert!(
+        pty.wait_for_screen("AFTER-BANG", 20),
+        "the reply is missing:\n{}",
+        pty.screen()
+    );
+    let body = server.requests()[0].json();
+    let users = body["messages"]
+        .as_array()
+        .expect("messages is an array")
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .map(|message| message["content"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(users.contains("Ran `printf 'BANG-%s' OUTPUT`"), "{users}");
+    assert!(users.contains("BANG-OUTPUT"), "{users}");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0033 acceptance: `!!cmd` runs and shows, but its output never enters the request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_bangbang_stays_out_of_the_context() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("AFTER-BANGBANG")]).await;
+    let config = format!(
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
+         base_url = \"{}\"\n",
+        server.base_url
+    );
+    let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // Distinct output (the command text has no `BANG-SECRET`), so the wait cannot match the
+    // echoed input line.
+    pty.send(b"!!printf 'BANG-%s' SECRET\r");
+    assert!(
+        pty.wait_for_screen("BANG-SECRET", 20),
+        "the command output is not on screen:\n{}",
+        pty.screen()
+    );
+    pty.send(b"next\r");
+    assert!(
+        pty.wait_for_screen("AFTER-BANGBANG", 20),
+        "the reply is missing:\n{}",
+        pty.screen()
+    );
+    let body = server.requests()[0].json();
+    let users = body["messages"]
+        .as_array()
+        .expect("messages is an array")
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .map(|message| message["content"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !users.contains("BANG-SECRET"),
+        "!! output must not enter the context: {users}"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0033 + ADR 0012: a `!` command really is confined — a write outside the workspace
+/// fails (the default tier is `workspace-write`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_bang_is_confined_to_the_workspace() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let escape = format!("/tmp/radian-bang-escape-{}", std::process::id());
+    let _ = std::fs::remove_file(&escape);
+    let config = format!(
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
+         base_url = \"{}\"\n",
+        server.base_url
+    );
+    let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(format!("!echo x > {escape}\r").as_bytes());
+    assert!(
+        pty.wait_for_screen("[exit code:", 20),
+        "the block never appeared:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !std::path::Path::new(&escape).exists(),
+        "the sandbox must deny a write outside the workspace"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0033: every `!`/`!!` run is audited in the journal (`UserBash`), even when it does not
+/// enter the context.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_bang_is_audited_in_the_journal() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let dir = TempDir::new("bang-audit");
+    let config = format!(
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
+         base_url = \"{}\"\n",
+        server.base_url
+    );
+    let mut pty = Pty::spawn_with_config(
+        &["--session-dir", dir.path().to_str().unwrap()],
+        &[("OPENAI_API_KEY", "sk-test")],
+        &config,
+        24,
+        100,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    // The output must not appear in the command text: `wait_for_screen("AUDITED")` used to
+    // match the echoed `!!printf AUDITED` and quit before the command (and its `UserBash`
+    // record) ran. `printf 'A%sB' Z` prints `AZB`, which the command text does not contain.
+    pty.send(b"!!printf 'A%sB' Z\r");
+    assert!(
+        pty.wait_for_screen("AZB", 20),
+        "the command output is not on screen:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+    let journal = std::fs::read_dir(dir.path())
+        .expect("the session dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+        .expect("a session file");
+    let text = std::fs::read_to_string(&journal).expect("the journal is readable");
+    assert!(
+        text.contains("\"event\":\"UserBash\""),
+        "no UserBash audit record:\n{text}"
+    );
+    assert!(
+        text.contains("\"command\":\"printf 'A%sB' Z\"")
+            && text.contains("\"exclude_from_context\":true"),
+        "the audit record is missing its fields:\n{text}"
+    );
+}
+
+/// ADR 0033: only one `!` at a time (a second is refused) and Esc cancels the running one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_bang_is_single_and_escapable() {
+    let _serial = pty_guard();
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let config = format!(
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
+         base_url = \"{}\"\n",
+        server.base_url
+    );
+    let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"!sleep 30\r");
+    assert!(
+        pty.wait_for_screen("sleep 30", 10),
+        "the command block is not on screen:\n{}",
+        pty.screen()
+    );
+    // A second command while the first runs is refused, not queued or run.
+    pty.send(b"!echo SECOND\r");
+    assert!(
+        pty.wait_for_screen("already running", 10),
+        "the second command was not refused:\n{}",
+        pty.screen()
+    );
+    // Esc cancels the running one; its block says so.
+    pty.send(&[0x1b]);
+    assert!(
+        pty.wait_for_screen("[cancelled]", 20),
+        "the command was not cancelled:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0033: Ctrl-C (`Effect::Cancel`) also stops a running `!`, so there is no orphan process
+/// group. A turn must be running for Ctrl-C to mean "cancel" (otherwise it arms quit), so this
+/// starts one with a reply that never finishes and then cancels both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_ctrl_c_stops_a_running_bang() {
+    let _serial = pty_guard();
+    // A reply that never finishes: the turn stays running while the bash does.
+    let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
+    let config = format!(
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
+         base_url = \"{}\"\n",
+        server.base_url
+    );
+    let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"!sleep 30\r");
+    assert!(
+        pty.wait_for_screen("sleep 30", 10),
+        "the command block is not on screen:\n{}",
+        pty.screen()
+    );
+
+    // Start a turn so Ctrl-C is a cancel; the mock hangs, so it is still running.
+    pty.send(b"hello\r");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while server.requests().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !server.requests().is_empty(),
+        "the turn never started:\n{}",
+        pty.screen()
+    );
+
+    // Ctrl-C cancels the turn AND the running `!`.
+    pty.send(&[0x03]);
+    assert!(
+        pty.wait_for_screen("[cancelled]", 20),
+        "Ctrl-C did not cancel the running !:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// ADR 0033: the loop runs `!` through radian-coding's **sandboxed** executor, never a naked
+/// `Command`. A structural test pins it, so a future edit cannot quietly bypass the sandbox.
+#[test]
+fn the_bang_command_runs_through_the_sandboxed_executor() {
+    let source =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")).unwrap();
+    assert!(
+        source.contains("radian_coding::run_user_bash"),
+        "the loop must reuse the shell tool's sandboxed executor"
+    );
+    let arm = source
+        .split("Effect::RunBash")
+        .nth(1)
+        .unwrap_or_default()
+        .split("Effect::Inject")
+        .next()
+        .unwrap_or_default();
+    assert!(
+        !arm.contains("Command::new"),
+        "the RunBash arm must not build a command directly (that would bypass the sandbox):\n{arm}"
+    );
 }

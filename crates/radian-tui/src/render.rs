@@ -72,7 +72,13 @@ pub fn wrap_char_offsets(text: &str, width: usize) -> Vec<WrappedLine> {
             }
             continue;
         }
-        let ch_width = ch.width().unwrap_or(0);
+        // A tab occupies four columns (ADR 0028 R9's rule, one rule for every text the
+        // transcript wraps); it is not a space, so it never collapses.
+        let ch_width = if ch == '\t' {
+            4
+        } else {
+            ch.width().unwrap_or(0)
+        };
         let extra = usize::from(pending_space.is_some());
         if line_width + extra + ch_width > width && line_width > 0 {
             out.push(WrappedLine {
@@ -116,7 +122,11 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
                 pending_space = !line.is_empty();
                 continue;
             }
-            let ch_width = ch.width().unwrap_or(0);
+            let ch_width = if ch == '\t' {
+                4
+            } else {
+                ch.width().unwrap_or(0)
+            };
             let extra = usize::from(pending_space);
             if line_width + extra + ch_width > width && line_width > 0 {
                 out.push(std::mem::take(&mut line));
@@ -153,7 +163,11 @@ pub fn wrap_line_count(text: &str, width: usize) -> usize {
                 pending_space = any;
                 continue;
             }
-            let ch_width = ch.width().unwrap_or(0);
+            let ch_width = if ch == '\t' {
+                4
+            } else {
+                ch.width().unwrap_or(0)
+            };
             let extra = usize::from(pending_space);
             if line_width + extra + ch_width > width && line_width > 0 {
                 lines += 1;
@@ -179,8 +193,10 @@ pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
         EntryKind::User => "> ",
         EntryKind::Assistant => "  ",
         EntryKind::Reasoning => "~ ",
-        EntryKind::ToolCall => "-> ",
-        EntryKind::ToolResult => "<- ",
+        // Rule 2: every marker is two cells; rule 4: a result's marker sits one cell further
+        // right, so a result reads as subordinate to its call.
+        EntryKind::ToolCall => "->",
+        EntryKind::ToolResult => " <-",
         EntryKind::Notice => "* ",
         // The compaction line has no marker of its own: it is a rule-like `── … ──` line.
         EntryKind::Compaction => "",
@@ -189,7 +205,10 @@ pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
         EntryKind::Banner => "  ",
         EntryKind::Startup => "  ",
         EntryKind::Warning => "! ",
-        EntryKind::Tip => "Tip: ",
+        // Rule 2: two cells like every other marker; the `Tip:` label is content now.
+        EntryKind::Tip => "  ",
+        // ADR 0033: the command line; `!` (context) vs `!!` (not) differ in color, not marker.
+        EntryKind::Bash { .. } => "$ ",
     }
 }
 
@@ -208,6 +227,13 @@ fn marker(kind: EntryKind, theme: &Theme) -> (&'static str, Style) {
         EntryKind::Tip => theme.truncation,
         // The compaction one-liner is structural: the hunk/accent role.
         EntryKind::Compaction => theme.diff_hunk,
+        // ADR 0033: `!` uses the command color; `!!` steps down to the hint level.
+        EntryKind::Bash {
+            exclude_from_context: false,
+        } => theme.tool_call,
+        EntryKind::Bash {
+            exclude_from_context: true,
+        } => theme.hint,
     };
     (marker_prefix(kind), style)
 }
@@ -225,6 +251,13 @@ fn body_style(entry: &Entry, theme: &Theme) -> Style {
         EntryKind::Tip => theme.hint,
         // The expanded summary is body text; its one-liner is styled by `marker`.
         EntryKind::Compaction => theme.notice_body,
+        // ADR 0033: the same split as `marker`.
+        EntryKind::Bash {
+            exclude_from_context: false,
+        } => theme.tool_call,
+        EntryKind::Bash {
+            exclude_from_context: true,
+        } => theme.hint,
         EntryKind::User | EntryKind::Assistant => {
             if entry.interrupted {
                 Style::default().add_modifier(Modifier::ITALIC)
@@ -369,16 +402,20 @@ fn render_row(
             None => Line::from(vec![Span::raw(String::new())]),
         };
     }
+    // The collapsed reasoning placeholder is one synthetic line: its marker is the marker
+    // column's own glyph (ADR 0028 rule 5), so the body column does not move
+    // between folded and expanded. `>` stands in for `▸` (ADR 0027: `▸` is not in
+    // all seven checked fonts).
+    let placeholder = entry.kind == EntryKind::Reasoning && row.hint;
     let lead = if row.code {
         String::new()
+    } else if placeholder {
+        "> ".to_string()
     } else if first_text {
         prefix.to_string()
     } else {
         " ".repeat(prefix.width())
     };
-    // The collapsed reasoning placeholder is one synthetic line: the reasoning role, not the
-    // body style.
-    let placeholder = entry.kind == EntryKind::Reasoning && row.chars.is_empty();
     // A notice's content is the secondary level (the owner's assignment: its value is 次,
     // only its label is 强调); the marker's own role stays `notice`.
     let body = if placeholder {
@@ -520,10 +557,16 @@ pub fn transcript_lines(
     width: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    entries
-        .iter()
-        .flat_map(|entry| entry_lines(entry, modes, width, theme))
-        .collect()
+    let mut out = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        // The container owns the blank line between blocks (ADR 0028 rule 1).
+        out.extend(std::iter::repeat_n(
+            Line::from(""),
+            blocks::block_gap(entries.get(index.wrapping_sub(1)), entry),
+        ));
+        out.extend(entry_lines(entry, modes, width, theme));
+    }
+    out
 }
 
 /// The transcript's total line count and the `height` lines starting at line `start`, laying
@@ -550,15 +593,38 @@ pub fn visible_lines(
             __t.elapsed().as_millis()
         );
     }
-    let total: usize = counts.iter().sum();
+    // The container's blank lines are part of the transcript (ADR 0028 rule 1):
+    // the total and the window include them, or the scroll position and the mapping would
+    // disagree with the drawing. The sum is computed without allocating a per-entry vector
+    // (this is the 50k-entry frame path).
+    let mut total: usize = counts.iter().sum::<usize>();
+    for index in 1..entries.len() {
+        total += blocks::block_gap(entries.get(index - 1), &entries[index]);
+    }
     let mut out = Vec::with_capacity(height);
     let mut line = 0usize;
-    for (entry, count) in entries.iter_mut().zip(&counts) {
+    for index in 0..entries.len() {
         if out.len() >= height {
             break;
         }
-        let next = line + count;
+        let gap = blocks::block_gap(entries.get(index.wrapping_sub(1)), &entries[index]);
+        let count = counts[index];
+        let entry = &mut entries[index];
+        let next = line + gap + count;
         if next > start {
+            // The gap lines first, then the entry's own lines.
+            for _ in 0..gap {
+                if out.len() >= height {
+                    break;
+                }
+                if line >= start {
+                    out.push(Line::from(""));
+                }
+                line += 1;
+            }
+            if out.len() >= height {
+                break;
+            }
             let skip = start.saturating_sub(line);
             let blocks = blocks::blocks_for(entry, modes.reasoning);
             let body = blocks::layout(entry, &blocks, modes, width);
@@ -629,10 +695,11 @@ impl InputStyle {
     }
 }
 
-/// The input prompt, in the style of pi: the first line starts with `> ` and the continuation
-/// lines indent by the same two cells, so the text stays aligned. Two cells of the width go to
-/// it, which is why `input_height` measures the text at `width - 2`.
-const INPUT_PROMPT: &str = "> ";
+/// The input prompt, in the style of pi: the first line starts with `❯ ` and the continuation
+/// lines indent by the same two cells, so the text stays aligned. The owner's 2026-10-14
+/// decision: **both** input styles use `❯`. Its display width (2 cells) is what the layout
+/// reserves — never its byte length (`❯` is three bytes, which used to shift the box cursor).
+const INPUT_PROMPT: &str = "❯ ";
 
 /// The bordered style's prompt: the owner's `❯`, colored with the theme's
 /// accent role (`theme.model`, pi's `accent`). Two cells, like `> `.
@@ -749,12 +816,19 @@ fn input_height(app: &App, width: usize) -> u16 {
     (rows.clamp(1, MAX_INPUT_ROWS) as u16) + 2
 }
 
-/// The text width inside the input area: `> ` on the first line for `lines`, a border plus the
+/// The display width of a prompt constant: the columns it occupies, **not** its byte length
+/// (`❯` is three bytes and one cell). Every layout use of a prompt goes through this.
+fn prompt_width(prompt: &str) -> usize {
+    UnicodeWidthStr::width(prompt)
+}
+
+/// The text width inside the input area: `❯ ` on the first line for `lines`, a border plus the
 /// `❯ ` prompt for `box`.
 fn input_inner_width(app: &App, width: usize) -> usize {
     let reserved = match app.input_style {
-        InputStyle::Lines => INPUT_PROMPT.len(),
-        InputStyle::Box => 2 + BOX_PROMPT.len(),
+        InputStyle::Lines => prompt_width(INPUT_PROMPT),
+        // Two border cells plus the prompt.
+        InputStyle::Box => 2 + prompt_width(BOX_PROMPT),
     };
     width.saturating_sub(reserved).max(1)
 }
@@ -1172,9 +1246,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // The find matcher wraps at the same width; a resize recomputes it (once, not per frame).
     app.set_transcript_width(width);
     let modes = app.display_modes();
+    let t_draw = std::time::Instant::now();
     let (total, _) = visible_lines(&mut app.entries, modes, width, 0, 0, &theme);
+    radian_session::trace::took("draw/measure", t_draw);
     app.set_viewport(chunks[0].height, total);
+    let t_window = std::time::Instant::now();
     let (_, visible) = visible_lines(&mut app.entries, modes, width, app.scroll, height, &theme);
+    radian_session::trace::took("draw/window", t_window);
     let visible = match app.find_state() {
         Some(find) => visible
             .into_iter()
@@ -1209,7 +1287,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
         None => visible,
     };
+    let t_render = std::time::Instant::now();
     frame.render_widget(Paragraph::new(visible), chunks[0]);
+    radian_session::trace::took("draw/render-transcript", t_render);
 
     // The picker overlay draws over the transcript; the input box and the status bar stay
     // visible below it (ADR 0023 U4).
@@ -1218,10 +1298,19 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     if !completion.is_empty() {
-        let style = theme.completion;
+        // The highlighted row: the menu's cursor, styled with the theme's
+        // `selection` (reversed in `mono`), so it is clear which candidate Enter/Tab accepts.
         let lines: Vec<Line> = completion
             .into_iter()
-            .map(|row| Line::from(Span::styled(row, style)))
+            .enumerate()
+            .map(|(index, row)| {
+                let style = if index == app.completion_cursor {
+                    theme.selection
+                } else {
+                    theme.completion
+                };
+                Line::from(Span::styled(row, style))
+            })
             .collect();
         frame.render_widget(Paragraph::new(lines), chunks[1]);
     }
@@ -1400,7 +1489,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                             .iter()
                             .enumerate()
                             .map(|(index, row)| {
-                                let lead = if index == 0 { INPUT_PROMPT } else { "  " };
+                                let lead = if index == 0 {
+                                    INPUT_PROMPT.to_string()
+                                } else {
+                                    " ".repeat(prompt_width(INPUT_PROMPT))
+                                };
                                 Line::from(vec![
                                     Span::styled(lead, app.theme.hint),
                                     Span::styled(row.clone(), style),
@@ -1428,7 +1521,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                         ]));
                     } else {
                         for (index, row) in rows[offset..].iter().enumerate() {
-                            let lead = if index == 0 { BOX_PROMPT } else { "  " };
+                            let lead = if index == 0 {
+                                BOX_PROMPT.to_string()
+                            } else {
+                                " ".repeat(prompt_width(BOX_PROMPT))
+                            };
                             body.push(Line::from(vec![
                                 Span::styled(lead, accent),
                                 Span::styled(row.clone(), style),
@@ -1448,9 +1545,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 // (one cell); a full row clamps the cursor to its last cell rather than onto the
                 // rule or the border.
                 let lead = match app.input_style {
-                    InputStyle::Lines => INPUT_PROMPT.len() as u16,
-                    // Border (1) + the `❯ ` prompt (2).
-                    InputStyle::Box => 1 + BOX_PROMPT.len() as u16,
+                    InputStyle::Lines => prompt_width(INPUT_PROMPT) as u16,
+                    // Border (1) + the `❯ ` prompt (2 cells).
+                    InputStyle::Box => 1 + prompt_width(BOX_PROMPT) as u16,
                 };
                 let col = cursor_col.min(inner_width.saturating_sub(1)) as u16;
                 let row = (cursor_row - offset).min(visible.saturating_sub(1)) as u16;
@@ -1461,10 +1558,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
     }
 
-    frame.render_widget(
-        Paragraph::new(status_lines(app, chunks[3].width as usize)),
-        chunks[3],
-    );
+    let t_status = std::time::Instant::now();
+    let status = status_lines(app, chunks[3].width as usize);
+    radian_session::trace::took("draw/status-lines", t_status);
+    frame.render_widget(Paragraph::new(status), chunks[3]);
+    radian_session::trace::mark("draw/end");
 }
 
 /// The status area's height: one row for the `classic` preset, the footer's rows for `pi`.
@@ -1479,7 +1577,7 @@ fn status_height(app: &App, width: usize) -> u16 {
 fn status_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     match app.footer.preset() {
         crate::footer::Preset::Classic => vec![status_line(app, width)],
-        crate::footer::Preset::Full | crate::footer::Preset::Pi => {
+        crate::footer::Preset::Deck | crate::footer::Preset::Full | crate::footer::Preset::Pi => {
             let mut lines = app.footer.lines(app, width);
             if let Some(chrome) = chrome_line(app, width) {
                 lines.push(chrome);

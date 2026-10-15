@@ -29,8 +29,8 @@ fn the_cursor_cell_counts_display_width_not_chars() {
     app.input.set_text("你好");
     let terminal = render(&mut app, 20, 8);
     let cursor = terminal.backend().cursor_position();
-    // The input area has a `> ` prompt, so the text starts at x = 2; two 2-cell characters put
-    // the cursor at column 4.
+    // The input area has a `❯ ` prompt (two cells), so the text starts at x = 2; two 2-cell
+    // characters put the cursor at column 4.
     assert_eq!(cursor.x, 6, "prompt + two 2-cell characters");
     // The area is three rows tall at the bottom (a rule, one text row, a rule).
     assert_eq!(cursor.y, 5);
@@ -66,4 +66,88 @@ fn a_multiline_input_grows_the_box_and_a_long_one_scrolls_to_the_cursor() {
     let cursor = terminal.backend().cursor_position();
     // The area is 12 tall (10 text rows + 2 rules), at the bottom of the screen.
     assert_eq!(cursor.y, 30 - 1 - 12 + 1 + 9);
+}
+
+/// The `box` style's cursor: one border cell plus the `❯ ` prompt's **two display cells**
+/// (owner hand test 2026-10-14: the prompt's byte length used to shift it two cells right,
+/// because `❯` is three bytes).
+#[test]
+fn the_box_cursor_counts_the_prompts_display_width() {
+    use radian_tui::render::InputStyle;
+    let mut app = App::new("m", "s");
+    classic_footer(&mut app);
+    app.input_style = InputStyle::Box;
+    // Empty: the border (1) + the prompt (2 cells).
+    let terminal = render(&mut app, 20, 8);
+    assert_eq!(terminal.backend().cursor_position().x, 3, "empty");
+    // One ASCII character: right after it.
+    app.input.set_text("f");
+    let terminal = render(&mut app, 20, 8);
+    assert_eq!(terminal.backend().cursor_position().x, 4, "ASCII");
+    // A CJK character is two cells.
+    app.input.set_text("你");
+    let terminal = render(&mut app, 20, 8);
+    assert_eq!(terminal.backend().cursor_position().x, 5, "CJK");
+}
+
+/// The `lines` style's cursor for the same cases (its prompt is the same two cells, without a
+/// border).
+#[test]
+fn the_lines_cursor_counts_the_prompts_display_width() {
+    let mut app = App::new("m", "s");
+    classic_footer(&mut app);
+    let terminal = render(&mut app, 20, 8);
+    assert_eq!(terminal.backend().cursor_position().x, 2, "empty");
+    app.input.set_text("f");
+    let terminal = render(&mut app, 20, 8);
+    assert_eq!(terminal.backend().cursor_position().x, 3, "ASCII");
+    app.input.set_text("你");
+    let terminal = render(&mut app, 20, 8);
+    assert_eq!(terminal.backend().cursor_position().x, 4, "CJK");
+}
+
+/// A continuation line aligns with the first line's text in **both** styles: the indent is the
+/// prompt's display width, not its byte length.
+#[test]
+fn a_continuation_line_aligns_with_the_first_line() {
+    use radian_tui::render::InputStyle;
+    for style in [InputStyle::Lines, InputStyle::Box] {
+        let mut app = App::new("m", "s");
+        classic_footer(&mut app);
+        app.input_style = style;
+        app.input.set_text("a\nb");
+        let terminal = render(&mut app, 20, 10);
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..10)
+            .map(|y| {
+                (0..20)
+                    .map(|x| {
+                        buffer
+                            .cell((x, y))
+                            .map(|c| c.symbol())
+                            .unwrap_or(" ")
+                            .to_string()
+                    })
+                    .collect()
+            })
+            .collect();
+        let first = rows
+            .iter()
+            .position(|row| row.contains("❯ a"))
+            .unwrap_or_else(|| panic!("{style:?}: no first line in {rows:?}"));
+        let continuation = &rows[first + 1];
+        let text_col = first_text_column(&rows[first]);
+        let continuation_col = first_text_column(continuation);
+        assert_eq!(
+            continuation_col, text_col,
+            "{style:?}: `{}` must start under `a` in `{}`",
+            continuation, rows[first]
+        );
+        assert!(continuation.contains('b'), "{style:?}: {continuation:?}");
+    }
+}
+
+/// The display column of the first non-space character after the prompt/border.
+fn first_text_column(row: &str) -> usize {
+    row.chars().position(|c| c.is_alphanumeric()).unwrap_or(0)
 }

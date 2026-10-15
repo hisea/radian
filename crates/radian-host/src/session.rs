@@ -28,7 +28,7 @@ use radian_sandbox::Sandbox;
 use radian_session::{SessionCreatedData, SessionJournal};
 
 use crate::cost::RoutePrice;
-use crate::describe::{Wording, describe};
+use crate::describe::{Wording, describe, sandbox_word};
 use crate::home::skills_dir;
 use crate::memory::{InjectionConfig, MemoryHooks, MemoryService, MemoryTools, ProjectState};
 use crate::model::SwitchableModel;
@@ -108,13 +108,25 @@ pub enum SessionCommand {
     Steer(Message),
     /// Cancel the running turn.
     Cancel,
+    /// Enqueue a message that does **not** wake an idle driver (ADR 0033's `!` output, ADR
+    /// 0011's `inject`): it joins the next turn's context without starting one.
+    Inject(Message),
+}
+
+/// One `!`/`!!` command's audit record (ADR 0033): the durable `UserBash` journal entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserBashRecord {
+    pub command: String,
+    pub exclude_from_context: bool,
+    pub exit_code: Option<i32>,
+    pub cancelled: bool,
 }
 
 impl SessionCommand {
     /// The capability a session must declare to accept this command.
     pub fn capability(&self) -> SessionCapability {
         match self {
-            Self::SendFollowup(_) => SessionCapability::SendMessage,
+            Self::SendFollowup(_) | Self::Inject(_) => SessionCapability::SendMessage,
             Self::Steer(_) => SessionCapability::Steer,
             Self::Cancel => SessionCapability::Cancel,
         }
@@ -123,6 +135,7 @@ impl SessionCommand {
     pub fn name(&self) -> &'static str {
         match self {
             Self::SendFollowup(_) => "send",
+            Self::Inject(_) => "inject",
             Self::Steer(_) => "steer",
             Self::Cancel => "cancel",
         }
@@ -231,6 +244,10 @@ pub trait SessionFacade: Send + Sync {
     /// Applies a startup trust choice (ADR 0031 T3): writes `trust.json` for the persistent
     /// choices and journals `ProjectTrustChanged`, or changes only this session's state.
     fn record_trust(&self, choice: trust::Choice) -> Result<trust::Setup, String>;
+
+    /// Appends one durable `UserBash` audit record (ADR 0033). Both `!` and `!!` call it; the
+    /// record is audit-only and never replayed.
+    fn record_user_bash(&self, record: &UserBashRecord);
 }
 
 /// How the driver task ended.
@@ -287,6 +304,8 @@ pub struct SessionSetup {
     /// call ran under, which the host can only resolve offline. `None` means no price is
     /// resolved, so a resumed session's tokens are restored but its fee stays hidden.
     pub price_for: Option<RoutePrice>,
+    /// Branch names the `git_commit` tool refuses besides `main`/`master` (ADR 0030 R10).
+    pub protected_branches: Vec<String>,
     pub servers: Vec<McpServerConfig>,
     pub system_prompt: Option<String>,
     pub context_budget: Option<ContextBudget>,
@@ -303,6 +322,11 @@ pub struct SessionSetup {
     /// host (`~` and paths relative to the config file). The user-level `~/.radian/skills` is
     /// discovered first, so it wins a name conflict.
     pub skills_extra_paths: Vec<PathBuf>,
+    /// `[skills] builtin` (ADR 0025): include the compiled-in skills. Default true.
+    pub skills_builtin: bool,
+    /// `[skills] disabled`: built-in skill names to leave out.
+    pub skills_disabled: Vec<String>,
+    /// `true` to resume
     /// The project-trust state this session starts with (ADR 0031 T3). The host resolves it
     /// before `open_session`; `needs_ask` means an interactive host must ask before the first
     /// turn, and the session is untrusted until it answers.
@@ -363,6 +387,9 @@ pub struct SessionFacts {
     pub profile_line: String,
     /// The `[sandbox]` line.
     pub sandbox_facts: String,
+    /// The startup summary's word for the sandbox (ADR 0027): the real backend for
+    /// `workspace`, `no exec` for `safe`, `no sandbox` for `full`. The TUI prints it as-is.
+    pub sandbox_word: String,
     /// The `[memory]` line.
     pub memory_notice: String,
     /// Whether this process has a memory root (`/memory` is refused without one).
@@ -695,6 +722,20 @@ impl SessionFacade for LocalSession {
         LocalSession::record_trust(self, choice)
     }
 
+    fn record_user_bash(&self, record: &UserBashRecord) {
+        // Audit only (ADR 0033): append the durable `UserBash` record. A write failure is not
+        // the user's problem here (the command already ran); it is dropped like the other
+        // best-effort audit writes.
+        let _ = self.runtime.block_on(self.journal.append_runtime_event(
+            radian_session::RuntimeEvent::UserBash {
+                command: record.command.clone(),
+                exclude_from_context: record.exclude_from_context,
+                exit_code: record.exit_code,
+                cancelled: record.cancelled,
+            },
+        ));
+    }
+
     /// Re-validates the capability, then runs the command. The check is here as well as in the
     /// UI: a facade whose list the UI ignored still refuses.
     fn command(&self, command: SessionCommand) -> Result<(), CommandRefused> {
@@ -719,6 +760,16 @@ impl SessionFacade for LocalSession {
                     .set_turn_source(Some(agent_core::InputSource::User));
                 self.runtime
                     .block_on(self.inbox.steer(text, agent_core::InputSource::User))
+                    .map(|_| ())
+                    .map_err(|error| CommandRefused::inbox(name, &error))
+            }
+            SessionCommand::Inject(message) => {
+                // ADR 0033 + ADR 0011: `inject` is the "no wake" lane, so a `!` output never
+                // starts a turn; the source is `User` (the human typed the command).
+                self.hooks
+                    .set_turn_source(Some(agent_core::InputSource::User));
+                self.runtime
+                    .block_on(self.inbox.inject(message, agent_core::InputSource::User))
                     .map(|_| ())
                     .map_err(|error| CommandRefused::inbox(name, &error))
             }
@@ -803,6 +854,8 @@ pub async fn open_session(
         profile,
         memory_root,
         skills_extra_paths,
+        skills_builtin,
+        skills_disabled,
         trust,
         resume,
         config_snapshot,
@@ -814,6 +867,7 @@ pub async fn open_session(
         config_queue,
         budget_for,
         price_for,
+        protected_branches,
     } = setup;
 
     // The pending queue (ADR 0023 U7): approvals and questions share it. It exists before the
@@ -821,8 +875,14 @@ pub async fn open_session(
     let queue: Arc<SessionQueue> = Arc::new(PendingQueue::new());
     let origin = session_id.as_str().to_string();
 
-    // The startup description, before the sandbox moves into the tools.
+    // The startup description, before the sandbox moves into the tools. The summary word
+    // comes from the real backend name, not from searching the description text (which does
+    // not name the backend in the `workspace` tier).
     let (profile_line, sandbox_facts) = describe(tier.sandbox_mode(), sandbox.as_ref(), wording);
+    let sandbox_word = sandbox_word(
+        tier.sandbox_mode(),
+        sandbox.as_ref().map(Sandbox::backend_name),
+    );
     let coding = build_coding_tools(coding_root.as_deref(), sandbox)?;
     // ADR 0024 Q5: `ask_user` is mounted whenever a human is there to answer, **whether or not**
     // there are coding tools. It is its own provider, so a host without `--workspace` still
@@ -914,7 +974,12 @@ pub async fn open_session(
     let skills = {
         // The user level first, then `[skills] extra_paths` (ADR 0025 slice 4): the first
         // discovery of a name wins, so `~/.radian/skills` beats an extra root.
-        let discovery = skills::discover_with_extras(skills_dir().as_deref(), &skills_extra_paths);
+        let discovery = skills::discover_with_extras(
+            skills_dir().as_deref(),
+            &skills_extra_paths,
+            skills_builtin,
+            &skills_disabled,
+        );
         for warning in &discovery.warnings {
             memory_warning(warning);
         }
@@ -929,7 +994,13 @@ pub async fn open_session(
         memory_warning,
     ));
     radian_session::trace::took("open/hooks+skills", t0);
-    let mut tools = HostTools::new(coding, memory_tools, mcp.clone());
+    // ADR 0030 R10: pin the repository now, before the model runs. A workspace that is not a
+    // git repository does not mount `git_commit` at all.
+    let git_commit = crate::git_commit::RepoPin::resolve(&workspace).map(|pin| {
+        crate::git_commit::GitCommitTools::new(workspace.clone(), Arc::clone(&journal), pin)
+            .with_protected_branches(protected_branches)
+    });
+    let mut tools = HostTools::new(coding, memory_tools, mcp.clone(), git_commit);
     let ask_registered = ask.is_some();
     if let Some(ask) = ask {
         tools = tools.with_ask(ask);
@@ -949,7 +1020,14 @@ pub async fn open_session(
 
     // MCP server **processes** start here, when the tool session opens. The session file
     // already exists, so a failure names the way to continue it.
-    // A written abort changes the fold on disk, so the shared parse is stale: re-parse then.
+    // A written abort changes the file on disk, so the shared parse is stale: re-parse then.
+    //
+    // Today an abort does not change the **fold**: an uncommitted segment at end of file and an
+    // aborted one both drop the segment and leave the history and the declared calls alone
+    // (`agent_core::TranscriptFold`; `an_aborted_segment_and_one_at_end_of_file_fold_identically`
+    // pins that). So this re-parse is a no-op for the recovered transcript and no test can tell
+    // it apart from reusing the parse. It is kept deliberately: the parse is the host's view of
+    // the file, and if the abort ever gains an effect on the fold, the driver must see it.
     let recovery_parse = match (&parsed, wrote_abort) {
         (Some(parsed), false) => Some(parsed),
         _ => None,
@@ -1040,6 +1118,7 @@ pub async fn open_session(
     let facts = SessionFacts {
         profile_line,
         sandbox_facts,
+        sandbox_word,
         memory_notice,
         memory_enabled: memory.is_some(),
         mcp_configured,

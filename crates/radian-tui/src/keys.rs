@@ -27,6 +27,9 @@ pub enum Action {
     LineEnd,
     HistoryPrev,
     HistoryNext,
+    /// Move the completion menu's highlight down. It only does anything
+    /// while a completion menu is up; otherwise the key is inert.
+    MenuNext,
     DeleteBefore,
     DeleteUnder,
     DeleteWord,
@@ -102,6 +105,7 @@ impl Action {
             Action::LineEnd => "line_end",
             Action::HistoryPrev => "history_prev",
             Action::HistoryNext => "history_next",
+            Action::MenuNext => "menu_next",
             Action::DeleteBefore => "delete_before",
             Action::DeleteUnder => "delete_under",
             Action::DeleteWord => "delete_word",
@@ -168,6 +172,7 @@ const DEFAULT_BINDINGS: &[(&str, Action)] = &[
     ("line_end", Action::LineEnd),
     ("history_prev", Action::HistoryPrev),
     ("history_next", Action::HistoryNext),
+    ("menu_next", Action::MenuNext),
     ("delete_before", Action::DeleteBefore),
     ("delete_under", Action::DeleteUnder),
     ("delete_word", Action::DeleteWord),
@@ -210,6 +215,8 @@ const DEFAULT_KEYS: &[(&str, &[&str])] = &[
     ("line_end", &["end", "ctrl-e"]),
     ("history_prev", &["up"]),
     ("history_next", &["down"]),
+    // Ctrl-P is `toggle_startup`, so the menu's down key is Ctrl-N.
+    ("menu_next", &["ctrl-n"]),
     ("delete_before", &["backspace"]),
     ("delete_under", &["delete"]),
     ("delete_word", &["ctrl-w"]),

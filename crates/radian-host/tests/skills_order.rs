@@ -83,6 +83,8 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
         path: skill_dir.join("SKILL.md"),
         dir: skill_dir,
         disable_model_invocation: false,
+        source: radian_host::skills::SkillSource::User,
+        body: None,
     }];
     let skills_hooks = Arc::new(SkillsHooks::new(&skills));
     let permissions = Arc::new(PermissionHooks::new(
