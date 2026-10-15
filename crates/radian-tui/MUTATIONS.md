@@ -1093,3 +1093,15 @@ Base `edfa320` · 一次性 worktree `/tmp/radian-esc-mut2`，跑完 `git checko
 | ESC-M2 | Esc 映射回 `UntrustHere`（持久，会写 `trust.json`） | `update::tests::escaping_the_trust_modal_untrusts_this_session_only` | ✅ |
 
 1/1 抓住。（早先 ESC-M1「Esc → `TrustHere`」见上一节。）
+
+## ask-ui：问答界面照 omp（ADR 0024/2，2026-10-16）
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| ASK-A | Other 编辑时吞掉 ↑↓（把 Other 行当多行字段） | `other_keeps_its_text_while_moving_with_arrows` | ✅ |
+| ASK-B | `⏎` 在单选时不前进 | `a_single_question_selects_and_advances`（待补） | 待跑 |
+| ASK-C | 多选 `⏎` 变成单选 | `a_multi_question_toggles_and_other_is_its_own_answer` | 待跑 |
+| ASK-D | 必答题未答也能提交 | `a_required_question_blocks_the_submit` | 待跑 |
+| ASK-E | 备注不进答案 | `n_opens_a_note_and_the_note_reaches_the_answer` | 待跑 |
+| ASK-F | 两个 `recommended` 不报错 | `every_question_limit_is_an_invalid_arguments_failure` | 待跑 |
+| ASK-G | 标签不截断（超 16 宽） | `a_long_tab_label_is_truncated` | 待跑 |
