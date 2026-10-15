@@ -264,7 +264,7 @@ fn default_deny_read() -> Vec<PathBuf> {
 /// shared common directory it names.
 pub(crate) fn discover_git_metadata(workspace: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    collect_git(workspace, 0, &mut out);
+    collect_git(workspace, 0, &mut out, &mut |_| {});
     out.sort();
     out.dedup();
     out
@@ -272,23 +272,58 @@ pub(crate) fn discover_git_metadata(workspace: &Path) -> Vec<PathBuf> {
 
 const MAX_GIT_DEPTH: usize = 3;
 
-fn collect_git(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+/// Directory names whose subtree is never searched for git metadata: a package manager's
+/// dependency tree (no repository to protect there, and it can hold hundreds of thousands of
+/// files).
+const SKIP_DIR_NAMES: &[&str] = &["node_modules"];
+
+/// The standard cache-directory marker (`https://bford.info/cachedir/`). Cargo, and other
+/// tools, drop one at the root of a directory that holds disposable build output; a directory
+/// carrying it is never searched either. This is what keeps a 10+ GB `target/` from costing
+/// one `stat` per file on every startup (the walk runs once, when the sandbox is built).
+const CACHEDIR_TAG: &str = "CACHEDIR.TAG";
+
+/// Whether a directory found **inside** the workspace must not be searched. The workspace root
+/// itself is never skipped: if the user names it, it is walked. Subdirectories are skipped by
+/// name ([`SKIP_DIR_NAMES`]) and by the standard cache-directory marker
+/// (`https://bford.info/cachedir/`) — cargo drops one at the root of a directory holding
+/// disposable build output. The marker costs one `lstat` per directory, never one per file,
+/// which is what keeps a 10+ GB `target/` from being walked on every startup.
+fn is_skipped_dir(dir: &Path) -> bool {
+    dir.file_name().is_some_and(|name| {
+        name == ".radian-sandbox"
+            || SKIP_DIR_NAMES
+                .iter()
+                .any(|skip| name.to_str().is_some_and(|n| n == *skip))
+    }) || std::fs::symlink_metadata(dir.join(CACHEDIR_TAG)).is_ok()
+}
+
+/// Walks `dir` and its subdirectories (bounded depth) collecting `.git` entries, calling
+/// `visit` for every directory it actually enters. `visit` exists so a test can assert that a
+/// skipped subtree is never entered; `discover_git_metadata` passes a no-op.
+fn collect_git(dir: &Path, depth: usize, out: &mut Vec<PathBuf>, visit: &mut impl FnMut(&Path)) {
     if depth > MAX_GIT_DEPTH {
         return;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
+    visit(dir);
     for entry in entries.flatten() {
         let path = entry.path();
-        let name = entry.file_name();
-        if name == ".git" {
+        if entry.file_name() == ".git" {
             add_git_entry(&path, out);
             continue;
         }
-        let Ok(meta) = entry.metadata() else { continue };
-        if meta.is_dir() && name != ".radian-sandbox" {
-            collect_git(&path, depth + 1, out);
+        // `file_type` is the `d_type` from `read_dir` on every Unix we support (it falls back
+        // to `lstat` only for `DT_UNKNOWN` filesystems). It is not followed through a symlink,
+        // exactly like the `metadata()` it replaces: a symlinked directory is not a directory
+        // here, so it is never traversed.
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() && !is_skipped_dir(&path) {
+            collect_git(&path, depth + 1, out, visit);
         }
     }
 }
@@ -326,5 +361,96 @@ fn add_git_entry(path: &Path, out: &mut Vec<PathBuf>) {
         if let Some(common) = gitdir.parent().and_then(Path::parent) {
             out.push(common.to_path_buf());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(label: &str) -> Self {
+            static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let dir = std::env::temp_dir().join(format!(
+                "radian-policy-test-{}-{label}-{n}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(std::fs::canonicalize(&dir).unwrap())
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The walk never enters a cache-tagged directory, however large it is. A `CACHEDIR.TAG`
+    /// directory holding thousands of files (what `target/debug/deps` looks like) must cost
+    /// nothing beyond the one `lstat` for the marker: not one entry is read inside it.
+    #[test]
+    fn the_walk_never_enters_a_cache_tagged_directory() {
+        let dir = TempDir::new("scale");
+        let target = dir.path().join("target");
+        let deps = target.join("debug").join("deps");
+        std::fs::create_dir_all(&deps).unwrap();
+        std::fs::write(
+            target.join("CACHEDIR.TAG"),
+            "Signature: 8a477f597d28d172789f06886806bc55\n",
+        )
+        .unwrap();
+        for i in 0..2000 {
+            std::fs::write(deps.join(format!("thing-{i}.rlib")), b"x").unwrap();
+        }
+        // A real repository next to it, so the walk has something to find and we can tell the
+        // walk actually ran.
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+
+        let mut visited = Vec::new();
+        let mut out = Vec::new();
+        collect_git(dir.path(), 0, &mut out, &mut |path: &Path| {
+            visited.push(path.to_path_buf())
+        });
+
+        assert!(
+            !visited.iter().any(|p| p.starts_with(&target)),
+            "no directory under target/ may be entered: {visited:?}"
+        );
+        // The walk did run: the workspace itself and the repository beside `target/`.
+        assert!(visited.contains(&dir.path().to_path_buf()), "{visited:?}");
+        assert!(visited.contains(&repo), "{visited:?}");
+        assert_eq!(
+            out,
+            vec![std::fs::canonicalize(repo.join(".git")).unwrap()],
+            "only the repository outside the cache directory is collected"
+        );
+    }
+
+    /// A `node_modules` directory is skipped by name, at any depth.
+    #[test]
+    fn the_walk_never_enters_node_modules() {
+        let dir = TempDir::new("node-modules");
+        let modules = dir.path().join("app").join("node_modules");
+        std::fs::create_dir_all(modules.join("pkg").join(".git")).unwrap();
+
+        let mut visited = Vec::new();
+        let mut out = Vec::new();
+        collect_git(dir.path(), 0, &mut out, &mut |path: &Path| {
+            visited.push(path.to_path_buf())
+        });
+
+        assert!(
+            !visited.iter().any(|p| p.starts_with(&modules)),
+            "node_modules must not be entered: {visited:?}"
+        );
+        assert!(out.is_empty(), "{out:?}");
     }
 }

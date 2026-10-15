@@ -286,6 +286,67 @@ fn a_missing_workspace_is_an_invalid_workspace_error() {
     );
 }
 
+/// A dependency tree (`node_modules`) and a cache-tagged directory (`CACHEDIR.TAG`, what cargo
+/// writes at the root of `target/`) are not searched for git metadata: their `.git` is not
+/// collected, while a normal nested repository still is. Walking `target/` is what made
+/// startup take ~2 s on a 10+ GB tree.
+#[test]
+fn a_repository_inside_a_skipped_directory_is_not_collected() {
+    let dir = TempDir::new("skip");
+    let normal = dir.path().join("proj").join("nested");
+    let node_modules = dir.path().join("proj").join("node_modules");
+    let target = dir.path().join("target");
+    for path in [&normal, &node_modules, &target] {
+        std::fs::create_dir_all(path).unwrap();
+        run_git(path, &["init", "-q"]);
+    }
+    std::fs::write(
+        target.join("CACHEDIR.TAG"),
+        "Signature: 8a477f597d28d172789f06886806bc55\n",
+    )
+    .unwrap();
+
+    let policy = SandboxPolicy::workspace_write(dir.path()).unwrap();
+
+    let normal_git = std::fs::canonicalize(normal.join(".git")).unwrap();
+    assert!(
+        policy.read_only.contains(&normal_git),
+        "a repository in a normal subdirectory must still be read-only: {:?}",
+        policy.read_only
+    );
+    for (label, path) in [("node_modules", &node_modules), ("CACHEDIR.TAG", &target)] {
+        let git = std::fs::canonicalize(path.join(".git")).unwrap();
+        assert!(
+            !policy.read_only.contains(&git),
+            "a repository under {label} must not be discovered: {:?}",
+            policy.read_only
+        );
+    }
+}
+
+/// The walk does not follow a symlinked directory — the same rule `DirEntry::metadata()`
+/// (an `lstat`) had before it became `file_type()`. A `.git` reachable only through a symlink
+/// is therefore not discovered. This pins the semantics the change had to preserve.
+#[test]
+fn a_symlinked_directory_is_not_traversed() {
+    let host = TempDir::new("symlink-target");
+    let real = host.path().join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    run_git(&real, &["init", "-q"]);
+
+    let dir = TempDir::new("symlink");
+    let linked = dir.path().join("linked");
+    std::os::unix::fs::symlink(&real, &linked).unwrap();
+
+    let policy = SandboxPolicy::workspace_write(dir.path()).unwrap();
+    let git = std::fs::canonicalize(real.join(".git")).unwrap();
+    assert!(
+        !policy.read_only.contains(&git),
+        "a symlinked directory is not traversed, so its .git is not discovered: {:?}",
+        policy.read_only
+    );
+}
+
 fn run_git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
         .args(args)
