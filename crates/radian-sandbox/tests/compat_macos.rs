@@ -1,12 +1,17 @@
 //! macOS compatibility round: what do ordinary commands need under `workspace-write` with
 //! the default sensitive-read denies? Findings feed the allowlist; anything incompatible is
 //! recorded, never fixed by widening a rule (ADR 0012 decision 3).
+//!
+//! ADR 0038 decision 4: the `workspace` tier a general session runs in asks for
+//! `WritableExceptExec`, so this round now builds that policy — `git commit` and `git add`
+//! work, while writing `.git/config` stays refused. The read-only rule a task agent keeps is
+//! covered by the escape matrix's `git_readonly` group and `tests/git_writable.rs`.
 #![cfg(target_os = "macos")]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use radian_sandbox::{Sandbox, SandboxPolicy};
+use radian_sandbox::{GitAccess, Sandbox, SandboxPolicy};
 
 struct Scratch(PathBuf);
 
@@ -61,7 +66,12 @@ fn workspace_write_is_compatible_with_the_common_commands() {
     git(&repo, &["add", "a.txt"]);
     git(&repo, &["commit", "-qm", "init"]);
 
-    let policy = SandboxPolicy::workspace_write(&repo).unwrap();
+    // ADR 0038 decision 4: the `workspace` tier a general session runs in asks for
+    // `WritableExceptExec`, so `.git` is writable except the entries git executes. The compat
+    // round exercises that policy, not the read-only default a task agent keeps.
+    let policy = SandboxPolicy::workspace_write(&repo)
+        .unwrap()
+        .git_access(GitAccess::WritableExceptExec);
     let sandbox = Sandbox::from_policy(policy).unwrap();
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
 
@@ -80,13 +90,22 @@ fn workspace_write_is_compatible_with_the_common_commands() {
             vec!["config", "--get", "user.email"],
             true,
         ),
+        // ADR 0038: a general session may commit in the workspace tier.
         (
             "git commit",
             "git",
             vec!["commit", "--allow-empty", "-qm", "x"],
+            true,
+        ),
+        ("git add", "git", vec!["add", "a.txt"], true),
+        // The escape hatch stays shut: writing `.git/config` (here `core.hooksPath`, which
+        // would run the model's own hooks) is refused by the exec-entry carve-out.
+        (
+            "git config set",
+            "git",
+            vec!["config", "core.hooksPath", "/tmp/elsewhere"],
             false,
         ),
-        ("git add", "git", vec!["add", "a.txt"], false),
         ("ssh -V", "ssh", vec!["-V"], true),
         ("cargo --version", &cargo, vec!["--version"], true),
     ] {
@@ -99,7 +118,7 @@ fn workspace_write_is_compatible_with_the_common_commands() {
         if must_succeed {
             assert!(ok, "{name} should work under workspace-write: {detail}");
         } else {
-            // Expected to be refused by the read-only `.git` carve-out or write boundary.
+            // Expected to be refused by the `.git` exec-entry carve-out or the write boundary.
             assert!(
                 !ok,
                 "{name} unexpectedly succeeded; the write boundary or .git carve-out is not binding"
