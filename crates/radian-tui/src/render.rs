@@ -13,7 +13,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use radian_permissions::ApprovalRequest;
 
 use crate::app::{
-    App, Entry, EntryKind, Modal, TurnState, budget_status_text, mcp_text, usage_text,
+    App, Entry, EntryKind, Modal, TrustWizard, TurnState, budget_status_text, mcp_text, usage_text,
 };
 use crate::blocks::{self, BodyLine};
 use crate::login::LoginWizard;
@@ -774,105 +774,165 @@ const BOX_PROMPT: &str = "❯ ";
 /// The placeholder shown while the input is empty.
 const INPUT_HINT: &str = "(type a message, Enter to send, Ctrl-J for a new line)";
 
-/// The input area's height: one rule above, the text rows, one rule below.
-/// The `/login` box's height (rows in `login_lines`, plus the two border rows).
-const LOGIN_HEIGHT: u16 = 8;
-
-/// The wizard's lines, styled with the app theme's levels (ADR 0028): the prompt is main
-/// text, the selected choice is the emphasis (accent), the rest is secondary, and the
-/// key hints are weak. **The key is never among them** (D3): a filled field renders one `*`
-/// per character, an empty one its hint.
-fn login_lines(wizard: &LoginWizard, theme: &Theme, width: usize) -> Vec<Line<'static>> {
+/// The `/login` wizard's panel (ADR 0035): the shared [`crate::panel::Panel`] with
+/// the step's rows, the provider/protocol choices through [`crate::select_list`], and the
+/// step's key hints in the bottom border. Pure, so the layout is testable without a terminal.
+/// **The key is never among the rows** (D3): a filled field renders one `*` per character.
+pub fn login_panel(
+    wizard: &LoginWizard,
+    width: usize,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+) -> Vec<Line<'static>> {
     use crate::login::LoginStep;
-    let _ = width;
-    let prompt = |text: &str| Line::from(Span::styled(text.to_owned(), theme.text));
+    let ascii = glyphs == crate::footer::Glyphs::Ascii;
+    let inner = width.saturating_sub(4).max(1);
+    let label = |text: &str| Line::from(Span::styled(text.to_owned(), theme.text));
     let value = |text: String| Line::from(Span::styled(text, theme.text));
-    let hint = |text: &'static str| Span::styled(text.to_owned(), theme.hint);
-    let mut lines: Vec<Line> = Vec::new();
+    let mut panel = crate::panel::Panel::new("/login");
     match &wizard.step {
         LoginStep::ChooseProvider { cursor } => {
-            lines.push(Line::from(vec![
-                Span::styled("choose a provider ".to_owned(), theme.text),
-                hint("(↑/↓, Enter)"),
-                Span::styled(":".to_owned(), theme.text),
-            ]));
-            for (index, (id, description)) in LoginWizard::choices().into_iter().enumerate() {
-                let marker = if index == *cursor { "> " } else { "   " };
-                let style = if index == *cursor {
-                    theme.notice_label
-                } else {
-                    theme.notice_body
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(format!(" {marker} "), style),
-                    Span::styled(format!("{id:<20}"), style),
-                    Span::styled(description, theme.hint),
-                ]));
+            panel = panel.row(label("choose a provider"));
+            let items: Vec<crate::select_list::Item> = LoginWizard::choices()
+                .into_iter()
+                .map(|(id, description)| crate::select_list::Item::new(id).description(description))
+                .collect();
+            let list =
+                crate::select_list::view(theme, &items, "", *cursor, items.len(), inner, ascii);
+            for line in list.lines {
+                panel = panel.row(line);
             }
+            panel = panel
+                .hint("↑/↓", "choose")
+                .hint("⏎", "next")
+                .hint("esc", "cancel");
         }
         LoginStep::CustomName => {
-            lines.push(prompt("provider name (also its auth.json entry):"));
-            lines.push(value(format!(" {}", wizard.name)));
+            panel = panel
+                .row(label("provider name (also its auth.json entry):"))
+                .row(value(wizard.name.clone()));
+            panel = panel.hint("⏎", "next").hint("esc", "cancel");
         }
         LoginStep::CustomProtocol { cursor } => {
-            lines.push(Line::from(vec![
-                Span::styled("wire protocol ".to_owned(), theme.text),
-                hint("(↑/↓, Enter)"),
-                Span::styled(":".to_owned(), theme.text),
-            ]));
-            for (index, kind) in crate::login::PROTOCOLS.iter().enumerate() {
-                let marker = if index == *cursor { "> " } else { "   " };
-                let style = if index == *cursor {
-                    theme.notice_label
-                } else {
-                    theme.notice_body
-                };
-                lines.push(Line::from(Span::styled(format!(" {marker} {kind}"), style)));
+            panel = panel.row(label("wire protocol"));
+            let items: Vec<crate::select_list::Item> = crate::login::PROTOCOLS
+                .iter()
+                .map(|kind| crate::select_list::Item::new(*kind))
+                .collect();
+            let list =
+                crate::select_list::view(theme, &items, "", *cursor, items.len(), inner, ascii);
+            for line in list.lines {
+                panel = panel.row(line);
             }
+            panel = panel
+                .hint("↑/↓", "choose")
+                .hint("⏎", "next")
+                .hint("esc", "cancel");
         }
         LoginStep::CustomBaseUrl => {
-            lines.push(prompt("base URL:"));
-            lines.push(value(format!(" {}", wizard.base_url)));
+            panel = panel
+                .row(label("base URL:"))
+                .row(value(wizard.base_url.clone()));
+            panel = panel.hint("⏎", "next").hint("esc", "cancel");
         }
         LoginStep::KeyInput => {
-            lines.push(prompt("API key (hidden; paste works too):"));
-            let masked = crate::login::LoginWizard::masked(&wizard.key);
-            lines.push(value(if masked.is_empty() {
-                String::new()
-            } else {
-                masked
-            }));
+            panel = panel
+                .row(label("API key (hidden; paste works too):"))
+                .row(value(LoginWizard::masked(&wizard.key)));
+            panel = panel.hint("⏎", "next").hint("esc", "cancel");
         }
         LoginStep::Verifying => {
-            lines.push(Line::from(Span::styled(
-                format!("verifying {} … ", wizard.provider_name()),
-                theme.text,
-            )));
-            lines
-                .last_mut()
-                .expect("just pushed")
-                .spans
-                .push(hint("(Esc cancels)"));
+            panel = panel.row(label(&format!("verifying {} …", wizard.provider_name())));
+            panel = panel.hint("esc", "cancel");
         }
         LoginStep::VerifyFailed { reason } => {
-            lines.push(Line::from(Span::styled(
-                format!("verification failed: {reason}"),
-                theme.turn_cancelled,
-            )));
-            lines.push(Line::from(vec![
-                Span::styled("save anyway? ".to_owned(), theme.text),
-                Span::styled("[y] save   ".to_owned(), theme.hint),
-                Span::styled("[n/Esc] cancel".to_owned(), theme.hint),
-            ]));
+            panel = panel
+                .row(Line::from(Span::styled(
+                    format!("verification failed: {reason}"),
+                    theme.turn_cancelled,
+                )))
+                .row(label("save anyway?"));
+            panel = panel.hint("y", "save").hint("n/esc", "cancel");
         }
     }
     if let Some(error) = &wizard.error {
-        lines.push(Line::from(Span::styled(
+        panel = panel.row(Line::from(Span::styled(
             error.clone(),
             theme.turn_cancelled,
         )));
     }
-    lines
+    panel.lines(width, theme, glyphs)
+}
+
+/// The `/login` panel's height, measured from the panel itself so the frame and the layout
+/// agree.
+fn login_height(
+    wizard: &LoginWizard,
+    width: usize,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+) -> u16 {
+    login_panel(wizard, width, theme, glyphs).len() as u16
+}
+
+/// The startup project-trust panel (ADR 0031 T3, ADR 0035): the shared panel with
+/// the workspace line, the choices through [`crate::select_list`], and the hardcoded key
+/// hints. The cursor's default is the fail-safe `UntrustHere`.
+pub fn trust_panel(
+    wizard: &TrustWizard,
+    width: usize,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+) -> Vec<Line<'static>> {
+    let ascii = glyphs == crate::footer::Glyphs::Ascii;
+    let inner = width.saturating_sub(4).max(1);
+    let items: Vec<crate::select_list::Item> = wizard
+        .choices
+        .iter()
+        .map(|choice| crate::select_list::Item::new(wizard.label(*choice)))
+        .collect();
+    let list =
+        crate::select_list::view(theme, &items, "", wizard.cursor, items.len(), inner, ascii);
+    let mut panel = crate::panel::Panel::new("project trust").row(Line::from(Span::styled(
+        format!("project resources found in {}", wizard.workspace.display()),
+        theme.text,
+    )));
+    for line in list.lines {
+        panel = panel.row(line);
+    }
+    panel = panel
+        .hint("↑/↓", "choose")
+        .hint("⏎", "select")
+        .hint("esc", "do not trust");
+    panel.lines(width, theme, glyphs)
+}
+
+/// The trust panel's height, measured from the panel itself.
+fn trust_height(
+    wizard: &TrustWizard,
+    width: usize,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+) -> u16 {
+    trust_panel(wizard, width, theme, glyphs).len() as u16
+}
+
+/// The `/logout` confirmation (ADR 0035): the shared panel with the provider and
+/// the hardcoded `y`/`n` hints in the bottom border.
+pub fn logout_panel(
+    provider: &str,
+    width: usize,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+) -> Vec<Line<'static>> {
+    crate::panel::Panel::new("/logout")
+        .row(Line::from(Span::styled(
+            format!("remove the stored credential for `{provider}`?"),
+            theme.text,
+        )))
+        .hint("[y]", "remove")
+        .hint("[n/esc]", "keep")
+        .lines(width, theme, glyphs)
 }
 
 /// The `bar` style's left rail (ADR 0035 V3): the accent vertical bar on every input row
@@ -1056,12 +1116,12 @@ pub fn approval_cap(screen_height: usize, completion: usize) -> usize {
 /// The approval box's floor, border and key line included.
 pub const MIN_APPROVAL_HEIGHT: usize = 5;
 
-/// The height the approval box needs: the wrapped body rows (bounded by `cap`), the key line
-/// and the border. The body scrolls rather than growing past `cap`.
+/// The height the approval box needs: the wrapped body rows (bounded by `cap`) and the
+/// panel's two border rows. The body scrolls rather than growing past `cap`.
 fn approval_height(request: &ApprovalRequest, width: usize, cap: usize) -> u16 {
-    let rows = wrap(&approval_body(request), width.saturating_sub(2).max(1)).len();
-    let visible = rows.min(cap.saturating_sub(3).max(1));
-    (visible as u16 + 3).clamp(
+    let rows = wrap(&approval_body(request), width.saturating_sub(4).max(1)).len();
+    let visible = rows.min(cap.saturating_sub(2).max(1));
+    (visible as u16 + 2).clamp(
         MIN_APPROVAL_HEIGHT as u16,
         cap.max(MIN_APPROVAL_HEIGHT) as u16,
     )
@@ -1356,11 +1416,21 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 app.footer_glyphs(),
             )
         }
-        Some(Modal::Login(_)) => LOGIN_HEIGHT,
-        // The `/logout` confirmation is a two-line box like the `/memory` one.
-        Some(Modal::ConfirmLogout(_)) => 4,
-        // The trust prompt lists up to five options plus a header and a key line.
-        Some(Modal::Trust(wizard)) => wizard.choices.len() as u16 + 3,
+        Some(Modal::Login(wizard)) => {
+            login_height(wizard, area.width as usize, &app.theme, app.footer_glyphs())
+        }
+        // The `/logout` confirmation is the shared panel with one row and the hints.
+        Some(Modal::ConfirmLogout(provider)) => logout_panel(
+            provider,
+            area.width as usize,
+            &app.theme,
+            app.footer_glyphs(),
+        )
+        .len() as u16,
+        // The trust prompt lists up to five options plus a header and the two borders.
+        Some(Modal::Trust(wizard)) => {
+            trust_height(wizard, area.width as usize, &app.theme, app.footer_glyphs())
+        }
         // The find box replaces the input with a **bordered** box: three rows (top border, the
         // query, bottom border). `bar`'s input (its status row plus one text row) can be
         // shorter than that, so the height is raised for the box, never lowered for the others.
@@ -1465,7 +1535,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // The picker overlay draws over the transcript; the input box and the status bar stay
     // visible below it (ADR 0023 U4).
     if let Some(picker) = app.picker() {
-        crate::picker::draw(frame, chunks[0], picker);
+        crate::picker::draw(frame, chunks[0], picker, &app.theme, app.footer_glyphs());
     }
 
     if !completion.is_empty() {
@@ -1474,12 +1544,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     match app.top_modal() {
         Some(Modal::Approval(prompt)) => {
-            // The body scrolls inside the box; the key line is the box's own last row, so a
-            // long command can never push the answers off screen.
-            let inner_width = (input_area.width as usize).saturating_sub(2).max(1);
+            // ADR 0035: the shared panel draws the frame, the window indicator on
+            // the top border and the key hints in the bottom border, so a long command can
+            // never push the answers off screen.
+            let width = input_area.width as usize;
+            let inner_width = width.saturating_sub(4).max(1);
             let body = wrap(&approval_body(&prompt.request), inner_width);
             let total = body.len();
-            let visible = (middle as usize).saturating_sub(3).max(1);
+            // The panel's rows are the box height minus its two borders.
+            let visible = (input_area.height as usize).saturating_sub(2).max(1);
             // Feed the measurement back, the way the transcript's viewport is fed back, so the
             // scroll keys clamp against real rows.
             let (scroll, total, visible) = {
@@ -1493,32 +1566,23 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             };
             let first = scroll.min(total.saturating_sub(1));
             let last = (first + visible).min(total);
-            let lines: Vec<Line> = body[first..last]
-                .iter()
-                .map(|row| Line::from(row.clone()))
-                .collect();
-            let mut block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(app.theme.approval_border)
-                .title(" approve tool call? ");
+            let mut panel = crate::panel::Panel::new("approve tool call?");
             if total > visible {
-                // The window indicator goes in the top-right corner: the bottom row belongs to
-                // the keys.
-                block = block.title_top(
-                    Line::from(format!(" lines {}–{} of {total} ", first + 1, last))
-                        .right_aligned(),
-                );
+                // The window indicator sits on the top border, where it costs no body row.
+                panel = panel.right_title(format!("lines {}–{} of {total}", first + 1, last));
             }
-            frame.render_widget(&block, input_area);
-            let inner = block.inner(input_area);
-            let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner);
-            frame.render_widget(Paragraph::new(lines), rows[0]);
+            for row in &body[first..last] {
+                panel = panel.row(Line::from(row.clone()));
+            }
+            // The keys are hardcoded (ADR 0023 U4); the panel puts them in the bottom border.
+            panel = panel
+                .hint("[y]", "allow once")
+                .hint("[a]", "always this session")
+                .hint("[n]", "deny")
+                .hint("[!]", "auto for this session");
             frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    APPROVAL_KEYS,
-                    app.theme.approval_border,
-                ))),
-                rows[1],
+                Paragraph::new(panel.lines(width, &app.theme, app.footer_glyphs())),
+                input_area,
             );
         }
         Some(Modal::Question(form)) => {
@@ -1538,59 +1602,31 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             frame.render_widget(Paragraph::new(lines), input_area);
         }
         Some(Modal::Login(wizard)) => {
-            let lines = login_lines(wizard, &app.theme, input_area.width as usize);
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(app.theme.approval_border)
-                .title(" /login ");
-            frame.render_widget(&block, input_area);
-            let inner = block.inner(input_area);
-            frame.render_widget(Paragraph::new(lines), inner);
+            let lines = login_panel(
+                wizard,
+                input_area.width as usize,
+                &app.theme,
+                app.footer_glyphs(),
+            );
+            frame.render_widget(Paragraph::new(lines), input_area);
         }
         Some(Modal::Trust(wizard)) => {
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(app.theme.approval_border)
-                .title(" project trust ");
-            frame.render_widget(&block, chunks[2]);
-            let inner = block.inner(chunks[2]);
-            let mut lines = vec![Line::from(format!(
-                "project resources found in {}",
-                wizard.workspace.display()
-            ))];
-            for (index, choice) in wizard.choices.iter().enumerate() {
-                let marker = if index == wizard.cursor { "> " } else { "  " };
-                let style = if index == wizard.cursor {
-                    app.theme.approval_border
-                } else {
-                    Style::default()
-                };
-                lines.push(Line::from(Span::styled(
-                    format!("{marker}{}", wizard.label(*choice)),
-                    style,
-                )));
-            }
-            lines.push(Line::from(Span::styled(
-                "Up/Down choose   Enter select   Esc = do not trust",
-                app.theme.hint,
-            )));
-            frame.render_widget(Paragraph::new(lines), inner);
+            let lines = trust_panel(
+                wizard,
+                chunks[2].width as usize,
+                &app.theme,
+                app.footer_glyphs(),
+            );
+            frame.render_widget(Paragraph::new(lines), chunks[2]);
         }
         Some(Modal::ConfirmLogout(provider)) => {
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(app.theme.approval_border)
-                .title(" /logout ");
-            frame.render_widget(&block, input_area);
-            let inner = block.inner(input_area);
-            let lines = vec![
-                Line::from(format!("remove the stored credential for `{provider}`?")),
-                Line::from(Span::styled(
-                    "[y] remove   [n/Esc] keep",
-                    app.theme.approval_border,
-                )),
-            ];
-            frame.render_widget(Paragraph::new(lines), inner);
+            let lines = logout_panel(
+                provider,
+                input_area.width as usize,
+                &app.theme,
+                app.footer_glyphs(),
+            );
+            frame.render_widget(Paragraph::new(lines), input_area);
         }
         _ if app.find_state().is_some() => {
             // The find box replaces the input box's line; the input text itself is untouched
@@ -1714,13 +1750,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                     // first row **always**, so the band's own rows start one below it and a
                     // turn starting or ending never moves anything.
                     let band = app.theme.input_bar;
-                    // The rail is the accent (pi's `accent`, the same role the `box` border
-                    // uses); the text keeps its own level (main, or weak for the placeholder),
-                    // patched onto the band.
+                    // The rail takes the accent (pi's `accent`, the role the `box` border uses)
+                    // over the band; the text keeps its own level — main, or the weak
+                    // placeholder — and the band only supplies the background behind it
+                    // (`band.patch(style)` lets the text's own color win).
                     let rail_style = band.patch(app.theme.notice_label);
-                    // The text keeps its own level (main, or the weak placeholder), and the
-                    // band only supplies the background behind it: `band.patch(style)` lets the
-                    // text's own color win while the band's fills the rest.
                     let text_style = band.patch(style);
                     let area_width = input_area.width as usize;
                     let mut body: Vec<Line> = vec![bar_status_line(app)];

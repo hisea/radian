@@ -1239,3 +1239,16 @@ Base `d72d17c`（本片三个提交的最后一块）· 就地变异：改前 `c
   `std::process::exit(128 + signal)`）后 `pty::pty_a_hung_main_loop_still_exits_on_a_signal`
   FAILED（该用例的挂起机制本片改成了 `--slow-draw`，见下），还原后逐字节相同、
   测试重新通过。这证明改用 `--slow-draw` 没有削弱该用例对看门狗的检查。
+## panels-adopt：其余弹出层改用共享面板与列表（ADR 0035/2，2026-10-16）
+
+Base `d47e876` · 一次性 detached worktree `/tmp/pa-mut`（跑完 `git worktree remove --force`）。
+每个变异用 `--no-fail-fast`，还原后 `git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| PA-M1 | 审批框 `y` 答 `Deny` 而不是 `AllowOnce` | `approval::keys_answer_the_prompt_with_the_queue_id` | ✅（left `Deny`、right `AllowOnce`） |
+| PA-M2 | 信任弹窗 Esc 选持久的 `UntrustHere`（会写盘） | `update::escaping_the_trust_modal_untrusts_this_session_only` | ✅（left `UntrustHere`、right `UntrustSession`） |
+| PA-M3 | 会话选择器过滤只看 id（不看 summary） | `picker::tests::filtering_narrows_by_id_and_summary_and_escape_quits` | ✅（可见行 0，期望 1） |
+
+3/3 抓住。三个变异都是**原有行为测试**，证明这次外观迁移没有削弱它们（审批的 `y`、信任 Esc
+只限本次不写盘、选择器按 id 或 summary 过滤）。外观本身由新的 TestBackend 快照覆盖。
