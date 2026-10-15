@@ -15,7 +15,7 @@ use agent_core::{
     ToolProvider, ToolSession,
 };
 use common::TempDir;
-use radian_coding::{CodingSession, CodingTools};
+use radian_coding::{CodingSession, CodingTools, JobEvent};
 use radian_sandbox::{Sandbox, SandboxMode, SandboxPolicy};
 use serde_json::{Value, json};
 
@@ -238,6 +238,44 @@ async fn a_background_job_returns_at_once_and_job_output_returns_increments() {
     assert!(!done.contains("first"), "the increment only: {done}");
 
     session.shutdown_jobs();
+}
+
+// ---------- 2b. a waited settle is not notified ----------
+
+/// A settle a `job_output wait=true` is blocked on is the model's already, so the registry
+/// marks it `notify: false` (ADR 0037 decision 4). The waiter count is what carries that.
+#[tokio::test]
+async fn a_waited_settle_is_not_notified() {
+    let dir = TempDir::new("jobs-waited");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+    let session = tools.open_session().await.expect("session");
+    let mut events = session.jobs().subscribe();
+
+    // The job ends on its own shortly, while the wait is blocked.
+    let (id, _) = start(&session, "sleep 0.3; echo done", None).await;
+    let wait = exec(
+        &session,
+        "job_output",
+        json!({"job_id": id, "wait": true, "timeout_ms": 60_000}),
+    );
+    let settle = async {
+        loop {
+            match events.recv().await {
+                Ok(JobEvent::Settled { notify, .. }) => return notify,
+                Ok(JobEvent::Started { .. }) => continue,
+                Err(error) => panic!("no settle event: {error}"),
+            }
+        }
+    };
+    let (result, notify) = tokio::join!(wait, settle);
+    let text = output_text(&result.expect("the wait returns"));
+    assert!(text.contains("[status: exited 0]"), "{text}");
+    assert!(
+        !notify,
+        "a settle a wait already returned must not be notified again"
+    );
 }
 
 // ---------- 2. wait timeout ----------
