@@ -1093,3 +1093,13 @@ Base `edfa320` · 一次性 worktree `/tmp/radian-esc-mut2`，跑完 `git checko
 | ESC-M2 | Esc 映射回 `UntrustHere`（持久，会写 `trust.json`） | `update::tests::escaping_the_trust_modal_untrusts_this_session_only` | ✅ |
 
 1/1 抓住。（早先 ESC-M1「Esc → `TrustHere`」见上一节。）
+
+## startup-line（摘要行写真实沙箱后端，2026-10-14）
+
+Base `62ae29e` · 一次性 worktree `/tmp/radian-sl-mut`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| S-M1 | TUI 摘要行改回搜索 `sandbox_facts` 文本（macOS 上写 `none`） | `pty::pty_the_startup_summary_names_the_real_sandbox_backend` | ✅ |
+
+1/1 抓住。
