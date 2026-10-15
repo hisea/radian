@@ -49,6 +49,9 @@ pub struct AnthropicConfig {
     /// turn echoes them back unchanged (ADR 0014 R10; wire notes §2.3/§4.2). `None` sends no
     /// `thinking` key and leaves the request byte-identical to the pre-thinking adapter.
     pub thinking: Option<ThinkingConfig>,
+    /// Prompt caching, on by default ([`CacheMode::Auto`]). Under `None` the request carries no
+    /// `cache_control` and is byte-identical to the adapter before prompt caching existed.
+    pub cache: CacheMode,
     /// Sent with every request, after the built-in headers.
     pub headers: Vec<(String, String)>,
     /// Merged into the request body (e.g. `temperature`, `top_p`), under the per-request
@@ -77,6 +80,21 @@ pub enum ThinkingConfig {
     Adaptive,
 }
 
+/// Prompt caching (Anthropic `cache_control`, wire notes §2.4). The adapter places explicit
+/// breakpoints itself; it never sends the top-level automatic-caching field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CacheMode {
+    /// Place at most one breakpoint on each of: the last tool definition, the end of the system
+    /// prompt, and the last cacheable block of the last message. That is three of the four
+    /// documented slots; the adapter never uses the fourth (wire notes §2.4).
+    #[default]
+    Auto,
+    /// No caching: no `cache_control` anywhere, so the request body is byte-identical to the
+    /// adapter before prompt caching existed. A host that wants a stable request shape (or an
+    /// endpoint that rejects `cache_control`) sets this.
+    None,
+}
+
 /// Header values are hidden: custom headers often carry credentials such as `X-API-Key`.
 impl fmt::Debug for AnthropicConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -88,6 +106,7 @@ impl fmt::Debug for AnthropicConfig {
             .field("anthropic_version", &self.anthropic_version)
             .field("max_tokens", &self.max_tokens)
             .field("thinking", &self.thinking)
+            .field("cache", &self.cache)
             .field("headers", &header_names)
             .field("extra_body", &self.extra_body)
             .field("connect_timeout", &self.connect_timeout)
@@ -106,6 +125,7 @@ impl AnthropicConfig {
             anthropic_version: DEFAULT_ANTHROPIC_VERSION.into(),
             max_tokens: 4096,
             thinking: None,
+            cache: CacheMode::Auto,
             headers: Vec::new(),
             extra_body: Map::new(),
             connect_timeout: Duration::from_secs(30),
@@ -126,6 +146,11 @@ impl AnthropicConfig {
 
     pub fn with_thinking(mut self, thinking: ThinkingConfig) -> Self {
         self.thinking = Some(thinking);
+        self
+    }
+
+    pub fn with_cache(mut self, cache: CacheMode) -> Self {
+        self.cache = cache;
         self
     }
 

@@ -5,7 +5,7 @@ use agent_core::{
 };
 use serde_json::{Map, Value, json};
 
-use crate::config::{AnthropicConfig, ThinkingConfig};
+use crate::config::{AnthropicConfig, CacheMode, ThinkingConfig};
 
 /// Keys the adapter owns. Settings may not override them. `max_tokens` is here because
 /// Anthropic requires it and the adapter always sends it (see the wire notes §2).
@@ -18,6 +18,16 @@ const RESERVED: [&str; 7] = [
     "tools",
     "tool_choice",
 ];
+
+/// The documented maximum number of explicit `cache_control` breakpoints in one request
+/// (wire notes §2.4). The adapter places at most three (last tool, end of system, last
+/// cacheable block of the last message), so it never approaches this; `build_body` asserts it.
+const MAX_CACHE_BREAKPOINTS: usize = 4;
+
+/// The only cache type Anthropic supports today: a 5-minute ephemeral entry.
+fn cache_control() -> Value {
+    json!({"type": "ephemeral"})
+}
 
 pub(crate) fn build_body(
     request: &ModelRequest,
@@ -58,15 +68,23 @@ pub(crate) fn build_body(
             },
         );
     }
+    let caching = config.cache == CacheMode::Auto;
+    // Count the breakpoints the adapter itself places. The documented limit governs these
+    // explicit marks, so a key that merely shares the name inside a tool's `input_schema` or a
+    // tool call's arguments is the caller's data and must not be mistaken for a breakpoint.
+    let mut breakpoints = 0usize;
     if let Some(system) = &request.system_prompt {
-        body.insert("system".into(), json!(system));
+        let marked = caching && !system.is_empty();
+        breakpoints += usize::from(marked);
+        body.insert("system".into(), system_value(system, marked));
     }
-    body.insert(
-        "messages".into(),
-        Value::Array(messages(&request.messages)?),
-    );
+    let mut messages = messages(&request.messages)?;
+    if caching && cache_last_message_block(&mut messages) {
+        breakpoints += 1;
+    }
+    body.insert("messages".into(), Value::Array(messages));
     if !request.tools.is_empty() {
-        let tools: Vec<Value> = request
+        let mut tools: Vec<Value> = request
             .tools
             .iter()
             .map(|tool| {
@@ -77,9 +95,90 @@ pub(crate) fn build_body(
                 })
             })
             .collect();
+        if caching {
+            // The last tool definition is the tool breakpoint; tools earlier in the array stay
+            // as they are (their prefix is covered by the breakpoint's cumulative hash).
+            if let Some(last) = tools.last_mut().and_then(Value::as_object_mut) {
+                last.insert("cache_control".into(), cache_control());
+                breakpoints += 1;
+            }
+        }
         body.insert("tools".into(), Value::Array(tools));
     }
-    Ok(Value::Object(body))
+    let body = Value::Object(body);
+    debug_assert!(breakpoints <= MAX_CACHE_BREAKPOINTS);
+    Ok(body)
+}
+
+/// The `system` field. When [`mark_breakpoint`] is set (caching on and the prompt non-empty), it
+/// becomes the documented array form with the breakpoint on its last (only) block. Otherwise it
+/// stays the plain string it is today: `text` has `minLength 1`, so an empty block may not exist,
+/// let alone carry `cache_control` (wire notes §2.4).
+fn system_value(system: &str, mark_breakpoint: bool) -> Value {
+    if mark_breakpoint {
+        json!([{
+            "type": "text",
+            "text": system,
+            "cache_control": cache_control(),
+        }])
+    } else {
+        json!(system)
+    }
+}
+
+/// Put one `cache_control` breakpoint on the last cacheable block of the last message, in
+/// place. Thinking and redacted_thinking blocks cannot be cached directly, and an empty block
+/// cannot either, so the scan walks back to the last eligible block. A final message whose
+/// content is a plain string (the empty-user fallback) has no block to mark. Returns whether a
+/// breakpoint was placed.
+fn cache_last_message_block(messages: &mut [Value]) -> bool {
+    let Some(blocks) = messages
+        .last_mut()
+        .and_then(|message| message.get_mut("content"))
+        .and_then(Value::as_array_mut)
+    else {
+        return false;
+    };
+    for block in blocks.iter_mut().rev() {
+        if is_cacheable(block) {
+            if let Some(map) = block.as_object_mut() {
+                map.insert("cache_control".into(), cache_control());
+            }
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether a content block may carry `cache_control`: text, image, tool_use and tool_result
+/// can, thinking and redacted_thinking cannot, and an empty text block cannot (wire notes
+/// §2.4). The adapter builds no other block type.
+fn is_cacheable(block: &Value) -> bool {
+    match block["type"].as_str() {
+        Some("text") => block["text"].as_str().is_some_and(|text| !text.is_empty()),
+        Some("thinking" | "redacted_thinking") => false,
+        Some(_) => true,
+        None => false,
+    }
+}
+
+/// How many `cache_control` keys a value carries, at any depth. The tests use it as an oracle
+/// over bodies they build themselves, where every occurrence is a real breakpoint; `build_body`
+/// checks its own documented limit with a counter instead, so a caller's lookalike key (see
+/// `auto_does_not_mistake_a_user_data_key_for_a_breakpoint`) cannot trip it. Test-only, so it is
+/// not compiled into the shipped adapter.
+#[cfg(test)]
+fn count_cache_breakpoints(value: &Value) -> usize {
+    match value {
+        Value::Object(map) => {
+            map.keys()
+                .filter(|key| key.as_str() == "cache_control")
+                .count()
+                + map.values().map(count_cache_breakpoints).sum::<usize>()
+        }
+        Value::Array(items) => items.iter().map(count_cache_breakpoints).sum(),
+        _ => 0,
+    }
 }
 
 fn settings_object(settings: &Value) -> Result<Map<String, Value>, ModelError> {
@@ -283,6 +382,12 @@ mod tests {
         AnthropicConfig::new("http://localhost", "claude-test")
     }
 
+    /// The default config with caching off. Tests about the request *mapping* use this so the
+    /// shapes stay readable; caching itself is tested by the `cache_control` cases below.
+    fn uncached() -> AnthropicConfig {
+        config().with_cache(CacheMode::None)
+    }
+
     fn request(messages: Vec<Message>) -> ModelRequest {
         ModelRequest {
             system_prompt: None,
@@ -302,7 +407,7 @@ mod tests {
 
     #[test]
     fn the_required_fields_and_stream_flag_are_always_sent() {
-        let body = build_body(&request(vec![Message::user("hi")]), &config()).unwrap();
+        let body = build_body(&request(vec![Message::user("hi")]), &uncached()).unwrap();
         assert_eq!(body["model"], "claude-test");
         assert_eq!(body["max_tokens"], 4096);
         assert_eq!(body["stream"], true);
@@ -392,7 +497,7 @@ mod tests {
             concurrency: ToolConcurrency::Shared,
         }];
 
-        let body = build_body(&req, &config()).unwrap();
+        let body = build_body(&req, &uncached()).unwrap();
         assert_eq!(
             body,
             json!({
@@ -459,7 +564,7 @@ mod tests {
                 ],
                 meta: MessageMeta::default(),
             }]),
-            &config(),
+            &uncached(),
         )
         .unwrap();
         assert_eq!(
@@ -570,11 +675,13 @@ mod tests {
         assert_eq!(body["max_tokens"], 123);
     }
 
-    /// Acceptance 5: with thinking off (the default), the body carries no `thinking` key, so
-    /// it is byte-identical to the adapter before extended thinking existed.
+    /// Acceptance 5: with thinking off (the default) **and caching off**, the body carries no
+    /// `thinking` key and no `cache_control`, so it is byte-identical to the adapter before
+    /// either feature existed. (With the default `CacheMode::Auto` the only difference is the
+    /// breakpoints; the `cache_control` tests below pin those.)
     #[test]
     fn thinking_off_leaves_the_request_body_unchanged() {
-        let body = build_body(&request(vec![Message::user("hi")]), &config()).unwrap();
+        let body = build_body(&request(vec![Message::user("hi")]), &uncached()).unwrap();
         assert_eq!(
             body,
             json!({
@@ -710,7 +817,7 @@ mod tests {
     fn an_empty_provider_payload_array_sends_the_plain_assistant() {
         let body = build_body(
             &request(vec![assistant_with_payload("[]", vec![])]),
-            &config(),
+            &uncached(),
         )
         .unwrap();
         assert_eq!(
@@ -851,5 +958,324 @@ mod tests {
             json!({"type": "enabled", "budget_tokens": 8192})
         );
         assert_ne!(adaptive["thinking"], enabled["thinking"]);
+    }
+
+    // ---------- prompt caching (Anthropic `cache_control`) ----------
+
+    /// The default is [`CacheMode::Auto`], so a host that changes nothing gets caching.
+    #[test]
+    fn the_default_cache_mode_is_auto() {
+        assert_eq!(config().cache, CacheMode::Auto);
+    }
+
+    fn tool(name: &str) -> ToolSpec {
+        ToolSpec {
+            name: name.into(),
+            description: format!("{name} tool."),
+            input_schema: json!({"type": "object"}),
+            concurrency: ToolConcurrency::Shared,
+        }
+    }
+
+    /// A request that exercises all three breakpoint sites.
+    fn caching_request() -> ModelRequest {
+        let mut req = request(vec![
+            Message::user("first"),
+            Message::assistant("second"),
+            Message::user("third"),
+        ]);
+        req.system_prompt = Some("Be brief.".into());
+        req.tools = vec![tool("add"), tool("mul")];
+        req
+    }
+
+    /// Auto places exactly one breakpoint on each of the three stated sites: the **last** tool
+    /// definition, the end of the system prompt, and the last block of the last message — three
+    /// of the four documented slots (the count test below holds the limit).
+    #[test]
+    fn auto_places_the_three_breakpoints_where_stated() {
+        let body = build_body(&caching_request(), &config()).unwrap();
+
+        let tools = body["tools"].as_array().unwrap();
+        assert!(
+            tools[0].get("cache_control").is_none(),
+            "only the last tool definition is a breakpoint: {tools:?}"
+        );
+        assert_eq!(tools[1]["cache_control"], json!({"type": "ephemeral"}));
+
+        assert_eq!(
+            body["system"],
+            json!([{
+                "type": "text",
+                "text": "Be brief.",
+                "cache_control": {"type": "ephemeral"},
+            }])
+        );
+
+        let last = body["messages"].as_array().unwrap().last().unwrap();
+        assert_eq!(last["content"][0]["type"], "text");
+        assert_eq!(
+            last["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert_eq!(count_cache_breakpoints(&body), 3);
+    }
+
+    /// The site is present only when its content is: no tools, no system prompt, no
+    /// breakpoint. This also counts the limit (never more than four) on the fullest request.
+    #[test]
+    fn breakpoints_follow_what_the_request_carries() {
+        let cases: [(&str, bool, bool, usize); 4] = [
+            ("messages only", false, false, 1),
+            ("system only", true, false, 2),
+            ("tools only", false, true, 2),
+            ("system and tools", true, true, 3),
+        ];
+        for (name, system, tools, expected) in cases {
+            let mut req = request(vec![Message::user("hi")]);
+            if system {
+                req.system_prompt = Some("Be brief.".into());
+            }
+            if tools {
+                req.tools = vec![tool("add"), tool("mul")];
+            }
+            let body = build_body(&req, &config()).unwrap();
+            assert_eq!(count_cache_breakpoints(&body), expected, "{name}");
+            assert!(expected <= 4, "{name}");
+            if !system {
+                assert!(body.get("system").is_none(), "{name}");
+            }
+            if !tools {
+                assert!(body.get("tools").is_none(), "{name}");
+            }
+        }
+    }
+
+    /// With caching off, the body is exactly the one the adapter sent before prompt caching
+    /// existed: system is a plain string, tools carry no `cache_control`, and the messages are
+    /// unchanged. Nothing in the body mentions `cache_control`.
+    #[test]
+    fn none_sends_the_body_the_adapter_sent_before_prompt_caching() {
+        let body = build_body(&caching_request(), &uncached()).unwrap();
+        assert_eq!(
+            body,
+            json!({
+                "model": "claude-test",
+                "max_tokens": 4096,
+                "stream": true,
+                "system": "Be brief.",
+                "messages": [
+                    {"role": "user", "content": [{"type": "text", "text": "first"}]},
+                    {"role": "assistant", "content": [{"type": "text", "text": "second"}]},
+                    {"role": "user", "content": [{"type": "text", "text": "third"}]}
+                ],
+                "tools": [
+                    {"name": "add", "description": "add tool.", "input_schema": {"type": "object"}},
+                    {"name": "mul", "description": "mul tool.", "input_schema": {"type": "object"}}
+                ]
+            })
+        );
+        assert!(!body.to_string().contains("cache_control"), "{body}");
+        assert_eq!(count_cache_breakpoints(&body), 0);
+    }
+
+    /// An empty system prompt keeps the plain-string form: `text` has `minLength 1`, so an empty
+    /// block (and therefore a breakpoint on it) may not be built.
+    #[test]
+    fn auto_leaves_an_empty_system_prompt_as_a_plain_string() {
+        let mut req = request(vec![Message::user("hi")]);
+        req.system_prompt = Some(String::new());
+        let body = build_body(&req, &config()).unwrap();
+        assert_eq!(body["system"], "");
+        assert_eq!(count_cache_breakpoints(&body), 1, "only the message block");
+    }
+
+    /// Thinking and redacted_thinking blocks cannot carry `cache_control`; a last message made
+    /// only of them gets no breakpoint rather than an illegal one.
+    #[test]
+    fn auto_never_marks_a_thinking_block() {
+        let payload = r#"[{"type":"thinking","thinking":"why","signature":"sig"},{"type":"redacted_thinking","data":"opaque"}]"#;
+        let body = build_body(
+            &request(vec![
+                Message::user("hi"),
+                Message::Assistant {
+                    content: Vec::new(),
+                    reasoning: Vec::new(),
+                    tool_calls: Vec::new(),
+                    provider_payload: Some(OpaqueJson::parse(payload).unwrap()),
+                    interrupted: false,
+                    meta: MessageMeta::default(),
+                },
+            ]),
+            &config(),
+        )
+        .unwrap();
+        assert_eq!(count_cache_breakpoints(&body), 0);
+    }
+
+    /// The empty-user fallback is a plain string, not a block array; there is nowhere legal to
+    /// put a breakpoint, so Auto adds none.
+    #[test]
+    fn auto_never_marks_a_string_content_message() {
+        let body = build_body(
+            &request(vec![Message::User {
+                content: Vec::new(),
+                meta: MessageMeta::default(),
+            }]),
+            &config(),
+        )
+        .unwrap();
+        assert_eq!(body["messages"][0]["content"], "");
+        assert_eq!(count_cache_breakpoints(&body), 0);
+    }
+
+    /// An `EmbeddedResource` whose body text is empty. `blocks()` drops empty
+    /// `ContentPart::Text` parts, but this is not a `Text` part, so it becomes a
+    /// `{"type":"text","text":""}` block — the one path by which an empty text block reaches the
+    /// request. Anthropic rejects `cache_control` on it (wire notes §2.4).
+    fn empty_text_block() -> ContentPart {
+        ContentPart::EmbeddedResource {
+            resource: json!({"text": "", "uri": "file:///empty"}),
+            annotations: None,
+            meta: None,
+        }
+    }
+
+    /// The last message ends with an empty text block (and the system prompt is empty): the scan
+    /// walks back to the previous non-empty block and marks there, leaving the empty block and
+    /// the empty system prompt without one.
+    #[test]
+    fn auto_skips_a_trailing_empty_text_block() {
+        let mut req = request(vec![Message::User {
+            content: vec![ContentPart::text("keep me"), empty_text_block()],
+            meta: MessageMeta::default(),
+        }]);
+        req.system_prompt = Some(String::new());
+
+        let body = build_body(&req, &config()).unwrap();
+
+        assert_eq!(body["system"], json!(""));
+        let last = body["messages"].as_array().unwrap().last().unwrap();
+        assert_eq!(last["content"][1]["type"], "text");
+        assert_eq!(last["content"][1]["text"], "");
+        assert!(
+            last["content"][1].get("cache_control").is_none(),
+            "an empty text block may not carry cache_control: {last:?}"
+        );
+        assert_eq!(
+            last["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert_eq!(count_cache_breakpoints(&body), 1);
+    }
+
+    /// A last message whose only block is an empty text block has nowhere legal to put a
+    /// breakpoint, so Auto adds none.
+    #[test]
+    fn auto_never_marks_an_empty_text_block() {
+        let body = build_body(
+            &request(vec![Message::User {
+                content: vec![empty_text_block()],
+                meta: MessageMeta::default(),
+            }]),
+            &config(),
+        )
+        .unwrap();
+        let last = body["messages"].as_array().unwrap().last().unwrap();
+        assert_eq!(last["content"][0]["type"], "text");
+        assert_eq!(last["content"][0]["text"], "");
+        assert!(last["content"][0].get("cache_control").is_none());
+        assert_eq!(count_cache_breakpoints(&body), 0);
+    }
+
+    /// A tool_result block is cacheable; a conversation that ends on one is marked there.
+    #[test]
+    fn auto_marks_a_trailing_tool_result_block() {
+        let body = build_body(
+            &request(vec![
+                Message::user("what?"),
+                Message::Assistant {
+                    reasoning: Vec::new(),
+                    content: Vec::new(),
+                    tool_calls: vec![call("toolu_1", "t", json!({}))],
+                    provider_payload: None,
+                    interrupted: false,
+                    meta: MessageMeta::default(),
+                },
+                Message::Tool {
+                    result: ToolResult::success("toolu_1", vec![ContentPart::text("5")]),
+                    meta: MessageMeta::default(),
+                },
+            ]),
+            &config(),
+        )
+        .unwrap();
+        let last = body["messages"].as_array().unwrap().last().unwrap();
+        assert_eq!(last["content"][0]["type"], "tool_result");
+        assert_eq!(
+            last["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert_eq!(count_cache_breakpoints(&body), 1);
+    }
+
+    /// A tool's `input_schema` and a tool call's arguments may legitimately contain a key named
+    /// `cache_control`; those are the caller's data, not breakpoints. The adapter's limit counts
+    /// only what it places, so such a request is built normally. (A whole-body scan would count
+    /// six keys here and trip the `debug_assert`.)
+    #[test]
+    fn auto_does_not_mistake_a_user_data_key_for_a_breakpoint() {
+        let mut req = request(vec![
+            Message::user("hi"),
+            Message::Assistant {
+                content: Vec::new(),
+                reasoning: Vec::new(),
+                tool_calls: vec![call(
+                    "toolu_1",
+                    "t",
+                    json!({"cache_control": 1, "nested": {"cache_control": 2}}),
+                )],
+                provider_payload: None,
+                interrupted: false,
+                meta: MessageMeta::default(),
+            },
+        ]);
+        req.system_prompt = Some("Be brief.".into());
+        req.tools = vec![ToolSpec {
+            name: "t".into(),
+            description: "t tool.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {"cache_control": {"type": "string"}},
+            }),
+            concurrency: ToolConcurrency::Shared,
+        }];
+
+        let body = build_body(&req, &config()).unwrap();
+
+        // The three real breakpoints are where they belong ...
+        assert_eq!(
+            body["system"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert_eq!(
+            body["tools"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        let last = body["messages"].as_array().unwrap().last().unwrap();
+        assert_eq!(last["content"][0]["type"], "tool_use");
+        assert_eq!(
+            last["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        // ... and the caller's lookalike keys are left untouched.
+        assert_eq!(last["content"][0]["input"]["cache_control"], json!(1));
+        assert_eq!(
+            last["content"][0]["input"]["nested"]["cache_control"],
+            json!(2)
+        );
+        // Six keys named `cache_control` in total: three breakpoints plus three lookalikes (two
+        // in the tool call's arguments, one in the tool's `input_schema`).
+        assert_eq!(count_cache_breakpoints(&body), 6);
     }
 }

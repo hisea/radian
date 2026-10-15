@@ -2671,9 +2671,10 @@ async fn pty_yes_runs_an_ask_without_a_prompt_and_still_audits_it() {
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
     pty.expand_startup();
+    // Wait for the line itself: expand_startup returns on the first expanded frame it sees,
+    // and under load the pty can hold only part of that frame (gate run, load ~300).
     assert!(
-        pty.screen()
-            .contains("auto: tool calls are approved without asking"),
+        pty.wait_for_screen("auto: tool calls are approved without asking", 10),
         "the startup must say approvals are off:\n{}",
         pty.screen()
     );
@@ -7779,9 +7780,10 @@ async fn pty_resume_restores_auto_on_workspace() {
     );
     // The startup line is one of the folded lines.
     pty.expand_startup();
+    // Wait for the line itself: expand_startup returns on the first expanded frame it sees,
+    // and under load the pty can hold only part of that frame (gate run, load ~300).
     assert!(
-        pty.screen()
-            .contains("auto: tool calls are approved without asking"),
+        pty.wait_for_screen("auto: tool calls are approved without asking", 10),
         "the startup line must name the restored policy:\n{}",
         pty.screen()
     );

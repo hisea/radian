@@ -1252,3 +1252,15 @@ Base `d47e876` · 一次性 detached worktree `/tmp/pa-mut`（跑完 `git worktr
 
 3/3 抓住。三个变异都是**原有行为测试**，证明这次外观迁移没有削弱它们（审批的 `y`、信任 Esc
 只限本次不写盘、选择器按 id 或 summary 过滤）。外观本身由新的 TestBackend 快照覆盖。
+
+## md-test-speed：中文 Markdown 选区测试从 N² 改成每格 4 次（2026-10-15）
+
+`a_chinese_markdown_selection_does_not_panic` 原来对每两个格子都做一次选区（N²，每次重新排版），在工作区测试里约占 700 s；
+改成每个格子分别与第一个格子、最后一个格子、自己组成选区（每个格子都当过起点和终点），同机 debug 构建约 14 s。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| MS-M1 | `md_chars` 给所有合成格子一个假偏移（上一个源字节 + 1） | `markdown::a_chinese_markdown_selection_does_not_panic`（`select.rs:213` panic） | ✅ |
+| MS-M2 | 只给列表符号 `•` 这一个合成格子假偏移 1（落在「能」的 UTF-8 中间） | 同上 | ✅ |
+
+另记一个无效变异：「只给第 200 字节之后的第一个合成格子假偏移」——那一处的上一个字符是 ASCII，`+1` 正好是合法边界，不会 panic，不能说明覆盖缺口；MS-M2 用确定落在多字节中间的单格变异代替。

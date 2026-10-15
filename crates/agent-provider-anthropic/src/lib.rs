@@ -22,5 +22,5 @@ mod stream;
 #[cfg(feature = "testing")]
 pub mod testing;
 
-pub use config::{AnthropicConfig, ApiKey, ConfigError, ThinkingConfig};
+pub use config::{AnthropicConfig, ApiKey, CacheMode, ConfigError, ThinkingConfig};
 pub use model::Anthropic;

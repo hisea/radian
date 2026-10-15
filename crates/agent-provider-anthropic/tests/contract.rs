@@ -16,7 +16,7 @@ use agent_provider_anthropic::testing::{
     MockServer, Reply, block_stop, error, input_json_delta, message_delta, message_start,
     message_stop, text_delta, text_start, tool_start,
 };
-use agent_provider_anthropic::{Anthropic, AnthropicConfig, ApiKey, ThinkingConfig};
+use agent_provider_anthropic::{Anthropic, AnthropicConfig, ApiKey, CacheMode, ThinkingConfig};
 use agent_provider_contract::{FnCall, Reason, UsageField, Wire};
 use serde_json::{Map, Value, json};
 
@@ -378,7 +378,9 @@ async fn contract_12_attachment_parts_are_separate_text_blocks() {
     .await;
     let base = server.base_url.clone();
     let model = Anthropic::new(
-        AnthropicConfig::new(base, "contract-model").with_api_key(ApiKey::new(SECRET)),
+        AnthropicConfig::new(base, "contract-model")
+            .with_api_key(ApiKey::new(SECRET))
+            .with_cache(CacheMode::None),
     )
     .expect("a local mock config is valid");
     let request = ModelRequest {
@@ -427,7 +429,9 @@ async fn contract_12b_an_empty_text_part_is_dropped_and_the_attachment_remains()
     .await;
     let base = server.base_url.clone();
     let model = Anthropic::new(
-        AnthropicConfig::new(base, "contract-model").with_api_key(ApiKey::new(SECRET)),
+        AnthropicConfig::new(base, "contract-model")
+            .with_api_key(ApiKey::new(SECRET))
+            .with_cache(CacheMode::None),
     )
     .expect("a local mock config is valid");
     let request = ModelRequest {
