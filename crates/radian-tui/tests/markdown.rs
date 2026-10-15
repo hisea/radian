@@ -21,6 +21,7 @@ fn ctrl(c: char) -> KeyEvent {
 
 fn modes(reasoning: ReasoningMode) -> DisplayModes {
     DisplayModes {
+        glyphs: radian_tui::footer::Glyphs::Unicode,
         reasoning,
         tools: ToolDisplay {
             fold: ToolFold::Expanded,

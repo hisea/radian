@@ -430,6 +430,14 @@ fn render_row(
             crate::tools::LineRole::DiffRemoved => theme.diff_removed,
             crate::tools::LineRole::DiffContext => theme.diff_context,
             crate::tools::LineRole::DiffHunk => theme.diff_hunk,
+            // The `ask_user` block (ADR 0024 R1): the prompt is the emphasis, a
+            // description/note is weak, the box is structural.
+            crate::tools::LineRole::Accent => theme.notice_label,
+            crate::tools::LineRole::Muted => theme.notice_body,
+            crate::tools::LineRole::Dim => theme.truncation,
+            crate::tools::LineRole::Heading => theme
+                .notice_label
+                .add_modifier(ratatui::style::Modifier::BOLD),
             crate::tools::LineRole::Normal => style,
         }
     } else {
@@ -478,6 +486,9 @@ fn render_row(
                 blocks::MdStyle::QuoteBar => theme.md_quote_border,
                 blocks::MdStyle::Bullet => theme.md_list_bullet,
                 blocks::MdStyle::Rule => theme.md_hr,
+                blocks::MdStyle::Accent => theme.notice_label,
+                blocks::MdStyle::Muted => theme.notice_body,
+                blocks::MdStyle::Dim => theme.truncation,
                 blocks::MdStyle::TableBorder => theme.md_hr,
                 blocks::MdStyle::Plain => body_style,
             };

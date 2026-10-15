@@ -167,6 +167,7 @@ impl QuestionForm {
                     other: (question.allow_other && answer.other)
                         .then(|| answer.text.text())
                         .filter(|text| !text.is_empty()),
+                    note: None,
                 },
             })
             .collect();

@@ -320,6 +320,11 @@ pub enum MdStyle {
     LinkUrl,
     /// A quote's text (`mdQuote`).
     Quote,
+    /// The `ask_user` block's own roles (ADR 0024 R1): the emphasis, a weak line,
+    /// and a structural line. Not Markdown; the same per-piece mechanism.
+    Accent,
+    Muted,
+    Dim,
     /// A quote's `│ ` bar (`mdQuoteBorder`).
     QuoteBar,
     /// A list bullet or number (`mdListBullet`).
@@ -529,6 +534,7 @@ fn mermaid_sources(blocks: &[Block], text: &str, mermaid: bool) -> Vec<String> {
 /// expanded line onto the display after opening the one entry that matched.
 pub fn search_modes(modes: DisplayModes) -> DisplayModes {
     DisplayModes {
+        glyphs: modes.glyphs,
         reasoning: ReasoningMode::Expanded,
         tools: crate::tools::ToolDisplay {
             fold: crate::tools::ToolFold::Expanded,
@@ -689,6 +695,7 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize) -> usize {
     // (`tui.display.highlight`'s lazy rule).
     if has_blank_edge(&text) {
         let plain = DisplayModes {
+            glyphs: crate::footer::Glyphs::Unicode,
             highlight: false,
             ..modes
         };
@@ -1011,10 +1018,17 @@ fn layout_unstripped(
             lines
         }
         (EntryKind::ToolCall, _) => {
-            // One header line, laid out like a code line: never wrapped, truncated with `…`
-            // when it does not fit. The entry's text **is** this header (set at push time
-            // from the same function), so the characters map back and copy correctly.
-            tool_line(&text, width)
+            // ADR 0024 R1: an `ask_user` call is the boxed question block, with no
+            // answers yet (the result entry carries them).
+            match entry.tool.as_deref() {
+                Some(card) if card.name == "ask_user" => {
+                    ask_block(card, &text, false, body_width, modes.glyphs)
+                }
+                // One header line, laid out like a code line: never wrapped, truncated with `…`
+                // when it does not fit. The entry's text **is** this header (set at push time
+                // from the same function), so the characters map back and copy correctly.
+                _ => tool_line(&text, width),
+            }
         }
         (EntryKind::Compaction, _) => {
             // ADR 0028 R5: one line when folded, the summary and the user's verbatim words
@@ -1044,6 +1058,13 @@ fn layout_unstripped(
         }
         (EntryKind::ToolResult, _) => {
             let card = entry.tool.as_deref();
+            // ADR 0024 R1: the result of `ask_user` is the same block, now with the
+            // answers (or the declined/cancelled status).
+            if let Some(card) = card
+                && card.name == "ask_user"
+            {
+                return ask_block(card, &text, entry.is_error, body_width, modes.glyphs);
+            }
             let plan = match card {
                 Some(card) => tools::body_plan(
                     card,
@@ -1071,6 +1092,275 @@ fn layout_unstripped(
         }
         _ => prose_lines(&text, body_width),
     }
+}
+
+/// The box and mark glyphs of the `ask_user` block (ADR 0024 R1): unicode by
+/// default, pure ASCII under `glyphs = ascii`.
+struct AskGlyphs {
+    top_left: char,
+    top_right: char,
+    bottom_left: char,
+    bottom_right: char,
+    vertical: char,
+    horizontal: char,
+    tee_left: char,
+    tee_right: char,
+    single_on: &'static str,
+    single_off: &'static str,
+    multi_on: &'static str,
+    multi_off: &'static str,
+    desc: &'static str,
+}
+
+impl AskGlyphs {
+    fn for_glyphs(glyphs: crate::footer::Glyphs) -> Self {
+        match glyphs {
+            crate::footer::Glyphs::Ascii => Self {
+                top_left: '+',
+                top_right: '+',
+                bottom_left: '+',
+                bottom_right: '+',
+                vertical: '|',
+                horizontal: '-',
+                tee_left: '+',
+                tee_right: '+',
+                single_on: "(*)",
+                single_off: "( )",
+                multi_on: "[x]",
+                multi_off: "[ ]",
+                desc: "->",
+            },
+            crate::footer::Glyphs::Unicode | crate::footer::Glyphs::Nerd => Self {
+                top_left: '╭',
+                top_right: '╮',
+                bottom_left: '╰',
+                bottom_right: '╯',
+                vertical: '│',
+                horizontal: '─',
+                tee_left: '├',
+                tee_right: '┤',
+                single_on: "◉",
+                single_off: "○",
+                multi_on: "☑",
+                multi_off: "☐",
+                desc: "↳",
+            },
+        }
+    }
+}
+
+/// A synthesized `ask_user` line: no source characters (it neither copies nor matches), styled
+/// by `md` pieces.
+fn ask_line(pieces: Vec<(String, MdStyle)>) -> BodyLine {
+    let text: String = pieces.iter().map(|(text, _)| text.as_str()).collect();
+    let md: Vec<MdPiece> = pieces
+        .into_iter()
+        .map(|(text, style)| MdPiece {
+            text,
+            style,
+            offset: None,
+        })
+        .collect();
+    BodyLine {
+        chars: Vec::new(),
+        end: 0,
+        text,
+        code: false,
+        pad: false,
+        role: tools::LineRole::Normal,
+        hint: true,
+        diagram: None,
+        reason: false,
+        md: Some(md),
+        syntax: None,
+    }
+}
+
+/// The `ask_user` card as a boxed block (ADR 0024 R1): the request from the call's
+/// `arguments`, the answers from the result's `structured`. Three states: unanswered (the call,
+/// no structured result), answered, and declined/cancelled (an error result).
+fn ask_block(
+    card: &tools::ToolCard,
+    text: &str,
+    is_error: bool,
+    width: usize,
+    glyphs: crate::footer::Glyphs,
+) -> Vec<BodyLine> {
+    let g = AskGlyphs::for_glyphs(glyphs);
+    let questions: Vec<&serde_json::Value> = card
+        .arguments
+        .get("questions")
+        .and_then(serde_json::Value::as_array)
+        .map(|questions| questions.iter().collect())
+        .unwrap_or_default();
+    let answers = card
+        .structured
+        .as_ref()
+        .and_then(|value| value.get("answers"))
+        .and_then(serde_json::Value::as_array);
+    let mut out = Vec::new();
+    let count = questions.len();
+    let title = format!("Ask {count} question{}", if count == 1 { "" } else { "s" });
+    out.push(ask_line(ask_top_border(&g, width, &title)));
+    for question in &questions {
+        let id = question
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let kind = question
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("single");
+        let options = question
+            .get("options")
+            .and_then(serde_json::Value::as_array);
+        let mut label = format!("[{id}]");
+        if kind != "single" {
+            label.push_str(&format!(" · {kind}"));
+        }
+        if let Some(options) = options
+            && !options.is_empty()
+        {
+            label.push_str(&format!(" · options:{}", options.len()));
+        }
+        out.push(ask_line(ask_divider(&g, width, &label)));
+        let prompt = question
+            .get("prompt")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        for line in ask_wrap(prompt, width.saturating_sub(2)) {
+            out.push(ask_line(vec![
+                (" ".to_string(), MdStyle::Dim),
+                (line, MdStyle::Accent),
+            ]));
+        }
+        let reply = answers.and_then(|answers| {
+            answers
+                .iter()
+                .find(|reply| reply.get("id").and_then(serde_json::Value::as_str) == Some(id))
+        });
+        let selected: Vec<&str> = reply
+            .and_then(|reply| reply.get("selected").and_then(serde_json::Value::as_array))
+            .map(|selected| {
+                selected
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if kind != "text" {
+            for option in options.map(Vec::as_slice).unwrap_or(&[]) {
+                let option_id = option
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let chosen = selected.contains(&option_id);
+                let mark = match (kind, chosen) {
+                    ("multi", true) => g.multi_on,
+                    ("multi", false) => g.multi_off,
+                    (_, true) => g.single_on,
+                    (_, false) => g.single_off,
+                };
+                let mut label = option
+                    .get("label")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                if option
+                    .get("recommended")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    label.push_str(" (Recommended)");
+                }
+                out.push(ask_line(vec![
+                    (format!("  {mark} "), MdStyle::Dim),
+                    (label, MdStyle::Plain),
+                ]));
+                if let Some(description) = option
+                    .get("description")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    out.push(ask_line(vec![
+                        (format!("     {} ", g.desc), MdStyle::Dim),
+                        (description.to_owned(), MdStyle::Muted),
+                    ]));
+                }
+            }
+        }
+        if let Some(reply) = reply {
+            for (key, style) in [("other", MdStyle::Muted), ("note", MdStyle::Muted)] {
+                if let Some(value) = reply.get(key).and_then(serde_json::Value::as_str) {
+                    out.push(ask_line(vec![
+                        (format!("  {key}: "), MdStyle::Dim),
+                        (value.to_owned(), style),
+                    ]));
+                }
+            }
+        }
+    }
+    // Declined/cancelled (an error result) is one status line; the text is the tool failure.
+    if is_error {
+        let status = text.lines().next().unwrap_or("(no answer)").to_owned();
+        out.push(ask_line(vec![
+            (" ".to_string(), MdStyle::Dim),
+            (status, MdStyle::Muted),
+        ]));
+    }
+    out.push(ask_line(vec![(
+        format!("{}{}{}", g.bottom_left, g.horizontal, g.bottom_right),
+        MdStyle::Dim,
+    )]));
+    out
+}
+
+/// The block's top border with the title embedded (ADR 0024 R1).
+fn ask_top_border(g: &AskGlyphs, width: usize, title: &str) -> Vec<(String, MdStyle)> {
+    let mut pieces = vec![
+        (format!("{}{} ", g.top_left, g.horizontal), MdStyle::Dim),
+        (title.to_owned(), MdStyle::Heading),
+        (" ".to_string(), MdStyle::Dim),
+    ];
+    let used =
+        unicode_width::UnicodeWidthStr::width(format!("{}{} ", g.top_left, g.horizontal).as_str())
+            + unicode_width::UnicodeWidthStr::width(title)
+            + 1
+            + 1;
+    let fill = width.saturating_sub(used);
+    pieces.push((g.horizontal.to_string().repeat(fill), MdStyle::Dim));
+    pieces.push((g.top_right.to_string(), MdStyle::Dim));
+    pieces
+}
+
+/// A labeled `├──┤` divider (ADR 0024 R1): `[id] · kind · options:N`.
+fn ask_divider(g: &AskGlyphs, width: usize, label: &str) -> Vec<(String, MdStyle)> {
+    let prefix = format!("{}{} ", g.tee_left, g.horizontal);
+    let mut pieces = vec![
+        (prefix.clone(), MdStyle::Dim),
+        (label.to_owned(), MdStyle::Muted),
+        (" ".to_string(), MdStyle::Dim),
+    ];
+    let used = unicode_width::UnicodeWidthStr::width(prefix.as_str())
+        + unicode_width::UnicodeWidthStr::width(label)
+        + 1
+        + 1;
+    let fill = width.saturating_sub(used);
+    pieces.push((g.horizontal.to_string().repeat(fill), MdStyle::Dim));
+    pieces.push((g.tee_right.to_string(), MdStyle::Dim));
+    pieces
+}
+
+/// Wraps an `ask_user` prompt to `width` display cells (CJK counts 2).
+fn ask_wrap(text: &str, width: usize) -> Vec<String> {
+    crate::render::wrap_char_offsets(text, width.max(1))
+        .into_iter()
+        .map(|line| {
+            line.chars
+                .into_iter()
+                .filter_map(|i| text.get(i..).and_then(|r| r.chars().next()))
+                .collect()
+        })
+        .collect()
 }
 
 /// One tool header line: the same fit rule as a code line (a line exactly `width` wide shows
@@ -1286,6 +1576,7 @@ pub fn body_text_lines(entry: &Entry, modes: DisplayModes, width: usize) -> Vec<
     // cannot disagree.
     if has_blank_edge(&text) {
         let plain = DisplayModes {
+            glyphs: crate::footer::Glyphs::Unicode,
             highlight: false,
             ..modes
         };
@@ -2099,6 +2390,7 @@ mod tests {
 
     /// Both folds expanded: a geometry test that does not want the fold defaults.
     const EXPANDED: DisplayModes = DisplayModes {
+        glyphs: crate::footer::Glyphs::Unicode,
         reasoning: ReasoningMode::Expanded,
         tools: ToolDisplay {
             fold: ToolFold::Expanded,
@@ -2111,6 +2403,7 @@ mod tests {
     /// The given reasoning mode with the tools expanded.
     fn modes_with(reasoning: ReasoningMode) -> DisplayModes {
         DisplayModes {
+            glyphs: crate::footer::Glyphs::Unicode,
             reasoning,
             ..EXPANDED
         }
@@ -2395,5 +2688,83 @@ mod tests {
         entry.live = false;
         let lines = layout(&entry, &[], modes_with(ReasoningMode::Collapsed), 40);
         assert_eq!(lines[0].text, "thinking (3 lines)");
+    }
+    /// ADR 0024 R1: the `ask_user` card is a boxed block. The call has no answers
+    /// (unanswered), the structured result marks the chosen option and shows a note, and an
+    /// error result is a declined/cancelled status.
+    #[test]
+    fn the_ask_block_is_a_boxed_question() {
+        use serde_json::json;
+        let arguments = json!({"questions":[{"id":"pick","prompt":"Pick one","kind":"single",
+            "options":[{"id":"a","label":"Option A","recommended":true},
+                       {"id":"b","label":"Option B","description":"the second"}]}]});
+        let card = tools::ToolCard::new("c1", "ask_user", arguments.clone());
+        let texts = |card: &tools::ToolCard, error: bool, glyphs| {
+            ask_block(card, "user declined to answer", error, 44, glyphs)
+                .into_iter()
+                .map(|line| line.text)
+                .collect::<Vec<_>>()
+        };
+
+        let unanswered = texts(&card, false, crate::footer::Glyphs::Unicode);
+        assert!(
+            unanswered[0].starts_with("╭─ Ask 1 question"),
+            "{unanswered:?}"
+        );
+        assert!(unanswered[0].ends_with('╮'), "{unanswered:?}");
+        assert_eq!(unanswered[0].chars().count(), 44, "{unanswered:?}");
+        assert!(
+            unanswered.iter().any(|t| t.contains("[pick]")),
+            "{unanswered:?}"
+        );
+        assert!(
+            unanswered.iter().any(|t| t.contains("Pick one")),
+            "{unanswered:?}"
+        );
+        assert!(
+            unanswered
+                .iter()
+                .any(|t| t.contains("○ Option A (Recommended)")),
+            "{unanswered:?}"
+        );
+        assert!(
+            unanswered.iter().any(|t| t.contains("↳ the second")),
+            "{unanswered:?}"
+        );
+        assert!(unanswered.last().unwrap().ends_with('╯'), "{unanswered:?}");
+
+        // Answered: the chosen option is `◉` and the note shows.
+        let mut answered_card = card.clone();
+        answered_card.structured =
+            Some(json!({"answers":[{"id":"pick","selected":["a"],"note":"go with A"}]}));
+        let answered = texts(&answered_card, false, crate::footer::Glyphs::Unicode);
+        assert!(
+            answered.iter().any(|t| t.contains("◉ Option A")),
+            "{answered:?}"
+        );
+        assert!(
+            answered.iter().any(|t| t.contains("note: go with A")),
+            "{answered:?}"
+        );
+
+        // Declined: the error text is a status line.
+        let declined = texts(&card, true, crate::footer::Glyphs::Unicode);
+        assert!(
+            declined.iter().any(|t| t.contains("user declined")),
+            "{declined:?}"
+        );
+
+        // The ascii fallback.
+        let ascii = texts(&card, false, crate::footer::Glyphs::Ascii);
+        assert!(ascii[0].starts_with("+- Ask 1 question"), "{ascii:?}");
+        assert!(
+            ascii.iter().any(|t| t.contains("( ) Option A")),
+            "{ascii:?}"
+        );
+        assert!(
+            ascii.iter().any(|t| t.contains("-> the second")),
+            "{ascii:?}"
+        );
+        assert!(!ascii.iter().any(|t| t.contains('╭')), "{ascii:?}");
     }
 }

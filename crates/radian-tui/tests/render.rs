@@ -307,6 +307,7 @@ fn option(id: &str, label: &str) -> radian_coding::QuestionOption {
         id: id.into(),
         label: label.into(),
         description: None,
+        recommended: false,
     }
 }
 
@@ -335,6 +336,7 @@ fn a_long_option_list_scrolls_to_keep_the_cursor_visible() {
         .collect();
     let mut form = form(vec![radian_coding::Question {
         id: "q".into(),
+        header: None,
         prompt: "Pick one".into(),
         kind: radian_coding::QuestionKind::Single,
         options,
@@ -359,6 +361,7 @@ fn a_long_option_list_scrolls_to_keep_the_cursor_visible() {
 #[test]
 fn a_narrow_question_box_clips_instead_of_wrapping() {
     let form = form(vec![radian_coding::Question {
+        header: None,
         id: "q".into(),
         prompt: "a prompt that is far too long for the box".into(),
         kind: radian_coding::QuestionKind::Single,
@@ -381,6 +384,7 @@ fn a_narrow_question_box_clips_instead_of_wrapping() {
 fn the_overview_lists_each_question_and_its_answer() {
     let mut form = form(vec![
         radian_coding::Question {
+            header: None,
             id: "one".into(),
             prompt: "Pick one".into(),
             kind: radian_coding::QuestionKind::Single,
@@ -389,6 +393,7 @@ fn the_overview_lists_each_question_and_its_answer() {
             required: false,
         },
         radian_coding::Question {
+            header: None,
             id: "two".into(),
             prompt: "Say something".into(),
             kind: radian_coding::QuestionKind::Text,
@@ -411,6 +416,7 @@ fn the_overview_lists_each_question_and_its_answer() {
 #[test]
 fn the_decline_confirmation_is_shown() {
     let mut form = form(vec![radian_coding::Question {
+        header: None,
         id: "one".into(),
         prompt: "Pick one".into(),
         kind: radian_coding::QuestionKind::Text,
@@ -1179,7 +1185,8 @@ fn the_list_and_memory_cards_have_their_own_heads() {
             "ask_user",
             serde_json::json!({"questions": [{"id": "q1"}, {"id": "q2"}]}),
             serde_json::json!({"request_id": "r", "answers": []}),
-            "ask_user: 2 questions",
+            // ADR 0024 R1: the call is a boxed block, not the plain head.
+            "Ask 2 questions",
         ),
         (
             "memory_get",
@@ -1855,6 +1862,7 @@ fn the_login_wizard_uses_the_text_hierarchy() {
 /// not depend on the fold defaults.
 #[allow(dead_code)]
 const EXPANDED: DisplayModes = DisplayModes {
+    glyphs: radian_tui::footer::Glyphs::Unicode,
     reasoning: ReasoningMode::Expanded,
     tools: radian_tui::tools::ToolDisplay {
         fold: radian_tui::tools::ToolFold::Expanded,
@@ -1878,6 +1886,7 @@ fn the_question_keys_stay_visible_with_a_long_option_list() {
             origin: "session".into(),
             request: PendingRequest::Question(radian_coding::QuestionRequest {
                 questions: vec![radian_coding::Question {
+                    header: None,
                     id: "q".into(),
                     prompt: "Pick one".into(),
                     kind: QuestionKind::Single,

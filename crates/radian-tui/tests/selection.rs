@@ -204,6 +204,7 @@ fn with_mouse_off_the_whole_feature_is_gone() {
 /// not depend on the fold defaults.
 #[allow(dead_code)]
 const EXPANDED: DisplayModes = DisplayModes {
+    glyphs: radian_tui::footer::Glyphs::Unicode,
     reasoning: ReasoningMode::Expanded,
     tools: radian_tui::tools::ToolDisplay {
         fold: radian_tui::tools::ToolFold::Expanded,

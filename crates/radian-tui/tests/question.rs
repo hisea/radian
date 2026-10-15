@@ -14,6 +14,7 @@ fn option(id: &str, label: &str) -> QuestionOption {
         id: id.into(),
         label: label.into(),
         description: None,
+        recommended: false,
     }
 }
 
@@ -25,6 +26,7 @@ fn question(
 ) -> Question {
     Question {
         id: id.into(),
+        header: None,
         prompt: format!("question {id}?"),
         kind,
         options,

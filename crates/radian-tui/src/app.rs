@@ -1368,6 +1368,7 @@ impl App {
             tools: self.tool_display,
             mermaid: self.mermaid_enabled,
             highlight: self.highlight_enabled,
+            glyphs: self.footer_glyphs(),
         }
     }
 
