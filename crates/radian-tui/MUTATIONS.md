@@ -1176,3 +1176,17 @@ Base `e2a0392` · 一次性 worktree `/tmp/radian-ime-mut*`，还原后 `git sta
 IM-M2 与既有记录一致（见上文 `RESIZE-B`：closed-master 测试抓不到收窄的缺失——收窄省的是 CPU，
 不是保证退出；退出由第一次 `tty_readiness` 的 Gone 与主循环兜底覆盖，两者都用同一个
 `tty_readiness`）。IM-M3 证明这次改动没有削弱该测试对 POLLHUP 的检查。
+
+## spinner（运行指示一处定义 + 输入框上沿状态线，ADR 0027/9/10，2026-10-15）
+
+Base `c0ae44c` · 一次性 worktree `/tmp/radian-sp-mut2`，还原后 `git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SP-M1 | 旋转档节拍 250 ms 改 100 ms | `spinner::tests::the_frame_advances_with_time` | ✅ |
+| SP-M2 | 状态线的两个空格变一个 | `render::the_input_rule_shows_the_spinner_status_while_running` | ✅ |
+| SP-M3 | `spinner_tick` 不再判断 `spinner_visible`（空闲仍驱动重绘） | `pty::pty_an_idle_screen_is_not_redrawn` | ✅ |
+| SP-M4 | `glyphs = ascii` 时仍用弧字形 | `spinner::tests::the_ascii_set_falls_back` | ✅ |
+
+4/4 抓住。（SP-M1 第一次用「节拍改 50 ms」未被抓，因为 `index` 当时重复硬编码了 250 ms；
+改成 `index` 用 `kind.interval()` 后，100 ms 变异被抓住。）
