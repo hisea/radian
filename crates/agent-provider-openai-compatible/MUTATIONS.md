@@ -26,3 +26,14 @@
 
 M7 起初只有单元测试抓住：契约的反例是 `429 "too many tokens"`，被状态门短路了。于是给契约
 补了 `400 "too many tokens"` 反例（`e8a016a`），契约层也能抓住同一个变异。
+
+## ADR 0014 reasoning replay (2026-10-15)
+
+One-shot detached worktree `.radian-worktrees/rr-mutations` (from the branch HEAD, deleted
+after); each mutation restored with `git checkout --`, `git status --short` empty at the end.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| RR-A | drop the replay entirely (`if let Some(field) = replay` becomes a no-op) | caught (rc=101) | `request::tests::reasoning_is_replayed_only_when_the_model_asks_for_it` |
+| RR-B | keep the replay but skip it for an empty reasoning (drop Q3's `""`) | caught (rc=101) | `request::tests::reasoning_is_replayed_only_when_the_model_asks_for_it` (the `messages[2]` empty-string assertion) |
+| RR-C | replay even when the config is `None` | caught (rc=101) | `request::tests::reasoning_is_not_sent_to_the_provider` (R4) |
