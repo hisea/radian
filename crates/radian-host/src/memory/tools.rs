@@ -3,8 +3,10 @@
 //!
 //! Every write is `Source::Agent` — the host decides the source, never the model (invariant
 //! 3) — and the permission layer asks before either write runs (D5). `memory_save` defaults
-//! to the Project scope and **never** registers a project (D2): an unlinked workspace gets a
-//! tool error naming `project new`/`relink`, not a silent new identity.
+//! to the Project scope and, since ADR 0021, a save in a git workspace **registers
+//! the project** when its identity key is not registered yet (reporting one notice line); a
+//! directory that is not a project workspace is refused with a tool error. Reads never
+//! register.
 //!
 //! Results are low-trust data (invariant 4): every text result starts with
 //! [`LOW_TRUST_NOTE`], and each record carries its `scope`, `source` and `verification`.
@@ -16,8 +18,11 @@ use agent_core::{
 use radian_memory::{Kind, MemoryError, MemoryId, MemoryRecord, Scope, SearchQuery};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::sync::Arc;
 
-use super::service::{MemoryService, MemoryServiceError, ScopeSelection, WriteScope};
+use super::service::{
+    MemoryService, MemoryServiceError, ProjectForWrite, ScopeSelection, WriteScope,
+};
 
 /// The fixed first line of every memory tool result (ADR 0021 invariant 4: memory is
 /// low-trust data, not instructions).
@@ -29,14 +34,35 @@ pub const DEFAULT_SEARCH_LIMIT: usize = 20;
 pub const MAX_SEARCH_LIMIT: usize = 50;
 
 /// The memory tools, bound to one workspace's [`MemoryService`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MemoryTools {
     service: MemoryService,
+    /// The host's notice line (ADR 0021): a default-scope save that registered this
+    /// workspace as a project reports the new project and its identity key here, so both hosts
+    /// show one line. A no-op until the host sets it.
+    notice: Arc<dyn Fn(&str) + Send + Sync>,
+}
+
+impl std::fmt::Debug for MemoryTools {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemoryTools")
+            .field("service", &self.service)
+            .finish_non_exhaustive()
+    }
 }
 
 impl MemoryTools {
     pub fn new(service: MemoryService) -> Self {
-        Self { service }
+        Self {
+            service,
+            notice: Arc::new(|_| {}),
+        }
+    }
+
+    /// Sets the host's notice line ([`MemoryTools::notice`]). The session host wires its own.
+    pub fn with_notice(mut self, notice: Arc<dyn Fn(&str) + Send + Sync>) -> Self {
+        self.notice = notice;
+        self
     }
 }
 
@@ -46,6 +72,7 @@ impl ToolProvider for MemoryTools {
     async fn open_session(&self) -> Result<Self::Session, ToolError> {
         Ok(MemorySession {
             service: self.service.clone(),
+            notices: Arc::clone(&self.notice),
             specs: specs(),
         })
     }
@@ -55,6 +82,7 @@ impl ToolProvider for MemoryTools {
 /// synchronous, so no state is held here beyond the specs.
 pub struct MemorySession {
     service: MemoryService,
+    notices: Arc<dyn Fn(&str) + Send + Sync>,
     specs: Vec<ToolSpec>,
 }
 
@@ -117,9 +145,19 @@ impl MemorySession {
             Some(name) => parse_kind(name)?,
             None => Kind::Fact,
         };
+        let scope: WriteScope = args.scope.into();
+        if scope == WriteScope::Project {
+            // ADR 0021: a **write** in the default scope registers a git workspace
+            // whose identity key is not registered yet, and refuses a directory that is not a
+            // project workspace. Reads and injection never come here.
+            match self.service.project_for_write().map_err(tool_failure)? {
+                ProjectForWrite::Linked(_) => {}
+                ProjectForWrite::Created(created) => (self.notices)(&created.notice()),
+            }
+        }
         let record = self
             .service
-            .save_as_agent(args.scope.into(), kind, args.key, args.content)
+            .save_as_agent(scope, kind, args.key, args.content)
             .map_err(tool_failure)?;
         Ok(ToolOutput::text(format!(
             "{LOW_TRUST_NOTE}\nSaved:\n{}",
@@ -170,18 +208,31 @@ fn parse_kind(raw: &str) -> Result<Kind, ToolFailure> {
 }
 
 /// Every storage failure becomes a tool error the model can act on: a key/revision conflict
-/// names the current holder, and an unlinked workspace says exactly what the user must run.
+/// names the current holder, and a scope the host refused says what to do instead. Neither
+/// text suggests another scope: revision 1 made the default scope work (ADR 0021
+/// decision 2), so "save it globally instead" is never the answer — a fact that mentions this
+/// project's paths, branches or structure does not belong in Global.
 fn tool_failure(error: MemoryServiceError) -> ToolFailure {
     match error {
+        // Reachable when the identity key cannot be resolved to a project at all (for example
+        // a `--project` operation in a workspace the user never registered): give up saving or
+        // ask the user; never move the record to Global.
         MemoryServiceError::Unlinked { .. } => ToolFailure::new(
             "memory_unlinked",
             format!(
-                "{error}. Save to the global scope instead, or ask the user to run \
-                 `radian memory project new` or `radian memory relink <ProjectId>`"
+                "{error}. Do not save this record anywhere else; ask the user to link the \
+                 project, or do not save it"
             ),
         ),
-        MemoryServiceError::Storage(MemoryError::NotFound { id }) => {
-            ToolFailure::new("not_found", format!("no memory record {id}"))
+        MemoryServiceError::NotAProjectWorkspace { .. } => ToolFailure::new(
+            "not_a_project_workspace",
+            format!(
+                "{error}. Do not save this record anywhere else; either ask the user to run \
+                 `radian memory project new` here, or do not save it"
+            ),
+        ),
+        MemoryServiceError::Storage(storage @ MemoryError::NotFound { .. }) => {
+            ToolFailure::new("not_found", storage.to_string())
         }
         MemoryServiceError::Storage(MemoryError::KeyConflict { key, id, revision }) => {
             ToolFailure::new(
@@ -391,9 +442,13 @@ fn specs() -> Vec<ToolSpec> {
             name: "memory_save".into(),
             description: format!(
                 "{LOW_TRUST_NOTE} Save a new memory record written by the agent. The default \
-                 scope is the current project; `global` is available when the workspace has \
-                 no project. A project must already be linked: this never creates one. A key \
-                 already held by another Active record is refused."
+                 scope is the current project. Pass `scope: \"global\"` only for a preference \
+                 or fact that holds in every project, or when the user asks for global; \
+                 anything that mentions this project's paths, branches or structure must not \
+                 be global. A git workspace whose project is not registered yet is registered \
+                 by this save (the host shows a notice); a directory that is not a project \
+                 workspace is refused. A key already held by another Active record is \
+                 refused."
             ),
             input_schema: json!({
                 "type": "object",
@@ -481,8 +536,35 @@ mod tests {
         (dir, service)
     }
 
+    /// The same, but the workspace has a `.git` **directory**: its identity key comes from a
+    /// repository, which is what makes a default-scope write register it (ADR 0021).
+    /// No `git` process is needed — `identity::project_identity_key` reads the `.git` entry.
+    fn git_workspace(label: &str) -> (std::path::PathBuf, MemoryService) {
+        let dir = scratch(label);
+        let ws = dir.join("ws");
+        std::fs::create_dir_all(ws.join(".git")).unwrap();
+        let service = MemoryService::open(&ws, dir.join("memory"));
+        (dir, service)
+    }
+
     async fn session(service: MemoryService) -> MemorySession {
         MemoryTools::new(service).open_session().await.unwrap()
+    }
+
+    /// A session whose host notice lines are captured, so a test asserts exactly what the host
+    /// would show (ADR 0021).
+    async fn session_with_notices(
+        service: MemoryService,
+        notices: &std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> MemorySession {
+        let sink = std::sync::Arc::clone(notices);
+        MemoryTools::new(service)
+            .with_notice(std::sync::Arc::new(move |line: &str| {
+                sink.lock().unwrap().push(line.to_owned())
+            }))
+            .open_session()
+            .await
+            .unwrap()
     }
 
     fn call(name: &str, arguments: Value) -> ToolCall {
@@ -644,16 +726,116 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// ADR 0021: a default-scope save in a git workspace whose project is
+    /// not registered **registers it** and reports one notice line naming the new project and
+    /// its identity key. The second save is silent (already linked).
     #[tokio::test]
-    async fn an_unlinked_workspace_refuses_a_project_save_and_allows_global() {
-        let (dir, service) = service("unlinked");
+    async fn a_save_in_a_git_workspace_registers_the_project_and_notices_once() {
+        let (dir, service) = git_workspace("create-on-save");
         let root = dir.join("memory");
-        let session = session(service).await;
+        let identity_key = service.identity_key().to_string();
+        let notices = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let session = session_with_notices(service.clone(), &notices).await;
+
+        let saved = run(&session, "memory_save", json!({"content": "agent note"}))
+            .await
+            .unwrap();
+        let text = output_text(&saved);
+        assert!(text.contains("scope=project:"), "{text}");
+
+        let project = service.project_id().unwrap();
+        let lines = notices.lock().unwrap().clone();
+        assert_eq!(lines.len(), 1, "one notice for the creation: {lines:?}");
+        assert!(lines[0].contains(&project.to_string()), "{lines:?}");
+        assert!(lines[0].contains(&identity_key), "{lines:?}");
+        assert!(
+            root.join("projects")
+                .join(project.as_str())
+                .join("log.jsonl")
+                .exists(),
+            "the record went to the new project"
+        );
+
+        // The record is in the new project, and a later save adds no further notice.
+        let found = run(&session, "memory_search", json!({"query": "agent note"}))
+            .await
+            .unwrap();
+        assert!(output_text(&found).contains("scope=project:"), "{found:?}");
+        run(&session, "memory_save", json!({"content": "second"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            notices.lock().unwrap().len(),
+            1,
+            "a linked project notices once, not per save"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0021: **reads never register** — the same git workspace, read
+    /// by `memory_search`/`memory_get`, stays unregistered and shows no notice.
+    #[tokio::test]
+    async fn a_read_never_registers_a_project() {
+        let (dir, service) = git_workspace("read-no-create");
+        let root = dir.join("memory");
+        let notices = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let session = session_with_notices(service.clone(), &notices).await;
+
+        let found = run(&session, "memory_search", json!({"query": "anything"}))
+            .await
+            .unwrap();
+        assert!(
+            output_text(&found).contains("No matching memory records."),
+            "{found:?}"
+        );
+        let missing = run(
+            &session,
+            "memory_get",
+            json!({"id": "mem-00000000000000000000000000000000"}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(missing.code, "not_found");
+
+        assert!(notices.lock().unwrap().is_empty(), "a read noticed");
+        assert!(
+            service.projects().unwrap().is_empty(),
+            "a read registered a project"
+        );
+        assert!(
+            !root.join("projects").exists(),
+            "a read created the directory"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0021: a default-scope save in a directory that is not a
+    /// project workspace fails and **says the memory was not saved**, with no suggestion to
+    /// move it to another scope (that suggestion is what leaked a radian-only fact into Global
+    /// on 2026-10-15). An explicit `scope: global` is still the model's own choice.
+    #[tokio::test]
+    async fn a_save_outside_a_project_workspace_is_refused_without_suggesting_global() {
+        let (dir, service) = service("not-a-workspace");
+        let root = dir.join("memory");
+        let notices = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let session = session_with_notices(service, &notices).await;
+
         let error = run(&session, "memory_save", json!({"content": "project note"}))
             .await
             .unwrap_err();
-        assert_eq!(error.code, "memory_unlinked");
-        assert!(error.message.contains("project new"), "{}", error.message);
+        assert_eq!(error.code, "not_a_project_workspace");
+        assert!(
+            error.message.contains("not a project workspace"),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains("not saved"), "{}", error.message);
+        assert!(
+            !error.message.contains("global"),
+            "the refusal must not suggest another scope: {}",
+            error.message
+        );
+        assert!(notices.lock().unwrap().is_empty());
         assert!(
             !root.join("projects").exists(),
             "a refused save registered a project"
@@ -672,6 +854,51 @@ mod tests {
             output_text(&global)
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0021: the tool description states when `scope: global` is
+    /// right, so the model stops making a project fact global.
+    #[test]
+    fn the_save_description_states_when_global_is_right() {
+        let description = specs()
+            .into_iter()
+            .find(|spec| spec.name == "memory_save")
+            .expect("memory_save")
+            .description;
+        assert!(
+            description.contains("holds in every project"),
+            "{description}"
+        );
+        assert!(
+            description.contains("the user asks for global"),
+            "{description}"
+        );
+        assert!(description.contains("must not be global"), "{description}");
+        assert!(
+            !description.contains("never creates one"),
+            "the description no longer claims a project must already be linked: {description}"
+        );
+    }
+
+    /// ADR 0021: the `memory_unlinked` text never mentions the global
+    /// scope.
+    #[test]
+    fn the_unlinked_tool_error_never_suggests_global() {
+        let failure = tool_failure(MemoryServiceError::Unlinked {
+            identity_key: "/x/radian/.git".into(),
+            candidates: vec![radian_memory::ProjectId("mem-1".into())],
+        });
+        assert_eq!(failure.code, "memory_unlinked");
+        assert!(
+            failure.message.contains("not linked"),
+            "{}",
+            failure.message
+        );
+        assert!(
+            !failure.message.contains("global"),
+            "the unlinked error must not suggest another scope: {}",
+            failure.message
+        );
     }
 
     #[tokio::test]
@@ -697,6 +924,22 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code, "unknown_tool");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unknown id is the store's own wording (`no memory record <id>`), so the tool and
+    /// the CLI cannot drift (ADR 0021 D1).
+    #[tokio::test]
+    async fn an_unknown_memory_get_uses_the_stores_not_found_wording() {
+        let (dir, service) = service("get-missing");
+        service.create_project().unwrap();
+        let session = session(service).await;
+        let missing = "mem-00000000000000000000000000000000";
+        let error = run(&session, "memory_get", json!({"id": missing}))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "not_found");
+        assert_eq!(error.message, format!("no memory record {missing}"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

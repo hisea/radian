@@ -118,14 +118,28 @@ key. Writes default to Project; `--global` writes a Global record.
 | `relink <ProjectId>` | attach this workspace to an existing project |
 | `split <from> <to> <id…>` / `merge <into> <from>` | move records between projects; need confirmation |
 
-- **No silent project identity** (ADR 0021 D2): a workspace whose identity key is not in the
-  registry is *unlinked*. `project new` registers it; `project` shows candidates (projects
-  whose identity key has the same repository name) and `relink` attaches it. Until then,
-  Project reads and writes fail with a message naming the candidates and `--global`; Global
-  still works.
+- **A write registers the project itself** (ADR 0021): a default-scope `add` in a
+  git repository whose project is not in the registry registers it, saves there, and prints
+  one `[memory] created project …` notice line naming the project and its identity key. When a
+  project with the same repository name already exists (a moved or re-cloned repository), the
+  notice adds the `relink`/`merge` hint. **Only a write registers**: reads and injection never
+  do — a default-scope `list`/`search` on an unregistered workspace reads Global only and says
+  so. A directory that is not a git repository is **not a project workspace**: a default-scope
+  `add` fails with "not a project workspace … the memory was not saved", registers nothing and
+  never points at another scope; `radian memory project new` still registers such a directory
+  by hand. `project`/`relink` remain the explicit route to link or re-link an identity key.
+- **`--global` is for facts that hold in every project**, or when the user asks for global: a
+  memory that mentions this project's paths, branches or structure belongs to the project
+  scope (the `memory_save` tool description says this too).
 - **Confirmations** (`forget`, `purge`, `split`, `merge`): a terminal asks `y/N`; `--yes`
   skips it; **without a terminal and without `--yes` the command refuses, exits 2 and does
   nothing**.
+- **A command that takes an `<id>` finds the scope itself** (`show`, `edit`, `archive`,
+  `restore`, `confirm`, `forget`): an id is unique across scopes, so the command looks the id
+  up in Project (when this workspace is linked) and then Global and acts on the scope that
+  holds it — a Global record still works from an unlinked workspace. An explicit
+  `--global`/`--project` **only restricts** the search to that scope; an id that no visible
+  scope holds is `no memory record <id>`.
 - Every user command writes `source: user`; the store applies the revision and same-key rules
   (`KeyConflict`, `RevisionConflict`).
 - **Exit codes**: 0 on success; 1 for a conflict, a missing record or an unlinked workspace;
@@ -136,8 +150,10 @@ key. Writes default to Project; `--global` writes a Global record.
 During a conversation the model also gets four tools: `memory_search` and `memory_get` (read,
 **allowed** by the rules) and `memory_save` and `memory_revise` (write, always **asked**;
 `--yes` answers the ask and the decision is still audited). Agent writes are `source: agent`
-and `unverified`; a user record is never modified, and a user key still wins. An unlinked
-workspace gets a tool error naming `project new`/`relink`, never a silent new project.
+and `unverified`; a user record is never modified, and a user key still wins. A `memory_save`
+in the default scope registers a git workspace whose project is not registered yet (the same
+notice line as above, on stderr); a directory that is not a project workspace is refused with
+a tool error that says the memory was not saved and does not point at another scope.
 
 Each request also injects the current memory into the **system prompt** (never the
 transcript): Active records in the D6 order, up to 2000 tokens (Global 500 / Project 1500 soft

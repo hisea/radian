@@ -209,3 +209,34 @@ Base `eb7ec96`（N2/N5/N6/N7）、`cefd46e`（N8/N9）· 一次性 detached work
 6/6 抓住。N6 另有端到端 `radian-tui` 的
 `pty_panic_path_does_not_orphan_a_background_job`（exit 101 + 组为空）覆盖；那里用
 `--panic-with-background-job` 钩子先起 job 再 panic。
+## glob / grep：两个 Shared 搜索工具（2026-10-15，backlog B1）
+
+Base `236f4c3`（实现 `385d21d` + 接线 `18aeff7` + 测试 `236f4c3`）· 就地变异（改源码），
+每个变异前把文件复制到工作树外的 scratchpad，跑完从副本还原并逐字节比较，结束时
+`git status --short` 为空。
+
+每个变异用 `cargo test -p <crate> --test <target> --no-fail-fast -- --exact <test>`（会重新编译）。
+
+| # | 变异（行为） | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| G1 | glob 不套用 pattern（遍历分支恒真） | `search::glob_matches_by_path_and_skips_non_matches` | ✅ |
+| G2 | 不读 `.gitignore`（`.git_ignore(false)`） | `search::the_ignore_rules_are_respected_by_both_tools` | ✅ |
+| G3 | 不剪枝 `.git`（`filter_entry` 恒真） | `search::the_dot_git_directory_is_skipped_by_both_tools` | ✅ |
+| G4 | 跟随符号链接（`follow_links(true)`） | `search::a_symlink_out_of_the_workspace_is_never_followed` | ✅ |
+| G5 | `glob` 的基路径不走边界解析（`root.root().join(path)`） | `search::the_boundary_refuses_a_path_outside_the_workspace` | ✅ |
+| G6 | `grep` 的基路径同上 | `search::the_boundary_refuses_a_path_outside_the_workspace` | ✅ |
+| G7 | `glob` 不截断结果（`truncate(usize::MAX)`） | `search::glob_caps_the_result_and_names_the_cut` | ✅ |
+| G8 | `*` 跨目录（`literal_separator(false)`） | `search::a_single_star_stays_within_one_directory` | ✅ |
+| G9 | `grep` 不套用任何匹配上限（budget 恒为 `usize::MAX`） | `search::grep_caps_the_matches_per_file_and_names_the_cut`（总数上限测试同样会抓） | ✅ |
+| G10 | 非法正则的 code 从 `invalid_regex` 改成 `invalid_arguments` | `search::an_invalid_regex_is_a_named_tool_error` | ✅ |
+| G11 | 忽略 `case_insensitive`（恒 `false`） | `search::grep_reports_matches_with_path_line_and_text` | ✅ |
+| G12 | 不输出 after-context（`after_pending = 0`） | `search::grep_shows_context_lines_and_separates_groups` | ✅ |
+| G13 | 二进制探测恒假（NUL 文件也搜） | `search::grep_skips_binary_files` | ✅ |
+| G14 | `read_only()` 去掉 `glob`/`grep` | `radian-permissions::profile::tests::the_search_tools_are_allowed_in_every_tier` | ✅ |
+
+14/14 抓住。G5/G6 是同一行为在两个工具里的两份实现：只变异其中一个，`the_boundary_refuses_a_path_outside_the_workspace`
+里那个工具的 `unwrap_err()` 会因为不再报错而 panic，两个变异各自被同一个测试抓住。G9 只改
+`budget` 的计算：`per_file_cap` 与 `cap` 都不再生效，per-file 与 total 两条上限测试都会失败，
+这里记的是 per-file 那条。G13 用 `if false` 而不是删掉整个 `sniff` 块：删块会让 `sniff`/`filled`
+变成未使用（只是警告），而 `if false` 让分支在编译期仍然存在、行为上关闭探测，语义更接近"关掉这个
+判断"。

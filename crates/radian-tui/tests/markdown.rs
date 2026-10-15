@@ -475,7 +475,12 @@ fn a_user_message_shows_markup_literally() {
 /// The crash: a selection over Chinese Markdown panicked at
 /// `select.rs`'s `text[offset..]` because a synthesized cell (a heading's `##`, a bullet, an
 /// indent, a link's `(url)`) carried a fake source offset that landed inside a multi-byte
-/// char. Every cell of every selection now maps safely, at every width.
+/// char. Every cell, at every width, now maps safely as either end of a selection.
+///
+/// The failure belongs to **one endpoint's** offset, so every cell is used as the anchor and as
+/// the head against the first cell, the last cell and itself: 4 selections per cell instead of
+/// every ordered pair. The all-pairs form was N² selections, each laying the entry out again,
+/// and took about 700 s of the workspace test run (2026-10-15) for the same coverage.
 #[test]
 fn a_chinese_markdown_selection_does_not_panic() {
     let body = "能。这就是上面那份文档里 7 张图……\n\n## 一个很长的中文标题\n\n- 所以我逐张在这个库上检查了每一张图的来源，其中 **7 张图** 和 `code`\n\n> 这是一段中文引用\n\n```mermaid\ngraph TD; A-->B;\n```\n";
@@ -483,18 +488,21 @@ fn a_chinese_markdown_selection_does_not_panic() {
         let mut app = App::new("m", "s");
         assistant(&mut app, body);
         let modes = modes(ReasoningMode::Expanded);
-        // Every ordered pair of display cells is a selection: locate, copy and highlight must
-        // not panic. Synthesized cells are included.
-        let cells = display_cells(&app, modes, width);
-        for &(line_a, col_a) in &cells {
-            for &(line_b, col_b) in &cells {
-                let (Some(a), Some(b)) = (
-                    select::locate(&app.entries, modes, width, line_a, col_a + 2),
-                    select::locate(&app.entries, modes, width, line_b, col_b + 2),
-                ) else {
-                    continue;
-                };
-                let selection = select::Selection { anchor: a, head: b };
+        // Every display cell, synthesized cells and each line's end gap included, located once.
+        let points: Vec<_> = display_cells(&app, modes, width)
+            .into_iter()
+            .filter_map(|(line, col)| select::locate(&app.entries, modes, width, line, col + 2))
+            .collect();
+        assert!(!points.is_empty(), "the body lays out at width {width}");
+        let (first, last) = (points[0], points[points.len() - 1]);
+        for &point in &points {
+            for (anchor, head) in [
+                (point, first),
+                (first, point),
+                (point, last),
+                (point, point),
+            ] {
+                let selection = select::Selection { anchor, head };
                 let _ = select::logical_text(&app.entries, &selection);
                 let _ = select::highlight_rows(&app.entries, modes, width, 0, 60, &selection);
             }
