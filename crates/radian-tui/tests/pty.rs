@@ -8131,16 +8131,19 @@ async fn pty_a_resume_shows_the_sessions_earlier_tokens_and_fee() {
         110,
     );
     assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
-    // The earlier turn's tokens are there (1M in, 100K out) ...
+    // The earlier turn's tokens are there (1M in, 100K out). The default `tokens` format is
+    // `^{in} v{out} R{cache}` (ADR 0027's ASCII-default icons), and `format_tokens`
+    // keeps one decimal under 10 (so 1 000 000 is `1.0M`) and rounds above it (`100K`).
     assert!(
-        pty.wait_for_screen("↑1M", 10),
+        pty.wait_for_screen("^1.0M", 10),
         "the resumed token total is missing:\n{}",
         pty.screen()
     );
-    assert!(pty.screen().contains("↓100K"), "{}", pty.screen());
-    // ... and its fee: 1M x $0.15 + 100K x $0.60 per Mtok = $0.21.
+    assert!(pty.screen().contains("v100K"), "{}", pty.screen());
+    // ... and its fee: 1M x $0.15 + 100K x $0.60 per Mtok = $0.21, three decimals
+    // (ADR 0027).
     assert!(
-        pty.wait_for_screen("$0.21", 10),
+        pty.wait_for_screen("$0.210", 10),
         "the resumed fee is missing:\n{}",
         pty.screen()
     );

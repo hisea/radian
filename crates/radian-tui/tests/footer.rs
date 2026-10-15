@@ -585,7 +585,8 @@ fn a_compaction_usage_reaches_the_footer_totals() {
     let line = row(&terminal, 11);
     // The summary's tokens are in the totals (50K in, 2K out) ...
     assert!(line.contains("50K"), "the summary's input: {line:?}");
-    assert!(line.contains("2K"), "the summary's output: {line:?}");
+    // `format_tokens` keeps one decimal under 10 (ADR 0027): 2 000 is `2.0K`.
+    assert!(line.contains("2.0K"), "the summary's output: {line:?}");
     // ... and in the fee.
     assert!(line.contains("$0.180"), "the summary's fee: {line:?}");
 
@@ -1162,11 +1163,21 @@ fn the_brand_is_the_unicode_glyph_by_default() {
 }
 
 /// ADR 0027's sample: the deck's third row, whole, is
-/// `↑15M ↓2.6M R1962M $14.510 41.3%/1.0M` (compact tokens, a 3-decimal cost, the context
+/// `^15M v2.6M R1962M $14.510 41.3%/1.0M` (compact tokens, a 3-decimal cost, the context
 /// share with one decimal and the window in `M`).
 #[test]
 fn the_deck_numbers_row_matches_the_sample() {
     let mut app = App::new("mock", "s");
+    // The price first: the fee is accumulated **per call at the price in force then**
+    // (ADR 0027), so a call arriving before the price is known contributes no fee
+    // at all — unlike the old "session totals × the current price at draw time" formula.
+    // 15M input at 967_333 micro-dollars per million = 14_509_995 micros = $14.510.
+    app.set_model_price(Some(radian_host::ModelPrice {
+        input: 967_333,
+        output: 0,
+        cache_read: None,
+        cache_write: None,
+    }));
     app.projection.add_usage(&agent_core::ModelUsage {
         input: Some(15_000_000),
         output: Some(2_600_000),
@@ -1181,13 +1192,6 @@ fn the_deck_numbers_row_matches_the_sample() {
         request_bytes: 0,
         baseline_input_tokens: None,
         estimated_growth_tokens: None,
-    }));
-    // 15M input at 967_333 micro-dollars per million = 14_509_995 micros = $14.510.
-    app.set_model_price(Some(radian_host::ModelPrice {
-        input: 967_333,
-        output: 0,
-        cache_read: None,
-        cache_write: None,
     }));
     let terminal = render(&mut app, 100, 12);
     // The numbers row is right-aligned; the content itself is the sample.
