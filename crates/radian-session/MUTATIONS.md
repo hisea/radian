@@ -219,3 +219,12 @@ Base: `3653071` · 在本任务工作树内逐条施加后从副本还原（`--n
 
 4/4 抓住。T1 的校验与一次性 `Session::open` 共用同一个 `LineScanner`，所以变异同时也会让
 `read_fixtures` 失败；这里记的是新增的 tail 侧测试。
+
+## review-fixes-1 (2026-10-15): atomic fork child
+
+One-shot detached worktree `.radian-worktrees/rf1-mutations` (from the branch HEAD, deleted
+after); the mutation was restored with `git checkout --`, `git status --short` empty at the end.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| RF1-FB | write the child directly to the final path and keep it on failure (no temp/rename) | caught (rc=101) | `fork::tests::a_failed_child_leaves_nothing_behind` (the half child existed) |

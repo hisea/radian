@@ -40,6 +40,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::fail;
+use crate::jobs::Jobs;
 use crate::provider::Limits;
 use crate::workspace::WorkspaceRoot;
 
@@ -86,8 +87,14 @@ pub(crate) fn spec(mode: SandboxMode) -> ToolSpec {
              capped: past the budget the start and the end are kept and the middle is \
              replaced by a marker naming the discarded bytes (the end is always kept, \
              because that is where a failing command's error is). The process group is \
-             killed on timeout or cancellation. Use `cwd` (workspace-relative) to run \
-             somewhere other than the workspace root."
+             killed on timeout or cancellation. The timeout is clamped to the configured \
+             maximum (600 s by default); for a command that needs longer use `background: \
+             true`, which has no default timeout. Use `cwd` (workspace-relative) to run \
+             somewhere other than the workspace root. Set `background: true` for a command \
+             that outlives the foreground timeout: it returns at once with a job id and an \
+             output file, and the three `job_*` tools read, list and stop it. Background jobs \
+             have no default timeout. Do not sleep or poll; use `job_output` with `wait: \
+             true` to wait for the end."
         ),
         input_schema: json!({
             "type": "object",
@@ -100,7 +107,9 @@ pub(crate) fn spec(mode: SandboxMode) -> ToolSpec {
                     "type": "integer",
                     "minimum": 1,
                     "description": "How long the command may run before its process group is \
-                                    killed. Clamped to the configured maximum."
+                                    killed. Clamped to the configured maximum. Ignored for \
+                                    `background: true` unless given, in which case the job is \
+                                    killed like `job_kill` and settles as timed out."
                 },
                 "cwd": {
                     "type": "string",
@@ -115,7 +124,17 @@ pub(crate) fn spec(mode: SandboxMode) -> ToolSpec {
                                     that, the start and the end are kept and the middle is \
                                     replaced by a marker; the end is always kept, because \
                                     that is where a failing command's error is. Clamped to \
-                                    the configured maximum."
+                                    the configured maximum. Ignored for `background: true` \
+                                    (the ring is fixed; the .out file is the full history)."
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": "Run the command in the background and return at once \
+                                    (default false). It keeps running under the same sandbox; \
+                                    its output streams to a workspace file. Read it with \
+                                    `job_output` (pass `wait: true` to wait for the end), \
+                                    list jobs with `job_list`, stop one with `job_kill`. No \
+                                    default timeout. Do not sleep or poll."
                 }
             },
             "required": ["command"],
@@ -179,12 +198,16 @@ struct ShellArgs {
     cwd: Option<String>,
     /// Per-stream output budget; clamped to the hard cap.
     max_output_bytes: Option<usize>,
+    /// ADR 0037: run in the background and return at once.
+    background: Option<bool>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run(
     root: &WorkspaceRoot,
     sandbox: &Sandbox,
     limits: &Limits,
+    jobs: &Jobs,
     arguments: &serde_json::Value,
     cx: &ToolContext<'_>,
 ) -> Result<ToolOutput, ToolFailure> {
@@ -205,6 +228,11 @@ pub(crate) async fn run(
             format!("`{}` is not a directory", args.cwd.unwrap_or_default()),
         ));
     }
+
+    if args.background.unwrap_or(false) {
+        return start_background(root, sandbox, jobs, &cwd, &args);
+    }
+
     let (timeout, clamped) = clamp_timeout(args.timeout_secs, limits);
     let (output_cap, output_clamped) = clamp_output(args.max_output_bytes, limits);
 
@@ -230,6 +258,54 @@ pub(crate) async fn run(
     ))
 }
 
+/// Starts `command` as a background job (ADR 0037) and returns the one-line acknowledgement:
+/// the job id, the output file and the three tools. No default timeout; an explicit
+/// `timeout_secs` kills the job like `job_kill` and settles it as timed out.
+fn start_background(
+    root: &WorkspaceRoot,
+    sandbox: &Sandbox,
+    jobs: &Jobs,
+    cwd: &Path,
+    args: &ShellArgs,
+) -> Result<ToolOutput, ToolFailure> {
+    let timeout = args
+        .timeout_secs
+        .map(|secs| Duration::from_secs(secs.max(1)));
+    let info = jobs.start(sandbox, cwd, &args.command, timeout)?;
+    let output = info
+        .output
+        .strip_prefix(root.root())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| info.output.to_string_lossy().into_owned());
+    let cwd_relative = cwd
+        .strip_prefix(root.root())
+        .ok()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| ".".into());
+    let text = format!(
+        "started background job {id}\n\
+         output: {output}\n\
+         read it with `job_output` (pass `wait: true` to wait for the end); `job_list` lists \
+         this session's jobs; `job_kill` stops one.\n\
+         Do not sleep or poll: use `job_output` with `wait: true` to wait for the end. The full \
+         history stays in the output file.\n",
+        id = info.id,
+    );
+    Ok(ToolOutput {
+        content: vec![ContentPart::text(text)],
+        structured: Some(json!({
+            "background": true,
+            "job_id": info.id,
+            "output": output,
+            "command": args.command,
+            "cwd": cwd_relative,
+            "sandbox_mode": sandbox.mode().as_str(),
+            "timeout_secs": timeout.map(|t| t.as_secs()),
+        })),
+    })
+}
+
 fn clamp_timeout(requested: Option<u64>, limits: &Limits) -> (Duration, bool) {
     let max = limits.max_shell_timeout.as_secs().max(1);
     match requested {
@@ -251,14 +327,15 @@ fn clamp_output(requested: Option<usize>, limits: &Limits) -> (usize, bool) {
     }
 }
 
-async fn execute(
+/// The sandboxed `/bin/sh -c` command for `command`, with the cwd set and (for a transparent
+/// backend) the environment filtered to the policy whitelist. Shared by the foreground
+/// executor and background jobs (ADR 0037): a job runs under exactly the same sandbox and
+/// environment rules as a foreground command.
+pub(crate) fn sandboxed_command(
     sandbox: &Sandbox,
     cwd: &Path,
     command: &str,
-    timeout: Duration,
-    output_cap: usize,
-    cancel: &CancellationToken,
-) -> Result<Outcome, ToolFailure> {
+) -> Result<Command, ToolFailure> {
     let mut process = sandbox
         .command_str("/bin/sh", &["-c", command])
         .map_err(|e| {
@@ -280,6 +357,18 @@ async fn execute(
             }
         }
     }
+    Ok(process)
+}
+
+async fn execute(
+    sandbox: &Sandbox,
+    cwd: &Path,
+    command: &str,
+    timeout: Duration,
+    output_cap: usize,
+    cancel: &CancellationToken,
+) -> Result<Outcome, ToolFailure> {
+    let mut process = sandboxed_command(sandbox, cwd, command)?;
 
     let started = Instant::now();
     let mut supervised = Supervised::spawn(&mut process, output_cap).map_err(|e| {
@@ -556,9 +645,14 @@ fn lock(mutex: &Mutex<bool>) -> MutexGuard<'_, bool> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Locks a `Mutex<bool>` from another module (background jobs share the `reaped` invariant).
+pub(crate) fn lock_bool(mutex: &Mutex<bool>) -> MutexGuard<'_, bool> {
+    lock(mutex)
+}
+
 /// Blocks until `pid` exits, leaving it unreaped so its pid and process group stay reserved.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn wait_for_exit_without_reaping(pid: u32) {
+pub(crate) fn wait_for_exit_without_reaping(pid: u32) {
     let id: libc::id_t = pid;
     loop {
         // SAFETY: `info` is zeroed plain data that waitid fills in; no other preconditions.
@@ -578,24 +672,33 @@ fn wait_for_exit_without_reaping(pid: u32) {
 /// Platforms without `waitid(WNOWAIT)` have a short window between the reap and the group
 /// kill; the tool is verified on macOS and Linux only.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn wait_for_exit_without_reaping(_pid: u32) {}
+pub(crate) fn wait_for_exit_without_reaping(_pid: u32) {}
 
-/// Sends SIGKILL to process group `pid`. Unix only in practice; other platforms have no
+/// Sends `signal` to process group `pid`. Unix only in practice; other platforms have no
 /// verified backend for the enforced modes.
-fn kill_group(pid: u32) {
+pub(crate) fn signal_group(pid: u32, signal: i32) {
     #[cfg(unix)]
     {
         if let Ok(pgid) = libc::pid_t::try_from(pid) {
             // SAFETY: killpg takes plain integers and has no memory-safety preconditions.
             unsafe {
-                libc::killpg(pgid, libc::SIGKILL);
+                libc::killpg(pgid, signal);
             }
         }
     }
     #[cfg(not(unix))]
     {
-        let _ = pid;
+        let _ = (pid, signal);
     }
+}
+
+/// Sends SIGKILL to process group `pid`. Unix only in practice; other platforms have no
+/// verified backend for the enforced modes.
+fn kill_group(pid: u32) {
+    #[cfg(unix)]
+    signal_group(pid, libc::SIGKILL);
+    #[cfg(not(unix))]
+    let _ = pid;
 }
 
 // ---------- reporting ----------
@@ -621,7 +724,9 @@ fn report(
     text.push_str(&format!("$ {command}\n"));
     if outcome.timed_out {
         text.push_str(&format!(
-            "[timed out after {timeout:?}; the process group was killed]\n"
+            "[timed out after {timeout:?}; the process group was killed. For a command that \
+             needs longer, use `background: true` (no default timeout) and `job_output` with \
+             `wait: true`.\n"
         ));
     }
     if outcome.cancelled {

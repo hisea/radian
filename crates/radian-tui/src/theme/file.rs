@@ -112,6 +112,9 @@ fn fg_source(role: Role) -> Option<&'static str> {
         Role::ReasoningMax => Some("thinkingMax"),
         Role::Interrupted => Some("warning"),
         Role::User => Some("userMessageText"),
+        // The `bar` input's text keeps the main level; its band is the user message's
+        // background (ADR 0035 V3), so the composer is the same surface as a user block.
+        Role::InputBar => Some("text"),
         Role::ToolCall => Some("toolTitle"),
         Role::ToolResult => Some("toolOutput"),
         Role::ToolResultError => Some("error"),
@@ -180,6 +183,7 @@ fn fg_source(role: Role) -> Option<&'static str> {
 fn bg_source(role: Role) -> Option<&'static str> {
     match role {
         Role::User => Some("userMessageBg"),
+        Role::InputBar => Some("userMessageBg"),
         Role::Selection => Some("selectedBg"),
         Role::ToolPendingBg => Some("toolPendingBg"),
         Role::ToolSuccessBg => Some("toolSuccessBg"),
@@ -729,6 +733,23 @@ mod tests {
             warnings.iter().all(|w| w.contains("missing role(s)")),
             "{warnings:?}"
         );
+    }
+
+    /// ADR 0035 V3: the `bar` input's band comes from pi's `userMessageBg` (the same band as a
+    /// user message) and its text from pi's `text`; a theme file that has neither still loads
+    /// (the band falls back with the other roles).
+    #[test]
+    fn the_input_bar_takes_pi_text_and_the_user_background() {
+        let (theme, warnings) = loaded(&theme_json(
+            "{}",
+            "{\"text\": \"#ffffff\", \"userMessageBg\": \"#222222\"}",
+        ));
+        assert!(
+            warnings.iter().all(|w| w.contains("missing role(s)")),
+            "{warnings:?}"
+        );
+        assert_eq!(theme.input_bar.fg, Some(Color::Rgb(255, 255, 255)));
+        assert_eq!(theme.input_bar.bg, Some(Color::Rgb(0x22, 0x22, 0x22)));
     }
 
     #[test]

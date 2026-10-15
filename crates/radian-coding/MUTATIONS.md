@@ -160,3 +160,52 @@ Base `c120b0e` · 就地变异（改 `utf8_prefix`），跑完从备份还原、
 `an_over_long_first_line_cut_mid_character_keeps_a_valid_prefix` 钉住（变异 F1 下该用例仍过,
 因为它本来就走前缀分支）；"非法字节在预算之外不失败"由
 `an_invalid_byte_beyond_the_budget_does_not_fail_the_read` 钉住。
+
+## bg-jobs：后台 shell 命令与三个 job 工具（ADR 0037 切片 1-2，2026-10-16）
+
+Base `7978228`（J1-J6）、`80c158b`（J7）· 一次性 detached worktree `/tmp/bg-mut`、`/tmp/bg-mut2`
+（跑完 `git worktree remove --force`）。
+每个变异用 `cargo test -p radian-coding --no-fail-fast -- <test> --exact`（会重新编译），
+还原后 `git status --short` 为空（只留未跟踪的备份与脚本，随 worktree 一起删掉）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| J1 | `job_output` 的 wait 超时顺手 `terminate`（杀掉 job） | `a_wait_timeout_returns_running_and_leaves_the_job_alive` | ✅ |
+| J2 | `signal_group` 用 `kill` 而不是 `killpg`（只杀 leader） | `job_kill_kills_the_whole_process_group` | ✅ |
+| J3 | 并发上限检查关掉（`if false && running >= MAX_RUNNING_JOBS`） | `the_fifth_running_job_is_refused` | ✅ |
+| J4 | 取消 turn 时顺手 `terminate`（杀掉 job） | `a_cancelled_turn_leaves_the_job_running` | ✅ |
+| J5 | `kill_all` 不再发信号（session-end 清理跳过） | `session_end_cleanup_kills_every_running_group` | ✅ |
+| J6 | `Ring::since` 忽略游标、每次返回整个 ring | `jobs::tests::the_ring_keeps_the_last_bytes_and_reports_the_increment` | ✅ |
+| J7 | `supervise` 去掉 leader 退出后的 `signal_group(pid, SIGKILL)`（自然退出不杀组） | `a_natural_exit_kills_a_background_grandchild` | ✅ |
+
+7/7 抓住。J1/J4 需要测试在 wait 返回后**再等一个有界窗口**（`gone_within`）才断言进程还活着：
+只断言「立刻 alive」会被 SIGTERM 的投递竞态放过（第一次跑时 J1 就没抓住）；改后两者都确定性抓住。
+J2 改的是共享的 `signal_group`，前台 `a_timeout_kills_the_whole_process_group` 也会抓，
+这里记的是 jobs 测试。J6 由单元测试抓住（集成测试 `a_background_job_returns_at_once_and_job_output_returns_increments`
+的「第二次读只返回增量」断言同样会抓）。
+
+J7 是评审发现的洞：去掉 `signal_group(pid, SIGKILL)` 后原 9 个测试全绿（`job_kill` 与 timeout 自己
+发信号，不经过这条路径）。新测试跑 `sleep 300 & echo $! > grandchild.pid; exit 0`，settle 成
+`exited 0` 后断言孙子进程没了。同一变异下也观察到：孙子进程攥着 stdout/stderr，reader 的 EOF
+要等 `READER_GRACE`（两个流各 2 s），所以 settle 被推迟约 4 s（测试 14.05 s vs 修好后 0.02 s）；
+正确代码里先杀组、管道随即关闭，settle 不延迟。
+
+## bg-jobs-2：完成通知、journal、/jobs、崩溃（ADR 0037 切片 3-4，2026-10-16）
+
+Base `eb7ec96`（N2/N5/N6/N7）、`cefd46e`（N8/N9）· 一次性 detached worktree `/tmp/bg2-mut`、`/tmp/bg2b-mut`
+（跑完 `git worktree remove --force`）。
+每个变异用 `cargo test -p <pkg> --test <target> --no-fail-fast -- <test> --exact`（会重新编译），
+还原后 `git status --short` 为空（只留未跟踪的备份与脚本，随 worktree 一起删掉）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| N2 | settle 的 `notify` 忽略 `waiters`（被 `job_output wait=true` 等到的 settle 又通知一次） | `jobs::a_waited_settle_is_not_notified` | ✅ |
+| N5 | `kill_all` 只杀第一个（session-end/`/jobs kill all` 留下其余的） | `jobs::session_end_cleanup_kills_every_running_group` | ✅ |
+| N6 | `Drop for Jobs` 变成 no-op（panic 路径不清理） | `jobs::dropping_the_registry_kills_every_running_group` | ✅ |
+| N7 | 前台 timeout 消息去掉 `background: true` 的提示 | `shell::a_timeout_kills_the_whole_process_group` | ✅ |
+| N8 | `notify` 计算忽略 `Termination::Killed`（被 kill 的 job 也通知） | `jobs::the_notify_flag_follows_the_settle_kind` | ✅ |
+| N9 | `kill_all` 不设 `termination = Killed`（session-end settle 读成 `signal 9` 并通知） | `jobs::a_session_cleanup_settle_is_not_notified` | ✅ |
+
+6/6 抓住。N6 另有端到端 `radian-tui` 的
+`pty_panic_path_does_not_orphan_a_background_job`（exit 101 + 组为空）覆盖；那里用
+`--panic-with-background-job` 钩子先起 job 再 panic。

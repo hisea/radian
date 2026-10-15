@@ -85,6 +85,20 @@ pub fn format_duration(duration: Duration) -> String {
     }
 }
 
+/// `12s`, `5m02s`, `1h02m`: the whole-second duration the `bar` input's status row shows
+/// (ADR 0035 V3 writes it as `12s`). [`format_duration`] keeps a decimal for the footer's
+/// `elapsed` item; a status line does not need sub-second precision.
+pub fn format_seconds(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m{:02}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{}h{:02}m", seconds / 3600, (seconds % 3600) / 60)
+    }
+}
+
 /// `42.1 tok/s`.
 pub fn format_speed(tokens_per_second: f64) -> String {
     format!("{tokens_per_second:.1} tok/s")
@@ -172,6 +186,11 @@ mod tests {
         assert_eq!(format_duration(Duration::from_millis(16_200)), "16.2s");
         assert_eq!(format_duration(Duration::from_secs(62)), "1m02s");
         assert_eq!(format_duration(Duration::from_secs(3_720)), "1h02m");
+        // ADR 0035 V3's status-row clock is the whole-second form (`12s`, never `12.3s`).
+        assert_eq!(format_seconds(Duration::from_millis(12_300)), "12s");
+        assert_eq!(format_seconds(Duration::from_millis(900)), "0s");
+        assert_eq!(format_seconds(Duration::from_secs(62)), "1m02s");
+        assert_eq!(format_seconds(Duration::from_secs(3_720)), "1h02m");
         assert_eq!(format_speed(42.14), "42.1 tok/s");
         assert_eq!(format_tokens(999), "999");
         assert_eq!(format_tokens(1_000), "1.0K");
