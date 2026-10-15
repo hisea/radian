@@ -1122,3 +1122,16 @@ Base `3ccd4db` · 一次性 worktree `/tmp/radian-mut-bangcancel` · 跑完 `git
 
 Ctrl-C 只有在 turn 运行时才表示取消（否则是 arm quit），所以测试用一个永不结束的
 `Reply::SseThenHang` 起一个 turn，再发 0x03，断言 `!` 块显示 `[cancelled]`。
+
+## select-list：共享列表原语与 /model 平铺（ADR 0035）
+
+Base `3c1c579` · 一次性 worktree `/tmp/radian-sl-mut`（detached，跑完删除）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SL1 | `window()` 恒返回 0（窗口不跟随） | `select_list::the_window_follows_the_selection_and_shows_a_scrollbar` | ✅ |
+| SL2 | `scrollbar_thumb()` 恒返回 0（滑块位置错） | 同上 | ✅ |
+| SL3 | 接受候选时插入 `description`（provider）而不是 `provider/model` | `the_flat_model_list_filters_by_provider_and_accepts_the_pair` | ✅ |
+| SL4 | `select_list::matches` 只匹配 label（丢掉 description） | `select_list::the_filter_matches_the_label_and_the_description` | ✅ |
+
+4/4 抓住。
