@@ -202,17 +202,21 @@ pub(crate) fn profile_text(policy: &SandboxPolicy) -> String {
 }
 
 /// The entries under one discovered git directory that git can execute, denied write under
-/// [`GitAccess::WritableExceptExec`] (ADR 0038): `config`, `config.worktree`, `hooks/`, and
-/// under `modules/<name>/` each submodule's `config` and `hooks/`. Everything else under
-/// `.git` stays writable.
+/// [`GitAccess::WritableExceptExec`] (ADR 0038): `config`, `config.worktree`, `hooks/`, each
+/// submodule's `config` and `hooks/` (nested submodules included), and a linked worktree's
+/// `gitdir`, `commondir` and `config.worktree`. Everything else under `.git` stays writable.
 ///
 /// A submodule's directory is matched with a regex over `modules/<name>` rather than by
 /// enumerating the names found at discovery time: a submodule the model adds during the
-/// session must be covered too. A worktree's `.git` **file** is not a directory and has no
-/// executable entry of its own; the per-worktree git dir and the shared common dir the pointer
-/// names are discovered separately and passed through this same function.
+/// session must be covered too, and the same goes for a worktree it adds.
+///
+/// A worktree's `.git` is a pointer **file**, not a directory. It has no executable entry of
+/// its own, but writing it would let the model repoint git at a gitdir it controls, whose
+/// hooks then run outside the sandbox when the user next runs git; so it keeps the **full**
+/// deny, exactly as under [`GitAccess::ReadOnly`].
 fn git_exec_denies(profile: &mut String, path: &Path) {
     if !path.is_dir() {
+        profile.push_str(&format!("(deny file-write* {})\n", target(path)));
         return;
     }
     let base = path.to_string_lossy();
@@ -232,14 +236,30 @@ fn git_exec_denies(profile: &mut String, path: &Path) {
         quoted("/hooks")
     ));
     let escaped = regex_escape(&base);
+    // Nested submodules (`modules/<a>/modules/<b>/config`): one or more `modules/<name>`
+    // segments. The top-level `config` and `hooks` are the literal and subpath rules above, so
+    // this needs at least one segment (a `+`, not a `*`).
     profile.push_str(&format!(
         "(deny file-write* (regex {}))\n",
-        sbpl_string(&format!("^{escaped}/modules/[^/]+/config$"))
+        sbpl_string(&format!("^{escaped}(/modules/[^/]+)+/config$"))
     ));
     profile.push_str(&format!(
         "(deny file-write* (regex {}))\n",
-        sbpl_string(&format!("^{escaped}/modules/[^/]+/hooks(/.*)?$"))
+        sbpl_string(&format!("^{escaped}(/modules/[^/]+)+/hooks(/.*)?$"))
     ));
+    // A linked worktree of this git dir, or of a nested submodule's: the shared common dir
+    // holds one `worktrees/<name>/` per worktree, and its `gitdir`, `commondir` and
+    // `config.worktree` are executables by the same argument (a repointed link, or a
+    // `core.hooksPath` in the per-worktree config). Matched by name so a worktree added during
+    // the session is covered without re-discovery.
+    for name in ["gitdir", "commondir", "config\\.worktree"] {
+        profile.push_str(&format!(
+            "(deny file-write* (regex {}))\n",
+            sbpl_string(&format!(
+                "^{escaped}(/modules/[^/]+)*/worktrees/[^/]+/{name}$"
+            ))
+        ));
+    }
 }
 
 /// Escapes the regex metacharacters a filesystem path may contain, so it matches literally
@@ -329,9 +349,10 @@ mod tests {
     }
 
     /// ADR 0038: `WritableExceptExec` keeps `.git` writable except the entries git can
-    /// execute. The whole-directory deny must be gone, and the four exec rules must be
-    /// present with the right shapes: `literal` for config/config.worktree, `subpath` for
-    /// `hooks/`, and a regex over `modules/<name>` for submodules.
+    /// execute. The whole-directory deny must be gone, and the exec rules must be present with
+    /// the right shapes: `literal` for config/config.worktree, `subpath` for `hooks/`, a regex
+    /// over nested `modules/<name>` segments for submodules, and regexes for a linked
+    /// worktree's `gitdir`/`commondir`/`config.worktree`.
     #[test]
     fn writable_except_exec_carves_out_only_the_exec_entries() {
         let dir = std::env::temp_dir().join(format!(
@@ -361,14 +382,24 @@ mod tests {
             profile.contains(&format!("(deny file-write* (subpath \"{quoted}/hooks\"))")),
             "{profile}"
         );
-        // The submodule rules are a regex over the name (a later submodule is covered without
-        // re-discovery); the path's `.` is regex-escaped and then SBPL-escaped, so it appears
-        // as `\\.` in the profile source.
-        assert!(profile.contains("/modules/[^/]+/config$"), "{profile}");
-        assert!(profile.contains("/modules/[^/]+/hooks(/.*)?$"), "{profile}");
+        // The submodule rules are a regex over one or more `modules/<name>` segments (a nested
+        // submodule is covered without re-discovery); the path's `.` is regex-escaped and then
+        // SBPL-escaped, so it appears as `\\.` in the profile source.
+        assert!(profile.contains("(/modules/[^/]+)+/config$"), "{profile}");
         assert!(
-            profile.contains(r"\\.git/modules/"),
+            profile.contains("(/modules/[^/]+)+/hooks(/.*)?$"),
+            "{profile}"
+        );
+        assert!(
+            profile.contains(r"\\.git(/modules/"),
             "the path dot must be regex-escaped and SBPL-escaped:\n{profile}"
+        );
+        // The linked worktree's link files and per-worktree config, by name.
+        assert!(profile.contains("/worktrees/[^/]+/gitdir$"), "{profile}");
+        assert!(profile.contains("/worktrees/[^/]+/commondir$"), "{profile}");
+        assert!(
+            profile.contains(r"/worktrees/[^/]+/config\\.worktree$"),
+            "{profile}"
         );
         // The whole git directory must NOT be read-only anymore.
         assert!(
@@ -377,11 +408,11 @@ mod tests {
         );
     }
 
-    /// A worktree's `.git` is a pointer **file**: it is discovered and passed here, but it has
-    /// no executable entry of its own, so under `WritableExceptExec` it gets no carve-out (its
-    /// per-worktree git dir and shared common dir are separate discovered entries).
+    /// A worktree's `.git` is a pointer **file**: it has no executable entry of its own, but
+    /// writing it would repoint git at a gitdir the model controls, so under
+    /// `WritableExceptExec` it keeps the full deny (a `literal`, exactly as `ReadOnly` does).
     #[test]
-    fn a_worktree_pointer_file_gets_no_exec_carve_out() {
+    fn a_worktree_pointer_file_keeps_the_full_deny() {
         let dir = std::env::temp_dir().join(format!(
             "radian-seatbelt-profile-{}-pointer",
             std::process::id()
@@ -395,8 +426,11 @@ mod tests {
         let profile = profile_text(&p);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(
-            !profile.contains(&format!("(literal \"{}\")", pointer.to_string_lossy())),
-            "a pointer file is not a directory and must not be carved out:\n{profile}"
+            profile.contains(&format!(
+                "(deny file-write* (literal \"{}\"))",
+                pointer.to_string_lossy()
+            )),
+            "a worktree pointer file must keep the full read-only deny:\n{profile}"
         );
     }
 

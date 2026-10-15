@@ -23,6 +23,10 @@ struct Scratch {
     proj: PathBuf,
     /// The submodule's git dir: `<proj>/.git/modules/sub`.
     subgit: PathBuf,
+    /// A nested submodule's git dir with **no** working tree
+    /// (`<nest>/.git/modules/a/modules/b`). Discovery cannot reach it, so only the
+    /// nested-module regex guards it.
+    nestedgit: PathBuf,
     /// The host repository of `wt-in`, whose `.git` is the worktree's shared common dir.
     host: PathBuf,
     /// The linked worktree of `host`, inside the workspace.
@@ -67,6 +71,50 @@ impl Scratch {
         );
         let subgit = std::fs::canonicalize(proj.join(".git/modules/sub")).unwrap();
 
+        // A separate repository with a two-level submodule chain whose working trees are gone
+        // (as after `git submodule deinit`): `nest/.git/modules/a/modules/b` exists, but neither
+        // `nest/a/.git` nor `nest/a/b/.git` does, so discovery cannot reach the nested git dir.
+        // Only the nested-module regex on `nest/.git` protects `modules/a/modules/b/{config,
+        // hooks}` — which is exactly what a one-level (non-nested) regex would miss.
+        let nest = ws.join("nest");
+        std::fs::create_dir_all(&nest).unwrap();
+        init_repo(&nest, "n.txt");
+        let asrc = root.join("asrc");
+        std::fs::create_dir_all(&asrc).unwrap();
+        init_repo(&asrc, "a.txt");
+        git(
+            &nest,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                asrc.to_str().unwrap(),
+                "a",
+            ],
+        );
+        let bsrc = root.join("bsrc");
+        std::fs::create_dir_all(&bsrc).unwrap();
+        init_repo(&bsrc, "b.txt");
+        git(
+            &nest.join("a"),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                bsrc.to_str().unwrap(),
+                "b",
+            ],
+        );
+        let nestedgit = std::fs::canonicalize(nest.join(".git/modules/a/modules/b")).unwrap();
+        std::fs::remove_dir_all(nest.join("a/b")).unwrap();
+        std::fs::remove_dir_all(nest.join("a")).unwrap();
+        // `git init` creates `hooks/`; make sure it exists so the control can write a file in it.
+        std::fs::create_dir_all(nestedgit.join("hooks")).unwrap();
+
         // A second repository with a linked worktree, both inside the workspace.
         let host = ws.join("wthost");
         std::fs::create_dir_all(&host).unwrap();
@@ -90,6 +138,7 @@ impl Scratch {
             ws,
             proj,
             subgit,
+            nestedgit,
             host,
             wtin_name,
         }
@@ -302,6 +351,88 @@ fn writable_except_exec_allows_git_and_denies_the_exec_entries() {
         &format!(
             "cd {p} && git branch sbx-tmp && git branch -D sbx-tmp",
             p = q(proj)
+        ),
+    );
+}
+
+/// A linked worktree and a nested submodule add exec entries beyond the plain `.git`, and they
+/// must stay denied too. A worktree's `.git` is a pointer **file**: writing it would repoint git
+/// at a gitdir the model controls (whose hooks then run outside the sandbox), so it keeps the
+/// full deny. The shared common dir's `worktrees/<name>/{gitdir,commondir,config.worktree}` are
+/// the same kind of handle. A nested submodule's config is `modules/<a>/modules/<b>/config`.
+/// Native git inside the worktree must still commit.
+#[test]
+fn writable_except_exec_protects_worktree_links_and_nested_submodules() {
+    let scratch = Scratch::new();
+    let control = Sandbox::new(SandboxMode::FullAccess, &scratch.ws).unwrap();
+    let git_writable = sandbox(&scratch, GitAccess::WritableExceptExec);
+    let wt_in = scratch.ws.join("wt-in");
+
+    // Native git inside the linked worktree still works: its per-worktree git dir and the
+    // shared object store are writable; only the executable entries are denied.
+    expect(
+        &git_writable,
+        &control,
+        "worktree_git_commit",
+        true,
+        &format!(
+            "cd {p} && printf 'w\\n' >> h.txt && git -c user.name=Sandbox -c user.email=sandbox@example.com commit -aqm wt",
+            p = q(&wt_in)
+        ),
+    );
+
+    // The worktree's `.git` is a pointer FILE. Repointing it at a gitdir the model controls
+    // would run that gitdir's hooks outside the sandbox, so it stays fully read-only.
+    expect(
+        &git_writable,
+        &control,
+        "worktree_pointer_file",
+        false,
+        &format!("printf x > {}", q(&wt_in.join(".git"))),
+    );
+
+    // The shared common dir's per-worktree link files and per-worktree config.
+    let per = scratch.host.join(".git/worktrees").join(&scratch.wtin_name);
+    expect(
+        &git_writable,
+        &control,
+        "worktree_gitdir",
+        false,
+        &format!("printf x > {}", q(&per.join("gitdir"))),
+    );
+    expect(
+        &git_writable,
+        &control,
+        "worktree_commondir",
+        false,
+        &format!("printf x > {}", q(&per.join("commondir"))),
+    );
+    expect(
+        &git_writable,
+        &control,
+        "worktree_config_worktree",
+        false,
+        &format!("printf x > {}", q(&per.join("config.worktree"))),
+    );
+
+    // A nested submodule's git dir with no working tree of its own (`nest/.git/modules/a/
+    // modules/b`), so discovery cannot reach it: only the two-level nested-module regex on
+    // `nest/.git` guards `modules/a/modules/b/{config,hooks}`.
+    expect(
+        &git_writable,
+        &control,
+        "nested_submodule_config",
+        false,
+        &format!("printf x > {}", q(&scratch.nestedgit.join("config"))),
+    );
+    expect(
+        &git_writable,
+        &control,
+        "nested_submodule_hook",
+        false,
+        &format!(
+            "printf x > {}",
+            q(&scratch.nestedgit.join("hooks/sbx-new-hook"))
         ),
     );
 }

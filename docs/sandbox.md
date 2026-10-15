@@ -134,26 +134,38 @@ Linux 的 bwrap 带 `--unshare-pid`，沙箱内看不到外部 pid，本来就�
 默认取更窄的 `ReadOnly`：调用方必须点名 `WritableExceptExec` 才会放宽，忘了接线的宿主退回安全一侧。
 
 **macOS 规则**（SBPL 最后匹配优先；对每个发现到的 git 目录——`.git` 目录、worktree 的 per-worktree
-gitdir 与共享 common dir，三者经同一函数处理——在整块可写之下追加）：
+gitdir 与共享 common dir，三者经同一函数处理——在整块可写之下追加；发现到的是**文件**（worktree 的
+`.git` 指针）时则整块拒写）：
 
 - `(deny file-write* (literal <git>/config))`
 - `(deny file-write* (literal <git>/config.worktree))`
 - `(deny file-write* (subpath <git>/hooks))`（`subpath` 让整个目录及其下、以及尚不存在的 `hooks/` 都拒）
-- `(deny file-write* (regex "^<esc>/modules/[^/]+/config$"))`
-- `(deny file-write* (regex "^<esc>/modules/[^/]+/hooks(/.*)?$"))`
+- `(deny file-write* (regex "^<esc>(/modules/[^/]+)+/config$"))`（嵌套子模块：一层或多层 `modules/<name>`）
+- `(deny file-write* (regex "^<esc>(/modules/[^/]+)+/hooks(/.*)?$"))`
+- `(deny file-write* (regex "^<esc>(/modules/[^/]+)*/worktrees/[^/]+/gitdir$"))`
+- `(deny file-write* (regex "^<esc>(/modules/[^/]+)*/worktrees/[^/]+/commondir$"))`
+- `(deny file-write* (regex "^<esc>(/modules/[^/]+)*/worktrees/[^/]+/config\.worktree$"))`
 
-子模块用 `<name>` 的 regex 而不是发现时枚举名字，是为了覆盖会话中**新加**的子模块。worktree 的
-`.git` 是个**指针文件**、不是目录，没有自己的执行入口，因此不额外加规则（它的 per-worktree gitdir
-与共享 common dir 是分开发现、分开处理的条目）。`<git>/info/` **有意不拒**（ADR 0038 的只读清单只
-列了 `config`、`config.worktree`、`hooks/` 与子模块同类），对象库、refs、index、`logs/` 都照常可写。
+子模块与 worktree 的名字都用 regex 而不是发现时枚举，是为了覆盖会话中**新加**的子模块/worktree。
+子模块 regex 用 `(/modules/[^/]+)+`（一层或**多**层）：`modules/<a>/modules/<b>` 这种嵌套 gitdir 的
+**中间**目录不一定被发现（子模块的工作树不在工作区里时——`git submodule deinit`、部分检出、或子模块
+路径在别处），此时只有 `<git>` 上这条多级 regex 护得住它。worktree 的 `.git` 是个**指针文件**、不是
+目录：它没有自己的执行入口，但**写它就会让模型把 git 指向自己控制的 gitdir**（那里的 hook 会在沙箱外、
+用户下次跑 git 时执行），所以它保留**整块** deny，和 `ReadOnly` 完全一样；共享 common dir 里的
+`worktrees/<name>/{gitdir,commondir,config.worktree}` 同理按名字拒写（`gitdir` 被改指向、`commondir`
+被改指向、per-worktree `config` 里放 `core.hooksPath`）。`<git>/info/` **有意不拒**（ADR 0038 的只读
+清单只列了 `config`、`config.worktree`、`hooks/` 与子模块同类），对象库、refs、index、`logs/` 都照常可写。
 
 **行为测试**：`crates/radian-sandbox/tests/git_writable.rs`（macOS-only；每条命令都带 `FullAccess`
-对照，scratch 里同时含仓库、子模块与链式 worktree）。它断言写 `config`、`config.worktree`、`hooks/`
-（新建与覆盖）、子模块与 worktree 的同类入口全被拒；`info/`、`objects/` 可写；`git add`、`git commit`、
-`git checkout -b`、`git stash`、`git branch -D` 在沙箱里成功。同文件的 `readonly_keeps_the_whole_git_read_only`
-在同一个 workspace 上对照 `ReadOnly`：整块只读、原生 git 写失败、`git status` 仍可用。规则"形状"另由
+对照，scratch 里同时含仓库、子模块、链式 worktree，和一个**没有工作树**的两级子模块 gitdir）。它断言
+写 `config`、`config.worktree`、`hooks/`（新建与覆盖）、子模块的同类入口、worktree 的**指针文件**、
+共享 common dir 的 `worktrees/<name>/{gitdir,commondir,config.worktree}`、以及嵌套子模块
+`modules/a/modules/b/{config,hooks}` 全被拒；`info/`、`objects/` 可写；`git add`、`git commit`、
+`git checkout -b`、`git stash`、`git branch -D`，以及 **worktree 里的 `git commit`** 在沙箱里成功。
+同文件的 `readonly_keeps_the_whole_git_read_only` 在同一个 workspace 上对照 `ReadOnly`：整块只读、
+原生 git 写失败、`git status` 仍可用。规则"形状"另由
 `seatbelt::tests::writable_except_exec_carves_out_only_the_exec_entries` 与
-`a_worktree_pointer_file_gets_no_exec_carve_out` 钉住。
+`a_worktree_pointer_file_keeps_the_full_deny` 钉住。
 
 **未验证 / Linux**：ADR 0038 切片①**只在 macOS 上实施**。Linux（bwrap）无论 `git_access` 取何值都
 保持今天的整块 `--ro-bind` 只读（`bwrap.rs` 里带注释）；任何"Linux 也只留执行入口只读"的说法都要等
