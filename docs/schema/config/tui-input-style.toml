@@ -1,0 +1,12 @@
+# ADR 0035 V3：`tui.input_style` 是输入框的形状。默认 `bar`（整行一条背景带、左侧强调色
+# 竖条 `▎`、没有边框与上下规则线，带的正上方固定一行状态行放 spinner）；`lines` 是上下两条
+# 横线加 `❯ ` 提示；`box` 是圆角框。未知值是启动警告并回退 `bar`（展示偏好，不拒绝文件）。
+schema_version = 1
+
+[model]
+provider = "example"
+base_url = "https://example.com/v1"
+model = "m-1"
+
+[tui]
+input_style = "bar"

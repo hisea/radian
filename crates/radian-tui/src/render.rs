@@ -13,7 +13,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use radian_permissions::ApprovalRequest;
 
 use crate::app::{
-    App, Entry, EntryKind, Modal, TurnState, budget_status_text, mcp_text, usage_text,
+    App, Entry, EntryKind, Modal, TrustWizard, TurnState, budget_status_text, mcp_text, usage_text,
 };
 use crate::blocks::{self, BodyLine};
 use crate::login::LoginWizard;
@@ -740,12 +740,17 @@ pub fn visible_lines_with(
 /// The tallest the input area grows before it scrolls internally instead.
 const MAX_INPUT_ROWS: usize = 10;
 
+/// The rows the find box needs: its top border, the query, its bottom border (`Borders::ALL`).
+const FIND_BOX_HEIGHT: u16 = 3;
+
 /// How the input area is drawn (config `tui.input_style`, owner UI review 2026-10-13).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InputStyle {
-    /// A rule above and below, `> ` on the first line, continuation lines indented two cells.
-    /// The default.
+    /// The banded input (ADR 0035 V3, omp's `rail`, the default): one background band per row
+    /// with a left accent rail, no border and no rules, and a fixed status row above the band.
     #[default]
+    Bar,
+    /// A rule above and below, `> ` on the first line, continuation lines indented two cells.
     Lines,
     /// The bordered box with a ` message ` title (the pre-review shape).
     Box,
@@ -757,6 +762,7 @@ impl InputStyle {
         match name {
             "lines" => Some(Self::Lines),
             "box" => Some(Self::Box),
+            "bar" => Some(Self::Bar),
             _ => None,
         }
     }
@@ -775,112 +781,199 @@ const BOX_PROMPT: &str = "❯ ";
 /// The placeholder shown while the input is empty.
 const INPUT_HINT: &str = "(type a message, Enter to send, Ctrl-J for a new line)";
 
-/// The input area's height: one rule above, the text rows, one rule below.
-/// The `/login` box's height (rows in `login_lines`, plus the two border rows).
-const LOGIN_HEIGHT: u16 = 8;
-
-/// The wizard's lines, styled with the app theme's levels (ADR 0028): the prompt is main
-/// text, the selected choice is the emphasis (accent), the rest is secondary, and the
-/// key hints are weak. **The key is never among them** (D3): a filled field renders one `*`
-/// per character, an empty one its hint.
-fn login_lines(wizard: &LoginWizard, theme: &Theme, width: usize) -> Vec<Line<'static>> {
+/// The `/login` wizard's panel (ADR 0035): the shared [`crate::panel::Panel`] with
+/// the step's rows, the provider/protocol choices through [`crate::select_list`], and the
+/// step's key hints in the bottom border. Pure, so the layout is testable without a terminal.
+/// **The key is never among the rows** (D3): a filled field renders one `*` per character.
+pub fn login_panel(
+    wizard: &LoginWizard,
+    width: usize,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+) -> Vec<Line<'static>> {
     use crate::login::LoginStep;
-    let _ = width;
-    let prompt = |text: &str| Line::from(Span::styled(text.to_owned(), theme.text));
+    let ascii = glyphs == crate::footer::Glyphs::Ascii;
+    let inner = width.saturating_sub(4).max(1);
+    let label = |text: &str| Line::from(Span::styled(text.to_owned(), theme.text));
     let value = |text: String| Line::from(Span::styled(text, theme.text));
-    let hint = |text: &'static str| Span::styled(text.to_owned(), theme.hint);
-    let mut lines: Vec<Line> = Vec::new();
+    let mut panel = crate::panel::Panel::new("/login");
     match &wizard.step {
         LoginStep::ChooseProvider { cursor } => {
-            lines.push(Line::from(vec![
-                Span::styled("choose a provider ".to_owned(), theme.text),
-                hint("(↑/↓, Enter)"),
-                Span::styled(":".to_owned(), theme.text),
-            ]));
-            for (index, (id, description)) in LoginWizard::choices().into_iter().enumerate() {
-                let marker = if index == *cursor { "> " } else { "   " };
-                let style = if index == *cursor {
-                    theme.notice_label
-                } else {
-                    theme.notice_body
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(format!(" {marker} "), style),
-                    Span::styled(format!("{id:<20}"), style),
-                    Span::styled(description, theme.hint),
-                ]));
+            panel = panel.row(label("choose a provider"));
+            let items: Vec<crate::select_list::Item> = LoginWizard::choices()
+                .into_iter()
+                .map(|(id, description)| crate::select_list::Item::new(id).description(description))
+                .collect();
+            let list =
+                crate::select_list::view(theme, &items, "", *cursor, items.len(), inner, ascii);
+            for line in list.lines {
+                panel = panel.row(line);
             }
+            panel = panel
+                .hint("↑/↓", "choose")
+                .hint("⏎", "next")
+                .hint("esc", "cancel");
         }
         LoginStep::CustomName => {
-            lines.push(prompt("provider name (also its auth.json entry):"));
-            lines.push(value(format!(" {}", wizard.name)));
+            panel = panel
+                .row(label("provider name (also its auth.json entry):"))
+                .row(value(wizard.name.clone()));
+            panel = panel.hint("⏎", "next").hint("esc", "cancel");
         }
         LoginStep::CustomProtocol { cursor } => {
-            lines.push(Line::from(vec![
-                Span::styled("wire protocol ".to_owned(), theme.text),
-                hint("(↑/↓, Enter)"),
-                Span::styled(":".to_owned(), theme.text),
-            ]));
-            for (index, kind) in crate::login::PROTOCOLS.iter().enumerate() {
-                let marker = if index == *cursor { "> " } else { "   " };
-                let style = if index == *cursor {
-                    theme.notice_label
-                } else {
-                    theme.notice_body
-                };
-                lines.push(Line::from(Span::styled(format!(" {marker} {kind}"), style)));
+            panel = panel.row(label("wire protocol"));
+            let items: Vec<crate::select_list::Item> = crate::login::PROTOCOLS
+                .iter()
+                .map(|kind| crate::select_list::Item::new(*kind))
+                .collect();
+            let list =
+                crate::select_list::view(theme, &items, "", *cursor, items.len(), inner, ascii);
+            for line in list.lines {
+                panel = panel.row(line);
             }
+            panel = panel
+                .hint("↑/↓", "choose")
+                .hint("⏎", "next")
+                .hint("esc", "cancel");
         }
         LoginStep::CustomBaseUrl => {
-            lines.push(prompt("base URL:"));
-            lines.push(value(format!(" {}", wizard.base_url)));
+            panel = panel
+                .row(label("base URL:"))
+                .row(value(wizard.base_url.clone()));
+            panel = panel.hint("⏎", "next").hint("esc", "cancel");
         }
         LoginStep::KeyInput => {
-            lines.push(prompt("API key (hidden; paste works too):"));
-            let masked = crate::login::LoginWizard::masked(&wizard.key);
-            lines.push(value(if masked.is_empty() {
-                String::new()
-            } else {
-                masked
-            }));
+            panel = panel
+                .row(label("API key (hidden; paste works too):"))
+                .row(value(LoginWizard::masked(&wizard.key)));
+            panel = panel.hint("⏎", "next").hint("esc", "cancel");
         }
         LoginStep::Verifying => {
-            lines.push(Line::from(Span::styled(
-                format!("verifying {} … ", wizard.provider_name()),
-                theme.text,
-            )));
-            lines
-                .last_mut()
-                .expect("just pushed")
-                .spans
-                .push(hint("(Esc cancels)"));
+            panel = panel.row(label(&format!("verifying {} …", wizard.provider_name())));
+            panel = panel.hint("esc", "cancel");
         }
         LoginStep::VerifyFailed { reason } => {
-            lines.push(Line::from(Span::styled(
-                format!("verification failed: {reason}"),
-                theme.turn_cancelled,
-            )));
-            lines.push(Line::from(vec![
-                Span::styled("save anyway? ".to_owned(), theme.text),
-                Span::styled("[y] save   ".to_owned(), theme.hint),
-                Span::styled("[n/Esc] cancel".to_owned(), theme.hint),
-            ]));
+            panel = panel
+                .row(Line::from(Span::styled(
+                    format!("verification failed: {reason}"),
+                    theme.turn_cancelled,
+                )))
+                .row(label("save anyway?"));
+            panel = panel.hint("y", "save").hint("n/esc", "cancel");
         }
     }
     if let Some(error) = &wizard.error {
-        lines.push(Line::from(Span::styled(
+        panel = panel.row(Line::from(Span::styled(
             error.clone(),
             theme.turn_cancelled,
         )));
     }
-    lines
+    panel.lines(width, theme, glyphs)
 }
 
-/// The error style for wizard problems (a note-colored line; no new theme role).
+/// The `/login` panel's height, measured from the panel itself so the frame and the layout
+/// agree.
+fn login_height(
+    wizard: &LoginWizard,
+    width: usize,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+) -> u16 {
+    login_panel(wizard, width, theme, glyphs).len() as u16
+}
+
+/// The startup project-trust panel (ADR 0031 T3, ADR 0035): the shared panel with
+/// the workspace line, the choices through [`crate::select_list`], and the hardcoded key
+/// hints. The cursor's default is the fail-safe `UntrustHere`.
+pub fn trust_panel(
+    wizard: &TrustWizard,
+    width: usize,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+) -> Vec<Line<'static>> {
+    let ascii = glyphs == crate::footer::Glyphs::Ascii;
+    let inner = width.saturating_sub(4).max(1);
+    let items: Vec<crate::select_list::Item> = wizard
+        .choices
+        .iter()
+        .map(|choice| crate::select_list::Item::new(wizard.label(*choice)))
+        .collect();
+    let list =
+        crate::select_list::view(theme, &items, "", wizard.cursor, items.len(), inner, ascii);
+    let mut panel = crate::panel::Panel::new("project trust").row(Line::from(Span::styled(
+        format!("project resources found in {}", wizard.workspace.display()),
+        theme.text,
+    )));
+    for line in list.lines {
+        panel = panel.row(line);
+    }
+    panel = panel
+        .hint("↑/↓", "choose")
+        .hint("⏎", "select")
+        .hint("esc", "do not trust");
+    panel.lines(width, theme, glyphs)
+}
+
+/// The trust panel's height, measured from the panel itself.
+fn trust_height(
+    wizard: &TrustWizard,
+    width: usize,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+) -> u16 {
+    trust_panel(wizard, width, theme, glyphs).len() as u16
+}
+
+/// The `/logout` confirmation (ADR 0035): the shared panel with the provider and
+/// the hardcoded `y`/`n` hints in the bottom border.
+pub fn logout_panel(
+    provider: &str,
+    width: usize,
+    theme: &Theme,
+    glyphs: crate::footer::Glyphs,
+) -> Vec<Line<'static>> {
+    crate::panel::Panel::new("/logout")
+        .row(Line::from(Span::styled(
+            format!("remove the stored credential for `{provider}`?"),
+            theme.text,
+        )))
+        .hint("[y]", "remove")
+        .hint("[n/esc]", "keep")
+        .lines(width, theme, glyphs)
+}
+
+/// The `bar` style's left rail (ADR 0035 V3): the accent vertical bar on every input row
+/// (omp's `ACCENT_RAIL`). The `ascii` glyph set uses `|` (ADR 0027's rule: the
+/// unicode glyphs are only used when the font set has them).
+const BAR_RAIL: &str = "▎";
+/// The `bar` rail in the `ascii` glyph set.
+const BAR_RAIL_ASCII: &str = "|";
+/// The cells before the `bar` style's text: the rail plus one cell of padding (omp's rail
+/// `defaultPaddingX = 1`). The status row's spinner starts at the same column — the text
+/// column (ADR 0035, 正文列起) — so the two read as one block.
+const BAR_LEAD: usize = 2;
+
+/// The input area's height: the text rows plus the style's chrome — two rule/border rows for
+/// `lines`/`box`, the one fixed status row for `bar` (ADR 0035 V3: `bar` has no rules).
 fn input_height(app: &App, width: usize) -> u16 {
     let inner = input_inner_width(app, width);
-    let rows = crate::composer::rows(&app.input.text(), inner).len();
-    (rows.clamp(1, MAX_INPUT_ROWS) as u16) + 2
+    let rows = crate::composer::rows(&app.input.text(), inner)
+        .len()
+        .clamp(1, MAX_INPUT_ROWS);
+    match app.input_style {
+        InputStyle::Lines | InputStyle::Box => rows as u16 + 2,
+        InputStyle::Bar => rows as u16 + 1,
+    }
+}
+
+/// The input's visible text rows (`input_area.height` minus the same chrome `input_height`
+/// reserves for the style), at least one.
+fn input_visible_rows(app: &App, height: u16) -> usize {
+    let chrome = match app.input_style {
+        InputStyle::Lines | InputStyle::Box => 2,
+        InputStyle::Bar => 1,
+    };
+    height.saturating_sub(chrome).max(1) as usize
 }
 
 /// The display width of a prompt constant: the columns it occupies, **not** its byte length
@@ -890,14 +983,57 @@ fn prompt_width(prompt: &str) -> usize {
 }
 
 /// The text width inside the input area: `❯ ` on the first line for `lines`, a border plus the
-/// `❯ ` prompt for `box`.
+/// `❯ ` prompt for `box`, the rail plus its one cell of padding for `bar`.
 fn input_inner_width(app: &App, width: usize) -> usize {
     let reserved = match app.input_style {
         InputStyle::Lines => prompt_width(INPUT_PROMPT),
         // Two border cells plus the prompt.
         InputStyle::Box => 2 + prompt_width(BOX_PROMPT),
+        InputStyle::Bar => BAR_LEAD,
     };
     width.saturating_sub(reserved).max(1)
+}
+
+/// The `bar` style's rail glyph for the terminal's glyph set.
+fn bar_rail(app: &App) -> &'static str {
+    match app.footer_glyphs() {
+        crate::footer::Glyphs::Ascii => BAR_RAIL_ASCII,
+        _ => BAR_RAIL,
+    }
+}
+
+/// The status row a `bar` input carries **above** its band (ADR 0035 V3 / decision 1):
+/// `<spinner>  Working · 12s · esc to interrupt` while a turn runs, and a blank row — which
+/// still occupies its line — when idle, so the band and the transcript never move when a turn
+/// starts or ends.
+///
+/// The spinner and the state word are the ones the `lines`/`box` rule line shows (ADR 0027
+/// revision 2, `App::spinner_status`), with ADR 0027's two spaces after the
+/// spinner; the spinner takes the accent and the rest is one level weaker. The clock is the
+/// footer's `elapsed` (`TurnTimer`: the running generation, else the last one), written in
+/// whole seconds as the ADR's `12s`; `esc to interrupt` is shown exactly while a turn runs,
+/// because that is when Esc cancels it.
+pub fn bar_status_line(app: &App) -> Line<'static> {
+    let Some(status) = app.spinner_status() else {
+        return Line::from("");
+    };
+    let spin = app.spinner_frame();
+    let mut spans = vec![
+        Span::styled(" ".repeat(BAR_LEAD), app.theme.hint),
+        Span::styled(spin.glyph, app.spinner_style(spin)),
+        Span::styled("  ", app.theme.hint),
+        Span::styled(status.to_string(), app.theme.hint),
+    ];
+    if let Some(elapsed) = app.timer.elapsed(app.now) {
+        spans.push(Span::styled(
+            format!(" · {}", crate::timing::format_seconds(elapsed)),
+            app.theme.hint,
+        ));
+    }
+    if app.turn_running() {
+        spans.push(Span::styled(" · esc to interrupt", app.theme.hint));
+    }
+    Line::from(spans)
 }
 
 /// The approval prompt's key line. It is drawn on its **own** row under the body, never part
@@ -987,12 +1123,12 @@ pub fn approval_cap(screen_height: usize, completion: usize) -> usize {
 /// The approval box's floor, border and key line included.
 pub const MIN_APPROVAL_HEIGHT: usize = 5;
 
-/// The height the approval box needs: the wrapped body rows (bounded by `cap`), the key line
-/// and the border. The body scrolls rather than growing past `cap`.
+/// The height the approval box needs: the wrapped body rows (bounded by `cap`) and the
+/// panel's two border rows. The body scrolls rather than growing past `cap`.
 fn approval_height(request: &ApprovalRequest, width: usize, cap: usize) -> u16 {
-    let rows = wrap(&approval_body(request), width.saturating_sub(2).max(1)).len();
-    let visible = rows.min(cap.saturating_sub(3).max(1));
-    (visible as u16 + 3).clamp(
+    let rows = wrap(&approval_body(request), width.saturating_sub(4).max(1)).len();
+    let visible = rows.min(cap.saturating_sub(2).max(1));
+    (visible as u16 + 2).clamp(
         MIN_APPROVAL_HEIGHT as u16,
         cap.max(MIN_APPROVAL_HEIGHT) as u16,
     )
@@ -1287,11 +1423,27 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 app.footer_glyphs(),
             )
         }
-        Some(Modal::Login(_)) => LOGIN_HEIGHT,
-        // The `/logout` confirmation is a two-line box like the `/memory` one.
-        Some(Modal::ConfirmLogout(_)) => 4,
-        // The trust prompt lists up to five options plus a header and a key line.
-        Some(Modal::Trust(wizard)) => wizard.choices.len() as u16 + 3,
+        Some(Modal::Login(wizard)) => {
+            login_height(wizard, area.width as usize, &app.theme, app.footer_glyphs())
+        }
+        // The `/logout` confirmation is the shared panel with one row and the hints.
+        Some(Modal::ConfirmLogout(provider)) => logout_panel(
+            provider,
+            area.width as usize,
+            &app.theme,
+            app.footer_glyphs(),
+        )
+        .len() as u16,
+        // The trust prompt lists up to five options plus a header and the two borders.
+        Some(Modal::Trust(wizard)) => {
+            trust_height(wizard, area.width as usize, &app.theme, app.footer_glyphs())
+        }
+        // The find box replaces the input with a **bordered** box: three rows (top border, the
+        // query, bottom border). `bar`'s input (its status row plus one text row) can be
+        // shorter than that, so the height is raised for the box, never lowered for the others.
+        _ if app.find_state().is_some() => {
+            input_height(app, area.width as usize).max(FIND_BOX_HEIGHT)
+        }
         _ => input_height(app, area.width as usize),
     };
     // The widget lines are part of the middle block.
@@ -1390,7 +1542,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // The picker overlay draws over the transcript; the input box and the status bar stay
     // visible below it (ADR 0023 U4).
     if let Some(picker) = app.picker() {
-        crate::picker::draw(frame, chunks[0], picker);
+        crate::picker::draw(frame, chunks[0], picker, &app.theme, app.footer_glyphs());
     }
 
     if !completion.is_empty() {
@@ -1399,12 +1551,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     match app.top_modal() {
         Some(Modal::Approval(prompt)) => {
-            // The body scrolls inside the box; the key line is the box's own last row, so a
-            // long command can never push the answers off screen.
-            let inner_width = (input_area.width as usize).saturating_sub(2).max(1);
+            // ADR 0035: the shared panel draws the frame, the window indicator on
+            // the top border and the key hints in the bottom border, so a long command can
+            // never push the answers off screen.
+            let width = input_area.width as usize;
+            let inner_width = width.saturating_sub(4).max(1);
             let body = wrap(&approval_body(&prompt.request), inner_width);
             let total = body.len();
-            let visible = (middle as usize).saturating_sub(3).max(1);
+            // The panel's rows are the box height minus its two borders.
+            let visible = (input_area.height as usize).saturating_sub(2).max(1);
             // Feed the measurement back, the way the transcript's viewport is fed back, so the
             // scroll keys clamp against real rows.
             let (scroll, total, visible) = {
@@ -1418,32 +1573,23 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             };
             let first = scroll.min(total.saturating_sub(1));
             let last = (first + visible).min(total);
-            let lines: Vec<Line> = body[first..last]
-                .iter()
-                .map(|row| Line::from(row.clone()))
-                .collect();
-            let mut block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(app.theme.approval_border)
-                .title(" approve tool call? ");
+            let mut panel = crate::panel::Panel::new("approve tool call?");
             if total > visible {
-                // The window indicator goes in the top-right corner: the bottom row belongs to
-                // the keys.
-                block = block.title_top(
-                    Line::from(format!(" lines {}–{} of {total} ", first + 1, last))
-                        .right_aligned(),
-                );
+                // The window indicator sits on the top border, where it costs no body row.
+                panel = panel.right_title(format!("lines {}–{} of {total}", first + 1, last));
             }
-            frame.render_widget(&block, input_area);
-            let inner = block.inner(input_area);
-            let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner);
-            frame.render_widget(Paragraph::new(lines), rows[0]);
+            for row in &body[first..last] {
+                panel = panel.row(Line::from(row.clone()));
+            }
+            // The keys are hardcoded (ADR 0023 U4); the panel puts them in the bottom border.
+            panel = panel
+                .hint("[y]", "allow once")
+                .hint("[a]", "always this session")
+                .hint("[n]", "deny")
+                .hint("[!]", "auto for this session");
             frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    APPROVAL_KEYS,
-                    app.theme.approval_border,
-                ))),
-                rows[1],
+                Paragraph::new(panel.lines(width, &app.theme, app.footer_glyphs())),
+                input_area,
             );
         }
         Some(Modal::Question(form)) => {
@@ -1463,59 +1609,31 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             frame.render_widget(Paragraph::new(lines), input_area);
         }
         Some(Modal::Login(wizard)) => {
-            let lines = login_lines(wizard, &app.theme, input_area.width as usize);
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(app.theme.approval_border)
-                .title(" /login ");
-            frame.render_widget(&block, input_area);
-            let inner = block.inner(input_area);
-            frame.render_widget(Paragraph::new(lines), inner);
+            let lines = login_panel(
+                wizard,
+                input_area.width as usize,
+                &app.theme,
+                app.footer_glyphs(),
+            );
+            frame.render_widget(Paragraph::new(lines), input_area);
         }
         Some(Modal::Trust(wizard)) => {
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(app.theme.approval_border)
-                .title(" project trust ");
-            frame.render_widget(&block, chunks[2]);
-            let inner = block.inner(chunks[2]);
-            let mut lines = vec![Line::from(format!(
-                "project resources found in {}",
-                wizard.workspace.display()
-            ))];
-            for (index, choice) in wizard.choices.iter().enumerate() {
-                let marker = if index == wizard.cursor { "> " } else { "  " };
-                let style = if index == wizard.cursor {
-                    app.theme.approval_border
-                } else {
-                    Style::default()
-                };
-                lines.push(Line::from(Span::styled(
-                    format!("{marker}{}", wizard.label(*choice)),
-                    style,
-                )));
-            }
-            lines.push(Line::from(Span::styled(
-                "Up/Down choose   Enter select   Esc = do not trust",
-                app.theme.hint,
-            )));
-            frame.render_widget(Paragraph::new(lines), inner);
+            let lines = trust_panel(
+                wizard,
+                chunks[2].width as usize,
+                &app.theme,
+                app.footer_glyphs(),
+            );
+            frame.render_widget(Paragraph::new(lines), chunks[2]);
         }
         Some(Modal::ConfirmLogout(provider)) => {
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(app.theme.approval_border)
-                .title(" /logout ");
-            frame.render_widget(&block, input_area);
-            let inner = block.inner(input_area);
-            let lines = vec![
-                Line::from(format!("remove the stored credential for `{provider}`?")),
-                Line::from(Span::styled(
-                    "[y] remove   [n/Esc] keep",
-                    app.theme.approval_border,
-                )),
-            ];
-            frame.render_widget(Paragraph::new(lines), inner);
+            let lines = logout_panel(
+                provider,
+                input_area.width as usize,
+                &app.theme,
+                app.footer_glyphs(),
+            );
+            frame.render_widget(Paragraph::new(lines), input_area);
         }
         _ if app.find_state().is_some() => {
             // The find box replaces the input box's line; the input text itself is untouched
@@ -1531,10 +1649,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         // before (a confirmation only makes it non-editable).
         _ => {
             // pi-style: a rule above and below instead of a box, and
-            // `> ` on the first line. `input_height` already reserves the two rule rows, so the
-            // layout of everything else is unchanged.
+            // `> ` on the first line. `input_height` already reserves the style's chrome (the
+            // two rules, the box border or `bar`'s status row), so the layout of everything
+            // else is unchanged.
             let inner_width = input_inner_width(app, input_area.width as usize);
-            let visible = input_area.height.saturating_sub(2).max(1) as usize;
+            let visible = input_visible_rows(app, input_area.height);
             let text = app.input.text();
             let rows = crate::composer::rows(&text, inner_width);
             let (cursor_row, cursor_col) = app.input.cursor_cell(inner_width);
@@ -1551,8 +1670,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             // the state text on the top rule; idle has neither.
             let status = app.spinner_status();
             let spin = app.spinner_frame();
-            // Both styles reserve the same two rows (rules / borders), so the rest of the
-            // layout does not depend on the choice.
             match app.input_style {
                 InputStyle::Lines => {
                     let body: Vec<Line> = if empty {
@@ -1634,15 +1751,53 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                         .title(title);
                     frame.render_widget(Paragraph::new(body).block(block), input_area);
                 }
+                InputStyle::Bar => {
+                    // ADR 0035 V3 (omp's `rail`): one background band per row with the accent
+                    // rail on the left, no border and no rules. The status row is the area's
+                    // first row **always**, so the band's own rows start one below it and a
+                    // turn starting or ending never moves anything.
+                    let band = app.theme.input_bar;
+                    // The rail takes the accent (pi's `accent`, the role the `box` border uses)
+                    // over the band; the text keeps its own level — main, or the weak
+                    // placeholder — and the band only supplies the background behind it
+                    // (`band.patch(style)` lets the text's own color win).
+                    let rail_style = band.patch(app.theme.notice_label);
+                    let text_style = band.patch(style);
+                    let area_width = input_area.width as usize;
+                    let mut body: Vec<Line> = vec![bar_status_line(app)];
+                    let text_rows: Vec<String> = if empty {
+                        vec![INPUT_HINT.to_string()]
+                    } else {
+                        rows[offset..].to_vec()
+                    };
+                    for row in &text_rows {
+                        let mut spans = vec![
+                            Span::styled(bar_rail(app).to_string(), rail_style),
+                            // The one cell of padding after the rail carries the band, never
+                            // the text's own style.
+                            Span::styled(" ".to_string(), band),
+                            Span::styled(row.clone(), text_style),
+                        ];
+                        // Fill the rest of the row with the band, so it covers the whole width
+                        // (a band that stops at the text reads as a highlight, not a surface).
+                        let used = BAR_LEAD + UnicodeWidthStr::width(row.as_str());
+                        if used < area_width {
+                            spans.push(Span::styled(" ".repeat(area_width - used), band));
+                        }
+                        body.push(Line::from(spans));
+                    }
+                    frame.render_widget(Paragraph::new(body), input_area);
+                }
             }
             if app.input_editable() {
-                // The text starts after the prompt (`> `, two cells) or after the box border
-                // (one cell); a full row clamps the cursor to its last cell rather than onto the
-                // rule or the border.
+                // The text starts after the prompt (`> `, two cells), after the box border plus
+                // the `❯ ` prompt, or after `bar`'s rail plus its one cell of padding; a full
+                // row clamps the cursor to its last cell rather than onto the rule or border.
                 let lead = match app.input_style {
                     InputStyle::Lines => prompt_width(INPUT_PROMPT) as u16,
                     // Border (1) + the `❯ ` prompt (2 cells).
                     InputStyle::Box => 1 + prompt_width(BOX_PROMPT) as u16,
+                    InputStyle::Bar => BAR_LEAD as u16,
                 };
                 let col = cursor_col.min(inner_width.saturating_sub(1)) as u16;
                 let row = (cursor_row - offset).min(visible.saturating_sub(1)) as u16;

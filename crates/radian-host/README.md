@@ -48,8 +48,8 @@ Option<GitCommitTools>)` is one `ToolProvider`, so
 `Agent` still has a single provider type. `open_session()` opens the MCP servers **first** (if
 that fails, no built-in state needs unwinding), then the built-in tools, then merges the specs
 with `merge_tool_specs(built_in, mcp)`. `HostSession::execute` routes a call to the built-in
-session when the name is a built-in one, else to MCP; `close()` closes the MCP session (the
-built-in session has nothing to release, so it uses the trait's default `close`).
+session when the name is a built-in one, else to MCP; `close()` shuts the background jobs
+down (ADR 0037 decision 6) and then closes the MCP session.
 
 ### `git_commit` (ADR 0030 R10)
 
@@ -62,6 +62,20 @@ resolve inside the workspace (the file tools' boundary). It refuses a detached H
 `main`/`master`, `[git] protected_branches`, and any branch but an allowed one (the
 orchestration slices pass `radian/<id>`). It never pushes, branches, amends or rebases, and it
 appends the non-critical `GitCommitted { commit, branch, files }` audit event.
+
+### Background jobs (ADR 0037)
+
+The host creates the `radian_coding::Jobs` registry (from the canonical workspace root) and
+passes it to `CodingTools::with_jobs`, so it can subscribe to job lifecycle notices.
+`job_notify::JobNotifier` writes the non-critical `BackgroundJobStarted` /`BackgroundJobSettled`
+records and sends **one System message** per notifiable settle: while a turn is in flight it
+`inject`s (`next_step`, no wake), and while the driver is idle it `followup`s (`next_turn`,
+which wakes a turn). After `MAX_CONSECUTIVE_WAKES` (3) wake-started turns with no user input it
+degrades to `inject` only; a user message (`SessionCommand::SendFollowup`/`Steer`/`Inject`)
+resets the budget. A settle is not notified when the model already has it (a `job_output
+wait`, a `job_kill`, a session-exit cleanup); a timeout is notified. On resume, a
+`BackgroundJobStarted` with no settle is injected once as unknown and never re-run. The registry
+also kills every running group on `close()` and on drop (the panic path, `killpg` only).
 
 ## Headers, session ids, MCP config, workspace
 

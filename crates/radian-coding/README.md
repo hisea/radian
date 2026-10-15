@@ -15,7 +15,10 @@ contract; this file is the practical summary.
 | `list` | `Shared` | List a directory, sorted, with kind and size; symlinks shown but not followed; capped by `max_entries`. |
 | `git_status` | `Shared` | `git status --porcelain=v1 --branch --untracked-files=all`. |
 | `git_diff` | `Shared` | `git diff [--cached] [-- <path>]`; the path must stay inside the workspace. |
-| `shell` | `Exclusive` | `/bin/sh -c <command>` **through a sandbox**, with `cwd` (workspace-relative), `timeout_secs` and `max_output_bytes`. Present only when the host built the tools with a `Sandbox`. |
+| `shell` | `Exclusive` | `/bin/sh -c <command>` **through a sandbox**, with `cwd` (workspace-relative), `timeout_secs`, `max_output_bytes` and `background`. Present only when the host built the tools with a `Sandbox`. `background: true` returns at once with a job id and an output file (no default timeout); the three `job_*` tools below read, list and stop it (ADR 0037). |
+| `job_output` | `Shared` | Read what a background `shell` job produced since the last call, plus a `[status: …]` line. `wait: true` blocks until the job ends or `timeout_ms` (default 30 s, max 600 s); a wait timeout does **not** kill the job. |
+| `job_list` | `Shared` | List this session's background jobs: id, command first line, state (running / exited n / signal n / killed / timed out), elapsed, output file. |
+| `job_kill` | `Shared` | SIGTERM the job's whole process group, then SIGKILL after 2 s. A settled job is a no-op. |
 | `ask_user` | `Exclusive` | Ask the user one or more structured questions (single/multi/text) and wait for the answers. Its **own** provider (`AskTools`, not part of `CodingTools`): a host mounts it only when a human is there to answer, and it exists whether or not the host has a workspace (ADR 0024 Q5). The wait races the turn's cancellation and never fabricates an answer. |
 
 `write`/`patch` are `Exclusive` because they mutate files: running them alone keeps each
@@ -47,7 +50,8 @@ need, do **not** raise `max_bytes` to reach it.
 | `max_git_output_bytes` | 1 MiB | Bound git output, truncated on a character boundary with a marker. |
 | `git_timeout` | 10 s | A hung git must not hang the turn. |
 | `default_shell_output_bytes` / `max_shell_output_bytes` | 64 KiB / 1 MiB, **per stream** | Aligned with `read`'s default and hard cap. Past the budget the first quarter and the last three quarters are kept and the middle is replaced by a marker naming the discarded bytes; the tail is larger because a failing build's error is at the end. `max_output_bytes` lets the model raise it, clamped to the hard cap. Discarded bytes are reported per stream in the text and in `structured.*_truncated_bytes`. |
-| `default_shell_timeout` / `max_shell_timeout` | 60 s / 600 s | A model-supplied `timeout_secs` is clamped to the maximum, and the clamp is reported. |
+| `default_shell_timeout` / `max_shell_timeout` | 60 s / 600 s | A model-supplied `timeout_secs` is clamped to the maximum, and the clamp is reported. A command that needs longer uses `background: true` (no default timeout). |
+| `MAX_RUNNING_JOBS` / `JOB_RING_BYTES` | 4 / 64 KiB | At most four background jobs run at once (a fifth start is a tool error); each holds a process group, an `.out` file and a bounded ring. The ring only has to cover one `job_output` gap; the file is the full history. |
 
 ## What is enforced, and what is not
 

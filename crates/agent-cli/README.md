@@ -1,6 +1,7 @@
 # agent-cli
 
-`agent` is a chat client: one model (OpenAI-compatible or Anthropic), optional MCP servers,
+The library behind `radian exec` (ADR 0032): a chat client with one model
+(OpenAI-compatible or Anthropic), optional MCP servers,
 optional built-in file/git tools (`--workspace`), and sessions that are written to disk
 through `radian-runtime` / `radian-session`.
 
@@ -22,7 +23,7 @@ The key is read only from the environment variable, never from the command line;
 printed and never written to the session file. The session's config snapshot records the
 provider name and the model, not the key or a header value.
 
-`--version` prints `agent <version>` and exits 0 before any setup runs: no key is read, no
+`radian exec --version` prints `radian <version>` and exits 0 before any setup runs: no key is read, no
 session file is created, and no network is touched. The version is the package's own
 (`CARGO_PKG_VERSION` in `Cargo.toml`), never a literal in the source.
 
@@ -84,14 +85,14 @@ These are their own mode: `--export`/`--search`/`--list`/`--fork` conflict with 
 listing does not use one; `--fork` uses it to name the child); clap rejects a combination with
 exit 2. `--model` is only required for a conversation (`-p` or interactive).
 
-A closed stdout is not an error: `agent --list | head -1` (and the same for `--export`,
-`--search` and every `agent memory` subcommand) stops quietly with **exit 0** and prints
+A closed stdout is not an error: `radian exec --list | head -1` (and the same for `--export`,
+`--search` and every `radian memory` subcommand) stops quietly with **exit 0** and prints
 nothing. The process's default `SIGPIPE` disposition is deliberately **not** restored: a write
-to an exited MCP child's pipe would then kill the whole agent with a signal.
+to an exited MCP child's pipe would then kill the whole command with a signal.
 
-## Memory (`agent memory …`)
+## Memory (`radian memory …`)
 
-`agent memory` is the user side of ADR 0021 (M1): durable memory shared across sessions,
+`radian memory` is the user side of ADR 0021 (M1): durable memory shared across sessions,
 stored under `~/.radian/memory/` (`$RADIAN_HOME/memory`). It is its own mode: **no `--model`,
 no key, no session file, no network**. Put `--workspace <dir>` before `memory` to name the
 workspace; the default is the current directory.
@@ -222,16 +223,16 @@ anywhere (the ADR 0008 §4.2 heuristic) both fail startup, and the message names
 without echoing the value. `schema_version` is required; a newer one is read read-only with a
 warning, an older one is refused. See the root `README.md` for the example file.
 
-## Migrating a Pi configuration (`agent config import-pi`)
+## Migrating a Pi configuration (`radian config import-pi`)
 
-`agent config import-pi --from <pi-agent-dir>` drafts a Radian configuration from a Pi agent
+`radian config import-pi --from <pi-agent-dir>` drafts a Radian configuration from a Pi agent
 directory (`~/.pi/agent` by default for Pi; `PI_CODING_AGENT_DIR` moves it). It is its own
 mode: **no `--model`, no key, no session file, no network**.
 
 ```sh
-agent config import-pi --from ~/.pi/agent > /tmp/radian.toml   # a draft on stdout
-agent config import-pi --from ~/.pi/agent                      # review it, write nothing
-agent config import-pi --from ~/.pi/agent --write              # save it (refuses to overwrite)
+radian config import-pi --from ~/.pi/agent > /tmp/radian.toml   # a draft on stdout
+radian config import-pi --from ~/.pi/agent                      # review it, write nothing
+radian config import-pi --from ~/.pi/agent --write              # save it (refuses to overwrite)
 ```
 
 - `--from` is **required** and has no default: the command never reads a directory you did not
