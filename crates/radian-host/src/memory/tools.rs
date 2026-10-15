@@ -177,7 +177,7 @@ fn tool_failure(error: MemoryServiceError) -> ToolFailure {
             "memory_unlinked",
             format!(
                 "{error}. Save to the global scope instead, or ask the user to run \
-                 `agent memory project new` or `agent memory relink <ProjectId>`"
+                 `radian memory project new` or `radian memory relink <ProjectId>`"
             ),
         ),
         MemoryServiceError::Storage(MemoryError::NotFound { id }) => {
