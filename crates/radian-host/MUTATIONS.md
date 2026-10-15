@@ -646,3 +646,15 @@ Base `65ea1ed` · 一次性 worktree `/tmp/radian-ce-mut`，还原后 `git statu
 | CE-M3 | 转义大小写敏感（只查小写） | `context::tests::a_content_closing_tag_is_escaped`（大写变体未转义） | ✅ |
 
 3/3 抓住。
+
+## review-fixes-1 (2026-10-15): git filters + corrupt trust
+
+One-shot detached worktree `.radian-worktrees/rf1-mutations` (from the branch HEAD, deleted
+after); each mutation restored with `git checkout --`, `git status --short` empty at the end.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| RF1-FA-A | skip the filter check entirely (`check_filters` returns `Ok`) | caught (rc=101) | `a_filter_driver_not_in_allowed_filters_is_refused` (the marker was created) |
+| RF1-FA-B | allow every driver (drop the `allowed_filters` membership check) | caught (rc=101) | `a_filter_driver_not_in_allowed_filters_is_refused` |
+| RF1-FA-C | treat `lfs` with a non-`git-lfs` command as allowed | caught (rc=101) | `lfs_is_allowed_only_with_a_git_lfs_command` |
+| RF1-FC | `read_at(path).unwrap_or_default()` in `set_at` again | caught (rc=101) | `trust::tests::a_corrupt_record_is_not_overwritten` |
