@@ -593,3 +593,16 @@ Base `65ea1ed` · 一次性 worktree `/tmp/radian-ce-mut`，还原后 `git statu
 | CE-M3 | 转义大小写敏感（只查小写） | `context::tests::a_content_closing_tag_is_escaped`（大写变体未转义） | ✅ |
 
 3/3 抓住。
+
+## 分档定价（研究 F5）
+
+Base `ba964a4` · 一次性 worktree `.radian-worktrees/tp-mut`（detached，跑完删除）。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| TP1 | `rates_for` 恒用基础档（忽略 tiers） | `cost::tests::a_context_tier_prices_the_whole_call_above_its_threshold` | ✅ |
+| TP3 | 边界用 `>=` 而不是 `>` | 同上（「正好在阈值仍是基础档」那条断言） | ✅ |
+
+TP2（「阈值用会话累计」）在当前结构里不可表达：`cost_micros`/`rates_for` 是纯函数，只拿到
+**本次调用**的 `ModelUsage`，没有会话累计可拿；`restore_usage` 也是逐条记录调用 `cost_micros`。
+这正是研究 F5 要的语义（阈值比的是这次请求自己的输入长度），所以没有对应变异。
