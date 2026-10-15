@@ -468,14 +468,28 @@ impl Inbox {
     }
 }
 
-/// A value that differs between processes (and between runs): the process id plus the
-/// wall clock in nanoseconds. Ids only need to be unique, not ordered or guessable.
+/// A process-wide sequence for `id_nonce`. The wall clock alone is not enough: the clock's
+/// granularity can hand two calls in a tight loop the **same** nanosecond (observed on macOS,
+/// where two `Inbox::new` in one test collided), and two inboxes in one process would then
+/// generate the same prefix - and their counters both start at 1, so the ids collided.
+static NONCE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// A value that differs between processes (and between runs) **and** between calls in one
+/// process: the process id, the wall clock in nanoseconds, and a process-wide counter. Ids
+/// only need to be unique, not ordered or guessable.
 fn id_nonce() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("{:x}{:x}", std::process::id(), nanos)
+    let seq = NONCE_SEQ.fetch_add(1, Ordering::Relaxed);
+    id_nonce_at(std::process::id(), nanos, seq)
+}
+
+/// The nonce's composition, split out so a test can inject the **same** clock reading twice
+/// (the collision the counter exists for).
+fn id_nonce_at(pid: u32, nanos: u128, seq: u64) -> String {
+    format!("{pid:x}{nanos:x}{seq:x}")
 }
 
 fn message_meta_id(message: &Message) -> Option<&MessageId> {
@@ -552,6 +566,42 @@ mod tests {
         let a = first.followup("a", InputSource::User).await.unwrap();
         let b = second.followup("b", InputSource::User).await.unwrap();
         assert_ne!(a, b);
+    }
+
+    #[tokio::test]
+    async fn inboxes_built_in_a_tight_loop_never_generate_the_same_id() {
+        // The regression the nonce's counter exists for: a tight loop can read the same
+        // nanosecond for many `Inbox::new` calls, and with a clock-only nonce every inbox
+        // then started at `...-1`. 512 is enough to cross a clock tick many times over.
+        let mut ids = std::collections::HashSet::new();
+        for _ in 0..512 {
+            let inbox = Inbox::new(4);
+            let id = inbox.followup("x", InputSource::User).await.unwrap();
+            assert!(ids.insert(id), "an id repeated within one process");
+        }
+    }
+
+    #[test]
+    fn the_nonce_differs_for_the_same_clock_reading() {
+        // Injected directly: the same pid **and** the same nanosecond (the collision), which
+        // the process-wide counter must still separate.
+        assert_ne!(
+            id_nonce_at(7, 123_456_789, 0),
+            id_nonce_at(7, 123_456_789, 1)
+        );
+        assert_ne!(
+            id_nonce_at(7, 123_456_789, 1),
+            id_nonce_at(7, 123_456_789, 2)
+        );
+        // And the other two parts still differ across processes and runs.
+        assert_ne!(
+            id_nonce_at(7, 123_456_789, 0),
+            id_nonce_at(8, 123_456_789, 0)
+        );
+        assert_ne!(
+            id_nonce_at(7, 123_456_789, 0),
+            id_nonce_at(7, 123_456_790, 0)
+        );
     }
 
     #[tokio::test]
