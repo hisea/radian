@@ -611,6 +611,12 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
 - **the `AUTO` status marker** (ADR 0026 D9): turn auto on with `/auto on` — does the reversed
   `AUTO` segment stand out as "this session behaves differently" in `dark`, `light` and `mono`,
   without reading as an error? pty automation asserts the text, not the prominence.
+- **the `/access` confirmation and marker** (ADR 0038 slice 2): type `/access` — does it name
+  the current tier and its source (`flag`/`config`/`project`/`session`/`default`)? Type
+  `/access full` — does the confirmation panel make "full means no sandbox" obvious, is the
+  default highlight on `cancel`, and do ↑/↓/Enter/Esc feel right? After "remember for this
+  project", restart — is the tier applied and is the `(project)` marker readable in the footer
+  and the startup summary? pty automation asserts the text, not the feel (ADR 0009).
 - **the input area's three styles**: is the default `bar` band
   comfortable — the rail clear, the band reaching the right edge, multi-line and a CJK line
   banded on every row, and the status row above it (`◜  Working · 12s · esc to interrupt`) not

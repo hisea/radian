@@ -57,6 +57,15 @@ pub(crate) fn parse_profile(name: &str) -> Result<ProfileArg, SetupError> {
     }
 }
 
+/// The [`ProfileArg`] for a [`Preset`] (the reverse of [`ProfileArg::preset`]).
+pub(crate) fn from_preset(preset: Preset) -> ProfileArg {
+    match preset {
+        Preset::Safe => ProfileArg::Safe,
+        Preset::WorkspaceWrite => ProfileArg::WorkspaceWrite,
+        Preset::FullAccess => ProfileArg::FullAccess,
+    }
+}
+
 /// The default profile: **`workspace-write`**, never `full-access`.
 ///
 /// Rationale: it is the least surprising useful mode. The built-in file tools are confined by
