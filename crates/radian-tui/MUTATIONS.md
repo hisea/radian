@@ -1165,3 +1165,14 @@ Base `e2a0392` · 一次性 worktree `/tmp/radian-ime-mut*`，还原后 `git sta
 IM-M2 与既有记录一致（见上文 `RESIZE-B`：closed-master 测试抓不到收窄的缺失——收窄省的是 CPU，
 不是保证退出；退出由第一次 `tty_readiness` 的 Gone 与主循环兜底覆盖，两者都用同一个
 `tty_readiness`）。IM-M3 证明这次改动没有削弱该测试对 POLLHUP 的检查。
+
+## fork-commit（/fork 等落盘, 2026-10-15）
+
+Base `52265c1` · 一次性 worktree `/tmp/radian-fc-mut`，还原后 `git status --short` 为空。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| FC-M1 | `/fork` 不看 `turn_committed`（间隙下立即 fork, 空历史） | `pty_a_fork_waits_for_the_turn_to_be_committed` | ✅ |
+| FC-M2 | `ForkDeadline` 超时也执行 fork（生成空子会话） | `pty_a_fork_gives_up_when_the_turn_is_still_being_written` | ✅ |
+
+2/2 抓住。
