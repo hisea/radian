@@ -52,7 +52,7 @@ impl Glyphs {
     }
 
     /// The tool-call status glyphs (ADR 0028 rule 4): running, success, failure.
-    /// The unicode set is covered by all seven checked fonts (ADR 0027): omp's
+    /// The unicode set is covered by all six checked fonts (ADR 0027 and 6): omp's
     /// `⟳`/`✔`/`✘` are not, so `~`/`+`/`×` stand in. The Nerd set uses the Font Awesome
     /// codepoints; the ASCII set is plain.
     pub fn tool_status(self) -> [&'static str; 3] {
@@ -1199,7 +1199,7 @@ fn item_data<'a>(app: &'a App, id: &str, item: &'a Item) -> Option<ItemData<'a>>
                 if app.footer_glyphs() == Glyphs::Ascii {
                     " auto".to_string()
                 } else {
-                    // `⟲` (U+27F2) is missing from six of the seven fonts (revision 4): `~`.
+                    // `⟲` (U+27F2) is missing from five of the six fonts (revision 4): `~`.
                     " ~".to_string()
                 }
             } else {
@@ -1421,7 +1421,7 @@ fn render_bar(item: &Item, fraction: f64) -> String {
 /// icon carry one; the rest are plain text.
 fn glyph(id: &str, glyphs: Glyphs) -> &'static str {
     match (id, glyphs) {
-        // ADR 0027: the unicode icons must exist in all seven mainstream coding
+        // ADR 0027 and 6: the unicode icons must exist in all six mainstream coding
         // fonts (see the README's coverage table), so `⌂ ◷ ◫ ◐ ⛁ ⬡` are replaced or dropped.
         // `@ # *` and `»` are in every one; the rest are text-only.
         ("host", Glyphs::Unicode) => "@ ",
@@ -1490,7 +1490,7 @@ mod tests {
     use super::*;
 
     /// Every non-ASCII glyph the `unicode` tier can draw (ADR 0027). Each one is
-    /// checked against the seven fonts by `scripts/check-glyph-coverage.py` and listed in the
+    /// checked against the six fonts by `scripts/check-glyph-coverage.py` and listed in the
     /// README's coverage table. A new glyph makes this test fail until it is re-checked and
     /// added here.
     const VERIFIED_COVERED: &str = "»│━─×▖▘▝▗";
@@ -1563,7 +1563,7 @@ mod tests {
         }
     }
 
-    /// The unicode tier only draws glyphs the seven checked fonts all have. Every item glyph
+    /// The unicode tier only draws glyphs the six checked fonts all have. Every item glyph
     /// (from the built-in presets), the spinner frames, the separators, the context bar and
     /// the auto marker are checked.
     #[test]

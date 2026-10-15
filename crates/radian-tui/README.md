@@ -270,12 +270,12 @@ find_next = ["ctrl-g", "shift-enter"]
 `git_branch`/`worktree`（绘制路径从不跑 git），刷新失败保留旧值并画成暗色。`[tui.widgets]`
 的 `above_input`/`below_input` 把同样的条目 id 放到输入框上/下一行。
 
-#### Glyph coverage (ADR 0027)
+#### Glyph coverage (ADR 0027 and 6)
 
 A glyph the font does not have is drawn by a system fallback font with different metrics, so it
 sits off the baseline. The `unicode` tier (the default, no Nerd Font needed) therefore only uses
-characters that **all** of Menlo, SF Mono, JetBrains Mono, Cascadia Code, Fira Code, Operator
-Mono and Source Code Pro have. The brand is `R` (bold accent) here, `󰰠` under `nerd`, `rad` under
+characters that **all** of Menlo, SF Mono, JetBrains Mono, Cascadia Code, Fira Code and
+Source Code Pro have (ADR 0027: Operator Mono left the reference set). The brand is `R` (bold accent) here, `󰰠` under `nerd`, `rad` under
 `ascii`; `㎭` (U+33AD) is gone (East-Asian-Wide, off-baseline fallback). The spinner's default
 is `pulse` (`⏺`, one cell); the covered optional kind is `quadrant` (`▖▘▝▗`). The arc
 (`◜◝◞◟`), the braille (`⠋⠙⠸⠴`) and `pulse` itself are the **documented exceptions** to this
@@ -288,35 +288,35 @@ not installed is printed as `未查`, never guessed. The unit test
 `footer::tests::unicode_tier_glyphs_are_all_verified_covered` keeps a new unicode-tier glyph
 from slipping in unchecked.
 
-| glyph | codepoint | use | Menlo | SF Mono | JetBrains Mono | Cascadia Code | Fira Code | Operator Mono | Source Code Pro |
-|---|---|---|---|---|---|---|---|---|---|
-| `R` | U+0052 | brand (unicode) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `@` | U+0040 | host | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `»` | U+00BB | speed | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `*` | U+002A | reasoning | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `#` | U+0023 | session | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `^` | U+005E | tokens in | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `v` | U+0076 | tokens out | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `~` | U+007E | auto-compaction marker | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `~` `+` `×` | U+007E/2B/D7 | tool status: running / success / failure | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `>` | U+003E | reasoning fold marker | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `│` | U+2502 | footer separator | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `━` | U+2501 | context bar fill | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `─` | U+2500 | context bar empty | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `▖` | U+2596 | spinner frame 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `▘` | U+2598 | spinner frame 2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `▝` | U+259D | spinner frame 3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `▗` | U+2597 | spinner frame 4 (`quadrant`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| glyph | codepoint | use | Menlo | SF Mono | JetBrains Mono | Cascadia Code | Fira Code | Source Code Pro |
+|---|---|---|---|---|---|---|---|---|
+| `R` | U+0052 | brand (unicode) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `@` | U+0040 | host | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `»` | U+00BB | speed | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `*` | U+002A | reasoning | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `#` | U+0023 | session | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `^` | U+005E | tokens in | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `v` | U+0076 | tokens out | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `~` | U+007E | auto-compaction marker | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `~` `+` `×` | U+007E/2B/D7 | tool status: running / success / failure | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `>` | U+003E | reasoning fold marker | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `│` | U+2502 | footer separator | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `━` | U+2501 | context bar fill | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `─` | U+2500 | context bar empty | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▖` | U+2596 | spinner frame 1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▘` | U+2598 | spinner frame 2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▝` | U+259D | spinner frame 3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `▗` | U+2597 | spinner frame 4 (`quadrant`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 Documented exceptions (allowed to fall back; the test keeps them in a separate set):
 
-| glyph | codepoint | use | Menlo | SF Mono | JetBrains Mono | Cascadia Code | Fira Code | Operator Mono | Source Code Pro |
-|---|---|---|---|---|---|---|---|---|---|
-| `⏺` | U+23FA | spinner default (`pulse`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `◜` `◝` `◞` `◟` | U+25DC…DF | spinner `arc` | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ |
-| `⠋` `⠙` `⠹` `⠸` `⠼` `⠴` `⠦` `⠧` `⠇` `⠏` | U+280B… | spinner `braille` | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| glyph | codepoint | use | Menlo | SF Mono | JetBrains Mono | Cascadia Code | Fira Code | Source Code Pro |
+|---|---|---|---|---|---|---|---|---|
+| `⏺` | U+23FA | spinner default (`pulse`) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `◜` `◝` `◞` `◟` | U+25DC…DF | spinner `arc` | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ |
+| `⠋` `⠙` `⠹` `⠸` `⠼` `⠴` `⠦` `⠧` `⠇` `⠏` | U+280B… | spinner `braille` | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ |
 
-Replaced or dropped in the `unicode` tier (they were not in all seven fonts):
+Replaced or dropped in the `unicode` tier (they were not in all six fonts):
 
 | was | U+ | now |
 |---|---|---|
@@ -334,10 +334,10 @@ Replaced or dropped in the `unicode` tier (they were not in all seven fonts):
 | `▶` `▼` startup fold | U+25B6/BC | `+` `-` |
 | `㎭` brand | U+33AD | `R` / `󰰠` / `rad` |
 
-Not in the all-seven set but kept (they are not tier-gated icons): the `❯` input prompt (the
+Not in the all-six set but kept (they are not tier-gated icons): the `❯` input prompt (the
 owner's choice; `box` style only) and text arrows (`→`, `•` in the question UI — `•` is in all
-seven, `→` is not, but it is prose, not an icon). The banner wordmark and the box-drawing
-characters (`╭╮╯╰`, `┌┐└┘`, `─│`) are in all seven.
+six, `→` is not, but it is prose, not an icon). The banner wordmark and the box-drawing
+characters (`╭╮╯╰`, `┌┐└┘`, `─│`) are in all six.
 - `theme`: `dark` and `light` are **pi's own palettes**, read
   through the same ADR 0029 conversion a theme file uses: the three text levels are pi's
   brightness gradient (dark: `text` 89%, `muted` 67%, `dim` 56%), and every semantic color
