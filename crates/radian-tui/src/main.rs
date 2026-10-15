@@ -419,9 +419,9 @@ fn main() -> ExitCode {
             exit_trace("exit");
             code
         }
-        Ok(Err(message)) => {
-            print_exit_line(&message);
-            ExitCode::from(1)
+        Ok(Err(error)) => {
+            print_exit_line(error.message());
+            ExitCode::from(error.code())
         }
         Err(_) => {
             let mut message = "the app panicked".to_string();
@@ -439,6 +439,43 @@ fn main() -> ExitCode {
     }
 }
 
+/// Why the TUI stopped. ADR 0032 A3 unifies the codes: a **startup refusal** is a
+/// usage/setup error and exits 2 (it was 1 before), everything that fails once the run began
+/// (the driver, the input, `--list`) exits 1.
+enum RunError {
+    /// A startup/setup refusal: a bad config, an unknown keybinding, a `--resume` with
+    /// nothing to resume, the window check. Exit 2, like clap's own usage errors.
+    Startup(String),
+    /// The run itself failed. Exit 1.
+    Failed(String),
+}
+
+/// Every `?` in the startup phase converts a plain message into a [`RunError::Startup`] - the
+/// default, because that phase is where nearly every refusal happens. The few failures that
+/// can only happen after the run began name [`RunError::Failed`] explicitly.
+impl From<String> for RunError {
+    fn from(message: String) -> Self {
+        Self::Startup(message)
+    }
+}
+
+impl RunError {
+    /// The process exit code (ADR 0032 A3).
+    fn code(&self) -> u8 {
+        match self {
+            Self::Startup(_) => 2,
+            Self::Failed(_) => 1,
+        }
+    }
+
+    /// The one line the normal screen gets.
+    fn message(&self) -> &str {
+        match self {
+            Self::Startup(message) | Self::Failed(message) => message,
+        }
+    }
+}
+
 /// Prints the exit reason on the normal screen. `eprintln!` panics when the terminal is
 /// already gone (a closed pty makes the write fail), which would turn a clean exit into 101;
 /// a failure to print the line is not a failure to exit.
@@ -452,12 +489,14 @@ fn run(
     runtime: &tokio::runtime::Runtime,
     rx: Receiver<UiEvent>,
     tx: Sender<UiEvent>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, RunError> {
     mark("run-start");
     if cli.list {
         return match list_sessions(&cli) {
             Ok(()) | Err(ListError::BrokenPipe) => Ok(None),
-            Err(ListError::Failed(message)) => Err(message),
+            // `--list` failing is a real error of this run, not a startup refusal (ADR 0032
+            // A3's table: print-and-exit modes return 1 for a real error).
+            Err(ListError::Failed(message)) => Err(RunError::Failed(message)),
         };
     }
     // ADR 0013 decision 4: diagnostics live in the user cache directory, and cleanup runs at
@@ -486,7 +525,7 @@ fn run(
     }
     // A keymap conflict refuses startup before the terminal is entered.
     if let Err(error) = radian_tui::keys::Keymap::from_config(&config.tui.keybindings) {
-        return Err(format!("config: {error}"));
+        return Err(RunError::Startup(format!("config: {error}")));
     }
     // ADR 0026 D8: on a resume the journal's last model change outranks the config file (the
     // command line still outranks both). `--resume`'s id is known by here (`dir` too).
@@ -511,10 +550,10 @@ fn run(
     // Nothing to resume is a refusal, not a new session: `--resume` without a value never
     // creates a file.
     if resume_only && startup_picker.is_none() {
-        return Err(
+        return Err(RunError::Startup(
             "no sessions for this workspace to resume; run without --resume to start one"
                 .to_string(),
-        );
+        ));
     }
     let pick_notice = cli.pick && startup_picker.is_none();
 
@@ -730,7 +769,7 @@ fn run(
         Some(credential) => Some(credential),
         None if is_local_base_url(&probe_base_url) => None,
         None => {
-            return Err(
+            return Err(RunError::Startup(
                 match radian_host::resolve_note(&key_id).map_err(|e| e.to_string())? {
                     Some(note) => note,
                     None => format!(
@@ -740,7 +779,7 @@ fn run(
                         radian_host::redact_base_url(&probe_base_url)
                     ),
                 },
-            );
+            ));
         }
     };
     // The config's headers come first, so a `--header` of the same name wins.
@@ -786,7 +825,7 @@ fn run(
     // window (the budget is then off).
     match window.startup_check() {
         radian_host::WindowCheck::Ok => {}
-        radian_host::WindowCheck::Refuse(message) => return Err(message),
+        radian_host::WindowCheck::Refuse(message) => return Err(RunError::Startup(message)),
         radian_host::WindowCheck::Warn(message) => eprintln!("{message}"),
     }
     if let Some(warning) = radian_host::output_ceiling_warning(request_max_output, window.output) {
@@ -1563,7 +1602,9 @@ fn run(
     exit_trace("stopped");
     match joined {
         radian_host::DriverEnd::Ok => {}
-        radian_host::DriverEnd::Failed(error) => return Err(format!("driver: {error}")),
+        radian_host::DriverEnd::Failed(error) => {
+            return Err(RunError::Failed(format!("driver: {error}")));
+        }
         radian_host::DriverEnd::Panicked(message) => {
             let mut message = format!("the driver task ended unexpectedly: {message}");
             if let Some(panic) = radian_tui::terminal::last_panic() {
@@ -1571,7 +1612,7 @@ fn run(
                 message.push_str(": ");
                 message.push_str(&panic);
             }
-            return Err(message);
+            return Err(RunError::Failed(message));
         }
     }
     // A failure in the UI loop is the app's failure too; the terminal is already restored.
