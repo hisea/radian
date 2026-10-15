@@ -153,17 +153,16 @@ pub fn apply(choice: Choice, workspace: &Path, audit: Audit<'_>) -> Result<Resol
     let path = trust_file().ok_or("no RADIAN_HOME or HOME to place trust.json under")?;
     match choice {
         Choice::TrustHere | Choice::UntrustHere => {
-            set_at(&path, workspace, resolved.decision, audit)
-                .map_err(|error| error.to_string())?;
+            set_at(&path, workspace, resolved.decision, audit)?;
         }
         Choice::TrustParent => {
             let parent = workspace
                 .parent()
                 .ok_or("the workspace has no parent directory")?;
-            set_at(&path, parent, resolved.decision, audit).map_err(|error| error.to_string())?;
+            set_at(&path, parent, resolved.decision, audit)?;
             // The child's own decision is cleared so the parent's trust is inherited, matching
             // pi's "trust parent" option.
-            forget_at(&path, workspace, audit).map_err(|error| error.to_string())?;
+            forget_at(&path, workspace, audit)?;
         }
         Choice::TrustSession | Choice::UntrustSession => unreachable!("not persistent"),
     }
@@ -279,18 +278,20 @@ pub fn write_at(path: &Path, store: &Store) -> std::io::Result<()> {
 }
 
 /// Sets one directory's decision at `path`, writes the record and calls `audit` once (T2). The
-/// directory is canonicalized first, so a symlink writes the target's key.
+/// directory is canonicalized first, so a symlink writes the target's key. A corrupt or
+/// unreadable record is an error (ADR 0031 T2): it is never silently replaced with an empty
+/// store, which would destroy every other directory's decision.
 pub fn set_at(
     path: &Path,
     dir: &Path,
     decision: Decision,
     audit: Audit<'_>,
-) -> std::io::Result<()> {
+) -> Result<(), String> {
     let canonical = canonical(dir);
     let key = canonical.to_string_lossy().into_owned();
-    let mut store = read_at(path).unwrap_or_default();
+    let mut store = read_at(path)?;
     store.insert(key, decision.as_bool());
-    write_at(path, &store)?;
+    write_at(path, &store).map_err(|error| format!("{}: cannot write: {error}", path.display()))?;
     audit(&ProjectTrustChanged {
         path: canonical,
         decision,
@@ -299,15 +300,16 @@ pub fn set_at(
 }
 
 /// Removes one directory's saved decision (the `/trust forget` path, 片 C). Removing a key that
-/// is not there is not an error and writes nothing.
-pub fn forget_at(path: &Path, dir: &Path, audit: Audit<'_>) -> std::io::Result<()> {
+/// is not there is not an error and writes nothing. A corrupt record is an error, like
+/// [`set_at`].
+pub fn forget_at(path: &Path, dir: &Path, audit: Audit<'_>) -> Result<(), String> {
     let canonical = canonical(dir);
     let key = canonical.to_string_lossy().into_owned();
-    let mut store = read_at(path).unwrap_or_default();
+    let mut store = read_at(path)?;
     if store.remove(&key).is_none() {
         return Ok(());
     }
-    write_at(path, &store)?;
+    write_at(path, &store).map_err(|error| format!("{}: cannot write: {error}", path.display()))?;
     audit(&ProjectTrustChanged {
         path: canonical,
         decision: Decision::Untrust,
@@ -592,6 +594,34 @@ mod tests {
         let before = audit.lock().unwrap().len();
         forget_at(&scratch.path(), &dir, &callback).unwrap();
         assert_eq!(audit.lock().unwrap().len(), before);
+    }
+
+    /// ADR 0031 T2 (review fix): a corrupt `trust.json` is an error, never silently replaced
+    /// with an empty store. The write must not happen, so every other directory's decision
+    /// survives.
+    #[test]
+    fn a_corrupt_record_is_not_overwritten() {
+        let scratch = Scratch::new("corrupt");
+        let dir = scratch.root.join("proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(scratch.path().parent().unwrap()).unwrap();
+        let bytes = b"{not json".to_vec();
+        std::fs::write(scratch.path(), &bytes).unwrap();
+        let audit = Mutex::new(Vec::new());
+        let callback = |change: &ProjectTrustChanged| audit.lock().unwrap().push(change.clone());
+
+        let error = set_at(&scratch.path(), &dir, Decision::Trust, &callback).unwrap_err();
+        assert!(error.contains("not valid JSON"), "{error}");
+        assert_eq!(
+            std::fs::read(scratch.path()).unwrap(),
+            bytes,
+            "the corrupt file was overwritten"
+        );
+        assert!(audit.lock().unwrap().is_empty(), "no audit on a failed write");
+
+        let error = forget_at(&scratch.path(), &dir, &callback).unwrap_err();
+        assert!(error.contains("not valid JSON"), "{error}");
+        assert_eq!(std::fs::read(scratch.path()).unwrap(), bytes);
     }
 
     #[test]
