@@ -372,6 +372,12 @@ pub const DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_m
 /// key, disarms it and the hint disappears.
 pub const QUIT_WINDOW: Duration = Duration::from_secs(2);
 
+/// How long a `/fork` waits for the last turn's boundary to reach the journal (the runtime
+/// `TurnFinished`) before giving up. The fork reads the parent file, so forking before the
+/// append would copy an empty history. Long enough for an fsync, short enough to tell the
+/// user the session is still writing.
+pub const FORK_COMMIT_WAIT: Duration = Duration::from_secs(5);
+
 /// Whether an [`Input`] is something the **user** did — a key, a paste, a mouse action, an
 /// approval answer — as opposed to a host fact or an asynchronous result. Only user input
 /// disarms the Ctrl-C quit window: a terminal resize or a
@@ -481,6 +487,7 @@ fn is_user_input(input: &Input) -> bool {
         | Input::MouseDrag { .. }
         | Input::MouseUp { .. } => true,
         Input::QuitDeadline
+        | Input::ForkDeadline
         | Input::Resize { .. }
         | Input::Stream(_)
         | Input::Event(_)
@@ -618,6 +625,8 @@ pub enum Input {
     /// The armed quit window closed: disarm and redraw, so the hint goes away. Sent by the
     /// loop on its `recv_timeout` (ADR 0023 U2: a time-driven display takes the timeout).
     QuitDeadline,
+    /// The deadline of a `/fork` waiting for the turn boundary to reach the journal.
+    ForkDeadline,
     /// A printable character typed into the focused text field.
     Char(char),
     /// The find box's backspace (not keymap-driven).
@@ -1156,6 +1165,16 @@ pub struct App {
     pub projection: Arc<SessionProjection>,
     pub quit: bool,
     pub note: Option<String>,
+    /// The driver stopped (a fatal error, a panic or a graceful close): the session is over.
+    /// The reason is shown in the status bar and `/fork` is refused. The TUI stays so the
+    /// reason is readable; the user quits with the ordinary keys.
+    pub session_ended: Option<String>,
+    /// Whether the last turn's boundary is on disk (the runtime `TurnFinished` was seen). A
+    /// `/fork` requested while a turn is still being written waits for it (see
+    /// [`App::pending_fork`]).
+    pub turn_committed: bool,
+    /// A `/fork` waiting for the turn boundary to reach the journal, with its deadline.
+    pub pending_fork: Option<Instant>,
     /// How many requests the queue holds (ADR 0023 U7), for the status bar.
     pub pending: usize,
     /// The startup screen: the leading block of entries (wordmark,
@@ -1294,6 +1313,9 @@ impl App {
             projection: Arc::new(SessionProjection::new()),
             quit: false,
             note: None,
+            session_ended: None,
+            turn_committed: true,
+            pending_fork: None,
             pending: 0,
             startup_screen: None,
             startup_len: 0,
@@ -2452,6 +2474,14 @@ impl App {
                 self.quit_pending = None;
                 UpdateResult::dirty()
             }
+            Input::ForkDeadline => {
+                // The wait for the turn boundary ran out: say so and drop the fork, so no
+                // empty child session is created.
+                if self.pending_fork.take().is_some() {
+                    self.push_notice("still writing the turn; try again");
+                }
+                UpdateResult::dirty()
+            }
             Input::Action(action) => {
                 // A completion menu is a selectable list: while it is up,
                 // Up/Down (and Ctrl-N) move the highlight and wrap, Enter and Tab accept the
@@ -3280,6 +3310,13 @@ impl App {
 
     /// ADR 0017: a failed turn is shown in the transcript; the session stays open.
     fn apply_runtime_event(&mut self, event: &RuntimeEvent) -> UpdateResult {
+        if let RuntimeEvent::TurnFinished { .. } = event {
+            // The turn boundary is on disk: a `/fork` that was waiting for it can run now.
+            self.turn_committed = true;
+            if self.pending_fork.take().is_some() {
+                return UpdateResult::effect(Effect::Session(command::SessionOutcome::Fork));
+            }
+        }
         if matches!(event, RuntimeEvent::ConfigChanged { .. }) {
             // The driver applied the queued change: the status bar's `next:` promise is done.
             self.next_model = None;
@@ -3706,10 +3743,24 @@ impl App {
             command::Outcome::Fork => {
                 // ADR 0022 §1: fork only when the session is idle. The decision is app state,
                 // so it is made here rather than in the loop.
+                if self.session_ended.is_some() {
+                    self.push_notice(
+                        "the session has ended; there is nothing to fork (`/fork` needs a live \
+                         session)",
+                    );
+                    return UpdateResult::dirty();
+                }
                 if self.turn() == TurnState::Running {
                     self.push_notice(
                         "finish the current turn before forking (`/fork` needs an idle session)",
                     );
+                    return UpdateResult::dirty();
+                }
+                // The turn ended (idle) but its boundary may not be on disk yet: the fork
+                // reads the parent file, so it would copy an empty history. Wait for the
+                // journaled `TurnFinished` (bounded by `FORK_COMMIT_WAIT`).
+                if !self.turn_committed {
+                    self.pending_fork = Some(self.now + FORK_COMMIT_WAIT);
                     return UpdateResult::dirty();
                 }
                 UpdateResult::effect(Effect::Session(command::SessionOutcome::Fork))
@@ -3901,7 +3952,10 @@ impl App {
             // ADR 0023 U5: the turn, budget, usage and tool facts are written to the session
             // projection by the event sink (`ProjectionSink`), never here. `App` handles only
             // the transcript, the note and the effects.
-            AgentEvent::TurnStarted => {}
+            AgentEvent::TurnStarted => {
+                // The turn is being written now; a `/fork` must wait for its `TurnFinished`.
+                self.turn_committed = false;
+            }
             // ADR 0027: the local turn timer starts with the model request and
             // stops with its response. The token count is the model's reported output.
             AgentEvent::ModelRequestStarted { .. } => self.timer.request_started(self.now),

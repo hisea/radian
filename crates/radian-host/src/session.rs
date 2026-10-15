@@ -374,7 +374,7 @@ pub struct HostBindings {
     /// Called for a failed turn (ADR 0017).
     pub runtime_events: Arc<dyn RuntimeEvents>,
     /// Called once when the driver task ends (the TUI sends an event, the CLI notifies).
-    pub driver_stopped: Arc<dyn Fn() + Send + Sync>,
+    pub driver_stopped: Arc<dyn Fn(DriverEnd) + Send + Sync>,
     /// Runs at the start of the driver task (a TUI test hook panics here).
     pub before_driver: Option<Arc<dyn Fn() + Send + Sync>>,
     /// A memory hook's warning line (the two hosts prefix it differently).
@@ -1079,6 +1079,14 @@ pub async fn open_session(
     })?;
     radian_session::trace::took("open/driver-recover", t0);
     driver.set_turn_timeout(turn_timeout);
+    // Test hook: a controllable gap between the turn's `RunFinished` and its journaled
+    // `TurnFinished` (the `/fork` commit-wait test).
+    driver.set_commit_delay(
+        std::env::var("RADIAN_TURN_COMMIT_DELAY_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(std::time::Duration::from_millis),
+    );
     driver.set_runtime_events(runtime_events);
     if let Some(budget_for) = budget_for.clone() {
         driver.set_budget_for(budget_for);
@@ -1136,7 +1144,7 @@ pub async fn open_session(
             Ok(Err(error)) => DriverEnd::Failed(error.to_string()),
             Err(join) => DriverEnd::Panicked(join.to_string()),
         };
-        driver_stopped();
+        driver_stopped(end.clone());
         let _ = done_tx.send(end);
     });
 

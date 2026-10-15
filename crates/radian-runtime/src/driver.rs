@@ -106,6 +106,9 @@ pub struct Driver<M: Model, P: ToolProvider, H: Hooks> {
     /// A per-turn time limit: each turn's deadline is computed when the turn starts, so it
     /// is fresh rather than an absolute instant fixed at startup.
     turn_timeout: Option<std::time::Duration>,
+    /// Test hook: how long to wait after the turn ends and before the journaled
+    /// `TurnFinished` (a controllable gap between `RunFinished` and the commit).
+    commit_delay: Option<std::time::Duration>,
     /// A host listener for the runtime events this driver writes (ADR 0017). `None` keeps the
     /// behavior a host that never installed one had before.
     runtime_events: Option<Arc<dyn RuntimeEvents>>,
@@ -201,6 +204,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             queue,
             options,
             turn_timeout: None,
+            commit_delay: None,
             runtime_events: None,
             #[cfg(feature = "testing")]
             testing_wake_branch: Arc::new(tokio::sync::Notify::new()),
@@ -282,6 +286,12 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
     /// applies to every turn rather than only the first.
     pub fn set_turn_timeout(&mut self, timeout: Option<std::time::Duration>) {
         self.turn_timeout = timeout;
+    }
+
+    /// Test hook: delay the journaled `TurnFinished` by `delay`, so a test can control the
+    /// gap between `RunFinished` (the UI's idle) and the commit.
+    pub fn set_commit_delay(&mut self, delay: Option<std::time::Duration>) {
+        self.commit_delay = delay;
     }
 
     /// Test seam: the wake-branch signal (fired when the turn loop enters the wake branch).
@@ -484,28 +494,42 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
                 if let Some(sink) = &runtime_events {
                     sink.on_runtime_event(&failed);
                 }
-                journal
-                    .append_runtime_event(RuntimeEvent::TurnFinished {
-                        turn_id,
-                        outcome: TurnOutcome::Failed,
-                        reason: None,
-                        stop_reason: None,
-                    })
-                    .await?;
+                if let Some(delay) = self.commit_delay {
+                    tokio::time::sleep(delay).await;
+                }
+                let finished = RuntimeEvent::TurnFinished {
+                    turn_id,
+                    outcome: TurnOutcome::Failed,
+                    reason: None,
+                    stop_reason: None,
+                };
+                journal.append_runtime_event(finished.clone()).await?;
+                // The host hears the journaled turn boundary (ADR 0023 U5): it flips its
+                // "the turn is on disk" flag, so a `/fork` cannot race the append.
+                if let Some(sink) = &runtime_events {
+                    sink.on_runtime_event(&finished);
+                }
                 // The driver keeps running: the next input opens a fresh turn.
                 return Ok(());
             }
         };
 
+        if let Some(delay) = self.commit_delay {
+            tokio::time::sleep(delay).await;
+        }
         let (outcome, reason, stop_reason) = wire_outcome(&outcome);
-        journal
-            .append_runtime_event(RuntimeEvent::TurnFinished {
-                turn_id,
-                outcome,
-                reason,
-                stop_reason,
-            })
-            .await?;
+        let finished = RuntimeEvent::TurnFinished {
+            turn_id,
+            outcome,
+            reason,
+            stop_reason,
+        };
+        journal.append_runtime_event(finished.clone()).await?;
+        // Journaled before the host hears it: the host flips its "the turn is on disk" flag
+        // here, so a `/fork` that arrives first waits for this event.
+        if let Some(sink) = &runtime_events {
+            sink.on_runtime_event(&finished);
+        }
         Ok(())
     }
 
