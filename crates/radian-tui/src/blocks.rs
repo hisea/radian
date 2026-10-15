@@ -2751,6 +2751,22 @@ mod tests {
         assert!(stripped.iter().any(|t| t.contains("a b c")), "{stripped:?}");
     }
 
+    /// A code block shows its fence line (weak) as its title and end.
+    #[test]
+    fn a_code_block_shows_its_fence() {
+        let mut entry = Entry::new(EntryKind::Assistant, "```rust\nlet x = 1;\n```\n");
+        let blocks = blocks_for(&mut entry, ReasoningMode::Collapsed);
+        let lines = layout(&entry, &blocks, DisplayModes::default(), 40);
+        let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert!(texts.contains(&"```rust"), "{texts:?}");
+        assert!(texts.contains(&"let x = 1;"), "{texts:?}");
+        assert_eq!(
+            texts.iter().filter(|t| **t == "```").count(),
+            1,
+            "{texts:?}"
+        );
+    }
+
     /// A heading's `#` uses the weak role; the text is the heading role (level 1 underlined).
     #[test]
     fn headings_keep_the_hash_with_their_own_role() {
