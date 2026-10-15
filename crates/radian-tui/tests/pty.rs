@@ -8357,6 +8357,52 @@ async fn pty_bang_is_single_and_escapable() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
+/// ADR 0033: Ctrl-C (`Effect::Cancel`) also stops a running `!`, so there is no orphan process
+/// group. A turn must be running for Ctrl-C to mean "cancel" (otherwise it arms quit), so this
+/// starts one with a reply that never finishes and then cancels both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_ctrl_c_stops_a_running_bang() {
+    let _serial = pty_guard();
+    // A reply that never finishes: the turn stays running while the bash does.
+    let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
+    let config = format!(
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
+         base_url = \"{}\"\n",
+        server.base_url
+    );
+    let mut pty = Pty::spawn_with_config(&[], &[("OPENAI_API_KEY", "sk-test")], &config, 24, 100);
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+    pty.send(b"!sleep 30\r");
+    assert!(
+        pty.wait_for_screen("sleep 30", 10),
+        "the command block is not on screen:\n{}",
+        pty.screen()
+    );
+
+    // Start a turn so Ctrl-C is a cancel; the mock hangs, so it is still running.
+    pty.send(b"hello\r");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while server.requests().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !server.requests().is_empty(),
+        "the turn never started:\n{}",
+        pty.screen()
+    );
+
+    // Ctrl-C cancels the turn AND the running `!`.
+    pty.send(&[0x03]);
+    assert!(
+        pty.wait_for_screen("[cancelled]", 20),
+        "Ctrl-C did not cancel the running !:\n{}",
+        pty.screen()
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
 /// ADR 0033: the loop runs `!` through radian-coding's **sandboxed** executor, never a naked
 /// `Command`. A structural test pins it, so a future edit cannot quietly bypass the sandbox.
 #[test]
