@@ -45,20 +45,28 @@ macOS 版本漂移（spike 记录过 `process-fork*` 变 unbound）。探针在�
 `file_type()` 不穿过符号链接，和它替换掉的 `metadata()`（`lstat`）语义一致——经符号链接可达的
 `.git` 不会被发现（`tests/backend.rs::a_symlinked_directory_is_not_traversed` 钉住这条）。
 
-两类子目录**不进入**，也不在其中发现 `.git`：
+两类子目录**只收集它自己根下的 `.git`，不往下钻**：
 
 - 名字是 `node_modules` 的目录（包管理器的依赖树，里面不该有要保护的仓库）；
 - 根下有标准缓存标记 `CACHEDIR.TAG`（`https://bford.info/cachedir/`）的目录。cargo 会把它写在
   `target/` 根上。
 
-理由是**性能与语义**：缓存目录里不该有要保护的仓库，而缓存目录可以极大。工作区里的 `target/`
-（10+ GB、`target/debug/deps` 一层几万个文件）在深度 3 以内，旧实现对**每个目录项**调用一次
-`entry.metadata()`，于是每次启动几十万次 `stat`，把 `workspace`/`full` 档位的首帧从 ~0.3 s 拉到
-~2.1 s（`RADIAN_TRACE_PHASES=1` 的 `open-session-done`）。新实现每个目录最多多一次
-`lstat`（查标记），不再随文件数增长（`policy.rs::the_walk_never_enters_a_cache_tagged_directory`
-用一个含 2000 个文件的 `CACHEDIR.TAG` 目录钉住"从未进入"）。**未改变**的语义：正常子目录里的
-`.git` 照旧被发现并只读；worktree 指针文件及其共享 common dir 的规则不变；工作区根自身即使是
-缓存目录也照样遍历（用户点名的目录不跳过）。
+理由是**性能**：缓存目录可以极大。工作区里的 `target/`（10+ GB、`target/debug/deps` 一层几万个
+文件）在深度 3 以内，旧实现对**每个目录项**调用一次 `entry.metadata()`，于是每次启动几十万次
+`stat`，把 `workspace`/`full` 档位的首帧从 ~0.3 s 拉到 ~2.1 s（`RADIAN_TRACE_PHASES=1` 的
+`open-session-done`）。新实现每个目录最多多一次 `lstat`（查标记），不再随文件数增长
+（`policy.rs::the_walk_never_enters_a_cache_tagged_directory` 用一个含 2000 个文件的
+`CACHEDIR.TAG` 目录钉住"从未进入"）。
+
+**但跳过的目录根自己的 `.git` 照样进只读清单**（`backend.rs::
+a_skipped_directory_that_is_itself_a_repository_still_has_its_dot_git_collected`）。否则存在一个
+绕过：不可信的仓库只要在自己的根放一个 `CACHEDIR.TAG`（或把目录叫 `node_modules`），`collect_git`
+就会整个跳过它，`.git` 不再是只读，模型可以往 `.git/hooks` 里写东西——用户之后在那个目录跑
+`git` 就会执行。跳过的只是**子树**：根自己的 `.git` 用与遍历相同的规则收集（`add_git_entry`，
+worktree 指针文件及其共享 common dir 也照旧），成本只多一次 `lstat`。
+
+**未改变**的语义：正常子目录里的 `.git` 照旧被发现并只读；worktree 指针文件及其共享 common dir
+的规则不变；工作区根自身即使是缓存目录也照样遍历（用户点名的目录不跳过）。
 
 - **ADR 0020（2026-10-13）**：宿主在 enforced 档位把**实际的会话目录**（`--session-dir`
   可能已改位）与 `~/.radian/memory` 加进 `deny_read`，并在建沙箱前把它们创建为 0700（Linux 的

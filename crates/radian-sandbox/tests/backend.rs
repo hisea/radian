@@ -287,24 +287,29 @@ fn a_missing_workspace_is_an_invalid_workspace_error() {
 }
 
 /// A dependency tree (`node_modules`) and a cache-tagged directory (`CACHEDIR.TAG`, what cargo
-/// writes at the root of `target/`) are not searched for git metadata: their `.git` is not
-/// collected, while a normal nested repository still is. Walking `target/` is what made
-/// startup take ~2 s on a 10+ GB tree.
+/// writes at the root of `target/`) are not searched for git metadata: a repository **deeper
+/// inside** one of them is not collected, while a normal nested repository still is. Walking
+/// `target/` is what made startup take ~2 s on a 10+ GB tree.
 #[test]
 fn a_repository_inside_a_skipped_directory_is_not_collected() {
     let dir = TempDir::new("skip");
     let normal = dir.path().join("proj").join("nested");
-    let node_modules = dir.path().join("proj").join("node_modules");
-    let target = dir.path().join("target");
+    // The repositories sit one level **below** the skipped directory root, so it is the
+    // skipping of the subtree (not the root's own `.git` rule) that is under test here.
+    let node_modules = dir.path().join("proj").join("node_modules").join("pkg");
+    let target = dir.path().join("target").join("debug");
+    let node_modules_root = node_modules.parent().unwrap().to_path_buf();
+    let target_root = target.parent().unwrap().to_path_buf();
     for path in [&normal, &node_modules, &target] {
         std::fs::create_dir_all(path).unwrap();
         run_git(path, &["init", "-q"]);
     }
     std::fs::write(
-        target.join("CACHEDIR.TAG"),
+        target_root.join("CACHEDIR.TAG"),
         "Signature: 8a477f597d28d172789f06886806bc55\n",
     )
     .unwrap();
+    assert!(node_modules_root.is_dir() && target_root.is_dir());
 
     let policy = SandboxPolicy::workspace_write(dir.path()).unwrap();
 
@@ -322,6 +327,49 @@ fn a_repository_inside_a_skipped_directory_is_not_collected() {
             policy.read_only
         );
     }
+}
+
+/// A repository **root** that is itself the skipped directory must still have its `.git`
+/// collected. Without this, an untrusted repository could drop a `CACHEDIR.TAG` (or name
+/// itself `node_modules`) and have `collect_git` skip it entirely, leaving `.git` writable —
+/// the model could then write its hooks, which run the next time the user runs git there.
+/// The subtree is still not descended into (see the scale test in `policy.rs`).
+#[test]
+fn a_skipped_directory_that_is_itself_a_repository_still_has_its_dot_git_collected() {
+    let dir = TempDir::new("skip-root-repo");
+    let cached = dir.path().join("target");
+    let modules = dir.path().join("node_modules");
+    for path in [&cached, &modules] {
+        std::fs::create_dir_all(path).unwrap();
+        run_git(path, &["init", "-q"]);
+    }
+    std::fs::write(
+        cached.join("CACHEDIR.TAG"),
+        "Signature: 8a477f597d28d172789f06886806bc55\n",
+    )
+    .unwrap();
+    // A repository deeper inside the cache-tagged root must stay undiscovered (the skip still
+    // applies to the subtree).
+    let hidden = cached.join("nested").join("pkg");
+    std::fs::create_dir_all(&hidden).unwrap();
+    run_git(&hidden, &["init", "-q"]);
+
+    let policy = SandboxPolicy::workspace_write(dir.path()).unwrap();
+
+    for (label, path) in [("CACHEDIR.TAG", &cached), ("node_modules", &modules)] {
+        let git = std::fs::canonicalize(path.join(".git")).unwrap();
+        assert!(
+            policy.read_only.contains(&git),
+            "a repository root skipped by name/marker must still be read-only ({label}): {:?}",
+            policy.read_only
+        );
+    }
+    let hidden_git = std::fs::canonicalize(hidden.join(".git")).unwrap();
+    assert!(
+        !policy.read_only.contains(&hidden_git),
+        "the subtree of a skipped directory is still not searched: {:?}",
+        policy.read_only
+    );
 }
 
 /// The walk does not follow a symlinked directory — the same rule `DirEntry::metadata()`

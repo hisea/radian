@@ -100,3 +100,22 @@ Base: `2d7cb90` · 一次性检出 `/tmp/radian-us-mut`（detached，跑完删�
 | M4 | 放行写在 deny **之前**（SBPL 后写优先，deny 反而赢） | `whitelisted_allowed` 与 `dns_resolves` 都变 denied | ✅ 2 例 FAILED |
 
 4/4 抓住。
+
+## startup-speed：git 元数据发现跳过缓存目录与 node_modules（2026-10-15）
+
+工作区 `<home>/Code/radian-dogfood-ss`，分支 `dogfood/startup-speed`；每个变异改完从副本
+还原并用 `cmp` 确认。跑 `cargo test -p radian-sandbox --no-fail-fast`。
+
+| # | 变异 | 抓住它的测试 | 结果 |
+|---|---|---|---|
+| SP-1 | 去掉 `CACHEDIR.TAG` 跳过（`is_skipped_dir` 不查标记） | `policy::tests::the_walk_never_enters_a_cache_tagged_directory`、`backend::a_repository_inside_a_skipped_directory_is_not_collected` | ✅ |
+| SP-2 | 去掉 `node_modules` 跳过（`SKIP_DIR_NAMES` 置空） | `policy::tests::the_walk_never_enters_node_modules`、`backend::a_repository_inside_a_skipped_directory_is_not_collected` | ✅ |
+| SP-3 | 把跳过检查放到遍历入口（连用户点名的工作区根也跳过） | `policy::tests::the_workspace_root_is_walked_even_when_it_is_cache_tagged` | ✅ |
+| SP-4 | 恢复跟随符号链接（`file_type()` 换回 `metadata()`） | `backend::a_symlinked_directory_is_not_traversed` | ✅ |
+| SP-5 | 跳过目录根自己的 `.git` 不再收集（即只 `continue`，这就是被评审指出的绕过） | `backend::a_skipped_directory_that_is_itself_a_repository_still_has_its_dot_git_collected` | ✅ |
+
+5/5 抓住。SP-5 是一个真实的安全回归：不可信仓库在自己的根放 `CACHEDIR.TAG`（或叫
+`node_modules`）即可让 `.git` 保持可写，模型能写 `.git/hooks`（用户下次在那里跑 git 会执行）。
+修法是 `is_skipped_dir` 命中的目录只收集它**自己根下**的 `.git`（复用 `add_git_entry`，不往下钻），
+子树仍然不搜（`a_repository_inside_a_skipped_directory_is_not_collected` 与
+`the_walk_never_enters_a_cache_tagged_directory` 继续钉住）。

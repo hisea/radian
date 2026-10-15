@@ -322,9 +322,23 @@ fn collect_git(dir: &Path, depth: usize, out: &mut Vec<PathBuf>, visit: &mut imp
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
-        if file_type.is_dir() && !is_skipped_dir(&path) {
-            collect_git(&path, depth + 1, out, visit);
+        if !file_type.is_dir() {
+            continue;
         }
+        if is_skipped_dir(&path) {
+            // A skipped directory is not descended into, so a large cache (`target/`) costs
+            // one `lstat`, not one per file. But the directory **itself** may be a repository
+            // root: skipping its subtree must not skip its own `.git`, or an untrusted nested
+            // repository could hide it behind a `CACHEDIR.TAG` and get its hooks written to
+            // (they run when the user next runs git there). Collect only its own `.git`
+            // (`add_git_entry` is the same rule the walk uses), never deeper than that.
+            let own_git = path.join(".git");
+            if std::fs::symlink_metadata(&own_git).is_ok() {
+                add_git_entry(&own_git, out);
+            }
+            continue;
+        }
+        collect_git(&path, depth + 1, out, visit);
     }
 }
 
