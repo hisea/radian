@@ -3789,6 +3789,67 @@ async fn pty_the_memory_notice_names_the_project_state_and_the_budget() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
+/// ADR 0021: `/memory add` in a git workspace registers the project
+/// itself, and the TUI shows the one notice line naming it. It must reach the transcript (a
+/// `Notice` entry), not stderr, which the fullscreen UI draws over.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pty_a_memory_add_shows_the_created_project_notice() {
+    let _serial = pty_guard();
+    let dir = TempDir::new("memory-auto-create");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(ws.join(".git")).unwrap();
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    // A `.git` directory is enough: the identity key comes from the repository, so the write
+    // registers the project. No `git` process, no real repository content.
+    let server = MockServer::start(vec![text_reply("never")]).await;
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "mem-auto-create",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &[("RADIAN_HOME", home.to_str().unwrap())],
+        30,
+        110,
+    );
+    assert!(pty.wait_for_screen("message", 10), "{}", pty.screen());
+
+    pty.send(b"/memory add \"hello world\"\r");
+    assert!(
+        pty.wait_for_screen("created project", 10),
+        "the notice names the new project: {}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("identity key", 10),
+        "the notice names the identity key: {}",
+        pty.screen()
+    );
+    pty.send(b"/memory list\r");
+    assert!(
+        pty.wait_for_screen("hello world", 10),
+        "the record is in the new project: {}",
+        pty.screen()
+    );
+    assert!(
+        server.requests().is_empty(),
+        "a /memory command must not reach the model"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
 /// ADR 0021 D7: `/memory` commands run in the TUI without a model request, and the record
 /// they create is injected into the next request's system prompt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -1123,6 +1123,17 @@ fn run(
         .panic_in_driver
         .then(|| Arc::new(panic_in_driver) as Arc<dyn Fn() + Send + Sync>);
     let memory_warning = Arc::new(|message: &str| eprintln!("radian: [memory] {message}"));
+    // ADR 0021: the memory tools' notice (the project a default-scope write
+    // registered) is a line the user must see, so it goes into the transcript as a notice
+    // instead of stderr, which the fullscreen UI would draw over.
+    let memory_notice_line = {
+        let tx = tx.clone();
+        Arc::new(move |line: &str| {
+            let _ = tx.send(UiEvent::Command(AppInput::SessionDone(vec![format!(
+                "[memory] {line}"
+            )])));
+        })
+    };
 
     // ADR 0031 T3: resolve project trust before the session exists. The TUI is interactive, so
     // a workspace with resources and no decision asks through a startup modal (pushed after
@@ -1208,6 +1219,7 @@ fn run(
                 driver_stopped,
                 before_driver,
                 memory_warning,
+                memory_notice_line,
             },
         ))
         .map_err(|error| error.to_string())?;

@@ -5610,9 +5610,18 @@ async fn memory_unlinked_workspace_refuses_project_writes_and_lists_global() {
 
     let (code, _, stderr) = env.run(&["add", "a project note"]).await;
     assert_eq!(code, 1, "{stderr}");
-    assert!(stderr.contains("not linked"), "{stderr}");
-    assert!(stderr.contains("--global"), "{stderr}");
-    assert!(stderr.contains("relink"), "{stderr}");
+    assert!(
+        stderr.contains("not a project workspace"),
+        "the workspace is not a git repository, so it is not a project workspace: {stderr}"
+    );
+    assert!(
+        stderr.contains("not saved"),
+        "the refusal says the memory was not saved: {stderr}"
+    );
+    assert!(
+        !stderr.contains("--global"),
+        "the refusal must not point at another scope: {stderr}"
+    );
     assert!(
         !env.home.join("memory/projects").exists(),
         "a refused Project write created a project directory"
@@ -5620,6 +5629,133 @@ async fn memory_unlinked_workspace_refuses_project_writes_and_lists_global() {
 
     let (code, _, _) = env.run(&["list", "--project"]).await;
     assert_eq!(code, 1, "a Project-only read needs a project");
+}
+
+/// ADR 0021: a default-scope `radian memory add` in a git workspace
+/// whose project was never registered **registers it**, prints one notice line naming the new
+/// project and its identity key, and saves into that project. The next add is silent.
+#[tokio::test]
+async fn memory_add_registers_a_git_workspace_and_prints_one_notice() {
+    if !git_available() {
+        eprintln!("skipping: git is not on PATH");
+        return;
+    }
+    let env = MemoryEnv::new("mem-auto-create");
+    git(&env.ws, &["init", "-q"]);
+
+    let (code, _, stderr) = env.run(&["add", "a project note"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("[memory] created project"),
+        "one notice line names the new project: {stderr}"
+    );
+    assert!(
+        stderr.contains("identity key"),
+        "the notice names the identity key: {stderr}"
+    );
+    assert_eq!(
+        stderr.lines().count(),
+        1,
+        "one notice line, not a paragraph: {stderr}"
+    );
+    let project = linked_project(&env, &env.ws).await;
+    assert!(
+        stderr.contains(&project),
+        "the notice names the project it created: {stderr}"
+    );
+    // The record went into that project.
+    let (code, stdout, stderr) = env.run(&["list"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stdout.contains("project:"),
+        "the record is a project record: {stdout}"
+    );
+    assert!(stdout.contains("a project note"), "{stdout}");
+    let registry = std::fs::read_to_string(env.home.join("memory/projects.jsonl")).unwrap();
+    assert_eq!(
+        registry
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count(),
+        1,
+        "projects.jsonl gained the one project: {registry}"
+    );
+
+    // Already linked: the second add says nothing about projects.
+    let (code, _, stderr) = env.run(&["add", "a second note"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.is_empty(),
+        "no notice for a linked project: {stderr}"
+    );
+
+    // A read never registers anything: the same commands in a second, unregistered repository
+    // leave the registry alone.
+    let other = env.workspace("other");
+    git(&other, &["init", "-q"]);
+    let (code, stdout, stderr) = env.run_in(&other, &["list"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stdout.contains("a project note"), "{stdout}");
+    let after = std::fs::read_to_string(env.home.join("memory/projects.jsonl")).unwrap();
+    assert_eq!(after, registry, "a read registered a project");
+}
+
+/// ADR 0021, for the agent's own tool: the first `memory_save` in a git
+/// workspace registers the project, `radian exec` shows the notice line, and the record lands
+/// in that project.
+#[tokio::test]
+async fn memory_save_in_a_git_workspace_creates_the_project_and_exec_shows_the_notice() {
+    if !git_available() {
+        eprintln!("skipping: git is not on PATH");
+        return;
+    }
+    let env = MemoryEnv::new("mem-save-create");
+    git(&env.ws, &["init", "-q"]);
+
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "memory_save", r#"{"content":"agent note"}"#),
+        text_reply("remembered"),
+    ])
+    .await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                env.ws.to_str().unwrap(),
+                "--session-id",
+                "auto-created",
+                "--yes",
+                "-p",
+                "remember this",
+            ],
+            &[
+                ("RADIAN_HOME", env.home.to_str().unwrap()),
+                ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
+            ],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("[memory] created project"),
+        "exec shows the notice line: {stderr}"
+    );
+
+    let (code, stdout, stderr) = env.run(&["list", "--json"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let value: Value = serde_json::from_str(stdout.trim()).expect("list --json");
+    let record = &value.as_array().unwrap()[0];
+    assert_eq!(record["content"], "agent note");
+    assert_eq!(record["source"], "agent");
+    assert!(
+        record["scope"]["project"].is_string(),
+        "the record went to the new project: {record}"
+    );
 }
 
 #[tokio::test]
