@@ -24,7 +24,7 @@ use radian_permissions::{ApprovalPolicy, Approver, AuditSink, PermissionHooks, P
 use radian_runtime::{
     BudgetFor, CancelCause, ConfigQueue, ConfigSlot, Driver, Inbox, RuntimeEvents,
 };
-use radian_sandbox::Sandbox;
+use radian_sandbox::{Sandbox, SandboxSlot};
 use radian_session::{SessionCreatedData, SessionJournal};
 
 use crate::cost::RoutePrice;
@@ -229,6 +229,13 @@ pub trait SessionFacade: Send + Sync {
     /// capability as answering: it belongs to the interactive approver.
     fn set_approval(&self, policy: ApprovalPolicy) -> Result<(), CommandRefused>;
 
+    /// Switch the session's permission tier in place (ADR 0038 slice 2's `/access`). The
+    /// profile and the sandbox are rebuilt through the host's [`AccessBuilder`]; a failed
+    /// sandbox probe is a refusal that changes nothing. The switch takes effect on the next
+    /// tool call (a running command keeps its sandbox). The durable `ConfigChanged`
+    /// (`{"access": …}`) is queued for the driver to journal at the turn boundary.
+    fn set_access(&self, tier: Preset) -> Result<(), CommandRefused>;
+
     /// The discovered skills, in discovery order (ADR 0025 S1). The UI lists them (`/skills`)
     /// and completes their names (`/skill:`); the host owns the list because it owns discovery.
     fn skills(&self) -> &[Skill];
@@ -292,6 +299,19 @@ pub enum SessionError {
     Message(String),
 }
 
+/// The parts a tier switch rebuilds (ADR 0038 slice 2): the permission profile and the
+/// sandbox for the new tier. The sandbox is `None` for `safe`.
+pub struct AccessParts {
+    pub profile: Profile,
+    pub sandbox: Option<Sandbox>,
+}
+
+/// Rebuilds [`AccessParts`] for a tier. The host/binary owns the inputs (the workspace, the
+/// sandbox deny-read list, the Unix-socket whitelist, the `--allow-shell-command` rules), so
+/// the session calls back into it instead of guessing. A failed sandbox probe returns `Err`,
+/// which the facade turns into a refusal: the switch never degrades (ADR 0012).
+pub type AccessBuilder = Arc<dyn Fn(Preset) -> Result<AccessParts, String> + Send + Sync>;
+
 /// The values a host resolves before the session exists. Both binaries build this from their
 /// own flags and config; `open_session` does the rest.
 pub struct SessionSetup {
@@ -333,6 +353,9 @@ pub struct SessionSetup {
     pub tier: Preset,
     /// The permission profile (the host adds its own `allow` rules and approval policy).
     pub profile: Profile,
+    /// Rebuilds the profile and sandbox for a run-time tier switch (ADR 0038 slice 2). `None`
+    /// for a host that has no `/access` command (the CLI): a switch is then refused.
+    pub access_builder: Option<AccessBuilder>,
     /// The memory root, or `None` when neither `RADIAN_HOME` nor `HOME` is set.
     pub memory_root: Option<PathBuf>,
     /// Extra skill roots from `[skills] extra_paths` (ADR 0025 slice 4), already resolved by the
@@ -453,6 +476,11 @@ pub struct LocalSession {
     journal: Arc<SessionJournal>,
     inbox: Arc<Inbox>,
     hooks: Arc<PermissionHooks>,
+    /// The sandbox the coding tools and the host's `!`/`!!` path read at each call (ADR 0038
+    /// slice 2). `set_access` swaps it; a call in flight keeps the `Arc` it cloned.
+    sandbox_slot: SandboxSlot,
+    /// Rebuilds the profile and sandbox for a tier switch. `None` refuses `set_access`.
+    access_builder: Option<AccessBuilder>,
     projection: Arc<SessionProjection>,
     /// The pending approvals and questions (ADR 0023 U7).
     queue: Arc<SessionQueue>,
@@ -740,6 +768,43 @@ impl SessionFacade for LocalSession {
         Ok(())
     }
 
+    fn set_access(&self, tier: Preset) -> Result<(), CommandRefused> {
+        if !self
+            .capabilities
+            .contains(&SessionCapability::AnswerRequest)
+        {
+            return Err(CommandRefused {
+                command: "set-access".into(),
+                capability: Some(SessionCapability::AnswerRequest.as_str().to_string()),
+                reason: "this session does not declare the `answer` capability".into(),
+            });
+        }
+        let Some(builder) = &self.access_builder else {
+            return Err(CommandRefused {
+                command: "set-access".into(),
+                capability: None,
+                reason: "this session cannot switch the tier at run time".into(),
+            });
+        };
+        // The rebuild runs the sandbox probe for an enforced tier. A failure is a refusal that
+        // changes nothing (ADR 0012: a failed probe never degrades).
+        let parts = builder(tier).map_err(|reason| CommandRefused {
+            command: "set-access".into(),
+            capability: None,
+            reason,
+        })?;
+        // The live switch first (the next tool call obeys it), then the durable record the
+        // driver journals at the next turn boundary (ADR 0004 path B, ADR 0038 decision 2).
+        self.hooks.set_profile(parts.profile);
+        self.sandbox_slot.set(parts.sandbox);
+        self.config_queue
+            .push(serde_json::json!({ "access": tier.as_str() }));
+        // The status bar reads the tier from the projection; keep it in step. The startup
+        // source marker is a startup fact and is not re-applied here.
+        self.projection.set_tier(Some(tier.as_str().to_string()));
+        Ok(())
+    }
+
     fn skills(&self) -> &[Skill] {
         &self.skills
     }
@@ -917,6 +982,7 @@ pub async fn open_session(
         sandbox,
         tier,
         profile,
+        access_builder,
         memory_root,
         skills_extra_paths,
         skills_builtin,
@@ -964,7 +1030,11 @@ pub async fn open_session(
         tier.sandbox_mode(),
         sandbox.as_ref().map(Sandbox::backend_name),
     );
-    let (coding, jobs) = build_coding_tools(coding_root.as_deref(), sandbox)?;
+    // ADR 0038 slice 2: the sandbox lives in a shared slot, so `/access` can swap it and the
+    // coding tools read the new one on their next call. The host keeps this clone; the tools
+    // get another.
+    let sandbox_slot = SandboxSlot::from_option(sandbox);
+    let (coding, jobs) = build_coding_tools(coding_root.as_deref(), sandbox_slot.clone())?;
     // ADR 0024 Q5: `ask_user` is mounted whenever a human is there to answer, **whether or not**
     // there are coding tools. It is its own provider, so a host without `--workspace` still
     // advertises it. `None` is what the model sees as "no such tool".
@@ -1282,6 +1352,8 @@ pub async fn open_session(
         journal,
         inbox,
         hooks,
+        sandbox_slot,
+        access_builder,
         projection,
         queue,
         memory,
@@ -1359,26 +1431,29 @@ fn open_journal(
 
 fn build_coding_tools(
     workspace: Option<&Path>,
-    sandbox: Option<Sandbox>,
+    sandbox: SandboxSlot,
 ) -> Result<(Option<CodingTools>, Option<Arc<radian_coding::Jobs>>), SessionError> {
-    match (workspace, sandbox) {
-        (Some(dir), Some(sandbox)) => {
-            let tools = CodingTools::with_sandbox(dir, sandbox).map_err(|error| {
-                SessionError::Message(format!("--workspace {}: {error}", dir.display()))
-            })?;
+    match workspace {
+        Some(dir) => {
+            // The slot decides whether `shell` exists: an empty slot is the `safe` tier (no
+            // shell advertised), a non-empty one is a sandbox the shell can run under. The
+            // tool set is fixed here at `open_session`; a later switch to a *narrower* tier
+            // still denies `shell` through the permission rules (ADR 0038 slice 2).
+            let tools = if sandbox.is_some() {
+                CodingTools::with_sandbox_slot(dir, sandbox).map_err(|error| {
+                    SessionError::Message(format!("--workspace {}: {error}", dir.display()))
+                })?
+            } else {
+                CodingTools::new(dir).map_err(|error| {
+                    SessionError::Message(format!("--workspace {}: {error}", dir.display()))
+                })?
+            };
             // The host creates the registry (from the canonical root) so it can subscribe to
             // job lifecycle notices and write the durable start/settle records (ADR 0037).
             let jobs = Arc::new(radian_coding::Jobs::new(tools.root()));
             Ok((Some(tools.with_jobs(Arc::clone(&jobs))), Some(jobs)))
         }
-        (Some(dir), None) => {
-            let tools = CodingTools::new(dir).map_err(|error| {
-                SessionError::Message(format!("--workspace {}: {error}", dir.display()))
-            })?;
-            let jobs = Arc::new(radian_coding::Jobs::new(tools.root()));
-            Ok((Some(tools.with_jobs(Arc::clone(&jobs))), Some(jobs)))
-        }
-        (None, _) => Ok((None, None)),
+        None => Ok((None, None)),
     }
 }
 
@@ -1421,4 +1496,25 @@ pub fn resumed_model_route(
         }
     }
     route
+}
+
+/// The permission tier a **resume** would restore (ADR 0038 decision 2): the journal's last
+/// `ConfigChanged` whose change carries an `access` key. `None` when the file has none — the
+/// caller then falls back to the remembered per-project tier, the config and the default.
+/// Reads the session file line by line; this runs before anything durable is created.
+pub fn resumed_access(session_dir: &Path, session_id: &str) -> Option<Preset> {
+    let text = std::fs::read_to_string(session_dir.join(format!("{session_id}.jsonl"))).ok()?;
+    let mut tier = None;
+    for line in text.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if value["event"] == "ConfigChanged"
+            && let Some(name) = value["data"]["change"]["access"].as_str()
+            && let Some(found) = crate::access::parse_tier(name)
+        {
+            tier = Some(found);
+        }
+    }
+    tier
 }

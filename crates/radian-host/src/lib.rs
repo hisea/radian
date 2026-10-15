@@ -139,9 +139,10 @@ pub use provider::{
 pub use radian_runtime::ModelRoute;
 pub use session::session_hooks;
 pub use session::{
-    ApprovalRouting, CommandRefused, DriverEnd, HostBindings, LocalSession, SessionCapability,
-    SessionCommand, SessionError, SessionFacade, SessionFacts, SessionId, SessionQueue,
-    SessionSetup, UserBashRecord, open_session, resumed_model_route,
+    AccessBuilder, AccessParts, ApprovalRouting, CommandRefused, DriverEnd, HostBindings,
+    LocalSession, SessionCapability, SessionCommand, SessionError, SessionFacade, SessionFacts,
+    SessionId, SessionQueue, SessionSetup, UserBashRecord, open_session, resumed_access,
+    resumed_model_route,
 };
 pub use session_id::{generate_session_id, validate_session_id};
 pub use sessions::{

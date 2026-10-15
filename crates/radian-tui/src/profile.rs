@@ -15,7 +15,6 @@ use radian_permissions::{
     Action, ApprovalPolicy, Preset, Profile, ResourceMatcher, Rule, ToolMatcher,
 };
 use radian_sandbox::{Sandbox, SandboxError, SandboxMode, SandboxPolicy};
-
 /// The `--profile` value: a product concept (ADR 0012 P1), not a backend flag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tier {
@@ -47,6 +46,74 @@ pub fn parse_tier(value: &str) -> Result<Tier, String> {
             "--profile {other:?} is not one of safe, workspace, full"
         )),
     }
+}
+
+/// The [`Tier`] for a [`Preset`] (the reverse of [`Tier::preset`]).
+pub fn tier_of(preset: Preset) -> Tier {
+    match preset {
+        Preset::Safe => Tier::Safe,
+        Preset::WorkspaceWrite => Tier::WorkspaceWrite,
+        Preset::FullAccess => Tier::FullAccess,
+    }
+}
+
+/// Where the tier in force at startup came from (ADR 0038 decision 3). `/access` with no
+/// argument shows [`AccessSource::label`]; the startup summary and the footer append
+/// [`AccessSource::suffix`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccessSource {
+    /// `--profile` on the command line.
+    Flag,
+    /// `permissions.profile` in the config file.
+    Config,
+    /// The remembered per-project record (`~/.radian/access/access.json`).
+    Project,
+    /// The resumed session's last `ConfigChanged` access.
+    Session,
+    /// Nothing named a tier: the built-in default (`workspace`).
+    Default,
+}
+
+impl AccessSource {
+    /// The source word `/access` prints, matching the task's "flag, config, or remembered".
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Flag => "flag",
+            Self::Config => "config",
+            Self::Project => "project",
+            Self::Session => "session",
+            Self::Default => "default",
+        }
+    }
+
+    /// The suffix the startup summary and the footer append. A named source is marked so the
+    /// user can see why the tier is what it is; the built-in default stays bare.
+    pub fn suffix(self) -> &'static str {
+        match self {
+            Self::Flag => " (flag)",
+            Self::Config => " (config)",
+            Self::Project => " (project)",
+            Self::Session => " (session)",
+            Self::Default => "",
+        }
+    }
+}
+
+/// The [`radian_host::AccessParts`] a run-time tier switch rebuilds (ADR 0038 slice 2): the
+/// profile with this host's `--allow-shell-command` rules, and the sandbox with the deny-read
+/// list and the Unix-socket whitelist. A failed sandbox probe is the `Err` that makes
+/// `/access` refuse (ADR 0012: a failed probe never degrades).
+pub fn build_access(
+    preset: Preset,
+    workspace: &Path,
+    allow_shell_commands: &[String],
+    deny_read: &[std::path::PathBuf],
+    allow_unix_sockets: &[std::path::PathBuf],
+) -> Result<radian_host::AccessParts, String> {
+    let tier = tier_of(preset);
+    let profile = build_profile(tier, workspace, allow_shell_commands)?;
+    let sandbox = build_sandbox(tier, workspace, deny_read, allow_unix_sockets)?;
+    Ok(radian_host::AccessParts { profile, sandbox })
 }
 
 /// The permission profile: the preset's rules, plus host `allow` rules for shell commands.
