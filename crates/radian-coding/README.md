@@ -13,6 +13,8 @@ contract; this file is the practical summary.
 | `write` | `Exclusive` | Create or overwrite a file with exact content (no newline added). Parent must exist. Never follows a symlink at the destination. |
 | `patch` | `Exclusive` | Replace exactly one occurrence of `old` with `new`. Zero or multiple matches refuse the edit and leave the file untouched (no fuzzy matching). |
 | `list` | `Shared` | List a directory, sorted, with kind and size; symlinks shown but not followed; capped by `max_entries`. |
+| `glob` | `Shared` | Find files whose **workspace-relative path** matches a glob (`src/**/*.rs`); sorted; `.gitignore` respected, `.git` skipped, symlinks never followed; capped by `max_results`. |
+| `grep` | `Shared` | Regex search file contents; `path:line:text` per match, `path-line-text` for `context` lines, `--` between groups; `.gitignore` respected, binary files skipped; capped per file and in total. |
 | `git_status` | `Shared` | `git status --porcelain=v1 --branch --untracked-files=all`. |
 | `git_diff` | `Shared` | `git diff [--cached] [-- <path>]`; the path must stay inside the workspace. |
 | `shell` | `Exclusive` | `/bin/sh -c <command>` **through a sandbox**, with `cwd` (workspace-relative), `timeout_secs`, `max_output_bytes` and `background`. Present only when the host built the tools with a `Sandbox`. `background: true` returns at once with a job id and an output file (no default timeout); the three `job_*` tools below read, list and stop it (ADR 0037). |
@@ -39,6 +41,30 @@ bounded by about `max_bytes` plus one reader buffer, even for a file with a sing
 line. This is the fix for dogfood10 D25 (a 73 KB guide read 20 times): read the section you
 need, do **not** raise `max_bytes` to reach it.
 
+## Search (`glob`, `grep`)
+
+`glob` and `grep` are `Shared`, so a batch of searches overlaps instead of queueing behind one
+another (the reason they exist: `shell` is `Exclusive`, and the safe tier has no shell at all).
+Both walk from a workspace-resolved base (`path`, default the workspace root) with the same
+per-entry rules, which `list`/`read` do not have because they look at one path:
+
+- `.gitignore` (and `.ignore`) files **inside** the tree are respected, with or without a git
+  repository; no ignore file **above** the base and no global gitignore is consulted, so the
+  same tree gives the same result on every machine;
+- the `.git` directory is pruned;
+- symlinks are **never** followed — a symlinked file is not a match and a symlinked directory is
+  not descended — so a link out of the workspace is never read;
+- dot-files other than `.git` are included.
+
+`glob` matches the model's pattern against each workspace-relative path (`*` does not cross a
+`/`, `**` does), sorts, and cuts to `max_results` with a `[truncated: showing N of M matches]`
+line. `grep` matches each line with a regex (an invalid one is an `invalid_regex` tool error),
+skips binary files (a NUL byte in the first 8 KiB), and prints `path:line:text`, context lines
+as `path-line-text`, and `--` between non-contiguous groups. A line longer than 8 KiB is matched
+on its prefix and reported with a `[truncated]` marker, so one enormous line cannot grow the
+result. Matches are capped per file (`default_grep_matches_per_file`) and in total
+(`max_matches`), each cut named in the text.
+
 ## Limits (`Limits`, all overridable)
 
 | Field | Default | Why |
@@ -47,6 +73,10 @@ need, do **not** raise `max_bytes` to reach it.
 | `max_write_bytes` | 8 MiB | Bound a single write so a runaway model cannot fill the disk in one call. |
 | `max_patch_bytes` | 4 MiB | Patch holds the file in memory twice; the cap keeps that bounded. |
 | `max_list_entries` / `default_list_entries` | 5000 / 500 | Bound the listing result. |
+| `max_glob_results` / `default_glob_results` | 5000 / 500 | Bound one `glob` result set. |
+| `max_grep_matches` / `default_grep_matches` | 5000 / 200 | Bound `grep`'s total matches. |
+| `default_grep_matches_per_file` | 50 | One file must not fill the result (not model-settable). |
+| `max_grep_context` | 10 | Bound the context lines a single match can add. |
 | `max_git_output_bytes` | 1 MiB | Bound git output, truncated on a character boundary with a marker. |
 | `git_timeout` | 10 s | A hung git must not hang the turn. |
 | `default_shell_output_bytes` / `max_shell_output_bytes` | 64 KiB / 1 MiB, **per stream** | Aligned with `read`'s default and hard cap. Past the budget the first quarter and the last three quarters are kept and the middle is replaced by a marker naming the discarded bytes; the tail is larger because a failing build's error is at the end. `max_output_bytes` lets the model raise it, clamped to the hard cap. Discarded bytes are reported per stream in the text and in `structured.*_truncated_bytes`. |
@@ -92,8 +122,8 @@ Enforced (each with tests in `tests/escaping.rs` and `tests/mutation.rs`):
 
 ## Mounting
 
-- In `agent-cli`: `--workspace <dir>` exposes the six file/git tools, plus `shell` when the
-  profile built a sandbox (`workspace`/`full`). Without the flag nothing changes.
+- In `agent-cli`: `--workspace <dir>` exposes the eight file/git/search tools, plus `shell` when
+  the profile built a sandbox (`workspace`/`full`). Without the flag nothing changes.
 - Directly: `CodingTools::new(root)` returns a `ToolProvider` (no shell); pass it to
   `Agent::new(model, tools)`.
 - With a sandbox: build one with `radian_sandbox::Sandbox::new(mode, root)` (an enforced mode

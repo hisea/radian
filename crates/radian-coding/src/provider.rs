@@ -8,7 +8,7 @@ use agent_core::{
 use radian_sandbox::{Sandbox, SandboxMode, SandboxSlot};
 
 use crate::workspace::{WorkspaceError, WorkspaceRoot};
-use crate::{fail, git, jobs, list, patch, read, shell, write};
+use crate::{fail, git, glob, grep, jobs, list, patch, read, shell, write};
 
 /// Resource bounds, all overridable with [`CodingTools::with_limits`]. Defaults are chosen
 /// so a single tool call cannot blow up the model context or the session file.
@@ -26,6 +26,18 @@ pub struct Limits {
     pub max_list_entries: usize,
     /// `list`'s default entry cap.
     pub default_list_entries: usize,
+    /// Hard cap for one `glob` result set.
+    pub max_glob_results: usize,
+    /// `glob`'s default result cap when the model does not give one.
+    pub default_glob_results: usize,
+    /// Hard cap for `grep`'s total matches.
+    pub max_grep_matches: usize,
+    /// `grep`'s default total match cap when the model does not give one.
+    pub default_grep_matches: usize,
+    /// `grep`'s per-file match cap. Not model-settable: one file must not fill the result.
+    pub default_grep_matches_per_file: usize,
+    /// Hard cap on a model-supplied `grep` `context` line count.
+    pub max_grep_context: usize,
     /// Output cap for `git_status`/`git_diff`.
     pub max_git_output_bytes: usize,
     /// How long a git invocation may run.
@@ -50,6 +62,12 @@ impl Default for Limits {
             max_patch_bytes: 4 << 20,     // 4 MiB
             max_list_entries: 5000,
             default_list_entries: 500,
+            max_glob_results: 5000,
+            default_glob_results: 500,
+            max_grep_matches: 5000,
+            default_grep_matches: 200,
+            default_grep_matches_per_file: 50,
+            max_grep_context: 10,
             max_git_output_bytes: 1 << 20, // 1 MiB
             git_timeout: Duration::from_secs(10),
             // Per stream, and aligned with `read`'s default budget: 64 KiB is enough for the
@@ -216,6 +234,8 @@ fn specs(shell_mode: Option<SandboxMode>) -> Vec<ToolSpec> {
         write::spec(),
         patch::spec(),
         list::spec(),
+        glob::spec(),
+        grep::spec(),
         git::status_spec(),
         git::diff_spec(),
     ];
@@ -244,6 +264,8 @@ impl ToolSession for CodingSession {
             "write" => write::run(&self.root, &self.limits, &call.arguments).await,
             "patch" => patch::run(&self.root, &self.limits, &call.arguments).await,
             "list" => list::run(&self.root, &self.limits, &call.arguments).await,
+            "glob" => glob::run(&self.root, &self.limits, &call.arguments).await,
+            "grep" => grep::run(&self.root, &self.limits, &call.arguments).await,
             "git_status" => git::status(&self.root, &self.limits, &call.arguments).await,
             "git_diff" => git::diff(&self.root, &self.limits, &call.arguments).await,
             "shell" => match self.sandbox.get() {

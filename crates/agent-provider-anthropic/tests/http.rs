@@ -187,9 +187,12 @@ async fn a_turn_sends_the_expected_request_and_returns_the_text() {
     assert_eq!(body["max_tokens"], 4096);
     assert_eq!(body["stream"], true);
     assert_eq!(body["temperature"], 0.3);
+    // The prompt-caching breakpoint sits on the last cacheable block of the last message.
     assert_eq!(
         body["messages"],
-        json!([{"role": "user", "content": [{"type": "text", "text": "hi"}]}])
+        json!([{"role": "user", "content": [
+            {"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}
+        ]}])
     );
     assert!(body.get("system").is_none());
 
@@ -293,10 +296,24 @@ async fn the_system_prompt_and_tools_are_sent_in_their_anthropic_shape() {
     model.complete(request, cx).await.unwrap();
 
     let body = server.requests()[0].json();
-    assert_eq!(body["system"], "Be brief.");
+    // Under the default `CacheMode::Auto` the system prompt is sent as a content-block array
+    // with a breakpoint on its last block, and the last tool definition carries one too.
+    assert_eq!(
+        body["system"],
+        json!([{
+            "type": "text",
+            "text": "Be brief.",
+            "cache_control": {"type": "ephemeral"},
+        }])
+    );
     assert_eq!(
         body["tools"],
-        json!([{"name": "add", "description": "Adds.", "input_schema": {"type": "object"}}])
+        json!([{
+            "name": "add",
+            "description": "Adds.",
+            "input_schema": {"type": "object"},
+            "cache_control": {"type": "ephemeral"},
+        }])
     );
 }
 
@@ -370,12 +387,14 @@ async fn a_tool_call_round_trips_through_the_core() {
     let transcript = session.history_for_resume().history;
     assert_eq!(tool_result_text(&transcript, "toolu_1"), "5");
 
-    // The second request sends the tool result back as a user message with a tool_result block.
+    // The second request sends the tool result back as a user message with a tool_result block;
+    // the breakpoint lands on that last block.
     let second = server.requests()[1].json();
     assert_eq!(
         second["messages"].as_array().unwrap().last().unwrap(),
         &json!({"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": "toolu_1", "content": "5"}
+            {"type": "tool_result", "tool_use_id": "toolu_1", "content": "5",
+             "cache_control": {"type": "ephemeral"}}
         ]})
     );
 }
